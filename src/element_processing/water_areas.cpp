@@ -1,356 +1,634 @@
-use geo::{Contains, Intersects, LineString, Point, Polygon, Rect};
-use std::time::Instant;
 
-use crate::{
-    block_definitions::WATER,
-    coordinate_system::cartesian::XZPoint,
-    osm_parser::{ProcessedMemberRole, ProcessedNode, ProcessedRelation},
-    world_editor::WorldEditor,
-};
+#include <vector>
+#include <string>
+#include <map>
+#include <chrono>
+#include <iostream>
+#include <optional>
+#include <algorithm>
 
-pub fn generate_water_areas(editor: &mut WorldEditor, element: &ProcessedRelation) {
-    let start_time = Instant::now();
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/linestring.hpp>
+#include <boost/geometry/geometries/polygon.hpp>
+#include <boost/geometry/geometries/box.hpp>
 
-    // Check if this is a water relation (either with water tag or natural=water)
-    let is_water = element.tags.contains_key("water")
-        || element.tags.get("natural") == Some(&"water".to_string());
+//#include "block_definitions.h"
+//#include "coordin_system/caesian/XZPoint.h"
+//#include "osm_parser.h"
+//#include "world_editor.h"
 
-    if !is_water {
+#include "../../arnis_adapter.h"
+#undef stoi
+namespace arnis
+{
+
+namespace water_areas {
+
+using BgPoint = boost::geometry::model::d2::point_xy<double>;
+using BgLinestring = boost::geometry::model::linestring<BgPoint>;
+using BgPolygon = boost::geometry::model::polygon<BgPoint>;
+using BgBox = boost::geometry::model::box<BgPoint>;
+
+static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
+{
+	std::vector<std::size_t> removed;
+	std::vector<std::vector<ProcessedNode>> merged;
+
+	for (std::size_t i = 0; i < loops.size(); ++i) {
+		for (std::size_t j = 0; j < loops.size(); ++j) {
+			if (i == j) {
+				continue;
+			}
+			if (std::find(removed.begin(), removed.end(), i) != removed.end() ||
+					std::find(removed.begin(), removed.end(), j) != removed.end()) {
+				continue;
+			}
+
+			const std::vector<ProcessedNode> &x = loops[i];
+			const std::vector<ProcessedNode> &y = loops[j];
+
+if			(x.empty() || y.empty())
+			{
+				continue;
+			}
+
+			if (x.front().id == x.back().id) {
+				continue;
+			}
+			if (y.front().id == y.back().id) {
+				continue;
+			}
+
+			if (x.front().id == y.front().id) {
+				removed.push_back(i);
+				removed.push_back(j);
+
+				std::vector<ProcessedNode> r = x;
+				std::reverse(r.begin(), r.end());
+				r.insert(r.end(), y.begin() + 1, y.end());
+				merged.push_back(std::move(r));
+			} else if (x.back().id == y.back().id) {
+				removed.push_back(i);
+				removed.push_back(j);
+
+				std::vector<ProcessedNode> r = x;
+				r.insert(r.end(), y.rbegin() + 1, y.rend());
+				std::reverse(r.begin() + x.size(),
+						r.end()); // correct ordering after insert from reverse iterator
+				merged.push_back(std::move(r));
+			} else if (x.front().id == y.back().id) {
+				removed.push_back(i);
+				removed.push_back(j);
+
+				std::vector<ProcessedNode> r = y;
+				r.insert(r.end(), x.begin() + 1, x.end());
+				merged.push_back(std::move(r));
+			} else if (x.back().id == y.front().id) {
+				removed.push_back(i);
+				removed.push_back(j);
+
+				std::vector<ProcessedNode> r = x;
+				r.insert(r.end(), y.begin() + 1, y.end());
+				merged.push_back(std::move(r));
+			}
+		}
+	}
+
+	std::sort(removed.begin(), removed.end());
+	for (auto it = removed.rbegin(); it != removed.rend(); ++it) {
+		if (*it < loops.size()) {
+			loops.erase(loops.begin() + *it);
+		}
+	}
+
+	std::size_t merged_len = merged.size();
+	for (auto &m : merged) {
+		loops.push_back(std::move(m));
+	}
+
+	if (merged_len > 0) {
+		merge_loopy_loops(loops);
+	}
+}
+
+static bool verify_loopy_loops(const std::vector<std::vector<ProcessedNode>> &loops)
+{
+	bool valid = true;
+	for (const auto &l : loops) {
+		if (l.empty() || l.front().id != l.back().id) {
+			std::cerr << "WARN: Disconnected loop" << std::endl;
+			valid = false;
+		}
+	}
+	return valid;
+}
+
+static void rect_fill(
+		int min_x, int max_x, int min_z, int max_z, int ground_level, WorldEditor &editor)
+{
+	for (int x = min_x; x < max_x; ++x) {
+		for (int z = min_z; z < max_z; ++z) {
+			editor.set_block(block_definitions::WATER, x, ground_level, z,
+					std::optional<int>{}, std::optional<int>{});
+		}
+	}
+}
+
+static void inverse_floodfill_iterative(const std::pair<int, int> &min,
+		const std::pair<int, int> &max, int ground_level,
+		const std::vector<BgPolygon> &outers, const std::vector<BgPolygon> &inners,
+		WorldEditor &editor)
+{
+	for (int x = min.first; x < max.first; ++x) {
+		for (int z = min.second; z < max.second; ++z) {
+			BgPoint p(static_cast<double>(x), static_cast<double>(z));
+			bool in_outer = false;
+			for (const auto &poly : outers) {
+				if (boost::geometry::within(p, poly)) {
+					in_outer = true;
+					break;
+				}
+			}
+			if (!in_outer) {
+				continue;
+			}
+			bool in_inner = false;
+			for (const auto &poly : inners) {
+				if (boost::geometry::within(p, poly)) {
+					in_inner = true;
+					break;
+				}
+			}
+			if (!in_inner) {
+				editor.set_block(block_definitions::WATER, x, ground_level, z,
+						std::optional<int>{}, std::optional<int>{});
+			}
+		}
+	}
+}
+/*
+static void inverse_floodfill_recursive(const std::pair<int, int> &min,
+		const std::pair<int, int> &max, const std::vector<BgPolygon> &outers,
+		const std::vector<BgPolygon> &inners,
+
+		WorldEditor &editor, const std::chrono::steady_clock::time_point &start_time)
+{
+	if (std::chrono::duration_cast<std::chrono::seconds>(
+				std::chrono::steady_clock::now() - start_time)
+					.count() > 25) {
+		std::cout << "Water area generation exceeded 25 seconds, continuing anyway"
+				  << std::endl;
+	}
+
+	const long long ITERATIVE_THRES = 10000LL;
+
+	if (min.first > max.first || min.second > max.second) {
+		return;
+	}
+
+	long long dx = static_cast<long long>(max.first - min.first);
+	long long dz = static_cast<long long>(max.second - min.second);
+	if (dx * dz < ITERATIVE_THRES) {
+		inverse_floodfill_iterative(min, max, 0, outers, inners, editor);
+		return;
+	}
+
+	int center_x = (min.first + max.first) / 2;
+	int center_z = (min.second + max.second) / 2;
+	std::array<std::tuple<int, int, int, int>, 4> quadrants = {
+			std::make_tuple(min.first, center_x, min.second, center_z),
+			std::make_tuple(center_x, max.first, min.second, center_z),
+			std::make_tuple(min.first, center_x, center_z, max.second),
+			std::make_tuple(center_x, max.first, center_z, max.second)};
+
+	for (auto [min_x, max_x, min_z, max_z] : quadrants) {
+		BgBox rect(BgPoint(static_cast<double>(min_x), static_cast<double>(min_z)),
+				BgPoint(static_cast<double>(max_x), static_cast<double>(max_z)));
+
+		bool outer_contains = false;
+		for (const auto &outer : outers) {
+			if (boost::geometry::within(rect, outer)) {
+				outer_contains = true;
+				break;
+			}
+		}
+
+		bool inner_intersects = false;
+		for (const auto &inner : inners) {
+			if (boost::geometry::intersects(inner, rect)) {
+				inner_intersects = true;
+				break;
+			}
+		}
+
+		if (outer_contains && !inner_intersects) {
+			rect_fill(min_x, max_x, min_z, max_z, 0, editor);
+			continue;
+		}
+
+		std::vector<BgPolygon> outers_intersects;
+		for (const auto &poly : outers) {
+			if (boost::geometry::intersects(poly, rect)) {
+				outers_intersects.push_back(poly);
+			}
+		}
+		std::vector<BgPolygon> inners_intersects;
+		for (const auto &poly : inners) {
+			if (boost::geometry::intersects(poly, rect)) {
+				inners_intersects.push_back(poly);
+			}
+		}
+
+		if (!outers_intersects.empty()) {
+			inverse_floodfill_recursive(std::make_pair(min_x, min_z),
+					std::make_pair(max_x, max_z), outers_intersects, inners_intersects,
+					editor, start_time);
+		}
+	}
+}
+*/
+/*
+void inverse_floodfill_iterative(
+    std::pair<int32_t, int32_t> min,
+    std::pair<int32_t, int32_t> max,
+    int value,
+    const std::vector<BgPolygon>& outers,
+    const std::vector<BgPolygon>& inners,
+    world::WorldEditor& editor);
+*/
+
+#if 0
+void inverse_floodfill_recursive(
+    std::pair<int32_t, int32_t> min,
+    std::pair<int32_t, int32_t> max,    const std::vector<BgPolygon>& outers,
+    const std::vector<BgPolygon>& inners,
+    WorldEditor& editor,
+    const std::chrono::steady_clock::time_point& start_time)
+{
+    using namespace std::chrono;
+    constexpr int64_t ITERATIVE_THRES = 10'000;
+
+    if (min.first > max.first || min.second > max.second) {
         return;
     }
-
-    // Don't handle water below layer 0
-    if let Some(layer) = element.tags.get("layer") {
-        if layer.parse::<i32>().map(|x| x < 0).unwrap_or(false) {
-            return;
-        }
+/*
+    if (duration<seconds>(steady_clock::now() - start_time).count() > 25) {
+        std::cout << "Water area generation exceeded 25 seconds, continuing anyway\n";
     }
+*/
+    int64_t width = static_cast<int64_t>(max.first) - static_cast<int64_t>(min.first);
+    int64_t height = static_cast<int64_t>(max.second) - static_cast<int64_t>(min.second);
 
-    let mut outers: Vec<Vec<ProcessedNode>> = vec![];
-    let mut inners: Vec<Vec<ProcessedNode>> = vec![];
-
-    for mem in &element.members {
-        match mem.role {
-            ProcessedMemberRole::Outer => outers.push(mem.way.nodes.clone()),
-            ProcessedMemberRole::Inner => inners.push(mem.way.nodes.clone()),
-        }
-    }
-
-    // Process each outer polygon individually
-    for (i, outer_nodes) in outers.iter().enumerate() {
-        let mut individual_outers = vec![outer_nodes.clone()];
-
-        merge_loopy_loops(&mut individual_outers);
-        if !verify_loopy_loops(&individual_outers) {
-            println!(
-                "Skipping invalid outer polygon {} for relation {}",
-                i + 1,
-                element.id
-            );
-            continue; // Skip this outer if it's not valid
-        }
-
-        merge_loopy_loops(&mut inners);
-        if !verify_loopy_loops(&inners) {
-            // If inners are invalid, process outer without inners
-            let empty_inners: Vec<Vec<ProcessedNode>> = vec![];
-            let mut temp_inners = empty_inners;
-            merge_loopy_loops(&mut temp_inners);
-
-            let (min_x, min_z) = editor.get_min_coords();
-            let (max_x, max_z) = editor.get_max_coords();
-            let individual_outers_xz: Vec<Vec<XZPoint>> = individual_outers
-                .iter()
-                .map(|x| x.iter().map(|y| y.xz()).collect::<Vec<_>>())
-                .collect();
-            let empty_inners_xz: Vec<Vec<XZPoint>> = vec![];
-
-            inverse_floodfill(
-                min_x,
-                min_z,
-                max_x,
-                max_z,
-                individual_outers_xz,
-                empty_inners_xz,
-                editor,
-                start_time,
-            );
-            continue;
-        }
-
-        let (min_x, min_z) = editor.get_min_coords();
-        let (max_x, max_z) = editor.get_max_coords();
-        let individual_outers_xz: Vec<Vec<XZPoint>> = individual_outers
-            .iter()
-            .map(|x| x.iter().map(|y| y.xz()).collect::<Vec<_>>())
-            .collect();
-        let inners_xz: Vec<Vec<XZPoint>> = inners
-            .iter()
-            .map(|x| x.iter().map(|y| y.xz()).collect::<Vec<_>>())
-            .collect();
-
-        inverse_floodfill(
-            min_x,
-            min_z,
-            max_x,
-            max_z,
-            individual_outers_xz,
-            inners_xz,
-            editor,
-            start_time,
-        );
-    }
-}
-
-// Merges ways that share nodes into full loops
-fn merge_loopy_loops(loops: &mut Vec<Vec<ProcessedNode>>) {
-    let mut removed: Vec<usize> = vec![];
-    let mut merged: Vec<Vec<ProcessedNode>> = vec![];
-
-    for i in 0..loops.len() {
-        for j in 0..loops.len() {
-            if i == j {
-                continue;
-            }
-
-            if removed.contains(&i) || removed.contains(&j) {
-                continue;
-            }
-
-            let x: &Vec<ProcessedNode> = &loops[i];
-            let y: &Vec<ProcessedNode> = &loops[j];
-
-            // it's looped already
-            if x[0].id == x.last().unwrap().id {
-                continue;
-            }
-
-            // it's looped already
-            if y[0].id == y.last().unwrap().id {
-                continue;
-            }
-
-            if x[0].id == y[0].id {
-                removed.push(i);
-                removed.push(j);
-
-                let mut x: Vec<ProcessedNode> = x.clone();
-                x.reverse();
-                x.extend(y.iter().skip(1).cloned());
-                merged.push(x);
-            } else if x.last().unwrap().id == y.last().unwrap().id {
-                removed.push(i);
-                removed.push(j);
-
-                let mut x: Vec<ProcessedNode> = x.clone();
-                x.extend(y.iter().rev().skip(1).cloned());
-
-                merged.push(x);
-            } else if x[0].id == y.last().unwrap().id {
-                removed.push(i);
-                removed.push(j);
-
-                let mut y: Vec<ProcessedNode> = y.clone();
-                y.extend(x.iter().skip(1).cloned());
-
-                merged.push(y);
-            } else if x.last().unwrap().id == y[0].id {
-                removed.push(i);
-                removed.push(j);
-
-                let mut x: Vec<ProcessedNode> = x.clone();
-                x.extend(y.iter().skip(1).cloned());
-
-                merged.push(x);
-            }
-        }
-    }
-
-    removed.sort();
-
-    for r in removed.iter().rev() {
-        loops.remove(*r);
-    }
-
-    let merged_len: usize = merged.len();
-    for m in merged {
-        loops.push(m);
-    }
-
-    if merged_len > 0 {
-        merge_loopy_loops(loops);
-    }
-}
-
-fn verify_loopy_loops(loops: &[Vec<ProcessedNode>]) -> bool {
-    let mut valid: bool = true;
-    for l in loops {
-        if l[0].id != l.last().unwrap().id {
-            eprintln!("WARN: Disconnected loop");
-            valid = false;
-        }
-    }
-
-    valid
-}
-
-// Water areas are absolutely huge. We can't easily flood fill the entire thing.
-// Instead, we'll iterate over all the blocks in our MC world, and check if each
-// one is in the river or not
-#[allow(clippy::too_many_arguments)]
-fn inverse_floodfill(
-    min_x: i32,
-    min_z: i32,
-    max_x: i32,
-    max_z: i32,
-    outers: Vec<Vec<XZPoint>>,
-    inners: Vec<Vec<XZPoint>>,
-    editor: &mut WorldEditor,
-    start_time: Instant,
-) {
-    let inners: Vec<_> = inners
-        .into_iter()
-        .map(|x| {
-            Polygon::new(
-                LineString::from(
-                    x.iter()
-                        .map(|pt| (pt.x as f64, pt.z as f64))
-                        .collect::<Vec<_>>(),
-                ),
-                vec![],
-            )
-        })
-        .collect();
-
-    let outers: Vec<_> = outers
-        .into_iter()
-        .map(|x| {
-            Polygon::new(
-                LineString::from(
-                    x.iter()
-                        .map(|pt| (pt.x as f64, pt.z as f64))
-                        .collect::<Vec<_>>(),
-                ),
-                vec![],
-            )
-        })
-        .collect();
-
-    inverse_floodfill_recursive(
-        (min_x, min_z),
-        (max_x, max_z),
-        &outers,
-        &inners,
-        editor,
-        start_time,
-    );
-}
-
-fn inverse_floodfill_recursive(
-    min: (i32, i32),
-    max: (i32, i32),
-    outers: &[Polygon],
-    inners: &[Polygon],
-    editor: &mut WorldEditor,
-    start_time: Instant,
-) {
-    // Check if we've exceeded 25 seconds
-    if start_time.elapsed().as_secs() > 25 {
-        println!("Water area generation exceeded 25 seconds, continuing anyway");
-    }
-
-    const ITERATIVE_THRES: i64 = 10_000;
-
-    if min.0 > max.0 || min.1 > max.1 {
-        return;
-    }
-
-    // Multiply as i64 to avoid overflow; in release builds where unchecked math is
-    // enabled, this could cause the rest of this code to end up in an infinite loop.
-    if ((max.0 - min.0) as i64) * ((max.1 - min.1) as i64) < ITERATIVE_THRES {
+    if (width * height < ITERATIVE_THRES) {
         inverse_floodfill_iterative(min, max, 0, outers, inners, editor);
         return;
     }
 
-    let center_x: i32 = (min.0 + max.0) / 2;
-    let center_z: i32 = (min.1 + max.1) / 2;
-    let quadrants: [(i32, i32, i32, i32); 4] = [
-        (min.0, center_x, min.1, center_z),
-        (center_x, max.0, min.1, center_z),
-        (min.0, center_x, center_z, max.1),
-        (center_x, max.0, center_z, max.1),
-    ];
+    int32_t center_x = (min.first + max.first) / 2;
+    int32_t center_z = (min.second + max.second) / 2;
 
-    for (min_x, max_x, min_z, max_z) in quadrants {
-        let rect: Rect = Rect::new(
-            Point::new(min_x as f64, min_z as f64),
-            Point::new(max_x as f64, max_z as f64),
+    std::array<std::tuple<int32_t, int32_t, int32_t, int32_t>, 4> quadrants = {{
+        {min.first, center_x, min.second, center_z},
+        {center_x, max.first, min.second, center_z},
+        {min.first, center_x, center_z, max.second},
+        {center_x, max.first, center_z, max.second}
+    }};
+
+    for (const auto& [min_x, max_x, min_z, max_z] : quadrants) {
+        BgBox rect(BgPoint(static_cast<double>(min_x), static_cast<double>(min_z)),
+                   BgPoint(static_cast<double>(max_x), static_cast<double>(max_z)));
+
+        bool any_outer_contains = std::any_of(
+            outers.begin(), outers.end(),
+            [&rect](const BgPolygon& outer) {
+                return boost::geometry::within(rect, outer);
+            }
         );
 
-        if outers.iter().any(|outer: &Polygon| outer.contains(&rect))
-            && !inners.iter().any(|inner: &Polygon| inner.intersects(&rect))
-        {
+        bool any_inner_intersects = std::any_of(
+            inners.begin(), inners.end(),
+            [&rect](const BgPolygon& inner) {
+                return boost::geometry::intersects(inner, rect);
+            }
+        );
+
+        if (any_outer_contains && !any_inner_intersects) {
             rect_fill(min_x, max_x, min_z, max_z, 0, editor);
             continue;
         }
 
-        let outers_intersects: Vec<_> = outers
-            .iter()
-            .filter(|poly| poly.intersects(&rect))
-            .cloned()
-            .collect();
-        let inners_intersects: Vec<_> = inners
-            .iter()
-            .filter(|poly| poly.intersects(&rect))
-            .cloned()
-            .collect();
+        std::vector<BgPolygon> outers_intersects;
+        std::copy_if(
+            outers.begin(), outers.end(),
+            std::back_inserter(outers_intersects),
+            [&rect](const BgPolygon& poly) { return boost::geometry::intersects(poly, rect); }
+        );
 
-        if !outers_intersects.is_empty() {
+        std::vector<BgPolygon> inners_intersects;
+        std::copy_if(
+            inners.begin(), inners.end(),
+            std::back_inserter(inners_intersects),
+            [&rect](const BgPolygon& poly) { return boost::geometry::intersects(poly, rect); }
+        );
+
+        if (!outers_intersects.empty()) {
             inverse_floodfill_recursive(
-                (min_x, min_z),
-                (max_x, max_z),
-                &outers_intersects,
-                &inners_intersects,
+                {min_x, min_z},
+                {max_x, max_z},
+                outers_intersects,
+                inners_intersects,
                 editor,
-                start_time,
+                start_time
+            );
+        }
+    }
+}
+#endif
+/*
+#include <vector>
+#include <chrono>
+#include <iostream>
+#include <algorithm>
+#include <boost/geometry.hpp>
+#include <boost/geometry/geometries/point_xy.hpp>
+#include <boost/geometry/geometries/linestring.hpp>
+#include <boost/geometry/geometries/polygon.hpp>
+using BgPoint = boost::geometry::model::d2::point_xy<double>;
+using BgLinestring = boost::geometry::model::linestring<BgPoint>;
+using BgPolygon = boost::geometry::model::polygon<BgPoint>;
+using BgBox = BgPolygon;
+
+namespace world {
+    struct WorldEditor {
+        // Editor methods and data
+    };
+}
+*/
+
+
+/*
+void rect_fill(int min_x, int max_x, int min_z, int max_z, int value, world::WorldEditor& editor);
+
+void invers_floodfill_iterative(
+    std::pair<int32_t, int32_t> min,
+    std::pair<int32_t, int32_t> max,
+    int value,
+    const std::vector<BgPolygon>& outers,
+    const std::vector<BgPolygon>& inners,
+    world::WorldEditor& editor);
+*/
+BgPolygon make_rectangle_polygon(int min_x, int max_x, int min_z, int max_z) {
+    BgPolygon poly;
+    boost::geometry::append(poly.outer(), BgPoint(min_x, min_z));
+    boost::geometry::append(poly.outer(), BgPoint(max_x, min_z));
+    boost::geometry::append(poly.outer(), BgPoint(max_x, max_z));
+    boost::geometry::append(poly.outer(), BgPoint(min_x, max_z));
+    boost::geometry::append(poly.outer(), BgPoint(min_x, min_z)); // close polygon
+    boost::geometry::correct(poly);
+    return poly;
+}
+
+void inverse_floodfill_recursive(
+    std::pair<int32_t, int32_t> min,
+    std::pair<int32_t, int32_t> max,
+    const std::vector<BgPolygon>& outers,
+    const std::vector<BgPolygon>& inners,
+    WorldEditor& editor,
+    const std::chrono::steady_clock::time_point& start_time)
+{
+    using namespace std::chrono;
+    constexpr int64_t ITERATIVE_THRES = 10'000;
+
+    if (min.first > max.first || min.second > max.second) {
+        return;
+    }
+
+    if (duration_cast<seconds>(steady_clock::now() - start_time).count() > 25) {
+        std::cout << "Water area generation exceeded 25 seconds, continuing anyway\n";
+    }
+
+    int64_t width = static_cast<int64_t>(max.first) - static_cast<int64_t>(min.first);
+    int64_t height = static_cast<int64_t>(max.second) - static_cast<int64_t>(min.second);
+
+    if (width * height < ITERATIVE_THRES) {
+        inverse_floodfill_iterative(min, max, 0, outers, inners, editor);
+        return;
+    }
+
+    int32_t center_x = (min.first + max.first) / 2;
+    int32_t center_z = (min.second + max.second) / 2;
+
+    std::array<std::tuple<int32_t, int32_t, int32_t, int32_t>, 4> quadrants = {{
+        {min.first, center_x, min.second, center_z},
+        {center_x, max.first, min.second, center_z},
+        {min.first, center_x, center_z, max.second},
+        {center_x, max.first, center_z, max.second}
+    }};
+
+    for (const auto& [min_x, max_x, min_z, max_z] : quadrants) {
+        auto rect = make_rectangle_polygon(min_x, max_x, min_z, max_z);
+
+        bool any_outer_contains = std::any_of(
+            outers.begin(), outers.end(),
+            [&rect](const BgPolygon& outer) {
+                return boost::geometry::within(rect, outer);
+            }
+        );
+
+        bool any_inner_intersects = std::any_of(
+
+ inners.begin(), inners.end(),
+            [&rect](const BgPolygon& inner) {
+                return boost::geometry::intersects(inner, rect);
+            }
+        );
+
+        if (any_outer_contains && !any_inner_intersects) {
+            rect_fill(min_x, max_x, min_z, max_z, 0, editor);
+            continue;
+        }
+
+        std::vector<BgPolygon> outers_intersects;
+        std::copy_if(
+            outers.begin(), outers.end(),
+            std::back_inserter(outers_intersects),
+            [&rect](const BgPolygon& poly) { return boost::geometry::intersects(poly, rect); }
+        );
+
+        std::vector<BgPolygon> inners_intersects;
+        std::copy_if(
+            inners.begin(), inners.end(),
+            std::back_inserter(inners_intersects),
+            [&rect](const BgPolygon& poly) { return boost::geometry::intersects(poly, rect); }
+        );
+
+        if (!outers_intersects.empty()) {
+            inverse_floodfill_recursive(
+                {min_x, min_z},
+                {max_x, max_z},
+                outers_intersects,
+                inners_intersects,
+                editor,
+                start_time
             );
         }
     }
 }
 
-// once we "zoom in" enough, it's more efficient to switch to iteration
-fn inverse_floodfill_iterative(
-    min: (i32, i32),
-    max: (i32, i32),
-    ground_level: i32,
-    outers: &[Polygon],
-    inners: &[Polygon],
-    editor: &mut WorldEditor,
-) {
-    for x in min.0..max.0 {
-        for z in min.1..max.1 {
-            let p: Point = Point::new(x as f64, z as f64);
 
-            if outers.iter().any(|poly: &Polygon| poly.contains(&p))
-                && inners.iter().all(|poly: &Polygon| !poly.contains(&p))
-            {
-                editor.set_block(WATER, x, ground_level, z, None, None);
-            }
-        }
-    }
+static void inverse_floodfill(int min_x, int min_z, int max_x, int max_z,
+		const std::vector<std::vector<XZPoint>> &outers,
+		const std::vector<std::vector<XZPoint>> &inners, WorldEditor &editor,
+		const std::chrono::steady_clock::time_point &start_time)
+{
+	std::vector<BgPolygon> inners_bg;
+	inners_bg.reserve(inners.size());
+	for (const auto &poly_pts : inners) {
+		BgLinestring ls;
+		ls.reserve(poly_pts.size());
+		for (const auto &pt : poly_pts) {
+			ls.emplace_back(static_cast<double>(pt.x), static_cast<double>(pt.z));
+		}
+		// ensure closed
+		if (!ls.empty() &&
+				(ls.front().x() != ls.back().x() || ls.front().y() != ls.back().y())) {
+			ls.push_back(ls.front());
+		}
+		BgPolygon poly;
+		boost::geometry::assign_points(poly, ls);
+		boost::geometry::correct(poly);
+		inners_bg.push_back(std::move(poly));
+	}
+
+	std::vector<BgPolygon> outers_bg;
+	outers_bg.reserve(outers.size());
+	for (const auto &poly_pts : outers) {
+		BgLinestring ls;
+		ls.reserve(poly_pts.size());
+		for (const auto &pt : poly_pts) {
+			ls.emplace_back(static_cast<double>(pt.x), static_cast<double>(pt.z));
+		}
+		if (!ls.empty() &&
+				(ls.front().x() != ls.back().x() || ls.front().y() != ls.back().y())) {
+			ls.push_back(ls.front());
+		}
+		BgPolygon poly;
+		boost::geometry::assign_points(poly, ls);
+		boost::geometry::correct(poly);
+		outers_bg.push_back(std::move(poly));
+	}
+
+	inverse_floodfill_recursive(std::make_pair(min_x, min_z),
+			std::make_pair(max_x, max_z), outers_bg, inners_bg, editor, start_time);
 }
 
-fn rect_fill(
-    min_x: i32,
-    max_x: i32,
-    min_z: i32,
-    max_z: i32,
-    ground_level: i32,
-    editor: &mut WorldEditor,
-) {
-    for x in min_x..max_x {
-        for z in min_z..max_z {
-            editor.set_block(WATER, x, ground_level, z, None, None);
-        }
-    }
+void generate_water_areas(WorldEditor &editor, const ProcessedRelation &element)
+{
+	auto start_time = std::chrono::steady_clock::now();
+
+	bool is_water = false;
+	auto it = element.tags.find("water");
+	if (it != element.tags.end()) {
+		is_water = true;
+	} else {
+		auto it_nat = element.tags.find("natural");
+		if (it_nat != element.tags.end() && it_nat->second == "water") {
+			is_water = true;
+		}
+	}
+
+	if (!is_water) {
+		return;
+	}
+
+	auto it_layer = element.tags.find("layer");
+	if (it_layer != element.tags.end()) {
+		try {
+			int layer = std::stoi(it_layer->second);
+			if (layer < 0) {
+				return;
+			}
+		} catch (...) {
+			// ignore parse errors
+		}
+	}
+
+	std::vector<std::vector<ProcessedNode>> outers;
+	std::vector<std::vector<ProcessedNode>> inners;
+
+	for (const auto &mem : element.members) {
+		if (mem.role == ProcessedMemberRole::Outer) {
+			outers.push_back(mem.way.nodes);
+		} else if (mem.role == ProcessedMemberRole::Inner) {
+			inners.push_back(mem.way.nodes);
+		}
+	}
+
+	for (std::size_t i = 0; i < outers.size(); ++i) {
+		std::vector<std::vector<ProcessedNode>> individual_outers;
+		individual_outers.push_back(outers[i]);
+
+		merge_loopy_loops(individual_outers);
+		if (!verify_loopy_loops(individual_outers)) {
+			std::cout << "Skipping invalid outer polygon " << (i + 1) << " for rela "
+					  << element.id << std::endl;
+			continue;
+		}
+
+		// Work on a copy of inners for merging/verification
+		std::vector<std::vector<ProcessedNode>> inners_copy = inners;
+		merge_loopy_loops(inners_copy);
+		if (!verify_loopy_loops(inners_copy)) {
+			std::vector<std::vector<ProcessedNode>> empty_inners;
+			std::vector<std::vector<ProcessedNode>> temp_inners = empty_inners;
+			merge_loopy_loops(temp_inners);
+
+			auto [min_x, min_z] = editor.get_min_coords();
+			auto [max_x, max_z] = editor.get_max_coords();
+
+			std::vector<std::vector<XZPoint>> individual_outers_xz;
+			for (const auto &poly : individual_outers) {
+				std::vector<XZPoint> v;
+				v.reserve(poly.size());
+				for (const auto &n : poly) {
+					v.push_back(n.xz());
+				}
+				individual_outers_xz.push_back(std::move(v));
+			}
+			std::vector<std::vector<XZPoint>> empty_inners_xz;
+
+			inverse_floodfill(min_x, min_z, max_x, max_z, individual_outers_xz,
+					empty_inners_xz, editor, start_time);
+			continue;
+		}
+
+		auto [min_x, min_z] = editor.get_min_coords();
+		auto [max_x, max_z] = editor.get_max_coords();
+
+		std::vector<std::vector<XZPoint>> individual_outers_xz;
+		for (const auto &poly : individual_outers) {
+			std::vector<XZPoint> v;
+			v.reserve(poly.size());
+			for (const auto &n : poly) {
+				v.push_back(n.xz());
+			}
+			individual_outers_xz.push_back(std::move(v));
+		}
+
+		std::vector<std::vector<XZPoint>> inners_xz;
+		for (const auto &poly : inners_copy) {
+			std::vector<XZPoint> v;
+			v.reserve(poly.size());
+			for (const auto &n : poly) {
+				v.push_back(n.xz());
+			}
+			inners_xz.push_back(std::move(v));
+		}
+
+		inverse_floodfill(min_x, min_z, max_x, max_z, individual_outers_xz, inners_xz,
+				editor, start_time);
+	}
+}
+}
 }

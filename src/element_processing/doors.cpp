@@ -1,25 +1,39 @@
-use crate::block_definitions::*;
-use crate::osm_parser::ProcessedNode;
-use crate::world_editor::WorldEditor;
+#include <string>
+#include <optional>
+#include <stdexcept>
 
-pub fn generate_doors(editor: &mut WorldEditor, element: &ProcessedNode) {
-    // Check if the element is a door or entrance
-    if element.tags.contains_key("door") || element.tags.contains_key("entrance") {
-        // Check for the "level" tag and skip doors that are not at ground level
-        if let Some(level_str) = element.tags.get("level") {
-            if let Ok(level) = level_str.parse::<i32>() {
-                if level != 0 {
-                    return; // Skip doors not on ground level
+#include "../../arnis_adapter.h"
+namespace arnis
+{
+
+namespace doors
+{
+
+
+void generate_doors(crate::world_editor::WorldEditor& editor, crate::osm_parser::ProcessedNode const& element) {
+    if (element.tags.find("door") != element.tags.end() || element.tags.find("entrance") != element.tags.end()) {
+        auto it = element.tags.find("level");
+        if (it != element.tags.end()) {
+            try {
+                int level = std::stoi(it->second);
+                if (level != 0) {
+                    return;
                 }
+            } catch (const std::invalid_argument&) {
+                // ignore parse error
+            } catch (const std::out_of_range&) {
+                // ignore parse error
             }
         }
 
-        let x: i32 = element.x;
-        let z: i32 = element.z;
+        int x = element.x;
+        int z = element.z;
 
-        // Set the ground block and the door blocks
-        editor.set_block(GRAY_CONCRETE, x, 0, z, None, None);
-        editor.set_block(DARK_OAK_DOOR_LOWER, x, 1, z, None, None);
-        editor.set_block(DARK_OAK_DOOR_UPPER, x, 2, z, None, None);
+        editor.set_block(crate::block_definitions::GRAY_CONCRETE, x, 0, z, std::optional<int>{}, std::optional<int>{});
+        editor.set_block(crate::block_definitions::DARK_OAK_DOOR_LOWER, x, 1, z, std::optional<int>{}, std::optional<int>{});
+        editor.set_block(crate::block_definitions::DARK_OAK_DOOR_UPPER, x, 2, z, std::optional<int>{}, std::optional<int>{});
     }
+}
+
+}
 }

@@ -1,170 +1,170 @@
-use crate::args::Args;
-use crate::block_definitions::*;
-use crate::bresenham::bresenham_line;
-use crate::element_processing::tree::Tree;
-use crate::floodfill::flood_fill_area;
-use crate::osm_parser::{ProcessedMemberRole, ProcessedRelation, ProcessedWay};
-use crate::world_editor::WorldEditor;
-use rand::Rng;
+#include <string>
+#include <tuple>
+#include <utility>
+#include <optional>
+#include <random>
+#include <algorithm>
 
-pub fn generate_leisure(editor: &mut WorldEditor, element: &ProcessedWay, args: &Args) {
-    if let Some(leisure_type) = element.tags.get("leisure") {
-        let mut previous_node: Option<(i32, i32)> = None;
-        let mut corner_addup: (i32, i32, i32) = (0, 0, 0);
-        let mut current_leisure: Vec<(i32, i32)> = vec![];
+// Project headers
+#include "args.h"
+#include "block_definitions.h"
+#include "bresenham.h"
+#include "../element_processing/tree.h"
+#include "floodfill.h"
+#include "osm_parser.h"
+#include "world_editor.h"
+#include "../../arnis_adapter.h"
+namespace arnis
+{
 
-        // Determine block type based on leisure type
-        let block_type: Block = match leisure_type.as_str() {
-            "park" | "nature_reserve" | "garden" | "disc_golf_course" | "golf_course" => {
-                GRASS_BLOCK
-            }
-            "schoolyard" => BLACK_CONCRETE,
-            "playground" | "recreation_ground" | "pitch" | "beach_resort" | "dog_park" => {
-                if let Some(surface) = element.tags.get("surface") {
-                    match surface.as_str() {
-                        "clay" => TERRACOTTA,
-                        "sand" => SAND,
-                        "tartan" => RED_TERRACOTTA,
-                        "grass" => GRASS_BLOCK,
-                        "dirt" => DIRT,
-                        "pebblestone" | "cobblestone" | "unhewn_cobblestone" => COBBLESTONE,
-                        _ => GREEN_STAINED_HARDENED_CLAY,
-                    }
+namespace leisure
+{
+
+
+void generate_leisure(WorldEditor& editor, const ProcessedWay& element, const Args& args) {
+    auto leisure_it = element.tags.find(std::string("leisure"));
+    if (leisure_it != element.tags.end()) {
+        const std::string& leisure_type = leisure_it->second;
+        std::optional<std::pair<int, int>> previous_node = std::nullopt;
+        std::tuple<int, int, int> corner_addup = std::make_tuple(0, 0, 0);
+        std::vector<std::pair<int, int>> current_leisure;
+
+        Block block_type = GRASS_BLOCK;
+        if (leisure_type == "park" || leisure_type == "nature_reserve" || leisure_type == "garden" ||
+            leisure_type == "disc_golf_course" || leisure_type == "golf_course") {
+            block_type = GRASS_BLOCK;
+        } else if (leisure_type == "schoolyard") {
+            block_type = BLACK_CONCRETE;
+        } else if (leisure_type == "playground" || leisure_type == "recreation_ground" ||
+                   leisure_type == "pitch" || leisure_type == "beach_resort" || leisure_type == "dog_park") {
+            auto surf_it = element.tags.find(std::string("surface"));
+            if (surf_it != element.tags.end()) {
+                const std::string& surface = surf_it->second;
+                if (surface == "clay") {
+                    block_type = TERRACOTTA;
+                } else if (surface == "sand") {
+                    block_type = SAND;
+                } else if (surface == "tartan") {
+                    block_type = RED_TERRACOTTA;
+                } else if (surface == "grass") {
+                    block_type = GRASS_BLOCK;
+                } else if (surface == "dirt") {
+                    block_type = DIRT;
+                } else if (surface == "pebblestone" || surface == "cobblestone" || surface == "unhewn_cobblestone") {
+                    block_type = COBBLESTONE;
                 } else {
-                    GREEN_STAINED_HARDENED_CLAY
+                    block_type = GREEN_STAINED_HARDENED_CLAY;
                 }
+            } else {
+                block_type = GREEN_STAINED_HARDENED_CLAY;
             }
-            "swimming_pool" | "swimming_area" => WATER, //Swimming area: Area in a larger body of water for swimming
-            "bathing_place" => SMOOTH_SANDSTONE,        // Could be sand or concrete
-            "outdoor_seating" => SMOOTH_STONE,          //Usually stone or stone bricks
-            "water_park" | "slipway" => LIGHT_GRAY_CONCRETE, // Water park area, not the pool. Usually is concrete
-            "ice_rink" => PACKED_ICE, // TODO: Ice for Ice Rink, needs building defined
-            _ => GRASS_BLOCK,
-        };
-
-        // Process leisure area nodes
-        for node in &element.nodes {
-            if let Some(prev) = previous_node {
-                // Draw a line between the current and previous node
-                let bresenham_points: Vec<(i32, i32, i32)> =
-                    bresenham_line(prev.0, 0, prev.1, node.x, 0, node.z);
-                for (bx, _, bz) in bresenham_points {
-                    editor.set_block(
-                        block_type,
-                        bx,
-                        0,
-                        bz,
-                        Some(&[
-                            GRASS_BLOCK,
-                            STONE_BRICKS,
-                            SMOOTH_STONE,
-                            LIGHT_GRAY_CONCRETE,
-                            COBBLESTONE,
-                            GRAY_CONCRETE,
-                        ]),
-                        None,
-                    );
-                }
-
-                current_leisure.push((node.x, node.z));
-                corner_addup.0 += node.x;
-                corner_addup.1 += node.z;
-                corner_addup.2 += 1;
-            }
-            previous_node = Some((node.x, node.z));
+        } else if (leisure_type == "swimming_pool" || leisure_type == "swimming_area") {
+            block_type = WATER;
+        } else if (leisure_type == "bathing_place") {
+            block_type = SMOOTH_SANDSTONE;
+        } else if (leisure_type == "outdoor_seating") {
+            block_type = SMOOTH_STONE;
+        } else if (leisure_type == "water_park" || leisure_type == "slipway") {
+            block_type = LIGHT_GRAY_CONCRETE;
+        } else if (leisure_type == "ice_rink") {
+            block_type = PACKED_ICE;
+        } else {
+            block_type = GRASS_BLOCK;
         }
 
-        // Flood-fill the interior of the leisure area
-        if corner_addup != (0, 0, 0) {
-            let polygon_coords: Vec<(i32, i32)> = element
-                .nodes
-                .iter()
-                .map(|n: &crate::osm_parser::ProcessedNode| (n.x, n.z))
-                .collect();
-            let filled_area: Vec<(i32, i32)> =
-                flood_fill_area(&polygon_coords, args.timeout.as_ref());
+        for (const ProcessedNode& node : element.nodes) {
+            if (previous_node.has_value()) {
+                std::pair<int,int> prev = previous_node.value();
+                std::vector<std::tuple<int,int,int>> bresenham_points =
+                    bresenham_line(prev.first, 0, prev.second, node.x, 0, node.z);
+                for (const std::tuple<int,int,int>& t : bresenham_points) {
+                    int bx = std::get<0>(t);
+                    int bz = std::get<2>(t);
+                    editor.set_block(block_type, bx, 0, bz,
+                                     std::optional<std::vector<Block>>({
+                                         GRASS_BLOCK, STONE_BRICKS, SMOOTH_STONE,
+                                         LIGHT_GRAY_CONCRETE, COBBLESTONE, GRAY_CONCRETE
+                                     }),
+                                     std::nullopt);
+                }
 
-            for (x, z) in filled_area {
-                editor.set_block(block_type, x, 0, z, Some(&[GRASS_BLOCK]), None);
+                current_leisure.push_back(std::make_pair(node.x, node.z));
+                std::get<0>(corner_addup) += node.x;
+                std::get<1>(corner_addup) += node.z;
+                std::get<2>(corner_addup) += 1;
+            }
+            previous_node = std::make_pair(node.x, node.z);
+        }
 
-                // Add decorative elements for parks and gardens
-                if matches!(leisure_type.as_str(), "park" | "garden" | "nature_reserve")
-                    && editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK]))
-                {
-                    let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
-                    let random_choice: i32 = rng.gen_range(0..1000);
+        if (corner_addup != std::make_tuple(0, 0, 0)) {
+            std::vector<std::pair<int,int>> polygon_coords;
+            polygon_coords.reserve(element.nodes.size());
+            for (const ProcessedNode& n : element.nodes) {
+                polygon_coords.push_back(std::make_pair(n.x, n.z));
+            }
 
-                    match random_choice {
-                        0..30 => {
-                            // Flowers
-                            let flower_choice = match random_choice {
-                                0..10 => RED_FLOWER,
-                                10..20 => YELLOW_FLOWER,
-                                20..30 => BLUE_FLOWER,
-                                _ => WHITE_FLOWER,
-                            };
-                            editor.set_block(flower_choice, x, 1, z, None, None);
+            auto timeout_opt = args.timeout;
+            std::vector<std::pair<int,int>> filled_area = flood_fill_area(polygon_coords, timeout_opt);
+
+            for (const std::pair<int,int>& p : filled_area) {
+                int x = p.first;
+                int z = p.second;
+                editor.set_block(block_type, x, 0, z, std::optional<std::vector<Block>>({GRASS_BLOCK}), std::nullopt);
+
+                if ((leisure_type == "park" || leisure_type == "garden" || leisure_type == "nature_reserve") &&
+                    editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>({GRASS_BLOCK}))) {
+
+                    std::random_device rd;
+                    std::mt19937 rng(rd());
+                    std::uniform_int_distribution<int> dist(0, 999);
+                    int random_choice = dist(rng);
+
+                    if (random_choice >= 0 && random_choice < 30) {
+                        Block flower_choice = WHITE_FLOWER;
+                        if (random_choice < 10) {
+                            flower_choice = RED_FLOWER;
+                        } else if (random_choice < 20) {
+                            flower_choice = YELLOW_FLOWER;
+                        } else {
+                            flower_choice = BLUE_FLOWER;
                         }
-                        30..90 => {
-                            // Grass
-                            editor.set_block(GRASS, x, 1, z, None, None);
-                        }
-                        90..105 => {
-                            // Oak leaves
-                            editor.set_block(OAK_LEAVES, x, 1, z, None, None);
-                        }
-                        105..120 => {
-                            // Tree
-                            Tree::create(editor, (x, 1, z));
-                        }
-                        _ => {}
+                        editor.set_block(flower_choice, x, 1, z, std::nullopt, std::nullopt);
+                    } else if (random_choice >= 30 && random_choice < 90) {
+                        editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
+                    } else if (random_choice >= 90 && random_choice < 105) {
+                        editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
+                    } else if (random_choice >= 105 && random_choice < 120) {
+                        Tree::create(editor, std::make_tuple(x, 1, z));
                     }
                 }
 
-                // Add playground or recreation ground features
-                if matches!(leisure_type.as_str(), "playground" | "recreation_ground") {
-                    let mut rng: rand::prelude::ThreadRng = rand::thread_rng();
-                    let random_choice: i32 = rng.gen_range(0..5000);
+                if (leisure_type == "playground" || leisure_type == "recreation_ground") {
+                    std::random_device rd2;
+                    std::mt19937 rng2(rd2());
+                    std::uniform_int_distribution<int> dist2(0, 4999);
+                    int rc = dist2(rng2);
 
-                    match random_choice {
-                        0..10 => {
-                            // Swing set
-                            for y in 1..=3 {
-                                editor.set_block(OAK_FENCE, x - 1, y, z, None, None);
-                                editor.set_block(OAK_FENCE, x + 1, y, z, None, None);
-                            }
-                            editor.set_block(OAK_PLANKS, x - 1, 4, z, None, None);
-                            editor.set_block(OAK_SLAB, x, 4, z, None, None);
-                            editor.set_block(OAK_PLANKS, x + 1, 4, z, None, None);
-                            editor.set_block(STONE_BLOCK_SLAB, x, 2, z, None, None);
+                    if (rc >= 0 && rc < 10) {
+                        for (int y = 1; y <= 3; ++y) {
+                            editor.set_block(OAK_FENCE, x - 1, y, z, std::nullopt, std::nullopt);
+                            editor.set_block(OAK_FENCE, x + 1, y, z, std::nullopt, std::nullopt);
                         }
-                        10..20 => {
-                            // Slide
-                            editor.set_block(OAK_SLAB, x, 1, z, None, None);
-                            editor.set_block(OAK_SLAB, x + 1, 2, z, None, None);
-                            editor.set_block(OAK_SLAB, x + 2, 3, z, None, None);
-
-                            editor.set_block(OAK_PLANKS, x + 2, 2, z, None, None);
-                            editor.set_block(OAK_PLANKS, x + 2, 1, z, None, None);
-
-                            editor.set_block(LADDER, x + 2, 2, z - 1, None, None);
-                            editor.set_block(LADDER, x + 2, 1, z - 1, None, None);
-                        }
-                        20..30 => {
-                            // Sandpit
-                            editor.fill_blocks(
-                                SAND,
-                                x - 3,
-                                0,
-                                z - 3,
-                                x + 3,
-                                0,
-                                z + 3,
-                                Some(&[GREEN_STAINED_HARDENED_CLAY]),
-                                None,
-                            );
-                        }
-                        _ => {}
+                        editor.set_block(OAK_PLANKS, x - 1, 4, z, std::nullopt, std::nullopt);
+                        editor.set_block(OAK_SLAB, x, 4, z, std::nullopt, std::nullopt);
+                        editor.set_block(OAK_PLANKS, x + 1, 4, z, std::nullopt, std::nullopt);
+                        editor.set_block(STONE_BLOCK_SLAB, x, 2, z, std::nullopt, std::nullopt);
+                    } else if (rc >= 10 && rc < 20) {
+                        editor.set_block(OAK_SLAB, x, 1, z, std::nullopt, std::nullopt);
+                        editor.set_block(OAK_SLAB, x + 1, 2, z, std::nullopt, std::nullopt);
+                        editor.set_block(OAK_SLAB, x + 2, 3, z, std::nullopt, std::nullopt);
+                        editor.set_block(OAK_PLANKS, x + 2, 2, z, std::nullopt, std::nullopt);
+                        editor.set_block(OAK_PLANKS, x + 2, 1, z, std::nullopt, std::nullopt);
+                        editor.set_block(LADDER, x + 2, 2, z - 1, std::nullopt, std::nullopt);
+                        editor.set_block(LADDER, x + 2, 1, z - 1, std::nullopt, std::nullopt);
+                    } else if (rc >= 20 && rc < 30) {
+                        editor.fill_blocks(SAND, x - 3, 0, z - 3, x + 3, 0, z + 3,
+                                           std::optional<std::vector<Block>>({GREEN_STAINED_HARDENED_CLAY}),
+                                           std::nullopt);
                     }
                 }
             }
@@ -172,35 +172,32 @@ pub fn generate_leisure(editor: &mut WorldEditor, element: &ProcessedWay, args: 
     }
 }
 
-pub fn generate_leisure_from_relation(
-    editor: &mut WorldEditor,
-    rel: &ProcessedRelation,
-    args: &Args,
-) {
-    if rel.tags.get("leisure") == Some(&"park".to_string()) {
-        // First generate individual ways with their original tags
-        for member in &rel.members {
-            if member.role == ProcessedMemberRole::Outer {
-                generate_leisure(editor, &member.way, args);
+void generate_leisure_from_relation(WorldEditor& editor, const ProcessedRelation& rel, const Args& args) {
+    auto leisure_it = rel.tags.find(std::string("leisure"));
+    if (leisure_it != rel.tags.end() && leisure_it->second == "park") {
+        for (const ProcessedMember& member : rel.members) {
+            if (member.role == ProcessedMemberRole::Outer) {
+                generate_leisure(editor, member.way, args);
             }
         }
 
-        // Then combine all outer ways into one
-        let mut combined_nodes = Vec::new();
-        for member in &rel.members {
-            if member.role == ProcessedMemberRole::Outer {
-                combined_nodes.extend(member.way.nodes.clone());
+        std::vector<ProcessedNode> combined_nodes;
+        for (const ProcessedMember& member : rel.members) {
+            if (member.role == ProcessedMemberRole::Outer) {
+                combined_nodes.insert(combined_nodes.end(), member.way.nodes.begin(), member.way.nodes.end());
             }
         }
 
-        // Create combined way with relation tags
-        let combined_way = ProcessedWay {
-            id: rel.id,
-            nodes: combined_nodes,
-            tags: rel.tags.clone(),
-        };
+        ProcessedWay combined_way;
+        combined_way.id = rel.id;
+        combined_way.nodes = std::move(combined_nodes);
+        combined_way.tags = rel.tags;
 
-        // Generate leisure area from combined way
-        generate_leisure(editor, &combined_way, args);
+        generate_leisure(editor, combined_way, args);
     }
+}
+
+        
+}
+
 }

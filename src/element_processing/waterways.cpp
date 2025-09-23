@@ -1,115 +1,141 @@
-use crate::block_definitions::*;
-use crate::bresenham::bresenham_line;
-use crate::osm_parser::ProcessedWay;
-use crate::world_editor::WorldEditor;
+#include "block_definitions.h"
+#include "bresenham.h"
+#include "osm_parser.h"
+#include "world_editor.h"
 
-pub fn generate_waterways(editor: &mut WorldEditor, element: &ProcessedWay) {
-    if let Some(waterway_type) = element.tags.get("waterway") {
-        let (mut waterway_width, waterway_depth) = get_waterway_dimensions(waterway_type);
+#include <vector>
+#include <string>
+#include <unordered_map>
+#include <optional>
+#include <utility>
+#include <tuple>
+#include <algorithm>
+#include <stdexcept>
 
-        // Check for custom width in tags
-        if let Some(width_str) = element.tags.get("width") {
-            waterway_width = width_str.parse::<i32>().unwrap_or_else(|_| {
-                width_str
-                    .parse::<f32>()
-                    .map(|f: f32| f as i32)
-                    .unwrap_or(waterway_width)
-            });
-        }
 
-        // Skip layers below the ground level
-        if matches!(
-            element.tags.get("layer").map(|s| s.as_str()),
-            Some("-1") | Some("-2") | Some("-3")
-        ) {
-            return;
-        }
+#include "../../arnis_adapter.h"
+#undef stoi
+#undef stof
+namespace arnis
+{
 
-        // Process consecutive node pairs to create waterways
-        // Use windows(2) to avoid connecting last node back to first
-        for nodes_pair in element.nodes.windows(2) {
-            let prev_node = nodes_pair[0].xz();
-            let current_node = nodes_pair[1].xz();
+    namespace waterways{
 
-            // Draw a line between the current and previous node
-            let bresenham_points: Vec<(i32, i32, i32)> = bresenham_line(
-                prev_node.x,
-                0,
-                prev_node.z,
-                current_node.x,
-                0,
-                current_node.z,
-            );
-
-            for (bx, _, bz) in bresenham_points {
-                // Create water channel with proper depth and sloped banks
-                create_water_channel(editor, bx, bz, waterway_width, waterway_depth);
-            }
-        }
-    }
+std::pair<int, int> get_waterway_dimensions(const std::string& waterway_type) {
+    if (waterway_type == "river") return std::pair<int,int>(8, 3);
+    if (waterway_type == "canal") return std::pair<int,int>(6, 2);
+    if (waterway_type == "stream") return std::pair<int,int>(3, 2);
+    if (waterway_type == "fairway") return std::pair<int,int>(12, 3);
+    if (waterway_type == "flowline") return std::pair<int,int>(2, 1);
+    if (waterway_type == "brook") return std::pair<int,int>(2, 1);
+    if (waterway_type == "ditch") return std::pair<int,int>(2, 1);
+    if (waterway_type == "drain") return std::pair<int,int>(1, 1);
+    return std::pair<int,int>(4, 2);
 }
 
-/// Determines width and depth based on waterway type
-fn get_waterway_dimensions(waterway_type: &str) -> (i32, i32) {
-    match waterway_type {
-        "river" => (8, 3),    // Large rivers: 8 blocks wide, 3 blocks deep
-        "canal" => (6, 2),    // Canals: 6 blocks wide, 2 blocks deep
-        "stream" => (3, 2),   // Streams: 3 blocks wide, 2 blocks deep
-        "fairway" => (12, 3), // Shipping fairways: 12 blocks wide, 3 blocks deep
-        "flowline" => (2, 1), // Water flow lines: 2 blocks wide, 1 block deep
-        "brook" => (2, 1),    // Small brooks: 2 blocks wide, 1 block deep
-        "ditch" => (2, 1),    // Ditches: 2 blocks wide, 1 block deep
-        "drain" => (1, 1),    // Drainage: 1 block wide, 1 block deep
-        _ => (4, 2),          // Default: 4 blocks wide, 2 blocks deep
-    }
-}
-
-/// Creates a water channel with proper depth and sloped banks
-fn create_water_channel(
-    editor: &mut WorldEditor,
-    center_x: i32,
-    center_z: i32,
-    width: i32,
-    depth: i32,
+void create_water_channel(
+    WorldEditor& editor,
+    int center_x,
+    int center_z,
+    int width,
+    int depth
 ) {
-    let half_width = width / 2;
+    int half_width = width / 2;
+    for (int x = center_x - half_width - 1; x <= center_x + half_width + 1; ++x) {
+        for (int z = center_z - half_width - 1; z <= center_z + half_width + 1; ++z) {
+            int dx = std::abs(x - center_x);
+            int dz = std::abs(z - center_z);
+            int distance_from_center = std::max(dx, dz);
 
-    for x in (center_x - half_width - 1)..=(center_x + half_width + 1) {
-        for z in (center_z - half_width - 1)..=(center_z + half_width + 1) {
-            let dx = (x - center_x).abs();
-            let dz = (z - center_z).abs();
-            let distance_from_center = dx.max(dz);
-
-            if distance_from_center <= half_width {
-                // Main water channel
-                for y in (1 - depth)..=0 {
-                    editor.set_block(WATER, x, y, z, None, None);
+            if (distance_from_center <= half_width) {
+                for (int y = 1 - depth; y <= 0; ++y) {
+                    editor.set_block(WATER, x, y, z, std::nullopt, std::nullopt);
                 }
 
-                // Place one layer of dirt below the water channel
-                editor.set_block(DIRT, x, -depth, z, None, None);
+                editor.set_block(DIRT, x, -depth, z, std::nullopt, std::nullopt);
 
-                // Clear vegetation above the water
-                editor.set_block(AIR, x, 1, z, Some(&[GRASS, WHEAT, CARROTS, POTATOES]), None);
-            } else if distance_from_center == half_width + 1 && depth > 1 {
-                // Create sloped banks (one block interval slopes)
-                let slope_depth = (depth - 1).max(1);
-                for y in (1 - slope_depth)..=0 {
-                    if y == 0 {
-                        // Surface level - place water or air
-                        editor.set_block(WATER, x, y, z, None, None);
+                editor.set_block(
+                    AIR,
+                    x,
+                    1,
+                    z,
+                    std::optional<std::vector<Block>>(std::vector<Block>{GRASS, WHEAT, CARROTS, POTATOES}),
+                    std::nullopt
+                );
+            } else if (distance_from_center == half_width + 1 && depth > 1) {
+                int slope_depth = std::max(depth - 1, 1);
+                for (int y = 1 - slope_depth; y <= 0; ++y) {
+                    if (y == 0) {
+                        editor.set_block(WATER, x, y, z, std::nullopt, std::nullopt);
                     } else {
-                        // Below surface - dig out for slope
-                        editor.set_block(AIR, x, y, z, None, None);
+                        editor.set_block(AIR, x, y, z, std::nullopt, std::nullopt);
                     }
                 }
 
-                // Place one layer of dirt below the sloped areas
-                editor.set_block(DIRT, x, -slope_depth, z, None, None);
+                editor.set_block(DIRT, x, -slope_depth, z, std::nullopt, std::nullopt);
 
-                // Clear vegetation above sloped areas
-                editor.set_block(AIR, x, 1, z, Some(&[GRASS, WHEAT, CARROTS, POTATOES]), None);
+                editor.set_block(
+                    AIR,
+                    x,
+                    1,
+                    z,
+                    std::optional<std::vector<Block>>(std::vector<Block>{GRASS, WHEAT, CARROTS, POTATOES}),
+                    std::nullopt
+                );
             }
         }
     }
+}
+
+void generate_waterways(WorldEditor& editor, const ProcessedWay& element) {
+    auto it = element.tags.find("waterway");
+    if (it == element.tags.end()) {
+        return;
+    }
+
+    std::pair<int,int> dims = get_waterway_dimensions(it->second);
+    int waterway_width = dims.first;
+    int waterway_depth = dims.second;
+
+    auto width_it = element.tags.find("width");
+    if (width_it != element.tags.end()) {
+        const std::string& width_str = width_it->second;
+        try {
+            waterway_width = std::stoi(width_str);
+        } catch (const std::exception&) {
+            try {
+                float f = std::stof(width_str);
+                waterway_width = static_cast<int>(f);
+            } catch (const std::exception&) {
+                // keep default width
+            }
+        }
+    }
+
+    auto layer_it = element.tags.find("layer");
+    if (layer_it != element.tags.end()) {
+        const std::string& layer_val = layer_it->second;
+        if (layer_val == "-1" || layer_val == "-2" || layer_val == "-3") {
+            return;
+        }
+    }
+
+    for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
+        auto prev_node = element.nodes[i].xz();
+        auto current_node = element.nodes[i + 1].xz();
+
+        std::vector<std::tuple<int,int,int>> bresenham_points = bresenham_line(
+            prev_node.x, 0, prev_node.z,
+            current_node.x, 0, current_node.z
+        );
+
+        for (const auto& pt : bresenham_points) {
+            int bx = std::get<0>(pt);
+            int bz = std::get<2>(pt);
+            create_water_channel(editor, bx, bz, waterway_width, waterway_depth);
+        }
+    }
+}
+
+}
 }

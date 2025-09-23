@@ -1,638 +1,573 @@
-use crate::args::Args;
-use crate::block_definitions::*;
-use crate::bresenham::bresenham_line;
-use crate::coordinate_system::cartesian::XZPoint;
-use crate::floodfill::flood_fill_area;
-use crate::osm_parser::{ProcessedElement, ProcessedWay};
-use crate::world_editor::WorldEditor;
-use std::collections::HashMap;
+#include <vector>
+#include <unordered_map>
+#include <string>
+#include <optional>
+#include <tuple>
+#include <cmath>
+#include <algorithm>
+#include <cstddef>
 
-/// Generates highways with elevation support based on layer tags and connectivity analysis
-pub fn generate_highways(
-    editor: &mut WorldEditor,
-    element: &ProcessedElement,
-    args: &Args,
-    all_elements: &[ProcessedElement],
-) {
-    let highway_connectivity = build_highway_connectivity_map(all_elements);
-    generate_highways_internal(editor, element, args, &highway_connectivity);
-}
+#include "../../arnis_adapter.h"
+namespace arnis
+{
 
-/// Build a connectivity map for highway endpoints to determine where slopes are needed
-fn build_highway_connectivity_map(elements: &[ProcessedElement]) -> HashMap<(i32, i32), Vec<i32>> {
-    let mut connectivity_map: HashMap<(i32, i32), Vec<i32>> = HashMap::new();
+namespace highways
+{
 
-    for element in elements {
-        if let ProcessedElement::Way(way) = element {
-            if way.tags.contains_key("highway") {
-                let layer_value = way
-                    .tags
-                    .get("layer")
-                    .and_then(|layer| layer.parse::<i32>().ok())
-                    .unwrap_or(0);
 
-                // Treat negative layers as ground level (0) for connectivity
-                let layer_value = if layer_value < 0 { 0 } else { layer_value };
 
-                // Add connectivity for start and end nodes
-                if !way.nodes.is_empty() {
-                    let start_node = &way.nodes[0];
-                    let end_node = &way.nodes[way.nodes.len() - 1];
+#if 0
+namespace crate {
+namespace args {
+struct Args {
+    double scale = 1.0;
+    std::optional<int> timeout;
+};
+} // namespace args
 
-                    let start_coord = (start_node.x, start_node.z);
-                    let end_coord = (end_node.x, end_node.z);
+namespace bresenham {
+std::vector<std::tuple<int, int, int>> bresenham_line(int x1, int y1, int z1, int x2, int y2, int z2);
+} // namespace bresenham
 
-                    connectivity_map
-                        .entry(start_coord)
-                        .or_default()
-                        .push(layer_value);
-                    connectivity_map
-                        .entry(end_coord)
-                        .or_default()
-                        .push(layer_value);
+namespace floodfill {
+std::vector<std::pair<int, int>> flood_fill_area(const std::vector<std::pair<int, int>>& polygon, const std::optional<int>& timeout);
+} // namespace floodfill
+
+namespace coordinate_system {
+namespace cartesian {
+struct XZPoint {
+    int x;
+    int z;
+};
+} // namespace cartesian
+} // namespace coordinate_system
+
+namespace osm_parser {
+struct ProcessedNode {
+    int x;
+    int z;
+    coordinate_system::cartesian::XZPoint xz() const { return {x, z}; }
+};
+
+struct ProcessedWay {
+    std::vector<ProcessedNode> nodes;
+    std::unordered_map<std::string, std::string> tags;
+};
+
+enum class ElementType { Node, Way };
+
+struct ProcessedElement {
+    ElementType type;
+    std::optional<ProcessedNode> node;
+    std::optional<ProcessedWay> way;
+    std::unordered_map<std::string, std::string> tags;
+
+    const std::unordered_map<std::string, std::string>& tags_map() const { return tags; }
+};
+} // namespace osm_parser
+
+namespace block_definitions {
+enum Block {
+    STONE,
+    STONE_BRICKS,
+    STONE_BRICK_SLAB,
+    BLACK_CONCRETE,
+    WHITE_CONCRETE,
+    GRAY_CONCRETE,
+    LIGHT_GRAY_CONCRETE,
+    BRICK,
+    OAK_PLANKS,
+    DIRT,
+    GRAVEL,
+    SAND,
+    GRASS_BLOCK,
+    DIRT_PATH,
+    COBBLESTONE_WALL,
+    OAK_FENCE,
+    GLOWSTONE,
+    GREEN_WOOL,
+    YELLOW_WOOL,
+    RED_WOOL,
+    WHITE_WOOL,
+    SAND_TRAP, // placeholder
+    STONE_BRICK_SLABS // placeholder
+};
+} // namespace block_definitions
+
+namespace world_editor {
+using crate::block_definitions::Block;
+
+struct WorldEditor {
+    void set_block(Block block, int x, int y, int z, const std::optional<std::vector<Block>>& overlay, const std::optional<std::vector<Block>>& palette) {
+        // Implementation provided by host environment
+        (void)block; (void)x; (void)y; (void)z; (void)overlay; (void)palette;
+    }
+
+    bool check_for_block(int x, int y, int z, const std::optional<std::vector<Block>>& blocks) const {
+        // Implementation provided by host environment
+        (void)x; (void)y; (void)z; (void)blocks;
+        return false;
+    }
+};
+} // namespace world_editor
+
+} // namespace crate
+
+#endif
+
+// Hash for pair<int,int> used in unordered_map
+struct PairHash {
+    std::size_t operator()(const std::pair<int,int>& p) const noexcept {
+        return std::hash<long long>()( (static_cast<long long>(p.first) << 32) ^ static_cast<unsigned long long>(p.second) );
+    }
+};
+
+std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash> build_highway_connectivity_map(const std::vector<crate::osm_parser::ProcessedElement>& elements) {
+    std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash> connectivity_map;
+    for (const auto& element : elements) {
+        if (element.type == crate::osm_parser::ElementType::Way /* && element.way.has_value()*/) {
+            const crate::osm_parser::ProcessedWay& way = *element.way;
+            auto it_highway = way.tags.find("highway");
+            if (it_highway != way.tags.end()) {
+                int layer_value = 0;
+                auto it_layer = way.tags.find("layer");
+                if (it_layer != way.tags.end()) {
+                    try {
+                        layer_value = std::stoi(it_layer->second);
+                    } catch (...) {
+                        layer_value = 0;
+                    }
+                }
+                if (layer_value < 0) {
+                    layer_value = 0;
+                }
+                if (!way.nodes.empty()) {
+                    const crate::osm_parser::ProcessedNode& start_node = way.nodes.front();
+                    const crate::osm_parser::ProcessedNode& end_node = way.nodes.back();
+                    std::pair<int,int> start_coord = { start_node.x, start_node.z };
+                    std::pair<int,int> end_coord = { end_node.x, end_node.z };
+                    connectivity_map[start_coord].push_back(layer_value);
+                    connectivity_map[end_coord].push_back(layer_value);
                 }
             }
         }
     }
-
-    connectivity_map
+    return connectivity_map;
 }
 
-/// Internal function that generates highways with connectivity context for elevation handling
-fn generate_highways_internal(
-    editor: &mut WorldEditor,
-    element: &ProcessedElement,
-    args: &Args,
-    highway_connectivity: &HashMap<(i32, i32), Vec<i32>>, // Maps node coordinates to list of layers that connect to this node
-) {
-    if let Some(highway_type) = element.tags().get("highway") {
-        if highway_type == "street_lamp" {
-            // Handle street lamps
-            if let ProcessedElement::Node(first_node) = element {
-                let x: i32 = first_node.x;
-                let z: i32 = first_node.z;
-                editor.set_block(COBBLESTONE_WALL, x, 1, z, None, None);
-                for dy in 2..=4 {
-                    editor.set_block(OAK_FENCE, x, dy, z, None, None);
-                }
-                editor.set_block(GLOWSTONE, x, 5, z, None, None);
-            }
-        } else if highway_type == "crossing" {
-            // Handle traffic signals for crossings
-            if let Some(crossing_type) = element.tags().get("crossing") {
-                if crossing_type == "traffic_signals" {
-                    if let ProcessedElement::Node(node) = element {
-                        let x: i32 = node.x;
-                        let z: i32 = node.z;
-
-                        for dy in 1..=3 {
-                            editor.set_block(COBBLESTONE_WALL, x, dy, z, None, None);
-                        }
-
-                        editor.set_block(GREEN_WOOL, x, 4, z, None, None);
-                        editor.set_block(YELLOW_WOOL, x, 5, z, None, None);
-                        editor.set_block(RED_WOOL, x, 6, z, None, None);
-                    }
-                }
-            }
-        } else if highway_type == "bus_stop" {
-            // Handle bus stops
-            if let ProcessedElement::Node(node) = element {
-                let x = node.x;
-                let z = node.z;
-                for dy in 1..=3 {
-                    editor.set_block(COBBLESTONE_WALL, x, dy, z, None, None);
-                }
-
-                editor.set_block(WHITE_WOOL, x, 4, z, None, None);
-                editor.set_block(WHITE_WOOL, x + 1, 4, z, None, None);
-            }
-        } else if element
-            .tags()
-            .get("area")
-            .is_some_and(|v: &String| v == "yes")
-        {
-            let ProcessedElement::Way(way) = element else {
-                return;
-            };
-
-            // Handle areas like pedestrian plazas
-            let mut surface_block: Block = STONE; // Default block
-
-            // Determine the block type based on the 'surface' tag
-            if let Some(surface) = element.tags().get("surface") {
-                surface_block = match surface.as_str() {
-                    "paving_stones" | "sett" => STONE_BRICKS,
-                    "bricks" => BRICK,
-                    "wood" => OAK_PLANKS,
-                    "asphalt" => BLACK_CONCRETE,
-                    "gravel" | "fine_gravel" => GRAVEL,
-                    "grass" => GRASS_BLOCK,
-                    "dirt" | "ground" | "earth" => DIRT,
-                    "sand" => SAND,
-                    "concrete" => LIGHT_GRAY_CONCRETE,
-                    _ => STONE, // Default to stone for unknown surfaces
-                };
-            }
-
-            // Fill the area using flood fill or by iterating through the nodes
-            let polygon_coords: Vec<(i32, i32)> = way
-                .nodes
-                .iter()
-                .map(|n: &crate::osm_parser::ProcessedNode| (n.x, n.z))
-                .collect();
-            let filled_area: Vec<(i32, i32)> =
-                flood_fill_area(&polygon_coords, args.timeout.as_ref());
-
-            for (x, z) in filled_area {
-                editor.set_block(surface_block, x, 0, z, None, None);
-            }
-        } else {
-            let mut previous_node: Option<(i32, i32)> = None;
-            let mut block_type = BLACK_CONCRETE;
-            let mut block_range: i32 = 2;
-            let mut add_stripe = false;
-            let mut add_outline = false;
-            let scale_factor = args.scale;
-
-            // Parse the layer value for elevation calculation
-            let layer_value = element
-                .tags()
-                .get("layer")
-                .and_then(|layer| layer.parse::<i32>().ok())
-                .unwrap_or(0);
-
-            // Treat negative layers as ground level (0)
-            let layer_value = if layer_value < 0 { 0 } else { layer_value };
-
-            // Skip if 'level' is negative in the tags (indoor mapping)
-            if let Some(level) = element.tags().get("level") {
-                if level.parse::<i32>().unwrap_or(0) < 0 {
-                    return;
-                }
-            }
-
-            // Determine block type and range based on highway type
-            match highway_type.as_str() {
-                "footway" | "pedestrian" => {
-                    block_type = GRAY_CONCRETE;
-                    block_range = 1;
-                }
-                "path" => {
-                    block_type = DIRT_PATH;
-                    block_range = 1;
-                }
-                "motorway" | "primary" | "trunk" => {
-                    block_range = 5;
-                    add_stripe = true;
-                }
-                "secondary" => {
-                    block_range = 4;
-                    add_stripe = true;
-                }
-                "tertiary" => {
-                    add_stripe = true;
-                }
-                "track" => {
-                    block_range = 1;
-                }
-                "service" => {
-                    block_type = GRAY_CONCRETE;
-                    block_range = 2;
-                }
-                "secondary_link" | "tertiary_link" => {
-                    //Exit ramps, sliproads
-                    block_type = BLACK_CONCRETE;
-                    block_range = 1;
-                }
-                "escape" => {
-                    // Sand trap for vehicles on mountainous roads
-                    block_type = SAND;
-                    block_range = 1;
-                }
-                "steps" => {
-                    //TODO: Add correct stairs respecting height, step_count, etc.
-                    block_type = GRAY_CONCRETE;
-                    block_range = 1;
-                }
-
-                _ => {
-                    if let Some(lanes) = element.tags().get("lanes") {
-                        if lanes == "2" {
-                            block_range = 3;
-                            add_stripe = true;
-                            add_outline = true;
-                        } else if lanes != "1" {
-                            block_range = 4;
-                            add_stripe = true;
-                            add_outline = true;
-                        }
-                    }
-                }
-            }
-
-            let ProcessedElement::Way(way) = element else {
-                return;
-            };
-
-            if scale_factor < 1.0 {
-                block_range = ((block_range as f64) * scale_factor).floor() as i32;
-            }
-
-            // Calculate elevation based on layer
-            const LAYER_HEIGHT_STEP: i32 = 6; // Each layer is 6 blocks higher/lower
-            let base_elevation = layer_value * LAYER_HEIGHT_STEP;
-
-            // Check if we need slopes at start and end
-            let needs_start_slope =
-                should_add_slope_at_node(&way.nodes[0], layer_value, highway_connectivity);
-            let needs_end_slope = should_add_slope_at_node(
-                &way.nodes[way.nodes.len() - 1],
-                layer_value,
-                highway_connectivity,
-            );
-
-            // Calculate total way length for slope distribution
-            let total_way_length = calculate_way_length(way);
-
-            // Check if this is a short isolated elevated segment - if so, treat as ground level
-            let is_short_isolated_elevated =
-                needs_start_slope && needs_end_slope && layer_value > 0 && total_way_length <= 35;
-
-            // Override elevation and slopes for short isolated segments
-            let (effective_elevation, effective_start_slope, effective_end_slope) =
-                if is_short_isolated_elevated {
-                    (0, false, false) // Treat as ground level
-                } else {
-                    (base_elevation, needs_start_slope, needs_end_slope)
-                };
-
-            let slope_length = (total_way_length as f32 * 0.35).clamp(15.0, 50.0) as usize; // 35% of way length, max 50 blocks, min 15 blocks
-
-            // Iterate over nodes to create the highway
-            let mut segment_index = 0;
-            let total_segments = way.nodes.len() - 1;
-
-            for node in &way.nodes {
-                if let Some(prev) = previous_node {
-                    let (x1, z1) = prev;
-                    let x2: i32 = node.x;
-                    let z2: i32 = node.z;
-
-                    // Generate the line of coordinates between the two nodes
-                    let bresenham_points: Vec<(i32, i32, i32)> =
-                        bresenham_line(x1, 0, z1, x2, 0, z2);
-
-                    // Calculate elevation for this segment
-                    let segment_length = bresenham_points.len();
-
-                    // Variables to manage dashed line pattern
-                    let mut stripe_length: i32 = 0;
-                    let dash_length: i32 = (5.0 * scale_factor).ceil() as i32;
-                    let gap_length: i32 = (5.0 * scale_factor).ceil() as i32;
-
-                    for (point_index, (x, _, z)) in bresenham_points.iter().enumerate() {
-                        // Calculate Y elevation for this point based on slopes and layer
-                        let current_y = calculate_point_elevation(
-                            segment_index,
-                            point_index,
-                            segment_length,
-                            total_segments,
-                            effective_elevation,
-                            effective_start_slope,
-                            effective_end_slope,
-                            slope_length,
-                        );
-
-                        // Draw the road surface for the entire width
-                        for dx in -block_range..=block_range {
-                            for dz in -block_range..=block_range {
-                                let set_x: i32 = x + dx;
-                                let set_z: i32 = z + dz;
-
-                                // Zebra crossing logic
-                                if highway_type == "footway"
-                                    && element.tags().get("footway")
-                                        == Some(&"crossing".to_string())
-                                {
-                                    let is_horizontal: bool = (x2 - x1).abs() >= (z2 - z1).abs();
-                                    if is_horizontal {
-                                        if set_x % 2 < 1 {
-                                            editor.set_block(
-                                                WHITE_CONCRETE,
-                                                set_x,
-                                                current_y,
-                                                set_z,
-                                                Some(&[BLACK_CONCRETE]),
-                                                None,
-                                            );
-                                        } else {
-                                            editor.set_block(
-                                                BLACK_CONCRETE,
-                                                set_x,
-                                                current_y,
-                                                set_z,
-                                                None,
-                                                None,
-                                            );
-                                        }
-                                    } else if set_z % 2 < 1 {
-                                        editor.set_block(
-                                            WHITE_CONCRETE,
-                                            set_x,
-                                            current_y,
-                                            set_z,
-                                            Some(&[BLACK_CONCRETE]),
-                                            None,
-                                        );
-                                    } else {
-                                        editor.set_block(
-                                            BLACK_CONCRETE,
-                                            set_x,
-                                            current_y,
-                                            set_z,
-                                            None,
-                                            None,
-                                        );
-                                    }
-                                } else {
-                                    editor.set_block(
-                                        block_type,
-                                        set_x,
-                                        current_y,
-                                        set_z,
-                                        None,
-                                        Some(&[BLACK_CONCRETE, WHITE_CONCRETE]),
-                                    );
-                                }
-
-                                // Add stone brick foundation underneath elevated highways for thickness
-                                if effective_elevation > 0 && current_y > 0 {
-                                    // Add 1 layer of stone bricks underneath the highway surface
-                                    editor.set_block(
-                                        STONE_BRICKS,
-                                        set_x,
-                                        current_y - 1,
-                                        set_z,
-                                        None,
-                                        None,
-                                    );
-                                }
-
-                                // Add support pillars for elevated highways
-                                if effective_elevation != 0 && current_y > 0 {
-                                    add_highway_support_pillar(
-                                        editor,
-                                        set_x,
-                                        current_y,
-                                        set_z,
-                                        dx,
-                                        dz,
-                                        block_range,
-                                    );
-                                }
-                            }
-                        }
-
-                        // Add light gray concrete outline for multi-lane roads
-                        if add_outline {
-                            // Left outline
-                            for dz in -block_range..=block_range {
-                                let outline_x = x - block_range - 1;
-                                let outline_z = z + dz;
-                                editor.set_block(
-                                    LIGHT_GRAY_CONCRETE,
-                                    outline_x,
-                                    current_y,
-                                    outline_z,
-                                    None,
-                                    None,
-                                );
-                            }
-                            // Right outline
-                            for dz in -block_range..=block_range {
-                                let outline_x = x + block_range + 1;
-                                let outline_z = z + dz;
-                                editor.set_block(
-                                    LIGHT_GRAY_CONCRETE,
-                                    outline_x,
-                                    current_y,
-                                    outline_z,
-                                    None,
-                                    None,
-                                );
-                            }
-                        }
-
-                        // Add a dashed white line in the middle for larger roads
-                        if add_stripe {
-                            if stripe_length < dash_length {
-                                let stripe_x: i32 = *x;
-                                let stripe_z: i32 = *z;
-                                editor.set_block(
-                                    WHITE_CONCRETE,
-                                    stripe_x,
-                                    current_y,
-                                    stripe_z,
-                                    Some(&[BLACK_CONCRETE]),
-                                    None,
-                                );
-                            }
-
-                            // Increment stripe_length and reset after completing a dash and gap
-                            stripe_length += 1;
-                            if stripe_length >= dash_length + gap_length {
-                                stripe_length = 0;
-                            }
-                        }
-                    }
-
-                    segment_index += 1;
-                }
-                previous_node = Some((node.x, node.z));
+void add_highway_support_pillar(crate::world_editor::WorldEditor& editor, int x, int highway_y, int z, int dx, int dz, int /*_block_range*/) {
+    using crate::block_definitions::STONE_BRICKS;
+    if (dx == 0 && dz == 0 && ((x + z) % 8) == 0) {
+        for (int y = 1; y < highway_y; ++y) {
+            editor.set_block(STONE_BRICKS, x, y, z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+        }
+        for (int base_dx = -1; base_dx <= 1; ++base_dx) {
+            for (int base_dz = -1; base_dz <= 1; ++base_dz) {
+                editor.set_block(STONE_BRICKS, x + base_dx, 0, z + base_dz, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
             }
         }
     }
 }
 
-/// Helper function to determine if a slope should be added at a specific node
-fn should_add_slope_at_node(
-    node: &crate::osm_parser::ProcessedNode,
-    current_layer: i32,
-    highway_connectivity: &HashMap<(i32, i32), Vec<i32>>,
-) -> bool {
-    let node_coord = (node.x, node.z);
-
-    // If we don't have connectivity information, always add slopes for non-zero layers
-    if highway_connectivity.is_empty() {
+bool should_add_slope_at_node(const crate::osm_parser::ProcessedNode& node, int current_layer, const std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash>& highway_connectivity) {
+    std::pair<int,int> node_coord = { node.x, node.z };
+    if (highway_connectivity.empty()) {
         return current_layer != 0;
     }
-
-    // Check if there are other highways at different layers connected to this node
-    if let Some(connected_layers) = highway_connectivity.get(&node_coord) {
-        // Count how many ways are at the same layer as current way
-        let same_layer_count = connected_layers
-            .iter()
-            .filter(|&&layer| layer == current_layer)
-            .count();
-
-        // If this is the only way at this layer connecting to this node, we need a slope
-        // (unless we're at ground level and connecting to ground level ways)
-        if same_layer_count <= 1 {
+    auto it = highway_connectivity.find(node_coord);
+    if (it != highway_connectivity.end()) {
+        const std::vector<int>& connected_layers = it->second;
+        std::size_t same_layer_count = 0;
+        for (int layer : connected_layers) {
+            if (layer == current_layer) {
+                ++same_layer_count;
+            }
+        }
+        if (same_layer_count <= 1) {
             return current_layer != 0;
         }
-
-        // If there are multiple ways at the same layer, don't add slope
-        false
+        return false;
     } else {
-        // No other highways connected, add slope if not at ground level
-        current_layer != 0
+        return current_layer != 0;
     }
 }
 
-/// Helper function to calculate the total length of a way in blocks
-fn calculate_way_length(way: &ProcessedWay) -> usize {
-    let mut total_length = 0;
-    let mut previous_node: Option<&crate::osm_parser::ProcessedNode> = None;
-
-    for node in &way.nodes {
-        if let Some(prev) = previous_node {
-            let dx = (node.x - prev.x).abs();
-            let dz = (node.z - prev.z).abs();
-            total_length += ((dx * dx + dz * dz) as f32).sqrt() as usize;
+std::size_t calculate_way_length(const crate::osm_parser::ProcessedWay& way) {
+    std::size_t total_length = 0;
+    const crate::osm_parser::ProcessedNode* prev = nullptr;
+    for (const auto& node : way.nodes) {
+        if (prev != nullptr) {
+            int dx = (node.x - prev->x);
+            int dz = (node.z - prev->z);
+            double seg = std::sqrt(static_cast<double>(dx*dx + dz*dz));
+            total_length += static_cast<std::size_t>(seg);
         }
-        previous_node = Some(node);
+        prev = &node;
     }
-
-    total_length
+    return total_length;
 }
 
-/// Calculate the Y elevation for a specific point along the highway
-#[allow(clippy::too_many_arguments)]
-fn calculate_point_elevation(
-    segment_index: usize,
-    point_index: usize,
-    segment_length: usize,
-    total_segments: usize,
-    base_elevation: i32,
-    needs_start_slope: bool,
-    needs_end_slope: bool,
-    slope_length: usize,
-) -> i32 {
-    // If no slopes needed, return base elevation
-    if !needs_start_slope && !needs_end_slope {
+int calculate_point_elevation(std::size_t segment_index, std::size_t point_index, std::size_t segment_length, std::size_t total_segments, int base_elevation, bool needs_start_slope, bool needs_end_slope, std::size_t slope_length) {
+    if (!needs_start_slope && !needs_end_slope) {
         return base_elevation;
     }
-
-    // Calculate total distance from start
-    let total_distance_from_start = segment_index * segment_length + point_index;
-    let total_way_length = total_segments * segment_length;
-
-    // Ensure we have reasonable values
-    if total_way_length == 0 || slope_length == 0 {
+    std::size_t total_distance_from_start = segment_index * segment_length + point_index;
+    std::size_t total_way_length = total_segments * segment_length;
+    if (total_way_length == 0 || slope_length == 0) {
         return base_elevation;
     }
-
-    // Start slope calculation - gradual rise from ground level
-    if needs_start_slope && total_distance_from_start <= slope_length {
-        let slope_progress = total_distance_from_start as f32 / slope_length as f32;
-        let elevation_offset = (base_elevation as f32 * slope_progress) as i32;
+    if (needs_start_slope && total_distance_from_start <= slope_length) {
+        float slope_progress = static_cast<float>(total_distance_from_start) / static_cast<float>(slope_length);
+        int elevation_offset = static_cast<int>(static_cast<float>(base_elevation) * slope_progress);
         return elevation_offset;
     }
-
-    // End slope calculation - gradual descent to ground level
-    if needs_end_slope
-        && total_distance_from_start >= (total_way_length.saturating_sub(slope_length))
-    {
-        let distance_from_end = total_way_length - total_distance_from_start;
-        let slope_progress = distance_from_end as f32 / slope_length as f32;
-        let elevation_offset = (base_elevation as f32 * slope_progress) as i32;
+    if (needs_end_slope && total_distance_from_start >= (total_way_length > slope_length ? total_way_length - slope_length : 0)) {
+        std::size_t distance_from_end = (total_way_length > total_distance_from_start) ? (total_way_length - total_distance_from_start) : 0;
+        float slope_progress = static_cast<float>(distance_from_end) / static_cast<float>(slope_length);
+        int elevation_offset = static_cast<int>(static_cast<float>(base_elevation) * slope_progress);
         return elevation_offset;
     }
-
-    // Middle section at full elevation
-    base_elevation
+    return base_elevation;
 }
 
-/// Add support pillars for elevated highways
-fn add_highway_support_pillar(
-    editor: &mut WorldEditor,
-    x: i32,
-    highway_y: i32,
-    z: i32,
-    dx: i32,
-    dz: i32,
-    _block_range: i32, // Keep for future use
-) {
-    // Only add pillars at specific intervals and positions
-    if dx == 0 && dz == 0 && (x + z) % 8 == 0 {
-        // Add pillar from ground to highway level
-        for y in 1..highway_y {
-            editor.set_block(STONE_BRICKS, x, y, z, None, None);
-        }
+void generate_highways_internal(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args, const std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash>& highway_connectivity) {
+    using crate::block_definitions::Block;
+    using crate::block_definitions::COBBLESTONE_WALL;
+    using crate::block_definitions::OAK_FENCE;
+    using crate::block_definitions::GLOWSTONE;
+    using crate::block_definitions::GREEN_WOOL;
+    using crate::block_definitions::YELLOW_WOOL;
+    using crate::block_definitions::RED_WOOL;
+    using crate::block_definitions::WHITE_WOOL;
+    (void)COBBLESTONE_WALL; (void)OAK_FENCE; (void)GLOWSTONE; (void)GREEN_WOOL; (void)YELLOW_WOOL; (void)RED_WOOL; (void)WHITE_WOOL;
 
-        // Add pillar base
-        for base_dx in -1..=1 {
-            for base_dz in -1..=1 {
-                editor.set_block(STONE_BRICKS, x + base_dx, 0, z + base_dz, None, None);
+    auto it_highway = element.tags().find("highway");
+    if (it_highway == element.tags().end()) {
+        return;
+    }
+    const std::string& highway_type = it_highway->second;
+    if (highway_type == "street_lamp") {
+        if (element.type == crate::osm_parser::ElementType::Node && element.node.has_value()) {
+            int x = element.node->x;
+            int z = element.node->z;
+            editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            for (int dy = 2; dy <= 4; ++dy) {
+                editor.set_block(crate::block_definitions::OAK_FENCE, x, dy, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            }
+            editor.set_block(crate::block_definitions::GLOWSTONE, x, 5, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+        }
+        return;
+    } else if (highway_type == "crossing") {
+        auto it_crossing = element.tags().find("crossing");
+        if (it_crossing != element.tags().end() && it_crossing->second == "traffic_signals") {
+            if (element.type == crate::osm_parser::ElementType::Node && element.node.has_value()) {
+                int x = element.node->x;
+                int z = element.node->z;
+                for (int dy = 1; dy <= 3; ++dy) {
+                    editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, dy, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                }
+                editor.set_block(GREEN_WOOL, x, 4, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                editor.set_block(YELLOW_WOOL, x, 5, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                editor.set_block(RED_WOOL, x, 6, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            }
+        }
+        return;
+    } else if (highway_type == "bus_stop") {
+        if (element.type == crate::osm_parser::ElementType::Node && element.node.has_value()) {
+            int x = element.node->x;
+            int z = element.node->z;
+            for (int dy = 1; dy <= 3; ++dy) {
+                editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, dy, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            }
+            editor.set_block(crate::block_definitions::WHITE_WOOL, x, 4, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            editor.set_block(crate::block_definitions::WHITE_WOOL, x + 1, 4, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+        }
+        return;
+    } else {
+        auto it_area = element.tags().find("area");
+        if (it_area != element.tags().end() && it_area->second == "yes") {
+            if (element.type != crate::osm_parser::ElementType::Way || !element.way.has_value()) {
+                return;
+            }
+            crate::block_definitions::Block surface_block = crate::block_definitions::STONE;
+            auto it_surface = element.tags().find("surface");
+            if (it_surface != element.tags().end()) {
+                const std::string& surface = it_surface->second;
+                if (surface == "paving_stones" || surface == "sett") surface_block = crate::block_definitions::STONE_BRICKS;
+                else if (surface == "bricks") surface_block = crate::block_definitions::BRICK;
+                else if (surface == "wood") surface_block = crate::block_definitions::OAK_PLANKS;
+                else if (surface == "asphalt") surface_block = crate::block_definitions::BLACK_CONCRETE;
+                else if (surface == "gravel" || surface == "fine_gravel") surface_block = crate::block_definitions::GRAVEL;
+                else if (surface == "grass") surface_block = crate::block_definitions::GRASS_BLOCK;
+                else if (surface == "dirt" || surface == "ground" || surface == "earth") surface_block = crate::block_definitions::DIRT;
+                else if (surface == "sand") surface_block = crate::block_definitions::SAND;
+                else if (surface == "concrete") surface_block = crate::block_definitions::LIGHT_GRAY_CONCRETE;
+                else surface_block = crate::block_definitions::STONE;
+            }
+            const crate::osm_parser::ProcessedWay& way = *element.way;
+            std::vector<std::pair<int,int>> polygon_coords;
+            polygon_coords.reserve(way.nodes.size());
+            for (const auto& n : way.nodes) {
+                polygon_coords.emplace_back(n.x, n.z);
+            }
+            std::vector<std::pair<int,int>> filled_area = crate::floodfill::flood_fill_area(polygon_coords, args.timeout);
+            for (const auto& p : filled_area) {
+                editor.set_block(surface_block, p.first, 0, p.second, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            }
+            return;
+        }
+    }
+
+    // Main highway/walkway processing below
+    crate::block_definitions::Block block_type = crate::block_definitions::BLACK_CONCRETE;
+    int block_range = 2;
+    bool add_stripe = false;
+    bool add_outline = false;
+    double scale_factor = args.scale;
+
+    int layer_value = 0;
+    auto it_layer = element.tags().find("layer");
+    if (it_layer != element.tags().end()) {
+        try {
+            layer_value = std::stoi(it_layer->second);
+        } catch (...) {
+            layer_value = 0;
+        }
+    }
+    if (layer_value < 0) {
+        layer_value = 0;
+    }
+
+    auto it_level = element.tags().find("level");
+    if (it_level != element.tags().end()) {
+        try {
+            int level_val = std::stoi(it_level->second);
+            if (level_val < 0) return;
+        } catch (...) {
+            // ignore parse errors
+        }
+    }
+
+    if (highway_type == "footway" || highway_type == "pedestrian") {
+        block_type = crate::block_definitions::GRAY_CONCRETE;
+        block_range = 1;
+    } else if (highway_type == "path") {
+        block_type = crate::block_definitions::DIRT_PATH;
+        block_range = 1;
+    } else if (highway_type == "motorway" || highway_type == "primary" || highway_type == "trunk") {
+        block_range = 5;
+        add_stripe = true;
+    } else if (highway_type == "secondary") {
+        block_range = 4;
+        add_stripe = true;
+    } else if (highway_type == "tertiary") {
+        add_stripe = true;
+    } else if (highway_type == "track") {
+        block_range = 1;
+    } else if (highway_type == "service") {
+        block_type = crate::block_definitions::GRAY_CONCRETE;
+        block_range = 2;
+    } else if (highway_type == "secondary_link" || highway_type == "tertiary_link") {
+        block_type = crate::block_definitions::BLACK_CONCRETE;
+        block_range = 1;
+    } else if (highway_type == "escape") {
+        block_type = crate::block_definitions::SAND;
+        block_range = 1;
+    } else if (highway_type == "steps") {
+        block_type = crate::block_definitions::GRAY_CONCRETE;
+        block_range = 1;
+    } else {
+        auto it_lanes = element.tags().find("lanes");
+        if (it_lanes != element.tags().end()) {
+            const std::string& lanes = it_lanes->second;
+            if (lanes == "2") {
+                block_range = 3;
+                add_stripe = true;
+                add_outline = true;
+            } else if (lanes != "1") {
+                block_range = 4;
+                add_stripe = true;
+                add_outline = true;
             }
         }
     }
+
+    if (element.type != crate::osm_parser::ElementType::Way || !element.way.has_value()) {
+        return;
+    }
+    const crate::osm_parser::ProcessedWay& way = *element.way;
+
+    if (scale_factor < 1.0) {
+        block_range = static_cast<int>(std::floor(static_cast<double>(block_range) * scale_factor));
+    }
+
+    const int LAYER_HEIGHT_STEP = 6;
+    int base_elevation = layer_value * LAYER_HEIGHT_STEP;
+
+    bool needs_start_slope = false;
+    bool needs_end_slope = false;
+    if (!way.nodes.empty()) {
+        needs_start_slope = should_add_slope_at_node(way.nodes.front(), layer_value, highway_connectivity);
+        needs_end_slope = should_add_slope_at_node(way.nodes.back(), layer_value, highway_connectivity);
+    }
+
+    std::size_t total_way_length = calculate_way_length(way);
+
+    bool is_short_isolated_elevated = (needs_start_slope && needs_end_slope && layer_value > 0 && total_way_length <= 35);
+
+    int effective_elevation = 0;
+    bool effective_start_slope = false;
+    bool effective_end_slope = false;
+    if (is_short_isolated_elevated) {
+        effective_elevation = 0;
+        effective_start_slope = false;
+        effective_end_slope = false;
+    } else {
+        effective_elevation = base_elevation;
+        effective_start_slope = needs_start_slope;
+        effective_end_slope = needs_end_slope;
+    }
+
+    std::size_t slope_length = static_cast<std::size_t>(std::clamp(static_cast<double>(total_way_length) * 0.35, 15.0, 50.0));
+
+    std::optional<std::pair<int,int>> previous_node;
+    std::size_t segment_index = 0;
+    std::size_t total_segments = (way.nodes.size() > 0) ? (way.nodes.size() - 1) : 0;
+
+    for (const auto& node : way.nodes) {
+        if (previous_node.has_value()) {
+            int x1 = previous_node->first;
+            int z1 = previous_node->second;
+            int x2 = node.x;
+            int z2 = node.z;
+            std::vector<std::tuple<int,int,int>> bresenham_points = crate::bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
+            std::size_t segment_length = bresenham_points.size();
+
+            int stripe_length_counter = 0;
+            int dash_length = static_cast<int>(std::ceil(5.0 * scale_factor));
+            int gap_length = static_cast<int>(std::ceil(5.0 * scale_factor));
+
+            for (std::size_t point_index = 0; point_index < bresenham_points.size(); ++point_index) {
+                int x = std::get<0>(bresenham_points[point_index]);
+                int z = std::get<2>(bresenham_points[point_index]);
+                int current_y = calculate_point_elevation(segment_index, point_index, segment_length, total_segments, effective_elevation, effective_start_slope, effective_end_slope, slope_length);
+
+                for (int dx = -block_range; dx <= block_range; ++dx) {
+                    for (int dz = -block_range; dz <= block_range; ++dz) {
+                        int set_x = x + dx;
+                        int set_z = z + dz;
+
+                        bool zebra = false;
+                        if (highway_type == "footway") {
+                            auto it_footway = element.tags().find("footway");
+                            if (it_footway != element.tags().end() && it_footway->second == "crossing") {
+                                bool is_horizontal = (std::abs(x2 - x1) >= std::abs(z2 - z1));
+                                if (is_horizontal) {
+                                    if ((set_x % 2 + 2) % 2 < 1) zebra = true;
+                                } else {
+                                    if ((set_z % 2 + 2) % 2 < 1) zebra = true;
+                                }
+                            }
+                        }
+
+                        if (zebra) {
+                            editor.set_block(crate::block_definitions::WHITE_CONCRETE, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE }), std::optional<std::vector<crate::block_definitions::Block>>());
+                        } else {
+                            editor.set_block(block_type, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE, crate::block_definitions::WHITE_CONCRETE }));
+                        }
+
+                        if (effective_elevation > 0 && current_y > 0) {
+                            editor.set_block(crate::block_definitions::STONE_BRICKS, set_x, current_y - 1, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+                        }
+
+                        if (effective_elevation != 0 && current_y > 0) {
+                            add_highway_support_pillar(editor, set_x, current_y, set_z, dx, dz, block_range);
+                        }
+                    }
+                }
+
+                if (add_outline) {
+                    for (int dz = -block_range; dz <= block_range; ++dz) {
+                        int outline_x = x - block_range - 1;
+                        int outline_z = z + dz;
+                        editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, outline_x, current_y, outline_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+                    }
+                    for (int dz = -block_range; dz <= block_range; ++dz) {
+                        int outline_x = x + block_range + 1;
+                        int outline_z = z + dz;
+                        editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, outline_x, current_y, outline_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+                    }
+                }
+
+                if (add_stripe) {
+                    if (stripe_length_counter < dash_length) {
+                        int stripe_x = x;
+                        int stripe_z = z;
+                        editor.set_block(crate::block_definitions::WHITE_CONCRETE, stripe_x, current_y, stripe_z, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE }), std::optional<std::vector<crate::block_definitions::Block>>());
+                    }
+                    ++stripe_length_counter;
+                    if (stripe_length_counter >= dash_length + gap_length) {
+                        stripe_length_counter = 0;
+                    }
+                }
+            }
+
+            ++segment_index;
+        }
+        previous_node = std::make_optional(std::pair<int,int>{ node.x, node.z });
+    }
 }
 
-/// Generates a siding using stone brick slabs
-pub fn generate_siding(editor: &mut WorldEditor, element: &ProcessedWay) {
-    let mut previous_node: Option<XZPoint> = None;
-    let siding_block: Block = STONE_BRICK_SLAB;
+void generate_highways(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args, const std::vector<crate::osm_parser::ProcessedElement>& all_elements) {
+    auto highway_connectivity = build_highway_connectivity_map(all_elements);
+    generate_highways_internal(editor, element, args, highway_connectivity);
+}
 
-    for node in &element.nodes {
-        let current_node = node.xz();
-
-        // Draw the siding using Bresenham's line algorithm between nodes
-        if let Some(prev_node) = previous_node {
-            let bresenham_points: Vec<(i32, i32, i32)> = bresenham_line(
-                prev_node.x,
-                0,
-                prev_node.z,
-                current_node.x,
-                0,
-                current_node.z,
-            );
-
-            for (bx, _, bz) in bresenham_points {
-                if !editor.check_for_block(bx, 0, bz, Some(&[BLACK_CONCRETE, WHITE_CONCRETE])) {
-                    editor.set_block(siding_block, bx, 1, bz, None, None);
+void generate_siding(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedWay& element) {
+    std::optional<crate::coordinate_system::cartesian::XZPoint> previous_node;
+    crate::block_definitions::Block siding_block = crate::block_definitions::STONE_BRICK_SLAB;
+    for (const auto& node : element.nodes) {
+        crate::coordinate_system::cartesian::XZPoint current_node = node.xz();
+        if (previous_node.has_value()) {
+            std::vector<std::tuple<int,int,int>> bresenham_points = crate::bresenham::bresenham_line(previous_node->x, 0, previous_node->z, current_node.x, 0, current_node.z);
+            for (const auto& p : bresenham_points) {
+                int bx = std::get<0>(p);
+                int bz = std::get<2>(p);
+                if (!editor.check_for_block(bx, 0, bz, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE, crate::block_definitions::WHITE_CONCRETE }))) {
+                    editor.set_block(siding_block, bx, 1, bz, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
                 }
             }
         }
-
-        previous_node = Some(current_node);
+        previous_node.emplace(current_node);
     }
 }
 
-/// Generates an aeroway
-pub fn generate_aeroway(editor: &mut WorldEditor, way: &ProcessedWay, args: &Args) {
-    let mut previous_node: Option<(i32, i32)> = None;
-    let surface_block = LIGHT_GRAY_CONCRETE;
-
-    for node in &way.nodes {
-        if let Some(prev) = previous_node {
-            let (x1, z1) = prev;
-            let x2 = node.x;
-            let z2 = node.z;
-            let points = bresenham_line(x1, 0, z1, x2, 0, z2);
-            let way_width: i32 = (12.0 * args.scale).ceil() as i32;
-
-            for (x, _, z) in points {
-                for dx in -way_width..=way_width {
-                    for dz in -way_width..=way_width {
-                        let set_x = x + dx;
-                        let set_z = z + dz;
-                        editor.set_block(surface_block, set_x, 0, set_z, None, None);
+void generate_aeroway(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedWay& way, const crate::args::Args& args) {
+    std::optional<std::pair<int,int>> previous_node;
+    crate::block_definitions::Block surface_block = crate::block_definitions::LIGHT_GRAY_CONCRETE;
+    for (const auto& node : way.nodes) {
+        if (previous_node.has_value()) {
+            int x1 = previous_node->first;
+            int z1 = previous_node->second;
+            int x2 = node.x;
+            int z2 = node.z;
+            std::vector<std::tuple<int,int,int>> points = crate::bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
+            int way_width = static_cast<int>(std::ceil(12.0 * args.scale));
+            for (const auto& p : points) {
+                int x = std::get<0>(p);
+                int z = std::get<2>(p);
+                for (int dx = -way_width; dx <= way_width; ++dx) {
+                    for (int dz = -way_width; dz <= way_width; ++dz) {
+                        int set_x = x + dx;
+                        int set_z = z + dz;
+                        editor.set_block(surface_block, set_x, 0, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
                     }
                 }
             }
         }
-        previous_node = Some((node.x, node.z));
+        previous_node = std::make_optional(std::pair<int,int>{ node.x, node.z });
     }
+}
+
+}
 }

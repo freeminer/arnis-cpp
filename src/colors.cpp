@@ -1,88 +1,150 @@
-pub type RGBTuple = (u8, u8, u8);
+#include <string>
+#include <string_view>
+#include <optional>
+#include <tuple>
+#include <cctype>
+#include <algorithm>
+#include <cstdint>
+#include <charconv>
 
-pub fn color_text_to_rgb_tuple(text: &str) -> Option<RGBTuple> {
-    if let Some(rgb) = full_hex_color_to_rgb_tuple(text) {
-        return Some(rgb);
-    }
+#include "colors.h"
 
-    if let Some(rgb) = short_hex_color_to_rgb_tuple(text) {
-        return Some(rgb);
-    }
-
-    if let Some(rgb) = color_name_to_rgb_tuple(text) {
-        return Some(rgb);
-    }
-
-    None
+std::optional<RGBTuple> color_text_to_rgb_tuple(std::string_view text)
+{
+	if (auto rgb = full_hex_color_to_rgb_tuple(text))
+		return rgb;
+	if (auto rgb = short_hex_color_to_rgb_tuple(text))
+		return rgb;
+	if (auto rgb = color_name_to_rgb_tuple(text))
+		return rgb;
+	return std::nullopt;
 }
-
-fn full_hex_color_to_rgb_tuple(text: &str) -> Option<RGBTuple> {
-    if text.len() != 7
-        || !text.starts_with("#")
-        || !text.chars().skip(1).all(|c: char| c.is_ascii_hexdigit())
-    {
-        return None;
-    }
-    let r: u8 = u8::from_str_radix(&text[1..3], 16).unwrap();
-    let g: u8 = u8::from_str_radix(&text[3..5], 16).unwrap();
-    let b: u8 = u8::from_str_radix(&text[5..7], 16).unwrap();
-    Some((r, g, b))
+std::uint32_t rgb_distance(const RGBTuple &from, const RGBTuple &to)
+{
+	std::int32_t dr = static_cast<std::int32_t>(std::get<0>(from)) -
+					  static_cast<std::int32_t>(std::get<0>(to));
+	std::int32_t dg = static_cast<std::int32_t>(std::get<1>(from)) -
+					  static_cast<std::int32_t>(std::get<1>(to));
+	std::int32_t db = static_cast<std::int32_t>(std::get<2>(from)) -
+					  static_cast<std::int32_t>(std::get<2>(to));
+	std::int32_t dist = dr * dr + dg * dg + db * db;
+	return static_cast<std::uint32_t>(dist);
 }
-
-fn short_hex_color_to_rgb_tuple(text: &str) -> Option<RGBTuple> {
-    if text.len() != 4
-        || !text.starts_with("#")
-        || !text.chars().skip(1).all(|c: char| c.is_ascii_hexdigit())
-    {
-        return None;
-    }
-    let r: u8 = u8::from_str_radix(&text[1..2], 16).unwrap();
-    let r: u8 = r | (r << 4);
-    let g: u8 = u8::from_str_radix(&text[2..3], 16).unwrap();
-    let g: u8 = g | (g << 4);
-    let b: u8 = u8::from_str_radix(&text[3..4], 16).unwrap();
-    let b: u8 = b | (b << 4);
-    Some((r, g, b))
+ std::optional<RGBTuple> color_name_to_rgb_tuple(std::string_view text)
+{
+	if (text == "aqua" || text == "cyan")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 255, 255));
+	if (text == "beige")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(187, 173, 142));
+	if (text == "black")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 0, 0));
+	if (text == "blue")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 0, 255));
+	if (text == "brown")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(128, 64, 0));
+	if (text == "fuchsia" || text == "magenta")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 0, 255));
+	if (text == "gray" || text == "grey")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(128, 128, 128));
+	if (text == "green")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 128, 0));
+	if (text == "lime")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 255, 0));
+	if (text == "maroon")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(128, 0, 0));
+	if (text == "navy")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 0, 128));
+	if (text == "olive")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(128, 128, 0));
+	if (text == "orange")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 128, 0));
+	if (text == "purple")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(128, 0, 128));
+	if (text == "red")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 0, 0));
+	if (text == "silver")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(192, 192, 192));
+	if (text == "teal")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 128, 0));
+	if (text == "white")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 255, 255));
+	if (text == "yellow")
+		return std::make_optional(
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 255, 0));
+	return std::nullopt;
 }
+ std::optional<RGBTuple> short_hex_color_to_rgb_tuple(std::string_view text)
+{
+	if (text.size() != 4 || text.front() != '#' ||
+			!std::all_of(text.begin() + 1, text.end(), [](char c) {
+				return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+			})) {
+		return std::nullopt;
+	}
 
-// https://wiki.openstreetmap.org/wiki/Key:colour
-// https://wiki.openstreetmap.org/wiki/Key:roof:colour
-fn color_name_to_rgb_tuple(text: &str) -> Option<RGBTuple> {
-    Some(match text {
-        "aqua" | "cyan" => (0, 255, 255),
-        "beige" => (187, 173, 142),
-        "black" => (0, 0, 0),
-        "blue" => (0, 0, 255),
-        "brown" => (128, 64, 0),
-        // darkgrey
-        "fuchsia" | "magenta" => (255, 0, 255),
-        "gray" | "grey" => (128, 128, 128),
-        "green" => (0, 128, 0),
-        // lightgrey
-        "lime" => (0, 255, 0),
-        "maroon" => (128, 0, 0),
-        "navy" => (0, 0, 128),
-        "olive" => (128, 128, 0),
-        "orange" => (255, 128, 0),
-        "purple" => (128, 0, 128),
-        "red" => (255, 0, 0),
-        "silver" => (192, 192, 192),
-        "teal" => (0, 128, 0),
-        "white" => (255, 255, 255),
-        "yellow" => (255, 255, 0),
-        _ => {
-            return None;
-        }
-    })
+	unsigned int v;
+	auto res = std::from_chars(text.data() + 1, text.data() + 2, v, 16);
+	if (res.ec != std::errc())
+		return std::nullopt;
+	std::uint8_t r = static_cast<std::uint8_t>(v);
+	r = static_cast<std::uint8_t>(r | (r << 4));
+
+	res = std::from_chars(text.data() + 2, text.data() + 3, v, 16);
+	if (res.ec != std::errc())
+		return std::nullopt;
+	std::uint8_t g = static_cast<std::uint8_t>(v);
+	g = static_cast<std::uint8_t>(g | (g << 4));
+
+	res = std::from_chars(text.data() + 3, text.data() + 4, v, 16);
+	if (res.ec != std::errc())
+		return std::nullopt;
+	std::uint8_t b = static_cast<std::uint8_t>(v);
+	b = static_cast<std::uint8_t>(b | (b << 4));
+
+	return std::make_optional(std::make_tuple(r, g, b));
 }
+ std::optional<RGBTuple> full_hex_color_to_rgb_tuple(std::string_view text)
+{
+	if (text.size() != 7 || text.front() != '#' ||
+			!std::all_of(text.begin() + 1, text.end(), [](char c) {
+				return std::isxdigit(static_cast<unsigned char>(c)) != 0;
+			})) {
+		return std::nullopt;
+	}
 
-pub fn rgb_distance(from: &RGBTuple, to: &RGBTuple) -> u32 {
-    // i32 because .pow(2) returns the same data type as self and 255^2 wouldn't fit
-    let difference: (i32, i32, i32) = (
-        from.0 as i32 - to.0 as i32,
-        from.1 as i32 - to.1 as i32,
-        from.2 as i32 - to.2 as i32,
-    );
-    let distance: i32 = difference.0.pow(2) + difference.1.pow(2) + difference.2.pow(2);
-    distance as u32
+	unsigned int v;
+	auto res = std::from_chars(text.data() + 1, text.data() + 3, v, 16);
+	if (res.ec != std::errc())
+		return std::nullopt;
+	std::uint8_t r = static_cast<std::uint8_t>(v);
+
+	res = std::from_chars(text.data() + 3, text.data() + 5, v, 16);
+	if (res.ec != std::errc())
+		return std::nullopt;
+	std::uint8_t g = static_cast<std::uint8_t>(v);
+
+	res = std::from_chars(text.data() + 5, text.data() + 7, v, 16);
+	if (res.ec != std::errc())
+		return std::nullopt;
+	std::uint8_t b = static_cast<std::uint8_t>(v);
+
+	return std::make_optional(std::make_tuple(r, g, b));
 }

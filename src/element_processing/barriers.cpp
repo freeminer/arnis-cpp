@@ -1,171 +1,151 @@
-use crate::block_definitions::*;
-use crate::bresenham::bresenham_line;
-use crate::osm_parser::{ProcessedElement, ProcessedNode};
-use crate::world_editor::WorldEditor;
+#include "block_definitions.h"
+#include "bresenham.h"
+#include "osm_parser.h"
+#include "world_editor.h"
 
-pub fn generate_barriers(editor: &mut WorldEditor, element: &ProcessedElement) {
-    // Default values
-    let mut barrier_material: Block = COBBLESTONE_WALL;
-    let mut barrier_height: i32 = 2;
+#include <string>
+#include <unordered_map>
+#include <vector>
+#include <tuple>
+#include <cmath>
+#include <optional>
 
-    match element.tags().get("barrier").map(|s| s.as_str()) {
-        Some("bollard") => {
-            barrier_material = COBBLESTONE_WALL;
-            barrier_height = 1;
-        }
-        Some("kerb") => {
-            // Ignore kerbs
-            return;
-        }
-        Some("hedge") => {
-            barrier_material = OAK_LEAVES;
-            barrier_height = 2;
-        }
-        Some("fence") => {
-            // Handle fence sub-types
-            match element.tags().get("fence_type").map(|s| s.as_str()) {
-                Some("railing" | "bars" | "krest") => {
-                    barrier_material = STONE_BRICK_WALL;
-                    barrier_height = 1;
+
+#include "../../arnis_adapter.h"
+
+#undef stoi
+#undef stof
+namespace arnis
+{
+
+namespace barriers {
+
+void generate_barriers(world_editor::WorldEditor& editor, osm_parser::ProcessedElement const& element) {
+    block_definitions::Block barrier_material = block_definitions::COBBLESTONE_WALL;
+    int barrier_height = 2;
+
+    {
+        const std::unordered_map<std::string, std::string>& tags = element.tags();
+        auto it = tags.find("barrier");
+        if (it != tags.end()) {
+            const std::string& val = it->second;
+            if (val == "bollard") {
+                barrier_material = block_definitions::COBBLESTONE_WALL;
+                barrier_height = 1;
+            } else if (val == "kerb") {
+                return;
+            } else if (val == "hedge") {
+                barrier_material = block_definitions::OAK_LEAVES;
+                barrier_height = 2;
+            } else if (val == "fence") {
+                auto fit = tags.find("fence_type");
+                if (fit != tags.end()) {
+                    const std::string& f = fit->second;
+                    if (f == "railing" || f == "bars" || f == "krest") {
+                        barrier_material = block_definitions::STONE_BRICK_WALL;
+                        barrier_height = 1;
+                    } else if (f == "chain_link" || f == "metal" || f == "wire" || f == "barbed_wire" || f == "corrugated_metal" || f == "electric" || f == "metal_bars") {
+                        barrier_material = block_definitions::STONE_BRICK_WALL;
+                        barrier_height = 2;
+                    } else if (f == "slatted" || f == "paling") {
+                        barrier_material = block_definitions::OAK_FENCE;
+                        barrier_height = 1;
+                    } else if (f == "wood" || f == "split_rail" || f == "panel" || f == "pole") {
+                        barrier_material = block_definitions::OAK_FENCE;
+                        barrier_height = 2;
+                    } else if (f == "concrete" || f == "stone") {
+                        barrier_material = block_definitions::STONE_BRICK_WALL;
+                        barrier_height = 2;
+                    } else if (f == "glass") {
+                        barrier_material = block_definitions::GLASS;
+                        barrier_height = 1;
+                    }
                 }
-                Some(
-                    "chain_link" | "metal" | "wire" | "barbed_wire" | "corrugated_metal"
-                    | "electric" | "metal_bars",
-                ) => {
-                    barrier_material = STONE_BRICK_WALL; // IRON_BARS
-                    barrier_height = 2;
-                }
-                Some("slatted" | "paling") => {
-                    barrier_material = OAK_FENCE;
-                    barrier_height = 1;
-                }
-                Some("wood" | "split_rail" | "panel" | "pole") => {
-                    barrier_material = OAK_FENCE;
-                    barrier_height = 2;
-                }
-                Some("concrete" | "stone") => {
-                    barrier_material = STONE_BRICK_WALL;
-                    barrier_height = 2;
-                }
-                Some("glass") => {
-                    barrier_material = GLASS;
-                    barrier_height = 1;
-                }
-                _ => {}
+            } else if (val == "wall") {
+                barrier_material = block_definitions::STONE_BRICK_WALL;
+                barrier_height = 3;
             }
         }
-        Some("wall") => {
-            barrier_material = STONE_BRICK_WALL;
-            barrier_height = 3;
-        }
-        _ => {}
-    }
-    // Tagged material takes priority over inferred
-    if let Some(barrier_mat) = element.tags().get("material") {
-        if barrier_mat == "brick" {
-            barrier_material = BRICK;
-        }
-        if barrier_mat == "concrete" {
-            barrier_material = LIGHT_GRAY_CONCRETE;
-        }
-        if barrier_mat == "metal" {
-            barrier_material = STONE_BRICK_WALL; // IRON_BARS
-        }
     }
 
-    if let ProcessedElement::Way(way) = element {
-        // Determine wall height
-        let wall_height: i32 = element
-            .tags()
-            .get("height")
-            .and_then(|height: &String| height.parse::<f32>().ok())
-            .map(|height: f32| height.round() as i32)
-            .unwrap_or(barrier_height);
+    {
+        const std::unordered_map<std::string, std::string>& tags = element.tags();
+        auto mit = tags.find("material");
+        if (mit != tags.end()) {
+            const std::string& mat = mit->second;
+            if (mat == "brick") {
+                barrier_material = block_definitions::BRICK;
+            }
+            if (mat == "concrete") {
+                barrier_material = block_definitions::LIGHT_GRAY_CONCRETE;
+            }
+            if (mat == "metal") {
+                barrier_material = block_definitions::STONE_BRICK_WALL;
+            }
+        }
+    }
 
-        // Process nodes to create the barrier wall
-        for i in 1..way.nodes.len() {
-            let prev: &crate::osm_parser::ProcessedNode = &way.nodes[i - 1];
-            let x1: i32 = prev.x;
-            let z1: i32 = prev.z;
+    std::optional<osm_parser::Way> maybe_way = element.as_way();
+    if (!maybe_way.has_value()) {
+        return;
+    }
+    const osm_parser::Way& way = maybe_way.value();
 
-            let cur: &crate::osm_parser::ProcessedNode = &way.nodes[i];
-            let x2: i32 = cur.x;
-            let z2: i32 = cur.z;
+    int wall_height = barrier_height;
+    {
+        const std::unordered_map<std::string, std::string>& tags = element.tags();
+        auto hit = tags.find("height");
+        if (hit != tags.end()) {
+            try {
+                float h = std::stof(hit->second);
+                wall_height = static_cast<int>(std::lround(h));
+            } catch (...) {
+                wall_height = barrier_height;
+            }
+        }
+    }
 
-            // Generate the line of coordinates between the two nodes
-            let bresenham_points: Vec<(i32, i32, i32)> = bresenham_line(x1, 0, z1, x2, 0, z2);
+    for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+        const osm_parser::ProcessedNode& prev = way.nodes[i - 1];
+        int x1 = prev.x;
+        int z1 = prev.z;
 
-            for (bx, _, bz) in bresenham_points {
-                // Build the barrier wall to the specified height
-                for y in 1..=wall_height {
-                    editor.set_block(barrier_material, bx, y, bz, None, None);
-                }
+        const osm_parser::ProcessedNode& cur = way.nodes[i];
+        int x2 = cur.x;
+        int z2 = cur.z;
 
-                // Add an optional top to the barrier if the height is more than 1
-                if wall_height > 1 {
-                    editor.set_block(STONE_BRICK_SLAB, bx, wall_height + 1, bz, None, None);
-                }
+        std::vector<std::tuple<int, int, int>> bresenham_points = bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
+        for (const auto& pt : bresenham_points) {
+            int bx = std::get<0>(pt);
+            int bz = std::get<2>(pt);
+
+            for (int y = 1; y <= wall_height; ++y) {
+                editor.set_block(barrier_material, bx, y, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+            }
+
+            if (wall_height > 1) {
+                editor.set_block(block_definitions::STONE_BRICK_SLAB, bx, wall_height + 1, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
             }
         }
     }
 }
 
-pub fn generate_barrier_nodes(editor: &mut WorldEditor<'_>, node: &ProcessedNode) {
-    match node.tags.get("barrier").map(|s| s.as_str()) {
-        Some("bollard") => {
-            editor.set_block(COBBLESTONE_WALL, node.x, 1, node.z, None, None);
-        }
-        Some("stile" | "gate" | "swing_gate" | "lift_gate") => {
-            /*editor.set_block(
-                OAK_TRAPDOOR,
-                node.x,
-                1,
-                node.z,
-                Some(&[
-                    COBBLESTONE_WALL,
-                    OAK_FENCE,
-                    STONE_BRICK_WALL,
-                    OAK_LEAVES,
-                    STONE_BRICK_SLAB,
-                ]),
-                None,
-            );
-            editor.set_block(
-                AIR,
-                node.x,
-                2,
-                node.z,
-                Some(&[
-                    COBBLESTONE_WALL,
-                    OAK_FENCE,
-                    STONE_BRICK_WALL,
-                    OAK_LEAVES,
-                    STONE_BRICK_SLAB,
-                ]),
-                None,
-            );
-            editor.set_block(
-                AIR,
-                node.x,
-                3,
-                node.z,
-                Some(&[
-                    COBBLESTONE_WALL,
-                    OAK_FENCE,
-                    STONE_BRICK_WALL,
-                    OAK_LEAVES,
-                    STONE_BRICK_SLAB,
-                ]),
-                None,
-            );*/
-        }
-        Some("block") => {
-            editor.set_block(STONE, node.x, 1, node.z, None, None);
-        }
-        Some("entrance") => {
-            editor.set_block(AIR, node.x, 1, node.z, None, None);
-        }
-        None => {}
-        _ => {}
+void generate_barrier_nodes(world_editor::WorldEditor& editor, osm_parser::ProcessedNode const& node) {
+    auto it = node.tags.find("barrier");
+    if (it == node.tags.end()) {
+        return;
+    }
+    const std::string& val = it->second;
+    if (val == "bollard") {
+        editor.set_block(block_definitions::COBBLESTONE_WALL, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+    } else if (val == "stile" || val == "gate" || val == "swing_gate" || val == "lift_gate") {
+        // intentionally left blank (original code had commented behavior)
+    } else if (val == "block") {
+        editor.set_block(block_definitions::STONE, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+    } else if (val == "entrance") {
+        editor.set_block(block_definitions::AIR, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
     }
 }
+
+}
+}  

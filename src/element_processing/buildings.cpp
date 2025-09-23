@@ -1,1579 +1,1351 @@
-use crate::args::Args;
-use crate::block_definitions::*;
-use crate::bresenham::bresenham_line;
-use crate::colors::color_text_to_rgb_tuple;
-use crate::coordinate_system::cartesian::XZPoint;
-use crate::element_processing::subprocessor::buildings_interior::generate_building_interior;
-use crate::floodfill::flood_fill_area;
-use crate::osm_parser::{ProcessedMemberRole, ProcessedRelation, ProcessedWay};
-use crate::world_editor::WorldEditor;
-use rand::Rng;
-use std::collections::HashSet;
-use std::time::Duration;
+#include <algorithm>
+#include <cmath>
+#include <cstddef>
+#include <cstdint>
+#include <exception>
+#include <functional>
+#include <limits>
+#include <map>
+#include <optional>
+#include <random>
+#include <set>
+#include <string>
+#include <tuple>
+#include <unordered_map>
+#include <unordered_set>
+#include <utility>
+#include <vector>
 
-/// Enum representing different roof types
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum RoofType {
-    Gabled,    // Two sloping sides meeting at a ridge
-    Hipped, // All sides slope downwards to walls (including Half-hipped, Gambrel, Mansard variations)
-    Skillion, // Single sloping surface
-    Pyramidal, // All sides come to a point at the top
-    Dome,   // Rounded, hemispherical structure
-    Flat,   // Default flat roof
-}
 
-#[inline]
-pub fn generate_buildings(
-    editor: &mut WorldEditor,
-    element: &ProcessedWay,
-    args: &Args,
-    relation_levels: Option<i32>,
-) {
-    // Get min_level first so we can use it both for start_level and building height calculations
-    let min_level = if let Some(min_level_str) = element.tags.get("building:min_level") {
-        min_level_str.parse::<i32>().unwrap_or(0)
-    } else {
-        0
-    };
+#include "../../arnis_adapter.h"
 
-    // Calculate y-offset for non-terrain mode for absolute positioning
-    let abs_terrain_offset = if !args.terrain { args.ground_level } else { 0 };
+//using namespace arnis;
+namespace arnis
+{
 
-    // Calculate starting y-offset from min_level
-    let scale_factor = args.scale;
-    let min_level_offset = multiply_scale(min_level * 4, scale_factor);
+namespace buildings
+{
 
-    // Cache floodfill result: compute once and reuse throughout
-    let polygon_coords: Vec<(i32, i32)> = element.nodes.iter().map(|n| (n.x, n.z)).collect();
-    let cached_floor_area: Vec<(i32, i32)> =
-        flood_fill_area(&polygon_coords, args.timeout.as_ref());
-    let cached_footprint_size = cached_floor_area.len();
+/*
 
-    // Use fixed starting Y coordinate based on maximum ground level when terrain is enabled
-    let start_y_offset = if args.terrain {
-        // Get nodes' XZ points to find maximum elevation
-        let building_points: Vec<XZPoint> = element
-            .nodes
-            .iter()
-            .map(|n| {
-                XZPoint::new(
-                    n.x - editor.get_min_coords().0,
-                    n.z - editor.get_min_coords().1,
-                )
-            })
-            .collect();
+// Basic placeholder types and constants
+using Block = int;
 
-        // Calculate maximum and minimum ground level across all nodes
-        let mut max_ground_level = args.ground_level;
+struct XZPoint {
+    int x;
+    int z;
+    XZPoint(int x_, int z_) : x(x_), z(z_) {}
+    static XZPoint new_point(int x_, int z_) { return XZPoint(x_, z_); }
+};
 
-        for point in &building_points {
-            if let Some(ground) = editor.get_ground() {
-                let level = ground.level(*point);
-                max_ground_level = max_ground_level.max(level);
+struct Ground {
+    int level(const XZPoint& p) const;
+};
+
+struct WorldEditor {
+    std::pair<int,int> get_min_coords() const;
+    Ground* get_ground() const; // may return nullptr
+    void set_block(Block b, int x, int y, int z, const Block* alternatives = nullptr, std::size_t alt_count = 0) const;
+    void set_block_absolute(Block b, int x, int y, int z, const Block* alternatives = nullptr, std::size_t alt_count = 0) const;
+};
+
+struct Node { int x; int z; };
+
+struct ProcessedWay {
+    std::vector<Node> nodes;
+    std::unordered_map<std::string, std::string> tags;
+};
+
+struct Args {
+    bool terrain;
+    int ground_level;
+    double scale;
+    bool roof;
+    bool interior;
+    std::optional<int> timeout;
+    std::optional<int> timeout_ref() const { return timeout; }
+};
+
+// Example block constants (placeholders)
+constexpr Block POLISHED_ANDESITE = 1;
+constexpr Block SMOOTH_STONE = 2;
+constexpr Block STONE_BRICKS = 3;
+constexpr Block MUD_BRICKS = 4;
+constexpr Block ANDESITE = 5;
+constexpr Block CHISELED_STONE_BRICKS = 6;
+constexpr Block STONE_BRICK_SLAB = 7;
+constexpr Block OAK_FENCE = 8;
+constexpr Block OAK_PLANKS = 9;
+constexpr Block STONE_BLOCK_SLAB = 10;
+constexpr Block SMOOTH_STONE_BLOCK = 11;
+constexpr Block COBBLESTONE = 12;
+constexpr Block COBBLESTONE_WALL = 13;
+constexpr Block STONE_BRICKS_BLOCK = 14;
+constexpr Block GLOWSTONE = 15;
+constexpr Block COBBLESTONE_BLOCK = 16;
+// Helper function declarations (assumed implemented elsewhere)
+int multiply_scale(int value, double scale);
+std::vector<std::pair<int,int>> flood_fill_area(const std::vector<std::pair<int,int>>& polygon_coords, const std::optional<int>& timeout);
+Block get_castle_wall_block();
+std::optional<std::tuple<uint8_t,uint8_t,uint8_t>> color_text_to_rgb_tuple(const std::string& text);
+Block get_building_wall_block_for_color(const std::tuple<uint8_t,uint8_t,uint8_t>& rgb);
+Block get_fallback_building_block();
+Block get_random_floor_block();
+Block get_window_block_for_building_type(const std::string& building_type);
+void generate_bridge(WorldEditor* editor, const ProcessedWay& element, const std::optional<int>& timeout);
+std::vector<std::tuple<int,int,int>> bresenham_line(int x1, int y1, int z1, int x2, int y2, int z2);
+void generate_building_interior(WorldEditor* editor,
+                                const std::vector<std::pair<int,int>>& floor_area,
+                                int min_x, int min_z, int max_x, int max_z,
+                                int start_y_offset, int building_height,
+                                Block wall_block,
+                                const std::vector<int>& floor_levels,
+                                const Args& args,
+                                const ProcessedWay& element,
+                                int abs_terrain_offset);
+void generate_roof(WorldEditor* editor,
+                   const ProcessedWay& element,
+                   int start_y_offset,
+                   int building_height,
+                   Block floor_block,
+                   Block wall_block,
+                   Block accent_block,
+                   int roof_type_int,
+                   const std::vector<std::pair<int,int>>& cached_floor_area,
+                   int abs_terrain_offset);
+
+*/
+
+
+// RoofType enum
+enum class RoofType {
+    Gabled,
+    Hipped,
+    Skillion,
+    Pyramidal,
+    Dome,
+    Flat
+};
+
+// Hash for pair<int,int>
+struct PairHash {
+    std::size_t operator()(const std::pair<int,int>& p) const noexcept {
+        std::size_t h1 = std::hash<int>()(p.first);
+        std::size_t h2 = std::hash<int>()(p.second);
+        return h1 ^ (h2 + 0x9e3779b97f4a7c15ULL + (h1<<6) + (h1>>2));
+    }
+};
+using pair_hash = PairHash;
+
+
+
+
+
+inline int32_t multiply_scale(int32_t value, double scale_factor);
+void generate_bridge(WorldEditor &editor, const ProcessedWay &element,
+		const std::optional<std::chrono::duration<double>> &floodfill_timeout);
+
+        inline void generate_roof(
+    WorldEditor & editor,
+    ProcessedWay const & element,
+    int32_t start_y_offset,
+    int32_t building_height,
+    Block floor_block,
+    Block wall_block,
+    Block accent_block,
+    RoofType roof_type,
+    std::vector<std::pair<int32_t,int32_t>> const & cached_floor_area,
+    int32_t abs_terrain_offset
+);
+
+
+
+
+
+
+
+void generate_buildings(WorldEditor* editor,
+                        const ProcessedWay& element,
+                        const Args& args,
+                        const std::optional<int>& relation_levels) {
+    // min_level
+    int min_level = 0;
+    {
+        auto it = element.tags.find("building:min_level");
+        if (it != element.tags.end()) {
+            try {
+                min_level = std::stoi(it->second);
+            } catch (...) {
+                min_level = 0;
+            }
+        }
+    }
+
+    int abs_terrain_offset = (!args.terrain) ? args.ground_level : 0;
+    double scale_factor = args.scale;
+    int min_level_offset = multiply_scale(min_level * 4, scale_factor);
+
+    std::vector<std::pair<int,int>> polygon_coords;
+    polygon_coords.reserve(element.nodes.size());
+    for (const auto& n : element.nodes) {
+        polygon_coords.emplace_back(n.x, n.z);
+    }
+
+    std::vector<std::pair<int,int>> cached_floor_area = flood_fill_area(polygon_coords, args.timeout_ref());
+    std::size_t cached_footprint_size = cached_floor_area.size();
+
+    int start_y_offset = 0;
+    if (args.terrain) {
+        std::vector<XZPoint> building_points;
+        building_points.reserve(element.nodes.size());
+        auto min_coords = editor->get_min_coords();
+        for (const auto& n : element.nodes) {
+            building_points.emplace_back(
+                XZPoint::new_point(n.x - min_coords.first, n.z - min_coords.second)
+            );
+        }
+
+        int max_ground_level = args.ground_level;
+        Ground* grd = editor->get_ground();
+        for (const auto& point : building_points) {
+            if (grd) {
+                int lvl = grd->level(point);
+                if (lvl > max_ground_level) max_ground_level = lvl;
             }
         }
 
-        // Use the maximum level + min_level offset as the fixed base for the entire building
-        max_ground_level + min_level_offset
+        start_y_offset = max_ground_level + min_level_offset;
     } else {
-        // When terrain is disabled, just use min_level_offset
-        min_level_offset
-    };
+        start_y_offset = min_level_offset;
+    }
 
-    // Calculate building bounds and floor area before processing interior
-    let min_x = element.nodes.iter().map(|n| n.x).min().unwrap_or(0);
-    let max_x = element.nodes.iter().map(|n| n.x).max().unwrap_or(0);
-    let min_z = element.nodes.iter().map(|n| n.z).min().unwrap_or(0);
-    let max_z = element.nodes.iter().map(|n| n.z).max().unwrap_or(0);
+    int min_x = std::numeric_limits<int>::max();
+    int max_x = std::numeric_limits<int>::min();
+    int min_z = std::numeric_limits<int>::max();
+    int max_z = std::numeric_limits<int>::min();
+    for (const auto& n : element.nodes) {
+        if (n.x < min_x) min_x = n.x;
+        if (n.x > max_x) max_x = n.x;
+        if (n.z < min_z) min_z = n.z;
+        if (n.z > max_z) max_z = n.z;
+    }
+    if (min_x == std::numeric_limits<int>::max()) { min_x = 0; }
+    if (min_z == std::numeric_limits<int>::max()) { min_z = 0; }
+    if (max_x == std::numeric_limits<int>::min()) { max_x = 0; }
+    if (max_z == std::numeric_limits<int>::min()) { max_z = 0; }
 
-    let mut previous_node: Option<(i32, i32)> = None;
-    let mut corner_addup: (i32, i32, i32) = (0, 0, 0);
-    let mut current_building: Vec<(i32, i32)> = vec![];
+    std::optional<std::pair<int,int>> previous_node;
+    std::tuple<int,int,int> corner_addup = std::make_tuple(0,0,0);
+    std::vector<std::pair<int,int>> current_building;
 
-    // Get building type for type-specific block selection
-    let building_type = element
-        .tags
-        .get("building")
-        .or_else(|| element.tags.get("building:part"))
-        .map(|s| s.as_str())
-        .unwrap_or("yes");
+    // building type
+    std::string building_type = "yes";
+    {
+        auto it = element.tags.find("building");
+        if (it != element.tags.end()) {
+            building_type = it->second;
+        } else {
+            auto it2 = element.tags.find("building:part");
+            if (it2 != element.tags.end()) building_type = it2->second;
+        }
+    }
 
-    let wall_block: Block = if element.tags.get("historic") == Some(&"castle".to_string()) {
-        // Historic forts and castles should use stone/brick materials
-        get_castle_wall_block()
-    } else {
-        element
-            .tags
-            .get("building:colour")
-            .and_then(|building_colour: &String| {
-                color_text_to_rgb_tuple(building_colour)
-                    .map(|rgb: (u8, u8, u8)| get_building_wall_block_for_color(rgb))
-            })
-            .unwrap_or_else(get_fallback_building_block)
-    };
+    Block wall_block;
+    {
+        auto it_hist = element.tags.find("historic");
+        if (it_hist != element.tags.end() && it_hist->second == "castle") {
+            wall_block = get_castle_wall_block();
+        } else {
+            auto it_col = element.tags.find("building:colour");
+            if (it_col != element.tags.end()) {
+                auto rgb = color_text_to_rgb_tuple(it_col->second);
+                if (rgb.has_value()) {
+                    wall_block = get_building_wall_block_for_color(rgb.value());
+                } else {
+                    wall_block = get_fallback_building_block();
+                }
+            } else {
+                wall_block = get_fallback_building_block();
+            }
+        }
+    }
 
-    let floor_block: Block = get_random_floor_block();
+    Block floor_block = get_random_floor_block();
+    Block window_block = get_window_block_for_building_type(building_type);
 
-    // Select window type based on building type
-    let window_block: Block = get_window_block_for_building_type(building_type);
+    std::unordered_set<std::pair<int,int>, PairHash> processed_points;
+    int building_height = std::max(3, static_cast<int>(6.0 * scale_factor));
+    bool is_tall_building = false;
 
-    // Set to store processed flood fill points
-    let mut processed_points: HashSet<(i32, i32)> = HashSet::new();
-    let mut building_height: i32 = ((6.0 * scale_factor) as i32).max(3); // Default building height with scale and minimum
-    let mut is_tall_building = false;
-    let mut rng = rand::thread_rng();
-    let use_vertical_windows = rng.gen_bool(0.7);
-    let use_accent_roof_line = rng.gen_bool(0.25);
+    std::random_device rd;
+    std::mt19937 rng(rd());
+    std::bernoulli_distribution dist_vwin(0.7);
+    std::bernoulli_distribution dist_accent_roof(0.25);
+    bool use_vertical_windows = dist_vwin(rng);
+    bool use_accent_roof_line = dist_accent_roof(rng);
 
-    // Random accent block selection for this building
-    let accent_blocks = [
-        POLISHED_ANDESITE,
+    Block accent_blocks_arr[] = {
+        //POLISHED_ANDESITE,
         SMOOTH_STONE,
         STONE_BRICKS,
-        MUD_BRICKS,
-        ANDESITE,
-        CHISELED_STONE_BRICKS,
-    ];
-    let accent_block = accent_blocks[rng.gen_range(0..accent_blocks.len())];
+        //MUD_BRICKS,
+        //ANDESITE,
+        //CHISELED_STONE_BRICKS
+    };
+    std::uniform_int_distribution<std::size_t> dist_accent_idx(0, sizeof(accent_blocks_arr)/sizeof(accent_blocks_arr[0]) - 1);
+    Block accent_block = accent_blocks_arr[dist_accent_idx(rng)];
 
-    // Skip if 'layer' or 'level' is negative in the tags
-    if let Some(layer) = element.tags.get("layer") {
-        if layer.parse::<i32>().unwrap_or(0) < 0 {
-            return;
+    // Skip if 'layer' or 'level' negative
+    {
+        auto it = element.tags.find("layer");
+        if (it != element.tags.end()) {
+            try {
+                if (std::stoi(it->second) < 0) return;
+            } catch (...) {}
+        }
+    }
+    {
+        auto it = element.tags.find("level");
+        if (it != element.tags.end()) {
+            try {
+                if (std::stoi(it->second) < 0) return;
+            } catch (...) {}
         }
     }
 
-    if let Some(level) = element.tags.get("level") {
-        if level.parse::<i32>().unwrap_or(0) < 0 {
-            return;
-        }
-    }
-
-    // Determine building height from tags
-    if let Some(levels_str) = element.tags.get("building:levels") {
-        if let Ok(levels) = levels_str.parse::<i32>() {
-            let lev = levels - min_level;
-
-            if lev >= 1 {
-                building_height = multiply_scale(levels * 4 + 2, scale_factor);
-                building_height = building_height.max(3);
-
-                // Mark as tall building if more than 7 stories
-                if levels > 7 {
-                    is_tall_building = true;
+    // building:levels
+    {
+        auto it = element.tags.find("building:levels");
+        if (it != element.tags.end()) {
+            try {
+                int levels = std::stoi(it->second);
+                int lev = levels - min_level;
+                if (lev >= 1) {
+                    building_height = multiply_scale(levels * 4 + 2, scale_factor);
+                    if (building_height < 3) building_height = 3;
+                    if (levels > 7) is_tall_building = true;
                 }
-            }
+            } catch (...) {}
         }
     }
 
-    if let Some(height_str) = element.tags.get("height") {
-        if let Ok(height) = height_str.trim_end_matches("m").trim().parse::<f64>() {
-            building_height = (height * scale_factor) as i32;
-            building_height = building_height.max(3);
-
-            // Mark as tall building if height suggests more than 7 stories
-            if height > 28.0 {
-                is_tall_building = true;
-            }
+    // height tag
+    {
+        auto it = element.tags.find("height");
+        if (it != element.tags.end()) {
+            try {
+                std::string s = it->second;
+                // trim trailing 'm' and whitespace
+                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+                if (!s.empty() && s.back() == 'm') s.pop_back();
+                while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+                double height = std::stod(s);
+                building_height = static_cast<int>(height * scale_factor);
+                if (building_height < 3) building_height = 3;
+                if (height > 28.0) is_tall_building = true;
+            } catch (...) {}
         }
     }
 
-    if let Some(levels) = relation_levels {
+    if (relation_levels.has_value()) {
+        int levels = relation_levels.value();
         building_height = multiply_scale(levels * 4 + 2, scale_factor);
-        building_height = building_height.max(3);
-
-        // Mark as tall building if more than 7 stories
-        if levels > 7 {
-            is_tall_building = true;
-        }
+        if (building_height < 3) building_height = 3;
+        if (levels > 7) is_tall_building = true;
     }
 
-    // Determine accent line usage based on whether building has multiple floors
-    let has_multiple_floors = building_height > 6;
-    let use_accent_lines = has_multiple_floors && rng.gen_bool(0.2);
-    let use_vertical_accent = has_multiple_floors && !use_accent_lines && rng.gen_bool(0.1);
+    bool has_multiple_floors = building_height > 6;
+    std::bernoulli_distribution dist_use_accent_lines(0.2);
+    bool use_accent_lines = has_multiple_floors && dist_use_accent_lines(rng);
+    std::bernoulli_distribution dist_use_vertical_accent(0.1);
+    bool use_vertical_accent = has_multiple_floors && !use_accent_lines && dist_use_vertical_accent(rng);
 
-    if let Some(amenity_type) = element.tags.get("amenity") {
-        if amenity_type == "shelter" {
-            let roof_block: Block = STONE_BRICK_SLAB;
-
-            // Use cached floor area instead of recalculating
-            let roof_area: &Vec<(i32, i32)> = &cached_floor_area;
-
-            // Place fences and roof slabs at each corner node directly
-            for node in &element.nodes {
-                let x: i32 = node.x;
-                let z: i32 = node.z;
-
-                for shelter_y in 1..=multiply_scale(4, scale_factor) {
-                    editor.set_block(OAK_FENCE, x, shelter_y, z, None, None);
+    {
+        auto it = element.tags.find("amenity");
+        if (it != element.tags.end() && it->second == "shelter") {
+            Block roof_block = STONE_BRICK_SLAB;
+            const std::vector<std::pair<int,int>>& roof_area = cached_floor_area;
+            for (const auto& node : element.nodes) {
+                int x = node.x;
+                int z = node.z;
+                for (int shelter_y = 1; shelter_y <= multiply_scale(4, scale_factor); ++shelter_y) {
+                    editor->set_block(OAK_FENCE, x, shelter_y, z);
                 }
-                editor.set_block(roof_block, x, 5, z, None, None);
+                editor->set_block(roof_block, x, 5, z);
             }
-
-            // Flood fill the roof area
-            for (x, z) in roof_area.iter() {
-                editor.set_block(roof_block, *x, 5, *z, None, None);
+            for (const auto& p : roof_area) {
+                editor->set_block(roof_block, p.first, 5, p.second);
             }
-
             return;
         }
     }
 
-    if let Some(building_type) = element.tags.get("building") {
-        if building_type == "garage" {
-            building_height = ((2.0 * scale_factor) as i32).max(3);
-        } else if building_type == "shed" {
-            building_height = ((2.0 * scale_factor) as i32).max(3);
-
-            if element.tags.contains_key("bicycle_parking") {
-                let ground_block: Block = OAK_PLANKS;
-                let roof_block: Block = STONE_BLOCK_SLAB;
-
-                // Use cached floor area instead of recalculating
-                let floor_area: &Vec<(i32, i32)> = &cached_floor_area;
-
-                // Fill the floor area
-                for (x, z) in floor_area.iter() {
-                    editor.set_block(ground_block, *x, 0, *z, None, None);
-                }
-
-                // Place fences and roof slabs at each corner node directly
-                for node in &element.nodes {
-                    let x: i32 = node.x;
-                    let z: i32 = node.z;
-
-                    for dy in 1..=4 {
-                        editor.set_block(OAK_FENCE, x, dy, z, None, None);
+    {
+        auto it = element.tags.find("building");
+        if (it != element.tags.end()) {
+            const std::string& btype = it->second;
+            if (btype == "garage") {
+                building_height = std::max(3, static_cast<int>(2.0 * scale_factor));
+            } else if (btype == "shed") {
+                building_height = std::max(3, static_cast<int>(2.0 * scale_factor));
+                if (element.tags.find("bicycle_parking") != element.tags.end()) {
+                    Block ground_block = OAK_PLANKS;
+                    Block roof_block = STONE_BLOCK_SLAB;
+                    const std::vector<std::pair<int,int>>& floor_area = cached_floor_area;
+                    for (const auto& p : floor_area) {
+                        editor->set_block(ground_block, p.first, 0, p.second);
                     }
-                    editor.set_block(roof_block, x, 5, z, None, None);
-                }
-
-                // Flood fill the roof area
-                for (x, z) in floor_area.iter() {
-                    editor.set_block(roof_block, *x, 5, *z, None, None);
-                }
-
-                return;
-            }
-        } else if building_type == "parking"
-            || element
-                .tags
-                .get("parking")
-                .is_some_and(|p| p == "multi-storey")
-        {
-            // Parking building structure
-
-            // Ensure minimum height
-            building_height = building_height.max(16);
-
-            // Use cached floor area instead of recalculating
-            let floor_area: &Vec<(i32, i32)> = &cached_floor_area;
-
-            for level in 0..=(building_height / 4) {
-                let current_level_y = level * 4;
-
-                // Build walls
-                for node in &element.nodes {
-                    let x: i32 = node.x;
-                    let z: i32 = node.z;
-
-                    // Build walls up to the current level
-                    for y in (current_level_y + 1)..=(current_level_y + 4) {
-                        editor.set_block(STONE_BRICKS, x, y, z, None, None);
+                    for (const auto& node : element.nodes) {
+                        int x = node.x;
+                        int z = node.z;
+                        for (int dy = 1; dy <= 4; ++dy) {
+                            editor->set_block(OAK_FENCE, x, dy, z);
+                        }
+                        editor->set_block(roof_block, x, 5, z);
                     }
-                }
-
-                // Fill the floor area for each level
-                for (x, z) in floor_area {
-                    if level == 0 {
-                        editor.set_block(SMOOTH_STONE, *x, current_level_y, *z, None, None);
-                    } else {
-                        editor.set_block(COBBLESTONE, *x, current_level_y, *z, None, None);
+                    for (const auto& p : floor_area) {
+                        editor->set_block(roof_block, p.first, 5, p.second);
                     }
+                    return;
                 }
-            }
-
-            // Outline for each level
-            for level in 0..=(building_height / 4) {
-                let current_level_y = level * 4;
-
-                // Use the nodes to create the outline
-                let mut prev_outline = None;
-                for node in &element.nodes {
-                    let x = node.x;
-                    let z = node.z;
-
-                    if let Some((prev_x, prev_z)) = prev_outline {
-                        let outline_points =
-                            bresenham_line(prev_x, current_level_y, prev_z, x, current_level_y, z);
-                        for (bx, _, bz) in outline_points {
-                            editor.set_block(
-                                SMOOTH_STONE,
-                                bx,
-                                current_level_y,
-                                bz,
-                                Some(&[COBBLESTONE, COBBLESTONE_WALL]),
-                                None,
-                            );
-                            editor.set_block(
-                                STONE_BRICK_SLAB,
-                                bx,
-                                current_level_y + 2,
-                                bz,
-                                None,
-                                None,
-                            );
-                            if bx % 2 == 0 {
-                                editor.set_block(
-                                    COBBLESTONE_WALL,
-                                    bx,
-                                    current_level_y + 1,
-                                    bz,
-                                    None,
-                                    None,
-                                );
-                            }
+            } else if (btype == "parking" ||
+                       (element.tags.find("parking") != element.tags.end() && element.tags.at("parking") == "multi-storey")) {
+                building_height = std::max(building_height, 16);
+                const std::vector<std::pair<int,int>>& floor_area = cached_floor_area;
+                int top_level = building_height / 4;
+                for (int level = 0; level <= top_level; ++level) {
+                    int current_level_y = level * 4;
+                    for (const auto& node : element.nodes) {
+                        int x = node.x;
+                        int z = node.z;
+                        for (int y = current_level_y + 1; y <= current_level_y + 4; ++y) {
+                            editor->set_block(STONE_BRICKS, x, y, z);
                         }
                     }
-                    prev_outline = Some((x, z));
-                }
-            }
-
-            return;
-        } else if building_type == "roof" {
-            let roof_height: i32 = 5;
-
-            // Iterate through the nodes to create the roof edges using Bresenham's line algorithm
-            for node in &element.nodes {
-                let x: i32 = node.x;
-                let z: i32 = node.z;
-
-                if let Some(prev) = previous_node {
-                    let bresenham_points: Vec<(i32, i32, i32)> =
-                        bresenham_line(prev.0, roof_height, prev.1, x, roof_height, z);
-                    for (bx, _, bz) in bresenham_points {
-                        editor.set_block(STONE_BRICK_SLAB, bx, roof_height, bz, None, None);
-                        // Set roof block at edge
+                    for (const auto& p : floor_area) {
+                        if (level == 0) {
+                            editor->set_block(SMOOTH_STONE, p.first, current_level_y, p.second);
+                        } else {
+                            editor->set_block(COBBLESTONE, p.first, current_level_y, p.second);
+                        }
                     }
                 }
-
-                for y in 1..=(roof_height - 1) {
-                    editor.set_block(COBBLESTONE_WALL, x, y, z, None, None);
+                for (int level = 0; level <= top_level; ++level) {
+                    int current_level_y = level * 4;
+                    std::optional<std::pair<int,int>> prev_outline;
+                    for (const auto& node : element.nodes) {
+                        int x = node.x;
+                        int z = node.z;
+                        if (prev_outline.has_value()) {
+                            auto outline_points = bresenham_line(prev_outline->first, current_level_y, prev_outline->second, x, current_level_y, z);
+                            for (const auto& t : outline_points) {
+                                int bx = std::get<0>(t);
+                                int bz = std::get<2>(t);
+                                std::vector<Block> alts = {COBBLESTONE, COBBLESTONE_WALL};
+                                editor->set_block(SMOOTH_STONE_BLOCK, bx, current_level_y, bz, alts);
+                                editor->set_block(STONE_BRICK_SLAB, bx, current_level_y + 2, bz);
+                                if ((bx % 2) == 0) {
+                                    editor->set_block(COBBLESTONE_WALL, bx, current_level_y + 1, bz);
+                                }
+                            }
+                        }
+                        prev_outline = std::make_pair(x,z);
+                    }
                 }
-
-                previous_node = Some((x, z));
+                return;
+            } else if (btype == "roof") {
+                int roof_height = 5;
+                for (const auto& node : element.nodes) {
+                    int x = node.x;
+                    int z = node.z;
+                    if (previous_node.has_value()) {
+                        auto prev = previous_node.value();
+                        auto bresenham_points = bresenham_line(prev.first, roof_height, prev.second, x, roof_height, z);
+                        for (const auto& t : bresenham_points) {
+                            int bx = std::get<0>(t);
+                            int bz = std::get<2>(t);
+                            editor->set_block(STONE_BRICK_SLAB, bx, roof_height, bz);
+                        }
+                    }
+                    for (int y = 1; y <= (roof_height - 1); ++y) {
+                        editor->set_block(COBBLESTONE_WALL, x, y, z);
+                    }
+                    previous_node = std::make_pair(x,z);
+                }
+                const std::vector<std::pair<int,int>>& roof_area = cached_floor_area;
+                for (const auto& p : roof_area) {
+                    editor->set_block(STONE_BRICK_SLAB, p.first, roof_height, p.second);
+                }
+                return;
+            } else if (btype == "apartments") {
+                if (building_height == std::max(3, static_cast<int>(6.0 * scale_factor))) {
+                    building_height = std::max(3, static_cast<int>(15.0 * scale_factor));
+                }
+            } else if (btype == "hospital") {
+                if (building_height == std::max(3, static_cast<int>(6.0 * scale_factor))) {
+                    building_height = std::max(3, static_cast<int>(23.0 * scale_factor));
+                }
+            } else if (btype == "bridge") {
+                generate_bridge(*editor, element, args.timeout_ref());
+                return;
             }
-
-            // Use cached floor area
-            let roof_area: &Vec<(i32, i32)> = &cached_floor_area;
-
-            // Fill the interior of the roof with STONE_BRICK_SLAB
-            for (x, z) in roof_area.iter() {
-                editor.set_block(STONE_BRICK_SLAB, *x, roof_height, *z, None, None);
-                // Set roof block
-            }
-
-            return;
-        } else if building_type == "apartments" {
-            // If building has no height attribute, assign a defined height
-            if building_height == ((6.0 * scale_factor) as i32).max(3) {
-                building_height = ((15.0 * scale_factor) as i32).max(3);
-            }
-        } else if building_type == "hospital" {
-            // If building has no height attribute, assign a defined height
-            if building_height == ((6.0 * scale_factor) as i32).max(3) {
-                building_height = ((23.0 * scale_factor) as i32).max(3);
-            }
-        } else if building_type == "bridge" {
-            generate_bridge(editor, element, args.timeout.as_ref());
-            return;
         }
     }
 
     // Process nodes to create walls and corners
-    for node in &element.nodes {
-        let x: i32 = node.x;
-        let z: i32 = node.z;
+    for (const auto& node : element.nodes) {
+        int x = node.x;
+        int z = node.z;
+        if (previous_node.has_value()) {
+            auto prev = previous_node.value();
+            auto bresenham_points = bresenham_line(prev.first, start_y_offset, prev.second, x, start_y_offset, z);
+            for (const auto& t : bresenham_points) {
+                int bx = std::get<0>(t);
+                int bz = std::get<2>(t);
 
-        if let Some(prev) = previous_node {
-            // Calculate walls and corners using Bresenham line
-            let bresenham_points =
-                bresenham_line(prev.0, start_y_offset, prev.1, x, start_y_offset, z);
-            for (bx, _, bz) in bresenham_points {
-                // Create foundation pillars from ground up to building base if needed
-                // Only create foundations for buildings without min_level (elevated buildings shouldn't have foundations)
-                if args.terrain && min_level == 0 {
-                    // Calculate actual ground level at this position
-                    let local_ground_level = if let Some(ground) = editor.get_ground() {
-                        ground.level(XZPoint::new(
-                            bx - editor.get_min_coords().0,
-                            bz - editor.get_min_coords().1,
-                        ))
-                    } else {
-                        args.ground_level
-                    };
-
-                    // Add foundation blocks from ground to building base
-                    for y in local_ground_level..start_y_offset + 1 {
-                        editor.set_block_absolute(
-                            wall_block,
-                            bx,
-                            y + abs_terrain_offset,
-                            bz,
-                            None,
-                            None,
-                        );
+                if (args.terrain && min_level == 0) {
+                    int local_ground_level = args.ground_level;
+                    Ground* grd = editor->get_ground();
+                    if (grd) {
+                        auto min_coords = editor->get_min_coords();
+                        local_ground_level = grd->level(XZPoint::new_point(bx - min_coords.first, bz - min_coords.second));
+                    }
+                    for (int y = local_ground_level; y <= start_y_offset; ++y) {
+                        editor->set_block_absolute(wall_block, bx, y + abs_terrain_offset, bz);
                     }
                 }
 
-                for h in (start_y_offset + 1)..=(start_y_offset + building_height) {
-                    // Add windows to the walls at intervals
-                    // Use different window patterns for tall buildings
-                    if is_tall_building && use_vertical_windows {
-                        // Tall building pattern - narrower windows with continuous vertical strips
-                        if h > start_y_offset + 1 && (bx + bz) % 3 == 0 {
-                            editor.set_block_absolute(
-                                window_block,
-                                bx,
-                                h + abs_terrain_offset,
-                                bz,
-                                None,
-                                None,
-                            );
+                for (int h = start_y_offset + 1; h <= start_y_offset + building_height; ++h) {
+                    if (is_tall_building && use_vertical_windows) {
+                        if (h > start_y_offset + 1 && ((bx + bz) % 3) == 0) {
+                            editor->set_block_absolute(window_block, bx, h + abs_terrain_offset, bz);
                         } else {
-                            editor.set_block_absolute(
-                                wall_block,
-                                bx,
-                                h + abs_terrain_offset,
-                                bz,
-                                None,
-                                None,
-                            );
+                            editor->set_block_absolute(wall_block, bx, h + abs_terrain_offset, bz);
                         }
                     } else {
-                        // Original pattern for regular buildings (non-vertical windows)
-                        if h > start_y_offset + 1 && h % 4 != 0 && (bx + bz) % 6 < 3 {
-                            editor.set_block_absolute(
-                                window_block,
-                                bx,
-                                h + abs_terrain_offset,
-                                bz,
-                                None,
-                                None,
-                            );
+                        if (h > start_y_offset + 1 && (h % 4) != 0 && ((bx + bz) % 6) < 3) {
+                            editor->set_block_absolute(window_block, bx, h + abs_terrain_offset, bz);
                         } else {
-                            // Use accent block line between windows if enabled for this building
-                            let use_accent_line =
-                                use_accent_lines && h > start_y_offset + 1 && h % 4 == 0;
-                            // Use vertical accent block pattern (where windows would be, but on non-window Y levels) if enabled
-                            let use_vertical_accent_here = use_vertical_accent
-                                && h > start_y_offset + 1
-                                && h % 4 == 0
-                                && (bx + bz) % 6 < 3;
-
-                            if use_accent_line || use_vertical_accent_here {
-                                editor.set_block_absolute(
-                                    accent_block,
-                                    bx,
-                                    h + abs_terrain_offset,
-                                    bz,
-                                    None,
-                                    None,
-                                );
+                            bool use_accent_line = use_accent_lines && h > start_y_offset + 1 && (h % 4) == 0;
+                            bool use_vertical_accent_here = use_vertical_accent && h > start_y_offset + 1 && (h % 4) == 0 && ((bx + bz) % 6) < 3;
+                            if (use_accent_line || use_vertical_accent_here) {
+                                editor->set_block_absolute(accent_block, bx, h + abs_terrain_offset, bz);
                             } else {
-                                editor.set_block_absolute(
-                                    wall_block,
-                                    bx,
-                                    h + abs_terrain_offset,
-                                    bz,
-                                    None,
-                                    None,
-                                );
+                                editor->set_block_absolute(wall_block, bx, h + abs_terrain_offset, bz);
                             }
                         }
                     }
                 }
 
-                let roof_line_block = if use_accent_roof_line {
-                    accent_block
-                } else {
-                    wall_block
-                };
-                editor.set_block_absolute(
-                    roof_line_block,
-                    bx,
-                    start_y_offset + building_height + abs_terrain_offset + 1,
-                    bz,
-                    None,
-                    None,
-                );
+                Block roof_line_block = use_accent_roof_line ? accent_block : wall_block;
+                editor->set_block_absolute(roof_line_block, bx, start_y_offset + building_height + abs_terrain_offset + 1, bz);
 
-                current_building.push((bx, bz));
-                corner_addup = (corner_addup.0 + bx, corner_addup.1 + bz, corner_addup.2 + 1);
+                current_building.emplace_back(bx, bz);
+                std::get<0>(corner_addup) += bx;
+                std::get<1>(corner_addup) += bz;
+                std::get<2>(corner_addup) += 1;
             }
         }
-
-        previous_node = Some((x, z));
+        previous_node = std::make_pair(x,z);
     }
 
-    // Flood-fill interior with floor variation
-    if corner_addup != (0, 0, 0) {
-        // Use cached floor area
-        let floor_area: &Vec<(i32, i32)> = &cached_floor_area;
+    if (std::get<2>(corner_addup) != 0) {
+        const std::vector<std::pair<int,int>>& floor_area = cached_floor_area;
 
-        // Calculate floor heights for each level based on building height
-        let mut floor_levels = Vec::new();
-
-        // Always add the ground floor
-        floor_levels.push(start_y_offset);
-
-        // Calculate additional floors if building has sufficient height
-        if building_height > 6 {
-            // Determine number of floors (approximately 1 floor per 4 blocks of height)
-            let num_upper_floors = (building_height / 4).max(1);
-
-            // Add Y coordinates for each upper floor - match the intermediate floor placement
-            // Main building code places intermediate floors at start_y_offset + 2 + 4, start_y_offset + 2 + 8, etc.
-            for floor in 1..num_upper_floors {
-                floor_levels.push(start_y_offset + 2 + (floor * 4));
+        std::vector<int> floor_levels;
+        floor_levels.push_back(start_y_offset);
+        if (building_height > 6) {
+            int num_upper_floors = std::max(1, building_height / 4);
+            for (int floor = 1; floor < num_upper_floors; ++floor) {
+                floor_levels.push_back(start_y_offset + 2 + (floor * 4));
             }
         }
 
-        for (x, z) in floor_area.iter().cloned() {
-            if processed_points.insert((x, z)) {
-                // Create foundation columns for the floor area when using terrain
-                if args.terrain {
-                    // Calculate actual ground level at this position
-                    if let Some(ground) = editor.get_ground() {
-                        ground.level(XZPoint::new(
-                            x - editor.get_min_coords().0,
-                            z - editor.get_min_coords().1,
-                        ))
+        for (const auto& p : floor_area) {
+            int x = p.first;
+            int z = p.second;
+            if (processed_points.insert(p).second) {
+                if (args.terrain) {
+                    Ground* grd = editor->get_ground();
+                    if (grd) {
+                        auto min_coords = editor->get_min_coords();
+                        (void)grd->level(XZPoint::new_point(x - min_coords.first, z - min_coords.second));
                     } else {
-                        args.ground_level
-                    };
+                        (void)args.ground_level;
+                    }
                 }
 
-                // Set floor at start_y_offset
-                editor.set_block_absolute(
-                    floor_block,
-                    x,
-                    start_y_offset + abs_terrain_offset,
-                    z,
-                    None,
-                    None,
-                );
+                editor->set_block_absolute(floor_block, x, start_y_offset + abs_terrain_offset, z);
 
-                // Set level ceilings if height > 4
-                if building_height > 4 {
-                    for h in (start_y_offset + 2 + 4..start_y_offset + building_height).step_by(4) {
-                        if x % 5 == 0 && z % 5 == 0 {
-                            // Light fixtures
-                            editor.set_block_absolute(
-                                GLOWSTONE,
-                                x,
-                                h + abs_terrain_offset,
-                                z,
-                                None,
-                                None,
-                            );
+                if (building_height > 4) {
+                    for (int h = start_y_offset + 2 + 4; h < start_y_offset + building_height; h += 4) {
+                        if ((x % 5) == 0 && (z % 5) == 0) {
+                            editor->set_block_absolute(GLOWSTONE, x, h + abs_terrain_offset, z);
                         } else {
-                            editor.set_block_absolute(
-                                floor_block,
-                                x,
-                                h + abs_terrain_offset,
-                                z,
-                                None,
-                                None,
-                            );
+                            editor->set_block_absolute(floor_block, x, h + abs_terrain_offset, z);
                         }
                     }
-                } else if x % 5 == 0 && z % 5 == 0 {
-                    editor.set_block_absolute(
-                        GLOWSTONE,
-                        x,
-                        start_y_offset + building_height + abs_terrain_offset,
-                        z,
-                        None,
-                        None,
-                    );
+                } else if ((x % 5) == 0 && (z % 5) == 0) {
+                    editor->set_block_absolute(GLOWSTONE, x, start_y_offset + building_height + abs_terrain_offset, z);
                 }
 
-                // Only set ceiling at proper height if we don't use a specific roof shape or roof generation is disabled
-                if !args.roof
-                    || !element.tags.contains_key("roof:shape")
-                    || element.tags.get("roof:shape").unwrap() == "flat"
-                {
-                    editor.set_block_absolute(
-                        floor_block,
-                        x,
-                        start_y_offset + building_height + abs_terrain_offset + 1,
-                        z,
-                        None,
-                        None,
-                    );
+                if (!args.roof
+                    || element.tags.find("roof:shape") == element.tags.end()
+                    || element.tags.at("roof:shape") == "flat") {
+                    editor->set_block_absolute(floor_block, x, start_y_offset + building_height + abs_terrain_offset + 1, z);
+                    }
                 }
-            }
         }
 
-        // Generate interior features
-        if args.interior {
-            // Only generate interiors for buildings that aren't special types
-            let building_type = element
-                .tags
-                .get("building")
-                .map(|s| s.as_str())
-                .unwrap_or("yes");
-            let skip_interior = matches!(
-                building_type,
-                "garage" | "shed" | "parking" | "roof" | "bridge"
-            );
-
-            if !skip_interior && floor_area.len() > 100 {
-                // Only for buildings with sufficient floor area
-                generate_building_interior(
-                    editor,
-                    floor_area,
-                    min_x,
-                    min_z,
-                    max_x,
-                    max_z,
-                    start_y_offset,
-                    building_height,
-                    wall_block,
-                    &floor_levels,
-                    args,
-                    element,
-                    abs_terrain_offset,
-                );
+        if (args.interior) {
+            std::string btype = "yes";
+            auto it = element.tags.find("building");
+            if (it != element.tags.end()) btype = it->second;
+            bool skip_interior = (btype == "garage" || btype == "shed" || btype == "parking" || btype == "roof" || btype == "bridge");
+            if (!skip_interior && floor_area.size() > 100) {
+                generate_building_interior(*editor, floor_area, min_x, min_z, max_x, max_z, start_y_offset, building_height, wall_block, floor_levels, args, element, abs_terrain_offset);
             }
         }
     }
 
-    // Process roof shapes if specified and roof generation is enabled
-    if args.roof {
-        if let Some(roof_shape) = element.tags.get("roof:shape") {
-            let roof_type = match roof_shape.as_str() {
-                "gabled" => RoofType::Gabled,
-                "hipped" | "half-hipped" | "gambrel" | "mansard" | "round" => RoofType::Hipped,
-                "skillion" => RoofType::Skillion,
-                "pyramidal" => RoofType::Pyramidal,
-                "dome" | "onion" | "cone" => RoofType::Dome,
-                _ => RoofType::Flat,
-            };
+    if (args.roof) {
+        auto it_shape = element.tags.find("roof:shape");
+        if (it_shape != element.tags.end()) {
+            RoofType roof_type;
+            const std::string& shape = it_shape->second;
+            if (shape == "gabled") roof_type = RoofType::Gabled;
+            else if (shape == "hipped" || shape == "half-hipped" || shape == "gambrel" || shape == "mansard" || shape == "round") roof_type = RoofType::Hipped;
+            else if (shape == "skillion") roof_type = RoofType::Skillion;
+            else if (shape == "pyramidal") roof_type = RoofType::Pyramidal;
+            else if (shape == "dome" || shape == "onion" || shape == "cone") roof_type = RoofType::Dome;
+            else roof_type = RoofType::Flat;
 
-            generate_roof(
-                editor,
-                element,
-                start_y_offset,
-                building_height,
-                floor_block,
-                wall_block,
-                accent_block,
-                roof_type,
-                &cached_floor_area,
-                abs_terrain_offset,
-            );
+            generate_roof(*editor, element, start_y_offset, building_height, floor_block, wall_block, accent_block, roof_type, cached_floor_area, abs_terrain_offset);
         } else {
-            // Handle buildings without explicit roof:shape tag
-            let building_type = element
-                .tags
-                .get("building")
-                .map(|s| s.as_str())
-                .unwrap_or("yes");
+            std::string btype = "yes";
+            auto it = element.tags.find("building");
+            if (it != element.tags.end()) btype = it->second;
 
-            // For apartments, give 80% chance to generate a gabled roof only if building footprint is not too large
-            if building_type == "apartments"
-                || building_type == "residential"
-                || building_type == "house"
-                || building_type == "yes"
-            {
-                // Use cached footprint area and size instead of recalculating
-                let footprint_size = cached_footprint_size;
-
-                // Maximum footprint size threshold for gabled roofs
-                let max_footprint_for_gabled = 800;
-
-                let mut rng = rand::thread_rng();
-                if footprint_size <= max_footprint_for_gabled && rng.gen_bool(0.9) {
-                    generate_roof(
-                        editor,
-                        element,
-                        start_y_offset,
-                        building_height,
-                        floor_block,
-                        wall_block,
-                        accent_block,
-                        RoofType::Gabled,
-                        &cached_floor_area,
-                        abs_terrain_offset,
-                    );
+            if (btype == "apartments" || btype == "residential" || btype == "house" || btype == "yes") {
+                std::size_t footprint_size = cached_footprint_size;
+                const std::size_t max_footprint_for_gabled = 800;
+                std::bernoulli_distribution dist_gabled(0.9);
+                if (footprint_size <= max_footprint_for_gabled && dist_gabled(rng)) {
+                    generate_roof(*editor, element, start_y_offset, building_height, floor_block, wall_block, accent_block, RoofType::Gabled, cached_floor_area, abs_terrain_offset);
                 }
-                // If footprint too large or not selected for gabled roof, building gets default flat roof (no action needed)
             }
-            // Other building types without roof:shape get default flat roof (no action needed)
         }
     } else {
-        // Default flat roof - already handled by the building generation code
+        // flat roof default - already applied
     }
 }
 
-fn multiply_scale(value: i32, scale_factor: f64) -> i32 {
-    // Use bit operations for faster multiplication when possible
-    if scale_factor == 1.0 {
-        value
-    } else if scale_factor == 2.0 {
-        value << 1
-    } else if scale_factor == 4.0 {
-        value << 2
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+/*
+#include <cstdint>
+#include <cmath>
+#include <vector>
+#include <unordered_map>
+#include <limits>
+#include <algorithm>
+#include <random>
+#include <utility>
+
+namespace heck {
+
+// Basic types and helpers
+enum class StairFacing { North, South, East, West };
+enum class StairShape { Straight, OuterLeft, OuterRight };
+
+struct Block {
+    int id;
+};
+
+struct BlockWithProperties {
+    Block base;
+    StairFacing facing;
+    StairShape shape;
+    bool has_props;
+
+    static BlockWithProperties simple(Block b) {
+        return BlockWithProperties{b, StairFacing::North, StairShape::Straight, false};
+    }
+};
+
+struct Node {
+    int32_t x;
+    int32_t z;
+};
+
+struct ProcessedWay {
+    std::vector<Node> nodes;
+};
+
+enum class RoofType { Flat, Gabled, Hipped, Skillion, Pyramidal, Dome };
+
+struct WorldEditor {
+    void set_block_absolute(Block block, int32_t x, int32_t y, int32_t z, void* a, void* b);
+    void set_block_with_properties_absolute(BlockWithProperties bwp, int32_t x, int32_t y, int32_t z, void* a, void* b);
+};
+
+// Helpers referenced in the original code (stubs)
+inline Block get_stair_block_for_material(Block material) {
+    return material;
+}
+
+inline BlockWithProperties create_stair_with_properties(Block material, StairFacing facing, StairShape shape) {
+    return BlockWithProperties{material, facing, shape, true};
+}
+
+// Hash for pair<int32_t,int32_t>
+struct pair_hash {
+    std::size_t operator()(std::pair<int32_t,int32_t> const& p) const noexcept {
+        std::uint64_t a = static_cast<std::uint32_t>(p.first);
+        std::uint64_t b = static_cast<std::uint32_t>(p.second);
+        std::uint64_t res = (a << 32) ^ b;
+        return static_cast<std::size_t>(res ^ (res >> 33));
+    }
+};
+*/
+
+// multiply_scale implementation
+inline int32_t multiply_scale(int32_t value, double scale_factor) {
+    if (scale_factor == 1.0) {
+        return value;
+    } else if (scale_factor == 2.0) {
+        return value << 1;
+    } else if (scale_factor == 4.0) {
+        return value << 2;
     } else {
-        let result = (value as f64) * scale_factor;
-        result.floor() as i32
+        double result = static_cast<double>(value) * scale_factor;
+        return static_cast<int32_t>(std::floor(result));
     }
 }
 
-/// Unified function to generate various roof types
-#[allow(clippy::too_many_arguments)]
-#[inline]
-fn generate_roof(
-    editor: &mut WorldEditor,
-    element: &ProcessedWay,
-    start_y_offset: i32,
-    building_height: i32,
-    floor_block: Block,
-    wall_block: Block,
-    accent_block: Block,
-    roof_type: RoofType,
-    cached_floor_area: &[(i32, i32)],
-    abs_terrain_offset: i32,
+inline void generate_roof(
+    WorldEditor & editor,
+    ProcessedWay const & element,
+    int32_t start_y_offset,
+    int32_t building_height,
+    Block floor_block,
+    Block wall_block,
+    Block accent_block,
+    RoofType roof_type,
+    std::vector<std::pair<int32_t,int32_t>> const & cached_floor_area,
+    int32_t abs_terrain_offset
 ) {
-    // Use the provided cached floor area instead of recalculating
-    let floor_area = cached_floor_area;
+    using std::int32_t;
+    const auto & floor_area = cached_floor_area;
 
-    // Pre-calculate building bounds once
-    let (min_x, max_x, min_z, max_z) = element.nodes.iter().fold(
-        (i32::MAX, i32::MIN, i32::MAX, i32::MIN),
-        |(min_x, max_x, min_z, max_z), n| {
-            (
-                min_x.min(n.x),
-                max_x.max(n.x),
-                min_z.min(n.z),
-                max_z.max(n.z),
-            )
-        },
-    );
+    // Pre-calculate bounds
+    int32_t min_x = std::numeric_limits<int32_t>::max();
+    int32_t max_x = std::numeric_limits<int32_t>::min();
+    int32_t min_z = std::numeric_limits<int32_t>::max();
+    int32_t max_z = std::numeric_limits<int32_t>::min();
 
-    let center_x = (min_x + max_x) >> 1; // Bit shift is faster than division
-    let center_z = (min_z + max_z) >> 1;
+    for (auto const & n : element.nodes) {
+        min_x = std::min(min_x, n.x);
+        max_x = std::max(max_x, n.x);
+        min_z = std::min(min_z, n.z);
+        max_z = std::max(max_z, n.z);
+    }
 
-    // Set base height for roof to be at least one block above building top
-    let base_height = start_y_offset + building_height + 1;
+    int32_t center_x = (min_x + max_x) >> 1;
+    int32_t center_z = (min_z + max_z) >> 1;
 
-    match roof_type {
-        RoofType::Flat => {
-            // Simple flat roof
-            for &(x, z) in floor_area {
-                editor.set_block_absolute(
-                    floor_block,
-                    x,
-                    base_height + abs_terrain_offset,
-                    z,
-                    None,
-                    None,
-                );
+    int32_t base_height = start_y_offset + building_height + 1;
+
+    // Random generator
+    static thread_local std::random_device rd;
+    static thread_local std::mt19937 rng(rd());
+
+    if (roof_type == RoofType::Flat) {
+        for (auto const & p : floor_area) {
+            editor.set_block_absolute(floor_block, p.first, base_height + abs_terrain_offset, p.second, nullptr, nullptr);
+        }
+        return;
+    }
+
+    if (roof_type == RoofType::Gabled) {
+        int32_t width = max_x - min_x;
+        int32_t length = max_z - min_z;
+        int32_t building_size = std::max(width, length);
+
+        int32_t roof_height_boost = static_cast<int32_t>(3.0 + std::max(1.0, std::log(std::max(1.0, static_cast<double>(building_size) * 0.15))));
+        int32_t roof_peak_height = base_height + roof_height_boost;
+
+        bool is_wider_than_long = width > length;
+        int32_t max_distance = is_wider_than_long ? (length >> 1) : (width >> 1);
+
+        std::bernoulli_distribution coin(0.5);
+        Block roof_block = coin(rng) ? accent_block : wall_block;
+
+        std::vector<std::pair<std::pair<int32_t,int32_t>, int32_t>> roof_heights;
+        roof_heights.reserve(floor_area.size());
+
+        for (auto const & p : floor_area) {
+            int32_t x = p.first;
+            int32_t z = p.second;
+            int32_t distance_to_ridge = is_wider_than_long ? std::abs(z - center_z) : std::abs(x - center_x);
+
+            int32_t roof_height;
+            if (distance_to_ridge == 0 && ((is_wider_than_long && z == center_z) || (!is_wider_than_long && x == center_x))) {
+                roof_height = roof_peak_height;
+            } else {
+                double slope_ratio = static_cast<double>(distance_to_ridge) / static_cast<double>(std::max(1, max_distance));
+                roof_height = static_cast<int32_t>(static_cast<double>(roof_peak_height) - (slope_ratio * static_cast<double>(roof_height_boost)));
+            }
+            roof_height = std::max(base_height, roof_height);
+            roof_heights.push_back({{x, z}, roof_height});
+        }
+
+        std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_map;
+        roof_map.reserve(roof_heights.size() * 2);
+        for (auto const & kv : roof_heights) {
+            roof_map[kv.first] = kv.second;
+        }
+
+        Block stair_block_material = get_stair_block_for_material(roof_block);
+        std::vector<std::tuple<int32_t,int32_t,int32_t,Block, std::optional<BlockWithProperties>>> blocks_to_place;
+        blocks_to_place.reserve(floor_area.size() * 2);
+
+        for (auto const & kv : roof_heights) {
+            int32_t x = kv.first.first;
+            int32_t z = kv.first.second;
+            int32_t roof_height = kv.second;
+
+            bool has_lower_neighbor = false;
+            std::pair<int32_t,int32_t> ncoords[4] = {{x-1,z},{x+1,z},{x,z-1},{x,z+1}};
+            for (auto const & nc : ncoords) {
+                auto it = roof_map.find(nc);
+                if (it != roof_map.end() && it->second < roof_height) {
+                    has_lower_neighbor = true;
+                    break;
+                }
+            }
+
+            for (int32_t y = base_height; y <= roof_height; ++y) {
+                if (y == roof_height && has_lower_neighbor) {
+                    BlockWithProperties stair_block_with_props;
+                    if (is_wider_than_long) {
+                        if (z < center_z) {
+                            stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::South, StairShape::Straight);
+                        } else {
+                            stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::North, StairShape::Straight);
+                        }
+                    } else if (x < center_x) {
+                        stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::Straight);
+                    } else {
+                        stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::West, StairShape::Straight);
+                    }
+                    blocks_to_place.emplace_back(x, y, z, roof_block, std::optional<BlockWithProperties>(stair_block_with_props));
+                } else {
+                    blocks_to_place.emplace_back(x, y, z, roof_block, std::optional<BlockWithProperties>());
+                }
             }
         }
 
-        RoofType::Gabled => {
-            // Pre-calculate building dimensions once
-            let width = max_x - min_x;
-            let length = max_z - min_z;
-            let building_size = width.max(length);
-
-            // Enhanced logarithmic scaling with increased base values for taller roofs
-            let roof_height_boost = (3.0 + (building_size as f64 * 0.15).ln().max(1.0)) as i32;
-            let roof_peak_height = base_height + roof_height_boost;
-
-            // Pre-determine orientation and material
-            let is_wider_than_long = width > length;
-            let max_distance = if is_wider_than_long {
-                length >> 1
+        for (auto const & t : blocks_to_place) {
+            int32_t x, y, z;
+            Block block;
+            std::optional<BlockWithProperties> maybe_bwp;
+            std::tie(x, y, z, block, maybe_bwp) = t;
+            if (maybe_bwp.has_value()) {
+                editor.set_block_with_properties_absolute(maybe_bwp.value(), x, y + abs_terrain_offset, z, nullptr, nullptr);
             } else {
-                width >> 1
-            };
+                editor.set_block_absolute(block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+            }
+        }
 
-            // 50% accent block, otherwise wall block for roof
-            let mut rng = rand::thread_rng();
-            let roof_block = if rng.gen_bool(0.5) {
-                accent_block
-            } else {
-                wall_block
-            };
+        return;
+    }
 
-            // Pre-allocate with capacity hint for better performance
-            let mut roof_heights = Vec::with_capacity(floor_area.len());
-            let mut blocks_to_place = Vec::with_capacity(floor_area.len() * 4);
+    if (roof_type == RoofType::Hipped) {
+        int32_t width = max_x - min_x;
+        int32_t length = max_z - min_z;
 
-            // First pass: calculate all roof heights using vectorized operations
-            for &(x, z) in floor_area {
-                let distance_to_ridge = if is_wider_than_long {
-                    (z - center_z).abs()
-                } else {
-                    (x - center_x).abs()
-                };
+        bool is_rectangular = ((static_cast<double>(width) / std::max(1, length) > 1.3) || (static_cast<double>(length) / std::max(1, width) > 1.3));
+        bool long_axis_is_x = width > length;
 
-                let roof_height = if distance_to_ridge == 0
-                    && ((is_wider_than_long && z == center_z)
-                        || (!is_wider_than_long && x == center_x))
-                {
-                    roof_peak_height
-                } else {
-                    let slope_ratio = distance_to_ridge as f64 / max_distance.max(1) as f64;
-                    (roof_peak_height as f64 - (slope_ratio * roof_height_boost as f64)) as i32
-                }
-                .max(base_height);
+        int32_t roof_peak_height = base_height + ((std::max(width, length) > 20) ? 7 : 5);
 
-                roof_heights.push(((x, z), roof_height));
+        std::bernoulli_distribution coin(0.5);
+        Block roof_block = coin(rng) ? accent_block : wall_block;
+
+        if (is_rectangular) {
+            std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
+            roof_heights.reserve(floor_area.size() * 2);
+
+            for (auto const & p : floor_area) {
+                int32_t x = p.first;
+                int32_t z = p.second;
+
+                int32_t distance_to_ridge = long_axis_is_x ? std::abs(z - center_z) : std::abs(x - center_x);
+
+                int32_t max_distance_from_ridge = long_axis_is_x ? ((max_z - min_z) / 2) : ((max_x - min_x) / 2);
+
+                double slope_factor = (max_distance_from_ridge > 0) ? static_cast<double>(distance_to_ridge) / static_cast<double>(max_distance_from_ridge) : 0.0;
+
+                int32_t roof_height = roof_peak_height - static_cast<int32_t>(slope_factor * static_cast<double>(roof_peak_height - base_height));
+                int32_t roof_y = std::max(base_height, roof_height);
+                roof_heights[{x, z}] = roof_y;
             }
 
-            // Second pass: batch process blocks with pre-computed stair materials
-            let stair_block_material = get_stair_block_for_material(roof_block);
+            Block stair_block_material = get_stair_block_for_material(roof_block);
 
-            for &((x, z), roof_height) in &roof_heights {
-                // Check neighboring heights efficiently using iterator
-                let has_lower_neighbor = roof_heights
-                    .iter()
-                    .filter_map(|&((nx, nz), nh)| {
-                        if (nx - x).abs() + (nz - z).abs() == 1 {
-                            Some(nh)
-                        } else {
-                            None
-                        }
-                    })
-                    .any(|nh| nh < roof_height);
+            for (auto const & p : floor_area) {
+                int32_t x = p.first;
+                int32_t z = p.second;
+                int32_t roof_height = roof_heights[{x, z}];
 
-                // Fill from base height to calculated roof height
-                for y in base_height..=roof_height {
-                    if y == roof_height && has_lower_neighbor {
-                        // Pre-compute stair direction
-                        let stair_block_with_props = if is_wider_than_long {
-                            if z < center_z {
-                                create_stair_with_properties(
-                                    stair_block_material,
-                                    StairFacing::South,
-                                    StairShape::Straight,
-                                )
-                            } else {
-                                create_stair_with_properties(
-                                    stair_block_material,
-                                    StairFacing::North,
-                                    StairShape::Straight,
-                                )
+                for (int32_t y = base_height; y <= roof_height; ++y) {
+                    if (y == roof_height) {
+                        bool has_lower_neighbor = false;
+                        std::pair<int32_t,int32_t> ncoords[4] = {{x-1,z},{x+1,z},{x,z-1},{x,z+1}};
+                        for (auto const & nc : ncoords) {
+                            auto it = roof_heights.find(nc);
+                            if (it != roof_heights.end() && it->second < roof_height) {
+                                has_lower_neighbor = true;
+                                break;
                             }
-                        } else if x < center_x {
-                            create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::East,
-                                StairShape::Straight,
-                            )
-                        } else {
-                            create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::West,
-                                StairShape::Straight,
-                            )
-                        };
-
-                        blocks_to_place.push((x, y, z, roof_block, Some(stair_block_with_props)));
-                    } else {
-                        blocks_to_place.push((x, y, z, roof_block, None));
-                    }
-                }
-            }
-
-            // Batch place all blocks to reduce function call overhead
-            for (x, y, z, block, stair_props) in blocks_to_place {
-                if let Some(stair_block) = stair_props {
-                    editor.set_block_with_properties_absolute(
-                        stair_block,
-                        x,
-                        y + abs_terrain_offset,
-                        z,
-                        None,
-                        None,
-                    );
-                } else {
-                    editor.set_block_absolute(block, x, y + abs_terrain_offset, z, None, None);
-                }
-            }
-        }
-
-        RoofType::Hipped => {
-            // Calculate building dimensions and determine the long axis
-            let width = max_x - min_x;
-            let length = max_z - min_z;
-
-            // Determine if building is significantly rectangular or more square-shaped
-            let is_rectangular =
-                (width as f64 / length as f64 > 1.3) || (length as f64 / width as f64 > 1.3);
-            let long_axis_is_x = width > length;
-
-            // Make roof taller and more pointy
-            let roof_peak_height = base_height + if width.max(length) > 20 { 7 } else { 5 };
-
-            // 50% accent block, otherwise wall block for roof
-            let mut rng = rand::thread_rng();
-            let roof_block = if rng.gen_bool(0.5) {
-                accent_block
-            } else {
-                wall_block
-            };
-
-            // Find the building's approximate center line along the long axis
-            if is_rectangular {
-                // First pass: calculate all roof heights
-                let mut roof_heights = std::collections::HashMap::new();
-
-                for &(x, z) in floor_area {
-                    // Calculate distance to the ridge line
-                    let distance_to_ridge = if long_axis_is_x {
-                        // Distance in Z direction for X-axis ridge
-                        (z - center_z).abs()
-                    } else {
-                        // Distance in X direction for Z-axis ridge
-                        (x - center_x).abs()
-                    };
-
-                    // Calculate maximum distance from ridge to edge
-                    let max_distance_from_ridge = if long_axis_is_x {
-                        (max_z - min_z) / 2
-                    } else {
-                        (max_x - min_x) / 2
-                    };
-
-                    // Create proper slope from ridge (high) to edges (low)
-                    let slope_factor = if max_distance_from_ridge > 0 {
-                        distance_to_ridge as f64 / max_distance_from_ridge as f64
-                    } else {
-                        0.0
-                    };
-
-                    // Ridge gets peak height, edges get base height
-                    let roof_height = roof_peak_height
-                        - (slope_factor * (roof_peak_height - base_height) as f64) as i32;
-                    let roof_y = roof_height.max(base_height);
-                    roof_heights.insert((x, z), roof_y);
-                }
-
-                // Second pass: place blocks with stairs at height transitions
-                for &(x, z) in floor_area {
-                    let roof_height = roof_heights[&(x, z)];
-
-                    // Fill from base to calculated height
-                    for y in base_height..=roof_height {
-                        if y == roof_height {
-                            // Check if this is a height transition point by looking at neighboring blocks
-                            let has_lower_neighbor =
-                                [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)].iter().any(
-                                    |(nx, nz)| {
-                                        roof_heights
-                                            .get(&(*nx, *nz))
-                                            .is_some_and(|&nh| nh < roof_height)
-                                    },
-                                );
-
-                            if has_lower_neighbor {
-                                // Determine stair direction based on ridge orientation and position
-                                let stair_block_material = get_stair_block_for_material(roof_block);
-                                let stair_block_with_props = if long_axis_is_x {
-                                    // Ridge runs along X, slopes in Z direction
-                                    if z < center_z {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::South,
-                                            StairShape::Straight,
-                                        ) // Facing toward center (south)
-                                    } else {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::North,
-                                            StairShape::Straight,
-                                        ) // Facing toward center (north)
-                                    }
-                                } else {
-                                    // Ridge runs along Z, slopes in X direction
-                                    if x < center_x {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::East,
-                                            StairShape::Straight,
-                                        ) // Facing toward center (east)
-                                    } else {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::West,
-                                            StairShape::Straight,
-                                        ) // Facing toward center (west)
-                                    }
-                                };
-                                editor.set_block_with_properties_absolute(
-                                    stair_block_with_props,
-                                    x,
-                                    y + abs_terrain_offset,
-                                    z,
-                                    None,
-                                    None,
-                                );
-                            } else {
-                                // Use regular roof block where height doesn't change (ridge area)
-                                editor.set_block_absolute(
-                                    roof_block,
-                                    x,
-                                    y + abs_terrain_offset,
-                                    z,
-                                    None,
-                                    None,
-                                );
-                            }
-                        } else {
-                            // Fill interior with solid blocks
-                            editor.set_block_absolute(
-                                roof_block,
-                                x,
-                                y + abs_terrain_offset,
-                                z,
-                                None,
-                                None,
-                            );
                         }
-                    }
-                }
-            } else {
-                // For more complex or square buildings, use distance from center approach
 
-                // First pass: calculate all roof heights based on distance from center
-                let mut roof_heights = std::collections::HashMap::new();
-
-                for &(x, z) in floor_area {
-                    // Calculate distance from center point
-                    let dx = (x - center_x) as f64;
-                    let dz = (z - center_z) as f64;
-                    let distance_from_center = (dx * dx + dz * dz).sqrt();
-
-                    // Calculate maximum possible distance from center to any corner
-                    let max_distance = {
-                        let corner_distances = [
-                            ((min_x - center_x).pow(2) + (min_z - center_z).pow(2)) as f64,
-                            ((min_x - center_x).pow(2) + (max_z - center_z).pow(2)) as f64,
-                            ((max_x - center_x).pow(2) + (min_z - center_z).pow(2)) as f64,
-                            ((max_x - center_x).pow(2) + (max_z - center_z).pow(2)) as f64,
-                        ];
-                        corner_distances
-                            .iter()
-                            .fold(0.0f64, |a, &b| a.max(b))
-                            .sqrt()
-                    };
-
-                    // Create slope from center (high) to edges (low)
-                    let distance_factor = if max_distance > 0.0 {
-                        (distance_from_center / max_distance).min(1.0)
-                    } else {
-                        0.0
-                    };
-
-                    // Center gets peak height, edges get base height
-                    let roof_height = roof_peak_height
-                        - (distance_factor * (roof_peak_height - base_height) as f64) as i32;
-                    let roof_y = roof_height.max(base_height);
-                    roof_heights.insert((x, z), roof_y);
-                }
-
-                // Second pass: place blocks with stairs at height transitions
-                for &(x, z) in floor_area {
-                    let roof_height = roof_heights[&(x, z)];
-
-                    // Fill from base height to calculated roof height
-                    for y in base_height..=roof_height {
-                        if y == roof_height {
-                            // Check if this is a height transition point by looking at neighboring blocks
-                            let has_lower_neighbor =
-                                [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)].iter().any(
-                                    |(nx, nz)| {
-                                        roof_heights
-                                            .get(&(*nx, *nz))
-                                            .is_some_and(|&nh| nh < roof_height)
-                                    },
-                                );
-
-                            if has_lower_neighbor {
-                                // For complex buildings, determine stair direction based on slope toward center
-                                let center_dx = x - center_x;
-                                let center_dz = z - center_z;
-
-                                let stair_block_material = get_stair_block_for_material(roof_block);
-                                let stair_block = if center_dx.abs() > center_dz.abs() {
-                                    // Primary slope is in X direction
-                                    if center_dx > 0 {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::West,
-                                            StairShape::Straight,
-                                        ) // Facing toward center
-                                    } else {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::East,
-                                            StairShape::Straight,
-                                        ) // Facing toward center
-                                    }
+                        if (has_lower_neighbor) {
+                            BlockWithProperties stair_block_with_props;
+                            if (long_axis_is_x) {
+                                if (z < center_z) {
+                                    stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::South, StairShape::Straight);
                                 } else {
-                                    // Primary slope is in Z direction
-                                    if center_dz > 0 {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::North,
-                                            StairShape::Straight,
-                                        ) // Facing toward center
-                                    } else {
-                                        create_stair_with_properties(
-                                            stair_block_material,
-                                            StairFacing::South,
-                                            StairShape::Straight,
-                                        ) // Facing toward center
-                                    }
-                                };
-
-                                editor.set_block_with_properties_absolute(
-                                    stair_block,
-                                    x,
-                                    y + abs_terrain_offset,
-                                    z,
-                                    None,
-                                    None,
-                                );
-                            } else {
-                                // Use regular roof block where height doesn't change
-                                editor.set_block_absolute(
-                                    roof_block,
-                                    x,
-                                    y + abs_terrain_offset,
-                                    z,
-                                    None,
-                                    None,
-                                );
-                            }
-                        } else {
-                            // Fill interior with solid blocks
-                            editor.set_block_absolute(
-                                roof_block,
-                                x,
-                                y + abs_terrain_offset,
-                                z,
-                                None,
-                                None,
-                            );
-                        }
-                    }
-                }
-            }
-        }
-
-        RoofType::Skillion => {
-            // Skillion roof - single sloping surface
-            let width = (max_x - min_x).max(1);
-            let building_size = (max_x - min_x).max(max_z - min_z);
-
-            // Scale roof height based on building size (4-10 blocks)
-            let max_roof_height = (building_size / 3).clamp(4, 10);
-
-            // 50% accent block, otherwise wall block for roof
-            let mut rng = rand::thread_rng();
-            let roof_block = if rng.gen_bool(0.5) {
-                accent_block
-            } else {
-                wall_block
-            };
-
-            // First pass: calculate all roof heights
-            let mut roof_heights = std::collections::HashMap::new();
-            for &(x, z) in floor_area {
-                let slope_progress = (x - min_x) as f64 / width as f64;
-                let roof_height = base_height + (slope_progress * max_roof_height as f64) as i32;
-                roof_heights.insert((x, z), roof_height);
-            }
-
-            // Second pass: place blocks with stairs only where height increases
-            for &(x, z) in floor_area {
-                let roof_height = roof_heights[&(x, z)];
-
-                // Fill from base height to calculated roof height to create solid roof
-                for y in base_height..=roof_height {
-                    if y == roof_height {
-                        // Check if this is a height transition point by looking at neighboring blocks
-                        let has_lower_neighbor = [(x - 1, z), (x + 1, z), (x, z - 1), (x, z + 1)]
-                            .iter()
-                            .any(|(nx, nz)| {
-                                roof_heights
-                                    .get(&(*nx, *nz))
-                                    .is_some_and(|&nh| nh < roof_height)
-                            });
-
-                        if has_lower_neighbor {
-                            // Place stairs at height transitions for a stepped appearance
-                            let stair_block_material = get_stair_block_for_material(roof_block);
-                            let stair_block_with_props = create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::East,
-                                StairShape::Straight,
-                            );
-                            editor.set_block_with_properties_absolute(
-                                stair_block_with_props,
-                                x,
-                                y + abs_terrain_offset,
-                                z,
-                                None,
-                                None,
-                            );
-                        } else {
-                            // Use regular roof material where height doesn't change
-                            editor.set_block_absolute(
-                                roof_block,
-                                x,
-                                y + abs_terrain_offset,
-                                z,
-                                None,
-                                None,
-                            );
-                        }
-                    } else {
-                        // Fill interior with solid blocks
-                        editor.set_block_absolute(
-                            roof_block,
-                            x,
-                            y + abs_terrain_offset,
-                            z,
-                            None,
-                            None,
-                        );
-                    }
-                }
-            }
-        }
-
-        RoofType::Pyramidal => {
-            // Pyramidal roof - all sides slope to a single central peak point
-            let building_size = (max_x - min_x).max(max_z - min_z);
-
-            // Calculate peak height based on building size (taller peak for larger buildings)
-            let peak_height = base_height + (building_size / 3).clamp(3, 8);
-
-            // 50% accent block, otherwise wall block for roof
-            let mut rng = rand::thread_rng();
-            let roof_block = if rng.gen_bool(0.5) {
-                accent_block
-            } else {
-                wall_block
-            };
-
-            // First pass: calculate all roof heights
-            let mut roof_heights = std::collections::HashMap::new();
-            for &(x, z) in floor_area {
-                // Calculate distance from this point to the center
-                let dx = (x - center_x).abs() as f64;
-                let dz = (z - center_z).abs() as f64;
-
-                // Use the maximum distance to either edge to determine slope
-                // This creates the pyramid effect where all sides slope equally
-                let distance_to_edge = dx.max(dz);
-
-                // Calculate maximum distance from center to any edge
-                let max_distance = ((max_x - min_x) / 2).max((max_z - min_z) / 2) as f64;
-
-                // Calculate height based on distance from center
-                // Points closer to center are higher, creating the pyramid slope
-                let height_factor = if max_distance > 0.0 {
-                    (1.0 - (distance_to_edge / max_distance)).max(0.0f64)
-                } else {
-                    1.0
-                };
-
-                let roof_height =
-                    base_height + (height_factor * (peak_height - base_height) as f64) as i32;
-                roof_heights.insert((x, z), roof_height);
-            }
-
-            // Second pass: place blocks with stairs at the surface
-            for &(x, z) in floor_area {
-                let roof_height = roof_heights[&(x, z)];
-
-                // Fill from base height to calculated roof height to create solid pyramid
-                for y in base_height..=roof_height {
-                    if y == roof_height {
-                        // Place stairs at the surface with correct facing direction
-                        // Determine which direction the stairs should face based on the slope
-                        let dx = x - center_x;
-                        let dz = z - center_z;
-
-                        // Check if there are higher neighbors to determine stair orientation
-                        let north_height = roof_heights
-                            .get(&(x, z - 1))
-                            .copied()
-                            .unwrap_or(base_height);
-                        let south_height = roof_heights
-                            .get(&(x, z + 1))
-                            .copied()
-                            .unwrap_or(base_height);
-                        let west_height = roof_heights
-                            .get(&(x - 1, z))
-                            .copied()
-                            .unwrap_or(base_height);
-                        let east_height = roof_heights
-                            .get(&(x + 1, z))
-                            .copied()
-                            .unwrap_or(base_height);
-
-                        // Check for corner situations where two directions have lower neighbors
-                        let has_lower_north = north_height < roof_height;
-                        let has_lower_south = south_height < roof_height;
-                        let has_lower_west = west_height < roof_height;
-                        let has_lower_east = east_height < roof_height;
-
-                        // Check for corner situations (two adjacent directions are lower)
-                        let stair_block_material = get_stair_block_for_material(roof_block);
-                        let stair_block = if has_lower_north && has_lower_west {
-                            create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::East,
-                                StairShape::OuterRight,
-                            )
-                        } else if has_lower_north && has_lower_east {
-                            create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::South,
-                                StairShape::OuterRight,
-                            )
-                        } else if has_lower_south && has_lower_west {
-                            create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::East,
-                                StairShape::OuterLeft,
-                            )
-                        } else if has_lower_south && has_lower_east {
-                            create_stair_with_properties(
-                                stair_block_material,
-                                StairFacing::North,
-                                StairShape::OuterLeft,
-                            )
-                        } else {
-                            // Single direction
-                            if dx.abs() > dz.abs() {
-                                // Primary slope is in X direction
-                                if dx > 0 && east_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::West,
-                                        StairShape::Straight,
-                                    ) // Facing west (stairs face toward center)
-                                } else if dx < 0 && west_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::East,
-                                        StairShape::Straight,
-                                    ) // Facing east (stairs face toward center)
-                                } else if dz > 0 && south_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::North,
-                                        StairShape::Straight,
-                                    ) // Facing north (stairs face toward center)
-                                } else if dz < 0 && north_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::South,
-                                        StairShape::Straight,
-                                    ) // Facing south (stairs face toward center)
-                                } else {
-                                    BlockWithProperties::simple(roof_block) // Use regular block if no clear slope direction
+                                    stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::North, StairShape::Straight);
                                 }
                             } else {
-                                // Primary slope is in Z direction
-                                if dz > 0 && south_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::North,
-                                        StairShape::Straight,
-                                    ) // Facing north (stairs face toward center)
-                                } else if dz < 0 && north_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::South,
-                                        StairShape::Straight,
-                                    ) // Facing south (stairs face toward center)
-                                } else if dx > 0 && east_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::West,
-                                        StairShape::Straight,
-                                    ) // Facing west (stairs face toward center)
-                                } else if dx < 0 && west_height < roof_height {
-                                    create_stair_with_properties(
-                                        stair_block_material,
-                                        StairFacing::East,
-                                        StairShape::Straight,
-                                    ) // Facing east (stairs face toward center)
+                                if (x < center_x) {
+                                    stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::Straight);
                                 } else {
-                                    BlockWithProperties::simple(roof_block) // Use regular block if no clear slope direction
+                                    stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::West, StairShape::Straight);
                                 }
                             }
-                        };
-
-                        editor.set_block_with_properties_absolute(
-                            stair_block,
-                            x,
-                            y + abs_terrain_offset,
-                            z,
-                            None,
-                            None,
-                        );
+                            editor.set_block_with_properties_absolute(stair_block_with_props, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                        } else {
+                            editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                        }
                     } else {
-                        // Fill interior with solid blocks
-                        editor.set_block_absolute(
-                            roof_block,
-                            x,
-                            y + abs_terrain_offset,
-                            z,
-                            None,
-                            None,
-                        );
+                        editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                    }
+                }
+            }
+        } else {
+            std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
+            roof_heights.reserve(floor_area.size() * 2);
+
+            for (auto const & p : floor_area) {
+                int32_t x = p.first;
+                int32_t z = p.second;
+                double dx = static_cast<double>(x - center_x);
+                double dz = static_cast<double>(z - center_z);
+                double distance_from_center = std::sqrt(dx*dx + dz*dz);
+
+                double corner_sq[4] = {
+                    static_cast<double>((min_x - center_x)*(min_x - center_x) + (min_z - center_z)*(min_z - center_z)),
+                    static_cast<double>((min_x - center_x)*(min_x - center_x) + (max_z - center_z)*(max_z - center_z)),
+                    static_cast<double>((max_x - center_x)*(max_x - center_x) + (min_z - center_z)*(min_z - center_z)),
+                    static_cast<double>((max_x - center_x)*(max_x - center_x) + (max_z - center_z)*(max_z - center_z))
+                };
+                double max_distance = 0.0;
+                for (int i = 0; i < 4; ++i) max_distance = std::max(max_distance, corner_sq[i]);
+                max_distance = std::sqrt(max_distance);
+
+                double distance_factor = (max_distance > 0.0) ? std::min(1.0, distance_from_center / max_distance) : 0.0;
+
+                int32_t roof_height = roof_peak_height - static_cast<int32_t>(distance_factor * static_cast<double>(roof_peak_height - base_height));
+                int32_t roof_y = std::max(base_height, roof_height);
+                roof_heights[{x, z}] = roof_y;
+            }
+
+            Block stair_block_material = get_stair_block_for_material(roof_block);
+
+            for (auto const & p : floor_area) {
+                int32_t x = p.first;
+                int32_t z = p.second;
+                int32_t roof_height = roof_heights[{x, z}];
+
+                for (int32_t y = base_height; y <= roof_height; ++y) {
+                    if (y == roof_height) {
+                        bool has_lower_neighbor = false;
+                        std::pair<int32_t,int32_t> ncoords[4] = {{x-1,z},{x+1,z},{x,z-1},{x,z+1}};
+                        for (auto const & nc : ncoords) {
+                            auto it = roof_heights.find(nc);
+                            if (it != roof_heights.end() && it->second < roof_height) {
+                                has_lower_neighbor = true;
+                                break;
+                            }
+                        }
+
+                        if (has_lower_neighbor) {
+                            int32_t center_dx = x - center_x;
+                            int32_t center_dz = z - center_z;
+                            BlockWithProperties stair_block;
+                            if (std::abs(center_dx) > std::abs(center_dz)) {
+                                if (center_dx > 0) {
+                                    stair_block = create_stair_with_properties(stair_block_material, StairFacing::West, StairShape::Straight);
+                                } else {
+                                    stair_block = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::Straight);
+                                }
+                            } else {
+                                if (center_dz > 0) {
+                                    stair_block = create_stair_with_properties(stair_block_material, StairFacing::North, StairShape::Straight);
+                                } else {
+                                    stair_block = create_stair_with_properties(stair_block_material, StairFacing::South, StairShape::Straight);
+                                }
+                            }
+                            editor.set_block_with_properties_absolute(stair_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                        } else {
+                            editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                        }
+                    } else {
+                        editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
                     }
                 }
             }
         }
 
-        RoofType::Dome => {
-            // Dome roof - rounded hemispherical structure
-            let radius = ((max_x - min_x).max(max_z - min_z) / 2) as f64;
+        return;
+    }
 
-            // 50% accent block, otherwise wall block for roof
-            let mut rng = rand::thread_rng();
-            let roof_block = if rng.gen_bool(0.5) {
-                accent_block
-            } else {
-                wall_block
-            };
+    if (roof_type == RoofType::Skillion) {
+        int32_t width = std::max(1, max_x - min_x);
+        int32_t building_size = std::max(max_x - min_x, max_z - min_z);
 
-            for &(x, z) in floor_area {
-                let distance_from_center = ((x - center_x).pow(2) + (z - center_z).pow(2)) as f64;
-                let normalized_distance = (distance_from_center.sqrt() / radius).min(1.0);
+        int32_t max_roof_height = std::clamp(building_size / 3, 4, 10);
 
-                // Use hemisphere equation to determine the height
-                let height_factor = (1.0 - normalized_distance * normalized_distance).sqrt();
-                let surface_height = base_height + (height_factor * (radius * 0.8)) as i32;
+        std::bernoulli_distribution coin(0.5);
+        Block roof_block = coin(rng) ? accent_block : wall_block;
 
-                // Fill from the base to the surface
-                for y in base_height..=surface_height {
-                    editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, None, None);
+        std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
+        roof_heights.reserve(floor_area.size() * 2);
+
+        for (auto const & p : floor_area) {
+            int32_t x = p.first;
+            int32_t z = p.second;
+            double slope_progress = static_cast<double>(x - min_x) / static_cast<double>(width);
+            int32_t roof_height = base_height + static_cast<int32_t>(slope_progress * static_cast<double>(max_roof_height));
+            roof_heights[{x, z}] = roof_height;
+        }
+
+        Block stair_block_material = get_stair_block_for_material(roof_block);
+
+        for (auto const & p : floor_area) {
+            int32_t x = p.first;
+            int32_t z = p.second;
+            int32_t roof_height = roof_heights[{x, z}];
+
+            for (int32_t y = base_height; y <= roof_height; ++y) {
+                if (y == roof_height) {
+                    bool has_lower_neighbor = false;
+                    std::pair<int32_t,int32_t> ncoords[4] = {{x-1,z},{x+1,z},{x,z-1},{x,z+1}};
+                    for (auto const & nc : ncoords) {
+                        auto it = roof_heights.find(nc);
+                        if (it != roof_heights.end() && it->second < roof_height) {
+                            has_lower_neighbor = true;
+                            break;
+                        }
+                    }
+
+                    if (has_lower_neighbor) {
+                        BlockWithProperties stair_block_with_props = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::Straight);
+                        editor.set_block_with_properties_absolute(stair_block_with_props, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                    } else {
+                        editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                    }
+                } else {
+                    editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
                 }
             }
         }
+
+        return;
+    }
+
+    if (roof_type == RoofType::Pyramidal) {
+        int32_t building_size = std::max(max_x - min_x, max_z - min_z);
+
+        int32_t peak_height = base_height + std::clamp(building_size / 3, 3, 8);
+
+        std::bernoulli_distribution coin(0.5);
+        Block roof_block = coin(rng) ? accent_block : wall_block;
+
+        //std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
+        std::unordered_map<std::pair<int32_t,int32_t>, int32_t, PairHash> roof_heights;
+        roof_heights.reserve(floor_area.size() * 2);
+
+        for (auto const & p : floor_area) {
+            int32_t x = p.first;
+            int32_t z = p.second;
+
+            double dx = static_cast<double>(std::abs(x - center_x));
+            double dz = static_cast<double>(std::abs(z - center_z));
+            double distance_to_edge = std::max(dx, dz);
+
+            double max_distance = static_cast<double>(std::max((max_x - min_x) / 2, (max_z - min_z) / 2));
+
+            double height_factor = (max_distance > 0.0) ? std::max(0.0, 1.0 - (distance_to_edge / max_distance)) : 1.0;
+
+            int32_t roof_height = base_height + static_cast<int32_t>(height_factor * static_cast<double>(peak_height - base_height));
+            roof_heights[{x, z}] = std::max(base_height, roof_height);
+        }
+
+        Block stair_block_material = get_stair_block_for_material(roof_block);
+
+        for (auto const & p : floor_area) {
+            int32_t x = p.first;
+            int32_t z = p.second;
+            int32_t roof_height = roof_heights[{x, z}];
+
+            for (int32_t y = base_height; y <= roof_height; ++y) {
+                if (y == roof_height) {
+                    int32_t dx = x - center_x;
+                    int32_t dz = z - center_z;
+
+                    int32_t north_height = roof_heights.count({x, z-1}) ? roof_heights[{x, z-1}] : base_height;
+                    int32_t south_height = roof_heights.count({x, z+1}) ? roof_heights[{x, z+1}] : base_height;
+                    int32_t west_height  = roof_heights.count({x-1, z}) ? roof_heights[{x-1, z}] : base_height;
+                    int32_t east_height  = roof_heights.count({x+1, z}) ? roof_heights[{x+1, z}] : base_height;
+
+                    bool has_lower_north = north_height < roof_height;
+                    bool has_lower_south = south_height < roof_height;
+                    bool has_lower_west  = west_height  < roof_height;
+                    bool has_lower_east  = east_height  < roof_height;
+
+                    BlockWithProperties stair_block;
+                    if (has_lower_north && has_lower_west) {
+                        stair_block = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::OuterRight);
+                    } else if (has_lower_north && has_lower_east) {
+                        stair_block = create_stair_with_properties(stair_block_material, StairFacing::South, StairShape::OuterRight);
+                    } else if (has_lower_south && has_lower_west) {
+                        stair_block = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::OuterLeft);
+                    } else if (has_lower_south && has_lower_east) {
+                        stair_block = create_stair_with_properties(stair_block_material, StairFacing::North, StairShape::OuterLeft);
+                    } else {
+                        if (std::abs(dx) > std::abs(dz)) {
+                            if (dx > 0 && east_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::West, StairShape::Straight);
+                            } else if (dx < 0 && west_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::Straight);
+                            } else if (dz > 0 && south_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::North, StairShape::Straight);
+                            } else if (dz < 0 && north_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::South, StairShape::Straight);
+                            } else {
+                                stair_block = BlockWithProperties::simple(roof_block);
+                            }
+                        } else {
+                            if (dz > 0 && south_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::North, StairShape::Straight);
+                            } else if (dz < 0 && north_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::South, StairShape::Straight);
+                            } else if (dx > 0 && east_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::West, StairShape::Straight);
+                            } else if (dx < 0 && west_height < roof_height) {
+                                stair_block = create_stair_with_properties(stair_block_material, StairFacing::East, StairShape::Straight);
+                            } else {
+                                stair_block = BlockWithProperties::simple(roof_block);
+                            }
+                        }
+                    }
+
+                    editor.set_block_with_properties_absolute(stair_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                } else {
+                    editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+                }
+            }
+        }
+
+        return;
+    }
+
+    if (roof_type == RoofType::Dome) {
+        double radius = static_cast<double>(std::max(max_x - min_x, max_z - min_z)) / 2.0;
+
+        std::bernoulli_distribution coin(0.5);
+        Block roof_block = coin(rng) ? accent_block : wall_block;
+
+        for (auto const & p : floor_area) {
+            int32_t x = p.first;
+            int32_t z = p.second;
+            double distance_from_center_sq = static_cast<double>((x - center_x)*(x - center_x) + (z - center_z)*(z - center_z));
+            double normalized_distance = std::min(1.0, std::sqrt(distance_from_center_sq) / std::max(1.0, radius));
+
+            double height_factor = std::sqrt(std::max(0.0, 1.0 - normalized_distance * normalized_distance));
+            int32_t surface_height = base_height + static_cast<int32_t>(height_factor * (radius * 0.8));
+
+            for (int32_t y = base_height; y <= surface_height; ++y) {
+                editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+            }
+        }
+
+        return;
     }
 }
 
-pub fn generate_building_from_relation(
-    editor: &mut WorldEditor,
-    relation: &ProcessedRelation,
-    args: &Args,
-) {
-    // Extract levels from relation tags
-    let relation_levels = relation
-        .tags
-        .get("building:levels")
-        .and_then(|l: &String| l.parse::<i32>().ok())
-        .unwrap_or(2); // Default to 2 levels
 
-    // Process the outer way to create the building walls
-    for member in &relation.members {
-        if member.role == ProcessedMemberRole::Outer {
-            generate_buildings(editor, &member.way, args, Some(relation_levels));
+
+
+
+
+
+
+/*
+#include <vector>
+#include <string>
+#include <optional>
+#include <tuple>
+#include <chrono>
+#include <unordered_map>
+#include <utility>
+#include <stdexcept>
+*/
+
+void generate_building_from_relation(
+    WorldEditor& editor,
+    const ProcessedRelation& relation,
+    const Args& args
+) {
+    int relation_levels = 2;
+    auto it = relation.tags.find(std::string("building:levels"));
+    if (it != relation.tags.end()) {
+        try {
+            relation_levels = std::stoi(it->second);
+        } catch (const std::exception&) {
+            relation_levels = 2;
         }
     }
 
-    // Handle inner ways (holes, courtyards, etc.)
-    /*for member in &relation.members {
-        if member.role == ProcessedMemberRole::Inner {
-            let polygon_coords: Vec<(i32, i32)> =
-                member.way.nodes.iter().map(|n| (n.x, n.z)).collect();
-            let hole_area: Vec<(i32, i32)> =
-                flood_fill_area(&polygon_coords, args.timeout.as_ref());
+    for (const auto& member : relation.members) {
+        if (member.role == ProcessedMemberRole::Outer) {
+            generate_buildings(&editor, member.way, args, std::optional<int>(relation_levels));
+        }
+    }
 
-            for (x, z) in hole_area {
-                // Remove blocks in the inner area to create a hole
-                editor.set_block(AIR, x, ground_level, z, None, Some(&[SPONGE]));
+    /*
+    for (const auto& member : relation.members) {
+        if (member.role == ProcessedMemberRole::Inner) {
+            std::vector<std::pair<int,int>> polygon_coords;
+            polygon_coords.reserve(member.way.nodes.size());
+            for (const auto& n : member.way.nodes) polygon_coords.emplace_back(n.x, n.z);
+
+            std::vector<std::pair<int,int>> hole_area = flood_fill_area(polygon_coords, args.timeout);
+
+            for (const auto& p : hole_area) {
+                int x = p.first;
+                int z = p.second;
+                editor.set_block(AIR, x, ground_level, z, std::nullopt, std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
             }
         }
-    }*/
+    }
+    */
 }
 
-/// Generates a bridge structure, paying attention to the "level" tag.
-fn generate_bridge(
-    editor: &mut WorldEditor,
-    element: &ProcessedWay,
-    floodfill_timeout: Option<&Duration>,
+void generate_bridge(
+    WorldEditor& editor,
+    const ProcessedWay& element,
+    const std::optional<std::chrono::duration<double>>& floodfill_timeout
 ) {
-    let floor_block: Block = STONE;
-    let railing_block: Block = STONE_BRICKS;
+    Block floor_block = STONE;
+    Block railing_block = STONE_BRICKS;
 
-    // Process the nodes to create bridge pathways and railings
-    let mut previous_node: Option<(i32, i32)> = None;
-    for node in &element.nodes {
-        let x: i32 = node.x;
-        let z: i32 = node.z;
+    std::optional<std::pair<int,int>> previous_node = std::nullopt;
+    for (const auto& node : element.nodes) {
+        int x = node.x;
+        int z = node.z;
 
-        // Calculate bridge level based on the "level" tag
-        let bridge_y_offset = if let Some(level_str) = element.tags.get("level") {
-            if let Ok(level) = level_str.parse::<i32>() {
-                (level * 3) + 1
-            } else {
-                1 // Default elevation
-            }
-        } else {
-            1 // Default elevation
-        };
-
-        // Create bridge path using Bresenham's line
-        if let Some(prev) = previous_node {
-            let bridge_points: Vec<(i32, i32, i32)> =
-                bresenham_line(prev.0, bridge_y_offset, prev.1, x, bridge_y_offset, z);
-
-            for (bx, by, bz) in bridge_points {
-                // Place railing blocks
-                editor.set_block(railing_block, bx, by + 1, bz, None, None);
-                editor.set_block(railing_block, bx, by, bz, None, None);
+        int bridge_y_offset = 1;
+        auto it = element.tags.find(std::string("level"));
+        if (it != element.tags.end()) {
+            try {
+                int level = std::stoi(it->second);
+                bridge_y_offset = (level * 3) + 1;
+            } catch (const std::exception&) {
+                bridge_y_offset = 1;
             }
         }
 
-        previous_node = Some((x, z));
-    }
+        if (previous_node.has_value()) {
+            auto prev = previous_node.value();
+            std::vector<std::tuple<int,int,int>> bridge_points =
+                bresenham_line(prev.first, bridge_y_offset, prev.second, x, bridge_y_offset, z);
 
-    // Flood fill the area between the bridge path nodes
-    let polygon_coords: Vec<(i32, i32)> = element.nodes.iter().map(|n| (n.x, n.z)).collect();
-
-    let bridge_area: Vec<(i32, i32)> = flood_fill_area(&polygon_coords, floodfill_timeout);
-
-    // Calculate bridge level based on the "level" tag
-    let bridge_y_offset = if let Some(level_str) = element.tags.get("level") {
-        if let Ok(level) = level_str.parse::<i32>() {
-            (level * 3) + 1
-        } else {
-            1 // Default elevation
+            for (const auto& tp : bridge_points) {
+                int bx = std::get<0>(tp);
+                int by = std::get<1>(tp);
+                int bz = std::get<2>(tp);
+                editor.set_block(railing_block, bx, by + 1, bz, std::nullopt, std::nullopt);
+                editor.set_block(railing_block, bx, by, bz, std::nullopt, std::nullopt);
+            }
         }
-    } else {
-        1 // Default elevation
-    };
 
-    // Place floor blocks
-    for (x, z) in bridge_area {
-        editor.set_block(floor_block, x, bridge_y_offset, z, None, None);
+        previous_node = std::make_pair(x, z);
     }
+
+    std::vector<std::pair<int,int>> polygon_coords;
+    polygon_coords.reserve(element.nodes.size());
+    for (const auto& n : element.nodes) polygon_coords.emplace_back(n.x, n.z);
+
+    std::vector<std::pair<int,int>> bridge_area = flood_fill_area(polygon_coords, floodfill_timeout);
+
+    int bridge_y_offset = 1;
+    auto it2 = element.tags.find(std::string("level"));
+    if (it2 != element.tags.end()) {
+        try {
+            int level = std::stoi(it2->second);
+            bridge_y_offset = (level * 3) + 1;
+        } catch (const std::exception&) {
+            bridge_y_offset = 1;
+        }
+    }
+
+    for (const auto& p : bridge_area) {
+        int x = p.first;
+        int z = p.second;
+        editor.set_block(floor_block, x, bridge_y_offset, z, std::nullopt, std::nullopt);
+    }
+}
+
+
+}
 }
