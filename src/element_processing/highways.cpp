@@ -7,7 +7,7 @@
 #include <algorithm>
 #include <cstddef>
 
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 namespace arnis
 {
 

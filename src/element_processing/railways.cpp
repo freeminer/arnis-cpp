@@ -15,7 +15,7 @@ using std::nullopt;
 using std::pair;
 
 #include "../bresenham.h"
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 #undef stoi
 namespace arnis
 {

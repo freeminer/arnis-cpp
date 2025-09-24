@@ -13,7 +13,7 @@
 #include "floodfill.h"
 #include "osm_parser.h"
 #include "world_editor.h"
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 namespace arnis
 {
 

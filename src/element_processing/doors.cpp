@@ -2,7 +2,7 @@
 #include <optional>
 #include <stdexcept>
 
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 namespace arnis
 {
 

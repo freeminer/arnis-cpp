@@ -9,7 +9,7 @@
 
 
 #include "tree.h"
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 #undef stoi
 namespace arnis
 {

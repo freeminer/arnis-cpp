@@ -9,7 +9,7 @@
 #include "osm_parser.hpp"
 #include "world_editor.hpp"
 
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 
 //using namespace arnis;
 namespace arnis

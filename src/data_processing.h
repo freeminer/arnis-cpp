@@ -1,5 +1,5 @@
 #pragma once
-#include "../arnis_adapter.h"
+#include "../../arnis_adapter.h"
 
 namespace arnis
 {

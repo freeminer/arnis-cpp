@@ -5,7 +5,7 @@
 #include <algorithm>
 #include <cmath>
 
-#include "../../arnis_adapter.h"
+#include "../../../arnis_adapter.h"
 namespace arnis
 {
 
