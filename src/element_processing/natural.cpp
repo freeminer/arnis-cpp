@@ -8,13 +8,13 @@
 #include <algorithm>
 
 
-#include "tree.h"
 #include "../../../arnis_adapter.h"
-#undef stoi
+#include "tree.h"
+#include "../floodfill.h"
 namespace arnis
 {
 
-    namespace natural
+namespace natural
 {
 
 

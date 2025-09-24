@@ -1,17 +1,10 @@
 #pragma once
-
-/*
-struct RGB {
-    int r;
-    int g;
-    int b;
-};
-*/
-//usngg RGB =
+#include "colors.h"
 
 namespace arnis
 {
 
+	
 enum class StairFacing
 {
 	North,
@@ -61,6 +54,9 @@ inline const char *StairShape_as_str(StairShape s) noexcept
 	return "";
 }
 
+	class Block;
+class BlockWithProperties;
+	
 Block get_building_wall_block_for_color(const RGB &color);
 Block get_fallback_building_block();
 Block get_random_floor_block();

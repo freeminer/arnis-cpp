@@ -6,8 +6,9 @@
 #include <cstddef>
 #include <cstdint>
 
-#include "../../arnis_adapter.h"
+#include "colors.h"
 
+#include "../../arnis_adapter.h"
 namespace arnis
 {
 

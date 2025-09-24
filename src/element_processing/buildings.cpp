@@ -16,8 +16,8 @@
 
 
 #include "../../../arnis_adapter.h"
-
-//using namespace arnis;
+#include "../floodfill.h"
+#include "subprocessor/buildings_interior.h"
 namespace arnis
 {
 

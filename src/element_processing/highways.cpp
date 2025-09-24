@@ -8,6 +8,7 @@
 #include <cstddef>
 
 #include "../../../arnis_adapter.h"
+#include "../floodfill.h"
 namespace arnis
 {
 
