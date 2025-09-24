@@ -12,10 +12,7 @@
 #include <algorithm>
 #include <stdexcept>
 
-
 #include "../../../arnis_adapter.h"
-#undef stoi
-#undef stof
 namespace arnis
 {
 

@@ -6,10 +6,10 @@
 #include <algorithm>
 
 // Project headers
-#include "args.h"
+#include "../args.h"
 #include "block_definitions.h"
 #include "bresenham.h"
-#include "../element_processing/tree.h"
+#include "tree.h"
 #include "floodfill.h"
 #include "osm_parser.h"
 #include "world_editor.h"

@@ -11,10 +11,8 @@
 
 #include "../../../arnis_adapter.h"
 
-//using namespace arnis;
 namespace arnis
 {
-
 
 void generate_bridges(world_editor::WorldEditor& editor, osm_parser::ProcessedWay const& element) {
     auto it = element.tags.find(std::string("bridge"));

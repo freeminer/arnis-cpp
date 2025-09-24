@@ -1,13 +1,11 @@
-#include <algorithm>
 #include <array>
 #include <random>
 #include <string>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 #include <optional>
 
-#include "args.h"
+#include "../args.h"
 #include "block_definitions.h"
 #include "tree.h"
 #include "floodfill.h"
@@ -21,8 +19,6 @@ namespace arnis
 
 namespace landuse
 {
-using Node = ProcessedNode;
-
 
 
 void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args const & args) {

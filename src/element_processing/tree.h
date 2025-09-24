@@ -8,11 +8,7 @@
 #include <optional>
 #include <functional>
 
-
 #include "../../../arnis_adapter.h"
-
-using namespace arnis;
-
 namespace arnis
 {
 

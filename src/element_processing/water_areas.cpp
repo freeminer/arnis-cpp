@@ -19,7 +19,6 @@
 //#include "world_editor.h"
 
 #include "../../../arnis_adapter.h"
-#undef stoi
 namespace arnis
 {
 

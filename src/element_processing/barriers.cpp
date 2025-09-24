@@ -10,11 +10,7 @@
 #include <cmath>
 #include <optional>
 
-
 #include "../../../arnis_adapter.h"
-
-#undef stoi
-#undef stof
 namespace arnis
 {
 

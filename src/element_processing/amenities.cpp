@@ -6,6 +6,8 @@
 #include <cstdlib>
 
 #include "../../../arnis_adapter.h"
+namespace arnis
+{
 
 
 /*
@@ -32,10 +34,8 @@ namespace world_editor {
 }
 */
 
-namespace arnis
-{
 
-    namespace amenities
+namespace amenities
 {
 
 
