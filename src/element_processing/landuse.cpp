@@ -9,7 +9,7 @@
 
 #include "args.h"
 #include "block_definitions.h"
-#include "../element_processing/tree.h"
+#include "tree.h"
 #include "floodfill.h"
 #include "osm_parser.h"
 #include "world_editor.h"
