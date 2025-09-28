@@ -7,7 +7,6 @@
 #include <boost/geometry.hpp>
 #include <boost/geometry/geometries/point.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
-#include "debug/dump.h"
 
 #include "floodfill.h"
 
@@ -32,7 +31,11 @@ struct pair_hash {
 
 // Check if the current time exceeds the timeout duration
 inline bool timeout_exceeded(const std::chrono::steady_clock::time_point& start_time, const std::chrono::milliseconds& timeout_duration) {
-    return (std::chrono::steady_clock::now() - start_time) > timeout_duration;
+	const auto ex = (std::chrono::steady_clock::now() - start_time) > timeout_duration;
+	if (ex) {
+		std::cerr << "timeout" << start_time.time_since_epoch()  << " : " <<  timeout_duration << "\n";
+	}
+	return ex;
 }
 
 //namespace FloodFill  

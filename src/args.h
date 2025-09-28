@@ -47,7 +47,7 @@ struct Args
 
 	// Set floodfill timeout (seconds) (optional)
 	//std::optional<std::chrono::duration<double>> timeout{std::nullopt};
-	const std::chrono::milliseconds timeout{200};
+	const std::chrono::milliseconds timeout{5000};
 	std::chrono::milliseconds timeout_ref() const { return timeout; }
 
 	// Spawn point coordinates (lat, lng)
