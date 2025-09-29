@@ -1,458 +1,302 @@
-use crate::coordinate_system::{geographic::LLBBox, transformation::geo_distance};
-use image::Rgb;
-use std::path::Path;
+#if 0
 
-/// Maximum Y coordinate in Minecraft (build height limit)
-const MAX_Y: i32 = 319;
-/// Scale factor for converting real elevation to Minecraft heights
-const BASE_HEIGHT_SCALE: f64 = 0.7;
-/// AWS S3 Terrarium tiles endpoint (no API key required)
-const AWS_TERRARIUM_URL: &str =
-    "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
-/// Terrarium format offset for height decoding
-const TERRARIUM_OFFSET: f64 = 32768.0;
-/// Minimum zoom level for terrain tiles
-const MIN_ZOOM: u8 = 10;
-/// Maximum zoom level for terrain tiles
-const MAX_ZOOM: u8 = 15;
+#if 0
+#define STB_IMAGE_IMPLEMENTATION
+#include "stb_image.h"
+#endif
 
-/// Holds processed elevation data and metadata
-#[derive(Clone)]
-pub struct ElevationData {
-    /// Height values in Minecraft Y coordinates
-    pub(crate) heights: Vec<Vec<i32>>,
-    /// Width of the elevation grid
-    pub(crate) width: usize,
-    /// Height of the elevation grid
-    pub(crate) height: usize,
+#include <cmath>
+#include <cstdint>
+#include <curl/curl.h>
+#include <filesystem>
+#include <fstream>
+#include <iostream>
+#include <limits>
+#include <optional>
+#include <sstream>
+#include <stdexcept>
+#include <string>
+#include <tuple>
+#include <utility>
+#include <vector>
+#include <algorithm>
+
+namespace crate {
+namespace coordinate_system {
+namespace geographic {
+
+class Coordinate {
+public:
+    Coordinate() : lat_(0.0), lng_(0.0) {}
+    Coordinate(double lat, double lng) : lat_(lat), lng_(lng) {}
+    double lat() const { return lat_; }
+    double lng() const { return lng_; }
+private:
+    double lat_;
+    double lng_;
+};
+
+class LLBBox {
+public:
+    LLBBox() = default;
+    LLBBox(const Coordinate& a, const Coordinate& b) : a_(a), b_(b) {}
+    Coordinate min() const {
+        double minlat = std::min(a_.lat(), b_.lat());
+        double minlng = std::min(a_.lng(), b_.lng());
+        return Coordinate(minlat, minlng);
+    }
+    Coordinate max() const {
+        double maxlat = std::max(a_.lat(), b_.lat());
+        double maxlng = std::max(a_.lng(), b_.lng());
+        return Coordinate(maxlat, maxlng);
+    }
+private:
+    Coordinate a_;
+    Coordinate b_;
+};
+
+} // namespace geographic
+
+namespace transformation {
+
+// Returns approximate distances in degrees? To mimic original signature returning two doubles (z,x).
+// For compatibility we compute rough meter estimates for lat and lng edges and return as pair (z,x).
+inline std::pair<double, double> geo_distance(const geographic::Coordinate& a, const geographic::Coordinate& b) {
+    constexpr double R = 6371000.0; // Earth radius meters
+    double lat1 = a.lat() * M_PI / 180.0;
+    double lat2 = b.lat() * M_PI / 180.0;
+    double dlat = lat2 - lat1;
+    double dlng = (b.lng() - a.lng()) * M_PI / 180.0;
+    double hav = std::sin(dlat/2.0)*std::sin(dlat/2.0) + std::cos(lat1)*std::cos(lat2)*std::sin(dlng/2.0)*std::sin(dlng/2.0);
+    double distance = 2.0 * R * std::asin(std::sqrt(hav));
+    // Return (z-distance, x-distance) in meters approximated via lat and lng separate components:
+    double avg_lat = (lat1 + lat2) / 2.0;
+    double lat_m = std::abs((b.lat() - a.lat()) * M_PI / 180.0) * R;
+    double lng_m = std::abs((b.lng() - a.lng()) * M_PI / 180.0) * R * std::cos(avg_lat);
+    return std::make_pair(lat_m, lng_m);
 }
 
-/// Calculates appropriate zoom level for the given bounding box
-fn calculate_zoom_level(bbox: &LLBBox) -> u8 {
-    let lat_diff: f64 = (bbox.max().lat() - bbox.min().lat()).abs();
-    let lng_diff: f64 = (bbox.max().lng() - bbox.min().lng()).abs();
-    let max_diff: f64 = lat_diff.max(lng_diff);
-    let zoom: u8 = (-max_diff.log2() + 20.0) as u8;
-    zoom.clamp(MIN_ZOOM, MAX_ZOOM)
+} // namespace transformation
+} // namespace coordinate_system
+} // namespace crate
+
+// Constants
+constexpr int32_t MAX_Y = 319;
+constexpr double BASE_HEIGHT_SCALE = 0.7;
+const std::string AWS_TERRARIUM_URL = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/{z}/{x}/{y}.png";
+constexpr double TERRARIUM_OFFSET = 32768.0;
+constexpr uint8_t MIN_ZOOM = 10;
+constexpr uint8_t MAX_ZOOM = 15;
+
+// ElevationData struct
+struct ElevationData {
+    std::vector<std::vector<int32_t>> heights;
+    std::size_t width;
+    std::size_t height;
+};
+
+// CURL write callback
+size_t curl_write_callback(void* contents, size_t size, size_t nmemb, void* userp) {
+    size_t total = size * nmemb;
+    std::vector<uint8_t>* buffer = reinterpret_cast<std::vector<uint8_t>*>(userp);
+    buffer->insert(buffer->end(), reinterpret_cast<uint8_t*>(contents), reinterpret_cast<uint8_t*>(contents) + total);
+    return total;
 }
 
-fn lat_lng_to_tile(lat: f64, lng: f64, zoom: u8) -> (u32, u32) {
-    let lat_rad: f64 = lat.to_radians();
-    let n: f64 = 2.0_f64.powi(zoom as i32);
-    let x: u32 = ((lng + 180.0) / 360.0 * n).floor() as u32;
-    let y: u32 = ((1.0 - lat_rad.tan().asinh() / std::f64::consts::PI) / 2.0 * n).floor() as u32;
-    (x, y)
+uint8_t calculate_zoom_level(const crate::coordinate_system::geographic::LLBBox& bbox) {
+    double lat_diff = std::abs(bbox.max().lat() - bbox.min().lat());
+    double lng_diff = std::abs(bbox.max().lng() - bbox.min().lng());
+    double max_diff = std::max(lat_diff, lng_diff);
+    double raw = -std::log2(max_diff) + 20.0;
+    int z = static_cast<int>(std::floor(raw));
+    if (z < MIN_ZOOM) z = MIN_ZOOM;
+    if (z > MAX_ZOOM) z = MAX_ZOOM;
+    return static_cast<uint8_t>(z);
 }
 
-/// Downloads a tile from AWS Terrain Tiles service
-fn download_tile(
-    client: &reqwest::blocking::Client,
-    tile_x: u32,
-    tile_y: u32,
-    zoom: u8,
-    tile_path: &Path,
-) -> Result<image::ImageBuffer<Rgb<u8>, Vec<u8>>, Box<dyn std::error::Error>> {
-    println!("Fetching tile x={tile_x},y={tile_y},z={zoom} from AWS Terrain Tiles");
-    let url: String = AWS_TERRARIUM_URL
-        .replace("{z}", &zoom.to_string())
-        .replace("{x}", &tile_x.to_string())
-        .replace("{y}", &tile_y.to_string());
-
-    let response: reqwest::blocking::Response = client.get(&url).send()?;
-    response.error_for_status_ref()?;
-    let bytes = response.bytes()?;
-    std::fs::write(tile_path, &bytes)?;
-    let img: image::DynamicImage = image::load_from_memory(&bytes)?;
-    Ok(img.to_rgb8())
+std::pair<uint32_t, uint32_t> lat_lng_to_tile(double lat, double lng, uint8_t zoom) {
+    double lat_rad = lat * M_PI / 180.0;
+    double n = std::pow(2.0, static_cast<int>(zoom));
+    uint32_t x = static_cast<uint32_t>(std::floor((lng + 180.0) / 360.0 * n));
+    uint32_t y = static_cast<uint32_t>(std::floor((1.0 - std::asinh(std::tan(lat_rad)) / M_PI) / 2.0 * n));
+    return std::make_pair(x, y);
 }
 
-pub fn fetch_elevation_data(
-    bbox: &LLBBox,
-    scale: f64,
-    ground_level: i32,
-) -> Result<ElevationData, Box<dyn std::error::Error>> {
-    let (base_scale_z, base_scale_x) = geo_distance(bbox.min(), bbox.max());
+std::vector<std::pair<uint32_t, uint32_t>> get_tile_coordinates(const crate::coordinate_system::geographic::LLBBox& bbox, uint8_t zoom) {
+    auto p1 = lat_lng_to_tile(bbox.min().lat(), bbox.min().lng(), zoom);
+    auto p2 = lat_lng_to_tile(bbox.max().lat(), bbox.max().lng(), zoom);
+    uint32_t x1 = p1.first;
+    uint32_t y1 = p1.second;
+    uint32_t x2 = p2.first;
+    uint32_t y2 = p2.second;
+    std::vector<std::pair<uint32_t, uint32_t>> tiles;
+    uint32_t xmin = std::min(x1, x2);
+    uint32_t xmax = std::max(x1, x2);
+    uint32_t ymin = std::min(y1, y2);
+    uint32_t ymax = std::max(y1, y2);
+    for (uint32_t x = xmin; x <= xmax; ++x) {
+        for (uint32_t y = ymin; y <= ymax; ++y) {
+            tiles.emplace_back(x, y);
+        }
+    }
+    return tiles;
+}
 
-    // Apply same floor() and scale operations as CoordTransformer.llbbox_to_xzbbox()
-    let scale_factor_z: f64 = base_scale_z.floor() * scale;
-    let scale_factor_x: f64 = base_scale_x.floor() * scale;
-
-    // Calculate zoom and tiles
-    let zoom: u8 = calculate_zoom_level(bbox);
-    let tiles: Vec<(u32, u32)> = get_tile_coordinates(bbox, zoom);
-
-    // Match grid dimensions with Minecraft world size
-    let grid_width: usize = scale_factor_x as usize;
-    let grid_height: usize = scale_factor_z as usize;
-
-    // Initialize height grid with proper dimensions
-    let mut height_grid: Vec<Vec<f64>> = vec![vec![f64::NAN; grid_width]; grid_height];
-    let mut extreme_values_found = Vec::new(); // Track extreme values for debugging
-
-    let client: reqwest::blocking::Client = reqwest::blocking::Client::new();
-
-    let tile_cache_dir = Path::new("./arnis-tile-cache");
-    if !tile_cache_dir.exists() {
-        std::fs::create_dir_all(tile_cache_dir)?;
+// Download tile and decode PNG into RGB vector (row-major)
+std::optional<std::tuple<std::vector<uint8_t>, int, int>> download_tile_and_decode(uint32_t tile_x, uint32_t tile_y, uint8_t zoom, const std::filesystem::path& tile_path) {
+    std::string url = AWS_TERRARIUM_URL;
+    // replace placeholders
+    {
+        std::ostringstream ss;
+        ss << static_cast<int>(zoom);
+        std::string s = ss.str();
+        size_t pos = url.find("{z}");
+        if (pos != std::string::npos) url.replace(pos, 3, s);
+    }
+    {
+        std::ostringstream ss;
+        ss << tile_x;
+        std::string s = ss.str();
+        size_t pos = url.find("{x}");
+        if (pos != std::string::npos) url.replace(pos, 3, s);
+    }
+    {
+        std::ostringstream ss;
+        ss << tile_y;
+        std::string s = ss.str();
+        size_t pos = url.find("{y}");
+        if (pos != std::string::npos) url.replace(pos, 3, s);
     }
 
-    // Fetch and process each tile
-    for (tile_x, tile_y) in &tiles {
-        // Check if tile is already cached
-        let tile_path = tile_cache_dir.join(format!("z{zoom}_x{tile_x}_y{tile_y}.png"));
+    CURL* curl = curl_easy_init();
+    if (!curl) {
+        return std::nullopt;
+    }
+    std::vector<uint8_t> buffer;
+    curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+    curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, curl_write_callback);
+    curl_easy_setopt(curl, CURLOPT_WRITEDATA, &buffer);
+    curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+    CURLcode res = curl_easy_perform(curl);
+    long http_code = 0;
+    curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &http_code);
+    curl_easy_cleanup(curl);
+    if (res != CURLE_OK || http_code < 200 || http_code >= 300) {
+        return std::nullopt;
+    }
 
-        let rgb_img: image::ImageBuffer<Rgb<u8>, Vec<u8>> = if tile_path.exists() {
-            // Check if the cached file has a reasonable size (PNG files should be at least a few KB)
-            let file_size = match std::fs::metadata(&tile_path) {
-                Ok(metadata) => metadata.len(),
-                Err(_) => 0,
-            };
+    // write to cache file
+    try {
+        std::ofstream ofs(tile_path, std::ios::binary);
+        ofs.write(reinterpret_cast<const char*>(buffer.data()), static_cast<std::streamsize>(buffer.size()));
+    } catch (...) {
+        // ignore write failures but continue with in-memory buffer
+    }
 
-            if file_size < 1000 {
-                eprintln!("Warning: Cached tile at {} appears to be too small ({} bytes). Refetching tile.",
-                         tile_path.display(), file_size);
+    int width = 0;
+    int height = 0;
+    int channels = 0;
+    unsigned char* img = stbi_load_from_memory(buffer.data(), static_cast<int>(buffer.size()), &width, &height, &channels, 3);
+    if (!img) {
+        return std::nullopt;
+    }
+    std::vector<uint8_t> pixels;
+    pixels.assign(img, img + (width * height * 3));
+    stbi_image_free(img);
+    return std::make_tuple(std::move(pixels), width, height);
+}
 
-                // Remove the potentially corrupted file
-                if let Err(remove_err) = std::fs::remove_file(&tile_path) {
-                    eprintln!(
-                        "Warning: Failed to remove corrupted tile file: {}",
-                        remove_err
-                    );
-                }
+std::vector<double> create_gaussian_kernel(std::size_t size, double sigma) {
+    std::vector<double> kernel(size, 0.0);
+    double center = static_cast<double>(size) / 2.0;
+    for (std::size_t i = 0; i < size; ++i) {
+        double x = static_cast<double>(i) - center;
+        kernel[i] = std::exp(-(x * x) / (2.0 * sigma * sigma));
+    }
+    double sum = 0.0;
+    for (double v : kernel) sum += v;
+    if (sum != 0.0) {
+        for (double& v : kernel) v /= sum;
+    }
+    return kernel;
+}
 
-                // Re-download the tile
-                download_tile(&client, *tile_x, *tile_y, zoom, &tile_path)?
-            } else {
-                println!(
-                    "Loading cached tile x={tile_x},y={tile_y},z={zoom} from {}",
-                    tile_path.display()
-                );
+std::vector<std::vector<double>> apply_gaussian_blur(const std::vector<std::vector<double>>& heights, double sigma) {
+    std::size_t kernel_size = static_cast<std::size_t>(std::ceil(sigma * 3.0)) * 2 + 1;
+    std::vector<double> kernel = create_gaussian_kernel(kernel_size, sigma);
+    std::vector<std::vector<double>> blurred = heights;
+    std::size_t h = blurred.size();
+    if (h == 0) return blurred;
+    std::size_t w = blurred[0].size();
 
-                // Try to load cached tile, but handle corruption gracefully
-                match image::open(&tile_path) {
-                    Ok(img) => img.to_rgb8(),
-                    Err(e) => {
-                        eprintln!("Warning: Cached tile at {} is corrupted or invalid: {}. Re-downloading...", tile_path.display(), e);
-
-                        // Remove the corrupted file
-                        if let Err(remove_err) = std::fs::remove_file(&tile_path) {
-                            eprintln!(
-                                "Warning: Failed to remove corrupted tile file: {}",
-                                remove_err
-                            );
-                        }
-
-                        // Re-download the tile
-                        download_tile(&client, *tile_x, *tile_y, zoom, &tile_path)?
-                    }
+    // horizontal pass
+    for (std::size_t y = 0; y < h; ++y) {
+        std::vector<double> temp = blurred[y];
+        for (std::size_t i = 0; i < w; ++i) {
+            double sum = 0.0;
+            double weight = 0.0;
+            for (std::size_t j = 0; j < kernel.size(); ++j) {
+                int idx = static_cast<int>(i) + static_cast<int>(j) - static_cast<int>(kernel_size / 2);
+                if (idx >= 0 && idx < static_cast<int>(w)) {
+                    double val = blurred[y][static_cast<std::size_t>(idx)];
+                    sum += val * kernel[j];
+                    weight += kernel[j];
                 }
             }
-        } else {
-            // Download the tile for the first time
-            download_tile(&client, *tile_x, *tile_y, zoom, &tile_path)?
-        };
+            temp[i] = (weight == 0.0) ? 0.0 : sum / weight;
+        }
+        blurred[y] = std::move(temp);
+    }
 
-        // Only process pixels that fall within the requested bbox
-        for (y, row) in rgb_img.rows().enumerate() {
-            for (x, pixel) in row.enumerate() {
-                // Convert tile pixel coordinates back to geographic coordinates
-                let pixel_lng = ((*tile_x as f64 + x as f64 / 256.0) / (2.0_f64.powi(zoom as i32)))
-                    * 360.0
-                    - 180.0;
-                let pixel_lat_rad = std::f64::consts::PI
-                    * (1.0
-                        - 2.0 * (*tile_y as f64 + y as f64 / 256.0) / (2.0_f64.powi(zoom as i32)));
-                let pixel_lat = pixel_lat_rad.sinh().atan().to_degrees();
-
-                // Skip pixels outside the requested bounding box
-                if pixel_lat < bbox.min().lat()
-                    || pixel_lat > bbox.max().lat()
-                    || pixel_lng < bbox.min().lng()
-                    || pixel_lng > bbox.max().lng()
-                {
-                    continue;
+    // vertical pass
+    for (std::size_t x = 0; x < w; ++x) {
+        std::vector<double> column(h);
+        for (std::size_t y = 0; y < h; ++y) column[y] = blurred[y][x];
+        for (std::size_t y = 0; y < h; ++y) {
+            double sum = 0.0;
+            double weight = 0.0;
+            for (std::size_t j = 0; j < kernel.size(); ++j) {
+                int idx = static_cast<int>(y) + static_cast<int>(j) - static_cast<int>(kernel_size / 2);
+                if (idx >= 0 && idx < static_cast<int>(h)) {
+                    sum += column[static_cast<std::size_t>(idx)] * kernel[j];
+                    weight += kernel[j];
                 }
-
-                // Map geographic coordinates to grid coordinates
-                let rel_x = (pixel_lng - bbox.min().lng()) / (bbox.max().lng() - bbox.min().lng());
-                let rel_y =
-                    1.0 - (pixel_lat - bbox.min().lat()) / (bbox.max().lat() - bbox.min().lat());
-
-                let scaled_x = (rel_x * grid_width as f64).round() as usize;
-                let scaled_y = (rel_y * grid_height as f64).round() as usize;
-
-                if scaled_y >= grid_height || scaled_x >= grid_width {
-                    continue;
-                }
-
-                // Decode Terrarium format: (R * 256 + G + B/256) - 32768
-                let height: f64 =
-                    (pixel[0] as f64 * 256.0 + pixel[1] as f64 + pixel[2] as f64 / 256.0)
-                        - TERRARIUM_OFFSET;
-
-                // Track extreme values for debugging
-                if !(-1000.0..=10000.0).contains(&height) {
-                    extreme_values_found
-                        .push((tile_x, tile_y, x, y, pixel[0], pixel[1], pixel[2], height));
-                    if extreme_values_found.len() <= 5 {
-                        // Only log first 5 extreme values
-                        eprintln!("Extreme value found: tile({tile_x},{tile_y}) pixel({x},{y}) RGB({},{},{}) = {height}m", 
-                                 pixel[0], pixel[1], pixel[2]);
-                    }
-                }
-
-                height_grid[scaled_y][scaled_x] = height;
             }
+            blurred[y][x] = (weight == 0.0) ? 0.0 : sum / weight;
         }
     }
 
-    // Report on extreme values found
-    if !extreme_values_found.is_empty() {
-        eprintln!(
-            "Found {} total extreme elevation values during tile processing",
-            extreme_values_found.len()
-        );
-        eprintln!("This may indicate corrupted tile data or areas with invalid elevation data");
-    }
-
-    // Fill in any NaN values by interpolating from nearest valid values
-    fill_nan_values(&mut height_grid);
-
-    // Filter extreme outliers that might be due to corrupted tile data
-    filter_elevation_outliers(&mut height_grid);
-
-    // Calculate blur sigma based on grid resolution
-    // Reference points for tuning:
-    const SMALL_GRID_REF: f64 = 100.0; // Reference grid size
-    const SMALL_SIGMA_REF: f64 = 15.0; // Sigma for 100x100 grid
-    const LARGE_GRID_REF: f64 = 1000.0; // Reference grid size
-    const LARGE_SIGMA_REF: f64 = 7.0; // Sigma for 1000x1000 grid
-
-    let grid_size: f64 = (grid_width.min(grid_height) as f64).max(1.0);
-
-    let sigma: f64 = if grid_size <= SMALL_GRID_REF {
-        // Linear scaling for small grids
-        SMALL_SIGMA_REF * (grid_size / SMALL_GRID_REF)
-    } else {
-        // Logarithmic scaling for larger grids
-        let ln_small: f64 = SMALL_GRID_REF.ln();
-        let ln_large: f64 = LARGE_GRID_REF.ln();
-        let log_grid_size: f64 = grid_size.ln();
-        let t: f64 = (log_grid_size - ln_small) / (ln_large - ln_small);
-        SMALL_SIGMA_REF + t * (LARGE_SIGMA_REF - SMALL_SIGMA_REF)
-    };
-
-    /* eprintln!(
-        "Grid: {}x{}, Blur sigma: {:.2}",
-        grid_width, grid_height, sigma
-    ); */
-
-    // Continue with the existing blur and conversion to Minecraft heights...
-    let blurred_heights: Vec<Vec<f64>> = apply_gaussian_blur(&height_grid, sigma);
-
-    let mut mc_heights: Vec<Vec<i32>> = Vec::with_capacity(blurred_heights.len());
-
-    // Find min/max in raw data
-    let mut min_height: f64 = f64::MAX;
-    let mut max_height: f64 = f64::MIN;
-    let mut extreme_low_count = 0;
-    let mut extreme_high_count = 0;
-
-    for row in &blurred_heights {
-        for &height in row {
-            min_height = min_height.min(height);
-            max_height = max_height.max(height);
-
-            // Count extreme values that might indicate data issues
-            if height < -1000.0 {
-                extreme_low_count += 1;
-            }
-            if height > 10000.0 {
-                extreme_high_count += 1;
-            }
-        }
-    }
-
-    eprintln!("Height data range: {min_height} to {max_height} m");
-    if extreme_low_count > 0 {
-        eprintln!(
-            "WARNING: Found {extreme_low_count} pixels with extremely low elevations (< -1000m)"
-        );
-    }
-    if extreme_high_count > 0 {
-        eprintln!(
-            "WARNING: Found {extreme_high_count} pixels with extremely high elevations (> 10000m)"
-        );
-    }
-
-    let height_range: f64 = max_height - min_height;
-    // Apply scale factor to height scaling
-    let mut height_scale: f64 = BASE_HEIGHT_SCALE * scale.sqrt(); // sqrt to make height scaling less extreme
-    let mut scaled_range: f64 = height_range * height_scale;
-
-    // Adaptive scaling: ensure we don't exceed reasonable Y range
-    let available_y_range = (MAX_Y - ground_level) as f64;
-    let safety_margin = 0.9; // Use 90% of available range
-    let max_allowed_range = available_y_range * safety_margin;
-
-    if scaled_range > max_allowed_range {
-        let adjustment_factor = max_allowed_range / scaled_range;
-        height_scale *= adjustment_factor;
-        scaled_range = height_range * height_scale;
-        eprintln!(
-            "Height range too large, applying scaling adjustment factor: {adjustment_factor:.3}"
-        );
-        eprintln!("Adjusted scaled range: {scaled_range:.1} blocks");
-    }
-
-    // Convert to scaled Minecraft Y coordinates
-    for row in blurred_heights {
-        let mc_row: Vec<i32> = row
-            .iter()
-            .map(|&h| {
-                // Scale the height differences
-                let relative_height: f64 = (h - min_height) / height_range;
-                let scaled_height: f64 = relative_height * scaled_range;
-                // With terrain enabled, ground_level is used as the MIN_Y for terrain
-                ((ground_level as f64 + scaled_height).round() as i32).clamp(ground_level, MAX_Y)
-            })
-            .collect();
-        mc_heights.push(mc_row);
-    }
-
-    let mut min_block_height: i32 = i32::MAX;
-    let mut max_block_height: i32 = i32::MIN;
-    for row in &mc_heights {
-        for &height in row {
-            min_block_height = min_block_height.min(height);
-            max_block_height = max_block_height.max(height);
-        }
-    }
-    eprintln!("Minecraft height data range: {min_block_height} to {max_block_height} blocks");
-
-    Ok(ElevationData {
-        heights: mc_heights,
-        width: grid_width,
-        height: grid_height,
-    })
+    return blurred;
 }
 
-fn get_tile_coordinates(bbox: &LLBBox, zoom: u8) -> Vec<(u32, u32)> {
-    // Convert lat/lng to tile coordinates
-    let (x1, y1) = lat_lng_to_tile(bbox.min().lat(), bbox.min().lng(), zoom);
-    let (x2, y2) = lat_lng_to_tile(bbox.max().lat(), bbox.max().lng(), zoom);
-
-    let mut tiles: Vec<(u32, u32)> = Vec::new();
-    for x in x1.min(x2)..=x1.max(x2) {
-        for y in y1.min(y2)..=y1.max(y2) {
-            tiles.push((x, y));
-        }
-    }
-    tiles
-}
-
-fn apply_gaussian_blur(heights: &[Vec<f64>], sigma: f64) -> Vec<Vec<f64>> {
-    let kernel_size: usize = (sigma * 3.0).ceil() as usize * 2 + 1;
-    let kernel: Vec<f64> = create_gaussian_kernel(kernel_size, sigma);
-
-    // Apply blur
-    let mut blurred: Vec<Vec<f64>> = heights.to_owned();
-
-    // Horizontal pass
-    for row in blurred.iter_mut() {
-        let mut temp: Vec<f64> = row.clone();
-        for (i, val) in temp.iter_mut().enumerate() {
-            let mut sum: f64 = 0.0;
-            let mut weight_sum: f64 = 0.0;
-            for (j, k) in kernel.iter().enumerate() {
-                let idx: i32 = i as i32 + j as i32 - kernel_size as i32 / 2;
-                if idx >= 0 && idx < row.len() as i32 {
-                    sum += row[idx as usize] * k;
-                    weight_sum += k;
-                }
-            }
-            *val = sum / weight_sum;
-        }
-        *row = temp;
-    }
-
-    // Vertical pass
-    let height: usize = blurred.len();
-    let width: usize = blurred[0].len();
-    for x in 0..width {
-        let temp: Vec<_> = blurred
-            .iter()
-            .take(height)
-            .map(|row: &Vec<f64>| row[x])
-            .collect();
-
-        for (y, row) in blurred.iter_mut().enumerate().take(height) {
-            let mut sum: f64 = 0.0;
-            let mut weight_sum: f64 = 0.0;
-            for (j, k) in kernel.iter().enumerate() {
-                let idx: i32 = y as i32 + j as i32 - kernel_size as i32 / 2;
-                if idx >= 0 && idx < height as i32 {
-                    sum += temp[idx as usize] * k;
-                    weight_sum += k;
-                }
-            }
-            row[x] = sum / weight_sum;
-        }
-    }
-
-    blurred
-}
-
-fn create_gaussian_kernel(size: usize, sigma: f64) -> Vec<f64> {
-    let mut kernel: Vec<f64> = vec![0.0; size];
-    let center: f64 = size as f64 / 2.0;
-
-    for (i, value) in kernel.iter_mut().enumerate() {
-        let x: f64 = i as f64 - center;
-        *value = (-x * x / (2.0 * sigma * sigma)).exp();
-    }
-
-    let sum: f64 = kernel.iter().sum();
-    for k in kernel.iter_mut() {
-        *k /= sum;
-    }
-
-    kernel
-}
-
-fn fill_nan_values(height_grid: &mut [Vec<f64>]) {
-    let height: usize = height_grid.len();
-    let width: usize = height_grid[0].len();
-
-    let mut changes_made: bool = true;
-    while changes_made {
-        changes_made = false;
-
-        for y in 0..height {
-            for x in 0..width {
-                if height_grid[y][x].is_nan() {
-                    let mut sum: f64 = 0.0;
-                    let mut count: i32 = 0;
-
-                    // Check neighboring cells
-                    for dy in -1..=1 {
-                        for dx in -1..=1 {
-                            let ny: i32 = y as i32 + dy;
-                            let nx: i32 = x as i32 + dx;
-
-                            if ny >= 0 && ny < height as i32 && nx >= 0 && nx < width as i32 {
-                                let val: f64 = height_grid[ny as usize][nx as usize];
-                                if !val.is_nan() {
-                                    sum += val;
-                                    count += 1;
+void fill_nan_values(std::vector<std::vector<double>>& grid) {
+    std::size_t height = grid.size();
+    if (height == 0) return;
+    std::size_t width = grid[0].size();
+    bool changes = true;
+    while (changes) {
+        changes = false;
+        for (std::size_t y = 0; y < height; ++y) {
+            for (std::size_t x = 0; x < width; ++x) {
+                if (std::isnan(grid[y][x])) {
+                    double sum = 0.0;
+                    int count = 0;
+                    for (int dy = -1; dy <= 1; ++dy) {
+                        for (int dx = -1; dx <= 1; ++dx) {
+                            int ny = static_cast<int>(y) + dy;
+                            int nx = static_cast<int>(x) + dx;
+                            if (ny >= 0 && ny < static_cast<int>(height) && nx >= 0 && nx < static_cast<int>(width)) {
+                                double v = grid[ny][nx];
+                                if (!std::isnan(v)) {
+                                    sum += v;
+                                    ++count;
                                 }
                             }
                         }
                     }
-
-                    if count > 0 {
-                        height_grid[y][x] = sum / count as f64;
-                        changes_made = true;
+                    if (count > 0) {
+                        grid[y][x] = sum / static_cast<double>(count);
+                        changes = true;
                     }
                 }
             }
@@ -460,119 +304,243 @@ fn fill_nan_values(height_grid: &mut [Vec<f64>]) {
     }
 }
 
-fn filter_elevation_outliers(height_grid: &mut [Vec<f64>]) {
-    let height = height_grid.len();
-    let width = height_grid[0].len();
+void filter_elevation_outliers(std::vector<std::vector<double>>& grid) {
+    std::vector<double> all;
+    for (auto const& row : grid) {
+        for (double v : row) {
+            if (!std::isnan(v) && std::isfinite(v)) all.push_back(v);
+        }
+    }
+    if (all.empty()) return;
+    std::sort(all.begin(), all.end());
+    std::size_t len = all.size();
+    std::size_t p1_idx = static_cast<std::size_t>(len * 0.01);
+    std::size_t p99_idx = static_cast<std::size_t>(len * 0.99);
+    if (p1_idx >= len) p1_idx = 0;
+    if (p99_idx >= len) p99_idx = len - 1;
+    double min_reasonable = all[p1_idx];
+    double max_reasonable = all[p99_idx];
+    std::size_t filtered = 0;
+    for (auto& row : grid) {
+        for (double& v : row) {
+            if (!std::isnan(v) && (v < min_reasonable || v > max_reasonable)) {
+                v = std::numeric_limits<double>::quiet_NaN();
+                ++filtered;
+            }
+        }
+    }
+    if (filtered > 0) {
+        fill_nan_values(grid);
+    }
+}
 
-    // Collect all valid height values to calculate statistics
-    let mut all_heights: Vec<f64> = Vec::new();
-    for row in height_grid.iter() {
-        for &h in row {
-            if !h.is_nan() && h.is_finite() {
-                all_heights.push(h);
+std::optional<ElevationData> fetch_elevation_data(const crate::coordinate_system::geographic::LLBBox& bbox, double scale, int32_t ground_level) {
+    using crate::coordinate_system::transformation::geo_distance;
+    auto [base_scale_z, base_scale_x] = geo_distance(bbox.min(), bbox.max());
+    double scale_factor_z = std::floor(base_scale_z) * scale;
+    double scale_factor_x = std::floor(base_scale_x) * scale;
+    uint8_t zoom = calculate_zoom_level(bbox);
+    std::vector<std::pair<uint32_t, uint32_t>> tiles = get_tile_coordinates(bbox, zoom);
+
+    std::size_t grid_width = static_cast<std::size_t>(std::max(1.0, scale_factor_x));
+    std::size_t grid_height = static_cast<std::size_t>(std::max(1.0, scale_factor_z));
+
+    std::vector<std::vector<double>> height_grid(grid_height, std::vector<double>(grid_width, std::numeric_limits<double>::quiet_NaN()));
+    std::vector<std::tuple<uint32_t, uint32_t, int, int, uint8_t, uint8_t, uint8_t, double>> extreme_values_found;
+
+    std::filesystem::path tile_cache_dir = std::filesystem::path("./arnis-tile-cache");
+    if (!std::filesystem::exists(tile_cache_dir)) {
+        std::error_code ec;
+        std::filesystem::create_directories(tile_cache_dir, ec);
+    }
+
+    for (auto const& tile : tiles) {
+        uint32_t tile_x = tile.first;
+        uint32_t tile_y = tile.second;
+        std::ostringstream fname;
+        fname << "z" << static_cast<int>(zoom) << "_x" << tile_x << "_y" << tile_y << ".png";
+        std::filesystem::path tile_path = tile_cache_dir / fname.str();
+
+        std::vector<uint8_t> pixels;
+        int width = 0;
+        int height = 0;
+        bool ok = false;
+
+        if (std::filesystem::exists(tile_path)) {
+            std::error_code ec;
+            auto file_size = std::filesystem::file_size(tile_path, ec);
+            if (!ec && file_size >= 1000) {
+                // try to load from disk
+                std::ifstream ifs(tile_path, std::ios::binary);
+                std::vector<uint8_t> data((std::istreambuf_iterator<char>(ifs)), std::istreambuf_iterator<char>());
+                int channels = 0;
+                unsigned char* img = stbi_load_from_memory(data.data(), static_cast<int>(data.size()), &width, &height, &channels, 3);
+                if (img) {
+                    pixels.assign(img, img + (width * height * 3));
+                    stbi_image_free(img);
+                    ok = true;
+                } else {
+                    // fallthrough to re-download
+                    std::filesystem::remove(tile_path, ec);
+                }
+            } else {
+                std::filesystem::remove(tile_path, std::error_code{});
+            }
+        }
+
+        if (!ok) {
+            auto decoded = download_tile_and_decode(tile_x, tile_y, zoom, tile_path);
+            if (!decoded.has_value()) {
+                continue;
+            }
+            auto tuple = decoded.value();
+            pixels = std::move(std::get<0>(tuple));
+            width = std::get<1>(tuple);
+            height = std::get<2>(tuple);
+        }
+
+        if (width <= 0 || height <= 0) continue;
+
+        for (int py = 0; py < height; ++py) {
+            for (int px = 0; px < width; ++px) {
+                int idx = (py * width + px) * 3;
+                uint8_t r = pixels[idx + 0];
+                uint8_t g = pixels[idx + 1];
+                uint8_t b = pixels[idx + 2];
+
+                double pixel_lng = ((static_cast<double>(tile_x) + static_cast<double>(px) / static_cast<double>(width)) / std::pow(2.0, static_cast<int>(zoom))) * 360.0 - 180.0;
+                double pixel_lat_rad = M_PI * (1.0 - 2.0 * (static_cast<double>(tile_y) + static_cast<double>(py) / static_cast<double>(height)) / std::pow(2.0, static_cast<int>(zoom)));
+                double pixel_lat = std::atan(std::sinh(pixel_lat_rad)) * 180.0 / M_PI;
+
+                if (pixel_lat < bbox.min().lat() || pixel_lat > bbox.max().lat() || pixel_lng < bbox.min().lng() || pixel_lng > bbox.max().lng()) {
+                    continue;
+                }
+
+                double rel_x = (pixel_lng - bbox.min().lng()) / (bbox.max().lng() - bbox.min().lng());
+                double rel_y = 1.0 - (pixel_lat - bbox.min().lat()) / (bbox.max().lat() - bbox.min().lat());
+
+                std::size_t scaled_x = static_cast<std::size_t>(std::round(rel_x * static_cast<double>(grid_width)));
+                std::size_t scaled_y = static_cast<std::size_t>(std::round(rel_y * static_cast<double>(grid_height)));
+
+                if (scaled_y >= grid_height || scaled_x >= grid_width) {
+                    continue;
+                }
+
+                double height_m = (static_cast<double>(r) * 256.0 + static_cast<double>(g) + static_cast<double>(b) / 256.0) - TERRARIUM_OFFSET;
+
+                if (!(height_m >= -1000.0 && height_m <= 10000.0)) {
+                    if (extreme_values_found.size() <= 5) {
+                        std::cerr << "Extreme value found: tile(" << tile_x << "," << tile_y << ") pixel(" << px << "," << py << ") RGB(" << static_cast<int>(r) << "," << static_cast<int>(g) << "," << static_cast<int>(b) << ") = " << height_m << "m\n";
+                    }
+                    extreme_values_found.emplace_back(tile_x, tile_y, px, py, r, g, b, height_m);
+                }
+
+                height_grid[scaled_y][scaled_x] = height_m;
             }
         }
     }
 
-    if all_heights.is_empty() {
-        return;
+    if (!extreme_values_found.empty()) {
+        std::cerr << "Found " << extreme_values_found.size() << " total extreme elevation values during tile processing\n";
+        std::cerr << "This may indicate corrupted tile data or areas with invalid elevation data\n";
     }
 
-    // Sort to find percentiles
-    all_heights.sort_by(|a, b| a.partial_cmp(b).unwrap());
-    let len = all_heights.len();
+    fill_nan_values(height_grid);
+    filter_elevation_outliers(height_grid);
 
-    // Use 1st and 99th percentiles to define reasonable bounds
-    let p1_idx = (len as f64 * 0.01) as usize;
-    let p99_idx = (len as f64 * 0.99) as usize;
-    let min_reasonable = all_heights[p1_idx];
-    let max_reasonable = all_heights[p99_idx];
+    constexpr double SMALL_GRID_REF = 100.0;
+    constexpr double SMALL_SIGMA_REF = 15.0;
+    constexpr double LARGE_GRID_REF = 1000.0;
+    constexpr double LARGE_SIGMA_REF = 7.0;
 
-    eprintln!("Filtering outliers outside range: {min_reasonable:.1}m to {max_reasonable:.1}m");
+    double grid_size = static_cast<double>(std::min(grid_width, grid_height));
+    if (grid_size < 1.0) grid_size = 1.0;
 
-    let mut outliers_filtered = 0;
+    double sigma = 0.0;
+    if (grid_size <= SMALL_GRID_REF) {
+        sigma = SMALL_SIGMA_REF * (grid_size / SMALL_GRID_REF);
+    } else {
+        double ln_small = std::log(SMALL_GRID_REF);
+        double ln_large = std::log(LARGE_GRID_REF);
+        double log_grid_size = std::log(grid_size);
+        double t = (log_grid_size - ln_small) / (ln_large - ln_small);
+        sigma = SMALL_SIGMA_REF + t * (LARGE_SIGMA_REF - SMALL_SIGMA_REF);
+    }
 
-    // Replace outliers with NaN, then fill them using interpolation
-    for row in height_grid.iter_mut().take(height) {
-        for h in row.iter_mut().take(width) {
-            if !h.is_nan() && (*h < min_reasonable || *h > max_reasonable) {
-                *h = f64::NAN;
-                outliers_filtered += 1;
-            }
+    std::vector<std::vector<double>> blurred = apply_gaussian_blur(height_grid, sigma);
+
+    std::vector<std::vector<int32_t>> mc_heights;
+    mc_heights.reserve(blurred.size());
+
+    double min_height = std::numeric_limits<double>::infinity();
+    double max_height = -std::numeric_limits<double>::infinity();
+    int extreme_low_count = 0;
+    int extreme_high_count = 0;
+
+    for (auto const& row : blurred) {
+        for (double val : row) {
+            if (val < min_height) min_height = val;
+            if (val > max_height) max_height = val;
+            if (val < -1000.0) ++extreme_low_count;
+            if (val > 10000.0) ++extreme_high_count;
         }
     }
 
-    if outliers_filtered > 0 {
-        eprintln!("Filtered {outliers_filtered} elevation outliers, interpolating replacements...");
-        // Re-run the NaN filling to interpolate the filtered values
-        fill_nan_values(height_grid);
+    std::cerr << "Height data range: " << min_height << " to " << max_height << " m\n";
+    if (extreme_low_count > 0) {
+        std::cerr << "WARNING: Found " << extreme_low_count << " pixels with extremely low elevations (< -1000m)\n";
     }
+    if (extreme_high_count > 0) {
+        std::cerr << "WARNING: Found " << extreme_high_count << " pixels with extremely high elevations (> 10000m)\n";
+    }
+
+    double height_range = max_height - min_height;
+    if (height_range == 0.0) height_range = 1.0;
+
+    double height_scale = BASE_HEIGHT_SCALE * std::sqrt(scale);
+    double scaled_range = height_range * height_scale;
+
+    double available_y_range = static_cast<double>(MAX_Y - ground_level);
+    double safety_margin = 0.9;
+    double max_allowed_range = available_y_range * safety_margin;
+
+    if (scaled_range > max_allowed_range) {
+        double adjustment_factor = max_allowed_range / scaled_range;
+        height_scale *= adjustment_factor;
+        scaled_range = height_range * height_scale;
+        std::cerr << "Height range too large, applying scaling adjustment factor: " << adjustment_factor << "\n";
+        std::cerr << "Adjusted scaled range: " << scaled_range << " blocks\n";
+    }
+
+    for (auto const& row : blurred) {
+        std::vector<int32_t> mc_row;
+        mc_row.reserve(row.size());
+        for (double h : row) {
+            double relative_height = (h - min_height) / height_range;
+            double scaled_height = relative_height * scaled_range;
+            int32_t block_y = static_cast<int32_t>(std::round(static_cast<double>(ground_level) + scaled_height));
+            if (block_y < ground_level) block_y = ground_level;
+            if (block_y > MAX_Y) block_y = MAX_Y;
+            mc_row.push_back(block_y);
+        }
+        mc_heights.push_back(std::move(mc_row));
+    }
+
+    int32_t min_block_height = std::numeric_limits<int32_t>::max();
+    int32_t max_block_height = std::numeric_limits<int32_t>::min();
+    for (auto const& row : mc_heights) {
+        for (int32_t v : row) {
+            if (v < min_block_height) min_block_height = v;
+            if (v > max_block_height) max_block_height = v;
+        }
+    }
+    std::cerr << "Minecraft height data range: " << min_block_height << " to " << max_block_height << " blocks\n";
+
+    ElevationData result;
+    result.heights = std::move(mc_heights);
+    result.width = grid_width;
+    result.height = grid_height;
+    return std::make_optional(result);
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn test_terrarium_height_decoding() {
-        // Test known Terrarium RGB values
-        // Sea level (0m) in Terrarium format should be (128, 0, 0) = 32768 - 32768 = 0
-        let sea_level_pixel = [128, 0, 0];
-        let height = (sea_level_pixel[0] as f64 * 256.0
-            + sea_level_pixel[1] as f64
-            + sea_level_pixel[2] as f64 / 256.0)
-            - TERRARIUM_OFFSET;
-        assert_eq!(height, 0.0);
-
-        // Test simple case: height of 1000m
-        // 1000 + 32768 = 33768 = 131 * 256 + 232
-        let test_pixel = [131, 232, 0];
-        let height =
-            (test_pixel[0] as f64 * 256.0 + test_pixel[1] as f64 + test_pixel[2] as f64 / 256.0)
-                - TERRARIUM_OFFSET;
-        assert_eq!(height, 1000.0);
-
-        // Test below sea level (-100m)
-        // -100 + 32768 = 32668 = 127 * 256 + 156
-        let below_sea_pixel = [127, 156, 0];
-        let height = (below_sea_pixel[0] as f64 * 256.0
-            + below_sea_pixel[1] as f64
-            + below_sea_pixel[2] as f64 / 256.0)
-            - TERRARIUM_OFFSET;
-        assert_eq!(height, -100.0);
-    }
-
-    #[test]
-    fn test_aws_url_generation() {
-        let url = AWS_TERRARIUM_URL
-            .replace("{z}", "15")
-            .replace("{x}", "17436")
-            .replace("{y}", "11365");
-        assert_eq!(
-            url,
-            "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/15/17436/11365.png"
-        );
-    }
-
-    #[test]
-    #[ignore] // This test requires internet connection, run with --ignored
-    fn test_aws_tile_fetch() {
-        use reqwest::blocking::Client;
-
-        let client = Client::new();
-        let url = "https://s3.amazonaws.com/elevation-tiles-prod/terrarium/15/17436/11365.png";
-
-        let response = client.get(url).send();
-        assert!(response.is_ok());
-
-        let response = response.unwrap();
-        assert!(response.status().is_success());
-        assert!(response
-            .headers()
-            .get("content-type")
-            .unwrap()
-            .to_str()
-            .unwrap()
-            .contains("image"));
-    }
-}
+#endif
