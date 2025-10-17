@@ -280,40 +280,40 @@ Block get_stair_block_for_material(const Block &material) {
 
 
 
-static const std::array<Block, 7> WINDOW_VARIATIONS = {
-    GLASS,
+static const std::array<Block*, 7> WINDOW_VARIATIONS = {
+    &GLASS,
 
-    GRAY_STAINED_GLASS,
-    LIGHT_GRAY_STAINED_GLASS,
-    GRAY_STAINED_GLASS,
-    BROWN_STAINED_GLASS,
-    WHITE_STAINED_GLASS,
-    TINTED_GLASS
+    &GRAY_STAINED_GLASS,
+    &LIGHT_GRAY_STAINED_GLASS,
+    &GRAY_STAINED_GLASS,
+    &BROWN_STAINED_GLASS,
+    &WHITE_STAINED_GLASS,
+    &TINTED_GLASS
     
 };
 
-static const std::vector<std::pair<RGB, std::vector<Block>>> DEFINED_COLORS = {
-    { {233, 107, 57},  { BRICK, NETHER_BRICK } },
-    { {18, 12, 13},    { POLISHED_BLACKSTONE_BRICKS, BLACKSTONE, DEEPSLATE_BRICKS } },
-    { {76, 127, 153},  { LIGHT_BLUE_TERRACOTTA } },
-    { {0, 0, 0},       { DEEPSLATE_BRICKS, BLACKSTONE, POLISHED_BLACKSTONE } },
-    { {186, 195, 142}, { END_STONE_BRICKS, SANDSTONE, SMOOTH_SANDSTONE, LIGHT_GRAY_CONCRETE } },
-    { {57, 41, 35},    { BROWN_TERRACOTTA, BROWN_CONCRETE, MUD_BRICKS, BRICK } },
-    { {112, 108, 138}, { LIGHT_BLUE_TERRACOTTA, GRAY_TERRACOTTA, GRAY_CONCRETE } },
-    { {122, 92, 66},   { MUD_BRICKS, BROWN_TERRACOTTA, SANDSTONE, BRICK } },
-    { {24, 13, 14},    { NETHER_BRICK, BLACKSTONE, DEEPSLATE_BRICKS } },
-    { {159, 82, 36},   { BROWN_TERRACOTTA, BRICK, POLISHED_GRANITE, BROWN_CONCRETE, NETHERITE_BLOCK, POLISHED_DEEPSLATE } },
-    { {128, 128, 128}, { POLISHED_ANDESITE, LIGHT_GRAY_CONCRETE, SMOOTH_STONE, STONE_BRICKS } },
-    { {174, 173, 174}, { POLISHED_ANDESITE, LIGHT_GRAY_CONCRETE, SMOOTH_STONE, STONE_BRICKS } },
-    { {141, 101, 142}, { STONE_BRICKS, BRICK, MUD_BRICKS } },
-    { {142, 60, 46},   { BLACK_TERRACOTTA, NETHERITE_BLOCK, NETHER_BRICK, POLISHED_GRANITE, POLISHED_DEEPSLATE, BROWN_TERRACOTTA } },
-    { {153, 83, 28},   { BLACK_TERRACOTTA, POLISHED_GRANITE, BROWN_CONCRETE, BROWN_TERRACOTTA, STONE_BRICKS } },
-    { {224, 216, 175}, { SMOOTH_SANDSTONE, LIGHT_GRAY_CONCRETE, POLISHED_ANDESITE, SMOOTH_STONE } },
-    { {188, 182, 179}, { SMOOTH_SANDSTONE, LIGHT_GRAY_CONCRETE, QUARTZ_BRICKS, POLISHED_ANDESITE, SMOOTH_STONE } },
-    { {35, 86, 85},    { POLISHED_BLACKSTONE_BRICKS, BLUE_TERRACOTTA, LIGHT_BLUE_TERRACOTTA } },
-    { {255, 255, 255}, { WHITE_CONCRETE, QUARTZ_BRICKS, QUARTZ_BLOCK } },
-    { {209, 177, 161}, { WHITE_TERRACOTTA, SMOOTH_SANDSTONE, SMOOTH_STONE, SANDSTONE, LIGHT_GRAY_CONCRETE } },
-    { {191, 147, 42},  { SMOOTH_SANDSTONE, SANDSTONE, SMOOTH_STONE } }
+static const std::vector<std::pair<RGB, std::vector<Block*>>> DEFINED_COLORS = {
+    { {233, 107, 57},  { &BRICK, &NETHER_BRICK } },
+    { {18, 12, 13},    { &POLISHED_BLACKSTONE_BRICKS, &BLACKSTONE, &DEEPSLATE_BRICKS } },
+    { {76, 127, 153},  { &LIGHT_BLUE_TERRACOTTA } },
+    { {0, 0, 0},       { &DEEPSLATE_BRICKS, &BLACKSTONE, &POLISHED_BLACKSTONE } },
+    { {186, 195, 142}, { &END_STONE_BRICKS, &SANDSTONE, &SMOOTH_SANDSTONE, &LIGHT_GRAY_CONCRETE } },
+    { {57, 41, 35},    { &BROWN_TERRACOTTA, &BROWN_CONCRETE, &MUD_BRICKS, &BRICK } },
+    { {112, 108, 138}, { &LIGHT_BLUE_TERRACOTTA, &GRAY_TERRACOTTA, &GRAY_CONCRETE } },
+    { {122, 92, 66},   { &MUD_BRICKS, &BROWN_TERRACOTTA, &SANDSTONE, &BRICK } },
+    { {24, 13, 14},    { &NETHER_BRICK, &BLACKSTONE, &DEEPSLATE_BRICKS } },
+    { {159, 82, 36},   { &BROWN_TERRACOTTA, &BRICK, &POLISHED_GRANITE, &BROWN_CONCRETE, &NETHERITE_BLOCK, &POLISHED_DEEPSLATE } },
+    { {128, 128, 128}, { &POLISHED_ANDESITE, &LIGHT_GRAY_CONCRETE, &SMOOTH_STONE, &STONE_BRICKS } },
+    { {174, 173, 174}, { &POLISHED_ANDESITE, &LIGHT_GRAY_CONCRETE, &SMOOTH_STONE, &STONE_BRICKS } },
+    { {141, 101, 142}, { &STONE_BRICKS, &BRICK, &MUD_BRICKS } },
+    { {142, 60, 46},   { &BLACK_TERRACOTTA, &NETHERITE_BLOCK, &NETHER_BRICK, &POLISHED_GRANITE, &POLISHED_DEEPSLATE, &BROWN_TERRACOTTA } },
+    { {153, 83, 28},   { &BLACK_TERRACOTTA, &POLISHED_GRANITE, &BROWN_CONCRETE, &BROWN_TERRACOTTA, &STONE_BRICKS } },
+    { {224, 216, 175}, { &SMOOTH_SANDSTONE, &LIGHT_GRAY_CONCRETE, &POLISHED_ANDESITE, &SMOOTH_STONE } },
+    { {188, 182, 179}, { &SMOOTH_SANDSTONE, &LIGHT_GRAY_CONCRETE, &QUARTZ_BRICKS, &POLISHED_ANDESITE, &SMOOTH_STONE } },
+    { {35, 86, 85},    { &POLISHED_BLACKSTONE_BRICKS, &BLUE_TERRACOTTA, &LIGHT_BLUE_TERRACOTTA } },
+    { {255, 255, 255}, { &WHITE_CONCRETE, &QUARTZ_BRICKS, &QUARTZ_BLOCK } },
+    { {209, 177, 161}, { &WHITE_TERRACOTTA, &SMOOTH_SANDSTONE, &SMOOTH_STONE, &SANDSTONE, &LIGHT_GRAY_CONCRETE } },
+    { {191, 147, 42},  { &SMOOTH_SANDSTONE, &SANDSTONE, &SMOOTH_STONE } }
     };
 
 /*
@@ -375,7 +375,7 @@ Block get_window_block_for_building_type(const std::string& building_type) {
     }
     {
         std::uniform_int_distribution<std::size_t> dist(0, WINDOW_VARIATIONS.size() - 1);
-        return WINDOW_VARIATIONS[dist(rng)];
+        return *WINDOW_VARIATIONS[dist(rng)];
     }
 }
 
@@ -404,14 +404,14 @@ Block get_building_wall_block_for_color(const RGB& color) {
     auto best_it = std::min_element(
         DEFINED_COLORS.begin(),
         DEFINED_COLORS.end(),
-        [&color](const std::pair<RGB, std::vector<Block>>& a, const std::pair<RGB, std::vector<Block>>& b) {
+        [&color](const std::pair<RGB, std::vector<Block*>>& a, const std::pair<RGB, std::vector<Block*>>& b) {
             return colors::rgb_distance(color, a.first) < colors::rgb_distance(color, b.first);
         }
     );
     if (best_it != DEFINED_COLORS.end() && !best_it->second.empty()) {
         std::mt19937& rng = global_rng();
         std::uniform_int_distribution<std::size_t> dist(0, best_it->second.size() - 1);
-        return best_it->second[dist(rng)];
+        return *best_it->second[dist(rng)];
     }
     return get_fallback_building_block();
 }

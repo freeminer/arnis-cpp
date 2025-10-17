@@ -33,7 +33,9 @@ struct pair_hash {
 inline bool timeout_exceeded(const std::chrono::steady_clock::time_point& start_time, const std::chrono::milliseconds& timeout_duration) {
 	const auto ex = (std::chrono::steady_clock::now() - start_time) > timeout_duration;
 	if (ex) {
-		// std::cerr << "timeout " << start_time.time_since_epoch()  << " : " <<  timeout_duration << "\n";
+#if !NDEBUG
+        std::cout << "timeout " << start_time.time_since_epoch()  << " : " <<  timeout_duration << "\n";
+#endif
 	}
 	return ex;
 }
