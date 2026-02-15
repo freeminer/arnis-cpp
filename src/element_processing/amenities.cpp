@@ -7,38 +7,12 @@
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill.h"
+
 namespace arnis
 {
 
-
-/*
-namespace crate {
-namespace args { struct Args { std::optional<int> timeout; }; }
-namespace block_definitions { struct Block {}; extern const Block CAULDRON, IRON_BLOCK, OAK_PLANKS, STONE_BLOCK_SLAB, OAK_FENCE, STONE_BRICK_SLAB, WATER, GRAY_CONCRETE, BLACK_CONCRETE, LIGHT_GRAY_CONCRETE, COBBLESTONE_WALL, GLOWSTONE, SMOOTH_STONE, OAK_LOG; }
-namespace bresenham { std::vector<std::tuple<int,int,int>> bresenham_line(int,int,int,int,int,int); }
-namespace coordinate_system { namespace cartesian { struct XZPoint { int x; int z; XZPoint(int xx=0,int zz=0):x(xx),z(zz){} }; } }
-namespace floodfill { std::vector<std::pair<int,int>> flood_fill_area(const std::vector<std::pair<int,int>>& polygon, const std::optional<int>& timeout); }
-namespace osm_parser {
-    struct ProcessedNode { int x; int z; crate::coordinate_system::cartesian::XZPoint xz() const { return crate::coordinate_system::cartesian::XZPoint(x,z); } };
-    struct ProcessedElement {
-        const std::unordered_map<std::string,std::string>& tags() const { return _tags; }
-        const std::vector<ProcessedNode>& nodes() const { return _nodes; }
-        std::unordered_map<std::string,std::string> _tags;
-        std::vector<ProcessedNode> _nodes;
-    };
-}
-namespace world_editor {
-    struct WorldEditor {
-        void set_block(const crate::block_definitions::Block& b, int x, int y, int z, const std::optional<std::vector<const crate::block_definitions::Block*>>& alt = std::nullopt, const std::optional<int>& meta = std::nullopt) {}
-    };
-}
-}
-*/
-
-
 namespace amenities
 {
-
 
 void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args) {
     // Skip if 'layer' or 'level' is negative in the tags
@@ -69,6 +43,19 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
     {
         const std::vector<crate::osm_parser::ProcessedNode>& nodes = element.nodes();
         if (!nodes.empty()) first_node.emplace( crate::coordinate_system::cartesian::XZPoint(nodes.front().x, nodes.front().z));
+    }
+
+    // Handle recycling containers
+    if (amenity_type == "recycling") {
+        // Check if it's a container type
+        auto it_recycling_type = tags.find("recycling_type");
+        bool is_container = (it_recycling_type != tags.end() && it_recycling_type->second == "container");
+        
+        if (is_container && first_node.has_value()) {
+            // For now, just place a cauldron for recycling containers
+            editor.set_block(crate::block_definitions::CAULDRON, first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
+        }
+        return;
     }
 
     if (amenity_type == "waste_disposal" || amenity_type == "waste_basket") {
@@ -115,7 +102,10 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
 
     if (amenity_type == "bench") {
         if (first_node.has_value()) {
-            bool r = (std::rand() & 1) != 0;
+            // Use deterministic approach for consistent bench orientation
+            // Simple hash-based approach for consistency
+            unsigned int hash = static_cast<unsigned int>(element.id());
+            bool r = (hash & 1) != 0;
             if (r) {
                 editor.set_block(crate::block_definitions::SMOOTH_STONE, first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
                 editor.set_block(crate::block_definitions::OAK_LOG, first_node->x + 1, 1, first_node->z, std::nullopt, std::nullopt);
@@ -161,7 +151,9 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
                 for (const auto& t : bresenham_points) {
                     int bx = std::get<0>(t);
                     int bz = std::get<2>(t);
-                    editor.set_block(block_type, bx, 0, bz, std::optional<std::vector<const crate::block_definitions::Block*>>(std::nullopt), std::nullopt);
+                    // Use replacement whitelist for better block placement
+                    editor.set_block(block_type, bx, 0, bz, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::BLACK_CONCRETE }), std::nullopt);
+                    
                     if (amenity_type == "fountain") {
                         for (int dx = -1; dx <= 1; ++dx) for (int dz = -1; dz <= 1; ++dz) if (!(dx == 0 && dz == 0)) {
                             editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, bx + dx, 0, bz + dz, std::nullopt, std::nullopt);
@@ -185,27 +177,40 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
                 editor.set_block(block_type, x, 0, z, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::BLACK_CONCRETE, &crate::block_definitions::GRAY_CONCRETE }), std::nullopt);
 
                 if (amenity_type == "parking") {
-                    int space_width = 4;
-                    int space_length = 6;
-                    int lane_width = 5;
-                    int zone_x = (x >= 0 ? x : x - (space_width-1)) / space_width;
-                    int zone_z = (z >= 0 ? z : z - (space_length + lane_width -1)) / (space_length + lane_width);
-                    int local_x = x % space_width; if (local_x < 0) local_x += space_width;
-                    int local_z = z % (space_length + lane_width); if (local_z < 0) local_z += (space_length + lane_width);
+                    // Create defined parking spaces with realistic layout
+                    int space_width = 4; // Width of each parking space
+                    int space_length = 6; // Length of each parking space
+                    int lane_width = 5; // Width of driving lanes
 
+                    // Calculate which "zone" this coordinate falls into
+                    int zone_x = x / space_width;
+                    int zone_z = z / (space_length + lane_width);
+                    int local_x = x % space_width;
+                    if (local_x < 0) local_x += space_width;
+                    int local_z = z % (space_length + lane_width);
+                    if (local_z < 0) local_z += (space_length + lane_width);
+
+                    // Create parking space boundaries (only within parking areas, not in driving lanes)
                     if (local_z < space_length) {
+                        // We're in a parking space area, not in the driving lane
                         if (local_x == 0) {
+                            // Vertical parking space lines (only on the left edge)
                             editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0, z, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::BLACK_CONCRETE, &crate::block_definitions::GRAY_CONCRETE }), std::nullopt);
                         } else if (local_z == 0) {
+                            // Horizontal parking space lines (only on the top edge)
                             editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0, z, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::BLACK_CONCRETE, &crate::block_definitions::GRAY_CONCRETE }), std::nullopt);
                         }
                     } else if (local_z == space_length) {
+                        // Bottom edge of parking spaces (border with driving lane)
                         editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0, z, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::BLACK_CONCRETE, &crate::block_definitions::GRAY_CONCRETE }), std::nullopt);
                     } else if (local_z > space_length && local_z < space_length + lane_width) {
+                        // Driving lane - use darker concrete
                         editor.set_block(crate::block_definitions::BLACK_CONCRETE, x, 0, z, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::GRAY_CONCRETE }), std::nullopt);
                     }
 
-                    if (local_x == 0 && local_z == 0 && (zone_x % 3 + 3) % 3 == 0 && (zone_z % 2 + 2) % 2 == 0) {
+                    // Add light posts at parking space outline corners
+                    if (local_x == 0 && local_z == 0 && zone_x % 3 == 0 && zone_z % 2 == 0) {
+                        // Light posts at regular intervals on parking space corners
                         editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
                         for (int dy = 2; dy <= 4; ++dy) editor.set_block(crate::block_definitions::OAK_FENCE, x, dy, z, std::nullopt, std::nullopt);
                         editor.set_block(crate::block_definitions::GLOWSTONE, x, 5, z, std::nullopt, std::nullopt);
@@ -218,5 +223,6 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
 
     return;
 }
-}
-}
+
+} // namespace amenities
+} // namespace arnis

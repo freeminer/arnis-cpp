@@ -1,6 +1,6 @@
 #include "block_definitions.h"
 #include "bresenham.h"
-#include "osm_parser.h"
+#include "../osm_parser.h"
 #include "world_editor.h"
 
 #include <string>
@@ -99,6 +99,10 @@ void generate_barriers(world_editor::WorldEditor& editor, osm_parser::ProcessedE
                 wall_height = barrier_height;
             }
         }
+        // Ensure minimum height of 2
+        if (wall_height < 2) {
+            wall_height = 2;
+        }
     }
 
     for (std::size_t i = 1; i < way.nodes.size(); ++i) {
@@ -135,7 +139,56 @@ void generate_barrier_nodes(world_editor::WorldEditor& editor, osm_parser::Proce
     if (val == "bollard") {
         editor.set_block(block_definitions::COBBLESTONE_WALL, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
     } else if (val == "stile" || val == "gate" || val == "swing_gate" || val == "lift_gate") {
-        // intentionally left blank (original code had commented behavior)
+        /* Future implementation for gates:
+        editor.set_block(
+            block_definitions::OAK_TRAPDOOR,
+            node.x,
+            1,
+            node.z,
+            std::optional<std::vector<block_definitions::Block>>(
+                std::vector<block_definitions::Block>{
+                    block_definitions::COBBLESTONE_WALL,
+                    block_definitions::OAK_FENCE,
+                    block_definitions::STONE_BRICK_WALL,
+                    block_definitions::OAK_LEAVES,
+                    block_definitions::STONE_BRICK_SLAB
+                }
+            ),
+            std::optional<int>()
+        );
+        editor.set_block(
+            block_definitions::AIR,
+            node.x,
+            2,
+            node.z,
+            std::optional<std::vector<block_definitions::Block>>(
+                std::vector<block_definitions::Block>{
+                    block_definitions::COBBLESTONE_WALL,
+                    block_definitions::OAK_FENCE,
+                    block_definitions::STONE_BRICK_WALL,
+                    block_definitions::OAK_LEAVES,
+                    block_definitions::STONE_BRICK_SLAB
+                }
+            ),
+            std::optional<int>()
+        );
+        editor.set_block(
+            block_definitions::AIR,
+            node.x,
+            3,
+            node.z,
+            std::optional<std::vector<block_definitions::Block>>(
+                std::vector<block_definitions::Block>{
+                    block_definitions::COBBLESTONE_WALL,
+                    block_definitions::OAK_FENCE,
+                    block_definitions::STONE_BRICK_WALL,
+                    block_definitions::OAK_LEAVES,
+                    block_definitions::STONE_BRICK_SLAB
+                }
+            ),
+            std::optional<int>()
+        );
+        */
     } else if (val == "block") {
         editor.set_block(block_definitions::STONE, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
     } else if (val == "entrance") {

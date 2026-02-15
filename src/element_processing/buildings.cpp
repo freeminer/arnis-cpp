@@ -108,7 +108,7 @@ void generate_roof(WorldEditor* editor,
                    Block floor_block,
                    Block wall_block,
                    Block accent_block,
-                   int roof_type_int,
+                   RoofType roof_type,
                    const std::vector<std::pair<int,int>>& cached_floor_area,
                    int abs_terrain_offset);
 
@@ -176,6 +176,24 @@ void generate_buildings(WorldEditor* editor,
             } catch (...) {
                 min_level = 0;
             }
+        }
+    }
+
+    // Skip if 'layer' or 'level' negative
+    {
+        auto it = element.tags.find("layer");
+        if (it != element.tags.end()) {
+            try {
+                if (std::stoi(it->second) < 0) return;
+            } catch (...) {}
+        }
+    }
+    {
+        auto it = element.tags.find("level");
+        if (it != element.tags.end()) {
+            try {
+                if (std::stoi(it->second) < 0) return;
+            } catch (...) {}
         }
     }
 
@@ -292,24 +310,6 @@ void generate_buildings(WorldEditor* editor,
     };
     std::uniform_int_distribution<std::size_t> dist_accent_idx(0, sizeof(accent_blocks_arr)/sizeof(accent_blocks_arr[0]) - 1);
     Block accent_block = accent_blocks_arr[dist_accent_idx(rng)];
-
-    // Skip if 'layer' or 'level' negative
-    {
-        auto it = element.tags.find("layer");
-        if (it != element.tags.end()) {
-            try {
-                if (std::stoi(it->second) < 0) return;
-            } catch (...) {}
-        }
-    }
-    {
-        auto it = element.tags.find("level");
-        if (it != element.tags.end()) {
-            try {
-                if (std::stoi(it->second) < 0) return;
-            } catch (...) {}
-        }
-    }
 
     // building:levels
     {
@@ -600,8 +600,21 @@ void generate_buildings(WorldEditor* editor,
             auto it = element.tags.find("building");
             if (it != element.tags.end()) btype = it->second;
             bool skip_interior = (btype == "garage" || btype == "shed" || btype == "parking" || btype == "roof" || btype == "bridge");
+            
+            // Detect abandoned buildings (similar to Rust version)
+            bool is_abandoned_building = false;
+            auto it_abandoned = element.tags.find("abandoned");
+            if (it_abandoned != element.tags.end() && it_abandoned->second == "yes") {
+                is_abandoned_building = true;
+            } else {
+                auto it_abandoned_building = element.tags.find("abandoned:building");
+                if (it_abandoned_building != element.tags.end()) {
+                    is_abandoned_building = true;
+                }
+            }
+            
             if (!skip_interior && floor_area.size() > 100) {
-                generate_building_interior(*editor, floor_area, min_x, min_z, max_x, max_z, start_y_offset, building_height, wall_block, floor_levels, args, element, abs_terrain_offset);
+                generate_building_interior(*editor, floor_area, min_x, min_z, max_x, max_z, start_y_offset, building_height, wall_block, floor_levels, args, element, abs_terrain_offset, is_abandoned_building);
             }
         }
     }
@@ -1244,6 +1257,24 @@ void generate_building_from_relation(
     const ProcessedRelation& relation,
     const Args& args
 ) {
+    // Skip if 'layer' or 'level' negative
+    {
+        auto it = relation.tags.find("layer");
+        if (it != relation.tags.end()) {
+            try {
+                if (std::stoi(it->second) < 0) return;
+            } catch (...) {}
+        }
+    }
+    {
+        auto it = relation.tags.find("level");
+        if (it != relation.tags.end()) {
+            try {
+                if (std::stoi(it->second) < 0) return;
+            } catch (...) {}
+        }
+    }
+
     int relation_levels = 2;
     auto it = relation.tags.find(std::string("building:levels"));
     if (it != relation.tags.end()) {
@@ -1284,6 +1315,26 @@ void generate_bridge(
     const ProcessedWay& element,
     const std::optional<std::chrono::duration<double>>& floodfill_timeout
 ) {
+    // Need at least 2 nodes for a bridge
+    if (element.nodes.size() < 2) {
+        return;
+    }
+
+    // Get start and end node elevations and use MAX for level bridge deck
+    // Using MAX ensures bridges don't dip when multiple bridge ways meet in a valley
+    int bridge_deck_ground_y = 0;
+    if (!element.nodes.empty()) {
+        const auto& start_node = element.nodes.front();
+        const auto& end_node = element.nodes.back();
+        // Get ground reference from editor
+        auto* ground = editor.get_ground();
+        if (ground) {
+            int start_y = ground->level(XZPoint(start_node.x, start_node.z));
+            int end_y = ground->level(XZPoint(end_node.x, end_node.z));
+            bridge_deck_ground_y = std::max(start_y, end_y);
+        }
+    }
+
     Block floor_block = STONE;
     Block railing_block = STONE_BRICKS;
 
@@ -1312,8 +1363,10 @@ void generate_bridge(
                 int bx = std::get<0>(tp);
                 int by = std::get<1>(tp);
                 int bz = std::get<2>(tp);
-                editor.set_block(railing_block, bx, by + 1, bz, std::nullopt, std::nullopt);
-                editor.set_block(railing_block, bx, by, bz, std::nullopt, std::nullopt);
+                // Use fixed bridge deck height (max of endpoints)
+                int bridge_y = bridge_deck_ground_y + bridge_y_offset;
+                editor.set_block(railing_block, bx, bridge_y + 1, bz, std::nullopt, std::nullopt);
+                editor.set_block(railing_block, bx, bridge_y, bz, std::nullopt, std::nullopt);
             }
         }
 
@@ -1337,10 +1390,13 @@ void generate_bridge(
         }
     }
 
+    // Use the same level bridge deck height for filled areas
+    int floor_y = bridge_deck_ground_y + bridge_y_offset;
+
     for (const auto& p : bridge_area) {
         int x = p.first;
         int z = p.second;
-        editor.set_block(floor_block, x, bridge_y_offset, z, std::nullopt, std::nullopt);
+        editor.set_block(floor_block, x, floor_y, z, std::nullopt, std::nullopt);
     }
 }
 

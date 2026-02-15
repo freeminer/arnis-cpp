@@ -1,11 +1,12 @@
+use crate::clipping::clip_way_to_bbox;
 use crate::coordinate_system::cartesian::{XZBBox, XZPoint};
 use crate::coordinate_system::geographic::{LLBBox, LLPoint};
 use crate::coordinate_system::transformation::CoordTransformer;
 use crate::progress::emit_gui_progress_update;
 use colored::Colorize;
 use serde::Deserialize;
-use serde_json::Value;
 use std::collections::HashMap;
+use std::sync::Arc;
 
 // Raw data from OSM
 
@@ -28,9 +29,18 @@ struct OsmElement {
     pub members: Vec<OsmMember>,
 }
 
-#[derive(Deserialize)]
-struct OsmData {
-    pub elements: Vec<OsmElement>,
+#[derive(Debug, Deserialize)]
+pub struct OsmData {
+    elements: Vec<OsmElement>,
+    #[serde(default)]
+    pub remark: Option<String>,
+}
+
+impl OsmData {
+    /// Returns true if there are no elements in the OSM data
+    pub fn is_empty(&self) -> bool {
+        self.elements.is_empty()
+    }
 }
 
 struct SplitOsmData {
@@ -67,11 +77,6 @@ impl SplitOsmData {
     }
 }
 
-fn parse_raw_osm_data(json_data: Value) -> Result<SplitOsmData, serde_json::Error> {
-    let osm_data: OsmData = serde_json::from_value(json_data)?;
-    Ok(SplitOsmData::from_raw_osm_data(osm_data))
-}
-
 // End raw data
 
 // Normalized data that we can use
@@ -106,12 +111,13 @@ pub struct ProcessedWay {
 pub enum ProcessedMemberRole {
     Outer,
     Inner,
+    Part,
 }
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct ProcessedMember {
     pub role: ProcessedMemberRole,
-    pub way: ProcessedWay,
+    pub way: Arc<ProcessedWay>,
 }
 
 #[derive(Debug, Clone, PartialEq)]
@@ -163,7 +169,7 @@ impl ProcessedElement {
 }
 
 pub fn parse_osm_data(
-    json_data: Value,
+    osm_data: OsmData,
     bbox: LLBBox,
     scale: f64,
     debug: bool,
@@ -173,7 +179,7 @@ pub fn parse_osm_data(
     emit_gui_progress_update(5.0, "Parsing data...");
 
     // Deserialize the JSON data into the OSMData structure
-    let data = parse_raw_osm_data(json_data).expect("Failed to parse OSM data");
+    let data = SplitOsmData::from_raw_osm_data(osm_data);
 
     let (coord_transformer, xzbbox) = CoordTransformer::llbbox_to_xzbbox(&bbox, scale)
         .unwrap_or_else(|e| {
@@ -188,7 +194,7 @@ pub fn parse_osm_data(
     }
 
     let mut nodes_map: HashMap<u64, ProcessedNode> = HashMap::new();
-    let mut ways_map: HashMap<u64, ProcessedWay> = HashMap::new();
+    let mut ways_map: HashMap<u64, Arc<ProcessedWay>> = HashMap::new();
 
     let mut processed_elements: Vec<ProcessedElement> = Vec::new();
 
@@ -211,9 +217,11 @@ pub fn parse_osm_data(
 
             nodes_map.insert(element.id, processed.clone());
 
-            // Process nodes with tags
-            if let Some(tags) = &element.tags {
-                if !tags.is_empty() {
+            // Only add tagged nodes to processed_elements if they're within or near the bbox
+            // This significantly improves performance by filtering out distant nodes
+            if !element.tags.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
+                // Node has tags, check if it's in the bbox (with some margin)
+                if xzbbox.contains(&xzpoint) {
                     processed_elements.push(ProcessedElement::Node(processed));
                 }
             }
@@ -231,22 +239,32 @@ pub fn parse_osm_data(
             }
         }
 
-        if !nodes.is_empty() {
-            // Clip the way to the bounding box
-            let tags = element.tags.clone().unwrap_or_default();
-            let clipped_nodes = clip_way_to_bbox(&nodes, &xzbbox, &tags);
+        // Clip the way to bbox to reduce node count dramatically
+        let tags = element.tags.clone().unwrap_or_default();
 
-            if !clipped_nodes.is_empty() {
-                let processed: ProcessedWay = ProcessedWay {
-                    id: element.id,
-                    tags: element.tags.clone().unwrap_or_default(),
-                    nodes: clipped_nodes,
-                };
+        // Store unclipped way for relation assembly (clipping happens after ring merging)
+        let way = Arc::new(ProcessedWay {
+            id: element.id,
+            tags,
+            nodes,
+        });
+        ways_map.insert(element.id, Arc::clone(&way));
 
-                ways_map.insert(element.id, processed.clone());
-                processed_elements.push(ProcessedElement::Way(processed));
-            }
+        // Clip way nodes for standalone way processing (not relations)
+        let clipped_nodes = clip_way_to_bbox(&way.nodes, &xzbbox);
+
+        // Skip ways that are completely outside the bbox (empty after clipping)
+        if clipped_nodes.is_empty() {
+            continue;
         }
+
+        let processed: ProcessedWay = ProcessedWay {
+            id: element.id,
+            tags: way.tags.clone(),
+            nodes: clipped_nodes,
+        };
+
+        processed_elements.push(ProcessedElement::Way(processed));
     }
 
     // Third pass: process relations and clip member ways
@@ -255,10 +273,27 @@ pub fn parse_osm_data(
             continue;
         };
 
-        // Only process multipolygons for now
-        if tags.get("type").map(|x: &String| x.as_str()) != Some("multipolygon") {
+        // Process multipolygons, boundary relations, and building relations
+        let relation_type = tags.get("type").map(|x: &String| x.as_str());
+        if relation_type != Some("multipolygon")
+            && relation_type != Some("boundary")
+            && relation_type != Some("building")
+        {
             continue;
         };
+
+        let is_building_relation = relation_type == Some("building");
+
+        // Water relations require unclipped ways for ring merging in water_areas.rs
+        // Boundary relations also require unclipped ways for proper ring assembly
+        // Building multipolygon relations also need unclipped ways so that
+        // open outer-way segments can be merged into closed rings before clipping
+        let is_water_relation = is_water_element(tags);
+        let is_boundary_relation = tags.contains_key("boundary");
+        let is_building_multipolygon = (tags.contains_key("building")
+            || tags.contains_key("building:part"))
+            && relation_type == Some("multipolygon");
+        let keep_unclipped = is_water_relation || is_boundary_relation || is_building_multipolygon;
 
         let members: Vec<ProcessedMember> = element
             .members
@@ -269,22 +304,50 @@ pub fn parse_osm_data(
                     return None;
                 }
 
-                let role = match mem.role.as_str() {
-                    "outer" => ProcessedMemberRole::Outer,
-                    "inner" => ProcessedMemberRole::Inner,
-                    _ => return None,
+                let trimmed_role = mem.role.trim();
+                let role = if trimmed_role.eq_ignore_ascii_case("outer")
+                    || trimmed_role.eq_ignore_ascii_case("outline")
+                {
+                    ProcessedMemberRole::Outer
+                } else if trimmed_role.eq_ignore_ascii_case("inner") {
+                    ProcessedMemberRole::Inner
+                } else if trimmed_role.eq_ignore_ascii_case("part") && is_building_relation {
+                    // "part" role only applies to type=building relations.
+                    // For multipolygon/boundary relations, treat it as unknown.
+                    ProcessedMemberRole::Part
+                } else {
+                    return None;
                 };
 
                 // Check if the way exists in ways_map
-                let way: ProcessedWay = match ways_map.get(&mem.r#ref) {
-                    Some(w) => w.clone(),
+                let way = match ways_map.get(&mem.r#ref) {
+                    Some(w) => Arc::clone(w),
                     None => {
                         // Way was likely filtered out because it was completely outside the bbox
                         return None;
                     }
                 };
 
-                Some(ProcessedMember { role, way })
+                // Water and boundary relations: keep unclipped for ring merging
+                // Other relations: clip member ways now
+                let final_way = if keep_unclipped {
+                    way
+                } else {
+                    let clipped_nodes = clip_way_to_bbox(&way.nodes, &xzbbox);
+                    if clipped_nodes.is_empty() {
+                        return None;
+                    }
+                    Arc::new(ProcessedWay {
+                        id: way.id,
+                        tags: way.tags.clone(),
+                        nodes: clipped_nodes,
+                    })
+                };
+
+                Some(ProcessedMember {
+                    role,
+                    way: final_way,
+                })
             })
             .collect();
 
@@ -297,9 +360,36 @@ pub fn parse_osm_data(
         }
     }
 
-    emit_gui_progress_update(15.0, "");
+    emit_gui_progress_update(14.0, "");
+
+    drop(nodes_map);
+    drop(ways_map);
 
     (processed_elements, xzbbox)
+}
+
+/// Returns true if tags indicate a water element handled by water_areas.rs.
+fn is_water_element(tags: &HashMap<String, String>) -> bool {
+    // Check for explicit water tag
+    if tags.contains_key("water") {
+        return true;
+    }
+
+    // Check for natural=water or natural=bay
+    if let Some(natural_val) = tags.get("natural") {
+        if natural_val == "water" || natural_val == "bay" {
+            return true;
+        }
+    }
+
+    // Check for waterway=dock (also handled as water area)
+    if let Some(waterway_val) = tags.get("waterway") {
+        if waterway_val == "dock" {
+            return true;
+        }
+    }
+
+    false
 }
 
 const PRIORITY_ORDER: [&str; 6] = [
@@ -316,288 +406,4 @@ pub fn get_priority(element: &ProcessedElement) -> usize {
     }
     // Return a default priority if none of the tags match
     PRIORITY_ORDER.len()
-}
-
-/// Clips a way to the bounding box boundaries using Sutherland-Hodgman algorithm for polygons
-/// or simple line clipping for polylines
-fn clip_way_to_bbox(
-    nodes: &[ProcessedNode],
-    xzbbox: &XZBBox,
-    tags: &HashMap<String, String>,
-) -> Vec<ProcessedNode> {
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-
-    // For certain tags, use simple line clipping instead of polygon clipping
-    if ["waterway", "highway", "barrier", "railway", "service"]
-        .iter()
-        .any(|key| tags.contains_key(*key))
-    {
-        return clip_polyline_to_bbox(nodes, xzbbox);
-    }
-
-    // For now, let's be conservative and only clip if the way actually extends outside the bbox
-    // Check if any nodes are outside the bbox
-    let has_nodes_outside = nodes
-        .iter()
-        .any(|node| !xzbbox.contains(&XZPoint::new(node.x, node.z)));
-
-    // If all nodes are inside the bbox, return the original nodes unchanged
-    if !has_nodes_outside {
-        return nodes.to_vec();
-    }
-
-    let min_x = xzbbox.min_x() as f64;
-    let min_z = xzbbox.min_z() as f64;
-    let max_x = xzbbox.max_x() as f64;
-    let max_z = xzbbox.max_z() as f64;
-
-    // Convert nodes to a simple coordinate list for easier processing
-    let mut polygon: Vec<(f64, f64)> = nodes.iter().map(|n| (n.x as f64, n.z as f64)).collect();
-
-    // Only close polygon if it's already nearly closed (last point close to first)
-    let should_close = if polygon.len() > 2 {
-        let first = polygon[0];
-        let last = polygon[polygon.len() - 1];
-        let distance = ((first.0 - last.0).powi(2) + (first.1 - last.1).powi(2)).sqrt();
-        distance < 10.0 // Close if within 10 units
-    } else {
-        false
-    };
-
-    if should_close && polygon.first() != polygon.last() {
-        polygon.push(polygon[0]);
-    }
-
-    // Clip against each edge of the bounding box using Sutherland-Hodgman algorithm
-    let bbox_edges = [
-        (min_x, min_z, max_x, min_z), // Bottom edge
-        (max_x, min_z, max_x, max_z), // Right edge
-        (max_x, max_z, min_x, max_z), // Top edge
-        (min_x, max_z, min_x, min_z), // Left edge
-    ];
-
-    for (edge_x1, edge_z1, edge_x2, edge_z2) in bbox_edges {
-        let mut clipped_polygon = Vec::new();
-
-        if polygon.is_empty() {
-            break;
-        }
-
-        for i in 0..polygon.len() {
-            let current = polygon[i];
-            let next = polygon[(i + 1) % polygon.len()];
-
-            let current_inside = point_inside_edge(current, edge_x1, edge_z1, edge_x2, edge_z2);
-            let next_inside = point_inside_edge(next, edge_x1, edge_z1, edge_x2, edge_z2);
-
-            if next_inside {
-                if !current_inside {
-                    // Entering: add intersection point
-                    if let Some(intersection) = line_edge_intersection(
-                        current.0, current.1, next.0, next.1, edge_x1, edge_z1, edge_x2, edge_z2,
-                    ) {
-                        clipped_polygon.push(intersection);
-                    }
-                }
-                // Add the next point since it's inside
-                clipped_polygon.push(next);
-            } else if current_inside {
-                // Exiting: add intersection point
-                if let Some(intersection) = line_edge_intersection(
-                    current.0, current.1, next.0, next.1, edge_x1, edge_z1, edge_x2, edge_z2,
-                ) {
-                    clipped_polygon.push(intersection);
-                }
-            }
-            // If both outside, don't add anything
-        }
-
-        polygon = clipped_polygon;
-    }
-
-    // Convert back to ProcessedNode format
-    let mut result: Vec<ProcessedNode> = polygon
-        .into_iter()
-        .enumerate()
-        .map(|(i, (x, z))| ProcessedNode {
-            id: i as u64, // Use index as synthetic ID
-            x: x.round() as i32,
-            z: z.round() as i32,
-            tags: HashMap::new(),
-        })
-        .collect();
-
-    // For closed polygons, ensure the first and last nodes have the same ID to maintain closure
-    // Check if the original was nearly closed and if so, ensure the clipped result is also closed
-    if nodes.len() > 2 {
-        let original_first = &nodes[0];
-        let original_last = nodes.last().unwrap();
-        let was_closed = original_first.id == original_last.id;
-
-        if was_closed && !result.is_empty() && result.len() > 2 {
-            // Make sure the clipped polygon is also closed by giving the last node the same ID as the first
-            let first_id = result[0].id;
-            if let Some(last_node) = result.last_mut() {
-                last_node.id = first_id;
-            }
-        }
-    }
-
-    result
-}
-
-/// Check if a point is on the "inside" side of an edge (using cross product)
-fn point_inside_edge(
-    point: (f64, f64),
-    edge_x1: f64,
-    edge_z1: f64,
-    edge_x2: f64,
-    edge_z2: f64,
-) -> bool {
-    // Calculate cross product to determine which side of the edge the point is on
-    let edge_dx = edge_x2 - edge_x1;
-    let edge_dz = edge_z2 - edge_z1;
-    let point_dx = point.0 - edge_x1;
-    let point_dz = point.1 - edge_z1;
-
-    // Cross product: positive means point is on the "left" side (inside for clockwise bbox)
-    let cross_product = edge_dx * point_dz - edge_dz * point_dx;
-    cross_product >= 0.0
-}
-
-/// Find intersection between a line segment and an edge
-#[allow(clippy::too_many_arguments)]
-fn line_edge_intersection(
-    line_x1: f64,
-    line_z1: f64,
-    line_x2: f64,
-    line_z2: f64,
-    edge_x1: f64,
-    edge_z1: f64,
-    edge_x2: f64,
-    edge_z2: f64,
-) -> Option<(f64, f64)> {
-    let line_dx = line_x2 - line_x1;
-    let line_dz = line_z2 - line_z1;
-    let edge_dx = edge_x2 - edge_x1;
-    let edge_dz = edge_z2 - edge_z1;
-
-    let denom = line_dx * edge_dz - line_dz * edge_dx;
-
-    if denom.abs() < 1e-10 {
-        return None; // Lines are parallel
-    }
-
-    let dx = edge_x1 - line_x1;
-    let dz = edge_z1 - line_z1;
-
-    let t = (dx * edge_dz - dz * edge_dx) / denom;
-
-    // Only return intersection if it's on the line segment
-    if (0.0..=1.0).contains(&t) {
-        let x = line_x1 + t * line_dx;
-        let z = line_z1 + t * line_dz;
-        Some((x, z))
-    } else {
-        None
-    }
-}
-
-/// Clips a polyline (open line) to the bounding box boundaries
-/// This prevents artificial connections that can occur with polygon clipping algorithms
-fn clip_polyline_to_bbox(nodes: &[ProcessedNode], xzbbox: &XZBBox) -> Vec<ProcessedNode> {
-    if nodes.is_empty() {
-        return Vec::new();
-    }
-
-    let min_x = xzbbox.min_x() as f64;
-    let min_z = xzbbox.min_z() as f64;
-    let max_x = xzbbox.max_x() as f64;
-    let max_z = xzbbox.max_z() as f64;
-
-    let mut result = Vec::new();
-
-    for i in 0..nodes.len() {
-        let current = &nodes[i];
-        let current_point = (current.x as f64, current.z as f64);
-
-        // Check if current point is inside bbox
-        let current_inside = current_point.0 >= min_x
-            && current_point.0 <= max_x
-            && current_point.1 >= min_z
-            && current_point.1 <= max_z;
-
-        if current_inside {
-            result.push(current.clone());
-        }
-
-        // If there's a next point, check for intersections with bbox edges
-        if i + 1 < nodes.len() {
-            let next = &nodes[i + 1];
-            let next_point = (next.x as f64, next.z as f64);
-            let next_inside = next_point.0 >= min_x
-                && next_point.0 <= max_x
-                && next_point.1 >= min_z
-                && next_point.1 <= max_z;
-
-            // If line segment crosses bbox boundary, add intersection points
-            if current_inside != next_inside {
-                let intersections =
-                    find_bbox_intersections(current_point, next_point, min_x, min_z, max_x, max_z);
-
-                for intersection in intersections {
-                    result.push(ProcessedNode {
-                        id: 0, // Synthetic ID for intersection points
-                        x: intersection.0.round() as i32,
-                        z: intersection.1.round() as i32,
-                        tags: HashMap::new(),
-                    });
-                }
-            }
-        }
-    }
-
-    result
-}
-
-/// Find intersections between a line segment and bounding box edges
-fn find_bbox_intersections(
-    start: (f64, f64),
-    end: (f64, f64),
-    min_x: f64,
-    min_z: f64,
-    max_x: f64,
-    max_z: f64,
-) -> Vec<(f64, f64)> {
-    let mut intersections = Vec::new();
-
-    // Check intersection with each bbox edge
-    let bbox_edges = [
-        (min_x, min_z, max_x, min_z), // Bottom edge
-        (max_x, min_z, max_x, max_z), // Right edge
-        (max_x, max_z, min_x, max_z), // Top edge
-        (min_x, max_z, min_x, min_z), // Left edge
-    ];
-
-    for (edge_x1, edge_z1, edge_x2, edge_z2) in bbox_edges {
-        if let Some(intersection) = line_edge_intersection(
-            start.0, start.1, end.0, end.1, edge_x1, edge_z1, edge_x2, edge_z2,
-        ) {
-            // Check if intersection is actually on the bbox edge
-            let on_edge = (intersection.0 >= min_x
-                && intersection.0 <= max_x
-                && intersection.1 >= min_z
-                && intersection.1 <= max_z)
-                && ((intersection.0 == min_x || intersection.0 == max_x)
-                    || (intersection.1 == min_z || intersection.1 == max_z));
-
-            if on_edge {
-                intersections.push(intersection);
-            }
-        }
-    }
-
-    intersections
 }

@@ -12,17 +12,38 @@ if (window.__TAURI__) {
 
 const DEFAULT_LOCALE_PATH = `./locales/en.json`;
 
+// Track current bbox selection info localization key for language changes
+let currentBboxSelectionKey = "select_area_prompt";
+let currentBboxSelectionColor = "#ffffff";
+
+// Helper function to set bbox selection info text and track it for language changes
+async function setBboxSelectionInfo(bboxSelectionElement, localizationKey, color) {
+  currentBboxSelectionKey = localizationKey;
+  currentBboxSelectionColor = color;
+  
+  // Ensure localization is available
+  let localization = window.localization;
+  if (!localization) {
+    localization = await getLocalization();
+  }
+  
+  localizeElement(localization, { element: bboxSelectionElement }, localizationKey);
+  bboxSelectionElement.style.color = color;
+}
+
 // Initialize elements and start the demo progress
 window.addEventListener("DOMContentLoaded", async () => {
   registerMessageEvent();
-  window.selectWorld = selectWorld;
+  window.createWorld = createWorld;
   window.startGeneration = startGeneration;
   setupProgressListener();
+  await initSavePath();
   initSettings();
-  initWorldPicker();
+  initTelemetryConsent();
   handleBboxInput();
   const localization = await getLocalization();
   await applyLocalization(localization);
+  updateFormatToggleUI(selectedWorldFormat);
   initFooter();
   await checkForUpdates();
 });
@@ -64,7 +85,7 @@ async function localizeElement(json, elementObject, localizedStringKey) {
   const attribute = localizedStringKey.startsWith("placeholder_") ? "placeholder" : "textContent";
 
   if (element) {
-    if (localizedStringKey in json) {
+    if (json && localizedStringKey in json) {
       element[attribute] = json[localizedStringKey];
     } else {
       // Fallback to default (English) string
@@ -76,41 +97,45 @@ async function localizeElement(json, elementObject, localizedStringKey) {
 
 async function applyLocalization(localization) {
   const localizationElements = {
-    "h2[data-localize='select_location']": "select_location",
-    "#bbox-text": "zoom_in_and_choose",
-    "h2[data-localize='select_world']": "select_world",
-    "span[id='choose_world']": "choose_world",
+    "span[id='choose_world']": "create_world",
     "#selected-world": "no_world_selected",
     "#start-button": "start_generation",
-    "h2[data-localize='progress']": "progress",
-    "h2[data-localize='choose_world_modal_title']": "choose_world_modal_title",
-    "button[data-localize='select_existing_world']": "select_existing_world",
-    "button[data-localize='generate_new_world']": "generate_new_world",
     "h2[data-localize='customization_settings']": "customization_settings",
-    "label[data-localize='world_scale']": "world_scale",
-    "label[data-localize='custom_bounding_box']": "custom_bounding_box",
-    "label[data-localize='floodfill_timeout']": "floodfill_timeout",
+    "span[data-localize='world_scale']": "world_scale",
+    "span[data-localize='custom_bounding_box']": "custom_bounding_box",
     // DEPRECATED: Ground level localization removed
     // "label[data-localize='ground_level']": "ground_level",
-    "label[data-localize='language']": "language",
-    "label[data-localize='terrain']": "terrain",
-    "label[data-localize='interior']": "interior",
-    "label[data-localize='roof']": "roof",
-    "label[data-localize='fillground']": "fillground",
-    "label[data-localize='map_theme']": "map_theme",
+    "span[data-localize='language']": "language",
+    "span[data-localize='generation_mode']": "generation_mode",
+    "option[data-localize='mode_geo_terrain']": "mode_geo_terrain",
+    "option[data-localize='mode_geo_only']": "mode_geo_only",
+    "option[data-localize='mode_terrain_only']": "mode_terrain_only",
+    "span[data-localize='terrain']": "terrain",
+    "span[data-localize='interior']": "interior",
+    "span[data-localize='roof']": "roof",
+    "span[data-localize='fillground']": "fillground",
+    "span[data-localize='city_boundaries']": "city_boundaries",
+    "span[data-localize='map_theme']": "map_theme",
+    "span[data-localize='save_path']": "save_path",
     ".footer-link": "footer_text",
     "button[data-localize='license_and_credits']": "license_and_credits",
     "h2[data-localize='license_and_credits']": "license_and_credits",
 
     // Placeholder strings
     "input[id='bbox-coords']": "placeholder_bbox",
-    "input[id='floodfill-timeout']": "placeholder_floodfill",
     // DEPRECATED: Ground level placeholder removed
     // "input[id='ground-level']": "placeholder_ground"
   };
 
   for (const selector in localizationElements) {
     localizeElement(localization, { selector: selector }, localizationElements[selector]);
+  }
+
+  // Re-apply current bbox selection info text with new language
+  const bboxSelectionInfo = document.getElementById("bbox-selection-info");
+  if (bboxSelectionInfo && currentBboxSelectionKey) {
+    localizeElement(localization, { element: bboxSelectionInfo }, currentBboxSelectionKey);
+    bboxSelectionInfo.style.color = currentBboxSelectionColor;
   }
 
   // Update error messages
@@ -161,7 +186,7 @@ async function checkForUpdates() {
       updateMessage.style.textDecoration = "none";
 
       localizeElement(window.localization, { element: updateMessage }, "new_version_available");
-      footer.style.marginTop = "15px";
+      footer.style.marginTop = "10px";
       footer.appendChild(updateMessage);
     }
   } catch (error) {
@@ -184,7 +209,7 @@ function registerMessageEvent() {
 // Function to set up the progress bar listener
 function setupProgressListener() {
   const progressBar = document.getElementById("progress-bar");
-  const progressMessage = document.getElementById("progress-message");
+  const progressInfo = document.getElementById("progress-info");
   const progressDetail = document.getElementById("progress-detail");
 
   window.__TAURI__.event.listen("progress-update", (event) => {
@@ -196,17 +221,34 @@ function setupProgressListener() {
     }
 
     if (message != "") {
-      progressMessage.textContent = message;
+      progressInfo.textContent = message;
 
       if (message.startsWith("Error!")) {
-        progressMessage.style.color = "#fa7878";
+        progressInfo.style.color = "#fa7878";
         generationButtonEnabled = true;
       } else if (message.startsWith("Done!")) {
-        progressMessage.style.color = "#7bd864";
+        progressInfo.style.color = "#7bd864";
         generationButtonEnabled = true;
       } else {
-        progressMessage.style.color = "";
+        progressInfo.style.color = "#ececec";
       }
+    }
+  });
+
+  // Listen for map preview ready event from backend
+  window.__TAURI__.event.listen("map-preview-ready", () => {
+    console.log("Map preview ready event received");
+    showWorldPreviewButton();
+  });
+
+  // Listen for open-mcworld-file event to show the generated Bedrock world in file explorer
+  window.__TAURI__.event.listen("open-mcworld-file", async (event) => {
+    const filePath = event.payload;
+    try {
+      // Use our custom command to show the file in the system file explorer
+      await invoke("gui_show_in_folder", { path: filePath });
+    } catch (error) {
+      console.error("Failed to show mcworld file in folder:", error);
     }
   });
 }
@@ -229,6 +271,20 @@ function initSettings() {
     settingsModal.style.display = "none";
   }
 
+  // Close settings and license modals on escape key
+  document.addEventListener("keydown", (event) => {
+    if (event.key === "Escape") {
+      if (settingsModal.style.display === "flex") {
+        closeSettings();
+      }
+      
+      const licenseModal = document.getElementById("license-modal");
+      if (licenseModal && licenseModal.style.display === "flex") {
+        closeLicense();
+      }
+    }
+  });
+
   window.openSettings = openSettings;
   window.closeSettings = closeSettings;
 
@@ -236,6 +292,12 @@ function initSettings() {
   slider.addEventListener("input", () => {
     sliderValue.textContent = parseFloat(slider.value).toFixed(2);
   });
+
+  // World format toggle (Java/Bedrock)
+  initWorldFormatToggle();
+
+  // Save path setting
+  initSavePathSetting();
 
   // Language selector
   const languageSelect = document.getElementById("language-select");
@@ -275,6 +337,14 @@ function initSettings() {
     // Reload localization with the new language
     const localization = await fetchLanguage(selectedLanguage);
     await applyLocalization(localization);
+
+    // Restore correct #selected-world text after localization overwrites it
+    updateFormatToggleUI(selectedWorldFormat);
+    // If a world was already created, show its name
+    if (worldPath) {
+      const lastSegment = worldPath.split(/[\\/]/).pop();
+      document.getElementById('selected-world').textContent = lastSegment;
+    }
   });
 
   // Tile theme selector
@@ -301,6 +371,20 @@ function initSettings() {
     }
   });
 
+  // Telemetry consent toggle
+  const telemetryToggle = document.getElementById("telemetry-toggle");
+  const telemetryKey = 'telemetry-consent';
+
+  // Load saved telemetry consent
+  const savedConsent = localStorage.getItem(telemetryKey);
+  telemetryToggle.checked = savedConsent === 'true';
+
+  // Handle telemetry consent change
+  telemetryToggle.addEventListener("change", () => {
+    const isEnabled = telemetryToggle.checked;
+    localStorage.setItem(telemetryKey, isEnabled ? 'true' : 'false');
+  });
+
 
   /// License and Credits
   function openLicense() {
@@ -325,24 +409,194 @@ function initSettings() {
   window.closeLicense = closeLicense;
 }
 
-function initWorldPicker() {
-  // World Picker
-  const worldPickerModal = document.getElementById("world-modal");
+// World format selection (Java/Bedrock)
+let selectedWorldFormat = 'java'; // Default to Java
 
-  // Open world picker modal
-  function openWorldPicker() {
-    worldPickerModal.style.display = "flex";
-    worldPickerModal.style.justifyContent = "center";
-    worldPickerModal.style.alignItems = "center";
+function initWorldFormatToggle() {
+  // Load saved format preference
+  const savedFormat = localStorage.getItem('arnis-world-format');
+  if (savedFormat && (savedFormat === 'java' || savedFormat === 'bedrock')) {
+    selectedWorldFormat = savedFormat;
+  }
+  
+  // Apply the saved selection to UI
+  updateFormatToggleUI(selectedWorldFormat);
+}
+
+function setWorldFormat(format) {
+  if (format !== 'java' && format !== 'bedrock') return;
+  
+  selectedWorldFormat = format;
+  localStorage.setItem('arnis-world-format', format);
+  updateFormatToggleUI(format);
+}
+
+function updateFormatToggleUI(format) {
+  const javaBtn = document.getElementById('format-java');
+  const bedrockBtn = document.getElementById('format-bedrock');
+  const chooseWorldBtn = document.getElementById('choose-world-btn');
+  const selectedWorldText = document.getElementById('selected-world');
+  
+  if (format === 'java') {
+    javaBtn.classList.add('format-active');
+    bedrockBtn.classList.remove('format-active');
+    // Enable Create World button for Java
+    if (chooseWorldBtn) {
+      chooseWorldBtn.disabled = false;
+      chooseWorldBtn.style.opacity = '1';
+      chooseWorldBtn.style.cursor = 'pointer';
+    }
+    // Show appropriate text based on whether a world was already created
+    if (selectedWorldText && !worldPath) {
+      const noWorldText = window.localization?.no_world_selected || 'No world created';
+      selectedWorldText.textContent = noWorldText;
+      selectedWorldText.style.color = '#fecc44';
+    }
+  } else {
+    javaBtn.classList.remove('format-active');
+    bedrockBtn.classList.add('format-active');
+    // Disable Create World button for Bedrock
+    if (chooseWorldBtn) {
+      chooseWorldBtn.disabled = true;
+      chooseWorldBtn.style.opacity = '0.5';
+      chooseWorldBtn.style.cursor = 'not-allowed';
+    }
+    // Clear world selection and show Bedrock info message
+    worldPath = "";
+    if (selectedWorldText) {
+      const bedrockText = window.localization?.bedrock_auto_generated || 'Bedrock world is auto-generated';
+      selectedWorldText.textContent = bedrockText;
+      selectedWorldText.style.color = '#fecc44';
+    }
+  }
+}
+
+// Expose to window for onclick handlers
+window.setWorldFormat = setWorldFormat;
+
+// Telemetry consent (first run only)
+function initTelemetryConsent() {
+  const key = 'telemetry-consent'; // values: 'true' | 'false'
+  const existing = localStorage.getItem(key);
+
+  const modal = document.getElementById('telemetry-modal');
+  if (!modal) return;
+
+  if (existing === null) {
+    // First run: ask for consent
+    modal.style.display = 'flex';
+    modal.style.justifyContent = 'center';
+    modal.style.alignItems = 'center';
   }
 
-  // Close world picker modal
-  function closeWorldPicker() {
-    worldPickerModal.style.display = "none";
+  // Expose handlers
+  window.acceptTelemetry = () => {
+    localStorage.setItem(key, 'true');
+    modal.style.display = 'none';
+    // Update settings toggle to reflect the consent
+    const telemetryToggle = document.getElementById('telemetry-toggle');
+    if (telemetryToggle) {
+      telemetryToggle.checked = true;
+    }
+  };
+
+  window.rejectTelemetry = () => {
+    localStorage.setItem(key, 'false');
+    modal.style.display = 'none';
+    // Update settings toggle to reflect the consent
+    const telemetryToggle = document.getElementById('telemetry-toggle');
+    if (telemetryToggle) {
+      telemetryToggle.checked = false;
+    }
+  };
+
+  // Utility for other scripts to read consent
+  window.getTelemetryConsent = () => {
+    const v = localStorage.getItem(key);
+    return v === null ? null : v === 'true';
+  };
+}
+
+/// Save path management
+let savePath = "";
+
+async function initSavePath() {
+  // Check if user has a saved path in localStorage
+  const saved = localStorage.getItem('arnis-save-path');
+  if (saved) {
+    // Validate the saved path still exists (handles upgrades / moved directories)
+    try {
+      const normalized = await invoke('gui_set_save_path', { path: saved });
+      savePath = normalized;
+      localStorage.setItem('arnis-save-path', savePath);
+    } catch (_) {
+      // Saved path is no longer valid – re-detect
+      console.warn("Stored save path no longer valid, re-detecting...");
+      localStorage.removeItem('arnis-save-path');
+      try {
+        savePath = await invoke('gui_get_default_save_path');
+        localStorage.setItem('arnis-save-path', savePath);
+      } catch (error) {
+        console.error("Failed to detect save path:", error);
+      }
+    }
+  } else {
+    // Auto-detect on first run
+    try {
+      savePath = await invoke('gui_get_default_save_path');
+      localStorage.setItem('arnis-save-path', savePath);
+    } catch (error) {
+      console.error("Failed to detect save path:", error);
+    }
   }
 
-  window.openWorldPicker = openWorldPicker;
-  window.closeWorldPicker = closeWorldPicker;
+  // Populate the save path input in settings
+  const savePathInput = document.getElementById('save-path-input');
+  if (savePathInput) {
+    savePathInput.value = savePath;
+  }
+}
+
+function initSavePathSetting() {
+  const savePathInput = document.getElementById('save-path-input');
+  if (!savePathInput) return;
+
+  savePathInput.value = savePath;
+
+  // Manual text input – validate on change, revert if invalid
+  savePathInput.addEventListener('change', async () => {
+    const newPath = savePathInput.value.trim();
+    if (!newPath) {
+      savePathInput.value = savePath;
+      return;
+    }
+
+    try {
+      const validated = await invoke('gui_set_save_path', { path: newPath });
+      savePath = validated;
+      localStorage.setItem('arnis-save-path', savePath);
+    } catch (_) {
+      // Invalid path – silently revert to previous value
+      savePathInput.value = savePath;
+    }
+  });
+
+  // Folder picker button
+  const browseBtn = document.getElementById('save-path-browse');
+  if (browseBtn) {
+    browseBtn.addEventListener('click', async () => {
+      try {
+        const picked = await invoke('gui_pick_save_directory', { startPath: savePath });
+        if (picked) {
+          savePath = picked;
+          savePathInput.value = savePath;
+          localStorage.setItem('arnis-save-path', savePath);
+        }
+      } catch (error) {
+        console.error("Folder picker failed:", error);
+      }
+    });
+  }
 }
 
 /**
@@ -352,7 +606,7 @@ function initWorldPicker() {
  */
 function handleBboxInput() {
   const inputBox = document.getElementById("bbox-coords");
-  const bboxInfo = document.getElementById("bbox-info");
+  const bboxSelectionInfo = document.getElementById("bbox-selection-info");
 
   inputBox.addEventListener("input", function () {
     const input = inputBox.value.trim();
@@ -364,11 +618,12 @@ function handleBboxInput() {
       
       // Clear the info text only if no map selection exists
       if (!mapSelectedBBox) {
-        bboxInfo.textContent = "";
-        bboxInfo.style.color = "";
+        setBboxSelectionInfo(bboxSelectionInfo, "select_area_prompt", "#ffffff");
       } else {
-        // Restore map selection display
-        displayBboxInfoText(mapSelectedBBox);
+        // Restore map selection info display but don't update input field
+        const [lng1, lat1, lng2, lat2] = mapSelectedBBox.split(" ").map(Number);
+        const selectedSize = calculateBBoxSize(lng1, lat1, lng2, lat2);
+        displayBboxSizeStatus(bboxSelectionInfo, selectedSize);
       }
       return;
     }
@@ -404,8 +659,7 @@ function handleBboxInput() {
         // Update the info text and mark custom input as valid
         customBBoxValid = true;
         selectedBBox = bboxText.replace(/,/g, ' '); // Convert to space format for consistency
-        localizeElement(window.localization, { element: bboxInfo }, "custom_selection_confirmed");
-        bboxInfo.style.color = "#7bd864";
+        setBboxSelectionInfo(bboxSelectionInfo, "custom_selection_confirmed", "#7bd864");
       } else {
         // Valid numbers but invalid order or range
         customBBoxValid = false;
@@ -415,8 +669,7 @@ function handleBboxInput() {
         } else {
           selectedBBox = mapSelectedBBox;
         }
-        localizeElement(window.localization, { element: bboxInfo }, "error_coordinates_out_of_range");
-        bboxInfo.style.color = "#fecc44";
+        setBboxSelectionInfo(bboxSelectionInfo, "error_coordinates_out_of_range", "#fecc44");
       }
     } else {
       // Input doesn't match the required format
@@ -427,8 +680,7 @@ function handleBboxInput() {
       } else {
         selectedBBox = mapSelectedBBox;
       }
-      localizeElement(window.localization, { element: bboxInfo }, "invalid_format");
-      bboxInfo.style.color = "#fecc44";
+      setBboxSelectionInfo(bboxSelectionInfo, "invalid_format", "#fecc44");
     }
   });
 }
@@ -471,11 +723,26 @@ function normalizeLongitude(lon) {
   return ((lon + 180) % 360 + 360) % 360 - 180;
 }
 
-const threshold1 = 30000000.00;
-const threshold2 = 45000000.00;
+const threshold1 = 44000000.00;  // Yellow warning threshold (~6.2km x 7km)
+const threshold2 = 85000000.00;  // Red error threshold (~8.7km x 9.8km)
 let selectedBBox = "";
 let mapSelectedBBox = "";  // Tracks bbox from map selection
 let customBBoxValid = false;  // Tracks if custom input is valid
+
+/**
+ * Displays the appropriate bbox size status message based on area thresholds
+ * @param {HTMLElement} bboxSelectionElement - The element to display the message in
+ * @param {number} selectedSize - The calculated bbox area in square meters
+ */
+function displayBboxSizeStatus(bboxSelectionElement, selectedSize) {
+  if (selectedSize > threshold2) {
+    setBboxSelectionInfo(bboxSelectionElement, "area_too_large", "#fa7878");
+  } else if (selectedSize > threshold1) {
+    setBboxSelectionInfo(bboxSelectionElement, "area_extensive", "#fecc44");
+  } else {
+    setBboxSelectionInfo(bboxSelectionElement, "selection_confirmed", "#7bd864");
+  }
+}
 
 // Function to handle incoming bbox data
 function displayBboxInfoText(bboxText) {
@@ -490,11 +757,13 @@ function displayBboxInfoText(bboxText) {
   selectedBBox = mapSelectedBBox;
   customBBoxValid = false;
 
-  const bboxInfo = document.getElementById("bbox-info");
+  const bboxSelectionInfo = document.getElementById("bbox-selection-info");
+  const bboxCoordsInput = document.getElementById("bbox-coords");
 
   // Reset the info text if the bbox is 0,0,0,0
   if (lng1 === 0 && lat1 === 0 && lng2 === 0 && lat2 === 0) {
-    bboxInfo.textContent = "";
+    setBboxSelectionInfo(bboxSelectionInfo, "select_area_prompt", "#ffffff");
+    bboxCoordsInput.value = "";
     mapSelectedBBox = "";
     if (!customBBoxValid) {
       selectedBBox = "";
@@ -502,39 +771,41 @@ function displayBboxInfoText(bboxText) {
     return;
   }
 
+  // Update the custom bbox input with the map selection (comma-separated format)
+  bboxCoordsInput.value = `${lng1},${lat1},${lng2},${lat2}`;
+
   // Calculate the size of the selected bbox
   const selectedSize = calculateBBoxSize(lng1, lat1, lng2, lat2);
 
-  if (selectedSize > threshold2) {
-    localizeElement(window.localization, { element: bboxInfo }, "area_too_large");
-    bboxInfo.style.color = "#fa7878";
-  } else if (selectedSize > threshold1) {
-    localizeElement(window.localization, { element: bboxInfo }, "area_extensive");
-    bboxInfo.style.color = "#fecc44";
-  } else {
-    localizeElement(window.localization, { element: bboxInfo }, "selection_confirmed");
-    bboxInfo.style.color = "#7bd864";
-  }
+  displayBboxSizeStatus(bboxSelectionInfo, selectedSize);
 }
 
 let worldPath = "";
-let isNewWorld = false;
 
-async function selectWorld(generate_new_world) {
+async function createWorld() {
+  // Don't create if format is Bedrock (button should be disabled)
+  if (selectedWorldFormat === 'bedrock') return;
+
+  // Don't create if save path hasn't been initialized
+  if (!savePath) {
+    console.warn("Cannot create world: save path not set");
+    return;
+  }
+
   try {
-    const worldName = await invoke('gui_select_world', { generateNew: generate_new_world });
+    const worldName = await invoke('gui_create_world', { savePath: savePath });
     if (worldName) {
       worldPath = worldName;
-      isNewWorld = generate_new_world;
       const lastSegment = worldName.split(/[\\/]/).pop();
       document.getElementById('selected-world').textContent = lastSegment;
       document.getElementById('selected-world').style.color = "#fecc44";
+
+      // Notify that world changed (reset preview)
+      notifyWorldChanged();
     }
   } catch (error) {
     handleWorldSelectionError(error);
   }
-
-  closeWorldPicker();
 }
 
 /**
@@ -570,18 +841,21 @@ async function startGeneration() {
     }
 
     if (!selectedBBox || selectedBBox == "0.000000 0.000000 0.000000 0.000000") {
-      const bboxInfo = document.getElementById('bbox-info');
-      localizeElement(window.localization, { element: bboxInfo }, "select_location_first");
-      bboxInfo.style.color = "#fa7878";
+      const bboxSelectionInfo = document.getElementById('bbox-selection-info');
+      setBboxSelectionInfo(bboxSelectionInfo, "select_location_first", "#fa7878");
       return;
     }
 
-    if (!worldPath || worldPath === "") {
+    // Only require world creation for Java format (Bedrock generates a new .mcworld file)
+    if (selectedWorldFormat === 'java' && (!worldPath || worldPath === "")) {
       const selectedWorld = document.getElementById('selected-world');
-      localizeElement(window.localization, { element: selectedWorld }, "select_minecraft_world_first");
+      localizeElement(window.localization, { element: selectedWorld }, "create_world_first");
       selectedWorld.style.color = "#fa7878";
       return;
     }
+
+    // Clear any existing world preview since we're generating a new one
+    notifyWorldChanged();
 
     // Get the map iframe reference
     const mapFrame = document.querySelector('.map-container');
@@ -595,19 +869,25 @@ async function startGeneration() {
       }
     }
 
-    var terrain = document.getElementById("terrain-toggle").checked;
+    // Get generation mode from dropdown
+    var generationMode = document.getElementById("generation-mode-select").value;
+    var terrain = (generationMode === "geo-terrain" || generationMode === "terrain-only");
+    var skipOsmObjects = (generationMode === "terrain-only");
+
     var interior = document.getElementById("interior-toggle").checked;
     var roof = document.getElementById("roof-toggle").checked;
     var fill_ground = document.getElementById("fillground-toggle").checked;
+    var city_boundaries = document.getElementById("city-boundaries-toggle").checked;
     var scale = parseFloat(document.getElementById("scale-value-slider").value);
-    var floodfill_timeout = parseInt(document.getElementById("floodfill-timeout").value, 10);
     // var ground_level = parseInt(document.getElementById("ground-level").value, 10);
     // DEPRECATED: Ground level input removed from UI
     var ground_level = -62;
 
-    // Validate floodfill_timeout and ground_level
-    floodfill_timeout = isNaN(floodfill_timeout) || floodfill_timeout < 0 ? 20 : floodfill_timeout;
-    ground_level = isNaN(ground_level) || ground_level < -62 ? 20 : ground_level;
+    // Validate ground_level
+    ground_level = isNaN(ground_level) || ground_level < -62 ? -62 : ground_level;
+
+    // Get telemetry consent (defaults to false if not set)
+    const telemetryConsent = window.getTelemetryConsent ? window.getTelemetryConsent() : false;
 
     // Pass the selected options to the Rust backend
     await invoke("gui_start_generation", {
@@ -615,13 +895,16 @@ async function startGeneration() {
         selectedWorld: worldPath,
         worldScale: scale,
         groundLevel: ground_level,
-        floodfillTimeout: floodfill_timeout,
         terrainEnabled: terrain,
+        skipOsmObjects: skipOsmObjects,
         interiorEnabled: interior,
         roofEnabled: roof,
         fillgroundEnabled: fill_ground,
-        isNewWorld: isNewWorld,
-        spawnPoint: spawnPoint
+        cityBoundariesEnabled: city_boundaries,
+        isNewWorld: true,
+        spawnPoint: spawnPoint,
+        telemetryConsent: telemetryConsent || false,
+        worldFormat: selectedWorldFormat
     });
 
     console.log("Generation process started.");
@@ -629,5 +912,62 @@ async function startGeneration() {
   } catch (error) {
     console.error("Error starting generation:", error);
     generationButtonEnabled = true;
+  }
+}
+
+// World preview overlay state
+let worldPreviewEnabled = false;
+let currentWorldMapData = null;
+
+/**
+ * Notifies the map iframe that world preview data is ready
+ * Called when the backend emits the map-preview-ready event
+ */
+async function showWorldPreviewButton() {
+  // Try to load the world map data
+  await loadWorldMapData();
+
+  if (currentWorldMapData) {
+    // Send data to the map iframe
+    const mapFrame = document.querySelector('.map-container');
+    if (mapFrame && mapFrame.contentWindow) {
+      mapFrame.contentWindow.postMessage({
+        type: 'worldPreviewReady',
+        data: currentWorldMapData
+      }, '*');
+      console.log("World preview data sent to map iframe");
+    }
+  } else {
+    console.warn("Map data not available yet");
+  }
+}
+
+/**
+ * Notifies the map iframe that the world has changed (reset preview)
+ */
+function notifyWorldChanged() {
+  currentWorldMapData = null;
+  const mapFrame = document.querySelector('.map-container');
+  if (mapFrame && mapFrame.contentWindow) {
+    mapFrame.contentWindow.postMessage({
+      type: 'worldChanged'
+    }, '*');
+  }
+}
+
+/**
+ * Loads the world map data from the backend
+ */
+async function loadWorldMapData() {
+  if (!worldPath) return;
+  
+  try {
+    const mapData = await invoke('gui_get_world_map_data', { worldPath: worldPath });
+    if (mapData) {
+      currentWorldMapData = mapData;
+      console.log("World map data loaded successfully");
+    }
+  } catch (error) {
+    console.error("Failed to load world map data:", error);
   }
 }

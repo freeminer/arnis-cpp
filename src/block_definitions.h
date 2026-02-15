@@ -197,6 +197,12 @@ extern Block STONE_BRICK_WALL;
 extern Block CARROTS;
 extern Block DARK_OAK_DOOR_LOWER;
 extern Block DARK_OAK_DOOR_UPPER;
+extern Block DARK_OAK_LOG;
+extern Block DARK_OAK_LEAVES;
+extern Block JUNGLE_LOG;
+extern Block JUNGLE_LEAVES;
+extern Block ACACIA_LOG;
+extern Block ACACIA_LEAVES;
 extern Block POTATOES;
 extern Block WHEAT;
 extern Block BEDROCK;
@@ -262,7 +268,64 @@ extern Block SMOOTH_SANDSTONE_STAIRS;
 extern Block QUARTZ_STAIRS;
 extern Block POLISHED_ANDESITE_STAIRS;
 extern Block NETHER_BRICK_STAIRS;
+extern Block  COBWEB;
+extern Block  CHISELLED_BOOKSHELF_NORTH; // Chiseled Bookshelf
+extern Block CHISELLED_BOOKSHELF_EAST;  // Chiseled Bookshelf East
+extern Block CHISELLED_BOOKSHELF_SOUTH; // Chiseled Bookshelf South
+extern Block CHISELLED_BOOKSHELF_WEST;  // Chiseled Bookshelf West
+extern Block DAMAGED_ANVIL;          // Damaged Anvil
 
+
+
+extern Block CHAIN;
+extern Block END_ROD;
+extern Block LIGHTNING_ROD;
+extern Block GOLD_BLOCK;
+extern Block SEA_LANTERN;
+extern Block ORANGE_CONCRETE;
+extern Block ORANGE_WOOL;
+extern Block BLUE_WOOL;
+extern Block GREEN_CONCRETE;
+extern Block BRICK_WALL;
+extern Block REDSTONE_BLOCK;
+extern Block CHAIN_X;
+extern Block CHAIN_Z;
+extern Block SPRUCE_DOOR_LOWER;
+extern Block SPRUCE_DOOR_UPPER;
+extern Block SMOOTH_STONE_SLAB;
+extern Block GLASS_PANE;
+extern Block LIGHT_GRAY_TERRACOTTA;
+extern Block OAK_SLAB_TOP;
+extern Block OAK_DOOR_UPPER;
+extern Block SPRUCE_LEAVES;
+extern Block CYAN_STAINED_GLASS;
+extern Block BLUE_STAINED_GLASS;
+extern Block LIGHT_BLUE_STAINED_GLASS;
+extern Block DAYLIGHT_DETECTOR;
+extern Block RED_STAINED_GLASS;
+extern Block YELLOW_STAINED_GLASS;
+extern Block PURPLE_STAINED_GLASS;
+extern Block ORANGE_STAINED_GLASS;
+extern Block MAGENTA_STAINED_GLASS;
+extern Block FLOWER_POT;
+extern Block OAK_TRAPDOOR_OPEN_NORTH;
+extern Block OAK_TRAPDOOR_OPEN_SOUTH;
+extern Block OAK_TRAPDOOR_OPEN_EAST;
+extern Block OAK_TRAPDOOR_OPEN_WEST;
+extern Block QUARTZ_SLAB_TOP;
+extern Block DARK_OAK_TRAPDOOR;
+extern Block SPRUCE_TRAPDOOR;
+extern Block BIRCH_TRAPDOOR;
+extern Block MUD_BRICK_SLAB;
+extern Block BRICK_SLAB;
+extern Block POTTED_RED_TULIP;
+extern Block POTTED_DANDELION;
+extern Block POTTED_BLUE_ORCHID;
+extern Block BARREL;
+extern Block FERN;
+extern Block CHIPPED_ANVIL;
+extern Block LARGE_FERN_LOWER;
+extern Block LARGE_FERN_UPPER;
 extern Block &SMOOTH_STONE_BLOCK;// = SMOOTH_STONE;
 }
 

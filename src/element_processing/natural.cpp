@@ -206,7 +206,8 @@ static std::vector<std::pair<int,int>> flood_fill_area(const std::vector<std::pa
 
 // Generate natural area for single element
 //static 
-void generate_natural(WorldEditor& editor, const ProcessedElement& element, const Args& args) {
+void generate_natural(WorldEditor& editor, const ProcessedElement& element, const Args& args, 
+                     FloodFillCache const & flood_fill_cache, BuildingFootprintBitmap const & building_footprints) {
     const auto& tags = element.tags();
     auto it_nat = tags.find("natural");
     if (it_nat == tags.end()) return;
@@ -216,10 +217,99 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
         if (element.is_node()) {
             int x = element.as_node().x;
             int z = element.as_node().z;
+            
+            // Use deterministic RNG seeded by element ID for consistent results across region boundaries
+            std::mt19937 rng(element.id());
+            
+            // Determine tree type based on tags
+            std::vector<TreeType> trees_ok_to_generate;
+            
+            // Check species tag
+            auto it_species = tags.find("species");
+            if (it_species != tags.end()) {
+                const std::string& species = it_species->second;
+                if (species.find("Betula") != std::string::npos) {
+                    trees_ok_to_generate.push_back(TreeType::Birch);
+                }
+                if (species.find("Quercus") != std::string::npos) {
+                    trees_ok_to_generate.push_back(TreeType::Oak);
+                }
+                if (species.find("Picea") != std::string::npos) {
+                    trees_ok_to_generate.push_back(TreeType::Spruce);
+                }
+            } else {
+                // Check genus:wikidata tag
+                auto it_genus_wikidata = tags.find("genus:wikidata");
+                if (it_genus_wikidata != tags.end()) {
+                    const std::string& genus_wikidata = it_genus_wikidata->second;
+                    if (genus_wikidata == "Q12004") {
+                        trees_ok_to_generate.push_back(TreeType::Birch);
+                    } else if (genus_wikidata == "Q26782") {
+                        trees_ok_to_generate.push_back(TreeType::Oak);
+                    } else if (genus_wikidata == "Q25243") {
+                        trees_ok_to_generate.push_back(TreeType::Spruce);
+                    } else {
+                        trees_ok_to_generate.push_back(TreeType::Oak);
+                        trees_ok_to_generate.push_back(TreeType::Spruce);
+                        trees_ok_to_generate.push_back(TreeType::Birch);
+                    }
+                } else {
+                    // Check genus tag
+                    auto it_genus = tags.find("genus");
+                    if (it_genus != tags.end()) {
+                        const std::string& genus = it_genus->second;
+                        if (genus == "Betula") {
+                            trees_ok_to_generate.push_back(TreeType::Birch);
+                        } else if (genus == "Quercus") {
+                            trees_ok_to_generate.push_back(TreeType::Oak);
+                        } else if (genus == "Picea") {
+                            trees_ok_to_generate.push_back(TreeType::Spruce);
+                        } else {
+                            trees_ok_to_generate.push_back(TreeType::Oak);
+                        }
+                    } else {
+                        // Check leaf_type tag
+                        auto it_leaf_type = tags.find("leaf_type");
+                        if (it_leaf_type != tags.end()) {
+                            const std::string& leaf_type = it_leaf_type->second;
+                            if (leaf_type == "broadleaved") {
+                                trees_ok_to_generate.push_back(TreeType::Oak);
+                                trees_ok_to_generate.push_back(TreeType::Birch);
+                            } else if (leaf_type == "needleleaved") {
+                                trees_ok_to_generate.push_back(TreeType::Spruce);
+                            } else {
+                                trees_ok_to_generate.push_back(TreeType::Oak);
+                                trees_ok_to_generate.push_back(TreeType::Spruce);
+                                trees_ok_to_generate.push_back(TreeType::Birch);
+                            }
+                        } else {
+                            trees_ok_to_generate.push_back(TreeType::Oak);
+                            trees_ok_to_generate.push_back(TreeType::Spruce);
+                            trees_ok_to_generate.push_back(TreeType::Birch);
+                        }
+                    }
+                }
+            }
+            
+            // Ensure we have at least one tree type
+            if (trees_ok_to_generate.empty()) {
+                trees_ok_to_generate.push_back(TreeType::Oak);
+                trees_ok_to_generate.push_back(TreeType::Spruce);
+                trees_ok_to_generate.push_back(TreeType::Birch);
+            }
+            
+            // Select a random tree type
+            std::uniform_int_distribution<std::size_t> tree_dist(0, trees_ok_to_generate.size() - 1);
+            TreeType tree_type = trees_ok_to_generate[tree_dist(rng)];
+            
+            // Create the tree
             Tree::create(editor, Coord{x, 1, z});
         }
         return;
     }
+
+    // Use deterministic RNG seeded by element ID for consistent results across region boundaries
+    std::mt19937 rng(element.id());
 
     // Determine block type based on natural tag
     Block block_type = GRASS_BLOCK;
@@ -291,14 +381,33 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
 
         std::vector<std::pair<int,int>> filled_area = flood_fill_area(polygon_coords, args.timeout);
 
-        std::random_device rd;
-        std::mt19937 rng(rd());
+        // Determine tree types for wood/tree_row areas
+        std::vector<TreeType> trees_ok_to_generate;
+        auto it_leaf_type = tags.find("leaf_type");
+        if (it_leaf_type != tags.end()) {
+            const std::string& leaf_type = it_leaf_type->second;
+            if (leaf_type == "broadleaved") {
+                trees_ok_to_generate.push_back(TreeType::Oak);
+                trees_ok_to_generate.push_back(TreeType::Birch);
+            } else if (leaf_type == "needleleaved") {
+                trees_ok_to_generate.push_back(TreeType::Spruce);
+            } else {
+                trees_ok_to_generate.push_back(TreeType::Oak);
+                trees_ok_to_generate.push_back(TreeType::Spruce);
+                trees_ok_to_generate.push_back(TreeType::Birch);
+            }
+        } else {
+            trees_ok_to_generate.push_back(TreeType::Oak);
+            trees_ok_to_generate.push_back(TreeType::Spruce);
+            trees_ok_to_generate.push_back(TreeType::Birch);
+        }
 
         for (const auto& p : filled_area) {
             int x = p.first;
             int z = p.second;
             editor.set_block(block_type, x, 0, z, std::nullopt, std::nullopt);
 
+            // Generate custom layer instead of dirt, must be stone on the lowest level
             if (natural_type == "beach" || natural_type == "sand" || natural_type == "dune" || natural_type == "shoal") {
                 editor.set_block(SAND, x, 0, z, std::nullopt, std::nullopt);
             } else if (natural_type == "glacier") {
@@ -308,10 +417,11 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                 editor.set_block(STONE, x, 0, z, std::nullopt, std::nullopt);
             }
 
+            // Generate surface elements
             if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{WATER} })) {
                 continue;
             }
-
+            
             if (natural_type == "grassland") {
                 if (!editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{GRASS_BLOCK} })) {
                     continue;
@@ -342,7 +452,7 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                 std::uniform_int_distribution<int> uni500(0, 499);
                 int random_choice = uni500(rng);
                 if (random_choice == 0) {
-                    Tree::create(editor, std::make_tuple(x, 1, z));
+                    Tree::create(editor, {x, 1, z});
                 } else if (random_choice == 1) {
                     std::uniform_int_distribution<int> flower_dist(1, 4);
                     int f = flower_dist(rng);
@@ -372,7 +482,14 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                 std::uniform_int_distribution<int> uni30(0, 29);
                 int random_choice = uni30(rng);
                 if (random_choice == 0) {
-                    Tree::create(editor, std::make_tuple(x, 1, z));
+                    // Select a random tree type from the approved list
+                    if (!trees_ok_to_generate.empty()) {
+                        std::uniform_int_distribution<std::size_t> tree_dist(0, trees_ok_to_generate.size() - 1);
+                        TreeType tree_type = trees_ok_to_generate[tree_dist(rng)];
+                        Tree::create(editor, {x, 1, z});
+                    } else {
+                        Tree::create(editor, {x, 1, z});
+                    }
                 } else if (random_choice == 1) {
                     std::uniform_int_distribution<int> flower_dist(1, 4);
                     int f = flower_dist(rng);
@@ -423,7 +540,7 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                         std::uniform_int_distribution<int> uni40(0, 39);
                         int random_choice = uni40(rng);
                         if (random_choice == 0) {
-                            Tree::create(editor, std::make_tuple(x, 1, z));
+                            Tree::create(editor, {x, 1, z});
                         } else if (random_choice < 35) {
                             editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
                         }
@@ -450,9 +567,12 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                     editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
                 }
             } else if (natural_type == "mountain_range") {
+                // Create block clusters instead of random placement
                 std::uniform_int_distribution<int> uni1000(0, 999);
                 int cluster_chance = uni1000(rng);
+
                 if (cluster_chance < 50) {
+                    // 5% chance to start a new cluster
                     std::uniform_int_distribution<int> uni7(0, 6);
                     int cb = uni7(rng);
                     Block cluster_block = DIRT;
@@ -464,28 +584,37 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                     else if (cb == 5) cluster_block = ANDESITE;
                     else cluster_block = GRASS_BLOCK;
 
+                    // Generate cluster size (5-10 blocks radius)
                     std::uniform_int_distribution<int> cluster_size_dist(5, 10);
                     int cluster_size = cluster_size_dist(rng);
 
-                    std::uniform_real_distribution<float> frand(0.0f, 1.0f);
-
+                    // Create cluster around current position
                     for (int dx = -cluster_size; dx <= cluster_size; ++dx) {
                         for (int dz = -cluster_size; dz <= cluster_size; ++dz) {
                             int cluster_x = x + dx;
                             int cluster_z = z + dz;
+
+                            // Use distance to create more natural cluster shape
                             float distance = std::sqrt(float(dx*dx + dz*dz));
                             if (distance <= static_cast<float>(cluster_size)) {
+                                // Probability decreases with distance from center
                                 float place_prob = 1.0f - (distance / static_cast<float>(cluster_size));
+                                std::uniform_real_distribution<float> frand(0.0f, 1.0f);
                                 if (frand(rng) < place_prob) {
                                     editor.set_block(cluster_block, cluster_x, 0, cluster_z, std::nullopt, std::nullopt);
+
+                                    // Add vegetation on grass blocks
                                     if (cluster_block == GRASS_BLOCK) {
                                         std::uniform_int_distribution<int> vegetation_chance_dist(0, 99);
                                         int vegetation_chance = vegetation_chance_dist(rng);
                                         if (vegetation_chance == 0) {
-                                            Tree::create(editor, std::make_tuple(cluster_x, 1, cluster_z));
+                                            // 1% chance for rare trees
+                                            Tree::create(editor, {cluster_x, 1, cluster_z});
                                         } else if (vegetation_chance < 15) {
+                                            // 15% chance for grass
                                             editor.set_block(GRASS, cluster_x, 1, cluster_z, std::nullopt, std::nullopt);
                                         } else if (vegetation_chance < 25) {
+                                            // 10% chance for oak leaves
                                             editor.set_block(OAK_LEAVES, cluster_x, 1, cluster_z, std::nullopt, std::nullopt);
                                         }
                                     }
@@ -495,23 +624,30 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                     }
                 }
             } else if (natural_type == "saddle") {
+                // Saddle areas - lowest point between peaks, mix of stone and grass
                 std::uniform_int_distribution<int> uni100(0, 99);
                 int terrain_chance = uni100(rng);
                 if (terrain_chance < 30) {
+                    // 30% chance for exposed stone
                     editor.set_block(STONE, x, 0, z, std::nullopt, std::nullopt);
                 } else if (terrain_chance < 50) {
+                    // 20% chance for gravel/rocky terrain
                     editor.set_block(GRAVEL, x, 0, z, std::nullopt, std::nullopt);
                 } else {
+                    // 50% chance for grass
                     editor.set_block(GRASS_BLOCK, x, 0, z, std::nullopt, std::nullopt);
                     std::bernoulli_distribution dgrass(0.4);
                     if (dgrass(rng)) {
+                        // 40% chance for grass on top
                         editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
                     }
                 }
             } else if (natural_type == "ridge") {
+                // Ridge areas - elevated crest, mostly rocky with some vegetation
                 std::uniform_int_distribution<int> uni100(0, 99);
                 int ridge_chance = uni100(rng);
                 if (ridge_chance < 60) {
+                    // 60% chance for stone/rocky terrain
                     std::uniform_int_distribution<int> uni4(0, 3);
                     int rock = uni4(rng);
                     Block rock_type = STONE;
@@ -521,35 +657,46 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                     else rock_type = ANDESITE;
                     editor.set_block(rock_type, x, 0, z, std::nullopt, std::nullopt);
                 } else {
+                    // 40% chance for grass with sparse vegetation
                     editor.set_block(GRASS_BLOCK, x, 0, z, std::nullopt, std::nullopt);
                     std::uniform_int_distribution<int> uni100b(0, 99);
                     int vegetation_chance = uni100b(rng);
                     if (vegetation_chance < 20) {
+                        // 20% chance for grass
                         editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
                     } else if (vegetation_chance < 25) {
+                        // 5% chance for small shrubs
                         editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
                     }
                 }
             } else if (natural_type == "shrubbery") {
+                // Manicured shrubs and decorative vegetation
                 editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
                 editor.set_block(OAK_LEAVES, x, 2, z, std::nullopt, std::nullopt);
             } else if (natural_type == "tundra") {
+                // Treeless habitat with low vegetation, mosses, lichens
                 if (!editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{GRASS_BLOCK} })) {
                     continue;
                 }
                 std::uniform_int_distribution<int> uni100(0, 99);
                 int tundra_chance = uni100(rng);
                 if (tundra_chance < 40) {
+                    // 40% chance for grass (sedges, grasses)
                     editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
                 } else if (tundra_chance < 60) {
+                    // 20% chance for moss
                     editor.set_block(MOSS_BLOCK, x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{GRASS_BLOCK} }, std::nullopt);
                 } else if (tundra_chance < 70) {
+                    // 10% chance for dead bush (lichens)
                     editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
                 }
+                // 30% chance for bare ground (no surface block)
             } else if (natural_type == "cliff") {
+                // Cliff areas - predominantly stone with minimal vegetation
                 std::uniform_int_distribution<int> uni100(0, 99);
                 int cliff_chance = uni100(rng);
                 if (cliff_chance < 90) {
+                    // 90% chance for stone variants
                     std::uniform_int_distribution<int> uni4(0, 3);
                     int stone_type_choice = uni4(rng);
                     Block stone_type = STONE;
@@ -559,17 +706,21 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                     else stone_type = DIORITE;
                     editor.set_block(stone_type, x, 0, z, std::nullopt, std::nullopt);
                 } else {
+                    // 10% chance for gravel/loose rock
                     editor.set_block(GRAVEL, x, 0, z, std::nullopt, std::nullopt);
                 }
             } else if (natural_type == "hill") {
+                // Hill areas - elevated terrain with sparse trees and mostly grass
                 if (!editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{GRASS_BLOCK} })) {
                     continue;
                 }
                 std::uniform_int_distribution<int> uni1000(0, 999);
                 int hill_chance = uni1000(rng);
                 if (hill_chance == 0) {
-                    Tree::create(editor, std::make_tuple(x, 1, z));
+                    // 0.1% chance for rare trees
+                    Tree::create(editor, {x, 1, z});
                 } else if (hill_chance < 50) {
+                    // 5% chance for flowers
                     std::uniform_int_distribution<int> flower_dist(1, 4);
                     int f = flower_dist(rng);
                     Block flower_block = RED_FLOWER;
@@ -579,11 +730,14 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                     else flower_block = WHITE_FLOWER;
                     editor.set_block(flower_block, x, 1, z, std::nullopt, std::nullopt);
                 } else if (hill_chance < 600) {
+                    // 55% chance for grass
                     editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
                 } else if (hill_chance < 650) {
+                    // 5% chance for tall grass
                     editor.set_block(TALL_GRASS_BOTTOM, x, 1, z, std::nullopt, std::nullopt);
                     editor.set_block(TALL_GRASS_TOP, x, 2, z, std::nullopt, std::nullopt);
                 }
+                // 35% chance for bare grass block
             }
         }
     }
@@ -591,13 +745,14 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
 
 // Generate natural from relation
 //static
- void generate_natural_from_relation(WorldEditor& editor, const ProcessedRelation& rel, const Args& args) {
+void generate_natural_from_relation(WorldEditor& editor, const ProcessedRelation& rel, const Args& args, 
+                                   FloodFillCache const & flood_fill_cache, BuildingFootprintBitmap const & building_footprints) {
     if (rel.tags.find("natural") == rel.tags.end()) return;
 
     for (const auto& member : rel.members) {
         if (member.role == ProcessedMemberRole::Outer) {
             ProcessedElement elem = ProcessedElement::FromWay(member.way);
-            generate_natural(editor, elem, args);
+            generate_natural(editor, elem, args, flood_fill_cache, building_footprints);
         }
     }
 
@@ -614,7 +769,7 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
         combined_way.nodes = combined_nodes;
         combined_way.tags = rel.tags;
         ProcessedElement combined_elem = ProcessedElement::FromWay(combined_way);
-        generate_natural(editor, combined_elem, args);
+        generate_natural(editor, combined_elem, args, flood_fill_cache, building_footprints);
     }
 }
 

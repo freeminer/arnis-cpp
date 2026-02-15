@@ -6,12 +6,13 @@
 #include <optional>
 
 #include "../args.h"
+#include "../floodfill_cache.h"
 #include "block_definitions.h"
 #include "tree.h"
-#include "floodfill.h"
-#include "osm_parser.h"
+#include "../osm_parser.h"
 #include "world_editor.h"
-
+#include "../deterministic_rng.h"
+#include "../bresenham.h"
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -21,7 +22,8 @@ namespace landuse
 {
 
 
-void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args const & args) {
+void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args const & args, 
+                     FloodFillCache const & flood_fill_cache, BuildingFootprintBitmap const & building_footprints) {
     const std::string binding = std::string();
     const std::string landuse_tag = [&]() -> std::string {
         auto it = element.tags.find(std::string("landuse"));
@@ -77,21 +79,84 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
         polygon_coords.emplace_back(n.x, n.z);
     }
 
-    auto & timeout = args.timeout;
-    std::vector<std::pair<int, int>> floor_area = flood_fill_area(polygon_coords, timeout);
+    // Use deterministic RNG seeded by element ID for consistent results across region boundaries
+    std::mt19937 rng = element_rng(element.id);
 
-    std::mt19937 rng(std::random_device{}());
+    // Get the area of the landuse element using cache
+    std::vector<std::pair<int, int>> floor_area = flood_fill_cache.get_or_compute(element, args.timeout_ref());
+
+    // Trees ok to generate based on leaf_type
+    std::vector<TreeType> trees_ok_to_generate;
+    auto it_leaf_type = element.tags.find("leaf_type");
+    if (it_leaf_type != element.tags.end()) {
+        const std::string& leaf_type = it_leaf_type->second;
+        if (leaf_type == "broadleaved") {
+            trees_ok_to_generate.push_back(TreeType::Oak);
+            trees_ok_to_generate.push_back(TreeType::Birch);
+        } else if (leaf_type == "needleleaved") {
+            trees_ok_to_generate.push_back(TreeType::Spruce);
+        } else {
+            trees_ok_to_generate.push_back(TreeType::Oak);
+            trees_ok_to_generate.push_back(TreeType::Spruce);
+            trees_ok_to_generate.push_back(TreeType::Birch);
+        }
+    } else {
+        trees_ok_to_generate.push_back(TreeType::Oak);
+        trees_ok_to_generate.push_back(TreeType::Spruce);
+        trees_ok_to_generate.push_back(TreeType::Birch);
+    }
 
     for (auto const & coord : floor_area) {
         int x = coord.first;
         int z = coord.second;
 
+        // Apply per-block randomness for certain landuse types
+        Block actual_block = block_type;
+        if (landuse_tag == "residential" && block_type == STONE_BRICKS) {
+            // Urban residential: mix of stone bricks, cracked stone bricks, stone, cobblestone
+            std::uniform_int_distribution<int> dist100(0, 99);
+            int random_value = dist100(rng);
+            if (random_value < 72) {
+                actual_block = STONE_BRICKS;
+            } else if (random_value < 87) {
+                actual_block = CRACKED_STONE_BRICKS;
+            } else if (random_value < 92) {
+                actual_block = STONE;
+            } else {
+                actual_block = COBBLESTONE;
+            }
+        } else if (landuse_tag == "commercial") {
+            // Commercial: mix of smooth stone, stone, cobblestone, stone bricks
+            std::uniform_int_distribution<int> dist100(0, 99);
+            int random_value = dist100(rng);
+            if (random_value < 40) {
+                actual_block = SMOOTH_STONE;
+            } else if (random_value < 70) {
+                actual_block = STONE_BRICKS;
+            } else if (random_value < 90) {
+                actual_block = STONE;
+            } else {
+                actual_block = COBBLESTONE;
+            }
+        } else if (landuse_tag == "industrial") {
+            // Industrial: primarily stone, with some stone bricks and smooth stone
+            std::uniform_int_distribution<int> dist100(0, 99);
+            int random_value = dist100(rng);
+            if (random_value < 70) {
+                actual_block = STONE;
+            } else if (random_value < 90) {
+                actual_block = STONE_BRICKS;
+            } else {
+                actual_block = SMOOTH_STONE;
+            }
+        }
+
         if (landuse_tag == "traffic_island") {
-            editor.set_block(block_type, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            editor.set_block(actual_block, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
         } else if (landuse_tag == "construction" || landuse_tag == "railway") {
-            editor.set_block(block_type, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>{ std::vector<Block>{ SPONGE } });
+            editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>{ std::vector<Block>{ SPONGE } });
         } else {
-            editor.set_block(block_type, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
         }
 
         if (landuse_tag == "cemetery") {
@@ -118,9 +183,14 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
                         editor.set_block(RED_FLOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                     }
                 } else if (random_choice < 33) {
-                    Tree::create(editor, std::make_tuple(x, 1, z));
+                    Tree::create(editor, Coord{x, 1, z});
                 } else if (random_choice < 35) {
                     editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (random_choice < 37) {
+                    editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (random_choice < 41) {
+                    editor.set_block(LARGE_FERN_LOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                    editor.set_block(LARGE_FERN_UPPER, x, 2, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                 }
             }
         } else if (landuse_tag == "forest") {
@@ -128,17 +198,82 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
                 std::uniform_int_distribution<int> dist30(0, 29);
                 int random_choice = dist30(rng);
                 if (random_choice == 20) {
-                    Tree::create(editor, std::make_tuple(x, 1, z));
+                    std::uniform_int_distribution<std::size_t> treeIdxDist(0, trees_ok_to_generate.size() - 1);
+                    TreeType tree_type = trees_ok_to_generate[treeIdxDist(rng)];
+                    Tree::create_of_type(editor, Coord{x, 1, z}, tree_type, &building_footprints);
                 } else if (random_choice == 2) {
-                    std::uniform_int_distribution<int> dist5(1, 5);
-                    int pick = dist5(rng);
+                    std::uniform_int_distribution<int> dist6(1, 6);
+                    int pick = dist6(rng);
                     Block flower_block = OAK_LEAVES;
                     if (pick == 2) flower_block = RED_FLOWER;
                     else if (pick == 3) flower_block = BLUE_FLOWER;
                     else if (pick == 4) flower_block = YELLOW_FLOWER;
-                    else if (pick == 5) flower_block = WHITE_FLOWER;
+                    else if (pick == 5) flower_block = FERN;
+                    else if (pick == 6) flower_block = WHITE_FLOWER;
                     editor.set_block(flower_block, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                 } else if (random_choice <= 12) {
+                    std::uniform_int_distribution<int> dist100(0, 99);
+                    if (dist100(rng) < 12) {
+                        editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                    } else {
+                        editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                    }
+                }
+            }
+        } else if (landuse_tag == "grass") {
+            if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
+                std::uniform_int_distribution<int> dist200(0, 199);
+                int r = dist200(rng);
+                if (r == 0) {
+                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (r <= 8) {
+                    editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (r <= 170) {
+                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                }
+            }
+        } else if (landuse_tag == "greenfield") {
+            if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
+                std::uniform_int_distribution<int> dist200(0, 199);
+                int r = dist200(rng);
+                if (r == 0) {
+                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (r <= 2) {
+                    editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (r <= 17) {
+                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                }
+            }
+        } else if (landuse_tag == "meadow") {
+            if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
+                std::uniform_int_distribution<int> dist1000(0, 1000);
+                int random_choice = dist1000(rng);
+                if (random_choice < 5) {
+                    Tree::create(editor, Coord{x, 1, z}, &building_footprints);
+                } else if (random_choice < 6) {
+                    editor.set_block(RED_FLOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (random_choice < 9) {
+                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (random_choice < 40) {
+                    editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (random_choice < 65) {
+                    editor.set_block(LARGE_FERN_LOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                    editor.set_block(LARGE_FERN_UPPER, x, 2, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (random_choice < 825) {
+                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                }
+            }
+        } else if (landuse_tag == "orchard") {
+            if (x % 18 == 0 && z % 10 == 0) {
+                Tree::create(editor, Coord{x, 1, z}, &building_footprints);
+            } else if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
+                std::uniform_int_distribution<int> dist100(0, 99);
+                int r = dist100(rng);
+                if (r == 0) {
+                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (r <= 2) {
+                    editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                } else if (r <= 20) {
                     editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                 }
             }
@@ -235,52 +370,6 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
             } else if (random_choice < 565) {
                 editor.set_block(COBBLESTONE, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>{ std::vector<Block>{ SPONGE } });
             }
-        } else if (landuse_tag == "grass") {
-            if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
-                std::uniform_int_distribution<int> dist200(0, 199);
-                int r = dist200(rng);
-                if (r == 0) {
-                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (r <= 170) {
-                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                }
-            }
-        } else if (landuse_tag == "greenfield") {
-            if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
-                std::uniform_int_distribution<int> dist200(0, 199);
-                int r = dist200(rng);
-                if (r == 0) {
-                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (r <= 17) {
-                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                }
-            }
-        } else if (landuse_tag == "meadow") {
-            if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
-                std::uniform_int_distribution<int> dist1000(0, 1000);
-                int random_choice = dist1000(rng);
-                if (random_choice < 5) {
-                    Tree::create(editor, std::make_tuple(x, 1, z));
-                } else if (random_choice < 6) {
-                    editor.set_block(RED_FLOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (random_choice < 9) {
-                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (random_choice < 800) {
-                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                }
-            }
-        } else if (landuse_tag == "orchard") {
-            if (x % 18 == 0 && z % 10 == 0) {
-                Tree::create(editor, std::make_tuple(x, 1, z));
-            } else if (editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ GRASS_BLOCK } })) {
-                std::uniform_int_distribution<int> dist100(0, 99);
-                int r = dist100(rng);
-                if (r == 0) {
-                    editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (r <= 20) {
-                    editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                }
-            }
         } else if (landuse_tag == "quarry") {
             editor.set_block(STONE, x, -1, z, std::optional<std::vector<Block>>{ std::vector<Block>{ STONE } }, std::optional<std::vector<Block>>());
             editor.set_block(STONE, x, -2, z, std::optional<std::vector<Block>>{ std::vector<Block>{ STONE } }, std::optional<std::vector<Block>>());
@@ -302,27 +391,68 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
             }
         }
     }
+    
+    // Generate a stone brick wall fence around cemeteries
+    if (landuse_tag == "cemetery") {
+        // Generate cemetery fence
+        for (std::size_t i = 1; i < element.nodes.size(); ++i) {
+            const auto& prev = element.nodes[i - 1];
+            const auto& cur = element.nodes[i];
+            
+            std::vector<std::tuple<int, int, int>> points = bresenham_line(prev.x, 0, prev.z, cur.x, 0, cur.z);
+            for (const auto& [bx, _, bz] : points) {
+                editor.set_block(STONE_BRICK_WALL, bx, 1, bz, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+                editor.set_block(STONE_BRICK_SLAB, bx, 2, bz, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
+            }
+        }
+    }
 }
 
-void generate_landuse_from_relation(WorldEditor & editor, ProcessedRelation const & rel, Args const & args) {
+void generate_landuse_from_relation(WorldEditor & editor, ProcessedRelation const & rel, Args const & args, 
+                                   FloodFillCache const & flood_fill_cache, BuildingFootprintBitmap const & building_footprints) {
     if (rel.tags.find(std::string("landuse")) != rel.tags.end()) {
+        // Process each outer member way individually using cached flood fill.
+        // We intentionally do not combine all outer nodes into one mega-way,
+        // because that creates a nonsensical polygon spanning the whole relation
+        // extent, misses the flood fill cache, and can cause multi-GB allocations.
         for (auto const & member : rel.members) {
             if (member.role == ProcessedMemberRole::Outer) {
-                generate_landuse(editor, member.way, args);
+                // Use relation tags so the member inherits the relation's landuse=* type
+                ProcessedWay way_with_rel_tags { member.way.id, member.way.nodes, rel.tags };
+                generate_landuse(editor, way_with_rel_tags, args, flood_fill_cache, building_footprints);
             }
         }
+    }
+}
 
-        std::vector<Node> combined_nodes;
-        for (auto const & member : rel.members) {
-            if (member.role == ProcessedMemberRole::Outer) {
-                combined_nodes.insert(combined_nodes.end(), member.way.nodes.begin(), member.way.nodes.end());
-            }
-        }
+/// Generates ground blocks for place=* areas (squares, neighbourhoods, etc.)
+void generate_place(WorldEditor & editor, ProcessedWay const & element, Args const & args, 
+                   FloodFillCache const & flood_fill_cache) {
+    auto it_place = element.tags.find("place");
+    if (it_place == element.tags.end()) {
+        return;
+    }
+    
+    const std::string& place_tag = it_place->second;
 
-        if (!combined_nodes.empty()) {
-            ProcessedWay combined_way { rel.id, combined_nodes, rel.tags };
-            generate_landuse(editor, combined_way, args);
-        }
+    // Determine block type based on place tag
+    Block block_type;
+    if (place_tag == "square") {
+        block_type = STONE_BRICKS;
+    } else if (place_tag == "neighbourhood" || place_tag == "city_block" || place_tag == "quarter" || place_tag == "suburb") {
+        block_type = SMOOTH_STONE;
+    } else {
+        return;
+    }
+
+    // Get the area using flood fill cache
+    std::vector<std::pair<int, int>> floor_area = flood_fill_cache.get_or_compute(element, args.timeout_ref());
+
+    // Place ground blocks
+    for (auto const & coord : floor_area) {
+        int x = coord.first;
+        int z = coord.second;
+        editor.set_block(block_type, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
     }
 }
 

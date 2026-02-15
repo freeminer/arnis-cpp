@@ -18,8 +18,12 @@ struct Args
 	// JSON file to save OSM data to (optional)
 	std::optional<std::string> save_json_file{std::nullopt};
 
-	// Path to the Minecraft world (required)
-	std::string path{};
+	// Output directory for the generated world (required for Java, optional for Bedrock).
+	// Use --output-dir (or the deprecated --path alias) to specify where the world is created.
+	std::optional<std::string> path{std::nullopt};
+
+	// Generate a Bedrock Edition world (.mcworld) instead of Java Edition
+	bool bedrock{false};
 
 	// Downloader method (requests/curl/wget) (optional)
 	std::string downloader{std::string("requests")};
@@ -42,16 +46,19 @@ struct Args
 	// Enable filling ground (optional)
 	bool fillground{false};
 
+	// Enable city boundary ground generation (optional)
+	// When enabled, detects building clusters and places stone ground in urban areas.
+	// Isolated buildings in rural areas will keep grass around them.
+	bool city_boundaries{true};
+
 	// Enable debug mode (optional)
 	bool debug{false};
 
 	// Set floodfill timeout (seconds) (optional)
-	//std::optional<std::chrono::duration<double>> timeout{std::nullopt};
-	const std::chrono::milliseconds timeout{3000};
-	std::chrono::milliseconds timeout_ref() const { return timeout; }
-
-	// Spawn point coordinates (lat, lng)
-	std::optional<std::pair<double, double>> spawn_point{std::nullopt};
+	std::optional<std::chrono::milliseconds> timeout{std::nullopt};
+	std::chrono::milliseconds timeout_ref() const { 
+		return timeout.value_or(std::chrono::milliseconds(3000)); 
+	}
 };
 
 }
