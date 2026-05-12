@@ -1,6 +1,7 @@
 {
   "create_world": "Crear mundo",
   "no_world_selected": "Ningún mundo creado",
+  "no_world_generated_yet": "Ningún mundo generado todavía",
   "start_generation": "Iniciar generación",
   "custom_selection_confirmed": "¡Selección personalizada confirmada!",
   "error_coordinates_out_of_range": "Error: Las coordenadas están fuera de rango o están ordenadas incorrectamente (Lat antes de Lng requerido).",
@@ -21,6 +22,7 @@
   "create_world_first": "¡Crea un mundo primero!",
   "select_location_first": "¡Seleccione una ubicación primero!",
   "area_too_large": "Esta área es muy grande y podría exceder los límites típicos de computación.",
+  "area_extreme": "Esta área es extremadamente grande y es posible que sea demasiado extensa para generarse correctamente.",
   "area_extensive": "El área es bastante extensa y puede requerir mucho tiempo y recursos.",
   "selection_confirmed": "¡Selección confirmada!",
   "select_area_prompt": "Selecciona un área en el mapa usando las herramientas.",
@@ -39,7 +41,17 @@
   "interior": "Generación Interior",
   "roof": "Generación de Tejado",
   "fillground": "Rellenar Suelo",
-  "city_boundaries": "Suelo Urbano",
+  "land_cover": "Cobertura del suelo",
+  "disable_height_limit": "Ampliar altura de construcción",
+  "aws_only_elevation": "Terreno clásico",
   "bedrock_auto_generated": "El mundo Bedrock se genera automáticamente",
-  "save_path": "Ruta de guardado"
+  "save_path": "Ruta de guardado",
+  "rotation_angle": "Ángulo de Rotación",
+  "settings_section_generation": "Generación",
+  "settings_section_world": "Mundo",
+  "settings_section_map": "Mapa y entrada",
+  "settings_section_application": "Aplicación",
+  "clear_tile_cache": "Borrar caché de tiles",
+  "clear_tile_cache_button": "Borrar",
+  "anonymous_crash_reports": "Informes de fallos anónimos"
 }

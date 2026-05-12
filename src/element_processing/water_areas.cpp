@@ -5,6 +5,7 @@
 #include <iostream>
 #include <optional>
 #include <algorithm>
+#include <cmath>
 #include <limits>
 #include <tuple>
 
@@ -215,6 +216,163 @@ static void inverse_floodfill(int min_x, int min_z, int max_x, int max_z,
 			std::make_pair(max_x, max_z), outers_bg, inners_bg, editor);
 }
 
+struct ScanlineEdge {
+	double x1;
+	double z1;
+	double x2;
+	double z2;
+};
+
+static std::vector<ScanlineEdge> collect_ring_edges(const std::vector<XZPoint> &ring)
+{
+	std::vector<ScanlineEdge> edges;
+	if (ring.size() < 2)
+		return edges;
+	for (std::size_t i = 0; i + 1 < ring.size(); ++i) {
+		const auto &a = ring[i];
+		const auto &b = ring[i + 1];
+		if (a.z != b.z) {
+			edges.push_back({static_cast<double>(a.x), static_cast<double>(a.z),
+					static_cast<double>(b.x), static_cast<double>(b.z)});
+		}
+	}
+	const auto &first = ring.front();
+	const auto &last = ring.back();
+	if (first.z != last.z) {
+		edges.push_back({static_cast<double>(last.x), static_cast<double>(last.z),
+				static_cast<double>(first.x), static_cast<double>(first.z)});
+	}
+	return edges;
+}
+
+static std::vector<ScanlineEdge> collect_all_ring_edges(
+		const std::vector<std::vector<XZPoint>> &rings)
+{
+	std::vector<ScanlineEdge> edges;
+	for (const auto &ring : rings) {
+		auto ring_edges = collect_ring_edges(ring);
+		edges.insert(edges.end(), ring_edges.begin(), ring_edges.end());
+	}
+	return edges;
+}
+
+static std::vector<std::pair<int, int>> compute_scanline_spans(
+		const std::vector<ScanlineEdge> &edges, double z, int min_x, int max_x)
+{
+	std::vector<double> xs;
+	for (const auto &edge : edges) {
+		if ((edge.z1 > z) != (edge.z2 > z)) {
+			double t = (z - edge.z1) / (edge.z2 - edge.z1);
+			xs.push_back(edge.x1 + t * (edge.x2 - edge.x1));
+		}
+	}
+	if (xs.empty())
+		return {};
+
+	std::sort(xs.begin(), xs.end());
+	std::vector<std::pair<int, int>> spans;
+	for (std::size_t i = 0; i + 1 < xs.size(); i += 2) {
+		int start = std::max(static_cast<int>(std::ceil(xs[i])), min_x);
+		int end = std::min(static_cast<int>(std::floor(xs[i + 1])), max_x);
+		if (start <= end)
+			spans.emplace_back(start, end);
+	}
+	return spans;
+}
+
+static std::vector<std::pair<int, int>> union_spans(
+		const std::vector<std::pair<int, int>> &a,
+		const std::vector<std::pair<int, int>> &b)
+{
+	if (a.empty())
+		return b;
+	if (b.empty())
+		return a;
+	std::vector<std::pair<int, int>> all;
+	all.reserve(a.size() + b.size());
+	all.insert(all.end(), a.begin(), a.end());
+	all.insert(all.end(), b.begin(), b.end());
+	std::sort(all.begin(), all.end());
+
+	std::vector<std::pair<int, int>> out;
+	auto current = all.front();
+	for (std::size_t i = 1; i < all.size(); ++i) {
+		if (all[i].first <= current.second + 1) {
+			current.second = std::max(current.second, all[i].second);
+		} else {
+			out.push_back(current);
+			current = all[i];
+		}
+	}
+	out.push_back(current);
+	return out;
+}
+
+static std::vector<std::pair<int, int>> subtract_spans(
+		const std::vector<std::pair<int, int>> &a,
+		const std::vector<std::pair<int, int>> &b)
+{
+	if (b.empty())
+		return a;
+	std::vector<std::pair<int, int>> out;
+	std::size_t bi = 0;
+	for (const auto &[a_start, a_end] : a) {
+		int pos = a_start;
+		while (bi < b.size() && b[bi].second < a_start)
+			++bi;
+		for (std::size_t j = bi; j < b.size() && b[j].first <= a_end; ++j) {
+			if (b[j].first > pos)
+				out.emplace_back(pos, std::min(b[j].first - 1, a_end));
+			pos = std::max(pos, b[j].second + 1);
+		}
+		if (pos <= a_end)
+			out.emplace_back(pos, a_end);
+	}
+	return out;
+}
+
+static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
+		const std::vector<std::vector<XZPoint>> &outers,
+		const std::vector<std::vector<XZPoint>> &inners,
+		WorldEditor &editor)
+{
+	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
+	outer_edge_groups.reserve(outers.size());
+	for (const auto &outer : outers)
+		outer_edge_groups.push_back(collect_ring_edges(outer));
+	auto inner_edges = collect_all_ring_edges(inners);
+
+	for (int z = min_z; z <= max_z; ++z) {
+		std::vector<std::pair<int, int>> outer_spans;
+		for (const auto &edges : outer_edge_groups) {
+			auto spans = compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x);
+			if (!spans.empty())
+				outer_spans = union_spans(outer_spans, spans);
+		}
+		if (outer_spans.empty())
+			continue;
+
+		std::vector<std::pair<int, int>> fill_spans = outer_spans;
+		if (!inner_edges.empty()) {
+			auto inner_spans =
+					compute_scanline_spans(inner_edges, static_cast<double>(z), min_x, max_x);
+			if (!inner_spans.empty())
+				fill_spans = subtract_spans(outer_spans, inner_spans);
+		}
+
+		for (const auto &[start, end] : fill_spans) {
+			for (int x = start; x <= end; ++x) {
+				int water_y = editor.get_water_level(x, z);
+				int ground_y = editor.get_ground_level(x, z);
+				if (ground_y <= water_y) {
+					editor.set_block_absolute(block_definitions::WATER, x, water_y, z,
+							std::nullopt, std::nullopt);
+				}
+			}
+		}
+	}
+}
+
 static void generate_water_areas(
     WorldEditor &editor,
     const std::vector<std::vector<ProcessedNode>> &outers,
@@ -270,7 +428,7 @@ static void generate_water_areas(
         inners_xz.push_back(std::move(v));
     }
 
-    inverse_floodfill(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor);
+    scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor);
 }
 
 static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &rings) {

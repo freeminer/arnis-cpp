@@ -13,6 +13,7 @@
 #include "floodfill.h"
 #include "../osm_parser.h"
 #include "world_editor.h"
+#include "surfaces.h"
 #include "../../../arnis_adapter.h"
 namespace arnis
 {
@@ -41,27 +42,7 @@ void generate_leisure(WorldEditor& editor, const ProcessedWay& element, const Ar
             block_type = BLACK_CONCRETE;
         } else if (leisure_type == "playground" || leisure_type == "recreation_ground" ||
                    leisure_type == "pitch" || leisure_type == "beach_resort" || leisure_type == "dog_park") {
-            auto surf_it = element.tags.find(std::string("surface"));
-            if (surf_it != element.tags.end()) {
-                const std::string& surface = surf_it->second;
-                if (surface == "clay") {
-                    block_type = TERRACOTTA;
-                } else if (surface == "sand") {
-                    block_type = SAND;
-                } else if (surface == "tartan") {
-                    block_type = RED_TERRACOTTA;
-                } else if (surface == "grass") {
-                    block_type = GRASS_BLOCK;
-                } else if (surface == "dirt") {
-                    block_type = DIRT;
-                } else if (surface == "pebblestone" || surface == "cobblestone" || surface == "unhewn_cobblestone") {
-                    block_type = COBBLESTONE;
-                } else {
-                    block_type = GREEN_STAINED_HARDENED_CLAY;
-                }
-            } else {
-                block_type = GREEN_STAINED_HARDENED_CLAY;
-            }
+            block_type = GREEN_STAINED_HARDENED_CLAY;
         } else if (leisure_type == "swimming_pool" || leisure_type == "swimming_area") {
             block_type = WATER;
         } else if (leisure_type == "bathing_place") {
@@ -74,6 +55,13 @@ void generate_leisure(WorldEditor& editor, const ProcessedWay& element, const Ar
             block_type = PACKED_ICE;
         } else {
             block_type = GRASS_BLOCK;
+        }
+
+        if (auto surf_it = element.tags.find(std::string("surface")); surf_it != element.tags.end()) {
+            if (const auto* surface_blocks = surfaces::get_blocks_for_surface(surf_it->second);
+                    surface_blocks && !surface_blocks->empty()) {
+                block_type = surface_blocks->front();
+            }
         }
 
         for (const ProcessedNode& node : element.nodes) {
@@ -107,8 +95,8 @@ void generate_leisure(WorldEditor& editor, const ProcessedWay& element, const Ar
                 polygon_coords.push_back(std::make_pair(n.x, n.z));
             }
 
-            auto timeout_opt = args.timeout;
-            std::vector<std::pair<int,int>> filled_area = flood_fill_area(polygon_coords, timeout_opt);
+            std::vector<std::pair<int,int>> filled_area =
+                    flood_fill_cache.get_or_compute(element, args.timeout);
 
             for (const std::pair<int,int>& p : filled_area) {
                 int x = p.first;

@@ -8,6 +8,67 @@ use serde::Deserialize;
 use std::collections::HashMap;
 use std::sync::Arc;
 
+// Tags Arnis never reads. Filtered at parse time to save memory.
+const IGNORED_TAGS: &[&str] = &[
+    "created_by",
+    "note",
+    "fixme",
+    "FIXME",
+    "todo",
+    "TODO",
+    "wikipedia",
+    "wikidata",
+    "wikimedia_commons",
+    "import_uuid",
+    "import",
+    "old_name",
+    "loc_name",
+    "official_name",
+    "alt_name",
+    "operator",
+    "phone",
+    "fax",
+    "email",
+    "url",
+    "website",
+    "opening_hours",
+    "description",
+    "attribution",
+    "start_date",
+    "check_date",
+    "survey:date",
+    "ref:bag",
+    "ref:bygningsnr",
+];
+
+// Tag-key prefixes Arnis never reads (localized names, addresses, regional import refs).
+const IGNORED_PREFIXES: &[&str] = &[
+    "addr:",
+    "source",
+    "name:",
+    "alt_name:",
+    "contact:",
+    "is_in:",
+    "operator:",
+    "tiger:",
+    "NHD:",
+    "lacounty:",
+    "nysgissam:",
+    "ref:ruian:",
+    "building:ruian:",
+    "osak:",
+    "gnis:",
+    "yh:",
+    "check_date:",
+];
+
+fn filter_tags(mut tags: HashMap<String, String>) -> HashMap<String, String> {
+    tags.retain(|k, _| {
+        !IGNORED_TAGS.contains(&k.as_str()) && !IGNORED_PREFIXES.iter().any(|p| k.starts_with(p))
+    });
+    tags
+}
+
 // Raw data from OSM
 
 #[derive(Debug, Deserialize)]
@@ -210,7 +271,7 @@ pub fn parse_osm_data(
 
             let processed: ProcessedNode = ProcessedNode {
                 id: element.id,
-                tags: element.tags.clone().unwrap_or_default(),
+                tags: filter_tags(element.tags.unwrap_or_default()),
                 x: xzpoint.x,
                 z: xzpoint.z,
             };
@@ -219,11 +280,8 @@ pub fn parse_osm_data(
 
             // Only add tagged nodes to processed_elements if they're within or near the bbox
             // This significantly improves performance by filtering out distant nodes
-            if !element.tags.as_ref().map(|t| t.is_empty()).unwrap_or(true) {
-                // Node has tags, check if it's in the bbox (with some margin)
-                if xzbbox.contains(&xzpoint) {
-                    processed_elements.push(ProcessedElement::Node(processed));
-                }
+            if !processed.tags.is_empty() && xzbbox.contains(&xzpoint) {
+                processed_elements.push(ProcessedElement::Node(processed));
             }
         }
     }
@@ -240,7 +298,7 @@ pub fn parse_osm_data(
         }
 
         // Clip the way to bbox to reduce node count dramatically
-        let tags = element.tags.clone().unwrap_or_default();
+        let tags = filter_tags(element.tags.unwrap_or_default());
 
         // Store unclipped way for relation assembly (clipping happens after ring merging)
         let way = Arc::new(ProcessedWay {
@@ -273,27 +331,24 @@ pub fn parse_osm_data(
             continue;
         };
 
-        // Process multipolygons, boundary relations, and building relations
+        // Process multipolygons and building relations
         let relation_type = tags.get("type").map(|x: &String| x.as_str());
-        if relation_type != Some("multipolygon")
-            && relation_type != Some("boundary")
-            && relation_type != Some("building")
-        {
+        if relation_type != Some("multipolygon") && relation_type != Some("building") {
             continue;
         };
 
-        let is_building_relation = relation_type == Some("building");
+        let is_building_relation = relation_type == Some("building")
+            || tags.contains_key("building")
+            || tags.contains_key("building:part");
 
         // Water relations require unclipped ways for ring merging in water_areas.rs
-        // Boundary relations also require unclipped ways for proper ring assembly
         // Building multipolygon relations also need unclipped ways so that
         // open outer-way segments can be merged into closed rings before clipping
         let is_water_relation = is_water_element(tags);
-        let is_boundary_relation = tags.contains_key("boundary");
         let is_building_multipolygon = (tags.contains_key("building")
             || tags.contains_key("building:part"))
             && relation_type == Some("multipolygon");
-        let keep_unclipped = is_water_relation || is_boundary_relation || is_building_multipolygon;
+        let keep_unclipped = is_water_relation || is_building_multipolygon;
 
         let members: Vec<ProcessedMember> = element
             .members
@@ -311,10 +366,16 @@ pub fn parse_osm_data(
                     ProcessedMemberRole::Outer
                 } else if trimmed_role.eq_ignore_ascii_case("inner") {
                     ProcessedMemberRole::Inner
-                } else if trimmed_role.eq_ignore_ascii_case("part") && is_building_relation {
-                    // "part" role only applies to type=building relations.
-                    // For multipolygon/boundary relations, treat it as unknown.
-                    ProcessedMemberRole::Part
+                } else if trimmed_role.eq_ignore_ascii_case("part") {
+                    if relation_type == Some("building") {
+                        // "part" role only applies to type=building relations.
+                        ProcessedMemberRole::Part
+                    } else {
+                        // For multipolygon relations, "part" is not a valid role, skip.
+                        return None;
+                    }
+                } else if is_building_relation {
+                    ProcessedMemberRole::Outer
                 } else {
                     return None;
                 };
@@ -328,8 +389,8 @@ pub fn parse_osm_data(
                     }
                 };
 
-                // Water and boundary relations: keep unclipped for ring merging
-                // Other relations: clip member ways now
+                // If keep_unclipped is true (e.g., certain water or building multipolygon
+                // relations), keep member ways unclipped for ring merging; otherwise clip now.
                 let final_way = if keep_unclipped {
                     way
                 } else {
@@ -355,7 +416,7 @@ pub fn parse_osm_data(
             processed_elements.push(ProcessedElement::Relation(ProcessedRelation {
                 id: element.id,
                 members,
-                tags: tags.clone(),
+                tags: filter_tags(tags.clone()),
             }));
         }
     }

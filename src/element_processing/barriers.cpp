@@ -11,12 +11,17 @@
 #include <optional>
 
 #include "../../../arnis_adapter.h"
+#include "bridges.h"
 namespace arnis
 {
 
 namespace barriers {
 
-void generate_barriers(world_editor::WorldEditor& editor, osm_parser::ProcessedElement const& element) {
+const int BRIDGE_BARRIER_NEARBY_RADIUS = 2;
+
+void generate_barriers(world_editor::WorldEditor& editor,
+        osm_parser::ProcessedElement const& element,
+        const bridges::BridgeSurfaceMap& bridge_surface) {
     block_definitions::Block barrier_material = block_definitions::COBBLESTONE_WALL;
     int barrier_height = 2;
 
@@ -119,25 +124,60 @@ void generate_barriers(world_editor::WorldEditor& editor, osm_parser::ProcessedE
             int bx = std::get<0>(pt);
             int bz = std::get<2>(pt);
 
-            for (int y = 1; y <= wall_height; ++y) {
-                editor.set_block(barrier_material, bx, y, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
-            }
-
-            if (wall_height > 1) {
-                editor.set_block(block_definitions::STONE_BRICK_SLAB, bx, wall_height + 1, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+            if (auto deck_y = bridge_surface.nearby_deck_y(bx, bz, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+                for (int y = 1; y <= wall_height; ++y) {
+                    editor.set_block_absolute(barrier_material, bx, *deck_y + y, bz,
+                            std::optional<std::vector<block_definitions::Block>>(),
+                            std::optional<std::vector<block_definitions::Block>>());
+                }
+                if (wall_height > 1) {
+                    editor.set_block_absolute(block_definitions::STONE_BRICK_SLAB, bx,
+                            *deck_y + wall_height + 1, bz,
+                            std::optional<std::vector<block_definitions::Block>>(),
+                            std::optional<std::vector<block_definitions::Block>>());
+                }
+            } else {
+                for (int y = 1; y <= wall_height; ++y) {
+                    editor.set_block(barrier_material, bx, y, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+                }
+                if (wall_height > 1) {
+                    editor.set_block(block_definitions::STONE_BRICK_SLAB, bx, wall_height + 1, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+                }
             }
         }
     }
 }
 
-void generate_barrier_nodes(world_editor::WorldEditor& editor, osm_parser::ProcessedNode const& node) {
+void generate_barriers(world_editor::WorldEditor& editor, osm_parser::ProcessedElement const& element) {
+    static const bridges::BridgeSurfaceMap empty_bridge_surface;
+    generate_barriers(editor, element, empty_bridge_surface);
+}
+
+void place_barrier_node_block(world_editor::WorldEditor& editor,
+        osm_parser::ProcessedNode const& node,
+        const bridges::BridgeSurfaceMap& bridge_surface,
+        block_definitions::Block block,
+        int dy) {
+    if (auto deck_y = bridge_surface.nearby_deck_y(node.x, node.z, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+        editor.set_block_absolute(block, node.x, *deck_y + dy, node.z,
+                std::optional<std::vector<block_definitions::Block>>(),
+                std::optional<std::vector<block_definitions::Block>>());
+    } else {
+        editor.set_block(block, node.x, dy, node.z,
+                std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+    }
+}
+
+void generate_barrier_nodes(world_editor::WorldEditor& editor,
+        osm_parser::ProcessedNode const& node,
+        const bridges::BridgeSurfaceMap& bridge_surface) {
     auto it = node.tags.find("barrier");
     if (it == node.tags.end()) {
         return;
     }
     const std::string& val = it->second;
     if (val == "bollard") {
-        editor.set_block(block_definitions::COBBLESTONE_WALL, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+        place_barrier_node_block(editor, node, bridge_surface, block_definitions::COBBLESTONE_WALL, 1);
     } else if (val == "stile" || val == "gate" || val == "swing_gate" || val == "lift_gate") {
         /* Future implementation for gates:
         editor.set_block(
@@ -190,10 +230,15 @@ void generate_barrier_nodes(world_editor::WorldEditor& editor, osm_parser::Proce
         );
         */
     } else if (val == "block") {
-        editor.set_block(block_definitions::STONE, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+        place_barrier_node_block(editor, node, bridge_surface, block_definitions::STONE, 1);
     } else if (val == "entrance") {
-        editor.set_block(block_definitions::AIR, node.x, 1, node.z, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
+        place_barrier_node_block(editor, node, bridge_surface, block_definitions::AIR, 1);
     }
+}
+
+void generate_barrier_nodes(world_editor::WorldEditor& editor, osm_parser::ProcessedNode const& node) {
+    static const bridges::BridgeSurfaceMap empty_bridge_surface;
+    generate_barrier_nodes(editor, node, empty_bridge_surface);
 }
 
 }

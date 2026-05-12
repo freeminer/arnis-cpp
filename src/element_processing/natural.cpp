@@ -6,6 +6,7 @@
 #include <tuple>
 #include <cmath>
 #include <algorithm>
+#include <cstdint>
 
 
 #include "../../../arnis_adapter.h"
@@ -204,6 +205,32 @@ static std::vector<std::pair<int,int>> flood_fill_area(const std::vector<std::pa
 
 #endif
 
+uint64_t coord_hash(int x, int z) {
+    uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32;
+    h ^= static_cast<uint32_t>(z);
+    h += 0x9e3779b97f4a7c15ULL;
+    h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ULL;
+    h = (h ^ (h >> 27)) * 0x94d049bb133111ebULL;
+    return h ^ (h >> 31);
+}
+
+Block vary_rock_block(Block base, int x, int z) {
+    const uint64_t h = coord_hash(x, z) % 10;
+    if (base == STONE) {
+        if (h <= 4) return STONE;
+        if (h <= 6) return ANDESITE;
+        if (h == 7) return COBBLESTONE;
+        return GRAVEL;
+    }
+    if (base == COBBLESTONE) {
+        if (h <= 4) return COBBLESTONE;
+        if (h <= 6) return ANDESITE;
+        if (h == 7) return STONE;
+        return GRAVEL;
+    }
+    return base;
+}
+
 // Generate natural area for single element
 //static 
 void generate_natural(WorldEditor& editor, const ProcessedElement& element, const Args& args, 
@@ -343,6 +370,22 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
     } else {
         block_type = GRASS_BLOCK;
     }
+    const bool rock_variation =
+            natural_type == "blockfield" || natural_type == "cliff" ||
+            natural_type == "saddle" || natural_type == "ridge" ||
+            natural_type == "mountain_range";
+
+    const std::optional<std::vector<Block>> protected_surface_blocks(
+            std::vector<Block>{
+                BLACK_CONCRETE,
+                GRAY_CONCRETE_POWDER,
+                CYAN_TERRACOTTA,
+                GRAY_CONCRETE,
+                LIGHT_GRAY_CONCRETE,
+                WHITE_CONCRETE,
+                DIRT_PATH,
+                SMOOTH_STONE,
+            });
 
     if (element.type != ProcessedElement::Type::Way) {
         return;
@@ -362,7 +405,10 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
             for (const auto& t : bres) {
                 int bx = std::get<0>(t);
                 int bz = std::get<2>(t);
-                editor.set_block(block_type, bx, 0, bz, std::nullopt, std::nullopt);
+                if (!editor.check_for_block(bx, 0, bz, protected_surface_blocks)) {
+                    Block block = rock_variation ? vary_rock_block(block_type, bx, bz) : block_type;
+                    editor.set_block(block, bx, 0, bz, std::nullopt, std::nullopt);
+                }
             }
             current_natural.emplace_back(x, z);
             std::get<0>(corner_addup) += x;
@@ -379,7 +425,7 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
             polygon_coords.emplace_back(n.x, n.z);
         }
 
-        std::vector<std::pair<int,int>> filled_area = flood_fill_area(polygon_coords, args.timeout);
+        std::vector<std::pair<int,int>> filled_area = flood_fill_cache.get_or_compute(way, args.timeout);
 
         // Determine tree types for wood/tree_row areas
         std::vector<TreeType> trees_ok_to_generate;
@@ -402,10 +448,26 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
             trees_ok_to_generate.push_back(TreeType::Birch);
         }
 
+        std::optional<std::vector<Block>> protected_fill_blocks(
+                std::vector<Block>{
+                    BLACK_CONCRETE,
+                    GRAY_CONCRETE_POWDER,
+                    CYAN_TERRACOTTA,
+                    GRAY_CONCRETE,
+                    LIGHT_GRAY_CONCRETE,
+                    WHITE_CONCRETE,
+                    DIRT_PATH,
+                    SMOOTH_STONE,
+                    WATER,
+                });
+
         for (const auto& p : filled_area) {
             int x = p.first;
             int z = p.second;
-            editor.set_block(block_type, x, 0, z, std::nullopt, std::nullopt);
+            if (!editor.check_for_block(x, 0, z, protected_fill_blocks)) {
+                Block block = rock_variation ? vary_rock_block(block_type, x, z) : block_type;
+                editor.set_block(block, x, 0, z, std::nullopt, std::nullopt);
+            }
 
             // Generate custom layer instead of dirt, must be stone on the lowest level
             if (natural_type == "beach" || natural_type == "sand" || natural_type == "dune" || natural_type == "shoal") {
@@ -414,7 +476,15 @@ void generate_natural(WorldEditor& editor, const ProcessedElement& element, cons
                 editor.set_block(PACKED_ICE, x, 0, z, std::nullopt, std::nullopt);
                 editor.set_block(STONE, x, -1, z, std::nullopt, std::nullopt);
             } else if (natural_type == "bare_rock") {
-                editor.set_block(STONE, x, 0, z, std::nullopt, std::nullopt);
+                const uint64_t h = coord_hash(x, z) % 12;
+                Block rock = STONE;
+                if (h <= 4) rock = STONE;
+                else if (h <= 6) rock = ANDESITE;
+                else if (h <= 8) rock = COBBLESTONE;
+                else if (h == 9) rock = GRAVEL;
+                else if (h == 10) rock = TUFF;
+                else rock = COARSE_DIRT;
+                editor.set_block(rock, x, 0, z, std::nullopt, std::nullopt);
             }
 
             // Generate surface elements

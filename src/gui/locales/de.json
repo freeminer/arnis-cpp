@@ -1,6 +1,7 @@
 {
   "create_world": "Welt erstellen",
   "no_world_selected": "Keine Welt erstellt",
+  "no_world_generated_yet": "Noch keine Welt generiert",
   "start_generation": "Generierung starten",
   "custom_selection_confirmed": "Benutzerdefinierte Auswahl bestätigt!",
   "error_coordinates_out_of_range": "Fehler: Koordinaten sind außerhalb des Bereichs oder falsch geordnet (Lat vor Lng erforderlich).",
@@ -21,6 +22,7 @@
   "create_world_first": "Erstelle zuerst eine Welt!",
   "select_location_first": "Wähle zuerst einen Standort aus!",
   "area_too_large": "Dieses Gebiet ist sehr groß und könnte das Berechnungslimit überschreiten.",
+  "area_extreme": "Dieses Gebiet ist extrem groß und könnte möglicherweise zu groß sein, um erfolgreich generiert zu werden.",
   "area_extensive": "Diese Gebietsgröße könnte längere Zeit für die Generierung benötigen.",
   "selection_confirmed": "Auswahl bestätigt!",
   "select_area_prompt": "Wähle einen Bereich auf der Karte aus.",
@@ -39,7 +41,17 @@
   "interior": "Innenraum Generierung",
   "roof": "Dach Generierung",
   "fillground": "Boden füllen",
-  "city_boundaries": "Stadtboden",
+  "land_cover": "Landbedeckung",
+  "disable_height_limit": "Bauhöhe erweitern",
+  "aws_only_elevation": "Klassisches Terrain",
   "bedrock_auto_generated": "Bedrock-Welt wird automatisch generiert",
-  "save_path": "Speicherpfad"
+  "save_path": "Speicherpfad",
+  "rotation_angle": "Rotationswinkel",
+  "settings_section_generation": "Generierung",
+  "settings_section_world": "Welt",
+  "settings_section_map": "Karte & Eingabe",
+  "settings_section_application": "Anwendung",
+  "clear_tile_cache": "Tile-Cache leeren",
+  "clear_tile_cache_button": "Leeren",
+  "anonymous_crash_reports": "Anonyme Absturzberichte"
 }

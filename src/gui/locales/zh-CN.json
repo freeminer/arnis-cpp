@@ -1,6 +1,7 @@
 {
   "create_world": "创建世界",
   "no_world_selected": "未创建世界",
+  "no_world_generated_yet": "尚未生成世界",
   "start_generation": "开始生成",
   "custom_selection_confirmed": "自定义选择已确认！",
   "error_coordinates_out_of_range": "错误：坐标超出范围或顺序不正确（需要先纬度后经度）。",
@@ -21,6 +22,7 @@
   "create_world_first": "请先创建一个世界！",
   "select_location_first": "请先选择一个位置！",
   "area_too_large": "该区域非常大，可能会超出典型的计算限制。",
+  "area_extreme": "此区域极大，可能过大而无法成功生成。",
   "area_extensive": "该区域相当广泛，可能需要大量时间和资源。",
   "selection_confirmed": "选择已确认！",
   "select_area_prompt": "使用工具在地图上选择一个区域。",
@@ -39,7 +41,17 @@
   "interior": "内部生成",
   "roof": "屋顶生成",
   "fillground": "填充地面",
-  "city_boundaries": "城市地面",
+  "land_cover": "土地覆盖",
+  "disable_height_limit": "扩展建造高度",
+  "aws_only_elevation": "旧版地形",
   "bedrock_auto_generated": "Bedrock 世界自动生成",
-  "save_path": "存档路径"
+  "save_path": "存档路径",
+  "rotation_angle": "旋转角度",
+  "settings_section_generation": "生成",
+  "settings_section_world": "世界",
+  "settings_section_map": "地图与输入",
+  "settings_section_application": "应用",
+  "clear_tile_cache": "清除瓦片缓存",
+  "clear_tile_cache_button": "清除",
+  "anonymous_crash_reports": "匿名崩溃报告"
 }

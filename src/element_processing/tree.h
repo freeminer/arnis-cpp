@@ -89,7 +89,17 @@ static const std::array<std::pair<Coord, Coord>, 5> BIRCH_LEAVES_FILL = {{
     { {  0, 7, 0 }, {  0, 8, 0 } },
 }};
 
-enum class TreeType { Oak = 0, Spruce = 1, Birch = 2, DarkOak = 3, Jungle = 4, Acacia = 5 };
+enum class TreeType {
+    Oak = 0,
+    Spruce = 1,
+    Birch = 2,
+    DarkOak = 3,
+    Jungle = 4,
+    Acacia = 5,
+    Cherry = 6,
+    TallOak = 7,
+    Pine = 8
+};
 
 struct Tree {
     Block log_block;
@@ -104,6 +114,12 @@ struct Tree {
         }
     }
 
+    static void round_absolute(WorldEditor& editor, Block material, const Coord& center, std::span<const Coord> block_pattern) {
+        for (const Coord& d : block_pattern) {
+            editor.set_block_absolute(material, center.x + d.x, center.y + d.y, center.z + d.z, std::nullopt, std::nullopt);
+        }
+    }
+
     static Tree get_tree(TreeType kind);
     
     static void create(WorldEditor& editor, const Coord& pos, const BuildingFootprintBitmap* building_footprints = nullptr);
@@ -114,6 +130,7 @@ struct Tree {
     static std::vector<Block> get_building_floor_blocks();
     static std::vector<Block> get_structural_blocks();
     static std::vector<Block> get_functional_blocks();
+    static bool canopy_might_intersect_building(int x, int z, const BuildingFootprintBitmap* building_footprints);
 };
 
 }

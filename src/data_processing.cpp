@@ -2,12 +2,15 @@
 #include <sys/types.h>
 #include <unordered_set>
 #include <memory>
+#include <utility>
 
 #include "../../arnis_adapter.h"
 #include "element_processing/historic.h"
 #include "element_processing/power.h"
 #include "element_processing/emergency.h"
 #include "element_processing/advertising.h"
+#include "element_processing/bridges.h"
+#include "element_processing/buildings.h"
 #include "floodfill_cache.h"
 
 namespace arnis
@@ -18,8 +21,17 @@ namespace buildings
 {
 void generate_building_from_relation(
 		WorldEditor &editor, const ProcessedRelation &relation, const Args &args);
+void generate_building_from_relation(
+		WorldEditor &editor, const ProcessedRelation &relation, const Args &args,
+		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
+		const CoordinateBitmap &building_passages);
 void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 		const Args &args, const std::optional<int> &relation_levels);
+void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
+		const Args &args, const std::optional<int> &relation_levels,
+		const FloodFillCache &flood_fill_cache,
+		const CoordinateBitmap &building_passages,
+		const std::vector<HolePolygon> *hole_polygons);
 }
 
 namespace highways
@@ -27,8 +39,20 @@ namespace highways
 void generate_highways(WorldEditor &editor, const ProcessedElement &element,
 		const Args &args, const std::vector<ProcessedElement> &all_elements, 
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout);
+void generate_highways(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, const std::vector<ProcessedElement> &all_elements,
+		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
+		const RoadMaskBitmap &road_mask,
+		const bridges::BridgeStructureMap &bridge_structures,
+		const bridges::BridgeSurfaceMap &bridge_surface);
 void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args);
 void generate_siding(WorldEditor &editor, const ProcessedWay &way);
+void generate_siding(WorldEditor &editor, const ProcessedWay &way,
+		const bridges::BridgeSurfaceMap &bridge_surface);
+CoordinateBitmap collect_road_surface_coords(
+		const std::vector<ProcessedElement> &elements, const ::XZBBox &xzbbox, double scale);
+CoordinateBitmap collect_building_passage_coords(
+		const std::vector<ProcessedElement> &elements, const ::XZBBox &xzbbox, double scale);
 }
 
 namespace landuse
@@ -56,6 +80,9 @@ namespace amenities
 {
 void generate_amenities(
 		WorldEditor &editor, const ProcessedElement &element, const Args &args);
+void generate_amenities(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, const FloodFillCache &flood_fill_cache,
+		const RoadMaskBitmap &road_mask);
 }
 
 namespace leisure
@@ -70,7 +97,11 @@ void generate_leisure_from_relation(
 namespace barriers
 {
 void generate_barriers(WorldEditor &editor, const ProcessedElement &element);
+void generate_barriers(WorldEditor &editor, const ProcessedElement &element,
+		const bridges::BridgeSurfaceMap &bridge_surface);
 void generate_barrier_nodes(WorldEditor &editor, const ProcessedNode &node);
+void generate_barrier_nodes(WorldEditor &editor, const ProcessedNode &node,
+		const bridges::BridgeSurfaceMap &bridge_surface);
 }
 
 namespace waterways
@@ -86,8 +117,16 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way);
 
 namespace railways
 {
+using RailBridgeInternalEndpoints = std::vector<std::pair<int, int>>;
 void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &way);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element);
+void generate_railways(WorldEditor &editor, const ProcessedWay &element,
+		std::vector<std::pair<int, int>> &subway_points,
+		const RailBridgeInternalEndpoints &rail_bridge_internal_endpoints);
+RailBridgeInternalEndpoints collect_rail_bridge_internal_endpoints(
+		const std::vector<ProcessedElement> &elements);
+void carve_subway_interior(WorldEditor &editor,
+		const std::vector<std::pair<int, int>> &subway_points);
 }
 
 namespace tourisms
@@ -100,6 +139,8 @@ namespace man_made
 void generate_man_made(
 		WorldEditor &editor, const ProcessedElement &element, const Args &args);
 void generate_man_made_nodes(WorldEditor &editor, const ProcessedNode &node);
+void generate_man_made_nodes(WorldEditor &editor, const ProcessedNode &node,
+		const Args &args);
 }
 
 namespace doors
@@ -134,6 +175,17 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 		const Args &args_, FloodFillCache const & flood_fill_cache, 
         BuildingFootprintBitmap const & building_footprints)
 {
+	auto [min_x, min_z] = editor.get_min_coords();
+	auto [max_x, max_z] = editor.get_max_coords();
+	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	auto road_mask = highways::collect_road_surface_coords(elements, xzbbox, args_.scale);
+	auto bridge_structures = bridges::BridgeStructureMap::build(elements, editor);
+	auto bridge_surface = bridges::BridgeSurfaceMap::build(elements, bridge_structures, args_.scale);
+	auto building_passages = highways::collect_building_passage_coords(elements, xzbbox, args_.scale);
+	std::vector<std::pair<int, int>> subway_points;
+	auto rail_bridge_internal_endpoints =
+			railways::collect_rail_bridge_internal_endpoints(elements);
+
 	// Pre-scan: detect building relation outlines that should be suppressed.
 	// Only applies to type=building relations (NOT type=multipolygon).
 	// When a type=building relation has "part" members, the outline way should not
@@ -179,20 +231,22 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 				// Skip building outlines that are suppressed by building relations with parts.
 				// The individual building:part ways will render instead.
 				if (suppressed_building_outlines.find(way.id) == suppressed_building_outlines.end()) {
-					buildings::generate_buildings(&editor, way, args, std::optional<int>{});
+					buildings::generate_buildings(&editor, way, args, std::optional<int>{},
+							flood_fill_cache, building_passages, nullptr);
 				}
 			} else if (way.tags.contains("highway")) {
-				highways::generate_highways(editor, element, args, elements, {});
+				highways::generate_highways(editor, element, args, elements, {},
+						road_mask, bridge_structures, bridge_surface);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache, building_footprints);
 			} else if (way.tags.contains("natural")) {
 				natural::generate_natural(editor, element, args, flood_fill_cache, building_footprints);
 			} else if (way.tags.contains("amenity")) {
-				amenities::generate_amenities(editor, element, args);
+				amenities::generate_amenities(editor, element, args, flood_fill_cache, road_mask);
 			} else if (way.tags.contains("leisure")) {
 				leisure::generate_leisure(editor, way, args, flood_fill_cache, building_footprints);
 			} else if (way.tags.contains("barrier")) {
-				barriers::generate_barriers(editor, element);
+				barriers::generate_barriers(editor, element, bridge_surface);
 			} else if (way.tags.contains("waterway")) {
 				auto it_val = way.tags.find("waterway");
 				if (it_val != way.tags.end() && it_val->second == "dock") {
@@ -204,7 +258,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 			} else if (way.tags.contains("bridge")) {
 				// bridges::generate_bridges(editor, way, ground_level); // TODO FIX
 			} else if (way.tags.contains("railway")) {
-				railways::generate_railways(editor, way);
+				railways::generate_railways(
+						editor, way, subway_points, rail_bridge_internal_endpoints);
 			} else if (way.tags.contains("roller_coaster")) {
 				railways::generate_roller_coaster(editor, way);
 			} else if (way.tags.contains("aeroway") ||
@@ -212,7 +267,7 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 				highways::generate_aeroway(editor, way, args);
 			} else if (way.tags.get("service") ==
 					   std::optional<std::string>(std::string("siding"))) {
-				highways::generate_siding(editor, way);
+				highways::generate_siding(editor, way, bridge_surface);
 			} else if (way.tags.get("tomb") ==
 					   std::optional<std::string>(std::string("pyramid"))) {
 				historic::generate_pyramid(editor, way, args);
@@ -235,15 +290,16 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 							   std::optional<std::string>(std::string("tree"))) {
 				natural::generate_natural(editor, element, args, flood_fill_cache, building_footprints);
 			} else if (node.tags.contains("amenity")) {
-				amenities::generate_amenities(editor, element, args);
+				amenities::generate_amenities(editor, element, args, flood_fill_cache, road_mask);
 			} else if (node.tags.contains("barrier")) {
-				barriers::generate_barrier_nodes(editor, node);
+				barriers::generate_barrier_nodes(editor, node, bridge_surface);
 			} else if (node.tags.contains("highway")) {
-				highways::generate_highways(editor, element, args, elements, {});
+				highways::generate_highways(editor, element, args, elements, {},
+						road_mask, bridge_structures, bridge_surface);
 			} else if (node.tags.contains("tourism")) {
 				tourisms::generate_tourisms(editor, node);
 			} else if (node.tags.contains("man_made")) {
-				man_made::generate_man_made_nodes(editor, node);
+				man_made::generate_man_made_nodes(editor, node, args);
 			} else if (node.tags.contains("power")) {
 				power::generate_power_nodes(editor, node);
 			} else if (node.tags.contains("historic")) {
@@ -267,7 +323,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 										std::optional<std::string>(std::string("building")));
 
 			if (is_building_relation) {
-				buildings::generate_building_from_relation(editor, rel, args);
+				buildings::generate_building_from_relation(
+						editor, rel, args, flood_fill_cache, xzbbox, building_passages);
 			} else if (rel.tags.contains("water") ||
 					   rel.tags.get("natural") ==
 							   std::optional<std::string>(std::string("water")) ||
@@ -285,6 +342,10 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 				man_made::generate_man_made(editor, ProcessedElement(rel), args);
 			}
 		}
+	}
+
+	if (!subway_points.empty()) {
+		railways::carve_subway_interior(editor, subway_points);
 	}
 
 	return true;

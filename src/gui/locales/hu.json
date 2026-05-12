@@ -1,6 +1,7 @@
 {
   "create_world": "Világ létrehozása",
   "no_world_selected": "Nincs világ létrehozva",
+  "no_world_generated_yet": "Még nincs világ generálva",
   "start_generation": "Generálás indítása",
   "custom_selection_confirmed": "Egyéni kiválasztás megerősítve",
   "error_coordinates_out_of_range": "Hiba: A koordináták tartományon kívül vannak vagy hibásan rendezettek (a szélességi foknak a hosszúsági fok előtt kell lennie)",
@@ -21,6 +22,7 @@
   "create_world_first": "Először hozz létre egy világot!",
   "select_location_first": "Válassz egy helyet először!",
   "area_too_large": "Ez a terület nagyon nagy, és meghaladhatja a szokásos számítási korlátokat.",
+  "area_extreme": "Ez a terület rendkívül nagy, és lehet, hogy túl nagy ahhoz, hogy sikeresen legenerálható legyen.",
   "area_extensive": "A terület meglehetősen kiterjedt, és jelentős időt és erőforrásokat igényelhet.",
   "selection_confirmed": "Kiválasztás megerősítve",
   "select_area_prompt": "Jelölj ki egy területet a térképen az eszközökkel.",
@@ -39,7 +41,17 @@
   "interior": "Belső generálás",
   "roof": "Tető generálás",
   "fillground": "Talaj feltöltése",
-  "city_boundaries": "Városi talaj",
+  "land_cover": "Felszínborítás",
+  "disable_height_limit": "Építési magasság kiterjesztése",
+  "aws_only_elevation": "Régi domborzat",
   "bedrock_auto_generated": "A Bedrock világ automatikusan generálódik",
-  "save_path": "Mentési útvonal"
+  "save_path": "Mentési útvonal",
+  "rotation_angle": "Forgatási Szög",
+  "settings_section_generation": "Generálás",
+  "settings_section_world": "Világ",
+  "settings_section_map": "Térkép és bevitel",
+  "settings_section_application": "Alkalmazás",
+  "clear_tile_cache": "Csempe-gyorsítótár törlése",
+  "clear_tile_cache_button": "Törlés",
+  "anonymous_crash_reports": "Névtelen összeomlási jelentések"
 }

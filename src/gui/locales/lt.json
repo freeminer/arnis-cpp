@@ -1,6 +1,7 @@
 {
   "create_world": "Sukurti pasaulį",
   "no_world_selected": "Pasaulis nesukurtas",
+  "no_world_generated_yet": "Pasaulis dar nesugeneruotas",
   "start_generation": "Pradėti generaciją",
   "custom_selection_confirmed": "Rėmo pasirinkimas patvirtintas!",
   "error_coordinates_out_of_range": "Klaida: Koordinatės yra už ribų arba neteisingai išdėstytos (plat turi būti prieš ilg).",
@@ -21,6 +22,7 @@
   "create_world_first": "Pirmiausia sukurkite pasaulį!",
   "select_location_first": "Pirma pasirinkite vietą!",
   "area_too_large": "Šis plotas yra labai didelis ir gali viršyti tipinius resursų limitus.",
+  "area_extreme": "Šis plotas yra itin didelis ir gali būti per didelis, kad būtų sėkmingai sugeneruotas.",
   "area_extensive": "Šis plotas yra pakankamai didelis kuriam reikėtų daug laiko ir resursų.",
   "selection_confirmed": "Pasirinkimas patvirtintas!",
   "select_area_prompt": "Pasirinkite plotą žemėlapyje naudodami įrankius.",
@@ -39,7 +41,17 @@
   "interior": "Interjero generavimas",
   "roof": "Stogo generavimas",
   "fillground": "Užpildyti pagrindą",
-  "city_boundaries": "Miesto žemė",
+  "land_cover": "Žemės danga",
+  "disable_height_limit": "Praplėsti statybos aukštį",
+  "aws_only_elevation": "Senasis reljefas",
   "bedrock_auto_generated": "Bedrock pasaulis generuojamas automatiškai",
-  "save_path": "Išsaugojimo kelias"
+  "save_path": "Išsaugojimo kelias",
+  "rotation_angle": "Pasukimo Kampas",
+  "settings_section_generation": "Generavimas",
+  "settings_section_world": "Pasaulis",
+  "settings_section_map": "Žemėlapis ir įvestis",
+  "settings_section_application": "Programa",
+  "clear_tile_cache": "Išvalyti plytelių talpyklą",
+  "clear_tile_cache_button": "Išvalyti",
+  "anonymous_crash_reports": "Anoniminės avarijų ataskaitos"
 }

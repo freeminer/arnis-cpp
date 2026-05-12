@@ -2,6 +2,8 @@
 #include <unordered_map>
 #include <optional>
 #include <stdexcept>
+#include <tuple>
+#include <vector>
 
 
 #include "../../../arnis_adapter.h"
@@ -83,6 +85,24 @@ void generate_tourisms(crate::world_editor::WorldEditor& editor, const crate::os
                 if (info_type != "office" && info_type != "visitor_centre") {
                     editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
                     editor.set_block(crate::block_definitions::OAK_PLANKS, x, 2, z, std::nullopt, std::nullopt);
+
+                    const int abs_y = editor.get_absolute_y(x, 2, z);
+                    const std::vector<std::pair<std::string, std::string>> info_patterns = {
+                        {"blue", "minecraft:stripe_left"},
+                        {"blue", "minecraft:stripe_right"},
+                        {"blue", "minecraft:stripe_top"},
+                        {"blue", "minecraft:stripe_middle"},
+                        {"blue", "minecraft:border"},
+                    };
+                    const std::vector<std::tuple<int, int, std::string>> banner_faces = {
+                        {0, 1, "south"},
+                        {0, -1, "north"},
+                        {1, 0, "east"},
+                        {-1, 0, "west"},
+                    };
+                    for (const auto& [dx, dz, facing] : banner_faces) {
+                        editor.place_wall_banner(x + dx, abs_y, z + dz, facing, info_patterns);
+                    }
                 }
             }
         }
@@ -91,5 +111,3 @@ void generate_tourisms(crate::world_editor::WorldEditor& editor, const crate::os
 
 } // namespace generators
 } // namespace crate
-
-

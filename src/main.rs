@@ -11,13 +11,17 @@ mod coordinate_system;
 mod data_processing;
 mod deterministic_rng;
 mod element_processing;
+mod elevation;
 mod elevation_data;
 mod floodfill;
 mod floodfill_cache;
 mod ground;
+mod ground_generation;
+mod land_cover;
 mod map_renderer;
 mod map_transformation;
 mod osm_parser;
+mod overture;
 #[cfg(feature = "gui")]
 mod progress;
 mod retrieve_data;
@@ -25,7 +29,6 @@ mod retrieve_data;
 mod telemetry;
 #[cfg(test)]
 mod test_utilities;
-mod urban_ground;
 mod version_check;
 mod world_editor;
 mod world_utils;
@@ -45,7 +48,7 @@ mod progress {
     pub fn emit_gui_error(_message: &str) {}
     pub fn emit_gui_progress_update(_progress: f64, _message: &str) {}
     pub fn emit_map_preview_ready() {}
-    pub fn emit_open_mcworld_file(_path: &str) {}
+    pub fn emit_show_in_folder(_path: &str) {}
     pub fn is_running_with_gui() -> bool {
         false
     }
@@ -138,6 +141,20 @@ fn run_cli() {
             "Created new world at: {}",
             world_path.display().to_string().bright_white().bold()
         );
+        if args.disable_height_limit {
+            if let Err(e) = world_utils::install_tall_datapack(&world_path) {
+                eprintln!(
+                    "{} Failed to install tall-world datapack: {}",
+                    "Error:".red().bold(),
+                    e
+                );
+                std::process::exit(1);
+            }
+            eprintln!(
+                "Note: tall-world datapack installed (requires Minecraft 1.21.4+). \
+                 First load will prompt 'Experimental Features'; world can't be uploaded to Realms."
+            );
+        }
         (world_path, None)
     };
 
@@ -158,6 +175,27 @@ fn run_cli() {
     // Parse raw data
     let (mut parsed_elements, mut xzbbox) =
         osm_parser::parse_osm_data(raw_data, args.bbox, args.scale, args.debug);
+
+    // Fetch supplementary building data from Overture Maps
+    {
+        println!("{} Fetching Overture Maps data...", "  [+]".bold());
+        let overture_elements =
+            overture::fetch_overture_buildings(&args.bbox, args.scale, args.debug);
+        if !overture_elements.is_empty() {
+            let before_count = parsed_elements.len();
+            let unique_overture =
+                overture::deduplicate_against_osm(overture_elements, &parsed_elements);
+            parsed_elements.extend(unique_overture);
+            let added = parsed_elements.len() - before_count;
+            println!(
+                "  Added {} buildings from Overture Maps",
+                added.to_string().bright_white().bold()
+            );
+        } else {
+            println!("  No additional buildings from Overture Maps for this area");
+        }
+    }
+
     parsed_elements
         .sort_by_key(|element: &osm_parser::ProcessedElement| osm_parser::get_priority(element));
 
@@ -181,12 +219,69 @@ fn run_cli() {
     // Transform map (parsed_elements). Operations are defined in a json file
     map_transformation::transform_map(&mut parsed_elements, &mut xzbbox, &mut ground);
 
+    // Apply rotation if specified
+    if args.rotation.abs() > f64::EPSILON {
+        if let Err(e) = map_transformation::rotate::rotate_world(
+            args.rotation,
+            &mut parsed_elements,
+            &mut xzbbox,
+            &mut ground,
+        ) {
+            eprintln!("{} Rotation failed: {}", "Error:".red().bold(), e);
+            std::process::exit(1);
+        }
+    }
+
+    // Convert spawn lat/lng to Minecraft XZ coordinates if provided
+    let spawn_point: Option<(i32, i32)> = match (args.spawn_lat, args.spawn_lng) {
+        (Some(lat), Some(lng)) => {
+            use coordinate_system::geographic::LLPoint;
+            use coordinate_system::transformation::CoordTransformer;
+
+            let llpoint = LLPoint::new(lat, lng).unwrap_or_else(|e| {
+                eprintln!("{} Invalid spawn coordinates: {}", "Error:".red().bold(), e);
+                std::process::exit(1);
+            });
+
+            let (transformer, pre_rot_bbox) =
+                CoordTransformer::llbbox_to_xzbbox(&args.bbox, args.scale).unwrap_or_else(|e| {
+                    eprintln!(
+                        "{} Failed to convert spawn point: {}",
+                        "Error:".red().bold(),
+                        e
+                    );
+                    std::process::exit(1);
+                });
+
+            let xzpoint = transformer.transform_point(llpoint);
+            let (sx, sz) = map_transformation::rotate::rotate_xz_point(
+                xzpoint.x,
+                xzpoint.z,
+                args.rotation,
+                &pre_rot_bbox,
+            );
+
+            Some((sx, sz))
+        }
+        _ => None,
+    };
+
+    // Derive terrain-aware spawn Y while `ground` is still in scope (it gets
+    // moved into `generate_world_with_options` below). Used only for Java's
+    // post-generation `set_spawn_in_level_dat` call — Bedrock derives spawn Y
+    // independently inside `BedrockWriter::write_level_dat`.
+    let spawn_y_for_java = spawn_point.map(|(sx, sz)| {
+        use coordinate_system::cartesian::XZPoint;
+        let rel = XZPoint::new(sx - xzbbox.min_x(), sz - xzbbox.min_z());
+        ground.level(rel) + 3
+    });
+
     // Build generation options
     let generation_options = data_processing::GenerationOptions {
         path: generation_path.clone(),
         format: world_format,
         level_name,
-        spawn_point: None,
+        spawn_point,
     };
 
     // Generate world
@@ -205,6 +300,24 @@ fn run_cli() {
                     "Done!".green().bold(),
                     generation_path.display()
                 );
+            }
+
+            // For Java Edition, update spawn point in level.dat if provided
+            if !args.bedrock {
+                if let (Some((spawn_x, spawn_z)), Some(spawn_y)) = (spawn_point, spawn_y_for_java) {
+                    if let Err(e) = world_utils::set_spawn_in_level_dat(
+                        &generation_path,
+                        spawn_x,
+                        spawn_y,
+                        spawn_z,
+                    ) {
+                        eprintln!(
+                            "{} Failed to set spawn point in level.dat: {}",
+                            "Warning:".yellow().bold(),
+                            e
+                        );
+                    }
+                }
             }
         }
         Err(e) => {

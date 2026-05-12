@@ -9,7 +9,24 @@ use crate::floodfill::flood_fill_area;
 use crate::osm_parser::{ProcessedElement, ProcessedMemberRole, ProcessedWay};
 use fnv::FnvHashMap;
 use rayon::prelude::*;
+use std::sync::{Arc, OnceLock};
 use std::time::Duration;
+
+/// Shared, reference-counted flood fill result.
+///
+/// Using `Arc<Vec<...>>` lets handlers grab a cached result without deep-copying
+/// the coordinate list — a single refcount bump instead of a `Vec::clone` that
+/// would memcpy 8 bytes per cell (large forests/farmland easily hit 100k+ cells).
+pub type FloodFillResult = Arc<Vec<(i32, i32)>>;
+
+/// Returns a reference to a process-wide shared empty flood-fill result.
+///
+/// Used as the sentinel for Node/Relation elements that don't produce a flood
+/// fill, so we don't allocate a fresh empty `Arc<Vec<_>>` on every call.
+fn empty_flood_fill_result() -> &'static FloodFillResult {
+    static EMPTY: OnceLock<FloodFillResult> = OnceLock::new();
+    EMPTY.get_or_init(|| Arc::new(Vec::new()))
+}
 
 /// A memory-efficient bitmap for storing coordinates.
 ///
@@ -54,6 +71,18 @@ impl CoordinateBitmap {
             min_z,
             width,
             height,
+            count: 0,
+        }
+    }
+
+    /// Creates a zero-size bitmap that contains nothing and allocates no memory.
+    pub fn new_empty() -> Self {
+        Self {
+            bits: Vec::new(),
+            min_x: 0,
+            min_z: 0,
+            width: 0,
+            height: 0,
             count: 0,
         }
     }
@@ -225,10 +254,17 @@ impl CoordinateBitmap {
 /// Type alias for building footprint bitmap (for backwards compatibility).
 pub type BuildingFootprintBitmap = CoordinateBitmap;
 
+/// Type alias for the road surface bitmap used by amenity processors.
+/// Built by `highways::collect_road_surface_coords` using the same Bresenham +
+/// block_range geometry as the renderer, so every placed road/path block coordinate
+/// is marked as 1 and everything else is 0.
+pub type RoadMaskBitmap = CoordinateBitmap;
+
 /// A cache of pre-computed flood fill results, keyed by element ID.
 pub struct FloodFillCache {
-    /// Cached results: element_id -> filled coordinates
-    way_cache: FnvHashMap<u64, Vec<(i32, i32)>>,
+    /// Cached results: element_id -> filled coordinates (shared via Arc so handler
+    /// fetches are O(1) refcount bumps instead of deep clones).
+    way_cache: FnvHashMap<u64, FloodFillResult>,
 }
 
 impl FloodFillCache {
@@ -269,10 +305,17 @@ impl FloodFillCache {
             })
             .collect();
 
-        // Build the cache
+        // Build the cache. Empty flood-fill results (degenerate rings or
+        // flood-fill timeouts) reuse the process-wide empty sentinel so a
+        // noisy input doesn't spawn many distinct empty allocations.
         let mut cache = Self::new();
         for (id, filled) in way_results {
-            cache.way_cache.insert(id, filled);
+            let entry = if filled.is_empty() {
+                Arc::clone(empty_flood_fill_result())
+            } else {
+                Arc::new(filled)
+            };
+            cache.way_cache.insert(id, entry);
         }
 
         cache
@@ -288,28 +331,36 @@ impl FloodFillCache {
         &self,
         way: &ProcessedWay,
         timeout: Option<&Duration>,
-    ) -> Vec<(i32, i32)> {
+    ) -> FloodFillResult {
         if let Some(cached) = self.way_cache.get(&way.id) {
-            // Clone is intentional: each result is typically accessed once during
-            // sequential processing, so the cost is acceptable vs Arc complexity
-            cached.clone()
+            // Cheap refcount bump — the underlying Vec is shared between the
+            // cache and the caller.
+            Arc::clone(cached)
         } else {
-            // Fallback: compute on demand for synthetic/combined ways from relations
+            // Fallback: compute on demand for synthetic/combined ways from relations.
+            // These are rare (only relations with tag-inherited members), so the
+            // extra Arc allocation here is fine. Empty results still go through
+            // the shared sentinel to stay consistent with the cached path.
             let polygon_coords: Vec<(i32, i32)> = way.nodes.iter().map(|n| (n.x, n.z)).collect();
-            flood_fill_area(&polygon_coords, timeout)
+            let filled = flood_fill_area(&polygon_coords, timeout);
+            if filled.is_empty() {
+                Arc::clone(empty_flood_fill_result())
+            } else {
+                Arc::new(filled)
+            }
         }
     }
 
     /// Gets cached flood fill result for a ProcessedElement (Way only).
-    /// For Nodes/Relations, returns empty vec.
+    /// For Nodes/Relations, returns a process-wide shared empty vec (no alloc).
     pub fn get_or_compute_element(
         &self,
         element: &ProcessedElement,
         timeout: Option<&Duration>,
-    ) -> Vec<(i32, i32)> {
+    ) -> FloodFillResult {
         match element {
             ProcessedElement::Way(way) => self.get_or_compute(way, timeout),
-            _ => Vec::new(),
+            _ => Arc::clone(empty_flood_fill_result()),
         }
     }
 
@@ -330,7 +381,6 @@ impl FloodFillCache {
     fn way_needs_flood_fill(way: &ProcessedWay) -> bool {
         way.tags.contains_key("building")
             || way.tags.contains_key("building:part")
-            || way.tags.contains_key("boundary")
             || way.tags.contains_key("landuse")
             || way.tags.contains_key("leisure")
             || way.tags.contains_key("amenity")
@@ -362,12 +412,13 @@ impl FloodFillCache {
 
         for element in elements {
             match element {
-                ProcessedElement::Way(way) => {
-                    if way.tags.contains_key("building") || way.tags.contains_key("building:part") {
-                        if let Some(cached) = self.way_cache.get(&way.id) {
-                            for &(x, z) in cached {
-                                footprints.set(x, z);
-                            }
+                ProcessedElement::Way(way)
+                    if way.tags.contains_key("building")
+                        || way.tags.contains_key("building:part") =>
+                {
+                    if let Some(cached) = self.way_cache.get(&way.id) {
+                        for &(x, z) in cached.iter() {
+                            footprints.set(x, z);
                         }
                     }
                 }
@@ -381,7 +432,7 @@ impl FloodFillCache {
                             // Inner members represent courtyards/holes where trees can spawn.
                             if member.role == ProcessedMemberRole::Outer {
                                 if let Some(cached) = self.way_cache.get(&member.way.id) {
-                                    for &(x, z) in cached {
+                                    for &(x, z) in cached.iter() {
                                         footprints.set(x, z);
                                     }
                                 }
@@ -394,64 +445,6 @@ impl FloodFillCache {
         }
 
         footprints
-    }
-
-    /// Collects centroids of all buildings from the pre-computed cache.
-    ///
-    /// This is used for urban ground detection - building clusters are identified
-    /// using their centroids, and a concave hull is computed around dense clusters
-    /// to determine where city ground (smooth stone) should be placed.
-    ///
-    /// Returns a vector of (x, z) centroid coordinates for all buildings.
-    pub fn collect_building_centroids(&self, elements: &[ProcessedElement]) -> Vec<(i32, i32)> {
-        let mut centroids = Vec::new();
-
-        for element in elements {
-            match element {
-                ProcessedElement::Way(way) => {
-                    if way.tags.contains_key("building") || way.tags.contains_key("building:part") {
-                        if let Some(cached) = self.way_cache.get(&way.id) {
-                            if let Some(centroid) = Self::compute_centroid(cached) {
-                                centroids.push(centroid);
-                            }
-                        }
-                    }
-                }
-                ProcessedElement::Relation(rel) => {
-                    let is_building = rel.tags.contains_key("building")
-                        || rel.tags.contains_key("building:part")
-                        || rel.tags.get("type").map(|t| t.as_str()) == Some("building");
-                    if is_building {
-                        // For building relations, compute centroid from outer ways
-                        let mut all_coords = Vec::new();
-                        for member in &rel.members {
-                            if member.role == ProcessedMemberRole::Outer {
-                                if let Some(cached) = self.way_cache.get(&member.way.id) {
-                                    all_coords.extend(cached.iter().copied());
-                                }
-                            }
-                        }
-                        if let Some(centroid) = Self::compute_centroid(&all_coords) {
-                            centroids.push(centroid);
-                        }
-                    }
-                }
-                _ => {}
-            }
-        }
-
-        centroids
-    }
-
-    /// Computes the centroid of a set of coordinates.
-    fn compute_centroid(coords: &[(i32, i32)]) -> Option<(i32, i32)> {
-        if coords.is_empty() {
-            return None;
-        }
-        let sum_x: i64 = coords.iter().map(|(x, _)| i64::from(*x)).sum();
-        let sum_z: i64 = coords.iter().map(|(_, z)| i64::from(*z)).sum();
-        let len = coords.len() as i64;
-        Some(((sum_x / len) as i32, (sum_z / len) as i32))
     }
 
     /// Removes a way's cached flood fill result, freeing memory.

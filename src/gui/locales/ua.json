@@ -1,6 +1,7 @@
 {
   "create_world": "Створити світ",
   "no_world_selected": "Світ не створено",
+  "no_world_generated_yet": "Світ ще не згенеровано",
   "start_generation": "Почати генерацію",
   "custom_selection_confirmed": "Користувацький вибір підтверджено!",
   "error_coordinates_out_of_range": "Помилка: Координати поза діапазоном або неправильно впорядковані (потрібно широта перед довгота)",
@@ -21,6 +22,7 @@
   "create_world_first": "Спочатку створіть світ!",
   "select_location_first": "Спочатку виберіть місцезнаходження!",
   "area_too_large": "Ця область дуже велика і може перевищити типові обчислювальні межі",
+  "area_extreme": "Ця область надзвичайно велика і можливо, надто велика для успішної генерації.",
   "area_extensive": "Область досить велика і може вимагати значного часу та ресурсів",
   "selection_confirmed": "Вибір підтверджено!",
   "select_area_prompt": "Виберіть область на карті за допомогою інструментів.",
@@ -39,7 +41,17 @@
   "interior": "Генерація інтер'єру",
   "roof": "Генерація даху",
   "fillground": "Заповнити землю",
-  "city_boundaries": "Міська земля",
+  "land_cover": "Земельне покриття",
+  "disable_height_limit": "Розширити висоту будівництва",
+  "aws_only_elevation": "Застарілий рельєф",
   "bedrock_auto_generated": "Bedrock світ генерується автоматично",
-  "save_path": "Шлях збереження"
+  "save_path": "Шлях збереження",
+  "rotation_angle": "Кут Обертання",
+  "settings_section_generation": "Генерація",
+  "settings_section_world": "Світ",
+  "settings_section_map": "Карта та введення",
+  "settings_section_application": "Застосунок",
+  "clear_tile_cache": "Очистити кеш плиток",
+  "clear_tile_cache_button": "Очистити",
+  "anonymous_crash_reports": "Анонімні звіти про збої"
 }

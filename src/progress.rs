@@ -49,12 +49,23 @@ pub fn emit_gui_progress_update(progress: f64, message: &str) {
 }
 
 pub fn emit_gui_error(message: &str) {
-    let truncated_message = if message.len() > 35 {
-        &message[..35]
-    } else {
-        message
-    };
-    emit_gui_progress_update(0.0, &format!("Error! {truncated_message}"));
+    // Truncate by characters (not bytes) to avoid panicking when the GUI
+    // status bar receives an error containing multi-byte UTF-8. e.g.
+    // localized OS error messages like "Недостаточно системных ресурсов…"
+    // where byte 35 lands inside a Cyrillic character.
+    const MAX_CHARS: usize = 35;
+    let truncated: String = message.chars().take(MAX_CHARS).collect();
+    emit_gui_progress_update(0.0, &format!("Error! {truncated}"));
+}
+
+/// Emits the final in-game level name (including localized area suffix for Java,
+/// or the location-based name for Bedrock) so the GUI can display it.
+pub fn emit_world_name_update(name: &str) {
+    if let Some(window) = get_main_window() {
+        if let Err(e) = window.emit("world-name-update", name) {
+            eprintln!("Failed to emit world-name-update event: {e}");
+        }
+    }
 }
 
 /// Emits an event when the world map preview is ready
@@ -66,11 +77,11 @@ pub fn emit_map_preview_ready() {
     }
 }
 
-/// Emits an event to open the generated mcworld file
-pub fn emit_open_mcworld_file(path: &str) {
+/// Emits an event to reveal a file or folder in the system file explorer
+pub fn emit_show_in_folder(path: &str) {
     if let Some(window) = get_main_window() {
-        if let Err(e) = window.emit("open-mcworld-file", path) {
-            eprintln!("Failed to emit open-mcworld-file event: {}", e);
+        if let Err(e) = window.emit("show-in-folder", path) {
+            eprintln!("Failed to emit show-in-folder event: {}", e);
         }
     }
 }

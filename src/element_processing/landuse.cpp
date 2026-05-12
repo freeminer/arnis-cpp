@@ -41,24 +41,18 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
         block_type = COARSE_DIRT;
     } else if (landuse_tag == "traffic_island") {
         block_type = STONE_BLOCK_SLAB;
-    } else if (landuse_tag == "residential") {
-        auto it = element.tags.find(std::string("residential"));
-        std::string residential_tag = (it != element.tags.end()) ? it->second : binding;
-        if (residential_tag == "rural") {
-            block_type = GRASS_BLOCK;
-        } else {
-            block_type = STONE_BRICKS;
-        }
-    } else if (landuse_tag == "commercial") {
-        block_type = SMOOTH_STONE;
+    } else if (landuse_tag == "residential" || landuse_tag == "commercial") {
+        return;
     } else if (landuse_tag == "education" || landuse_tag == "religious") {
         block_type = POLISHED_ANDESITE;
     } else if (landuse_tag == "industrial") {
-        block_type = COBBLESTONE;
+        block_type = STONE;
     } else if (landuse_tag == "military") {
         block_type = GRAY_CONCRETE;
     } else if (landuse_tag == "railway") {
         block_type = GRAVEL;
+    } else if (landuse_tag == "vineyard" || landuse_tag == "brownfield") {
+        block_type = COARSE_DIRT;
     } else if (landuse_tag == "landfill") {
         auto it = element.tags.find(std::string("man_made"));
         std::string manmade_tag = (it != element.tags.end()) ? it->second : binding;
@@ -112,33 +106,7 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
 
         // Apply per-block randomness for certain landuse types
         Block actual_block = block_type;
-        if (landuse_tag == "residential" && block_type == STONE_BRICKS) {
-            // Urban residential: mix of stone bricks, cracked stone bricks, stone, cobblestone
-            std::uniform_int_distribution<int> dist100(0, 99);
-            int random_value = dist100(rng);
-            if (random_value < 72) {
-                actual_block = STONE_BRICKS;
-            } else if (random_value < 87) {
-                actual_block = CRACKED_STONE_BRICKS;
-            } else if (random_value < 92) {
-                actual_block = STONE;
-            } else {
-                actual_block = COBBLESTONE;
-            }
-        } else if (landuse_tag == "commercial") {
-            // Commercial: mix of smooth stone, stone, cobblestone, stone bricks
-            std::uniform_int_distribution<int> dist100(0, 99);
-            int random_value = dist100(rng);
-            if (random_value < 40) {
-                actual_block = SMOOTH_STONE;
-            } else if (random_value < 70) {
-                actual_block = STONE_BRICKS;
-            } else if (random_value < 90) {
-                actual_block = STONE;
-            } else {
-                actual_block = COBBLESTONE;
-            }
-        } else if (landuse_tag == "industrial") {
+        if (landuse_tag == "industrial") {
             // Industrial: primarily stone, with some stone bricks and smooth stone
             std::uniform_int_distribution<int> dist100(0, 99);
             int random_value = dist100(rng);
@@ -149,13 +117,49 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
             } else {
                 actual_block = SMOOTH_STONE;
             }
+        } else if (landuse_tag == "military") {
+            std::uniform_int_distribution<int> dist100(0, 99);
+            int random_value = dist100(rng);
+            if (random_value < 89) {
+                actual_block = GRAY_CONCRETE;
+            } else if (random_value < 99) {
+                actual_block = STONE_BRICKS;
+            } else {
+                actual_block = COBBLESTONE;
+            }
+        } else if (landuse_tag == "quarry") {
+            std::uniform_int_distribution<int> dist100(0, 99);
+            int random_value = dist100(rng);
+            if (random_value < 40) {
+                actual_block = STONE;
+            } else if (random_value < 60) {
+                actual_block = GRAVEL;
+            } else if (random_value < 80) {
+                actual_block = COBBLESTONE;
+            } else {
+                actual_block = ANDESITE;
+            }
         }
+
+        const std::optional<std::vector<Block>> protected_blocks(
+                std::vector<Block>{
+                    BLACK_CONCRETE,
+                    GRAY_CONCRETE_POWDER,
+                    CYAN_TERRACOTTA,
+                    GRAY_CONCRETE,
+                    LIGHT_GRAY_CONCRETE,
+                    WHITE_CONCRETE,
+                    DIRT_PATH,
+                    SMOOTH_STONE,
+                    WATER,
+                });
+        const bool is_protected = editor.check_for_block(x, 0, z, protected_blocks);
 
         if (landuse_tag == "traffic_island") {
             editor.set_block(actual_block, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
         } else if (landuse_tag == "construction" || landuse_tag == "railway") {
             editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>{ std::vector<Block>{ SPONGE } });
-        } else {
+        } else if (!is_protected) {
             editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
         }
 
@@ -183,12 +187,12 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
                         editor.set_block(RED_FLOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                     }
                 } else if (random_choice < 33) {
-                    Tree::create(editor, Coord{x, 1, z});
-                } else if (random_choice < 35) {
+                    Tree::create(editor, Coord{x, 1, z}, &building_footprints);
+                } else if (!is_protected && random_choice < 35) {
                     editor.set_block(OAK_LEAVES, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (random_choice < 37) {
+                } else if (!is_protected && random_choice < 37) {
                     editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
-                } else if (random_choice < 41) {
+                } else if (!is_protected && random_choice < 41) {
                     editor.set_block(LARGE_FERN_LOWER, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                     editor.set_block(LARGE_FERN_UPPER, x, 2, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                 }
@@ -276,6 +280,18 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
                 } else if (r <= 20) {
                     editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
                 }
+            }
+        } else if ((landuse_tag == "vineyard" || landuse_tag == "brownfield" || landuse_tag == "landfill") &&
+                editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{
+                        std::vector<Block>{ COARSE_DIRT }})) {
+            std::uniform_int_distribution<int> dist150(0, 149);
+            int r = dist150(rng);
+            if (r <= 3) {
+                editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
+            } else if (r == 4) {
+                editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
+            } else if (r <= 15) {
+                editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
             }
         } else if (landuse_tag == "farmland") {
             if (!editor.check_for_block(x, 0, z, std::optional<std::vector<Block>>{ std::vector<Block>{ WATER } })) {
@@ -440,7 +456,7 @@ void generate_place(WorldEditor & editor, ProcessedWay const & element, Args con
     if (place_tag == "square") {
         block_type = STONE_BRICKS;
     } else if (place_tag == "neighbourhood" || place_tag == "city_block" || place_tag == "quarter" || place_tag == "suburb") {
-        block_type = SMOOTH_STONE;
+        return;
     } else {
         return;
     }

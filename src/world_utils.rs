@@ -205,3 +205,186 @@ pub fn create_new_world(base_path: &Path) -> Result<String, String> {
 
     Ok(new_world_path.display().to_string())
 }
+
+/// Name of the bundled Java datapack that extends the Overworld build height.
+pub const TALL_DATAPACK_NAME: &str = "arnis_tall";
+
+/// Install the bundled tall-world datapack into a Java world and register it
+/// in `level.dat`'s `Data.DataPacks.Enabled` so it auto-activates on first
+/// load. Pack assets target Minecraft 1.21.4 (matching the bundled level.dat
+/// template) — older clients will refuse to load the world.
+pub fn install_tall_datapack(world_path: &Path) -> Result<(), String> {
+    const PACK_MCMETA: &[u8] = include_bytes!("../assets/minecraft/datapack_tall/pack.mcmeta");
+    const OVERWORLD_JSON: &[u8] = include_bytes!(
+        "../assets/minecraft/datapack_tall/data/minecraft/dimension_type/overworld.json"
+    );
+
+    let dp_root = world_path.join("datapacks").join(TALL_DATAPACK_NAME);
+    let dim_dir = dp_root
+        .join("data")
+        .join("minecraft")
+        .join("dimension_type");
+    fs::create_dir_all(&dim_dir)
+        .map_err(|e| format!("Failed to create datapack directories: {e}"))?;
+
+    fs::write(dp_root.join("pack.mcmeta"), PACK_MCMETA)
+        .map_err(|e| format!("Failed to write pack.mcmeta: {e}"))?;
+    fs::write(dim_dir.join("overworld.json"), OVERWORLD_JSON)
+        .map_err(|e| format!("Failed to write overworld.json: {e}"))?;
+
+    register_tall_datapack_in_level_dat(world_path)?;
+
+    Ok(())
+}
+
+/// Appends the pack entry if missing. Expected to run on a fresh level.dat
+/// template whose Enabled list starts with `["vanilla"]`, so the appended
+/// entry naturally lands after vanilla and our dimension_type override wins.
+fn register_tall_datapack_in_level_dat(world_path: &Path) -> Result<(), String> {
+    let level_path = world_path.join("level.dat");
+    if !level_path.exists() {
+        return Err(format!("level.dat not found at {level_path:?}"));
+    }
+
+    let raw = fs::read(&level_path).map_err(|e| format!("Failed to read level.dat: {e}"))?;
+    let mut decoder = GzDecoder::new(raw.as_slice());
+    let mut decompressed = Vec::new();
+    decoder
+        .read_to_end(&mut decompressed)
+        .map_err(|e| format!("Failed to decompress level.dat: {e}"))?;
+
+    let mut root: Value = fastnbt::from_bytes(&decompressed)
+        .map_err(|e| format!("Failed to parse level.dat NBT: {e}"))?;
+
+    let entry = format!("file/{TALL_DATAPACK_NAME}");
+
+    {
+        let data = match root {
+            Value::Compound(ref mut r) => match r.get_mut("Data") {
+                Some(Value::Compound(ref mut d)) => d,
+                _ => return Err("level.dat missing Data compound".to_string()),
+            },
+            _ => return Err("level.dat root is not a compound".to_string()),
+        };
+
+        let data_packs = data
+            .entry("DataPacks".to_string())
+            .or_insert_with(|| Value::Compound(Default::default()));
+        let Value::Compound(ref mut dp) = data_packs else {
+            return Err("level.dat Data.DataPacks is not a compound".to_string());
+        };
+
+        let enabled = dp
+            .entry("Enabled".to_string())
+            .or_insert_with(|| Value::List(Vec::new()));
+        let Value::List(ref mut list) = enabled else {
+            return Err("level.dat Data.DataPacks.Enabled is not a list".to_string());
+        };
+
+        let already_enabled = list
+            .iter()
+            .any(|v| matches!(v, Value::String(s) if s == &entry));
+        if !already_enabled {
+            list.push(Value::String(entry));
+        }
+    }
+
+    let serialized =
+        fastnbt::to_bytes(&root).map_err(|e| format!("Failed to serialize level.dat: {e}"))?;
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(&serialized)
+        .map_err(|e| format!("Failed to compress level.dat: {e}"))?;
+    let compressed = encoder
+        .finish()
+        .map_err(|e| format!("Failed to finalize level.dat compression: {e}"))?;
+    fs::write(&level_path, compressed).map_err(|e| format!("Failed to write level.dat: {e}"))?;
+
+    Ok(())
+}
+
+/// Sets the player spawn point in an existing Java Edition level.dat file.
+///
+/// Updates both the world spawn point (SpawnX/SpawnY/SpawnZ) and the player
+/// position if a Player compound exists. Callers derive `spawn_y` from the
+/// generated terrain so the player spawns above ground even in extended-height
+/// worlds where terrain may reach Y≈2000.
+pub fn set_spawn_in_level_dat(
+    world_path: &Path,
+    spawn_x: i32,
+    spawn_y: i32,
+    spawn_z: i32,
+) -> Result<(), String> {
+    let level_path = world_path.join("level.dat");
+    if !level_path.exists() {
+        return Err(format!("level.dat not found at {level_path:?}"));
+    }
+
+    // Read and decompress
+    let level_data = fs::read(&level_path).map_err(|e| format!("Failed to read level.dat: {e}"))?;
+
+    let mut decoder = GzDecoder::new(level_data.as_slice());
+    let mut decompressed_data = Vec::new();
+    decoder
+        .read_to_end(&mut decompressed_data)
+        .map_err(|e| format!("Failed to decompress level.dat: {e}"))?;
+
+    let mut nbt_data: Value = fastnbt::from_bytes(&decompressed_data)
+        .map_err(|e| format!("Failed to parse level.dat NBT data: {e}"))?;
+
+    // Update spawn point
+    let data = match nbt_data {
+        Value::Compound(ref mut root) => match root.get_mut("Data") {
+            Some(Value::Compound(ref mut data)) => data,
+            _ => {
+                return Err(
+                    "Invalid level.dat structure: missing or non-compound \"Data\" section"
+                        .to_string(),
+                );
+            }
+        },
+        _ => {
+            return Err(
+                "Invalid level.dat structure: root NBT value is not a compound".to_string(),
+            );
+        }
+    };
+
+    data.insert("SpawnX".to_string(), Value::Int(spawn_x));
+    data.insert("SpawnY".to_string(), Value::Int(spawn_y));
+    data.insert("SpawnZ".to_string(), Value::Int(spawn_z));
+
+    // Update player position if Player compound exists
+    if let Some(Value::Compound(ref mut player)) = data.get_mut("Player") {
+        if let Some(Value::List(ref mut pos)) = player.get_mut("Pos") {
+            if pos.len() >= 3 {
+                if let Some(Value::Double(ref mut pos_x)) = pos.get_mut(0) {
+                    *pos_x = spawn_x as f64;
+                }
+                if let Some(Value::Double(ref mut pos_y)) = pos.get_mut(1) {
+                    *pos_y = spawn_y as f64;
+                }
+                if let Some(Value::Double(ref mut pos_z)) = pos.get_mut(2) {
+                    *pos_z = spawn_z as f64;
+                }
+            }
+        }
+    }
+
+    // Serialize, compress, and write back
+    let serialized_data = fastnbt::to_bytes(&nbt_data)
+        .map_err(|e| format!("Failed to serialize updated level.dat: {e}"))?;
+
+    let mut encoder = flate2::write::GzEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder
+        .write_all(&serialized_data)
+        .map_err(|e| format!("Failed to compress updated level.dat: {e}"))?;
+    let compressed_data = encoder
+        .finish()
+        .map_err(|e| format!("Failed to finalize compression for level.dat: {e}"))?;
+
+    fs::write(&level_path, compressed_data)
+        .map_err(|e| format!("Failed to write updated level.dat: {e}"))?;
+
+    Ok(())
+}

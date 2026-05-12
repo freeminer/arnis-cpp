@@ -1,0 +1,609 @@
+use crate::block_definitions::*;
+use crate::deterministic_rng::coord_rng;
+use crate::floodfill_cache::BuildingFootprintBitmap;
+use crate::world_editor::WorldEditor;
+use rand::Rng;
+
+type Coord = (i32, i32, i32);
+
+// TODO all this data would probably be better suited in a TOML file or something.
+
+/// A circular pattern around a central point.
+#[rustfmt::skip]
+const ROUND1_PATTERN: [Coord; 8] = [
+    (-2, 0, 0),
+    (2, 0, 0),
+    (0, 0, -2),
+    (0, 0, 2),
+    (-1, 0, -1),
+    (1, 0, 1),
+    (1, 0, -1),
+    (-1, 0, 1),
+];
+
+/// A wider circular pattern.
+const ROUND2_PATTERN: [Coord; 12] = [
+    (3, 0, 0),
+    (2, 0, -1),
+    (2, 0, 1),
+    (1, 0, -2),
+    (1, 0, 2),
+    (-3, 0, 0),
+    (-2, 0, -1),
+    (-2, 0, 1),
+    (-1, 0, 2),
+    (-1, 0, -2),
+    (0, 0, -3),
+    (0, 0, 3),
+];
+
+/// A more scattered circular pattern.
+const ROUND3_PATTERN: [Coord; 12] = [
+    (3, 0, -1),
+    (3, 0, 1),
+    (2, 0, -2),
+    (2, 0, 2),
+    (1, 0, -3),
+    (1, 0, 3),
+    (-3, 0, -1),
+    (-3, 0, 1),
+    (-2, 0, -2),
+    (-2, 0, 2),
+    (-1, 0, 3),
+    (-1, 0, -3),
+];
+
+/// Used for iterating over each of the round patterns
+const ROUND_PATTERNS: [&[Coord]; 3] = [&ROUND1_PATTERN, &ROUND2_PATTERN, &ROUND3_PATTERN];
+
+//////////////////////////////////////////////////
+
+const OAK_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 3, 0), (-1, 9, 0)),
+    ((1, 3, 0), (1, 9, 0)),
+    ((0, 3, -1), (0, 9, -1)),
+    ((0, 3, 1), (0, 9, 1)),
+    ((0, 9, 0), (0, 10, 0)),
+];
+
+const SPRUCE_LEAVES_FILL: [(Coord, Coord); 6] = [
+    ((-1, 3, 0), (-1, 10, 0)),
+    ((0, 3, -1), (0, 10, -1)),
+    ((1, 3, 0), (1, 10, 0)),
+    ((0, 3, -1), (0, 10, -1)),
+    ((0, 3, 1), (0, 10, 1)),
+    ((0, 11, 0), (0, 11, 0)),
+];
+
+const BIRCH_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 2, 0), (-1, 7, 0)),
+    ((1, 2, 0), (1, 7, 0)),
+    ((0, 2, -1), (0, 7, -1)),
+    ((0, 2, 1), (0, 7, 1)),
+    ((0, 7, 0), (0, 8, 0)),
+];
+
+/// Dark oak: short but wide canopy, leaves start at y=3 up to y=6 with a cap
+const DARK_OAK_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 3, 0), (-1, 6, 0)),
+    ((1, 3, 0), (1, 6, 0)),
+    ((0, 3, -1), (0, 6, -1)),
+    ((0, 3, 1), (0, 6, 1)),
+    ((0, 6, 0), (0, 7, 0)),
+];
+
+/// Jungle: tall tree with canopy only near the top, leaves from y=7 to y=11
+const JUNGLE_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 7, 0), (-1, 11, 0)),
+    ((1, 7, 0), (1, 11, 0)),
+    ((0, 7, -1), (0, 11, -1)),
+    ((0, 7, 1), (0, 11, 1)),
+    ((0, 11, 0), (0, 12, 0)),
+];
+
+/// Acacia: umbrella-shaped canopy with a gentle dome, leaves from y=5 to y=8
+const ACACIA_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 5, 0), (-1, 8, 0)),
+    ((1, 5, 0), (1, 8, 0)),
+    ((0, 5, -1), (0, 8, -1)),
+    ((0, 5, 1), (0, 8, 1)),
+    ((0, 8, 0), (0, 9, 0)),
+];
+
+/// Cherry: medium trunk with a wide, rounded canopy of pink blossoms.
+const CHERRY_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 4, 0), (-1, 9, 0)),
+    ((1, 4, 0), (1, 9, 0)),
+    ((0, 4, -1), (0, 9, -1)),
+    ((0, 4, 1), (0, 9, 1)),
+    ((0, 9, 0), (0, 10, 0)),
+];
+
+/// Tall oak: extra-tall trunk with a smaller crown sitting near the top.
+const TALL_OAK_LEAVES_FILL: [(Coord, Coord); 5] = [
+    ((-1, 8, 0), (-1, 12, 0)),
+    ((1, 8, 0), (1, 12, 0)),
+    ((0, 8, -1), (0, 12, -1)),
+    ((0, 8, 1), (0, 12, 1)),
+    ((0, 12, 0), (0, 13, 0)),
+];
+
+/// Pine: very tall narrow conifer using spruce blocks.
+const PINE_LEAVES_FILL: [(Coord, Coord); 6] = [
+    ((-1, 5, 0), (-1, 12, 0)),
+    ((0, 5, -1), (0, 12, -1)),
+    ((1, 5, 0), (1, 12, 0)),
+    ((0, 5, -1), (0, 12, -1)),
+    ((0, 5, 1), (0, 12, 1)),
+    ((0, 13, 0), (0, 13, 0)),
+];
+
+//////////////////////////////////////////////////
+
+/// Maximum horizontal canopy radius used by the predefined tree patterns.
+const MAX_CANOPY_RADIUS: i32 = 3;
+
+fn round_absolute(
+    editor: &mut WorldEditor,
+    material: Block,
+    (x, y, z): Coord,
+    block_pattern: &[Coord],
+) {
+    for (i, j, k) in block_pattern {
+        editor.set_block_absolute(material, x + i, y + j, z + k, None, None);
+    }
+}
+
+#[derive(Clone, Copy)]
+pub enum TreeType {
+    Oak,
+    Spruce,
+    Birch,
+    DarkOak,
+    Jungle,
+    Acacia,
+    Cherry,
+    TallOak,
+    Pine,
+}
+
+// TODO what should be moved in, and what should be referenced?
+pub struct Tree<'a> {
+    // kind: TreeType, // NOTE: Not actually necessary to store!
+    log_block: Block,
+    log_height: i32,
+    leaves_block: Block,
+    leaves_fill: &'a [(Coord, Coord)],
+    round_ranges: [Vec<i32>; 3],
+}
+
+impl Tree<'_> {
+    fn canopy_might_intersect_building(
+        x: i32,
+        z: i32,
+        building_footprints: Option<&BuildingFootprintBitmap>,
+    ) -> bool {
+        let Some(footprints) = building_footprints else {
+            return false;
+        };
+
+        for check_x in (x - MAX_CANOPY_RADIUS)..=(x + MAX_CANOPY_RADIUS) {
+            for check_z in (z - MAX_CANOPY_RADIUS)..=(z + MAX_CANOPY_RADIUS) {
+                if footprints.contains(check_x, check_z) {
+                    return true;
+                }
+            }
+        }
+
+        false
+    }
+
+    /// Creates a tree at the specified coordinates.
+    ///
+    /// # Arguments
+    /// * `editor` - The world editor to place blocks
+    /// * `(x, y, z)` - The base coordinates for the tree
+    /// * `building_footprints` - Optional bitmap of (x, z) coordinates that are inside buildings.
+    ///   If provided, trees will not be placed at coordinates within this bitmap.
+    pub fn create(
+        editor: &mut WorldEditor,
+        (x, y, z): Coord,
+        building_footprints: Option<&BuildingFootprintBitmap>,
+    ) {
+        // Use deterministic RNG based on coordinates for consistent tree types across region boundaries
+        // The element_id of 0 is used as a salt for tree-specific randomness
+        let mut rng = coord_rng(x, z, 0);
+
+        let tree_type = match rng.random_range(1..=13) {
+            1..=3 => TreeType::Oak,
+            4..=5 => TreeType::Spruce,
+            6..=7 => TreeType::Birch,
+            8 => TreeType::DarkOak,
+            9 => TreeType::Jungle,
+            10 => TreeType::Acacia,
+            11 => TreeType::Cherry,
+            12 => TreeType::TallOak,
+            13 => TreeType::Pine,
+            _ => unreachable!(),
+        };
+
+        Self::create_of_type(editor, (x, y, z), tree_type, building_footprints);
+    }
+
+    /// Creates a tree of a specific type at the specified coordinates.
+    pub fn create_of_type(
+        editor: &mut WorldEditor,
+        (x, y, z): Coord,
+        tree_type: TreeType,
+        building_footprints: Option<&BuildingFootprintBitmap>,
+    ) {
+        // Skip if this coordinate is inside a building
+        if let Some(footprints) = building_footprints {
+            if footprints.contains(x, z) {
+                return;
+            }
+        }
+
+        // Skip if this coordinate is on a road, path, or other paved surface
+        if editor.check_for_block(
+            x,
+            0,
+            z,
+            Some(&[
+                BLACK_CONCRETE,
+                GRAY_CONCRETE_POWDER,
+                CYAN_TERRACOTTA,
+                GRAY_CONCRETE,
+                LIGHT_GRAY_CONCRETE,
+                DIRT_PATH,
+                SMOOTH_STONE,
+                WATER,
+            ]),
+        ) {
+            return;
+        }
+
+        let mut blacklist: Vec<Block> = Vec::new();
+        blacklist.extend(Self::get_building_wall_blocks());
+        blacklist.extend(Self::get_building_floor_blocks());
+        blacklist.extend(Self::get_structural_blocks());
+        blacklist.extend(Self::get_functional_blocks());
+        blacklist.push(WATER);
+
+        let tree = Self::get_tree(tree_type);
+        let check_canopy_collision =
+            Self::canopy_might_intersect_building(x, z, building_footprints);
+
+        // Resolve trunk base Y once from the trunk's (x,z) position.
+        // All tree blocks use this as reference so the canopy doesn't
+        // warp to follow the hillside terrain.
+        let base_y = editor.get_absolute_y(x, y, z);
+
+        // Build the logs
+        editor.fill_blocks_absolute(
+            tree.log_block,
+            x,
+            base_y,
+            z,
+            x,
+            base_y + tree.log_height,
+            z,
+            None,
+            Some(&blacklist),
+        );
+
+        // Fill in the leaves
+        for ((i1, j1, k1), (i2, j2, k2)) in tree.leaves_fill {
+            if check_canopy_collision {
+                for leaf_x in (x + i1)..=(x + i2) {
+                    for leaf_y in (base_y + j1)..=(base_y + j2) {
+                        for leaf_z in (z + k1)..=(z + k2) {
+                            if building_footprints.is_none_or(|fp| !fp.contains(leaf_x, leaf_z)) {
+                                editor.set_block_absolute(
+                                    tree.leaves_block,
+                                    leaf_x,
+                                    leaf_y,
+                                    leaf_z,
+                                    None,
+                                    None,
+                                );
+                            }
+                        }
+                    }
+                }
+            } else {
+                editor.fill_blocks_absolute(
+                    tree.leaves_block,
+                    x + i1,
+                    base_y + j1,
+                    z + k1,
+                    x + i2,
+                    base_y + j2,
+                    z + k2,
+                    None,
+                    None,
+                );
+            }
+        }
+
+        // Do the three rounds
+        for (round_range, round_pattern) in tree.round_ranges.iter().zip(ROUND_PATTERNS) {
+            for offset in round_range {
+                if check_canopy_collision {
+                    for &(i, j, k) in round_pattern {
+                        let leaf_x = x + i;
+                        let leaf_z = z + k;
+                        if building_footprints.is_none_or(|fp| !fp.contains(leaf_x, leaf_z)) {
+                            editor.set_block_absolute(
+                                tree.leaves_block,
+                                leaf_x,
+                                base_y + offset + j,
+                                leaf_z,
+                                None,
+                                None,
+                            );
+                        }
+                    }
+                } else {
+                    round_absolute(
+                        editor,
+                        tree.leaves_block,
+                        (x, base_y + offset, z),
+                        round_pattern,
+                    );
+                }
+            }
+        }
+    }
+
+    fn get_tree(kind: TreeType) -> Self {
+        match kind {
+            TreeType::Oak => Self {
+                // kind,
+                log_block: OAK_LOG,
+                log_height: 8,
+                leaves_block: OAK_LEAVES,
+                leaves_fill: &OAK_LEAVES_FILL,
+                round_ranges: [
+                    (3..=8).rev().collect(),
+                    (4..=7).rev().collect(),
+                    (5..=6).rev().collect(),
+                ],
+            },
+
+            TreeType::Spruce => Self {
+                // kind,
+                log_block: SPRUCE_LOG,
+                log_height: 9,
+                leaves_block: SPRUCE_LEAVES,
+                leaves_fill: &SPRUCE_LEAVES_FILL,
+                // Conical shape: wide at bottom, narrow at top
+                round_ranges: [vec![9, 7, 6, 4, 3], vec![6, 3], vec![]],
+            },
+
+            TreeType::Birch => Self {
+                // kind,
+                log_block: BIRCH_LOG,
+                log_height: 6,
+                leaves_block: BIRCH_LEAVES,
+                leaves_fill: &BIRCH_LEAVES_FILL,
+                round_ranges: [(2..=6).rev().collect(), (2..=4).collect(), vec![]],
+            },
+
+            TreeType::DarkOak => Self {
+                // Short trunk with a very wide, bushy canopy
+                log_block: DARK_OAK_LOG,
+                log_height: 5,
+                leaves_block: DARK_OAK_LEAVES,
+                leaves_fill: &DARK_OAK_LEAVES_FILL,
+                // All 3 round patterns used for maximum width
+                round_ranges: [
+                    (3..=6).rev().collect(),
+                    (3..=5).rev().collect(),
+                    (4..=5).rev().collect(),
+                ],
+            },
+
+            TreeType::Jungle => Self {
+                // Tall trunk, canopy clustered at the top
+                log_block: JUNGLE_LOG,
+                log_height: 10,
+                leaves_block: JUNGLE_LEAVES,
+                leaves_fill: &JUNGLE_LEAVES_FILL,
+                // Canopy only near the top of the tree
+                round_ranges: [(7..=11).rev().collect(), (8..=10).rev().collect(), vec![]],
+            },
+
+            TreeType::Acacia => Self {
+                // Medium trunk with umbrella-shaped canopy, domed center
+                log_block: ACACIA_LOG,
+                log_height: 6,
+                leaves_block: ACACIA_LEAVES,
+                leaves_fill: &ACACIA_LEAVES_FILL,
+                // Inner rounds reach higher → gentle dome, outer stays low → wide brim
+                round_ranges: [
+                    (5..=8).rev().collect(),
+                    (5..=7).rev().collect(),
+                    (6..=7).rev().collect(),
+                ],
+            },
+
+            TreeType::Cherry => Self {
+                log_block: CHERRY_LOG,
+                log_height: 7,
+                leaves_block: CHERRY_LEAVES,
+                leaves_fill: &CHERRY_LEAVES_FILL,
+                round_ranges: [
+                    (4..=9).rev().collect(),
+                    (5..=8).rev().collect(),
+                    (6..=7).rev().collect(),
+                ],
+            },
+
+            TreeType::TallOak => Self {
+                log_block: OAK_LOG,
+                log_height: 11,
+                leaves_block: OAK_LEAVES,
+                leaves_fill: &TALL_OAK_LEAVES_FILL,
+                round_ranges: [(8..=12).rev().collect(), (9..=11).rev().collect(), vec![10]],
+            },
+
+            TreeType::Pine => Self {
+                log_block: SPRUCE_LOG,
+                log_height: 12,
+                leaves_block: SPRUCE_LEAVES,
+                leaves_fill: &PINE_LEAVES_FILL,
+                round_ranges: [vec![11, 9, 7, 5], vec![8, 5], vec![]],
+            },
+        } // match
+    } // fn get_tree
+
+    /// Get all possible building wall blocks
+    fn get_building_wall_blocks() -> Vec<Block> {
+        vec![
+            BLACKSTONE,
+            BLACK_TERRACOTTA,
+            BRICK,
+            BROWN_CONCRETE,
+            BROWN_TERRACOTTA,
+            DEEPSLATE_BRICKS,
+            END_STONE_BRICKS,
+            GRAY_CONCRETE,
+            GRAY_TERRACOTTA,
+            LIGHT_BLUE_TERRACOTTA,
+            LIGHT_GRAY_CONCRETE,
+            MUD_BRICKS,
+            NETHER_BRICK,
+            NETHERITE_BLOCK,
+            POLISHED_ANDESITE,
+            POLISHED_BLACKSTONE,
+            POLISHED_BLACKSTONE_BRICKS,
+            POLISHED_DEEPSLATE,
+            POLISHED_GRANITE,
+            QUARTZ_BLOCK,
+            QUARTZ_BRICKS,
+            SANDSTONE,
+            SMOOTH_SANDSTONE,
+            SMOOTH_STONE,
+            STONE_BRICKS,
+            WHITE_CONCRETE,
+            WHITE_TERRACOTTA,
+            ORANGE_TERRACOTTA,
+            GREEN_STAINED_HARDENED_CLAY,
+            BLUE_TERRACOTTA,
+            YELLOW_TERRACOTTA,
+            BLACK_CONCRETE,
+            GRAY_CONCRETE_POWDER,
+            CYAN_TERRACOTTA,
+            WHITE_CONCRETE,
+            GRAY_CONCRETE,
+            LIGHT_GRAY_CONCRETE,
+            BROWN_CONCRETE,
+            RED_CONCRETE,
+            ORANGE_TERRACOTTA,
+            YELLOW_CONCRETE,
+            LIME_CONCRETE,
+            GREEN_STAINED_HARDENED_CLAY,
+            CYAN_CONCRETE,
+            LIGHT_BLUE_CONCRETE,
+            BLUE_CONCRETE,
+            PURPLE_CONCRETE,
+            MAGENTA_CONCRETE,
+            RED_TERRACOTTA,
+        ]
+    }
+
+    /// Get all possible building floor blocks
+    fn get_building_floor_blocks() -> Vec<Block> {
+        vec![
+            GRAY_CONCRETE,
+            LIGHT_GRAY_CONCRETE,
+            WHITE_CONCRETE,
+            SMOOTH_STONE,
+            POLISHED_ANDESITE,
+            STONE_BRICKS,
+        ]
+    }
+
+    /// Get structural blocks (fences, walls, stairs, slabs, rails, etc.)
+    fn get_structural_blocks() -> Vec<Block> {
+        vec![
+            // Fences
+            OAK_FENCE,
+            // Walls
+            COBBLESTONE_WALL,
+            ANDESITE_WALL,
+            STONE_BRICK_WALL,
+            // Stairs
+            OAK_STAIRS,
+            // Slabs
+            OAK_SLAB,
+            STONE_BLOCK_SLAB,
+            STONE_BRICK_SLAB,
+            // Rails
+            RAIL,
+            RAIL_NORTH_SOUTH,
+            RAIL_EAST_WEST,
+            RAIL_ASCENDING_EAST,
+            RAIL_ASCENDING_WEST,
+            RAIL_ASCENDING_NORTH,
+            RAIL_ASCENDING_SOUTH,
+            RAIL_NORTH_EAST,
+            RAIL_NORTH_WEST,
+            RAIL_SOUTH_EAST,
+            RAIL_SOUTH_WEST,
+            // Doors and trapdoors
+            OAK_DOOR,
+            DARK_OAK_DOOR_LOWER,
+            DARK_OAK_DOOR_UPPER,
+            OAK_TRAPDOOR,
+            // Ladders
+            LADDER,
+        ]
+    }
+
+    /// Get functional blocks (furniture, decorative items, etc.)
+    fn get_functional_blocks() -> Vec<Block> {
+        vec![
+            // Furniture and functional blocks
+            CHEST,
+            CRAFTING_TABLE,
+            FURNACE,
+            ANVIL,
+            BREWING_STAND,
+            NOTE_BLOCK,
+            BOOKSHELF,
+            CAULDRON,
+            // Beds
+            RED_BED_NORTH_HEAD,
+            RED_BED_NORTH_FOOT,
+            RED_BED_EAST_HEAD,
+            RED_BED_EAST_FOOT,
+            RED_BED_SOUTH_HEAD,
+            RED_BED_SOUTH_FOOT,
+            RED_BED_WEST_HEAD,
+            RED_BED_WEST_FOOT,
+            // Pressure plates and signs
+            OAK_PRESSURE_PLATE,
+            SIGN,
+            // Glass blocks (windows)
+            GLASS,
+            WHITE_STAINED_GLASS,
+            GRAY_STAINED_GLASS,
+            LIGHT_GRAY_STAINED_GLASS,
+            BROWN_STAINED_GLASS,
+            CYAN_STAINED_GLASS,
+            BLUE_STAINED_GLASS,
+            LIGHT_BLUE_STAINED_GLASS,
+            TINTED_GLASS,
+            // Carpets
+            WHITE_CARPET,
+            RED_CARPET,
+            // Other structural/building blocks
+            IRON_BARS,
+            IRON_BLOCK,
+            SCAFFOLDING,
+            BEDROCK,
+        ]
+    }
+} // impl Tree

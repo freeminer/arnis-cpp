@@ -1,6 +1,7 @@
 {
   "create_world": "Skapa värld",
   "no_world_selected": "Ingen värld skapad",
+  "no_world_generated_yet": "Ingen värld genererad ännu",
   "start_generation": "Starta generering",
   "custom_selection_confirmed": "Anpassad markering bekräftad!",
   "error_coordinates_out_of_range": "Fel: Koordinater är utanför området eller felaktigt ordnade (Lat före Lng krävs).",
@@ -21,6 +22,7 @@
   "create_world_first": "Skapa en värld först!",
   "select_location_first": "Välj plats först!",
   "area_too_large": "Detta område är mycket stort och kan överskrida vanliga beräkningsgränser.",
+  "area_extreme": "Det här området är extremt stort och kan vara för stort för att genereras framgångsrikt.",
   "area_extensive": "Området är ganska extensivt och kan ta betydande tid och resurser.",
   "selection_confirmed": "Val bekräftat!",
   "select_area_prompt": "Välj ett område på kartan med verktygen.",
@@ -39,7 +41,17 @@
   "interior": "Interiörgenerering",
   "roof": "Takgenerering",
   "fillground": "Fyll mark",
-  "city_boundaries": "Stadsmark",
+  "land_cover": "Marktäcke",
+  "disable_height_limit": "Utöka byggnadshöjd",
+  "aws_only_elevation": "Äldre terräng",
   "bedrock_auto_generated": "Bedrock-världen genereras automatiskt",
-  "save_path": "Sökväg"
+  "save_path": "Sökväg",
+  "rotation_angle": "Rotationsvinkel",
+  "settings_section_generation": "Generering",
+  "settings_section_world": "Värld",
+  "settings_section_map": "Karta och inmatning",
+  "settings_section_application": "Applikation",
+  "clear_tile_cache": "Rensa plattcache",
+  "clear_tile_cache_button": "Rensa",
+  "anonymous_crash_reports": "Anonyma kraschrapporter"
 }

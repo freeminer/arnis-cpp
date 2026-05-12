@@ -1,6 +1,7 @@
 {
   "create_world": "Utwórz świat",
   "no_world_selected": "Nie utworzono świata",
+  "no_world_generated_yet": "Nie wygenerowano jeszcze świata",
   "start_generation": "Rozpocznij generowanie",
   "custom_selection_confirmed": "Niestandardowy wybór potwierdzony!",
   "error_coordinates_out_of_range": "Błąd: Współrzędne są poza zakresem lub w złej kolejności (wymagana szerokość przed długością).",
@@ -21,6 +22,7 @@
   "create_world_first": "Najpierw utwórz świat!",
   "select_location_first": "Najpierw wybierz lokalizację!",
   "area_too_large": "Ten obszar jest bardzo duży i może przekroczyć limity obliczeniowe.",
+  "area_extreme": "Ten obszar jest ekstremalnie duży i może być zbyt rozległy, aby zostać pomyślnie wygenerowany.",
   "area_extensive": "Ten obszar jest rozległy i może pochłonąć dużo czasu oraz zasobów.",
   "selection_confirmed": "Wybór potwierdzony!",
   "select_area_prompt": "Zaznacz obszar na mapie za pomocą narzędzi.",
@@ -39,7 +41,17 @@
   "interior": "Generowanie wnętrza",
   "roof": "Generowanie dachu",
   "fillground": "Wypełnij podłoże",
-  "city_boundaries": "Podłoże miejskie",
+  "land_cover": "Pokrycie terenu",
+  "disable_height_limit": "Rozszerz wysokość budowania",
+  "aws_only_elevation": "Klasyczny teren",
   "bedrock_auto_generated": "Świat Bedrock jest generowany automatycznie",
-  "save_path": "Ścieżka zapisu"
+  "save_path": "Ścieżka zapisu",
+  "rotation_angle": "Kąt Obrotu",
+  "settings_section_generation": "Generowanie",
+  "settings_section_world": "Świat",
+  "settings_section_map": "Mapa i dane",
+  "settings_section_application": "Aplikacja",
+  "clear_tile_cache": "Wyczyść pamięć kafelków",
+  "clear_tile_cache_button": "Wyczyść",
+  "anonymous_crash_reports": "Anonimowe raporty o awariach"
 }

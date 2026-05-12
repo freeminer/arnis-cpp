@@ -1,18 +1,40 @@
 use crate::args::Args;
 use crate::coordinate_system::{cartesian::XZPoint, geographic::LLBBox};
+use crate::elevation::compute_grid_dims;
 use crate::elevation_data::{fetch_elevation_data, ElevationData};
+use crate::land_cover::{self, LandCoverData};
 use crate::progress::emit_gui_progress_update;
 #[cfg(feature = "gui")]
 use crate::telemetry::{send_log, LogLevel};
 use colored::Colorize;
 use image::{Rgb, RgbImage};
 
-/// Represents terrain data and elevation settings
+/// Parameters describing the inverse-rotation needed to check whether a world
+/// coordinate falls inside the original (pre-rotation) bounding box.
+#[derive(Clone)]
+pub struct RotationMask {
+    /// Center of rotation (world coordinates)
+    pub cx: f64,
+    pub cz: f64,
+    /// sin/cos of the *negative* angle (inverse rotation)
+    pub neg_sin: f64,
+    pub cos: f64,
+    /// Original axis-aligned bounding box before rotation
+    pub orig_min_x: i32,
+    pub orig_max_x: i32,
+    pub orig_min_z: i32,
+    pub orig_max_z: i32,
+}
+
+/// Represents terrain data, land cover classification, and elevation settings
 #[derive(Clone)]
 pub struct Ground {
     pub elevation_enabled: bool,
     ground_level: i32,
     elevation_data: Option<ElevationData>,
+    land_cover: Option<LandCoverData>,
+    /// When set, coordinates outside the rotated original bbox are skipped.
+    rotation_mask: Option<RotationMask>,
 }
 
 impl Ground {
@@ -21,31 +43,185 @@ impl Ground {
             elevation_enabled: false,
             ground_level,
             elevation_data: None,
+            land_cover: None,
+            rotation_mask: None,
         }
     }
 
-    pub fn new_enabled(bbox: &LLBBox, scale: f64, ground_level: i32) -> Self {
-        match fetch_elevation_data(bbox, scale, ground_level) {
+    pub fn new_enabled(
+        bbox: &LLBBox,
+        scale: f64,
+        ground_level: i32,
+        fetch_land_cover: bool,
+        disable_height_limit: bool,
+        extended_max_y: i32,
+        aws_only_elevation: bool,
+    ) -> Self {
+        // Fetch land cover FIRST so we can feed it into the elevation
+        // post-processing pipeline for land-cover-aware artifact repair.
+        // The elevation grid is built from the same (bbox, scale) so both
+        // grids share dimensions (both use compute_grid_dims).
+        let (_, _, grid_w, grid_h) = compute_grid_dims(bbox, scale);
+        let mut land_cover = if fetch_land_cover {
+            let lc = land_cover::fetch_land_cover_data(bbox, grid_w, grid_h);
+            if lc.is_some() {
+                println!("Land cover data loaded successfully");
+            } else {
+                eprintln!("Warning: Land cover data unavailable, using default ground blocks");
+            }
+            lc
+        } else {
+            None
+        };
+
+        match fetch_elevation_data(
+            bbox,
+            scale,
+            ground_level,
+            disable_height_limit,
+            extended_max_y,
+            land_cover.as_mut(),
+            aws_only_elevation,
+        ) {
             Ok(elevation_data) => Self {
                 elevation_enabled: true,
                 ground_level,
                 elevation_data: Some(elevation_data),
+                land_cover,
+                rotation_mask: None,
             },
             Err(e) => {
                 eprintln!("Failed to fetch elevation data: {}", e);
                 #[cfg(feature = "gui")]
-                send_log(
-                    LogLevel::Warning,
-                    "Elevation unavailable, using flat ground",
-                );
-                // Graceful fallback: disable elevation and keep provided ground_level
+                {
+                    let short: String = e.to_string().chars().take(200).collect();
+                    send_log(
+                        LogLevel::Warning,
+                        &format!("Elevation unavailable, using flat ground ({short})"),
+                    );
+                }
+                // Graceful fallback: disable elevation and keep provided ground_level.
+                // Land cover we already fetched is discarded since it has no
+                // elevation grid to align against.
                 Self {
                     elevation_enabled: false,
                     ground_level,
                     elevation_data: None,
+                    land_cover: None,
+                    rotation_mask: None,
                 }
             }
         }
+    }
+
+    /// Returns whether land cover data is available
+    #[inline(always)]
+    pub fn has_land_cover(&self) -> bool {
+        self.land_cover.is_some()
+    }
+
+    /// Returns the ESA WorldCover land cover class at the given coordinates.
+    /// Returns 0 if land cover data is not available.
+    #[inline(always)]
+    pub fn cover_class(&self, coord: XZPoint) -> u8 {
+        if let (Some(ref lc), Some(ref data)) = (&self.land_cover, &self.elevation_data) {
+            let x_ratio = (coord.x as f64 / (data.world_width - 1).max(1) as f64).clamp(0.0, 1.0);
+            let z_ratio = (coord.z as f64 / (data.world_height - 1).max(1) as f64).clamp(0.0, 1.0);
+            let x = ((x_ratio * (lc.width - 1) as f64).round() as usize).min(lc.width - 1);
+            let z = ((z_ratio * (lc.height - 1) as f64).round() as usize).min(lc.height - 1);
+            lc.grid[z][x]
+        } else {
+            0
+        }
+    }
+
+    /// Returns the water distance-to-shore value at the given coordinates.
+    /// 0 = non-water, 1 = shore, 2+ = progressively deeper water.
+    #[inline(always)]
+    pub fn water_distance(&self, coord: XZPoint) -> u8 {
+        if let (Some(ref lc), Some(ref data)) = (&self.land_cover, &self.elevation_data) {
+            let x_ratio = (coord.x as f64 / (data.world_width - 1).max(1) as f64).clamp(0.0, 1.0);
+            let z_ratio = (coord.z as f64 / (data.world_height - 1).max(1) as f64).clamp(0.0, 1.0);
+            let x = ((x_ratio * (lc.width - 1) as f64).round() as usize).min(lc.width - 1);
+            let z = ((z_ratio * (lc.height - 1) as f64).round() as usize).min(lc.height - 1);
+            lc.water_distance[z][x]
+        } else {
+            0
+        }
+    }
+
+    /// Returns a continuous 0.0–1.0 value indicating how "watery" a block is,
+    /// using bilinear interpolation of the water classification grid.
+    ///
+    /// Nearest-neighbor grid lookups (`cover_class`) create rectangular water
+    /// edges when the grid is coarser than block resolution.  Bilinear
+    /// interpolation produces a smooth gradient across grid cell boundaries,
+    /// allowing noise-based thresholding to create organic shorelines.
+    #[inline(always)]
+    pub fn water_blend(&self, coord: XZPoint) -> f64 {
+        if let (Some(ref lc), Some(ref data)) = (&self.land_cover, &self.elevation_data) {
+            // Continuous grid coordinates (no rounding — that's the key difference
+            // from cover_class which uses .round())
+            let fx = (coord.x as f64 / (data.world_width - 1).max(1) as f64).clamp(0.0, 1.0)
+                * (lc.width - 1) as f64;
+            let fz = (coord.z as f64 / (data.world_height - 1).max(1) as f64).clamp(0.0, 1.0)
+                * (lc.height - 1) as f64;
+
+            let x0 = (fx.floor() as usize).min(lc.width - 1);
+            let x1 = (x0 + 1).min(lc.width - 1);
+            let z0 = (fz.floor() as usize).min(lc.height - 1);
+            let z1 = (z0 + 1).min(lc.height - 1);
+
+            let tx = fx - fx.floor();
+            let tz = fz - fz.floor();
+
+            // Sample pre-smoothed water-ness at the 4 surrounding grid cells.
+            // The grid was Gaussian-blurred from the binary LC_WATER mask so
+            // that even at integer block positions (1-to-1 grid-to-world
+            // mapping, where tx == tz == 0 below) the sampled value is
+            // continuous — the renderer's hard `> 0.5` threshold then traces
+            // a clean curved shoreline contour instead of the raw ESA 10 m
+            // rectangular grid edge.
+            // Widen f32 storage to f64 for the bilinear arithmetic. This
+            // doesn't recover the ~10⁻⁷ precision lost at storage, but it
+            // prevents extra rounding from accumulating in the four
+            // multiply-adds + the threshold comparison downstream.
+            let w00 = lc.water_blend_grid[z0][x0] as f64;
+            let w10 = lc.water_blend_grid[z0][x1] as f64;
+            let w01 = lc.water_blend_grid[z1][x0] as f64;
+            let w11 = lc.water_blend_grid[z1][x1] as f64;
+
+            // Bilinear interpolation
+            let top = w00 * (1.0 - tx) + w10 * tx;
+            let bottom = w01 * (1.0 - tx) + w11 * tx;
+            top * (1.0 - tz) + bottom * tz
+        } else {
+            0.0
+        }
+    }
+
+    /// Computes terrain slope at the given coordinates.
+    ///
+    /// Slope is the difference between the maximum and minimum elevation of
+    /// 4 cardinal neighbors sampled at a step distance. Higher values indicate
+    /// steeper terrain.
+    ///
+    /// Returns 0 if elevation data is not available.
+    #[inline(always)]
+    pub fn slope(&self, coord: XZPoint) -> i32 {
+        if !self.elevation_enabled {
+            return 0;
+        }
+
+        const STEP: i32 = 4;
+        let east = self.level(XZPoint::new(coord.x + STEP, coord.z));
+        let west = self.level(XZPoint::new(coord.x - STEP, coord.z));
+        let north = self.level(XZPoint::new(coord.x, coord.z - STEP));
+        let south = self.level(XZPoint::new(coord.x, coord.z + STEP));
+
+        let max_val = east.max(west).max(north).max(south);
+        let min_val = east.min(west).min(north).min(south);
+        max_val - min_val
     }
 
     /// Returns the ground level at the given coordinates
@@ -58,6 +234,41 @@ impl Ground {
         let data: &ElevationData = self.elevation_data.as_ref().unwrap();
         let (x_ratio, z_ratio) = self.get_data_coordinates(coord, data);
         self.interpolate_height(x_ratio, z_ratio, data)
+    }
+
+    /// Returns the appropriate Y level for water placement.
+    /// On steep terrain, snaps to the local minimum within a small radius
+    /// to compensate for spatial misalignment between water classification
+    /// data (OSM/ESA) and the elevation DEM.
+    pub fn water_level(&self, coord: XZPoint) -> i32 {
+        let center = self.level(coord);
+        if !self.elevation_enabled {
+            return center;
+        }
+        // Check if terrain is steep here; if flat, no snapping needed
+        let slope = self.slope(coord);
+        if slope <= 2 {
+            return center;
+        }
+        // On steep terrain, find the minimum elevation in a small radius
+        // to snap water to the canyon/valley floor
+        let mut min_y = center;
+        for r in 1..=3i32 {
+            for &(dx, dz) in &[
+                (-r, 0),
+                (r, 0),
+                (0, -r),
+                (0, r),
+                (-r, -r),
+                (-r, r),
+                (r, -r),
+                (r, r),
+            ] {
+                let neighbor = self.level(XZPoint::new(coord.x + dx, coord.z + dz));
+                min_y = min_y.min(neighbor);
+            }
+        }
+        min_y
     }
 
     #[allow(unused)]
@@ -78,20 +289,112 @@ impl Ground {
         coords.map(|c: XZPoint| self.level(c)).max()
     }
 
-    /// Converts game coordinates to elevation data coordinates
+    /// Converts game coordinates to elevation data coordinates (0.0 to 1.0 ratio)
     #[inline(always)]
     fn get_data_coordinates(&self, coord: XZPoint, data: &ElevationData) -> (f64, f64) {
-        let x_ratio: f64 = coord.x as f64 / data.width as f64;
-        let z_ratio: f64 = coord.z as f64 / data.height as f64;
+        let x_ratio: f64 = coord.x as f64 / (data.world_width - 1).max(1) as f64;
+        let z_ratio: f64 = coord.z as f64 / (data.world_height - 1).max(1) as f64;
         (x_ratio.clamp(0.0, 1.0), z_ratio.clamp(0.0, 1.0))
     }
 
-    /// Interpolates height value from the elevation grid
+    /// Bilinearly interpolates height value from the elevation grid
     #[inline(always)]
     fn interpolate_height(&self, x_ratio: f64, z_ratio: f64, data: &ElevationData) -> i32 {
-        let x: usize = ((x_ratio * (data.width - 1) as f64).round() as usize).min(data.width - 1);
-        let z: usize = ((z_ratio * (data.height - 1) as f64).round() as usize).min(data.height - 1);
-        data.heights[z][x]
+        let fx = x_ratio * (data.width - 1) as f64;
+        let fz = z_ratio * (data.height - 1) as f64;
+        let x0 = fx.floor() as usize;
+        let z0 = fz.floor() as usize;
+        let x1 = (x0 + 1).min(data.width - 1);
+        let z1 = (z0 + 1).min(data.height - 1);
+        let dx = fx - x0 as f64;
+        let dz = fz - z0 as f64;
+        // Widen f32 storage to f64 for the bilinear arithmetic. The real
+        // property we rely on: across the Minecraft Y range (roughly −64 up
+        // through a few thousand even with --disable-height-limit), f32's
+        // mantissa gives ~10⁻⁷ precision per stored cell, which is far
+        // smaller than the 0.5-block half-width used by `round()` below.
+        // So for any value that isn't pathologically close to a half-integer
+        // boundary, the final `result.round() as i32` matches the f64 path.
+        let v00 = data.heights[z0][x0] as f64;
+        let v10 = data.heights[z0][x1] as f64;
+        let v01 = data.heights[z1][x0] as f64;
+        let v11 = data.heights[z1][x1] as f64;
+        let lerp_top = v00 + (v10 - v00) * dx;
+        let lerp_bot = v01 + (v11 - v01) * dx;
+        let result = lerp_top + (lerp_bot - lerp_top) * dz;
+        result.round() as i32
+    }
+
+    /// Replace the elevation grid with new rotated/transformed data.
+    /// Used by the rotation operator to update elevation after rotating.
+    pub fn set_elevation_data(
+        &mut self,
+        heights: Vec<Vec<f64>>,
+        grid_width: usize,
+        grid_height: usize,
+        world_width: usize,
+        world_height: usize,
+    ) {
+        if let Some(ref mut data) = self.elevation_data {
+            // Rotation operators build a fresh f64 work grid; downcast here to
+            // match `ElevationData::heights`'s f32 storage layout.
+            data.heights = heights
+                .into_iter()
+                .map(|row| row.into_iter().map(|v| v as f32).collect())
+                .collect();
+            data.width = grid_width;
+            data.height = grid_height;
+            data.world_width = world_width;
+            data.world_height = world_height;
+        }
+    }
+
+    /// Replace the land-cover grids with new rotated/transformed data.
+    /// Used by the rotation operator to keep land cover aligned with elevation.
+    pub fn set_land_cover_data(
+        &mut self,
+        grid: Vec<Vec<u8>>,
+        water_distance: Vec<Vec<u8>>,
+        width: usize,
+        height: usize,
+    ) {
+        if let Some(ref mut lc) = self.land_cover {
+            lc.grid = grid;
+            lc.water_distance = water_distance;
+            lc.width = width;
+            lc.height = height;
+            // The water-blend mask was derived from the pre-rotation grid —
+            // refresh it from the rotated grid so the shoreline softening
+            // stays aligned with the new classification.
+            lc.refresh_water_blend_grid();
+        }
+    }
+
+    /// Store rotation parameters so we can mask out-of-bounds blocks later.
+    pub fn set_rotation_mask(&mut self, mask: RotationMask) {
+        self.rotation_mask = Some(mask);
+    }
+
+    /// Returns `true` if the coordinate is inside the rotated original bbox.
+    /// When no rotation was applied, always returns `true`.
+    #[inline(always)]
+    pub fn is_in_rotated_bounds(&self, x: i32, z: i32) -> bool {
+        let mask = match self.rotation_mask {
+            Some(ref m) => m,
+            None => return true,
+        };
+        // Inverse-rotate (x, z) back to original space
+        let dx = x as f64 - mask.cx;
+        let dz = z as f64 - mask.cz;
+        let orig_x = dx * mask.cos + dz * mask.neg_sin + mask.cx;
+        let orig_z = -dx * mask.neg_sin + dz * mask.cos + mask.cz;
+        // Allow a tiny tolerance so points that land infinitesimally outside the
+        // integer bbox due to floating-point rounding are still considered inside.
+        const EPSILON: f64 = 1.0e-9;
+        orig_x >= mask.orig_min_x as f64 - EPSILON
+            && orig_x <= mask.orig_max_x as f64 + EPSILON
+            && orig_z >= mask.orig_min_z as f64 - EPSILON
+            && orig_z <= mask.orig_max_z as f64 + EPSILON
     }
 
     fn save_debug_image(&self, filename: &str) {
@@ -109,20 +412,26 @@ impl Ground {
         let mut img: image::ImageBuffer<Rgb<u8>, Vec<u8>> =
             RgbImage::new(width as u32, height as u32);
 
-        let mut min_height: i32 = i32::MAX;
-        let mut max_height: i32 = i32::MIN;
+        let mut min_height: f32 = f32::MAX;
+        let mut max_height: f32 = f32::MIN;
 
         for row in heights {
             for &h in row {
-                min_height = min_height.min(h);
-                max_height = max_height.max(h);
+                if h.is_finite() {
+                    min_height = min_height.min(h);
+                    max_height = max_height.max(h);
+                }
             }
         }
 
+        let range = max_height - min_height;
         for (y, row) in heights.iter().enumerate() {
             for (x, &h) in row.iter().enumerate() {
-                let normalized: u8 =
-                    (((h - min_height) as f64 / (max_height - min_height) as f64) * 255.0) as u8;
+                let normalized: u8 = if range > 0.0 {
+                    (((h - min_height) / range) * 255.0) as u8
+                } else {
+                    128
+                };
                 img.put_pixel(
                     x as u32,
                     y as u32,
@@ -147,12 +456,30 @@ impl Ground {
 pub fn generate_ground_data(args: &Args) -> Ground {
     if args.terrain {
         println!("{} Fetching elevation...", "[3/7]".bold());
-        emit_gui_progress_update(14.0, "Fetching elevation...");
-        let ground = Ground::new_enabled(&args.bbox, args.scale, args.ground_level);
+        emit_gui_progress_update(15.0, "Fetching elevation...");
+        let ground = Ground::new_enabled(
+            &args.bbox,
+            args.scale,
+            args.ground_level,
+            args.land_cover,
+            args.disable_height_limit,
+            extended_max_y_for(args),
+            args.aws_only_elevation,
+        );
         if args.debug {
             ground.save_debug_image("elevation_debug");
         }
         return ground;
     }
     Ground::new_flat(args.ground_level)
+}
+
+/// Per-format build-height cap when the user opts into extended build height:
+/// 2031 for the Java datapack, 512 for the Bedrock behavior pack.
+pub(crate) fn extended_max_y_for(args: &Args) -> i32 {
+    if args.bedrock {
+        512
+    } else {
+        2031
+    }
 }

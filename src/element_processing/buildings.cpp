@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <exception>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <optional>
 #include <random>
@@ -17,9 +18,19 @@
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill.h"
+#include "../floodfill_cache.h"
+#include "buildings.h"
+#include "historic.h"
 #include "subprocessor/buildings_interior.h"
 namespace arnis
 {
+
+namespace man_made
+{
+bool is_tank_structure(const ProcessedWay &way);
+void generate_tank_structure(
+		WorldEditor &editor, const ProcessedElement &element, const Args &args);
+}
 
 namespace buildings
 {
@@ -125,6 +136,8 @@ enum class RoofType {
     Flat
 };
 
+constexpr int BUILDING_PASSAGE_HEIGHT = 4;
+
 // Hash for pair<int,int>
 struct PairHash {
     std::size_t operator()(const std::pair<int,int>& p) const noexcept {
@@ -134,6 +147,133 @@ struct PairHash {
     }
 };
 using pair_hash = PairHash;
+
+namespace {
+
+std::optional<int> parse_i32_tag(const tags_t &tags, const std::string &key)
+{
+    auto it = tags.find(key);
+    if (it == tags.end())
+        return std::nullopt;
+    try {
+        return std::stoi(it->second);
+    } catch (...) {
+        return std::nullopt;
+    }
+}
+
+bool has_tag_value(const tags_t &tags, const std::string &key, const std::string &value)
+{
+    auto it = tags.find(key);
+    return it != tags.end() && it->second == value;
+}
+
+bool should_skip_underground_tags(const tags_t &tags)
+{
+    if (auto layer = parse_i32_tag(tags, "layer"); layer.has_value() && *layer < 0)
+        return true;
+    if (auto level = parse_i32_tag(tags, "level"); level.has_value() && *level < 0)
+        return true;
+    if (has_tag_value(tags, "location", "underground") ||
+            has_tag_value(tags, "location", "subway"))
+        return true;
+    return tags.contains("building:levels:underground") && !tags.contains("building:levels");
+}
+
+std::vector<std::pair<int, int>> way_polygon_coords(const ProcessedWay &way)
+{
+    std::vector<std::pair<int, int>> polygon_coords;
+    polygon_coords.reserve(way.nodes.size());
+    for (const auto &n : way.nodes)
+        polygon_coords.emplace_back(n.x, n.z);
+    return polygon_coords;
+}
+
+std::vector<std::pair<int, int>> compute_floor_area(
+        const FloodFillCache *flood_fill_cache, const ProcessedWay &way,
+        const Args &args)
+{
+    if (flood_fill_cache)
+        return flood_fill_cache->get_or_compute(way, args.timeout);
+    return flood_fill_area(way_polygon_coords(way), args.timeout_ref());
+}
+
+void merge_way_segments(std::vector<std::vector<ProcessedNode>> &rings)
+{
+    bool changed = true;
+    while (changed) {
+        changed = false;
+        for (std::size_t i = 0; i < rings.size() && !changed; ++i) {
+            if (rings[i].empty())
+                continue;
+            for (std::size_t j = i + 1; j < rings.size(); ++j) {
+                if (rings[j].empty())
+                    continue;
+
+                auto &a = rings[i];
+                auto &b = rings[j];
+                auto same_point = [](const ProcessedNode &lhs, const ProcessedNode &rhs) {
+                    return lhs.id == rhs.id || (lhs.x == rhs.x && lhs.z == rhs.z);
+                };
+
+                if (same_point(a.back(), b.front())) {
+                    a.insert(a.end(), std::next(b.begin()), b.end());
+                } else if (same_point(a.back(), b.back())) {
+                    a.insert(a.end(), std::next(b.rbegin()), b.rend());
+                } else if (same_point(a.front(), b.back())) {
+                    a.insert(a.begin(), b.begin(), std::prev(b.end()));
+                } else if (same_point(a.front(), b.front())) {
+                    a.insert(a.begin(), std::next(b.rbegin()), b.rend());
+                } else {
+                    continue;
+                }
+
+                rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(j));
+                changed = true;
+                break;
+            }
+        }
+    }
+}
+
+bool close_ring_if_near(std::vector<ProcessedNode> &ring)
+{
+    if (ring.size() < 3)
+        return false;
+    const auto &first = ring.front();
+    const auto &last = ring.back();
+    if (first.id != last.id && std::abs(first.x - last.x) <= 1 &&
+            std::abs(first.z - last.z) <= 1)
+        ring.push_back(first);
+    const auto &closed_last = ring.back();
+    return first.id == closed_last.id ||
+           (std::abs(first.x - closed_last.x) <= 1 &&
+                   std::abs(first.z - closed_last.z) <= 1);
+}
+
+std::vector<std::vector<ProcessedNode>> collect_merged_rings(
+        const ProcessedRelation &relation, ProcessedMemberRole role)
+{
+    std::vector<std::vector<ProcessedNode>> rings;
+    for (const auto &member : relation.members) {
+        if (member.role == role)
+            rings.push_back(member.way.nodes);
+    }
+    merge_way_segments(rings);
+    std::vector<std::vector<ProcessedNode>> out;
+    for (auto &ring : rings) {
+        if (close_ring_if_near(ring) && ring.size() >= 4)
+            out.push_back(std::move(ring));
+    }
+    return out;
+}
+
+bool passage_at(const CoordinateBitmap *building_passages, int x, int z)
+{
+    return building_passages && building_passages->contains(x, z);
+}
+
+}
 
 
 
@@ -166,6 +306,27 @@ void generate_buildings(WorldEditor* editor,
                         const ProcessedWay& element,
                         const Args& args,
                         const std::optional<int>& relation_levels) {
+    FloodFillCache empty_cache;
+    CoordinateBitmap empty_passages = CoordinateBitmap::new_empty();
+    generate_buildings(editor, element, args, relation_levels, empty_cache, empty_passages, nullptr);
+}
+
+void generate_buildings(WorldEditor* editor,
+                        const ProcessedWay& element,
+                        const Args& args,
+                        const std::optional<int>& relation_levels,
+                        const FloodFillCache& flood_fill_cache,
+                        const CoordinateBitmap& building_passages,
+                        const std::vector<HolePolygon>* hole_polygons) {
+    if (should_skip_underground_tags(element.tags)) {
+        return;
+    }
+
+    if (element.tags.get("tomb") == "pyramid") {
+        historic::generate_pyramid(*editor, element, args);
+        return;
+    }
+
     // min_level
     int min_level = 0;
     {
@@ -179,36 +340,66 @@ void generate_buildings(WorldEditor* editor,
         }
     }
 
-    // Skip if 'layer' or 'level' negative
-    {
-        auto it = element.tags.find("layer");
-        if (it != element.tags.end()) {
-            try {
-                if (std::stoi(it->second) < 0) return;
-            } catch (...) {}
-        }
-    }
-    {
-        auto it = element.tags.find("level");
-        if (it != element.tags.end()) {
-            try {
-                if (std::stoi(it->second) < 0) return;
-            } catch (...) {}
-        }
+    static const std::unordered_set<uint64_t> skip_way_ids = {
+        5013364, 204068874, 32920861
+    };
+    if (skip_way_ids.find(element.id) != skip_way_ids.end())
+        return;
+
+    if (arnis::man_made::is_tank_structure(element)) {
+        arnis::man_made::generate_tank_structure(*editor, ProcessedElement(element), args);
+        return;
     }
 
     int abs_terrain_offset = (!args.terrain) ? args.ground_level : 0;
     double scale_factor = args.scale;
     int min_level_offset = multiply_scale(min_level * 4, scale_factor);
-
-    std::vector<std::pair<int,int>> polygon_coords;
-    polygon_coords.reserve(element.nodes.size());
-    for (const auto& n : element.nodes) {
-        polygon_coords.emplace_back(n.x, n.z);
+    if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
+        std::string s = it->second;
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        if (!s.empty() && s.back() == 'm') s.pop_back();
+        while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back()))) s.pop_back();
+        try {
+            min_level_offset = static_cast<int>(std::stod(s) * scale_factor);
+        } catch (...) {
+            min_level_offset = 0;
+        }
     }
+    const CoordinateBitmap *effective_passages =
+            (min_level_offset == 0) ? &building_passages : nullptr;
 
-    std::vector<std::pair<int,int>> cached_floor_area = flood_fill_area(polygon_coords, args.timeout_ref());
+    std::vector<std::pair<int,int>> cached_floor_area =
+            compute_floor_area(&flood_fill_cache, element, args);
+    if (hole_polygons && !hole_polygons->empty() && !cached_floor_area.empty()) {
+        std::unordered_set<std::pair<int,int>, PairHash> outer_area(
+                cached_floor_area.begin(), cached_floor_area.end());
+        std::unordered_set<std::pair<int,int>, PairHash> hole_points;
+        for (const auto &hole : *hole_polygons) {
+            if (hole.way.nodes.size() < 3)
+                continue;
+            auto hole_area = compute_floor_area(&flood_fill_cache, hole.way, args);
+            bool overlaps_outer = false;
+            for (const auto &point : hole_area) {
+                if (outer_area.contains(point)) {
+                    overlaps_outer = true;
+                    break;
+                }
+            }
+            if (!overlaps_outer)
+                continue;
+            for (const auto &point : hole_area)
+                hole_points.insert(point);
+        }
+        if (!hole_points.empty()) {
+            cached_floor_area.erase(
+                    std::remove_if(cached_floor_area.begin(), cached_floor_area.end(),
+                            [&](const auto &point) { return hole_points.contains(point); }),
+                    cached_floor_area.end());
+        }
+    }
     std::size_t cached_footprint_size = cached_floor_area.size();
+    if (cached_footprint_size == 0)
+        return;
 
     int start_y_offset = 0;
     if (args.terrain) {
@@ -500,8 +691,9 @@ void generate_buildings(WorldEditor* editor,
             for (const auto& t : bresenham_points) {
                 int bx = std::get<0>(t);
                 int bz = std::get<2>(t);
+                const bool is_passage = passage_at(effective_passages, bx, bz);
 
-                if (args.terrain && min_level == 0) {
+                if (args.terrain && min_level == 0 && !is_passage) {
                     int local_ground_level = args.ground_level;
                     Ground* grd = editor->get_ground();
                     if (grd) {
@@ -513,7 +705,11 @@ void generate_buildings(WorldEditor* editor,
                     }
                 }
 
-                for (int h = start_y_offset + 1; h <= start_y_offset + building_height; ++h) {
+                const int passage_height = std::min(BUILDING_PASSAGE_HEIGHT, building_height);
+                const int wall_start = is_passage
+                        ? start_y_offset + passage_height + 1
+                        : start_y_offset + 1;
+                for (int h = wall_start; h <= start_y_offset + building_height; ++h) {
                     if (is_tall_building && use_vertical_windows) {
                         if (h > start_y_offset + 1 && ((bx + bz) % 3) == 0) {
                             editor->set_block_absolute(window_block, bx, h + abs_terrain_offset, bz);
@@ -533,6 +729,10 @@ void generate_buildings(WorldEditor* editor,
                             }
                         }
                     }
+                }
+                if (is_passage && passage_height < building_height) {
+                    editor->set_block_absolute(floor_block, bx,
+                            start_y_offset + passage_height + abs_terrain_offset, bz);
                 }
 
                 Block roof_line_block = use_accent_roof_line ? accent_block : wall_block;
@@ -563,6 +763,7 @@ void generate_buildings(WorldEditor* editor,
             int x = p.first;
             int z = p.second;
             if (processed_points.insert(p).second) {
+                const bool is_passage = passage_at(effective_passages, x, z);
                 if (args.terrain) {
                     Ground* grd = editor->get_ground();
                     if (grd) {
@@ -573,10 +774,16 @@ void generate_buildings(WorldEditor* editor,
                     }
                 }
 
-                editor->set_block_absolute(floor_block, x, start_y_offset + abs_terrain_offset, z);
+                if (!is_passage) {
+                    editor->set_block_absolute(floor_block, x, start_y_offset + abs_terrain_offset, z);
+                }
 
                 if (building_height > 4) {
+                    const int passage_ceiling = start_y_offset +
+                            std::min(BUILDING_PASSAGE_HEIGHT, building_height);
                     for (int h = start_y_offset + 2 + 4; h < start_y_offset + building_height; h += 4) {
+                        if (is_passage && h <= passage_ceiling)
+                            continue;
                         if ((x % 5) == 0 && (z % 5) == 0) {
                             editor->set_block_absolute(GLOWSTONE, x, h + abs_terrain_offset, z);
                         } else {
@@ -1257,57 +1464,67 @@ void generate_building_from_relation(
     const ProcessedRelation& relation,
     const Args& args
 ) {
-    // Skip if 'layer' or 'level' negative
-    {
-        auto it = relation.tags.find("layer");
-        if (it != relation.tags.end()) {
-            try {
-                if (std::stoi(it->second) < 0) return;
-            } catch (...) {}
-        }
-    }
-    {
-        auto it = relation.tags.find("level");
-        if (it != relation.tags.end()) {
-            try {
-                if (std::stoi(it->second) < 0) return;
-            } catch (...) {}
-        }
-    }
+    FloodFillCache empty_cache;
+    CoordinateBitmap empty_passages = CoordinateBitmap::new_empty();
+    auto min_coords = editor.get_min_coords();
+    auto max_coords = editor.get_max_coords();
+    XZBBox xzbbox(min_coords.first, min_coords.second, max_coords.first, max_coords.second);
+    generate_building_from_relation(editor, relation, args, empty_cache, xzbbox, empty_passages);
+}
 
-    int relation_levels = 2;
-    auto it = relation.tags.find(std::string("building:levels"));
-    if (it != relation.tags.end()) {
-        try {
-            relation_levels = std::stoi(it->second);
-        } catch (const std::exception&) {
-            relation_levels = 2;
-        }
+void generate_building_from_relation(
+    WorldEditor& editor,
+    const ProcessedRelation& relation,
+    const Args& args,
+    const FloodFillCache& flood_fill_cache,
+    const XZBBox& xzbbox,
+    const CoordinateBitmap& building_passages
+) {
+    (void)xzbbox;
+    if (should_skip_underground_tags(relation.tags)) {
+        return;
     }
 
-    for (const auto& member : relation.members) {
-        if (member.role == ProcessedMemberRole::Outer) {
-            generate_buildings(&editor, member.way, args, std::optional<int>(relation_levels));
-        }
-    }
-
-    /*
-    for (const auto& member : relation.members) {
-        if (member.role == ProcessedMemberRole::Inner) {
-            std::vector<std::pair<int,int>> polygon_coords;
-            polygon_coords.reserve(member.way.nodes.size());
-            for (const auto& n : member.way.nodes) polygon_coords.emplace_back(n.x, n.z);
-
-            std::vector<std::pair<int,int>> hole_area = flood_fill_area(polygon_coords, args.timeout);
-
-            for (const auto& p : hole_area) {
-                int x = p.first;
-                int z = p.second;
-                editor.set_block(AIR, x, ground_level, z, std::nullopt, std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
+    int relation_levels = parse_i32_tag(relation.tags, "building:levels").value_or(2);
+    const bool is_building_type = relation.tags.get("type") == "building";
+    bool has_parts = false;
+    if (is_building_type) {
+        for (const auto &member : relation.members) {
+            if (member.role == ProcessedMemberRole::Part) {
+                has_parts = true;
+                break;
             }
         }
     }
-    */
+    if (has_parts) {
+        return;
+    }
+
+    auto outer_rings = collect_merged_rings(relation, ProcessedMemberRole::Outer);
+    auto inner_rings = collect_merged_rings(relation, ProcessedMemberRole::Inner);
+
+    std::vector<HolePolygon> hole_polygons;
+    hole_polygons.reserve(inner_rings.size());
+    for (std::size_t i = 0; i < inner_rings.size(); ++i) {
+        ProcessedWay way;
+        way.id = static_cast<std::int64_t>((1ULL << 63) |
+                ((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
+                (0x8000ULL | (i & 0x7FFFULL)));
+        way.nodes = std::move(inner_rings[i]);
+        hole_polygons.push_back(HolePolygon{std::move(way), true});
+    }
+
+    for (std::size_t i = 0; i < outer_rings.size(); ++i) {
+        ProcessedWay merged_way;
+        merged_way.id = static_cast<std::int64_t>((1ULL << 63) |
+                ((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
+                (i & 0xFFFFULL));
+        merged_way.tags = relation.tags;
+        merged_way.nodes = std::move(outer_rings[i]);
+        generate_buildings(&editor, merged_way, args, std::optional<int>(relation_levels),
+                flood_fill_cache, building_passages,
+                hole_polygons.empty() ? nullptr : &hole_polygons);
+    }
 }
 
 void generate_bridge(

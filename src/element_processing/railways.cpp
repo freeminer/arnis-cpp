@@ -2,8 +2,11 @@
 #include <tuple>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <cmath>
+#include <algorithm>
+#include <limits>
 
 using std::vector;
 using std::tuple;
@@ -23,6 +26,45 @@ namespace arnis
 
 namespace railways
 {
+
+const int SUBWAY_DEPTH = 3;
+const int RAIL_BRIDGE_FLAT_CLEARANCE = 4;
+const int RAIL_BRIDGE_DIP_THRESHOLD = 4;
+const std::size_t RAIL_BRIDGE_RAMP_MIN = 8;
+const std::size_t RAIL_BRIDGE_RAMP_MAX = 30;
+const float RAIL_BRIDGE_RAMP_FRACTION = 0.25f;
+const std::size_t RAIL_BRIDGE_PILLAR_INTERVAL = 8;
+const int WALL_RADIUS = 2;
+const int AIR_RADIUS = 1;
+const int INTERIOR_HEIGHT = 4;
+const std::size_t LIGHT_INTERVAL = 8;
+const int MIN_Y = -64;
+
+struct PairHash {
+    std::size_t operator()(const pair<int, int>& p) const noexcept {
+        return std::hash<long long>()(
+                (static_cast<long long>(p.first) << 32) ^
+                static_cast<unsigned long long>(p.second));
+    }
+};
+
+using RailBridgeInternalEndpoints = vector<pair<int, int>>;
+
+bool contains_endpoint(const RailBridgeInternalEndpoints& endpoints, const pair<int, int>& xz) {
+    return std::find(endpoints.begin(), endpoints.end(), xz) != endpoints.end();
+}
+
+Block subway_shell_block(int x, int y, int z) {
+    uint32_t h = static_cast<uint32_t>(x) * 73856093u +
+            static_cast<uint32_t>(y) * 19349663u +
+            static_cast<uint32_t>(z) * 83492791u;
+    const uint32_t v = h % 100u;
+    if (v < 15)
+        return CRACKED_STONE_BRICKS;
+    if (v < 18)
+        return MOSSY_STONE_BRICKS;
+    return STONE_BRICKS;
+}
 
 
 // --- Block definitions (example) ---
@@ -193,66 +235,329 @@ Block determine_rail_direction(
     }
 }
 
+Block ascending_toward(const pair<int,int>& from, const pair<int,int>& to) {
+    int dx = to.first - from.first;
+    int dz = to.second - from.second;
+    if (std::abs(dx) >= std::abs(dz)) {
+        return dx > 0 ? RAIL_ASCENDING_EAST : RAIL_ASCENDING_WEST;
+    }
+    return dz < 0 ? RAIL_ASCENDING_NORTH : RAIL_ASCENDING_SOUTH;
+}
+
+Block determine_rail_with_slope(
+    const pair<int,int>& current,
+    const optional<pair<int,int>>& prev,
+    const optional<pair<int,int>>& next,
+    int prev_ground,
+    int current_ground,
+    int next_ground
+) {
+    if (next_ground > current_ground && next)
+        return ascending_toward(current, *next);
+    if (prev_ground > current_ground && prev)
+        return ascending_toward(current, *prev);
+    return determine_rail_direction(current, prev, next);
+}
+
+bool is_rail_bridge(const ProcessedWay& way) {
+    if (way.tags.get("indoor") == "yes")
+        return false;
+    auto it = way.tags.find("bridge");
+    return it != way.tags.end() && it->second != "no";
+}
+
+bool renders_as_rail_bridge(const ProcessedWay& way) {
+    auto it = way.tags.find("railway");
+    if (it == way.tags.end() || way.nodes.size() < 2 || !is_rail_bridge(way))
+        return false;
+    const string& railway_type = it->second;
+    if (railway_type == "subway" || way.tags.get("subway") == "yes")
+        return false;
+    const vector<string> skip_types = {
+        "proposed", "abandoned", "construction", "razed", "turntable"
+    };
+    for (const auto& skip : skip_types) {
+        if (railway_type == skip)
+            return false;
+    }
+    return way.tags.get("tunnel") != "yes";
+}
+
+RailBridgeInternalEndpoints collect_rail_bridge_internal_endpoints(
+        const vector<ProcessedElement>& elements) {
+    std::unordered_map<pair<int,int>, int, PairHash> counts;
+    for (const auto& element : elements) {
+        if (!element.is_way())
+            continue;
+        const auto& way = element.as_way();
+        if (!renders_as_rail_bridge(way))
+            continue;
+        const auto& s = way.nodes.front();
+        const auto& e = way.nodes.back();
+        ++counts[{s.x, s.z}];
+        if (s.x != e.x || s.z != e.z)
+            ++counts[{e.x, e.z}];
+    }
+
+    RailBridgeInternalEndpoints endpoints;
+    for (const auto& [xz, count] : counts) {
+        if (count > 1)
+            endpoints.push_back(xz);
+    }
+    return endpoints;
+}
+
 // --- Main generation functions ---
 
-void generate_railways(WorldEditor& editor, const ProcessedWay& element) {
-    auto it = element.tags.find("railway");
-    if (it == element.tags.end()) return;
-
-    const string& railway_type = it->second;
-    // Skip undesired railway types
-    const vector<string> skip_types = {
-        "proposed", "abandoned", "subway", "construction", "razed", "turntable"
-    };
-    for (const auto& s : skip_types) {
-        if (railway_type == s) return;
-    }
-
-    if (auto it_subway = element.tags.find("subway"); it_subway != element.tags.end() && it_subway->second == "yes") {
-        return;
-    }
-    if (auto it_tunnel = element.tags.find("tunnel"); it_tunnel != element.tags.end() && it_tunnel->second == "yes") {
-        return;
-    }
-
-    if (element.nodes.size() < 2) return;
-
+void generate_at_grade_rail(WorldEditor& editor, const ProcessedWay& element) {
+    std::size_t tds = 0;
     for (size_t i = 1; i < element.nodes.size(); ++i) {
         XZ prev_node = element.nodes[i - 1].xz();
         XZ cur_node  = element.nodes[i].xz();
 
         auto points = bresenham_line(prev_node.x, 0, prev_node.z, cur_node.x, 0, cur_node.z);
         auto smoothed_points = smooth_diagonal_rails(points);
+        const std::size_t skip_first = i > 1 ? 1 : 0;
 
-        for (size_t j = 0; j < smoothed_points.size(); ++j) {
+        for (size_t j = skip_first; j < smoothed_points.size(); ++j) {
             int bx = get<0>(smoothed_points[j]);
-            //int by = get<1>(smoothed_points[j]);
             int bz = get<2>(smoothed_points[j]);
+
+            const int prev_ground = j > 0
+                    ? editor.get_ground_level(get<0>(smoothed_points[j - 1]), get<2>(smoothed_points[j - 1]))
+                    : editor.get_ground_level(bx, bz);
+            const int next_ground = j + 1 < smoothed_points.size()
+                    ? editor.get_ground_level(get<0>(smoothed_points[j + 1]), get<2>(smoothed_points[j + 1]))
+                    : editor.get_ground_level(bx, bz);
+            const int current_ground = editor.get_ground_level(bx, bz);
+
+            if (prev_ground < current_ground) {
+                for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
+                    editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
+            }
 
             editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
 
             optional<pair<int,int>> prev_opt = nullopt;
             optional<pair<int,int>> next_opt = nullopt;
+            if (j > 0)
+                prev_opt = pair<int,int>{get<0>(smoothed_points[j - 1]), get<2>(smoothed_points[j - 1])};
+            if (j + 1 < smoothed_points.size())
+                next_opt = pair<int,int>{get<0>(smoothed_points[j + 1]), get<2>(smoothed_points[j + 1])};
 
-            if (j > 0) {
-                int px = get<0>(smoothed_points[j - 1]);
-                int pz = get<2>(smoothed_points[j - 1]);
-                prev_opt = pair<int,int>{px, pz};
-            }
-            if (j + 1 < smoothed_points.size()) {
-                int nx = get<0>(smoothed_points[j + 1]);
-                int nz = get<2>(smoothed_points[j + 1]);
-                next_opt = pair<int,int>{nx, nz};
-            }
-
-            Block rail_block = determine_rail_direction({bx, bz}, prev_opt, next_opt);
+            Block rail_block = determine_rail_with_slope(
+                    {bx, bz}, prev_opt, next_opt, prev_ground, current_ground, next_ground);
             editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
 
-            if ((bx % 4) == 0) {
+            if ((tds % 4) == 0)
                 editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
-            }
+            ++tds;
         }
     }
+}
+
+void generate_rail_bridge(WorldEditor& editor, const ProcessedWay& way,
+        const RailBridgeInternalEndpoints& internal_endpoints) {
+    if (way.nodes.size() < 2)
+        return;
+
+    vector<pair<int,int>> all_points;
+    for (size_t i = 1; i < way.nodes.size(); ++i) {
+        auto points = bresenham_line(way.nodes[i - 1].x, 0, way.nodes[i - 1].z,
+                way.nodes[i].x, 0, way.nodes[i].z);
+        auto smoothed = smooth_diagonal_rails(points);
+        for (const auto& point : smoothed) {
+            pair<int,int> xz{get<0>(point), get<2>(point)};
+            if (all_points.empty() || all_points.back() != xz)
+                all_points.push_back(xz);
+        }
+    }
+    if (all_points.empty())
+        return;
+
+    vector<int> terrain_ys;
+    terrain_ys.reserve(all_points.size());
+    int max_y = std::numeric_limits<int>::min();
+    int min_y = std::numeric_limits<int>::max();
+    for (const auto& [bx, bz] : all_points) {
+        int y = editor.get_ground_level(bx, bz);
+        terrain_ys.push_back(y);
+        max_y = std::max(max_y, y);
+        min_y = std::min(min_y, y);
+    }
+
+    const int deck_y = (max_y - min_y) < RAIL_BRIDGE_DIP_THRESHOLD
+            ? max_y + RAIL_BRIDGE_FLAT_CLEARANCE
+            : max_y;
+    const std::size_t total = all_points.size();
+    const std::size_t last_idx = total - 1;
+    const int start_ground = terrain_ys.front();
+    const int end_ground = terrain_ys.back();
+    const bool start_internal = contains_endpoint(internal_endpoints, all_points.front());
+    const bool end_internal = contains_endpoint(internal_endpoints, all_points.back());
+
+    std::size_t needed = 0;
+    if (!start_internal)
+        needed = std::max<std::size_t>(needed, std::max(0, deck_y - start_ground));
+    if (!end_internal)
+        needed = std::max<std::size_t>(needed, std::max(0, deck_y - end_ground));
+    needed += 1;
+    const std::size_t raw_ramp = static_cast<std::size_t>(total * RAIL_BRIDGE_RAMP_FRACTION);
+    const std::size_t ramp_length = std::max(needed,
+            std::clamp(raw_ramp, RAIL_BRIDGE_RAMP_MIN, RAIL_BRIDGE_RAMP_MAX));
+    const float denom = static_cast<float>(std::max<std::size_t>(1, ramp_length - 1));
+
+    vector<int> bridge_ys;
+    bridge_ys.reserve(total);
+    for (std::size_t tds = 0; tds < total; ++tds) {
+        const int start_ramp_y = start_internal ? deck_y :
+                static_cast<int>(std::round(start_ground + (deck_y - start_ground) *
+                        std::min(1.0f, static_cast<float>(tds) / denom)));
+        const std::size_t dist_from_end = last_idx > tds ? last_idx - tds : 0;
+        const int end_ramp_y = end_internal ? deck_y :
+                static_cast<int>(std::round(end_ground + (deck_y - end_ground) *
+                        std::min(1.0f, static_cast<float>(dist_from_end) / denom)));
+        bridge_ys.push_back(std::max(std::min(start_ramp_y, end_ramp_y), terrain_ys[tds]));
+    }
+
+    for (std::size_t i = 0; i < total; ++i) {
+        const auto [bx, bz] = all_points[i];
+        const int y = bridge_ys[i];
+        optional<pair<int,int>> prev_xz = i > 0 ? optional<pair<int,int>>(all_points[i - 1]) : nullopt;
+        optional<pair<int,int>> next_xz = i + 1 < total ? optional<pair<int,int>>(all_points[i + 1]) : nullopt;
+        const int prev_y = i > 0 ? bridge_ys[i - 1] : y;
+        const int next_y = i + 1 < total ? bridge_ys[i + 1] : y;
+        const Block rail_block = determine_rail_with_slope({bx, bz}, prev_xz, next_xz, prev_y, y, next_y);
+
+        editor.set_block_absolute(STONE_BRICKS, bx, y - 1, bz, nullopt, nullopt);
+        editor.set_block_absolute((i % 4) == 0 ? OAK_LOG : GRAVEL, bx, y, bz, nullopt, nullopt);
+        editor.set_block_absolute(rail_block, bx, y + 1, bz, nullopt, nullopt);
+
+        if (i % RAIL_BRIDGE_PILLAR_INTERVAL == 0) {
+            const int ground_y = terrain_ys[i];
+            const int pillar_top = y - 2;
+            for (int py = ground_y + 1; py <= pillar_top; ++py)
+                editor.set_block_absolute(STONE_BRICKS, bx, py, bz, nullopt, nullopt);
+        }
+    }
+}
+
+void generate_subway_shell(WorldEditor& editor, const ProcessedWay& element,
+        vector<pair<int,int>>& subway_points) {
+    for (size_t i = 1; i < element.nodes.size(); ++i) {
+        XZ prev_node = element.nodes[i - 1].xz();
+        XZ cur_node  = element.nodes[i].xz();
+        auto points = bresenham_line(prev_node.x, 0, prev_node.z, cur_node.x, 0, cur_node.z);
+        auto smoothed = smooth_diagonal_rails(points);
+
+        for (size_t j = 0; j < smoothed.size(); ++j) {
+            int bx = get<0>(smoothed[j]);
+            int bz = get<2>(smoothed[j]);
+            if (subway_points.empty() || subway_points.back() != pair<int,int>{bx, bz})
+                subway_points.emplace_back(bx, bz);
+
+            const int ground_y = editor.get_ground_level(bx, bz);
+            const int ceil_y = ground_y - SUBWAY_DEPTH;
+            const int floor_y = ceil_y - INTERIOR_HEIGHT - 1;
+            if (floor_y <= MIN_Y)
+                continue;
+
+            const int prev_ground = j > 0
+                    ? editor.get_ground_level(get<0>(smoothed[j - 1]), get<2>(smoothed[j - 1]))
+                    : ground_y;
+            const int next_ground = j + 1 < smoothed.size()
+                    ? editor.get_ground_level(get<0>(smoothed[j + 1]), get<2>(smoothed[j + 1]))
+                    : ground_y;
+
+            for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx) {
+                for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz) {
+                    for (int y = floor_y; y <= ceil_y; ++y) {
+                        const bool wall_or_ceiling =
+                                dx == -WALL_RADIUS || dx == WALL_RADIUS ||
+                                dz == -WALL_RADIUS || dz == WALL_RADIUS ||
+                                y == ceil_y;
+                        Block block = y == floor_y ? POLISHED_DEEPSLATE :
+                                (wall_or_ceiling ? subway_shell_block(bx + dx, y, bz + dz) : STONE_BRICKS);
+                        editor.set_block_absolute(block, bx + dx, y, bz + dz, nullopt, nullopt);
+                    }
+                }
+            }
+
+            optional<pair<int,int>> prev_xz = j > 0
+                    ? optional<pair<int,int>>(pair<int,int>{get<0>(smoothed[j - 1]), get<2>(smoothed[j - 1])})
+                    : nullopt;
+            optional<pair<int,int>> next_xz = j + 1 < smoothed.size()
+                    ? optional<pair<int,int>>(pair<int,int>{get<0>(smoothed[j + 1]), get<2>(smoothed[j + 1])})
+                    : nullopt;
+            const Block rail_block = determine_rail_with_slope(
+                    {bx, bz}, prev_xz, next_xz, prev_ground, ground_y, next_ground);
+            editor.set_block_absolute(rail_block, bx, floor_y + 1, bz,
+                    std::optional<std::vector<Block>>({STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
+                    std::optional<std::vector<Block>>());
+        }
+    }
+}
+
+void carve_subway_interior(WorldEditor& editor, const vector<pair<int,int>>& subway_points) {
+    const std::optional<std::vector<Block>> carve_whitelist(
+            std::vector<Block>{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, STONE});
+    for (std::size_t idx = 0; idx < subway_points.size(); ++idx) {
+        const auto [bx, bz] = subway_points[idx];
+        const int ground_y = editor.get_ground_level(bx, bz);
+        const int ceil_y = ground_y - SUBWAY_DEPTH;
+        const int floor_y = ceil_y - INTERIOR_HEIGHT - 1;
+        if (floor_y <= MIN_Y)
+            continue;
+        for (int dx = -AIR_RADIUS; dx <= AIR_RADIUS; ++dx) {
+            for (int dz = -AIR_RADIUS; dz <= AIR_RADIUS; ++dz) {
+                for (int y = floor_y + 1; y < ceil_y; ++y) {
+                    if (dx == 0 && dz == 0 && y == floor_y + 1)
+                        continue;
+                    editor.set_block_absolute(AIR, bx + dx, y, bz + dz,
+                            carve_whitelist, std::optional<std::vector<Block>>());
+                }
+            }
+        }
+        if (idx % LIGHT_INTERVAL == 0)
+            editor.set_block_absolute(SEA_LANTERN, bx, ceil_y - 1, bz, nullopt, nullopt);
+    }
+}
+
+void generate_railways(WorldEditor& editor, const ProcessedWay& element,
+        vector<pair<int,int>>& subway_points,
+        const RailBridgeInternalEndpoints& rail_bridge_internal_endpoints) {
+    auto it = element.tags.find("railway");
+    if (it == element.tags.end()) return;
+
+    const string& railway_type = it->second;
+    if (railway_type == "subway" || element.tags.get("subway") == "yes") {
+        generate_subway_shell(editor, element, subway_points);
+        return;
+    }
+
+    const vector<string> skip_types = {
+        "proposed", "abandoned", "construction", "razed", "turntable"
+    };
+    for (const auto& s : skip_types) {
+        if (railway_type == s) return;
+    }
+
+    if (auto it_tunnel = element.tags.find("tunnel"); it_tunnel != element.tags.end() && it_tunnel->second == "yes") {
+        return;
+    }
+
+    if (element.nodes.size() < 2) return;
+    if (is_rail_bridge(element)) {
+        generate_rail_bridge(editor, element, rail_bridge_internal_endpoints);
+    } else {
+        generate_at_grade_rail(editor, element);
+    }
+}
+
+void generate_railways(WorldEditor& editor, const ProcessedWay& element) {
+    vector<pair<int,int>> subway_points;
+    RailBridgeInternalEndpoints internal_endpoints;
+    generate_railways(editor, element, subway_points, internal_endpoints);
 }
 
 void generate_roller_coaster(WorldEditor& editor, const ProcessedWay& element) {

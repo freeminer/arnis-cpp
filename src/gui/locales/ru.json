@@ -1,6 +1,7 @@
 {
   "create_world": "Создать мир",
   "no_world_selected": "Мир не создан",
+  "no_world_generated_yet": "Мир ещё не сгенерирован",
   "start_generation": "Начать генерацию",
   "custom_selection_confirmed": "Пользовательский выбор подтвержден!",
   "error_coordinates_out_of_range": "Ошибка: Координаты находятся вне зоны действия или указаны в неправильном порядке (сначала широта, затем долгота)",
@@ -21,6 +22,7 @@
   "create_world_first": "Сначала создайте мир!",
   "select_location_first": "Сначала выберите местоположение!",
   "area_too_large": "Эта область слишком велика и может превысить типичные вычислительные ограничения",
+  "area_extreme": "Эта область чрезвычайно велика и, вероятно, слишком большая для успешной генерации.",
   "area_extensive": "Область довольно обширна и может потребовать значительного времени и ресурсов",
   "selection_confirmed": "Выбор подтвержден!",
   "select_area_prompt": "Выберите область на карте с помощью инструментов.",
@@ -39,7 +41,17 @@
   "interior": "Генерация Интерьера",
   "roof": "Генерация Крыши",
   "fillground": "Заполнить Землю",
-  "city_boundaries": "Городской грунт",
+  "land_cover": "Земельный покров",
+  "disable_height_limit": "Расширить высоту строительства",
+  "aws_only_elevation": "Устаревший рельеф",
   "bedrock_auto_generated": "Мир Bedrock генерируется автоматически",
-  "save_path": "Путь сохранения"
+  "save_path": "Путь сохранения",
+  "rotation_angle": "Угол Поворота",
+  "settings_section_generation": "Генерация",
+  "settings_section_world": "Мир",
+  "settings_section_map": "Карта и ввод",
+  "settings_section_application": "Приложение",
+  "clear_tile_cache": "Очистить кэш тайлов",
+  "clear_tile_cache_button": "Очистить",
+  "anonymous_crash_reports": "Анонимные отчёты о сбоях"
 }

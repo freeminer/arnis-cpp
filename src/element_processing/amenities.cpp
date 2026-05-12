@@ -7,6 +7,7 @@
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill.h"
+#include "../floodfill_cache.h"
 
 namespace arnis
 {
@@ -14,7 +15,29 @@ namespace arnis
 namespace amenities
 {
 
-void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args) {
+static std::optional<std::pair<int, int>> get_nearest_road_block(
+        int x, int z, int max_radius, const RoadMaskBitmap& road_mask)
+{
+    for (int dist = 0; dist <= max_radius; ++dist) {
+        for (int dx = -dist; dx <= dist; ++dx) {
+            for (int dz = -dist; dz <= dist; ++dz) {
+                if (std::max(std::abs(dx), std::abs(dz)) != dist)
+                    continue;
+                int cx = x + dx;
+                int cz = z + dz;
+                if (road_mask.contains(cx, cz))
+                    return std::make_pair(cx, cz);
+            }
+        }
+    }
+    return std::nullopt;
+}
+
+void generate_amenities(crate::world_editor::WorldEditor& editor,
+        const crate::osm_parser::ProcessedElement& element,
+        const crate::args::Args& args,
+        const FloodFillCache& flood_fill_cache,
+        const RoadMaskBitmap& road_mask) {
     // Skip if 'layer' or 'level' is negative in the tags
     {
         const std::unordered_map<std::string,std::string>& t = element.tags();
@@ -81,7 +104,8 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
         for (const crate::osm_parser::ProcessedNode& n : element.nodes()) polygon_coords.emplace_back(n.x, n.z);
         if (polygon_coords.empty()) return;
 
-        std::vector<std::pair<int,int>> floor_area = crate::floodfill::flood_fill_area(polygon_coords, args.timeout);
+        std::vector<std::pair<int,int>> floor_area =
+                flood_fill_cache.get_or_compute_element(element, args.timeout);
 
         for (const auto& p : floor_area) {
             editor.set_block(ground_block, p.first, 0, p.second, std::nullopt, std::nullopt);
@@ -102,19 +126,29 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
 
     if (amenity_type == "bench") {
         if (first_node.has_value()) {
-            // Use deterministic approach for consistent bench orientation
-            // Simple hash-based approach for consistency
-            unsigned int hash = static_cast<unsigned int>(element.id());
-            bool r = (hash & 1) != 0;
-            if (r) {
-                editor.set_block(crate::block_definitions::SMOOTH_STONE, first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
-                editor.set_block(crate::block_definitions::OAK_LOG, first_node->x + 1, 1, first_node->z, std::nullopt, std::nullopt);
-                editor.set_block(crate::block_definitions::OAK_LOG, first_node->x - 1, 1, first_node->z, std::nullopt, std::nullopt);
+            auto road_pos = get_nearest_road_block(first_node->x, first_node->z, 4, road_mask);
+            bool use_east_west = false;
+            if (road_pos.has_value()) {
+                int dx = std::abs(road_pos->first - first_node->x);
+                int dz = std::abs(road_pos->second - first_node->z);
+                use_east_west = dz >= dx;
             } else {
-                editor.set_block(crate::block_definitions::SMOOTH_STONE, first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
-                editor.set_block(crate::block_definitions::OAK_LOG, first_node->x, 1, first_node->z + 1, std::nullopt, std::nullopt);
-                editor.set_block(crate::block_definitions::OAK_LOG, first_node->x, 1, first_node->z - 1, std::nullopt, std::nullopt);
+                use_east_west = (static_cast<unsigned int>(element.id()) & 1) != 0;
             }
+
+            const int dx = use_east_west ? 1 : 0;
+            const int dz = use_east_west ? 0 : 1;
+            const auto facing_a = use_east_west ? StairFacing::West : StairFacing::North;
+            const auto facing_b = use_east_west ? StairFacing::East : StairFacing::South;
+            const int abs_y = editor.get_absolute_y(first_node->x, 1, first_node->z);
+
+            editor.set_block_with_properties_absolute(
+                    top_stair(create_stair_with_properties(OAK_STAIRS, facing_a, StairShape::Straight)),
+                    first_node->x - dx, abs_y, first_node->z - dz, nullptr, nullptr);
+            editor.set_block(OAK_SLAB_TOP, first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
+            editor.set_block_with_properties_absolute(
+                    top_stair(create_stair_with_properties(OAK_STAIRS, facing_b, StairShape::Straight)),
+                    first_node->x + dx, abs_y, first_node->z + dz, nullptr, nullptr);
         }
         return;
     }
@@ -123,7 +157,8 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
         const crate::block_definitions::Block roof_block = crate::block_definitions::STONE_BRICK_SLAB;
         std::vector<std::pair<int,int>> polygon_coords;
         for (const crate::osm_parser::ProcessedNode& n : element.nodes()) polygon_coords.emplace_back(n.x, n.z);
-        std::vector<std::pair<int,int>> roof_area = crate::floodfill::flood_fill_area(polygon_coords, args.timeout);
+        std::vector<std::pair<int,int>> roof_area =
+                flood_fill_cache.get_or_compute_element(element, args.timeout);
 
         for (const crate::osm_parser::ProcessedNode& node : element.nodes()) {
             int x = node.x; int z = node.z;
@@ -137,12 +172,37 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
         return;
     }
 
-    if (amenity_type == "parking" || amenity_type == "fountain") {
+    if (amenity_type == "drinking_water") {
+        if (first_node.has_value()) {
+            int x = first_node->x;
+            int z = first_node->z;
+            editor.set_block(COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
+            int abs_y = editor.get_absolute_y(x, 1, z);
+            editor.set_block_absolute(LEVER, x - 1, abs_y + 1, z, std::nullopt, std::nullopt);
+            editor.set_block_absolute(COBBLESTONE_WALL, x, abs_y + 1, z, std::nullopt, std::nullopt);
+            editor.set_block_absolute(WATER_CAULDRON, x - 1, abs_y, z, std::nullopt, std::nullopt);
+        }
+        return;
+    }
+
+    if (amenity_type == "fountain") {
+        std::vector<std::pair<int,int>> flood_area =
+                flood_fill_cache.get_or_compute_element(element, args.timeout);
+        for (const auto& p : flood_area) {
+            editor.set_block(WATER, p.first, 0, p.second, std::nullopt, std::nullopt);
+        }
+        for (const crate::osm_parser::ProcessedNode& node : element.nodes()) {
+            editor.set_block(LIGHT_GRAY_CONCRETE, node.x, 0, node.z, std::nullopt, std::nullopt);
+        }
+        return;
+    }
+
+    if (amenity_type == "parking") {
         std::optional<crate::coordinate_system::cartesian::XZPoint> previous_node = std::nullopt;
         std::tuple<int,int,int> corner_addup = std::make_tuple(0,0,0);
         std::vector<std::pair<int,int>> current_amenity;
 
-        const crate::block_definitions::Block block_type = (amenity_type == "fountain") ? crate::block_definitions::WATER : crate::block_definitions::GRAY_CONCRETE;
+        const crate::block_definitions::Block block_type = crate::block_definitions::GRAY_CONCRETE;
 
         for (const crate::osm_parser::ProcessedNode& node : element.nodes()) {
             crate::coordinate_system::cartesian::XZPoint pt = node.xz();
@@ -154,11 +214,6 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
                     // Use replacement whitelist for better block placement
                     editor.set_block(block_type, bx, 0, bz, std::optional<std::vector<const crate::block_definitions::Block*>>(std::vector<const crate::block_definitions::Block*>{ &crate::block_definitions::BLACK_CONCRETE }), std::nullopt);
                     
-                    if (amenity_type == "fountain") {
-                        for (int dx = -1; dx <= 1; ++dx) for (int dz = -1; dz <= 1; ++dz) if (!(dx == 0 && dz == 0)) {
-                            editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, bx + dx, 0, bz + dz, std::nullopt, std::nullopt);
-                        }
-                    }
                     current_amenity.emplace_back(node.x, node.z);
                     std::get<0>(corner_addup) += node.x;
                     std::get<1>(corner_addup) += node.z;
@@ -169,8 +224,8 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
         }
 
         if (std::get<2>(corner_addup) > 0) {
-            std::vector<std::pair<int,int>> polygon_coords = current_amenity;
-            std::vector<std::pair<int,int>> flood_area = crate::floodfill::flood_fill_area(polygon_coords, args.timeout);
+            std::vector<std::pair<int,int>> flood_area =
+                    flood_fill_cache.get_or_compute_element(element, args.timeout);
 
             for (const auto& p : flood_area) {
                 int x = p.first; int z = p.second;
@@ -222,6 +277,14 @@ void generate_amenities(crate::world_editor::WorldEditor& editor, const crate::o
     }
 
     return;
+}
+
+void generate_amenities(crate::world_editor::WorldEditor& editor,
+        const crate::osm_parser::ProcessedElement& element,
+        const crate::args::Args& args) {
+    FloodFillCache cache;
+    RoadMaskBitmap road_mask;
+    generate_amenities(editor, element, args, cache, road_mask);
 }
 
 } // namespace amenities

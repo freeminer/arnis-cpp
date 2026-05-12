@@ -8,6 +8,9 @@
 #include <cstddef>
 
 #include "../../../arnis_adapter.h"
+#include "../floodfill_cache.h"
+#include "bridges.h"
+#include "surfaces.h"
 #include "../floodfill.h"
 namespace arnis
 {
@@ -126,6 +129,18 @@ struct PairHash {
 // Minimum terrain dip (in blocks) below max endpoint elevation to classify a bridge as valley-spanning
 const int VALLEY_BRIDGE_THRESHOLD = 7;
 
+const std::vector<crate::block_definitions::Block> DEFAULT_ROAD_MIX = {
+    crate::block_definitions::GRAY_CONCRETE_POWDER,
+    crate::block_definitions::CYAN_TERRACOTTA,
+};
+
+const std::vector<crate::block_definitions::Block> ROAD_PROTECTED_SURFACES = {
+    crate::block_definitions::BLACK_CONCRETE,
+    crate::block_definitions::GRAY_CONCRETE_POWDER,
+    crate::block_definitions::CYAN_TERRACOTTA,
+    crate::block_definitions::WHITE_CONCRETE,
+};
+
 std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash> build_highway_connectivity_map(const std::vector<crate::osm_parser::ProcessedElement>& elements) {
     std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash> connectivity_map;
     for (const auto& element : elements) {
@@ -241,6 +256,73 @@ std::size_t calculate_way_length(const crate::osm_parser::ProcessedWay& way) {
     return total_length;
 }
 
+std::size_t calculate_total_bresenham_length(const crate::osm_parser::ProcessedWay& way) {
+    if (way.nodes.size() < 2) {
+        return 0;
+    }
+    std::size_t total_length = 1;
+    for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+        const auto& prev = way.nodes[i - 1];
+        const auto& cur = way.nodes[i];
+        total_length += static_cast<std::size_t>(
+                std::max(std::abs(cur.x - prev.x), std::abs(cur.z - prev.z)));
+    }
+    return total_length;
+}
+
+std::vector<std::pair<int, int>> stair_fill_cells(std::pair<int, int> prev,
+        std::pair<int, int> curr) {
+    std::vector<std::pair<int, int>> cells;
+    int x = prev.first;
+    int z = prev.second;
+    while (x != curr.first || z != curr.second) {
+        if (x != curr.first) {
+            x += (curr.first - x) > 0 ? 1 : -1;
+            cells.emplace_back(x, z);
+        }
+        if (z != curr.second) {
+            z += (curr.second - z) > 0 ? 1 : -1;
+            cells.emplace_back(x, z);
+        }
+    }
+    if (cells.empty()) {
+        cells.push_back(curr);
+    }
+    return cells;
+}
+
+int highway_block_range(const std::string& highway_type,
+        const std::unordered_map<std::string, std::string>& tags,
+        double scale) {
+    int block_range = 2;
+    if (highway_type == "footway" || highway_type == "pedestrian" ||
+            highway_type == "path" || highway_type == "track" ||
+            highway_type == "secondary_link" || highway_type == "tertiary_link" ||
+            highway_type == "escape" || highway_type == "steps") {
+        block_range = 1;
+    } else if (highway_type == "motorway" || highway_type == "primary" ||
+            highway_type == "trunk") {
+        block_range = 5;
+    } else if (highway_type == "secondary") {
+        block_range = 4;
+    } else if (highway_type == "tertiary") {
+        block_range = 2;
+    } else if (highway_type == "service") {
+        block_range = 2;
+    } else {
+        auto it_lanes = tags.find("lanes");
+        if (it_lanes != tags.end()) {
+            if (it_lanes->second == "2")
+                block_range = 3;
+            else if (it_lanes->second != "1")
+                block_range = 4;
+        }
+    }
+    if (scale < 1.0)
+        block_range = static_cast<int>(std::floor(block_range * scale));
+    return std::max(0, block_range);
+}
+
 int calculate_point_elevation(std::size_t segment_index, std::size_t point_index, std::size_t segment_length, std::size_t total_segments, int base_elevation, bool needs_start_slope, bool needs_end_slope, std::size_t slope_length) {
     if (!needs_start_slope && !needs_end_slope) {
         return base_elevation;
@@ -264,7 +346,14 @@ int calculate_point_elevation(std::size_t segment_index, std::size_t point_index
     return base_elevation;
 }
 
-void generate_highways_internal(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args, const std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash>& highway_connectivity, const std::optional<std::chrono::duration<double>>& floodfill_timeout) {
+void generate_highways_internal(crate::world_editor::WorldEditor& editor,
+        const crate::osm_parser::ProcessedElement& element,
+        const crate::args::Args& args,
+        const std::unordered_map<std::pair<int,int>, std::vector<int>, PairHash>& highway_connectivity,
+        const std::optional<std::chrono::duration<double>>& floodfill_timeout,
+        const crate::RoadMaskBitmap& road_mask,
+        const crate::bridges::BridgeStructureMap& bridge_structures,
+        const crate::bridges::BridgeSurfaceMap& bridge_surface) {
     using crate::block_definitions::Block;
     using crate::block_definitions::COBBLESTONE_WALL;
     using crate::block_definitions::OAK_FENCE;
@@ -274,6 +363,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
     using crate::block_definitions::RED_WOOL;
     using crate::block_definitions::WHITE_WOOL;
     (void)COBBLESTONE_WALL; (void)OAK_FENCE; (void)GLOWSTONE; (void)GREEN_WOOL; (void)YELLOW_WOOL; (void)RED_WOOL; (void)WHITE_WOOL;
+    (void)road_mask;
 
     auto it_highway = element.tags().find("highway");
     if (it_highway == element.tags().end()) {
@@ -333,22 +423,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
             if (element.type != crate::osm_parser::ElementType::Way || !element.way.has_value()) {
                 return;
             }
-            crate::block_definitions::Block surface_block = crate::block_definitions::STONE;
-            auto it_surface = element.tags().find("surface");
-            if (it_surface != element.tags().end()) {
-                const std::string& surface = it_surface->second;
-                if (surface == "paving_stones" || surface == "sett") surface_block = crate::block_definitions::STONE_BRICKS;
-                else if (surface == "bricks") surface_block = crate::block_definitions::BRICK;
-                else if (surface == "wood") surface_block = crate::block_definitions::OAK_PLANKS;
-                else if (surface == "asphalt") surface_block = crate::block_definitions::BLACK_CONCRETE;
-                else if (surface == "gravel" || surface == "fine_gravel") surface_block = crate::block_definitions::GRAVEL;
-                else if (surface == "grass") surface_block = crate::block_definitions::GRASS_BLOCK;
-                else if (surface == "dirt" || surface == "ground" || surface == "earth") surface_block = crate::block_definitions::DIRT;
-                else if (surface == "sand") surface_block = crate::block_definitions::SAND;
-                else if (surface == "concrete") surface_block = crate::block_definitions::LIGHT_GRAY_CONCRETE;
-                else surface_block = crate::block_definitions::STONE;
-            }
             const crate::osm_parser::ProcessedWay& way = *element.way;
+            auto surface_blocks = crate::surfaces::get_blocks_for_surface_way(
+                    way, std::vector<crate::block_definitions::Block>{crate::block_definitions::STONE});
             std::vector<std::pair<int,int>> polygon_coords;
             polygon_coords.reserve(way.nodes.size());
             for (const auto& n : way.nodes) {
@@ -356,6 +433,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
             }
             std::vector<std::pair<int,int>> filled_area = crate::floodfill::flood_fill_area(polygon_coords, floodfill_timeout);
             for (const auto& p : filled_area) {
+                const auto surface_block = crate::surfaces::semirandom_surface(
+                        p.first, p.second, surface_blocks);
                 editor.set_block(surface_block, p.first, 0, p.second, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
             }
             return;
@@ -444,6 +523,22 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
         return;
     }
     const crate::osm_parser::ProcessedWay& way = *element.way;
+    const auto* bridge_member = bridge_structures.lookup_member(way.id);
+    const auto* bridge_ramp = bridge_structures.lookup_ramp(way.id);
+    const bool is_bridge_member = bridge_member != nullptr;
+    const bool is_bridge_ramp = bridge_ramp != nullptr;
+
+    std::vector<crate::block_definitions::Block> default_surface = DEFAULT_ROAD_MIX;
+    if (highway_type == "footway" || highway_type == "pedestrian" || highway_type == "steps") {
+        default_surface = {crate::block_definitions::SMOOTH_STONE};
+    } else if (highway_type == "path" || highway_type == "track") {
+        default_surface = {crate::block_definitions::DIRT_PATH};
+    } else if (highway_type == "escape") {
+        default_surface = {crate::block_definitions::SAND};
+    } else if (block_type != crate::block_definitions::BLACK_CONCRETE) {
+        default_surface = {block_type};
+    }
+    const auto block_types = crate::surfaces::get_blocks_for_surface_way(way, default_surface);
 
     if (scale_factor < 1.0) {
         block_range = static_cast<int>(std::floor(static_cast<double>(block_range) * scale_factor));
@@ -518,14 +613,22 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
         }
     }
 
+    const std::size_t total_bresenham_length = calculate_total_bresenham_length(way);
+    const std::size_t raw_bridge_ramp_length = static_cast<std::size_t>(
+            std::clamp(static_cast<float>(total_bresenham_length) * 0.35f, 15.0f, 50.0f));
+    const std::size_t bridge_internal_ramp_length = std::clamp<std::size_t>(
+            raw_bridge_ramp_length, 1,
+            std::max<std::size_t>(1, total_bresenham_length / 2));
+
     // Check if this is a short isolated elevated segment (layer > 0), if so, treat as ground level
-    bool is_short_isolated_elevated = (needs_start_slope && needs_end_slope && layer_value > 0 && total_way_length <= 35);
+    bool is_short_isolated_elevated = (!is_bridge_member && !is_bridge_ramp &&
+            needs_start_slope && needs_end_slope && layer_value > 0 && total_way_length <= 35);
 
     // Override elevation and slopes for short isolated segments
     int effective_elevation = 0;
     bool effective_start_slope = false;
     bool effective_end_slope = false;
-    if (is_short_isolated_elevated) {
+    if (is_bridge_member || is_bridge_ramp || is_short_isolated_elevated) {
         effective_elevation = 0;
         effective_start_slope = false;
         effective_end_slope = false;
@@ -540,6 +643,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
     std::optional<std::pair<int,int>> previous_node;
     std::size_t segment_index = 0;
     std::size_t total_segments = (way.nodes.size() > 0) ? (way.nodes.size() - 1) : 0;
+    std::size_t cumulative_distance_from_start = 0;
+    std::optional<int> previous_bridge_y;
+    std::optional<std::pair<int, int>> previous_rail_left;
+    std::optional<std::pair<int, int>> previous_rail_right;
 
     for (const auto& node : way.nodes) {
         if (previous_node.has_value()) {
@@ -553,17 +660,35 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
             int stripe_length_counter = 0;
             int dash_length = static_cast<int>(std::ceil(5.0 * scale_factor));
             int gap_length = static_cast<int>(std::ceil(5.0 * scale_factor));
+            const bool bridge_like = is_bridge_member || is_bridge_ramp;
+            const std::size_t skip_first = bridge_like && segment_index > 0 ? 1 : 0;
+            std::optional<std::pair<float, float>> bridge_rail_perp;
+            if (bridge_like) {
+                const float dx_seg = static_cast<float>(x2 - x1);
+                const float dz_seg = static_cast<float>(z2 - z1);
+                const float seg_len = std::sqrt(dx_seg * dx_seg + dz_seg * dz_seg);
+                if (seg_len > 0.0f) {
+                    bridge_rail_perp = std::make_pair(-dz_seg / seg_len, dx_seg / seg_len);
+                }
+            }
 
-            for (std::size_t point_index = 0; point_index < bresenham_points.size(); ++point_index) {
+            for (std::size_t point_index = skip_first; point_index < bresenham_points.size(); ++point_index) {
                 int x = std::get<0>(bresenham_points[point_index]);
                 int z = std::get<2>(bresenham_points[point_index]);
+                const std::size_t tds = cumulative_distance_from_start + point_index;
                 
                 // Calculate Y elevation for this point
-                // For valley bridges: use fixed deck height (max of endpoints) to stay level
-                // For overpasses and regular roads: use terrain-relative elevation with slopes
+                // Bridge structures drive absolute Y for full bridge groups and their ramps.
                 int current_y;
                 bool use_absolute_y = false;
-                if (is_valley_bridge) {
+                if (bridge_member) {
+                    current_y = bridge_member->y_at(
+                            tds, total_bresenham_length, bridge_internal_ramp_length);
+                    use_absolute_y = true;
+                } else if (bridge_ramp) {
+                    current_y = bridge_ramp->y_at(tds, total_bresenham_length);
+                    use_absolute_y = true;
+                } else if (is_valley_bridge) {
                     // Valley bridge deck is level at the maximum endpoint elevation
                     // Don't add base_elevation - the layer tag indicates it's above water/road,
                     // not that it should be higher than the terrain endpoints
@@ -573,6 +698,38 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
                     // Regular road or overpass: use terrain-relative calculation with ramps
                     current_y = calculate_point_elevation(segment_index, point_index, segment_length, total_segments, effective_elevation, effective_start_slope, effective_end_slope, slope_length);
                     use_absolute_y = false;
+                }
+                if (auto deck_y = bridge_surface.deck_y_at(x, z)) {
+                    current_y = *deck_y;
+                    use_absolute_y = true;
+                }
+
+                if (bridge_like) {
+                    if (previous_bridge_y.has_value()) {
+                        int fill_lo = 0;
+                        int fill_hi = -1;
+                        if (current_y >= *previous_bridge_y + 3) {
+                            fill_lo = *previous_bridge_y + 1;
+                            fill_hi = current_y - 2;
+                        } else if (current_y <= *previous_bridge_y - 3) {
+                            fill_lo = current_y + 1;
+                            fill_hi = *previous_bridge_y - 2;
+                        }
+                        if (fill_lo <= fill_hi) {
+                            for (int fill_y = fill_lo; fill_y <= fill_hi; ++fill_y) {
+                                for (int fdx = -block_range; fdx <= block_range; ++fdx) {
+                                    for (int fdz = -block_range; fdz <= block_range; ++fdz) {
+                                        editor.set_block_absolute(
+                                                crate::block_definitions::STONE_BRICKS,
+                                                x + fdx, fill_y, z + fdz,
+                                                std::optional<std::vector<crate::block_definitions::Block>>(),
+                                                std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES));
+                                    }
+                                }
+                            }
+                        }
+                    }
+                    previous_bridge_y = current_y;
                 }
 
                 for (int dx = -block_range; dx <= block_range; ++dx) {
@@ -600,10 +757,11 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
                                 editor.set_block(crate::block_definitions::WHITE_CONCRETE, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE }), std::optional<std::vector<crate::block_definitions::Block>>());
                             }
                         } else {
+                            const auto road_block = crate::surfaces::semirandom_surface(set_x, set_z, block_types);
                             if (use_absolute_y) {
-                                editor.set_block_absolute(block_type, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE, crate::block_definitions::WHITE_CONCRETE }));
+                                editor.set_block_absolute(road_block, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES));
                             } else {
-                                editor.set_block(block_type, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE, crate::block_definitions::WHITE_CONCRETE }));
+                                editor.set_block(road_block, set_x, current_y, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES));
                             }
                         }
 
@@ -625,6 +783,50 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
                                 add_highway_support_pillar(editor, set_x, current_y, set_z, dx, dz, block_range);
                             }
                         }
+                    }
+                }
+
+                if (bridge_like && bridge_rail_perp.has_value()) {
+                    const float perp_x = bridge_rail_perp->first;
+                    const float perp_z = bridge_rail_perp->second;
+                    const float rail_dist = static_cast<float>(block_range) *
+                            (std::abs(perp_x) + std::abs(perp_z)) + 1.0f;
+                    for (int side = 0; side < 2; ++side) {
+                        const float sign = side == 0 ? 1.0f : -1.0f;
+                        auto& previous_rail = side == 0 ? previous_rail_left : previous_rail_right;
+                        const int rail_x = static_cast<int>(
+                                std::round(static_cast<float>(x) + perp_x * rail_dist * sign));
+                        const int rail_z = static_cast<int>(
+                                std::round(static_cast<float>(z) + perp_z * rail_dist * sign));
+                        const std::pair<int, int> rail_cell{rail_x, rail_z};
+                        const auto cells_to_fill = previous_rail.has_value() ?
+                                stair_fill_cells(*previous_rail, rail_cell) :
+                                std::vector<std::pair<int, int>>{rail_cell};
+                        for (const auto& rail_fill : cells_to_fill) {
+                            const int rx = rail_fill.first;
+                            const int rz = rail_fill.second;
+                            if (bridge_surface.contains(rx, rz)) {
+                                continue;
+                            }
+                            editor.set_block_absolute(
+                                    crate::block_definitions::LIGHT_GRAY_CONCRETE,
+                                    rx, current_y, rz,
+                                    std::optional<std::vector<crate::block_definitions::Block>>(),
+                                    std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES));
+                            if (current_y > 0) {
+                                editor.set_block_absolute(
+                                        crate::block_definitions::STONE_BRICKS,
+                                        rx, current_y - 1, rz,
+                                        std::optional<std::vector<crate::block_definitions::Block>>(),
+                                        std::optional<std::vector<crate::block_definitions::Block>>());
+                            }
+                            editor.set_block_absolute(
+                                    crate::block_definitions::BRICK_WALL,
+                                    rx, current_y + 1, rz,
+                                    std::optional<std::vector<crate::block_definitions::Block>>(),
+                                    std::optional<std::vector<crate::block_definitions::Block>>());
+                        }
+                        previous_rail = rail_cell;
                     }
                 }
 
@@ -656,9 +858,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
                         int stripe_x = x;
                         int stripe_z = z;
                         if (use_absolute_y) {
-                            editor.set_block_absolute(crate::block_definitions::WHITE_CONCRETE, stripe_x, current_y, stripe_z, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE }), std::optional<std::vector<crate::block_definitions::Block>>());
+                            editor.set_block_absolute(crate::block_definitions::WHITE_CONCRETE, stripe_x, current_y, stripe_z, std::optional<std::vector<crate::block_definitions::Block>>(block_types), std::optional<std::vector<crate::block_definitions::Block>>());
                         } else {
-                            editor.set_block(crate::block_definitions::WHITE_CONCRETE, stripe_x, current_y, stripe_z, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE }), std::optional<std::vector<crate::block_definitions::Block>>());
+                            editor.set_block(crate::block_definitions::WHITE_CONCRETE, stripe_x, current_y, stripe_z, std::optional<std::vector<crate::block_definitions::Block>>(block_types), std::optional<std::vector<crate::block_definitions::Block>>());
                         }
                     }
                     ++stripe_length_counter;
@@ -669,17 +871,38 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor, const 
             }
 
             ++segment_index;
+            if (!bresenham_points.empty()) {
+                cumulative_distance_from_start += bresenham_points.size() - 1;
+            }
         }
         previous_node = std::make_optional(std::pair<int,int>{ node.x, node.z });
     }
 }
 
-void generate_highways(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args, const std::vector<crate::osm_parser::ProcessedElement>& all_elements, const std::optional<std::chrono::duration<double>>& floodfill_timeout) {
+void generate_highways(crate::world_editor::WorldEditor& editor,
+        const crate::osm_parser::ProcessedElement& element,
+        const crate::args::Args& args,
+        const std::vector<crate::osm_parser::ProcessedElement>& all_elements,
+        const std::optional<std::chrono::duration<double>>& floodfill_timeout,
+        const crate::RoadMaskBitmap& road_mask,
+        const crate::bridges::BridgeStructureMap& bridge_structures,
+        const crate::bridges::BridgeSurfaceMap& bridge_surface) {
     auto highway_connectivity = build_highway_connectivity_map(all_elements);
-    generate_highways_internal(editor, element, args, highway_connectivity, floodfill_timeout);
+    generate_highways_internal(editor, element, args, highway_connectivity, floodfill_timeout,
+            road_mask, bridge_structures, bridge_surface);
 }
 
-void generate_siding(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedWay& element) {
+void generate_highways(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedElement& element, const crate::args::Args& args, const std::vector<crate::osm_parser::ProcessedElement>& all_elements, const std::optional<std::chrono::duration<double>>& floodfill_timeout) {
+    static const crate::RoadMaskBitmap empty_road_mask = crate::RoadMaskBitmap::new_empty();
+    static const crate::bridges::BridgeStructureMap empty_bridge_structures;
+    static const crate::bridges::BridgeSurfaceMap empty_bridge_surface;
+    generate_highways(editor, element, args, all_elements, floodfill_timeout,
+            empty_road_mask, empty_bridge_structures, empty_bridge_surface);
+}
+
+void generate_siding(crate::world_editor::WorldEditor& editor,
+        const crate::osm_parser::ProcessedWay& element,
+        const crate::bridges::BridgeSurfaceMap& bridge_surface) {
     std::optional<crate::coordinate_system::cartesian::XZPoint> previous_node;
     crate::block_definitions::Block siding_block = crate::block_definitions::STONE_BRICK_SLAB;
     for (const auto& node : element.nodes) {
@@ -689,13 +912,22 @@ void generate_siding(crate::world_editor::WorldEditor& editor, const crate::osm_
             for (const auto& p : bresenham_points) {
                 int bx = std::get<0>(p);
                 int bz = std::get<2>(p);
-                if (!editor.check_for_block(bx, 0, bz, std::optional<std::vector<crate::block_definitions::Block>>({ crate::block_definitions::BLACK_CONCRETE, crate::block_definitions::WHITE_CONCRETE }))) {
+                if (auto deck_y = bridge_surface.deck_y_at(bx, bz)) {
+                    if (!editor.check_for_block_absolute(bx, *deck_y, bz, std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES))) {
+                        editor.set_block_absolute(siding_block, bx, *deck_y + 1, bz, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+                    }
+                } else if (!editor.check_for_block(bx, 0, bz, std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES))) {
                     editor.set_block(siding_block, bx, 1, bz, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
                 }
             }
         }
         previous_node.emplace(current_node);
     }
+}
+
+void generate_siding(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedWay& element) {
+    static const crate::bridges::BridgeSurfaceMap empty_bridge_surface;
+    generate_siding(editor, element, empty_bridge_surface);
 }
 
 void generate_aeroway(crate::world_editor::WorldEditor& editor, const crate::osm_parser::ProcessedWay& way, const crate::args::Args& args) {
@@ -723,6 +955,98 @@ void generate_aeroway(crate::world_editor::WorldEditor& editor, const crate::osm
         }
         previous_node = std::make_optional(std::pair<int,int>{ node.x, node.z });
     }
+}
+
+crate::CoordinateBitmap collect_road_surface_coords(
+        const std::vector<crate::osm_parser::ProcessedElement>& elements,
+        const ::XZBBox& xzbbox,
+        double scale) {
+    crate::CoordinateBitmap bitmap(xzbbox);
+    for (const auto& element : elements) {
+        if (!element.is_way())
+            continue;
+        const auto& way = element.as_way();
+        auto it_highway = way.tags.find("highway");
+        if (it_highway == way.tags.end())
+            continue;
+        const auto& highway_type = it_highway->second;
+        if (highway_type == "street_lamp" || highway_type == "crossing" ||
+                highway_type == "bus_stop")
+            continue;
+        if (way.tags.get("area") == "yes" || way.tags.get("indoor") == "yes")
+            continue;
+        try {
+            auto it_level = way.tags.find("level");
+            if (it_level != way.tags.end() && std::stoi(it_level->second) < 0)
+                continue;
+        } catch (...) {
+        }
+
+        const int block_range = highway_block_range(highway_type, way.tags, scale);
+        for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+            const auto& prev = way.nodes[i - 1];
+            const auto& cur = way.nodes[i];
+            const auto points = crate::bresenham::bresenham_line(prev.x, 0, prev.z, cur.x, 0, cur.z);
+            for (const auto& p : points) {
+                const int bx = std::get<0>(p);
+                const int bz = std::get<2>(p);
+                for (int dx = -block_range; dx <= block_range; ++dx) {
+                    for (int dz = -block_range; dz <= block_range; ++dz) {
+                        bitmap.set(bx + dx, bz + dz);
+                    }
+                }
+            }
+        }
+    }
+    return bitmap;
+}
+
+crate::CoordinateBitmap collect_building_passage_coords(
+        const std::vector<crate::osm_parser::ProcessedElement>& elements,
+        const ::XZBBox& xzbbox,
+        double scale) {
+    bool has_any = false;
+    for (const auto& element : elements) {
+        if (element.is_way()) {
+            const auto& way = element.as_way();
+            if (way.tags.get("tunnel") == "building_passage" &&
+                    way.tags.contains("highway")) {
+                has_any = true;
+                break;
+            }
+        }
+    }
+    if (!has_any)
+        return crate::CoordinateBitmap::new_empty();
+
+    crate::CoordinateBitmap bitmap(xzbbox);
+    for (const auto& element : elements) {
+        if (!element.is_way())
+            continue;
+        const auto& way = element.as_way();
+        if (way.tags.get("tunnel") != "building_passage")
+            continue;
+        auto it_highway = way.tags.find("highway");
+        if (it_highway == way.tags.end())
+            continue;
+
+        const int block_range = highway_block_range(it_highway->second, way.tags, scale);
+        for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+            const auto& prev = way.nodes[i - 1];
+            const auto& cur = way.nodes[i];
+            const auto points = crate::bresenham::bresenham_line(prev.x, 0, prev.z, cur.x, 0, cur.z);
+            for (const auto& p : points) {
+                const int bx = std::get<0>(p);
+                const int bz = std::get<2>(p);
+                for (int dx = -block_range; dx <= block_range; ++dx) {
+                    for (int dz = -block_range; dz <= block_range; ++dz) {
+                        bitmap.set(bx + dx, bz + dz);
+                    }
+                }
+            }
+        }
+    }
+    return bitmap;
 }
 
 }

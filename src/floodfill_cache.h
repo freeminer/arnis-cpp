@@ -47,8 +47,13 @@ private:
     size_t count_;
 
 public:
+    CoordinateBitmap()
+        : min_x_(0), min_z_(0), width_(0), height_(0), count_(0) {}
+
     /// Creates a new empty bitmap covering the given world bounds.
     CoordinateBitmap(const XZBBox& xzbbox);
+
+    static CoordinateBitmap new_empty() { return CoordinateBitmap(); }
     
     /// Sets a coordinate.
     void set(int32_t x, int32_t z);
@@ -82,6 +87,7 @@ public:
 
 /// Type alias for building footprint bitmap (for backwards compatibility).
 using BuildingFootprintBitmap = CoordinateBitmap;
+using RoadMaskBitmap = CoordinateBitmap;
 
 /// Forward declaration
 class FloodFillCache;
