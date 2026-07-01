@@ -7,12 +7,14 @@
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
+#include "bridge_styles.h"
 
 namespace arnis::bridges
 {
 
 struct BridgeMemberInfo {
     int deck_y = 0;
+    bridge_styles::BridgeStyle style = bridge_styles::BridgeStyle::Beam;
     std::optional<int> start_internal_ramp;
     std::optional<int> end_internal_ramp;
 
@@ -31,6 +33,8 @@ class BridgeStructureMap {
 public:
     static BridgeStructureMap build(
             const std::vector<ProcessedElement> &elements, const WorldEditor &editor);
+    static BridgeStructureMap build(const std::vector<ProcessedElement> &elements,
+            const WorldEditor &editor, const bridge_styles::BridgeOutlineIndex &outlines);
 
     const BridgeMemberInfo *lookup_member(std::int64_t way_id) const;
     const BridgeRampInfo *lookup_ramp(std::int64_t way_id) const;

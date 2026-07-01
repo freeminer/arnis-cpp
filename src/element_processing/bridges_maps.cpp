@@ -239,6 +239,37 @@ std::optional<int> decide_internal_ramp(const std::pair<int, int> &xz, int deck_
     const int ground_y = editor.get_ground_level(xz.first, xz.second);
     return deck_y > ground_y ? std::optional<int>(ground_y) : std::nullopt;
 }
+
+bridge_styles::BridgeStyle majority_style(const std::vector<std::size_t> &group_indices,
+        const std::vector<const ProcessedWay *> &bridge_ways,
+        const bridge_styles::BridgeOutlineIndex &outlines)
+{
+    std::unordered_map<bridge_styles::BridgeStyle, std::size_t> counts;
+    for (const auto idx : group_indices) {
+        const auto style =
+                bridge_styles::resolve_bridge_style_with_outline(*bridge_ways[idx], outlines);
+        ++counts[style];
+    }
+    const bridge_styles::BridgeStyle priority[] = {
+        bridge_styles::BridgeStyle::Suspension,
+        bridge_styles::BridgeStyle::CableStayed,
+        bridge_styles::BridgeStyle::Arch,
+        bridge_styles::BridgeStyle::Truss,
+        bridge_styles::BridgeStyle::Covered,
+        bridge_styles::BridgeStyle::Boardwalk,
+        bridge_styles::BridgeStyle::Beam,
+    };
+    bridge_styles::BridgeStyle best = bridge_styles::BridgeStyle::Beam;
+    std::size_t best_count = 0;
+    for (const auto style : priority) {
+        const auto count = counts[style];
+        if (count > best_count) {
+            best = style;
+            best_count = count;
+        }
+    }
+    return best;
+}
 }
 
 bool is_bridge_way(const ProcessedWay &way)
@@ -283,6 +314,13 @@ int BridgeRampInfo::y_at(std::size_t tds, std::size_t total_bresenham) const
 
 BridgeStructureMap BridgeStructureMap::build(
         const std::vector<ProcessedElement> &elements, const WorldEditor &editor)
+{
+    const auto outlines = bridge_styles::BridgeOutlineIndex::build(elements);
+    return build(elements, editor, outlines);
+}
+
+BridgeStructureMap BridgeStructureMap::build(const std::vector<ProcessedElement> &elements,
+        const WorldEditor &editor, const bridge_styles::BridgeOutlineIndex &outlines)
 {
     BridgeStructureMap result;
     std::vector<const ProcessedWay *> bridge_ways;
@@ -397,6 +435,7 @@ BridgeStructureMap BridgeStructureMap::build(
 
     for (const auto &group_entry : groups) {
         const auto &group_indices = group_entry.second;
+        const auto group_style = majority_style(group_indices, bridge_ways, outlines);
         std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> endpoint_counts;
         for (const auto idx : group_indices) {
             const auto &way = *bridge_ways[idx];
@@ -440,9 +479,11 @@ BridgeStructureMap BridgeStructureMap::build(
         std::size_t total_length = 0;
         for (const auto idx : group_indices)
             total_length += way_length_blocks(*bridge_ways[idx]);
+        const int style_clearance =
+                group_style == bridge_styles::BridgeStyle::Arch ? 8 : 0;
         const int clearance = (dip < FLAT_TERRAIN_DIP_THRESHOLD &&
                                       total_length >= SHORT_BRIDGE_LENGTH_BLOCKS)
-                ? max_layer * LAYER_HEIGHT_STEP
+                ? std::max(max_layer * LAYER_HEIGHT_STEP, style_clearance)
                 : 0;
         const int deck_y = terrain_max + clearance;
 
@@ -490,6 +531,7 @@ BridgeStructureMap BridgeStructureMap::build(
             const auto &e = way.nodes.back();
             BridgeMemberInfo info;
             info.deck_y = deck_y;
+            info.style = group_style;
             info.start_internal_ramp = decide_internal_ramp(
                     {s.x, s.z}, deck_y, endpoint_counts, boundary_with_external_ramp, editor);
             info.end_internal_ramp = decide_internal_ramp(

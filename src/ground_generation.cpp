@@ -78,6 +78,32 @@ bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
             }));
 }
 
+bool is_replaceable_surface(WorldEditor &editor, int x, int y, int z)
+{
+    // Rust parity gap: full src/ground_generation.rs surface palette is not ported.
+    // This keeps the C++ post-OSM ground pass from overwriting roads/buildings/water.
+    return !editor.block_exists_absolute(x, y, z) ||
+            editor.check_for_block_absolute(x, y, z,
+                    std::optional<std::vector<Block>>(std::vector<Block>{
+                            STONE,
+                            DIRT,
+                            GRASS_BLOCK,
+                            GRASS,
+                            SAND,
+                            SANDSTONE,
+                            GRAVEL,
+                            CLAY,
+                            COARSE_DIRT,
+                            PODZOL,
+                            MUD,
+                            ANDESITE,
+                            COBBLESTONE,
+                            TUFF,
+                            DEEPSLATE,
+                            COBBLED_DEEPSLATE,
+                    }));
+}
+
 Block natural_surface_for(WorldEditor &editor, int x, int ground_y, int z)
 {
     const int slope = local_slope(editor, x, z);
@@ -129,11 +155,28 @@ void generate_ground_layer(
         const XZBBox &xzbbox,
         const BuildingFootprintBitmap &building_footprints)
 {
+    // Rust parity: src/ground_generation.rs::generate_ground_layer ordering.
+    // C++ uses a conservative surface pass plus LC_WATER pre-paint for water_depth.
     for (int x = xzbbox.min_x(); x <= xzbbox.max_x(); ++x) {
         for (int z = xzbbox.min_z(); z <= xzbbox.max_z(); ++z) {
             const int ground_y = editor.get_ground_level(x, z);
 
-            if (!is_protected_surface(editor, x, ground_y, z)) {
+            if (editor.is_lc_water(x, z)) {
+                const int water_y = editor.get_water_level(x, z);
+                if (ground_y <= water_y && !is_protected_surface(editor, x, water_y, z)) {
+                    editor.set_block_absolute(WATER, x, water_y, z, std::nullopt, std::nullopt);
+                    if (water_y - 1 > -64)
+                        editor.set_block_absolute(SAND, x, water_y - 1, z,
+                                std::nullopt, std::nullopt);
+                    if (water_y - 2 > -64)
+                        editor.set_block_absolute(SANDSTONE, x, water_y - 2, z,
+                                std::nullopt, std::nullopt);
+                }
+                continue;
+            }
+
+            if (!is_protected_surface(editor, x, ground_y, z) &&
+                    is_replaceable_surface(editor, x, ground_y, z)) {
                 const Block surface = natural_surface_for(editor, x, ground_y, z);
                 editor.set_block_absolute(surface, x, ground_y, z, std::nullopt, std::nullopt);
 

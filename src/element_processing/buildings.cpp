@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -9,6 +10,7 @@
 #include <optional>
 #include <random>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -111,7 +113,10 @@ void generate_building_interior(WorldEditor* editor,
                                 const std::vector<int>& floor_levels,
                                 const Args& args,
                                 const ProcessedWay& element,
-                                int abs_terrain_offset);
+                                int abs_terrain_offset,
+                                bool is_abandoned_building,
+                                const CoordinateBitmap& building_passages,
+                                bool has_sloped_roof);
 void generate_roof(WorldEditor* editor,
                    const ProcessedWay& element,
                    int start_y_offset,
@@ -133,10 +138,25 @@ enum class RoofType {
     Skillion,
     Pyramidal,
     Dome,
+    Cone,
+    Onion,
     Flat
 };
 
 constexpr int BUILDING_PASSAGE_HEIGHT = 4;
+
+inline void generate_roof(
+    WorldEditor & editor,
+    ProcessedWay const & element,
+    int32_t start_y_offset,
+    int32_t building_height,
+    Block floor_block,
+    Block wall_block,
+    Block accent_block,
+    RoofType roof_type,
+    std::vector<std::pair<int32_t,int32_t>> const & cached_floor_area,
+    int32_t abs_terrain_offset
+);
 
 // Hash for pair<int,int>
 struct PairHash {
@@ -271,6 +291,234 @@ std::vector<std::vector<ProcessedNode>> collect_merged_rings(
 bool passage_at(const CoordinateBitmap *building_passages, int x, int z)
 {
     return building_passages && building_passages->contains(x, z);
+}
+
+double parse_tag_meters(const std::string &value, double fallback = 0.0)
+{
+    std::string s = value;
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.pop_back();
+    if (!s.empty() && s.back() == 'm')
+        s.pop_back();
+    while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
+        s.pop_back();
+    try {
+        return std::stod(s);
+    } catch (...) {
+        return fallback;
+    }
+}
+
+std::string normalized_material(std::string_view material)
+{
+    std::string out;
+    out.reserve(material.size());
+    for (unsigned char c : material) {
+        if (std::isspace(c) || c == '_' || c == '-')
+            continue;
+        out.push_back(static_cast<char>(std::tolower(c)));
+    }
+    return out;
+}
+
+Block choose_block(const std::vector<Block> &options, std::mt19937 &rng)
+{
+    std::uniform_int_distribution<std::size_t> dist(0, options.size() - 1);
+    return options[dist(rng)];
+}
+
+std::optional<Block> get_roof_block_for_material_cpp(
+        const std::string &material, std::mt19937 &rng)
+{
+    const std::string normalized = normalized_material(material);
+    if (normalized == "glass" || normalized == "glazing")
+        return GLASS;
+    if (normalized == "tile" || normalized == "tiles" ||
+            normalized == "rooftiles" || normalized == "ceramic" ||
+            normalized == "ceramictiles" || normalized == "claytile" ||
+            normalized == "claytiles" || normalized == "terracotta")
+        return choose_block({BRICK, NETHER_BRICK, RED_NETHER_BRICKS, MUD_BRICKS}, rng);
+    if (normalized == "slate" || normalized == "slates")
+        return choose_block({POLISHED_BLACKSTONE, DEEPSLATE_BRICKS, BLACKSTONE}, rng);
+    if (normalized == "metal" || normalized == "steel" ||
+            normalized == "aluminium" || normalized == "aluminum" ||
+            normalized == "corrugatedsteel" || normalized == "corrugatediron" ||
+            normalized == "corrugatedmetal" || normalized == "tin" ||
+            normalized == "zinc" || normalized == "lead" ||
+            normalized == "sheetmetal" || normalized == "metalsheet")
+        return choose_block({LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, IRON_BLOCK}, rng);
+    if (normalized == "concrete" || normalized == "reinforcedconcrete")
+        return choose_block({LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, SMOOTH_STONE}, rng);
+    if (normalized == "wood" || normalized == "timber" ||
+            normalized == "shingle" || normalized == "shingles" ||
+            normalized == "woodshingle" || normalized == "woodshingles")
+        return choose_block({OAK_PLANKS, SPRUCE_PLANKS, DARK_OAK_PLANKS}, rng);
+    if (normalized == "thatch" || normalized == "straw" ||
+            normalized == "reed" || normalized == "reeds")
+        return HAY_BALE;
+    if (normalized == "asphalt" || normalized == "bitumen" ||
+            normalized == "tar" || normalized == "tarpaper" ||
+            normalized == "rolledasphalt" || normalized == "rolledroofing")
+        return choose_block({BLACKSTONE, POLISHED_BLACKSTONE}, rng);
+    if (normalized == "stone")
+        return choose_block({STONE_BRICKS, SMOOTH_STONE, ANDESITE}, rng);
+    if (normalized == "gravel")
+        return GRAVEL;
+    if (normalized == "grass" || normalized == "green" ||
+            normalized == "vegetation" || normalized == "greenroof" ||
+            normalized == "sod")
+        return choose_block({GRASS_BLOCK, MOSS_BLOCK}, rng);
+    if (normalized == "eternit" || normalized == "asbestos" ||
+            normalized == "fibrecement" || normalized == "fibercement")
+        return choose_block({LIGHT_GRAY_CONCRETE, GRAY_CONCRETE}, rng);
+    return std::nullopt;
+}
+
+Block roof_friendly_block(Block block)
+{
+    if (block == OAK_LOG)
+        return OAK_PLANKS;
+    if (block == SPRUCE_LOG)
+        return SPRUCE_PLANKS;
+    return block;
+}
+
+std::optional<Block> roof_block_from_tags(
+        const ProcessedWay &element, std::mt19937 &rng)
+{
+    for (const auto *key : {"roof:material", "material"}) {
+        if (auto it = element.tags.find(key); it != element.tags.end()) {
+            if (auto block = get_roof_block_for_material_cpp(it->second, rng))
+                return block;
+        }
+    }
+    for (const auto *key : {"roof:colour", "building:colour", "colour"}) {
+        if (auto it = element.tags.find(key); it != element.tags.end()) {
+            if (auto rgb = color_text_to_rgb_tuple(it->second))
+                return roof_friendly_block(get_building_wall_block_for_color(*rgb));
+        }
+    }
+    return std::nullopt;
+}
+
+RoofType parse_roof_type(const std::string &roof_shape)
+{
+    if (roof_shape == "gabled" || roof_shape == "gable" ||
+            roof_shape == "pitched" || roof_shape == "saltbox" ||
+            roof_shape == "double_saltbox" || roof_shape == "quadruple_saltbox" ||
+            roof_shape == "gabled_row")
+        return RoofType::Gabled;
+    if (roof_shape == "hipped" || roof_shape == "hip" ||
+            roof_shape == "half-hipped" || roof_shape == "gambrel" ||
+            roof_shape == "mansard" || roof_shape == "round" ||
+            roof_shape == "side_hipped" || roof_shape == "side_half-hipped")
+        return RoofType::Hipped;
+    if (roof_shape == "skillion" || roof_shape == "shed" ||
+            roof_shape == "lean_to" || roof_shape == "monopitch")
+        return RoofType::Skillion;
+    if (roof_shape == "pyramidal" || roof_shape == "pyramid")
+        return RoofType::Pyramidal;
+    if (roof_shape == "dome" || roof_shape == "spherical")
+        return RoofType::Dome;
+    if (roof_shape == "cone" || roof_shape == "conical" ||
+            roof_shape == "circular" || roof_shape == "spire")
+        return RoofType::Cone;
+    if (roof_shape == "onion")
+        return RoofType::Onion;
+    return RoofType::Flat;
+}
+
+int scaled_blocks(int value, double scale_factor)
+{
+    if (scale_factor == 1.0)
+        return value;
+    if (scale_factor == 2.0)
+        return value << 1;
+    if (scale_factor == 4.0)
+        return value << 2;
+    return static_cast<int>(std::floor(static_cast<double>(value) * scale_factor));
+}
+
+void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &element,
+        const std::vector<std::pair<int, int>> &cached_floor_area, const Args &args)
+{
+    const double scale_factor = args.scale;
+    const int abs_terrain_offset = !args.terrain ? args.ground_level : 0;
+
+    int min_level_offset = 0;
+    if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
+        min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
+    } else if (auto it = element.tags.find("building:min_level"); it != element.tags.end()) {
+        if (auto level = parse_i32_tag(element.tags, "building:min_level"))
+            min_level_offset = scaled_blocks(*level * 4, scale_factor);
+    } else if (auto it = element.tags.find("layer"); it != element.tags.end()) {
+        if (auto layer = parse_i32_tag(element.tags, "layer"); layer && *layer > 0)
+            min_level_offset = scaled_blocks(*layer * 4, scale_factor);
+    }
+
+    int start_y_offset = min_level_offset;
+    if (args.terrain) {
+        int max_ground_level = args.ground_level;
+        for (const auto &node : element.nodes)
+            max_ground_level = std::max(max_ground_level, editor.get_ground_level(node.x, node.z));
+        start_y_offset = max_ground_level + min_level_offset;
+    }
+
+    int roof_thickness = 5;
+    if (auto it = element.tags.find("height"); it != element.tags.end()) {
+        const int total = static_cast<int>(parse_tag_meters(it->second, 5.0) * scale_factor);
+        roof_thickness = element.tags.contains("min_height")
+                ? std::max(3, total - min_level_offset)
+                : std::max(3, total);
+    } else if (auto levels = parse_i32_tag(element.tags, "building:levels")) {
+        roof_thickness = std::max(3, scaled_blocks(*levels * 4 + 2, scale_factor));
+    }
+
+    std::mt19937 rng(static_cast<std::mt19937::result_type>(element.id));
+    const Block roof_block = roof_block_from_tags(element, rng).value_or(STONE_BRICK_SLAB);
+
+    const RoofType roof_type = [&]() {
+        if (auto it = element.tags.find("roof:shape"); it != element.tags.end())
+            return parse_roof_type(it->second);
+        return RoofType::Flat;
+    }();
+
+    if ((roof_type == RoofType::Dome || roof_type == RoofType::Hipped ||
+                roof_type == RoofType::Pyramidal || roof_type == RoofType::Cone ||
+                roof_type == RoofType::Onion) &&
+            !cached_floor_area.empty()) {
+        generate_roof(editor, element, start_y_offset - 4, 3,
+                roof_block, roof_block, roof_block,
+                roof_type == RoofType::Cone || roof_type == RoofType::Onion
+                        ? RoofType::Dome
+                        : roof_type,
+                cached_floor_area, abs_terrain_offset);
+        return;
+    }
+
+    const int slab_y = start_y_offset + roof_thickness;
+    std::optional<std::pair<int, int>> previous_node;
+    for (const auto &node : element.nodes) {
+        if (previous_node) {
+            auto points = bresenham_line(
+                    previous_node->first, slab_y, previous_node->second,
+                    node.x, slab_y, node.z);
+            for (const auto &point : points)
+                editor.set_block_absolute(roof_block, std::get<0>(point),
+                        slab_y + abs_terrain_offset, std::get<2>(point));
+        }
+
+        const int pillar_base = args.terrain ? editor.get_ground_level(node.x, node.z) : 0;
+        for (int y = pillar_base + 1; y < slab_y; ++y)
+            editor.set_block_absolute(COBBLESTONE_WALL, node.x,
+                    y + abs_terrain_offset, node.z);
+
+        previous_node = {node.x, node.z};
+    }
+
+    for (const auto &point : cached_floor_area)
+        editor.set_block_absolute(
+                roof_block, point.first, slab_y + abs_terrain_offset, point.second);
 }
 
 }
@@ -643,28 +891,7 @@ void generate_buildings(WorldEditor* editor,
                 }
                 return;
             } else if (btype == "roof") {
-                int roof_height = 5;
-                for (const auto& node : element.nodes) {
-                    int x = node.x;
-                    int z = node.z;
-                    if (previous_node.has_value()) {
-                        auto prev = previous_node.value();
-                        auto bresenham_points = bresenham_line(prev.first, roof_height, prev.second, x, roof_height, z);
-                        for (const auto& t : bresenham_points) {
-                            int bx = std::get<0>(t);
-                            int bz = std::get<2>(t);
-                            editor->set_block(STONE_BRICK_SLAB, bx, roof_height, bz);
-                        }
-                    }
-                    for (int y = 1; y <= (roof_height - 1); ++y) {
-                        editor->set_block(COBBLESTONE_WALL, x, y, z);
-                    }
-                    previous_node = std::make_pair(x,z);
-                }
-                const std::vector<std::pair<int,int>>& roof_area = cached_floor_area;
-                for (const auto& p : roof_area) {
-                    editor->set_block(STONE_BRICK_SLAB, p.first, roof_height, p.second);
-                }
+                generate_roof_only_structure(*editor, element, cached_floor_area, args);
                 return;
             } else if (btype == "apartments") {
                 if (building_height == std::max(3, static_cast<int>(6.0 * scale_factor))) {
@@ -821,7 +1048,19 @@ void generate_buildings(WorldEditor* editor,
             }
             
             if (!skip_interior && floor_area.size() > 100) {
-                generate_building_interior(*editor, floor_area, min_x, min_z, max_x, max_z, start_y_offset, building_height, wall_block, floor_levels, args, element, abs_terrain_offset, is_abandoned_building);
+                bool has_sloped_roof = false;
+                if (args.roof) {
+                    auto roof_shape = element.tags.find("roof:shape");
+                    if (roof_shape != element.tags.end())
+                        has_sloped_roof = parse_roof_type(roof_shape->second) != RoofType::Flat;
+                }
+                CoordinateBitmap no_passages = CoordinateBitmap::new_empty();
+                const CoordinateBitmap &interior_passages =
+                        effective_passages ? *effective_passages : no_passages;
+                generate_building_interior(*editor, floor_area, min_x, min_z, max_x,
+                        max_z, start_y_offset, building_height, wall_block, floor_levels,
+                        args, element, abs_terrain_offset, is_abandoned_building,
+                        interior_passages, has_sloped_roof);
             }
         }
     }
@@ -829,16 +1068,18 @@ void generate_buildings(WorldEditor* editor,
     if (args.roof) {
         auto it_shape = element.tags.find("roof:shape");
         if (it_shape != element.tags.end()) {
-            RoofType roof_type;
-            const std::string& shape = it_shape->second;
-            if (shape == "gabled") roof_type = RoofType::Gabled;
-            else if (shape == "hipped" || shape == "half-hipped" || shape == "gambrel" || shape == "mansard" || shape == "round") roof_type = RoofType::Hipped;
-            else if (shape == "skillion") roof_type = RoofType::Skillion;
-            else if (shape == "pyramidal") roof_type = RoofType::Pyramidal;
-            else if (shape == "dome" || shape == "onion" || shape == "cone") roof_type = RoofType::Dome;
-            else roof_type = RoofType::Flat;
+            RoofType roof_type = parse_roof_type(it_shape->second);
+            if (roof_type == RoofType::Cone || roof_type == RoofType::Onion)
+                roof_type = RoofType::Dome;
 
-            generate_roof(*editor, element, start_y_offset, building_height, floor_block, wall_block, accent_block, roof_type, cached_floor_area, abs_terrain_offset);
+            std::mt19937 roof_rng(static_cast<std::mt19937::result_type>(
+                    element.id ^ 0xF00FC010BA5EF00DULL));
+            const Block roof_floor_block =
+                    roof_block_from_tags(element, roof_rng).value_or(floor_block);
+
+            generate_roof(*editor, element, start_y_offset, building_height,
+                    roof_floor_block, wall_block, accent_block, roof_type,
+                    cached_floor_area, abs_terrain_offset);
         } else {
             std::string btype = "yes";
             auto it = element.tags.find("building");
@@ -1012,6 +1253,7 @@ inline void generate_roof(
     // Random generator
     static thread_local std::random_device rd;
     static thread_local std::mt19937 rng(rd());
+    const std::optional<Block> tagged_roof_block = roof_block_from_tags(element, rng);
 
     if (roof_type == RoofType::Flat) {
         for (auto const & p : floor_area) {
@@ -1032,7 +1274,7 @@ inline void generate_roof(
         int32_t max_distance = is_wider_than_long ? (length >> 1) : (width >> 1);
 
         std::bernoulli_distribution coin(0.5);
-        Block roof_block = coin(rng) ? accent_block : wall_block;
+        Block roof_block = tagged_roof_block.value_or(coin(rng) ? accent_block : wall_block);
 
         std::vector<std::pair<std::pair<int32_t,int32_t>, int32_t>> roof_heights;
         roof_heights.reserve(floor_area.size());
@@ -1124,7 +1366,7 @@ inline void generate_roof(
         int32_t roof_peak_height = base_height + ((std::max(width, length) > 20) ? 7 : 5);
 
         std::bernoulli_distribution coin(0.5);
-        Block roof_block = coin(rng) ? accent_block : wall_block;
+        Block roof_block = tagged_roof_block.value_or(coin(rng) ? accent_block : wall_block);
 
         if (is_rectangular) {
             std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
@@ -1273,7 +1515,7 @@ inline void generate_roof(
         int32_t max_roof_height = std::clamp(building_size / 3, 4, 10);
 
         std::bernoulli_distribution coin(0.5);
-        Block roof_block = coin(rng) ? accent_block : wall_block;
+        Block roof_block = tagged_roof_block.value_or(coin(rng) ? accent_block : wall_block);
 
         std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
         roof_heights.reserve(floor_area.size() * 2);
@@ -1326,7 +1568,7 @@ inline void generate_roof(
         int32_t peak_height = base_height + std::clamp(building_size / 3, 3, 8);
 
         std::bernoulli_distribution coin(0.5);
-        Block roof_block = coin(rng) ? accent_block : wall_block;
+        Block roof_block = tagged_roof_block.value_or(coin(rng) ? accent_block : wall_block);
 
         //std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
         std::unordered_map<std::pair<int32_t,int32_t>, int32_t, PairHash> roof_heights;
@@ -1421,7 +1663,7 @@ inline void generate_roof(
         double radius = static_cast<double>(std::max(max_x - min_x, max_z - min_z)) / 2.0;
 
         std::bernoulli_distribution coin(0.5);
-        Block roof_block = coin(rng) ? accent_block : wall_block;
+        Block roof_block = tagged_roof_block.value_or(coin(rng) ? accent_block : wall_block);
 
         for (auto const & p : floor_area) {
             int32_t x = p.first;
@@ -1578,7 +1820,6 @@ void generate_bridge(
 
             for (const auto& tp : bridge_points) {
                 int bx = std::get<0>(tp);
-                int by = std::get<1>(tp);
                 int bz = std::get<2>(tp);
                 // Use fixed bridge deck height (max of endpoints)
                 int bridge_y = bridge_deck_ground_y + bridge_y_offset;

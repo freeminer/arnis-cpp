@@ -13,6 +13,7 @@
 #include "world_editor.h"
 #include "../deterministic_rng.h"
 #include "../bresenham.h"
+#include "../structures/structures.h"
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -421,6 +422,15 @@ void generate_landuse(WorldEditor & editor, ProcessedWay const & element, Args c
                 editor.set_block(STONE_BRICK_SLAB, bx, 2, bz, std::optional<std::vector<Block>>(), std::optional<std::vector<Block>>());
             }
         }
+    }
+
+    if (landuse_tag == "construction") {
+        structures::crane::maybe_place_crane(editor, floor_area);
+        structures::excavator::scatter_excavators(editor, floor_area);
+    }
+
+    if (landuse_tag == "farmland") {
+        structures::tractor::maybe_place_tractor(editor, floor_area);
     }
 }
 

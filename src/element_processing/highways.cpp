@@ -9,6 +9,7 @@
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
+#include "bridge_styles.h"
 #include "bridges.h"
 #include "surfaces.h"
 #include "../floodfill.h"
@@ -647,6 +648,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor,
     std::optional<int> previous_bridge_y;
     std::optional<std::pair<int, int>> previous_rail_left;
     std::optional<std::pair<int, int>> previous_rail_right;
+    const auto bridge_style = bridge_member ? bridge_member->style :
+            crate::bridge_styles::BridgeStyle::Beam;
+    std::vector<crate::bridge_styles::BridgePathSample> bridge_path;
 
     for (const auto& node : way.nodes) {
         if (previous_node.has_value()) {
@@ -702,6 +706,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor,
                 if (auto deck_y = bridge_surface.deck_y_at(x, z)) {
                     current_y = *deck_y;
                     use_absolute_y = true;
+                }
+                if (is_bridge_member && bridge_rail_perp.has_value()) {
+                    bridge_path.push_back(crate::bridge_styles::BridgePathSample{
+                            x, current_y, z, bridge_rail_perp->first, bridge_rail_perp->second});
                 }
 
                 if (bridge_like) {
@@ -768,16 +776,29 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor,
                         // Add stone brick foundation underneath elevated highways/bridges for thickness
                         if ((effective_elevation > 0 || use_absolute_y) && current_y > 0) {
                             // Add 1 layer of stone bricks underneath the highway surface
+                            const auto foundation_block = is_bridge_member ?
+                                    crate::bridge_styles::foundation_block(bridge_style) :
+                                    crate::block_definitions::STONE_BRICKS;
                             if (use_absolute_y) {
-                                editor.set_block_absolute(crate::block_definitions::STONE_BRICKS, set_x, current_y - 1, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+                                editor.set_block_absolute(foundation_block, set_x, current_y - 1, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
                             } else {
-                                editor.set_block(crate::block_definitions::STONE_BRICKS, set_x, current_y - 1, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
+                                editor.set_block(foundation_block, set_x, current_y - 1, set_z, std::optional<std::vector<crate::block_definitions::Block>>(), std::optional<std::vector<crate::block_definitions::Block>>());
                             }
                         }
 
                         // Add support pillars for elevated highways/bridges
                         if ((effective_elevation != 0 || use_absolute_y) && current_y > 0) {
-                            if (use_absolute_y) {
+                            if (is_bridge_member) {
+                                const std::size_t interval =
+                                        std::max<std::size_t>(1, crate::bridge_styles::pillar_interval(bridge_style));
+                                const bool is_centerline = dx == 0 && dz == 0;
+                                const bool is_pillar_position = is_centerline && tds % interval == 0;
+                                const int centerline_ground_y = editor.get_ground_level(x, z);
+                                crate::bridge_styles::place_bridge_support_below_deck(
+                                        editor, bridge_style, set_x, current_y, set_z,
+                                        centerline_ground_y, tds, total_bresenham_length,
+                                        use_absolute_y, is_centerline, is_pillar_position);
+                            } else if (use_absolute_y) {
                                 add_highway_support_pillar_absolute(editor, set_x, current_y, set_z, dx, dz, block_range);
                             } else {
                                 add_highway_support_pillar(editor, set_x, current_y, set_z, dx, dz, block_range);
@@ -786,9 +807,19 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor,
                     }
                 }
 
-                if (bridge_like && bridge_rail_perp.has_value()) {
+                if (bridge_like && bridge_rail_perp.has_value() &&
+                        !(is_bridge_member && !crate::bridge_styles::has_side_railing(bridge_style))) {
                     const float perp_x = bridge_rail_perp->first;
                     const float perp_z = bridge_rail_perp->second;
+                    const auto rail_block = is_bridge_member ?
+                            crate::bridge_styles::rail_block(bridge_style) :
+                            crate::block_definitions::LIGHT_GRAY_CONCRETE;
+                    const auto rail_foundation = is_bridge_member ?
+                            crate::bridge_styles::rail_foundation_block(bridge_style) :
+                            crate::block_definitions::STONE_BRICKS;
+                    const auto parapet = is_bridge_member ?
+                            crate::bridge_styles::parapet_block(bridge_style) :
+                            std::optional<crate::block_definitions::Block>{crate::block_definitions::BRICK_WALL};
                     const float rail_dist = static_cast<float>(block_range) *
                             (std::abs(perp_x) + std::abs(perp_z)) + 1.0f;
                     for (int side = 0; side < 2; ++side) {
@@ -809,22 +840,24 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor,
                                 continue;
                             }
                             editor.set_block_absolute(
-                                    crate::block_definitions::LIGHT_GRAY_CONCRETE,
+                                    rail_block,
                                     rx, current_y, rz,
                                     std::optional<std::vector<crate::block_definitions::Block>>(),
                                     std::optional<std::vector<crate::block_definitions::Block>>(ROAD_PROTECTED_SURFACES));
                             if (current_y > 0) {
                                 editor.set_block_absolute(
-                                        crate::block_definitions::STONE_BRICKS,
+                                        rail_foundation,
                                         rx, current_y - 1, rz,
                                         std::optional<std::vector<crate::block_definitions::Block>>(),
                                         std::optional<std::vector<crate::block_definitions::Block>>());
                             }
-                            editor.set_block_absolute(
-                                    crate::block_definitions::BRICK_WALL,
-                                    rx, current_y + 1, rz,
-                                    std::optional<std::vector<crate::block_definitions::Block>>(),
-                                    std::optional<std::vector<crate::block_definitions::Block>>());
+                            if (parapet) {
+                                editor.set_block_absolute(
+                                        *parapet,
+                                        rx, current_y + 1, rz,
+                                        std::optional<std::vector<crate::block_definitions::Block>>(),
+                                        std::optional<std::vector<crate::block_definitions::Block>>());
+                            }
                         }
                         previous_rail = rail_cell;
                     }
@@ -876,6 +909,12 @@ void generate_highways_internal(crate::world_editor::WorldEditor& editor,
             }
         }
         previous_node = std::make_optional(std::pair<int,int>{ node.x, node.z });
+    }
+    if (is_bridge_member) {
+        const bool start_is_boundary = !(bridge_member && bridge_member->start_internal_ramp);
+        const bool end_is_boundary = !(bridge_member && bridge_member->end_internal_ramp);
+        crate::bridge_styles::decorate_bridge_above_deck(
+                editor, bridge_style, bridge_path, block_range, start_is_boundary, end_is_boundary);
     }
 }
 

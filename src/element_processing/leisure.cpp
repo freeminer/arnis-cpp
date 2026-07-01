@@ -14,6 +14,7 @@
 #include "../osm_parser.h"
 #include "world_editor.h"
 #include "surfaces.h"
+#include "../structures/structures.h"
 #include "../../../arnis_adapter.h"
 namespace arnis
 {
@@ -170,6 +171,10 @@ void generate_leisure(WorldEditor& editor, const ProcessedWay& element, const Ar
                                            std::nullopt);
                     }
                 }
+            }
+
+            if (leisure_type == "playground" || leisure_type == "recreation_ground") {
+                structures::playground::scatter_playgrounds(editor, filled_area);
             }
         }
     }

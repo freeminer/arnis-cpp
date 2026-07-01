@@ -10,6 +10,7 @@
 #include <vector>
 
 #include "../bresenham.h"
+#include "../structures/structures.h"
 #include "../../../arnis_adapter.h"
 namespace arnis
 {
@@ -562,6 +563,19 @@ void generate_man_made(WorldEditor& editor, const ProcessedElement& element, con
         generate_water_well(editor, element);
     } else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
         generate_tank_structure(editor, element, args);
+    } else if (t == "lighthouse") {
+        if (element.is_way() && !element.as_way().nodes.empty()) {
+            long long sx = 0;
+            long long sz = 0;
+            for (const auto& node : element.as_way().nodes) {
+                sx += node.x;
+                sz += node.z;
+            }
+            const auto n = static_cast<long long>(element.as_way().nodes.size());
+            structures::lighthouse::place(editor, static_cast<int>(sx / n), static_cast<int>(sz / n));
+        } else if (auto node = element.first_node(); node.has_value()) {
+            structures::lighthouse::place(editor, node->x, node->z);
+        }
     } else {
         // unknown type -> ignore
     }
@@ -584,6 +598,8 @@ void generate_man_made_nodes(WorldEditor& editor, const ProcessedNode& node, con
         generate_water_well(editor, element);
     } else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
         generate_tank_structure(editor, element, args);
+    } else if (t == "lighthouse") {
+        structures::lighthouse::place(editor, node.x, node.z);
     } else {
         // unknown -> ignore
     }

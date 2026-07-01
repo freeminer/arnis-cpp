@@ -1,4 +1,7 @@
 #include <vector>
+
+#include "../structures/structures.h"
+#include "../water_depth.h"
 #include <string>
 #include <map>
 #include <chrono>
@@ -171,7 +174,7 @@ void inverse_floodfill_recursive(
     }
 }
 
-static void inverse_floodfill(int min_x, int min_z, int max_x, int max_z,
+[[maybe_unused]] static void inverse_floodfill(int min_x, int min_z, int max_x, int max_z,
 		const std::vector<std::vector<XZPoint>> &outers,
 		const std::vector<std::vector<XZPoint>> &inners, WorldEditor &editor)
 {
@@ -334,7 +337,9 @@ static std::vector<std::pair<int, int>> subtract_spans(
 static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 		const std::vector<std::vector<XZPoint>> &outers,
 		const std::vector<std::vector<XZPoint>> &inners,
-		WorldEditor &editor)
+		WorldEditor &editor,
+		const water_depth::BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask)
 {
 	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
 	outer_edge_groups.reserve(outers.size());
@@ -362,11 +367,13 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 
 		for (const auto &[start, end] : fill_spans) {
 			for (int x = start; x <= end; ++x) {
+				if (road_mask.contains(x, z))
+					continue;
 				int water_y = editor.get_water_level(x, z);
 				int ground_y = editor.get_ground_level(x, z);
 				if (ground_y <= water_y) {
-					editor.set_block_absolute(block_definitions::WATER, x, water_y, z,
-							std::nullopt, std::nullopt);
+					water_depth::carve_water_column(
+							editor, x, z, water_y, bwf.depth_at(x, z), road_mask);
 				}
 			}
 		}
@@ -376,7 +383,9 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 static void generate_water_areas(
     WorldEditor &editor,
     const std::vector<std::vector<ProcessedNode>> &outers,
-    const std::vector<std::vector<ProcessedNode>> &inners)
+    const std::vector<std::vector<ProcessedNode>> &inners,
+    const water_depth::BigWaterField &bwf,
+    const RoadMaskBitmap &road_mask)
 {
     // Calculate polygon bounding box to limit fill area
     int32_t poly_min_x = std::numeric_limits<int32_t>::max();
@@ -428,7 +437,8 @@ static void generate_water_areas(
         inners_xz.push_back(std::move(v));
     }
 
-    scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor);
+    scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf, road_mask);
+    structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
 }
 
 static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &rings) {
@@ -540,7 +550,9 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 
 void generate_water_area_from_way(
     WorldEditor &editor,
-    const ProcessedWay &element)
+    const ProcessedWay &element,
+    const water_depth::BigWaterField &bwf,
+    const RoadMaskBitmap &road_mask)
 {
     std::vector<std::vector<ProcessedNode>> outers = {{element.nodes}};
     
@@ -549,12 +561,14 @@ void generate_water_area_from_way(
         return;
     }
 
-    generate_water_areas(editor, outers, {});
+    generate_water_areas(editor, outers, {}, bwf, road_mask);
 }
 
 void generate_water_areas_from_relation(
     WorldEditor &editor,
-    const ProcessedRelation &element)
+    const ProcessedRelation &element,
+    const water_depth::BigWaterField &bwf,
+    const RoadMaskBitmap &road_mask)
 {
     // Check if this is a water relation (either with water tag or natural=water or natural=bay)
     bool is_water = element.tags.find("water") != element.tags.end() ||
@@ -642,7 +656,7 @@ void generate_water_areas_from_relation(
         return;
     }
 
-    generate_water_areas(editor, outers, inners);
+    generate_water_areas(editor, outers, inners, bwf, road_mask);
 }
 
 }

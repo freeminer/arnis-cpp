@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <vector>
 #include <string>
 #include <unordered_map>
@@ -8,6 +9,7 @@
 #include "../../../arnis_adapter.h"
 #include "../floodfill.h"
 #include "../floodfill_cache.h"
+#include "../structures/structures.h"
 
 namespace arnis
 {
@@ -63,10 +65,8 @@ void generate_amenities(crate::world_editor::WorldEditor& editor,
     const std::string& amenity_type = it_amenity->second;
 
     std::optional<crate::coordinate_system::cartesian::XZPoint> first_node = std::nullopt;
-    {
-        const std::vector<crate::osm_parser::ProcessedNode>& nodes = element.nodes();
-        if (!nodes.empty()) first_node.emplace( crate::coordinate_system::cartesian::XZPoint(nodes.front().x, nodes.front().z));
-    }
+    if (const auto node = element.first_node(); node.has_value())
+        first_node.emplace(crate::coordinate_system::cartesian::XZPoint(node->x, node->z));
 
     // Handle recycling containers
     if (amenity_type == "recycling") {
@@ -188,11 +188,27 @@ void generate_amenities(crate::world_editor::WorldEditor& editor,
     if (amenity_type == "fountain") {
         std::vector<std::pair<int,int>> flood_area =
                 flood_fill_cache.get_or_compute_element(element, args.timeout);
-        for (const auto& p : flood_area) {
-            editor.set_block(WATER, p.first, 0, p.second, std::nullopt, std::nullopt);
-        }
-        for (const crate::osm_parser::ProcessedNode& node : element.nodes()) {
-            editor.set_block(LIGHT_GRAY_CONCRETE, node.x, 0, node.z, std::nullopt, std::nullopt);
+        if (flood_area.empty()) {
+            if (first_node.has_value())
+                structures::fountain::place(editor, first_node->x, first_node->z, 0);
+        } else {
+            long long sx = 0;
+            long long sz = 0;
+            for (const auto& p : flood_area) {
+                sx += p.first;
+                sz += p.second;
+            }
+            const int cx0 = static_cast<int>(sx / static_cast<long long>(flood_area.size()));
+            const int cz0 = static_cast<int>(sz / static_cast<long long>(flood_area.size()));
+            const auto best = std::min_element(flood_area.begin(), flood_area.end(),
+                    [cx0, cz0](const auto& a, const auto& b) {
+                        const long long adx = static_cast<long long>(a.first - cx0);
+                        const long long adz = static_cast<long long>(a.second - cz0);
+                        const long long bdx = static_cast<long long>(b.first - cx0);
+                        const long long bdz = static_cast<long long>(b.second - cz0);
+                        return adx * adx + adz * adz < bdx * bdx + bdz * bdz;
+                    });
+            structures::fountain::place(editor, best->first, best->second, flood_area.size());
         }
         return;
     }

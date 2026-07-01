@@ -7,7 +7,13 @@
 #include <utility>
 
 #include "../../../../arnis_adapter.h"
+#include "../../floodfill_cache.h"
 namespace arnis {
+
+namespace
+{
+constexpr int BUILDING_PASSAGE_HEIGHT = 4;
+}
 
 // INTERIOR1_LAYER1
 static constexpr std::array<std::array<char, 23>, 23> INTERIOR1_LAYER1 = {{
@@ -286,8 +292,12 @@ void generate_building_interior(
     const Args & args,
     const ProcessedWay & element,
     int abs_terrain_offset,
-    bool is_abandoned_building
+    bool is_abandoned_building,
+    const CoordinateBitmap &building_passages,
+    bool has_sloped_roof
 ) {
+    (void)args;
+    (void)element;
     // Skip interior generation for very small buildings
     int width = max_x - min_x + 1;
     int depth = max_z - min_z + 1;
@@ -325,14 +335,9 @@ void generate_building_interior(
             // For intermediate floors, extend walls up to just below the next floor
             current_floor_ceiling = floor_levels[floor_index + 1] - 1;
         } else {
-            // Last floor ceiling depends on roof generation
-            auto it = element.tags.find(std::string("roof:shape"));
-            bool has_roof_shape = (it != element.tags.end());
-            if (args.roof && has_roof_shape && it->second != "flat") {
-                // When roof generation is enabled with non-flat roofs, stop at building height (no extra ceiling)
+            if (has_sloped_roof) {
                 current_floor_ceiling = start_y_offset + building_height;
             } else {
-                // When roof generation is disabled or flat roof, extend to building top + 1 (includes ceiling)
                 current_floor_ceiling = start_y_offset + building_height + 1;
             }
         }
@@ -371,6 +376,10 @@ void generate_building_interior(
                 // Skip if outside the building's floor area
                 long long key = (static_cast<long long>(x) << 32) | (static_cast<unsigned int>(z));
                 if (floor_area_set.find(key) == floor_area_set.end()) {
+                    continue;
+                }
+                if (building_passages.contains(x, z) &&
+                        floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT, building_height)) {
                     continue;
                 }
 
