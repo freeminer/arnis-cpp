@@ -14,6 +14,27 @@ pub fn get_bedrock_output_directory() -> PathBuf {
         .unwrap_or_else(|| PathBuf::from("."))
 }
 
+/// Returns Luanti's worlds directory for the current OS.
+/// Windows: %APPDATA%\Minetest\worlds
+/// macOS:   ~/Library/Application Support/minetest/worlds
+/// Linux:   ~/.minetest/worlds
+/// Falls back to Desktop/Arnis Luanti Worlds if no path can be resolved.
+pub fn get_luanti_worlds_directory() -> PathBuf {
+    let base = if cfg!(target_os = "windows") {
+        dirs::data_dir().map(|p| p.join("Minetest"))
+    } else if cfg!(target_os = "macos") {
+        dirs::data_dir().map(|p| p.join("minetest"))
+    } else {
+        dirs::home_dir().map(|p| p.join(".minetest"))
+    };
+
+    base.map(|p| p.join("worlds")).unwrap_or_else(|| {
+        dirs::desktop_dir()
+            .unwrap_or_else(|| PathBuf::from("."))
+            .join("Arnis Luanti Worlds")
+    })
+}
+
 /// Gets the area name for a given bounding box using the center point.
 pub fn get_area_name_for_bedrock(bbox: &LLBBox) -> String {
     let center_lat = (bbox.min().lat() + bbox.max().lat()) / 2.0;
@@ -211,26 +232,47 @@ pub const TALL_DATAPACK_NAME: &str = "arnis_tall";
 
 /// Install the bundled tall-world datapack into a Java world and register it
 /// in `level.dat`'s `Data.DataPacks.Enabled` so it auto-activates on first
-/// load. Pack assets target Minecraft 1.21.4 (matching the bundled level.dat
-/// template) — older clients will refuse to load the world.
+/// load. The base `data/` tree uses the legacy flat dimension_type schema
+/// (formats 61-88, i.e. 1.21.4-1.21.10); overlays carry the attributes schema
+/// for 1.21.11-era (formats 90-100) and 26.1.x (format 101.x), since the
+/// schema is mutually incompatible across those eras.
 pub fn install_tall_datapack(world_path: &Path) -> Result<(), String> {
     const PACK_MCMETA: &[u8] = include_bytes!("../assets/minecraft/datapack_tall/pack.mcmeta");
     const OVERWORLD_JSON: &[u8] = include_bytes!(
         "../assets/minecraft/datapack_tall/data/minecraft/dimension_type/overworld.json"
     );
+    const OVERLAY_ATTRIBUTES_JSON: &[u8] = include_bytes!(
+        "../assets/minecraft/datapack_tall/overlay_attributes/data/minecraft/dimension_type/overworld.json"
+    );
+    const OVERLAY_2601_JSON: &[u8] = include_bytes!(
+        "../assets/minecraft/datapack_tall/overlay_2601/data/minecraft/dimension_type/overworld.json"
+    );
 
     let dp_root = world_path.join("datapacks").join(TALL_DATAPACK_NAME);
-    let dim_dir = dp_root
-        .join("data")
-        .join("minecraft")
-        .join("dimension_type");
-    fs::create_dir_all(&dim_dir)
-        .map_err(|e| format!("Failed to create datapack directories: {e}"))?;
+
+    // (overlay directory, embedded bytes); empty directory = base data/ tree.
+    let dim_files: [(&str, &[u8]); 3] = [
+        ("", OVERWORLD_JSON),
+        ("overlay_attributes", OVERLAY_ATTRIBUTES_JSON),
+        ("overlay_2601", OVERLAY_2601_JSON),
+    ];
+    for (overlay, bytes) in dim_files {
+        let mut dim_dir = dp_root.clone();
+        if !overlay.is_empty() {
+            dim_dir.push(overlay);
+        }
+        let dim_dir = dim_dir
+            .join("data")
+            .join("minecraft")
+            .join("dimension_type");
+        fs::create_dir_all(&dim_dir)
+            .map_err(|e| format!("Failed to create datapack directories: {e}"))?;
+        fs::write(dim_dir.join("overworld.json"), bytes)
+            .map_err(|e| format!("Failed to write overworld.json: {e}"))?;
+    }
 
     fs::write(dp_root.join("pack.mcmeta"), PACK_MCMETA)
         .map_err(|e| format!("Failed to write pack.mcmeta: {e}"))?;
-    fs::write(dim_dir.join("overworld.json"), OVERWORLD_JSON)
-        .map_err(|e| format!("Failed to write overworld.json: {e}"))?;
 
     register_tall_datapack_in_level_dat(world_path)?;
 

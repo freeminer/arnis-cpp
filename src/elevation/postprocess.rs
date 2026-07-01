@@ -153,6 +153,7 @@ pub fn apply_land_cover_repair(
     land_cover: &mut LandCoverData,
     built_up_sigma_cells: f64,
     coastal_pull_distance_cells: u32,
+    report: &dyn Fn(f64),
 ) {
     let grid_h = heights.len();
     if grid_h == 0 {
@@ -198,20 +199,18 @@ pub fn apply_land_cover_repair(
         land_cover.refresh_water_blend_grid();
     }
 
-    if coastal_pull_distance_cells > 0 {
-        pull_coastal_builtup_toward_water(
-            heights,
-            &land_cover.grid,
-            &is_water_surface,
-            coastal_pull_distance_cells,
-        );
-    }
+    // Smooth before pull; otherwise the Gaussian raises pulled cells back up.
+    // The Gaussian dominates this step's cost, so it drives the reported progress.
     smooth_built_up_gaussian(
         heights,
         &land_cover.grid,
         &is_water_surface,
         built_up_sigma_cells,
+        report,
     );
+    if coastal_pull_distance_cells > 0 {
+        pull_coastal_land_toward_water(heights, &is_water_surface, coastal_pull_distance_cells);
+    }
 }
 
 /// Flatten the water surface of each connected `LC_WATER` component and
@@ -726,28 +725,9 @@ fn reclassify_non_surface_water_cells(
     n
 }
 
-/// Pull built-up cells near water down toward the local water surface.
-///
-/// DSMs (AWS Terrain Tiles, Copernicus DSM, SRTM) include buildings and
-/// waterfront structures in the elevation. In Minecraft that appears as a
-/// flat strip of "city" sitting ~10–30 m above the water it's right next to
-/// — a cliff at the shoreline. A plain Gaussian blur can't fix this
-/// cleanly: with water included in the source it creates a broad ramp
-/// instead of a cliff; with water excluded it keeps the cliff.
-///
-/// This pass walks outward from every water cell (4-connected multi-source
-/// BFS bounded at `max_distance`) and, for each built-up cell inside that
-/// distance, lerps its elevation toward the nearest water cell's surface
-/// level with a **linear distance falloff**:
-///
-///     weight = (max_distance − distance) / max_distance
-///     new    = (1 − weight) · original + weight · water_level
-///
-/// Net effect: a controlled, known-width ramp from water up to the city
-/// interior that replaces the uncontrolled Gaussian-induced ramp.
-fn pull_coastal_builtup_toward_water(
+// Linearly pull land cells within max_distance toward the local water surface; skip > MAX_PULL_DROP_M above water (real cliffs).
+fn pull_coastal_land_toward_water(
     heights: &mut [Vec<f64>],
-    lc_grid: &[Vec<u8>],
     is_water_surface: &[Vec<bool>],
     max_distance: u32,
 ) {
@@ -756,6 +736,9 @@ fn pull_coastal_builtup_toward_water(
     }
     let h = heights.len();
     let w = heights[0].len();
+
+    // Cells above this threshold are treated as real cliffs and not pulled.
+    const MAX_PULL_DROP_M: f64 = 15.0;
 
     // Multi-source BFS: seed with confirmed water-surface cells (not just
     // LC_WATER, so a canyon-wall cell misclassified as water doesn't
@@ -769,9 +752,6 @@ fn pull_coastal_builtup_toward_water(
         for x in 0..w {
             if is_water_surface[y][x] {
                 dist[y][x] = 0;
-                // Heights at water-surface cells have been flattened to the
-                // component water level, so this is the target we pull
-                // coastal built-up cells toward.
                 water_level[y][x] = heights[y][x];
                 queue.push_back((x, y));
             }
@@ -800,14 +780,11 @@ fn pull_coastal_builtup_toward_water(
         }
     }
 
-    // Apply the linear pull-down to built-up cells in range.
     let mut affected = 0usize;
+    let mut skipped_cliff = 0usize;
     let denom = max_distance as f64;
     for y in 0..h {
         for x in 0..w {
-            if lc_grid[y][x] != LC_BUILT_UP {
-                continue;
-            }
             let d = dist[y][x];
             if d == 0 || d > max_distance {
                 continue;
@@ -817,18 +794,20 @@ fn pull_coastal_builtup_toward_water(
             if !wl.is_finite() || !orig.is_finite() {
                 continue;
             }
-            // Linear falloff: weight ≈ 1 at d=1 (right next to water),
-            // weight → 0 as d → max_distance.
+            if orig - wl > MAX_PULL_DROP_M {
+                skipped_cliff += 1;
+                continue;
+            }
             let weight = ((max_distance - d) as f64 / denom).clamp(0.0, 1.0);
             heights[y][x] = orig * (1.0 - weight) + wl * weight;
             affected += 1;
         }
     }
 
-    if affected > 0 {
+    if affected > 0 || skipped_cliff > 0 {
         eprintln!(
-            "Land cover repair: pulled {} coastal built-up cells toward water (within {} cells)",
-            affected, max_distance
+            "Land cover repair: pulled {} coastal land cells toward water (within {} cells); kept {} cells above {} m as real cliffs",
+            affected, max_distance, skipped_cliff, MAX_PULL_DROP_M
         );
     }
 }
@@ -856,6 +835,7 @@ fn smooth_built_up_gaussian(
     lc_grid: &[Vec<u8>],
     is_water_surface: &[Vec<bool>],
     sigma_cells: f64,
+    report: &dyn Fn(f64),
 ) {
     const MIN_SIGMA: f64 = 1.5;
     if sigma_cells < MIN_SIGMA {
@@ -887,7 +867,8 @@ fn smooth_built_up_gaussian(
 
     // Blur the mask itself -> feathered weights with a smooth 0..1 falloff
     // across the built-up boundary. Without this we'd get a visible seam.
-    let feathered_mask = gaussian_blur_grid(&mask, sigma_cells);
+    // Mask blur is the first half of this step's progress, heights blur the second.
+    let feathered_mask = gaussian_blur_grid_reported(&mask, sigma_cells, &|f| report(0.5 * f));
     drop(mask);
 
     // Build the source for the heights blur with *water-surface* cells set
@@ -908,7 +889,8 @@ fn smooth_built_up_gaussian(
                 .collect()
         })
         .collect();
-    let blurred_heights = gaussian_blur_grid(&heights_for_blur, sigma_cells);
+    let blurred_heights =
+        gaussian_blur_grid_reported(&heights_for_blur, sigma_cells, &|f| report(0.5 + 0.5 * f));
     drop(heights_for_blur);
 
     // Blend through the feathered mask. Water-surface cells are skipped so
@@ -943,6 +925,20 @@ fn smooth_built_up_gaussian(
 /// Edges are handled by renormalizing weights over the valid samples so the
 /// blur doesn't darken the border of the grid.
 pub(crate) fn gaussian_blur_grid(grid: &[Vec<f64>], sigma: f64) -> Vec<Vec<f64>> {
+    gaussian_blur_grid_reported(grid, sigma, &|_| {})
+}
+
+/// Same blur and output as `gaussian_blur_grid`, but calls `report(fraction)`
+/// (0.0..1.0) a handful of times from the calling thread as it works. On a
+/// city-sized grid each pass takes seconds, so this lets a progress bar advance
+/// instead of freezing. Rows/columns are processed in chunks purely so progress
+/// can be reported between them — both axes stay fully independent, so the
+/// result is identical to processing them all at once.
+fn gaussian_blur_grid_reported(
+    grid: &[Vec<f64>],
+    sigma: f64,
+    report: &dyn Fn(f64),
+) -> Vec<Vec<f64>> {
     let kernel_size: usize = (sigma * 3.0).ceil() as usize * 2 + 1;
     let kernel = create_gaussian_kernel(kernel_size, sigma);
     let half = kernel_size as i32 / 2;
@@ -956,72 +952,88 @@ pub(crate) fn gaussian_blur_grid(grid: &[Vec<f64>], sigma: f64) -> Vec<Vec<f64>>
         return vec![Vec::new(); h];
     }
 
+    // ~10 chunks per pass: enough to animate the bar, few enough that the extra
+    // rayon barriers cost nothing measurable.
+    const CHUNKS: usize = 10;
+
     // Horizontal pass — rows are independent.
-    let after_h: Vec<Vec<f64>> = grid
-        .par_iter()
-        .map(|row| {
-            let row_len = row.len() as i32;
-            (0..row.len())
-                .map(|i| {
-                    let mut sum = 0.0;
-                    let mut wsum = 0.0;
-                    for (j, &k) in kernel.iter().enumerate() {
-                        let idx = i as i32 + j as i32 - half;
-                        if idx >= 0 && idx < row_len {
-                            let v = row[idx as usize];
-                            if v.is_finite() {
-                                sum += v * k;
-                                wsum += k;
+    let row_chunk = h.div_ceil(CHUNKS);
+    let mut after_h: Vec<Vec<f64>> = Vec::with_capacity(h);
+    for rows in grid.chunks(row_chunk) {
+        let mut part: Vec<Vec<f64>> = rows
+            .par_iter()
+            .map(|row| {
+                let row_len = row.len() as i32;
+                (0..row.len())
+                    .map(|i| {
+                        let mut sum = 0.0;
+                        let mut wsum = 0.0;
+                        for (j, &k) in kernel.iter().enumerate() {
+                            let idx = i as i32 + j as i32 - half;
+                            if idx >= 0 && idx < row_len {
+                                let v = row[idx as usize];
+                                if v.is_finite() {
+                                    sum += v * k;
+                                    wsum += k;
+                                }
                             }
                         }
-                    }
-                    if wsum > 0.0 {
-                        sum / wsum
-                    } else {
-                        f64::NAN
-                    }
-                })
-                .collect()
-        })
-        .collect();
+                        if wsum > 0.0 {
+                            sum / wsum
+                        } else {
+                            f64::NAN
+                        }
+                    })
+                    .collect()
+            })
+            .collect();
+        after_h.append(&mut part);
+        report(0.5 * (after_h.len() as f64 / h as f64));
+    }
 
     // Vertical pass — columns are independent. Work column-at-a-time to keep
     // memory access sequential within each parallel task.
-    let blurred_columns: Vec<Vec<f64>> = (0..w)
-        .into_par_iter()
-        .map(|x| {
-            let column: Vec<f64> = after_h.iter().map(|row| row[x]).collect();
-            let col_len = column.len() as i32;
-            (0..column.len())
-                .map(|y| {
-                    let mut sum = 0.0;
-                    let mut wsum = 0.0;
-                    for (j, &k) in kernel.iter().enumerate() {
-                        let idx = y as i32 + j as i32 - half;
-                        if idx >= 0 && idx < col_len {
-                            let v = column[idx as usize];
-                            if v.is_finite() {
-                                sum += v * k;
-                                wsum += k;
+    let col_chunk = w.div_ceil(CHUNKS);
+    let mut out: Vec<Vec<f64>> = vec![vec![0.0; w]; h];
+    let mut x0 = 0usize;
+    while x0 < w {
+        let x1 = (x0 + col_chunk).min(w);
+        let blurred: Vec<(usize, Vec<f64>)> = (x0..x1)
+            .into_par_iter()
+            .map(|x| {
+                let column: Vec<f64> = after_h.iter().map(|row| row[x]).collect();
+                let col_len = column.len() as i32;
+                let col: Vec<f64> = (0..column.len())
+                    .map(|y| {
+                        let mut sum = 0.0;
+                        let mut wsum = 0.0;
+                        for (j, &k) in kernel.iter().enumerate() {
+                            let idx = y as i32 + j as i32 - half;
+                            if idx >= 0 && idx < col_len {
+                                let v = column[idx as usize];
+                                if v.is_finite() {
+                                    sum += v * k;
+                                    wsum += k;
+                                }
                             }
                         }
-                    }
-                    if wsum > 0.0 {
-                        sum / wsum
-                    } else {
-                        f64::NAN
-                    }
-                })
-                .collect()
-        })
-        .collect();
-
-    // Transpose columns back to row-major.
-    let mut out: Vec<Vec<f64>> = vec![vec![0.0; w]; h];
-    for (x, col) in blurred_columns.into_iter().enumerate() {
-        for (y, v) in col.into_iter().enumerate() {
-            out[y][x] = v;
+                        if wsum > 0.0 {
+                            sum / wsum
+                        } else {
+                            f64::NAN
+                        }
+                    })
+                    .collect();
+                (x, col)
+            })
+            .collect();
+        for (x, col) in blurred {
+            for (y, v) in col.into_iter().enumerate() {
+                out[y][x] = v;
+            }
         }
+        x0 = x1;
+        report(0.5 + 0.5 * (x0 as f64 / w as f64));
     }
     out
 }
@@ -1184,13 +1196,16 @@ pub fn filter_elevation_outliers(height_grid: &mut [Vec<f64>]) {
 /// Scale raw elevation (meters) to Minecraft Y coordinates, keeping f64 precision.
 /// `extended_max_y` is the cap when `disable_height_limit` is on (Java datapack:
 /// 2031; Bedrock BP: 512); ignored otherwise.
+/// Scales real-world metre heights to Minecraft Y. Also returns the affine
+/// parameters `(min_height_m, blocks_per_meter)` so a real-world elevation can
+/// be converted back to a Minecraft Y threshold (e.g. for the snow line).
 pub fn scale_to_minecraft(
     blurred_heights: &[Vec<f64>],
     scale: f64,
     ground_level: i32,
     disable_height_limit: bool,
     extended_max_y: i32,
-) -> Vec<Vec<f64>> {
+) -> (Vec<Vec<f64>>, f64, f64) {
     // Derive min/max
     let (min_height, max_height) = blurred_heights
         .par_iter()
@@ -1210,11 +1225,20 @@ pub fn scale_to_minecraft(
             |(lo1, hi1), (lo2, hi2)| (lo1.min(lo2), hi1.max(hi2)),
         );
 
-    let (min_height, _max_height, height_range) =
+    let (min_height, height_range) =
         if !min_height.is_finite() || !max_height.is_finite() || min_height >= max_height {
-            (0.0_f64, 0.0_f64, 0.0_f64)
+            // Zero-relief/degenerate: keep the real min height (the snow line
+            // needs it) but flatten the range so every cell maps to ground_level.
+            // `min <= max` distinguishes true flat terrain from an all-NaN grid,
+            // whose reduce leaves min = f64::MAX (finite but bogus) -> use 0.
+            let real_min = if min_height.is_finite() && min_height <= max_height {
+                min_height
+            } else {
+                0.0
+            };
+            (real_min, 0.0_f64)
         } else {
-            (min_height, max_height, max_height - min_height)
+            (min_height, max_height - min_height)
         };
 
     let effective_max_y = if disable_height_limit {
@@ -1264,12 +1288,38 @@ pub fn scale_to_minecraft(
         })
         .collect();
 
-    mc_heights
+    let blocks_per_meter = if height_range > 0.0 {
+        scaled_range / height_range
+    } else {
+        0.0
+    };
+    (mc_heights, min_height, blocks_per_meter)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn scale_flat_terrain_keeps_real_min_height() {
+        // Zero-relief terrain must still report its true elevation so the snow
+        // line can tell a high plateau from a low one.
+        let grid = vec![vec![4500.0_f64; 4]; 4];
+        let (mc, min_m, blocks_per_meter) = scale_to_minecraft(&grid, 1.0, 64, false, 0);
+        assert_eq!(min_m, 4500.0);
+        assert_eq!(blocks_per_meter, 0.0);
+        // Every cell flattens to ground level.
+        assert!(mc.iter().flatten().all(|&y| (y - 64.0).abs() < 1e-9));
+    }
+
+    #[test]
+    fn scale_all_nan_grid_min_height_zero() {
+        // No finite samples must not leak the f64::MAX reduce sentinel as min.
+        let grid = vec![vec![f64::NAN; 4]; 4];
+        let (_mc, min_m, blocks_per_meter) = scale_to_minecraft(&grid, 1.0, 64, false, 0);
+        assert_eq!(min_m, 0.0);
+        assert_eq!(blocks_per_meter, 0.0);
+    }
 
     #[test]
     fn test_fill_nan_values() {

@@ -45,7 +45,7 @@ fn download_with_reqwest(
 
     match response {
         Ok(resp) => {
-            emit_gui_progress_update(3.0, "Downloading data...");
+            emit_gui_progress_update(3.0, "");
             if resp.status().is_success() {
                 let text = resp.text()?;
                 if text.is_empty() {
@@ -129,7 +129,7 @@ pub fn fetch_data_from_overpass(
     save_file: Option<&str>,
 ) -> Result<OsmData, Box<dyn std::error::Error>> {
     println!("{} Fetching data...", "[1/7]".bold());
-    emit_gui_progress_update(1.0, "Fetching data...");
+    emit_gui_progress_update(1.0, "Downloading map data...");
 
     // List of Overpass API servers
     let arnis_api_server = "https://api.arnismc.com/overpass/api/interpreter";
@@ -152,6 +152,7 @@ pub fn fetch_data_from_overpass(
     (
         nwr["building"];
         nwr["building:part"];
+        relation["type"="building"];
         nwr["highway"];
         nwr["landuse"]["landuse"!="salt_pond"];
         nwr["natural"]["natural"!="coastline"]["natural"!="bay"]["natural"!="strait"];
@@ -172,6 +173,7 @@ pub fn fetch_data_from_overpass(
         nwr["advertising"];
         nwr["man_made"];
         nwr["aeroway"];
+        nwr["3dmr"];
         way["place"]["place"!~"^(ocean|sea|bay|strait|sound|fjord)$"];
         way;
     )->.relsinbbox;
@@ -194,7 +196,7 @@ pub fn fetch_data_from_overpass(
     {
         // Fetch data from Overpass API.
         // Strategy:
-        // 1) 25% chance: probe one random official server first.
+        // 1) 50% chance: probe one random official server first.
         // 2) If the probe does not succeed, run the normal path: arnis API once,
         //    then shuffled official, then shuffled fallback servers.
         #[derive(Clone, Copy, PartialEq, Eq)]
@@ -207,7 +209,7 @@ pub fn fetch_data_from_overpass(
         let mut request_plan: Vec<(&str, ServerKind)> = Vec::new();
         let mut probed_server: Option<&str> = None;
 
-        if rng.random_bool(0.25) {
+        if rng.random_bool(0.5) {
             let probe_idx = rng.random_range(0..api_servers.len());
             let probe_server = api_servers[probe_idx];
             request_plan.push((probe_server, ServerKind::Primary));

@@ -18,7 +18,7 @@ pub fn generate_leisure(
 ) {
     if let Some(leisure_type) = element.tags.get("leisure") {
         let mut previous_node: Option<(i32, i32)> = None;
-        let mut corner_addup: (i32, i32, i32) = (0, 0, 0);
+        let mut corner_count: i32 = 0;
         let mut current_leisure: Vec<(i32, i32)> = vec![];
 
         // Determine block type based on leisure type
@@ -30,9 +30,10 @@ pub fn generate_leisure(
             "playground" | "recreation_ground" | "pitch" | "beach_resort" | "dog_park" => {
                 GREEN_STAINED_HARDENED_CLAY
             }
-            "swimming_pool" | "swimming_area" => WATER, //Swimming area: Area in a larger body of water for swimming
-            "bathing_place" => SMOOTH_SANDSTONE,        // Could be sand or concrete
-            "outdoor_seating" => SMOOTH_STONE,          //Usually stone or stone bricks
+            "swimming_pool" | "swimming_area" => WATER, // Swimming area: Area in a larger body of water for swimming
+            "marina" => WATER, // A sort of parking lot for small watercraft
+            "bathing_place" => SMOOTH_SANDSTONE, // Could be sand or concrete
+            "outdoor_seating" => SMOOTH_STONE, //Usually stone or stone bricks
             "water_park" | "slipway" => LIGHT_GRAY_CONCRETE, // Water park area, not the pool. Usually is concrete
             "ice_rink" => PACKED_ICE, // TODO: Ice for Ice Rink, needs building defined
             _ => GRASS_BLOCK,
@@ -71,15 +72,13 @@ pub fn generate_leisure(
                 }
 
                 current_leisure.push((node.x, node.z));
-                corner_addup.0 += node.x;
-                corner_addup.1 += node.z;
-                corner_addup.2 += 1;
+                corner_count += 1;
             }
             previous_node = Some((node.x, node.z));
         }
 
         // Flood-fill the interior of the leisure area using cache
-        if corner_addup != (0, 0, 0) {
+        if corner_count > 0 {
             let filled_area = flood_fill_cache.get_or_compute(element, args.timeout.as_ref());
 
             // Use deterministic RNG seeded by element ID for consistent results across region boundaries
@@ -122,52 +121,11 @@ pub fn generate_leisure(
                         _ => {}
                     }
                 }
+            }
 
-                // Add playground or recreation ground features
-                if matches!(leisure_type.as_str(), "playground" | "recreation_ground") {
-                    let random_choice: i32 = rng.random_range(0..5000);
-
-                    match random_choice {
-                        0..10 => {
-                            // Swing set
-                            for y in 1..=3 {
-                                editor.set_block(OAK_FENCE, x - 1, y, z, None, None);
-                                editor.set_block(OAK_FENCE, x + 1, y, z, None, None);
-                            }
-                            editor.set_block(OAK_PLANKS, x - 1, 4, z, None, None);
-                            editor.set_block(OAK_SLAB, x, 4, z, None, None);
-                            editor.set_block(OAK_PLANKS, x + 1, 4, z, None, None);
-                            editor.set_block(STONE_BLOCK_SLAB, x, 2, z, None, None);
-                        }
-                        10..20 => {
-                            // Slide
-                            editor.set_block(OAK_SLAB, x, 1, z, None, None);
-                            editor.set_block(OAK_SLAB, x + 1, 2, z, None, None);
-                            editor.set_block(OAK_SLAB, x + 2, 3, z, None, None);
-
-                            editor.set_block(OAK_PLANKS, x + 2, 2, z, None, None);
-                            editor.set_block(OAK_PLANKS, x + 2, 1, z, None, None);
-
-                            editor.set_block(LADDER, x + 2, 2, z - 1, None, None);
-                            editor.set_block(LADDER, x + 2, 1, z - 1, None, None);
-                        }
-                        20..30 => {
-                            // Sandpit
-                            editor.fill_blocks(
-                                SAND,
-                                x - 3,
-                                0,
-                                z - 3,
-                                x + 3,
-                                0,
-                                z + 3,
-                                Some(&[GREEN_STAINED_HARDENED_CLAY]),
-                                None,
-                            );
-                        }
-                        _ => {}
-                    }
-                }
+            // Stamp bundled playground structures (replaces the old procedural props).
+            if matches!(leisure_type.as_str(), "playground" | "recreation_ground") {
+                crate::structures::playground::scatter_playgrounds(editor, filled_area.as_slice());
             }
         }
     }

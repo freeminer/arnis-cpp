@@ -30,9 +30,10 @@ Thumbs.db
 # Generated files
 /export.json
 /parsed_osm_data.txt
-/elevation_debug.png
+/*debug*.png
 /terrain-tile-cache
 /arnis-tile-cache
+
 /gen/
 /build/
 *.rmeta
@@ -51,3 +52,7 @@ gen/
 /flake/*
 !/flake/flake.nix
 !/flake/flake.lock
+
+# Local-only: stray diff + Teddy fork clone (must never be committed)
+/diff.diff
+/teddy-arnis/

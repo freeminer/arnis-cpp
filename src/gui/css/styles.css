@@ -152,6 +152,29 @@ a:hover {
   margin-bottom: 5px;
 }
 
+/* Time-remaining centered on the bar. White to match the percentage label; a
+   text-shadow keeps it legible over the green fill and the lighter track. */
+.progress-eta-overlay {
+  position: absolute;
+  top: 50%;
+  left: 50%;
+  transform: translate(-50%, -50%);
+  z-index: 1;
+  color: #ffffff;
+  font-size: 0.85em;
+  line-height: 1;
+  font-weight: 700;
+  white-space: nowrap;
+  pointer-events: none;
+  text-shadow: 0 1px 2px rgba(0, 0, 0, 0.85), 0 0 2px rgba(0, 0, 0, 0.7);
+  opacity: 0;
+  transition: opacity 0.3s ease;
+}
+
+.progress-eta-overlay.visible {
+  opacity: 1;
+}
+
 .world-name-label {
   font-size: 0.8em;
   color: #fecc44;
@@ -222,6 +245,7 @@ button:hover {
   background-color: #e0e0e0;
   border-radius: 10px;
   overflow: hidden;
+  position: relative;
 }
 
 #progress-detail {
@@ -236,6 +260,38 @@ button:hover {
   width: 0%;
   background-color: #4caf50;
   transition: width 0.4s;
+  position: relative;
+  overflow: hidden;
+}
+
+/* Subtle modern sheen: evenly-spaced soft diagonal highlights drifting across.
+   Period is 16px along the 45deg axis; the keyframe shifts by 16/cos45 so the
+   loop is seamless. Animates background-position only (width stays JS-driven). */
+.progress-bar::after {
+  content: "";
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  background-image: repeating-linear-gradient(
+    45deg,
+    transparent 0,
+    transparent 6px,
+    rgba(255, 255, 255, 0.12) 8px,
+    rgba(255, 255, 255, 0.12) 11px,
+    transparent 13px,
+    transparent 16px
+  );
+  will-change: background-position;
+  animation: progress-sheen 2s linear infinite;
+}
+
+@keyframes progress-sheen {
+  from { background-position: 0 0; }
+  to { background-position: 22.627px 0; }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .progress-bar::after { animation: none; will-change: auto; }
 }
 
 .footer {
@@ -310,7 +366,7 @@ button:hover {
   border-radius: 0 0 0 8px;
 }
 
-.format-toggle-btn:last-child {
+.format-toggle-btn.format-toggle-btn--rightmost {
   border-radius: 0 0 8px 0;
   border-left: 1px solid rgba(255, 255, 255, 0.15);
 }
@@ -483,48 +539,147 @@ button:hover {
   }
 }
 
-#terrain-toggle {
+/* Update / release-notes modal */
+.update-modal-content {
+  width: 600px;
+  max-width: calc(100vw - 40px);
+}
+
+.update-modal-body {
+  font-size: 0.9em;
+  line-height: 1.45;
+  padding: 12px 14px;
+  border: 1px solid #5b5b5b;
+  border-radius: 6px;
+  background-color: #5f5f5f;
+  margin-top: 4px;
+  text-align: justify;
+  text-justify: inter-word;
+  hyphens: auto;
+}
+
+.update-modal-body img {
+  /* Release banner / inline screenshots: scale to container without distortion */
+  max-width: 100%;
+  height: auto;
+  border-radius: 4px;
+  display: block;
+  margin: 8px auto;
+}
+
+.update-modal-body h1,
+.update-modal-body h2,
+.update-modal-body h3 {
+  margin: 14px 0 6px 0;
+  line-height: 1.25;
+}
+
+.update-modal-body h1 { font-size: 1.25em; }
+.update-modal-body h2 { font-size: 1.12em; }
+.update-modal-body h3 { font-size: 1.02em; }
+
+.update-modal-body p {
+  margin: 6px 0;
+}
+
+.update-modal-body ul,
+.update-modal-body ol {
+  margin: 6px 0;
+  padding-left: 22px;
+}
+
+.update-modal-body li {
+  margin: 2px 0;
+}
+
+.update-modal-body a {
+  color: #fecc44;
+  text-decoration: none;
+}
+
+.update-modal-body a:hover {
+  text-decoration: underline;
+}
+
+.update-modal-body code {
+  background-color: rgba(0, 0, 0, 0.25);
+  padding: 1px 5px;
+  border-radius: 3px;
+  font-family: ui-monospace, "Cascadia Code", Menlo, Consolas, monospace;
+  font-size: 0.9em;
+}
+
+.update-modal-body pre {
+  background-color: rgba(0, 0, 0, 0.25);
+  padding: 8px 10px;
+  border-radius: 4px;
+  overflow-x: auto;
+}
+
+.update-modal-body pre code {
+  background: none;
+  padding: 0;
+}
+
+.update-modal-body hr {
+  border: none;
+  border-top: 1px solid #797979;
+  margin: 12px 0;
+}
+
+.update-modal-body blockquote {
+  border-left: 3px solid #fecc44;
+  margin: 8px 0;
+  padding: 2px 10px;
+  color: #d8d8d8;
+}
+
+.update-modal-download-note {
+  flex-shrink: 0;
+  margin-top: 12px;
+  font-size: 0.8em;
+  line-height: 1.4;
+  opacity: 0.8;
+  text-align: center;
+}
+
+.update-modal-actions {
+  flex-shrink: 0;
+  margin-top: 12px;
+  display: flex;
+  justify-content: center;
+  gap: 10px;
+}
+
+.update-modal-actions button {
+  padding: 8px 16px;
+  font-weight: 600;
+  border: none;
+  border-radius: 6px;
+  cursor: pointer;
+}
+
+.update-modal-actions .btn-primary:hover {
+  filter: brightness(1.05);
+}
+
+#update-download-button[disabled] {
+  opacity: 0.5;
+  cursor: not-allowed;
+}
+
+/* Shared accent for all checkboxes and sliders so new toggles need no per-id CSS. */
+input[type="checkbox"],
+input[type="range"] {
   accent-color: #fecc44;
 }
 
-.terrain-toggle-container, .scale-slider-container {
+.terrain-toggle-container,
+.fillground-toggle-container,
+.interior-toggle-container,
+.roof-toggle-container,
+.scale-slider-container {
   margin: 15px 0;
-}
-
-#fillground-toggle {
-  accent-color: #fecc44;
-}
-
-.fillground-toggle-container, .scale-slider-container {
-  margin: 15px 0;
-}
-
-#interior-toggle {
-  accent-color: #fecc44;
-}
-
-.interior-toggle-container, .scale-slider-container {
-  margin: 15px 0;
-}
-
-#roof-toggle {
-  accent-color: #fecc44;
-}
-
-.roof-toggle-container, .scale-slider-container {
-  margin: 15px 0;
-}
-
-#land-cover-toggle {
-  accent-color: #fecc44;
-}
-
-#disable-height-limit-toggle {
-  accent-color: #fecc44;
-}
-
-#telemetry-toggle {
-  accent-color: #fecc44;
 }
 
 .scale-slider-container label {
@@ -826,11 +981,13 @@ button:hover {
 
 .license-button-row {
   justify-content: center;
+  gap: 8px;
   margin-top: 5px;
 }
 
 .license-button {
-  width: 80% !important;
+  flex: 1;
+  max-width: 50%;
 }
 
 /* Buy Me a Coffee and Discord styling */
@@ -842,18 +999,21 @@ button:hover {
   margin-bottom: -10px;
 }
 
+.github-link,
 .buymeacoffee-link,
 .discord-link {
   display: inline-block;
   transition: transform 0.3s ease, opacity 0.3s ease;
 }
 
+.github-link:hover,
 .buymeacoffee-link:hover,
 .discord-link:hover {
   transform: scale(1.05);
   opacity: 0.8;
 }
 
+.github-logo,
 .buymeacoffee-logo,
 .discord-logo {
   height: 35px;

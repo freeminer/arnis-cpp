@@ -2,6 +2,9 @@ use crate::args::Args;
 use crate::block_definitions::*;
 use crate::bresenham::bresenham_line;
 use crate::coordinate_system::cartesian::{XZBBox, XZPoint};
+use crate::element_processing::bridge_styles::{
+    decorate_bridge_above_deck, place_bridge_support_below_deck, BridgePathSample, BridgeStyle,
+};
 use crate::element_processing::bridges::{BridgeStructureMap, BridgeSurfaceMap};
 use crate::element_processing::get_nearest_non_road_block;
 use crate::element_processing::surfaces::{
@@ -538,11 +541,6 @@ fn generate_highways_internal(
             // Default surface mix. Overridden below based on highway_type or
             // an explicit surface=* tag via `get_blocks_for_surface`.
             let mut block_types: &[Block] = DEFAULT_ROAD_MIX;
-            let mut block_range: i32 = 2;
-            // default_lanes == 2 for highway types that historically had a
-            // center stripe; flipped to `lanes > 1` check below after we
-            // resolve the lanes tag. Keeps the same visual default.
-            let mut default_lanes: i32 = 1;
             let scale_factor = args.scale;
 
             // Reuse the function-level layer resolution (already normalised
@@ -556,60 +554,15 @@ fn generate_highways_internal(
                 }
             }
 
-            // Determine block type and range based on highway type
+            // Surface palette per highway type; width is resolved by
+            // highway_block_range below so renderer and prescan stay in sync.
             match highway_type.as_str() {
-                "footway" | "pedestrian" => {
+                "footway" | "pedestrian" | "service" | "steps" => {
                     block_types = &[GRAY_CONCRETE];
-                    block_range = 1;
                 }
-                "path" => {
-                    block_types = &[DIRT_PATH];
-                    block_range = 1;
-                }
-                "motorway" | "primary" | "trunk" => {
-                    block_range = 5;
-                    default_lanes = 2;
-                }
-                "secondary" => {
-                    block_range = 4;
-                    default_lanes = 2;
-                }
-                "tertiary" => {
-                    default_lanes = 2;
-                }
-                "track" => {
-                    block_range = 1;
-                }
-                "service" => {
-                    block_types = &[GRAY_CONCRETE];
-                    block_range = 2;
-                }
-                "secondary_link" | "tertiary_link" => {
-                    //Exit ramps, sliproads
-                    block_range = 1;
-                }
-                "escape" => {
-                    // Sand trap for vehicles on mountainous roads
-                    block_types = &[SAND];
-                    block_range = 1;
-                }
-                "steps" => {
-                    //TODO: Add correct stairs respecting height, step_count, etc.
-                    block_types = &[GRAY_CONCRETE];
-                    block_range = 1;
-                }
-
-                _ => {
-                    if let Some(lanes) = element.tags().get("lanes") {
-                        if lanes == "2" {
-                            block_range = 3;
-                            default_lanes = 2;
-                        } else if lanes != "1" {
-                            block_range = 4;
-                            default_lanes = 2;
-                        }
-                    }
-                }
+                "path" => block_types = &[DIRT_PATH],
+                "escape" => block_types = &[SAND], // sand trap for runaway vehicles
+                _ => {}
             }
 
             let ProcessedElement::Way(way) = element else {
@@ -620,6 +573,15 @@ fn generate_highways_internal(
             let bridge_ramp = bridge_structures.lookup_ramp(way.id);
             let is_bridge_member = bridge_member.is_some();
             let is_bridge_ramp = bridge_ramp.is_some();
+            let bridge_style = bridge_member.map(|m| m.style).unwrap_or(BridgeStyle::Beam);
+            let bridge_start_is_boundary = bridge_member
+                .map(|m| m.start_is_group_boundary)
+                .unwrap_or(true);
+            let bridge_end_is_boundary = bridge_member
+                .map(|m| m.end_is_group_boundary)
+                .unwrap_or(true);
+            let bridge_foundation_block = bridge_style.foundation_block();
+            let bridge_rail_block_choice = bridge_style.rail_block();
 
             // Optional surface override via the OSM `surface=*` tag. Applies to
             // all road types; for single-block surfaces like concrete or sand
@@ -647,39 +609,19 @@ fn generate_highways_internal(
                 block_types = &[SMOOTH_STONE];
             }
 
-            // Optional explicit width via `width=*` (meters ≈ blocks).
-            // Clamped to the terrain-flattening helper's sample-buffer cap.
-            if let Some(w) = element
-                .tags()
-                .get("width")
-                .and_then(|w| w.parse::<f32>().ok())
-            {
-                block_range = ((w / 2.0).round() as i32).clamp(1, MAX_BLOCK_RANGE as i32);
-            }
+            // Canonical width (shared with prescan/bridge consumers).
+            let block_range = highway_block_range(highway_type, &way.tags, scale_factor);
 
-            // Resolve lane-marking count. `lane_markings=no` disables them,
-            // `lanes=*` overrides the default for this highway type.
-            // Multi-lane inner dividers are drawn for lanes >= 2 (one line
-            // between every pair of adjacent lanes).
-            //
-            // Clamped to a realistic upper bound: the world's widest real
-            // roads have ~12 lanes, but an `i32` parse will accept
-            // arbitrary OSM values. Without the cap, a stray `lanes=999999`
-            // tag (typo or vandalism) would send the inner divider loop
-            // into millions of iterations per bresenham point.
+            // Lane-marking count; lane_markings=no drops the dividers, not the width.
             const MAX_LANES: i32 = 16;
-            let mut lanes = element
-                .tags()
+            let mut lanes = way
+                .tags
                 .get("lanes")
                 .and_then(|l| l.parse::<i32>().ok())
-                .unwrap_or(default_lanes)
-                .clamp(0, MAX_LANES);
-            if element.tags().get("lane_markings").map(|s| s.as_str()) == Some("no") {
+                .unwrap_or_else(|| highway_default_lanes(highway_type))
+                .clamp(1, MAX_LANES);
+            if way.tags.get("lane_markings").map(|s| s.as_str()) == Some("no") {
                 lanes = 1;
-            }
-
-            if scale_factor < 1.0 {
-                block_range = ((block_range as f64) * scale_factor).floor() as i32;
             }
 
             // Elevation based on layer (already normalised; `LAYER_HEIGHT_STEP`
@@ -747,6 +689,8 @@ fn generate_highways_internal(
             let mut cumulative_distance_from_start: usize = 0;
             // Previous bridge cell Y for steep-step gap fill.
             let mut previous_bridge_y: Option<i32> = None;
+            // Centerline samples captured for above-deck decoration after the segment loop.
+            let mut bridge_path: Vec<BridgePathSample> = Vec::new();
             // Previous rail cell per side; used to orthogonally connect diagonal steps.
             let mut previous_rail_left: Option<(i32, i32)> = None;
             let mut previous_rail_right: Option<(i32, i32)> = None;
@@ -886,6 +830,20 @@ fn generate_highways_internal(
                                 dir_horizontal,
                                 &mut row_medians,
                             );
+                        }
+
+                        // Only Arch actually reads this; other styles re-sample inside place_pillar.
+                        let centerline_ground_y =
+                            if is_bridge_member && matches!(bridge_style, BridgeStyle::Arch) {
+                                editor.get_ground_level(*x, *z)
+                            } else {
+                                0
+                            };
+
+                        if is_bridge_member {
+                            if let (Some(by), Some(perp)) = (bridge_y_here, bridge_rail_perp) {
+                                bridge_path.push((*x, by, *z, perp));
+                            }
                         }
 
                         // Backfill steep ramp steps where deck+foundation alone leaves an air band.
@@ -1031,10 +989,15 @@ fn generate_highways_internal(
                                 let is_elevated_deck =
                                     is_bridge_member || is_bridge_ramp || effective_elevation > 0;
                                 if is_elevated_deck && cell_y > 0 {
-                                    // Add 1 layer of stone bricks underneath the highway surface
+                                    // Foundation: stone bricks for everything except wooden boardwalks.
+                                    let foundation = if is_bridge_member {
+                                        bridge_foundation_block
+                                    } else {
+                                        STONE_BRICKS
+                                    };
                                     if use_absolute_y {
                                         editor.set_block_absolute(
-                                            STONE_BRICKS,
+                                            foundation,
                                             set_x,
                                             cell_y - 1,
                                             set_z,
@@ -1043,7 +1006,7 @@ fn generate_highways_internal(
                                         );
                                     } else {
                                         editor.set_block(
-                                            STONE_BRICKS,
+                                            foundation,
                                             set_x,
                                             cell_y - 1,
                                             set_z,
@@ -1052,7 +1015,33 @@ fn generate_highways_internal(
                                         );
                                     }
 
-                                    if use_absolute_y {
+                                    if is_bridge_member {
+                                        let interval = bridge_style.pillar_interval();
+                                        let is_center = dx == 0 && dz == 0;
+                                        // Beam keeps the legacy (x+z) rule; other styles use
+                                        // path-index so spacing stays consistent on diagonals.
+                                        let is_pillar = is_center
+                                            && interval > 0
+                                            && match bridge_style {
+                                                BridgeStyle::Beam => {
+                                                    (set_x + set_z).rem_euclid(interval as i32) == 0
+                                                }
+                                                _ => tds.is_multiple_of(interval),
+                                            };
+                                        place_bridge_support_below_deck(
+                                            editor,
+                                            bridge_style,
+                                            set_x,
+                                            cell_y,
+                                            set_z,
+                                            centerline_ground_y,
+                                            tds,
+                                            total_bresenham_length,
+                                            use_absolute_y,
+                                            is_center,
+                                            is_pillar,
+                                        );
+                                    } else if use_absolute_y {
                                         add_highway_support_pillar_absolute(
                                             editor,
                                             set_x,
@@ -1095,36 +1084,58 @@ fn generate_highways_internal(
                                     Some(prev) => stair_fill_cells(prev, rail_cell),
                                     None => vec![rail_cell],
                                 };
-                                for (rx, rz) in cells_to_fill {
-                                    if bridge_surface.contains(rx, rz) {
-                                        continue;
-                                    }
-                                    editor.set_block_absolute(
-                                        LIGHT_GRAY_CONCRETE,
-                                        rx,
-                                        by,
-                                        rz,
-                                        None,
-                                        Some(ROAD_PROTECTED_SURFACES),
-                                    );
-                                    if by > 0 {
+                                // Styles like boardwalk skip the side railing entirely.
+                                let skip_side_railing =
+                                    is_bridge_member && !bridge_style.has_side_railing();
+                                if !skip_side_railing {
+                                    for (rx, rz) in cells_to_fill {
+                                        if bridge_surface.contains(rx, rz) {
+                                            continue;
+                                        }
+                                        let rail_block = if is_bridge_member {
+                                            bridge_rail_block_choice
+                                        } else {
+                                            LIGHT_GRAY_CONCRETE
+                                        };
                                         editor.set_block_absolute(
-                                            STONE_BRICKS,
+                                            rail_block,
                                             rx,
-                                            by - 1,
+                                            by,
                                             rz,
                                             None,
-                                            None,
+                                            Some(ROAD_PROTECTED_SURFACES),
                                         );
+                                        let rail_foundation = if is_bridge_member {
+                                            bridge_style.rail_foundation_block()
+                                        } else {
+                                            STONE_BRICKS
+                                        };
+                                        if by > 0 {
+                                            editor.set_block_absolute(
+                                                rail_foundation,
+                                                rx,
+                                                by - 1,
+                                                rz,
+                                                None,
+                                                None,
+                                            );
+                                        }
+                                        let parapet = if is_bridge_member {
+                                            bridge_style.parapet_block()
+                                        } else {
+                                            Some(BRICK_WALL)
+                                        };
+                                        if let Some(p) = parapet {
+                                            editor.set_block_absolute(
+                                                p,
+                                                rx,
+                                                by + 1,
+                                                rz,
+                                                None,
+                                                None,
+                                            );
+                                        }
                                     }
-                                    editor.set_block_absolute(
-                                        BRICK_WALL,
-                                        rx,
-                                        by + 1,
-                                        rz,
-                                        None,
-                                        None,
-                                    );
                                 }
                                 *prev_state = Some(rail_cell);
                             }
@@ -1213,6 +1224,17 @@ fn generate_highways_internal(
                     cumulative_distance_from_start += segment_length - 1;
                 }
                 previous_node = Some((node.x, node.z));
+            }
+
+            if is_bridge_member {
+                decorate_bridge_above_deck(
+                    editor,
+                    bridge_style,
+                    &bridge_path,
+                    block_range,
+                    bridge_start_is_boundary,
+                    bridge_end_is_boundary,
+                );
             }
         }
     }
@@ -1426,30 +1448,124 @@ pub fn generate_siding(
     }
 }
 
-/// Generates an aeroway
+/// A centerline point with its segment's unit travel direction (`ux`, `uz`) and cumulative
+/// distance `s` (blocks) from the way start, used for dash phase.
+struct AerowayCenterPoint {
+    x: i32,
+    z: i32,
+    ux: f32,
+    uz: f32,
+    s: f32,
+}
+
+/// Runway centerline dash: stripe-on / stripe-off lengths in meters (scaled by `--scale`).
+const RUNWAY_DASH_ON_M: f32 = 10.0;
+const RUNWAY_DASH_OFF_M: f32 = 6.0;
+/// How far inside the runway edge (blocks) the solid white edge stripes sit.
+const RUNWAY_EDGE_INSET: f32 = 1.0;
+/// Half-width (metres) used when an aeroway has no `width=*` tag (~24 m strip).
+const AEROWAY_DEFAULT_HALF_M: f64 = 12.0;
+/// Clamp (metres) for `width=*`-derived half-widths — guards against absurd tags.
+const AEROWAY_MIN_HALF_M: f64 = 6.0;
+const AEROWAY_MAX_HALF_M: f64 = 40.0;
+
+/// True where a runway centerline dash is painted, given distance `s` (blocks) from the way start.
+fn runway_centerline_dash_on(s: f32, scale: f64) -> bool {
+    let on = (RUNWAY_DASH_ON_M * scale as f32).max(1.0);
+    let off = (RUNWAY_DASH_OFF_M * scale as f32).max(1.0);
+    (s % (on + off)) < on
+}
+
+/// Parses an OSM `width=*` value in metres (tolerates a trailing "m").
+// Parse an OSM width=* tag in metres, tolerating a trailing "m"/" m".
+fn parse_width_tag_m(tags: &HashMap<String, String>) -> Option<f64> {
+    let raw = tags.get("width")?;
+    let s = raw.trim().trim_end_matches('m').trim();
+    s.parse::<f64>().ok().filter(|v| v.is_finite() && *v > 0.0)
+}
+
+/// Renders an aeroway as a concrete strip with markings: runways get asphalt-gray with a dashed
+/// white centerline + white edge stripes, taxiways a lighter surface with a yellow centerline.
+/// No threshold "piano keys" — OSM splits runways into segments, so a per-way renderer can't tell
+/// a real end from an internal split.
 pub fn generate_aeroway(editor: &mut WorldEditor, way: &ProcessedWay, args: &Args) {
-    let mut previous_node: Option<(i32, i32)> = None;
-    let surface_block = LIGHT_GRAY_CONCRETE;
+    let aeroway = way.tags.get("aeroway").map(String::as_str);
+    let is_runway = aeroway == Some("runway");
+    let is_taxiway = aeroway == Some("taxiway");
 
-    for node in &way.nodes {
-        if let Some(prev) = previous_node {
-            let (x1, z1) = prev;
-            let x2 = node.x;
-            let z2 = node.z;
-            let points = bresenham_line(x1, 0, z1, x2, 0, z2);
-            let way_width: i32 = (12.0 * args.scale).ceil() as i32;
+    let base_block = if is_runway {
+        GRAY_CONCRETE
+    } else {
+        LIGHT_GRAY_CONCRETE
+    };
 
-            for (x, _, z) in points {
-                for dx in -way_width..=way_width {
-                    for dz in -way_width..=way_width {
-                        let set_x = x + dx;
-                        let set_z = z + dz;
-                        editor.set_block(surface_block, set_x, 0, set_z, None, None);
-                    }
-                }
+    // Half-width from the OSM `width=*` tag (metres, clamped to sane sizes); default when absent.
+    let half_m = parse_width_tag_m(&way.tags)
+        .map(|w| (w * 0.5).clamp(AEROWAY_MIN_HALF_M, AEROWAY_MAX_HALF_M))
+        .unwrap_or(AEROWAY_DEFAULT_HALF_M);
+    let half_width: i32 = (half_m * args.scale).round().max(1.0) as i32;
+
+    // Build the centerline once: bresenham per segment, consecutive duplicates dropped, with a
+    // running distance so dash phase and markings stay consistent across segments and regions.
+    let mut points: Vec<AerowayCenterPoint> = Vec::new();
+    let mut s_accum = 0.0_f32;
+    let mut last: Option<(i32, i32)> = None;
+    for pair in way.nodes.windows(2) {
+        let (x1, z1) = (pair[0].x, pair[0].z);
+        let (x2, z2) = (pair[1].x, pair[1].z);
+        let len = (((x2 - x1) as f32).hypot((z2 - z1) as f32)).max(1e-6);
+        let (ux, uz) = ((x2 - x1) as f32 / len, (z2 - z1) as f32 / len);
+        for (x, _, z) in bresenham_line(x1, 0, z1, x2, 0, z2) {
+            if last == Some((x, z)) {
+                continue;
+            }
+            if let Some((lx, lz)) = last {
+                s_accum += ((x - lx) as f32).hypot((z - lz) as f32);
+            }
+            points.push(AerowayCenterPoint {
+                x,
+                z,
+                ux,
+                uz,
+                s: s_accum,
+            });
+            last = Some((x, z));
+        }
+    }
+
+    // Pass 1: full surface, before markings. A runway's base may overwrite taxiway surface so it
+    // wins crossings regardless of element order; a taxiway's base only fills empty cells (`None`),
+    // so it never paints over a runway.
+    let runway_overwrites = [LIGHT_GRAY_CONCRETE, YELLOW_CONCRETE];
+    let base_over: Option<&[Block]> = is_runway.then_some(&runway_overwrites[..]);
+    for cp in &points {
+        for dx in -half_width..=half_width {
+            for dz in -half_width..=half_width {
+                editor.set_block(base_block, cp.x + dx, 0, cp.z + dz, base_over, None);
             }
         }
-        previous_node = Some((node.x, node.z));
+    }
+
+    // Pass 2: markings. `set_block` only overwrites a whitelisted block, so markings must list
+    // the base surface they replace — else pass 1 has claimed every cell and they're dropped.
+    let base_overwrite = [base_block];
+    let over_base = Some(&base_overwrite[..]);
+    for cp in &points {
+        // Perpendicular unit vector across the strip.
+        let (px, pz) = (-cp.uz, cp.ux);
+        if is_runway {
+            if runway_centerline_dash_on(cp.s, args.scale) {
+                editor.set_block(WHITE_CONCRETE, cp.x, 0, cp.z, over_base, None);
+            }
+            let off = (half_width as f32 - RUNWAY_EDGE_INSET).max(0.0);
+            for sign in [1.0_f32, -1.0] {
+                let ex = (cp.x as f32 + sign * px * off).round() as i32;
+                let ez = (cp.z as f32 + sign * pz * off).round() as i32;
+                editor.set_block(WHITE_CONCRETE, ex, 0, ez, over_base, None);
+            }
+        } else if is_taxiway {
+            editor.set_block(YELLOW_CONCRETE, cp.x, 0, cp.z, over_base, None);
+        }
     }
 }
 
@@ -1458,39 +1574,56 @@ pub fn generate_aeroway(editor: &mut WorldEditor, way: &ProcessedWay, args: &Arg
 /// This extracts the same logic used inside `generate_highways_internal` so
 /// that pre-scan passes (e.g. building-passage collection) can determine road
 /// width without generating any blocks.
+/// Default lane count per highway type when `lanes=*` is absent. OSM lanes
+/// are the total for both directions, so 2 is a normal two-way street.
+pub(crate) fn highway_default_lanes(highway_type: &str) -> i32 {
+    match highway_type {
+        "motorway" | "primary" | "trunk" | "secondary" | "tertiary" => 2,
+        _ => 1,
+    }
+}
+
+/// Canonical road half-width in blocks. Single source of truth shared by the
+/// renderer and the prescan/bitmap/bridge consumers, so they never disagree.
 pub(crate) fn highway_block_range(
     highway_type: &str,
     tags: &HashMap<String, String>,
     scale: f64,
 ) -> i32 {
-    let mut block_range: i32 = match highway_type {
-        "footway" | "pedestrian" => 1,
-        "path" => 1,
-        "motorway" | "primary" | "trunk" => 5,
-        "secondary" => 4,
-        "tertiary" => 2,
-        "track" => 1,
-        "service" => 2,
-        "secondary_link" | "tertiary_link" => 1,
-        "escape" => 1,
-        "steps" => 1,
-        _ => {
-            if let Some(lanes) = tags.get("lanes") {
-                if lanes == "2" {
-                    3
-                } else if lanes != "1" {
-                    4
-                } else {
-                    2
-                }
-            } else {
-                2
-            }
-        }
+    let (mut block_range, scales_with_lanes): (i32, bool) = match highway_type {
+        "footway" | "pedestrian" => (1, false),
+        "path" => (1, false),
+        "motorway" | "primary" | "trunk" => (5, true),
+        "secondary" => (4, true),
+        "tertiary" => (2, true),
+        "track" => (1, false),
+        "service" => (2, true),
+        "secondary_link" | "tertiary_link" => (1, true),
+        "escape" => (1, false),
+        "steps" => (1, false),
+        _ => (2, true),
     };
 
+    const MAX_LANES: i32 = 16;
+    let lanes = tags
+        .get("lanes")
+        .and_then(|l| l.parse::<i32>().ok())
+        .unwrap_or_else(|| highway_default_lanes(highway_type))
+        .clamp(1, MAX_LANES);
+
+    // Explicit width=* wins; else vehicular roads use 3.5 m/lane, never below
+    // the default. The -1 accounts for the centre block in 2*block_range+1.
+    if let Some(w) = parse_width_tag_m(tags) {
+        block_range = (w / 2.0).round() as i32;
+    } else if scales_with_lanes {
+        let lanes_based = ((lanes as f32 * 3.5 - 1.0) / 2.0).round() as i32;
+        block_range = block_range.max(lanes_based);
+    }
+    block_range = block_range.clamp(1, MAX_BLOCK_RANGE as i32);
+
     if scale < 1.0 {
-        block_range = ((block_range as f64) * scale).floor() as i32;
+        // max(1): scaling must never collapse a road to zero width.
+        block_range = (((block_range as f64) * scale).floor() as i32).max(1);
     }
 
     block_range
@@ -1630,4 +1763,243 @@ pub fn collect_building_passage_coords(
     }
 
     bitmap
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn highway_block_range_scales_with_lanes() {
+        let tags = |pairs: &[(&str, &str)]| -> HashMap<String, String> {
+            pairs
+                .iter()
+                .map(|(k, v)| (k.to_string(), v.to_string()))
+                .collect()
+        };
+        // Untagged roads keep their per-type defaults...
+        assert_eq!(highway_block_range("residential", &tags(&[]), 1.0), 2);
+        assert_eq!(highway_block_range("motorway", &tags(&[]), 1.0), 5);
+        assert_eq!(highway_block_range("secondary", &tags(&[]), 1.0), 4);
+        // ...except tertiary, which widens to its two-lane default.
+        assert_eq!(highway_block_range("tertiary", &tags(&[]), 1.0), 3);
+        assert_eq!(
+            highway_block_range("tertiary", &tags(&[("lanes", "2")]), 1.0),
+            3
+        );
+        // More lanes widen, clamped to the cap.
+        assert_eq!(
+            highway_block_range("primary", &tags(&[("lanes", "4")]), 1.0),
+            7
+        );
+        assert_eq!(
+            highway_block_range("motorway", &tags(&[("lanes", "6")]), 1.0),
+            MAX_BLOCK_RANGE as i32
+        );
+        // Non-vehicular types never scale with lanes.
+        assert_eq!(
+            highway_block_range("footway", &tags(&[("lanes", "4")]), 1.0),
+            1
+        );
+        // Explicit width=* wins and tolerates a unit suffix.
+        assert_eq!(
+            highway_block_range("residential", &tags(&[("width", "8")]), 1.0),
+            4
+        );
+        assert_eq!(
+            highway_block_range(
+                "residential",
+                &tags(&[("width", "8 m"), ("lanes", "2")]),
+                1.0
+            ),
+            4
+        );
+        // Down-scaling never collapses a road to zero width.
+        assert_eq!(highway_block_range("footway", &tags(&[]), 0.4), 1);
+        assert_eq!(highway_block_range("residential", &tags(&[]), 0.4), 1);
+    }
+
+    #[test]
+    fn runway_dash_alternates_on_and_off() {
+        // At scale 1: 10 blocks on, 6 off, repeating every 16.
+        assert!(runway_centerline_dash_on(0.0, 1.0));
+        assert!(runway_centerline_dash_on(9.0, 1.0));
+        assert!(!runway_centerline_dash_on(10.0, 1.0));
+        assert!(!runway_centerline_dash_on(15.0, 1.0));
+        assert!(
+            runway_centerline_dash_on(16.0, 1.0),
+            "pattern repeats at 16"
+        );
+        assert!(
+            runway_centerline_dash_on(160.0, 1.0),
+            "phase stays consistent far along"
+        );
+    }
+
+    #[test]
+    fn runway_dash_scales_with_world_scale() {
+        // At scale 2: 20 blocks on, 12 off.
+        assert!(runway_centerline_dash_on(19.0, 2.0));
+        assert!(!runway_centerline_dash_on(20.0, 2.0));
+    }
+
+    // --- Rendering regression tests: markings must actually overwrite the base surface. ---
+
+    use crate::coordinate_system::cartesian::XZBBox;
+    use crate::coordinate_system::geographic::LLBBox;
+    use crate::osm_parser::ProcessedNode;
+    use crate::world_editor::WorldEditor;
+    use clap::Parser as _;
+    use std::collections::HashMap as StdMap;
+    use std::path::PathBuf;
+
+    /// Builds an in-memory editor (never saved) over a 400×100 area at ground Y=0.
+    fn test_editor(xzbbox: &XZBBox) -> WorldEditor<'_> {
+        let llbbox = LLBBox::new(54.6, 9.9, 54.61, 9.91).unwrap();
+        WorldEditor::new(PathBuf::from("/dev/null/unused"), xzbbox, llbbox)
+    }
+
+    fn straight_aeroway(kind: &str) -> ProcessedWay {
+        let mut tags = StdMap::new();
+        tags.insert("aeroway".to_string(), kind.to_string());
+        ProcessedWay {
+            id: 1,
+            nodes: vec![
+                ProcessedNode {
+                    id: 1,
+                    tags: StdMap::new(),
+                    x: 10,
+                    z: 50,
+                },
+                ProcessedNode {
+                    id: 2,
+                    tags: StdMap::new(),
+                    x: 390,
+                    z: 50,
+                },
+            ],
+            tags,
+        }
+    }
+
+    #[test]
+    fn runway_paints_white_centerline_and_edges_over_gray() {
+        let args = Args::parse_from(["arnis", "--bbox", "1,2,3,4"].iter());
+        let xzbbox = XZBBox::rect_from_xz_lengths(400.0, 100.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+
+        generate_aeroway(&mut editor, &straight_aeroway("runway"), &args);
+
+        // Centerline at the way start (s=0, dash on) is white; a dash-gap cell stays gray.
+        assert!(
+            editor.check_for_block(10, 0, 50, Some(&[WHITE_CONCRETE])),
+            "centerline dash"
+        );
+        assert!(
+            editor.check_for_block(22, 0, 50, Some(&[GRAY_CONCRETE])),
+            "dash gap stays asphalt"
+        );
+        // Solid white edge stripe one block inside the 12-wide half (z = 50 ± 11).
+        assert!(
+            editor.check_for_block(10, 0, 39, Some(&[WHITE_CONCRETE])),
+            "left edge stripe"
+        );
+        assert!(
+            editor.check_for_block(10, 0, 61, Some(&[WHITE_CONCRETE])),
+            "right edge stripe"
+        );
+        // Plain surface between centerline and edge is asphalt gray.
+        assert!(
+            editor.check_for_block(10, 0, 45, Some(&[GRAY_CONCRETE])),
+            "asphalt base"
+        );
+    }
+
+    #[test]
+    fn taxiway_paints_yellow_centerline_over_light_gray() {
+        let args = Args::parse_from(["arnis", "--bbox", "1,2,3,4"].iter());
+        let xzbbox = XZBBox::rect_from_xz_lengths(400.0, 100.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+
+        generate_aeroway(&mut editor, &straight_aeroway("taxiway"), &args);
+
+        assert!(
+            editor.check_for_block(10, 0, 50, Some(&[YELLOW_CONCRETE])),
+            "yellow centerline"
+        );
+        assert!(
+            editor.check_for_block(10, 0, 45, Some(&[LIGHT_GRAY_CONCRETE])),
+            "light-gray base"
+        );
+        // Taxiways get no white edge stripes.
+        assert!(
+            !editor.check_for_block(10, 0, 39, Some(&[WHITE_CONCRETE])),
+            "no edge stripe"
+        );
+    }
+
+    #[test]
+    fn runway_width_tag_widens_the_strip() {
+        let args = Args::parse_from(["arnis", "--bbox", "1,2,3,4"].iter());
+        let xzbbox = XZBBox::rect_from_xz_lengths(400.0, 100.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+
+        let mut way = straight_aeroway("runway");
+        way.tags.insert("width".to_string(), "60".to_string());
+        generate_aeroway(&mut editor, &way, &args);
+
+        // 60 m wide ⇒ half-width 30: asphalt reaches z=70 and the edge stripe sits at z=50+29.
+        assert!(
+            editor.check_for_block(10, 0, 70, Some(&[GRAY_CONCRETE])),
+            "widened asphalt"
+        );
+        assert!(
+            editor.check_for_block(10, 0, 79, Some(&[WHITE_CONCRETE])),
+            "edge stripe at width/2-1"
+        );
+    }
+
+    #[test]
+    fn runway_overrides_a_crossing_taxiway_regardless_of_order() {
+        let args = Args::parse_from(["arnis", "--bbox", "1,2,3,4"].iter());
+        let xzbbox = XZBBox::rect_from_xz_lengths(400.0, 100.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+
+        // Process the taxiway FIRST — the order that used to leak taxiway surface onto the runway.
+        let mut tags = StdMap::new();
+        tags.insert("aeroway".to_string(), "taxiway".to_string());
+        let taxiway = ProcessedWay {
+            id: 2,
+            nodes: vec![
+                ProcessedNode {
+                    id: 3,
+                    tags: StdMap::new(),
+                    x: 200,
+                    z: 10,
+                },
+                ProcessedNode {
+                    id: 4,
+                    tags: StdMap::new(),
+                    x: 200,
+                    z: 90,
+                },
+            ],
+            tags,
+        };
+        generate_aeroway(&mut editor, &taxiway, &args);
+        generate_aeroway(&mut editor, &straight_aeroway("runway"), &args);
+
+        // The crossing cell belongs to the runway, not the taxiway.
+        assert!(
+            editor.check_for_block(200, 0, 50, Some(&[GRAY_CONCRETE])),
+            "runway wins crossing"
+        );
+        assert!(!editor.check_for_block(200, 0, 50, Some(&[YELLOW_CONCRETE])));
+        assert!(!editor.check_for_block(200, 0, 50, Some(&[LIGHT_GRAY_CONCRETE])));
+        // Away from the runway the taxiway is untouched.
+        assert!(
+            editor.check_for_block(200, 0, 20, Some(&[YELLOW_CONCRETE])),
+            "taxiway intact off-runway"
+        );
+    }
 }

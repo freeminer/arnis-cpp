@@ -28,6 +28,10 @@ pub struct Args {
     #[arg(long)]
     pub bedrock: bool,
 
+    /// Generate a Luanti/Minetest world (map.sqlite) instead of Java Edition
+    #[arg(long)]
+    pub luanti: bool,
+
     /// Downloader method (requests/curl/wget) (optional)
     #[arg(long, default_value = "requests")]
     pub downloader: String,
@@ -35,6 +39,12 @@ pub struct Args {
     /// World scale to use, in blocks per meter
     #[arg(long, default_value_t = 1.0)]
     pub scale: f64,
+
+    /// Projection mode for coordinate mapping
+    /// local: each generation starts at Minecraft (0,0) (default)
+    /// web_mercator: global projection for multi-generation worlds
+    #[arg(long, default_value = "local")]
+    pub projection: crate::projection::ProjectionKind,
 
     /// Ground level to use in the Minecraft world
     #[arg(long, default_value_t = -62)]
@@ -56,12 +66,18 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub fillground: bool,
 
-    /// Enable land cover classification (optional)
-    /// When enabled, fetches ESA WorldCover satellite data to classify terrain
-    /// (forests, deserts, wetlands, built-up areas, etc.) and select appropriate
-    /// surface blocks. Requires --terrain to be enabled.
-    #[arg(long = "land-cover", alias = "city-boundaries", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    /// Use the legacy procedural trees instead of the bundled schematic tree pack.
+    /// Schematic trees are on by default; this flag opts out.
+    #[arg(long, default_value_t = false)]
+    pub legacy_trees: bool,
+
+    /// ESA WorldCover land cover classification, always on (no CLI flag).
+    #[arg(skip = true)]
     pub land_cover: bool,
+
+    /// Disable fetching 3D models from external sources (3DMR + Wikimedia).
+    #[arg(long = "no-3d", default_value_t = true, action = ArgAction::SetFalse)]
+    pub use_3d: bool,
 
     /// Enable debug mode (optional)
     #[arg(long)]
@@ -96,14 +112,33 @@ pub struct Args {
     /// Print generation-only timing to stderr (excludes data fetching)
     #[arg(long, hide = true)]
     pub benchmark: bool,
+
+    /// Bake per-chunk lighting so distant chunks render lit in LOD mods
+    /// (Voxy/Chunky) without visiting them. Slower; off by default.
+    #[arg(long, default_value_t = false)]
+    pub bake_lighting: bool,
 }
 
 /// Validates CLI arguments after parsing.
 /// For Java Edition: `--path` is required. If the directory doesn't exist, it will be created.
 /// For Bedrock Edition (`--bedrock`): `--path` is optional (defaults to Desktop output).
 pub fn validate_args(args: &Args) -> Result<(), String> {
+    if args.bedrock && args.luanti {
+        return Err("Cannot use --bedrock and --luanti together.".to_string());
+    }
+
     if args.bedrock {
         // Bedrock: path is optional; if provided, it must be an existing directory
+        if let Some(ref path) = args.path {
+            if !path.exists() {
+                return Err(format!("Path does not exist: {}", path.display()));
+            }
+            if !path.is_dir() {
+                return Err(format!("Path is not a directory: {}", path.display()));
+            }
+        }
+    } else if args.luanti {
+        // Luanti: path optional, defaults to OS Luanti worlds dir
         if let Some(ref path) = args.path {
             if !path.exists() {
                 return Err(format!("Path does not exist: {}", path.display()));
@@ -198,6 +233,7 @@ mod tests {
         assert!(!args.terrain);
         assert!(!args.bedrock);
         assert!(!args.disable_height_limit);
+        assert!(!args.bake_lighting);
         // interior, roof, land_cover default to true
         assert!(args.interior);
         assert!(args.roof);
@@ -209,7 +245,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let tmp_path = tmpdir.path().to_str().unwrap();
 
-        // Test disabling interior/roof/land-cover with =false
+        // Test disabling interior/roof with =false
         let cmd = [
             "arnis",
             "--output-dir",
@@ -218,12 +254,12 @@ mod tests {
             "1,2,3,4",
             "--interior=false",
             "--roof=false",
-            "--land-cover=false",
         ];
         let args = Args::parse_from(cmd.iter());
         assert!(!args.interior);
         assert!(!args.roof);
-        assert!(!args.land_cover);
+        // land cover is always on (no flag)
+        assert!(args.land_cover);
 
         // Test enabling with bare flag (no value)
         let cmd = [
@@ -234,24 +270,10 @@ mod tests {
             "1,2,3,4",
             "--interior",
             "--roof",
-            "--land-cover",
         ];
         let args = Args::parse_from(cmd.iter());
         assert!(args.interior);
         assert!(args.roof);
-        assert!(args.land_cover);
-
-        // Test backwards compatibility with old --city-boundaries alias
-        let cmd = [
-            "arnis",
-            "--output-dir",
-            tmp_path,
-            "--bbox",
-            "1,2,3,4",
-            "--city-boundaries=false",
-        ];
-        let args = Args::parse_from(cmd.iter());
-        assert!(!args.land_cover);
     }
 
     #[test]

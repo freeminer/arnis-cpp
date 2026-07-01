@@ -19,8 +19,8 @@ use crate::block_definitions::{
     COBBLED_DEEPSLATE, COBBLESTONE, CRACKED_STONE_BRICKS, CYAN_TERRACOTTA, DEAD_BUSH, DEEPSLATE,
     DIRT, DIRT_PATH, FARMLAND, GRASS, GRASS_BLOCK, GRAVEL, GRAY_CONCRETE, GRAY_CONCRETE_POWDER,
     HAY_BALE, LIGHT_GRAY_CONCRETE, MUD, OAK_LEAVES, OAK_PLANKS, POTATOES, RED_FLOWER, SAND,
-    SANDSTONE, SMOOTH_STONE, STONE, STONE_BRICKS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, TUFF, WATER,
-    WHEAT, WHITE_CONCRETE, WHITE_FLOWER, YELLOW_FLOWER,
+    SANDSTONE, SMOOTH_STONE, SNOW_LAYER, STONE, STONE_BRICKS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP,
+    TUFF, WATER, WHEAT, WHITE_CONCRETE, WHITE_FLOWER, YELLOW_FLOWER,
 };
 use crate::coordinate_system::cartesian::{XZBBox, XZPoint};
 use crate::element_processing::tree;
@@ -118,19 +118,57 @@ pub fn generate_ground_layer(
     xzbbox: &XZBBox,
     building_footprints: &BuildingFootprintBitmap,
 ) -> Result<(), String> {
+    generate_ground_region(
+        editor,
+        ground,
+        args,
+        xzbbox,
+        building_footprints,
+        xzbbox.min_x(),
+        xzbbox.max_x(),
+        xzbbox.min_z(),
+        xzbbox.max_z(),
+        true,
+    );
+    Ok(())
+}
+
+/// Generate ground for `[iter_min_*..=iter_max_*]`. The shared grid is indexed against
+/// `xzbbox` (main origin); per-tile callers pass the main bbox + strict tile iter bounds.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_ground_region(
+    editor: &mut WorldEditor,
+    ground: &Ground,
+    args: &Args,
+    xzbbox: &XZBBox,
+    building_footprints: &BuildingFootprintBitmap,
+    iter_min_x: i32,
+    iter_max_x: i32,
+    iter_min_z: i32,
+    iter_max_z: i32,
+    show_progress: bool,
+) {
     let has_land_cover = ground.has_land_cover();
     let terrain_enabled = ground.elevation_enabled;
+    let climate = ground.climate();
 
-    let total_blocks: u64 = xzbbox.bounding_rect().total_blocks();
+    let total_blocks: u64 =
+        (iter_max_x - iter_min_x + 1).max(0) as u64 * (iter_max_z - iter_min_z + 1).max(0) as u64;
     let desired_updates: u64 = 1500;
     let batch_size: u64 = (total_blocks / desired_updates).max(1);
 
     let mut block_counter: u64 = 0;
 
-    println!("{} Generating ground...", "[6/7]".bold());
-    emit_gui_progress_update(70.0, "Generating ground...");
+    if show_progress {
+        println!("{} Generating ground...", "[6/7]".bold());
+        emit_gui_progress_update(70.0, "Generating ground...");
+    }
 
-    let ground_pb: ProgressBar = ProgressBar::new(total_blocks);
+    let ground_pb: ProgressBar = if show_progress {
+        ProgressBar::new(total_blocks)
+    } else {
+        ProgressBar::hidden()
+    };
     ground_pb.set_style(
         ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:45}] {pos}/{len} blocks ({eta})")
@@ -146,18 +184,23 @@ pub fn generate_ground_layer(
     // Process ground generation chunk-by-chunk for better cache locality.
     // This keeps the same region/chunk HashMap entries hot in CPU cache,
     // rather than jumping between regions on every Z iteration.
-    let min_chunk_x = xzbbox.min_x() >> 4;
-    let max_chunk_x = xzbbox.max_x() >> 4;
-    let min_chunk_z = xzbbox.min_z() >> 4;
-    let max_chunk_z = xzbbox.max_z() >> 4;
+    let min_chunk_x = iter_min_x >> 4;
+    let max_chunk_x = iter_max_x >> 4;
+    let min_chunk_z = iter_min_z >> 4;
+    let max_chunk_z = iter_max_z >> 4;
+
+    // Snow line as a Minecraft Y; i32::MAX disables snow (flat/low terrain).
+    let snow_threshold_y = ground.snow_threshold_y();
+    // Soften the snow edge so it isn't a perfect contour line.
+    const SNOW_EDGE_JITTER: f64 = 6.0;
 
     for chunk_x in min_chunk_x..=max_chunk_x {
         for chunk_z in min_chunk_z..=max_chunk_z {
             // Calculate the block range for this chunk, clamped to bbox
-            let chunk_min_x = (chunk_x << 4).max(xzbbox.min_x());
-            let chunk_max_x = ((chunk_x << 4) + 15).min(xzbbox.max_x());
-            let chunk_min_z = (chunk_z << 4).max(xzbbox.min_z());
-            let chunk_max_z = ((chunk_z << 4) + 15).min(xzbbox.max_z());
+            let chunk_min_x = (chunk_x << 4).max(iter_min_x);
+            let chunk_max_x = ((chunk_x << 4) + 15).min(iter_max_x);
+            let chunk_min_z = (chunk_z << 4).max(iter_min_z);
+            let chunk_max_z = ((chunk_z << 4) + 15).min(iter_max_z);
 
             // Precompute a per-chunk ground-Y cache so subsequent lookups
             // (main column + water-column + depth-fill neighbours, ~20+ per
@@ -175,6 +218,44 @@ pub fn generate_ground_layer(
                     chunk_max_z,
                 )
             });
+
+            // --fillground fast path: bulk-fill fully-buried sections to
+            // Uniform(STONE) so the per-column loop only walks the boundary
+            // section. Gated on full bbox coverage so out-of-bbox columns
+            // don't get stone underneath.
+            let mut column_fill_y_min = crate::world_editor::MIN_Y + 1;
+            if args.fillground {
+                let chunk_fully_in_bbox = chunk_min_x == chunk_x << 4
+                    && chunk_max_x == (chunk_x << 4) + 15
+                    && chunk_min_z == chunk_z << 4
+                    && chunk_max_z == (chunk_z << 4) + 15;
+                let rotated_in = chunk_fully_in_bbox
+                    && ground.is_in_rotated_bounds(chunk_min_x, chunk_min_z)
+                    && ground.is_in_rotated_bounds(chunk_max_x, chunk_min_z)
+                    && ground.is_in_rotated_bounds(chunk_min_x, chunk_max_z)
+                    && ground.is_in_rotated_bounds(chunk_max_x, chunk_max_z);
+                if rotated_in {
+                    let min_ground_y: i32 = if let Some(ref cache) = chunk_ground_cache {
+                        cache
+                            .grid
+                            .iter()
+                            .copied()
+                            .min()
+                            .unwrap_or(args.ground_level)
+                    } else {
+                        args.ground_level
+                    };
+                    // section_top = section_y*16 + 15 <= min_ground_y - 3
+                    let top_buried = (min_ground_y - 18).div_euclid(16) as i8;
+                    if top_buried >= crate::world_editor::MIN_SECTION_Y {
+                        let all_clean = editor
+                            .bulk_fill_chunk_sections_below(chunk_x, chunk_z, top_buried, STONE);
+                        if all_clean {
+                            column_fill_y_min = (top_buried as i32 + 1) * 16;
+                        }
+                    }
+                }
+            }
 
             for x in chunk_min_x..=chunk_max_x {
                 for z in chunk_min_z..=chunk_max_z {
@@ -318,18 +399,10 @@ pub fn generate_ground_layer(
                         }
 
                         if place_esa_water {
-                            // Single block of water at snapped level
+                            // Pre-paint; carve_lc_water_pass later overwrites with depth.
                             editor.set_block_if_absent_absolute(WATER, x, water_y, z);
-
-                            // Floor: sand/gravel/clay + sandstone below
-                            let h = land_cover::coord_hash(x, z);
-                            let floor_block = match h % 5 {
-                                0 => GRAVEL,
-                                1 => CLAY,
-                                _ => SAND,
-                            };
                             if water_y - 1 > MIN_Y {
-                                editor.set_block_if_absent_absolute(floor_block, x, water_y - 1, z);
+                                editor.set_block_if_absent_absolute(SAND, x, water_y - 1, z);
                             }
                             if water_y - 2 > MIN_Y {
                                 editor.set_block_if_absent_absolute(SANDSTONE, x, water_y - 2, z);
@@ -354,42 +427,49 @@ pub fn generate_ground_layer(
                                 // We don't force rock materials onto 21–27° slopes
                                 // any more — that's a normal hiking incline where
                                 // grass and trees belong.
-                                if slope > 8 {
-                                    // Sheer cliff: each column is 100% one material
-                                    // so the downward under-fill matches the surface,
-                                    // producing vertical stripes of cobbled/deepslate.
-                                    let h = land_cover::coord_hash(x, z);
-                                    if h.is_multiple_of(2) {
-                                        (COBBLED_DEEPSLATE, COBBLED_DEEPSLATE)
+                                if slope > 4 {
+                                    if let Some(p) = climate.slope_palette(x, z) {
+                                        // Arid canyon/mesa walls: tan/orange rock, not grey.
+                                        p
+                                    } else if slope > 8 {
+                                        // Sheer cliff: each column is 100% one material
+                                        // so the downward under-fill matches the surface,
+                                        // producing vertical stripes of cobbled/deepslate.
+                                        let h = land_cover::coord_hash(x, z);
+                                        if h.is_multiple_of(2) {
+                                            (COBBLED_DEEPSLATE, COBBLED_DEEPSLATE)
+                                        } else {
+                                            (DEEPSLATE, DEEPSLATE)
+                                        }
+                                    } else if slope > 6 {
+                                        // Very steep rock face: stone-dominant with
+                                        // weathered cobblestone chunks and occasional
+                                        // andesite banding. Deepslate stays below-surface
+                                        // only — it would read as "cliff" if exposed here.
+                                        let h = land_cover::coord_hash(x, z) % 20;
+                                        if h < 12 {
+                                            (STONE, DEEPSLATE) // 60%
+                                        } else if h < 17 {
+                                            (COBBLESTONE, DEEPSLATE) // 25%
+                                        } else {
+                                            (ANDESITE, DEEPSLATE) // 15%
+                                        }
                                     } else {
-                                        (DEEPSLATE, DEEPSLATE)
+                                        // Steep slope with natural scree: rocky mix where
+                                        // the gravel is a minority patch (not the whole
+                                        // surface) so it looks like real scree rather
+                                        // than a grey slope.
+                                        let h = land_cover::coord_hash(x, z) % 12;
+                                        match h {
+                                            0..=3 => (ANDESITE, STONE),    // 33%
+                                            4..=5 => (TUFF, STONE),        // 17%
+                                            6..=7 => (STONE, STONE),       // 17%
+                                            8..=9 => (COBBLESTONE, STONE), // 17%
+                                            _ => (GRAVEL, STONE),          // 17% scree
+                                        }
                                     }
-                                } else if slope > 6 {
-                                    // Very steep rock face: stone-dominant with
-                                    // weathered cobblestone chunks and occasional
-                                    // andesite banding. Deepslate stays below-surface
-                                    // only — it would read as "cliff" if exposed here.
-                                    let h = land_cover::coord_hash(x, z) % 20;
-                                    if h < 12 {
-                                        (STONE, DEEPSLATE) // 60%
-                                    } else if h < 17 {
-                                        (COBBLESTONE, DEEPSLATE) // 25%
-                                    } else {
-                                        (ANDESITE, DEEPSLATE) // 15%
-                                    }
-                                } else if slope > 4 {
-                                    // Steep slope with natural scree: rocky mix where
-                                    // the gravel is a minority patch (not the whole
-                                    // surface) so it looks like real scree rather
-                                    // than a grey slope.
-                                    let h = land_cover::coord_hash(x, z) % 12;
-                                    match h {
-                                        0..=3 => (ANDESITE, STONE),    // 33%
-                                        4..=5 => (TUFF, STONE),        // 17%
-                                        6..=7 => (STONE, STONE),       // 17%
-                                        8..=9 => (COBBLESTONE, STONE), // 17%
-                                        _ => (GRAVEL, STONE),          // 17% scree
-                                    }
+                                } else if let Some(p) = climate.surface_palette(cover, x, z) {
+                                    p
                                 } else {
                                     // Select surface block based on ESA land cover class
                                     match cover {
@@ -535,30 +615,27 @@ pub fn generate_ground_layer(
                             let (surface_block, under_block) = if surface_block != WATER
                                 && slope <= 3
                             {
-                                // Transition-zone blocks that noise decided are "not
-                                // water" get sand via water_blend > 0.01 (at least one
-                                // surrounding grid cell is water).  For blocks fully
-                                // outside the blend zone, fall back to neighbor check.
+                                // Sand only at the immediate 1-cell ring around LC_WATER
+                                // (plus near_placed_water below for OSM-rendered water).
                                 let near_esa_water = has_land_cover
                                     && !is_esa_water
-                                    && (water_blend > 0.01
-                                        || [
-                                            (-1i32, 0i32),
-                                            (1, 0),
-                                            (0, -1),
-                                            (0, 1),
-                                            (-1, -1),
-                                            (-1, 1),
-                                            (1, -1),
-                                            (1, 1),
-                                        ]
-                                        .iter()
-                                        .any(|(dx, dz)| {
-                                            ground.cover_class(XZPoint::new(
-                                                x + dx - xzbbox.min_x(),
-                                                z + dz - xzbbox.min_z(),
-                                            )) == land_cover::LC_WATER
-                                        }));
+                                    && [
+                                        (-1i32, 0i32),
+                                        (1, 0),
+                                        (0, -1),
+                                        (0, 1),
+                                        (-1, -1),
+                                        (-1, 1),
+                                        (1, -1),
+                                        (1, 1),
+                                    ]
+                                    .iter()
+                                    .any(|(dx, dz)| {
+                                        ground.cover_class(XZPoint::new(
+                                            x + dx - xzbbox.min_x(),
+                                            z + dz - xzbbox.min_z(),
+                                        )) == land_cover::LC_WATER
+                                    });
 
                                 // Also check placed water blocks (OSM rivers, etc.)
                                 let near_placed_water = [(-1i32, 0i32), (1, 0), (0, -1), (0, 1)]
@@ -624,6 +701,26 @@ pub fn generate_ground_layer(
                                 Some(&[WATER]),
                                 None,
                             );
+
+                            // Snow-cap terrain above the climatic snow line. Skip
+                            // water (placed block or ESA-classified, e.g. a steep
+                            // lake edge where rock sits at ground_y). Pre-existing
+                            // flat OSM stone is intentionally left uncapped here.
+                            if snow_threshold_y != i32::MAX
+                                && !surface_is_water
+                                && water_blend <= 0.5
+                            {
+                                let edge = (value_noise_01(x, z, 8) - 0.5) * SNOW_EDGE_JITTER;
+                                if ground_y as f64 >= snow_threshold_y as f64 + edge {
+                                    editor.set_block_if_absent_absolute(
+                                        SNOW_LAYER,
+                                        x,
+                                        ground_y + 1,
+                                        z,
+                                    );
+                                }
+                            }
+
                             if !surface_is_water {
                                 // Fill under-blocks deep enough to seal any visible
                                 // gap on cliff faces. Check all 8 neighbors (cardinal
@@ -1083,13 +1180,13 @@ pub fn generate_ground_layer(
                         }
                     }
 
-                    // Fill underground with stone
+                    // Fill underground; column_fill_y_min skips already-Uniform sections.
                     if args.fillground {
                         editor.fill_column_absolute(
                             STONE,
                             x,
                             z,
-                            MIN_Y + 1,
+                            column_fill_y_min,
                             ground_y - 3,
                             true, // skip_existing: don't overwrite blocks placed by element processing
                         );
@@ -1103,10 +1200,12 @@ pub fn generate_ground_layer(
                         ground_pb.inc(batch_size);
                     }
 
-                    gui_progress_grnd += progress_increment_grnd;
-                    if (gui_progress_grnd - last_emitted_progress).abs() > 0.25 {
-                        emit_gui_progress_update(gui_progress_grnd, "");
-                        last_emitted_progress = gui_progress_grnd;
+                    if show_progress {
+                        gui_progress_grnd += progress_increment_grnd;
+                        if (gui_progress_grnd - last_emitted_progress).abs() > 0.25 {
+                            emit_gui_progress_update(gui_progress_grnd, "");
+                            last_emitted_progress = gui_progress_grnd;
+                        }
                     }
                 }
             }
@@ -1118,8 +1217,6 @@ pub fn generate_ground_layer(
 
     ground_pb.inc(block_counter % batch_size);
     ground_pb.finish();
-
-    Ok(())
 }
 
 /// Smooth scalar noise in `[0, 1]` at approximately `scale`-block resolution.
@@ -1135,7 +1232,7 @@ pub fn generate_ground_layer(
 ///
 /// Cost: 4 hash calls + a few f64 ops per block — still well under 100 ns,
 /// negligible over the whole ground pass.
-fn value_noise_01(x: i32, z: i32, scale: i32) -> f64 {
+pub(crate) fn value_noise_01(x: i32, z: i32, scale: i32) -> f64 {
     let s = scale.max(1);
     // Integer lattice cell containing (x, z). div_euclid gives floor
     // division for negative coordinates too, so patches tile uniformly

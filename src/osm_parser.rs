@@ -5,7 +5,7 @@ use crate::coordinate_system::transformation::CoordTransformer;
 use crate::progress::emit_gui_progress_update;
 use colored::Colorize;
 use serde::Deserialize;
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::Arc;
 
 // Tags Arnis never reads. Filtered at parse time to save memory.
@@ -17,7 +17,6 @@ const IGNORED_TAGS: &[&str] = &[
     "todo",
     "TODO",
     "wikipedia",
-    "wikidata",
     "wikimedia_commons",
     "import_uuid",
     "import",
@@ -212,7 +211,7 @@ impl ProcessedElement {
         }
     }
 
-    pub fn kind(&self) -> &str {
+    pub fn kind(&self) -> &'static str {
         match self {
             ProcessedElement::Node(_) => "node",
             ProcessedElement::Way(_) => "way",
@@ -229,30 +228,44 @@ impl ProcessedElement {
     }
 }
 
+pub type OutlineSuppression = HashSet<(&'static str, u64)>;
+
 pub fn parse_osm_data(
     osm_data: OsmData,
     bbox: LLBBox,
     scale: f64,
     debug: bool,
-) -> (Vec<ProcessedElement>, XZBBox) {
+    projection: crate::projection::ProjectionKind,
+) -> (Vec<ProcessedElement>, XZBBox, OutlineSuppression) {
     println!("{} Parsing data...", "[2/7]".bold());
     println!("Bounding box: {bbox:?}");
-    emit_gui_progress_update(5.0, "Parsing data...");
 
     // Deserialize the JSON data into the OSMData structure
     let data = SplitOsmData::from_raw_osm_data(osm_data);
 
-    let (coord_transformer, xzbbox) = CoordTransformer::llbbox_to_xzbbox(&bbox, scale)
-        .unwrap_or_else(|e| {
-            eprintln!("Error in defining coordinate transformation:\n{e}");
-            panic!();
-        });
+    let (coord_transformer, xzbbox) = match projection {
+        crate::projection::ProjectionKind::WebMercator => {
+            let origin_lat = (bbox.min().lat() + bbox.max().lat()) / 2.0;
+            let origin_lon = (bbox.min().lng() + bbox.max().lng()) / 2.0;
+            let proj = crate::projection::WebMercatorProjection::new(origin_lat, origin_lon, scale);
+            CoordTransformer::with_projection(&bbox, scale, &proj)
+        }
+        crate::projection::ProjectionKind::Local => {
+            CoordTransformer::llbbox_to_xzbbox(&bbox, scale)
+        }
+    }
+    .unwrap_or_else(|e| {
+        eprintln!("Error in defining coordinate transformation:\n{e}");
+        panic!();
+    });
 
     if debug {
         println!("Total elements: {}", data.total_count());
         println!("Scale factor X: {}", coord_transformer.scale_factor_x());
         println!("Scale factor Z: {}", coord_transformer.scale_factor_z());
     }
+
+    let outline_suppression = compute_outline_suppression(&data.relations);
 
     let mut nodes_map: HashMap<u64, ProcessedNode> = HashMap::new();
     let mut ways_map: HashMap<u64, Arc<ProcessedWay>> = HashMap::new();
@@ -355,7 +368,9 @@ pub fn parse_osm_data(
             .iter()
             .filter_map(|mem: &OsmMember| {
                 if mem.r#type != "way" {
-                    eprintln!("WARN: Unknown relation member type \"{}\"", mem.r#type);
+                    if mem.r#type != "relation" && mem.r#type != "node" {
+                        eprintln!("WARN: Unknown relation member type \"{}\"", mem.r#type);
+                    }
                     return None;
                 }
 
@@ -421,12 +436,42 @@ pub fn parse_osm_data(
         }
     }
 
-    emit_gui_progress_update(14.0, "");
+    emit_gui_progress_update(18.5, "");
 
     drop(nodes_map);
     drop(ways_map);
 
-    (processed_elements, xzbbox)
+    (processed_elements, xzbbox, outline_suppression)
+}
+
+fn compute_outline_suppression(relations: &[OsmElement]) -> OutlineSuppression {
+    let mut suppressed: OutlineSuppression = HashSet::new();
+    for rel in relations {
+        let Some(tags) = &rel.tags else { continue };
+        if tags.get("type").map(|t| t.as_str()) != Some("building") {
+            continue;
+        }
+        let has_parts = rel
+            .members
+            .iter()
+            .any(|m| m.role.trim().eq_ignore_ascii_case("part"));
+        if !has_parts {
+            continue;
+        }
+        for m in &rel.members {
+            let r = m.role.trim();
+            if !(r.eq_ignore_ascii_case("outline") || r.eq_ignore_ascii_case("outer")) {
+                continue;
+            }
+            let kind: &'static str = match m.r#type.as_str() {
+                "way" => "way",
+                "relation" => "relation",
+                _ => continue,
+            };
+            suppressed.insert((kind, m.r#ref));
+        }
+    }
+    suppressed
 }
 
 /// Returns true if tags indicate a water element handled by water_areas.rs.

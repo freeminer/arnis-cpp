@@ -58,7 +58,7 @@ type ColorBlockMapping = (ColorTuple, BlockOptions);
 
 #[derive(Copy, Clone, PartialEq, Eq, Ord, PartialOrd, Hash, Debug)]
 pub struct Block {
-    id: u8,
+    id: u16,
 }
 
 /// Block with NBT properties shared via Arc so identical compounds reuse one allocation.
@@ -90,13 +90,19 @@ impl BlockWithProperties {
 
 impl Block {
     #[inline(always)]
-    const fn new(id: u8) -> Self {
+    const fn new(id: u16) -> Self {
         Self { id }
     }
 
     #[inline(always)]
-    pub fn id(&self) -> u8 {
+    pub fn id(&self) -> u16 {
         self.id
+    }
+
+    /// Rebuild a block from a raw id, for the packed section storage.
+    #[inline(always)]
+    pub(crate) const fn from_raw_id(id: u16) -> Self {
+        Self::new(id)
     }
 
     #[inline(always)]
@@ -106,7 +112,7 @@ impl Block {
 
     pub fn name(&self) -> &str {
         match self.id {
-            0 => "acacia_planks",
+            0 => "mangrove_log",
             1 => "air",
             2 => "andesite",
             3 => "birch_leaves",
@@ -328,14 +334,14 @@ impl Block {
             229 => "daylight_detector",
             230 => "cherry_log",
             231 => "cherry_leaves",
-            232 => "purple_stained_glass",
-            233 => "orange_stained_glass",
-            234 => "magenta_stained_glass",
+            232 => "brown_concrete_powder",
+            233 => "mangrove_leaves",
+            234 => "azalea_leaves",
             235 => "potted_poppy",
             236 => "oak_trapdoor",
             237 => "oak_trapdoor",
-            238 => "oak_trapdoor",
-            239 => "oak_trapdoor",
+            238 => "seagrass",
+            239 => "kelp_plant",
             240 => "quartz_slab",
             241 => "dark_oak_trapdoor",
             242 => "spruce_trapdoor",
@@ -345,17 +351,105 @@ impl Block {
             246 => "potted_red_tulip",
             247 => "potted_dandelion",
             248 => "potted_blue_orchid",
-            249 => "red_sand",
-            250 => "red_sandstone",
-            251 => "cactus",
+            249 => "diamond_ore",
+            250 => "redstone_ore",
+            251 => "lapis_ore",
             252 => "gray_concrete_powder",
             253 => "cyan_terracotta",
             254 => "black_wool",
             255 => "light_gray_wall_banner",
+            256 => "magma_block",
+            257 => "snow",
+            258 => "kelp",
+            259 => "tall_seagrass",
+            260 => "tall_seagrass",
+            261 => "sea_pickle",
+            265 => "soul_sand",
+            266 => "sandstone_wall",
+            267 => "cut_sandstone_slab",
+            268 => "smooth_quartz_slab",
+            269 => "smooth_quartz_stairs",
+            270 => "blackstone_stairs",
+            271 => "blackstone_wall",
+            272 => "diorite_wall",
+            273 => "iron_trapdoor",
+            274 => "jungle_trapdoor",
+            275 => "birch_fence",
+            276 => "jungle_fence",
+            277 => "birch_fence_gate",
+            278 => "dark_oak_fence_gate",
+            279 => "birch_door",
+            280 => "birch_pressure_plate",
+            281 => "stone_pressure_plate",
+            282 => "blast_furnace",
+            283 => "dispenser",
+            284 => "hopper",
+            285 => "grindstone",
+            286 => "lantern",
+            287 => "lodestone",
+            288 => "redstone_torch",
+            289 => "stone_button",
+            290 => "chiseled_polished_blackstone",
+            291 => "mossy_stone_brick_wall",
+            292 => "bamboo_stairs",
+            293 => "polished_deepslate_wall",
+            294 => "black_stained_glass",
+            295 => "polished_andesite_slab",
+            296 => "end_stone_brick_wall",
+            297 => "bamboo_slab",
+            298 => "chiseled_deepslate",
+            299 => "polished_deepslate_slab",
+            300 => "birch_button",
+            301 => "cobblestone_slab",
+            302 => "dark_oak_slab",
+            303 => "jungle_slab",
+            304 => "jungle_stairs",
+            305 => "nether_brick_fence",
+            306 => "oak_button",
+            307 => "powered_rail",
+            308 => "spruce_fence",
+            309 => "spruce_slab",
+            310 => "andesite_slab",
+            311 => "cobbled_deepslate_slab",
+            312 => "cobbled_deepslate_stairs",
+            313 => "dark_oak_fence",
+            314 => "dark_oak_pressure_plate",
+            316 => "gray_stained_glass_pane",
+            317 => "gray_wall_banner",
+            318 => "gray_wool",
+            319 => "nether_wart_block",
+            320 => "oak_fence_gate",
+            321 => "polished_basalt",
+            322 => "polished_blackstone_button",
+            323 => "polished_blackstone_pressure_plate",
+            324 => "red_nether_brick_slab",
+            325 => "spruce_button",
+            326 => "spruce_fence_gate",
+            327 => "acacia_trapdoor",
+            328 => "composter",
+            329 => "cyan_carpet",
+            330 => "dark_oak_button",
+            331 => "end_stone_brick_slab",
+            332 => "glass_pane",
+            333 => "green_carpet",
+            334 => "light_blue_carpet",
+            335 => "nether_brick_wall",
+            336 => "smoker",
+            337 => "smooth_red_sandstone",
+            338 => "smooth_red_sandstone_slab",
+            339 => "blue_stained_glass_pane",
+            340 => "cyan_wool",
+            341 => "light_gray_carpet",
+            342 => "mossy_cobblestone_slab",
+            343 => "mossy_stone_brick_slab",
+            344 => "prismarine",
+            345 => "stone_stairs",
+            346 => "tripwire_hook",
             _ => panic!("Invalid id"),
         }
-        // Note: If you want to add more blocks, please find unused ID
-        // slots below 255 so we don't need to update to u16 or higher.
+        // Note: ids are u16. Prefer a free slot below 256 for commonly placed
+        // blocks: sections holding only sub-256 ids store one byte per cell,
+        // while any id >= 256 forces that section to the wider two-byte storage.
     }
 
     pub fn properties(&self) -> Option<Value> {
@@ -690,20 +784,22 @@ impl Block {
                 map.insert("half".to_string(), Value::String("top".to_string()));
                 map
             })),
-            // Open oak trapdoor facing east
-            238 => Some(Value::Compound({
+            // Tall seagrass lower/upper halves.
+            259 => Some(Value::Compound({
                 let mut map = HashMap::new();
-                map.insert("facing".to_string(), Value::String("east".to_string()));
-                map.insert("open".to_string(), Value::String("true".to_string()));
-                map.insert("half".to_string(), Value::String("top".to_string()));
+                map.insert("half".to_string(), Value::String("lower".to_string()));
                 map
             })),
-            // Open oak trapdoor facing west
-            239 => Some(Value::Compound({
+            260 => Some(Value::Compound({
                 let mut map = HashMap::new();
-                map.insert("facing".to_string(), Value::String("west".to_string()));
-                map.insert("open".to_string(), Value::String("true".to_string()));
-                map.insert("half".to_string(), Value::String("top".to_string()));
+                map.insert("half".to_string(), Value::String("upper".to_string()));
+                map
+            })),
+            // Waterlogged sea pickle cluster.
+            261 => Some(Value::Compound({
+                let mut map = HashMap::new();
+                map.insert("pickles".to_string(), Value::String("2".to_string()));
+                map.insert("waterlogged".to_string(), Value::String("true".to_string()));
                 map
             })),
             _ => None,
@@ -715,7 +811,7 @@ impl Block {
 use std::sync::Mutex;
 
 #[allow(clippy::type_complexity)]
-static STAIR_CACHE: Lazy<Mutex<HashMap<(u8, StairFacing, StairShape), Arc<Value>>>> =
+static STAIR_CACHE: Lazy<Mutex<HashMap<(u16, StairFacing, StairShape), Arc<Value>>>> =
     Lazy::new(|| Mutex::new(HashMap::new()));
 
 // General function to create any stair block with facing and shape properties
@@ -1030,9 +1126,110 @@ pub const POTTED_DANDELION: Block = Block::new(247);
 pub const POTTED_BLUE_ORCHID: Block = Block::new(248);
 
 pub const GRAY_CONCRETE_POWDER: Block = Block::new(252);
+pub const BROWN_CONCRETE_POWDER: Block = Block::new(232);
 pub const CYAN_TERRACOTTA: Block = Block::new(253);
 pub const BLACK_WOOL: Block = Block::new(254);
 pub const LIGHT_GRAY_WALL_BANNER: Block = Block::new(255);
+
+pub const MANGROVE_LOG: Block = Block::new(0);
+pub const MANGROVE_LEAVES: Block = Block::new(233);
+pub const AZALEA_LEAVES: Block = Block::new(234);
+
+pub const DIAMOND_ORE: Block = Block::new(249);
+pub const REDSTONE_ORE: Block = Block::new(250);
+pub const LAPIS_ORE: Block = Block::new(251);
+
+// Underwater bed palette + vegetation (ported from the Teddy fork; ids kept verbatim).
+pub const SEAGRASS: Block = Block::new(238);
+pub const KELP_PLANT: Block = Block::new(239);
+pub const MAGMA_BLOCK: Block = Block::new(256);
+pub const SNOW_LAYER: Block = Block::new(257);
+pub const KELP: Block = Block::new(258);
+pub const TALL_SEAGRASS_BOTTOM: Block = Block::new(259);
+pub const TALL_SEAGRASS_TOP: Block = Block::new(260);
+pub const SEA_PICKLE: Block = Block::new(261);
+pub const SOUL_SAND: Block = Block::new(265);
+// Structure-schematic blocks, placed with their original block-states.
+pub const SANDSTONE_WALL: Block = Block::new(266);
+pub const CUT_SANDSTONE_SLAB: Block = Block::new(267);
+pub const SMOOTH_QUARTZ_SLAB: Block = Block::new(268);
+pub const SMOOTH_QUARTZ_STAIRS: Block = Block::new(269);
+pub const BLACKSTONE_STAIRS: Block = Block::new(270);
+pub const BLACKSTONE_WALL: Block = Block::new(271);
+pub const DIORITE_WALL: Block = Block::new(272);
+pub const IRON_TRAPDOOR: Block = Block::new(273);
+pub const JUNGLE_TRAPDOOR: Block = Block::new(274);
+pub const BIRCH_FENCE: Block = Block::new(275);
+pub const JUNGLE_FENCE: Block = Block::new(276);
+pub const BIRCH_FENCE_GATE: Block = Block::new(277);
+pub const DARK_OAK_FENCE_GATE: Block = Block::new(278);
+pub const BIRCH_DOOR: Block = Block::new(279);
+pub const BIRCH_PRESSURE_PLATE: Block = Block::new(280);
+pub const STONE_PRESSURE_PLATE: Block = Block::new(281);
+pub const BLAST_FURNACE: Block = Block::new(282);
+pub const DISPENSER: Block = Block::new(283);
+pub const HOPPER: Block = Block::new(284);
+pub const GRINDSTONE: Block = Block::new(285);
+pub const LANTERN: Block = Block::new(286);
+pub const LODESTONE: Block = Block::new(287);
+pub const REDSTONE_TORCH: Block = Block::new(288);
+pub const STONE_BUTTON: Block = Block::new(289);
+pub const CHISELED_POLISHED_BLACKSTONE: Block = Block::new(290);
+pub const MOSSY_STONE_BRICK_WALL: Block = Block::new(291);
+pub const BAMBOO_STAIRS: Block = Block::new(292);
+pub const POLISHED_DEEPSLATE_WALL: Block = Block::new(293);
+pub const BLACK_STAINED_GLASS: Block = Block::new(294);
+pub const POLISHED_ANDESITE_SLAB: Block = Block::new(295);
+pub const END_STONE_BRICK_WALL: Block = Block::new(296);
+pub const BAMBOO_SLAB: Block = Block::new(297);
+pub const CHISELED_DEEPSLATE: Block = Block::new(298);
+pub const POLISHED_DEEPSLATE_SLAB: Block = Block::new(299);
+pub const BIRCH_BUTTON: Block = Block::new(300);
+pub const COBBLESTONE_SLAB: Block = Block::new(301);
+pub const DARK_OAK_SLAB: Block = Block::new(302);
+pub const JUNGLE_SLAB: Block = Block::new(303);
+pub const JUNGLE_STAIRS: Block = Block::new(304);
+pub const NETHER_BRICK_FENCE: Block = Block::new(305);
+pub const OAK_BUTTON: Block = Block::new(306);
+pub const POWERED_RAIL: Block = Block::new(307);
+pub const SPRUCE_FENCE: Block = Block::new(308);
+pub const SPRUCE_SLAB: Block = Block::new(309);
+pub const ANDESITE_SLAB: Block = Block::new(310);
+pub const COBBLED_DEEPSLATE_SLAB: Block = Block::new(311);
+pub const COBBLED_DEEPSLATE_STAIRS: Block = Block::new(312);
+pub const DARK_OAK_FENCE: Block = Block::new(313);
+pub const DARK_OAK_PRESSURE_PLATE: Block = Block::new(314);
+pub const GRAY_STAINED_GLASS_PANE: Block = Block::new(316);
+pub const GRAY_WALL_BANNER: Block = Block::new(317);
+pub const GRAY_WOOL: Block = Block::new(318);
+pub const NETHER_WART_BLOCK: Block = Block::new(319);
+pub const OAK_FENCE_GATE: Block = Block::new(320);
+pub const POLISHED_BASALT: Block = Block::new(321);
+pub const POLISHED_BLACKSTONE_BUTTON: Block = Block::new(322);
+pub const POLISHED_BLACKSTONE_PRESSURE_PLATE: Block = Block::new(323);
+pub const RED_NETHER_BRICK_SLAB: Block = Block::new(324);
+pub const SPRUCE_BUTTON: Block = Block::new(325);
+pub const SPRUCE_FENCE_GATE: Block = Block::new(326);
+pub const ACACIA_TRAPDOOR: Block = Block::new(327);
+pub const COMPOSTER: Block = Block::new(328);
+pub const CYAN_CARPET: Block = Block::new(329);
+pub const DARK_OAK_BUTTON: Block = Block::new(330);
+pub const END_STONE_BRICK_SLAB: Block = Block::new(331);
+pub const GLASS_PANE: Block = Block::new(332);
+pub const GREEN_CARPET: Block = Block::new(333);
+pub const LIGHT_BLUE_CARPET: Block = Block::new(334);
+pub const NETHER_BRICK_WALL: Block = Block::new(335);
+pub const SMOKER: Block = Block::new(336);
+pub const SMOOTH_RED_SANDSTONE: Block = Block::new(337);
+pub const SMOOTH_RED_SANDSTONE_SLAB: Block = Block::new(338);
+pub const BLUE_STAINED_GLASS_PANE: Block = Block::new(339);
+pub const CYAN_WOOL: Block = Block::new(340);
+pub const LIGHT_GRAY_CARPET: Block = Block::new(341);
+pub const MOSSY_COBBLESTONE_SLAB: Block = Block::new(342);
+pub const MOSSY_STONE_BRICK_SLAB: Block = Block::new(343);
+pub const PRISMARINE: Block = Block::new(344);
+pub const STONE_STAIRS: Block = Block::new(345);
+pub const TRIPWIRE_HOOK: Block = Block::new(346);
 
 /// Maps a block to a stair variant in the same colour family.
 #[inline]
@@ -1075,6 +1272,7 @@ pub fn get_stair_block_for_material(material: Block) -> Block {
         MUD_BRICKS => MUD_BRICK_STAIRS,
         MUD => MUD_BRICK_STAIRS,
         BROWN_CONCRETE => MUD_BRICK_STAIRS,
+        BROWN_CONCRETE_POWDER => MUD_BRICK_STAIRS,
         BROWN_TERRACOTTA => MUD_BRICK_STAIRS,
         GRAY_TERRACOTTA => MUD_BRICK_STAIRS,
         LIGHT_GRAY_TERRACOTTA => MUD_BRICK_STAIRS,
@@ -1123,7 +1321,7 @@ pub fn get_stair_block_for_material(material: Block) -> Block {
         SPRUCE_LOG => SPRUCE_STAIRS,
 
         // Misc
-        IRON_BLOCK => POLISHED_BLACKSTONE_BRICK_STAIRS,
+        IRON_BLOCK => POLISHED_DIORITE_STAIRS,
         NETHERITE_BLOCK => POLISHED_BLACKSTONE_BRICK_STAIRS,
         HAY_BALE => OAK_STAIRS,
         GRAVEL => COBBLESTONE_STAIRS,
@@ -1139,7 +1337,7 @@ pub fn get_stair_block_for_material(material: Block) -> Block {
 pub fn get_slab_block_for_material(material: Block) -> Block {
     match material {
         STONE_BRICKS | CHISELED_STONE_BRICKS | CRACKED_STONE_BRICKS => STONE_BRICK_SLAB,
-        BRICK | BROWN_TERRACOTTA => BRICK_SLAB,
+        BRICK | BROWN_TERRACOTTA | BROWN_CONCRETE_POWDER => BRICK_SLAB,
         MUD_BRICKS | WHITE_TERRACOTTA | GRAY_TERRACOTTA | LIGHT_BLUE_TERRACOTTA => MUD_BRICK_SLAB,
         OAK_PLANKS | OAK_LOG | SPRUCE_PLANKS | DARK_OAK_PLANKS => OAK_SLAB,
         QUARTZ_BLOCK | QUARTZ_BRICKS | WHITE_CONCRETE => QUARTZ_SLAB_TOP,
@@ -1162,7 +1360,9 @@ pub fn get_wall_piece_for_material(material: Block) -> Block {
         | SMOOTH_STONE
         | POLISHED_DEEPSLATE
         | DEEPSLATE_BRICKS => STONE_BRICK_WALL,
-        BRICK | BROWN_TERRACOTTA | MUD_BRICKS | WHITE_TERRACOTTA => BRICK_WALL,
+        BRICK | BROWN_TERRACOTTA | BROWN_CONCRETE_POWDER | MUD_BRICKS | WHITE_TERRACOTTA => {
+            BRICK_WALL
+        }
         ANDESITE | GRAY_CONCRETE | LIGHT_GRAY_CONCRETE => ANDESITE_WALL,
         _ => COBBLESTONE_WALL,
     }

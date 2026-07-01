@@ -35,6 +35,11 @@ pub struct ElevationData {
     pub(crate) world_width: usize,
     /// Height of the world in blocks (used for coordinate mapping)
     pub(crate) world_height: usize,
+    /// Affine params of the metre->Minecraft-Y scaling: minimum source height
+    /// in metres and the blocks-per-metre slope. Used to map a real-world
+    /// elevation (e.g. the snow line) to a Minecraft Y threshold.
+    pub(crate) min_height_m: f64,
+    pub(crate) blocks_per_meter: f64,
 }
 
 /// Maximum elevation grid dimension requested from providers per axis.
@@ -101,6 +106,7 @@ pub fn compute_grid_dims(bbox: &LLBBox, scale: f64) -> (usize, usize, usize, usi
 /// and coastal tile-boundary artifacts.
 ///
 /// The returned ElevationData contains heights in Minecraft Y coordinates.
+#[allow(clippy::too_many_arguments)]
 pub fn fetch_elevation_data(
     bbox: &LLBBox,
     scale: f64,
@@ -109,7 +115,9 @@ pub fn fetch_elevation_data(
     extended_max_y: i32,
     land_cover: Option<&mut LandCoverData>,
     aws_only: bool,
+    benchmark: bool,
 ) -> Result<ElevationData, Box<dyn std::error::Error>> {
+    let mut bench = crate::bench::Bench::new(benchmark);
     let (world_width, world_height, grid_width, grid_height) = compute_grid_dims(bbox, scale);
 
     // Select the best provider for this region. When `aws_only` is set the
@@ -119,7 +127,7 @@ pub fn fetch_elevation_data(
     let provider_name = provider.name();
     let is_fallback = provider_name == "aws";
 
-    emit_gui_progress_update(16.0, "Fetching elevation...");
+    emit_gui_progress_update(10.0, "Fetching elevation...");
 
     // Fetch raw elevation data in meters, falling back to AWS on regional provider failure
     let raw = match provider.fetch_raw(bbox, grid_width, grid_height) {
@@ -162,41 +170,46 @@ pub fn fetch_elevation_data(
                 ),
             );
             let fallback = providers::aws_terrain::AwsTerrain;
-            emit_gui_progress_update(16.0, "Regional provider failed, fetching from AWS...");
+            emit_gui_progress_update(10.0, "Regional provider failed, fetching from AWS...");
             fallback.fetch_raw(bbox, grid_width, grid_height)?
         }
         Err(e) => return Err(e),
     };
 
-    emit_gui_progress_update(17.0, "Processing elevation...");
+    bench.mark("elev_raw_fetch");
+    emit_gui_progress_update(12.0, "Processing elevation...");
 
     // Shared post-processing pipeline
     let mut height_grid = raw.heights_meters;
     filter_elevation_outliers(&mut height_grid);
+    bench.mark("elev_filter_outliers");
     repair_terrain_anomalies(&mut height_grid);
+    bench.mark("elev_repair_anomalies");
+    emit_gui_progress_update(14.0, "Processing elevation...");
     // Safety net: fill any remaining NaN from tile gaps or partial provider coverage
     fill_nan_values(&mut height_grid);
+    bench.mark("elev_fill_nan");
 
-    // Land-cover-aware repair (targets urban LiDAR/DSM classification
-    // errors and coastal tile-boundary artifacts; leaves natural terrain
-    // untouched).
+    // Land-cover-aware repair: built-up Gaussian smoothing targets urban
+    // LiDAR/DSM classification errors, coastal pull-down flattens the
+    // shoreline cliff across all land classes.
     //
-    // Both scales are expressed in *meters* and converted to grid cells
-    // via the actual meters-per-cell for this bbox/grid, so the smoothing
-    // covers the same physical scale regardless of world size or provider
-    // resolution.
+    // Both scales are in meters and converted to grid cells via the actual
+    // meters-per-cell, so the smoothing covers the same physical scale
+    // regardless of world size or provider resolution.
     //
     // σ = 30 m for the built-up Gaussian: wide enough that a typical
     // 20 m-wide DSM artifact (tunnel portal, overpass, parking deck) is
-    // reduced to a residual the user can't distinguish from one Minecraft
-    // block. Hilly cities (SF, Pittsburgh) still keep their macro shape —
-    // the kernel falls off long before a real urban slope does. On coarse
+    // reduced to a residual indistinguishable from one Minecraft block.
+    // Hilly cities (SF, Pittsburgh) still keep their macro shape — the
+    // kernel falls off long before a real urban slope does. On coarse
     // providers (AWS fallback when σ < 1.5 cells) the Gaussian pass is
     // skipped internally.
     //
-    // 25 m coastal pull range: reaches far enough to cover DSM-captured
-    // piers/warehouses at the shoreline, short enough to leave the actual
-    // inland city alone.
+    // 25 m coastal pull range: short enough to leave the inland interior
+    // alone, long enough that a 7-10 m urban embankment (Munich Isar,
+    // Vienna Donaukanal) becomes a slope-tier-free ramp instead of a
+    // cliff with stepped stone walls.
     const BUILT_UP_SIGMA_M: f64 = 30.0;
     const COASTAL_PULL_M: f64 = 25.0;
     let (bbox_height_m, bbox_width_m) = geo_distance(bbox.min(), bbox.max());
@@ -211,21 +224,27 @@ pub fn fetch_elevation_data(
     };
 
     if let Some(lc) = land_cover {
+        // The land-cover Gaussian is the slowest elevation step on big areas;
+        // animate the bar across 14->16% as it runs instead of freezing.
         apply_land_cover_repair(
             &mut height_grid,
             lc,
             built_up_sigma_cells,
             coastal_pull_cells,
+            &|f| emit_gui_progress_update(14.0 + f * 2.0, "Processing elevation..."),
         );
     }
+    bench.mark("elev_landcover_repair");
+    emit_gui_progress_update(16.0, "Processing elevation...");
 
-    let mc_heights = scale_to_minecraft(
+    let (mc_heights, min_height_m, blocks_per_meter) = scale_to_minecraft(
         &height_grid,
         scale,
         ground_level,
         disable_height_limit,
         extended_max_y,
     );
+    bench.mark("elev_scale_to_mc");
 
     // Log min/max block heights
     let mut min_block_height = f64::MAX;
@@ -247,6 +266,8 @@ pub fn fetch_elevation_data(
         .into_iter()
         .map(|row| row.into_iter().map(|v| v as f32).collect())
         .collect();
+    bench.mark("elev_downcast");
+    emit_gui_progress_update(18.0, "Processing elevation...");
 
     Ok(ElevationData {
         heights: mc_heights_f32,
@@ -254,6 +275,8 @@ pub fn fetch_elevation_data(
         height: grid_height,
         world_width,
         world_height,
+        min_height_m,
+        blocks_per_meter,
     })
 }
 
