@@ -17,6 +17,45 @@ pub struct StructureSchematic {
     pub voxels: Vec<(i32, i32, i32, BlockWithProperties)>,
     pub anchor_x: i32,
     pub anchor_z: i32,
+    // Max horizontal distance from the anchor to any voxel, precomputed for the halo guard.
+    pub max_extent: i32,
+}
+
+// Max Chebyshev distance from (ax, az) to any voxel. Rotation-invariant, so it holds for any rot.
+fn extent_from_anchor(voxels: &[(i32, i32, i32, BlockWithProperties)], ax: i32, az: i32) -> i32 {
+    voxels
+        .iter()
+        .map(|&(vx, _, vz, _)| (vx - ax).abs().max((vz - az).abs()))
+        .max()
+        .unwrap_or(0)
+}
+
+impl StructureSchematic {
+    /// Re-anchor on the footprint centre, for models whose base fills the full footprint.
+    pub fn centered(mut self) -> Self {
+        self.anchor_x = self.width / 2;
+        self.anchor_z = self.length / 2;
+        self.max_extent = extent_from_anchor(&self.voxels, self.anchor_x, self.anchor_z);
+        self
+    }
+
+    /// Re-anchor on the centroid of the lowest layer, for tall models with a wide top.
+    pub fn base_anchored(mut self) -> Self {
+        let (mut sx, mut sz, mut n) = (0i64, 0i64, 0i64);
+        for &(vx, vy, vz, _) in &self.voxels {
+            if vy == 0 {
+                sx += vx as i64;
+                sz += vz as i64;
+                n += 1;
+            }
+        }
+        if n > 0 {
+            self.anchor_x = (sx / n) as i32;
+            self.anchor_z = (sz / n) as i32;
+        }
+        self.max_extent = extent_from_anchor(&self.voxels, self.anchor_x, self.anchor_z);
+        self
+    }
 }
 
 /// Map a Minecraft block-state string to a block + parsed properties; None for air/unmodeled.
@@ -124,7 +163,7 @@ fn map_structure_block(name: &str) -> Option<BlockWithProperties> {
         "spruce_button" => SPRUCE_BUTTON,
         "spruce_fence_gate" => SPRUCE_FENCE_GATE,
         "end_rod" => END_ROD,
-        "flower_pot" => FLOWER_POT,
+        "flower_pot" => EMPTY_FLOWER_POT,
         "sea_pickle" => SEA_PICKLE,
         "gray_concrete_powder" => GRAY_CONCRETE_POWDER,
         "gray_stained_glass_pane" => GRAY_STAINED_GLASS_PANE,
@@ -184,6 +223,110 @@ fn map_structure_block(name: &str) -> Option<BlockWithProperties> {
         "red_tulip" => RED_FLOWER,
         "dandelion" => YELLOW_FLOWER,
         "potted_azalea_bush" | "potted_flowering_azalea_bush" => FLOWER_POT,
+        // Tombstone blocks. Skeleton skulls are dropped by the no-match arm.
+        "gravel" => GRAVEL,
+        "podzol" => PODZOL,
+        "dirt" => DIRT,
+        "potted_allium" | "potted_cornflower" => FLOWER_POT,
+        "spruce_wall_sign" => SPRUCE_WALL_SIGN,
+        "mossy_cobblestone_stairs" => MOSSY_COBBLESTONE_STAIRS,
+        "mossy_stone_brick_stairs" => MOSSY_STONE_BRICK_STAIRS,
+        "granite_stairs" => GRANITE_STAIRS,
+        "diorite_stairs" => DIORITE_STAIRS,
+        "cobbled_deepslate" => COBBLED_DEEPSLATE,
+        "deepslate_tiles" => DEEPSLATE_TILES,
+        "deepslate_tile_slab" => DEEPSLATE_TILE_SLAB,
+        "deepslate_tile_wall" => DEEPSLATE_TILE_WALL,
+        "polished_blackstone" => POLISHED_BLACKSTONE,
+        "polished_blackstone_slab" => POLISHED_BLACKSTONE_SLAB,
+        "polished_deepslate" => POLISHED_DEEPSLATE,
+        "polished_diorite" => POLISHED_DIORITE,
+        "polished_diorite_slab" => POLISHED_DIORITE_SLAB,
+        "soul_lantern" => SOUL_LANTERN,
+        "chiseled_quartz_block" => CHISELED_QUARTZ_BLOCK,
+        // Helicopter blocks.
+        "white_concrete" => WHITE_CONCRETE,
+        // Starship blocks. Bedrock is remapped so schems never place unbreakable blocks.
+        "blackstone" => BLACKSTONE,
+        "clay" => CLAY,
+        "furnace" => FURNACE,
+        "polished_blackstone_bricks" => POLISHED_BLACKSTONE_BRICKS,
+        "polished_deepslate_stairs" => POLISHED_DEEPSLATE_STAIRS,
+        "polished_blackstone_stairs" => BLACKSTONE_STAIRS,
+        "observer" => BLAST_FURNACE,
+        "light_gray_wool" => LIGHT_GRAY_CONCRETE,
+        "light_gray_stained_glass_pane" => GRAY_STAINED_GLASS_PANE,
+        "tuff" => TUFF,
+        "polished_tuff" => POLISHED_ANDESITE,
+        "tuff_wall" | "polished_tuff_wall" | "granite_wall" => ANDESITE_WALL,
+        "mud_brick_wall" => BRICK_WALL,
+        "deepslate_brick_wall" => DEEPSLATE_TILE_WALL,
+        "polished_blackstone_wall" => BLACKSTONE_WALL,
+        "reinforced_deepslate" => CHISELED_DEEPSLATE,
+        "netherite_block" => NETHERITE_BLOCK,
+        "bedrock" => POLISHED_BLACKSTONE,
+        // Car blocks. Substitutions keep the shape class (slab/stairs/pane) over exact color.
+        "black_concrete" | "black_concrete_powder" => BLACK_CONCRETE,
+        "black_stained_glass_pane" => GRAY_STAINED_GLASS_PANE,
+        "white_stained_glass_pane" => GLASS_PANE,
+        "white_stained_glass" => WHITE_STAINED_GLASS,
+        "cyan_concrete" => CYAN_CONCRETE,
+        "orange_concrete" => ORANGE_CONCRETE,
+        "pink_concrete" => RED_CONCRETE,
+        "smooth_quartz" => SMOOTH_QUARTZ,
+        "smooth_stone" => SMOOTH_STONE,
+        "quartz_bricks" => QUARTZ_BRICKS,
+        "iron_block" => IRON_BLOCK,
+        "gray_carpet" => LIGHT_GRAY_CARPET,
+        "snow" => SNOW_LAYER,
+        "mangrove_slab" => RED_NETHER_BRICK_SLAB,
+        "deepslate_brick_slab" => POLISHED_DEEPSLATE_SLAB,
+        "warped_slab" => WARPED_SLAB,
+        "warped_stairs" => WARPED_STAIRS,
+        "warped_trapdoor" => WARPED_TRAPDOOR,
+        "polished_diorite_stairs" => POLISHED_DIORITE_STAIRS,
+        "acacia_stairs" => GRANITE_STAIRS,
+        "acacia_button" | "bamboo_button" | "mangrove_button" | "warped_button" => STONE_BUTTON,
+        "light_gray_candle" | "gray_candle" => END_ROD,
+        "polished_blackstone_brick_wall" => BLACKSTONE_WALL,
+        "black_wool" => BLACK_WOOL,
+        "blue_carpet" => LIGHT_BLUE_CARPET,
+        "nether_brick_slab" => RED_NETHER_BRICK_SLAB,
+        "mossy_cobblestone_wall" => MOSSY_STONE_BRICK_WALL,
+        // Bridge segment blocks. Wall signs are block entities and stay dropped.
+        "sandstone_stairs" => SMOOTH_SANDSTONE_STAIRS,
+        "sandstone_slab" => CUT_SANDSTONE_SLAB,
+        "cut_sandstone" => SMOOTH_SANDSTONE,
+        "sea_lantern" | "beacon" => SEA_LANTERN,
+        "stripped_warped_stem" => STRIPPED_WARPED_STEM,
+        "stripped_warped_hyphae" => STRIPPED_WARPED_HYPHAE,
+        "warped_fence_gate" => SPRUCE_FENCE_GATE,
+        // Wind-turbine blocks.
+        "quartz_block" => QUARTZ_BLOCK,
+        "quartz_pillar" => QUARTZ_PILLAR,
+        "quartz_slab" => QUARTZ_SLAB_TOP,
+        "quartz_stairs" => QUARTZ_STAIRS,
+        "red_concrete" => RED_CONCRETE,
+        "redstone_wall_torch" => REDSTONE_WALL_TORCH,
+        // Landmark blocks.
+        "green_wool" => GREEN_WOOL,
+        "green_terracotta" => GREEN_STAINED_HARDENED_CLAY,
+        "red_terracotta" => RED_TERRACOTTA,
+        "gray_concrete" => GRAY_CONCRETE,
+        "diorite" => DIORITE,
+        "snow_block" => SNOW_BLOCK,
+        "acacia_log" => ACACIA_LOG,
+        // No cracked/glazed variants exist; nearest match.
+        "cracked_polished_blackstone_bricks" => POLISHED_BLACKSTONE_BRICKS,
+        "brown_glazed_terracotta" => BROWN_TERRACOTTA,
+        "cut_red_sandstone" => SMOOTH_RED_SANDSTONE,
+        "andesite_stairs" => ANDESITE_STAIRS,
+        // Olympiahalle palette. All already carry through to Bedrock and Luanti.
+        "mud" => MUD,
+        "brown_stained_glass" => BROWN_STAINED_GLASS,
+        "nether_bricks" => NETHER_BRICK,
+        "black_terracotta" => BLACK_TERRACOTTA,
+        "tinted_glass" => TINTED_GLASS,
         _ => return None,
     };
     Some(BlockWithProperties::new(block, parse_state(name)))
@@ -209,7 +352,36 @@ fn parse_state(name: &str) -> Option<Value> {
     }
 }
 
+/// Decode a Sponge `Data` byte stream: LEB128 varint palette indices. Lazy, so
+/// a large model needs no `Vec<i32>` four times the size of its block data.
+fn varint_indices(data: &[i8]) -> impl Iterator<Item = i32> + '_ {
+    let mut i = 0usize;
+    std::iter::from_fn(move || {
+        if i >= data.len() {
+            return None;
+        }
+        let mut val: i32 = 0;
+        let mut shift = 0u32;
+        loop {
+            let byte = data[i] as u8;
+            i += 1;
+            if shift < 32 {
+                val |= i32::from(byte & 0x7F) << shift;
+            }
+            if byte & 0x80 == 0 {
+                break;
+            }
+            shift += 7;
+            if i >= data.len() {
+                break;
+            }
+        }
+        Some(val)
+    })
+}
+
 /// Decode a Sponge `Data`/`BlockData` byte stream: LEB128 varint palette indices.
+#[cfg(test)]
 fn decode_varints(data: &[u8]) -> Vec<i32> {
     let mut out = Vec::new();
     let mut i = 0;
@@ -250,13 +422,28 @@ fn short_field(c: &HashMap<String, Value>, k: &str) -> Result<i32, String> {
     }
 }
 
-/// Load a gzipped Sponge `.schem` (v2 or v3) keeping all mapped blocks + states.
-pub fn load_structure(gz_bytes: &[u8]) -> Result<StructureSchematic, String> {
-    let mut raw = Vec::new();
-    flate2::read::GzDecoder::new(gz_bytes)
-        .read_to_end(&mut raw)
-        .map_err(|e| format!("schem: gunzip failed: {e}"))?;
-    let root: Value = fastnbt::from_bytes(&raw).map_err(|e| format!("schem: nbt parse: {e}"))?;
+/// A parsed `.schem` still referring to its blocks by palette index. One byte
+/// per voxel, which at landmark size costs a quarter of expanded blocks.
+pub struct PalettizedSchematic {
+    pub width: i32,
+    pub length: i32,
+    /// One entry per accepted palette id; index with a voxel's `.3`.
+    pub palette: Vec<BlockWithProperties>,
+    /// (x, y, z, palette index), y floored so the lowest layer is 0.
+    pub voxels: Vec<(i16, i16, i16, u8)>,
+}
+
+/// Load a gzipped Sponge `.schem` keeping palette indices. Unmapped entries are
+/// dropped, so the palette is dense and fits a `u8`.
+pub fn load_palettized(gz_bytes: &[u8]) -> Result<PalettizedSchematic, String> {
+    // Scoped so the decompressed NBT is freed before the voxel list grows.
+    let root: Value = {
+        let mut raw = Vec::new();
+        flate2::read::GzDecoder::new(gz_bytes)
+            .read_to_end(&mut raw)
+            .map_err(|e| format!("schem: gunzip failed: {e}"))?;
+        fastnbt::from_bytes(&raw).map_err(|e| format!("schem: nbt parse: {e}"))?
+    };
     let root_c = as_compound(&root).ok_or("schem: root not a compound")?;
     let scm = root_c
         .get("Schematic")
@@ -269,51 +456,105 @@ pub fn load_structure(gz_bytes: &[u8]) -> Result<StructureSchematic, String> {
     if width <= 0 || height <= 0 || length <= 0 {
         return Err("schem: non-positive dimensions".into());
     }
+    if width > i32::from(i16::MAX) || height > i32::from(i16::MAX) || length > i32::from(i16::MAX) {
+        return Err("schem: dimensions exceed the i16 voxel coordinate range".into());
+    }
 
     let (palette_v, data_v) = match scm.get("Blocks").and_then(as_compound) {
         Some(blocks) => (blocks.get("Palette"), blocks.get("Data")),
         None => (scm.get("Palette"), scm.get("BlockData")),
     };
-    let palette = palette_v
+    let palette_c = palette_v
         .and_then(as_compound)
         .ok_or("schem: missing Palette")?;
 
-    let mut idx_to_block: HashMap<i32, BlockWithProperties> = HashMap::new();
-    for (name, v) in palette {
+    // Compacted so the per-voxel index stays a byte however sparse the source is.
+    let mut palette: Vec<BlockWithProperties> = Vec::new();
+    let mut idx_to_slot: HashMap<i32, u8> = HashMap::new();
+    for (name, v) in palette_c {
         if let Value::Int(i) = v {
             if let Some(bwp) = map_structure_block(name) {
-                idx_to_block.insert(*i, bwp);
+                if palette.len() >= 256 {
+                    return Err("schem: more than 256 rendered palette entries".into());
+                }
+                idx_to_slot.insert(*i, palette.len() as u8);
+                palette.push(bwp);
             }
         }
     }
 
-    let data_bytes: Vec<u8> = match data_v {
-        Some(Value::ByteArray(b)) => b.iter().map(|&x| x as u8).collect(),
-        _ => return Err("schem: missing BlockData".into()),
+    let Some(Value::ByteArray(data)) = data_v else {
+        return Err("schem: missing BlockData".into());
     };
-    let indices = decode_varints(&data_bytes);
+
+    // Sponge requires exactly Width*Height*Length entries. A stream that runs long
+    // or short is corrupt, and would otherwise fold into out-of-range coordinates.
+    let volume = i64::from(width) * i64::from(height) * i64::from(length);
+    if volume > i64::from(i32::MAX) {
+        return Err("schem: volume exceeds the supported range".into());
+    }
+    let volume = volume as usize;
 
     let wl = width * length;
-    let mut voxels = Vec::new();
-    for (i, &idx) in indices.iter().enumerate() {
-        let i = i as i32;
-        if let Some(bwp) = idx_to_block.get(&idx) {
-            let x = i % width;
-            let z = (i / width) % length;
-            let y = i / wl;
-            voxels.push((x, y, z, bwp.clone()));
+    let mut voxels: Vec<(i16, i16, i16, u8)> = Vec::new();
+    let mut min_y = i32::MAX;
+    let mut seen = 0usize;
+    for (i, idx) in varint_indices(data.iter().as_slice()).enumerate() {
+        if i >= volume {
+            return Err("schem: BlockData longer than Width*Height*Length".into());
         }
+        seen = i + 1;
+        if let Some(&slot) = idx_to_slot.get(&idx) {
+            let i = i as i32;
+            let y = i / wl;
+            min_y = min_y.min(y);
+            voxels.push((
+                (i % width) as i16,
+                y as i16,
+                ((i / width) % length) as i16,
+                slot,
+            ));
+        }
+    }
+    if seen != volume {
+        return Err(format!(
+            "schem: BlockData has {seen} entries, expected {volume}"
+        ));
     }
 
     // Drop empty layers below so the model's lowest block sits at y=0.
-    if let Some(min_y) = voxels.iter().map(|v| v.1).min() {
-        if min_y != 0 {
-            for v in &mut voxels {
-                v.1 -= min_y;
-            }
+    if min_y != i32::MAX && min_y != 0 {
+        let min_y = min_y as i16;
+        for v in &mut voxels {
+            v.1 -= min_y;
         }
     }
     voxels.shrink_to_fit();
+
+    Ok(PalettizedSchematic {
+        width,
+        length,
+        palette,
+        voxels,
+    })
+}
+
+/// Load a gzipped Sponge `.schem` (v2 or v3) keeping all mapped blocks + states.
+pub fn load_structure(gz_bytes: &[u8]) -> Result<StructureSchematic, String> {
+    let p = load_palettized(gz_bytes)?;
+    let (width, length) = (p.width, p.length);
+    let voxels: Vec<(i32, i32, i32, BlockWithProperties)> = p
+        .voxels
+        .iter()
+        .map(|&(x, y, z, slot)| {
+            (
+                i32::from(x),
+                i32::from(y),
+                i32::from(z),
+                p.palette[slot as usize].clone(),
+            )
+        })
+        .collect();
 
     // Anchor on the tallest column (the mast) so callers can place it precisely.
     let mut anchor = (0, 0);
@@ -325,12 +566,14 @@ pub fn load_structure(gz_bytes: &[u8]) -> Result<StructureSchematic, String> {
         }
     }
 
+    let max_extent = extent_from_anchor(&voxels, anchor.0, anchor.1);
     Ok(StructureSchematic {
         width,
         length,
         voxels,
         anchor_x: anchor.0,
         anchor_z: anchor.1,
+        max_extent,
     })
 }
 
@@ -377,7 +620,7 @@ fn rotate_rail_shape(s: &str, k: u8) -> String {
 }
 
 /// Rotate a block-state compound by `k` quarter-turns: facing, connection sides, rail shape, axis.
-fn rotate_props(props: &Value, k: u8) -> Value {
+pub(crate) fn rotate_props(props: &Value, k: u8) -> Value {
     let Value::Compound(c) = props else {
         return props.clone();
     };
@@ -421,10 +664,15 @@ pub fn place_structure(
 ) {
     let k = rot & 3;
     let (w, l) = (schem.width, schem.length);
-    debug_assert!(
-        w.max(l) <= 64,
-        "structure exceeds tile halo; clips at seams"
-    );
+    // Skip if any voxel sits farther from the anchor than the tile halo, else it clips at seams.
+    if schem.max_extent > crate::tile::TILE_EDITOR_HALO {
+        eprintln!(
+            "structure extent {} exceeds tile halo {}; skipping to avoid seam clipping",
+            schem.max_extent,
+            crate::tile::TILE_EDITOR_HALO
+        );
+        return;
+    }
     let (ax, az) = rotate_xz(schem.anchor_x, schem.anchor_z, w, l, k);
     for (vx, vy, vz, bwp) in &schem.voxels {
         let (rx, rz) = rotate_xz(*vx, *vz, w, l, k);
@@ -476,5 +724,46 @@ mod tests {
         assert!(map_structure_block("minecraft:iron_bars[north=true]").is_some());
         assert!(map_structure_block("minecraft:air").is_none());
         assert!(map_structure_block("minecraft:diamond_block").is_none());
+    }
+
+    /// Gzipped Sponge v2 with `entries` single-byte indices, all sandstone.
+    fn schem_bytes(width: i16, height: i16, length: i16, entries: usize) -> Vec<u8> {
+        use std::io::Write;
+        let mut palette = HashMap::new();
+        palette.insert("minecraft:sandstone".to_string(), Value::Int(0));
+        let mut root = HashMap::new();
+        root.insert("Width".to_string(), Value::Short(width));
+        root.insert("Height".to_string(), Value::Short(height));
+        root.insert("Length".to_string(), Value::Short(length));
+        root.insert("Palette".to_string(), Value::Compound(palette));
+        root.insert(
+            "BlockData".to_string(),
+            Value::ByteArray(fastnbt::ByteArray::new(vec![0i8; entries])),
+        );
+        let nbt = fastnbt::to_bytes(&Value::Compound(root)).unwrap();
+        let mut out = Vec::new();
+        let mut enc = flate2::write::GzEncoder::new(&mut out, flate2::Compression::fast());
+        enc.write_all(&nbt).unwrap();
+        enc.finish().unwrap();
+        out
+    }
+
+    // BlockData must match the declared volume. A stream that runs long or short
+    // would otherwise fold into out-of-range Y instead of failing.
+    #[test]
+    fn block_data_length_must_match_the_volume() {
+        let p = load_palettized(&schem_bytes(2, 3, 2, 12)).expect("exact volume loads");
+        assert_eq!(p.voxels.len(), 12);
+        for &(_, y, _, _) in &p.voxels {
+            assert!((0..3).contains(&y), "y {y} outside the declared height");
+        }
+        assert!(
+            load_palettized(&schem_bytes(2, 3, 2, 13)).is_err(),
+            "too long"
+        );
+        assert!(
+            load_palettized(&schem_bytes(2, 3, 2, 11)).is_err(),
+            "too short"
+        );
     }
 }

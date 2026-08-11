@@ -2,6 +2,7 @@ use crate::args::Args;
 use crate::block_definitions::*;
 use crate::bresenham::bresenham_line;
 use crate::deterministic_rng::element_rng;
+use crate::element_processing::bridges::BridgeSurfaceMap;
 use crate::element_processing::surfaces::get_blocks_for_surface;
 use crate::element_processing::tree::Tree;
 use crate::floodfill_cache::{BuildingFootprintBitmap, FloodFillCache};
@@ -15,6 +16,7 @@ pub fn generate_leisure(
     args: &Args,
     flood_fill_cache: &FloodFillCache,
     building_footprints: &BuildingFootprintBitmap,
+    bridge_surface: &BridgeSurfaceMap,
 ) {
     if let Some(leisure_type) = element.tags.get("leisure") {
         let mut previous_node: Option<(i32, i32)> = None;
@@ -87,9 +89,11 @@ pub fn generate_leisure(
             for &(x, z) in filled_area.iter() {
                 editor.set_block(block_type, x, 0, z, Some(&[GRASS_BLOCK]), None);
 
-                // Add decorative elements for parks and gardens
+                // Land-cover water is skipped because a park often spans its
+                // own lake, and the carve after this leaves plants floating.
                 if matches!(leisure_type.as_str(), "park" | "garden" | "nature_reserve")
                     && editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK]))
+                    && !editor.is_lc_water(x, z)
                 {
                     let random_choice: i32 = rng.random_range(0..1000);
 
@@ -115,8 +119,18 @@ pub fn generate_leisure(
                             editor.set_block(OAK_LEAVES, x, 1, z, None, None);
                         }
                         105..120 => {
-                            // Tree
-                            Tree::create(editor, (x, 1, z), Some(building_footprints));
+                            // Only where land cover says woody, else a park
+                            // canopies its own meadows. 1/1000 for specimens.
+                            if random_choice == 105 || editor.land_cover_backs_trees(x, z) {
+                                Tree::create(
+                                    editor,
+                                    (x, 1, z),
+                                    Some(building_footprints),
+                                    Some(bridge_surface),
+                                );
+                            } else {
+                                editor.set_block(GRASS, x, 1, z, None, None);
+                            }
                         }
                         _ => {}
                     }
@@ -126,6 +140,28 @@ pub fn generate_leisure(
             // Stamp bundled playground structures (replaces the old procedural props).
             if matches!(leisure_type.as_str(), "playground" | "recreation_ground") {
                 crate::structures::playground::scatter_playgrounds(editor, filled_area.as_slice());
+            }
+
+            if leisure_type == "pitch" {
+                // Clear park/ground vegetation scattered onto the pitch before marking.
+                let vegetation: &[Block] = &[
+                    GRASS,
+                    FERN,
+                    RED_FLOWER,
+                    YELLOW_FLOWER,
+                    BLUE_FLOWER,
+                    WHITE_FLOWER,
+                    OAK_LEAVES,
+                ];
+                for &(x, z) in filled_area.iter() {
+                    editor.set_block(AIR, x, 1, z, Some(vegetation), None);
+                }
+                crate::element_processing::sport_pitches::draw_pitch_markings(
+                    editor,
+                    element,
+                    filled_area.as_slice(),
+                    block_type,
+                );
             }
         }
     }
@@ -137,8 +173,9 @@ pub fn generate_leisure_from_relation(
     args: &Args,
     flood_fill_cache: &FloodFillCache,
     building_footprints: &BuildingFootprintBitmap,
+    bridge_surface: &BridgeSurfaceMap,
 ) {
-    if rel.tags.get("leisure") == Some(&"park".to_string()) {
+    if rel.tags.get("leisure").map(String::as_str) == Some("park") {
         // Process each outer member way individually using cached flood fill.
         // We intentionally do not combine all outer nodes into one mega-way,
         // because that creates a nonsensical polygon spanning the whole relation
@@ -157,6 +194,7 @@ pub fn generate_leisure_from_relation(
                     args,
                     flood_fill_cache,
                     building_footprints,
+                    bridge_surface,
                 );
             }
         }

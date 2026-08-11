@@ -1,6 +1,14 @@
 import { licenseText } from './license.js';
 import { fetchLanguage, invalidJSON } from './language.js';
 import { renderMarkdown, pickAssetForPlatform } from './update.js';
+import {
+  initSettingsStore,
+  setDynamicDefault,
+  refreshSettingsState,
+  localizeSettingsStore,
+  cancelSettingsResetConfirm,
+  flushSettingsStore,
+} from './settings-store.js';
 
 let invoke;
 if (window.__TAURI__) {
@@ -39,6 +47,10 @@ window.addEventListener("DOMContentLoaded", async () => {
   setupProgressListener();
   await initSavePath();
   initSettings();
+  // After initSettings(), so the slider label and rotation handlers exist
+  // before restored values are applied. Labels get localized a few lines below.
+  initSettingsStore({ resetWorldFormat: () => setWorldFormat('java') });
+  resolveDefaultSavePath();
   initTelemetryConsent();
   initClearCacheButton();
   initTooltips();
@@ -114,9 +126,9 @@ async function applyLocalization(localization) {
     "option[data-localize='mode_terrain_only']": "mode_terrain_only",
     "span[data-localize='terrain']": "terrain",
     "span[data-localize='interior']": "interior",
-    "span[data-localize='roof']": "roof",
     "span[data-localize='fillground']": "fillground",
-    "span[data-localize='land_cover']": "land_cover",
+    "span[data-localize='legacy_trees']": "legacy_trees",
+    "span[data-localize='overture']": "overture",
     "span[data-localize='three_dmr']": "three_dmr",
     "span[data-localize='disable_height_limit']": "disable_height_limit",
     "span[data-localize='aws_only_elevation']": "aws_only_elevation",
@@ -125,12 +137,27 @@ async function applyLocalization(localization) {
     "span[data-localize='map_theme']": "map_theme",
     "span[data-localize='save_path']": "save_path",
     "span[data-localize='rotation_angle']": "rotation_angle",
+    "span[data-localize='canopy_height']": "canopy_height",
+    "span[data-localize='max_tree_size']": "max_tree_size",
+    "button[data-localize='tree_size_small']": "tree_size_small",
+    "button[data-localize='tree_size_medium']": "tree_size_medium",
+    "button[data-localize='tree_size_big']": "tree_size_big",
+    "button[data-localize='tree_size_tall']": "tree_size_tall",
+    "button[data-localize='tree_size_giant']": "tree_size_giant",
+    "span[data-localize='gamemode']": "gamemode",
+    "button[data-localize='gamemode_survival']": "gamemode_survival",
+    "button[data-localize='gamemode_creative']": "gamemode_creative",
+    "button[data-localize='gamemode_spectator']": "gamemode_spectator",
+    "span[data-localize='world_time']": "world_time",
+    "span[data-localize='map_item']": "map_item",
     "div[data-localize='settings_section_generation']": "settings_section_generation",
     "div[data-localize='settings_section_world']": "settings_section_world",
     "div[data-localize='settings_section_map']": "settings_section_map",
     "div[data-localize='settings_section_application']": "settings_section_application",
     "span[data-localize='clear_tile_cache']": "clear_tile_cache",
     "button[data-localize='clear_tile_cache_button']": "clear_tile_cache_button",
+    // Row label only; settings-store.js owns the button text.
+    "span[data-localize='reset_all_settings']": "reset_all_settings",
     ".footer-link": "footer_text",
     "button[data-localize='license_and_credits']": "license_and_credits",
     "h2[data-localize='license_and_credits']": "license_and_credits",
@@ -149,6 +176,9 @@ async function applyLocalization(localization) {
   for (const selector in localizationElements) {
     localizeElement(localization, { selector: selector }, localizationElements[selector]);
   }
+
+  // settings-store.js creates these buttons and owns their text.
+  localizeSettingsStore(localization);
 
   // Re-apply current bbox selection info text with new language
   const bboxSelectionInfo = document.getElementById("bbox-selection-info");
@@ -363,7 +393,9 @@ function registerMessageEvent() {
   window.addEventListener('message', function (event) {
     const bboxText = event.data.bboxText;
 
-    if (bboxText) {
+    // Typed messages are handled below; only untyped bboxText messages are
+    // selection updates (typed ones carrying coordinates must not be).
+    if (bboxText && !event.data.type) {
       console.log("Updated BBOX Coordinates:", bboxText);
       displayBboxInfoText(bboxText);
     }
@@ -602,11 +634,13 @@ function setupProgressListener() {
       if (message.startsWith("Error!")) {
         progressInfo.style.color = "#fa7878";
         generationButtonEnabled = true;
+        window.arnisPreview3D?.setGenerationRunning(false);
         setWorldNameLabel("");
         resetEta();
       } else if (message.startsWith("Done!")) {
         progressInfo.style.color = "#7bd864";
         generationButtonEnabled = true;
+        window.arnisPreview3D?.setGenerationRunning(false);
         resetEta();
       } else {
         progressInfo.style.color = "#ececec";
@@ -666,6 +700,30 @@ function initEasterEggs() {
   });
 }
 
+// Language implied by the browser, ignoring any stored preference.
+function detectBrowserLanguage(availableOptions) {
+  const currentLang = navigator.language || 'en';
+  if (availableOptions.includes(currentLang)) return currentLang;
+  const base = currentLang.split('-')[0];
+  if (availableOptions.includes(base)) return base;
+  return 'en';
+}
+
+// Gives the settings store the save path default. Not awaited, since startup
+// must not block on a filesystem probe; on failure the revert stays hidden.
+function resolveDefaultSavePath() {
+  Promise.resolve()
+    .then(() => invoke('gui_get_default_save_path'))
+    .then((detected) => {
+      if (typeof detected === 'string' && detected) {
+        setDynamicDefault('savePath', detected);
+      }
+    })
+    .catch(() => {
+      // No detectable default, so that row keeps no revert button.
+    });
+}
+
 function initSettings() {
   // Settings
   const settingsModal = document.getElementById("settings-modal");
@@ -682,6 +740,9 @@ function initSettings() {
   // Close settings modal
   function closeSettings() {
     settingsModal.style.display = "none";
+    // Webview teardown events are not guaranteed, so commit here.
+    flushSettingsStore();
+    cancelSettingsResetConfirm();
   }
 
   // Close settings and license modals on escape key
@@ -710,10 +771,48 @@ function initSettings() {
   slider.addEventListener("input", () => {
     sliderValue.textContent = parseFloat(slider.value).toFixed(2);
   });
-  // Double-click to reset world scale to default (1.00)
+  // Double-click to reset world scale to default (1.00).
+  // Assigning .value fires no event, so dispatch them for the label and store.
   slider.addEventListener("dblclick", () => {
     slider.value = 1;
-    sliderValue.textContent = "1.00";
+    slider.dispatchEvent(new Event("input", { bubbles: true }));
+    slider.dispatchEvent(new Event("change", { bubbles: true }));
+  });
+
+  // Game mode segmented control
+  const gamemodeGroup = document.getElementById("gamemode-group");
+  gamemodeGroup.querySelectorAll(".segment").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      gamemodeGroup.querySelectorAll(".segment").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+
+  // Max tree size segmented control
+  const maxTreeSizeGroup = document.getElementById("max-tree-size-group");
+  maxTreeSizeGroup.querySelectorAll(".segment").forEach((btn) => {
+    btn.addEventListener("click", () => {
+      maxTreeSizeGroup.querySelectorAll(".segment").forEach((b) => b.classList.remove("active"));
+      btn.classList.add("active");
+    });
+  });
+
+  // World time slider (clock minutes 00:00-23:50; converted to ticks on submit)
+  const timeSlider = document.getElementById("world-time-slider");
+  const timeValue = document.getElementById("world-time-value");
+  function formatClock(minutes) {
+    if (minutes >= 1440) return "24:00";
+    const h = String(Math.floor(minutes / 60)).padStart(2, "0");
+    const m = String(minutes % 60).padStart(2, "0");
+    return `${h}:${m}`;
+  }
+  timeSlider.addEventListener("input", () => {
+    timeValue.textContent = formatClock(parseInt(timeSlider.value, 10));
+  });
+  timeSlider.addEventListener("dblclick", () => {
+    timeSlider.value = 720;
+    timeSlider.dispatchEvent(new Event("input", { bubbles: true }));
+    timeSlider.dispatchEvent(new Event("change", { bubbles: true }));
   });
 
   // Rotation angle input
@@ -723,6 +822,8 @@ function initSettings() {
     if (isNaN(val)) val = 0;
     val = Math.min(Math.max(val, -90), 90);
     rotationInput.value = val.toFixed(2);
+    // The bbox handlers set this from code, which fires no input event.
+    refreshSettingsState();
     // Tell the map iframe to update the rotation mask overlay
     const mapFrame = document.querySelector('.map-container');
     if (mapFrame && mapFrame.contentWindow) {
@@ -749,29 +850,22 @@ function initSettings() {
   // Language selector
   const languageSelect = document.getElementById("language-select");
   const availableOptions = Array.from(languageSelect.options).map(opt => opt.value);
-  
+
+  // The default here is the browser language, not an HTML attribute.
+  setDynamicDefault('language', detectBrowserLanguage(availableOptions));
+
   // Check for saved language preference first
   const savedLanguage = localStorage.getItem('arnis-language');
-  let languageToSet = 'en'; // Default to English
-  
+  let languageToSet;
+
   if (savedLanguage && availableOptions.includes(savedLanguage)) {
     // Use saved language if it exists and is available
     languageToSet = savedLanguage;
   } else {
     // Otherwise use browser language
-    const currentLang = navigator.language;
-    
-    // Try to match the exact language code first
-    if (availableOptions.includes(currentLang)) {
-      languageToSet = currentLang;
-    }
-    // Try to match just the base language code
-    else if (availableOptions.includes(currentLang.split('-')[0])) {
-      languageToSet = currentLang.split('-')[0];
-    }
-    // languageToSet remains 'en' as default
+    languageToSet = detectBrowserLanguage(availableOptions);
   }
-  
+
   languageSelect.value = languageToSet;
 
   // Handle language change
@@ -996,6 +1090,8 @@ function initTelemetryConsent() {
     if (telemetryToggle) {
       telemetryToggle.checked = true;
     }
+    // Set from code, so no change event fired.
+    refreshSettingsState();
   };
 
   window.rejectTelemetry = () => {
@@ -1006,6 +1102,7 @@ function initTelemetryConsent() {
     if (telemetryToggle) {
       telemetryToggle.checked = false;
     }
+    refreshSettingsState();
   };
 
   // Utility for other scripts to read consent
@@ -1460,6 +1557,7 @@ function displayBboxInfoText(bboxText) {
     if (!customBBoxValid) {
       selectedBBox = "";
     }
+    window.arnisPreview3D?.onBboxCleared();
     return;
   }
 
@@ -1470,6 +1568,9 @@ function displayBboxInfoText(bboxText) {
   const selectedSize = calculateBBoxSize(lng1, lat1, lng2, lat2);
 
   displayBboxSizeStatus(bboxSelectionInfo, selectedSize);
+
+  // Hide any rendered mini 3D preview if the selection actually changed
+  window.arnisPreview3D?.onBboxChanged(selectedBBox);
 }
 
 let worldPath = "";
@@ -1513,6 +1614,7 @@ function handleWorldSelectionError(errorCode) {
 }
 
 let generationButtonEnabled = true;
+
 /**
  * Initiates the world generation process
  * Validates required inputs and sends generation parameters to the backend
@@ -1569,10 +1671,12 @@ async function startGeneration() {
     var skipOsmObjects = (generationMode === "terrain-only");
 
     var interior = document.getElementById("interior-toggle").checked;
-    var roof = document.getElementById("roof-toggle").checked;
     var fill_ground = document.getElementById("fillground-toggle").checked;
     var legacy_trees = document.getElementById("legacy-trees-toggle").checked;
-    var land_cover = document.getElementById("land-cover-toggle").checked;
+    var canopy_height = document.getElementById("canopy-height-toggle").checked;
+    var maxTreeSizeBtn = document.querySelector("#max-tree-size-group .segment.active");
+    var maxTreeSize = maxTreeSizeBtn ? maxTreeSizeBtn.dataset.maxTreeSize : "giant";
+    var overture = document.getElementById("overture-toggle").checked;
     var use_3d = document.getElementById("use-3d-toggle").checked;
     var disable_height_limit = document.getElementById("disable-height-limit-toggle").checked;
     var aws_only_elevation = document.getElementById("aws-only-elevation-toggle").checked;
@@ -1591,6 +1695,13 @@ async function startGeneration() {
     // Get rotation angle
     var rotationAngle = parseFloat(document.getElementById("rotation-angle-input").value) || 0;
 
+    var gamemodeBtn = document.querySelector("#gamemode-group .segment.active");
+    var gamemode = gamemodeBtn ? gamemodeBtn.dataset.gamemode : "creative";
+    var mapItem = document.getElementById("map-item-toggle").checked;
+    // Clock minutes -> Minecraft ticks (tick 0 = 06:00; 24:00 wraps to 00:00)
+    var clockMinutes = (parseInt(document.getElementById("world-time-slider").value, 10) || 0) % 1440;
+    var worldTime = Math.round(((clockMinutes + 1440 - 360) % 1440) * (24000 / 1440));
+
     // Pass the selected options to the Rust backend
     await invoke("gui_start_generation", {
         bboxText: selectedBBox,
@@ -1600,10 +1711,11 @@ async function startGeneration() {
         terrainEnabled: terrain,
         skipOsmObjects: skipOsmObjects,
         interiorEnabled: interior,
-        roofEnabled: roof,
         fillgroundEnabled: fill_ground,
         legacyTreesEnabled: legacy_trees,
-        landCoverEnabled: land_cover,
+        maxTreeSize: maxTreeSize,
+        canopyHeightEnabled: canopy_height,
+        overtureEnabled: overture,
         use3dEnabled: use_3d,
         disableHeightLimit: disable_height_limit,
         awsOnlyElevation: aws_only_elevation,
@@ -1612,15 +1724,20 @@ async function startGeneration() {
         spawnPoint: spawnPoint,
         telemetryConsent: telemetryConsent || false,
         worldFormat: getEffectiveWorldFormat(),
-        rotationAngle: rotationAngle
+        rotationAngle: rotationAngle,
+        gamemode: gamemode,
+        worldTime: worldTime,
+        mapItem: mapItem
     });
 
     console.log("Generation process started.");
     resetEta();
     generationButtonEnabled = false;
+    window.arnisPreview3D?.setGenerationRunning(true);
   } catch (error) {
     console.error("Error starting generation:", error);
     generationButtonEnabled = true;
+    window.arnisPreview3D?.setGenerationRunning(false);
   }
 }
 
@@ -1668,8 +1785,6 @@ function notifyWorldChanged() {
  * Loads the world map data from the backend
  */
 async function loadWorldMapData() {
-  if (!worldPath) return;
-  
   try {
     const mapData = await invoke('gui_get_world_map_data', { worldPath: worldPath });
     if (mapData) {

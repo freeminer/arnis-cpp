@@ -16,6 +16,7 @@ mod luanti;
 pub mod bedrock;
 
 pub(crate) use common::WorldToModify;
+pub(crate) use common::{BlockStorage, RegionToModify, SectionToModify, MAX_BLOCK_ID};
 pub use common::{MIN_SECTION_Y, MIN_Y};
 
 pub(crate) use bedrock::{BedrockSaveError, BedrockWriter};
@@ -165,6 +166,17 @@ pub struct WorldEditor<'a> {
     luanti_game: LuantiGame,
     /// Bake per-chunk lighting (Java) for off-disk LOD renderers; off by default.
     bake_lighting: bool,
+    /// Place bundled schematic props (cars, boats, cranes, ...); off drops them all.
+    /// Driven by the same toggle as external 3D models (`args.use_3d`).
+    place_schematics: bool,
+    /// Map preview accumulator, fed as regions are saved/flushed.
+    preview: Option<Arc<crate::map_renderer::PreviewAccumulator>>,
+    game_mode: crate::args::GameMode,
+    world_time: i64,
+    /// Bedrock only: give the player a starting map that reveals the world as they explore.
+    start_with_map: bool,
+    /// Place bundled map image decals as map item frames. Java only.
+    map_decals: bool,
 }
 
 impl<'a> WorldEditor<'a> {
@@ -195,6 +207,12 @@ impl<'a> WorldEditor<'a> {
             luanti_ground_level: -62,
             luanti_game: LuantiGame::Mineclonia,
             bake_lighting: false,
+            place_schematics: true,
+            preview: None,
+            game_mode: crate::args::GameMode::Creative,
+            world_time: 6000,
+            start_with_map: false,
+            map_decals: false,
         }
     }
 
@@ -231,6 +249,12 @@ impl<'a> WorldEditor<'a> {
             luanti_ground_level: -62,
             luanti_game: LuantiGame::Mineclonia,
             bake_lighting: false,
+            place_schematics: true,
+            preview: None,
+            game_mode: crate::args::GameMode::Creative,
+            world_time: 6000,
+            start_with_map: false,
+            map_decals: false,
         }
     }
 
@@ -267,6 +291,12 @@ impl<'a> WorldEditor<'a> {
             luanti_ground_level: ground_level,
             luanti_game: game,
             bake_lighting: false,
+            place_schematics: true,
+            preview: None,
+            game_mode: crate::args::GameMode::Creative,
+            world_time: 6000,
+            start_with_map: false,
+            map_decals: false,
         }
     }
 
@@ -311,6 +341,54 @@ impl<'a> WorldEditor<'a> {
         })
     }
 
+    /// Whether land cover backs a speculative tree at (x, z), one no tag claims.
+    /// Tags that do assert trees, like `landuse=forest`, are authoritative and
+    /// must not consult this. True without land cover, so those worlds are unchanged.
+    pub fn land_cover_backs_trees(&self, x: i32, z: i32) -> bool {
+        let Some(ground) = self.ground.as_ref() else {
+            return true;
+        };
+        let coord = self.ground_point(x, z);
+        // A measured crown settles it. The tree-cover class is roughly twice as
+        // wide as reality, so it only answers where nothing was measured.
+        if ground.has_canopy() {
+            if let Some(h) = ground.canopy_height_m(coord) {
+                return h >= crate::canopy::CANOPY_MIN_M;
+            }
+        }
+        if !ground.has_land_cover() {
+            return true;
+        }
+        matches!(
+            ground.cover_class(coord),
+            crate::land_cover::LC_TREE_COVER | crate::land_cover::LC_SHRUBLAND
+        )
+    }
+
+    /// World (x, z) as a point on the shared `Ground` grid.
+    #[inline(always)]
+    fn ground_point(&self, x: i32, z: i32) -> crate::coordinate_system::cartesian::XZPoint {
+        crate::coordinate_system::cartesian::XZPoint::new(
+            x - self.ground_origin_x,
+            z - self.ground_origin_z,
+        )
+    }
+
+    /// Side of the lattice cell that holds at most one trunk.
+    #[inline(always)]
+    pub fn tree_slot_spacing(&self) -> i32 {
+        self.tree_pack.as_ref().map_or(5, |p| p.base_spacing())
+    }
+
+    /// Size tier the measured canopy asks for at this column, if it was measured.
+    pub fn canopy_size_hint(&self, x: i32, z: i32) -> Option<crate::trees::tree_library::TreeSize> {
+        let h = self
+            .ground
+            .as_ref()?
+            .canopy_height_m(self.ground_point(x, z))?;
+        (h >= crate::canopy::CANOPY_MIN_M).then(|| crate::trees::tree_library::size_for_canopy_m(h))
+    }
+
     /// ESA distance-to-shore (BFS capped at 15): 0 = non-water or open water past the
     /// cap, 1 = shore, 2..=15 = inward. So `is_lc_water && distance == 0` is the deep
     /// interior of a large body, never a narrow river.
@@ -326,6 +404,82 @@ impl<'a> WorldEditor<'a> {
     /// Enables baking per-chunk lighting into Java chunks.
     pub fn set_bake_lighting(&mut self, enabled: bool) {
         self.bake_lighting = enabled;
+    }
+
+    pub fn set_game_settings(&mut self, mode: crate::args::GameMode, world_time: i64) {
+        self.game_mode = mode;
+        self.world_time = world_time;
+    }
+
+    /// Bedrock only: enable the starting map that reveals the world as the player explores.
+    pub fn set_start_with_map(&mut self, enabled: bool) {
+        self.start_with_map = enabled;
+    }
+
+    /// Enable map image decals (Java only).
+    pub fn set_map_decals(&mut self, enabled: bool) {
+        self.map_decals = enabled;
+    }
+
+    /// True if image decals should be placed.
+    pub fn map_decals_enabled(&self) -> bool {
+        self.map_decals
+    }
+
+    /// Places an invisible fixed item frame holding a locked map on one face of a block.
+    /// facing: 2=north, 3=south, 4=west, 5=east. Absolute Y.
+    pub fn place_map_decal(&mut self, bx: i32, abs_y: i32, bz: i32, facing: i8, map_id: i32) {
+        let (dx, dz) = match facing {
+            3 => (0, 1),
+            4 => (-1, 0),
+            5 => (1, 0),
+            _ => (0, -1),
+        };
+        let fx = bx + dx;
+        let fz = bz + dz;
+
+        // Skip a face whose cell sits in the terrain; that frame would be culled on load.
+        let rel_y = abs_y - self.get_absolute_y(fx, 0, fz);
+        if rel_y < 1 {
+            return;
+        }
+
+        let mut components = HashMap::new();
+        components.insert("minecraft:map_id".to_string(), Value::Int(map_id));
+        let mut item = HashMap::new();
+        item.insert(
+            "id".to_string(),
+            Value::String("minecraft:filled_map".to_string()),
+        );
+        item.insert("count".to_string(), Value::Int(1));
+        item.insert("components".to_string(), Value::Compound(components));
+
+        let mut extra = HashMap::new();
+        extra.insert("Facing".to_string(), Value::Byte(facing));
+        extra.insert("ItemRotation".to_string(), Value::Byte(0));
+        extra.insert("Item".to_string(), Value::Compound(item));
+        extra.insert("ItemDropChance".to_string(), Value::Float(0.0));
+        extra.insert("Fixed".to_string(), Value::Byte(1));
+        extra.insert("Invisible".to_string(), Value::Byte(1));
+        extra.insert("TileX".to_string(), Value::Int(fx));
+        extra.insert("TileY".to_string(), Value::Int(abs_y));
+        extra.insert("TileZ".to_string(), Value::Int(fz));
+        extra.insert(
+            "block_pos".to_string(),
+            Value::List(vec![Value::Int(fx), Value::Int(abs_y), Value::Int(fz)]),
+        );
+
+        self.add_entity("minecraft:item_frame", fx, rel_y, fz, Some(extra));
+    }
+
+    /// Toggle placement of bundled schematic props (cars, boats, cranes, ...).
+    pub fn set_place_schematics(&mut self, enabled: bool) {
+        self.place_schematics = enabled;
+    }
+
+    /// True if bundled schematic props should be placed (see `set_place_schematics`).
+    pub fn place_schematics(&self) -> bool {
+        self.place_schematics
     }
 
     /// Returns the current world format
@@ -355,6 +509,11 @@ impl<'a> WorldEditor<'a> {
         self.world.regions.keys().copied().collect()
     }
 
+    /// Attach a map preview accumulator, fed as regions are saved/flushed.
+    pub fn set_preview(&mut self, preview: Arc<crate::map_renderer::PreviewAccumulator>) {
+        self.preview = Some(preview);
+    }
+
     /// Owned, `Send` context for writing regions off the merge thread.
     pub(crate) fn region_write_ctx(&self) -> java::RegionWriteCtx {
         java::RegionWriteCtx::new(
@@ -362,6 +521,7 @@ impl<'a> WorldEditor<'a> {
             self.llbbox,
             self.ground.clone(),
             self.bake_lighting,
+            self.preview.clone(),
         )
     }
 
@@ -441,6 +601,15 @@ impl<'a> WorldEditor<'a> {
         } else {
             0 // Default ground level if no terrain data
         }
+    }
+
+    /// True if no orthogonal neighbour sits lower, so a surface water source here stays boxed in and can't flow downhill.
+    pub fn water_source_is_enclosed(&self, x: i32, z: i32) -> bool {
+        let base = self.get_ground_level(x, z);
+        self.get_ground_level(x + 1, z) >= base
+            && self.get_ground_level(x - 1, z) >= base
+            && self.get_ground_level(x, z + 1) >= base
+            && self.get_ground_level(x, z - 1) >= base
     }
 
     /// Raw terrain elevation at world (x, z) via the ground origin (correct in tile editors, unlike get_min_coords); None without elevation data.
@@ -523,6 +692,11 @@ impl<'a> WorldEditor<'a> {
         let absolute_y = self.get_absolute_y(x, y, z);
         self.world.get_block(x, absolute_y, z).is_some()
     }
+
+    #[inline]
+    pub fn get_block_absolute(&self, x: i32, absolute_y: i32, z: i32) -> Option<Block> {
+        self.world.get_block(x, absolute_y, z)
+    }
     #[allow(clippy::too_many_arguments)]
     pub fn place_wall_banner(
         &mut self,
@@ -561,6 +735,9 @@ impl<'a> WorldEditor<'a> {
         if !self.xzbbox.contains(&XZPoint::new(x, z)) {
             return;
         }
+        if self.is_region_flushed(x, z) {
+            return;
+        }
         let chunk_x = x >> 4;
         let chunk_z = z >> 4;
         let region_x = chunk_x >> 5;
@@ -581,6 +758,103 @@ impl<'a> WorldEditor<'a> {
                 entry.insert(Value::List(vec![Value::Compound(be)]));
             }
         }
+    }
+
+    /// Writes a minecraft:bed block entity; beds have no baked model and render only when present.
+    pub fn set_bed_block_entity_absolute(&mut self, x: i32, absolute_y: i32, z: i32) {
+        let mut be = HashMap::new();
+        be.insert("id".to_string(), Value::String("minecraft:bed".to_string()));
+        be.insert("x".to_string(), Value::Int(x));
+        be.insert("y".to_string(), Value::Int(absolute_y));
+        be.insert("z".to_string(), Value::Int(z));
+        be.insert("keepPacked".to_string(), Value::Byte(0));
+        self.insert_block_entity(x, z, be);
+    }
+
+    /// Preview map in a frame at spawn, with the arnismc.com map one block below.
+    pub fn place_map_item_frame(
+        &mut self,
+        spawn_x: i32,
+        spawn_z: i32,
+        map_id: i32,
+        branding_map_id: i32,
+    ) {
+        // Player spawns facing south (+Z), so the display sits a couple blocks that way.
+        let ground = self.get_absolute_y(spawn_x, 0, spawn_z);
+        let lower_y = ground + 1;
+        let eye_y = ground + 2;
+        let frame_z = spawn_z + 2;
+        let post_z = spawn_z + 3;
+
+        // Solid block behind the lower map; chest behind the upper one.
+        self.set_block_absolute(SMOOTH_STONE, spawn_x, lower_y, post_z, None, Some(&[]));
+
+        self.set_block_absolute(AIR, spawn_x, eye_y, frame_z, None, Some(&[]));
+        self.set_block_absolute(AIR, spawn_x, lower_y, frame_z, None, Some(&[]));
+
+        // Preview on top, branding one block below.
+        self.add_filled_map_frame(spawn_x, eye_y, frame_z, map_id);
+        self.add_filled_map_frame(spawn_x, lower_y, frame_z, branding_map_id);
+
+        // Chest holds a takeable copy of the preview map.
+        let mut chest_components = HashMap::new();
+        chest_components.insert("minecraft:map_id".to_string(), Value::Int(map_id));
+        let mut chest_map = HashMap::new();
+        chest_map.insert("Slot".to_string(), Value::Byte(13));
+        chest_map.insert(
+            "id".to_string(),
+            Value::String("minecraft:filled_map".to_string()),
+        );
+        chest_map.insert("count".to_string(), Value::Int(1));
+        chest_map.insert("components".to_string(), Value::Compound(chest_components));
+        self.set_chest_with_items_absolute(spawn_x, eye_y, post_z, vec![chest_map]);
+    }
+
+    /// arnismc.com map at spawn on a floating block, used when the preview map is off.
+    pub fn place_branding_map_only(&mut self, spawn_x: i32, spawn_z: i32, branding_map_id: i32) {
+        let display_y = self.get_absolute_y(spawn_x, 0, spawn_z) + 2;
+        let frame_z = spawn_z + 2;
+        let post_z = spawn_z + 3;
+
+        // Floating block with the map on its front.
+        self.set_block_absolute(SMOOTH_STONE, spawn_x, display_y, post_z, None, Some(&[]));
+        self.set_block_absolute(AIR, spawn_x, display_y, frame_z, None, Some(&[]));
+        self.add_filled_map_frame(spawn_x, display_y, frame_z, branding_map_id);
+    }
+
+    /// Places an item frame holding a locked filled map, facing the player at spawn.
+    /// Left breakable (Fixed:0) on purpose; the chest below holds a takeable copy.
+    fn add_filled_map_frame(&mut self, x: i32, absolute_y: i32, frame_z: i32, map_id: i32) {
+        let mut components = HashMap::new();
+        components.insert("minecraft:map_id".to_string(), Value::Int(map_id));
+        let mut item = HashMap::new();
+        item.insert(
+            "id".to_string(),
+            Value::String("minecraft:filled_map".to_string()),
+        );
+        item.insert("count".to_string(), Value::Int(1));
+        item.insert("components".to_string(), Value::Compound(components));
+
+        let mut extra = HashMap::new();
+        extra.insert("Facing".to_string(), Value::Byte(2)); // faces north, toward the player
+        extra.insert("ItemRotation".to_string(), Value::Byte(0));
+        extra.insert("Item".to_string(), Value::Compound(item));
+        extra.insert("ItemDropChance".to_string(), Value::Float(1.0));
+        extra.insert("Fixed".to_string(), Value::Byte(0));
+        extra.insert("TileX".to_string(), Value::Int(x));
+        extra.insert("TileY".to_string(), Value::Int(absolute_y));
+        extra.insert("TileZ".to_string(), Value::Int(frame_z));
+        extra.insert(
+            "block_pos".to_string(),
+            Value::List(vec![
+                Value::Int(x),
+                Value::Int(absolute_y),
+                Value::Int(frame_z),
+            ]),
+        );
+
+        let rel_y = absolute_y - self.get_absolute_y(x, 0, frame_z);
+        self.add_entity("minecraft:item_frame", x, rel_y, frame_z, Some(extra));
     }
 
     /// Places a banner block entity at the given coordinates (absolute Y).
@@ -755,6 +1029,9 @@ impl<'a> WorldEditor<'a> {
         z: i32,
         _rotation: i8,
     ) {
+        if !self.xzbbox.contains(&XZPoint::new(x, z)) || self.is_region_flushed(x, z) {
+            return;
+        }
         let absolute_y = self.get_absolute_y(x, y, z);
         let chunk_x = x >> 4;
         let chunk_z = z >> 4;
@@ -814,6 +1091,10 @@ impl<'a> WorldEditor<'a> {
         extra_data: Option<HashMap<String, Value>>,
     ) {
         if !self.xzbbox.contains(&XZPoint::new(x, z)) {
+            return;
+        }
+        // Entities must respect eviction too, or they resurrect a flushed region.
+        if self.is_region_flushed(x, z) {
             return;
         }
 
@@ -902,6 +1183,9 @@ impl<'a> WorldEditor<'a> {
         if !self.xzbbox.contains(&XZPoint::new(x, z)) {
             return;
         }
+        if self.is_region_flushed(x, z) {
+            return;
+        }
 
         let chunk_x: i32 = x >> 4;
         let chunk_z: i32 = z >> 4;
@@ -973,6 +1257,9 @@ impl<'a> WorldEditor<'a> {
         items: Vec<HashMap<String, Value>>,
     ) {
         if !self.xzbbox.contains(&XZPoint::new(x, z)) {
+            return;
+        }
+        if self.is_region_flushed(x, z) {
             return;
         }
 
@@ -1064,6 +1351,14 @@ impl<'a> WorldEditor<'a> {
         )
     }
 
+    /// True if the region at these block coords was already streamed to disk and evicted.
+    /// Writers must drop such writes, or they resurrect the region and the final save
+    /// truncates the real on-disk data. Short-circuits when nothing has been evicted.
+    #[inline]
+    fn is_region_flushed(&self, x: i32, z: i32) -> bool {
+        !self.flushed_regions.is_empty() && self.flushed_regions.contains(&(x >> 9, z >> 9))
+    }
+
     /// Sets a block with properties at the given coordinates with absolute Y value.
     #[inline]
     pub fn set_block_with_properties_absolute(
@@ -1080,7 +1375,7 @@ impl<'a> WorldEditor<'a> {
             return;
         }
         // Drop writes to regions already flushed to disk (stream-to-disk eviction).
-        if !self.flushed_regions.is_empty() && self.flushed_regions.contains(&(x >> 9, z >> 9)) {
+        if self.is_region_flushed(x, z) {
             return;
         }
 
@@ -1249,7 +1544,7 @@ impl<'a> WorldEditor<'a> {
         if !self.xzbbox.contains(&XZPoint::new(x, z)) {
             return;
         }
-        if !self.flushed_regions.is_empty() && self.flushed_regions.contains(&(x >> 9, z >> 9)) {
+        if self.is_region_flushed(x, z) {
             return;
         }
         self.world.set_block_if_absent(x, absolute_y, z, block);
@@ -1259,6 +1554,12 @@ impl<'a> WorldEditor<'a> {
     #[inline]
     pub fn block_exists_absolute(&self, x: i32, absolute_y: i32, z: i32) -> bool {
         self.world.get_block(x, absolute_y, z).is_some()
+    }
+
+    /// Highest non-AIR block in `min_y..=max_y` at (x, z), or None when the column is clear.
+    #[inline]
+    pub fn highest_block_between(&self, x: i32, z: i32, min_y: i32, max_y: i32) -> Option<i32> {
+        self.world.highest_block_between(x, z, min_y, max_y)
     }
 
     /// Fills an entire column from y_min to y_max with one block type.
@@ -1278,7 +1579,7 @@ impl<'a> WorldEditor<'a> {
         if !self.xzbbox.contains(&XZPoint::new(x, z)) {
             return;
         }
-        if !self.flushed_regions.is_empty() && self.flushed_regions.contains(&(x >> 9, z >> 9)) {
+        if self.is_region_flushed(x, z) {
             return;
         }
         self.world
@@ -1293,6 +1594,10 @@ impl<'a> WorldEditor<'a> {
         section_y_max: i8,
         block: Block,
     ) -> bool {
+        // chunk coords -> block coords for the region check (chunk << 4).
+        if self.is_region_flushed(chunk_x << 4, chunk_z << 4) {
+            return false;
+        }
         self.world
             .bulk_fill_chunk_sections_below(chunk_x, chunk_z, section_y_max, block)
     }
@@ -1317,6 +1622,17 @@ impl<'a> WorldEditor<'a> {
         // (e.g. all-STONE from --fillground) back to Uniform, freeing ~4 KiB each.
         self.world.compact_sections();
 
+        // Non-Java formats have no per-region write hook, so feed the preview here.
+        if self.format != WorldFormat::JavaAnvil {
+            if let Some(preview) = &self.preview {
+                use rayon::prelude::*;
+                self.world
+                    .regions
+                    .par_iter()
+                    .for_each(|(&(rx, rz), region)| preview.ingest_region(rx, rz, region));
+            }
+        }
+
         match self.format {
             WorldFormat::JavaAnvil => {
                 if let Err(e) = self.save_java() {
@@ -1334,7 +1650,7 @@ impl<'a> WorldEditor<'a> {
                     return Err(e);
                 }
             }
-            WorldFormat::BedrockMcWorld => self.save_bedrock(),
+            WorldFormat::BedrockMcWorld => self.save_bedrock()?,
             WorldFormat::LuantiWorld => {
                 if let Err(e) = luanti::save_luanti_world(
                     &self.world,
@@ -1345,6 +1661,8 @@ impl<'a> WorldEditor<'a> {
                     self.luanti_level_name.as_deref(),
                     self.luanti_spawn_point,
                     self.luanti_ground_level,
+                    self.game_mode,
+                    self.world_time,
                 ) {
                     let user_msg = format!("Failed to save Luanti world: {}", e);
                     eprintln!("{}", user_msg);
@@ -1361,18 +1679,21 @@ impl<'a> WorldEditor<'a> {
         Ok(())
     }
 
-    fn save_bedrock(&mut self) {
+    fn save_bedrock(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{} Saving Bedrock world...", "[7/7]".bold());
         emit_gui_progress_update(90.0, "Saving Bedrock world...");
 
         if let Err(error) = self.save_bedrock_internal() {
-            eprintln!("Failed to save Bedrock world: {error}");
+            let user_msg = format!("Failed to save Bedrock world: {error}");
+            eprintln!("{user_msg}");
             #[cfg(feature = "gui")]
-            send_log(
-                LogLevel::Error,
-                &format!("Failed to save Bedrock world: {error}"),
-            );
+            {
+                send_log(LogLevel::Error, &user_msg);
+                emit_gui_error(&user_msg);
+            }
+            return Err(user_msg.into());
         }
+        Ok(())
     }
 
     fn save_bedrock_internal(&mut self) -> Result<(), BedrockSaveError> {
@@ -1393,6 +1714,9 @@ impl<'a> WorldEditor<'a> {
             self.bedrock_extend_height,
             self.projection.clone(),
             self.scale,
+            self.game_mode,
+            self.world_time,
+            self.start_with_map,
         )
         .write_world(&self.world, self.xzbbox, &self.llbbox)
     }
@@ -1550,4 +1874,40 @@ fn single_item(id: &str, slot: i8, count: i8) -> HashMap<String, Value> {
     item.insert("Slot".to_string(), Value::Byte(slot));
     item.insert("Count".to_string(), Value::Byte(count));
     item
+}
+
+#[cfg(test)]
+mod eviction_guard_tests {
+    use super::*;
+    use crate::coordinate_system::cartesian::XZBBox;
+    use crate::coordinate_system::geographic::LLBBox;
+
+    // Writing an entity or chest to an already-evicted region must NOT resurrect it,
+    // or the truncating final save wipes the region's real ground (the empty-spawn-chunk bug).
+    #[test]
+    fn writes_to_a_flushed_region_do_not_resurrect_it() {
+        let xzbbox = XZBBox::rect_from_min_max(0, 0, 1023, 1023).unwrap();
+        let llbbox = LLBBox::new(54.6, 9.9, 54.61, 9.91).unwrap();
+        let mut editor = WorldEditor::new(std::env::temp_dir(), &xzbbox, llbbox);
+
+        // Mark region (0,0) (blocks 0..511) as already streamed to disk.
+        editor.flushed_regions.insert((0, 0));
+
+        // All of these target region (0,0) and must be dropped.
+        editor.add_entity("minecraft:item_frame", 100, 5, 100, None);
+        editor.set_chest_with_items_absolute(100, 5, 100, vec![]);
+        editor.set_block_absolute(SMOOTH_STONE, 100, 5, 100, None, None);
+
+        assert!(
+            !editor.world.regions.contains_key(&(0, 0)),
+            "a flushed region must not be resurrected by entity/chest/block writes"
+        );
+
+        // A write to a non-flushed region still works.
+        editor.add_entity("minecraft:item_frame", 600, 5, 600, None);
+        assert!(
+            editor.world.regions.contains_key(&(1, 1)),
+            "writes to a resident region still land"
+        );
+    }
 }

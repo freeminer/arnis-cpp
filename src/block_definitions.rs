@@ -111,7 +111,12 @@ impl Block {
     }
 
     pub fn name(&self) -> &str {
-        match self.id {
+        self.try_name().expect("Invalid id")
+    }
+
+    /// Non-panicking variant of `name` (None for unassigned ids).
+    pub fn try_name(&self) -> Option<&str> {
+        Some(match self.id {
             0 => "mangrove_log",
             1 => "air",
             2 => "andesite",
@@ -339,7 +344,7 @@ impl Block {
             234 => "azalea_leaves",
             235 => "potted_poppy",
             236 => "oak_trapdoor",
-            237 => "oak_trapdoor",
+            237 => "sugar_cane",
             238 => "seagrass",
             239 => "kelp_plant",
             240 => "quartz_slab",
@@ -445,8 +450,28 @@ impl Block {
             344 => "prismarine",
             345 => "stone_stairs",
             346 => "tripwire_hook",
-            _ => panic!("Invalid id"),
-        }
+            347 => "spruce_wall_sign",
+            348 => "granite_stairs",
+            349 => "diorite_stairs",
+            350 => "deepslate_tiles",
+            351 => "deepslate_tile_slab",
+            352 => "deepslate_tile_wall",
+            353 => "polished_blackstone_slab",
+            354 => "polished_diorite_slab",
+            355 => "soul_lantern",
+            356 => "chiseled_quartz_block",
+            357 => "quartz_pillar",
+            358 => "redstone_wall_torch",
+            359 => "flower_pot",
+            360 => "warped_slab",
+            361 => "warped_stairs",
+            362 => "warped_trapdoor",
+            363 => "orange_concrete",
+            364 => "stripped_warped_stem",
+            365 => "stripped_warped_hyphae",
+            366 => "redstone_lamp",
+            _ => return None,
+        })
         // Note: ids are u16. Prefer a free slot below 256 for commonly placed
         // blocks: sections holding only sub-256 ids store one byte per cell,
         // while any id >= 256 forces that section to the wider two-byte storage.
@@ -772,14 +797,6 @@ impl Block {
             236 => Some(Value::Compound({
                 let mut map = HashMap::new();
                 map.insert("facing".to_string(), Value::String("north".to_string()));
-                map.insert("open".to_string(), Value::String("true".to_string()));
-                map.insert("half".to_string(), Value::String("top".to_string()));
-                map
-            })),
-            // Open oak trapdoor facing south
-            237 => Some(Value::Compound({
-                let mut map = HashMap::new();
-                map.insert("facing".to_string(), Value::String("south".to_string()));
                 map.insert("open".to_string(), Value::String("true".to_string()));
                 map.insert("half".to_string(), Value::String("top".to_string()));
                 map
@@ -1230,6 +1247,29 @@ pub const MOSSY_STONE_BRICK_SLAB: Block = Block::new(343);
 pub const PRISMARINE: Block = Block::new(344);
 pub const STONE_STAIRS: Block = Block::new(345);
 pub const TRIPWIRE_HOOK: Block = Block::new(346);
+// Tombstone and wind-turbine schematic blocks.
+pub const SPRUCE_WALL_SIGN: Block = Block::new(347);
+pub const GRANITE_STAIRS: Block = Block::new(348);
+pub const DIORITE_STAIRS: Block = Block::new(349);
+pub const DEEPSLATE_TILES: Block = Block::new(350);
+pub const DEEPSLATE_TILE_SLAB: Block = Block::new(351);
+pub const DEEPSLATE_TILE_WALL: Block = Block::new(352);
+pub const POLISHED_BLACKSTONE_SLAB: Block = Block::new(353);
+pub const POLISHED_DIORITE_SLAB: Block = Block::new(354);
+pub const SOUL_LANTERN: Block = Block::new(355);
+pub const CHISELED_QUARTZ_BLOCK: Block = Block::new(356);
+pub const QUARTZ_PILLAR: Block = Block::new(357);
+pub const REDSTONE_WALL_TORCH: Block = Block::new(358);
+pub const EMPTY_FLOWER_POT: Block = Block::new(359);
+pub const WARPED_SLAB: Block = Block::new(360);
+pub const WARPED_STAIRS: Block = Block::new(361);
+pub const WARPED_TRAPDOOR: Block = Block::new(362);
+pub const STRIPPED_WARPED_STEM: Block = Block::new(364);
+pub const STRIPPED_WARPED_HYPHAE: Block = Block::new(365);
+pub const ORANGE_CONCRETE: Block = Block::new(363);
+pub const REDSTONE_LAMP: Block = Block::new(366);
+// Reuses the retired open-trapdoor slot; sub-256 ids keep sections one byte per cell.
+pub const SUGAR_CANE: Block = Block::new(237);
 
 /// Maps a block to a stair variant in the same colour family.
 #[inline]
@@ -1369,7 +1409,7 @@ pub fn get_wall_piece_for_material(material: Block) -> Block {
 }
 
 // Window variations for different building types
-pub static WINDOW_VARIATIONS: [Block; 7] = [
+pub static WINDOW_VARIATIONS: [Block; 11] = [
     GLASS,
     GRAY_STAINED_GLASS,
     LIGHT_GRAY_STAINED_GLASS,
@@ -1377,6 +1417,10 @@ pub static WINDOW_VARIATIONS: [Block; 7] = [
     BROWN_STAINED_GLASS,
     WHITE_STAINED_GLASS,
     TINTED_GLASS,
+    LIGHT_BLUE_STAINED_GLASS,
+    CYAN_STAINED_GLASS,
+    BLACK_STAINED_GLASS,
+    BROWN_STAINED_GLASS,
 ];
 
 // Residential window options
@@ -1617,6 +1661,19 @@ static DEFINED_COLORS: &[ColorBlockMapping] = &[
         (210, 110, 60),
         &[ORANGE_TERRACOTTA, BRICK, BROWN_TERRACOTTA, RED_TERRACOTTA],
     ),
+    // Saturated tag colours, the muted entries above would wash these out
+    ((36, 137, 199), &[LIGHT_BLUE_CONCRETE]),
+    ((45, 47, 143), &[BLUE_CONCRETE, BLUE_TERRACOTTA]),
+    ((21, 119, 136), &[CYAN_CONCRETE]),
+    ((73, 91, 36), &[GREEN_CONCRETE]),
+    ((120, 200, 30), &[LIME_CONCRETE]),
+    ((241, 175, 21), &[YELLOW_CONCRETE]),
+    ((186, 133, 35), &[YELLOW_TERRACOTTA]),
+    ((200, 30, 30), &[RED_CONCRETE]),
+    ((100, 32, 156), &[PURPLE_CONCRETE]),
+    ((169, 48, 159), &[MAGENTA_CONCRETE]),
+    ((224, 97, 1), &[ORANGE_CONCRETE]),
+    ((90, 90, 90), &[GRAY_CONCRETE, POLISHED_DEEPSLATE]),
 ];
 
 // Function to randomly select building wall block with alternatives
@@ -1690,56 +1747,76 @@ pub fn get_wall_block_for_material(material: &str, rng: &mut impl rand::Rng) -> 
         .flat_map(|c| c.to_lowercase())
         .collect();
 
-    let options: &[Block] =
-        match normalized.as_str() {
-            "brick" | "bricks" | "redbrick" => &[BRICK, NETHER_BRICK],
-            "stone" | "limestone" | "sandstone" | "naturalstone" => {
-                &[STONE_BRICKS, COBBLESTONE, SANDSTONE, SMOOTH_STONE, ANDESITE]
-            }
-            "marble" | "granite" => &[POLISHED_GRANITE, POLISHED_DIORITE, QUARTZ_BLOCK],
-            "concrete" | "reinforcedconcrete" | "cementblock" | "cement" | "breezeblock"
-            | "concreteblock" | "concreteblocks" => &[
-                GRAY_CONCRETE,
-                LIGHT_GRAY_CONCRETE,
-                WHITE_CONCRETE,
-                SMOOTH_STONE,
-            ],
-            "plaster" | "stucco" | "render" | "rendering" | "limerender" => &[
-                WHITE_CONCRETE,
-                LIGHT_GRAY_CONCRETE,
-                QUARTZ_BLOCK,
-                SMOOTH_SANDSTONE,
-            ],
-            "wood" | "timber" | "timberframe" | "halftimber" | "halftimbered" | "loghouse"
-            | "logs" => &[OAK_PLANKS, SPRUCE_PLANKS, DARK_OAK_PLANKS, OAK_LOG],
-            "metal" | "steel" | "iron" | "aluminium" | "aluminum" | "corrugatedsteel"
-            | "corrugatediron" | "corrugatedmetal" | "tin" | "sheetmetal" | "metalsheet" => {
-                &[IRON_BLOCK, LIGHT_GRAY_CONCRETE, GRAY_CONCRETE]
-            }
-            "copper" | "oxidisedcopper" | "oxidizedcopper" | "patina" | "verdigris" => {
-                &[WAXED_OXIDIZED_COPPER]
-            }
-            "glass" => &[GLASS, LIGHT_GRAY_STAINED_GLASS, WHITE_STAINED_GLASS],
-            "tiles" | "tile" | "rooftiles" | "ceramictiles" | "ceramic" | "terracotta" => &[
-                WHITE_TERRACOTTA,
-                BROWN_TERRACOTTA,
-                RED_TERRACOTTA,
-                ORANGE_TERRACOTTA,
-                LIGHT_GRAY_CONCRETE,
-            ],
-            "mud" | "adobe" | "earth" | "clay" | "rammedearth" | "cob" => {
-                &[MUD_BRICKS, BROWN_TERRACOTTA, BROWN_CONCRETE]
-            }
-            "thatch" | "straw" => &[HAY_BALE],
-            "asbestos" | "asbestoscement" | "fibrecement" | "fibercement" => {
-                &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE]
-            }
-            "vinyl" | "siding" | "vinylsiding" | "weatherboard" | "weatherboarding"
-            | "clapboard" => &[OAK_PLANKS, SPRUCE_PLANKS, WHITE_CONCRETE],
-            "panel" | "panels" | "panelling" | "paneling" | "panelhouse" | "prefab"
-            | "prefabricated" => &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, WHITE_CONCRETE],
-            _ => return None,
-        };
+    let options: &[Block] = match normalized.as_str() {
+        "brick" | "bricks" | "redbrick" => &[BRICK, NETHER_BRICK],
+        // `hard` and `block` are among the most common building:material values.
+        "stone" | "naturalstone" | "hard" => &[STONE_BRICKS, COBBLESTONE, SMOOTH_STONE, ANDESITE],
+        "limestone" => &[SMOOTH_STONE, POLISHED_ANDESITE, WHITE_TERRACOTTA],
+        "sandstone" => &[SANDSTONE, SMOOTH_SANDSTONE],
+        "marble" => &[QUARTZ_BLOCK, POLISHED_DIORITE, WHITE_CONCRETE],
+        "granite" => &[POLISHED_GRANITE, POLISHED_DIORITE, QUARTZ_BLOCK],
+        "slate" => &[POLISHED_BLACKSTONE, DEEPSLATE_BRICKS, BLACKSTONE],
+        "concrete"
+        | "reinforcedconcrete"
+        | "cementblock"
+        | "cement"
+        | "breezeblock"
+        | "concreteblock"
+        | "concreteblocks"
+        | "block"
+        | "concretemasonryunit" => &[
+            GRAY_CONCRETE,
+            LIGHT_GRAY_CONCRETE,
+            WHITE_CONCRETE,
+            SMOOTH_STONE,
+        ],
+        "plaster" | "stucco" | "render" | "rendering" | "limerender" | "plastered" => &[
+            WHITE_CONCRETE,
+            LIGHT_GRAY_CONCRETE,
+            QUARTZ_BLOCK,
+            SMOOTH_SANDSTONE,
+        ],
+        "wood" | "timber" | "timberframe" | "halftimber" | "halftimbered" | "loghouse" | "logs"
+        | "bamboo" => &[OAK_PLANKS, SPRUCE_PLANKS, DARK_OAK_PLANKS, OAK_LOG],
+        "reed" => &[HAY_BALE],
+        "metal" | "steel" | "iron" | "aluminium" | "aluminum" | "corrugatedsteel"
+        | "corrugatediron" | "corrugatedmetal" | "tin" | "sheetmetal" | "metalsheet"
+        | "metalplates" => &[IRON_BLOCK, LIGHT_GRAY_CONCRETE, GRAY_CONCRETE],
+        "copper" | "oxidisedcopper" | "oxidizedcopper" | "patina" | "verdigris" => &[
+            WAXED_OXIDIZED_COPPER,
+            WAXED_EXPOSED_COPPER,
+            WAXED_COPPER_BLOCK,
+        ],
+        "glass" => &[
+            GLASS,
+            LIGHT_GRAY_STAINED_GLASS,
+            WHITE_STAINED_GLASS,
+            TINTED_GLASS,
+        ],
+        "mirror" | "solarpanels" => &[GLASS, BLUE_STAINED_GLASS, LIGHT_BLUE_STAINED_GLASS],
+        "tiles" | "tile" | "rooftiles" | "ceramictiles" | "ceramic" | "terracotta" => &[
+            WHITE_TERRACOTTA,
+            BROWN_TERRACOTTA,
+            RED_TERRACOTTA,
+            ORANGE_TERRACOTTA,
+        ],
+        "mud" | "adobe" | "earth" | "clay" | "rammedearth" | "cob" | "loam" => {
+            &[MUD_BRICKS, BROWN_TERRACOTTA, BROWN_CONCRETE]
+        }
+        "thatch" | "straw" => &[HAY_BALE],
+        "asbestos" | "asbestoscement" | "fibrecement" | "fibercement" => {
+            &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE]
+        }
+        "vinyl" | "siding" | "vinylsiding" | "weatherboard" | "weatherboarding" | "clapboard" => {
+            &[OAK_PLANKS, SPRUCE_PLANKS, WHITE_CONCRETE]
+        }
+        "panel" | "panels" | "panelling" | "paneling" | "panelhouse" | "prefab"
+        | "prefabricated" => &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, WHITE_CONCRETE],
+        "plastic" | "light" => &[WHITE_CONCRETE, LIGHT_GRAY_CONCRETE, QUARTZ_BLOCK, GLASS],
+        "mixed" | "masonry" => &[STONE_BRICKS, BRICK, SMOOTH_STONE, COBBLESTONE],
+        "pebbledash" => &[ANDESITE, COBBLESTONE, STONE_BRICKS, GRAVEL],
+        _ => return None,
+    };
 
     Some(options[rng.random_range(0..options.len())])
 }
@@ -1753,7 +1830,9 @@ pub fn get_roof_block_for_material(material: &str, rng: &mut impl rand::Rng) -> 
         .collect();
 
     let options: &[Block] = match normalized.as_str() {
-        "glass" | "glazing" => &[GLASS],
+        "glass" | "glazing" | "acrylicglass" => {
+            &[GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS]
+        }
         "tile" | "tiles" | "rooftiles" | "ceramic" | "ceramictiles" | "claytile" | "claytiles"
         | "terracotta" => &[BRICK, NETHER_BRICK, RED_NETHER_BRICKS, MUD_BRICKS],
         "slate" | "slates" => &[POLISHED_BLACKSTONE, DEEPSLATE_BRICKS, BLACKSTONE],
@@ -1761,22 +1840,141 @@ pub fn get_roof_block_for_material(material: &str, rng: &mut impl rand::Rng) -> 
         | "corrugatedmetal" | "tin" | "zinc" | "lead" | "sheetmetal" | "metalsheet" => {
             &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, IRON_BLOCK]
         }
+        "copper" => &[
+            WAXED_OXIDIZED_COPPER,
+            WAXED_EXPOSED_COPPER,
+            WAXED_COPPER_BLOCK,
+        ],
         "concrete" | "reinforcedconcrete" => &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, SMOOTH_STONE],
         "wood" | "timber" | "shingle" | "shingles" | "woodshingle" | "woodshingles" => {
             &[OAK_PLANKS, SPRUCE_PLANKS, DARK_OAK_PLANKS]
         }
-        "thatch" | "straw" | "reed" | "reeds" => &[HAY_BALE],
-        "asphalt" | "bitumen" | "tar" | "tarpaper" | "rolledasphalt" | "rolledroofing" => {
-            &[BLACKSTONE, POLISHED_BLACKSTONE]
-        }
+        "thatch" | "straw" | "reed" | "reeds" | "palmleaves" => &[HAY_BALE],
+        "asphalt" | "bitumen" | "tar" | "tarpaper" | "rolledasphalt" | "rolledroofing"
+        | "asphaltshingle" => &[BLACKSTONE, POLISHED_BLACKSTONE, POLISHED_BLACKSTONE_BRICKS],
         "stone" => &[STONE_BRICKS, SMOOTH_STONE, ANDESITE],
         "gravel" => &[GRAVEL],
         "grass" | "green" | "vegetation" | "greenroof" | "sod" => &[GRASS_BLOCK, MOSS_BLOCK],
         "eternit" | "asbestos" | "fibrecement" | "fibercement" => {
             &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE]
         }
+        "plastic" => &[LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, WHITE_CONCRETE, GLASS],
         _ => return None,
     };
 
     Some(options[rng.random_range(0..options.len())])
+}
+
+#[cfg(test)]
+mod material_tests {
+    use super::*;
+    use rand::SeedableRng;
+    use rand_chacha::ChaCha8Rng;
+
+    fn rng() -> ChaCha8Rng {
+        ChaCha8Rng::seed_from_u64(1)
+    }
+
+    #[test]
+    fn newly_added_wall_materials_resolve() {
+        // High-use building:material values that previously returned None.
+        for m in [
+            "hard",
+            "block",
+            "plastered",
+            "metal_plates",
+            "concrete masonry unit",
+            "slate",
+            "sandstone",
+            "limestone",
+            "marble",
+            "mixed",
+            "masonry",
+            "pebbledash",
+            "mirror",
+        ] {
+            assert!(
+                get_wall_block_for_material(m, &mut rng()).is_some(),
+                "wall material {m} should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn newly_added_roof_materials_resolve() {
+        for m in [
+            "copper",
+            "palm_leaves",
+            "asphalt_shingle",
+            "plastic",
+            "acrylic_glass",
+        ] {
+            assert!(
+                get_roof_block_for_material(m, &mut rng()).is_some(),
+                "roof material {m} should resolve"
+            );
+        }
+    }
+
+    #[test]
+    fn saturated_colours_map_to_matching_blocks() {
+        let cases = [
+            ((0, 128, 0), GREEN_CONCRETE),
+            ((255, 255, 0), YELLOW_CONCRETE),
+            ((255, 0, 0), RED_CONCRETE),
+            ((128, 0, 128), PURPLE_CONCRETE),
+            ((255, 128, 0), ORANGE_CONCRETE),
+            ((24, 116, 205), LIGHT_BLUE_CONCRETE),
+        ];
+        for (rgb, expected) in cases {
+            assert_eq!(
+                get_building_wall_block_for_color(rgb, &mut rng()),
+                expected,
+                "colour {rgb:?} should map to {expected:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn muted_colours_keep_muted_blocks() {
+        let saturated = [
+            GREEN_CONCRETE,
+            LIME_CONCRETE,
+            YELLOW_CONCRETE,
+            RED_CONCRETE,
+            PURPLE_CONCRETE,
+            MAGENTA_CONCRETE,
+            ORANGE_CONCRETE,
+            LIGHT_BLUE_CONCRETE,
+            BLUE_CONCRETE,
+            CYAN_CONCRETE,
+        ];
+        // beige, pale rose, brick red
+        for rgb in [(187, 173, 142), (209, 177, 161), (176, 74, 58)] {
+            let b = get_building_wall_block_for_color(rgb, &mut rng());
+            assert!(
+                !saturated.contains(&b),
+                "colour {rgb:?} got saturated {b:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn underscore_and_space_normalization_holds() {
+        // The normalizer strips spaces/underscores/hyphens and lowercases.
+        assert_eq!(
+            get_wall_block_for_material("Metal_Plates", &mut rng()),
+            get_wall_block_for_material("metalplates", &mut rng()),
+        );
+        assert_eq!(
+            get_roof_block_for_material("asphalt_shingle", &mut rng()),
+            get_roof_block_for_material("asphaltshingle", &mut rng()),
+        );
+    }
+
+    #[test]
+    fn unknown_materials_still_return_none() {
+        assert!(get_wall_block_for_material("notamaterial", &mut rng()).is_none());
+        assert!(get_roof_block_for_material("notamaterial", &mut rng()).is_none());
+    }
 }

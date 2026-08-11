@@ -20,7 +20,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       # Check out the PR head so comment-triggered runs benchmark the PR, not main.
-      - uses: actions/checkout@v6
+      - uses: actions/checkout@v7
         with:
           ref: refs/pull/${{ github.event.pull_request.number || github.event.issue.number }}/head
       - name: Resolve benchmarked commit
@@ -44,7 +44,7 @@ jobs:
       - name: Run benchmark command with memory tracking
         id: benchmark
         run: |
-          /usr/bin/time -v ./target/release/arnis --path="./world" --terrain --benchmark --bbox="48.125768 11.552296 48.148565 11.593838" 2> benchmark_log.txt
+          /usr/bin/time -v ./target/release/arnis --path="./world" --mode=geo-terrain --benchmark --bbox="48.125768 11.552296 48.148565 11.593838" 2> benchmark_log.txt
           grep "Maximum resident set size" benchmark_log.txt | awk '{print $6}' > peak_mem_kb.txt
           peak_kb=$(cat peak_mem_kb.txt)
           peak_mb=$((peak_kb / 1024))
@@ -97,7 +97,7 @@ jobs:
             verdict="🚨 This PR **drastically worsens generation time**."
           fi
 
-          baseline_mem=1005
+          baseline_mem=1160
           mem_diff=$((peak_mem - baseline_mem))
           mem_abs_diff=${mem_diff#-}
           mem_annotation=""

@@ -1,8 +1,10 @@
 //! Per-cell water depth carving from a chamfer-3-4 distance transform over the LC_WATER mask.
 
 use crate::block_definitions::{
-    Block, AIR, CLAY, COARSE_DIRT, DIRT, GRAVEL, KELP, KELP_PLANT, MAGMA_BLOCK, SAND, SANDSTONE,
-    SEAGRASS, SEA_PICKLE, SOUL_SAND, STONE, TALL_SEAGRASS_BOTTOM, TALL_SEAGRASS_TOP, WATER,
+    Block, AIR, BLUE_FLOWER, CLAY, COARSE_DIRT, DEAD_BUSH, DIRT, FERN, GRASS, GRAVEL, KELP,
+    KELP_PLANT, LARGE_FERN_LOWER, LARGE_FERN_UPPER, MAGMA_BLOCK, OAK_LEAVES, RED_FLOWER, SAND,
+    SANDSTONE, SEAGRASS, SEA_PICKLE, SOUL_SAND, STONE, TALL_GRASS_BOTTOM, TALL_GRASS_TOP,
+    TALL_SEAGRASS_BOTTOM, TALL_SEAGRASS_TOP, WATER, WHITE_FLOWER, YELLOW_FLOWER,
 };
 use crate::coordinate_system::cartesian::{XZBBox, XZPoint};
 use crate::floodfill_cache::RoadMaskBitmap;
@@ -90,6 +92,20 @@ impl BigWaterField {
             Some(i) => i32::from(nibble_get(&self.depth, i)),
             None => 0,
         }
+    }
+
+    /// Max depth in the 7x7 around (x, z); proxy for body width. Edge-safe via depth_at.
+    pub fn body_max_7x7(&self, x: i32, z: i32) -> i32 {
+        let mut m = 0;
+        for dz in -3..=3 {
+            for dx in -3..=3 {
+                m = m.max(self.depth_at(x + dx, z + dz));
+                if m >= MAX_WATER_DEPTH {
+                    return m;
+                }
+            }
+        }
+        m
     }
 }
 
@@ -273,23 +289,25 @@ fn polygon_local_max(component_max_units: u16) -> i32 {
     }
 }
 
-/// Depth from an effective DT and component max: ramp past the shoal, tier-clamped.
+/// Depth from an effective DT: local_max * sqrt(dist/span), tier-clamped.
 fn depth_from_dt(dt_eff: f64, component_max_units: u16) -> i32 {
     if dt_eff < f64::from(SHOAL_DT_UNITS) {
         return 0;
     }
     let local_max = polygon_local_max(component_max_units);
-    let slope = if component_max_units < 21 {
-        1.0 / 3.0
-    } else if component_max_units < 45 {
-        1.0 / 4.0
-    } else if component_max_units < 75 {
-        1.0 / 6.0
-    } else {
-        1.0 / 8.0
-    };
     let dist_blocks = (dt_eff - f64::from(SHOAL_DT_UNITS)) / 3.0;
-    ((dist_blocks * slope).floor() as i32).clamp(0, local_max)
+    // Sqrt curve: steep near shore, smooth plateau; kills the linear-band terracing.
+    let span: f64 = if component_max_units < 21 {
+        6.0
+    } else if component_max_units < 45 {
+        12.0
+    } else if component_max_units < 75 {
+        20.0
+    } else {
+        35.0
+    };
+    let t = (dist_blocks / span).clamp(0.0, 1.0);
+    ((f64::from(local_max) * t.sqrt()).floor() as i32).clamp(0, local_max)
 }
 
 /// Per-cell carve depth, with deterministic contour wobble on the bank lines.
@@ -343,6 +361,7 @@ pub fn carve_water_column(
     water_y: i32,
     depth: i32,
     road_mask: &RoadMaskBitmap,
+    bwf: &BigWaterField,
 ) {
     debug_assert!(
         depth <= MAX_WATER_DEPTH,
@@ -355,6 +374,7 @@ pub fn carve_water_column(
     for dy in 0..=depth {
         editor.set_block_absolute(WATER, x, water_y - dy, z, None, Some(&[]));
     }
+    clear_stranded_vegetation(editor, x, z, water_y);
     let bed_y = water_y - depth - 1;
 
     // Keep the bed plain near causeways so blobs/dunes/veg don't clutter piers.
@@ -371,20 +391,27 @@ pub fn carve_water_column(
             }
         }
         2..=6 => {
-            // Jitter the depth tier so patches don't ring the shore.
-            let h = crate::land_cover::coord_hash(x + 7, z + 13);
-            let d = (depth + (h % 3) as i32 - 1).max(1);
+            // Coherent jitter breaks concentric depth rings as patches, not speckle.
+            let jn = crate::ground_generation::value_noise_01(x + 7, z + 13, 22);
+            let jitter = if jn < 0.34 {
+                -1
+            } else if jn > 0.66 {
+                1
+            } else {
+                0
+            };
+            let d = (depth + jitter).max(1);
             // Domain-warp the sample coords so patches read organic, not circular.
-            let warp_x = crate::ground_generation::value_noise_01(x + 901, z + 33, 40);
-            let warp_z = crate::ground_generation::value_noise_01(x + 17, z + 811, 40);
-            let wx = x + ((warp_x - 0.5) * 24.0) as i32;
-            let wz = z + ((warp_z - 0.5) * 24.0) as i32;
+            let warp_x = crate::ground_generation::value_noise_01(x + 901, z + 33, 52);
+            let warp_z = crate::ground_generation::value_noise_01(x + 17, z + 811, 52);
+            let wx = x + ((warp_x - 0.5) * 28.0) as i32;
+            let wz = z + ((warp_z - 0.5) * 28.0) as i32;
             // Per-block noise, sampled lazily so most cells skip the rare tiers.
             let vn = |dx, dz, s| crate::ground_generation::value_noise_01(wx + dx, wz + dz, s);
             let top = if d <= 1 {
                 SAND
             } else if d == 2 {
-                if vn(53, 97, 36) > 0.50 {
+                if vn(53, 97, 56) > 0.50 {
                     SAND
                 } else {
                     GRAVEL
@@ -393,13 +420,13 @@ pub fn carve_water_column(
                 MAGMA_BLOCK
             } else if d >= 5 && vn(727, 911, 8) > 0.96 {
                 SOUL_SAND
-            } else if vn(73, 109, 42) > 0.74 {
+            } else if vn(73, 109, 64) > 0.74 {
                 CLAY
-            } else if vn(53, 97, 36) > 0.81 {
+            } else if vn(53, 97, 56) > 0.81 {
                 SAND
-            } else if vn(211, 41, 26) > 0.88 {
+            } else if vn(211, 41, 44) > 0.88 {
                 DIRT
-            } else if vn(311, 17, 30) > 0.90 {
+            } else if vn(311, 17, 50) > 0.90 {
                 COARSE_DIRT
             } else {
                 GRAVEL
@@ -424,13 +451,94 @@ pub fn carve_water_column(
     }
 
     // Dunes return their crest so veg plants on top instead of inside them.
-    let bump = if depth >= 1 && !near_bridge {
-        place_underwater_dunes(editor, x, z, water_y, bed_y, depth, top_block)
+    // 7x7 body max is sampled lazily; depth 1 always yields amp 0, skip it too.
+    let bump = if depth >= 2 && !near_bridge {
+        let amp = dune_amp(bwf.body_max_7x7(x, z), depth);
+        place_underwater_dunes(editor, x, z, water_y, bed_y, amp, top_block)
     } else {
         0
     };
     if depth >= 3 && !near_bridge {
         place_underwater_vegetation(editor, x, z, water_y, bed_y + bump, depth);
+    }
+}
+
+/// Loose plants scattered at ground+1, so removing one strands nothing else.
+const SURFACE_VEGETATION: &[Block] = &[
+    GRASS,
+    TALL_GRASS_BOTTOM,
+    TALL_GRASS_TOP,
+    FERN,
+    LARGE_FERN_LOWER,
+    LARGE_FERN_UPPER,
+    DEAD_BUSH,
+    RED_FLOWER,
+    YELLOW_FLOWER,
+    BLUE_FLOWER,
+    WHITE_FLOWER,
+    OAK_LEAVES,
+];
+
+/// Strip plants left floating on a freshly carved water surface, leaving piers
+/// alone. Reading first avoids filling a section with air per water cell.
+fn clear_stranded_vegetation(editor: &mut WorldEditor, x: i32, z: i32, water_y: i32) {
+    for y in water_y + 1..=water_y + 2 {
+        if editor.get_block_absolute(x, y, z).is_some() {
+            editor.set_block_absolute(AIR, x, y, z, Some(SURFACE_VEGETATION), None);
+        }
+    }
+    // A trunk rooted on the new surface has to go whole. Trees are placed
+    // before the polygon that floods them, and the land-cover water mask is
+    // coarser than the carve, so the guards on the tree paths can miss it.
+    if editor
+        .get_block_absolute(x, water_y + 1, z)
+        .is_some_and(is_trunk)
+    {
+        clear_tree_from(editor, x, water_y + 1, z);
+    }
+}
+
+fn is_trunk(block: Block) -> bool {
+    let name = block.name();
+    name.ends_with("_log") || name.ends_with("_stem")
+}
+
+fn is_tree_part(block: Block) -> bool {
+    is_trunk(block) || block.name().ends_with("_leaves")
+}
+
+/// Largest tree the flood will take out. A giant schematic is well under this,
+/// and the cap stops a canopy that touches its neighbour from unzipping a wood.
+const MAX_TREE_BLOCKS: usize = 4096;
+
+/// Erase the tree connected to (x, y, z). Clearing only the two plant layers
+/// would leave the canopy hanging in the air over the water. Blocks are set to
+/// air as they are visited, so a revisit sees air and stops; no visited set.
+fn clear_tree_from(editor: &mut WorldEditor, x: i32, y: i32, z: i32) {
+    let mut stack = vec![(x, y, z)];
+    let mut cleared = 0usize;
+    while let Some((cx, cy, cz)) = stack.pop() {
+        if cleared >= MAX_TREE_BLOCKS {
+            break;
+        }
+        if !editor
+            .get_block_absolute(cx, cy, cz)
+            .is_some_and(is_tree_part)
+        {
+            continue;
+        }
+        editor.set_block_absolute(AIR, cx, cy, cz, None, Some(&[]));
+        cleared += 1;
+        for (dx, dy, dz) in [
+            (1, 0, 0),
+            (-1, 0, 0),
+            (0, 1, 0),
+            (0, -1, 0),
+            (0, 0, 1),
+            (0, 0, -1),
+        ] {
+            stack.push((cx + dx, cy + dy, cz + dz));
+        }
     }
 }
 
@@ -446,15 +554,15 @@ fn bridge_adjacent(road_mask: &RoadMaskBitmap, x: i32, z: i32) -> bool {
     false
 }
 
-/// Dune amplitude for a cell, capped so the crest stays below the surface.
-/// Depth stands in for body width: deeper cells only occur in wider water.
-fn dune_amp(depth: i32) -> i32 {
-    let target = match depth {
+/// Dune amplitude: target keyed off body width (7x7 BWF max), capped below the surface.
+fn dune_amp(body_max: i32, depth: i32) -> i32 {
+    // BWF depth caps at MAX_WATER_DEPTH=6, so 6 must map to the top tier.
+    let target = match body_max {
         ..=3 => 2,
-        4 => 3,
+        4..=5 => 3,
         _ => 4,
     };
-    target.min(depth - 1)
+    target.min((depth - 1).max(0))
 }
 
 /// Width-aware multi-octave dunes 1-4 blocks tall on the bed. Returns the
@@ -465,10 +573,9 @@ fn place_underwater_dunes(
     z: i32,
     water_y: i32,
     bed_y: i32,
-    depth: i32,
+    amp: i32,
     bed_block: Block,
 ) -> i32 {
-    let amp = dune_amp(depth);
     if amp <= 0 {
         return 0;
     }
@@ -572,11 +679,21 @@ pub fn carve_lc_water_pass(
     xzbbox: &XZBBox,
     bwf: &BigWaterField,
     road_mask: &RoadMaskBitmap,
+    tunnel_footprint: &RoadMaskBitmap,
 ) {
     let x1 = bwf.min_x + bwf.width as i32 - 1;
     let z1 = bwf.min_z + bwf.height as i32 - 1;
     carve_lc_water_region(
-        editor, ground, xzbbox, bwf, road_mask, bwf.min_x, x1, bwf.min_z, z1,
+        editor,
+        ground,
+        xzbbox,
+        bwf,
+        road_mask,
+        tunnel_footprint,
+        bwf.min_x,
+        x1,
+        bwf.min_z,
+        z1,
     );
 }
 
@@ -590,6 +707,7 @@ pub fn carve_lc_water_region(
     xzbbox: &XZBBox,
     bwf: &BigWaterField,
     road_mask: &RoadMaskBitmap,
+    tunnel_footprint: &RoadMaskBitmap,
     iter_min_x: i32,
     iter_max_x: i32,
     iter_min_z: i32,
@@ -604,8 +722,8 @@ pub fn carve_lc_water_region(
     let z1 = (bwf.min_z + bwf.height as i32 - 1).min(iter_max_z);
     for z in z0..=z1 {
         for x in x0..=x1 {
-            // Keep road/bridge surfaces (causeways, decks).
-            if road_mask.contains(x, z) {
+            // Keep road/bridge surfaces (causeways, decks); never carve into a tunnel bore.
+            if road_mask.contains(x, z) || tunnel_footprint.contains(x, z) {
                 continue;
             }
             let coord = XZPoint::new(x - off_x, z - off_z);
@@ -617,7 +735,7 @@ pub fn carve_lc_water_region(
             if editor.get_ground_level(x, z) > water_y {
                 continue;
             }
-            carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask);
+            carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
         }
     }
 }
@@ -656,6 +774,43 @@ mod tests {
     }
 
     #[test]
+    fn sqrt_depth_monotonic_capped_no_cliffs() {
+        for cm in [10u16, 30, 60, 200] {
+            let lm = polygon_local_max(cm);
+            let mut prev = 0;
+            for dt in 0..=300u32 {
+                let d = depth_from_dt(f64::from(dt), cm);
+                assert!(d >= prev, "non-monotonic at dt={dt} cm={cm}");
+                assert!(d - prev <= 1, "step >1 at dt={dt} cm={cm}");
+                assert!(d <= lm);
+                prev = d;
+            }
+            assert_eq!(prev, lm, "far water reaches tier max for cm={cm}");
+        }
+    }
+
+    #[test]
+    fn body_max_7x7_edge_safe() {
+        let mut depth = vec![0u8; 8];
+        nibble_set(&mut depth, 5, 6); // cell (1,1) in a 4x4 field
+        let bwf = BigWaterField {
+            depth,
+            width: 4,
+            height: 4,
+            min_x: 0,
+            min_z: 0,
+        };
+        assert_eq!(
+            bwf.body_max_7x7(0, 0),
+            6,
+            "corner window clips but finds (1,1)"
+        );
+        assert_eq!(bwf.body_max_7x7(-3, -3), 0, "mostly-outside window");
+        assert_eq!(bwf.body_max_7x7(10, 10), 0, "fully outside");
+        assert_eq!(BigWaterField::empty().body_max_7x7(5, 5), 0);
+    }
+
+    #[test]
     fn estimate_no_water_is_zero() {
         let grid = vec![vec![0u8; 16]; 16];
         assert_eq!(estimate_max_carve_depth(&grid, 16, 16), 0);
@@ -686,13 +841,13 @@ mod tests {
     }
 
     #[test]
-    fn dune_amp_capped_by_depth() {
-        assert_eq!(dune_amp(1), 0);
-        assert_eq!(dune_amp(2), 1);
-        assert_eq!(dune_amp(3), 2);
-        assert_eq!(dune_amp(4), 3);
-        assert_eq!(dune_amp(5), 4);
-        assert_eq!(dune_amp(6), 4);
+    fn dune_amp_keys_off_body_max_capped_by_depth() {
+        assert_eq!(dune_amp(2, 1), 0);
+        assert_eq!(dune_amp(3, 6), 2);
+        assert_eq!(dune_amp(5, 6), 3);
+        assert_eq!(dune_amp(6, 2), 1);
+        assert_eq!(dune_amp(6, 6), 4);
+        assert_eq!(dune_amp(0, 0), 0);
     }
 
     #[test]

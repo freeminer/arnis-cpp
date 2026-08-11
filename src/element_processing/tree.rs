@@ -1,5 +1,6 @@
 use crate::block_definitions::*;
 use crate::deterministic_rng::coord_rng;
+use crate::element_processing::bridges::BridgeSurfaceMap;
 use crate::floodfill_cache::BuildingFootprintBitmap;
 use crate::world_editor::WorldEditor;
 use rand::Rng;
@@ -270,6 +271,10 @@ const WILLOW_LEAVES_FILL: [(Coord, Coord); 5] = [
 ];
 
 const MAX_CANOPY_RADIUS: i32 = 3;
+const CANOPY_SPAN: usize = (MAX_CANOPY_RADIUS * 2 + 1) as usize;
+const CANOPY_CELLS: usize = CANOPY_SPAN * CANOPY_SPAN;
+// Sentinel for a canopy column with no building under it.
+const NO_ROOF: i32 = i32::MIN;
 
 #[derive(Clone, Copy)]
 pub enum TreeType {
@@ -308,6 +313,8 @@ struct LeafPlacer<'a> {
     accent_chance: u8,
     check_collision: bool,
     footprints: Option<&'a BuildingFootprintBitmap>,
+    origin: (i32, i32),
+    roof_tops: [i32; CANOPY_CELLS],
 }
 
 // Deterministic per-position hash driving the organic gap and accent rolls.
@@ -323,9 +330,50 @@ fn leaf_gap_at(h: u64) -> bool {
 }
 
 impl LeafPlacer<'_> {
-    // Shared footprint gate: true if a building occupies (x, z).
-    fn blocked(&self, x: i32, z: i32) -> bool {
-        self.check_collision && self.footprints.is_some_and(|fp| fp.contains(x, z))
+    #[inline]
+    fn canopy_idx(dx: i32, dz: i32) -> usize {
+        (dx + MAX_CANOPY_RADIUS) as usize * CANOPY_SPAN + (dz + MAX_CANOPY_RADIUS) as usize
+    }
+
+    // Highest building block per canopy column, sampled before any leaf is written so a
+    // tree cannot occlude itself (the apex cap lands before the lower ring leaves).
+    fn sample_roof_tops(
+        editor: &WorldEditor,
+        x: i32,
+        z: i32,
+        base_y: i32,
+        top_y: i32,
+        footprints: Option<&BuildingFootprintBitmap>,
+    ) -> [i32; CANOPY_CELLS] {
+        let mut tops = [NO_ROOF; CANOPY_CELLS];
+        let Some(fp) = footprints else { return tops };
+
+        for dx in -MAX_CANOPY_RADIUS..=MAX_CANOPY_RADIUS {
+            for dz in -MAX_CANOPY_RADIUS..=MAX_CANOPY_RADIUS {
+                let (cx, cz) = (x + dx, z + dz);
+                if !fp.contains(cx, cz) {
+                    continue;
+                }
+                // A footprint column with nothing stamped falls back to culling the whole column.
+                tops[Self::canopy_idx(dx, dz)] = editor
+                    .highest_block_between(cx, cz, base_y, top_y)
+                    .unwrap_or(top_y);
+            }
+        }
+        tops
+    }
+
+    // Cull a leaf only where it would sit at or below the building in its column, so a
+    // canopy still drapes over a low roof instead of being sliced at the footprint edge.
+    fn blocked(&self, x: i32, y: i32, z: i32) -> bool {
+        if !self.check_collision {
+            return false;
+        }
+        let (dx, dz) = (x - self.origin.0, z - self.origin.1);
+        if dx.abs() > MAX_CANOPY_RADIUS || dz.abs() > MAX_CANOPY_RADIUS {
+            return self.footprints.is_some_and(|fp| fp.contains(x, z));
+        }
+        y <= self.roof_tops[Self::canopy_idx(dx, dz)]
     }
 
     fn place_core(&self, editor: &mut WorldEditor, x: i32, y: i32, z: i32) {
@@ -335,7 +383,7 @@ impl LeafPlacer<'_> {
     // Apex cap: the lone center-column cover over the trunk; skips the organic
     // gap (but not the footprint gate) so the log is never left exposed.
     fn place_apex_cap(&self, editor: &mut WorldEditor, x: i32, y: i32, z: i32) {
-        if self.blocked(x, z) {
+        if self.blocked(x, y, z) {
             return;
         }
         editor.set_block_absolute(self.leaves_block, x, y, z, None, None);
@@ -346,7 +394,7 @@ impl LeafPlacer<'_> {
     }
 
     fn place_with(&self, editor: &mut WorldEditor, x: i32, y: i32, z: i32, allow_accent: bool) {
-        if self.blocked(x, z) {
+        if self.blocked(x, y, z) {
             return;
         }
         let h = leaf_hash(x, y, z);
@@ -403,15 +451,10 @@ impl Tree {
         false
     }
 
-    /// Creates a tree at the specified coordinates.
-    pub fn create(
-        editor: &mut WorldEditor,
-        (x, y, z): Coord,
-        building_footprints: Option<&BuildingFootprintBitmap>,
-    ) {
+    /// The species mix for a scattered tree, keyed on the column.
+    fn random_type(x: i32, z: i32) -> TreeType {
         let mut rng = coord_rng(x, z, 0);
-
-        let tree_type = match rng.random_range(1..=100) {
+        match rng.random_range(1..=100) {
             1..=20 => TreeType::Oak,
             21..=32 => TreeType::Spruce,
             33..=44 => TreeType::Birch,
@@ -427,17 +470,77 @@ impl Tree {
             93..=98 => TreeType::FloweringOak,
             99..=100 => TreeType::Mangrove,
             _ => unreachable!(),
-        };
-
-        Self::create_of_type(editor, (x, y, z), tree_type, building_footprints);
+        }
     }
 
-    /// Creates a tree of a specific type at the specified coordinates.
+    /// Creates a tree at the specified coordinates.
+    pub fn create(
+        editor: &mut WorldEditor,
+        (x, y, z): Coord,
+        building_footprints: Option<&BuildingFootprintBitmap>,
+        bridge_surface: Option<&BridgeSurfaceMap>,
+    ) {
+        let tree_type = Self::random_type(x, z);
+        Self::build(
+            editor,
+            (x, y, z),
+            tree_type,
+            building_footprints,
+            bridge_surface,
+            false,
+            false,
+        );
+    }
+
+    /// Creates a tree the canopy map asked for. The map already fixed the
+    /// density, so the pack must not thin it again.
+    pub fn create_from_canopy(
+        editor: &mut WorldEditor,
+        (x, y, z): Coord,
+        building_footprints: Option<&BuildingFootprintBitmap>,
+        bridge_surface: Option<&BridgeSurfaceMap>,
+    ) {
+        let tree_type = Self::random_type(x, z);
+        Self::build(
+            editor,
+            (x, y, z),
+            tree_type,
+            building_footprints,
+            bridge_surface,
+            false,
+            true,
+        );
+    }
+
+    /// Creates a tree of a specific type. allow_on_paved is true only for natural=tree nodes.
     pub fn create_of_type(
         editor: &mut WorldEditor,
         (x, y, z): Coord,
         tree_type: TreeType,
         building_footprints: Option<&BuildingFootprintBitmap>,
+        bridge_surface: Option<&BridgeSurfaceMap>,
+        allow_on_paved: bool,
+    ) {
+        Self::build(
+            editor,
+            (x, y, z),
+            tree_type,
+            building_footprints,
+            bridge_surface,
+            allow_on_paved,
+            false,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        editor: &mut WorldEditor,
+        (x, y, z): Coord,
+        tree_type: TreeType,
+        building_footprints: Option<&BuildingFootprintBitmap>,
+        bridge_surface: Option<&BridgeSurfaceMap>,
+        allow_on_paved: bool,
+        density_decided: bool,
     ) {
         if let Some(footprints) = building_footprints {
             if footprints.contains(x, z) {
@@ -445,12 +548,16 @@ impl Tree {
             }
         }
 
-        // Skip road/path/water surfaces.
-        if editor.check_for_block(
-            x,
-            0,
-            z,
-            Some(&[
+        // A tree rooted under a bridge deck would grow straight up through the roadway.
+        if bridge_surface.is_some_and(|b| b.contains(x, z)) {
+            return;
+        }
+
+        // water always blocked; paved blocked unless allow_on_paved
+        let forbidden_ground: &[Block] = if allow_on_paved {
+            &[WATER]
+        } else {
+            &[
                 BLACK_CONCRETE,
                 GRAY_CONCRETE_POWDER,
                 CYAN_TERRACOTTA,
@@ -459,8 +566,9 @@ impl Tree {
                 DIRT_PATH,
                 SMOOTH_STONE,
                 WATER,
-            ]),
-        ) {
+            ]
+        };
+        if editor.check_for_block(x, 0, z, Some(forbidden_ground)) {
             return;
         }
 
@@ -484,22 +592,39 @@ impl Tree {
 
         // Schematic pack active: stamp a model instead of the procedural tree (checks above still apply).
         if let Some(region) = editor.tree_pack() {
-            let road_water = [
-                BLACK_CONCRETE,
-                GRAY_CONCRETE_POWDER,
-                CYAN_TERRACOTTA,
-                GRAY_CONCRETE,
-                LIGHT_GRAY_CONCRETE,
-                DIRT_PATH,
-                SMOOTH_STONE,
-                WATER,
-            ];
+            // same paving rule as above; is_lc_water still blocks water
+            let road_water: &[Block] = if allow_on_paved {
+                &[WATER]
+            } else {
+                &[
+                    BLACK_CONCRETE,
+                    GRAY_CONCRETE_POWDER,
+                    CYAN_TERRACOTTA,
+                    GRAY_CONCRETE,
+                    LIGHT_GRAY_CONCRETE,
+                    DIRT_PATH,
+                    SMOOTH_STONE,
+                    WATER,
+                ]
+            };
             let hint = habitat_for_tree_type(tree_type);
             let elev_y = editor.terrain_level(x, z).unwrap_or(base_y);
-            if let Some((sx, sz, idx, rot)) = region.pick_slot(x, z, hint, elev_y) {
-                // The slot can be a few blocks off (x,z); re-check it isn't road/water.
+            // Read at the slot, not the request, so the hint describes the
+            // column the trunk lands in.
+            let (hx, hz) = crate::trees::schematic::trunk_slot_s(x, z, region.base_spacing());
+            let req = crate::trees::region::SlotRequest {
+                want_size: editor.canopy_size_hint(hx, hz),
+                density_decided,
+            };
+            if let Some((sx, sz, idx, rot)) = region.pick_slot(x, z, hint, elev_y, req) {
+                // The slot can be a few blocks off (x,z), so every check that
+                // rejected the request has to run again on the moved trunk.
+                // Without the footprint one a tree asked for beside a building
+                // gets snapped onto its roof.
                 if editor.is_lc_water(sx, sz)
-                    || editor.check_for_block(sx, 0, sz, Some(&road_water))
+                    || building_footprints.is_some_and(|f| f.contains(sx, sz))
+                    || editor.check_for_block(sx, 0, sz, Some(road_water))
+                    || bridge_surface.is_some_and(|b| b.contains(sx, sz))
                 {
                     return;
                 }
@@ -564,12 +689,27 @@ impl Tree {
             );
         }
 
+        let roof_tops = if check_canopy_collision {
+            LeafPlacer::sample_roof_tops(
+                editor,
+                x,
+                z,
+                base_y,
+                base_y + canopy_top,
+                building_footprints,
+            )
+        } else {
+            [NO_ROOF; CANOPY_CELLS]
+        };
+
         let placer = LeafPlacer {
             leaves_block: tree.leaves_block,
             accent_block: tree.accent_block,
             accent_chance: tree.accent_chance,
             check_collision: check_canopy_collision,
             footprints: building_footprints,
+            origin: (x, z),
+            roof_tops,
         };
 
         // Inner canopy columns — accent only on the outermost ring (below).
@@ -1287,6 +1427,8 @@ mod tests {
             accent_chance: 0,
             check_collision: false,
             footprints: None,
+            origin: (0, 0),
+            roof_tops: [NO_ROOF; CANOPY_CELLS],
         };
 
         // Pick a gap cell via the same predicate place_with uses (no drift).
@@ -1304,6 +1446,84 @@ mod tests {
         assert!(
             editor.check_for_block_absolute(gx, 10, gz, Some(&[OAK_LEAVES]), None),
             "apex cap must place despite the organic gap"
+        );
+    }
+
+    // A canopy must drape over a low roof instead of being sliced at the footprint edge.
+    #[test]
+    fn canopy_clears_a_low_roof_but_not_its_interior() {
+        let xzbbox = XZBBox::rect_from_min_max(0, 0, 63, 63).unwrap();
+        let llbbox = LLBBox::new(54.6, 9.9, 54.61, 9.91).unwrap();
+        let mut editor = WorldEditor::new(std::env::temp_dir(), &xzbbox, llbbox);
+
+        // One-block "roof" at y=20 over a footprint cell next to the tree at (30, 30).
+        let (roof_x, roof_z, roof_y) = (31, 30, 20);
+        editor.set_block_absolute(SMOOTH_STONE, roof_x, roof_y, roof_z, None, None);
+
+        let mut footprints = BuildingFootprintBitmap::new(&xzbbox);
+        footprints.set(roof_x, roof_z);
+
+        let roof_tops = LeafPlacer::sample_roof_tops(&editor, 30, 30, 10, 30, Some(&footprints));
+        let placer = LeafPlacer {
+            leaves_block: OAK_LEAVES,
+            accent_block: None,
+            accent_chance: 0,
+            check_collision: true,
+            footprints: Some(&footprints),
+            origin: (30, 30),
+            roof_tops,
+        };
+
+        assert!(
+            placer.blocked(roof_x, roof_y - 5, roof_z),
+            "leaves below the roof are inside the building"
+        );
+        assert!(
+            placer.blocked(roof_x, roof_y, roof_z),
+            "the roof block itself is not a leaf slot"
+        );
+        assert!(
+            !placer.blocked(roof_x, roof_y + 1, roof_z),
+            "leaves above a low roof must survive"
+        );
+        assert!(
+            !placer.blocked(30, roof_y - 5, 30),
+            "columns outside the footprint are never culled"
+        );
+    }
+
+    // allow_on_paved lets a mapped tree stand on paving, water always rejected
+    #[test]
+    fn allow_on_paved_lets_dedicated_trees_stand_on_paving_but_never_on_water() {
+        let xzbbox = XZBBox::rect_from_min_max(0, 0, 63, 63).unwrap();
+        let llbbox = LLBBox::new(54.6, 9.9, 54.61, 9.91).unwrap();
+        let has_trunk = |editor: &WorldEditor| editor.check_for_block(30, 2, 30, Some(&[OAK_LOG]));
+
+        // Scattered tree (allow_on_paved = false) on a paved block: rejected.
+        let mut editor = WorldEditor::new(std::env::temp_dir(), &xzbbox, llbbox);
+        editor.set_block(SMOOTH_STONE, 30, 0, 30, None, None);
+        Tree::create_of_type(&mut editor, (30, 1, 30), TreeType::Oak, None, None, false);
+        assert!(
+            !has_trunk(&editor),
+            "a scattered tree must not grow on a paved surface"
+        );
+
+        // Deliberately-mapped tree (allow_on_paved = true) on the same paved block: allowed.
+        let mut editor = WorldEditor::new(std::env::temp_dir(), &xzbbox, llbbox);
+        editor.set_block(SMOOTH_STONE, 30, 0, 30, None, None);
+        Tree::create_of_type(&mut editor, (30, 1, 30), TreeType::Oak, None, None, true);
+        assert!(
+            has_trunk(&editor),
+            "a dedicated natural=tree node must stand on paving"
+        );
+
+        // Water is off-limits even with allow_on_paved = true.
+        let mut editor = WorldEditor::new(std::env::temp_dir(), &xzbbox, llbbox);
+        editor.set_block(WATER, 30, 0, 30, None, None);
+        Tree::create_of_type(&mut editor, (30, 1, 30), TreeType::Oak, None, None, true);
+        assert!(
+            !has_trunk(&editor),
+            "trees must never stand on water, even when paving is allowed"
         );
     }
 }

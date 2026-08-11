@@ -583,7 +583,6 @@ $(document).ready(function () {
     var worldOverlayEnabled = false;
     var worldPreviewAvailable = false;
     var sliderControl = null;
-    var worldOverlayHiddenForEdit = false; // Track if we hid the overlay for edit/delete mode
 
     // Create the opacity slider as a proper Leaflet control
     var SliderControl = L.Control.extend({
@@ -748,31 +747,6 @@ $(document).ready(function () {
         }
     }
 
-    // Temporarily hide the overlay (for edit/delete mode)
-    function hideWorldOverlayTemporarily() {
-        if (worldOverlay && worldOverlayEnabled) {
-            worldOverlayHiddenForEdit = true;
-            map.removeLayer(worldOverlay);
-        }
-        // Also visually disable the preview button during edit/delete mode
-        var btn = document.getElementById('world-preview-btn');
-        if (btn) {
-            btn.classList.add('editing-mode');
-        }
-    }
-
-    // Restore the overlay after edit/delete mode ends
-    function restoreWorldOverlay() {
-        if (worldOverlayHiddenForEdit && worldOverlay && worldOverlayEnabled) {
-            worldOverlay.addTo(map);
-            worldOverlayHiddenForEdit = false;
-        }
-        // Re-enable the preview button
-        var btn = document.getElementById('world-preview-btn');
-        if (btn) {
-            btn.classList.remove('editing-mode');
-        }
-    }
 
 
     // ========== Context Menu for Coordinate Copying ==========
@@ -1094,15 +1068,17 @@ $(document).ready(function () {
 
     drawControl = new L.Control.Draw({
         edit: {
-            featureGroup: drawnItems
+            featureGroup: drawnItems,
+            // No edit mode: the bbox rectangle has always-on drag handles instead
+            edit: false
         },
         draw: {
             rectangle: {
                 shapeOptions: {
-                    color: '#fe57a1',
-                    opacity: 0.6,
+                    color: '#fecc44',
+                    opacity: 0.8,
                     weight: 3,
-                    fillColor: '#fe57a1',
+                    fillColor: '#fecc44',
                     fillOpacity: 0.1,
                     dashArray: '10, 10',
                     lineCap: 'round',
@@ -1135,18 +1111,32 @@ $(document).ready(function () {
         _angleToolActive = true;
 
         // Create a transparent overlay over the map to capture all clicks
-        // (otherwise clicks on the bbox rectangle get swallowed by the layer)
+        // (otherwise clicks on the bbox rectangle get swallowed by the layer).
+        // z-index 700: above the map panes but below the leaflet controls, so
+        // the toolbar stays clickable while the angle tool is active.
         _angleOverlay = document.createElement('div');
-        _angleOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:1000;cursor:crosshair;';
+        _angleOverlay.style.cssText = 'position:absolute;top:0;left:0;width:100%;height:100%;z-index:700;cursor:crosshair;';
         map.getContainer().appendChild(_angleOverlay);
 
         _angleOverlay.addEventListener('click', _onAngleOverlayClick);
         _angleOverlay.addEventListener('mousemove', _onAngleOverlayMouseMove);
+        // The toolbar stays clickable above the overlay; a click on any other
+        // tool cancels the measurement instead of mixing modes.
+        document.addEventListener('click', _onAngleToolbarClick, true);
+    }
+
+    function _onAngleToolbarClick(e) {
+        if (!_angleToolActive) return;
+        var toolbar = e.target.closest && e.target.closest('.leaflet-draw-toolbar');
+        if (toolbar && (!_angleToolBtn || !_angleToolBtn.contains(e.target))) {
+            stopAngleTool();
+        }
     }
 
     function stopAngleTool() {
         _angleToolActive = false;
         _angleStartLatLng = null;
+        document.removeEventListener('click', _onAngleToolbarClick, true);
         if (_angleOverlay) {
             _angleOverlay.removeEventListener('click', _onAngleOverlayClick);
             _angleOverlay.removeEventListener('mousemove', _onAngleOverlayMouseMove);
@@ -1248,11 +1238,72 @@ $(document).ready(function () {
     // Add hint overlay at bottom-center of map when no bbox is selected
     var hintDiv = document.createElement('div');
     hintDiv.className = 'bbox-hint-overlay';
-    hintDiv.innerHTML = 'Use the <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="currentColor" stroke="currentColor" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round" style="vertical-align: -2px; opacity: 0.85;"><rect x="3" y="3" width="18" height="18"></rect></svg> tool to draw a custom area';
+    hintDiv.innerHTML = 'Use the <svg xmlns="http://www.w3.org/2000/svg" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" style="vertical-align: -2px; opacity: 0.85;"><rect x="5" y="5" width="14" height="14" stroke-width="1.4"></rect><g fill="currentColor" stroke="none"><rect x="3" y="3" width="4" height="4"></rect><rect x="17" y="3" width="4" height="4"></rect><rect x="3" y="17" width="4" height="4"></rect><rect x="17" y="17" width="4" height="4"></rect></g></svg> tool to draw a custom area';
     map.getContainer().appendChild(hintDiv);
 
     // Add world preview button to the edit toolbar after drawControl is added
     addWorldPreviewToEditToolbar();
+
+    // One-click bbox delete: replace leaflet.draw's enter-mode -> click shape ->
+    // save flow on the trash button (the app only ever has one selection).
+    (function makeDeleteOneClick() {
+        var oldBtn = document.querySelector('.leaflet-draw-edit-remove');
+        if (!oldBtn || !oldBtn.parentNode) return;
+        var btn = oldBtn.cloneNode(true); // drops leaflet.draw's mode listeners
+        oldBtn.parentNode.replaceChild(btn, oldBtn);
+
+        function syncState() {
+            var has = drawnItems.getLayers().length > 0;
+            btn.classList.toggle('leaflet-disabled', !has);
+            btn.title = has ? 'Delete selection' : 'No selection to delete';
+        }
+        drawnItems.on('layeradd layerremove', syncState);
+        syncState();
+
+        L.DomEvent
+            .on(btn, 'mousedown dblclick', L.DomEvent.stopPropagation)
+            .on(btn, 'click', L.DomEvent.stop)
+            .on(btn, 'click', function () {
+                var removed = L.layerGroup();
+                drawnItems.eachLayer(function (l) { removed.addLayer(l); });
+                if (removed.getLayers().length === 0) return;
+                // The existing draw:deleted handler removes the layers, resets
+                // the bounds, notifies the parent and refreshes the handles.
+                map.fire('draw:deleted', { layers: removed });
+            });
+    })();
+
+    // Terrain preview button: usable once the selected bbox fits the 3D
+    // preview size gate; clicking asks the parent to render the mini preview.
+    (function addTerrainPreviewButton() {
+        var editToolbar = document.querySelector('.leaflet-draw-toolbar:not(.leaflet-draw-toolbar-top)');
+        if (!editToolbar) {
+            var anchor = document.querySelector('.leaflet-draw-edit-remove');
+            if (anchor) editToolbar = anchor.parentElement;
+        }
+        if (!editToolbar) return;
+
+        var btn = document.createElement('a');
+        btn.className = 'leaflet-draw-edit-terrain disabled';
+        btn.href = '#';
+        btn.id = 'terrain-preview-btn';
+
+        btn.addEventListener('click', function (e) {
+            e.preventDefault();
+            e.stopPropagation();
+            if (btn.classList.contains('disabled')) return;
+            // Field is deliberately NOT named bboxText: the parent's message
+            // handler treats any bboxText-bearing message as a selection update.
+            window.parent.postMessage({
+                type: 'renderTerrainPreview',
+                previewBBoxText: document.getElementById('boxbounds').textContent
+            }, '*');
+        });
+
+        editToolbar.appendChild(btn);
+        window._terrainPreviewBtn = btn;
+        updateTerrainPreviewButton();
+    })();
     /*
     **
     **  create bounds layer
@@ -1263,10 +1314,10 @@ $(document).ready(function () {
     */
     startBounds = new L.LatLngBounds([0.0, 0.0], [0.0, 0.0]);
     var bounds = new L.Rectangle(startBounds, {
-        color: '#3778d4',
+        color: '#fecc44',
         opacity: 1.0,
         weight: 3,
-        fill: '#3778d4',
+        fill: '#fecc44',
         lineCap: 'round',
         lineJoin: 'round'
     });
@@ -1289,6 +1340,93 @@ $(document).ready(function () {
     });
     map.addLayer(bounds);
 
+    // ========== Always-on bbox handles (corner resize + centre move) ==========
+    var _bboxHandles = [];
+
+    function _getBboxRect() {
+        var rect = null;
+        drawnItems.eachLayer(function (layer) {
+            if (layer instanceof L.Rectangle) rect = layer;
+        });
+        return rect;
+    }
+
+    function _syncFromRect(rect) {
+        bounds.setBounds(rect.getBounds());
+        $('#boxbounds').text(formatBounds(bounds.getBounds(), '4326'));
+        $('#boxboundsmerc').text(formatBounds(bounds.getBounds(), currentproj));
+        notifyBboxUpdate();
+    }
+
+    function clearBboxHandles() {
+        _bboxHandles.forEach(function (h) { map.removeLayer(h); });
+        _bboxHandles = [];
+    }
+
+    function refreshBboxHandles() {
+        clearBboxHandles();
+        var rect = _getBboxRect();
+        if (!rect) return;
+        var b = rect.getBounds();
+
+        var corners = [
+            { get: 'getNorthWest', opp: 'getSouthEast', cls: 'nwse' },
+            { get: 'getNorthEast', opp: 'getSouthWest', cls: 'nesw' },
+            { get: 'getSouthEast', opp: 'getNorthWest', cls: 'nwse' },
+            { get: 'getSouthWest', opp: 'getNorthEast', cls: 'nesw' }
+        ];
+
+        corners.forEach(function (c) {
+            var icon = L.divIcon({
+                className: 'bbox-handle bbox-handle-' + c.cls,
+                iconSize: [12, 12],
+                iconAnchor: [6, 6]
+            });
+            var marker = L.marker(b[c.get](), { icon: icon, draggable: true, zIndexOffset: 2000 });
+            var fixedCorner = null;
+            marker.on('dragstart', function () {
+                fixedCorner = rect.getBounds()[c.opp]();
+            });
+            marker.on('drag', function (ev) {
+                rect.setBounds(new L.LatLngBounds(fixedCorner, ev.target.getLatLng()));
+            });
+            marker.on('dragend', function () {
+                _syncFromRect(rect);
+                refreshBboxHandles();
+            });
+            marker.addTo(map);
+            _bboxHandles.push(marker);
+        });
+
+        var moveIcon = L.divIcon({
+            className: 'bbox-handle bbox-handle-move',
+            iconSize: [16, 16],
+            iconAnchor: [8, 8]
+        });
+        var mover = L.marker(b.getCenter(), { icon: moveIcon, draggable: true, zIndexOffset: 2000 });
+        var startCenter = null;
+        var startB = null;
+        mover.on('dragstart', function (ev) {
+            startCenter = ev.target.getLatLng();
+            startB = rect.getBounds();
+        });
+        mover.on('drag', function (ev) {
+            var cur = ev.target.getLatLng();
+            var dLat = cur.lat - startCenter.lat;
+            var dLng = cur.lng - startCenter.lng;
+            rect.setBounds(new L.LatLngBounds(
+                [startB.getSouth() + dLat, startB.getWest() + dLng],
+                [startB.getNorth() + dLat, startB.getEast() + dLng]
+            ));
+        });
+        mover.on('dragend', function () {
+            _syncFromRect(rect);
+            refreshBboxHandles();
+        });
+        mover.addTo(map);
+        _bboxHandles.push(mover);
+    }
+
     // Show a brief toast notification on the map
     function showRotationToast(message) {
         // Remove any existing toast
@@ -1307,8 +1445,11 @@ $(document).ready(function () {
     }
 
     map.on('draw:created', function (e) {
+        // instanceof, not layerType: restore paths fire rectangles as "polygon"
+        var isRectangle = e.layer instanceof L.Rectangle;
+
         // Hide the hint overlay when a bbox area is drawn
-        if (e.layerType === 'rectangle') {
+        if (isRectangle) {
             var hint = document.querySelector('.bbox-hint-overlay');
             if (hint) hint.style.display = 'none';
         }
@@ -1324,7 +1465,7 @@ $(document).ready(function () {
         }
 
         // If it's a rectangle, remove any existing rectangles first
-        if (e.layerType === 'rectangle') {
+        if (isRectangle) {
             drawnItems.eachLayer(function(layer) {
                 if (layer instanceof L.Rectangle) {
                     drawnItems.removeLayer(layer);
@@ -1333,12 +1474,13 @@ $(document).ready(function () {
         }
 
         // Check if it's a rectangle and set proper styles before adding it to the layer
-        if (e.layerType === 'rectangle') {
+        if (isRectangle) {
             e.layer.setStyle({
-                color: '#3778d4',
+                color: '#fecc44',
                 opacity: 1.0,
                 weight: 3,
-                fill: '#3778d4',
+                fill: '#fecc44',
+                fillOpacity: 0.08,
                 lineCap: 'round',
                 lineJoin: 'round'
             });
@@ -1376,6 +1518,8 @@ $(document).ready(function () {
                 map.panTo(drawnItems.getLayers()[0].getLatLng());
             }
         }
+
+        refreshBboxHandles();
     });
 
     map.on('draw:deleted', function (e) {
@@ -1409,6 +1553,8 @@ $(document).ready(function () {
                 map.panTo(drawnItems.getLayers()[0].getLatLng());
             }
         }
+
+        refreshBboxHandles();
     });
 
     map.on('draw:edited', function (e) {
@@ -1434,23 +1580,9 @@ $(document).ready(function () {
         map.fitBounds(bounds.getBounds());
     });
 
-    // Hide world preview overlay when entering edit or delete mode
-    map.on('draw:editstart', function() {
-        hideWorldOverlayTemporarily();
-    });
-
-    map.on('draw:deletestart', function() {
-        hideWorldOverlayTemporarily();
-    });
-
-    // Restore world preview overlay when exiting edit or delete mode
-    map.on('draw:editstop', function() {
-        restoreWorldOverlay();
-    });
-
-    map.on('draw:deletestop', function() {
-        restoreWorldOverlay();
-    });
+    // Note: leaflet.draw's edit and delete modes are both disabled (always-on
+    // handles replace edit, the one-click trash replaces delete mode), so no
+    // draw:editstart/deletestart handlers are needed anymore.
     function display() {
         $('#boxbounds').text(formatBounds(bounds.getBounds(), '4326'));
         $('#boxboundsmerc').text(formatBounds(bounds.getBounds(), currentproj));
@@ -1518,6 +1650,28 @@ $(document).ready(function () {
 function notifyBboxUpdate() {
     const bboxText = document.getElementById('boxbounds').textContent;
     window.parent.postMessage({ bboxText: bboxText }, '*');
+    updateTerrainPreviewButton();
+}
+
+// Max bbox area for the 3D terrain preview; mirrors MINI_MAX_AREA_M2 in preview3d.js.
+var TERRAIN_PREVIEW_MAX_AREA_M2 = 500000000;
+
+// Enables the terrain-preview toolbar button while the selection fits the gate.
+function updateTerrainPreviewButton() {
+    var btn = window._terrainPreviewBtn;
+    if (!btn) return;
+    var parts = (document.getElementById('boxbounds').textContent || '').trim().split(/[,\s]+/).map(Number);
+    var ok = false;
+    if (parts.length === 4 && parts.every(isFinite)) {
+        var midLat = ((parts[0] + parts[2]) / 2) * Math.PI / 180;
+        var area = Math.abs(parts[2] - parts[0]) * 111320 *
+            Math.abs(parts[3] - parts[1]) * 111320 * Math.cos(midLat);
+        ok = area > 0 && area <= TERRAIN_PREVIEW_MAX_AREA_M2;
+    }
+    btn.classList.toggle('disabled', !ok);
+    btn.title = ok
+        ? 'Render 3D terrain preview'
+        : 'Select an area (up to 500 km²) to enable the 3D terrain preview';
 }
 
 // Expose marker coordinates to the parent window

@@ -2,8 +2,9 @@ use crate::args::Args;
 use crate::block_definitions::*;
 use crate::bresenham::bresenham_line;
 use crate::deterministic_rng::element_rng;
+use crate::element_processing::bridges::BridgeSurfaceMap;
 use crate::element_processing::tree::{Tree, TreeType};
-use crate::floodfill_cache::{BuildingFootprintBitmap, FloodFillCache};
+use crate::floodfill_cache::{BuildingFootprintBitmap, FloodFillCache, RoadMaskBitmap};
 use crate::osm_parser::{ProcessedMemberRole, ProcessedRelation, ProcessedWay};
 use crate::world_editor::WorldEditor;
 use rand::prelude::IndexedRandom;
@@ -15,6 +16,8 @@ pub fn generate_landuse(
     args: &Args,
     flood_fill_cache: &FloodFillCache,
     building_footprints: &BuildingFootprintBitmap,
+    road_mask: &RoadMaskBitmap,
+    bridge_surface: &BridgeSurfaceMap,
 ) {
     // Determine block type based on landuse tag
     let binding: String = "".to_string();
@@ -40,6 +43,7 @@ pub fn generate_landuse(
         "railway" => GRAVEL,
         "vineyard" => COARSE_DIRT,
         "brownfield" => COARSE_DIRT,
+        "farmyard" => COARSE_DIRT,
         "landfill" => {
             // Gravel if man_made = spoil_heap or heap, coarse dirt else
             let manmade_tag = element.tags.get("man_made").unwrap_or(&binding);
@@ -94,6 +98,8 @@ pub fn generate_landuse(
         }
         trees
     };
+
+    let is_cemetery = landuse_tag == "cemetery";
 
     for &(x, z) in floor_area.iter() {
         // Apply per-block randomness for certain landuse types
@@ -159,36 +165,34 @@ pub fn generate_landuse(
             editor.set_block(actual_block, x, 0, z, None, None);
         }
 
+        // Nothing is scattered on land-cover water: the depth carve turns these
+        // cells into lake after this runs, leaving plants floating on top.
+        if editor.is_lc_water(x, z) {
+            continue;
+        }
+
         // Add specific features for different landuse types
         match landuse_tag.as_str() {
             "cemetery" if (x % 3 == 0) && (z % 3 == 0) => {
+                // Flowers and ground cover only; tombstones are stamped below in this loop.
+                // 0..15 left empty to keep the original flower rates.
                 let random_choice: i32 = rng.random_range(0..100);
-                if random_choice < 15 {
-                    // Place graves
-                    if editor.check_for_block(x, 0, z, Some(&[PODZOL])) {
-                        if rng.random_bool(0.5) {
-                            editor.set_block(COBBLESTONE, x - 1, 1, z, None, None);
-                            editor.set_block(STONE_BRICK_SLAB, x - 1, 2, z, None, None);
-                            editor.set_block(STONE_BRICK_SLAB, x, 1, z, None, None);
-                            editor.set_block(STONE_BRICK_SLAB, x + 1, 1, z, None, None);
-                        } else {
-                            editor.set_block(COBBLESTONE, x, 1, z - 1, None, None);
-                            editor.set_block(STONE_BRICK_SLAB, x, 2, z - 1, None, None);
-                            editor.set_block(STONE_BRICK_SLAB, x, 1, z, None, None);
-                            editor.set_block(STONE_BRICK_SLAB, x, 1, z + 1, None, None);
-                        }
-                    }
-                } else if random_choice < 30 {
+                if (15..30).contains(&random_choice) {
                     if editor.check_for_block(x, 0, z, Some(&[PODZOL])) {
                         editor.set_block(RED_FLOWER, x, 1, z, None, None);
                     }
-                } else if random_choice < 33 {
-                    Tree::create(editor, (x, 1, z), Some(building_footprints));
-                } else if !is_protected && random_choice < 35 {
+                } else if (30..33).contains(&random_choice) {
+                    Tree::create(
+                        editor,
+                        (x, 1, z),
+                        Some(building_footprints),
+                        Some(bridge_surface),
+                    );
+                } else if !is_protected && (33..35).contains(&random_choice) {
                     editor.set_block(OAK_LEAVES, x, 1, z, None, None);
-                } else if !is_protected && random_choice < 37 {
+                } else if !is_protected && (35..37).contains(&random_choice) {
                     editor.set_block(FERN, x, 1, z, None, None);
-                } else if !is_protected && random_choice < 41 {
+                } else if !is_protected && (37..41).contains(&random_choice) {
                     editor.set_block(LARGE_FERN_LOWER, x, 1, z, None, None);
                     editor.set_block(LARGE_FERN_UPPER, x, 2, z, None, None);
                 }
@@ -201,7 +205,14 @@ pub fn generate_landuse(
                     let tree_type = *trees_ok_to_generate
                         .choose(&mut rng)
                         .unwrap_or(&TreeType::Oak);
-                    Tree::create_of_type(editor, (x, 1, z), tree_type, Some(building_footprints));
+                    Tree::create_of_type(
+                        editor,
+                        (x, 1, z),
+                        tree_type,
+                        Some(building_footprints),
+                        Some(bridge_surface),
+                        false,
+                    );
                 } else {
                     let random_choice: i32 = rng.random_range(0..30);
                     if random_choice == 2 {
@@ -224,9 +235,8 @@ pub fn generate_landuse(
                 }
             }
             "farmland" if !editor.check_for_block(x, 0, z, Some(&[WATER])) => {
-                // Check if the current block is not water or another undesired block
-                if x % 9 == 0 && z % 9 == 0 {
-                    // Place water in dot pattern
+                // Irrigation dots, but only where boxed in so they can't flow downhill and wash out crops.
+                if x % 9 == 0 && z % 9 == 0 && editor.water_source_is_enclosed(x, z) {
                     editor.set_block(WATER, x, 0, z, Some(&[FARMLAND]), None);
                 } else if rng.random_range(0..76) == 0 {
                     let special_choice: i32 = rng.random_range(1..=10);
@@ -334,7 +344,12 @@ pub fn generate_landuse(
             "meadow" if editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK])) => {
                 let random_choice: i32 = rng.random_range(0..1001);
                 if random_choice < 5 {
-                    Tree::create(editor, (x, 1, z), Some(building_footprints));
+                    Tree::create(
+                        editor,
+                        (x, 1, z),
+                        Some(building_footprints),
+                        Some(bridge_surface),
+                    );
                 } else if random_choice < 6 {
                     editor.set_block(RED_FLOWER, x, 1, z, None, None);
                 } else if random_choice < 9 {
@@ -350,7 +365,12 @@ pub fn generate_landuse(
             }
             "orchard" => {
                 if x % 18 == 0 && z % 10 == 0 {
-                    Tree::create(editor, (x, 1, z), Some(building_footprints));
+                    Tree::create(
+                        editor,
+                        (x, 1, z),
+                        Some(building_footprints),
+                        Some(bridge_surface),
+                    );
                 } else if editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK])) {
                     match rng.random_range(0..100) {
                         0 => editor.set_block(OAK_LEAVES, x, 1, z, None, None),
@@ -399,6 +419,10 @@ pub fn generate_landuse(
             }
             _ => {}
         }
+
+        if is_cemetery {
+            crate::structures::tombstone::maybe_place(editor, x, z, road_mask);
+        }
     }
 
     // Generate a stone brick wall fence around cemeteries
@@ -439,6 +463,8 @@ pub fn generate_landuse_from_relation(
     args: &Args,
     flood_fill_cache: &FloodFillCache,
     building_footprints: &BuildingFootprintBitmap,
+    road_mask: &RoadMaskBitmap,
+    bridge_surface: &BridgeSurfaceMap,
 ) {
     if rel.tags.contains_key("landuse") {
         // Process each outer member way individually using cached flood fill.
@@ -459,6 +485,8 @@ pub fn generate_landuse_from_relation(
                     args,
                     flood_fill_cache,
                     building_footprints,
+                    road_mask,
+                    bridge_surface,
                 );
             }
         }

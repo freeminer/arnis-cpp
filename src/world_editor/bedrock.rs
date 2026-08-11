@@ -136,6 +136,9 @@ pub struct BedrockWriter {
     extend_build_height: bool,
     projection: String,
     scale: f64,
+    game_mode: crate::args::GameMode,
+    world_time: i64,
+    start_with_map: bool,
 }
 
 impl BedrockWriter {
@@ -149,6 +152,9 @@ impl BedrockWriter {
         extend_build_height: bool,
         projection: String,
         scale: f64,
+        game_mode: crate::args::GameMode,
+        world_time: i64,
+        start_with_map: bool,
     ) -> Self {
         // If the path ends with .mcworld, use it as the final archive path
         // and create a temp directory without that extension for working files
@@ -166,6 +172,9 @@ impl BedrockWriter {
             extend_build_height,
             projection,
             scale,
+            game_mode,
+            world_time,
+            start_with_map,
         }
     }
 
@@ -284,13 +293,13 @@ impl BedrockWriter {
             spawn_mobs: false,
 
             // Game settings
-            game_type: 1, // Creative
+            game_type: self.game_mode.bedrock_game_type(),
             difficulty: 2, // Normal
             force_game_type: false,
 
             // Time
             last_played: now,
-            time: 0,
+            time: self.world_time,
             current_tick: 0,
 
             // Cheats and commands
@@ -369,7 +378,7 @@ impl BedrockWriter {
             center_maps_to_origin: false,
             confirmed_platform_locked_content: false,
             education_features_enabled: false,
-            start_with_map_enabled: false,
+            start_with_map_enabled: self.start_with_map,
             requires_copied_pack_removal_check: false,
             spawn_v1_villagers: false,
             is_hardcore: false,
@@ -1313,6 +1322,9 @@ mod tests {
             false,
             "local".to_string(),
             1.0,
+            crate::args::GameMode::Creative,
+            6000,
+            false,
         )
         .write_world(&world, &xzbbox, &llbbox)
         .expect("write_world");
@@ -1362,6 +1374,9 @@ mod tests {
             false,
             "local".to_string(),
             1.0,
+            crate::args::GameMode::Creative,
+            6000,
+            false,
         )
         .write_world(&world, &xzbbox, &llbbox)
         .expect("write_world");
@@ -1388,6 +1403,9 @@ mod tests {
             true,
             "local".to_string(),
             1.0,
+            crate::args::GameMode::Creative,
+            6000,
+            false,
         )
         .write_world(&world, &xzbbox, &llbbox)
         .expect("write_world");
@@ -1470,6 +1488,9 @@ mod tests {
             false,
             "local".to_string(),
             1.0,
+            crate::args::GameMode::Creative,
+            6000,
+            false,
         );
         writer.prepare_output_dir().expect("prepare dir");
         writer.write_chunks_to_db(&world).expect("write chunks");

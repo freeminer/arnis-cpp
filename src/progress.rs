@@ -2,9 +2,52 @@
 use crate::telemetry::{send_log, LogLevel};
 use once_cell::sync::OnceCell;
 use serde_json::json;
+use std::sync::atomic::{AtomicU32, Ordering};
 use tauri::{Emitter, WebviewWindow};
 
 pub static MAIN_WINDOW: OnceCell<WebviewWindow> = OnceCell::new();
+
+// Highest progress emitted so far (percent * 100), keeps the bar monotonic.
+static PROGRESS_FLOOR: AtomicU32 = AtomicU32::new(0);
+
+// Held (>0) while 3D-preview fetches reuse the generation pipeline, whose
+// 9-18% emits would otherwise move the progress bar and pollute the monotonic
+// floor. A refcount, not a bool: terrain/land-cover/buildings previews can
+// overlap, and the first one finishing must not unmute the rest.
+static SUPPRESS_COUNT: AtomicU32 = AtomicU32::new(0);
+
+/// Mutes/unmutes progress emits; used by the 3D terrain preview fetches.
+pub fn set_progress_suppressed(suppressed: bool) {
+    if suppressed {
+        SUPPRESS_COUNT.fetch_add(1, Ordering::Relaxed);
+    } else {
+        let _ = SUPPRESS_COUNT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |v| {
+            Some(v.saturating_sub(1))
+        });
+    }
+}
+
+// Terminal messages always pass: a generation finishing or failing while a
+// preview fetch holds the mute must still reach the GUI, or the Generate
+// button stays locked forever (main.js re-enables it on "Error!"/"Done!").
+fn emits_suppressed(progress: f64, message: &str) -> bool {
+    SUPPRESS_COUNT.load(Ordering::Relaxed) > 0 && progress < 100.0 && !message.starts_with("Error!")
+}
+
+/// Resets the monotonic progress floor at the start of a generation.
+pub fn reset_progress_floor() {
+    PROGRESS_FLOOR.store(0, Ordering::Relaxed);
+}
+
+// Error emits (0.0) pass through untouched.
+fn clamp_progress(progress: f64) -> f64 {
+    if progress <= 0.0 {
+        return progress;
+    }
+    let p = (progress * 100.0) as u32;
+    let prev = PROGRESS_FLOOR.fetch_max(p, Ordering::Relaxed);
+    f64::from(prev.max(p)) / 100.0
+}
 
 pub fn set_main_window(window: WebviewWindow) {
     MAIN_WINDOW.set(window).ok();
@@ -21,25 +64,26 @@ pub fn is_running_with_gui() -> bool {
 }
 
 /// This code manages a multi-step process with a progress bar indicating the overall completion.
-/// Percentages are monotonic in the ACTUAL execution order (download -> overture ->
-/// land cover -> elevation -> parse -> transform -> generate -> ground -> save):
+/// OSM download, Overture and elevation/land cover run in parallel within 1-18%; the shown
+/// percentage is kept monotonic by `clamp_progress` since those stages emit out of order:
 ///
-/// Downloading map data...    1-5%
-/// Adding extra buildings...  6%        (Overture; fetched right after download)
-/// Detecting surface types... 9%        (land cover; skipped if disabled)
-/// Fetching elevation...      10%
-/// Processing elevation...    12-18%
+/// Downloading data...        1-10%    (OSM 1-5, Overture 6, land cover 9, elevation fetch 10)
+/// Processing elevation...    12-18%   (runs parallel to the OSM download)
 /// (parsing, silent)          18.5%
 /// Transforming map...        19%
+/// Processing data...         19.5%    (flood fills, footprints, road masks, 3D prescan)
 /// Generating area...         20-70%
 /// Generating ground...       70-90%
 /// Saving world...            90-100%
 ///
 /// The function `emit_gui_progress_update` is used to send real-time progress updates to the UI.
 pub fn emit_gui_progress_update(progress: f64, message: &str) {
+    if emits_suppressed(progress, message) {
+        return;
+    }
     if let Some(window) = get_main_window() {
         let payload = json!({
-            "progress": progress,
+            "progress": clamp_progress(progress),
             "message": message
         });
 
@@ -57,9 +101,12 @@ pub fn emit_gui_progress_update(progress: f64, message: &str) {
 /// ~instant when streaming, a real save otherwise). Additive payload field;
 /// only the two terrain emits use it, all other sites stay on the plain fn.
 pub fn emit_gui_progress_update_ex(progress: f64, message: &str, streaming: bool) {
+    if emits_suppressed(progress, message) {
+        return;
+    }
     if let Some(window) = get_main_window() {
         let payload = json!({
-            "progress": progress,
+            "progress": clamp_progress(progress),
             "message": message,
             "streaming": streaming
         });

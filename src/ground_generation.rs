@@ -23,6 +23,7 @@ use crate::block_definitions::{
     TUFF, WATER, WHEAT, WHITE_CONCRETE, WHITE_FLOWER, YELLOW_FLOWER,
 };
 use crate::coordinate_system::cartesian::{XZBBox, XZPoint};
+use crate::element_processing::bridges::BridgeSurfaceMap;
 use crate::element_processing::tree;
 use crate::floodfill_cache::BuildingFootprintBitmap;
 use crate::ground::Ground;
@@ -106,6 +107,36 @@ impl ChunkGroundCache {
     }
 }
 
+/// Whether the canopy map covers this column's lattice cell, and whether it
+/// wants a trunk rooted here. Decided once per cell, at the cell's own trunk
+/// slot, since every column in a cell snaps to that slot anyway. An unmeasured
+/// cell reports `(false, false)` so the land cover keeps its say.
+#[allow(clippy::too_many_arguments)]
+fn canopy_verdict(
+    ground: &Ground,
+    x: i32,
+    z: i32,
+    origin_x: i32,
+    origin_z: i32,
+    spacing: i32,
+    schematic_trees: bool,
+) -> (bool, bool) {
+    let cell = XZPoint::new(
+        x.div_euclid(spacing) * spacing - origin_x,
+        z.div_euclid(spacing) * spacing - origin_z,
+    );
+    let Some(fraction) = ground.canopy_fraction(cell, spacing) else {
+        return (false, false);
+    };
+    if (x, z) != crate::trees::schematic::trunk_slot_s(x, z, spacing) {
+        return (true, false);
+    }
+    let p = crate::canopy::slot_probability(fraction, spacing, schematic_trees);
+    // Its own salt, so no existing draw shifts when the option is off.
+    let roll = (land_cover::coord_hash(x ^ 0x434D, z ^ 0x484D) % 10_000) as f64 / 10_000.0;
+    (true, roll < p)
+}
+
 /// Generate the ground layer for the entire bounding box.
 ///
 /// This must be called after all OSM element processing is complete and the
@@ -117,6 +148,8 @@ pub fn generate_ground_layer(
     args: &Args,
     xzbbox: &XZBBox,
     building_footprints: &BuildingFootprintBitmap,
+    tunnel_footprint: &BuildingFootprintBitmap,
+    bridge_surface: &BridgeSurfaceMap,
 ) -> Result<(), String> {
     generate_ground_region(
         editor,
@@ -124,6 +157,8 @@ pub fn generate_ground_layer(
         args,
         xzbbox,
         building_footprints,
+        tunnel_footprint,
+        bridge_surface,
         xzbbox.min_x(),
         xzbbox.max_x(),
         xzbbox.min_z(),
@@ -142,6 +177,8 @@ pub fn generate_ground_region(
     args: &Args,
     xzbbox: &XZBBox,
     building_footprints: &BuildingFootprintBitmap,
+    tunnel_footprint: &BuildingFootprintBitmap,
+    bridge_surface: &BridgeSurfaceMap,
     iter_min_x: i32,
     iter_max_x: i32,
     iter_min_z: i32,
@@ -149,6 +186,9 @@ pub fn generate_ground_region(
     show_progress: bool,
 ) {
     let has_land_cover = ground.has_land_cover();
+    let has_canopy = ground.has_canopy();
+    let tree_spacing = editor.tree_slot_spacing();
+    let schematic_trees = editor.tree_pack().is_some();
     let terrain_enabled = ground.elevation_enabled;
     let climate = ground.climate();
 
@@ -428,10 +468,7 @@ pub fn generate_ground_region(
                                 // any more — that's a normal hiking incline where
                                 // grass and trees belong.
                                 if slope > 4 {
-                                    if let Some(p) = climate.slope_palette(x, z) {
-                                        // Arid canyon/mesa walls: tan/orange rock, not grey.
-                                        p
-                                    } else if slope > 8 {
+                                    if slope > 8 {
                                         // Sheer cliff: each column is 100% one material
                                         // so the downward under-fill matches the surface,
                                         // producing vertical stripes of cobbled/deepslate.
@@ -818,20 +855,55 @@ pub fn generate_ground_region(
                                     Some(&[SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS]),
                                     None,
                                 );
+                            // Where the canopy map reaches, it decides which columns get
+                            // trees on any class, and land cover keeps the surface and the
+                            // undergrowth. Its roll uses its own hash, so turning the option
+                            // off leaves every other draw untouched.
+                            let (canopy_covered, canopy_tree) = if has_canopy && has_land_cover {
+                                canopy_verdict(
+                                    ground,
+                                    x,
+                                    z,
+                                    xzbbox.min_x(),
+                                    xzbbox.min_z(),
+                                    tree_spacing,
+                                    schematic_trees,
+                                )
+                            } else {
+                                (false, false)
+                            };
+                            // Placed before the vegetation pass, whose own guard then sees
+                            // the trunk and leaves the column alone.
+                            if canopy_tree
+                                && slope <= 4
+                                && ground_allows_trees
+                                && !tunnel_footprint.contains(x, z)
+                                && !editor.block_exists_absolute(x, ground_y + 1, z)
+                            {
+                                tree::Tree::create_from_canopy(
+                                    editor,
+                                    (x, 1, z),
+                                    Some(building_footprints),
+                                    Some(bridge_surface),
+                                );
+                            }
                             if has_land_cover && !editor.block_exists_absolute(x, ground_y + 1, z) {
                                 let cover = ground.cover_class(coord);
                                 let mut rng = crate::deterministic_rng::coord_rng(x, z, 0);
 
                                 match cover {
                                     land_cover::LC_TREE_COVER
-                                        if slope <= 4 && ground_allows_trees =>
+                                        if slope <= 4
+                                            && ground_allows_trees
+                                            && !tunnel_footprint.contains(x, z) =>
                                     {
                                         let choice = rng.random_range(0..30);
-                                        if choice == 0 {
+                                        if choice == 0 && !canopy_covered {
                                             tree::Tree::create(
                                                 editor,
                                                 (x, 1, z),
                                                 Some(building_footprints),
+                                                Some(bridge_surface),
                                             );
                                         } else if ground_is_natural {
                                             // Undergrowth only on natural surfaces
@@ -940,7 +1012,11 @@ pub fn generate_ground_region(
                                             None,
                                         ) =>
                                     {
-                                        if x % 9 == 0 && z % 9 == 0 {
+                                        // Irrigation dots, but only where boxed in so they can't flow downhill and wash out crops.
+                                        if x % 9 == 0
+                                            && z % 9 == 0
+                                            && editor.water_source_is_enclosed(x, z)
+                                        {
                                             editor.set_block_absolute(
                                                 WATER,
                                                 x,

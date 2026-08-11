@@ -7,9 +7,11 @@ use std::time::Duration;
 #[derive(Parser, Debug)]
 #[command(author, version, about)]
 pub struct Args {
-    /// Bounding box of the area (min_lat,min_lng,max_lat,max_lng) (required)
+    /// Bounding box of the area (min_lat,min_lng,max_lat,max_lng).
+    /// Required unless --file supplies a local .osm/.xml file to derive it from
+    /// (terrain-only mode ignores --file, so it always requires --bbox).
     #[arg(long, allow_hyphen_values = true, value_parser = LLBBox::from_str)]
-    pub bbox: LLBBox,
+    pub bbox: Option<LLBBox>,
 
     /// JSON file containing OSM data (optional)
     #[arg(long, group = "location")]
@@ -50,17 +52,21 @@ pub struct Args {
     #[arg(long, default_value_t = -62)]
     pub ground_level: i32,
 
-    /// Enable terrain (optional)
-    #[arg(long)]
-    pub terrain: bool,
+    /// What to generate, mirroring the GUI's generation mode dropdown:
+    /// geo-terrain: OSM objects on real elevation terrain (default)
+    /// geo-only: OSM objects on flat ground
+    /// terrain-only: real elevation terrain, no OSM or Overture objects (--overture has no effect)
+    #[arg(long, value_enum, default_value_t = GenerationMode::GeoTerrain)]
+    pub mode: GenerationMode,
 
-    /// Enable interior generation (optional)
-    #[arg(long, default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    /// Deprecated: terrain is on by default, use --mode geo-only for flat ground.
+    /// Accepted as a no-op so existing scripts keep working.
+    #[arg(long = "terrain", hide = true)]
+    pub legacy_terrain: bool,
+
+    /// Enable interior generation (optional, off unless requested)
+    #[arg(long, default_value_t = false, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
     pub interior: bool,
-
-    /// Enable roof generation (optional)
-    #[arg(long, default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
-    pub roof: bool,
 
     /// Enable filling ground (optional)
     #[arg(long, default_value_t = false)]
@@ -71,11 +77,24 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub legacy_trees: bool,
 
-    /// ESA WorldCover land cover classification, always on (no CLI flag).
-    #[arg(skip = true)]
-    pub land_cover: bool,
+    /// Largest schematic tree to place: small (<=6 blocks), medium (<=12),
+    /// big (<=20), tall (<=28) or giant. Oversized picks fall back to a smaller
+    /// species in the same community where there is one.
+    #[arg(long, value_enum, default_value_t = crate::trees::tree_library::TreeSize::Giant)]
+    pub max_tree_size: crate::trees::tree_library::TreeSize,
 
-    /// Disable fetching 3D models from external sources (3DMR + Wikimedia).
+    /// Place trees from the Meta/WRI global canopy height map instead of assuming
+    /// every tree-cover cell is forest. Land cover still decides the surface.
+    #[arg(long = "canopy-height", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub canopy_height: bool,
+
+    /// Add building footprints from Overture Maps that are missing in OpenStreetMap.
+    /// Helps sparsely mapped areas; may occasionally add a satellite-detected false positive.
+    #[arg(long = "overture", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub overture: bool,
+
+    /// Disable both external 3D models (3DMR + Wikimedia) and bundled schematic
+    /// props (cars, boats, cranes, ...) with a single toggle.
     #[arg(long = "no-3d", default_value_t = true, action = ArgAction::SetFalse)]
     pub use_3d: bool,
 
@@ -104,8 +123,8 @@ pub struct Args {
     #[arg(long, default_value_t = false)]
     pub disable_height_limit: bool,
 
-    /// Skip the regional high-resolution elevation providers  and only use
-    /// AWS Terrain Tiles for faster generation.
+    /// Use only the legacy AWS Terrain Tiles source (~30m) instead of
+    /// Mapterhorn and the regional high-resolution providers.
     #[arg(long, default_value_t = false)]
     pub aws_only_elevation: bool,
 
@@ -117,6 +136,91 @@ pub struct Args {
     /// (Voxy/Chunky) without visiting them. Slower; off by default.
     #[arg(long, default_value_t = false)]
     pub bake_lighting: bool,
+
+    /// Render a top-down PNG map preview of the generated world (Java and Bedrock)
+    #[arg(long, default_value_t = false)]
+    pub map_preview: bool,
+
+    /// Give the player a locked map item showing the whole world (Java only)
+    #[arg(long = "map-item", default_value_t = true, action = ArgAction::Set, num_args = 0..=1, default_missing_value = "true")]
+    pub map_item: bool,
+
+    /// Player game mode for the generated world
+    #[arg(long, value_enum, default_value_t = GameMode::Creative)]
+    pub gamemode: GameMode,
+
+    /// Initial time of day in ticks (0 = dawn, 6000 = noon, 18000 = midnight)
+    #[arg(long, default_value_t = 6000, value_parser = clap::value_parser!(i64).range(0..24000))]
+    pub world_time: i64,
+}
+
+/// Generation mode, matching the GUI's dropdown (src/gui/js/main.js).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Default, clap::ValueEnum)]
+pub enum GenerationMode {
+    /// OSM objects on real elevation terrain
+    #[default]
+    GeoTerrain,
+    /// OSM objects on flat ground
+    GeoOnly,
+    /// Real elevation terrain without any OSM or Overture objects
+    TerrainOnly,
+}
+
+impl GenerationMode {
+    /// Whether real elevation is fetched and applied instead of flat ground.
+    pub fn terrain(self) -> bool {
+        !matches!(self, GenerationMode::GeoOnly)
+    }
+
+    /// Whether OSM and Overture objects are skipped entirely.
+    pub fn skip_objects(self) -> bool {
+        matches!(self, GenerationMode::TerrainOnly)
+    }
+}
+
+impl Args {
+    /// Whether this run uses real elevation terrain rather than flat ground.
+    pub fn terrain(&self) -> bool {
+        self.mode.terrain()
+    }
+
+    /// Whether this run skips OSM/Overture objects (terrain-only).
+    pub fn skip_objects(&self) -> bool {
+        self.mode.skip_objects()
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, clap::ValueEnum)]
+pub enum GameMode {
+    Survival,
+    Creative,
+    Spectator,
+}
+
+impl GameMode {
+    pub fn from_str_lossy(s: &str) -> Self {
+        match s {
+            "survival" => GameMode::Survival,
+            "spectator" => GameMode::Spectator,
+            _ => GameMode::Creative,
+        }
+    }
+
+    pub fn java_game_type(self) -> i32 {
+        match self {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+            GameMode::Spectator => 3,
+        }
+    }
+
+    pub fn bedrock_game_type(self) -> i32 {
+        match self {
+            GameMode::Survival => 0,
+            GameMode::Creative => 1,
+            GameMode::Spectator => 6,
+        }
+    }
 }
 
 /// Validates CLI arguments after parsing.
@@ -125,6 +229,36 @@ pub struct Args {
 pub fn validate_args(args: &Args) -> Result<(), String> {
     if args.bedrock && args.luanti {
         return Err("Cannot use --bedrock and --luanti together.".to_string());
+    }
+
+    // The legacy --terrain flag is redundant now that terrain is the default, but it must
+    // not silently lose against a mode that asks for flat ground.
+    if args.legacy_terrain && args.mode == GenerationMode::GeoOnly {
+        return Err(
+            "--terrain contradicts --mode geo-only (flat ground). Drop --terrain, or use --mode geo-terrain."
+                .to_string(),
+        );
+    }
+
+    if args.map_preview && args.luanti {
+        return Err("--map-preview is not supported for Luanti worlds.".to_string());
+    }
+
+    // A bounding box is required unless a local --file supplies one to derive it from.
+    // Terrain-only mode ignores --file (it never loads OSM objects), so it always needs --bbox.
+    if args.bbox.is_none() {
+        if args.skip_objects() {
+            return Err(
+                "--mode terrain-only requires --bbox (a local --file is ignored in terrain-only mode)."
+                    .to_string(),
+            );
+        }
+        if args.file.is_none() {
+            return Err(
+                "Provide --bbox, or --file with a local .osm/.xml file to derive the bounding box from."
+                    .to_string(),
+            );
+        }
     }
 
     if args.bedrock {
@@ -180,12 +314,15 @@ pub fn validate_args(args: &Args) -> Result<(), String> {
             let llpoint =
                 LLPoint::new(lat, lng).map_err(|e| format!("Invalid spawn coordinates: {e}"))?;
 
-            // Validate that spawn point is within the bounding box
-            if !args.bbox.contains(&llpoint) {
-                return Err(
-                    "Spawn point (--spawn-lat, --spawn-lng) must be within the bounding box."
-                        .to_string(),
-                );
+            // Validate that spawn point is within the bounding box. Only enforceable when the
+            // bbox is known up front; a file-derived bbox isn't available until the file is parsed.
+            if let Some(bbox) = args.bbox {
+                if !bbox.contains(&llpoint) {
+                    return Err(
+                        "Spawn point (--spawn-lat, --spawn-lng) must be within the bounding box."
+                            .to_string(),
+                    );
+                }
             }
         }
         _ => {}
@@ -209,11 +346,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn test_generation_mode() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+        let base = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+
+        let parse = |extra: &[&str]| {
+            let mut cmd: Vec<&str> = base.to_vec();
+            cmd.extend_from_slice(extra);
+            Args::parse_from(cmd.iter())
+        };
+
+        // geo-terrain: objects on real elevation (the default)
+        let args = parse(&["--mode", "geo-terrain"]);
+        assert_eq!(args.mode, GenerationMode::GeoTerrain);
+        assert!(args.terrain());
+        assert!(!args.skip_objects());
+        assert!(validate_args(&args).is_ok());
+
+        // geo-only: objects on flat ground
+        let args = parse(&["--mode", "geo-only"]);
+        assert!(!args.terrain());
+        assert!(!args.skip_objects());
+        assert!(validate_args(&args).is_ok());
+
+        // terrain-only: elevation, no objects
+        let args = parse(&["--mode", "terrain-only"]);
+        assert!(args.terrain());
+        assert!(args.skip_objects());
+        assert!(validate_args(&args).is_ok());
+
+        // The legacy --terrain flag contradicts flat ground, so it must not pass silently
+        let args = parse(&["--mode", "geo-only", "--terrain"]);
+        assert!(validate_args(&args).is_err());
+
+        // Unknown modes are rejected by clap
+        let mut cmd: Vec<&str> = base.to_vec();
+        cmd.extend_from_slice(&["--mode", "objects"]);
+        assert!(Args::try_parse_from(cmd.iter()).is_err());
+    }
+
+    #[test]
     fn test_flags() {
         let tmpdir = tempfile::tempdir().unwrap();
         let tmp_path = tmpdir.path().to_str().unwrap();
 
-        // Test that terrain/debug are SetTrue
+        // The legacy --terrain flag still parses and still yields terrain (now the default)
         let cmd = [
             "arnis",
             "--output-dir",
@@ -225,19 +403,25 @@ mod tests {
         ];
         let args = Args::parse_from(cmd.iter());
         assert!(args.debug);
-        assert!(args.terrain);
+        assert!(args.legacy_terrain);
+        assert!(args.terrain());
+        assert!(validate_args(&args).is_ok());
 
         let cmd = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
         let args = Args::parse_from(cmd.iter());
         assert!(!args.debug);
-        assert!(!args.terrain);
+        // Terrain is on by default, matching the GUI's "Objects + Terrain" mode
+        assert_eq!(args.mode, GenerationMode::GeoTerrain);
+        assert!(args.terrain());
+        assert!(!args.skip_objects());
+        assert!(!args.legacy_terrain);
         assert!(!args.bedrock);
         assert!(!args.disable_height_limit);
         assert!(!args.bake_lighting);
-        // interior, roof, land_cover default to true
-        assert!(args.interior);
-        assert!(args.roof);
-        assert!(args.land_cover);
+        assert!(!args.map_preview);
+        // interior is opt-in (off by default); overture defaults to true
+        assert!(!args.interior);
+        assert!(args.overture);
     }
 
     #[test]
@@ -245,7 +429,7 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let tmp_path = tmpdir.path().to_str().unwrap();
 
-        // Test disabling interior/roof with =false
+        // Test disabling interior/overture with =false
         let cmd = [
             "arnis",
             "--output-dir",
@@ -253,13 +437,11 @@ mod tests {
             "--bbox",
             "1,2,3,4",
             "--interior=false",
-            "--roof=false",
+            "--overture=false",
         ];
         let args = Args::parse_from(cmd.iter());
         assert!(!args.interior);
-        assert!(!args.roof);
-        // land cover is always on (no flag)
-        assert!(args.land_cover);
+        assert!(!args.overture);
 
         // Test enabling with bare flag (no value)
         let cmd = [
@@ -269,11 +451,11 @@ mod tests {
             "--bbox",
             "1,2,3,4",
             "--interior",
-            "--roof",
+            "--overture",
         ];
         let args = Args::parse_from(cmd.iter());
         assert!(args.interior);
-        assert!(args.roof);
+        assert!(args.overture);
     }
 
     #[test]
@@ -369,8 +551,11 @@ mod tests {
         let tmpdir = tempfile::tempdir().unwrap();
         let tmp_path = tmpdir.path().to_str().unwrap();
 
+        // `arnis` alone now parses (--bbox is optional at the CLI layer), but validation
+        // rejects it: no output dir, and neither --bbox nor --file.
         let cmd = ["arnis"];
-        assert!(Args::try_parse_from(cmd.iter()).is_err());
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_err());
 
         let cmd = ["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
         let args = Args::try_parse_from(cmd.iter()).unwrap();
@@ -381,12 +566,51 @@ mod tests {
         let args = Args::try_parse_from(cmd.iter()).unwrap();
         assert!(validate_args(&args).is_ok());
 
-        let cmd = ["arnis", "--output-dir", tmp_path, "--file", ""];
-        assert!(Args::try_parse_from(cmd.iter()).is_err());
+        // #881: --file without --bbox is accepted; the bbox is derived from the file later.
+        let cmd = ["arnis", "--output-dir", tmp_path, "--file", "area.osm"];
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_ok());
+
+        // Neither --bbox nor --file (even with an output dir) is a validation error.
+        let cmd = ["arnis", "--output-dir", tmp_path];
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_err());
 
         // The --gui flag isn't used here, ugh. TODO clean up main.rs and its argparse usage.
         // let cmd = ["arnis", "--gui"];
         // assert!(Args::try_parse_from(cmd.iter()).is_ok());
+    }
+
+    #[test]
+    fn test_terrain_only_requires_bbox_even_with_file() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+
+        // terrain-only ignores --file, so a bbox is still required.
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--file",
+            "area.osm",
+            "--mode",
+            "terrain-only",
+        ];
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_err());
+
+        // With --bbox it validates.
+        let cmd = [
+            "arnis",
+            "--output-dir",
+            tmp_path,
+            "--bbox",
+            "1,2,3,4",
+            "--mode",
+            "terrain-only",
+        ];
+        let args = Args::try_parse_from(cmd.iter()).unwrap();
+        assert!(validate_args(&args).is_ok());
     }
 
     #[test]

@@ -23,28 +23,24 @@ export const licenseText = `
 <b>OpenFreeMap:</b><br> Vector tiles © <a href="https://openfreemap.org" style="color: inherit;" target="_blank">OpenFreeMap</a>, "Liberty" style © <a href="https://www.openmaptiles.org/" style="color: inherit;" target="_blank">OpenMapTiles</a>, map data © OpenStreetMap contributors
 <p>Users of this software must comply with the respective licensing terms of these map data providers when using the application.</p>
 
+<b>Mapterhorn Terrain Tiles:</b><br>
+Elevation data &copy; <a href="https://mapterhorn.com/" style="color: inherit;" target="_blank">Mapterhorn</a>, aggregating open elevation datasets including Copernicus GLO-30 (&copy; DLR/ESA) and national terrain models from mapping agencies (GeoBasis-DE, IGN France, IGN Espa&ntilde;a, GSI Japan, swisstopo and others) under CC-BY-4.0-family licenses. Full source list: <a href="https://mapterhorn.com/attribution/" style="color: inherit;" target="_blank">mapterhorn.com/attribution</a>.
+<br><br>
+
 <b>AWS Terrain Tiles:</b><br>
-Elevation data derived from the <a href="https://registry.opendata.aws/terrain-tiles/" style="color: inherit;" target="_blank">AWS Terrain Tiles</a> dataset (global fallback).
+Elevation data derived from the <a href="https://registry.opendata.aws/terrain-tiles/" style="color: inherit;" target="_blank">AWS Terrain Tiles</a> dataset (legacy fallback).
 <br><br>
 
 <b>USGS 3D Elevation Program (3DEP):</b><br>
 Elevation data provided by the <a href="https://www.usgs.gov/3d-elevation-program" style="color: inherit;" target="_blank">U.S. Geological Survey, 3D Elevation Program</a>. Public Domain.
 <br><br>
 
-<b>IGN France RGE ALTI:</b><br>
-Elevation data &copy; <a href="https://geoservices.ign.fr/" style="color: inherit;" target="_blank">IGN France</a>, RGE ALTI. Licensed under <a href="https://www.etalab.gouv.fr/licence-ouverte-open-licence/" style="color: inherit;" target="_blank">Licence Ouverte 2.0</a>.
-<br><br>
-
-<b>IGN España MDT:</b><br>
-Elevation data &copy; <a href="https://www.ign.es/" style="color: inherit;" target="_blank">Instituto Geogr&aacute;fico Nacional de Espa&ntilde;a</a>. Licensed under <a href="https://creativecommons.org/licenses/by/4.0/" style="color: inherit;" target="_blank">CC BY 4.0</a>.
-<br><br>
-
-<b>GSI Japan Elevation Tiles:</b><br>
-Elevation data provided by the <a href="https://maps.gsi.go.jp/" style="color: inherit;" target="_blank">Geospatial Information Authority of Japan</a>.
-<br><br>
-
 <b>ESA WorldCover 2021:</b><br>
 Land cover classification data provided by the <a href="https://esa-worldcover.org/en" style="color: inherit;" target="_blank">ESA WorldCover</a> project (10m resolution, v200). Contains modified Copernicus Sentinel data (2021) processed by ESA WorldCover consortium. Licensed under <a href="https://creativecommons.org/licenses/by/4.0/" style="color: inherit;" target="_blank">CC-BY 4.0</a>. &copy; ESA WorldCover project 2021.
+<br><br>
+
+<b>Meta / WRI Canopy Height Maps:</b><br>
+The "Real Tree Cover" setting places trees from the <a href="https://registry.opendata.aws/dataforgood-fb-forests/" style="color: inherit;" target="_blank">High Resolution Canopy Height Maps</a> (1m resolution), &copy; Meta and the <a href="https://www.wri.org/" style="color: inherit;" target="_blank">World Resources Institute</a>. Licensed under <a href="https://creativecommons.org/licenses/by/4.0/" style="color: inherit;" target="_blank">CC BY 4.0</a>.
 <br><br>
 
 <b>Koppen-Geiger Climate Data:</b><br>
@@ -53,6 +49,22 @@ Climate-based biome and surface selection uses the Koppen-Geiger climate classif
 
 <b>Schematic Tree Models:</b><br>
 The bundled region tree pack used by the optional "Schematic Trees" feature was created by <a href="https://www.planetminecraft.com/member/paleozoey/" style="color: inherit;" target="_blank">paleozoey</a>. Arnis bundles and places them; the artistry is theirs.
+<br><br>
+
+<b>Schematic Structures:</b><br>
+Bundled structures placed by Arnis; the artistry is the authors':<br>
+Boat by <a href="https://www.planetminecraft.com/member/_malta_/" style="color: inherit;" target="_blank">_malta_</a><br>
+Fountains by <a href="https://www.planetminecraft.com/member/jamesbuildsmc/" style="color: inherit;" target="_blank">jamesbuildsmc</a>, <a href="https://www.planetminecraft.com/member/the_only_masked/" style="color: inherit;" target="_blank">the_only_masked</a>, <a href="https://www.planetminecraft.com/member/lorenz185/" style="color: inherit;" target="_blank">lorenz185</a><br>
+Playground by <a href="https://www.planetminecraft.com/project/medieval-style-playground/" style="color: inherit;" target="_blank">Medieval Style Playground</a><br>
+Crane by <a href="https://www.planetminecraft.com/member/fedotir/" style="color: inherit;" target="_blank">fedotir</a><br>
+Lighthouse by <a href="https://www.minecraft-schematics.com/user/arkyouz/" style="color: inherit;" target="_blank">arkyouz</a><br>
+Tractor by <a href="https://www.planetminecraft.com/member/captain_jek/" style="color: inherit;" target="_blank">captain_jek</a><br>
+Excavator and cars by <a href="https://www.planetminecraft.com/member/yobi_wan/" style="color: inherit;" target="_blank">yobi_wan</a> and <a href="https://www.planetminecraft.com/member/dreamwanderer/" style="color: inherit;" target="_blank">dreamwanderer</a><br>
+Bridge segments by <a href="https://www.planetminecraft.com/member/hway/" style="color: inherit;" target="_blank">hway</a><br>
+Starship by <a href="https://www.planetminecraft.com/member/skyblocksquad/" style="color: inherit;" target="_blank">skyblocksquad</a><br>
+Tombstones by <a href="https://www.planetminecraft.com/member/bendeeee/" style="color: inherit;" target="_blank">bendeeee</a><br>
+Wind turbine by <a href="https://www.planetminecraft.com/member/zaevyy/" style="color: inherit;" target="_blank">zaevyy</a><br>
+Helicopter by the Arnis project
 <br><br>
 
 <b>bedrock-rs:</b><br>

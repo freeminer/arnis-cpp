@@ -6,9 +6,10 @@ use std::io::Read;
 use fastnbt::Value;
 
 use crate::block_definitions::{
-    Block, ACACIA_LEAVES, ACACIA_LOG, AZALEA_LEAVES, BIRCH_LEAVES, BIRCH_LOG, CHERRY_LEAVES,
-    CHERRY_LOG, DARK_OAK_LEAVES, DARK_OAK_LOG, JUNGLE_LEAVES, JUNGLE_LOG, MANGROVE_LEAVES,
-    MANGROVE_LOG, OAK_LEAVES, OAK_LOG, SPRUCE_LEAVES, SPRUCE_LOG, WATER,
+    Block, ACACIA_LEAVES, ACACIA_LOG, AZALEA_LEAVES, BIRCH_LEAVES, BIRCH_LOG, BLACK_CONCRETE,
+    CHERRY_LEAVES, CHERRY_LOG, CYAN_TERRACOTTA, DARK_OAK_LEAVES, DARK_OAK_LOG, DIRT_PATH,
+    GRAY_CONCRETE, GRAY_CONCRETE_POWDER, JUNGLE_LEAVES, JUNGLE_LOG, LIGHT_GRAY_CONCRETE,
+    MANGROVE_LEAVES, MANGROVE_LOG, OAK_LEAVES, OAK_LOG, SPRUCE_LEAVES, SPRUCE_LOG, WATER,
 };
 use crate::world_editor::WorldEditor;
 
@@ -165,6 +166,19 @@ pub fn load_schem(gz_bytes: &[u8]) -> Result<Schematic, String> {
     };
     let indices = decode_varints(&data_bytes);
 
+    // Sponge requires exactly Width*Height*Length entries. A stream that runs long
+    // or short is corrupt, and would otherwise fold into out-of-range coordinates.
+    let volume = i64::from(width) * i64::from(height) * i64::from(length);
+    if volume > i64::from(i32::MAX) {
+        return Err("schem: volume exceeds the supported range".into());
+    }
+    if indices.len() as i64 != volume {
+        return Err(format!(
+            "schem: BlockData has {} entries, expected {volume}",
+            indices.len()
+        ));
+    }
+
     let wl = width * length;
     let mut voxels = Vec::new();
     for (i, &idx) in indices.iter().enumerate() {
@@ -289,14 +303,41 @@ pub fn place_schematic_tree(
     let cx = (fw - 1) / 2;
     let cz = (fl - 1) / 2;
     let min_log_vy = schem.min_log_vy;
+
+    // Building top per column, sampled before stamping so the model cannot occlude itself.
+    // Only built when the footprint actually overlaps a building, so distant trees pay nothing.
+    let top_probe_y = base_y + schem.height;
+    let roof_tops: Option<Vec<i32>> = footprints
+        .filter(|fp| {
+            (0..fw).any(|rx| (0..fl).any(|rz| fp.contains(anchor_x + rx - cx, anchor_z + rz - cz)))
+        })
+        .map(|fp| {
+            let mut tops = vec![i32::MIN; (fw * fl).max(0) as usize];
+            for rx in 0..fw {
+                for rz in 0..fl {
+                    let (wx, wz) = (anchor_x + rx - cx, anchor_z + rz - cz);
+                    if fp.contains(wx, wz) {
+                        // Nothing stamped in a footprint column: cull the whole column.
+                        tops[(rx * fl + rz) as usize] = editor
+                            .highest_block_between(wx, wz, base_y, top_probe_y)
+                            .unwrap_or(top_probe_y);
+                    }
+                }
+            }
+            tops
+        });
+
     let mut trunk_bottom: HashMap<(i32, i32), (i32, Block)> =
         HashMap::with_capacity((schem.width * schem.length).max(0) as usize);
     for &(vx, vy, vz, block) in &schem.voxels {
         let (rx, rz) = rotate_xz(vx, vz, schem.width, schem.length, rot);
         let wx = anchor_x + rx - cx;
         let wz = anchor_z + rz - cz;
-        if footprints.is_some_and(|f| f.contains(wx, wz)) {
-            continue;
+        // Cull only at or below the building top so canopies drape over low roofs.
+        if let Some(tops) = &roof_tops {
+            if base_y + vy <= tops[(rx * fl + rz) as usize] {
+                continue;
+            }
         }
         // Logs over water are skipped (only root-level logs for predicted ESA water); leaves overhang.
         if is_log(block) {
@@ -326,6 +367,18 @@ pub fn place_schematic_tree(
         .map(|(top, _)| top - base_y)
         .min()
         .unwrap_or(0);
+    // Root flare must not eat paving. Blacklisting the road surfaces stops the
+    // flare at the plaza instead of replacing it, which is also what a street
+    // tree standing on paving wants.
+    let mut root_blacklist: Vec<Block> = blacklist.to_vec();
+    root_blacklist.extend_from_slice(&[
+        BLACK_CONCRETE,
+        GRAY_CONCRETE_POWDER,
+        CYAN_TERRACOTTA,
+        GRAY_CONCRETE,
+        LIGHT_GRAY_CONCRETE,
+        DIRT_PATH,
+    ]);
     for ((wx, wz), (top, log)) in trunk_bottom {
         if top - base_y > min_log_vy + ROOT_BASE_VY {
             continue;
@@ -337,7 +390,7 @@ pub fn place_schematic_tree(
         let from = (top - 1 - ROOT_MAX).max(gy);
         let to = top - 1;
         for wy in from..=to {
-            editor.set_block_absolute(log, wx, wy, wz, None, Some(blacklist));
+            editor.set_block_absolute(log, wx, wy, wz, None, Some(&root_blacklist));
         }
     }
 }

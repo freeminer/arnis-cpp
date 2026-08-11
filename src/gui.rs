@@ -155,7 +155,10 @@ pub fn run_gui() {
             gui_clear_tile_caches,
             gui_get_world_map_data,
             gui_show_in_folder,
-            gui_get_3d_model_attributions
+            gui_get_3d_model_attributions,
+            gui_get_terrain_preview,
+            gui_get_preview_landcover,
+            gui_get_preview_buildings
         ])
         .setup(|app| {
             let app_handle = app.handle();
@@ -509,14 +512,13 @@ fn set_player_spawn_in_level_dat(
 
 // Function to update player spawn Y coordinate based on terrain height after generation
 // This updates the spawn Y coordinate to be at terrain height + 3 blocks
+// `xzbbox` must be the box the world was generated from, post-rotation when a
+// rotation was applied, since `ground` is indexed against it.
 pub fn update_player_spawn_y_after_generation(
     world_path: &Path,
-    bbox_text: String,
-    scale: f64,
+    xzbbox: &XZBBox,
     ground: &Ground,
 ) -> Result<(), String> {
-    use crate::coordinate_system::transformation::CoordTransformer;
-
     // Read the current level.dat file to get existing spawn coordinates
     let level_path = PathBuf::from(world_path).join("level.dat");
     if !level_path.exists() {
@@ -574,13 +576,8 @@ pub fn update_player_spawn_y_after_generation(
 
     // Calculate terrain-based Y coordinate
     let spawn_y = if ground.elevation_enabled {
-        // Parse coordinates for terrain lookup
-        let llbbox = LLBBox::from_str(&bbox_text)
-            .map_err(|e| format!("Failed to parse bounding box for spawn point:\n{e}"))?;
-        let (_, xzbbox) = CoordTransformer::llbbox_to_xzbbox(&llbbox, scale)
-            .map_err(|e| format!("Failed to build transformation:\n{e}"))?;
-
-        // Calculate relative coordinates for ground system
+        // Deriving the bbox from lat/lng here would give the pre-rotation
+        // extents and sample the wrong point on rotated worlds.
         let relative_x = existing_spawn_x - xzbbox.min_x();
         let relative_z = existing_spawn_z - xzbbox.min_z();
         let terrain_point = XZPoint::new(relative_x, relative_z);
@@ -632,6 +629,45 @@ pub fn update_player_spawn_y_after_generation(
     Ok(())
 }
 
+/// Fetches a reduced-resolution elevation + land-cover grid for the 3D
+/// terrain preview. Returns one raw binary blob (layout in preview_3d.rs)
+/// so megabytes of grid data skip JSON serialization.
+#[tauri::command]
+async fn gui_get_terrain_preview(
+    bbox_text: String,
+    aws_only: bool,
+) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        crate::preview_3d::build_preview_payload(&bbox_text, aws_only)
+    })
+    .await
+    .map_err(|e| format!("Preview task failed: {e}"))??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// ESA land-cover grid for the 3D preview, fetched lazily when the user
+/// enables the overlay toggle (layout in preview_3d.rs).
+#[tauri::command]
+async fn gui_get_preview_landcover(bbox_text: String) -> Result<tauri::ipc::Response, String> {
+    let bytes = tauri::async_runtime::spawn_blocking(move || {
+        crate::preview_3d::build_landcover_grid(&bbox_text)
+    })
+    .await
+    .map_err(|e| format!("Preview land cover task failed: {e}"))??;
+    Ok(tauri::ipc::Response::new(bytes))
+}
+
+/// Overture building footprints for the 3D preview as GeoJSON. Size-gated;
+/// the frontend ignores all errors (buildings are a best-effort overlay).
+#[tauri::command]
+async fn gui_get_preview_buildings(bbox_text: String) -> Result<String, String> {
+    tauri::async_runtime::spawn_blocking(move || {
+        crate::preview_3d::build_buildings_geojson(&bbox_text)
+    })
+    .await
+    .map_err(|e| format!("Preview buildings task failed: {e}"))?
+}
+
 #[tauri::command]
 fn gui_get_version() -> String {
     env!("CARGO_PKG_VERSION").to_string()
@@ -679,6 +715,7 @@ fn gui_clear_tile_caches() -> Result<String, String> {
 
     let combined = clear_all_cached_tiles()
         .combined(clear_land_cover_cache())
+        .combined(crate::canopy::clear_canopy_cache())
         .combined(clear_model_caches());
     let megabytes = combined.bytes_freed as f64 / (1024.0 * 1024.0);
 
@@ -709,6 +746,32 @@ fn gui_clear_tile_caches() -> Result<String, String> {
 /// Returns None if the map image or metadata doesn't exist.
 #[tauri::command]
 fn gui_get_world_map_data(world_path: String) -> Result<Option<WorldMapData>, String> {
+    // Prefer the just-finished generation's preview; Bedrock has no world dir.
+    if let Some(r) = map_preview::last_preview_result() {
+        if r.png_path.exists() {
+            let image_data =
+                fs::read(&r.png_path).map_err(|e| format!("Failed to read map image: {e}"))?;
+            let base64_image =
+                base64::Engine::encode(&base64::engine::general_purpose::STANDARD, &image_data);
+            return Ok(Some(WorldMapData {
+                image_base64: format!("data:image/png;base64,{}", base64_image),
+                min_lat: r.min_lat,
+                max_lat: r.max_lat,
+                min_lon: r.min_lon,
+                max_lon: r.max_lon,
+                min_mc_x: r.min_mc_x,
+                max_mc_x: r.max_mc_x,
+                min_mc_z: r.min_mc_z,
+                max_mc_z: r.max_mc_z,
+            }));
+        }
+    }
+
+    // Empty for Bedrock; don't fall back to reading files from the CWD.
+    if world_path.is_empty() {
+        return Ok(None);
+    }
+
     let world_dir = PathBuf::from(&world_path);
     let map_path = world_dir.join("arnis_world_map.png");
     let metadata_path = world_dir.join("metadata.json");
@@ -778,15 +841,23 @@ struct WorldMapData {
 }
 
 /// Reveals a file or folder in the system file explorer.
-/// On Windows, tries to open files with the default application first (e.g. .mcworld with
-/// Minecraft Bedrock), falling back to Explorer. Directories always open in Explorer.
+/// On Windows, opens files with the default application (e.g. .mcworld with Minecraft
+/// Bedrock), except OneDrive paths which are revealed in Explorer to avoid the shell's
+/// "cannot find" error on unsynced/placeholder files. Directories always open in Explorer.
 #[tauri::command]
 fn gui_show_in_folder(path: String) -> Result<(), String> {
     #[cfg(target_os = "windows")]
     {
-        // On Windows, try to open with default application (e.g. .mcworld with Minecraft Bedrock)
-        // For directories, `start ""` opens Explorer directly. Falls back to explorer /select.
-        if std::process::Command::new("cmd")
+        // OneDrive files can be cloud placeholders / mid-sync that `start` can't launch
+        // ("Windows cannot find <path>"), so reveal-and-highlight instead of opening.
+        if path.to_lowercase().contains("onedrive") {
+            std::process::Command::new("explorer")
+                .args(["/select,", &path])
+                .spawn()
+                .map_err(|e| format!("Failed to open explorer: {}", e))?;
+        } else if std::process::Command::new("cmd")
+            // Otherwise open with the default app (e.g. .mcworld with Minecraft Bedrock);
+            // for directories `start ""` opens Explorer. Falls back to explorer /select.
             .args(["/C", "start", "", &path])
             .spawn()
             .is_err()
@@ -841,10 +912,11 @@ fn gui_start_generation(
     terrain_enabled: bool,
     skip_osm_objects: bool,
     interior_enabled: bool,
-    roof_enabled: bool,
     fillground_enabled: bool,
     legacy_trees_enabled: bool,
-    land_cover_enabled: bool, // renamed from city_boundaries_enabled
+    max_tree_size: String,
+    canopy_height_enabled: bool,
+    overture_enabled: bool,
     use_3d_enabled: bool,
     disable_height_limit: bool,
     aws_only_elevation: bool,
@@ -854,9 +926,14 @@ fn gui_start_generation(
     telemetry_consent: bool,
     world_format: String,
     rotation_angle: f64,
+    gamemode: String,
+    world_time: i64,
+    map_item: bool,
 ) -> Result<(), String> {
     use progress::emit_gui_error;
     use LLBBox;
+
+    progress::reset_progress_floor();
 
     // Store telemetry consent for crash reporting
     telemetry::set_telemetry_consent(telemetry_consent);
@@ -1092,7 +1169,7 @@ fn gui_start_generation(
             // Create an Args instance with the chosen bounding box
             // Note: path is used for Java-specific features like spawn point update
             let args: Args = Args {
-                bbox,
+                bbox: Some(bbox),
                 file: None,
                 save_json_file: None,
                 path: Some(if world_format == WorldFormat::JavaAnvil {
@@ -1106,12 +1183,20 @@ fn gui_start_generation(
                 scale: world_scale,
                 projection: crate::projection::ProjectionKind::Local,
                 ground_level,
-                terrain: terrain_enabled,
+                mode: if skip_osm_objects {
+                    crate::args::GenerationMode::TerrainOnly
+                } else if terrain_enabled {
+                    crate::args::GenerationMode::GeoTerrain
+                } else {
+                    crate::args::GenerationMode::GeoOnly
+                },
+                legacy_terrain: false,
                 interior: interior_enabled,
-                roof: roof_enabled,
                 fillground: fillground_enabled,
                 legacy_trees: legacy_trees_enabled,
-                land_cover: land_cover_enabled,
+                max_tree_size: crate::trees::tree_library::TreeSize::from_str_lossy(&max_tree_size),
+                canopy_height: canopy_height_enabled,
+                overture: overture_enabled,
                 use_3d: use_3d_enabled,
                 debug: false,
                 timeout: Some(std::time::Duration::from_secs(40)),
@@ -1122,27 +1207,48 @@ fn gui_start_generation(
                 aws_only_elevation,
                 benchmark: false,
                 bake_lighting: bake_lighting_enabled,
+                gamemode: crate::args::GameMode::from_str_lossy(&gamemode),
+                world_time: world_time.clamp(0, 23999),
+                map_item,
+                // Frontend refuses previews for rotated worlds, skip the work there.
+                map_preview: world_format != WorldFormat::LuantiWorld
+                    && rotation_angle.abs() <= f64::EPSILON,
             };
 
             // If skip_osm_objects is true (terrain-only mode), skip fetching and processing OSM data
             if skip_osm_objects {
                 // Generate ground data (terrain) for terrain-only mode
-                let ground = ground::generate_ground_data(&args);
+                let mut ground = ground::generate_ground_data(&args, bbox);
 
                 // Create empty parsed_elements and xzbbox for terrain-only mode
-                let parsed_elements = Vec::new();
-                let (_coord_transformer, xzbbox) =
-                    CoordTransformer::llbbox_to_xzbbox(&args.bbox, args.scale)
+                let mut parsed_elements = Vec::new();
+                let (_coord_transformer, mut xzbbox) =
+                    CoordTransformer::llbbox_to_xzbbox(&bbox, args.scale)
                         .map_err(|e| format!("Failed to create coordinate transformer: {}", e))?;
+
+                // The spawn point is rotated above, so skipping the world
+                // rotation here would drop the player outside the terrain.
+                map_transformation::transform_map(&mut parsed_elements, &mut xzbbox, &mut ground);
+
+                if rotation_angle.abs() > f64::EPSILON {
+                    map_transformation::rotate::rotate_world(
+                        rotation_angle.clamp(-90.0, 90.0),
+                        &mut parsed_elements,
+                        &mut xzbbox,
+                        &mut ground,
+                    )
+                    .map_err(|e| format!("Rotation failed: {e}"))?;
+                }
 
                 let _ = data_processing::generate_world_with_options(
                     parsed_elements,
-                    xzbbox.clone(),
-                    args.bbox,
+                    xzbbox,
+                    bbox,
                     ground,
                     &args,
                     generation_options.clone(),
                     osm_parser::OutlineSuppression::new(),
+                    osm_parser::PartGroups::new(),
                 );
                 if let Some(g) = cleanup_guard.as_mut() {
                     g.disarm();
@@ -1153,39 +1259,45 @@ fn gui_start_generation(
                 emit_gui_progress_update(100.0, "Done! World generation completed.");
                 println!("{}", "Done! World generation completed.".green().bold());
 
-                // Start map preview generation silently in background (Java only)
-                if world_format == WorldFormat::JavaAnvil {
-                    let preview_info =
-                        map_preview::MapPreviewInfo::new(generation_options.path.clone(), &xzbbox);
-                    map_preview::start_map_preview_generation(preview_info);
-                }
-
                 return Ok(());
             }
 
-            // Run data fetch and world generation (standard mode: objects + terrain, or objects only)
-            match retrieve_data::fetch_data_from_overpass(args.bbox, args.debug, "requests", None) {
+            // OSM, Overture and elevation/land-cover fetches only need the bbox, run them in parallel
+            let (fetch_result, overture_elements, ground) = std::thread::scope(|s| {
+                let overture_handle = s.spawn(|| {
+                    if args.overture {
+                        overture::fetch_overture_buildings(&bbox, args.scale, args.debug)
+                    } else {
+                        Vec::new()
+                    }
+                });
+                let ground_handle = s.spawn(|| ground::generate_ground_data(&args, bbox));
+                let fetch_result =
+                    retrieve_data::fetch_data_from_overpass(bbox, args.debug, "requests", None);
+                (
+                    fetch_result,
+                    overture_handle.join().expect("Overture fetch panicked"),
+                    ground_handle.join().expect("Terrain fetch panicked"),
+                )
+            });
+
+            // Run world generation
+            match fetch_result {
                 Ok(raw_data) => {
-                    let (mut parsed_elements, mut xzbbox, outline_suppression) =
+                    let (mut parsed_elements, mut xzbbox, outline_suppression, part_groups) =
                         osm_parser::parse_osm_data(
                             raw_data,
-                            args.bbox,
+                            bbox,
                             args.scale,
                             args.debug,
                             crate::projection::ProjectionKind::Local,
                         );
 
-                    // Fetch supplementary building data from Overture Maps
-                    {
-                        let overture_elements =
-                            overture::fetch_overture_buildings(&args.bbox, args.scale, args.debug);
-                        if !overture_elements.is_empty() {
-                            let unique_overture = overture::deduplicate_against_osm(
-                                overture_elements,
-                                &parsed_elements,
-                            );
-                            parsed_elements.extend(unique_overture);
-                        }
+                    // Merge supplementary Overture buildings against parsed OSM
+                    if !overture_elements.is_empty() {
+                        let unique_overture =
+                            overture::deduplicate_against_osm(overture_elements, &parsed_elements);
+                        parsed_elements.extend(unique_overture);
                     }
 
                     parsed_elements.sort_by(|el1, el2| {
@@ -1201,7 +1313,7 @@ fn gui_start_generation(
                         }
                     });
 
-                    let mut ground = ground::generate_ground_data(&args);
+                    let mut ground = ground;
 
                     // OSM water override first, then bridge repair.
                     ground.apply_osm_water_override(&parsed_elements, &xzbbox);
@@ -1227,12 +1339,13 @@ fn gui_start_generation(
 
                     let _ = data_processing::generate_world_with_options(
                         parsed_elements,
-                        xzbbox.clone(),
-                        args.bbox,
+                        xzbbox,
+                        bbox,
                         ground,
                         &args,
                         generation_options.clone(),
                         outline_suppression,
+                        part_groups,
                     );
                     if let Some(g) = cleanup_guard.as_mut() {
                         g.disarm();
@@ -1242,15 +1355,6 @@ fn gui_start_generation(
                     drop(_session_lock);
                     emit_gui_progress_update(100.0, "Done! World generation completed.");
                     println!("{}", "Done! World generation completed.".green().bold());
-
-                    // Start map preview generation silently in background (Java only)
-                    if world_format == WorldFormat::JavaAnvil {
-                        let preview_info = map_preview::MapPreviewInfo::new(
-                            generation_options.path.clone(),
-                            &xzbbox,
-                        );
-                        map_preview::start_map_preview_generation(preview_info);
-                    }
 
                     Ok(())
                 }
@@ -1272,4 +1376,71 @@ fn gui_start_generation(
     });
 
     Ok(())
+}
+
+#[cfg(test)]
+mod locale_tests {
+    use std::collections::BTreeSet;
+
+    // en-US is the source of truth, every other locale must match its key set
+    const LOCALES: &[(&str, &str)] = &[
+        ("en-US", include_str!("gui/locales/en-US.json")),
+        ("en", include_str!("gui/locales/en.json")),
+        ("ar", include_str!("gui/locales/ar.json")),
+        ("de", include_str!("gui/locales/de.json")),
+        ("es", include_str!("gui/locales/es.json")),
+        ("fi", include_str!("gui/locales/fi.json")),
+        ("fr-FR", include_str!("gui/locales/fr-FR.json")),
+        ("hu", include_str!("gui/locales/hu.json")),
+        ("ja", include_str!("gui/locales/ja.json")),
+        ("ko", include_str!("gui/locales/ko.json")),
+        ("lt", include_str!("gui/locales/lt.json")),
+        ("lv", include_str!("gui/locales/lv.json")),
+        ("pl", include_str!("gui/locales/pl.json")),
+        ("pt-BR", include_str!("gui/locales/pt-BR.json")),
+        ("ru", include_str!("gui/locales/ru.json")),
+        ("sl", include_str!("gui/locales/sl.json")),
+        ("sv", include_str!("gui/locales/sv.json")),
+        ("ua", include_str!("gui/locales/ua.json")),
+        ("zh-CN", include_str!("gui/locales/zh-CN.json")),
+    ];
+
+    fn locale_keys(name: &str, raw: &str) -> BTreeSet<String> {
+        let value: serde_json::Value = serde_json::from_str(raw)
+            .unwrap_or_else(|e| panic!("{name}.json is invalid JSON: {e}"));
+        value
+            .as_object()
+            .unwrap_or_else(|| panic!("{name}.json is not a JSON object"))
+            .keys()
+            .cloned()
+            .collect()
+    }
+
+    #[test]
+    fn locales_match_en_us_keys() {
+        let reference = locale_keys(LOCALES[0].0, LOCALES[0].1);
+        let mut errors = Vec::new();
+        for (name, raw) in &LOCALES[1..] {
+            let keys = locale_keys(name, raw);
+            let missing: Vec<_> = reference.difference(&keys).cloned().collect();
+            let extra: Vec<_> = keys.difference(&reference).cloned().collect();
+            if !missing.is_empty() {
+                errors.push(format!(
+                    "{name}.json is missing keys: {}",
+                    missing.join(", ")
+                ));
+            }
+            if !extra.is_empty() {
+                errors.push(format!(
+                    "{name}.json has keys not in en-US.json: {}",
+                    extra.join(", ")
+                ));
+            }
+        }
+        assert!(
+            errors.is_empty(),
+            "Locale key mismatches:\n{}",
+            errors.join("\n")
+        );
+    }
 }
