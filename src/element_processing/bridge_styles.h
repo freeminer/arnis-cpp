@@ -6,13 +6,15 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include <filesystem>
 
 #include "../../../arnis_adapter.h"
 
 namespace arnis::bridge_styles
 {
 
-enum class BridgeStyle {
+enum class BridgeStyle
+{
 	Beam,
 	Arch,
 	Truss,
@@ -29,7 +31,8 @@ bool has_side_railing(BridgeStyle style);
 std::optional<Block> parapet_block(BridgeStyle style);
 Block rail_foundation_block(BridgeStyle style);
 
-struct BridgePathSample {
+struct BridgePathSample
+{
 	int x = 0;
 	int y = 0;
 	int z = 0;
@@ -37,14 +40,16 @@ struct BridgePathSample {
 	float perp_z = 0.0f;
 };
 
-class BridgeOutlineIndex {
+class BridgeOutlineIndex
+{
 public:
 	static BridgeOutlineIndex build(const std::vector<ProcessedElement> &elements);
 
 	std::optional<BridgeStyle> style_for_way(const ProcessedWay &way) const;
 
 private:
-	struct OutlineEntry {
+	struct OutlineEntry
+	{
 		std::vector<std::pair<int, int>> nodes;
 		int bbox_min_x = 0;
 		int bbox_max_x = 0;
@@ -57,7 +62,8 @@ private:
 	std::vector<OutlineEntry> entries_;
 };
 
-BridgeStyle resolve_bridge_style(const std::unordered_map<std::string, std::string> &tags);
+BridgeStyle resolve_bridge_style(
+		const std::unordered_map<std::string, std::string> &tags);
 BridgeStyle resolve_bridge_style_with_outline(
 		const ProcessedWay &way, const BridgeOutlineIndex &outlines);
 
@@ -69,5 +75,9 @@ void place_bridge_support_below_deck(WorldEditor &editor, BridgeStyle style, int
 void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
 		const std::vector<BridgePathSample> &path, int block_range,
 		bool start_is_boundary, bool end_is_boundary);
+
+bool sweep_bridge_schematic(WorldEditor &editor,
+		const std::vector<BridgePathSample> &path, int block_range,
+		const std::filesystem::path &asset_root);
 
 }

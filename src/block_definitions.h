@@ -1,10 +1,10 @@
 #pragma once
 #include "colors.h"
+#include "deterministic_rng.h"
 
 namespace arnis
 {
 
-	
 enum class StairFacing
 {
 	North,
@@ -54,32 +54,27 @@ inline const char *StairShape_as_str(StairShape s) noexcept
 	return "";
 }
 
-	class Block;
+class Block;
 class BlockWithProperties;
-	
+
 Block get_building_wall_block_for_color(const RGB &color);
 Block get_fallback_building_block();
+Block get_castle_wall_block();
+Block get_building_wall_block_for_color(const RGB &color, ChaCha8Rng &rng);
+Block get_fallback_building_block(ChaCha8Rng &rng);
+Block get_castle_wall_block(ChaCha8Rng &rng);
 Block get_random_floor_block();
+// Seeded forms are used by the Rust-parity generators.  The legacy overload
+// remains for older callers that deliberately use the host-global palette RNG.
+Block get_random_floor_block(ChaCha8Rng &rng);
 Block get_window_block_for_building_type(const std::string &building_type);
+Block get_window_block_for_building_type(const std::string &building_type, ChaCha8Rng &rng);
 Block get_stair_block_for_material(const Block &material);
-BlockWithProperties create_stair_with_properties(const Block& base_stair_block, StairFacing facing, StairShape shape) ;
+BlockWithProperties create_stair_with_properties(
+		const Block &base_stair_block, StairFacing facing, StairShape shape);
 BlockWithProperties top_stair(BlockWithProperties stair);
 Block get_slab_block_for_material(const Block &material);
 Block get_wall_piece_for_material(const Block &material);
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 
 namespace block_definitions
 {
@@ -183,6 +178,7 @@ extern Block TALL_SEAGRASS_BOTTOM;
 extern Block TALL_SEAGRASS_TOP;
 extern Block SEA_PICKLE;
 extern Block SOUL_SAND;
+extern Block SUGAR_CANE;
 extern Block WHITE_CONCRETE;
 extern Block WHITE_FLOWER;
 extern Block WHITE_STAINED_GLASS;
@@ -232,6 +228,9 @@ extern Block IRON_ORE;
 extern Block COAL_ORE;
 extern Block GOLD_ORE;
 extern Block COPPER_ORE;
+extern Block LAPIS_ORE;
+extern Block REDSTONE_ORE;
+extern Block DIAMOND_ORE;
 extern Block CLAY;
 extern Block DIRT_PATH;
 extern Block ICE;
@@ -279,14 +278,12 @@ extern Block SMOOTH_SANDSTONE_STAIRS;
 extern Block QUARTZ_STAIRS;
 extern Block POLISHED_ANDESITE_STAIRS;
 extern Block NETHER_BRICK_STAIRS;
-extern Block  COBWEB;
-extern Block  CHISELLED_BOOKSHELF_NORTH; // Chiseled Bookshelf
-extern Block CHISELLED_BOOKSHELF_EAST;  // Chiseled Bookshelf East
+extern Block COBWEB;
+extern Block CHISELLED_BOOKSHELF_NORTH; // Chiseled Bookshelf
+extern Block CHISELLED_BOOKSHELF_EAST;	// Chiseled Bookshelf East
 extern Block CHISELLED_BOOKSHELF_SOUTH; // Chiseled Bookshelf South
-extern Block CHISELLED_BOOKSHELF_WEST;  // Chiseled Bookshelf West
-extern Block DAMAGED_ANVIL;          // Damaged Anvil
-
-
+extern Block CHISELLED_BOOKSHELF_WEST;	// Chiseled Bookshelf West
+extern Block DAMAGED_ANVIL;				// Damaged Anvil
 
 extern Block CHAIN;
 extern Block END_ROD;
@@ -372,7 +369,7 @@ extern Block GRAY_CONCRETE_POWDER;
 extern Block CYAN_TERRACOTTA;
 extern Block BLACK_WOOL;
 extern Block LIGHT_GRAY_WALL_BANNER;
-extern Block &SMOOTH_STONE_BLOCK;// = SMOOTH_STONE;
+extern Block &SMOOTH_STONE_BLOCK; // = SMOOTH_STONE;
 }
 
 using namespace block_definitions;

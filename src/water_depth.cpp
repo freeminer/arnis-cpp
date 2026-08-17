@@ -8,7 +8,7 @@
 #include <limits>
 #include <vector>
 
-#include "land_cover.h"
+#include "land_cover/land_cover.h"
 
 namespace arnis::water_depth
 {
@@ -53,7 +53,7 @@ double value_noise_01(int x, int z, int scale)
 	const int sx = scale > 0 ? x / scale : x;
 	const int sz = scale > 0 ? z / scale : z;
 	return static_cast<double>(land_cover::coord_hash(sx, sz) & 0x00FF'FFFFULL) /
-			static_cast<double>(0x0100'0000ULL);
+		   static_cast<double>(0x0100'0000ULL);
 }
 
 void chamfer_3_4_dt(std::vector<std::uint8_t> &d, std::size_t w, std::size_t h)
@@ -118,16 +118,14 @@ int depth_from_dt(double dt_eff, std::uint16_t component_max_units)
 	if (dt_eff < static_cast<double>(SHOAL_DT_UNITS))
 		return 0;
 	const int local_max = polygon_local_max(component_max_units);
-	const double slope = component_max_units < 21 ? 1.0 / 3.0 :
-			component_max_units < 45 ? 1.0 / 4.0 :
-			component_max_units < 75 ? 1.0 / 6.0 :
-			1.0 / 8.0;
 	const double dist_blocks = (dt_eff - static_cast<double>(SHOAL_DT_UNITS)) / 3.0;
-	return std::clamp(static_cast<int>(std::floor(dist_blocks * slope)), 0, local_max);
+	const double span = component_max_units < 21 ? 6. : component_max_units < 45 ? 12. :
+			component_max_units < 75 ? 20. : 35.;
+	return std::clamp(static_cast<int>(std::floor(local_max * std::sqrt(std::clamp(dist_blocks / span, 0., 1.)))), 0, local_max);
 }
 
-int ocean_depth_for_cell(int x, int z, std::uint16_t dt_units,
-		std::uint16_t component_max_units)
+int ocean_depth_for_cell(
+		int x, int z, std::uint16_t dt_units, std::uint16_t component_max_units)
 {
 	if (dt_units == 0)
 		return 0;
@@ -148,16 +146,18 @@ bool bridge_adjacent(const RoadMaskBitmap &road_mask, int x, int z)
 	return false;
 }
 
-int dune_amp(int depth)
+int dune_amp(int body_max, int depth)
 {
-	const int target = depth <= 3 ? 2 : depth == 4 ? 3 : 4;
+	const int target = body_max <= 3 ? 2 : body_max <= 5 ? 3 : 4;
 	return std::min(target, depth - 1);
 }
 
-int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y,
-		int bed_y, int depth, Block bed_block)
+int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y, int bed_y,
+		int depth, Block bed_block)
 {
-	const int amp = dune_amp(depth);
+	// This legacy helper has no BigWaterField width; preserve its former
+	// depth-driven amplitude while the region-aware path supplies body_max.
+	const int amp = dune_amp(depth, depth);
 	if (amp <= 0)
 		return 0;
 	const double warp_x = value_noise_01(x + 901, z + 33, 50);
@@ -165,8 +165,8 @@ int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y,
 	const int wx = x + static_cast<int>((warp_x - 0.5) * 30.0);
 	const int wz = z + static_cast<int>((warp_z - 0.5) * 30.0);
 	const double h_f = 0.40 * value_noise_01(wx + 113, wz + 257, 44) +
-			0.30 * value_noise_01(wx + 31, wz + 71, 18) +
-			0.30 * value_noise_01(wx + 7, wz + 11, 10);
+					   0.30 * value_noise_01(wx + 31, wz + 71, 18) +
+					   0.30 * value_noise_01(wx + 7, wz + 11, 10);
 	if (h_f < 0.28)
 		return 0;
 	const double t = (h_f - 0.28) / 0.72;
@@ -181,8 +181,8 @@ int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y,
 	return bump;
 }
 
-void place_underwater_vegetation(WorldEditor &editor, int x, int z, int water_y,
-		int bed_top, int depth)
+void place_underwater_vegetation(
+		WorldEditor &editor, int x, int z, int water_y, int bed_top, int depth)
 {
 	// Rust parity: src/water_depth.rs::place_underwater_vegetation.
 	// Block substitutions come from src/mapgen/earth/blocks.cpp Earth-game mappings.
@@ -199,12 +199,13 @@ void place_underwater_vegetation(WorldEditor &editor, int x, int z, int water_y,
 			const int hgt_pick =
 					static_cast<int>(land_cover::coord_hash(x + 211, z + 503) % 100);
 			const int share = 30 + hgt_pick * 70 / 100;
-			const int used = std::clamp(static_cast<int>(
-												static_cast<long long>(avail) * share / 100),
-					3, avail);
+			const int used = std::clamp(
+					static_cast<int>(static_cast<long long>(avail) * share / 100), 3,
+					avail);
 			const int plant_top = plant_bottom + used;
 			for (int y = plant_bottom; y < plant_top; ++y)
-				editor.set_block_absolute(KELP_PLANT, x, y, z, std::nullopt, std::nullopt);
+				editor.set_block_absolute(
+						KELP_PLANT, x, y, z, std::nullopt, std::nullopt);
 			editor.set_block_absolute(KELP, x, plant_top, z, std::nullopt, std::nullopt);
 		}
 		return;
@@ -238,12 +239,43 @@ int BigWaterField::depth_at(int x, int z) const
 {
 	const auto lx = static_cast<long long>(x) - static_cast<long long>(min_x_);
 	const auto lz = static_cast<long long>(z) - static_cast<long long>(min_z_);
-	if (lx < 0 || lz < 0 ||
-			static_cast<std::size_t>(lx) >= width_ ||
+	if (lx < 0 || lz < 0 || static_cast<std::size_t>(lx) >= width_ ||
 			static_cast<std::size_t>(lz) >= height_)
 		return 0;
 	const auto idx = static_cast<std::size_t>(lz) * width_ + static_cast<std::size_t>(lx);
 	return static_cast<int>(nibble_get(depth_, idx));
+}
+int BigWaterField::body_max_7x7(int x, int z) const
+{
+	int maximum = 0;
+	for (int dz = -3; dz <= 3; ++dz)
+		for (int dx = -3; dx <= 3; ++dx) {
+			maximum = std::max(maximum, depth_at(x + dx, z + dz));
+			if (maximum >= MAX_WATER_DEPTH) return maximum;
+		}
+	return maximum;
+}
+
+int estimate_max_carve_depth(const std::vector<std::vector<std::uint8_t>> &grid,
+		std::size_t world_width, std::size_t world_height)
+{
+	const auto height = grid.size();
+	const auto width = height ? grid.front().size() : 0;
+	if (!width || !height) return 0;
+	std::vector<std::uint8_t> dt(width * height);
+	bool water = false;
+	for (std::size_t z = 0; z < height; ++z) {
+		if (grid[z].size() != width) return 0;
+		for (std::size_t x = 0; x < width; ++x)
+			if (grid[z][x] == land_cover::LC_WATER) { dt[z * width + x] = DT_MAX; water = true; }
+	}
+	if (!water) return 0;
+	chamfer_3_4_dt(dt, width, height);
+	const auto grid_max = *std::max_element(dt.begin(), dt.end());
+	const double x_ratio = double(std::max<std::size_t>(1, world_width - 1)) / double(std::max<std::size_t>(1, width - 1));
+	const double z_ratio = double(std::max<std::size_t>(1, world_height - 1)) / double(std::max<std::size_t>(1, height - 1));
+	const double scaled = double(grid_max) * std::max({1., x_ratio, z_ratio});
+	return depth_from_dt(scaled + 2., static_cast<std::uint16_t>(std::min(scaled, double(std::numeric_limits<std::uint16_t>::max()))));
 }
 
 BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
@@ -293,7 +325,8 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 	const auto sh = static_cast<std::size_t>(smax_z - smin_z + 1);
 	const auto total = sw * sh;
 	if (sw == 0 || sh == 0 || total > MAX_WATER_FIELD_CELLS || total / sw != sh) {
-		std::cerr << "Warning: water area too large for depth carving; rendering flat water\n";
+		std::cerr
+				<< "Warning: water area too large for depth carving; rendering flat water\n";
 		return {};
 	}
 
@@ -348,8 +381,8 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 			const auto idx = static_cast<std::size_t>(c);
 			const int x = smin_x + static_cast<int>(idx % sw);
 			const int z = smin_z + static_cast<int>(idx / sw);
-			const int depth = ocean_depth_for_cell(
-					x, z, static_cast<std::uint16_t>(dt[idx]), cm);
+			const int depth =
+					ocean_depth_for_cell(x, z, static_cast<std::uint16_t>(dt[idx]), cm);
 			nibble_set(out.depth_, idx, static_cast<std::uint8_t>(depth));
 		}
 	}
@@ -375,30 +408,31 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 		top_block = (value_noise_01(x, z, 6) < 0.4 && depth <= 3) ? SAND : GRAVEL;
 		under_block = STONE;
 	} else if (depth >= 2) {
-		const auto h = land_cover::coord_hash(x + 7, z + 13);
-		const int d = std::max(1, depth + static_cast<int>(h % 3) - 1);
-		const double warp_x = value_noise_01(x + 901, z + 33, 40);
-		const double warp_z = value_noise_01(x + 17, z + 811, 40);
-		const int wx = x + static_cast<int>((warp_x - 0.5) * 24.0);
-		const int wz = z + static_cast<int>((warp_z - 0.5) * 24.0);
+		const double jn = value_noise_01(x + 7, z + 13, 22);
+		const int jitter = jn < .34 ? -1 : jn > .66 ? 1 : 0;
+		const int d = std::max(1, depth + jitter);
+		const double warp_x = value_noise_01(x + 901, z + 33, 52);
+		const double warp_z = value_noise_01(x + 17, z + 811, 52);
+		const int wx = x + static_cast<int>((warp_x - 0.5) * 28.0);
+		const int wz = z + static_cast<int>((warp_z - 0.5) * 28.0);
 		auto vn = [&](int dx, int dz, int scale) {
 			return value_noise_01(wx + dx, wz + dz, scale);
 		};
 		if (d <= 1)
 			top_block = SAND;
 		else if (d == 2)
-			top_block = vn(53, 97, 36) > 0.50 ? SAND : GRAVEL;
+			top_block = vn(53, 97, 56) > 0.50 ? SAND : GRAVEL;
 		else if (d >= 5 && vn(401, 503, 8) > 0.96)
 			top_block = MAGMA_BLOCK;
 		else if (d >= 5 && vn(727, 911, 8) > 0.96)
 			top_block = SOUL_SAND;
-		else if (vn(73, 109, 42) > 0.74)
+		else if (vn(73, 109, 64) > 0.74)
 			top_block = CLAY;
-		else if (vn(53, 97, 36) > 0.81)
+		else if (vn(53, 97, 56) > 0.81)
 			top_block = SAND;
-		else if (vn(211, 41, 26) > 0.88)
+		else if (vn(211, 41, 44) > 0.88)
 			top_block = DIRT;
-		else if (vn(311, 17, 30) > 0.90)
+		else if (vn(311, 17, 50) > 0.90)
 			top_block = COARSE_DIRT;
 		else
 			top_block = GRAVEL;
@@ -408,28 +442,37 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	if (bed_y > MIN_Y)
 		editor.set_block_absolute(top_block, x, bed_y, z, std::nullopt, std::nullopt);
 	if (bed_y - 1 > MIN_Y)
-		editor.set_block_absolute(under_block, x, bed_y - 1, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				under_block, x, bed_y - 1, z, std::nullopt, std::nullopt);
 
 	const int fill_to = std::max(bed_y - 2, MIN_Y + 1);
 	const int fill_from = std::max(bed_y - 12, MIN_Y + 1);
 	if (fill_from <= fill_to)
 		editor.fill_column_absolute(STONE, x, z, fill_from, fill_to, true);
 
-	const int bump = depth >= 1 && !near_bridge ?
-			place_underwater_dunes(editor, x, z, water_y, bed_y, depth, top_block) :
-			0;
+	const int bump = depth >= 2 && !near_bridge
+							 ? place_underwater_dunes(
+									   editor, x, z, water_y, bed_y, dune_amp(depth, depth), top_block)
+							 : 0;
 	if (depth >= 3 && !near_bridge)
 		place_underwater_vegetation(editor, x, z, water_y, bed_y + bump, depth);
 }
 
+void carve_lc_water_pass(
+		WorldEditor &editor, const BigWaterField &bwf, const RoadMaskBitmap &road_mask)
+{
+	const RoadMaskBitmap empty;
+	carve_lc_water_pass(editor, bwf, road_mask, empty);
+}
+
 void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
-		const RoadMaskBitmap &road_mask)
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint)
 {
 	if (bwf.empty())
 		return;
 	for (int z = bwf.min_z(); z <= bwf.max_z(); ++z) {
 		for (int x = bwf.min_x(); x <= bwf.max_x(); ++x) {
-			if (road_mask.contains(x, z) || !editor.is_lc_water(x, z))
+			if (road_mask.contains(x, z) || tunnel_footprint.contains(x, z) || !editor.is_lc_water(x, z))
 				continue;
 			const int water_y = editor.get_water_level(x, z);
 			if (editor.get_ground_level(x, z) > water_y)
@@ -437,6 +480,23 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask);
 		}
 	}
+}
+
+void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
+		int min_x, int max_x, int min_z, int max_z)
+{
+	if (bwf.empty()) return;
+	const int x0 = std::max(min_x, bwf.min_x()), x1 = std::min(max_x, bwf.max_x());
+	const int z0 = std::max(min_z, bwf.min_z()), z1 = std::min(max_z, bwf.max_z());
+	if (x0 > x1 || z0 > z1) return;
+	for (int z = z0; z <= z1; ++z)
+		for (int x = x0; x <= x1; ++x) {
+			if (road_mask.contains(x, z) || tunnel_footprint.contains(x, z) || !editor.is_lc_water(x, z)) continue;
+			const int water_y = editor.get_water_level(x, z);
+			if (editor.get_ground_level(x, z) <= water_y)
+				carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask);
+		}
 }
 
 }

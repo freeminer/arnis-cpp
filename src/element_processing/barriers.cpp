@@ -15,171 +15,190 @@
 namespace arnis
 {
 
-namespace barriers {
+namespace barriers
+{
 
 const int BRIDGE_BARRIER_NEARBY_RADIUS = 2;
 
-void generate_barriers(world_editor::WorldEditor& editor,
-        osm_parser::ProcessedElement const& element,
-        const bridges::BridgeSurfaceMap& bridge_surface) {
-    block_definitions::Block barrier_material = block_definitions::COBBLESTONE_WALL;
-    int barrier_height = 2;
+void generate_barriers(world_editor::WorldEditor &editor,
+		osm_parser::ProcessedElement const &element,
+		const bridges::BridgeSurfaceMap &bridge_surface)
+{
+	block_definitions::Block barrier_material = block_definitions::COBBLESTONE_WALL;
+	int barrier_height = 2;
 
-    {
-        const std::unordered_map<std::string, std::string>& tags = element.tags();
-        auto it = tags.find("barrier");
-        if (it != tags.end()) {
-            const std::string& val = it->second;
-            if (val == "bollard") {
-                barrier_material = block_definitions::COBBLESTONE_WALL;
-                barrier_height = 1;
-            } else if (val == "kerb") {
-                return;
-            } else if (val == "hedge") {
-                barrier_material = block_definitions::OAK_LEAVES;
-                barrier_height = 2;
-            } else if (val == "fence") {
-                auto fit = tags.find("fence_type");
-                if (fit != tags.end()) {
-                    const std::string& f = fit->second;
-                    if (f == "railing" || f == "bars" || f == "krest") {
-                        barrier_material = block_definitions::STONE_BRICK_WALL;
-                        barrier_height = 1;
-                    } else if (f == "chain_link" || f == "metal" || f == "wire" || f == "barbed_wire" || f == "corrugated_metal" || f == "electric" || f == "metal_bars") {
-                        barrier_material = block_definitions::STONE_BRICK_WALL;
-                        barrier_height = 2;
-                    } else if (f == "slatted" || f == "paling") {
-                        barrier_material = block_definitions::OAK_FENCE;
-                        barrier_height = 1;
-                    } else if (f == "wood" || f == "split_rail" || f == "panel" || f == "pole") {
-                        barrier_material = block_definitions::OAK_FENCE;
-                        barrier_height = 2;
-                    } else if (f == "concrete" || f == "stone") {
-                        barrier_material = block_definitions::STONE_BRICK_WALL;
-                        barrier_height = 2;
-                    } else if (f == "glass") {
-                        barrier_material = block_definitions::GLASS;
-                        barrier_height = 1;
-                    }
-                }
-            } else if (val == "wall") {
-                barrier_material = block_definitions::STONE_BRICK_WALL;
-                barrier_height = 3;
-            }
-        }
-    }
+	{
+		const std::unordered_map<std::string, std::string> &tags = element.tags();
+		auto it = tags.find("barrier");
+		if (it != tags.end()) {
+			const std::string &val = it->second;
+			if (val == "bollard") {
+				barrier_material = block_definitions::COBBLESTONE_WALL;
+				barrier_height = 1;
+			} else if (val == "kerb") {
+				return;
+			} else if (val == "hedge") {
+				barrier_material = block_definitions::OAK_LEAVES;
+				barrier_height = 2;
+			} else if (val == "fence") {
+				auto fit = tags.find("fence_type");
+				if (fit != tags.end()) {
+					const std::string &f = fit->second;
+					if (f == "railing" || f == "bars" || f == "krest") {
+						barrier_material = block_definitions::STONE_BRICK_WALL;
+						barrier_height = 1;
+					} else if (f == "chain_link" || f == "metal" || f == "wire" ||
+							   f == "barbed_wire" || f == "corrugated_metal" ||
+							   f == "electric" || f == "metal_bars") {
+						barrier_material = block_definitions::STONE_BRICK_WALL;
+						barrier_height = 2;
+					} else if (f == "slatted" || f == "paling") {
+						barrier_material = block_definitions::OAK_FENCE;
+						barrier_height = 1;
+					} else if (f == "wood" || f == "split_rail" || f == "panel" ||
+							   f == "pole") {
+						barrier_material = block_definitions::OAK_FENCE;
+						barrier_height = 2;
+					} else if (f == "concrete" || f == "stone") {
+						barrier_material = block_definitions::STONE_BRICK_WALL;
+						barrier_height = 2;
+					} else if (f == "glass") {
+						barrier_material = block_definitions::GLASS;
+						barrier_height = 1;
+					}
+				}
+			} else if (val == "wall") {
+				barrier_material = block_definitions::STONE_BRICK_WALL;
+				barrier_height = 3;
+			}
+		}
+	}
 
-    {
-        const std::unordered_map<std::string, std::string>& tags = element.tags();
-        auto mit = tags.find("material");
-        if (mit != tags.end()) {
-            const std::string& mat = mit->second;
-            if (mat == "brick") {
-                barrier_material = block_definitions::BRICK;
-            }
-            if (mat == "concrete") {
-                barrier_material = block_definitions::LIGHT_GRAY_CONCRETE;
-            }
-            if (mat == "metal") {
-                barrier_material = block_definitions::STONE_BRICK_WALL;
-            }
-        }
-    }
+	{
+		const std::unordered_map<std::string, std::string> &tags = element.tags();
+		auto mit = tags.find("material");
+		if (mit != tags.end()) {
+			const std::string &mat = mit->second;
+			if (mat == "brick") {
+				barrier_material = block_definitions::BRICK;
+			}
+			if (mat == "concrete") {
+				barrier_material = block_definitions::LIGHT_GRAY_CONCRETE;
+			}
+			if (mat == "metal") {
+				barrier_material = block_definitions::STONE_BRICK_WALL;
+			}
+		}
+	}
 
-    std::optional<osm_parser::Way> maybe_way = element.as_way();
-    if (!maybe_way.has_value()) {
-        return;
-    }
-    const osm_parser::Way& way = maybe_way.value();
+	std::optional<osm_parser::Way> maybe_way = element.as_way();
+	if (!maybe_way.has_value()) {
+		return;
+	}
+	const osm_parser::Way &way = maybe_way.value();
 
-    int wall_height = barrier_height;
-    {
-        const std::unordered_map<std::string, std::string>& tags = element.tags();
-        auto hit = tags.find("height");
-        if (hit != tags.end()) {
-            try {
-                float h = std::stof(hit->second);
-                wall_height = static_cast<int>(std::lround(h));
-            } catch (...) {
-                wall_height = barrier_height;
-            }
-        }
-        // Ensure minimum height of 2
-        if (wall_height < 2) {
-            wall_height = 2;
-        }
-    }
+	int wall_height = barrier_height;
+	{
+		const std::unordered_map<std::string, std::string> &tags = element.tags();
+		auto hit = tags.find("height");
+		if (hit != tags.end()) {
+			try {
+				float h = std::stof(hit->second);
+				wall_height = static_cast<int>(std::lround(h));
+			} catch (...) {
+				wall_height = barrier_height;
+			}
+		}
+		// Ensure minimum height of 2
+		if (wall_height < 2) {
+			wall_height = 2;
+		}
+	}
 
-    for (std::size_t i = 1; i < way.nodes.size(); ++i) {
-        const osm_parser::ProcessedNode& prev = way.nodes[i - 1];
-        int x1 = prev.x;
-        int z1 = prev.z;
+	for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+		const osm_parser::ProcessedNode &prev = way.nodes[i - 1];
+		int x1 = prev.x;
+		int z1 = prev.z;
 
-        const osm_parser::ProcessedNode& cur = way.nodes[i];
-        int x2 = cur.x;
-        int z2 = cur.z;
+		const osm_parser::ProcessedNode &cur = way.nodes[i];
+		int x2 = cur.x;
+		int z2 = cur.z;
 
-        std::vector<std::tuple<int, int, int>> bresenham_points = bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
-        for (const auto& pt : bresenham_points) {
-            int bx = std::get<0>(pt);
-            int bz = std::get<2>(pt);
+		std::vector<std::tuple<int, int, int>> bresenham_points =
+				bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
+		for (const auto &pt : bresenham_points) {
+			int bx = std::get<0>(pt);
+			int bz = std::get<2>(pt);
 
-            if (auto deck_y = bridge_surface.nearby_deck_y(bx, bz, BRIDGE_BARRIER_NEARBY_RADIUS)) {
-                for (int y = 1; y <= wall_height; ++y) {
-                    editor.set_block_absolute(barrier_material, bx, *deck_y + y, bz,
-                            std::optional<std::vector<block_definitions::Block>>(),
-                            std::optional<std::vector<block_definitions::Block>>());
-                }
-                if (wall_height > 1) {
-                    editor.set_block_absolute(block_definitions::STONE_BRICK_SLAB, bx,
-                            *deck_y + wall_height + 1, bz,
-                            std::optional<std::vector<block_definitions::Block>>(),
-                            std::optional<std::vector<block_definitions::Block>>());
-                }
-            } else {
-                for (int y = 1; y <= wall_height; ++y) {
-                    editor.set_block(barrier_material, bx, y, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
-                }
-                if (wall_height > 1) {
-                    editor.set_block(block_definitions::STONE_BRICK_SLAB, bx, wall_height + 1, bz, std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
-                }
-            }
-        }
-    }
+			if (auto deck_y = bridge_surface.nearby_deck_y(
+						bx, bz, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+				for (int y = 1; y <= wall_height; ++y) {
+					editor.set_block_absolute(barrier_material, bx, *deck_y + y, bz,
+							std::optional<std::vector<block_definitions::Block>>(),
+							std::optional<std::vector<block_definitions::Block>>());
+				}
+				if (wall_height > 1) {
+					editor.set_block_absolute(block_definitions::STONE_BRICK_SLAB, bx,
+							*deck_y + wall_height + 1, bz,
+							std::optional<std::vector<block_definitions::Block>>(),
+							std::optional<std::vector<block_definitions::Block>>());
+				}
+			} else {
+				for (int y = 1; y <= wall_height; ++y) {
+					editor.set_block(barrier_material, bx, y, bz,
+							std::optional<std::vector<block_definitions::Block>>(),
+							std::optional<int>());
+				}
+				if (wall_height > 1) {
+					editor.set_block(block_definitions::STONE_BRICK_SLAB, bx,
+							wall_height + 1, bz,
+							std::optional<std::vector<block_definitions::Block>>(),
+							std::optional<int>());
+				}
+			}
+		}
+	}
 }
 
-void generate_barriers(world_editor::WorldEditor& editor, osm_parser::ProcessedElement const& element) {
-    static const bridges::BridgeSurfaceMap empty_bridge_surface;
-    generate_barriers(editor, element, empty_bridge_surface);
+void generate_barriers(
+		world_editor::WorldEditor &editor, osm_parser::ProcessedElement const &element)
+{
+	static const bridges::BridgeSurfaceMap empty_bridge_surface;
+	generate_barriers(editor, element, empty_bridge_surface);
 }
 
-void place_barrier_node_block(world_editor::WorldEditor& editor,
-        osm_parser::ProcessedNode const& node,
-        const bridges::BridgeSurfaceMap& bridge_surface,
-        block_definitions::Block block,
-        int dy) {
-    if (auto deck_y = bridge_surface.nearby_deck_y(node.x, node.z, BRIDGE_BARRIER_NEARBY_RADIUS)) {
-        editor.set_block_absolute(block, node.x, *deck_y + dy, node.z,
-                std::optional<std::vector<block_definitions::Block>>(),
-                std::optional<std::vector<block_definitions::Block>>());
-    } else {
-        editor.set_block(block, node.x, dy, node.z,
-                std::optional<std::vector<block_definitions::Block>>(), std::optional<int>());
-    }
+void place_barrier_node_block(world_editor::WorldEditor &editor,
+		osm_parser::ProcessedNode const &node,
+		const bridges::BridgeSurfaceMap &bridge_surface, block_definitions::Block block,
+		int dy)
+{
+	if (auto deck_y = bridge_surface.nearby_deck_y(
+				node.x, node.z, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+		editor.set_block_absolute(block, node.x, *deck_y + dy, node.z,
+				std::optional<std::vector<block_definitions::Block>>(),
+				std::optional<std::vector<block_definitions::Block>>());
+	} else {
+		editor.set_block(block, node.x, dy, node.z,
+				std::optional<std::vector<block_definitions::Block>>(),
+				std::optional<int>());
+	}
 }
 
-void generate_barrier_nodes(world_editor::WorldEditor& editor,
-        osm_parser::ProcessedNode const& node,
-        const bridges::BridgeSurfaceMap& bridge_surface) {
-    auto it = node.tags.find("barrier");
-    if (it == node.tags.end()) {
-        return;
-    }
-    const std::string& val = it->second;
-    if (val == "bollard") {
-        place_barrier_node_block(editor, node, bridge_surface, block_definitions::COBBLESTONE_WALL, 1);
-    } else if (val == "stile" || val == "gate" || val == "swing_gate" || val == "lift_gate") {
-        /* Future implementation for gates:
+void generate_barrier_nodes(world_editor::WorldEditor &editor,
+		osm_parser::ProcessedNode const &node,
+		const bridges::BridgeSurfaceMap &bridge_surface)
+{
+	auto it = node.tags.find("barrier");
+	if (it == node.tags.end()) {
+		return;
+	}
+	const std::string &val = it->second;
+	if (val == "bollard") {
+		place_barrier_node_block(
+				editor, node, bridge_surface, block_definitions::COBBLESTONE_WALL, 1);
+	} else if (val == "stile" || val == "gate" || val == "swing_gate" ||
+			   val == "lift_gate") {
+		/* Future implementation for gates:
         editor.set_block(
             block_definitions::OAK_TRAPDOOR,
             node.x,
@@ -229,17 +248,20 @@ void generate_barrier_nodes(world_editor::WorldEditor& editor,
             std::optional<int>()
         );
         */
-    } else if (val == "block") {
-        place_barrier_node_block(editor, node, bridge_surface, block_definitions::STONE, 1);
-    } else if (val == "entrance") {
-        place_barrier_node_block(editor, node, bridge_surface, block_definitions::AIR, 1);
-    }
+	} else if (val == "block") {
+		place_barrier_node_block(
+				editor, node, bridge_surface, block_definitions::STONE, 1);
+	} else if (val == "entrance") {
+		place_barrier_node_block(editor, node, bridge_surface, block_definitions::AIR, 1);
+	}
 }
 
-void generate_barrier_nodes(world_editor::WorldEditor& editor, osm_parser::ProcessedNode const& node) {
-    static const bridges::BridgeSurfaceMap empty_bridge_surface;
-    generate_barrier_nodes(editor, node, empty_bridge_surface);
+void generate_barrier_nodes(
+		world_editor::WorldEditor &editor, osm_parser::ProcessedNode const &node)
+{
+	static const bridges::BridgeSurfaceMap empty_bridge_surface;
+	generate_barrier_nodes(editor, node, empty_bridge_surface);
 }
 
 }
-}  
+}

@@ -7,6 +7,19 @@
 namespace arnis
 {
 
+enum class GenerationMode
+{
+	GeoTerrain,
+	GeoOnly,
+	TerrainOnly
+};
+enum class GameMode
+{
+	Survival,
+	Creative,
+	Spectator
+};
+
 struct Args
 {
 	// Bounding box of the area (min_lat,min_lng,max_lat,max_lng) (required)
@@ -34,14 +47,30 @@ struct Args
 	// Ground level to use in the Minecraft world
 	int ground_level{-62};
 
-	// Enable terrain (optional)
-	bool terrain{false};
+	// Generation mode mirrors Rust. `terrain` remains as a compatibility cache for
+	// the existing C++ processors and defaults to the Rust geo-terrain behaviour.
+	GenerationMode mode{GenerationMode::GeoTerrain};
+	bool terrain{true};
+	bool legacy_terrain{false};
+	bool skip_objects() const { return mode == GenerationMode::TerrainOnly; }
 
 	// Enable interior generation (optional)
-	bool interior{true};
+	bool interior{false};
 
 	// Enable roof generation (optional)
 	bool roof{true};
+
+	bool legacy_trees{false};
+	bool canopy_height{true};
+	bool overture{true};
+	bool use_3d{true};
+	bool disable_height_limit{false};
+	bool aws_only_elevation{false};
+	bool bake_lighting{false};
+	bool map_preview{false};
+	bool map_item{true};
+	GameMode gamemode{GameMode::Creative};
+	int64_t world_time{6000};
 
 	// Enable filling ground (optional)
 	bool fillground{false};
@@ -56,8 +85,9 @@ struct Args
 
 	// Set floodfill timeout (seconds) (optional)
 	std::optional<std::chrono::milliseconds> timeout{std::nullopt};
-	std::chrono::milliseconds timeout_ref() const { 
-		return timeout.value_or(std::chrono::milliseconds(3000)); 
+	std::chrono::milliseconds timeout_ref() const
+	{
+		return timeout.value_or(std::chrono::milliseconds(3000));
 	}
 };
 

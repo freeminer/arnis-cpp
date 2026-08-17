@@ -24,7 +24,8 @@
 namespace arnis
 {
 
-namespace water_areas {
+namespace water_areas
+{
 
 using BgPoint = boost::geometry::model::d2::point_xy<double>;
 using BgLinestring = boost::geometry::model::linestring<BgPoint>;
@@ -40,8 +41,8 @@ static void rect_fill(
 {
 	for (int x = min_x; x < max_x; ++x) {
 		for (int z = min_z; z < max_z; ++z) {
-			editor.set_block(block_definitions::WATER, x, ground_level, z,
-					std::nullopt, std::nullopt);
+			editor.set_block(block_definitions::WATER, x, ground_level, z, std::nullopt,
+					std::nullopt);
 		}
 	}
 }
@@ -54,7 +55,7 @@ static void inverse_floodfill_iterative(const std::pair<int, int> &min,
 	for (int x = min.first; x < max.first; ++x) {
 		for (int z = min.second; z < max.second; ++z) {
 			BgPoint p(static_cast<double>(x), static_cast<double>(z));
-			
+
 			bool in_outer = false;
 			for (const auto &poly : outers) {
 				if (boost::geometry::within(p, poly)) {
@@ -62,11 +63,11 @@ static void inverse_floodfill_iterative(const std::pair<int, int> &min,
 					break;
 				}
 			}
-			
+
 			if (!in_outer) {
 				continue;
 			}
-			
+
 			bool in_inner = false;
 			for (const auto &poly : inners) {
 				if (boost::geometry::within(p, poly)) {
@@ -74,7 +75,7 @@ static void inverse_floodfill_iterative(const std::pair<int, int> &min,
 					break;
 				}
 			}
-			
+
 			if (!in_inner) {
 				editor.set_block(block_definitions::WATER, x, ground_level, z,
 						std::nullopt, std::nullopt);
@@ -83,95 +84,81 @@ static void inverse_floodfill_iterative(const std::pair<int, int> &min,
 	}
 }
 
-static BgPolygon make_rectangle_polygon(int min_x, int max_x, int min_z, int max_z) {
-    BgPolygon poly;
-    boost::geometry::append(poly.outer(), BgPoint(min_x, min_z));
-    boost::geometry::append(poly.outer(), BgPoint(max_x, min_z));
-    boost::geometry::append(poly.outer(), BgPoint(max_x, max_z));
-    boost::geometry::append(poly.outer(), BgPoint(min_x, max_z));
-    boost::geometry::append(poly.outer(), BgPoint(min_x, min_z)); // close polygon
-    boost::geometry::correct(poly);
-    return poly;
+static BgPolygon make_rectangle_polygon(int min_x, int max_x, int min_z, int max_z)
+{
+	BgPolygon poly;
+	boost::geometry::append(poly.outer(), BgPoint(min_x, min_z));
+	boost::geometry::append(poly.outer(), BgPoint(max_x, min_z));
+	boost::geometry::append(poly.outer(), BgPoint(max_x, max_z));
+	boost::geometry::append(poly.outer(), BgPoint(min_x, max_z));
+	boost::geometry::append(poly.outer(), BgPoint(min_x, min_z)); // close polygon
+	boost::geometry::correct(poly);
+	return poly;
 }
 
-void inverse_floodfill_recursive(
-    std::pair<int32_t, int32_t> min,
-    std::pair<int32_t, int32_t> max,
-    const std::vector<BgPolygon>& outers,
-    const std::vector<BgPolygon>& inners,
-    WorldEditor& editor)
+void inverse_floodfill_recursive(std::pair<int32_t, int32_t> min,
+		std::pair<int32_t, int32_t> max, const std::vector<BgPolygon> &outers,
+		const std::vector<BgPolygon> &inners, WorldEditor &editor)
 {
-    using namespace std::chrono;
-    constexpr int64_t ITERATIVE_THRES = 10'000;
+	using namespace std::chrono;
+	constexpr int64_t ITERATIVE_THRES = 10'000;
 
-    if (min.first > max.first || min.second > max.second) {
-        return;
-    }
+	if (min.first > max.first || min.second > max.second) {
+		return;
+	}
 
-    int64_t width = static_cast<int64_t>(max.first) - static_cast<int64_t>(min.first);
-    int64_t height = static_cast<int64_t>(max.second) - static_cast<int64_t>(min.second);
+	int64_t width = static_cast<int64_t>(max.first) - static_cast<int64_t>(min.first);
+	int64_t height = static_cast<int64_t>(max.second) - static_cast<int64_t>(min.second);
 
-    if (width * height < ITERATIVE_THRES) {
-        inverse_floodfill_iterative(min, max, 0, outers, inners, editor);
-        return;
-    }
+	if (width * height < ITERATIVE_THRES) {
+		inverse_floodfill_iterative(min, max, 0, outers, inners, editor);
+		return;
+	}
 
-    int32_t center_x = (min.first + max.first) / 2;
-    int32_t center_z = (min.second + max.second) / 2;
+	int32_t center_x = (min.first + max.first) / 2;
+	int32_t center_z = (min.second + max.second) / 2;
 
-    std::array<std::tuple<int32_t, int32_t, int32_t, int32_t>, 4> quadrants = {{
-        {min.first, center_x, min.second, center_z},
-        {center_x, max.first, min.second, center_z},
-        {min.first, center_x, center_z, max.second},
-        {center_x, max.first, center_z, max.second}
-    }};
+	std::array<std::tuple<int32_t, int32_t, int32_t, int32_t>, 4> quadrants = {
+			{{min.first, center_x, min.second, center_z},
+					{center_x, max.first, min.second, center_z},
+					{min.first, center_x, center_z, max.second},
+					{center_x, max.first, center_z, max.second}}};
 
-    for (const auto& [min_x, max_x, min_z, max_z] : quadrants) {
-        auto rect = make_rectangle_polygon(min_x, max_x, min_z, max_z);
+	for (const auto &[min_x, max_x, min_z, max_z] : quadrants) {
+		auto rect = make_rectangle_polygon(min_x, max_x, min_z, max_z);
 
-        bool any_outer_contains = std::any_of(
-            outers.begin(), outers.end(),
-            [&rect](const BgPolygon& outer) {
-                return boost::geometry::within(rect, outer);
-            }
-        );
+		bool any_outer_contains = std::any_of(
+				outers.begin(), outers.end(), [&rect](const BgPolygon &outer) {
+					return boost::geometry::within(rect, outer);
+				});
 
-        bool any_inner_intersects = std::any_of(
-            inners.begin(), inners.end(),
-            [&rect](const BgPolygon& inner) {
-                return boost::geometry::intersects(inner, rect);
-            }
-        );
+		bool any_inner_intersects = std::any_of(
+				inners.begin(), inners.end(), [&rect](const BgPolygon &inner) {
+					return boost::geometry::intersects(inner, rect);
+				});
 
-        if (any_outer_contains && !any_inner_intersects) {
-            rect_fill(min_x, max_x, min_z, max_z, 0, editor);
-            continue;
-        }
+		if (any_outer_contains && !any_inner_intersects) {
+			rect_fill(min_x, max_x, min_z, max_z, 0, editor);
+			continue;
+		}
 
-        std::vector<BgPolygon> outers_intersects;
-        std::copy_if(
-            outers.begin(), outers.end(),
-            std::back_inserter(outers_intersects),
-            [&rect](const BgPolygon& poly) { return boost::geometry::intersects(poly, rect); }
-        );
+		std::vector<BgPolygon> outers_intersects;
+		std::copy_if(outers.begin(), outers.end(), std::back_inserter(outers_intersects),
+				[&rect](const BgPolygon &poly) {
+					return boost::geometry::intersects(poly, rect);
+				});
 
-        std::vector<BgPolygon> inners_intersects;
-        std::copy_if(
-            inners.begin(), inners.end(),
-            std::back_inserter(inners_intersects),
-            [&rect](const BgPolygon& poly) { return boost::geometry::intersects(poly, rect); }
-        );
+		std::vector<BgPolygon> inners_intersects;
+		std::copy_if(inners.begin(), inners.end(), std::back_inserter(inners_intersects),
+				[&rect](const BgPolygon &poly) {
+					return boost::geometry::intersects(poly, rect);
+				});
 
-        if (!outers_intersects.empty()) {
-            inverse_floodfill_recursive(
-                {min_x, min_z},
-                {max_x, max_z},
-                outers_intersects,
-                inners_intersects,
-                editor
-            );
-        }
-    }
+		if (!outers_intersects.empty()) {
+			inverse_floodfill_recursive({min_x, min_z}, {max_x, max_z}, outers_intersects,
+					inners_intersects, editor);
+		}
+	}
 }
 
 [[maybe_unused]] static void inverse_floodfill(int min_x, int min_z, int max_x, int max_z,
@@ -219,7 +206,8 @@ void inverse_floodfill_recursive(
 			std::make_pair(max_x, max_z), outers_bg, inners_bg, editor);
 }
 
-struct ScanlineEdge {
+struct ScanlineEdge
+{
 	double x1;
 	double z1;
 	double x2;
@@ -336,10 +324,8 @@ static std::vector<std::pair<int, int>> subtract_spans(
 
 static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 		const std::vector<std::vector<XZPoint>> &outers,
-		const std::vector<std::vector<XZPoint>> &inners,
-		WorldEditor &editor,
-		const water_depth::BigWaterField &bwf,
-		const RoadMaskBitmap &road_mask)
+		const std::vector<std::vector<XZPoint>> &inners, WorldEditor &editor,
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask)
 {
 	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
 	outer_edge_groups.reserve(outers.size());
@@ -350,7 +336,8 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 	for (int z = min_z; z <= max_z; ++z) {
 		std::vector<std::pair<int, int>> outer_spans;
 		for (const auto &edges : outer_edge_groups) {
-			auto spans = compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x);
+			auto spans =
+					compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x);
 			if (!spans.empty())
 				outer_spans = union_spans(outer_spans, spans);
 		}
@@ -359,8 +346,8 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 
 		std::vector<std::pair<int, int>> fill_spans = outer_spans;
 		if (!inner_edges.empty()) {
-			auto inner_spans =
-					compute_scanline_spans(inner_edges, static_cast<double>(z), min_x, max_x);
+			auto inner_spans = compute_scanline_spans(
+					inner_edges, static_cast<double>(z), min_x, max_x);
 			if (!inner_spans.empty())
 				fill_spans = subtract_spans(outer_spans, inner_spans);
 		}
@@ -380,91 +367,91 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 	}
 }
 
-static void generate_water_areas(
-    WorldEditor &editor,
-    const std::vector<std::vector<ProcessedNode>> &outers,
-    const std::vector<std::vector<ProcessedNode>> &inners,
-    const water_depth::BigWaterField &bwf,
-    const RoadMaskBitmap &road_mask)
+static void generate_water_areas(WorldEditor &editor,
+		const std::vector<std::vector<ProcessedNode>> &outers,
+		const std::vector<std::vector<ProcessedNode>> &inners,
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask)
 {
-    // Calculate polygon bounding box to limit fill area
-    int32_t poly_min_x = std::numeric_limits<int32_t>::max();
-    int32_t poly_min_z = std::numeric_limits<int32_t>::max();
-    int32_t poly_max_x = std::numeric_limits<int32_t>::min();
-    int32_t poly_max_z = std::numeric_limits<int32_t>::min();
+	// Calculate polygon bounding box to limit fill area
+	int32_t poly_min_x = std::numeric_limits<int32_t>::max();
+	int32_t poly_min_z = std::numeric_limits<int32_t>::max();
+	int32_t poly_max_x = std::numeric_limits<int32_t>::min();
+	int32_t poly_max_z = std::numeric_limits<int32_t>::min();
 
-    for (const auto &outer : outers) {
-        for (const auto &node : outer) {
-            poly_min_x = std::min(poly_min_x, node.x);
-            poly_min_z = std::min(poly_min_z, node.z);
-            poly_max_x = std::max(poly_max_x, node.x);
-            poly_max_z = std::max(poly_max_z, node.z);
-        }
-    }
+	for (const auto &outer : outers) {
+		for (const auto &node : outer) {
+			poly_min_x = std::min(poly_min_x, node.x);
+			poly_min_z = std::min(poly_min_z, node.z);
+			poly_max_x = std::max(poly_max_x, node.x);
+			poly_max_z = std::max(poly_max_z, node.z);
+		}
+	}
 
-    // If no valid bounds, nothing to fill
-    if (poly_min_x == std::numeric_limits<int32_t>::max() || poly_max_x == std::numeric_limits<int32_t>::min()) {
-        return;
-    }
+	// If no valid bounds, nothing to fill
+	if (poly_min_x == std::numeric_limits<int32_t>::max() ||
+			poly_max_x == std::numeric_limits<int32_t>::min()) {
+		return;
+	}
 
-    // Clamp to world bounds just in case
-    auto [world_min_x, world_min_z] = editor.get_min_coords();
-    auto [world_max_x, world_max_z] = editor.get_max_coords();
-    int32_t min_x = std::max(poly_min_x, world_min_x);
-    int32_t min_z = std::max(poly_min_z, world_min_z);
-    int32_t max_x = std::min(poly_max_x, world_max_x);
-    int32_t max_z = std::min(poly_max_z, world_max_z);
+	// Clamp to world bounds just in case
+	auto [world_min_x, world_min_z] = editor.get_min_coords();
+	auto [world_max_x, world_max_z] = editor.get_max_coords();
+	int32_t min_x = std::max(poly_min_x, world_min_x);
+	int32_t min_z = std::max(poly_min_z, world_min_z);
+	int32_t max_x = std::min(poly_max_x, world_max_x);
+	int32_t max_z = std::min(poly_max_z, world_max_z);
 
-    std::vector<std::vector<XZPoint>> outers_xz;
-    outers_xz.reserve(outers.size());
-    for (const auto &outer : outers) {
-        std::vector<XZPoint> v;
-        v.reserve(outer.size());
-        for (const auto &node : outer) {
-            v.push_back(node.xz());
-        }
-        outers_xz.push_back(std::move(v));
-    }
+	std::vector<std::vector<XZPoint>> outers_xz;
+	outers_xz.reserve(outers.size());
+	for (const auto &outer : outers) {
+		std::vector<XZPoint> v;
+		v.reserve(outer.size());
+		for (const auto &node : outer) {
+			v.push_back(node.xz());
+		}
+		outers_xz.push_back(std::move(v));
+	}
 
-    std::vector<std::vector<XZPoint>> inners_xz;
-    inners_xz.reserve(inners.size());
-    for (const auto &inner : inners) {
-        std::vector<XZPoint> v;
-        v.reserve(inner.size());
-        for (const auto &node : inner) {
-            v.push_back(node.xz());
-        }
-        inners_xz.push_back(std::move(v));
-    }
+	std::vector<std::vector<XZPoint>> inners_xz;
+	inners_xz.reserve(inners.size());
+	for (const auto &inner : inners) {
+		std::vector<XZPoint> v;
+		v.reserve(inner.size());
+		for (const auto &node : inner) {
+			v.push_back(node.xz());
+		}
+		inners_xz.push_back(std::move(v));
+	}
 
-    scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf, road_mask);
-    structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
+	scanline_fill_water(
+			min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf, road_mask);
+	structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
 }
 
-static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &rings) {
-    bool valid = true;
-    for (const auto &ring : rings) {
-        if (ring.empty()) {
-            continue;
-        }
-        
-        const ProcessedNode &first = ring.front();
-        const ProcessedNode &last = ring.back();
+static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &rings)
+{
+	bool valid = true;
+	for (const auto &ring : rings) {
+		if (ring.empty()) {
+			continue;
+		}
 
-        // Check if ring is closed (by ID or proximity)
-        bool is_closed = (first.id == last.id) || 
-            ([&]() {
-                int32_t dx = std::abs(first.x - last.x);
-                int32_t dz = std::abs(first.z - last.z);
-                return dx <= 1 && dz <= 1;
-            })();
+		const ProcessedNode &first = ring.front();
+		const ProcessedNode &last = ring.back();
 
-        if (!is_closed) {
-            std::cerr << "WARN: Disconnected ring" << std::endl;
-            valid = false;
-        }
-    }
-    return valid;
+		// Check if ring is closed (by ID or proximity)
+		bool is_closed = (first.id == last.id) || ([&]() {
+			int32_t dx = std::abs(first.x - last.x);
+			int32_t dz = std::abs(first.z - last.z);
+			return dx <= 1 && dz <= 1;
+		})();
+
+		if (!is_closed) {
+			std::cerr << "WARN: Disconnected ring" << std::endl;
+			valid = false;
+		}
+	}
+	return valid;
 }
 
 static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
@@ -548,115 +535,112 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 	}
 }
 
-void generate_water_area_from_way(
-    WorldEditor &editor,
-    const ProcessedWay &element,
-    const water_depth::BigWaterField &bwf,
-    const RoadMaskBitmap &road_mask)
+void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &element,
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask)
 {
-    std::vector<std::vector<ProcessedNode>> outers = {{element.nodes}};
-    
-    if (!verify_closed_rings(outers)) {
-        std::cout << "Skipping way " << element.id << " due to invalid polygon" << std::endl;
-        return;
-    }
+	std::vector<std::vector<ProcessedNode>> outers = {{element.nodes}};
 
-    generate_water_areas(editor, outers, {}, bwf, road_mask);
+	if (!verify_closed_rings(outers)) {
+		std::cout << "Skipping way " << element.id << " due to invalid polygon"
+				  << std::endl;
+		return;
+	}
+
+	generate_water_areas(editor, outers, {}, bwf, road_mask);
 }
 
-void generate_water_areas_from_relation(
-    WorldEditor &editor,
-    const ProcessedRelation &element,
-    const water_depth::BigWaterField &bwf,
-    const RoadMaskBitmap &road_mask)
+void generate_water_areas_from_relation(WorldEditor &editor,
+		const ProcessedRelation &element, const water_depth::BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask)
 {
-    // Check if this is a water relation (either with water tag or natural=water or natural=bay)
-    bool is_water = element.tags.find("water") != element.tags.end() ||
-        ([&]() {
-            auto it_nat = element.tags.find("natural");
-            return it_nat != element.tags.end() && 
-                (it_nat->second == "water" || it_nat->second == "bay");
-        })();
+	// Check if this is a water relation (either with water tag or natural=water or natural=bay)
+	bool is_water = element.tags.find("water") != element.tags.end() || ([&]() {
+		auto it_nat = element.tags.find("natural");
+		return it_nat != element.tags.end() &&
+			   (it_nat->second == "water" || it_nat->second == "bay");
+	})();
 
-    if (!is_water) {
-        return;
-    }
+	if (!is_water) {
+		return;
+	}
 
-    // Don't handle water below layer 0
-    auto it_layer = element.tags.find("layer");
-    if (it_layer != element.tags.end()) {
-        try {
-            int layer = std::stoi(it_layer->second);
-            if (layer < 0) {
-                return;
-            }
-        } catch (...) {
-            // ignore parse errors
-        }
-    }
+	// Don't handle water below layer 0
+	auto it_layer = element.tags.find("layer");
+	if (it_layer != element.tags.end()) {
+		try {
+			int layer = std::stoi(it_layer->second);
+			if (layer < 0) {
+				return;
+			}
+		} catch (...) {
+			// ignore parse errors
+		}
+	}
 
-    std::vector<std::vector<ProcessedNode>> outers;
-    std::vector<std::vector<ProcessedNode>> inners;
+	std::vector<std::vector<ProcessedNode>> outers;
+	std::vector<std::vector<ProcessedNode>> inners;
 
-    for (const auto &mem : element.members) {
-        if (mem.role == ProcessedMemberRole::Outer) {
-            outers.push_back(mem.way.nodes);
-        } else if (mem.role == ProcessedMemberRole::Inner) {
-            inners.push_back(mem.way.nodes);
-        }
-    }
+	for (const auto &mem : element.members) {
+		if (mem.role == ProcessedMemberRole::Outer) {
+			outers.push_back(mem.way.nodes);
+		} else if (mem.role == ProcessedMemberRole::Inner) {
+			inners.push_back(mem.way.nodes);
+		}
+	}
 
-    // Preserve OSM-defined outer/inner roles without modification
-    merge_loopy_loops(outers);
+	// Preserve OSM-defined outer/inner roles without modification
+	merge_loopy_loops(outers);
 
-    // Filter: Keep only loops that are already closed OR can be closed within 1 block
-    outers.erase(
-        std::remove_if(outers.begin(), outers.end(), [](const std::vector<ProcessedNode>& loop_nodes) {
-            if (loop_nodes.size() < 3) {
-                return true;
-            }
-            const ProcessedNode& first = loop_nodes.front();
-            const ProcessedNode& last = loop_nodes.back();
-            if (first.id == last.id) {
-                return false; // Already closed by ID
-            }
-            int32_t dx = std::abs(first.x - last.x);
-            int32_t dz = std::abs(first.z - last.z);
-            return !(dx <= 1 && dz <= 1); // Remove if not closable within 1 block
-        }),
-        outers.end()
-    );
+	// Filter: Keep only loops that are already closed OR can be closed within 1 block
+	outers.erase(std::remove_if(outers.begin(), outers.end(),
+						 [](const std::vector<ProcessedNode> &loop_nodes) {
+							 if (loop_nodes.size() < 3) {
+								 return true;
+							 }
+							 const ProcessedNode &first = loop_nodes.front();
+							 const ProcessedNode &last = loop_nodes.back();
+							 if (first.id == last.id) {
+								 return false; // Already closed by ID
+							 }
+							 int32_t dx = std::abs(first.x - last.x);
+							 int32_t dz = std::abs(first.z - last.z);
+							 return !(dx <= 1 &&
+									  dz <= 1); // Remove if not closable within 1 block
+						 }),
+			outers.end());
 
-    // Now close the remaining loops that are within 1 block tolerance
-    for (auto& loop_nodes : outers) {
-        if (loop_nodes.size() >= 2) {
-            const ProcessedNode& first = loop_nodes.front();
-            const ProcessedNode& last = loop_nodes.back();
-            if (first.id != last.id) {
-                // Endpoints are close (within tolerance), close the loop
-                loop_nodes.push_back(first);
-            }
-        }
-    }
+	// Now close the remaining loops that are within 1 block tolerance
+	for (auto &loop_nodes : outers) {
+		if (loop_nodes.size() >= 2) {
+			const ProcessedNode &first = loop_nodes.front();
+			const ProcessedNode &last = loop_nodes.back();
+			if (first.id != last.id) {
+				// Endpoints are close (within tolerance), close the loop
+				loop_nodes.push_back(first);
+			}
+		}
+	}
 
-    // If no valid outer loops remain, skip the relation
-    if (outers.empty()) {
-        return;
-    }
+	// If no valid outer loops remain, skip the relation
+	if (outers.empty()) {
+		return;
+	}
 
-    // Verify again after filtering and closing
-    if (!verify_closed_rings(outers)) {
-        std::cout << "Skipping relation " << element.id << " due to invalid polygon" << std::endl;
-        return;
-    }
+	// Verify again after filtering and closing
+	if (!verify_closed_rings(outers)) {
+		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
+				  << std::endl;
+		return;
+	}
 
-    merge_loopy_loops(inners);
-    if (!verify_closed_rings(inners)) {
-        std::cout << "Skipping relation " << element.id << " due to invalid polygon" << std::endl;
-        return;
-    }
+	merge_loopy_loops(inners);
+	if (!verify_closed_rings(inners)) {
+		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
+				  << std::endl;
+		return;
+	}
 
-    generate_water_areas(editor, outers, inners, bwf, road_mask);
+	generate_water_areas(editor, outers, inners, bwf, road_mask);
 }
 
 }

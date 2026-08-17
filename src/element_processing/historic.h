@@ -2,8 +2,10 @@
 
 #include "../../../arnis_adapter.h"
 
-namespace arnis {
-namespace historic {
+namespace arnis
+{
+namespace historic
+{
 void generate_historic(WorldEditor &editor, const ProcessedNode &node);
 void generate_memorial(WorldEditor &editor, const ProcessedNode &node);
 void generate_monument(WorldEditor &editor, const ProcessedNode &node);

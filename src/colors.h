@@ -16,3 +16,5 @@ std::optional<RGBTuple> color_name_to_rgb_tuple(std::string_view text);
 std::optional<RGBTuple> color_text_to_rgb_tuple(std::string_view text);
 
 std::uint32_t rgb_distance(const RGBTuple &from, const RGBTuple &to);
+// Squared perceptual distance in Oklab; used by 3D model material mapping.
+float oklab_distance(const RGBTuple &from, const RGBTuple &to);
