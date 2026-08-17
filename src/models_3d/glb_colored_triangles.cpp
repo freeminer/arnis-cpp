@@ -1,5 +1,5 @@
 #include "voxelize.h"
-#include "../../../tinygltf_/tiny_gltf.h"
+#include <tiny_gltf.h>
 #include <algorithm>
 #include <array>
 #include <cmath>

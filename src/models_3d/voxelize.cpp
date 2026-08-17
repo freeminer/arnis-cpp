@@ -3,7 +3,7 @@
 #include <stdexcept>
 #include <algorithm>
 #include <unordered_map>
-#include "../../../tinygltf_/tiny_gltf.h"
+#include <tiny_gltf.h>
 #include "../../../arnis_adapter.h"
 #include "../colors.h"
 #include "../block_definitions.h"
