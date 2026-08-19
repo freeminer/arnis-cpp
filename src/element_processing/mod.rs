@@ -4,6 +4,9 @@ pub mod barriers;
 pub mod bridge_modules;
 pub mod bridge_styles;
 pub mod bridges;
+pub mod building_facade;
+#[cfg(test)]
+pub mod building_test_support;
 pub mod buildings;
 pub mod doors;
 pub mod emergency;
@@ -15,6 +18,7 @@ pub mod man_made;
 pub mod natural;
 pub mod power;
 pub mod railways;
+pub mod signage;
 pub mod sport_pitches;
 pub mod subprocessor;
 mod surfaces;

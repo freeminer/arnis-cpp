@@ -1,6 +1,7 @@
 use crate::args::Args;
 use crate::coordinate_system::cartesian::XZBBox;
 use crate::coordinate_system::geographic::LLBBox;
+use crate::element_processing::building_facade::BuildingContext;
 use crate::element_processing::*;
 use crate::floodfill_cache::{CoordinateBitmap, FloodFillCache};
 use crate::ground::Ground;
@@ -20,6 +21,7 @@ use crate::telemetry::{send_log, LogLevel};
 use crate::tile;
 use crate::world_editor::{FlushWorker, WorldEditor, WorldFormat};
 use colored::Colorize;
+use fnv::FnvHashMap;
 use indicatif::{ProgressBar, ProgressStyle};
 use rayon::prelude::*;
 use std::collections::{HashMap, HashSet};
@@ -177,31 +179,18 @@ pub(crate) fn sort_ground_fill_areas(elements: &mut [ProcessedElement]) {
     }
 }
 
-/// Drops the cached flood fills whose last reader sits at `index`.
-///
-/// `last_fill_use` maps a way id to the position of the final element that reads
-/// its fill, counting both the standalone way and any relation holding it as a
-/// member. Evicting anywhere else would force a later reader to refill.
+/// Drops every cached flood fill whose last reader sits at `index`.
+/// Group-lifetime extension can point a fill at an index belonging to a
+/// different element, so eviction goes by index, not by the current element.
 fn release_finished_fills(
     cache: &mut FloodFillCache,
-    last_fill_use: &HashMap<u64, usize>,
-    element: &ProcessedElement,
+    fills_expiring_at: &HashMap<usize, Vec<u64>>,
     index: usize,
 ) {
-    match element {
-        ProcessedElement::Way(way) => {
-            if last_fill_use.get(&way.id) == Some(&index) {
-                cache.remove_way(way.id);
-            }
+    if let Some(ids) = fills_expiring_at.get(&index) {
+        for &id in ids {
+            cache.remove_way(id);
         }
-        ProcessedElement::Relation(rel) => {
-            for member in &rel.members {
-                if last_fill_use.get(&member.way.id) == Some(&index) {
-                    cache.remove_way(member.way.id);
-                }
-            }
-        }
-        ProcessedElement::Node(_) => {}
     }
 }
 
@@ -226,6 +215,7 @@ fn process_element(
     building_passages: &CoordinateBitmap,
     road_mask: &CoordinateBitmap,
     rail_mask: &CoordinateBitmap,
+    tunnel_footprint: &CoordinateBitmap,
     xzbbox: &XZBBox,
     big_water_field: &crate::water_depth::BigWaterField,
     bridge_structures: &bridges::BridgeStructureMap,
@@ -234,9 +224,13 @@ fn process_element(
     rail_bridge_internal_endpoints: &railways::RailBridgeInternalEndpoints,
     rail_tunnel_points: &mut Vec<(i32, i32)>,
     tunnel_internal_endpoints: &highways::TunnelInternalEndpoints,
+    tunnel_portals: &highways::TunnelPortalMap,
     tunnel_cells: &mut Vec<highways::HighwayTunnelCell>,
     part_groups: &PartGroups,
+    group_members: &FnvHashMap<u64, Vec<u64>>,
+    still_surfaces: &water_areas::StillWaterSurfaces,
 ) {
+    let signage = editor.signage_enabled();
     match element {
         ProcessedElement::Way(way) => {
             // Fenced solar farms carry barrier=fence, which would shadow the generator below.
@@ -256,16 +250,18 @@ fn process_element(
             if way.tags.contains_key("building") || way.tags.contains_key("building:part") {
                 // parts of one building share a style seed so untagged parts match
                 let group_seed = part_groups.get(&way.id).copied().unwrap_or(way.id);
-                buildings::generate_buildings(
-                    editor,
-                    way,
-                    args,
-                    None,
-                    None,
+                let ctx = BuildingContext {
                     flood_fill_cache,
                     building_passages,
-                    group_seed,
-                );
+                    road_mask,
+                    building_footprints,
+                    group_members,
+                };
+                let anchor =
+                    buildings::generate_buildings(editor, way, args, None, None, &ctx, group_seed);
+                if signage {
+                    signage::generate_building_signage(editor, way, anchor);
+                }
             } else if way.tags.contains_key("highway") {
                 highways::generate_highways(
                     editor,
@@ -277,8 +273,13 @@ fn process_element(
                     bridge_structures,
                     bridge_surface,
                     tunnel_internal_endpoints,
+                    tunnel_portals,
+                    tunnel_footprint,
                     tunnel_cells,
                 );
+                if signage {
+                    signage::generate_highway_way_signage(editor, way, building_footprints);
+                }
             } else if way.tags.contains_key("landuse") {
                 landuse::generate_landuse(
                     editor,
@@ -303,6 +304,9 @@ fn process_element(
                 );
             } else if way.tags.contains_key("amenity") {
                 amenities::generate_amenities(editor, element, args, flood_fill_cache, road_mask);
+                if signage && way.tags.get("amenity").map(String::as_str) == Some("parking") {
+                    signage::generate_parking_signage(editor, way, road_mask);
+                }
             } else if way.tags.contains_key("leisure") {
                 leisure::generate_leisure(
                     editor,
@@ -315,14 +319,15 @@ fn process_element(
             } else if way.tags.contains_key("barrier") {
                 barriers::generate_barriers(editor, element, bridge_surface);
             } else if let Some(val) = way.tags.get("waterway") {
-                if val == "dock" {
-                    // docks count as water areas
+                if val == "dock" || val == "riverbank" {
+                    // docks and (legacy) riverbank areas count as water areas
                     water_areas::generate_water_area_from_way(
                         editor,
                         way,
-                        xzbbox,
                         big_water_field,
                         road_mask,
+                        tunnel_footprint,
+                        still_surfaces,
                     );
                 } else {
                     waterways::generate_waterways(editor, way);
@@ -356,11 +361,17 @@ fn process_element(
                     flood_fill_cache,
                     args.timeout.as_ref(),
                 );
+                if signage {
+                    signage::generate_power_signage(editor, way, road_mask);
+                }
             } else if way.tags.contains_key("place") {
                 landuse::generate_place(editor, way, args, flood_fill_cache);
             }
         }
         ProcessedElement::Node(node) => {
+            if signage {
+                signage::generate_node_signage(editor, node, building_footprints, road_mask);
+            }
             if node.tags.contains_key("door") || node.tags.contains_key("entrance") {
                 doors::generate_doors(editor, node);
             } else if node.tags.get("natural").map(String::as_str) == Some("tree") {
@@ -387,12 +398,14 @@ fn process_element(
                     bridge_structures,
                     bridge_surface,
                     tunnel_internal_endpoints,
+                    tunnel_portals,
+                    tunnel_footprint,
                     tunnel_cells,
                 );
             } else if node.tags.get("aeroway").map(String::as_str) == Some("helipad") {
                 highways::generate_helipad_node(editor, node, args, building_footprints);
             } else if node.tags.contains_key("tourism") {
-                tourisms::generate_tourisms(editor, node);
+                tourisms::generate_tourisms(editor, node, road_mask);
             } else if node.tags.contains_key("man_made") {
                 man_made::generate_man_made_nodes(editor, node, args);
             } else if node.tags.contains_key("power") {
@@ -402,7 +415,7 @@ fn process_element(
             } else if node.tags.contains_key("emergency") {
                 emergency::generate_emergency(editor, node);
             } else if node.tags.contains_key("advertising") {
-                advertising::generate_advertising(editor, node);
+                advertising::generate_advertising(editor, node, road_mask);
             }
         }
         ProcessedElement::Relation(rel) => {
@@ -410,14 +423,14 @@ fn process_element(
                 || rel.tags.contains_key("building:part")
                 || rel.tags.get("type").map(|t| t.as_str()) == Some("building");
             if is_building_relation {
-                buildings::generate_building_from_relation(
-                    editor,
-                    rel,
-                    args,
+                let ctx = BuildingContext {
                     flood_fill_cache,
-                    xzbbox,
                     building_passages,
-                );
+                    road_mask,
+                    building_footprints,
+                    group_members,
+                };
+                buildings::generate_building_from_relation(editor, rel, args, &ctx, xzbbox);
             } else if rel.tags.contains_key("water")
                 || rel
                     .tags
@@ -431,6 +444,8 @@ fn process_element(
                     xzbbox,
                     big_water_field,
                     road_mask,
+                    tunnel_footprint,
+                    still_surfaces,
                 );
             } else if rel.tags.contains_key("natural") {
                 natural::generate_natural_from_relation(
@@ -535,6 +550,32 @@ pub fn generate_world_with_options(
     editor.set_map_decals(world_format == WorldFormat::JavaAnvil);
     editor.set_projection_info(&args.projection.to_string(), args.scale);
 
+    // Signage pre-pass: every decal the world needs gets its map id now, so the tile
+    // threads only read the registry. Java only; other formats keep banner fallbacks.
+    let signage_start = args.benchmark.then(std::time::Instant::now);
+    let signage_ctx: Option<Arc<signage::SignageContext>> = (world_format
+        == WorldFormat::JavaAnvil)
+        .then(|| signage::build_context(&elements, args, llbbox, &xzbbox))
+        .flatten()
+        .map(Arc::new);
+    if let (Some(t), Some(_)) = (signage_start, signage_ctx.as_ref()) {
+        eprintln!("[BENCHMARK] signage_prepass_ms={}", t.elapsed().as_millis());
+    }
+    if let Some(ctx) = &signage_ctx {
+        editor.set_signage(Arc::clone(ctx));
+        println!(
+            "  Signage: {} distinct decals ({} map tiles), {} named intersections",
+            ctx.registry.len(),
+            ctx.registry.tile_count(),
+            ctx.intersections.len()
+        );
+    }
+    let wants_local_maps = signage_ctx.as_ref().is_some_and(|c| {
+        c.registry
+            .iter()
+            .any(|(k, _)| matches!(k, crate::decals::DecalKey::LocalMap { .. }))
+    });
+
     // Map preview accumulator, fed as regions are saved/flushed (Java/Bedrock).
     let preview_epoch = map_preview::begin_preview_epoch();
     // The map item consumes the same accumulator, so either feature enables it.
@@ -544,9 +585,12 @@ pub fn generate_world_with_options(
     // Branding map ships on every Java world.
     let place_branding = world_format == WorldFormat::JavaAnvil;
     let wants_png = args.map_preview && world_format != WorldFormat::LuantiWorld;
-    let preview = (wants_png || wants_map_item).then(|| {
+    let preview = (wants_png || wants_map_item || wants_local_maps).then(|| {
         Arc::new(if wants_png {
             PreviewAccumulator::new(&xzbbox)
+        } else if wants_local_maps {
+            // "You are here" boards crop this, so give them a little more resolution.
+            PreviewAccumulator::new_capped(&xzbbox, 1024)
         } else {
             PreviewAccumulator::new_capped(&xzbbox, 512)
         })
@@ -559,12 +603,16 @@ pub fn generate_world_with_options(
     // Materialize the lazy water-blend mask now, before world memory peaks.
     ground.warm_water_blend();
     // Load the schematic tree pack once (None keeps procedural trees); shared with tile editors.
+    // Uses the ground's real base, not args: the montane check measures blocks above it, and
+    // the base sinks when the relief needs the extended floor.
     let tree_pack =
-        crate::trees::tree_pack::load(args, llbbox, args.scale, args.ground_level).map(Arc::new);
+        crate::trees::tree_pack::load(args, llbbox, args.scale, ground.base_level()).map(Arc::new);
     let mut bench = crate::bench::Bench::new(args.benchmark);
 
     // Per-cell water depth field from the LC_WATER mask; empty without land cover.
     let big_water_field = crate::water_depth::compute_big_water_field(&ground, &xzbbox);
+    // Resolved once here: a body spanning many tiles must not be measured per tile.
+    let still_surfaces = water_areas::prescan_still_surfaces(&elements, &ground, &xzbbox);
 
     println!("{} Processing data...", "[4/7]".bold());
     emit_gui_progress_update(19.5, "Processing data...");
@@ -601,11 +649,23 @@ pub fn generate_world_with_options(
     // road or path surface. Uses the same Bresenham + block_range geometry as
     // generate_highways_internal, so the bitmap is a 1:1 match of what gets placed.
     // Amenity processors use this for O(1) nearest-road-block lookups.
-    let road_mask = highways::collect_road_surface_coords(&elements, &xzbbox, args.scale);
+    let road_mask = highways::collect_road_surface_coords(&elements, &editor, &xzbbox, args.scale);
 
-    // Tunnel bore footprints, so the water depth-carve and vegetation stay off them.
-    let mut tunnel_footprint = highways::collect_tunnel_footprint(&elements, &xzbbox, args.scale);
-    railways::add_tunnel_footprint(&elements, &xzbbox, &mut tunnel_footprint);
+    // Sibling index keyed on the hint-free seed: parts of one building can
+    // carry different packed style-hint bits and must still find each other.
+    let group_members: FnvHashMap<u64, Vec<u64>> = {
+        let mut map: FnvHashMap<u64, Vec<u64>> = FnvHashMap::default();
+        for (&way_id, &seed) in part_groups.iter() {
+            map.entry(crate::osm_parser::seed_without_hint(seed))
+                .or_default()
+                .push(way_id);
+        }
+        map.retain(|_, v| v.len() >= 2);
+        for v in map.values_mut() {
+            v.sort_unstable();
+        }
+        map
+    };
 
     let bridge_outlines =
         crate::element_processing::bridge_styles::BridgeOutlineIndex::build(&elements);
@@ -620,7 +680,24 @@ pub fn generate_world_with_options(
     // Rail centerlines, used to keep catenary masts off neighbouring tracks.
     let rail_mask = railways::collect_at_grade_rail_mask(&elements, &xzbbox);
 
-    let tunnel_internal_endpoints = highways::collect_tunnel_internal_endpoints(&elements);
+    let tunnel_internal_endpoints = highways::collect_tunnel_internal_endpoints(&elements, &xzbbox);
+
+    // Tunnel bore footprints, so the water depth-carve and vegetation stay off them.
+    let mut tunnel_footprint = highways::collect_tunnel_footprint(
+        &elements,
+        &editor,
+        &tunnel_internal_endpoints,
+        &xzbbox,
+        args.scale,
+    );
+    railways::add_tunnel_footprint(&elements, &xzbbox, &mut tunnel_footprint);
+    let tunnel_portals = highways::collect_tunnel_portals(
+        &elements,
+        &editor,
+        &bridge_structures,
+        &tunnel_internal_endpoints,
+        args.scale,
+    );
 
     // Resolved before the 3D archetypes so they never claim a landmark's element.
     let landmarks = crate::landmarks::prescan(&elements, &xzbbox, llbbox, args);
@@ -654,9 +731,11 @@ pub fn generate_world_with_options(
     let mut flush_worker: Option<FlushWorker> = None;
     // The spawn's region is kept resident (never evicted) so the finalize map-item lands on
     // real ground. Resolved exactly like the finalize call; spawn doesn't change during generation.
+    // An explicit spawn wins over level.dat, which the CLI only updates after generation.
     let spawn_region: Option<(i32, i32)> = place_branding.then(|| {
-        let (sx, sz) = crate::map_item::read_spawn_xz(&output_path)
-            .or(options.spawn_point)
+        let (sx, sz) = options
+            .spawn_point
+            .or_else(|| crate::map_item::read_spawn_xz(&output_path))
             .unwrap_or((xzbbox.min_x() + 1, xzbbox.min_z() + 1));
         (sx >> 9, sz >> 9)
     });
@@ -760,6 +839,8 @@ pub fn generate_world_with_options(
         let mut place_dur = std::time::Duration::ZERO;
         let mut merge_dur = std::time::Duration::ZERO;
         let total_tiles = indexed_tiles.len().max(1);
+        // Counted per tile, not per element: measured per-tile cost is near flat
+        // (the area work dominates), so tile count tracks time despite LPT order.
         let mut tiles_merged = 0usize;
         let mut last_emitted_pct = 20.0_f64;
         // Placement-side ticks so the bar moves before the first batch merges.
@@ -784,11 +865,22 @@ pub fn generate_world_with_options(
                     let mut tile_editor = WorldEditor::new(PathBuf::new(), &tile_xzbbox, llbbox);
                     tile_editor.set_ground(Arc::clone(&ground));
                     tile_editor.set_ground_origin(xzbbox.min_x(), xzbbox.min_z());
+                    // Ground generation runs on tile editors, so they need the real scale.
+                    tile_editor.set_projection_info(&args.projection.to_string(), args.scale);
                     tile_editor.set_place_schematics(args.use_3d);
                     tile_editor.set_map_decals(place_branding);
                     if let Some(ref tp) = tree_pack {
                         tile_editor.set_tree_pack(Arc::clone(tp));
                     }
+                    if let Some(ctx) = &signage_ctx {
+                        tile_editor.set_signage(Arc::clone(ctx));
+                    }
+                    tile_editor.set_strict_bounds(
+                        tile_bounds.min_x,
+                        tile_bounds.min_z,
+                        tile_bounds.max_x - 1,
+                        tile_bounds.max_z - 1,
+                    );
 
                     let mut tile_rail_tunnel_points: Vec<(i32, i32)> = Vec::new();
                     let mut tile_tunnel_cells: Vec<highways::HighwayTunnelCell> = Vec::new();
@@ -812,6 +904,7 @@ pub fn generate_world_with_options(
                             &building_passages,
                             &road_mask,
                             &rail_mask,
+                            &tunnel_footprint,
                             // World bbox (not tile) for relation/area ring clipping: clipping to
                             // the tile can drop a relation whose ring fails to close. The tile
                             // editor still bounds the actual writes.
@@ -823,8 +916,11 @@ pub fn generate_world_with_options(
                             &rail_bridge_internal_endpoints,
                             &mut tile_rail_tunnel_points,
                             &tunnel_internal_endpoints,
+                            &tunnel_portals,
                             &mut tile_tunnel_cells,
                             &part_groups,
+                            &group_members,
+                            &still_surfaces,
                         );
                     }
 
@@ -1020,6 +1116,23 @@ pub fn generate_world_with_options(
                 ProcessedElement::Node(_) => {}
             }
         }
+        // Group fills must live until the last member of the group renders.
+        for members in group_members.values() {
+            if let Some(max_idx) = members
+                .iter()
+                .filter_map(|id| last_fill_use.get(id))
+                .max()
+                .copied()
+            {
+                for id in members {
+                    last_fill_use.insert(*id, max_idx);
+                }
+            }
+        }
+        let mut fills_expiring_at: HashMap<usize, Vec<u64>> = HashMap::new();
+        for (&id, &idx) in last_fill_use.iter() {
+            fills_expiring_at.entry(idx).or_default().push(id);
+        }
         let process_pb: ProgressBar = ProgressBar::new(elements_count as u64);
         process_pb.set_style(ProgressStyle::default_bar()
             .template("{spinner:.green} [{elapsed_precise}] [{bar:45.white/black}] {pos}/{len} elements ({eta}) {msg}")
@@ -1041,7 +1154,7 @@ pub fn generate_world_with_options(
                 || outline_suppression.contains(&suppression_key)
             {
                 // Still the last reader on record, so release its fills.
-                release_finished_fills(&mut flood_fill_cache, &last_fill_use, &element, index);
+                release_finished_fills(&mut flood_fill_cache, &fills_expiring_at, index);
                 continue;
             }
             if element_counter.is_multiple_of(pb_batch_size) {
@@ -1076,6 +1189,7 @@ pub fn generate_world_with_options(
                 &building_passages,
                 &road_mask,
                 &rail_mask,
+                &tunnel_footprint,
                 &xzbbox,
                 &big_water_field,
                 &bridge_structures,
@@ -1084,13 +1198,16 @@ pub fn generate_world_with_options(
                 &rail_bridge_internal_endpoints,
                 &mut rail_tunnel_points,
                 &tunnel_internal_endpoints,
+                &tunnel_portals,
                 &mut tunnel_cells,
                 &part_groups,
+                &group_members,
+                &still_surfaces,
             );
 
             // Release flood fill cache entries for memory optimization.
             // (Skipped in the parallel path where the cache is shared immutably.)
-            release_finished_fills(&mut flood_fill_cache, &last_fill_use, &element, index);
+            release_finished_fills(&mut flood_fill_cache, &fills_expiring_at, index);
             // Element is dropped here, freeing its memory immediately.
         }
 
@@ -1210,8 +1327,9 @@ pub fn generate_world_with_options(
 
     // Map id 0 is the first map; branding is id 1 with the preview on, else id 0.
     if place_branding {
-        let (sx, sz) = crate::map_item::read_spawn_xz(&output_path)
-            .or(options.spawn_point)
+        let (sx, sz) = options
+            .spawn_point
+            .or_else(|| crate::map_item::read_spawn_xz(&output_path))
             .unwrap_or((xzbbox.min_x() + 1, xzbbox.min_z() + 1));
         if wants_map_item {
             editor.place_map_item_frame(sx, sz, 0, 1);
@@ -1226,6 +1344,10 @@ pub fn generate_world_with_options(
     }
     bench.mark("save");
 
+    // Map item, signage tiles and world settings are often longer than the region
+    // write, so they get their own band instead of a frozen bar at the end of save.
+    emit_gui_progress_update(97.0, "Finalizing world...");
+
     if wants_map_item {
         if let Some(p) = preview.as_ref() {
             match crate::map_item::write_map_item(&output_path, p, &xzbbox) {
@@ -1239,10 +1361,16 @@ pub fn generate_world_with_options(
         }
     }
 
-    if place_branding {
-        if let Err(e) = crate::map_item::write_decoration_maps(&output_path) {
-            eprintln!("Warning: Failed to create decoration maps: {e}");
+    if let Some(ctx) = &signage_ctx {
+        let t = args.benchmark.then(std::time::Instant::now);
+        match crate::map_item::write_decal_maps(&output_path, &ctx.registry, preview.as_deref()) {
+            Ok(n) => println!("Wrote {n} signage map tiles."),
+            Err(e) => eprintln!("Warning: Failed to create signage maps: {e}"),
         }
+        if let Some(t) = t {
+            eprintln!("[BENCHMARK] signage_maps_ms={}", t.elapsed().as_millis());
+        }
+        println!("{}", ctx.summary(args.debug));
     }
 
     // Write the preview PNG; off-thread in GUI mode so "Done" isn't delayed.
@@ -1287,7 +1415,7 @@ pub fn generate_world_with_options(
         eprintln!("[BENCHMARK] generation_time_ms={gen_ms}");
     }
 
-    emit_gui_progress_update(99.0, "Finalizing world...");
+    emit_gui_progress_update(99.5, "Finalizing world...");
 
     if world_format == WorldFormat::JavaAnvil {
         if let Err(e) = crate::world_utils::apply_java_world_settings(

@@ -5,6 +5,7 @@ mod bedrock_block_map;
 mod bench;
 mod biome;
 mod block_definitions;
+mod block_palette;
 mod bresenham;
 mod canopy;
 mod climate;
@@ -12,6 +13,7 @@ mod clipping;
 mod colors;
 mod coordinate_system;
 mod data_processing;
+mod decals;
 mod deterministic_rng;
 mod element_processing;
 mod elevation;
@@ -29,6 +31,7 @@ mod map_preview;
 mod map_renderer;
 mod map_transformation;
 mod models_3d;
+mod net;
 mod ore_generation;
 mod osm_parser;
 mod overture;
@@ -77,7 +80,22 @@ mod progress {
     }
 }
 #[cfg(target_os = "windows")]
-use windows::Win32::System::Console::{AttachConsole, FreeConsole, ATTACH_PARENT_PROCESS};
+use windows::Win32::System::Console::{AttachConsole, ATTACH_PARENT_PROCESS};
+
+/// Reattach to the console this process was launched from, so terminal output
+/// works in both CLI and GUI runs.
+///
+/// Deliberately no `FreeConsole` first: a windows-subsystem process starts with
+/// no console of its own, so `AttachConsole` alone reaches the parent terminal.
+/// Freeing first can only invalidate the inherited handles, and a `FreeConsole`
+/// that succeeds followed by a reattach that fails leaves stdout/stderr pointing
+/// at a dead console, which turns every later `println!` into a panic.
+#[cfg(target_os = "windows")]
+fn attach_parent_console() {
+    unsafe {
+        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
+    }
+}
 
 fn run_cli() {
     // Configure thread pool with 90% CPU cap to keep system responsive
@@ -118,6 +136,14 @@ fn run_cli() {
         eprintln!("{}: {}", "Error".red().bold(), e);
         std::process::exit(1);
     }
+
+    // Open up the world floor before anything touches the editor. The bundled packs already
+    // grant the full engine range; without this the lower half of it goes unused. The ceiling
+    // goes with it: chunk serialization needs the whole dimension span, not just the floor.
+    world_editor::set_world_bounds(
+        ground::extended_min_y_for(&args),
+        ground::world_top_y_for(&args),
+    );
 
     if args.legacy_terrain {
         eprintln!(
@@ -196,11 +222,7 @@ fn run_cli() {
     // requests load the public OpenStreetMap / elevation servers. Non-blocking.
     {
         const MAX_RECOMMENDED_AREA_KM2: f64 = 250.0;
-        let b = &effective_bbox;
-        let mid_lat = ((b.min().lat() + b.max().lat()) / 2.0).to_radians();
-        let width_m = (b.max().lng() - b.min().lng()) * 111_320.0 * mid_lat.cos();
-        let height_m = (b.max().lat() - b.min().lat()) * 111_320.0;
-        let area_km2 = (width_m * height_m).abs() / 1_000_000.0;
+        let area_km2 = effective_bbox.area_km2();
         if area_km2 > MAX_RECOMMENDED_AREA_KM2 {
             eprintln!(
                 "{} Large area selected (~{:.0} km²). Generation may take a long time and \
@@ -286,8 +308,16 @@ fn run_cli() {
     // its own internal Bench for the block-placement phases.
     let mut bench = bench::Bench::new(args.benchmark);
 
-    // Terrain-only skips every object source: no Overpass query, no Overture footprints.
-    if skip_objects {
+    // Terrain-only (or a scale too small to render objects) skips every object source:
+    // no Overpass query, no Overture footprints. Land cover is still fetched.
+    if args.skip_objects_due_to_scale() {
+        println!(
+            "{} Scale {:.2} is below {:.2}: skipping OpenStreetMap and Overture objects (terrain and land cover only)",
+            "[1/7]".bold(),
+            args.scale,
+            args::OBJECT_SKIP_SCALE
+        );
+    } else if skip_objects {
         println!(
             "{} Terrain-only mode: skipping OpenStreetMap and Overture objects",
             "[1/7]".bold()
@@ -299,15 +329,15 @@ fn run_cli() {
         println!("{} Fetching Overture Maps data...", "  [+]".bold());
     }
     let fetch_start = std::time::Instant::now();
-    let (raw_data, overture_elements, mut ground) = std::thread::scope(|s| {
+    let (raw_data, overture_data, mut ground) = std::thread::scope(|s| {
         let overture_handle = s.spawn(|| {
             let t = std::time::Instant::now();
-            let elements = if args.overture && !skip_objects {
+            let data = if args.overture && !skip_objects {
                 overture::fetch_overture_buildings(&effective_bbox, args.scale, args.debug)
             } else {
-                Vec::new()
+                overture::OvertureData::default()
             };
-            (elements, t.elapsed())
+            (data, t.elapsed())
         });
         let ground_handle = s.spawn(|| {
             let t = std::time::Instant::now();
@@ -334,13 +364,23 @@ fn run_cli() {
         };
         bench.report("osm_fetch", t.elapsed());
 
-        let (overture_elements, overture_dur) =
-            overture_handle.join().expect("Overture fetch panicked");
+        // A panicked worker already reported itself through the panic hook, so
+        // degrade instead of taking the whole run down with it.
+        let (overture_data, overture_dur) = overture_handle.join().unwrap_or_else(|_| {
+            eprintln!(
+                "{} Overture fetch failed, continuing without Overture buildings.",
+                "Warning:".yellow().bold()
+            );
+            (overture::OvertureData::default(), std::time::Duration::ZERO)
+        });
         bench.report("overture_fetch", overture_dur);
-        let (ground, ground_dur) = ground_handle.join().expect("Terrain fetch panicked");
+        let (ground, ground_dur) = ground_handle.join().unwrap_or_else(|_| {
+            eprintln!("{} Terrain fetch failed.", "Error:".red().bold());
+            std::process::exit(1);
+        });
         bench.report("terrain_total", ground_dur);
 
-        (raw_data, overture_elements, ground)
+        (raw_data, overture_data, ground)
     });
     bench.report("fetch_total", fetch_start.elapsed());
     bench.reset();
@@ -357,6 +397,21 @@ fn run_cli() {
     bench.mark("parse_osm");
 
     // Merge the Overture buildings now that the OSM elements are parsed.
+    let overture::OvertureData {
+        elements: overture_elements,
+        hints: overture_hints,
+    } = overture_data;
+
+    // Fill height/levels on OSM buildings that have neither, before the
+    // footprints are merged (Overture's own ways carry their tags already).
+    let enriched = overture_hints.apply(&mut parsed_elements);
+    if enriched > 0 {
+        println!(
+            "  Filled heights on {} OSM buildings from Overture Maps",
+            enriched.to_string().bright_white().bold()
+        );
+    }
+
     if !overture_elements.is_empty() {
         let before_count = parsed_elements.len();
         let unique_overture =
@@ -367,7 +422,7 @@ fn run_cli() {
             "  Added {} buildings from Overture Maps",
             added.to_string().bright_white().bold()
         );
-    } else if args.overture && !skip_objects {
+    } else if args.overture && !skip_objects && enriched == 0 {
         println!("  No additional buildings from Overture Maps for this area");
     }
 
@@ -377,6 +432,7 @@ fn run_cli() {
 
     // OSM water override first, then bridge repair handles remaining bridge-shadow cells.
     ground.apply_osm_water_override(&parsed_elements, &xzbbox);
+    ground.apply_osm_land_override(&parsed_elements, &xzbbox, args.scale);
     if args.debug {
         ground.save_land_cover_debug_image("landcover_debug_post_osm_water");
     }
@@ -539,13 +595,8 @@ fn run_cli() {
 }
 
 fn main() {
-    // If on Windows, free and reattach to the parent console when using as a CLI tool
-    // Either of these can fail, but if they do it is not an issue, so the return value is ignored
     #[cfg(target_os = "windows")]
-    unsafe {
-        let _ = FreeConsole();
-        let _ = AttachConsole(ATTACH_PARENT_PROCESS);
-    }
+    attach_parent_console();
 
     // Only run CLI mode if the user supplied args.
     #[cfg(feature = "gui")]

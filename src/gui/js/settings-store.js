@@ -1,6 +1,6 @@
 // Persistence, per-setting revert and global reset for the Settings modal.
-// Values live in one localStorage blob. The six preferences that already had
-// their own keys (language, map theme, world format, Luanti, save path,
+// Values live in one localStorage blob. The preferences that already had their
+// own keys (language, map theme, world format, Luanti, the two save paths,
 // telemetry) keep them and are only listed here for revert and reset.
 // Defaults come from the HTML attributes, which JS assignments never change,
 // so there is no ordering hazard with initSettings().
@@ -33,6 +33,7 @@ const SETTINGS = [
   { id: 'gamemode-group', kind: 'segmented', store: OWN, valueAttr: 'data-gamemode' },
   { id: 'world-time-slider', kind: 'number', store: OWN },
   { id: 'map-item-toggle', kind: 'checkbox', store: OWN },
+  { id: 'signage-group', kind: 'segmented', store: OWN, valueAttr: 'data-signage' },
   { id: 'disable-height-limit-toggle', kind: 'checkbox', store: OWN },
   { id: 'aws-only-elevation-toggle', kind: 'checkbox', store: OWN },
   { id: 'bake-lighting-toggle', kind: 'checkbox', store: OWN },
@@ -49,6 +50,7 @@ const SETTINGS = [
 
   // Application
   { id: 'save-path-input', kind: 'text', store: EXTERNAL, dynamicDefault: 'savePath' },
+  { id: 'bedrock-save-path-input', kind: 'text', store: EXTERNAL, dynamicDefault: 'bedrockSavePath' },
   { id: 'language-select', kind: 'select', store: EXTERNAL, dynamicDefault: 'language' },
 
   // Consent record, not a preference. The user answered it on first run and the
