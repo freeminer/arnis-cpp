@@ -1,4 +1,5 @@
 #include "advertising.h"
+#include "signage.h"
 #include "../deterministic_rng.h"
 #include <algorithm>
 
@@ -7,7 +8,8 @@ namespace arnis
 namespace advertising
 {
 
-void generate_advertising(WorldEditor &editor, const ProcessedNode &node)
+void generate_advertising(WorldEditor &editor, const ProcessedNode &node,
+		const RoadMaskBitmap &road_mask)
 {
 	// Skip if 'layer' or 'level' is negative in the tags
 	auto it_layer = node.tags.find("layer");
@@ -35,7 +37,9 @@ void generate_advertising(WorldEditor &editor, const ProcessedNode &node)
 	auto it_advertising = node.tags.find("advertising");
 	if (it_advertising != node.tags.end()) {
 		const std::string &advertising_type = it_advertising->second;
-		if (advertising_type == "column") {
+		if (advertising_type == "billboard") {
+			signage::generate_billboard(editor, node, road_mask);
+		} else if (advertising_type == "column") {
 			generate_advertising_column(editor, node);
 		} else if (advertising_type == "flag") {
 			generate_advertising_flag(editor, node);
@@ -47,6 +51,9 @@ void generate_advertising(WorldEditor &editor, const ProcessedNode &node)
 
 void generate_advertising_column(WorldEditor &editor, const ProcessedNode &node)
 {
+	if (signage::generate_column(editor, node)) {
+		return;
+	}
 	int x = node.x;
 	int z = node.z;
 
@@ -103,6 +110,9 @@ void generate_advertising_flag(WorldEditor &editor, const ProcessedNode &node)
 
 void generate_poster_box(WorldEditor &editor, const ProcessedNode &node)
 {
+	if (signage::generate_poster_box_posters(editor, node)) {
+		return;
+	}
 	int x = node.x;
 	int z = node.z;
 

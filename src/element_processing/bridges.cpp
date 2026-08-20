@@ -130,3 +130,151 @@ void generate_bridges(
 }
 
 }
+
+// BridgeStructureMap implementation
+BridgeStructureMap BridgeStructureMap::build(
+		const std::vector<ProcessedElement> &elements,
+		const WorldEditor &editor,
+		const bridge_styles::BridgeOutlineIndex &outlines) {
+	BridgeStructureMap result;
+
+	std::vector<const ProcessedWay*> bridge_ways;
+	std::vector<const ProcessedWay*> other_highway_ways;
+
+	for (const auto &elem : elements) {
+		if (elem.is_way()) {
+			const auto &way = elem.as_way();
+			if (!way.tags.contains("highway") || way.nodes.size() < 2) continue;
+			if (is_bridge_way(way)) {
+				bridge_ways.push_back(&way);
+			} else {
+				other_highway_ways.push_back(&way);
+			}
+		}
+	}
+
+	if (bridge_ways.empty()) return result;
+
+	// Build bridge member info for each bridge way
+	for (const auto *way : bridge_ways) {
+		if (way->nodes.size() < 2) continue;
+
+		const auto &start = way->nodes.front();
+		const auto &end = way->nodes.back();
+		auto *ground = const_cast<WorldEditor*>(&editor)->get_ground();
+
+		BridgeMemberInfo info;
+		if (ground) {
+			info.deck_y = std::max(
+				ground->level(XZPoint(start.x, start.z)),
+				ground->level(XZPoint(end.x, end.z))
+			);
+		}
+
+		// Determine bridge style
+		info.style = bridge_styles::resolve_bridge_style(way->tags);
+
+		auto way_id = static_cast<std::int64_t>(way->id);
+		result.members_.insert({way_id, info});
+	}
+
+	return result;
+}
+
+BridgeMemberInfo* BridgeStructureMap::lookup_member(std::int64_t way_id) {
+	auto it = members_.find(way_id);
+	return it != members_.end() ? &it->second : nullptr;
+}
+
+const BridgeMemberInfo* BridgeStructureMap::lookup_member(std::int64_t way_id) const {
+	auto it = members_.find(way_id);
+	return it != members_.end() ? &it->second : nullptr;
+}
+
+BridgeRampInfo* BridgeStructureMap::lookup_ramp(std::int64_t way_id) {
+	auto it = ramps_.find(way_id);
+	return it != ramps_.end() ? &it->second : nullptr;
+}
+
+const BridgeRampInfo* BridgeStructureMap::lookup_ramp(std::int64_t way_id) const {
+	auto it = ramps_.find(way_id);
+	return it != ramps_.end() ? &it->second : nullptr;
+}
+
+// BridgeSurfaceMap implementation
+BridgeSurfaceMap BridgeSurfaceMap::build(
+		const std::vector<ProcessedElement> &elements,
+		const BridgeStructureMap &structures,
+		double scale) {
+	BridgeSurfaceMap result;
+
+	for (const auto &elem : elements) {
+		if (elem.is_way()) {
+			const auto &way = elem.as_way();
+			auto way_id = static_cast<std::int64_t>(way->id);
+			auto *member = const_cast<BridgeStructureMap*>(&structures)->lookup_member(way_id);
+			if (!member) continue;
+
+			int deck_y = member->deck_y;
+			if (deck_y == 0) continue;
+
+			// Mark deck surface
+			for (size_t i = 1; i < way.nodes.size(); ++i) {
+				const auto &prev = way.nodes[i - 1];
+				const auto &cur = way.nodes[i];
+
+				double dx = cur.x - prev.x;
+				double dz = cur.z - prev.z;
+				double dist = std::sqrt(dx * dx + dz * dz);
+				int steps = static_cast<int>(std::max(1.0, dist * scale));
+
+				for (int t = 0; t <= steps; ++t) {
+					int x = static_cast<int>(std::round(prev.x + (dx * t / steps)));
+					int z = static_cast<int>(std::round(prev.z + (dz * t / steps)));
+
+					// 2 blocks on either side
+					for (int w = -2; w <= 2; ++w) {
+						float px = static_cast<float>(dz) / (dist + 0.01f);
+						float pz = static_cast<float>(-dx) / (dist + 0.01f);
+						int wx = static_cast<int>(std::round(x + px * w));
+						int wz = static_cast<int>(std::round(z + pz * w));
+						result.deck_y_.try_emplace({wx, wz}, deck_y);
+					}
+				}
+			}
+		}
+	}
+
+	return result;
+}
+
+std::optional<int> BridgeSurfaceMap::deck_y_at(int x, int z) const {
+	auto it = deck_y_.find({x, z});
+	return it != deck_y_.end() ? std::optional<int>(it->second) : std::nullopt;
+}
+
+std::optional<int> BridgeSurfaceMap::nearby_deck_y(int x, int z, int radius) const {
+	// Simple nearest-neighbor search
+	for (int r = 0; r <= radius; ++r) {
+		for (int dz = -r; dz <= r; ++dz) {
+			for (int dx = -r; dx <= r; ++dx) {
+				if (std::max(std::abs(dx), std::abs(dz)) != r) continue;
+				auto it = deck_y_.find({x + dx, z + dz});
+				if (it != deck_y_.end()) {
+					return it->second;
+				}
+			}
+		}
+	}
+	return std::nullopt;
+}
+
+bool BridgeSurfaceMap::contains(int x, int z) const {
+	return deck_y_at(x, z).has_value();
+}
+
+bool is_bridge_way(const ProcessedWay &way) {
+	return way.tags.contains("bridge") || way.tags.contains("layer");
+}
+
+} // namespace bridges

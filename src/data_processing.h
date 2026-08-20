@@ -5,9 +5,30 @@
 #include <algorithm>
 #include <filesystem>
 #include <string>
+#include <vector>
 
 namespace arnis
 {
+
+// Forward declarations
+struct ProcessedElement;
+class WorldEditor;
+struct Args;
+class Ground;
+struct XZBBox;
+
+// Hash for pair<string, uint64_t> used in StillWaterSurfaces
+struct PairHashStringUint
+{
+	std::size_t operator()(const std::pair<std::string, std::uint64_t> &p) const noexcept
+	{
+		// Simple hash combining string hash and uint64
+		std::size_t h1 = std::hash<std::string>{}(p.first);
+		std::size_t h2 = std::hash<std::uint64_t>{}(p.second);
+		return h1 ^ (h2 << 1);
+	}
+};
+
 enum class WorldFormat
 {
 	JavaAnvil,
@@ -110,6 +131,26 @@ struct GenerationProgress
 		   ground_end = 90.0, saving_start = 90.0, saving_end = 97.0,
 		   finalizing_start = 97.0, finalizing_end = 100.0;
 };
+
+/// Water surface Y of every still OSM water body, resolved once per element.
+struct StillWaterSurfaces
+{
+	std::unordered_map<std::pair<std::string, std::uint64_t>, int, PairHashStringUint> surfaces;
+	
+	int get(const std::string &kind, std::uint64_t id) const
+	{
+		auto it = surfaces.find({kind, id});
+		return it != surfaces.end() ? it->second : -1000; // Below world
+	}
+	bool has(const std::string &kind, std::uint64_t id) const
+	{
+		return surfaces.find({kind, id}) != surfaces.end();
+	}
+};
+
+/// Pre-scan water polygon surfaces so a body spanning many tiles is measured once.
+StillWaterSurfaces prescan_still_surfaces(
+		const std::vector<ProcessedElement> &elements, const Ground *ground, const XZBBox &xzbbox);
 inline double generation_stage_progress(const GenerationProgress &p,
 		double world_fraction, double ground_fraction, bool saving)
 {

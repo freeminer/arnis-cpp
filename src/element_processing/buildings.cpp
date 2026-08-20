@@ -44,98 +44,6 @@ void generate_tank_structure(
 namespace buildings
 {
 
-/*
-
-// Basic placeholder types and constants
-using Block = int;
-
-struct XZPoint {
-    int x;
-    int z;
-    XZPoint(int x_, int z_) : x(x_), z(z_) {}
-    static XZPoint new_point(int x_, int z_) { return XZPoint(x_, z_); }
-};
-
-struct Ground {
-    int level(const XZPoint& p) const;
-};
-
-struct WorldEditor {
-    std::pair<int,int> get_min_coords() const;
-    Ground* get_ground() const; // may return nullptr
-    void set_block(Block b, int x, int y, int z, const Block* alternatives = nullptr, std::size_t alt_count = 0) const;
-    void set_block_absolute(Block b, int x, int y, int z, const Block* alternatives = nullptr, std::size_t alt_count = 0) const;
-};
-
-struct Node { int x; int z; };
-
-struct ProcessedWay {
-    std::vector<Node> nodes;
-    std::unordered_map<std::string, std::string> tags;
-};
-
-struct Args {
-    bool terrain;
-    int ground_level;
-    double scale;
-    bool roof;
-    bool interior;
-    std::optional<int> timeout;
-    std::optional<int> timeout_ref() const { return timeout; }
-};
-
-// Example block constants (placeholders)
-constexpr Block POLISHED_ANDESITE = 1;
-constexpr Block SMOOTH_STONE = 2;
-constexpr Block STONE_BRICKS = 3;
-constexpr Block MUD_BRICKS = 4;
-constexpr Block ANDESITE = 5;
-constexpr Block CHISELED_STONE_BRICKS = 6;
-constexpr Block STONE_BRICK_SLAB = 7;
-constexpr Block OAK_FENCE = 8;
-constexpr Block OAK_PLANKS = 9;
-constexpr Block STONE_BLOCK_SLAB = 10;
-constexpr Block SMOOTH_STONE_BLOCK = 11;
-constexpr Block COBBLESTONE = 12;
-constexpr Block COBBLESTONE_WALL = 13;
-constexpr Block STONE_BRICKS_BLOCK = 14;
-constexpr Block GLOWSTONE = 15;
-constexpr Block COBBLESTONE_BLOCK = 16;
-// Helper function declarations (assumed implemented elsewhere)
-int multiply_scale(int value, double scale);
-std::vector<std::pair<int,int>> flood_fill_area(const std::vector<std::pair<int,int>>& polygon_coords, const std::optional<int>& timeout);
-Block get_castle_wall_block();
-std::optional<std::tuple<uint8_t,uint8_t,uint8_t>> color_text_to_rgb_tuple(const std::string& text);
-Block get_building_wall_block_for_color(const std::tuple<uint8_t,uint8_t,uint8_t>& rgb);
-Block get_fallback_building_block();
-Block get_random_floor_block();
-Block get_window_block_for_building_type(const std::string& building_type);
-void generate_bridge(WorldEditor* editor, const ProcessedWay& element, const std::optional<int>& timeout);
-std::vector<std::tuple<int,int,int>> bresenham_line(int x1, int y1, int z1, int x2, int y2, int z2);
-void generate_building_interior(WorldEditor* editor,
-                                const std::vector<std::pair<int,int>>& floor_area,
-                                int min_x, int min_z, int max_x, int max_z,
-                                int start_y_offset, int building_height,
-                                Block wall_block,
-                                const std::vector<int>& floor_levels,
-                                const Args& args,
-                                const ProcessedWay& element,
-                                int abs_terrain_offset,
-                                bool is_abandoned_building,
-                                const CoordinateBitmap& building_passages,
-                                bool has_sloped_roof);
-void generate_roof(WorldEditor* editor,
-                   const ProcessedWay& element,
-                   int start_y_offset,
-                   int building_height,
-                   Block floor_block,
-                   Block wall_block,
-                   Block accent_block,
-                   RoofType roof_type,
-                   const std::vector<std::pair<int,int>>& cached_floor_area,
-                   int abs_terrain_offset);
-
-*/
 
 // RoofType enum
 enum class RoofType
@@ -2955,72 +2863,6 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 				covered_by_sibling);
 }
 
-/*
-#include <cstdint>
-#include <cmath>
-#include <vector>
-#include <unordered_map>
-#include <limits>
-#include <algorithm>
-#include <random>
-#include <utility>
-
-namespace heck {
-
-// Basic types and helpers
-enum class StairFacing { North, South, East, West };
-enum class StairShape { Straight, OuterLeft, OuterRight };
-
-struct Block {
-    int id;
-};
-
-struct BlockWithProperties {
-    Block base;
-    StairFacing facing;
-    StairShape shape;
-    bool has_props;
-
-    static BlockWithProperties simple(Block b) {
-        return BlockWithProperties{b, StairFacing::North, StairShape::Straight, false};
-    }
-};
-
-struct Node {
-    int32_t x;
-    int32_t z;
-};
-
-struct ProcessedWay {
-    std::vector<Node> nodes;
-};
-
-enum class RoofType { Flat, Gabled, Hipped, Skillion, Pyramidal, Dome };
-
-struct WorldEditor {
-    void set_block_absolute(Block block, int32_t x, int32_t y, int32_t z, void* a, void* b);
-    void set_block_with_properties_absolute(BlockWithProperties bwp, int32_t x, int32_t y, int32_t z, void* a, void* b);
-};
-
-// Helpers referenced in the original code (stubs)
-inline Block get_stair_block_for_material(Block material) {
-    return material;
-}
-
-inline BlockWithProperties create_stair_with_properties(Block material, StairFacing facing, StairShape shape) {
-    return BlockWithProperties{material, facing, shape, true};
-}
-
-// Hash for pair<int32_t,int32_t>
-struct pair_hash {
-    std::size_t operator()(std::pair<int32_t,int32_t> const& p) const noexcept {
-        std::uint64_t a = static_cast<std::uint32_t>(p.first);
-        std::uint64_t b = static_cast<std::uint32_t>(p.second);
-        std::uint64_t res = (a << 32) ^ b;
-        return static_cast<std::size_t>(res ^ (res >> 33));
-    }
-};
-*/
 
 // multiply_scale implementation
 inline int32_t multiply_scale(int32_t value, double scale_factor)
@@ -3763,16 +3605,6 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 	}
 }
 
-/*
-#include <vector>
-#include <string>
-#include <optional>
-#include <tuple>
-#include <chrono>
-#include <unordered_map>
-#include <utility>
-#include <stdexcept>
-*/
 
 void generate_building_from_relation(
 		WorldEditor &editor, const ProcessedRelation &relation, const Args &args)

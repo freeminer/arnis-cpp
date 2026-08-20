@@ -18,100 +18,6 @@ namespace arnis
 namespace man_made
 {
 
-#if 0
-enum class Block {
-    OAK_SLAB,
-    OAK_LOG,
-    IRON_BLOCK,
-    IRON_BARS,
-    GRAY_CONCRETE,
-    BRICK,
-    WATER,
-    STONE_BRICKS,
-    OAK_FENCE,
-    POLISHED_ANDESITE,
-    SMOOTH_STONE
-};
-
-struct Args {
-    std::map<std::string, std::string> values;
-};
-
-struct ProcessedNode {
-    int x{};
-    int z{};
-    std::map<std::string, std::string> tags;
-};
-
-struct ProcessedWay {
-    std::vector<ProcessedNode> nodes;
-    std::map<std::string, std::string> tags;
-};
-
-struct ProcessedElement {
-    // Either way_nodes has content (Way) or single_node has content (Node)
-    std::optional<std::vector<ProcessedNode>> way_nodes;
-    std::optional<ProcessedNode> single_node;
-    std::map<std::string, std::string> tags;
-
-    const std::map<std::string, std::string>& tags_ref() const {
-        return tags;
-    }
-
-    std::optional<std::string> tag(const std::string& key) const {
-        auto it = tags.find(key);
-        if (it != tags.end()) {
-            return std::optional<std::string>(it->second);
-        }
-        return std::optional<std::string>();
-    }
-
-    std::optional<ProcessedNode> first_node() const {
-        if (single_node.has_value()) {
-            return single_node;
-        }
-        if (way_nodes.has_value() && !way_nodes->empty()) {
-            return std::optional<ProcessedNode>(way_nodes->front());
-        }
-        return std::optional<ProcessedNode>();
-    }
-
-    const std::vector<ProcessedNode>& nodes_vec() const {
-        static const std::vector<ProcessedNode> empty_vec{};
-        if (way_nodes.has_value()) {
-            return *way_nodes;
-        }
-        return empty_vec;
-    }
-};
-
-class WorldEditor {
-public:
-    void set_block(Block block, int x, int y, int z,
-                   std::optional<std::vector<Block>> = std::optional<std::vector<Block>>(),
-                   std::optional<int> = std::optional<int>()) {
-        // implementation-specific: place single block at (x,y,z)
-    }
-
-    void fill_blocks(Block block, int x1, int y1, int z1, int x2, int y2, int z2,
-                     std::optional<std::vector<Block>> = std::optional<std::vector<Block>>(),
-                     std::optional<int> = std::optional<int>()) {
-        int xmin = std::min(x1, x2);
-        int xmax = std::max(x1, x2);
-        int ymin = std::min(y1, y2);
-        int ymax = std::max(y1, y2);
-        int zmin = std::min(z1, z2);
-        int zmax = std::max(z1, z2);
-        for (int x = xmin; x <= xmax; ++x) {
-            for (int y = ymin; y <= ymax; ++y) {
-                for (int z = zmin; z <= zmax; ++z) {
-                    set_block(block, x, y, z, std::optional<std::vector<Block>>(), std::optional<int>());
-                }
-            }
-        }
-    }
-};
-#endif
 
 std::optional<int> parse_int(const std::optional<std::string> &s)
 {
@@ -124,27 +30,6 @@ std::optional<int> parse_int(const std::optional<std::string> &s)
 	}
 }
 
-#if 0
-std::vector<std::tuple<int,int,int>> bresenham_line(int x1, int y1, int z1, int x2, int /*y2*/, int z2) {
-    // 2D Bresenham on X-Z plane. Y retained as y1 for all points.
-    std::vector<std::tuple<int,int,int>> out;
-    int dx = std::abs(x2 - x1);
-    int dz = std::abs(z2 - z1);
-    int sx = x1 < x2 ? 1 : -1;
-    int sz = z1 < z2 ? 1 : -1;
-    int err = (dx > dz ? dx : -dz) / 2;
-    int x = x1;
-    int z = z1;
-    while (true) {
-        out.emplace_back(x, y1, z);
-        if (x == x2 && z == z2) break;
-        int e2 = err;
-        if (e2 > -dx) { err -= dz; x += sx; }
-        if (e2 < dz)  { err += dx; z += sz; }
-    }
-    return out;
-}
-#endif
 
 void generate_pier(WorldEditor &editor, const ProcessedElement &element)
 {

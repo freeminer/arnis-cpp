@@ -73,53 +73,7 @@ Block subway_shell_block(int x, int y, int z)
 	return STONE_BRICKS;
 }
 
-// --- Block definitions (example) ---
-#if 0
-enum class Block {
-    GRAVEL,
-    OAK_LOG,
-    RAIL_NORTH_SOUTH,
-    RAIL_EAST_WEST,
-    RAIL_NORTH_WEST,
-    RAIL_NORTH_EAST,
-    RAIL_SOUTH_WEST,
-    RAIL_SOUTH_EAST,
-    IRON_BLOCK,
-    // ... add more as needed
-};
-
-// --- Minimal stubs for types used in functions ---
-struct XZ {
-    int x;
-    int z;
-};
-
-struct Node {
-    int bx;
-    int bz;
-    XZ xz() const { return {bx, bz}; }
-};
-
-struct ProcessedWay {
-    vector<Node> nodes;
-    unordered_map<string, string> tags;
-};
-
-// WorldEditor stub - replace with your real implementation
-struct WorldEditor {
-    // metadata arguments are optional placeholders to match Rust's None, None
-    void set_block(Block block, int x, int y, int z, optional<int> = nullopt, optional<int> = nullopt) {
-        // Implement block placement in your world/editor here.
-        // This stub does nothing.
-    }
-};
-
-// Assume this function exists somewhere in your codebase:
-vector<tuple<int,int,int>> bresenham_line(int x1, int y1, int z1, int x2, int y2, int z2);
-
 // --- Helper functions translated from Rust ---
-
-#endif
 
 vector<tuple<int, int, int>> smooth_diagonal_rails(
 		const vector<tuple<int, int, int>> &points)

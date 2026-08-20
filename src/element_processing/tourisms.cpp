@@ -6,38 +6,14 @@
 #include <vector>
 
 #include "../../../arnis_adapter.h"
+#include "signage.h"
+
 namespace arnis
 {
 
 namespace tourisms
 {
 
-#if 0
-
-namespace crate {
-namespace block_definitions {
-constexpr int COBBLESTONE_WALL = 1;
-constexpr int OAK_PLANKS = 2;
-} // namespace block_definitions
-
-namespace osm_parser {
-struct ProcessedNode {
-    std::unordered_map<std::string, std::string> tags;
-    int x;
-    int z;
-};
-} // namespace osm_parser
-
-namespace world_editor {
-struct WorldEditor {
-    void set_block(int block, int x, int y, int z, std::optional<int> data, std::optional<int> meta) {
-        // Implementation omitted.
-    }
-};
-} // namespace world_editor
-
-namespace generators {
-#endif
 
 std::optional<int> parse_int(const std::string &s)
 {
@@ -53,8 +29,8 @@ std::optional<int> parse_int(const std::string &s)
 	}
 }
 
-void generate_tourisms(crate::world_editor::WorldEditor &editor,
-		const crate::osm_parser::ProcessedNode &element)
+void generate_tourisms(WorldEditor &editor, const ProcessedNode &element,
+		const RoadMaskBitmap &road_mask)
 {
 	auto it_layer = element.tags.find("layer");
 	if (it_layer != element.tags.end()) {
@@ -83,12 +59,15 @@ void generate_tourisms(crate::world_editor::WorldEditor &editor,
 			if (it_info != element.tags.end()) {
 				const std::string &info_type = it_info->second;
 				if (info_type != "office" && info_type != "visitor_centre") {
-					editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, 1, z,
-							std::nullopt, std::nullopt);
-					editor.set_block(crate::block_definitions::OAK_PLANKS, x, 2, z,
-							std::nullopt, std::nullopt);
+					// Try to generate information board with decal first
+					if (signage::generate_information_board(editor, element, road_mask)) {
+						return;
+					}
+					// Fallback: simple banner board if decal unavailable
+					editor.set_block(COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
+					editor.set_block(OAK_PLANKS, x, 2, z, std::nullopt, std::nullopt);
 
-					const int abs_y = editor.get_absolute_y(x, 2, z);
+					const int abs_y = editor.get_ground_level(x, 0, z) + 2;
 					const std::vector<std::pair<std::string, std::string>> info_patterns =
 							{
 									{"blue", "minecraft:stripe_left"},
@@ -113,5 +92,5 @@ void generate_tourisms(crate::world_editor::WorldEditor &editor,
 	}
 }
 
-} // namespace generators
-} // namespace crate
+} // namespace tourisms
+} // namespace arnis

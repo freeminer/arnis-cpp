@@ -22,6 +22,7 @@
 #include "../../../arnis_adapter.h"
 #include "../bresenham.h"
 #include "args.h"
+#include "../data_processing.h"
 namespace arnis
 {
 
@@ -474,7 +475,7 @@ static void generate_water_areas(WorldEditor &editor,
 		const std::vector<std::vector<ProcessedNode>> &outers,
 		const std::vector<std::vector<ProcessedNode>> &inners,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint)
+		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface)
 {
 	// Calculate polygon bounding box to limit fill area
 	int32_t poly_min_x = std::numeric_limits<int32_t>::max();
@@ -527,8 +528,11 @@ static void generate_water_areas(WorldEditor &editor,
 		inners_xz.push_back(std::move(v));
 	}
 
-	const auto still_surface =
+	std::optional<int> still_surface = precomputed_surface;
+	if (!still_surface.has_value()) {
+		still_surface =
 			still_surface_level(editor, min_x, min_z, max_x, max_z, outers_xz, inners_xz);
+	}
 	scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf,
 			road_mask, tunnel_footprint, still_surface);
 	structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
@@ -643,7 +647,7 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &element,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint)
+		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface)
 {
 	std::vector<std::vector<ProcessedNode>> outers = {{element.nodes}};
 
@@ -653,12 +657,13 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &eleme
 		return;
 	}
 
-	generate_water_areas(editor, outers, {}, bwf, road_mask, tunnel_footprint);
+	generate_water_areas(editor, outers, {}, bwf, road_mask, tunnel_footprint, precomputed_surface);
 }
 
 void generate_water_areas_from_relation(WorldEditor &editor,
 		const ProcessedRelation &element, const water_depth::BigWaterField &bwf,
-		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint)
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint,
+		std::optional<int> precomputed_surface)
 {
 	// Check if this is a water relation (either with water tag or natural=water or natural=bay)
 	bool is_water = element.tags.find("water") != element.tags.end() || ([&]() {
@@ -747,7 +752,7 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 		return;
 	}
 
-	generate_water_areas(editor, outers, inners, bwf, road_mask, tunnel_footprint);
+	generate_water_areas(editor, outers, inners, bwf, road_mask, tunnel_footprint, precomputed_surface);
 }
 
 }
