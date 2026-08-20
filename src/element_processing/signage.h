@@ -1,9 +1,8 @@
 #pragma once
 #include "../args.h"
-#include "../coordinate_system/cartesian.h"
 #include "../decals/registry.h"
 #include "../osm_parser.h"
-#include "../world_editor/world_editor.h"
+#include "world_editor.h"
 #include <memory>
 #include <unordered_set>
 namespace arnis::signage
