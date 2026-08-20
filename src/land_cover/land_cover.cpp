@@ -1,5 +1,6 @@
 #include "land_cover.h"
 #include "cog.h"
+#include "shoreline.h"
 #include "../../http.h"
 #include <filesystem>
 #include "../../arnis_adapter.h"
@@ -17,8 +18,30 @@
 #include <utility>
 #include <unordered_map>
 
+namespace arnis::highways
+{
+int highway_block_range(const std::string &highway_type,
+		const std::unordered_map<std::string, std::string> &tags, double scale);
+}
+
 namespace arnis::land_cover
 {
+namespace
+{
+double cells_per_meter(const GeographicBounds &bbox, std::size_t grid_width)
+{
+	constexpr double earth_radius_m = 6371000.0;
+	constexpr double pi = 3.14159265358979323846;
+	const double latitude = (bbox.min_lat + bbox.max_lat) * 0.5 * pi / 180.0;
+	const double delta = (bbox.max_lng - bbox.min_lng) * pi / 180.0;
+	const double sine = std::cos(latitude) * std::sin(delta * 0.5);
+	const double q = std::clamp(sine * sine, 0.0, 1.0);
+	const double width_m =
+			earth_radius_m * 2.0 * std::atan2(std::sqrt(q), std::sqrt(1.0 - q));
+	return width_m > 0.0 && grid_width > 0 ? grid_width / width_m : 1.0;
+}
+}
+
 std::string esa_tile_url(int lat, int lng)
 {
 	char ns = 'N', ew = 'E';
@@ -65,6 +88,7 @@ LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t wi
 		return out;
 	out.width = width;
 	out.height = height;
+	out.cells_per_meter = cells_per_meter(bbox, width);
 	out.grid.assign(height, std::vector<uint8_t>(width));
 	const auto fetch = [](const std::string &url, std::uint64_t offset,
 							   std::uint64_t length) {
@@ -78,9 +102,10 @@ LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t wi
 				bbox.max_lat, bbox.max_lng, out.grid, fetch);
 	if (!any)
 		return {};
+	reconstruct_water_shoreline(out.grid, width, height, out.cells_per_meter);
 	fill_land_cover_gaps(out.grid, width, height);
 	if (smooth_boundaries)
-		smooth_land_cover_boundaries(out.grid, width, height);
+		smooth_land_cover_boundaries(out.grid, width, height, out.cells_per_meter);
 	out.water_distance = compute_water_distance(out.grid, width, height);
 	out.refresh_water_blend_grid();
 	return out;
@@ -135,17 +160,17 @@ void fill_land_cover_gaps(
 	}
 }
 
-void smooth_land_cover_boundaries(
-		std::vector<std::vector<uint8_t>> &grid, std::size_t width, std::size_t height)
+void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
+		std::size_t width, std::size_t height, double cells_per_meter_value)
 {
 	width = std::min(width, grid.empty() ? std::size_t{0} : grid.front().size());
 	height = std::min(height, grid.size());
 	if (width == 0 || height == 0)
 		return;
-	constexpr double sigma = 2.0;
-	constexpr int radius = 6;
-	constexpr int side = radius * 2 + 1;
-	std::array<double, side * side> kernel{};
+	const double sigma = std::max(2.0, 2.0 * cells_per_meter_value);
+	const int radius = static_cast<int>(std::ceil(sigma * 3.0));
+	const int side = radius * 2 + 1;
+	std::vector<double> kernel(static_cast<std::size_t>(side * side));
 	for (int z = -radius; z <= radius; ++z)
 		for (int x = -radius; x <= radius; ++x)
 			kernel[std::size_t(z + radius) * side + std::size_t(x + radius)] =
@@ -198,6 +223,7 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 		return out;
 	out.width = width;
 	out.height = height;
+	out.cells_per_meter = cells_per_meter(bbox, width);
 	out.grid.assign(height, std::vector<uint8_t>(width));
 	bool has_data = false;
 	const double lat_span = bbox.max_lat - bbox.min_lat;
@@ -221,26 +247,32 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 		}
 	if (!has_data)
 		return {};
+	reconstruct_water_shoreline(out.grid, width, height, out.cells_per_meter);
 	fill_land_cover_gaps(out.grid, width, height);
 	if (smooth_boundaries)
-		smooth_land_cover_boundaries(out.grid, width, height);
+		smooth_land_cover_boundaries(out.grid, width, height, out.cells_per_meter);
 	out.water_distance = compute_water_distance(out.grid, width, height);
 	out.refresh_water_blend_grid();
 	return out;
 }
 
 void apply_bridge_land_cover_repair(LandCoverData &data,
-		const std::vector<ProcessedElement> &elements, const XZBBox &bbox, double scale)
+		std::vector<std::vector<float>> &heights, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox, double scale)
 {
-	if (data.width < 2 || data.height < 2)
+	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
+			heights.size() < data.height ||
+			std::any_of(heights.begin(), heights.begin() + data.height,
+					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
 	// real water/vegetation out of the mask is what lets bridge footprints be
 	// reclassified from their surrounding land-cover rather than overwritten.
 	std::vector<std::uint64_t> mask((data.width * data.height + 63) / 64);
 	std::vector<std::uint32_t> bridge_cells;
-	const double sx = double(data.width - 1) / std::max(1, bbox.max_x() - bbox.min_x());
-	const double sz = double(data.height - 1) / std::max(1, bbox.max_z() - bbox.min_z());
+	const double sx = double(data.width - 1) / double(world_width - 1);
+	const double sz = double(data.height - 1) / double(world_height - 1);
 	for (const auto &e : elements) {
 		if (e.type != ElementType::Way || !e.way || !bridges::is_bridge_way(*e.way) ||
 				e.way->nodes.size() < 2)
@@ -248,27 +280,17 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 		auto nodes = e.way->nodes;
 		int half_width = 1;
 		const auto highway = e.way->tags.get("highway");
-		if (highway == "motorway" || highway == "primary" || highway == "trunk")
-			half_width = 5;
-		else if (highway == "secondary")
-			half_width = 4;
-		else if (highway == "tertiary")
-			half_width = 2;
-		else if (!highway.empty())
-			half_width =
-					(highway == "footway" || highway == "pedestrian" ||
-							highway == "path" || highway == "track" || highway == "steps")
-							? 1
-							: 2;
+		if (!highway.empty())
+			half_width = highways::highway_block_range(highway, e.way->tags, scale);
 		else if (e.way->tags.find("railway") != e.way->tags.end()) {
 			try {
 				half_width += std::max(0, std::stoi(e.way->tags.get("tracks")) - 1);
 			} catch (...) {
 			}
-		}
-		half_width = std::max(1, scale < 1.0 ? int(std::floor(half_width * scale))
-											 : half_width) +
-					 8;
+		} else
+			half_width = std::max(
+					1, scale < 1.0 ? int(std::floor(half_width * scale)) : half_width);
+		half_width += 8;
 		const int range_x = std::max(1, int(std::ceil(half_width * sx)));
 		const int range_z = std::max(1, int(std::ceil(half_width * sz)));
 		for (std::size_t i = 1; i < nodes.size(); ++i) {
@@ -298,8 +320,19 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 	auto marked = [&](std::size_t i) { return (mask[i >> 6] >> (i & 63)) & 1U; };
 	constexpr std::array<std::pair<int, int>, 4> neighbours{
 			{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
+	struct Assignment
+	{
+		std::uint32_t cell;
+		std::uint8_t cls;
+		float water_level;
+	};
 	std::unordered_map<std::uint32_t, std::uint8_t> assigned;
-	std::deque<std::pair<std::uint32_t, std::uint8_t>> current, next;
+	std::unordered_map<std::uint32_t, float> water_levels;
+	std::deque<Assignment> current, next;
+	auto water_reachable = [&](std::size_t cell, float level) {
+		const float h = heights[cell / data.width][cell % data.width];
+		return !std::isfinite(h) || !std::isfinite(level) || h <= level + 6.f;
+	};
 	// Water-adjacent cells seed first, deliberately giving river crossings water
 	// precedence over neighbouring built-up terrain.
 	for (const auto cell : bridge_cells) {
@@ -310,8 +343,12 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 				continue;
 			const auto ni = std::size_t(nz) * data.width + nx;
 			if (!marked(ni) && data.grid[nz][nx] == LC_WATER) {
+				const float level = heights[nz][nx];
+				if (!water_reachable(cell, level))
+					continue;
 				assigned[cell] = LC_WATER;
-				current.push_back({cell, LC_WATER});
+				water_levels[cell] = level;
+				current.push_back({cell, LC_WATER, level});
 				break;
 			}
 		}
@@ -327,14 +364,15 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 				const auto cls = data.grid[nz][nx];
 				if (!marked(ni) && cls && cls != LC_WATER) {
 					assigned[cell] = cls;
-					current.push_back({cell, cls});
+					current.push_back(
+							{cell, cls, std::numeric_limits<float>::quiet_NaN()});
 					break;
 				}
 			}
 		}
 	for (int ring = 1; !current.empty() && ring < 64; ++ring) {
 		while (!current.empty()) {
-			auto [cell, cls] = current.front();
+			auto [cell, cls, level] = current.front();
 			current.pop_front();
 			const int x = cell % data.width, z = cell / data.width;
 			for (const auto [dx, dz] : neighbours) {
@@ -342,9 +380,12 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 				if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
 					continue;
 				const auto ni = std::size_t(nz) * data.width + nx;
-				if (marked(ni) && !assigned.contains(ni)) {
+				if (marked(ni) && !assigned.contains(ni) &&
+						(cls != LC_WATER || water_reachable(ni, level))) {
 					assigned[ni] = cls;
-					next.push_back({std::uint32_t(ni), cls});
+					if (cls == LC_WATER)
+						water_levels[ni] = level;
+					next.push_back({std::uint32_t(ni), cls, level});
 				}
 			}
 		}
@@ -357,6 +398,11 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 			const auto old = data.grid[z][x];
 			if (old != it->second) {
 				data.grid[z][x] = it->second;
+				if (it->second == LC_WATER)
+					if (const auto level = water_levels.find(cell);
+							level != water_levels.end() && std::isfinite(level->second) &&
+							std::isfinite(heights[z][x]) && heights[z][x] > level->second)
+						heights[z][x] = level->second;
 				water_changed |= (old == LC_WATER) != (it->second == LC_WATER);
 			}
 		}
@@ -367,12 +413,19 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 }
 
 void apply_osm_water_override(LandCoverData &data,
-		const std::vector<ProcessedElement> &elements, const XZBBox &bbox)
+		std::vector<std::vector<float>> &heights, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox)
 {
-	if (data.width < 2 || data.height < 2)
+	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
+			heights.size() < data.height ||
+			std::any_of(heights.begin(), heights.begin() + data.height,
+					[&](const auto &row) { return row.size() < data.width; }))
 		return;
-	const double sx = double(data.width - 1) / std::max(1, bbox.max_x() - bbox.min_x());
-	const double sz = double(data.height - 1) / std::max(1, bbox.max_z() - bbox.min_z());
+	const double sx = double(data.width - 1) / double(world_width - 1);
+	const double sz = double(data.height - 1) / double(world_height - 1);
+	const auto guard = build_water_override_guard(
+			data.grid, heights, data.cells_per_meter * data.cells_per_meter);
 	auto tag = [](const tags_t &tags, const char *name) -> const std::string * {
 		auto it = tags.find(name);
 		return it == tags.end() ? nullptr : &it->second;
@@ -381,8 +434,9 @@ void apply_osm_water_override(LandCoverData &data,
 		const auto *natural = tag(w.tags, "natural");
 		const auto *landuse = tag(w.tags, "landuse");
 		const auto *water = tag(w.tags, "water");
-		return (natural && (*natural == "water" || *natural == "bay")) ||
-			   (landuse && *landuse == "reservoir") ||
+		const auto *waterway = tag(w.tags, "waterway");
+		return (natural && *natural == "water") || (landuse && *landuse == "reservoir") ||
+			   (waterway && (*waterway == "dock" || *waterway == "riverbank")) ||
 			   (water && *water != "no" && *water != "0" && *water != "false");
 	};
 	auto is_water_tags = [&](const tags_t &tags) {
@@ -408,8 +462,15 @@ void apply_osm_water_override(LandCoverData &data,
 	};
 	std::size_t changed = 0;
 	auto write_water = [&](int x, int z) {
-		if (data.grid[z][x] != LC_WATER) {
+		if (data.grid[z][x] != LC_WATER && guard.allows(heights, x, z)) {
 			data.grid[z][x] = LC_WATER;
+			if (guard.has_elevation && z < int(guard.nearest_water_y.size()) &&
+					x < int(guard.nearest_water_y[z].size())) {
+				const float water = guard.nearest_water_y[z][x];
+				if (std::isfinite(water) && std::isfinite(heights[z][x]) &&
+						heights[z][x] > water)
+					heights[z][x] = water;
+			}
 			++changed;
 		}
 	};
@@ -467,6 +528,23 @@ void apply_osm_water_override(LandCoverData &data,
 		const auto *waterway = tag(w.tags, "waterway");
 		if (!is_water(w) && !waterway)
 			continue;
+		if (waterway && !is_water(w)) {
+			const auto *layer = tag(w.tags, "layer"), *location = tag(w.tags, "location"),
+					   *tunnel = tag(w.tags, "tunnel"), *covered = tag(w.tags, "covered");
+			const bool underground =
+					(layer && !layer->empty() && layer->front() == '-') ||
+					(location &&
+							(*location == "underground" || *location == "underwater")) ||
+					(tunnel && *tunnel != "no" && *tunnel != "0" && *tunnel != "false") ||
+					(covered &&
+							(*covered == "yes" || *covered == "1" || *covered == "true"));
+			const bool channel = *waterway == "river" || *waterway == "canal" ||
+								 *waterway == "fairway" || *waterway == "stream" ||
+								 *waterway == "flowline" || *waterway == "brook" ||
+								 *waterway == "ditch" || *waterway == "drain";
+			if (underground || !channel)
+				continue;
+		}
 		std::vector<std::pair<int, int>> pts;
 		for (const auto &n : w.nodes)
 			pts.push_back(grid(n.x, n.z));
@@ -534,12 +612,12 @@ static std::vector<double> gaussian_kernel(double sigma)
 
 std::vector<std::vector<float>> compute_water_blend_smooth(
 		const std::vector<std::vector<uint8_t>> &grid, std::size_t width,
-		std::size_t height)
+		std::size_t height, double cells_per_meter_value)
 {
 	if (width == 0 || height == 0)
 		return {};
 
-	const double sigma = 3.0;
+	const double sigma = std::max(3.0, 3.0 * cells_per_meter_value);
 	const auto kernel = gaussian_kernel(sigma);
 	const int radius = static_cast<int>(kernel.size() / 2);
 
@@ -765,7 +843,7 @@ std::vector<std::vector<uint8_t>> compute_water_distance(
 
 void LandCoverData::refresh_water_blend_grid()
 {
-	water_blend_grid = compute_water_blend_smooth(grid, width, height);
+	water_blend_grid = compute_water_blend_smooth(grid, width, height, cells_per_meter);
 }
 
 std::size_t clear_land_cover_cache(const std::filesystem::path &cache_dir)

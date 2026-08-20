@@ -1,6 +1,7 @@
 #pragma once
 
 #include <chrono>
+#include <cmath>
 #include <optional>
 #include <string>
 
@@ -19,6 +20,21 @@ enum class GameMode
 	Creative,
 	Spectator
 };
+enum class SignageLevel
+{
+	None,
+	Basic,
+	Full
+};
+
+inline constexpr double OBJECT_SKIP_SCALE = 0.3;
+inline constexpr double MIN_SCALE = 0.05;
+inline constexpr double MAX_SCALE = 4.0;
+
+inline bool valid_scale(double scale)
+{
+	return std::isfinite(scale) && scale >= MIN_SCALE && scale <= MAX_SCALE;
+}
 
 struct Args
 {
@@ -41,7 +57,7 @@ struct Args
 	// Downloader method (requests/curl/wget) (optional)
 	std::string downloader{std::string("requests")};
 
-	// World scale to use, in blocks per meter
+	// World scale to use, in blocks per meter (1.0 = real size)
 	double scale{1.0};
 
 	// Ground level to use in the Minecraft world
@@ -52,7 +68,14 @@ struct Args
 	GenerationMode mode{GenerationMode::GeoTerrain};
 	bool terrain{true};
 	bool legacy_terrain{false};
-	bool skip_objects() const { return mode == GenerationMode::TerrainOnly; }
+	bool skip_objects() const
+	{
+		return mode == GenerationMode::TerrainOnly || scale < OBJECT_SKIP_SCALE;
+	}
+	bool skip_objects_due_to_scale() const
+	{
+		return mode != GenerationMode::TerrainOnly && scale < OBJECT_SKIP_SCALE;
+	}
 
 	// Enable interior generation (optional)
 	bool interior{false};
@@ -71,6 +94,7 @@ struct Args
 	bool map_item{true};
 	GameMode gamemode{GameMode::Creative};
 	int64_t world_time{6000};
+	SignageLevel signage{SignageLevel::Basic};
 
 	// Enable filling ground (optional)
 	bool fillground{false};

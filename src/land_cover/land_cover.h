@@ -45,6 +45,7 @@ struct LandCoverData
 	std::vector<std::vector<float>> water_blend_grid;
 	std::size_t width{0};
 	std::size_t height{0};
+	double cells_per_meter{1.0};
 
 	void refresh_water_blend_grid();
 };
@@ -100,8 +101,10 @@ LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t gr
 // when a provider streams or incrementally updates a classification grid.
 void fill_land_cover_gaps(
 		std::vector<std::vector<uint8_t>> &grid, std::size_t width, std::size_t height);
-void smooth_land_cover_boundaries(
-		std::vector<std::vector<uint8_t>> &grid, std::size_t width, std::size_t height);
+void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
+		std::size_t width, std::size_t height, double cells_per_meter = 1.0);
+bool reconstruct_water_shoreline(std::vector<std::vector<std::uint8_t>> &grid,
+		std::size_t width, std::size_t height, double cells_per_meter);
 
 uint64_t coord_hash(int32_t x, int32_t z);
 
@@ -111,7 +114,7 @@ std::vector<std::vector<uint8_t>> compute_water_distance(
 
 std::vector<std::vector<float>> compute_water_blend_smooth(
 		const std::vector<std::vector<uint8_t>> &grid, std::size_t width,
-		std::size_t height);
+		std::size_t height, double cells_per_meter = 1.0);
 
 // Elevation-aware OSM-water guard, ported from osm_water_override.rs.  A
 // compact/non-linear land component is protected from line/polygon water
@@ -131,8 +134,15 @@ WaterOverrideGuard build_water_override_guard(
 		const std::vector<std::vector<float>> &heights, double cells_per_m2);
 
 void apply_bridge_land_cover_repair(LandCoverData &data,
-		const std::vector<ProcessedElement> &elements, const XZBBox &bbox, double scale);
+		std::vector<std::vector<float>> &heights, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox, double scale);
 void apply_osm_water_override(LandCoverData &data,
-		const std::vector<ProcessedElement> &elements, const XZBBox &bbox);
+		std::vector<std::vector<float>> &heights, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox);
+void apply_osm_land_override(LandCoverData &land_cover, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox, double scale);
 
 }

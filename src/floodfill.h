@@ -9,6 +9,10 @@ namespace arnis
 {
 namespace floodfill
 {
+// Bitmap flood fills are capped at this bounding-box area. Larger polygons use
+// the scanline path, which allocates only the returned interior cells.
+inline constexpr std::int64_t MAX_FLOOD_FILL_AREA = 25'000'000;
+
 std::vector<std::pair<int, int>> flood_fill_area(
 		const std::vector<std::pair<int, int>> &polygon_coords,
 		const std::chrono::milliseconds *timeout = nullptr);

@@ -35,11 +35,12 @@ private:
 };
 
 BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox);
-int estimate_max_carve_depth(const std::vector<std::vector<std::uint8_t>> &land_cover_grid,
+int estimate_max_carve_depth(
+		const std::vector<std::vector<std::uint8_t>> &land_cover_grid,
 		std::size_t world_width, std::size_t world_height);
 
 void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int depth,
-		const RoadMaskBitmap &road_mask);
+		const RoadMaskBitmap &road_mask, const BigWaterField &bwf);
 
 void carve_lc_water_pass(
 		WorldEditor &editor, const BigWaterField &bwf, const RoadMaskBitmap &road_mask);

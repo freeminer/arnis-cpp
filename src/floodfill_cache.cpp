@@ -18,6 +18,29 @@ bool same_ring_point(const ProcessedNode &a, const ProcessedNode &b)
 	return a.id == b.id || (a.x == b.x && a.z == b.z);
 }
 
+template <typename Tags>
+bool is_underground_building(const Tags &tags)
+{
+	auto negative_tag = [&tags](const char *key) {
+		auto it = tags.find(key);
+		if (it == tags.end())
+			return false;
+		try {
+			return std::stoi(it->second) < 0;
+		} catch (...) {
+			return false;
+		}
+	};
+	if (negative_tag("layer") || negative_tag("level"))
+		return true;
+	auto location = tags.find("location");
+	if (location != tags.end() &&
+			(location->second == "underground" || location->second == "subway"))
+		return true;
+	return tags.contains("building:levels:underground") &&
+		   !tags.contains("building:levels");
+}
+
 void merge_relation_segments(std::vector<std::vector<ProcessedNode>> &rings)
 {
 	bool changed = true;
@@ -81,6 +104,26 @@ void for_relation_ring_cells(
 }
 
 } // namespace
+
+bool is_oversized_ring(const ProcessedWay &way)
+{
+	if (way.nodes.size() < 4 || way.nodes.front().x != way.nodes.back().x ||
+			way.nodes.front().z != way.nodes.back().z)
+		return false;
+	int32_t min_x = std::numeric_limits<int32_t>::max();
+	int32_t max_x = std::numeric_limits<int32_t>::min();
+	int32_t min_z = std::numeric_limits<int32_t>::max();
+	int32_t max_z = std::numeric_limits<int32_t>::min();
+	for (const auto &node : way.nodes) {
+		min_x = std::min(min_x, node.x);
+		max_x = std::max(max_x, node.x);
+		min_z = std::min(min_z, node.z);
+		max_z = std::max(max_z, node.z);
+	}
+	const int64_t area = (static_cast<int64_t>(max_x) - min_x + 1) *
+						 (static_cast<int64_t>(max_z) - min_z + 1);
+	return area > floodfill::MAX_FLOOD_FILL_AREA;
+}
 
 CoordinateBitmap::CoordinateBitmap(const XZBBox &xzbbox)
 {
@@ -371,6 +414,13 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::get_or_compute(
 	}
 }
 
+const std::vector<std::pair<int32_t, int32_t>> *FloodFillCache::get_cached(
+		uint64_t way_id) const
+{
+	auto it = way_cache.find(way_id);
+	return it == way_cache.end() ? nullptr : &it->second;
+}
+
 std::vector<std::pair<int32_t, int32_t>> FloodFillCache::get_or_compute_element(
 		const ProcessedElement &element,
 		const std::optional<std::chrono::milliseconds> &timeout) const
@@ -401,7 +451,7 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 			const bool is_building =
 					it_building != rel.tags.end() || it_building_part != rel.tags.end() ||
 					(it_type != rel.tags.end() && it_type->second == "building");
-			if (!is_building)
+			if (!is_building || is_underground_building(rel.tags))
 				continue;
 			for_relation_ring_cells(rel, ProcessedMemberRole::Outer,
 					[&footprints](int32_t x, int32_t z) { footprints.set(x, z); });
@@ -416,10 +466,10 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 			auto it_building = way.tags.find("building");
 			auto it_building_part = way.tags.find("building:part");
 
-			if (it_building != way.tags.end() || it_building_part != way.tags.end()) {
-				auto it = way_cache.find(way.id);
-				if (it != way_cache.end()) {
-					for (const auto &coord : it->second) {
+			if ((it_building != way.tags.end() || it_building_part != way.tags.end()) &&
+					!is_underground_building(way.tags)) {
+				if (const auto *cached = get_cached(way.id)) {
+					for (const auto &coord : *cached) {
 						footprints.set(coord.first, coord.second);
 					}
 				}

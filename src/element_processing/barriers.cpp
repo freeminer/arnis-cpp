@@ -88,6 +88,9 @@ void generate_barriers(world_editor::WorldEditor &editor,
 			if (mat == "metal") {
 				barrier_material = block_definitions::STONE_BRICK_WALL;
 			}
+			if (mat == "wood") {
+				barrier_material = block_definitions::OAK_FENCE;
+			}
 		}
 	}
 

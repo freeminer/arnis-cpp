@@ -42,9 +42,9 @@ void repair_terrain_anomalies(std::vector<std::vector<double>> &h)
 			break;
 	}
 }
-std::tuple<std::vector<std::vector<double>>, double, double> scale_to_minecraft(
-		const std::vector<std::vector<double>> &in, double scale, int ground,
-		bool disable, int extended)
+std::tuple<std::vector<std::vector<double>>, double, double, int> scale_to_minecraft(
+		const std::vector<std::vector<double>> &in, double scale, int ground_level,
+		int min_ground_level, bool disable_height_limit, int extended_max_y)
 {
 	double lo = 1e300, hi = -1e300;
 	for (auto &r : in)
@@ -57,16 +57,33 @@ std::tuple<std::vector<std::vector<double>>, double, double> scale_to_minecraft(
 		lo = 0;
 		hi = 0;
 	}
-	double range = hi - lo;
-	int maxy = disable ? extended : 319;
-	double avail = std::max(0.0, double(maxy - 15 - ground));
-	double factor = range > 0 ? std::min(scale, avail / range) : 0;
+	const double range = hi - lo;
+	const int effective_max_y = disable_height_limit ? extended_max_y : 319;
+	const int ceiling = effective_max_y - 15;
+	const double ideal_scaled_range = range * scale;
+	if (disable_height_limit && min_ground_level < ground_level &&
+			std::isfinite(ideal_scaled_range)) {
+		const int needed = ideal_scaled_range >= double(std::numeric_limits<int>::max())
+								   ? std::numeric_limits<int>::max()
+								   : int(std::ceil(std::max(0.0, ideal_scaled_range)));
+		const long long candidate = static_cast<long long>(ceiling) - needed;
+		ground_level = std::clamp(
+				int(std::clamp(candidate,
+						static_cast<long long>(std::numeric_limits<int>::min()),
+						static_cast<long long>(std::numeric_limits<int>::max()))),
+				min_ground_level, ground_level);
+	}
+	const double available_y_range = std::max(0.0, double(ceiling - ground_level));
+	const double scaled_range = ideal_scaled_range <= available_y_range
+										? ideal_scaled_range
+										: (range > 0.0 ? available_y_range : 0.0);
+	const double factor = range > 0.0 ? scaled_range / range : 0.0;
 	std::vector<std::vector<double>> out = in;
 	for (auto &r : out)
 		for (double &v : r)
-			v = std::isfinite(v) ? std::clamp(ground + (v - lo) * factor, double(-64),
-										   double(maxy - 15))
-								 : ground;
-	return {std::move(out), lo, factor};
+			v = std::isfinite(v) ? std::clamp(ground_level + (v - lo) * factor,
+										   double(ground_level), double(ceiling))
+								 : ground_level;
+	return {std::move(out), lo, factor, ground_level};
 }
 }

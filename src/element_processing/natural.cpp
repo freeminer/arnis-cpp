@@ -457,6 +457,11 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		return;
 	}
 	const ProcessedWay &way = element.as_way();
+	// Resolve before the edge pass.  A closed ring that the capped fill
+	// refuses must not leave an outline around ground it cannot fill.
+	auto filled_area = flood_fill_cache.get_or_compute(way, args.timeout);
+	if (filled_area.empty() && is_oversized_ring(way))
+		return;
 
 	std::optional<std::pair<int, int>> previous_node;
 	std::tuple<int, int, int> corner_addup = std::make_tuple(0, 0, 0);
@@ -492,9 +497,6 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		for (const auto &n : way.nodes) {
 			polygon_coords.emplace_back(n.x, n.z);
 		}
-
-		std::vector<std::pair<int, int>> filled_area =
-				flood_fill_cache.get_or_compute(way, args.timeout);
 
 		// Determine tree types for wood/tree_row areas
 		std::vector<TreeType> trees_ok_to_generate;

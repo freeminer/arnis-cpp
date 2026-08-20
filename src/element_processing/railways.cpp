@@ -19,6 +19,7 @@ using std::vector;
 
 #include "../bresenham.h"
 #include "../floodfill_cache.h"
+#include "../world_editor/floor_state.h"
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
 #undef stoi
@@ -41,7 +42,6 @@ const int WALL_RADIUS = 2;
 const int AIR_RADIUS = 1;
 const int INTERIOR_HEIGHT = 4;
 const std::size_t LIGHT_INTERVAL = 8;
-const int MIN_Y = -64;
 
 struct PairHash
 {
@@ -644,7 +644,7 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 			const int ground_y = editor.get_ground_level(bx, bz);
 			const int ceil_y = ground_y - SUBWAY_DEPTH;
 			const int floor_y = ceil_y - INTERIOR_HEIGHT - 1;
-			if (floor_y <= MIN_Y)
+			if (floor_y <= world_editor::min_y())
 				continue;
 
 			const int prev_ground =
@@ -704,7 +704,7 @@ void carve_subway_interior(
 		const int ground_y = editor.get_ground_level(bx, bz);
 		const int ceil_y = ground_y - SUBWAY_DEPTH;
 		const int floor_y = ceil_y - INTERIOR_HEIGHT - 1;
-		if (floor_y <= MIN_Y)
+		if (floor_y <= world_editor::min_y())
 			continue;
 		for (int dx = -AIR_RADIUS; dx <= AIR_RADIUS; ++dx) {
 			for (int dz = -AIR_RADIUS; dz <= AIR_RADIUS; ++dz) {

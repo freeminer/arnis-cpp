@@ -1,5 +1,7 @@
 #include "elevation.h"
 
+#include "../coordinate_system/transformation.h"
+
 #include <algorithm>
 #include <cmath>
 #include <limits>
@@ -7,6 +9,31 @@
 
 namespace arnis::elevation
 {
+
+std::tuple<std::size_t, std::size_t, std::size_t, std::size_t> compute_grid_dims(
+		const geographic::LLBBox &bbox, double scale)
+{
+	const auto [base_z, base_x] = coordinate_system::geo_distance(bbox.min(), bbox.max());
+	const auto world_width =
+			static_cast<std::size_t>(std::max(0.0, std::floor(base_x) * scale)) + 1;
+	const auto world_height =
+			static_cast<std::size_t>(std::max(0.0, std::floor(base_z) * scale)) + 1;
+	std::size_t grid_width = std::max<std::size_t>(2, world_width);
+	std::size_t grid_height = std::max<std::size_t>(2, world_height);
+	const double cells = static_cast<double>(grid_width) * grid_height;
+	const double budget_shrink = std::sqrt(cells / MAX_ELEVATION_GRID_CELLS);
+	const double axis_shrink = static_cast<double>(std::max(grid_width, grid_height)) /
+							   MAX_ELEVATION_GRID_DIM;
+	const double shrink = std::max(budget_shrink, axis_shrink);
+	if (shrink > 1.0) {
+		grid_width = std::clamp(static_cast<std::size_t>(std::floor(grid_width / shrink)),
+				std::size_t{2}, std::max<std::size_t>(2, world_width));
+		grid_height =
+				std::clamp(static_cast<std::size_t>(std::floor(grid_height / shrink)),
+						std::size_t{2}, std::max<std::size_t>(2, world_height));
+	}
+	return {world_width, world_height, grid_width, grid_height};
+}
 
 static std::vector<double> gaussian_kernel(double sigma)
 {

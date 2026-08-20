@@ -40,12 +40,21 @@ struct RawRelation
 
 struct RawOsmDocument
 {
+	struct Completeness
+	{
+		std::uint64_t unresolved_node_refs{0};
+		std::uint64_t total_node_refs{0};
+		std::uint64_t ways_missing_nodes{0};
+	};
 	std::vector<RawNode> nodes;
 	std::vector<RawWay> ways;
 	std::vector<RawRelation> relations;
 	std::optional<std::array<double, 4>> bounds; // minlat,minlon,maxlat,maxlon
 	std::optional<std::string> remark;
+	Completeness completeness;
 };
+
+RawOsmDocument::Completeness analyze_completeness(const RawOsmDocument &document);
 
 // Parses standard .osm XML, including multiline/self-closing elements and XML entities.
 // The returned raw document preserves geographic coordinates; projection/clipping remains

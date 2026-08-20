@@ -1,4 +1,5 @@
 #include "llbbox.h"
+#include <cmath>
 #include <sstream>
 #include <stdexcept>
 namespace arnis::geographic
@@ -24,5 +25,13 @@ bool LLBBox::contains(const LLPoint &p) const
 {
 	return p.lat() >= min_.lat() && p.lat() <= max_.lat() && p.lng() >= min_.lng() &&
 		   p.lng() <= max_.lng();
+}
+
+double LLBBox::area_km2() const
+{
+	const double middle_lat = (min_.lat() + max_.lat()) * 0.5 * std::acos(-1.0) / 180.0;
+	const double width_m = (max_.lng() - min_.lng()) * 111320.0 * std::cos(middle_lat);
+	const double height_m = (max_.lat() - min_.lat()) * 111320.0;
+	return std::abs(width_m * height_m) / 1000000.0;
 }
 }

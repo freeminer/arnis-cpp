@@ -1,9 +1,11 @@
 #include "data_processing.h"
+#include "element_processing/signage.h"
 #include <sys/types.h>
 #include <unordered_set>
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <mutex>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
@@ -22,6 +24,7 @@
 #include "land_cover/land_cover.h"
 #include "ore_generation.h"
 #include "water_depth.h"
+#include "world_editor/floor_state.h"
 #include "clipping.h"
 #include "structures/boat.h"
 #include "structures/starship.h"
@@ -41,14 +44,26 @@ namespace arnis
 bool should_stream_to_disk(std::size_t tile_count)
 {
 	if (const char *v = std::getenv("ARNIS_STREAM_TO_DISK")) {
-		if (std::string(v) == "1") return true;
-		if (std::string(v) == "0") return false;
+		if (std::string(v) == "1")
+			return true;
+		if (std::string(v) == "0")
+			return false;
 	}
 	constexpr std::uint64_t base_mb = 500, per_region_mb = 26;
 	std::uint64_t available_mb = 0;
-	std::ifstream mem("/proc/meminfo"); std::string key; std::uint64_t kb;
-	while (mem >> key >> kb) { if (key == "MemAvailable:") { available_mb = kb / 1024; break; } std::string unit; std::getline(mem, unit); }
-	return available_mb > 0 && (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
+	std::ifstream mem("/proc/meminfo");
+	std::string key;
+	std::uint64_t kb;
+	while (mem >> key >> kb) {
+		if (key == "MemAvailable:") {
+			available_mb = kb / 1024;
+			break;
+		}
+		std::string unit;
+		std::getline(mem, unit);
+	}
+	return available_mb > 0 &&
+		   (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
 }
 
 bool should_use_parallel_tiles(std::size_t tile_count, bool java_format)
@@ -58,8 +73,8 @@ bool should_use_parallel_tiles(std::size_t tile_count, bool java_format)
 	return java_format && tile_count >= 3;
 }
 
-GenerationFeatureFlags generation_features(bool java_format, bool luanti_format,
-		bool map_item, bool map_preview)
+GenerationFeatureFlags generation_features(
+		bool java_format, bool luanti_format, bool map_item, bool map_preview)
 {
 	GenerationFeatureFlags f;
 	f.map_item = map_item && java_format;
@@ -71,7 +86,8 @@ GenerationFeatureFlags generation_features(bool java_format, bool luanti_format,
 
 GenerationTilePolicy generation_tile_policy(std::size_t tile_count, bool java_format)
 {
-	return {should_use_parallel_tiles(tile_count, java_format), should_stream_to_disk(tile_count)};
+	return {should_use_parallel_tiles(tile_count, java_format),
+			should_stream_to_disk(tile_count)};
 }
 
 void release_finished_fills(FloodFillCache &cache,
@@ -81,11 +97,13 @@ void release_finished_fills(FloodFillCache &cache,
 	if (element.is_way()) {
 		const auto &way = element.as_way();
 		auto it = last_use.find(way.id);
-		if (it != last_use.end() && it->second == index) cache.remove_way(way.id);
+		if (it != last_use.end() && it->second == index)
+			cache.remove_way(way.id);
 	} else if (element.is_relation()) {
 		for (const auto &member : element.as_relation().members) {
 			auto it = last_use.find(member.way.id);
-			if (it != last_use.end() && it->second == index) cache.remove_way(member.way.id);
+			if (it != last_use.end() && it->second == index)
+				cache.remove_way(member.way.id);
 		}
 	}
 }
@@ -456,7 +474,11 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 		const Args &args, const std::optional<int> &relation_levels,
 		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
-		const std::vector<HolePolygon> *hole_polygons);
+		const std::vector<HolePolygon> *hole_polygons,
+		std::optional<std::uint64_t> style_seed, const CoordinateBitmap *road_mask,
+		const CoordinateBitmap *building_footprints,
+		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
+				*group_members);
 }
 
 namespace highways
@@ -469,7 +491,8 @@ void generate_highways(WorldEditor &editor, const ProcessedElement &element,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
 		const RoadMaskBitmap &road_mask,
 		const bridges::BridgeStructureMap &bridge_structures,
-		const bridges::BridgeSurfaceMap &bridge_surface);
+		const bridges::BridgeSurfaceMap &bridge_surface,
+		const TunnelPortalMap &tunnel_portals);
 void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args);
 void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args,
 		const CoordinateBitmap &building_footprints);
@@ -551,9 +574,11 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &way);
 namespace water_areas
 {
 void generate_water_areas_from_relation(WorldEditor &editor, const ProcessedRelation &rel,
-		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask);
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
+		const RoadMaskBitmap *tunnel_footprint);
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way,
-		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask);
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
+		const RoadMaskBitmap *tunnel_footprint);
 }
 
 namespace railways
@@ -619,25 +644,48 @@ void generate_advertising(WorldEditor &editor, const ProcessedNode &node);
 }
 
 // Main generate_world function
-bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &elements,
-		const Args &args_, FloodFillCache &flood_fill_cache,
+bool generate_world(WorldEditor &editor,
+		const std::vector<ProcessedElement> &input_elements, const Args &args_,
+		FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints)
 {
+	// The floor is process-global because every chunk serializer must share one
+	// dimension span. Serialize overlapping library generations around it.
+	static std::mutex generation_floor_mutex;
+	const std::lock_guard floor_lock(generation_floor_mutex);
+	if (!valid_scale(args_.scale))
+		return false;
+	world_editor::set_world_bounds(
+			args_.disable_height_limit && !args_.bedrock ? -2032 : -64,
+			args_.disable_height_limit && !args_.bedrock ? 2031 : 319);
+	const int base_level = editor.ground ? editor.ground->base_level(args_.ground_level)
+										 : args_.ground_level;
+	world_editor::set_terrain_floor_y(base_level);
+	world_editor::set_base_chunk_y(base_level);
+	static const std::vector<ProcessedElement> no_elements;
+	const auto &elements = args_.skip_objects() ? no_elements : input_elements;
 	const auto geo = editor.geographic_bounds();
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
+	if (editor.map_decals && !editor.decal_registry)
+		editor.set_decal_registry(signage::build_registry(
+				elements, args_.signage, decals::detect_region(centre_lat, centre_lon)));
 	if (auto selector = trees::RegionSelector::load_for_location(centre_lat, centre_lon,
-			std::filesystem::path("assets/trees"), args_.scale, args_.ground_level)) {
-		auto shared_selector = std::make_shared<trees::RegionSelector>(std::move(*selector));
+				std::filesystem::path("assets/trees"), args_.scale, base_level)) {
+		auto shared_selector =
+				std::make_shared<trees::RegionSelector>(std::move(*selector));
 		editor.set_tree_slot_spacing(shared_selector->base_spacing());
-		editor.set_regional_tree_placer([&editor, shared_selector](int x, int y, int z, std::uint8_t cover) {
-			return trees::place_selected_region_tree_for_cover(
-					editor, *shared_selector, x, z, cover, y);
-		});
+		editor.set_regional_tree_placer(
+				[&editor, shared_selector](int x, int y, int z, std::uint8_t cover) {
+					return trees::place_selected_region_tree_for_cover(
+							editor, *shared_selector, x, z, cover, y);
+				});
 	}
 	models_3d::RemoteModelProvider wikidata_provider(
 			std::filesystem::path(".arnis_wikidata_cache"));
-	models_3d::three_dmr::Client three_dmr_provider(std::filesystem::path(".arnis_3dmr_cache"));
-	models_3d::custom::Client custom_model_provider(std::filesystem::path("assets/models"));
+	models_3d::three_dmr::Client three_dmr_provider(
+			std::filesystem::path(".arnis_3dmr_cache"));
+	models_3d::custom::Client custom_model_provider(
+			std::filesystem::path("assets/models"));
 	// Landmarks use their matched OSM feature's projected centre as the world
 	// anchor.  This keeps the C++ mapgen host independent of Rust's geographic
 	// projection plumbing while preserving the same suppression/late-placement
@@ -648,30 +696,52 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 			auto wikidata = element.tags().find("wikidata");
 			const auto key = std::pair<std::string, std::int64_t>{
 					std::string(element.kind()), static_cast<std::int64_t>(element.id())};
-			const bool named_match = wikidata != element.tags().end() &&
-					wikidata->second == landmark.qid;
-			const bool osm_match = std::find(landmark.osm_ids.begin(), landmark.osm_ids.end(), key) !=
+			const bool named_match =
+					wikidata != element.tags().end() && wikidata->second == landmark.qid;
+			const bool osm_match =
+					std::find(landmark.osm_ids.begin(), landmark.osm_ids.end(), key) !=
 					landmark.osm_ids.end();
 			if (!named_match && !osm_match)
 				continue;
 			std::vector<std::pair<int, int>> points;
-			if (element.is_node()) points.emplace_back(element.as_node().x, element.as_node().z);
-			else if (element.is_way()) for (const auto &n : element.as_way().nodes) points.emplace_back(n.x, n.z);
-			else for (const auto &m : element.as_relation().members) for (const auto &n : m.way.nodes) points.emplace_back(n.x, n.z);
-			if (points.empty()) continue;
+			if (element.is_node())
+				points.emplace_back(element.as_node().x, element.as_node().z);
+			else if (element.is_way())
+				for (const auto &n : element.as_way().nodes)
+					points.emplace_back(n.x, n.z);
+			else
+				for (const auto &m : element.as_relation().members)
+					for (const auto &n : m.way.nodes)
+						points.emplace_back(n.x, n.z);
+			if (points.empty())
+				continue;
 			std::int64_t sx = 0, sz = 0;
-			for (const auto &[x, z] : points) { sx += x; sz += z; }
-			landmark_anchors.push_back({landmark.qid, static_cast<int>(sx / points.size()),
-					static_cast<int>(sz / points.size())});
+			for (const auto &[x, z] : points) {
+				sx += x;
+				sz += z;
+			}
+			landmark_anchors.push_back(
+					{landmark.qid, static_cast<int>(sx / points.size()),
+							static_cast<int>(sz / points.size())});
 			break;
 		}
 	}
 	auto landmark_plan = landmarks::prescan(elements, landmark_anchors, args_.scale);
-	const auto model_pipeline = args_.use_3d ? std::optional<models_3d::Models3dPipeline>(
-			models_3d::Models3dPipeline::prescan_fetchable_models(elements, args_.scale,
-				[&](const std::string &key) { return wikidata_provider.fetch(key).has_value(); },
-				[&]() { return custom_model_provider.fetch("stadium.glb").has_value(); }, 0.0,
-				landmark_plan.suppressed)) : std::nullopt;
+	const auto model_pipeline =
+			args_.use_3d
+					? std::optional<models_3d::Models3dPipeline>(
+							  models_3d::Models3dPipeline::prescan_fetchable_models(
+									  elements, args_.scale,
+									  [&](const std::string &key) {
+										  return wikidata_provider.fetch(key).has_value();
+									  },
+									  [&]() {
+										  return custom_model_provider
+												  .fetch("stadium.glb")
+												  .has_value();
+									  },
+									  0.0, landmark_plan.suppressed))
+					: std::nullopt;
 	// Match Rust's specificity ordering: broad ground-cover polygons render
 	// first, allowing smaller nested areas to overwrite them later.
 	auto ordered_elements = elements;
@@ -687,13 +757,36 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 	if (editor.ground && !editor.ground->has_land_cover()) {
 		auto land_cover = build_osm_water_land_cover(elements, xzbbox);
 		if (land_cover.width > 0 && land_cover.height > 0) {
-			land_cover::apply_osm_water_override(land_cover, elements, xzbbox);
-			land_cover::apply_bridge_land_cover_repair(
-					land_cover, elements, xzbbox, args_.scale);
 			editor.ground->set_land_cover_data(std::move(land_cover),
 					static_cast<std::size_t>(max_x - min_x + 1),
 					static_cast<std::size_t>(max_z - min_z + 1));
 		}
+	}
+	if (editor.ground && editor.ground->has_land_cover()) {
+		auto &land_cover = *editor.ground->land_cover;
+		const auto [world_width, world_height] = editor.ground->world_dims();
+		std::vector<std::vector<float>> cover_heights(
+				land_cover.height, std::vector<float>(land_cover.width));
+		for (std::size_t z = 0; z < land_cover.height; ++z)
+			for (std::size_t x = 0; x < land_cover.width; ++x) {
+				const int world_x =
+						min_x + static_cast<int>(std::llround(
+										(double(x) / std::max<std::size_t>(
+															 1, land_cover.width - 1)) *
+										(world_width - 1)));
+				const int world_z =
+						min_z + static_cast<int>(std::llround(
+										(double(z) / std::max<std::size_t>(
+															 1, land_cover.height - 1)) *
+										(world_height - 1)));
+				cover_heights[z][x] = editor.ground->level({world_x, world_z});
+			}
+		land_cover::apply_osm_water_override(
+				land_cover, cover_heights, world_width, world_height, elements, xzbbox);
+		land_cover::apply_osm_land_override(
+				land_cover, world_width, world_height, elements, xzbbox, args_.scale);
+		land_cover::apply_bridge_land_cover_repair(land_cover, cover_heights, world_width,
+				world_height, elements, xzbbox, args_.scale);
 	}
 	auto road_mask = highways::collect_road_surface_coords(elements, xzbbox, args_.scale);
 	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
@@ -707,9 +800,11 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 	std::vector<std::pair<int, int>> subway_points;
 	std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
 	auto tunnel_internal_endpoints =
-			highways::collect_tunnel_internal_endpoints(elements);
-	auto tunnel_footprint =
-			highways::collect_tunnel_footprint(elements, xzbbox, args_.scale);
+			highways::collect_tunnel_internal_endpoints(elements, xzbbox);
+	auto tunnel_portals = highways::collect_tunnel_portals(
+			elements, editor, bridge_structures, tunnel_internal_endpoints, args_.scale);
+	auto tunnel_footprint = highways::collect_tunnel_footprint(
+			elements, editor, tunnel_internal_endpoints, xzbbox, args_.scale);
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	auto rail_bridge_internal_endpoints =
 			railways::collect_rail_bridge_internal_endpoints(elements);
@@ -723,6 +818,7 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 	// render as a standalone building, the individual parts render instead.
 	std::unordered_set<uint64_t> suppressed_building_outlines;
 	std::unordered_map<uint64_t, uint64_t> building_part_groups;
+	std::unordered_map<uint64_t, std::vector<uint64_t>> building_group_members;
 	for (const auto &element : elements) {
 		if (element.is_relation()) {
 			const auto &rel = element.as_relation();
@@ -732,8 +828,10 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 
 			if (is_building_type) {
 				for (const auto &member : rel.members)
-					if (member.role == ProcessedMemberRole::Part)
+					if (member.role == ProcessedMemberRole::Part) {
 						building_part_groups.emplace(member.way.id, rel.id);
+						building_group_members[rel.id].push_back(member.way.id);
+					}
 				bool has_parts = false;
 				for (const auto &member : rel.members) {
 					if (member.role == ProcessedMemberRole::Part) {
@@ -753,23 +851,30 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 		}
 	}
 
-	for (std::size_t element_index = 0; element_index < render_elements.size(); ++element_index) {
+	for (std::size_t element_index = 0; element_index < render_elements.size();
+			++element_index) {
 		auto const &element = render_elements[element_index];
 		auto args = args_;
-		if (model_pipeline && std::find(model_pipeline->suppressed().begin(),
-				model_pipeline->suppressed().end(),
-				std::pair<std::string, std::int64_t>{std::string(element.kind()),
-						static_cast<std::int64_t>(element.id())}) != model_pipeline->suppressed().end()) {
-			release_finished_fills(flood_fill_cache, last_fill_use, element, element_index);
+		if (model_pipeline &&
+				std::find(model_pipeline->suppressed().begin(),
+						model_pipeline->suppressed().end(),
+						std::pair<std::string, std::int64_t>{std::string(element.kind()),
+								static_cast<std::int64_t>(element.id())}) !=
+						model_pipeline->suppressed().end()) {
+			release_finished_fills(
+					flood_fill_cache, last_fill_use, element, element_index);
 			continue;
 		}
 
 		if (element.is_way()) {
 			auto const &way = element.as_way();
-			if (std::find(landmark_plan.suppressed.begin(), landmark_plan.suppressed.end(),
-					std::pair<std::string, std::int64_t>{"way", static_cast<std::int64_t>(way.id)}) !=
+			if (std::find(landmark_plan.suppressed.begin(),
+						landmark_plan.suppressed.end(),
+						std::pair<std::string, std::int64_t>{
+								"way", static_cast<std::int64_t>(way.id)}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(flood_fill_cache, last_fill_use, element, element_index);
+				release_finished_fills(
+						flood_fill_cache, last_fill_use, element, element_index);
 				continue;
 			}
 			// A successfully placed 3D model replaces the source OSM feature;
@@ -786,8 +891,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 			// generator, unlike the Rust dispatcher.
 			if (way.tags.contains("barrier") && !way.tags.contains("building") &&
 					way.tags.get("power") == std::optional<std::string>("generator")) {
-				power::generate_power(editor, element, building_footprints, flood_fill_cache,
-						args.timeout);
+				power::generate_power(editor, element, building_footprints,
+						flood_fill_cache, args.timeout);
 			}
 
 			if (way.tags.contains("building") || way.tags.contains("building:part")) {
@@ -798,16 +903,21 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 					auto group = building_part_groups.find(way.id);
 					buildings::generate_buildings(&editor, way, args,
 							std::optional<int>{}, flood_fill_cache, building_passages,
-							nullptr, group == building_part_groups.end() ? std::nullopt :
-								std::optional<std::uint64_t>(group->second));
+							nullptr,
+							group == building_part_groups.end()
+									? std::nullopt
+									: std::optional<std::uint64_t>(group->second),
+							&road_mask, &building_footprints, &building_group_members);
 				}
 			} else if (way.tags.contains("highway")) {
-				if (highways::renders_as_highway_tunnel(way))
-					highways::generate_highway_tunnel_shell(editor, way, args,
-							tunnel_internal_endpoints, highway_tunnel_cells);
-				else
+				const bool tunnel_rendered =
+						highways::renders_as_highway_tunnel(way) &&
+						highways::generate_highway_tunnel_shell(editor, way, args,
+								tunnel_internal_endpoints, tunnel_portals,
+								highway_tunnel_cells);
+				if (!tunnel_rendered)
 					highways::generate_highways(editor, element, args, elements, {},
-							road_mask, bridge_structures, bridge_surface);
+							road_mask, bridge_structures, bridge_surface, tunnel_portals);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
@@ -820,16 +930,17 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 				amenities::generate_amenities(
 						editor, element, args, flood_fill_cache, road_mask);
 			} else if (way.tags.contains("leisure")) {
-				leisure::generate_leisure(
-						editor, way, args, flood_fill_cache, building_footprints, bridge_surface);
+				leisure::generate_leisure(editor, way, args, flood_fill_cache,
+						building_footprints, bridge_surface);
 			} else if (way.tags.contains("barrier")) {
 				barriers::generate_barriers(editor, element, bridge_surface);
 			} else if (way.tags.contains("waterway")) {
 				auto it_val = way.tags.find("waterway");
 				if (it_val != way.tags.end() && it_val->second == "dock") {
 					// docks count as water areas
-					water_areas::generate_water_area_from_way(
-							editor, way, big_water_field, road_mask);
+					water_areas::generate_water_area_from_way(editor, way,
+							big_water_field, road_mask,
+							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 				} else {
 					waterways::generate_waterways(editor, way);
 				}
@@ -854,17 +965,22 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 			} else if (way.tags.contains("man_made")) {
 				man_made::generate_man_made(editor, element, args);
 			} else if (way.tags.contains("power")) {
-				power::generate_power(editor, element, building_footprints, flood_fill_cache,
-						args.timeout);
+				power::generate_power(editor, element, building_footprints,
+						flood_fill_cache, args.timeout);
 			} else if (way.tags.contains("place")) {
 				landuse::generate_place(editor, way, args, flood_fill_cache);
 			}
+			signage::place_way_signage(
+					editor, way, decals::detect_region(centre_lat, centre_lon));
 		} else if (element.is_node()) {
 			auto const &node = element.as_node();
-			if (std::find(landmark_plan.suppressed.begin(), landmark_plan.suppressed.end(),
-					std::pair<std::string, std::int64_t>{"node", static_cast<std::int64_t>(node.id)}) !=
+			if (std::find(landmark_plan.suppressed.begin(),
+						landmark_plan.suppressed.end(),
+						std::pair<std::string, std::int64_t>{
+								"node", static_cast<std::int64_t>(node.id)}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(flood_fill_cache, last_fill_use, element, element_index);
+				release_finished_fills(
+						flood_fill_cache, last_fill_use, element, element_index);
 				continue;
 			}
 			if (node.tags.get("aeroway") == std::optional<std::string>("helipad"))
@@ -887,9 +1003,9 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
 			} else if (node.tags.contains("highway")) {
 				highways::generate_highways(editor, element, args, elements, {},
-						road_mask, bridge_structures, bridge_surface);
+						road_mask, bridge_structures, bridge_surface, tunnel_portals);
 			} else if (node.tags.get("aeroway") ==
-					std::optional<std::string>(std::string("helipad"))) {
+					   std::optional<std::string>(std::string("helipad"))) {
 				highways::generate_helipad_node(editor, node, args, building_footprints);
 			} else if (node.tags.contains("tourism")) {
 				tourisms::generate_tourisms(editor, node);
@@ -904,16 +1020,22 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 			} else if (node.tags.contains("advertising")) {
 				advertising::generate_advertising(editor, node);
 			}
+			signage::place_node_signage(editor, node, args_.signage,
+					decals::detect_region(centre_lat, centre_lon));
 		} else if (element.is_relation()) {
 			auto const &rel = element.as_relation();
-			if (std::find(landmark_plan.suppressed.begin(), landmark_plan.suppressed.end(),
-					std::pair<std::string, std::int64_t>{"relation", static_cast<std::int64_t>(rel.id)}) !=
+			if (std::find(landmark_plan.suppressed.begin(),
+						landmark_plan.suppressed.end(),
+						std::pair<std::string, std::int64_t>{
+								"relation", static_cast<std::int64_t>(rel.id)}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(flood_fill_cache, last_fill_use, element, element_index);
+				release_finished_fills(
+						flood_fill_cache, last_fill_use, element, element_index);
 				continue;
 			}
 
-			if (editor.ground && !rel.members.empty() && !rel.members.begin()->way.nodes.empty()) {
+			if (editor.ground && !rel.members.empty() &&
+					!rel.members.begin()->way.nodes.empty()) {
 				args.ground_level = editor.ground->level(
 						rel.members.begin()->way.nodes.begin()->xz());
 			}
@@ -931,8 +1053,9 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 							   std::optional<std::string>(std::string("water")) ||
 					   rel.tags.get("natural") ==
 							   std::optional<std::string>(std::string("bay"))) {
-				water_areas::generate_water_areas_from_relation(
-						editor, rel, big_water_field, road_mask);
+				water_areas::generate_water_areas_from_relation(editor, rel,
+						big_water_field, road_mask,
+						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 			} else if (rel.tags.contains("natural")) {
 				natural::generate_natural_from_relation(editor, rel, args,
 						flood_fill_cache, building_footprints, bridge_surface);
@@ -941,8 +1064,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 						flood_fill_cache, building_footprints, road_mask, bridge_surface);
 			} else if (rel.tags.get("leisure") ==
 					   std::optional<std::string>(std::string("park"))) {
-				leisure::generate_leisure_from_relation(
-						editor, rel, args, flood_fill_cache, building_footprints, bridge_surface);
+				leisure::generate_leisure_from_relation(editor, rel, args,
+						flood_fill_cache, building_footprints, bridge_surface);
 			} else if (rel.tags.contains("man_made")) {
 				man_made::generate_man_made(editor, ProcessedElement(rel), args);
 			}
@@ -957,16 +1080,18 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 	ground_generation::generate_ground_layer(editor, args_, xzbbox, building_footprints,
 			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 	if (args_.fillground)
-		ore_generation::generate_ores(editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+		ore_generation::generate_ores(
+				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
 
-	water_depth::carve_lc_water_pass(editor, big_water_field, road_mask, tunnel_footprint);
+	water_depth::carve_lc_water_pass(
+			editor, big_water_field, road_mask, tunnel_footprint);
 	if (model_pipeline) {
-		models_3d::place_three_dmr_prescan(three_dmr_provider, editor,
-				model_pipeline->three_dmr(), args_.scale);
-		models_3d::place_wikidata_prescan(wikidata_provider, editor,
-				model_pipeline->wikidata(), args_.scale);
-		models_3d::place_custom_models(*model_pipeline, custom_model_provider, editor,
-				args_.scale);
+		models_3d::place_three_dmr_prescan(
+				three_dmr_provider, editor, model_pipeline->three_dmr(), args_.scale);
+		models_3d::place_wikidata_prescan(
+				wikidata_provider, editor, model_pipeline->wikidata(), args_.scale);
+		models_3d::place_custom_models(
+				*model_pipeline, custom_model_provider, editor, args_.scale);
 	}
 	landmarks::place_all(editor, landmark_plan, args_.scale);
 	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);

@@ -13,5 +13,6 @@ public:
 	const LLPoint &min() const { return min_; }
 	const LLPoint &max() const { return max_; }
 	bool contains(const LLPoint &) const;
+	double area_km2() const;
 };
 }

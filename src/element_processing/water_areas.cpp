@@ -5,6 +5,7 @@
 #include <string>
 #include <map>
 #include <chrono>
+#include <cstdint>
 #include <iostream>
 #include <optional>
 #include <algorithm>
@@ -322,16 +323,99 @@ static std::vector<std::pair<int, int>> subtract_spans(
 	return out;
 }
 
+static bool spans_contain(const std::vector<std::pair<int, int>> &spans, int x)
+{
+	return std::any_of(spans.begin(), spans.end(),
+			[x](const auto &span) { return x >= span.first && x <= span.second; });
+}
+
+// Rust parity: water_areas.rs::still_surface_level.  ESA land-cover data often
+// sees a reservoir at one level while the OSM outline includes its exposed
+// banks.  Resolve one surface for a sufficiently large, consistently-levelled
+// water body instead of following each terrain cell independently.
+static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, int min_z,
+		int max_x, int max_z, const std::vector<std::vector<XZPoint>> &outers,
+		const std::vector<std::vector<XZPoint>> &inners)
+{
+	if (!editor.ground || !editor.ground->has_land_cover())
+		return std::nullopt;
+	constexpr std::size_t max_samples = 250000;
+	constexpr std::size_t min_lc_columns = 64;
+	constexpr double min_lc_share = .3;
+	const auto width = static_cast<std::int64_t>(max_x) - min_x + 1;
+	const auto height = static_cast<std::int64_t>(max_z) - min_z + 1;
+	if (width <= 0 || height <= 0)
+		return std::nullopt;
+	const int stride = std::max(
+			1, static_cast<int>(std::ceil(
+					   std::sqrt(static_cast<double>(width * height) / max_samples))));
+
+	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
+	outer_edge_groups.reserve(outers.size());
+	for (const auto &outer : outers)
+		outer_edge_groups.push_back(collect_ring_edges(outer));
+	const auto inner_edges = collect_all_ring_edges(inners);
+	std::size_t total = 0;
+	std::vector<int> levels;
+	for (int z = min_z; z <= max_z; z += stride) {
+		std::vector<std::pair<int, int>> outer_spans;
+		for (const auto &edges : outer_edge_groups)
+			outer_spans = union_spans(outer_spans,
+					compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x));
+		if (outer_spans.empty())
+			continue;
+		auto spans = inner_edges.empty()
+							 ? outer_spans
+							 : subtract_spans(outer_spans,
+									   compute_scanline_spans(inner_edges,
+											   static_cast<double>(z), min_x, max_x));
+		for (const auto &[start, end] : spans) {
+			const int remainder = ((start % stride) + stride) % stride;
+			int x = start + (stride - remainder) % stride;
+			for (; x <= end; x += stride) {
+				++total;
+				const XZPoint relative{
+						x - editor.mg->node_min.X, z - editor.mg->node_min.Z};
+				if (editor.ground->cover_class(relative) == land_cover::LC_WATER)
+					levels.push_back(editor.get_ground_level(x, z));
+			}
+		}
+	}
+	if (levels.size() < min_lc_columns || levels.size() < min_lc_share * total)
+		return std::nullopt;
+	std::sort(levels.begin(), levels.end());
+	const auto q1 = levels.size() / 4;
+	const auto q3 = levels.size() * 3 / 4;
+	if (levels[q1] != levels[q3])
+		return std::nullopt;
+	return levels[levels.size() / 2];
+}
+
 static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 		const std::vector<std::vector<XZPoint>> &outers,
 		const std::vector<std::vector<XZPoint>> &inners, WorldEditor &editor,
-		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask)
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
+		const RoadMaskBitmap *tunnel_footprint, std::optional<int> still_surface)
 {
 	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
 	outer_edge_groups.reserve(outers.size());
 	for (const auto &outer : outers)
 		outer_edge_groups.push_back(collect_ring_edges(outer));
 	auto inner_edges = collect_all_ring_edges(inners);
+	auto filled_at = [&](int x, int z) {
+		std::vector<std::pair<int, int>> outer_spans;
+		for (const auto &edges : outer_edge_groups)
+			outer_spans = union_spans(
+					outer_spans, compute_scanline_spans(edges, static_cast<double>(z),
+										 min_x - 4, max_x + 4));
+		if (outer_spans.empty() || !spans_contain(outer_spans, x))
+			return false;
+		if (inner_edges.empty())
+			return true;
+		return !spans_contain(compute_scanline_spans(inner_edges, static_cast<double>(z),
+									  min_x - 4, max_x + 4),
+				x);
+	};
 
 	for (int z = min_z; z <= max_z; ++z) {
 		std::vector<std::pair<int, int>> outer_spans;
@@ -356,11 +440,30 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 			for (int x = start; x <= end; ++x) {
 				if (road_mask.contains(x, z))
 					continue;
-				int water_y = editor.get_water_level(x, z);
 				int ground_y = editor.get_ground_level(x, z);
+				int water_y = still_surface.value_or(editor.get_water_level(x, z));
+				if (still_surface && (ground_y > water_y || water_y - ground_y > 20))
+					continue;
+				if (!still_surface && ground_y > water_y) {
+					// A DEM step fully inside the water polygon remains water; a
+					// bank near its edge is left dry.  This is Rust's four-cell
+					// interior-margin test, evaluated from the same scanline edges.
+					if (!filled_at(x - 4, z) || !filled_at(x + 4, z) ||
+							!filled_at(x, z - 4) || !filled_at(x, z + 4))
+						continue;
+					water_y = ground_y;
+				}
 				if (ground_y <= water_y) {
+					// Rust fills down to terrain over a tunnel bore, but never
+					// excavates or replaces the bore below the terrain surface.
+					if (tunnel_footprint && tunnel_footprint->contains(x, z)) {
+						for (int y = ground_y + 1; y <= water_y; ++y)
+							editor.set_block_absolute(
+									WATER, x, y, z, std::nullopt, std::nullopt);
+						continue;
+					}
 					water_depth::carve_water_column(
-							editor, x, z, water_y, bwf.depth_at(x, z), road_mask);
+							editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
 				}
 			}
 		}
@@ -370,7 +473,8 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 static void generate_water_areas(WorldEditor &editor,
 		const std::vector<std::vector<ProcessedNode>> &outers,
 		const std::vector<std::vector<ProcessedNode>> &inners,
-		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask)
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
+		const RoadMaskBitmap *tunnel_footprint)
 {
 	// Calculate polygon bounding box to limit fill area
 	int32_t poly_min_x = std::numeric_limits<int32_t>::max();
@@ -423,8 +527,10 @@ static void generate_water_areas(WorldEditor &editor,
 		inners_xz.push_back(std::move(v));
 	}
 
-	scanline_fill_water(
-			min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf, road_mask);
+	const auto still_surface =
+			still_surface_level(editor, min_x, min_z, max_x, max_z, outers_xz, inners_xz);
+	scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf,
+			road_mask, tunnel_footprint, still_surface);
 	structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
 }
 
@@ -536,7 +642,8 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 }
 
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &element,
-		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask)
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
+		const RoadMaskBitmap *tunnel_footprint)
 {
 	std::vector<std::vector<ProcessedNode>> outers = {{element.nodes}};
 
@@ -546,12 +653,12 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &eleme
 		return;
 	}
 
-	generate_water_areas(editor, outers, {}, bwf, road_mask);
+	generate_water_areas(editor, outers, {}, bwf, road_mask, tunnel_footprint);
 }
 
 void generate_water_areas_from_relation(WorldEditor &editor,
 		const ProcessedRelation &element, const water_depth::BigWaterField &bwf,
-		const RoadMaskBitmap &road_mask)
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint)
 {
 	// Check if this is a water relation (either with water tag or natural=water or natural=bay)
 	bool is_water = element.tags.find("water") != element.tags.end() || ([&]() {
@@ -640,7 +747,7 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 		return;
 	}
 
-	generate_water_areas(editor, outers, inners, bwf, road_mask);
+	generate_water_areas(editor, outers, inners, bwf, road_mask, tunnel_footprint);
 }
 
 }

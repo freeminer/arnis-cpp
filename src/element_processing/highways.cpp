@@ -396,7 +396,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
 		const crate::RoadMaskBitmap &road_mask,
 		const crate::bridges::BridgeStructureMap &bridge_structures,
-		const crate::bridges::BridgeSurfaceMap &bridge_surface)
+		const crate::bridges::BridgeSurfaceMap &bridge_surface,
+		const TunnelPortalMap &tunnel_portals)
 {
 	using crate::block_definitions::Block;
 	using crate::block_definitions::COBBLESTONE_WALL;
@@ -607,6 +608,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const auto *bridge_ramp = bridge_structures.lookup_ramp(way.id);
 	const bool is_bridge_member = bridge_member != nullptr;
 	const bool is_bridge_ramp = bridge_ramp != nullptr;
+	const auto tunnel_approach = (is_bridge_member || is_bridge_ramp)
+										 ? std::nullopt
+										 : tunnel_portals.approach(way.id);
 
 	std::vector<crate::block_definitions::Block> default_surface = DEFAULT_ROAD_MIX;
 	if (highway_type == "footway" || highway_type == "pedestrian" ||
@@ -802,6 +806,11 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 							effective_start_slope, effective_end_slope, slope_length);
 					use_absolute_y = false;
 				}
+				const int tunnel_approach_offset =
+						(!use_absolute_y && tunnel_approach)
+								? tunnel_approach->offset(static_cast<int>(tds))
+								: 0;
+				current_y += tunnel_approach_offset;
 				if (auto deck_y = bridge_surface.deck_y_at(x, z)) {
 					current_y = *deck_y;
 					use_absolute_y = true;
@@ -910,8 +919,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						}
 
 						// Add stone brick foundation underneath elevated highways/bridges for thickness
-						if ((effective_elevation > 0 || use_absolute_y) &&
-								current_y > 0) {
+						if (((effective_elevation > 0 || use_absolute_y) &&
+									current_y > 0) ||
+								tunnel_approach_offset < 0) {
 							// Add 1 layer of stone bricks underneath the highway surface
 							const auto foundation_block =
 									is_bridge_member
@@ -1135,11 +1145,13 @@ void generate_highways(crate::world_editor::WorldEditor &editor,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
 		const crate::RoadMaskBitmap &road_mask,
 		const crate::bridges::BridgeStructureMap &bridge_structures,
-		const crate::bridges::BridgeSurfaceMap &bridge_surface)
+		const crate::bridges::BridgeSurfaceMap &bridge_surface,
+		const TunnelPortalMap &tunnel_portals)
 {
 	auto highway_connectivity = build_highway_connectivity_map(all_elements);
 	generate_highways_internal(editor, element, args, highway_connectivity,
-			floodfill_timeout, road_mask, bridge_structures, bridge_surface);
+			floodfill_timeout, road_mask, bridge_structures, bridge_surface,
+			tunnel_portals);
 }
 
 void generate_highways(crate::world_editor::WorldEditor &editor,
@@ -1151,8 +1163,10 @@ void generate_highways(crate::world_editor::WorldEditor &editor,
 			crate::RoadMaskBitmap::new_empty();
 	static const crate::bridges::BridgeStructureMap empty_bridge_structures;
 	static const crate::bridges::BridgeSurfaceMap empty_bridge_surface;
+	static const TunnelPortalMap empty_tunnel_portals;
 	generate_highways(editor, element, args, all_elements, floodfill_timeout,
-			empty_road_mask, empty_bridge_structures, empty_bridge_surface);
+			empty_road_mask, empty_bridge_structures, empty_bridge_surface,
+			empty_tunnel_portals);
 }
 
 void generate_siding(crate::world_editor::WorldEditor &editor,

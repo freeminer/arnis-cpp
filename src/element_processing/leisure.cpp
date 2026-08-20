@@ -71,6 +71,12 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 			}
 		}
 
+		// Rust parity: decide whether the capped fill is usable before drawing
+		// the perimeter, otherwise a refused huge ring leaves an orphan border.
+		auto filled_area = flood_fill_cache.get_or_compute(element, args.timeout);
+		if (filled_area.empty() && is_oversized_ring(element))
+			return;
+
 		for (const ProcessedNode &node : element.nodes) {
 			if (previous_node.has_value()) {
 				std::pair<int, int> prev = previous_node.value();
@@ -105,9 +111,6 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 			for (const ProcessedNode &n : element.nodes) {
 				polygon_coords.push_back(std::make_pair(n.x, n.z));
 			}
-
-			std::vector<std::pair<int, int>> filled_area =
-					flood_fill_cache.get_or_compute(element, args.timeout);
 
 			for (const std::pair<int, int> &p : filled_area) {
 				int x = p.first;

@@ -3,6 +3,7 @@
 #include <queue>
 #include <chrono>
 #include <algorithm>
+#include <array>
 #include <boost/geometry.hpp>
 #include <boost/geometry/geometries/point.hpp>
 #include <boost/geometry/geometries/polygon.hpp>
@@ -23,10 +24,9 @@ using Point2D = bg::model::d2::point_xy<int>;
 using Point2D_Float = bg::model::d2::point_xy<double>;
 using Polygon = bg::model::polygon<Point2D_Float>;
 
-/// Maximum bounding box area (in blocks) for flood fill.
-/// Polygons exceeding this are skipped to prevent excessive memory allocations.
-/// 25 million blocks ≈ 5000×5000; bitmap uses only ~3 MB at this size.
-const int64_t MAX_FLOOD_FILL_AREA = 25000000;
+// Rust parity: floodfill.rs::scanline_fill_area.  The bitmap path is bounded
+// by its full bounding box, while this path is bounded by actual filled cells.
+constexpr std::int64_t MAX_SCANLINE_EDGE_TESTS = 200'000'000;
 
 /// A compact bitmap for visited-coordinate tracking during flood fill.
 ///
@@ -250,6 +250,66 @@ static std::vector<std::pair<int, int>> original_flood_fill_area(
 	return filled_area;
 }
 
+// Even-odd scanline fill for polygons too large for the visited bitmap.  It
+// leaves boundary cells to the caller's outline pass, like geo::Contains.
+static std::vector<std::pair<int, int>> scanline_fill_area(
+		const std::vector<std::pair<int, int>> &polygon_coords, int32_t min_x,
+		int32_t max_x, int32_t min_z, int32_t max_z)
+{
+	const std::int64_t rows = static_cast<std::int64_t>(max_z) - min_z + 1;
+	const std::int64_t edges = static_cast<std::int64_t>(polygon_coords.size()) - 1;
+	if (rows <= 0 || edges <= 0 || rows > MAX_SCANLINE_EDGE_TESTS / edges)
+		return {};
+
+	struct Span
+	{
+		int32_t z, first, last;
+	};
+	std::vector<Span> spans;
+	std::vector<double> crossings;
+	std::int64_t cells = 0;
+	for (std::int64_t zi = min_z; zi <= max_z; ++zi) {
+		const auto z = static_cast<int32_t>(zi);
+		const double zf = static_cast<double>(z);
+		crossings.clear();
+		for (std::size_t i = 1; i < polygon_coords.size(); ++i) {
+			const auto [ix0, iz0] = polygon_coords[i - 1];
+			const auto [ix1, iz1] = polygon_coords[i];
+			const double x0 = static_cast<double>(ix0), z0 = static_cast<double>(iz0);
+			const double x1 = static_cast<double>(ix1), z1 = static_cast<double>(iz1);
+			// Half-open in z: a vertex on the row contributes once, not twice.
+			if ((z0 <= zf) == (z1 <= zf))
+				continue;
+			crossings.push_back(x0 + (zf - z0) * (x1 - x0) / (z1 - z0));
+		}
+		if (crossings.size() < 2)
+			continue;
+		std::sort(crossings.begin(), crossings.end());
+		for (std::size_t i = 1; i < crossings.size(); i += 2) {
+			const auto raw_first =
+					static_cast<std::int64_t>(std::floor(crossings[i - 1])) + 1;
+			const auto raw_last = static_cast<std::int64_t>(std::ceil(crossings[i])) - 1;
+			const auto first_clamped = std::clamp<std::int64_t>(raw_first, min_x, max_x);
+			const auto last_clamped = std::clamp<std::int64_t>(raw_last, min_x, max_x);
+			if (raw_last < min_x || raw_first > max_x || last_clamped < first_clamped)
+				continue;
+			const auto first = static_cast<int32_t>(first_clamped);
+			const auto last = static_cast<int32_t>(last_clamped);
+			cells += static_cast<std::int64_t>(last) - first + 1;
+			if (cells > MAX_FLOOD_FILL_AREA)
+				return {};
+			spans.push_back({z, first, last});
+		}
+	}
+
+	std::vector<std::pair<int, int>> filled;
+	filled.reserve(static_cast<std::size_t>(cells));
+	for (const auto &[z, first, last] : spans)
+		for (std::int64_t xi = first; xi <= last; ++xi)
+			filled.emplace_back(static_cast<int>(xi), z);
+	return filled;
+}
+
 /// Main flood fill function with automatic algorithm selection
 /// Chooses the best algorithm based on polygon size and complexity
 std::vector<std::pair<int, int>> flood_fill_area(
@@ -275,14 +335,13 @@ std::vector<std::pair<int, int>> flood_fill_area(
 	int32_t min_z = minmax_z.first->second;
 	int32_t max_z = minmax_z.second->second;
 
-	int64_t area = static_cast<int64_t>(max_x - min_x + 1) *
-				   static_cast<int64_t>(max_z - min_z + 1);
+	const int64_t area = (static_cast<int64_t>(max_x) - min_x + 1) *
+						 (static_cast<int64_t>(max_z) - min_z + 1);
 
-	// Safety cap: reject polygons whose bounding box is too large.
-	// This prevents multi-GB memory allocations when ocean-adjacent elements
-	// (e.g. natural=water, large landuse) produce huge clipped polygons.
+	// Past the bitmap cap use a scanline fill.  Thin large polygons remain
+	// renderable without allocating a bitmap for their enormous bounding box.
 	if (area > MAX_FLOOD_FILL_AREA) {
-		return {};
+		return scanline_fill_area(polygon_coords, min_x, max_x, min_z, max_z);
 	}
 
 	// For small and medium areas, use optimized flood fill with span filling

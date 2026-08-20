@@ -7,6 +7,7 @@
 #include <cstdint>
 
 #include "colors.h"
+#include "block_palette.h"
 
 #include "../../arnis_adapter.h"
 namespace arnis
@@ -248,6 +249,14 @@ Block get_stair_block_for_material(const Block &material)
 		return POLISHED_DIORITE_STAIRS;
 	else if (material == LIGHT_GRAY_CONCRETE)
 		return STONE_BRICK_STAIRS;
+	else if (material == BLACK_CONCRETE)
+		return POLISHED_BLACKSTONE_BRICK_STAIRS;
+	else if (material == LIGHT_BLUE_CONCRETE)
+		return POLISHED_DIORITE_STAIRS;
+	else if (material == CYAN_CONCRETE)
+		return DEEPSLATE_BRICK_STAIRS;
+	else if (material == GREEN_CONCRETE)
+		return MOSSY_COBBLESTONE_STAIRS;
 	else if (material == NETHER_BRICK)
 		return NETHER_BRICK_STAIRS;
 	else if (material == POLISHED_BLACKSTONE)
@@ -506,7 +515,8 @@ Block get_window_block_for_building_type(const std::string &building_type)
 	}
 }
 
-Block get_window_block_for_building_type(const std::string &building_type, ChaCha8Rng &rng)
+Block get_window_block_for_building_type(
+		const std::string &building_type, ChaCha8Rng &rng)
 {
 	const auto choose = [&rng](const auto &options) -> Block {
 		return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
@@ -517,14 +527,15 @@ Block get_window_block_for_building_type(const std::string &building_type, ChaCh
 				LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS});
 	if (building_type == "hospital" || building_type == "school" ||
 			building_type == "university")
-		return choose(std::vector<Block>{GLASS, WHITE_STAINED_GLASS,
-				LIGHT_GRAY_STAINED_GLASS});
+		return choose(
+				std::vector<Block>{GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS});
 	if (building_type == "hotel" || building_type == "restaurant")
 		return choose(std::vector<Block>{GLASS, WHITE_STAINED_GLASS});
 	if (building_type == "industrial" || building_type == "warehouse")
 		return choose(std::vector<Block>{GLASS, GRAY_STAINED_GLASS,
 				LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS});
-	return *WINDOW_VARIATIONS[rng.uniform(static_cast<std::uint32_t>(WINDOW_VARIATIONS.size()))];
+	return *WINDOW_VARIATIONS[rng.uniform(
+			static_cast<std::uint32_t>(WINDOW_VARIATIONS.size()))];
 }
 
 Block get_random_floor_block()
@@ -567,16 +578,7 @@ Block get_building_wall_block_for_color(const RGB &color)
 
 Block get_building_wall_block_for_color(const RGB &color, ChaCha8Rng &rng)
 {
-	if (DEFINED_COLORS.empty())
-		return get_fallback_building_block(rng);
-	const auto best_it = std::min_element(DEFINED_COLORS.begin(), DEFINED_COLORS.end(),
-			[&color](const std::pair<RGB, std::vector<Block *>> &a,
-					const std::pair<RGB, std::vector<Block *>> &b) {
-				return colors::rgb_distance(color, a.first) < colors::rgb_distance(color, b.first);
-			});
-	if (best_it == DEFINED_COLORS.end() || best_it->second.empty())
-		return get_fallback_building_block(rng);
-	return *best_it->second[rng.uniform(static_cast<std::uint32_t>(best_it->second.size()))];
+	return block_palette::wall_block_for_color(color, rng);
 }
 
 Block get_fallback_building_block()

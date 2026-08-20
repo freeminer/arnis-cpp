@@ -643,6 +643,28 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	const bool check_canopy_collision =
 			canopy_might_intersect_building(pos.x, pos.z, building_footprints);
 	const int base_y = editor.get_absolute_y(pos.x, pos.y, pos.z);
+	// Fixed-size tree models dominate country-scale terrain. Keep the same
+	// species palette but scale a nominal 25 m tree into a compact shrub.
+	if (editor.scale() < 0.35) {
+		const int height =
+				std::clamp(static_cast<int>(std::lround(25.0 * editor.scale())), 1, 8);
+		const int trunk = std::max(0, height - 1);
+		for (int dy = 0; dy < trunk; ++dy)
+			editor.set_block_absolute(tree.log_block, pos.x, base_y + dy, pos.z,
+					std::nullopt, std::optional<const std::vector<Block>>(blacklist));
+		const int top = base_y + trunk;
+		editor.set_block_absolute(tree.leaves_block, pos.x, top, pos.z, std::nullopt,
+				std::optional<const std::vector<Block>>(blacklist));
+		if (height >= 3)
+			for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
+				editor.set_block_absolute(tree.leaves_block, pos.x + dx, top, pos.z + dz,
+						std::nullopt, std::optional<const std::vector<Block>>(blacklist));
+		if (height >= 5)
+			editor.set_block_absolute(tree.leaves_block, pos.x, top + 1, pos.z,
+					std::nullopt, std::optional<const std::vector<Block>>(blacklist));
+		return;
+	}
 	int canopy_top = 0;
 	for (const auto &range : tree.leaves_fill)
 		canopy_top = std::max(canopy_top, range.second.y);

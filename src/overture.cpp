@@ -18,8 +18,6 @@ namespace arnis::overture
 namespace
 {
 
-constexpr std::size_t MAX_OVERTURE_BUILDINGS = 100000;
-
 uint32_t read_u32(
 		const std::vector<uint8_t> &bytes, std::size_t offset, bool little_endian)
 {
@@ -109,8 +107,7 @@ uint64_t gers_id_to_u64_impl(const std::string &gers_id)
 	return hash | OVERTURE_ID_HIGH_BIT;
 }
 
-std::string overture_class_to_osm_building_impl(
-		const std::optional<std::string> &subtype,
+std::string overture_class_to_osm_building_impl(const std::optional<std::string> &subtype,
 		const std::optional<std::string> &clazz)
 {
 	if (clazz) {
@@ -173,6 +170,13 @@ std::string overture_class_to_osm_building_impl(
 
 }
 
+std::size_t overture_building_budget(const geographic::LLBBox &bbox)
+{
+	return std::clamp(
+			static_cast<std::size_t>(bbox.area_km2() * OVERTURE_BUILDINGS_PER_KM2),
+			MIN_OVERTURE_BUILDINGS, MAX_OVERTURE_BUILDINGS);
+}
+
 std::optional<std::vector<std::pair<double, double>>> parse_overture_wkb_polygon(
 		const std::vector<std::uint8_t> &wkb)
 {
@@ -188,12 +192,13 @@ std::string overture_class_to_osm_building(const std::optional<std::string> &sub
 	return overture_class_to_osm_building_impl(subtype, clazz);
 }
 
-std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &building,
-		const geographic::LLBBox &bbox, double scale)
+std::optional<ProcessedWay> overture_building_to_way(
+		const OvertureBuilding &building, const geographic::LLBBox &bbox, double scale)
 {
 	if (building.exterior_ring.size() < 3)
 		return std::nullopt;
-	const auto [transformer, rectangle] = coordinate_system::CoordTransformer::llbbox_to_xzbbox(bbox, scale);
+	const auto [transformer, rectangle] =
+			coordinate_system::CoordTransformer::llbbox_to_xzbbox(bbox, scale);
 	const auto base = gers_id_to_u64(building.id);
 	ProcessedWay way;
 	way.id = static_cast<std::int64_t>(base);
@@ -201,47 +206,78 @@ std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &bui
 	double min_lng = min_lat, max_lng = -min_lat;
 	for (std::size_t i = 0; i < building.exterior_ring.size(); ++i) {
 		const auto [lng, lat] = building.exterior_ring[i];
-		if (!std::isfinite(lat) || !std::isfinite(lng) || lat < -90. || lat > 90. || lng < -180. || lng > 180.) continue;
-		min_lat = std::min(min_lat, lat); max_lat = std::max(max_lat, lat);
-		min_lng = std::min(min_lng, lng); max_lng = std::max(max_lng, lng);
+		if (!std::isfinite(lat) || !std::isfinite(lng) || lat < -90. || lat > 90. ||
+				lng < -180. || lng > 180.)
+			continue;
+		min_lat = std::min(min_lat, lat);
+		max_lat = std::max(max_lat, lat);
+		min_lng = std::min(min_lng, lng);
+		max_lng = std::max(max_lng, lng);
 		const auto point = transformer.transform_point(geographic::LLPoint(lat, lng));
-		way.nodes.push_back({static_cast<std::int64_t>(base + i), tags_t{}, point.x, point.z});
+		way.nodes.push_back(
+				{static_cast<std::int64_t>(base + i), tags_t{}, point.x, point.z});
 	}
-	if (way.nodes.size() < 3 || max_lng < bbox.min().lng() || min_lng > bbox.max().lng() ||
-			max_lat < bbox.min().lat() || min_lat > bbox.max().lat()) return std::nullopt;
-	if (way.nodes.front().x != way.nodes.back().x || way.nodes.front().z != way.nodes.back().z)
-		way.nodes.push_back({static_cast<std::int64_t>(base + building.exterior_ring.size()), {}, way.nodes.front().x, way.nodes.front().z});
-	XZBBox clipbox(rectangle.min().x, rectangle.min().z, rectangle.max().x, rectangle.max().z);
+	if (way.nodes.size() < 3 || max_lng < bbox.min().lng() ||
+			min_lng > bbox.max().lng() || max_lat < bbox.min().lat() ||
+			min_lat > bbox.max().lat())
+		return std::nullopt;
+	if (way.nodes.front().x != way.nodes.back().x ||
+			way.nodes.front().z != way.nodes.back().z)
+		way.nodes.push_back(
+				{static_cast<std::int64_t>(base + building.exterior_ring.size()), {},
+						way.nodes.front().x, way.nodes.front().z});
+	XZBBox clipbox(
+			rectangle.min().x, rectangle.min().z, rectangle.max().x, rectangle.max().z);
 	way.nodes = clipping::clip_way_to_bbox(way.nodes, clipbox);
-	if (way.nodes.size() < 4) return std::nullopt;
-	way.tags["building"] = overture_class_to_osm_building(building.subtype, building.clazz);
+	if (way.nodes.size() < 4)
+		return std::nullopt;
+	way.tags["building"] =
+			overture_class_to_osm_building(building.subtype, building.clazz);
 	const bool useful_floors = building.num_floors && *building.num_floors >= 2;
 	if (building.height && *building.height > 0. && *building.height < 1000. &&
-			((useful_floors && *building.height > 28.) || (!useful_floors && *building.height >= 10.)))
+			((useful_floors && *building.height > 28.) ||
+					(!useful_floors && *building.height >= 10.)))
 		way.tags["height"] = std::to_string(*building.height);
-	if (building.min_height && *building.min_height > 0. && *building.min_height < 1000.) way.tags["min_height"] = std::to_string(*building.min_height);
-	if (building.num_floors && *building.num_floors >= 2 && *building.num_floors < 200) way.tags["building:levels"] = std::to_string(*building.num_floors);
+	if (building.min_height && *building.min_height > 0. && *building.min_height < 1000.)
+		way.tags["min_height"] = std::to_string(*building.min_height);
+	if (building.num_floors && *building.num_floors >= 2 && *building.num_floors < 200)
+		way.tags["building:levels"] = std::to_string(*building.num_floors);
 	if (building.roof_shape) {
-		static const std::unordered_map<std::string, std::string> shapes{{"gable", "gabled"}, {"gabled", "gabled"}, {"hip", "hipped"}, {"hipped", "hipped"}, {"flat", "flat"}, {"pyramidal", "pyramidal"}, {"dome", "dome"}, {"onion", "dome"}, {"skillion", "skillion"}, {"shed", "skillion"}, {"gambrel", "gambrel"}, {"mansard", "mansard"}, {"round", "round"}};
-		way.tags["roof:shape"] = shapes.contains(*building.roof_shape) ? shapes.at(*building.roof_shape) : *building.roof_shape;
+		static const std::unordered_map<std::string, std::string> shapes{
+				{"gable", "gabled"}, {"gabled", "gabled"}, {"hip", "hipped"},
+				{"hipped", "hipped"}, {"flat", "flat"}, {"pyramidal", "pyramidal"},
+				{"dome", "dome"}, {"onion", "dome"}, {"skillion", "skillion"},
+				{"shed", "skillion"}, {"gambrel", "gambrel"}, {"mansard", "mansard"},
+				{"round", "round"}};
+		way.tags["roof:shape"] = shapes.contains(*building.roof_shape)
+										 ? shapes.at(*building.roof_shape)
+										 : *building.roof_shape;
 	}
-	if (building.roof_material) way.tags["roof:material"] = *building.roof_material;
-	if (building.roof_orientation) way.tags["roof:orientation"] = *building.roof_orientation;
-	if (building.facade_color) way.tags["building:colour"] = *building.facade_color;
-	if (building.roof_color) way.tags["roof:colour"] = *building.roof_color;
+	if (building.roof_material)
+		way.tags["roof:material"] = *building.roof_material;
+	if (building.roof_orientation)
+		way.tags["roof:orientation"] = *building.roof_orientation;
+	if (building.facade_color)
+		way.tags["building:colour"] = *building.facade_color;
+	if (building.roof_color)
+		way.tags["roof:colour"] = *building.roof_color;
 	way.tags["source"] = "overture_maps";
 	return way;
 }
 
-std::vector<ProcessedElement> convert_overture_buildings(const std::vector<OvertureBuilding> &buildings,
-		const geographic::LLBBox &bbox, double scale, bool include_osm_sourced, std::size_t maximum)
+std::vector<ProcessedElement> convert_overture_buildings(
+		const std::vector<OvertureBuilding> &buildings, const geographic::LLBBox &bbox,
+		double scale, bool include_osm_sourced, std::size_t maximum)
 {
 	std::vector<ProcessedElement> out;
 	out.reserve(std::min(maximum, buildings.size()));
 	for (const auto &building : buildings) {
-		if (out.size() >= maximum) break;
-		if (!include_osm_sourced && building.is_osm_sourced) continue;
-		if (auto way = overture_building_to_way(building, bbox, scale)) out.push_back(ProcessedElement::FromWay(*way));
+		if (out.size() >= maximum)
+			break;
+		if (!include_osm_sourced && building.is_osm_sourced)
+			continue;
+		if (auto way = overture_building_to_way(building, bbox, scale))
+			out.push_back(ProcessedElement::FromWay(*way));
 	}
 	return out;
 }
@@ -250,8 +286,10 @@ std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource
 		const geographic::LLBBox &bbox, double scale, bool include_osm_sourced,
 		std::size_t maximum)
 {
-	if (!source || scale <= 0 || maximum == 0)
+	if (!source || scale <= 0)
 		return {};
+	if (maximum == 0)
+		maximum = overture_building_budget(bbox);
 	// Ask the external decoder for no more rows than the conversion cap.  Keep
 	// a final cap in convert_overture_buildings in case a source ignores it.
 	try {
@@ -265,16 +303,17 @@ std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource
 	}
 }
 
-std::vector<ProcessedElement> fetch_overture_buildings(
-		double, double, double, double, double, bool debug)
+std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
+		double max_lat, double max_lng, double, bool debug)
 {
 	if (debug) {
+		const geographic::LLBBox bbox(min_lat, min_lng, max_lat, max_lng);
 		std::cerr << "Overture Maps fetching is not enabled in the C++ mapgen build "
 					 "(Parquet/HTTP range reader not linked). Self-contained WKB, ID, "
 					 "tag mapping, and OSM dedup helpers are ported, but live STAC "
 					 "partition reads still require a C++ Parquet backend. Continuing "
 					 "with OSM data only. Limit would be "
-				  << MAX_OVERTURE_BUILDINGS << " buildings." << std::endl;
+				  << overture_building_budget(bbox) << " buildings." << std::endl;
 	}
 	return {};
 }

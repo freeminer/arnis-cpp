@@ -98,6 +98,11 @@ public:
 using BuildingFootprintBitmap = CoordinateBitmap;
 using RoadMaskBitmap = CoordinateBitmap;
 
+// A closed ring whose bounding box exceeds the bitmap-fill cap.  Consumers
+// distinguish this deliberate refusal from an open way or a thin ring with no
+// interior, so they do not paint an orphan outline around untouched ground.
+bool is_oversized_ring(const ProcessedWay &way);
+
 /// Forward declaration
 class FloodFillCache;
 
@@ -122,6 +127,9 @@ public:
 	/// Pre-computes flood fills for all elements that need them.
 	static FloodFillCache precompute(const std::vector<ProcessedElement> &elements,
 			const std::optional<std::chrono::milliseconds> &timeout);
+
+	/// Gets cached flood fill result for a way, or computes it if not cached.
+	const std::vector<std::pair<int32_t, int32_t>> *get_cached(uint64_t way_id) const;
 
 	/// Gets cached flood fill result for a way, or computes it if not cached.
 	std::vector<std::pair<int32_t, int32_t>> get_or_compute(const ProcessedWay &way,

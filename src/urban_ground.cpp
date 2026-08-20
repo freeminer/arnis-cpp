@@ -10,8 +10,8 @@ namespace arnis {
 namespace {
 using Cell=std::pair<int,int>;
 using Points=std::vector<Cell>;
-long long urban_key(int x,int z) { return (static_cast<long long>(std::uint32_t(x))<<32)|std::uint32_t(z); }
-struct CellHash { std::size_t operator()(Cell c) const { return std::hash<long long>{}(urban_key(c.first,c.second)); } };
+std::uint64_t urban_key(int x,int z) { return (std::uint64_t(std::uint32_t(x))<<32)|std::uint32_t(z); }
+struct CellHash { std::size_t operator()(Cell c) const { return std::hash<std::uint64_t>{}(urban_key(c.first,c.second)); } };
 using Grid=std::unordered_map<Cell,Points,CellHash>;
 using Cells=std::unordered_set<Cell,CellHash>;
 
@@ -54,10 +54,12 @@ std::vector<UrbanCluster> clusters(const UrbanGroundConfig &config,const Grid &g
 }
 }
 
+UrbanGroundLookup UrbanGroundLookup::empty() { return {}; }
 bool UrbanGroundLookup::is_urban(int x,int z) const { return !cells_.empty() && cells_.contains(urban_key((x-min_x_)/cell_size_,(z-min_z_)/cell_size_)); }
 void UrbanGroundLookup::add_cell(int x,int z) { cells_.insert(urban_key(x,z)); }
 
 UrbanGroundComputer::UrbanGroundComputer(cartesian::XZBBox bbox, UrbanGroundConfig config):config_(std::move(config)),bbox_(std::move(bbox)) { if(config_.cell_size<=0) config_.cell_size=64; }
+UrbanGroundComputer UrbanGroundComputer::with_defaults(cartesian::XZBBox bbox) { return UrbanGroundComputer(std::move(bbox)); }
 void UrbanGroundComputer::add_building_centroid(int x,int z) { if(x>=bbox_.min_x()&&x<=bbox_.max_x()&&z>=bbox_.min_z()&&z<=bbox_.max_z()) building_centroids_.push_back({x,z}); }
 void UrbanGroundComputer::add_building_centroids(const Points &points) { for(auto [x,z]:points) add_building_centroid(x,z); }
 
