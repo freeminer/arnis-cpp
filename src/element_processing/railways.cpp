@@ -402,6 +402,45 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 {
+	std::optional<Block> adv_rail;
+	if (element.nodes.size() >= 2) {
+		const int total_dx = element.nodes.back().x - element.nodes.front().x;
+		const int total_dz = element.nodes.back().z - element.nodes.front().z;
+		const int sx = (total_dx > 0) - (total_dx < 0);
+		const int sz = (total_dz > 0) - (total_dz < 0);
+		const bool supported_direction = sx == 0 || sz == 0 ||
+				std::abs(total_dx) == std::abs(total_dz);
+		bool straight = supported_direction && (sx != 0 || sz != 0);
+		for (std::size_t i = 1; straight && i < element.nodes.size(); ++i) {
+			const int dx = element.nodes[i].x - element.nodes[i - 1].x;
+			const int dz = element.nodes[i].z - element.nodes[i - 1].z;
+			straight = dx * total_dz == dz * total_dx;
+		}
+		const int ground = editor.get_ground_level(
+				element.nodes.front().x, element.nodes.front().z);
+		for (std::size_t i = 1; straight && i < element.nodes.size(); ++i) {
+			const auto points = bresenham_line(element.nodes[i - 1].x, 0,
+					element.nodes[i - 1].z, element.nodes[i].x, 0, element.nodes[i].z);
+			for (const auto &point : points)
+				if (editor.get_ground_level(
+							std::get<0>(point), std::get<2>(point)) != ground) {
+					straight = false;
+					break;
+				}
+		}
+		if (straight) {
+			if (sx == 0)
+				adv_rail = ADV_RAIL_NORTH_SOUTH;
+			else if (sz == 0)
+				adv_rail = ADV_RAIL_EAST_WEST;
+			else if (sx == sz)
+				adv_rail = ADV_RAIL_DIAGONAL_NW_SE;
+			else
+				adv_rail = ADV_RAIL_DIAGONAL_NE_SW;
+			if (adv_rail->id() == RAIL.id())
+				adv_rail.reset();
+		}
+	}
 	std::size_t tds = 0;
 	for (size_t i = 1; i < element.nodes.size(); ++i) {
 		XZ prev_node = element.nodes[i - 1].xz();
@@ -443,8 +482,8 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 				next_opt = pair<int, int>{
 						get<0>(smoothed_points[j + 1]), get<2>(smoothed_points[j + 1])};
 
-			Block rail_block = determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
-					prev_ground, current_ground, next_ground);
+			Block rail_block = adv_rail.value_or(determine_rail_with_slope({bx, bz},
+					prev_opt, next_opt, prev_ground, current_ground, next_ground));
 			editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
 
 			if ((tds % 4) == 0)
@@ -706,6 +745,19 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 	for (const auto &s : skip_types) {
 		if (railway_type == s)
 			return;
+	}
+	if (railway_type == "platform" || railway_type == "station" ||
+			railway_type == "halt") {
+		for (std::size_t i = 1; i < element.nodes.size(); ++i) {
+			const auto &a = element.nodes[i - 1];
+			const auto &b = element.nodes[i];
+			Block platform = ADV_PLATFORM_HIGH;
+			platform.setParam2(std::abs(b.x - a.x) >= std::abs(b.z - a.z) ? 0 : 1);
+			for (const auto &point : bresenham_line(a.x, 0, a.z, b.x, 0, b.z))
+				editor.set_block(platform, std::get<0>(point), 1, std::get<2>(point),
+						nullopt, nullopt);
+		}
+		return;
 	}
 
 	if (element.nodes.size() < 2)
