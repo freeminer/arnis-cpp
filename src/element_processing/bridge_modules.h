@@ -1,6 +1,6 @@
 #pragma once
 
-#include "../world_editor/common.h"
+#include "../../../arnis_adapter.h"
 #include <vector>
 #include <optional>
 #include <cstddef>

@@ -42,149 +42,70 @@ namespace arnis
 {
 
 // Helper functions for ground fill area detection
-namespace {
-
-bool is_closed_ring(const std::vector<ProcessedNode> &nodes)
+namespace
 {
-	return nodes.size() >= 4 && nodes.front().x == nodes.back().x &&
-		   nodes.front().z == nodes.back().z;
-}
 
-bool same_point(const ProcessedNode &a, const ProcessedNode &b)
-{
-	return a.x == b.x && a.z == b.z;
-}
-
-double ring_area(const std::vector<ProcessedNode> &nodes)
-{
-	if (nodes.size() < 3)
-		return 0.0;
-	double twice_area = 0.0;
-	for (size_t i = 0; i < nodes.size(); ++i) {
-		const auto &a = nodes[i];
-		const auto &b = nodes[(i + 1) % nodes.size()];
-		twice_area += static_cast<double>(a.x) * b.z - static_cast<double>(b.x) * a.z;
-	}
-	return std::abs(twice_area * 0.5);
-}
-
-bool landuse_paints_ground(const tags_t &tags)
-{
-	const auto it = tags.find("landuse");
-	return it == tags.end() ||
-		   (it->second != "residential" && it->second != "commercial");
-}
-
-bool tag_is(const tags_t &tags, const std::string &key, const std::string &value)
+bool water_tag_is(const tags_t &tags, const std::string &key, const std::string &value)
 {
 	const auto it = tags.find(key);
 	return it != tags.end() && it->second == value;
 }
 
-std::optional<double> way_ground_fill_area(const ProcessedWay &way)
-{
-	const auto &tags = way.tags;
-	if (tags.contains("building") || tags.contains("building:part") ||
-			tags.contains("highway"))
-		return std::nullopt;
-	bool fills = false;
-	if (tags.contains("landuse"))
-		fills = landuse_paints_ground(tags);
-	else if (tags.contains("natural"))
-		fills = !tag_is(tags, "amenity", "fountain");
-	else if (!tags.contains("amenity"))
-		fills = tags.contains("leisure");
-	if (!fills)
-		return std::nullopt;
-	double area = ring_area(way.nodes);
-	return area > 0.0 ? std::optional<double>(area) : std::nullopt;
-}
-
-std::optional<double> relation_ground_fill_area(const ProcessedRelation &rel)
-{
-	const auto &tags = rel.tags;
-	if (tags.contains("building") || tags.contains("building:part") ||
-			tag_is(tags, "type", "building") || tags.contains("water") ||
-			tag_is(tags, "natural", "water") || tag_is(tags, "natural", "bay"))
-		return std::nullopt;
-	const bool fills = tags.contains("natural") ||
-					   (tags.contains("landuse") && landuse_paints_ground(tags)) ||
-					   tag_is(tags, "leisure", "park");
-	if (!fills)
-		return std::nullopt;
-	double area = 0.0;
-	for (const auto &member : rel.members) {
-		if (member.role == ProcessedMemberRole::Outer)
-			area += ring_area(member.way.nodes);
-	}
-	return area > 0.0 ? std::optional<double>(area) : std::nullopt;
-}
-
-std::optional<double> ground_fill_area(const ProcessedElement &element)
-{
-	if (element.is_way()) {
-		return way_ground_fill_area(element.as_way());
-	} else if (element.is_relation()) {
-		return relation_ground_fill_area(element.as_relation());
-	}
-	return std::nullopt;
-}
-
 bool is_water_area_way(const ProcessedWay &way)
 {
-	return tag_is(way.tags, "waterway", "dock") ||
-		   tag_is(way.tags, "waterway", "riverbank");
+	return water_tag_is(way.tags, "waterway", "dock") ||
+		   water_tag_is(way.tags, "waterway", "riverbank");
 }
 
-bool is_water_relation(const ProcessedRelation &rel)
+bool is_still_water_relation(const ProcessedRelation &rel)
 {
-	return rel.tags.contains("water") || tag_is(rel.tags, "natural", "water") ||
-		   tag_is(rel.tags, "natural", "bay") ||
-		   tag_is(rel.tags, "waterway", "riverbank") ||
-		   tag_is(rel.tags, "landuse", "reservoir");
+	return rel.tags.contains("water") || water_tag_is(rel.tags, "natural", "water") ||
+		   water_tag_is(rel.tags, "natural", "bay") ||
+		   water_tag_is(rel.tags, "waterway", "riverbank") ||
+		   water_tag_is(rel.tags, "landuse", "reservoir");
 }
 
 /// Compute still water surface level for a water polygon
 int compute_still_surface_level(const Ground *ground,
 		const std::vector<ProcessedNode> &outer_ring, const XZBBox &xzbbox)
 {
-	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
+	if (!ground || !ground->has_land_cover())
 		return -1000;
-	
+
 	if (outer_ring.empty())
 		return -1000;
-	
+
 	// Sample points from the ring and compute average ground level
 	std::int64_t sum_level = 0;
 	int count = 0;
 	for (const auto &node : outer_ring) {
 		if (node.x >= xzbbox.min_x() && node.x <= xzbbox.max_x() &&
-			node.z >= xzbbox.min_z() && node.z <= xzbbox.max_z()) {
+				node.z >= xzbbox.min_z() && node.z <= xzbbox.max_z()) {
 			sum_level += ground->level({node.x, node.z});
 			count++;
 		}
 	}
-	
+
 	if (count == 0)
 		return -1000;
-	
+
 	return static_cast<int>(sum_level / count);
 }
 
 } // anonymous namespace
 
-StillWaterSurfaces prescan_still_surfaces(
-		const std::vector<ProcessedElement> &elements, const Ground *ground, const XZBBox &xzbbox)
+StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &elements,
+		const Ground *ground, const XZBBox &xzbbox)
 {
 	StillWaterSurfaces result;
-	
-	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
+
+	if (!ground || !ground->has_land_cover())
 		return result;
-	
+
 	for (const auto &element : elements) {
 		std::pair<std::string, std::uint64_t> key;
 		std::vector<ProcessedNode> outer_ring;
-		
+
 		if (element.is_way()) {
 			const auto &way = element.as_way();
 			if (!is_water_area_way(way))
@@ -193,22 +114,20 @@ StillWaterSurfaces prescan_still_surfaces(
 			outer_ring = way.nodes;
 		} else if (element.is_relation()) {
 			const auto &rel = element.as_relation();
-			if (!is_water_relation(rel))
+			if (!is_still_water_relation(rel))
 				continue;
 			key = {"relation", rel.id};
 			// Collect outer ring from relation members
 			for (const auto &member : rel.members) {
 				if (member.role == ProcessedMemberRole::Outer) {
-					outer_ring.insert(outer_ring.end(),
-									  member.way.nodes.begin(),
-									  member.way.nodes.end());
+					outer_ring.insert(outer_ring.end(), member.way.nodes.begin(),
+							member.way.nodes.end());
 				}
 			}
 		} else {
 			continue;
 		}
-		}
-		
+
 		if (!outer_ring.empty()) {
 			int level = compute_still_surface_level(ground, outer_ring, xzbbox);
 			if (level > -1000) {
@@ -216,7 +135,7 @@ StillWaterSurfaces prescan_still_surfaces(
 			}
 		}
 	}
-	
+
 	return result;
 }
 
@@ -783,7 +702,8 @@ void carve_subway_interior(
 
 namespace tourisms
 {
-void generate_tourisms(WorldEditor &editor, const ProcessedNode &node);
+void generate_tourisms(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask);
 }
 
 namespace man_made
@@ -970,8 +890,9 @@ bool generate_world(WorldEditor &editor,
 	auto road_mask = highways::collect_road_surface_coords(elements, xzbbox, args_.scale);
 	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
 	// Pre-scan still water surfaces for consistent water levels across tiles
-	auto still_surfaces = editor.ground ? prescan_still_surfaces(elements, editor.ground.get(), xzbbox)
-	                                     : StillWaterSurfaces{};
+	auto still_surfaces =
+			editor.ground ? prescan_still_surfaces(elements, editor.ground, xzbbox)
+						  : StillWaterSurfaces{};
 	auto bridge_outlines = bridge_styles::BridgeOutlineIndex::build(elements);
 	auto bridge_structures =
 			bridges::BridgeStructureMap::build(elements, editor, bridge_outlines);
@@ -1096,10 +1017,10 @@ bool generate_world(WorldEditor &editor,
 						highways::renders_as_highway_tunnel(way) &&
 						highways::generate_highway_tunnel_shell(editor, way, args,
 								tunnel_internal_endpoints, tunnel_portals,
-		if (editor.signage_enabled()) {
-			signage::generate_highway_way_signage(editor, way, building_footprints, road_mask);
-		}
 								highway_tunnel_cells);
+				if (editor.signage_enabled())
+					signage::generate_highway_way_signage(
+							editor, way, building_footprints, road_mask);
 				if (!tunnel_rendered)
 					highways::generate_highways(editor, element, args, elements, {},
 							road_mask, bridge_structures, bridge_surface, tunnel_portals);
@@ -1114,10 +1035,8 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.contains("amenity")) {
 				amenities::generate_amenities(
 						editor, element, args, flood_fill_cache, road_mask);
-				if (editor.signage_enabled() &&
-						way.tags.get("amenity").value_or("") == "parking") {
-					signage::generate_parking_signage(
-							editor, way, road_mask);
+				if (editor.signage_enabled() && way.tags.get("amenity") == "parking") {
+					signage::generate_parking_signage(editor, way, road_mask);
 				}
 			} else if (way.tags.contains("leisure")) {
 				leisure::generate_leisure(editor, way, args, flood_fill_cache,
@@ -1162,9 +1081,9 @@ bool generate_world(WorldEditor &editor,
 				power::generate_power(editor, element, building_footprints,
 						flood_fill_cache, args.timeout);
 			} else if (way.tags.contains("place")) {
-			if (editor.signage_enabled()) {
-				signage::generate_power_signage(editor, way, road_mask);
-			}
+				if (editor.signage_enabled()) {
+					signage::generate_power_signage(editor, way, road_mask);
+				}
 				landuse::generate_place(editor, way, args, flood_fill_cache);
 			}
 			signage::place_way_signage(
@@ -1217,9 +1136,10 @@ bool generate_world(WorldEditor &editor,
 			} else if (node.tags.contains("advertising")) {
 				advertising::generate_advertising(editor, node, road_mask);
 			}
-		if (editor.signage_enabled()) {
-			signage::generate_node_signage(editor, node, building_footprints, road_mask);
-		}
+			if (editor.signage_enabled()) {
+				signage::generate_node_signage(
+						editor, node, building_footprints, road_mask);
+			}
 		} else if (element.is_relation()) {
 			auto const &rel = element.as_relation();
 			if (std::find(landmark_plan.suppressed.begin(),

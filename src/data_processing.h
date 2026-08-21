@@ -9,13 +9,7 @@
 
 namespace arnis
 {
-
-// Forward declarations
-struct ProcessedElement;
-class WorldEditor;
-struct Args;
-class Ground;
-struct XZBBox;
+// Note: Types are defined in arnis_adapter.h, no forward declarations needed
 
 // Hash for pair<string, uint64_t> used in StillWaterSurfaces
 struct PairHashStringUint

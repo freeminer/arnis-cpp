@@ -1,4 +1,5 @@
 #pragma once
+#include "../block_definitions.h"
 #include "../../../arnis_block.h"
 #include "floor_state.h"
 #include <array>
@@ -13,6 +14,11 @@
 #include <tuple>
 namespace arnis::world_editor
 {
+// Forward declarations
+GenerationBounds clipped_tile_bounds(
+		const GenerationBounds &b, int tile_x, int tile_z, int tile_size);
+GenerationBounds halo_tile_bounds(
+		const GenerationBounds &b, int tile_x, int tile_z, int tile_size, int halo);
 inline constexpr int MAX_BLOCK_ID = 512, SECTION_VOLUME = 4096;
 struct WorldMetadata
 {

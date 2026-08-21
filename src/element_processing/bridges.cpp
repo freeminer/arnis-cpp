@@ -131,6 +131,7 @@ void generate_bridges(
 
 }
 
+#if 0 // Duplicate legacy map implementation; canonical code lives in bridges_maps.cpp.
 // BridgeStructureMap implementation
 BridgeStructureMap BridgeStructureMap::build(
 		const std::vector<ProcessedElement> &elements,
@@ -278,3 +279,4 @@ bool is_bridge_way(const ProcessedWay &way) {
 }
 
 } // namespace bridges
+#endif

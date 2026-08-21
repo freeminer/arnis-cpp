@@ -67,7 +67,7 @@ void generate_tourisms(WorldEditor &editor, const ProcessedNode &element,
 					editor.set_block(COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
 					editor.set_block(OAK_PLANKS, x, 2, z, std::nullopt, std::nullopt);
 
-					const int abs_y = editor.get_ground_level(x, 0, z) + 2;
+					const int abs_y = editor.get_ground_level(x, z) + 2;
 					const std::vector<std::pair<std::string, std::string>> info_patterns =
 							{
 									{"blue", "minecraft:stripe_left"},

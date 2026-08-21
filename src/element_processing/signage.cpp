@@ -93,10 +93,7 @@ std::optional<std::pair<int, int>> get_nearest_road_block(int x, int z, int radi
 					continue; // skip inner square
 				int nx = x + dx;
 				int nz = z + dz;
-				if (nx >= 0 && nz >= 0 && 
-				    nx < static_cast<int>(road_mask.width()) && 
-				    nz < static_cast<int>(road_mask.height()) &&
-				    road_mask.get(nx, nz)) {
+				if (road_mask.contains(nx, nz)) {
 					return {{nx, nz}};
 				}
 			}
@@ -134,7 +131,7 @@ void place_roadside_sign(world_editor::WorldEditor &editor, const char *kind,
 		const int sz = z + static_cast<int>(std::round(-dx * k));
 		if (road_mask.contains(sx, sz))
 			continue;
-		if (footprints.contains(sx, sz) || editor.is_cell_road(sx, sz))
+		if (footprints.contains(sx, sz) || editor.is_lc_water(sx, sz))
 			continue;
 			
 		const int ground = editor.get_ground_level(sx, sz);
@@ -383,6 +380,7 @@ void place_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &wa
 		place_post(editor, node.x, node.z, *key, true);
 	if (way.tags.get("amenity") == "parking")
 		place_post(editor, node.x, node.z, decals::PictogramKey{"parking"}, true);
+}
 
 // Building and POI signage implementation
 namespace {
@@ -530,18 +528,21 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 		return;
 
 	// Skip elevated/deck/tunnel/layer!=0 highways
-	if (way.tags.get("bridge").value_or("") != "no" ||
-			way.tags.get("tunnel").value_or("") != "no" ||
-			way.tags.get("layer").has_value())
+	const auto bridge = way.tags.get("bridge");
+	const auto tunnel = way.tags.get("tunnel");
+	const auto layer = way.tags.get("layer");
+	if ((!bridge.empty() && bridge != "no") ||
+			(!tunnel.empty() && tunnel != "no") ||
+			(!layer.empty() && layer != "0"))
 		return;
 
 	// Skip area highways
-	if (way.tags.get("area").value_or("") == "yes")
+	if (way.tags.get("area") == "yes")
 		return;
 
-	const std::string highway = way.tags.get("highway").value_or("");
-	const bool oneway = way.tags.get("oneway").value_or("") == "yes";
-	const bool reversed = way.tags.get("oneway").value_or("") == "-1";
+	const std::string highway = way.tags.get("highway");
+	const bool oneway = way.tags.get("oneway") == "yes";
+	const bool reversed = way.tags.get("oneway") == "-1";
 
 	// Build Bresenham line along the way
 	std::vector<std::pair<int, int>> cells;
@@ -592,7 +593,7 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 	if (signs.shield.has_value() && cells.size() >= 40) {
 		if (cells.size() >= 120 || way.id % 3 == 0)
 			place_roadside_sign(editor, "route shields", cells,
-					std::min(40, cells.size() / 2), 0, signs.shield.value(),
+					std::min<std::size_t>(40, cells.size() / 2), 0, signs.shield.value(),
 					false, road_mask, footprints);
 
 		std::size_t pos = 250;
@@ -626,7 +627,7 @@ void generate_parking_signage(world_editor::WorldEditor &editor, const Processed
 	const int z = node.z;
 
 	// Don't place on carriageway
-	if (editor.is_cell_road(x, z))
+	if (road_mask.contains(x, z))
 		return;
 
 	if (!editor.owns(x, z))
@@ -677,12 +678,11 @@ place_signs:
 bool generate_billboard(WorldEditor &editor, const ProcessedNode &node,
 		const RoadMaskBitmap &road_mask)
 {
-	auto ctx = editor.signage();
-	if (!ctx)
+	if (!editor.signage_enabled())
 		return false;
 
-	decals::DecalKey key = decals::DecalKey::Poster(static_cast<std::uint8_t>(node.id % 6));
-	if (!ctx->has(key))
+	decals::DecalKey key = decals::PosterKey{static_cast<std::uint8_t>(node.id % 6)};
+	if (!editor.decal_registry->contains(key))
 		return false;
 
 	int x = node.x;
@@ -696,7 +696,7 @@ bool generate_billboard(WorldEditor &editor, const ProcessedNode &node,
 	}
 
 	auto [rx, rz] = right_dir(facing);
-	int ground = editor.get_ground_level(x, 0, z);
+	int ground = editor.get_ground_level(x, z);
 	int height = 6;
 	auto it_height = node.tags.find("height");
 	if (it_height != node.tags.end()) {
@@ -729,25 +729,22 @@ bool generate_billboard(WorldEditor &editor, const ProcessedNode &node,
 	}
 
 	auto [lx, lz] = WorldEditor::panel_left_anchor(x, z, facing, 3);
-	if (editor.place_decal_panel(lx, top, lz, facing, &key, false, false)) {
-		ctx->note("billboards", x, top, z);
-	}
+	editor.place_decal_panel(lx, top, lz, facing, key, false, false);
 
 	std::int8_t back = opposite(facing);
 	auto [bx, bz] = WorldEditor::panel_left_anchor(x, z, back, 3);
-	editor.place_decal_panel(bx, top, bz, back, &key, false, false);
+	editor.place_decal_panel(bx, top, bz, back, key, false, false);
 	return true;
 }
 
 bool generate_column(WorldEditor &editor, const ProcessedNode &node)
 {
-	auto ctx = editor.signage();
-	if (!ctx)
+	if (!editor.signage_enabled())
 		return false;
 
 	int x = node.x;
 	int z = node.z;
-	int ground = editor.get_ground_level(x, 0, z);
+	int ground = editor.get_ground_level(x, z);
 	for (int dy = 1; dy <= 3; ++dy) {
 		editor.set_block_absolute(GRAY_CONCRETE, x, ground + dy, z, std::nullopt, std::nullopt);
 	}
@@ -756,51 +753,43 @@ bool generate_column(WorldEditor &editor, const ProcessedNode &node)
 	bool any = false;
 	for (int f = 0; f < 4; ++f) {
 		std::int8_t facing = static_cast<std::int8_t>(f + 2);
-		decals::DecalKey key = decals::DecalKey::ColumnPoster(
-				static_cast<std::uint8_t>((node.id + f) % 5));
-		if (ctx->has(key)) {
-			any |= editor.place_decal_panel(x, ground + 3, z, facing, &key, false, false);
+		decals::DecalKey key = decals::ColumnPosterKey{
+				static_cast<std::uint8_t>((node.id + f) % 5)};
+		if (editor.decal_registry->contains(key)) {
+			any |= editor.place_decal_panel(x, ground + 3, z, facing, key, false, false);
 		}
-	}
-	if (any) {
-		ctx->note("advertising columns", x, ground + 3, z);
 	}
 	return any;
 }
 
 bool generate_poster_box_posters(WorldEditor &editor, const ProcessedNode &node)
 {
-	auto ctx = editor.signage();
-	if (!ctx)
+	if (!editor.signage_enabled())
 		return false;
 
 	int x = node.x;
 	int z = node.z;
-	int ground = editor.get_ground_level(x, 0, z);
+	int ground = editor.get_ground_level(x, z);
 
-	decals::DecalKey a = decals::DecalKey::ColumnPoster(static_cast<std::uint8_t>(node.id % 5));
-	decals::DecalKey b = decals::DecalKey::ColumnPoster(
-			static_cast<std::uint8_t>((node.id + 2) % 5));
+	decals::DecalKey a = decals::ColumnPosterKey{static_cast<std::uint8_t>(node.id % 5)};
+	decals::DecalKey b = decals::ColumnPosterKey{
+			static_cast<std::uint8_t>((node.id + 2) % 5)};
 
-	if (!ctx->has(a) || !ctx->has(b))
+	if (!editor.decal_registry->contains(a) || !editor.decal_registry->contains(b))
 		return false;
 
 	// North face: viewer's left is +x.
-	editor.place_decal_panel(x + 1, ground + 3, z, 2, &a, true, false);
-	editor.place_decal_panel(x, ground + 3, z, 2, &b, true, false);
-	editor.place_decal_panel(x, ground + 3, z, 3, &a, true, false);
-	editor.place_decal_panel(x + 1, ground + 3, z, 3, &b, true, false);
+	editor.place_decal_panel(x + 1, ground + 3, z, 2, a, true, false);
+	editor.place_decal_panel(x, ground + 3, z, 2, b, true, false);
+	editor.place_decal_panel(x, ground + 3, z, 3, a, true, false);
+	editor.place_decal_panel(x + 1, ground + 3, z, 3, b, true, false);
 	return true;
 }
-
-} // namespace signage
-} // namespace arnis
 
 bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
 		const RoadMaskBitmap &road_mask)
 {
-	auto ctx = editor.signage();
-	if (!ctx)
+	if (!editor.signage_enabled())
 		return false;
 
 	// Get information decal key based on node tags
@@ -820,12 +809,12 @@ bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
 	}
 	if (!key.has_value())
 		return false;
-	if (!key.has_value() || !ctx->has(key.value()))
+	if (!editor.decal_registry->contains(key.value()))
 		return false;
 
 	int x = node.x;
 	int z = node.z;
-	int ground = editor.get_ground_level(x, 0, z);
+	int ground = editor.get_ground_level(x, z);
 
 	// Face nearest road
 	std::int8_t facing = 3;
@@ -848,10 +837,7 @@ bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
 				editor.set_block_absolute(DARK_OAK_PLANKS, bx, y, bz, std::nullopt, std::nullopt);
 			}
 		}
-		bool ok = editor.place_decal_panel(lx, ground + 3, lz, facing, &key.value(), false, false);
-		if (ok) {
-			ctx->note("you-are-here boards", x, ground + 3, z);
-		}
+		bool ok = editor.place_decal_panel(lx, ground + 3, lz, facing, key.value(), false, false);
 		return ok;
 	} else {
 		// "i" post
@@ -862,8 +848,10 @@ bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
 
 		bool any = false;
 		for (std::int8_t f : {2, 3, 4, 5}) {
-			any |= editor.place_decal_panel(x, head, z, f, &key.value(), false, false);
+			any |= editor.place_decal_panel(x, head, z, f, key.value(), false, false);
 		}
 		return any;
 	}
 }
+
+} // namespace arnis::signage
