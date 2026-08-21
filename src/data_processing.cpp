@@ -804,10 +804,16 @@ bool generate_world(WorldEditor &editor,
 			Block node = block_definitions::DECAL_FRAME;
 			editor.set_block_absolute(node, frame.x, frame.y, frame.z,
 					std::nullopt, std::nullopt);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc++11-narrowing"
+#endif
 			return editor.mg && editor.mg->queueGeneratedDecal(
-					{static_cast<s16>(frame.x), static_cast<s16>(frame.y),
-							static_cast<s16>(frame.z)},
+					{frame.x, frame.y, frame.z},
 					*texture, frame.map_id, frame.facing, frame.rotation, frame.glow);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#endif
 		});
 	}
 	if (auto selector = trees::RegionSelector::load_for_location(centre_lat, centre_lon,
