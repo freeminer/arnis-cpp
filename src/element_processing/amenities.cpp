@@ -91,7 +91,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 
 	if (amenity_type == "waste_disposal" || amenity_type == "waste_basket") {
 		if (first_node.has_value()) {
-			editor.set_block(crate::block_definitions::CAULDRON, first_node->x, 1,
+			editor.set_block(crate::block_definitions::EARTH_TRASH_CAN, first_node->x, 1,
 					first_node->z, std::nullopt, std::nullopt);
 		}
 		return;
@@ -160,23 +160,18 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 				use_east_west = (static_cast<unsigned int>(element.id()) & 1) != 0;
 			}
 
-			const int dx = use_east_west ? 1 : 0;
-			const int dz = use_east_west ? 0 : 1;
-			const auto facing_a = use_east_west ? StairFacing::West : StairFacing::North;
-			const auto facing_b = use_east_west ? StairFacing::East : StairFacing::South;
-			const int abs_y = editor.get_absolute_y(first_node->x, 1, first_node->z);
-
-			editor.set_block_with_properties_absolute(
-					top_stair(create_stair_with_properties(
-							OAK_STAIRS, facing_a, StairShape::Straight)),
-					first_node->x - dx, abs_y, first_node->z - dz, nullptr, nullptr);
-			editor.set_block(OAK_SLAB_TOP, first_node->x, 1, first_node->z, std::nullopt,
-					std::nullopt);
-			editor.set_block_with_properties_absolute(
-					top_stair(create_stair_with_properties(
-							OAK_STAIRS, facing_b, StairShape::Straight)),
-					first_node->x + dx, abs_y, first_node->z + dz, nullptr, nullptr);
+			Block bench = crate::block_definitions::EARTH_BENCH;
+			bench.setParam2(use_east_west ? 1 : 0);
+			editor.set_block(bench, first_node->x, 1, first_node->z,
+					std::nullopt, std::nullopt);
 		}
+		return;
+	}
+
+	if (amenity_type == "bbq") {
+		if (first_node)
+			editor.set_block(crate::block_definitions::EARTH_BARBECUE,
+					first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
 		return;
 	}
 

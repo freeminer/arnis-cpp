@@ -1923,23 +1923,10 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 
 	int start_y_offset = 0;
 	if (args.terrain) {
-		std::vector<XZPoint> building_points;
-		building_points.reserve(element.nodes.size());
-		auto min_coords = editor->get_min_coords();
-		for (const auto &n : element.nodes) {
-			building_points.emplace_back(
-					XZPoint::new_point(n.x - min_coords.first, n.z - min_coords.second));
-		}
-
 		int max_ground_level = args.ground_level;
-		Ground *grd = editor->get_ground();
-		for (const auto &point : building_points) {
-			if (grd) {
-				int lvl = grd->level(point);
-				if (lvl > max_ground_level)
-					max_ground_level = lvl;
-			}
-		}
+		for (const auto &node : element.nodes)
+			max_ground_level = std::max(
+					max_ground_level, editor->get_ground_level(node.x, node.z));
 
 		start_y_offset = max_ground_level + min_level_offset;
 	} else {
@@ -2369,13 +2356,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 												bz + 2 * outward.second)));
 
 				if (args.terrain && min_level == 0 && !is_passage) {
-					int local_ground_level = args.ground_level;
-					Ground *grd = editor->get_ground();
-					if (grd) {
-						auto min_coords = editor->get_min_coords();
-						local_ground_level = grd->level(XZPoint::new_point(
-								bx - min_coords.first, bz - min_coords.second));
-					}
+					const int local_ground_level = editor->get_ground_level(bx, bz);
 					for (int y = local_ground_level; y <= start_y_offset; ++y) {
 						editor->set_block_absolute(
 								wall_block, bx, y + abs_terrain_offset, bz);
@@ -2724,17 +2705,6 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 			int z = p.second;
 			if (processed_points.insert(p).second) {
 				const bool is_passage = passage_at(effective_passages, x, z);
-				if (args.terrain) {
-					Ground *grd = editor->get_ground();
-					if (grd) {
-						auto min_coords = editor->get_min_coords();
-						(void)grd->level(XZPoint::new_point(
-								x - min_coords.first, z - min_coords.second));
-					} else {
-						(void)args.ground_level;
-					}
-				}
-
 				if (!is_passage) {
 					editor->set_block_absolute(
 							floor_block, x, start_y_offset + abs_terrain_offset, z);

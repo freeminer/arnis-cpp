@@ -37,6 +37,10 @@
 #include "models_3d/three_dmr/client.h"
 #include "landmarks.h"
 #include "trees/engine.h"
+#include "decals/render.h"
+#include "map_item_palette.h"
+#include "util/base64.h"
+#include "util/png.h"
 
 namespace arnis
 {
@@ -44,6 +48,30 @@ namespace arnis
 // Helper functions for ground fill area detection
 namespace
 {
+
+std::optional<std::string> decal_texture(
+		const decals::DecalRegistry &registry, int map_id)
+{
+	const auto tile = registry.tile(map_id);
+	if (!tile)
+		return std::nullopt;
+	const auto &[key, tile_x, tile_y] = *tile;
+	const auto canvas = decals::render(key);
+	constexpr std::uint32_t size = decals::TILE;
+	std::vector<std::uint8_t> rgba(std::size_t(size) * size * 4);
+	for (std::uint32_t y = 0; y < size; ++y)
+		for (std::uint32_t x = 0; x < size; ++x) {
+			const auto color = canvas.get(int(tile_x * size + x), int(tile_y * size + y));
+			const auto [r, g, b] = map_palette::map_color_rgb(color);
+			const auto offset = (std::size_t(y) * size + x) * 4;
+			rgba[offset] = r;
+			rgba[offset + 1] = g;
+			rgba[offset + 2] = b;
+			rgba[offset + 3] = color == TRANSPARENT ? 0 : 255;
+		}
+	const auto png = encodePNG(rgba.data(), size, size, 6);
+	return "[png:" + base64_encode(png);
+}
 
 bool water_tag_is(const tags_t &tags, const std::string &key, const std::string &value)
 {
@@ -768,6 +796,20 @@ bool generate_world(WorldEditor &editor,
 	if (editor.map_decals && !editor.decal_registry)
 		editor.set_decal_registry(signage::build_registry(
 				elements, args_.signage, decals::detect_region(centre_lat, centre_lon)));
+	if (editor.decal_registry && !editor.decal_frame_sink) {
+		editor.set_decal_frame_sink([&editor](const WorldEditor::DecalFrame &frame) {
+			const auto texture = decal_texture(*editor.decal_registry, frame.map_id);
+			if (!texture)
+				return false;
+			Block node = block_definitions::DECAL_FRAME;
+			editor.set_block_absolute(node, frame.x, frame.y, frame.z,
+					std::nullopt, std::nullopt);
+			return editor.mg && editor.mg->queueGeneratedDecal(
+					{static_cast<s16>(frame.x), static_cast<s16>(frame.y),
+							static_cast<s16>(frame.z)},
+					*texture, frame.map_id, frame.facing, frame.rotation, frame.glow);
+		});
+	}
 	if (auto selector = trees::RegionSelector::load_for_location(centre_lat, centre_lon,
 				std::filesystem::path("assets/trees"), args_.scale, base_level)) {
 		auto shared_selector =

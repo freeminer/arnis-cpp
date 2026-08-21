@@ -69,4 +69,15 @@ const std::vector<DecalKey> &DecalRegistry::ordered() const
 {
 	return ordered_;
 }
+std::optional<std::tuple<DecalKey, std::uint32_t, std::uint32_t>>
+DecalRegistry::tile(int map_id) const
+{
+	for (const auto &[key, entry] : entries_) {
+		const int offset = map_id - entry.base_id;
+		if (offset >= 0 && offset < int(entry.cols * entry.rows))
+			return std::tuple{key, std::uint32_t(offset) % entry.cols,
+					std::uint32_t(offset) / entry.cols};
+	}
+	return std::nullopt;
+}
 }

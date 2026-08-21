@@ -45,15 +45,18 @@ void generate_barriers(world_editor::WorldEditor &editor,
 				if (fit != tags.end()) {
 					const std::string &f = fit->second;
 					if (f == "railing" || f == "bars" || f == "krest") {
-						barrier_material = block_definitions::STONE_BRICK_WALL;
+						barrier_material = block_definitions::EARTH_FENCE_WROUGHT;
 						barrier_height = 1;
+					} else if (f == "barbed_wire" || f == "electric") {
+						barrier_material = block_definitions::EARTH_FENCE_BARBED;
+						barrier_height = 2;
 					} else if (f == "chain_link" || f == "metal" || f == "wire" ||
-							   f == "barbed_wire" || f == "corrugated_metal" ||
+							   f == "corrugated_metal" ||
 							   f == "electric" || f == "metal_bars") {
-						barrier_material = block_definitions::STONE_BRICK_WALL;
+						barrier_material = block_definitions::EARTH_FENCE_CHAINLINK;
 						barrier_height = 2;
 					} else if (f == "slatted" || f == "paling") {
-						barrier_material = block_definitions::OAK_FENCE;
+						barrier_material = block_definitions::EARTH_FENCE_PICKET;
 						barrier_height = 1;
 					} else if (f == "wood" || f == "split_rail" || f == "panel" ||
 							   f == "pole") {

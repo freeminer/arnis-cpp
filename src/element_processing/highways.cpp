@@ -346,7 +346,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						std::optional<std::vector<Block>>(),
 						std::optional<std::vector<Block>>());
 			}
-			editor.set_block(crate::block_definitions::GLOWSTONE, x, 5, z,
+			editor.set_block(crate::block_definitions::EARTH_STREET_LAMP, x, 5, z,
 					std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>());
 		}

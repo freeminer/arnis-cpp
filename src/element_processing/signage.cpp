@@ -449,12 +449,10 @@ void generate_building_signage(world_editor::WorldEditor &editor, const Processe
 	int ground = editor.get_ground_level(ax, az);
 
 	if (!name.text.empty()) {
-		editor.place_decal_panel(ax, ground + 3, az, 3,
-				decals::PictogramKey{"shop"}, false, false);
+		editor.place_text_sign(ax, ground + 3, az, 3, name.text, true);
 	}
 	if (!number.text.empty()) {
-		editor.place_decal_panel(ax + 1, ground + 2, az, 3,
-				decals::PictogramKey{"building"}, false, false);
+		editor.place_text_sign(ax + 1, ground + 2, az, 3, number.text, false);
 	}
 	(void)footprints;
 	(void)road_mask;
@@ -478,8 +476,8 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 			auto name = poi_name(tags, SignageLevel::Full);
 			if (!name.text.empty()) {
 				int ground = editor.get_ground_level(node.x, node.z);
-				editor.place_decal_panel(node.x, ground + 3, node.z, 3,
-						decals::PictogramKey{"shop"}, false, false);
+				editor.place_text_sign(node.x, ground + 3, node.z, 3,
+						name.text, true);
 			}
 		}
 	}

@@ -156,6 +156,10 @@ void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 	ProcessedNode node = maybe_node.value();
 	int x = node.x;
 	int z = node.z;
+	if (EARTH_WELL.id() != STONE_BRICKS.id()) {
+		editor.set_block(EARTH_WELL, x, 1, z, std::nullopt, std::nullopt);
+		return;
+	}
 
 	for (int dx = -1; dx <= 1; ++dx) {
 		for (int dz = -1; dz <= 1; ++dz) {
@@ -189,6 +193,13 @@ void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 
 	editor.set_block(IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(),
 			std::optional<int>());
+}
+
+void generate_manhole(WorldEditor &editor, const ProcessedElement &element)
+{
+	if (const auto node = element.first_node())
+		editor.set_block(EARTH_GRATING, node->x, 0, node->z,
+				std::nullopt, std::nullopt);
 }
 
 struct PairHash
@@ -513,6 +524,8 @@ void generate_man_made(
 		generate_chimney(editor, element);
 	} else if (t == "water_well") {
 		generate_water_well(editor, element);
+	} else if (t == "manhole") {
+		generate_manhole(editor, element);
 	} else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
 		generate_tank_structure(editor, element, args);
 	} else if (t == "lighthouse") {
@@ -552,6 +565,8 @@ void generate_man_made_nodes(
 		generate_chimney(editor, element);
 	} else if (t == "water_well") {
 		generate_water_well(editor, element);
+	} else if (t == "manhole") {
+		generate_manhole(editor, element);
 	} else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
 		generate_tank_structure(editor, element, args);
 	} else if (t == "lighthouse") {

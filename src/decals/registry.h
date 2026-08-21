@@ -168,5 +168,6 @@ public:
 	int max_id() const;
 	int tile_count() const;
 	const std::vector<DecalKey> &ordered() const;
+	std::optional<std::tuple<DecalKey, std::uint32_t, std::uint32_t>> tile(int map_id) const;
 };
 }
