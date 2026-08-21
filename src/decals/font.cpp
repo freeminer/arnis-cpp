@@ -1,6 +1,6 @@
 #include "font.h"
 #include "../map_item_palette.h"
-#include "../../../tinygltf_/stb_image.h"
+#include "stb_image.h"
 #include <algorithm>
 #include <array>
 #include <fstream>
@@ -34,11 +34,14 @@ std::vector<char32_t> codepoints(const std::string &s)
 		char32_t cp = c;
 		if ((c & 0xe0) == 0xc0 && i < s.size())
 			cp = ((c & 31) << 6) | (s[i++] & 63);
-		else if ((c & 0xf0) == 0xe0 && i + 1 < s.size())
-			cp = ((c & 15) << 12) | ((s[i++] & 63) << 6) | (s[i++] & 63);
-		else if ((c & 0xf8) == 0xf0 && i + 2 < s.size())
-			cp = ((c & 7) << 18) | ((s[i++] & 63) << 12) | ((s[i++] & 63) << 6) |
-				 (s[i++] & 63);
+		else if ((c & 0xf0) == 0xe0 && i + 1 < s.size()) {
+			const unsigned char c1 = s[i++], c2 = s[i++];
+			cp = ((c & 15) << 12) | ((c1 & 63) << 6) | (c2 & 63);
+		} else if ((c & 0xf8) == 0xf0 && i + 2 < s.size()) {
+			const unsigned char c1 = s[i++], c2 = s[i++], c3 = s[i++];
+			cp = ((c & 7) << 18) | ((c1 & 63) << 12) | ((c2 & 63) << 6) |
+				 (c3 & 63);
+		}
 		out.push_back(cp);
 	}
 	return out;

@@ -2,7 +2,7 @@
 #include "pictograms.h"
 #include "posters.h"
 #include "templates.h"
-#include "../../../tinygltf_/stb_image.h"
+#include "stb_image.h"
 #include <fstream>
 #include <iterator>
 namespace arnis::decals
