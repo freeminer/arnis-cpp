@@ -9,6 +9,7 @@
 #include <limits>
 #include <optional>
 #include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 namespace arnis::elevation
 {
@@ -87,6 +88,48 @@ bool inside(int x, int y, std::size_t w, std::size_t h)
 {
 	return x >= 0 && y >= 0 && static_cast<std::size_t>(x) < w &&
 		   static_cast<std::size_t>(y) < h;
+}
+
+std::vector<double> smooth_sparse_water_field(const std::vector<Cell> &cells,
+		const std::vector<double> &values, double sigma)
+{
+	std::vector<double> out(values.size());
+	if (cells.size() != values.size() || values.empty() || sigma < 1.5)
+		return values;
+	const int radius = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
+	const int bin_size = std::max(1, static_cast<int>(std::ceil(sigma)));
+	std::unordered_map<std::uint64_t, std::vector<std::size_t>> bins;
+	const auto bin_key = [](int x, int y) {
+		return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
+				static_cast<std::uint32_t>(y);
+	};
+	for (std::size_t i = 0; i < cells.size(); ++i)
+		bins[bin_key(static_cast<int>(cells[i].first) / bin_size,
+				static_cast<int>(cells[i].second) / bin_size)].push_back(i);
+	for (std::size_t i = 0; i < cells.size(); ++i) {
+		const int x = static_cast<int>(cells[i].first), y = static_cast<int>(cells[i].second);
+		const int bx = x / bin_size, by = y / bin_size;
+		double weighted = 0.0, weight_sum = 0.0;
+		for (int yy = by - 3; yy <= by + 3; ++yy)
+			for (int xx = bx - 3; xx <= bx + 3; ++xx) {
+				auto found = bins.find(bin_key(xx, yy));
+				if (found == bins.end())
+					continue;
+				for (const auto j : found->second) {
+					const double dx = static_cast<double>(cells[j].first) - x;
+					const double dy = static_cast<double>(cells[j].second) - y;
+					const double distance = std::hypot(dx, dy);
+					if (distance > radius || !std::isfinite(values[j]))
+						continue;
+					const double weight = std::exp(-0.5 * distance * distance /
+							(sigma * sigma));
+					weighted += values[j] * weight;
+					weight_sum += weight;
+				}
+			}
+		out[i] = weight_sum > 0.0 ? weighted / weight_sum : values[i];
+	}
+	return out;
 }
 
 bool has_non_water_neighbor(const CoverGrid &cover, std::size_t x, std::size_t y)
@@ -326,16 +369,32 @@ MaskGrid level_water_surfaces(
 				continue;
 			const double fallback = median(values);
 			const bool flowing = interquartile_range(values) > 5.0;
-			const double still_surface = flowing ? fallback : clamp_by_adjacent_land(
+			const double still_surface = clamp_by_adjacent_land(
 					values.size() >= 16 ? histogram_mode(values, 1.0) : fallback,
 					component, snapshot, cover);
+			std::vector<double> local_levels;
+			std::vector<Cell> flowing_cells;
 			for (const auto [x, y] : component) {
 				const double original = snapshot[y][x];
 				if (!std::isfinite(original))
 					continue;
-				double level = still_surface;
+				flowing_cells.push_back({x, y});
+				local_levels.push_back(flowing
+						? local_water_median(snapshot, cover, x, y, 12).value_or(fallback)
+						: still_surface);
+			}
+			if (flowing) {
+				const double sigma_cells = meters_per_cell > 0.0
+						? std::min(64.0, 40.0 / meters_per_cell) : 0.0;
+				local_levels = smooth_sparse_water_field(flowing_cells, local_levels,
+						sigma_cells);
+			}
+			for (std::size_t i = 0; i < flowing_cells.size(); ++i) {
+				const auto [x, y] = flowing_cells[i];
+				const double original = snapshot[y][x];
+				double level = local_levels[i];
 				if (flowing)
-					level = local_water_median(snapshot, cover, x, y, 12).value_or(fallback);
+					level = original + std::clamp(level - original, -1.5, 1.5);
 				if (flowing)
 					if (auto land = lowest_adjacent_land(snapshot, cover, x, y))
 						level = std::min(level, std::max(original, *land));

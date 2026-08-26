@@ -1,4 +1,5 @@
 #include "land_cover.h"
+#include "bridge_repair.h"
 #include "cog.h"
 #include "shoreline.h"
 #include "../../http.h"

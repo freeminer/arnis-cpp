@@ -362,12 +362,26 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					has_cover ? editor.ground->water_blend(relative) : 0.0;
 			const bool grid_water =
 					has_cover && editor.ground->water_distance(relative) > 0;
-			const bool existing_water = editor.check_for_block_absolute(x, ground_y, z,
-					std::optional<std::vector<Block>>(std::vector<Block>{WATER}));
+			// Probe each column at its own terrain level. Using the outer
+			// ground_y for neighbours misses OSM water on sloped terrain.
+			auto has_water_in_column = [&](int wx, int wz) {
+				const int neighbour_ground = editor.get_ground_level(wx, wz);
+				for (int dy = 0; dy <= 2; ++dy)
+					if (editor.check_for_block_absolute(wx, neighbour_ground + dy, wz,
+							std::optional<std::vector<Block>>(std::vector<Block>{WATER})))
+						return true;
+				return false;
+			};
+			const bool existing_water = has_water_in_column(x, z);
+			const bool osm_gap = !existing_water &&
+				((has_water_in_column(x, z - 1) && has_water_in_column(x, z + 1)) ||
+				 (has_water_in_column(x - 1, z) && has_water_in_column(x + 1, z)) ||
+				 (has_water_in_column(x + 1, z - 1) && has_water_in_column(x - 1, z + 1)) ||
+				 (has_water_in_column(x - 1, z - 1) && has_water_in_column(x + 1, z + 1)));
 
 			// Rust uses a smoothed ESA water mask, but never retracts a hard water
 			// cell.  Keep OSM water too, and avoid flooding cliff faces.
-			if (!in_tunnel && (grid_water || existing_water || water_blend > .5) &&
+			if (!in_tunnel && (grid_water || existing_water || osm_gap || water_blend > .5) &&
 					slope <= 4) {
 				const int water_y = editor.get_water_level(x, z);
 				if (ground_y <= water_y && !is_protected_surface(editor, x, water_y, z)) {

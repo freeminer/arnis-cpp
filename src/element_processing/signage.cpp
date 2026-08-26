@@ -10,7 +10,8 @@
 #include <set>
 namespace arnis::highways
 {
-int highway_block_range(const std::string &, const tags_t &, double);
+int highway_block_range(const std::string &,
+		const std::unordered_map<std::string, std::string> &, double);
 }
 namespace arnis::signage
 {
@@ -758,8 +759,8 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 				b.first * b.first + b.second * b.second;
 	});
 	std::optional<std::pair<int, int>> position;
-	for (const auto [sx, sz] : std::array<std::pair<int, int>, 4>{
-			 {qx, qz}, {qx, -qz}, {-qx, qz}, {-qx, -qz}}) {
+	for (const auto [sx, sz] : std::array<std::pair<int, int>, 4>{{
+			 {qx, qz}, {qx, -qz}, {-qx, qz}, {-qx, -qz}}}) {
 		for (const auto [dx, dz] : offsets) {
 			const int x = node.x + sx * (width_x + dx);
 			const int z = node.z + sz * (width_z + dz);
