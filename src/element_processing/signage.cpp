@@ -164,7 +164,8 @@ WaySigns highway_way_signs(const tags_t &tags, decals::SignRegion region)
 	}
 	if (!signed_road(highway))
 		return out;
-	if (tags.get("oneway") == "yes" || tags.get("oneway") == "-1")
+	if (tags.get("oneway") == "yes" || tags.get("oneway") == "-1" ||
+			tags.get("oneway") == "true")
 		out.no_entry = decals::TrafficKey{decals::TrafficSign::NoEntry};
 	if (auto speed = maxspeed(tags, region))
 		out.speed = decals::SpeedLimitKey{
@@ -345,13 +346,34 @@ void place_node_signage(world_editor::WorldEditor &editor, const ProcessedNode &
 		return;
 	}
 	const auto railway = node.tags.get("railway");
-	if (railway == "station" || railway == "halt")
-		place_post(editor, node.x, node.z, decals::PictogramKey{"train"}, true);
-	else if (railway == "tram_stop")
+	if (railway == "station" || railway == "halt") {
+		const bool subway = node.tags.get("station") == "subway" ||
+				node.tags.get("subway") == "yes";
+		place_post(editor, node.x, node.z,
+				decals::PictogramKey{subway ? decals::metro_logo(region) : "train"}, true);
+		if (!subway) {
+			auto name = poi_name(node.tags, SignageLevel::Full);
+			if (!name.text.empty())
+				editor.place_text_sign(node.x, editor.get_ground_level(node.x, node.z) + 4,
+						node.z, 3, name.text, true);
+		}
+	} else if (railway == "tram_stop") {
 		place_post(editor, node.x, node.z, decals::PictogramKey{"tram"}, true);
-	else if (railway == "subway_entrance")
+		auto name = poi_name(node.tags, SignageLevel::Full);
+		if (!name.text.empty())
+			editor.place_text_sign(node.x, editor.get_ground_level(node.x, node.z) + 4,
+					node.z, 3, name.text, true);
+	} else if (railway == "subway_entrance")
 		place_post(editor, node.x, node.z,
 				decals::PictogramKey{decals::metro_logo(region)}, true, true);
+
+	if (node.tags.get("highway") == "bus_stop") {
+		place_post(editor, node.x, node.z, decals::PictogramKey{"bus"}, true);
+		auto name = poi_name(node.tags, SignageLevel::Full);
+		if (!name.text.empty())
+			editor.place_text_sign(node.x, editor.get_ground_level(node.x, node.z) + 4,
+				node.z, 3, name.text, true);
+	}
 
 	const int ground = editor.get_ground_level(node.x, node.z);
 	if (node.tags.get("advertising") == "column") {
@@ -483,10 +505,34 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 	}
 
 	if (tags.contains("highway") || tags.get("railway") == "level_crossing") {
-		place_node_signage(editor, node, SignageLevel::Full, decals::SignRegion::Europe);
+		// Rust puts traffic signs at the nearest kerb instead of burying their post
+		// in the carriageway. Preserve the node position for facing, but relocate
+		// the physical post when this node is covered by the road mask.
+		if (const auto key = highway_node_sign(tags, SignageLevel::Full)) {
+			int sx = node.x, sz = node.z;
+			if (road_mask.contains(sx, sz)) {
+				bool found = false;
+				for (int radius = 1; radius <= 10 && !found; ++radius)
+					for (int dx = -radius; dx <= radius && !found; ++dx)
+						for (int dz = -radius; dz <= radius; ++dz) {
+							if (std::max(std::abs(dx), std::abs(dz)) != radius)
+								continue;
+							const int tx = node.x + dx, tz = node.z + dz;
+							if (!road_mask.contains(tx, tz) && editor.owns(tx, tz)) {
+								sx = tx;
+								sz = tz;
+								found = true;
+								break;
+							}
+						}
+			}
+			place_post(editor, sx, sz, *key);
+		} else {
+			place_node_signage(editor, node, SignageLevel::Full, decals::SignRegion::Europe);
+		}
 	}
 
-	if (tags.contains("railway")) {
+	if (tags.contains("railway") && tags.get("railway") != "level_crossing") {
 		place_node_signage(editor, node, SignageLevel::Full, decals::SignRegion::Europe);
 	}
 }
@@ -539,8 +585,30 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 		return;
 
 	const std::string highway = way.tags.get("highway");
-	const bool oneway = way.tags.get("oneway") == "yes";
+	const bool oneway = way.tags.get("oneway") == "yes" ||
+			way.tags.get("oneway") == "true";
 	const bool reversed = way.tags.get("oneway") == "-1";
+
+	// Rust adds street-name blades at owned intersections.  The C++ signage
+	// context does not yet expose the intersection index, so place the same
+	// readable name plate at the way's first terrain-level node as a fallback.
+	std::optional<std::string> way_name;
+	for (const char *key : {"name", "official:name"}) {
+		const auto it_name = way.tags.find(key);
+		if (it_name != way.tags.end() && !it_name->second.empty()) {
+			way_name = it_name->second;
+			break;
+		}
+	}
+	if (way_name) {
+		const auto &node = way.nodes.front();
+		if (editor.owns(node.x, node.z) && !road_mask.contains(node.x, node.z)) {
+			const int ground = editor.get_ground_level(node.x, node.z);
+			editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE,
+					node.x, ground + 2, node.z, std::nullopt, std::nullopt);
+			editor.place_text_sign(node.x, ground + 3, node.z, 3, *way_name, true);
+		}
+	}
 
 	// Build Bresenham line along the way
 	std::vector<std::pair<int, int>> cells;

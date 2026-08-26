@@ -19,7 +19,7 @@ struct Bounds
 };
 struct Placement
 {
-	std::int64_t osm_id = 0, model_id = 0;
+	std::uint64_t osm_id = 0, model_id = 0;
 	int anchor_x = 0, anchor_z = 0;
 	Bounds footprint{};
 	double world_yaw_degrees = 0;
@@ -27,10 +27,10 @@ struct Placement
 struct PrescanResult
 {
 	std::vector<Placement> placements;
-	std::vector<std::pair<std::string, std::int64_t>> suppressed;
+	std::vector<std::pair<std::string, std::uint64_t>> suppressed;
 };
 PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 		double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
 std::vector<std::pair<int, int>> deferred_regions(const PrescanResult &, double scale);
 }

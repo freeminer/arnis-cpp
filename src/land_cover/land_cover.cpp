@@ -274,17 +274,18 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 	const double sx = double(data.width - 1) / double(world_width - 1);
 	const double sz = double(data.height - 1) / double(world_height - 1);
 	for (const auto &e : elements) {
-		if (e.type != ElementType::Way || !e.way || !bridges::is_bridge_way(*e.way) ||
-				e.way->nodes.size() < 2)
+		if (!e.is_way() || !bridges::is_bridge_way(e.as_way()) ||
+				e.as_way().nodes.size() < 2)
 			continue;
-		auto nodes = e.way->nodes;
+		const auto &way = e.as_way();
+		auto nodes = way.nodes;
 		int half_width = 1;
-		const auto highway = e.way->tags.get("highway");
+		const auto highway = way.tags.get("highway");
 		if (!highway.empty())
-			half_width = highways::highway_block_range(highway, e.way->tags, scale);
-		else if (e.way->tags.find("railway") != e.way->tags.end()) {
+			half_width = highways::highway_block_range(highway, way.tags, scale);
+		else if (way.tags.find("railway") != way.tags.end()) {
 			try {
-				half_width += std::max(0, std::stoi(e.way->tags.get("tracks")) - 1);
+				half_width += std::max(0, std::stoi(way.tags.get("tracks")) - 1);
 			} catch (...) {
 			}
 		} else
@@ -483,7 +484,7 @@ void apply_osm_water_override(LandCoverData &data,
 			}
 	};
 	for (const auto &e : elements) {
-		if (e.type == ElementType::Relation) {
+		if (e.is_relation()) {
 			const auto &rel = e.as_relation();
 			if (!is_water_tags(rel.tags))
 				continue;
@@ -522,9 +523,9 @@ void apply_osm_water_override(LandCoverData &data,
 				}
 			continue;
 		}
-		if (e.type != ElementType::Way || !e.way || e.way->nodes.size() < 2)
+		if (!e.is_way() || e.as_way().nodes.size() < 2)
 			continue;
-		const auto &w = *e.way;
+		const auto &w = e.as_way();
 		const auto *waterway = tag(w.tags, "waterway");
 		if (!is_water(w) && !waterway)
 			continue;

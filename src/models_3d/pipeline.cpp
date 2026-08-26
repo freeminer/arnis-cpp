@@ -23,7 +23,7 @@ void append_unique(std::vector<T> &to, const std::vector<T> &from)
 
 Models3dPipeline Models3dPipeline::prescan(const std::vector<ProcessedElement> &elements,
 		double scale, double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
 {
 	Models3dPipeline out;
 	out.suppressed_ = already_suppressed;
@@ -44,7 +44,7 @@ Models3dPipeline Models3dPipeline::prescan(const std::vector<ProcessedElement> &
 Models3dPipeline Models3dPipeline::prescan_fetchable_wikidata(
 		const std::vector<ProcessedElement> &elements, double scale,
 		const std::function<bool(const std::string &)> &fetchable, double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
 {
 	Models3dPipeline out;
 	out.suppressed_ = already_suppressed;
@@ -64,7 +64,7 @@ Models3dPipeline Models3dPipeline::prescan_fetchable_models(
 		const std::vector<ProcessedElement> &elements, double scale,
 		const std::function<bool(const std::string &)> &wikidata_fetchable,
 		const std::function<bool()> &stadium_fetchable, double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
 {
 	Models3dPipeline out;
 	out.suppressed_ = already_suppressed;
@@ -151,7 +151,7 @@ std::vector<std::pair<int, int>> region_keys_around(int cx, int cz, int radius)
 
 ModelDiscovery discover_models(const std::vector<ProcessedElement> &elements,
 		double scale, double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
 {
 	return Models3dPipeline::prescan(elements, scale, world_rotation, already_suppressed)
 			.discovery(scale);
@@ -160,7 +160,7 @@ ModelDiscovery discover_models(const std::vector<ProcessedElement> &elements,
 ModelDiscovery discover_models_fetchable_wikidata(
 		const std::vector<ProcessedElement> &elements, double scale,
 		const std::function<bool(const std::string &)> &fetchable, double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
 {
 	return Models3dPipeline::prescan_fetchable_wikidata(
 			elements, scale, fetchable, world_rotation, already_suppressed)
@@ -170,7 +170,7 @@ ModelDiscovery discover_models_fetchable_wikidata(
 ModelDiscovery discover_models_fetchable(const std::vector<ProcessedElement> &elements,
 		double scale, const std::function<bool(const std::string &)> &wikidata_fetchable,
 		const std::function<bool()> &stadium_fetchable, double world_rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
 {
 	return Models3dPipeline::prescan_fetchable_models(elements, scale, wikidata_fetchable,
 			stadium_fetchable, world_rotation, already_suppressed)

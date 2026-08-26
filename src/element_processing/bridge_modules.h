@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../arnis_adapter.h"
+#include "../structures/schem_decoder.h"
 #include <vector>
 #include <optional>
 #include <cstddef>
@@ -14,7 +15,7 @@ struct BridgePathSample {
 
 struct BridgeModuleSlice {
 	int w, dy;
-	Block block;
+	BlockWithProperties block;
 };
 
 struct BridgeModule {

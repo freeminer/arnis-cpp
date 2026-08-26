@@ -34,7 +34,7 @@ struct GenerationOptions
 	WorldFormat format = WorldFormat::JavaAnvil;
 	std::filesystem::path output_path;
 	std::string level_name;
-	bool map_preview = false, map_item = false, bake_lighting = false, use_3d = false;
+	bool map_preview = false, map_item = true, bake_lighting = false, use_3d = true;
 	int ground_level = 0;
 	int spawn_x = 0, spawn_y = 0, spawn_z = 0;
 	std::string projection_name;

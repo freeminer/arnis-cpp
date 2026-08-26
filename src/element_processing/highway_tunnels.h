@@ -71,6 +71,7 @@ private:
 };
 
 bool renders_as_highway_tunnel(const ProcessedWay &way);
+bool tunnel_bore_fits(const WorldEditor &editor, const ProcessedWay &way, double scale);
 TunnelInternalEndpoints collect_tunnel_internal_endpoints(
 		const std::vector<ProcessedElement> &elements, const XZBBox &xzbbox);
 TunnelPortalMap collect_tunnel_portals(const std::vector<ProcessedElement> &elements,

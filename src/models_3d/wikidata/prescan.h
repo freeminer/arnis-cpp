@@ -22,7 +22,7 @@ struct Bounds
 };
 struct Placement
 {
-	std::int64_t osm_id = 0;
+	std::uint64_t osm_id = 0;
 	// Kept with the placement so fetch filtering can rebuild exactly the claims
 	// this model owns (Rust only claims OSM geometry after its download works).
 	std::string osm_kind;
@@ -38,20 +38,20 @@ struct Placement
 };
 struct SuppressionClaim
 {
-	std::pair<std::string, std::int64_t> key;
+	std::pair<std::string, std::uint64_t> key;
 	// OSM id of the successful model placement that owns this claim.  The
 	// claimed key may be a different building inside that model's footprint.
-	std::int64_t owner_osm_id = 0;
+	std::uint64_t owner_osm_id = 0;
 };
 struct PrescanResult
 {
 	std::vector<Placement> placements;
-	std::vector<std::pair<std::string, std::int64_t>> suppressed;
+	std::vector<std::pair<std::string, std::uint64_t>> suppressed;
 	std::vector<SuppressionClaim> suppression_claims;
 };
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rotation,
 		double scale,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
 std::vector<std::pair<int, int>> deferred_regions(const PrescanResult &, double scale);
 // Rust suppresses OSM geometry only after a model fetch succeeds.  Hosts that
 // fetch during discovery can apply this filter before merging suppression IDs.

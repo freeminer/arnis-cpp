@@ -22,7 +22,7 @@ struct Bounds
 };
 struct Placement
 {
-	std::int64_t representative_id = 0;
+	std::uint64_t representative_id = 0;
 	Kind kind = Kind::Parked;
 	int anchor_x = 0, anchor_z = 0, elevation_blocks = 0;
 	double yaw_degrees = 0.0, pitch_degrees = 0.0;

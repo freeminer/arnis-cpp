@@ -8,11 +8,19 @@
 
 #include "../../../../arnis_adapter.h"
 #include "../../floodfill_cache.h"
+#include "buildings_loot.h"
 namespace arnis
 {
 
 namespace
 {
+bool chest_gate(int x, int z, int floor_y, unsigned salt, unsigned modulus)
+{
+	const unsigned h = static_cast<unsigned>(x) * 0x9E3779B1u ^
+			static_cast<unsigned>(z) * 0x85EBCA77u ^
+			static_cast<unsigned>(floor_y) * 0xC2B2AE35u ^ salt;
+	return h % modulus == 0;
+}
 constexpr int BUILDING_PASSAGE_HEIGHT = 4;
 }
 
@@ -573,6 +581,9 @@ void generate_building_interior(WorldEditor &editor,
 		// Get dimensions for the selected pattern
 		int pattern_height = static_cast<int>(layer1->size());
 		int pattern_width = static_cast<int>((*layer1)[0].size());
+		const unsigned building_salt = static_cast<unsigned>(min_x) * 0x9E3779B1u ^
+				static_cast<unsigned>(min_z);
+		const unsigned chest_modulus = is_abandoned_building ? 160u : 128u;
 
 		// Calculate Y offset - place interior 1 block above floor level consistently
 		int y_offset = 1;
@@ -607,6 +618,21 @@ void generate_building_interior(WorldEditor &editor,
 				// Access the pattern arrays safely
 				char cell1 = (*layer1)[pattern_z][pattern_x];
 				char cell2 = (*layer2)[pattern_z][pattern_x];
+				if (cell1 == ' ' && cell2 == ' ') {
+					const bool wall_adjacent =
+							(*layer1)[(pattern_z + pattern_height - 1) % pattern_height][pattern_x] == 'W' ||
+							(*layer1)[(pattern_z + 1) % pattern_height][pattern_x] == 'W' ||
+							(*layer1)[pattern_z][(pattern_x + pattern_width - 1) % pattern_width] == 'W' ||
+							(*layer1)[pattern_z][(pattern_x + 1) % pattern_width] == 'W';
+					if (wall_adjacent && chest_gate(x, z, floor_y, building_salt, chest_modulus)) {
+						std::vector<std::tuple<std::string, int, int>> items;
+						for (const auto &item : buildings_loot::chest_loot(x, z, building_salt))
+							items.emplace_back(item.id, item.slot, item.count);
+						editor.set_chest_with_items_absolute(x,
+								floor_y + y_offset + abs_terrain_offset, z, items);
+						continue;
+					}
+				}
 
 				// Place first layer blocks
 				auto opt_block1 = get_interior_block(cell1, false, wall_block);
@@ -614,6 +640,9 @@ void generate_building_interior(WorldEditor &editor,
 					editor.set_block_absolute(opt_block1.value(), x,
 							floor_y + y_offset + abs_terrain_offset, z, std::nullopt,
 							std::nullopt);
+					if (cell1 >= '1' && cell1 <= '8')
+						editor.set_bed_block_entity_absolute(
+								x, floor_y + y_offset + abs_terrain_offset, z);
 
 					// If this is a wall in layer 1, add to wall positions to extend later
 					if (cell1 == 'W') {

@@ -7,12 +7,21 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
+#include <cctype>
 #include <nlohmann/json.hpp>
 
 namespace arnis::osm_parser
 {
 namespace
 {
+
+std::string norm_style(std::string v)
+{
+	std::string out;
+	for (unsigned char c : v)
+		if (!std::isspace(c) && c != '_' && c != '-') out.push_back(std::tolower(c));
+	return out;
+}
 
 std::string decode_xml(std::string value)
 {
@@ -38,13 +47,13 @@ std::unordered_map<std::string, std::string> attrs(const std::string &text)
 	return out;
 }
 
-std::int64_t integer(
+std::uint64_t integer(
 		const std::unordered_map<std::string, std::string> &a, const char *key)
 {
 	auto it = a.find(key);
 	if (it == a.end())
 		throw std::runtime_error(std::string("OSM element missing ") + key);
-	return std::stoll(it->second);
+	return std::stoull(it->second);
 }
 
 void read_tags(const std::string &body, tags_t &tags)
@@ -60,11 +69,89 @@ void read_tags(const std::string &body, tags_t &tags)
 	}
 }
 
+void filter_tags(tags_t &tags)
+{
+	static constexpr const char *ignored[] = {
+			"created_by", "note", "fixme", "FIXME", "todo", "TODO", "wikipedia",
+			"wikimedia_commons", "import_uuid", "import", "old_name", "loc_name",
+			"official_name", "alt_name", "operator", "phone", "fax", "email", "url",
+			"website", "opening_hours", "description", "attribution", "check_date",
+			"survey:date", "ref:bag", "ref:bygningsnr"};
+		const bool building = tags.contains("building") || tags.contains("building:part");
+		for (auto it = tags.begin(); it != tags.end();) {
+			const auto &k = it->first;
+			bool remove = k == "start_date" ? !building : false;
+			for (const auto *name : ignored)
+				remove = remove || k == name;
+			if (k != "addr:housenumber") {
+				static constexpr const char *prefixes[] = {"addr:", "source", "name:",
+						"alt_name:", "contact:", "is_in:", "operator:", "tiger:", "NHD:",
+						"lacounty:", "nysgissam:", "ref:ruian:", "building:ruian:", "osak:",
+						"gnis:", "yh:", "check_date:"};
+				for (const auto *prefix : prefixes)
+					if (k.starts_with(prefix)) remove = true;
+			}
+			if (remove) it = tags.erase(it); else ++it;
+		}
+}
+
 } // namespace
+
+StyleHint building_style_hint(const tags_t &tags)
+{
+	const auto material = norm_style(!tags.get("building:material").empty()
+			? tags.get("building:material")
+			: !tags.get("building:facade:material").empty()
+					? tags.get("building:facade:material") : tags.get("facade:material"));
+	if (material == "glass" || material == "mirror" || norm_style(tags.get("roof:material")) == "glass")
+		return StyleHint::Glass;
+	auto present = [&](const char *k) { return !tags.get(k).empty() && norm_style(tags.get(k)) != "no"; };
+	if (present("historic") || present("heritage") || tags.contains("ref:nrhp") || present("listed_status"))
+		return StyleHint::Masonry;
+	static constexpr const char *masonry[] = {"brick","bricks","redbrick","silicatebrick","stone","naturalstone","sandstone","limestone","masonry","granite","marble","terracotta","adobe","stucco","pebbledash"};
+	for (const auto *v : masonry) if (material == v) return StyleHint::Masonry;
+	const auto cladding = norm_style(tags.get("building:cladding").empty() ?
+			tags.get("cladding") : tags.get("building:cladding"));
+	static constexpr const char *cladding_types[] = {"brick", "brickmonolith", "plaster", "rendered", "rendering", "stone", "tiling"};
+	for (const auto *v : cladding_types) if (cladding == v) return StyleHint::Masonry;
+	const auto arch = norm_style(!tags.get("building:architecture").empty() ? tags.get("building:architecture") : tags.get("architecture"));
+	static constexpr const char *ornate[] = {"artdeco","artnouveau","gothic","neogothic","gothicrevival","baroque","neobaroque","rococo","renaissance","neorenaissance","romanesque","victorian","georgian","federal","italianate","beauxarts","queenanne","classicism","neoclassical"};
+	for (const auto *v : ornate) if (arch == v) return StyleHint::Masonry;
+	static constexpr const char *brutalist[] = {"brutalist", "constructivism", "stalinistneoclassicism"};
+	for (const auto *v : brutalist) if (arch == v) return StyleHint::Masonry;
+	static constexpr const char *modern[] = {"modern","contemporary","modernism","functionalism","newobjectivity","bauhaus","postmodern"};
+	for (const auto *v : modern) if (arch == v) return StyleHint::Contemporary;
+	for (const char *key : {"start_date", "construction_date", "year_of_construction"}) {
+		const auto value = tags.get(key);
+		for (std::size_t i = 0; i + 3 < value.size(); ++i) {
+			if (std::isdigit(static_cast<unsigned char>(value[i])) &&
+					std::isdigit(static_cast<unsigned char>(value[i + 1])) &&
+					std::isdigit(static_cast<unsigned char>(value[i + 2])) &&
+					std::isdigit(static_cast<unsigned char>(value[i + 3]))) {
+				if (std::stoi(value.substr(i, 4)) < 1945) return StyleHint::Masonry;
+				break;
+			}
+		}
+	}
+	if (material == "concrete" || material == "reinforcedconcrete" || material == "concretereinforced" || material == "concretemasonryunit")
+		return StyleHint::Contemporary;
+	return StyleHint::None;
+}
+
+ArchEra arch_era_from_hint(StyleHint hint)
+{
+	switch (hint) {
+	case StyleHint::Masonry: return ArchEra::TraditionalPreWar;
+	case StyleHint::Contemporary:
+	case StyleHint::Glass: return ArchEra::Contemporary;
+	case StyleHint::None: return ArchEra::Unknown;
+	}
+	return ArchEra::Unknown;
+}
 
 RawOsmDocument::Completeness analyze_completeness(const RawOsmDocument &document)
 {
-	std::unordered_set<std::int64_t> node_ids;
+	std::unordered_set<std::uint64_t> node_ids;
 	node_ids.reserve(document.nodes.size());
 	for (const auto &node : document.nodes)
 		node_ids.insert(node.id);
@@ -126,6 +213,7 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 		node.lon = std::stod(a.at("lon"));
 		if ((*it).size() > 2)
 			read_tags((*it)[2].str(), node.tags);
+		filter_tags(node.tags);
 		document.nodes.push_back(std::move(node));
 	}
 
@@ -139,6 +227,7 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 		for (std::sregex_iterator ni(body.begin(), body.end(), nd_re), ne; ni != ne; ++ni)
 			way.node_refs.push_back(integer(attrs((*ni)[1].str()), "ref"));
 		read_tags(body, way.tags);
+		filter_tags(way.tags);
 		document.ways.push_back(std::move(way));
 	}
 
@@ -156,11 +245,12 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 			auto m = attrs((*mi)[1].str());
 			RawRelationMember member;
 			member.type = m.contains("type") ? m["type"] : "";
-			member.ref = m.contains("ref") ? std::stoll(m["ref"]) : 0;
+			member.ref = m.contains("ref") ? std::stoull(m["ref"]) : 0;
 			member.role = m.contains("role") ? m["role"] : "";
 			relation.members.push_back(std::move(member));
 		}
 		read_tags(body, relation.tags);
+		filter_tags(relation.tags);
 		document.relations.push_back(std::move(relation));
 	}
 	document.completeness = analyze_completeness(document);
@@ -191,26 +281,30 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 				!element["id"].is_number_integer())
 			continue;
 		const auto type = element["type"].get<std::string>();
-		const auto id = element["id"].get<std::int64_t>();
+		const auto id = element["id"].get<std::uint64_t>();
 		if (type == "node") {
 			if (!element.contains("lat") || !element.contains("lon") ||
 					!element["lat"].is_number() || !element["lon"].is_number())
 				continue;
+			auto node_tags = parse_tags(element);
+			filter_tags(node_tags);
 			document.nodes.push_back({id, element["lat"].get<double>(),
-					element["lon"].get<double>(), parse_tags(element)});
+					element["lon"].get<double>(), std::move(node_tags)});
 		} else if (type == "way") {
 			RawWay way;
 			way.id = id;
-			way.tags = parse_tags(element);
+		way.tags = parse_tags(element);
+		filter_tags(way.tags);
 			if (element.contains("nodes") && element["nodes"].is_array())
 				for (const auto &node : element["nodes"])
 					if (node.is_number_integer())
-						way.node_refs.push_back(node.get<std::int64_t>());
+						way.node_refs.push_back(node.get<std::uint64_t>());
 			document.ways.push_back(std::move(way));
 		} else if (type == "relation") {
 			RawRelation relation;
 			relation.id = id;
-			relation.tags = parse_tags(element);
+		relation.tags = parse_tags(element);
+		filter_tags(relation.tags);
 			if (element.contains("members") && element["members"].is_array())
 				for (const auto &value : element["members"]) {
 					if (!value.is_object())
@@ -219,7 +313,7 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 					if (value.contains("type") && value["type"].is_string())
 						member.type = value["type"].get<std::string>();
 					if (value.contains("ref") && value["ref"].is_number_integer())
-						member.ref = value["ref"].get<std::int64_t>();
+							member.ref = value["ref"].get<std::uint64_t>();
 					if (value.contains("role") && value["role"].is_string())
 						member.role = value["role"].get<std::string>();
 					relation.members.push_back(std::move(member));

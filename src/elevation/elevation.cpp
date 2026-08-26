@@ -107,43 +107,34 @@ void fill_nan_values(std::vector<std::vector<double>> &heights)
 	if (heights.empty() || heights.front().empty())
 		return;
 
-	double fallback = 0.0;
-	bool have_fallback = false;
-	for (const auto &row : heights) {
-		for (double v : row) {
-			if (std::isfinite(v)) {
-				fallback = v;
-				have_fallback = true;
-				break;
-			}
-		}
-		if (have_fallback)
-			break;
-	}
-
-	for (std::size_t z = 0; z < heights.size(); ++z) {
-		for (std::size_t x = 0; x < heights[z].size(); ++x) {
-			if (std::isfinite(heights[z][x]))
-				continue;
-			double sum = 0.0;
-			int count = 0;
-			for (int dz = -1; dz <= 1; ++dz) {
-				for (int dx = -1; dx <= 1; ++dx) {
-					int nx = static_cast<int>(x) + dx;
-					int nz = static_cast<int>(z) + dz;
-					if (nx < 0 || nz < 0 || nz >= static_cast<int>(heights.size()) ||
-							nx >= static_cast<int>(
-										  heights[static_cast<std::size_t>(nz)].size()))
-						continue;
-					double v = heights[static_cast<std::size_t>(nz)]
-									  [static_cast<std::size_t>(nx)];
-					if (std::isfinite(v)) {
-						sum += v;
-						++count;
+	// Match Rust: every pass reads an immutable snapshot, avoiding scan-order
+	// bias when a large no-data area is filled from its perimeter.
+	bool changed = true;
+	while (changed) {
+		const auto snapshot = heights;
+		changed = false;
+		for (std::size_t z = 0; z < heights.size(); ++z) {
+			for (std::size_t x = 0; x < heights[z].size(); ++x) {
+				if (!std::isnan(heights[z][x]))
+					continue;
+				double sum = 0.0;
+				int count = 0;
+				for (int dz = -1; dz <= 1; ++dz)
+					for (int dx = -1; dx <= 1; ++dx) {
+						const int nx = static_cast<int>(x) + dx;
+						const int nz = static_cast<int>(z) + dz;
+						if (nx < 0 || nz < 0 || nz >= static_cast<int>(snapshot.size()) ||
+							nx >= static_cast<int>(snapshot[static_cast<std::size_t>(nz)].size()))
+							continue;
+						const double value = snapshot[static_cast<std::size_t>(nz)]
+									[static_cast<std::size_t>(nx)];
+						if (!std::isnan(value)) { sum += value; ++count; }
 					}
+				if (count > 0) {
+					heights[z][x] = sum / count;
+					changed = true;
 				}
 			}
-			heights[z][x] = count > 0 ? sum / count : fallback;
 		}
 	}
 }
@@ -153,33 +144,45 @@ void filter_elevation_outliers(std::vector<std::vector<double>> &heights)
 	if (heights.empty() || heights.front().empty())
 		return;
 
-	auto original = heights;
-	for (std::size_t z = 0; z < heights.size(); ++z) {
-		for (std::size_t x = 0; x < heights[z].size(); ++x) {
-			std::vector<double> neighbours;
-			for (int dz = -1; dz <= 1; ++dz) {
-				for (int dx = -1; dx <= 1; ++dx) {
-					int nx = static_cast<int>(x) + dx;
-					int nz = static_cast<int>(z) + dz;
-					if (nx < 0 || nz < 0 || nz >= static_cast<int>(original.size()) ||
-							nx >= static_cast<int>(original[static_cast<std::size_t>(nz)]
-														   .size()) ||
-							(dx == 0 && dz == 0))
-						continue;
-					double v = original[static_cast<std::size_t>(nz)]
-									   [static_cast<std::size_t>(nx)];
-					if (std::isfinite(v))
-						neighbours.push_back(v);
-				}
-			}
-			if (neighbours.size() < 3)
-				continue;
-			std::sort(neighbours.begin(), neighbours.end());
-			double median = neighbours[neighbours.size() / 2];
-			if (std::abs(original[z][x] - median) > 80.0)
-				heights[z][x] = median;
-		}
+	std::vector<double> values;
+	for (const auto &row : heights)
+		for (double value : row)
+			if (std::isfinite(value))
+				values.push_back(value);
+	if (values.size() < 4)
+		return;
+
+	auto nth = [&values](std::size_t index) {
+		std::nth_element(values.begin(), values.begin() + index, values.end());
+		return values[index];
+	};
+	const double q1 = nth(values.size() / 4);
+	const double q3 = nth((values.size() * 3) / 4);
+	const double iqr = q3 - q1;
+	const double lower = q1 - 3.0 * iqr;
+	const double upper = q3 + 3.0 * iqr;
+
+	std::size_t below = 0, above = 0;
+	for (double value : values) {
+		below += value < lower;
+		above += value > upper;
 	}
+	const std::size_t threshold = static_cast<std::size_t>(values.size() * 0.05);
+	const bool filter_lower = below > 0 && below <= threshold;
+	const bool filter_upper = above > 0 && above <= threshold;
+	if (!filter_lower && !filter_upper)
+		return;
+
+	std::size_t filtered = 0;
+	for (auto &row : heights)
+		for (double &value : row)
+			if (std::isfinite(value) &&
+					((filter_lower && value < lower) || (filter_upper && value > upper))) {
+				value = std::numeric_limits<double>::quiet_NaN();
+				++filtered;
+			}
+	if (filtered > 0)
+		fill_nan_values(heights);
 }
 
 }

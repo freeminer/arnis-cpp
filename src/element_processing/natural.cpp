@@ -13,6 +13,7 @@
 #include "bridges.h"
 #include "../floodfill.h"
 #include "../ground_generation.h"
+#include "../land_cover/land_cover.h"
 #include "../deterministic_rng.h"
 namespace arnis
 {
@@ -23,12 +24,7 @@ namespace natural
 
 uint64_t coord_hash(int x, int z)
 {
-	uint64_t h = static_cast<uint64_t>(static_cast<uint32_t>(x)) << 32;
-	h ^= static_cast<uint32_t>(z);
-	h += 0x9e3779b97f4a7c15ULL;
-	h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ULL;
-	h = (h ^ (h >> 27)) * 0x94d049bb133111ebULL;
-	return h ^ (h >> 31);
+	return land_cover::coord_hash(x, z);
 }
 
 Block vary_rock_block(Block base, int x, int z)
@@ -65,6 +61,13 @@ bool wetland_wet_zone(int x, int z)
 bool wetland_puddle_noise(int x, int z)
 {
 	return ground_generation::value_noise_01(x + 31, z + 17, 6) > 0.78;
+}
+
+// Rust's seam-safe test helper: keep the two gates independently reusable
+// for diagnostics and regression checks of wetland puddle placement.
+bool wetland_puddle_at(int x, int z)
+{
+	return wetland_wet_zone(x, z) && wetland_puddle_noise(x, z);
 }
 
 bool try_place_wetland_puddle(WorldEditor &editor, int x, int z)
@@ -268,7 +271,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			SMOOTH_STONE,
 	});
 
-	if (element.type != ProcessedElement::Type::Way) {
+	if (!element.is_way()) {
 		return;
 	}
 	const ProcessedWay &way = element.as_way();
@@ -528,7 +531,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					continue;
 				}
 				const bool wet = wetland_wet_zone(x, z);
-				if (wet && wetland_puddle_noise(x, z)) {
+	if (wetland_puddle_at(x, z)) {
 					if (try_place_wetland_puddle(editor, x, z))
 						wetland_puddles.emplace_back(x, z);
 					continue;

@@ -1,6 +1,7 @@
 #include "provider.h"
 #include "providers.h"
 #include "elevation.h"
+#include "postprocess.h"
 #include <cmath>
 #include <utility>
 #include <fstream>
@@ -193,6 +194,10 @@ ElevationData build_processed_grid(const std::vector<Tile> &tiles, double a, dou
 	auto out = build_grid(tiles, a, b, c, d, w, h);
 	fill_nan_values(out.heights);
 	filter_elevation_outliers(out.heights);
+	// Match the Rust elevation pipeline's final spatial anomaly repair.  Keep
+	// this after interpolation/outlier removal so the neighbourhood statistics
+	// see a complete finite grid.
+	repair_terrain_anomalies(out.heights);
 	return out;
 }
 void normalize_grid(ElevationData &g, double sea, double scale, double lo, double hi)

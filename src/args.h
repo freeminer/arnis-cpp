@@ -78,7 +78,7 @@ struct Args
 	}
 
 	// Enable interior generation (optional)
-	bool interior{false};
+	bool interior{true};
 
 	// Enable roof generation (optional)
 	bool roof{true};

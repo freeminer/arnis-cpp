@@ -519,7 +519,7 @@ std::string rotate_rail_shape(const std::string &shape, unsigned rotation)
 	}
 	return shape;
 }
-std::unordered_map<std::string, std::string> rotated_properties(
+std::unordered_map<std::string, std::string> rotated_properties_impl(
 		const std::unordered_map<std::string, std::string> &input, unsigned rotation)
 {
 	std::unordered_map<std::string, std::string> output;
@@ -537,6 +537,12 @@ std::unordered_map<std::string, std::string> rotated_properties(
 	}
 	return output;
 }
+}
+
+std::unordered_map<std::string, std::string> rotate_schem_properties(
+		const std::unordered_map<std::string, std::string> &input, unsigned rotation)
+{
+	return rotated_properties_impl(input, rotation);
 }
 
 BlockWithProperties resolve_schem_block_with_properties(const std::string &name)
@@ -598,7 +604,7 @@ bool place_schem_file_rotated(world_editor::WorldEditor &editor,
 	}
 	for (const auto &v : doc.voxels) {
 		BlockWithProperties b{resolve_schem_block(v.block),
-				rotated_properties(v.properties, rotation & 3)};
+					rotate_schem_properties(v.properties, rotation & 3)};
 		if (b.block == block_definitions::AIR)
 			continue;
 		int x = v.x + doc.offset_x, z = v.z + doc.offset_z;
@@ -660,7 +666,7 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 	}
 	for (const auto &v : doc.voxels) {
 		BlockWithProperties b{resolve_schem_block(v.block),
-				rotated_properties(v.properties, rotation & 3)};
+					rotate_schem_properties(v.properties, rotation & 3)};
 		if (b.block == block_definitions::AIR)
 			continue;
 		int x = v.x + doc.offset_x, z = v.z + doc.offset_z;
@@ -688,7 +694,7 @@ bool place_named_schem(world_editor::WorldEditor &editor, const std::string &nam
 		int oy, int oz, unsigned rotation, const Block *ground)
 {
 	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+		std::filesystem::path(__FILE__).parent_path().parent_path() /
 			("assets/structures/" + name + ".schem");
 	return place_schem_file_rotated(editor, file, ox, oy, oz, rotation, ground);
 }

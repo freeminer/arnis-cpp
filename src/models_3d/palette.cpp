@@ -42,7 +42,9 @@ struct E
 };
 // Kept in the same order as palette.rs.  Order is significant for stable
 // ties, so independently generated tiles choose the same material.
-const auto palette = std::to_array<E>({{{207, 213, 214}, WHITE_CONCRETE, 7},
+auto current_palette()
+{
+	return std::to_array<E>({{{207, 213, 214}, WHITE_CONCRETE, 7},
 		{{210, 178, 161}, WHITE_TERRACOTTA}, {{234, 236, 237}, WHITE_WOOL},
 		{{236, 230, 223}, QUARTZ_BLOCK}, {{235, 229, 222}, QUARTZ_BRICKS},
 		{{249, 254, 254}, SNOW_BLOCK}, {{220, 220, 220}, IRON_BLOCK},
@@ -82,6 +84,7 @@ const auto palette = std::to_array<E>({{{207, 213, 214}, WHITE_CONCRETE, 7},
 		{{36, 137, 199}, LIGHT_BLUE_CONCRETE}, {{113, 109, 138}, LIGHT_BLUE_TERRACOTTA},
 		{{100, 32, 156}, PURPLE_CONCRETE}, {{169, 48, 159}, MAGENTA_CONCRETE},
 		{{21, 119, 136}, CYAN_CONCRETE}, {{87, 91, 91}, CYAN_TERRACOTTA}});
+}
 
 float tag_match_distance(const RGBTuple &a, const RGBTuple &b)
 {
@@ -93,12 +96,14 @@ float tag_match_distance(const RGBTuple &a, const RGBTuple &b)
 }
 Block closest_block(RGBTuple color)
 {
+	const auto palette = current_palette();
 	return std::min_element(palette.begin(), palette.end(), [&](const E &a, const E &b) {
 		return oklab_distance(color, a.color) < oklab_distance(color, b.color);
 	})->block;
 }
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k)
 {
+	const auto palette = current_palette();
 	std::vector<E> values(palette.begin(), palette.end());
 	std::stable_sort(values.begin(), values.end(), [&](const E &a, const E &b) {
 		return oklab_distance(color, a.color) < oklab_distance(color, b.color);
@@ -113,6 +118,7 @@ std::vector<Block> closest_blocks(RGBTuple color, std::size_t k)
 std::vector<Block> closest_blocks_for_usage(
 		RGBTuple color, std::size_t k, std::uint8_t usage)
 {
+	const auto palette = current_palette();
 	std::vector<std::pair<float, Block>> values;
 	for (const auto &entry : palette)
 		if ((entry.usage & usage) != 0)
@@ -132,6 +138,7 @@ std::vector<Block> closest_blocks_for_usage(
 
 std::vector<Block> all_blocks_for_usage(std::uint8_t usage)
 {
+	const auto palette = current_palette();
 	std::vector<Block> out;
 	for (const auto &entry : palette)
 		if ((entry.usage & usage) != 0)

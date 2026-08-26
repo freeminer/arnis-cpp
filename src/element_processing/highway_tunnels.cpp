@@ -13,6 +13,10 @@
 
 namespace arnis::highways
 {
+
+int highway_block_range(const std::string &highway_type,
+		const std::unordered_map<std::string, std::string> &tags, double scale);
+
 namespace
 {
 constexpr int CEIL_OFFSET = 5, COVER_DROP = 7, RAMP_RUN = 3, LAYER_DROP = 7;
@@ -41,27 +45,7 @@ int half_width(const std::string &type, double scale)
 
 int highway_half_width(const ProcessedWay &way, double scale)
 {
-	const auto type = way.tags.get("highway");
-	int width = 2;
-	if (type == "footway" || type == "pedestrian" || type == "path" || type == "track" ||
-			type == "secondary_link" || type == "tertiary_link" || type == "escape" ||
-			type == "steps")
-		width = 1;
-	else if (type == "motorway" || type == "primary" || type == "trunk")
-		width = 5;
-	else if (type == "secondary")
-		width = 4;
-	else if (type == "tertiary" || type == "service")
-		width = 2;
-	else if (auto lanes = way.tags.find("lanes"); lanes != way.tags.end()) {
-		if (lanes->second == "2")
-			width = 3;
-		else if (lanes->second != "1")
-			width = 4;
-	}
-	if (scale < 1.0)
-		width = static_cast<int>(std::floor(width * scale));
-	return std::max(0, width);
+	return highway_block_range(way.tags.get("highway"), way.tags, scale);
 }
 
 int layer_extra(const ProcessedWay &way)
@@ -148,7 +132,7 @@ bool beyond_portal(const std::vector<PortalFace> &faces, int x, int z)
 	return false;
 }
 
-bool tunnel_bore_fits(const WorldEditor &editor, const ProcessedWay &way, double scale)
+bool tunnel_bore_fits_impl(const WorldEditor &editor, const ProcessedWay &way, double scale)
 {
 	const auto points = way_centerline(way);
 	if (points.size() < 2)
@@ -161,6 +145,12 @@ bool tunnel_bore_fits(const WorldEditor &editor, const ProcessedWay &way, double
 			   CEIL_OFFSET + 1;
 	});
 }
+
+}
+
+bool tunnel_bore_fits(const WorldEditor &editor, const ProcessedWay &way, double scale)
+{
+	return tunnel_bore_fits_impl(editor, way, scale);
 }
 
 void TunnelApproach::push(ApproachClaim claim)
@@ -263,7 +253,7 @@ TunnelPortalMap collect_tunnel_portals(const std::vector<ProcessedElement> &elem
 		if (!way.tags.contains("highway") || way.nodes.size() < 2)
 			continue;
 		if (renders_as_highway_tunnel(way)) {
-			if (tunnel_bore_fits(editor, way, scale))
+			if (tunnel_bore_fits_impl(editor, way, scale))
 				tunnels.push_back(&way);
 		} else {
 			surface.push_back(&way);
@@ -394,7 +384,7 @@ CoordinateBitmap collect_tunnel_footprint(const std::vector<ProcessedElement> &e
 		const auto &way = e.as_way();
 		const int wall = highway_half_width(way, scale) + 1;
 		const auto points = way_centerline(way);
-		if (!tunnel_bore_fits(editor, way, scale))
+		if (!tunnel_bore_fits_impl(editor, way, scale))
 			continue;
 		const auto faces = portal_faces(points, internal);
 		for (const auto &[x, z] : points)

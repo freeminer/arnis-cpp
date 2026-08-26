@@ -8,7 +8,7 @@
 
 namespace arnis::landmarks {
 namespace {
-using Key = std::pair<std::string, std::int64_t>;
+using Key = std::pair<std::string, std::uint64_t>;
 
 bool contains(const std::vector<Key> &keys, const Key &key)
 {

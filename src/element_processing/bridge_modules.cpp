@@ -1,6 +1,10 @@
 #include "bridge_modules.h"
 #include "../block_definitions.h"
+#include "../structures/schem_decoder.h"
+#include <algorithm>
 #include <cmath>
+#include <filesystem>
+#include <fstream>
 #include <unordered_map>
 
 namespace arnis::bridge_modules
@@ -12,6 +16,16 @@ const int PILLAR_GROUND_FILL_LIMIT = 48;
 static std::vector<BridgeModule> loaded_modules;
 static bool modules_loaded = false;
 
+static bool is_pillar_material(const Block &block)
+{
+	using namespace block_definitions;
+	return block.id() == SANDSTONE.id() || block.id() == SMOOTH_SANDSTONE.id() ||
+			block.id() == STONE.id() || block.id() == STONE_BRICKS.id() ||
+			block.id() == ANDESITE.id() || block.id() == ANDESITE_WALL.id() ||
+			block.id() == COBBLESTONE.id() || block.id() == SMOOTH_STONE.id() ||
+			block.id() == structures::resolve_schem_block("minecraft:sandstone_wall").id();
+}
+
 static void ensure_modules_loaded()
 {
 	if (modules_loaded)
@@ -19,10 +33,52 @@ static void ensure_modules_loaded()
 
 	loaded_modules.clear();
 
-	// Try to load bridge segments
-	// These would need to be actual .schem files in the project
-	// For now, create placeholder modules
-	// TODO: Load actual schematic files when available
+	const auto asset_dir = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+			"assets/structures";
+	const auto build_module = [&](const char *name, int street_y, bool pillars) {
+		std::ifstream file(asset_dir / (std::string(name) + ".schem"), std::ios::binary);
+		if (!file)
+			return;
+		std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(file)), {});
+		try {
+			auto schem = structures::decode_sponge_schem(bytes);
+			const int length = std::max(1, schem.width);
+			const int center_w = schem.length / 2;
+			BridgeModule module{static_cast<size_t>(length), center_w, pillars,
+				std::vector<std::vector<BridgeModuleSlice>>(length),
+				std::vector<std::vector<BridgeModuleSlice>>(length)};
+			for (const auto &voxel : schem.voxels) {
+				if (voxel.x < 0 || voxel.x >= length ||
+						(voxel.block == "minecraft:stone_button" && voxel.y < street_y))
+					continue;
+				module.slices[voxel.x].push_back({voxel.z - center_w, voxel.y - street_y,
+						BlockWithProperties{structures::resolve_schem_block(voxel.block), voxel.properties}});
+			}
+			if (pillars) {
+				for (int l = 0; l < length; ++l) {
+					std::unordered_map<int, BridgeModuleSlice> lowest;
+					for (const auto &voxel : module.slices[l]) {
+						const Block &b = voxel.block.block;
+						if (!is_pillar_material(b))
+							continue;
+						auto it = lowest.find(voxel.w);
+						if (it == lowest.end() || voxel.dy < it->second.dy)
+							lowest[voxel.w] = voxel;
+					}
+					for (const auto &[w, voxel] : lowest)
+						if (voxel.dy <= -PILLAR_FOOT_MIN_DEPTH)
+							module.feet[l].push_back(voxel);
+				}
+			}
+			loaded_modules.push_back(std::move(module));
+		} catch (...) {
+			// A missing or invalid optional segment simply disables modular bridges.
+		}
+	};
+	build_module("bridge_segment_1", 8, true);
+	build_module("bridge_segment_2", 16, true);
+	build_module("bridge_segment_3", 2, false);
+	build_module("bridge_segment_4", 3, false);
 	modules_loaded = true;
 }
 
@@ -69,12 +125,12 @@ static uint8_t direction_quarter_turns(float px, float pz)
 	}
 }
 
-Block rotated_block(const Block &block, uint8_t k)
+BlockWithProperties rotated_block(const BlockWithProperties &block, uint8_t k)
 {
 	if (k == 0)
 		return block;
-	// TODO: Implement proper rotation based on block properties
-	return block;
+	return BlockWithProperties{block.block,
+			structures::rotate_schem_properties(block.properties, k)};
 }
 
 void sweep_module(world_editor::WorldEditor *editor,
@@ -97,8 +153,8 @@ void sweep_module(world_editor::WorldEditor *editor,
 			int bz = static_cast<int>(std::round(z + pz * voxel.w));
 			int by = deck_y + voxel.dy;
 
-			Block rotated = rotated_block(voxel.block, k);
-			editor->set_block_absolute(rotated, bx, by, bz, {}, {});
+			editor->set_block_with_properties_absolute(rotated_block(voxel.block, k), bx, by, bz,
+				nullptr, nullptr);
 		}
 
 		// Place pillar feet
@@ -113,8 +169,8 @@ void sweep_module(world_editor::WorldEditor *editor,
 				if (bottom > ground) {
 					int limit = std::min(bottom, ground + PILLAR_GROUND_FILL_LIMIT);
 					for (int y = ground; y < limit; ++y) {
-						Block rotated = rotated_block(foot.block, k);
-						editor->set_block_absolute(rotated, bx, y, bz, {}, {});
+					editor->set_block_with_properties_absolute(rotated_block(foot.block, k), bx, y, bz,
+						nullptr, nullptr);
 					}
 				}
 			}

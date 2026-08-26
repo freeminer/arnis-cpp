@@ -11,8 +11,8 @@ std::string tag(const ProcessedElement &e, const char *n)
 	auto i = e.tags().find(n);
 	return i == e.tags().end() ? std::string{} : i->second;
 }
-bool has(const std::vector<std::pair<std::string, std::int64_t>> &v,
-		const std::pair<std::string, std::int64_t> &k)
+bool has(const std::vector<std::pair<std::string, std::uint64_t>> &v,
+		const std::pair<std::string, std::uint64_t> &k)
 {
 	return std::find(v.begin(), v.end(), k) != v.end();
 }
@@ -57,7 +57,7 @@ bool direction(const std::string &s, double &o)
 }
 }
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rotation,
-		const std::vector<std::pair<std::string, std::int64_t>> &already)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already)
 {
 	PrescanResult r;
 	std::vector<Bounds> footprints;
@@ -65,7 +65,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		auto key = std::make_pair(std::string(e.kind()), e.id());
 		if (has(already, key))
 			continue;
-		std::int64_t model = 0;
+		std::uint64_t model = 0;
 		try {
 			std::size_t n = 0;
 			auto raw = tag(e, "3dmr");

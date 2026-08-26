@@ -8,8 +8,8 @@ namespace arnis::models_3d::custom::stadium
 namespace
 {
 using P = std::pair<double, double>;
-bool has(const std::vector<std::pair<std::string, std::int64_t>> &v,
-		const std::pair<std::string, std::int64_t> &k)
+bool has(const std::vector<std::pair<std::string, std::uint64_t>> &v,
+		const std::pair<std::string, std::uint64_t> &k)
 {
 	return std::find(v.begin(), v.end(), k) != v.end();
 }
@@ -138,7 +138,7 @@ bool in_model_rect(const Placement &p, double scale, int x, int z, double margin
 }
 }
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double scale,
-		const std::vector<std::pair<std::string, std::int64_t>> &already)
+		const std::vector<std::pair<std::string, std::uint64_t>> &already)
 {
 	PrescanResult r;
 	std::vector<std::pair<int, int>> building_anchors;

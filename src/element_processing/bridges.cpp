@@ -175,29 +175,29 @@ BridgeStructureMap BridgeStructureMap::build(
 		// Determine bridge style
 		info.style = bridge_styles::resolve_bridge_style(way->tags);
 
-		auto way_id = static_cast<std::int64_t>(way->id);
+		auto way_id = way->id;
 		result.members_.insert({way_id, info});
 	}
 
 	return result;
 }
 
-BridgeMemberInfo* BridgeStructureMap::lookup_member(std::int64_t way_id) {
+BridgeMemberInfo* BridgeStructureMap::lookup_member(std::uint64_t way_id) {
 	auto it = members_.find(way_id);
 	return it != members_.end() ? &it->second : nullptr;
 }
 
-const BridgeMemberInfo* BridgeStructureMap::lookup_member(std::int64_t way_id) const {
+const BridgeMemberInfo* BridgeStructureMap::lookup_member(std::uint64_t way_id) const {
 	auto it = members_.find(way_id);
 	return it != members_.end() ? &it->second : nullptr;
 }
 
-BridgeRampInfo* BridgeStructureMap::lookup_ramp(std::int64_t way_id) {
+BridgeRampInfo* BridgeStructureMap::lookup_ramp(std::uint64_t way_id) {
 	auto it = ramps_.find(way_id);
 	return it != ramps_.end() ? &it->second : nullptr;
 }
 
-const BridgeRampInfo* BridgeStructureMap::lookup_ramp(std::int64_t way_id) const {
+const BridgeRampInfo* BridgeStructureMap::lookup_ramp(std::uint64_t way_id) const {
 	auto it = ramps_.find(way_id);
 	return it != ramps_.end() ? &it->second : nullptr;
 }
@@ -212,7 +212,7 @@ BridgeSurfaceMap BridgeSurfaceMap::build(
 	for (const auto &elem : elements) {
 		if (elem.is_way()) {
 			const auto &way = elem.as_way();
-			auto way_id = static_cast<std::int64_t>(way->id);
+			auto way_id = way->id;
 			auto *member = const_cast<BridgeStructureMap*>(&structures)->lookup_member(way_id);
 			if (!member) continue;
 

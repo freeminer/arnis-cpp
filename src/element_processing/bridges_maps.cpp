@@ -436,7 +436,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			node_to_other_highways[{end.x, end.z}].push_back(i);
 	}
 
-	std::unordered_set<std::int64_t> claimed_ramp_ways;
+	std::unordered_set<std::uint64_t> claimed_ramp_ways;
 
 	for (const auto &group_entry : groups) {
 		const auto &group_indices = group_entry.second;
@@ -549,13 +549,13 @@ BridgeStructureMap BridgeStructureMap::build(
 	return result;
 }
 
-const BridgeMemberInfo *BridgeStructureMap::lookup_member(std::int64_t way_id) const
+const BridgeMemberInfo *BridgeStructureMap::lookup_member(std::uint64_t way_id) const
 {
 	auto it = members_.find(way_id);
 	return it == members_.end() ? nullptr : &it->second;
 }
 
-const BridgeRampInfo *BridgeStructureMap::lookup_ramp(std::int64_t way_id) const
+const BridgeRampInfo *BridgeStructureMap::lookup_ramp(std::uint64_t way_id) const
 {
 	auto it = ramps_.find(way_id);
 	return it == ramps_.end() ? nullptr : &it->second;

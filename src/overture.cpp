@@ -201,7 +201,7 @@ std::optional<ProcessedWay> overture_building_to_way(
 			coordinate_system::CoordTransformer::llbbox_to_xzbbox(bbox, scale);
 	const auto base = gers_id_to_u64(building.id);
 	ProcessedWay way;
-	way.id = static_cast<std::int64_t>(base);
+	way.id = base;
 	double min_lat = std::numeric_limits<double>::infinity(), max_lat = -min_lat;
 	double min_lng = min_lat, max_lng = -min_lat;
 	for (std::size_t i = 0; i < building.exterior_ring.size(); ++i) {
@@ -215,7 +215,7 @@ std::optional<ProcessedWay> overture_building_to_way(
 		max_lng = std::max(max_lng, lng);
 		const auto point = transformer.transform_point(geographic::LLPoint(lat, lng));
 		way.nodes.push_back(
-				{static_cast<std::int64_t>(base + i), tags_t{}, point.x, point.z});
+				{base + i, tags_t{}, point.x, point.z});
 	}
 	if (way.nodes.size() < 3 || max_lng < bbox.min().lng() ||
 			min_lng > bbox.max().lng() || max_lat < bbox.min().lat() ||
@@ -224,7 +224,7 @@ std::optional<ProcessedWay> overture_building_to_way(
 	if (way.nodes.front().x != way.nodes.back().x ||
 			way.nodes.front().z != way.nodes.back().z)
 		way.nodes.push_back(
-				{static_cast<std::int64_t>(base + building.exterior_ring.size()), {},
+				{base + building.exterior_ring.size(), {},
 						way.nodes.front().x, way.nodes.front().z});
 	XZBBox clipbox(
 			rectangle.min().x, rectangle.min().z, rectangle.max().x, rectangle.max().z);

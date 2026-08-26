@@ -47,7 +47,7 @@ bool sweep_bridge_schematic(WorldEditor &editor,
 		const int x = static_cast<int>(std::lround(sample.x + sample.perp_x * offset));
 		const int z = static_cast<int>(std::lround(sample.z + sample.perp_z * offset));
 		const int y = sample.y + v.y - street_y;
-		if (editor.mg && editor.pos_ok({static_cast<pos_t>(x), static_cast<pos_t>(z)}))
+		if (editor.mg && editor.pos_ok(x, z))
 			editor.set_block_absolute(block, x, y, z);
 	}
 	// Long vehicular modules carry pillar feet; extend solid shaft columns to terrain.

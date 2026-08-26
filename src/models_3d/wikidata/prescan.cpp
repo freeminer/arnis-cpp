@@ -16,8 +16,8 @@ std::string tag(const ProcessedElement &e, const char *n)
 	auto i = e.tags().find(n);
 	return i == e.tags().end() ? std::string{} : i->second;
 }
-bool has(const std::vector<std::pair<std::string, std::int64_t>> &v,
-		const std::pair<std::string, std::int64_t> &k)
+bool has(const std::vector<std::pair<std::string, std::uint64_t>> &v,
+		const std::pair<std::string, std::uint64_t> &k)
 {
 	return std::find(v.begin(), v.end(), k) != v.end();
 }
@@ -131,7 +131,7 @@ std::vector<Block> palette_for(const ProcessedElement &e)
 }
 }
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rotation,
-		double scale, const std::vector<std::pair<std::string, std::int64_t>> &already)
+		double scale, const std::vector<std::pair<std::string, std::uint64_t>> &already)
 {
 	PrescanResult r;
 	if (scale <= 0)
@@ -139,7 +139,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 	struct FootprintOwner
 	{
 		Bounds bounds;
-		std::int64_t osm_id;
+		std::uint64_t osm_id;
 	};
 	std::vector<FootprintOwner> footprints;
 	for (const auto &e : elements) {
@@ -225,7 +225,7 @@ void retain_fetchable(
 {
 	if (!fetchable)
 		return;
-	std::unordered_set<std::int64_t> kept;
+	std::unordered_set<std::uint64_t> kept;
 	r.placements.erase(std::remove_if(r.placements.begin(), r.placements.end(),
 							   [&](const Placement &p) {
 								   if (!fetchable(p.qid))

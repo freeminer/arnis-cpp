@@ -13,14 +13,22 @@
 
 namespace arnis::structures
 {
+namespace boat { void scatter_boats(WorldEditor &, int, int, int, int); }
+namespace helicopter { void maybe_place_helicopter(WorldEditor &, int, int); }
+namespace starship { void place_on_launch_mount(WorldEditor &, const ProcessedWay &); }
+namespace tombstone { void maybe_place(WorldEditor &, int, int, const RoadMaskBitmap &); }
 const std::vector<StructureAsset> &rust_structure_assets()
 {
 	static const std::vector<StructureAsset> a = {{"car", "car.schem", 0, 0, 0, 0},
+			{"boat", "boat.schem", 0, 0, 0, 0},
 			{"crane", "crane.schem", 0, 0, 0, 0},
 			{"excavator", "excavator.schem", 0, 0, 0, 0},
 			{"fountain", "fountain.schem", 0, 0, 0, 0},
+			{"helicopter", "helicopter.schem", 0, 0, 0, 0},
 			{"lighthouse", "lighthouse.schem", 0, 0, 0, 0},
 			{"playground", "playground.schem", 0, 0, 0, 0},
+			{"starship", "starship.schem", 0, 0, 0, 0},
+			{"tombstone", "tombstone.schem", 0, 0, 0, 0},
 			{"tractor", "tractor.schem", 0, 0, 0, 0},
 			{"windturbine", "windturbine.schem", 0, 0, 0, 0}};
 	return a;
@@ -219,9 +227,10 @@ bool structure_registry_valid()
 }
 bool structure_has_procedural_generator(const std::string &n)
 {
-	return n == "fountain" || n == "lighthouse" || n == "windturbine" ||
+	return n == "boat" || n == "fountain" || n == "helicopter" ||
+		   n == "lighthouse" || n == "windturbine" ||
 		   n == "playground" || n == "excavator" || n == "tractor" || n == "crane" ||
-		   n == "car";
+		   n == "car" || n == "starship" || n == "tombstone";
 }
 std::vector<StructureAsset> procedural_structure_assets()
 {
@@ -342,6 +351,14 @@ bool place_named_structure(
 		car::maybe_place_car(e, x, z, 0);
 		return true;
 	}
+	if (name == "helicopter") {
+		helicopter::maybe_place_helicopter(e, x, z);
+		return true;
+	}
+	if (name == "boat") {
+		boat::scatter_boats(e, x - 1, z - 1, x + 1, z + 1);
+		return true;
+	}
 	const auto p = structure_asset_path(e, name);
 	return !p.empty() && place_schem_file(e, p, x, e.get_ground_level(x, z), z);
 }
@@ -363,6 +380,14 @@ PlacementResult place_named_structure_rotated(WorldEditor &e, const std::string 
 	if (name == "car") {
 		car::maybe_place_car(e, x, z, std::uint8_t(rotation & 3));
 		return {true, true, "car.schem"};
+	}
+	if (name == "boat") {
+		boat::scatter_boats(e, x - 1, z - 1, x + 1, z + 1);
+		return {true, true, "boat.schem"};
+	}
+	if (name == "helicopter") {
+		helicopter::maybe_place_helicopter(e, x, z);
+		return {true, true, "helicopter.schem"};
 	}
 	if (name == "fountain") {
 		fountain::place(e, x, z, area);
@@ -627,11 +652,12 @@ void simple_windturbine(WorldEditor &editor, int x, int z, uint8_t rot)
 
 }
 
+#if 0 // Structure generators are split into one C++ file per Rust module.
 namespace fountain
 {
 void place(WorldEditor &editor, int x, int z, std::size_t area_cells)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const auto h = coord_hash(x, z);
 	// Rust reserves fountain4 for broad OSM polygons; ordinary fountains pick
@@ -649,7 +675,7 @@ namespace playground
 void scatter_playgrounds(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const std::size_t n = cells.size();
 	if (n < 120)
@@ -667,8 +693,17 @@ void scatter_playgrounds(
 				});
 		if (too_close)
 			continue;
-		place_named_schem(editor, "playground" + std::to_string(((h >> 5) % 3) + 1), ax,
-				editor.get_absolute_y(ax, 1, az), az, (h >> 7) & 3, &SAND);
+		const int selected = static_cast<int>((h >> 5) % 3) + 1;
+		const int y = editor.get_absolute_y(ax, 1, az);
+		const unsigned rotation = (h >> 7) & 3;
+		bool placed_schematic = place_named_schem(editor,
+				"playground" + std::to_string(selected), ax, y, az, rotation, &SAND);
+		for (int fallback = 1; !placed_schematic && fallback <= 3; ++fallback)
+			if (fallback != selected)
+				placed_schematic = place_named_schem(editor,
+						"playground" + std::to_string(fallback), ax, y, az, rotation, &SAND);
+		if (!placed_schematic)
+			continue;
 		placed.emplace_back(ax, az);
 	}
 }
@@ -678,11 +713,11 @@ namespace lighthouse
 {
 void place(WorldEditor &editor, int x, int z)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const auto h = coord_hash(x, z);
 	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+			std::filesystem::path(__FILE__).parent_path().parent_path() /
 			"assets/structures/lighthouse.schem";
 	place_schem_file_rotated(editor, file, x, editor.get_absolute_y(x, 1, z), z, h & 3);
 }
@@ -692,7 +727,7 @@ namespace crane
 {
 void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	if (cells.size() < 1500)
 		return;
@@ -712,7 +747,7 @@ namespace excavator
 void scatter_excavators(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const std::size_t n = cells.size();
 	if (n < 1500)
@@ -742,7 +777,7 @@ namespace tractor
 void maybe_place_tractor(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const std::size_t n = cells.size();
 	if (n < 600)
@@ -758,6 +793,8 @@ void maybe_place_tractor(
 			editor, "tractor", ax, editor.get_absolute_y(ax, 1, az), az, (h >> 8) & 3);
 }
 }
+
+#endif
 
 namespace boat
 {
@@ -786,11 +823,12 @@ void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max
 }
 }
 
+#if 0
 namespace car
 {
 void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const auto h = coord_hash(cx, cz);
 	if (h % 100 >= 50)
@@ -801,7 +839,7 @@ void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 			"car_sedan", "car_suv", "car_uhaul", "car_workvan"}};
 	const auto model = models[(h >> 8) % models.size()];
 	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+			std::filesystem::path(__FILE__).parent_path().parent_path() /
 			"assets/structures" / (std::string(model) + ".schem");
 	unsigned align = 0;
 	if (std::ifstream in(file, std::ios::binary); in) {
@@ -816,6 +854,8 @@ void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 			(rot_base + align + flip) & 3, SchemAnchor::Centered);
 }
 }
+
+#endif
 
 namespace helicopter
 {
@@ -853,36 +893,22 @@ void place_on_launch_mount(WorldEditor &editor, const ProcessedWay &ring)
 }
 }
 
-namespace tombstone
-{
-void maybe_place(WorldEditor &editor, int x, int z, const RoadMaskBitmap &road_mask)
-{
-	if (((x % 4) + 4) % 4 || ((z % 4) + 4) % 4 || editor.is_lc_water(x, z) ||
-			road_mask.contains(x, z))
-		return;
-	const auto h = coord_hash(x + 0x5f5f, z + 0x3c3c);
-	if (h % 100 >= 28)
-		return;
-	const int y = editor.get_absolute_y(x, 0, z);
-	block(editor, (h & 1) ? STONE_BRICKS : POLISHED_ANDESITE, x, y, z);
-	block(editor, (h & 1) ? STONE_BRICKS : POLISHED_ANDESITE, x, y + 1, z);
-	block(editor, STONE_BLOCK_SLAB, x, y + 2, z);
-}
-}
-
+#if 0
 namespace windturbine
 {
 void place(WorldEditor &editor, int x, int z)
 {
-	if (!editor.place_schematics)
+	if (!editor.place_schematics())
 		return;
 	const auto h = coord_hash(x, z);
 	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+			std::filesystem::path(__FILE__).parent_path().parent_path() /
 			"assets/structures/windturbine.schem";
 	place_schem_file_anchored(editor, file, x, editor.get_absolute_y(x, 1, z), z, h & 3,
 			SchemAnchor::BaseCentroid);
 }
 }
+
+#endif
 
 }

@@ -5,9 +5,23 @@
 #include <cmath>
 namespace arnis::models_3d::wikidata
 {
+namespace {
+constexpr float MAX_XZ_EXTENT_M = 225.0f;
+constexpr float MAX_Y_EXTENT_M = 600.0f;
+constexpr float MIN_EXTENT_M = 2.0f;
+bool finite_position(float x, float y, float z)
+{
+	return std::isfinite(x) && std::isfinite(y) && std::isfinite(z);
+}
+}
+
 float scale_for_height(const ModelAsset &a, float h)
 {
-	return h / std::max(0.001f, a.max[1] - a.min[1]);
+	const float source_height = a.max[1] - a.min[1];
+	if (!std::isfinite(h) || h < MIN_EXTENT_M || !std::isfinite(source_height) ||
+			source_height <= 0.0f || h > MAX_Y_EXTENT_M)
+		return 0.0f;
+	return h / source_height;
 }
 static float normalize_yaw(float yaw)
 {
@@ -19,23 +33,27 @@ static float normalize_yaw(float yaw)
 bool place_wikidata_model(ModelProvider &provider, world_editor::WorldEditor &editor,
 		const std::string &key, float x, float y, float z, float scale, float yaw)
 {
+	if (!finite_position(x, y, z) || !std::isfinite(scale) || scale <= 0.0f ||
+			scale > MAX_XZ_EXTENT_M)
+		return false;
 	auto asset = provider.fetch(key);
 	return asset && place_model_asset(editor, *asset, x, y, z, scale, normalize_yaw(yaw));
 }
 bool place_wikidata_model_height(ModelProvider &p, world_editor::WorldEditor &e,
 		const std::string &k, float x, float y, float z, float h, float yaw)
 {
-	if (h <= 0.0f || !std::isfinite(h))
+	if (!finite_position(x, y, z))
 		return false;
 	auto a = p.fetch(k);
-	return a &&
-		   place_model_asset(e, *a, x, y, z, scale_for_height(*a, h), normalize_yaw(yaw));
+	const float scale = a ? scale_for_height(*a, h) : 0.0f;
+	return a && scale > 0.0f && place_model_asset(e, *a, x, y, z, scale, normalize_yaw(yaw));
 }
 bool place_wikidata_model_with_info(ModelProvider &p, world_editor::WorldEditor &e,
 		const std::string &k, const three_dmr::ModelInfo &i, float x, float y, float z,
 		float scale, float yaw)
 {
-	if (!std::isfinite(scale) || scale <= 0)
+	if (!finite_position(x, y, z) || !std::isfinite(scale) || scale <= 0 ||
+			scale > MAX_XZ_EXTENT_M || !std::isfinite(i.scale) || i.scale <= 0.0)
 		return false;
 	auto a = p.fetch(k);
 	if (!a)

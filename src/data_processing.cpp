@@ -628,8 +628,8 @@ void generate_siding(WorldEditor &editor, const ProcessedWay &way);
 void generate_siding(WorldEditor &editor, const ProcessedWay &way,
 		const bridges::BridgeSurfaceMap &bridge_surface);
 CoordinateBitmap collect_road_surface_coords(
-		const std::vector<ProcessedElement> &elements, const ::XZBBox &xzbbox,
-		double scale);
+		const std::vector<ProcessedElement> &elements, const WorldEditor &editor,
+		const ::XZBBox &xzbbox, double scale);
 CoordinateBitmap collect_building_passage_coords(
 		const std::vector<ProcessedElement> &elements, const ::XZBBox &xzbbox,
 		double scale);
@@ -700,6 +700,7 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &way);
 namespace water_areas
 {
 void generate_water_areas_from_relation(WorldEditor &editor, const ProcessedRelation &rel,
+		const XZBBox &xzbbox,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
 		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface);
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way,
@@ -841,8 +842,8 @@ bool generate_world(WorldEditor &editor,
 	for (const auto &landmark : landmarks::catalogue()) {
 		for (const auto &element : elements) {
 			auto wikidata = element.tags().find("wikidata");
-			const auto key = std::pair<std::string, std::int64_t>{
-					std::string(element.kind()), static_cast<std::int64_t>(element.id())};
+			const auto key = std::pair<std::string, std::uint64_t>{
+					std::string(element.kind()), element.id()};
 			const bool named_match =
 					wikidata != element.tags().end() && wikidata->second == landmark.qid;
 			const bool osm_match =
@@ -935,7 +936,8 @@ bool generate_world(WorldEditor &editor,
 		land_cover::apply_bridge_land_cover_repair(land_cover, cover_heights, world_width,
 				world_height, elements, xzbbox, args_.scale);
 	}
-	auto road_mask = highways::collect_road_surface_coords(elements, xzbbox, args_.scale);
+	auto road_mask = highways::collect_road_surface_coords(elements, editor, xzbbox,
+			args_.scale);
 	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
 	// Pre-scan still water surfaces for consistent water levels across tiles
 	auto still_surfaces =
@@ -1009,8 +1011,8 @@ bool generate_world(WorldEditor &editor,
 		if (model_pipeline &&
 				std::find(model_pipeline->suppressed().begin(),
 						model_pipeline->suppressed().end(),
-						std::pair<std::string, std::int64_t>{std::string(element.kind()),
-								static_cast<std::int64_t>(element.id())}) !=
+						std::pair<std::string, std::uint64_t>{std::string(element.kind()),
+								element.id()}) !=
 						model_pipeline->suppressed().end()) {
 			release_finished_fills(
 					flood_fill_cache, last_fill_use, element, element_index);
@@ -1021,8 +1023,8 @@ bool generate_world(WorldEditor &editor,
 			auto const &way = element.as_way();
 			if (std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::int64_t>{
-								"way", static_cast<std::int64_t>(way.id)}) !=
+						std::pair<std::string, std::uint64_t>{
+								"way", way.id}) !=
 					landmark_plan.suppressed.end()) {
 				release_finished_fills(
 						flood_fill_cache, last_fill_use, element, element_index);
@@ -1134,14 +1136,17 @@ bool generate_world(WorldEditor &editor,
 				}
 				landuse::generate_place(editor, way, args, flood_fill_cache);
 			}
-			signage::place_way_signage(
-					editor, way, decals::detect_region(centre_lat, centre_lon));
+			// Highway-specific signage was already placed above with roadside
+			// positioning. The generic pass would duplicate it at the first node.
+			if (!way.tags.contains("highway"))
+				signage::place_way_signage(
+						editor, way, decals::detect_region(centre_lat, centre_lon));
 		} else if (element.is_node()) {
 			auto const &node = element.as_node();
 			if (std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::int64_t>{
-								"node", static_cast<std::int64_t>(node.id)}) !=
+						std::pair<std::string, std::uint64_t>{
+								"node", node.id}) !=
 					landmark_plan.suppressed.end()) {
 				release_finished_fills(
 						flood_fill_cache, last_fill_use, element, element_index);
@@ -1192,8 +1197,8 @@ bool generate_world(WorldEditor &editor,
 			auto const &rel = element.as_relation();
 			if (std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::int64_t>{
-								"relation", static_cast<std::int64_t>(rel.id)}) !=
+						std::pair<std::string, std::uint64_t>{
+								"relation", rel.id}) !=
 					landmark_plan.suppressed.end()) {
 				release_finished_fills(
 						flood_fill_cache, last_fill_use, element, element_index);
@@ -1223,6 +1228,7 @@ bool generate_world(WorldEditor &editor,
 				if (still_surfaces.has("relation", rel.id))
 					surface_level = still_surfaces.get("relation", rel.id);
 				water_areas::generate_water_areas_from_relation(editor, rel,
+						xzbbox,
 						big_water_field, road_mask,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 						surface_level);

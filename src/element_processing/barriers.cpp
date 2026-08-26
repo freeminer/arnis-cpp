@@ -153,13 +153,13 @@ void generate_barriers(world_editor::WorldEditor &editor,
 				for (int y = 1; y <= wall_height; ++y) {
 					editor.set_block(barrier_material, bx, y, bz,
 							std::optional<std::vector<block_definitions::Block>>(),
-							std::optional<int>());
+							std::nullopt);
 				}
 				if (wall_height > 1) {
 					editor.set_block(block_definitions::STONE_BRICK_SLAB, bx,
 							wall_height + 1, bz,
 							std::optional<std::vector<block_definitions::Block>>(),
-							std::optional<int>());
+							std::nullopt);
 				}
 			}
 		}
@@ -186,7 +186,7 @@ void place_barrier_node_block(world_editor::WorldEditor &editor,
 	} else {
 		editor.set_block(block, node.x, dy, node.z,
 				std::optional<std::vector<block_definitions::Block>>(),
-				std::optional<int>());
+				std::nullopt);
 	}
 }
 
@@ -219,7 +219,7 @@ void generate_barrier_nodes(world_editor::WorldEditor &editor,
                     block_definitions::STONE_BRICK_SLAB
                 }
             ),
-            std::optional<int>()
+            std::nullopt
         );
         editor.set_block(
             block_definitions::AIR,
@@ -235,7 +235,7 @@ void generate_barrier_nodes(world_editor::WorldEditor &editor,
                     block_definitions::STONE_BRICK_SLAB
                 }
             ),
-            std::optional<int>()
+            std::nullopt
         );
         editor.set_block(
             block_definitions::AIR,
@@ -251,7 +251,7 @@ void generate_barrier_nodes(world_editor::WorldEditor &editor,
                     block_definitions::STONE_BRICK_SLAB
                 }
             ),
-            std::optional<int>()
+            std::nullopt
         );
         */
 	} else if (val == "block") {

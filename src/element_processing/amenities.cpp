@@ -1,22 +1,77 @@
 #include <algorithm>
+#include <array>
 #include <vector>
 #include <string>
 #include <unordered_map>
 #include <optional>
 #include <tuple>
 #include <cstdlib>
+#include <initializer_list>
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill.h"
 #include "../floodfill_cache.h"
 #include "../structures/structures.h"
 #include "surfaces.h"
+#include "signage.h"
 
 namespace arnis
 {
 
 namespace amenities
 {
+
+std::vector<std::tuple<std::string, int, int>> recycling_items(
+		const std::unordered_map<std::string, std::string> &tags, int x, int z)
+{
+	std::vector<std::string> pool;
+	for (const auto &[tag, item] : std::initializer_list<std::pair<const char *, const char *>>{
+			{"recycling:paper", "minecraft:paper"},
+			{"recycling:glass_bottles", "minecraft:glass_bottle"},
+			{"recycling:glass", "minecraft:glass"},
+			{"recycling:glass", "minecraft:glass_pane"},
+			{"recycling:clothes", "minecraft:leather_chestplate"},
+			{"recycling:shoes", "minecraft:leather_boots"},
+			{"recycling:cans", "minecraft:bucket"},
+			{"recycling:scrap_metal", "minecraft:iron_ingot"},
+			{"recycling:green_waste", "minecraft:oak_sapling"}})
+		if (auto it = tags.find(tag); it != tags.end() && it->second == "yes")
+			pool.emplace_back(item);
+	if (pool.empty())
+		return {};
+	auto rng = coord_rng(x, z, 0xBA773ULL);
+	std::vector<std::tuple<std::string, int, int>> items;
+	for (int slot = 0; slot < 27; ++slot)
+		if (rng() % 5 == 0) {
+			std::string item = pool[rng() % pool.size()];
+			if (item == "minecraft:iron_ingot") {
+				const std::array<const char *, 3> metals{{"minecraft:copper_ingot",
+						"minecraft:iron_ingot", "minecraft:gold_ingot"}};
+				item = metals[rng() % metals.size()];
+			} else if (item == "minecraft:oak_sapling") {
+				const std::array<const char *, 5> green{{"minecraft:oak_sapling",
+						"minecraft:birch_sapling", "minecraft:spruce_sapling",
+						"minecraft:tall_grass", "minecraft:wheat_seeds"}};
+				item = green[rng() % green.size()];
+			}
+			items.emplace_back(std::move(item), slot, 1 + rng() % 4);
+		}
+	return items;
+}
+
+bool place_furniture_decals(WorldEditor &editor,
+		const std::unordered_map<std::string, std::string> &tags, int x, int y, int z)
+{
+	tags_t signage_tags;
+	signage_tags.insert(tags.begin(), tags.end());
+	const auto key = signage::furniture_pictogram(signage_tags);
+	if (!key || !editor.decal_registry || !editor.decal_registry->contains(*key))
+		return false;
+	bool placed = false;
+	for (std::int8_t facing : {2, 3, 4, 5})
+		placed |= editor.place_decal_panel(x, y, z, facing, *key, false, false);
+	return placed;
+}
 
 static std::optional<std::pair<int, int>> get_nearest_road_block(
 		int x, int z, int max_radius, const RoadMaskBitmap &road_mask)
@@ -82,17 +137,30 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 							 it_recycling_type->second == "container");
 
 		if (is_container && first_node.has_value()) {
-			// For now, just place a cauldron for recycling containers
-			editor.set_block(crate::block_definitions::CAULDRON, first_node->x, 1,
-					first_node->z, std::nullopt, std::nullopt);
+			// Rust uses a barrel block entity for recycling containers.  The
+			// host can attach loot through the editor's block-entity sink.
+			const auto items = recycling_items(tags, first_node->x, first_node->z);
+			editor.set_barrel_with_items_absolute(first_node->x,
+					editor.get_ground_level(first_node->x, first_node->z) + 1,
+					first_node->z, items);
+			const bool decals_placed = place_furniture_decals(editor, tags, first_node->x,
+					editor.get_ground_level(first_node->x, first_node->z) + 3,
+					first_node->z);
+			if (!decals_placed && !items.empty() && editor.item_frame_sink)
+				editor.item_frame_sink(first_node->x + 1,
+						editor.get_ground_level(first_node->x + 1, first_node->z) + 3,
+						first_node->z, std::get<0>(items.front()));
 		}
 		return;
 	}
 
 	if (amenity_type == "waste_disposal" || amenity_type == "waste_basket") {
 		if (first_node.has_value()) {
-			editor.set_block(crate::block_definitions::EARTH_TRASH_CAN, first_node->x, 1,
+			editor.set_block(crate::block_definitions::CAULDRON, first_node->x, 1,
 					first_node->z, std::nullopt, std::nullopt);
+		place_furniture_decals(editor, tags, first_node->x,
+				editor.get_ground_level(first_node->x, first_node->z) + 3,
+					first_node->z);
 		}
 		return;
 	}
@@ -103,6 +171,9 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 					first_node->z, std::nullopt, std::nullopt);
 			editor.set_block(crate::block_definitions::IRON_BLOCK, first_node->x, 2,
 					first_node->z, std::nullopt, std::nullopt);
+			place_furniture_decals(editor, tags, first_node->x,
+					editor.get_ground_level(first_node->x, first_node->z) + 4,
+					first_node->z);
 		}
 		return;
 	}
@@ -268,9 +339,9 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 					// Use replacement whitelist for better block placement
 					editor.set_block(block_type, bx, 0, bz,
 							std::optional<
-									std::vector<const crate::block_definitions::Block *>>(
-									std::vector<const crate::block_definitions::Block *>{
-											&crate::block_definitions::BLACK_CONCRETE}),
+									std::vector<crate::block_definitions::Block>>(
+									std::vector<crate::block_definitions::Block>{
+											crate::block_definitions::BLACK_CONCRETE}),
 							std::nullopt);
 
 					current_amenity.emplace_back(node.x, node.z);
@@ -291,10 +362,10 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 				int z = p.second;
 				editor.set_block(block_type, x, 0, z,
 						std::optional<
-								std::vector<const crate::block_definitions::Block *>>(
-								std::vector<const crate::block_definitions::Block *>{
-										&crate::block_definitions::BLACK_CONCRETE,
-										&crate::block_definitions::GRAY_CONCRETE}),
+								std::vector<crate::block_definitions::Block>>(
+								std::vector<crate::block_definitions::Block>{
+										crate::block_definitions::BLACK_CONCRETE,
+										crate::block_definitions::GRAY_CONCRETE}),
 						std::nullopt);
 
 				if (amenity_type == "parking") {
@@ -322,11 +393,10 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 									crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0,
 									z,
 									std::optional<std::vector<
-											const crate::block_definitions::Block
-													*>>(std::vector<const crate::
-													block_definitions::Block *>{
-											&crate::block_definitions::BLACK_CONCRETE,
-											&crate::block_definitions::GRAY_CONCRETE}),
+										crate::block_definitions::Block>>(std::vector<crate::
+												block_definitions::Block>{
+											crate::block_definitions::BLACK_CONCRETE,
+											crate::block_definitions::GRAY_CONCRETE}),
 									std::nullopt);
 						} else if (local_z == 0) {
 							// Horizontal parking space lines (only on the top edge)
@@ -334,11 +404,10 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 									crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0,
 									z,
 									std::optional<std::vector<
-											const crate::block_definitions::Block
-													*>>(std::vector<const crate::
-													block_definitions::Block *>{
-											&crate::block_definitions::BLACK_CONCRETE,
-											&crate::block_definitions::GRAY_CONCRETE}),
+										crate::block_definitions::Block>>(std::vector<crate::
+												block_definitions::Block>{
+											crate::block_definitions::BLACK_CONCRETE,
+											crate::block_definitions::GRAY_CONCRETE}),
 									std::nullopt);
 						}
 					} else if (local_z == space_length) {
@@ -346,11 +415,11 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 						editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, x,
 								0, z,
 								std::optional<std::vector<
-										const crate::block_definitions::Block *>>(
+										crate::block_definitions::Block>>(
 										std::vector<
-												const crate::block_definitions::Block *>{
-												&crate::block_definitions::BLACK_CONCRETE,
-												&crate::block_definitions::
+												crate::block_definitions::Block>{
+												crate::block_definitions::BLACK_CONCRETE,
+												crate::block_definitions::
 														GRAY_CONCRETE}),
 								std::nullopt);
 					} else if (local_z > space_length &&
@@ -359,9 +428,8 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 						editor.set_block(crate::block_definitions::BLACK_CONCRETE, x, 0,
 								z,
 								std::optional<std::vector<
-										const crate::block_definitions::Block *>>(
-										std::vector<const crate::block_definitions::Block
-														*>{&crate::block_definitions::
+										crate::block_definitions::Block>>(
+										std::vector<crate::block_definitions::Block>{crate::block_definitions::
 																   GRAY_CONCRETE}),
 								std::nullopt);
 					}

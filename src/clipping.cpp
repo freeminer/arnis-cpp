@@ -82,9 +82,9 @@ std::optional<std::pair<P, P>> clip_segment(P a, P b, const XZBBox &box)
 		return std::nullopt;
 	return std::pair<P, P>{{a.x + low * dx, a.z + low * dz}, {a.x + high * dx, a.z + high * dz}};
 }
-ProcessedNode synthetic(std::int64_t way_id, std::size_t index, P point)
+ProcessedNode synthetic(std::uint64_t way_id, std::size_t index, P point)
 {
-	const auto id = static_cast<std::int64_t>(static_cast<std::uint64_t>(way_id) * 10000000ULL + index);
+	const auto id = way_id * 10000000ULL + index;
 	return {id, {}, int(std::lround(point.x)), int(std::lround(point.z))};
 }
 }

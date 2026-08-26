@@ -6,6 +6,20 @@
 namespace arnis
 {
 
+// Rust's leaf_gap_at/leaf_hash helpers: keep canopy gaps deterministic and
+// independent of the tree generation traversal order.
+static std::uint64_t leaf_hash(int x, int y, int z)
+{
+	return std::uint64_t(std::int64_t(x) * 73856093LL) ^
+			std::uint64_t(std::int64_t(y) * 19349663LL) ^
+			std::uint64_t(std::int64_t(z) * 83492791LL);
+}
+
+static bool leaf_gap_at(std::uint64_t hash)
+{
+	return hash % 100 < 4;
+}
+
 // Additional leaves fill patterns for new tree types
 static const std::array<std::pair<Coord, Coord>, 5> DARK_OAK_LEAVES_FILL = {{
 		{{-1, 3, 0}, {-1, 6, 0}},
@@ -702,10 +716,8 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 			return;
 		// Rust's position hash leaves small deterministic organic gaps.  The
 		// apex is exempt so a short trunk is never visibly exposed.
-		const std::uint64_t h = std::uint64_t(std::int64_t(x) * 73856093LL) ^
-								std::uint64_t(std::int64_t(y) * 19349663LL) ^
-								std::uint64_t(std::int64_t(z) * 83492791LL);
-		if (!apex && h % 100 < 4)
+		const std::uint64_t h = leaf_hash(x, y, z);
+		if (!apex && leaf_gap_at(h))
 			return;
 		Block block = tree.leaves_block;
 		if (surface && tree.accent_block &&

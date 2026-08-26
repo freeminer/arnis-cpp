@@ -32,11 +32,11 @@ void generate_doors(crate::world_editor::WorldEditor &editor,
 		int z = element.z;
 
 		editor.set_block(crate::block_definitions::GRAY_CONCRETE, x, 0, z,
-				std::optional<int>{}, std::optional<int>{});
+				std::nullopt, std::nullopt);
 		editor.set_block(crate::block_definitions::DARK_OAK_DOOR_LOWER, x, 1, z,
-				std::optional<int>{}, std::optional<int>{});
+				std::nullopt, std::nullopt);
 		editor.set_block(crate::block_definitions::DARK_OAK_DOOR_UPPER, x, 2, z,
-				std::optional<int>{}, std::optional<int>{});
+				std::nullopt, std::nullopt);
 	}
 }
 

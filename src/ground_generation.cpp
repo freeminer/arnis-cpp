@@ -241,7 +241,7 @@ std::optional<bool> canopy_tree_verdict(
 	if (x != slot_x || z != slot_z)
 		return false;
 	const double p =
-			canopy::slot_probability(*fraction, spacing, editor.place_schematics);
+			canopy::slot_probability(*fraction, spacing, editor.place_schematics());
 	const double roll =
 			double(land_cover::coord_hash(x ^ 0x434d, z ^ 0x484d) % 10000) / 10000.0;
 	return roll < p;

@@ -13,15 +13,15 @@ constexpr double plane_length_m = 90, climb_pitch = 12, climb_min_m = 1500,
 				 parked_min_m = 120;
 struct Seg
 {
-	std::int64_t id;
+	std::uint64_t id;
 	bool runway;
-	std::int64_t first, last;
+	std::uint64_t first, last;
 	std::vector<std::pair<double, double>> points;
 	double angle;
 };
 struct Strip
 {
-	std::int64_t id;
+	std::uint64_t id;
 	bool runway;
 	double cx, cz, dx, dz, length, perp, min_a, max_a;
 };
@@ -74,7 +74,7 @@ std::vector<Placement> prescan(
 		segs.push_back(std::move(s));
 	}
 	UF uf(segs.size());
-	std::map<std::int64_t, std::vector<std::size_t>> ends;
+	std::map<std::uint64_t, std::vector<std::size_t>> ends;
 	for (std::size_t i = 0; i < segs.size(); ++i) {
 		ends[segs[i].first].push_back(i);
 		ends[segs[i].last].push_back(i);
@@ -94,7 +94,7 @@ std::vector<Placement> prescan(
 	const double plane = plane_length_m * scale;
 	for (auto &[_, g] : groups) {
 		std::vector<std::pair<double, double>> p;
-		std::int64_t id = segs[g[0]].id;
+		std::uint64_t id = segs[g[0]].id;
 		bool runway = segs[g[0]].runway;
 		for (auto i : g) {
 			id = std::min(id, segs[i].id);

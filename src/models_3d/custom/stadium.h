@@ -19,7 +19,7 @@ struct Bounds
 };
 struct Placement
 {
-	std::int64_t osm_id = 0;
+	std::uint64_t osm_id = 0;
 	int anchor_x = 0, anchor_z = 0;
 	Bounds footprint{};
 	float long_m = 0, short_m = 0;
@@ -30,10 +30,10 @@ struct Placement
 struct PrescanResult
 {
 	std::vector<Placement> placements;
-	std::vector<std::pair<std::string, std::int64_t>> suppressed;
+	std::vector<std::pair<std::string, std::uint64_t>> suppressed;
 };
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double scale,
-		const std::vector<std::pair<std::string, std::int64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
 // Rust fetches the single shared stadium GLB before it lets stadium geometry
 // suppress roads/pitches/buildings.  Hosts can apply that decision without
 // coupling discovery to a particular HTTP implementation.

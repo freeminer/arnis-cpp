@@ -226,6 +226,8 @@ Block determine_rail_with_slope(const pair<int, int> &current,
 	return determine_rail_direction(current, prev, next);
 }
 
+bool catenary_wanted(const ProcessedWay &way);
+
 bool is_rail_bridge(const ProcessedWay &way)
 {
 	if (way.tags.get("indoor") == "yes")
@@ -279,12 +281,20 @@ RailBridgeInternalEndpoints collect_rail_bridge_internal_endpoints(
 CoordinateBitmap collect_at_grade_rail_mask(
 		const vector<ProcessedElement> &elements, const XZBBox &xzbbox)
 {
+	bool has_catenary = false;
+	for (const auto &element : elements)
+		if (element.is_way() && catenary_wanted(element.as_way())) {
+			has_catenary = true;
+			break;
+		}
+	if (!has_catenary)
+		return CoordinateBitmap::new_empty();
 	CoordinateBitmap mask(xzbbox);
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		if (way.nodes.size() < 2 || is_rail_bridge(way) ||
+		if (way.nodes.size() < 2 || way.tags.get("railway") != "rail" || is_rail_bridge(way) ||
 				way.tags.get("tunnel") == "yes" || way.tags.get("subway") == "yes" ||
 				way.tags.get("railway") == "subway")
 			continue;
@@ -325,6 +335,21 @@ vector<pair<int, int>> build_smoothed_centerline(const ProcessedWay &way)
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		const XZBBox &xzbbox, CoordinateBitmap &footprint)
 {
+	bool has_tunnel = false;
+	for (const auto &element : elements)
+		if (element.is_way()) {
+			const auto &way = element.as_way();
+			const auto railway = way.tags.get("railway");
+			static const std::unordered_set<std::string> tracks{"rail", "light_rail", "subway",
+					"tram", "narrow_gauge", "monorail", "funicular", "miniature", "preserved", "disused"};
+			if (way.nodes.size() >= 2 && tracks.contains(railway) && way.tags.get("area") != "yes" &&
+					(railway == "subway" || way.tags.get("subway") == "yes" || way.tags.get("tunnel") == "yes")) {
+				has_tunnel = true;
+				break;
+			}
+		}
+	if (!has_tunnel)
+		return;
 	if (footprint.is_empty())
 		footprint = CoordinateBitmap(xzbbox);
 	static const std::unordered_set<std::string> tracks{"rail", "light_rail", "subway",
@@ -402,67 +427,53 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 {
-	std::optional<Block> adv_rail;
-	if (element.nodes.size() >= 2) {
-		const int total_dx = element.nodes.back().x - element.nodes.front().x;
-		const int total_dz = element.nodes.back().z - element.nodes.front().z;
-		const int sx = (total_dx > 0) - (total_dx < 0);
-		const int sz = (total_dz > 0) - (total_dz < 0);
-		const bool supported_direction = sx == 0 || sz == 0 ||
-				std::abs(total_dx) == std::abs(total_dz);
-		bool straight = supported_direction && (sx != 0 || sz != 0);
-		for (std::size_t i = 1; straight && i < element.nodes.size(); ++i) {
-			const int dx = element.nodes[i].x - element.nodes[i - 1].x;
-			const int dz = element.nodes[i].z - element.nodes[i - 1].z;
-			straight = dx * total_dz == dz * total_dx;
+	auto adv_flat_rail = [](const pair<int, int> &current,
+			const optional<pair<int, int>> &prev,
+			const optional<pair<int, int>> &next) -> optional<Block> {
+		auto direction = [](int dx, int dz) {
+			return pair<int, int>{(dx > 0) - (dx < 0), (dz > 0) - (dz < 0)};
+		};
+
+		pair<int, int> dir{0, 0};
+		if (prev)
+			dir = direction(current.first - prev->first, current.second - prev->second);
+		if (next) {
+			const auto next_dir =
+					direction(next->first - current.first, next->second - current.second);
+			// Advtrains' available straight pieces cannot represent a corner in one
+			// cell. Keep the carts rail at just that transition cell.
+			if (prev && dir != next_dir)
+				return nullopt;
+			dir = next_dir;
 		}
-		const int ground = editor.get_ground_level(
-				element.nodes.front().x, element.nodes.front().z);
-		for (std::size_t i = 1; straight && i < element.nodes.size(); ++i) {
-			const auto points = bresenham_line(element.nodes[i - 1].x, 0,
-					element.nodes[i - 1].z, element.nodes[i].x, 0, element.nodes[i].z);
-			for (const auto &point : points)
-				if (editor.get_ground_level(
-							std::get<0>(point), std::get<2>(point)) != ground) {
-					straight = false;
-					break;
-				}
-		}
-		if (straight) {
-			if (sx == 0)
-				adv_rail = ADV_RAIL_NORTH_SOUTH;
-			else if (sz == 0)
-				adv_rail = ADV_RAIL_EAST_WEST;
-			else if (sx == sz)
-				adv_rail = ADV_RAIL_DIAGONAL_NW_SE;
-			else
-				adv_rail = ADV_RAIL_DIAGONAL_NE_SW;
-			if (adv_rail->id() == RAIL.id())
-				adv_rail.reset();
-		}
-	}
+
+		Block rail;
+		if (dir.first == 0 && dir.second != 0)
+			rail = ADV_RAIL_NORTH_SOUTH;
+		else if (dir.second == 0 && dir.first != 0)
+			rail = ADV_RAIL_EAST_WEST;
+		else if (dir.first == dir.second && dir.first != 0)
+			rail = ADV_RAIL_DIAGONAL_NW_SE;
+		else if (dir.first == -dir.second && dir.first != 0)
+			rail = ADV_RAIL_DIAGONAL_NE_SW;
+		else
+			return nullopt;
+		return rail.id() == RAIL.id() ? nullopt : optional<Block>{rail};
+	};
+
+	const auto centerline = build_smoothed_centerline(element);
 	std::size_t tds = 0;
-	for (size_t i = 1; i < element.nodes.size(); ++i) {
-		XZ prev_node = element.nodes[i - 1].xz();
-		XZ cur_node = element.nodes[i].xz();
-
-		auto points =
-				bresenham_line(prev_node.x, 0, prev_node.z, cur_node.x, 0, cur_node.z);
-		auto smoothed_points = smooth_diagonal_rails(points);
-		const std::size_t skip_first = i > 1 ? 1 : 0;
-
-		for (size_t j = skip_first; j < smoothed_points.size(); ++j) {
-			int bx = get<0>(smoothed_points[j]);
-			int bz = get<2>(smoothed_points[j]);
+	for (size_t j = 0; j < centerline.size(); ++j) {
+			const auto [bx, bz] = centerline[j];
 
 			const int prev_ground =
-					j > 0 ? editor.get_ground_level(get<0>(smoothed_points[j - 1]),
-									get<2>(smoothed_points[j - 1]))
+					j > 0 ? editor.get_ground_level(centerline[j - 1].first,
+									centerline[j - 1].second)
 						  : editor.get_ground_level(bx, bz);
 			const int next_ground =
-					j + 1 < smoothed_points.size()
-							? editor.get_ground_level(get<0>(smoothed_points[j + 1]),
-									  get<2>(smoothed_points[j + 1]))
+					j + 1 < centerline.size()
+							? editor.get_ground_level(centerline[j + 1].first,
+									  centerline[j + 1].second)
 							: editor.get_ground_level(bx, bz);
 			const int current_ground = editor.get_ground_level(bx, bz);
 
@@ -476,12 +487,13 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 			optional<pair<int, int>> prev_opt = nullopt;
 			optional<pair<int, int>> next_opt = nullopt;
 			if (j > 0)
-				prev_opt = pair<int, int>{
-						get<0>(smoothed_points[j - 1]), get<2>(smoothed_points[j - 1])};
-			if (j + 1 < smoothed_points.size())
-				next_opt = pair<int, int>{
-						get<0>(smoothed_points[j + 1]), get<2>(smoothed_points[j + 1])};
+				prev_opt = centerline[j - 1];
+			if (j + 1 < centerline.size())
+				next_opt = centerline[j + 1];
 
+			optional<Block> adv_rail;
+			if (prev_ground == current_ground && next_ground == current_ground)
+				adv_rail = adv_flat_rail({bx, bz}, prev_opt, next_opt);
 			Block rail_block = adv_rail.value_or(determine_rail_with_slope({bx, bz},
 					prev_opt, next_opt, prev_ground, current_ground, next_ground));
 			editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
@@ -489,7 +501,6 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 			if ((tds % 4) == 0)
 				editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
 			++tds;
-		}
 	}
 }
 

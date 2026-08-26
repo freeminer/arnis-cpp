@@ -44,6 +44,8 @@ enum class SchemAnchor
 SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data);
 Block resolve_schem_block(const std::string &name);
 BlockWithProperties resolve_schem_block_with_properties(const std::string &name);
+std::unordered_map<std::string, std::string> rotate_schem_properties(
+		const std::unordered_map<std::string, std::string> &input, unsigned rotation);
 bool place_schem_file(world_editor::WorldEditor &editor,
 		const std::filesystem::path &file, int ox, int oy, int oz);
 bool place_schem_file_rotated(world_editor::WorldEditor &editor,

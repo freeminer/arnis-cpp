@@ -39,12 +39,12 @@ public:
 	static BridgeStructureMap build(const std::vector<ProcessedElement> &elements,
 			const WorldEditor &editor, const bridge_styles::BridgeOutlineIndex &outlines);
 
-	const BridgeMemberInfo *lookup_member(std::int64_t way_id) const;
-	const BridgeRampInfo *lookup_ramp(std::int64_t way_id) const;
+	const BridgeMemberInfo *lookup_member(std::uint64_t way_id) const;
+	const BridgeRampInfo *lookup_ramp(std::uint64_t way_id) const;
 
 private:
-	std::unordered_map<std::int64_t, BridgeMemberInfo> members_;
-	std::unordered_map<std::int64_t, BridgeRampInfo> ramps_;
+	std::unordered_map<std::uint64_t, BridgeMemberInfo> members_;
+	std::unordered_map<std::uint64_t, BridgeRampInfo> ramps_;
 };
 
 class BridgeSurfaceMap

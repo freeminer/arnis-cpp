@@ -22,11 +22,11 @@ namespace man_made
 std::optional<int> parse_int(const std::optional<std::string> &s)
 {
 	if (!s.has_value())
-		return std::optional<int>();
+		return std::nullopt;
 	try {
 		return std::optional<int>(std::stoi(s.value()));
 	} catch (...) {
-		return std::optional<int>();
+		return std::nullopt;
 	}
 }
 
@@ -60,7 +60,7 @@ void generate_pier(WorldEditor &editor, const ProcessedElement &element)
 			for (int x = center_x - half_width; x <= center_x + half_width; ++x) {
 				for (int z = center_z - half_width; z <= center_z + half_width; ++z) {
 					editor.set_block(OAK_SLAB, x, pier_height, z,
-							std::optional<std::vector<Block>>(), std::optional<int>());
+							std::optional<std::vector<Block>>(), std::nullopt);
 				}
 			}
 
@@ -72,7 +72,7 @@ void generate_pier(WorldEditor &editor, const ProcessedElement &element)
 					int pillar_x = p.first;
 					int pillar_z = p.second;
 					editor.set_block(OAK_LOG, pillar_x, 0, pillar_z,
-							std::optional<std::vector<Block>>(), std::optional<int>());
+							std::optional<std::vector<Block>>(), std::nullopt);
 				}
 			}
 		}
@@ -105,21 +105,21 @@ void generate_antenna(WorldEditor &editor, const ProcessedElement &element)
 	}
 
 	editor.set_block(IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(),
-			std::optional<int>());
+			std::nullopt);
 	for (int y = 4; y < height; ++y) {
 		editor.set_block(IRON_BARS, x, y, z, std::optional<std::vector<Block>>(),
-				std::optional<int>());
+				std::nullopt);
 	}
 
 	for (int y = 7; y < height; y += 7) {
 		editor.set_block(IRON_BLOCK, x, y, z,
 				std::optional<std::vector<Block>>(std::vector<Block>{IRON_BARS}),
-				std::optional<int>());
+				std::nullopt);
 		std::vector<std::pair<int, int>> support_positions = {
 				{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
 		for (const auto &d : support_positions) {
 			editor.set_block(IRON_BLOCK, x + d.first, y, z + d.second,
-					std::optional<std::vector<Block>>(), std::optional<int>());
+					std::optional<std::vector<Block>>(), std::nullopt);
 		}
 	}
 
@@ -142,7 +142,7 @@ void generate_chimney(WorldEditor &editor, const ProcessedElement &element)
 				if (dx == 0 && dz == 0)
 					continue;
 				editor.set_block(BRICK, x + dx, y, z + dz,
-						std::optional<std::vector<Block>>(), std::optional<int>());
+						std::optional<std::vector<Block>>(), std::nullopt);
 			}
 		}
 	}
@@ -165,34 +165,34 @@ void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 		for (int dz = -1; dz <= 1; ++dz) {
 			if (dx == 0 && dz == 0) {
 				editor.set_block(WATER, x, -1, z, std::optional<std::vector<Block>>(),
-						std::optional<int>());
+						std::nullopt);
 				editor.set_block(WATER, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<int>());
+						std::nullopt);
 			} else {
 				editor.set_block(STONE_BRICKS, x + dx, 0, z + dz,
-						std::optional<std::vector<Block>>(), std::optional<int>());
+						std::optional<std::vector<Block>>(), std::nullopt);
 				editor.set_block(STONE_BRICKS, x + dx, 1, z + dz,
-						std::optional<std::vector<Block>>(), std::optional<int>());
+						std::optional<std::vector<Block>>(), std::nullopt);
 			}
 		}
 	}
 
 	editor.fill_blocks(OAK_LOG, x - 2, 1, z, x - 2, 4, z,
-			std::optional<std::vector<Block>>(), std::optional<int>());
+			std::optional<std::vector<Block>>(), std::nullopt);
 	editor.fill_blocks(OAK_LOG, x + 2, 1, z, x + 2, 4, z,
-			std::optional<std::vector<Block>>(), std::optional<int>());
+			std::optional<std::vector<Block>>(), std::nullopt);
 
 	editor.set_block(OAK_SLAB, x - 1, 5, z, std::optional<std::vector<Block>>(),
-			std::optional<int>());
+			std::nullopt);
 	editor.set_block(OAK_FENCE, x, 4, z, std::optional<std::vector<Block>>(),
-			std::optional<int>());
+			std::nullopt);
 	editor.set_block(
-			OAK_SLAB, x, 5, z, std::optional<std::vector<Block>>(), std::optional<int>());
+			OAK_SLAB, x, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
 	editor.set_block(OAK_SLAB, x + 1, 5, z, std::optional<std::vector<Block>>(),
-			std::optional<int>());
+			std::nullopt);
 
 	editor.set_block(IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(),
-			std::optional<int>());
+			std::nullopt);
 }
 
 void generate_manhole(WorldEditor &editor, const ProcessedElement &element)

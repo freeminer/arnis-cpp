@@ -1,4 +1,5 @@
 #include <vector>
+#include "../clipping.h"
 
 #include "../structures/structures.h"
 #include "../water_depth.h"
@@ -661,7 +662,8 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &eleme
 }
 
 void generate_water_areas_from_relation(WorldEditor &editor,
-		const ProcessedRelation &element, const water_depth::BigWaterField &bwf,
+		const ProcessedRelation &element, const XZBBox &xzbbox,
+		const water_depth::BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint,
 		std::optional<int> precomputed_surface)
 {
@@ -702,6 +704,11 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 
 	// Preserve OSM-defined outer/inner roles without modification
 	merge_loopy_loops(outers);
+	std::vector<std::vector<ProcessedNode>> clipped_outers;
+	for (const auto &ring : outers)
+		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
+			clipped_outers.push_back(std::move(*clipped));
+	outers = std::move(clipped_outers);
 
 	// Filter: Keep only loops that are already closed OR can be closed within 1 block
 	outers.erase(std::remove_if(outers.begin(), outers.end(),
@@ -746,6 +753,11 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 	}
 
 	merge_loopy_loops(inners);
+	std::vector<std::vector<ProcessedNode>> clipped_inners;
+	for (const auto &ring : inners)
+		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
+			clipped_inners.push_back(std::move(*clipped));
+	inners = std::move(clipped_inners);
 	if (!verify_closed_rings(inners)) {
 		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
 				  << std::endl;
