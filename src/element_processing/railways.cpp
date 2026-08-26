@@ -227,6 +227,7 @@ Block determine_rail_with_slope(const pair<int, int> &current,
 }
 
 bool catenary_wanted(const ProcessedWay &way);
+vector<pair<int, int>> build_connected_centerline(const ProcessedWay &way);
 
 bool is_rail_bridge(const ProcessedWay &way)
 {
@@ -298,12 +299,8 @@ CoordinateBitmap collect_at_grade_rail_mask(
 				way.tags.get("tunnel") == "yes" || way.tags.get("subway") == "yes" ||
 				way.tags.get("railway") == "subway")
 			continue;
-		for (size_t i = 1; i < way.nodes.size(); ++i) {
-			auto line = smooth_diagonal_rails(bresenham_line(way.nodes[i - 1].x, 0,
-					way.nodes[i - 1].z, way.nodes[i].x, 0, way.nodes[i].z));
-			for (const auto &[x, y, z] : line)
-				mask.set(x, z);
-		}
+		for (const auto &[x, z] : build_connected_centerline(way))
+			mask.set(x, z);
 	}
 	return mask;
 }
@@ -330,6 +327,153 @@ vector<pair<int, int>> build_smoothed_centerline(const ProcessedWay &way)
 				out.emplace_back(x, z);
 	}
 	return out;
+}
+
+// Advtrains uses sixteen connection directions. Odd directions advance two
+// cells on one axis and one on the other; this is why treating every raster
+// cell as an independently rotated straight rail cannot produce a connected
+// line. Generate a path whose heading changes by at most one connection unit
+// per step, so every transition is representable by dtrack_st or dtrack_cr.
+constexpr std::array<pair<int, int>, 16> ADV_DIR_VECTORS{{
+		{0, 1}, {1, 2}, {1, 1}, {2, 1}, {1, 0}, {2, -1}, {1, -1}, {1, -2},
+		{0, -1}, {-1, -2}, {-1, -1}, {-2, -1}, {-1, 0}, {-2, 1}, {-1, 1},
+		{-1, 2}}};
+
+int circular_delta(int from, int to)
+{
+	int delta = (to - from + 16) % 16;
+	if (delta > 8)
+		delta -= 16;
+	return delta;
+}
+
+int closest_adv_direction(int dx, int dz)
+{
+	if (!dx && !dz)
+		return 0;
+	const double length = std::hypot(static_cast<double>(dx), static_cast<double>(dz));
+	int best = 0;
+	double best_dot = -std::numeric_limits<double>::infinity();
+	for (int direction = 0; direction < 16; ++direction) {
+		const auto [vx, vz] = ADV_DIR_VECTORS[direction];
+		const double dot = (dx * vx + dz * vz) /
+				(length * std::hypot(static_cast<double>(vx), static_cast<double>(vz)));
+		if (dot > best_dot) {
+			best_dot = dot;
+			best = direction;
+		}
+	}
+	return best;
+}
+
+optional<int> adv_direction_between(const pair<int, int> &from, const pair<int, int> &to)
+{
+	const pair<int, int> delta{to.first - from.first, to.second - from.second};
+	for (int direction = 0; direction < 16; ++direction)
+		if (ADV_DIR_VECTORS[direction] == delta)
+			return direction;
+	return nullopt;
+}
+
+vector<pair<int, int>> build_advtrains_centerline(const ProcessedWay &way)
+{
+	vector<pair<int, int>> out;
+	if (way.nodes.empty())
+		return out;
+	pair<int, int> current{way.nodes.front().x, way.nodes.front().z};
+	out.push_back(current);
+	optional<int> heading;
+
+	for (std::size_t target_index = 1; target_index < way.nodes.size(); ++target_index) {
+		const pair<int, int> target{
+				way.nodes[target_index].x, way.nodes[target_index].z};
+		const bool final_target = target_index + 1 == way.nodes.size();
+		const std::size_t max_steps = 64 +
+				static_cast<std::size_t>(std::abs(target.first - current.first) +
+						std::abs(target.second - current.second)) * 8;
+		for (std::size_t step = 0; step < max_steps; ++step) {
+			const int dx = target.first - current.first;
+			const int dz = target.second - current.second;
+			const int distance2 = dx * dx + dz * dz;
+			if (distance2 == 0 || (!final_target && distance2 <= 4) ||
+					(final_target && distance2 <= 1))
+				break;
+
+			const int desired = closest_adv_direction(dx, dz);
+			int chosen = desired;
+			if (heading) {
+				const int turn = circular_delta(*heading, desired);
+				chosen = (*heading + (turn > 0 ? 1 : turn < 0 ? -1 : 0) + 16) % 16;
+			}
+			const auto [vx, vz] = ADV_DIR_VECTORS[chosen];
+			current = {current.first + vx, current.second + vz};
+			if (out.back() != current)
+				out.push_back(current);
+			heading = chosen;
+		}
+	}
+	return out;
+}
+
+vector<pair<int, int>> build_connected_centerline(const ProcessedWay &way)
+{
+	return ADVTRAINS_AVAILABLE ? build_advtrains_centerline(way)
+								 : build_smoothed_centerline(way);
+}
+
+bool unordered_connections_match(int a, int b, int c, int d)
+{
+	return (a == c && b == d) || (a == d && b == c);
+}
+
+optional<Block> advtrains_rail_for_connections(int first, int second)
+{
+	const std::array<Block, 4> straights{{ADV_RAIL_STRAIGHT_0,
+			ADV_RAIL_STRAIGHT_30, ADV_RAIL_STRAIGHT_45, ADV_RAIL_STRAIGHT_60}};
+	const std::array<Block, 4> curves{{ADV_RAIL_CURVE_0, ADV_RAIL_CURVE_30,
+			ADV_RAIL_CURVE_45, ADV_RAIL_CURVE_60}};
+	for (int suffix = 0; suffix < 4; ++suffix)
+		for (int param2 = 0; param2 < 4; ++param2) {
+			const int base = (suffix + param2 * 4) % 16;
+			if (unordered_connections_match(first, second, base, (base + 8) % 16)) {
+				Block rail = straights[suffix];
+				rail.setParam2(param2);
+				return rail;
+			}
+			if (unordered_connections_match(first, second, base, (base + 7) % 16)) {
+				Block rail = curves[suffix];
+				rail.setParam2(param2);
+				return rail;
+			}
+		}
+	return nullopt;
+}
+
+optional<Block> connected_advtrains_rail(const vector<pair<int, int>> &line,
+		std::size_t index)
+{
+	if (!ADVTRAINS_AVAILABLE || line.size() < 2)
+		return nullopt;
+	optional<int> incoming;
+	optional<int> outgoing;
+	if (index > 0)
+		if (auto forward = adv_direction_between(line[index - 1], line[index]))
+			incoming = (*forward + 8) % 16;
+	if (index + 1 < line.size())
+		outgoing = adv_direction_between(line[index], line[index + 1]);
+	if (!incoming && !outgoing)
+		return nullopt;
+	if (!incoming)
+		incoming = (*outgoing + 8) % 16;
+	if (!outgoing)
+		outgoing = (*incoming + 8) % 16;
+	if (auto exact = advtrains_rail_for_connections(*incoming, *outgoing))
+		return exact;
+	// Defensive fallback for malformed/overlapping OSM geometry: remain inside
+	// the Advtrains family and preserve one bound end instead of injecting a
+	// carts rail into an otherwise Advtrains path.
+	const int direction = outgoing.value_or((*incoming + 8) % 16);
+	return advtrains_rail_for_connections((direction + 8) % 16, direction);
 }
 
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
@@ -366,7 +510,7 @@ void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		if (!(it->second == "subway" || way.tags.get("subway") == "yes" ||
 					way.tags.get("tunnel") == "yes"))
 			continue;
-		for (const auto &[x, z] : build_smoothed_centerline(way))
+		for (const auto &[x, z] : build_connected_centerline(way))
 			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
 				for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz)
 					footprint.set(x + dx, z + dz);
@@ -427,41 +571,13 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 {
-	auto adv_flat_rail = [](const pair<int, int> &current,
-			const optional<pair<int, int>> &prev,
-			const optional<pair<int, int>> &next) -> optional<Block> {
-		auto direction = [](int dx, int dz) {
-			return pair<int, int>{(dx > 0) - (dx < 0), (dz > 0) - (dz < 0)};
-		};
-
-		pair<int, int> dir{0, 0};
-		if (prev)
-			dir = direction(current.first - prev->first, current.second - prev->second);
-		if (next) {
-			const auto next_dir =
-					direction(next->first - current.first, next->second - current.second);
-			// Advtrains' available straight pieces cannot represent a corner in one
-			// cell. Keep the carts rail at just that transition cell.
-			if (prev && dir != next_dir)
-				return nullopt;
-			dir = next_dir;
-		}
-
-		Block rail;
-		if (dir.first == 0 && dir.second != 0)
-			rail = ADV_RAIL_NORTH_SOUTH;
-		else if (dir.second == 0 && dir.first != 0)
-			rail = ADV_RAIL_EAST_WEST;
-		else if (dir.first == dir.second && dir.first != 0)
-			rail = ADV_RAIL_DIAGONAL_NW_SE;
-		else if (dir.first == -dir.second && dir.first != 0)
-			rail = ADV_RAIL_DIAGONAL_NE_SW;
-		else
-			return nullopt;
-		return rail.id() == RAIL.id() ? nullopt : optional<Block>{rail};
-	};
-
-	const auto centerline = build_smoothed_centerline(element);
+	const auto centerline = build_connected_centerline(element);
+	if (centerline.empty())
+		return;
+	int adv_base_y = std::numeric_limits<int>::min();
+	if (ADVTRAINS_AVAILABLE)
+		for (const auto &[x, z] : centerline)
+			adv_base_y = std::max(adv_base_y, editor.get_ground_level(x, z));
 	std::size_t tds = 0;
 	for (size_t j = 0; j < centerline.size(); ++j) {
 			const auto [bx, bz] = centerline[j];
@@ -477,12 +593,16 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 							: editor.get_ground_level(bx, bz);
 			const int current_ground = editor.get_ground_level(bx, bz);
 
-			if (prev_ground < current_ground) {
-				for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
+			if (ADVTRAINS_AVAILABLE) {
+				for (int fill_y = current_ground; fill_y <= adv_base_y; ++fill_y)
 					editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
+			} else {
+				if (prev_ground < current_ground)
+					for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
+						editor.set_block_absolute(
+								GRAVEL, bx, fill_y, bz, nullopt, nullopt);
+				editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
 			}
-
-			editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
 
 			optional<pair<int, int>> prev_opt = nullopt;
 			optional<pair<int, int>> next_opt = nullopt;
@@ -491,15 +611,23 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 			if (j + 1 < centerline.size())
 				next_opt = centerline[j + 1];
 
-			optional<Block> adv_rail;
-			if (prev_ground == current_ground && next_ground == current_ground)
-				adv_rail = adv_flat_rail({bx, bz}, prev_opt, next_opt);
-			Block rail_block = adv_rail.value_or(determine_rail_with_slope({bx, bz},
-					prev_opt, next_opt, prev_ground, current_ground, next_ground));
-			editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
+			const Block rail_block = connected_advtrains_rail(centerline, j)
+									 .value_or(determine_rail_with_slope({bx, bz}, prev_opt,
+											 next_opt, prev_ground, current_ground,
+											 next_ground));
+			if (ADVTRAINS_AVAILABLE)
+				editor.set_block_absolute(
+						rail_block, bx, adv_base_y + 1, bz, nullopt, nullopt);
+			else
+				editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
 
-			if ((tds % 4) == 0)
-				editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
+			if ((tds % 4) == 0) {
+				if (ADVTRAINS_AVAILABLE)
+					editor.set_block_absolute(
+							OAK_LOG, bx, adv_base_y, bz, nullopt, nullopt);
+				else
+					editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
+			}
 			++tds;
 	}
 }
@@ -514,17 +642,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	const bridge_styles::BridgeStyle style =
 			bridge_styles::resolve_bridge_style_with_outline(way, bridge_outlines);
 
-	vector<pair<int, int>> all_points;
-	for (size_t i = 1; i < way.nodes.size(); ++i) {
-		auto points = bresenham_line(way.nodes[i - 1].x, 0, way.nodes[i - 1].z,
-				way.nodes[i].x, 0, way.nodes[i].z);
-		auto smoothed = smooth_diagonal_rails(points);
-		for (const auto &point : smoothed) {
-			pair<int, int> xz{get<0>(point), get<2>(point)};
-			if (all_points.empty() || all_points.back() != xz)
-				all_points.push_back(xz);
-		}
-	}
+	vector<pair<int, int>> all_points = build_connected_centerline(way);
 	if (all_points.empty())
 		return;
 
@@ -585,6 +703,11 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		bridge_ys.push_back(
 				std::max(std::min(start_ramp_y, end_ramp_y), terrain_ys[tds]));
 	}
+	if (ADVTRAINS_AVAILABLE) {
+		const int connected_deck_y =
+				*std::max_element(bridge_ys.begin(), bridge_ys.end());
+		std::fill(bridge_ys.begin(), bridge_ys.end(), connected_deck_y);
+	}
 
 	const Block foundation_block = bridge_styles::foundation_block(style);
 	vector<bridge_styles::BridgePathSample> bridge_path;
@@ -599,8 +722,9 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 				i + 1 < total ? optional<pair<int, int>>(all_points[i + 1]) : nullopt;
 		const int prev_y = i > 0 ? bridge_ys[i - 1] : y;
 		const int next_y = i + 1 < total ? bridge_ys[i + 1] : y;
-		const Block rail_block =
-				determine_rail_with_slope({bx, bz}, prev_xz, next_xz, prev_y, y, next_y);
+		const Block rail_block = connected_advtrains_rail(all_points, i)
+								 .value_or(determine_rail_with_slope(
+										 {bx, bz}, prev_xz, next_xz, prev_y, y, next_y));
 
 		editor.set_block_absolute(foundation_block, bx, y - 1, bz, nullopt, nullopt);
 		editor.set_block_absolute(
@@ -632,16 +756,10 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 		vector<pair<int, int>> &subway_points)
 {
-	for (size_t i = 1; i < element.nodes.size(); ++i) {
-		XZ prev_node = element.nodes[i - 1].xz();
-		XZ cur_node = element.nodes[i].xz();
-		auto points =
-				bresenham_line(prev_node.x, 0, prev_node.z, cur_node.x, 0, cur_node.z);
-		auto smoothed = smooth_diagonal_rails(points);
-
-		for (size_t j = 0; j < smoothed.size(); ++j) {
-			int bx = get<0>(smoothed[j]);
-			int bz = get<2>(smoothed[j]);
+	const auto smoothed = build_connected_centerline(element);
+	for (size_t j = 0; j < smoothed.size(); ++j) {
+			int bx = smoothed[j].first;
+			int bz = smoothed[j].second;
 			if (subway_points.empty() || subway_points.back() != pair<int, int>{bx, bz})
 				subway_points.emplace_back(bx, bz);
 
@@ -653,12 +771,12 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 
 			const int prev_ground =
 					j > 0 ? editor.get_ground_level(
-									get<0>(smoothed[j - 1]), get<2>(smoothed[j - 1]))
+								smoothed[j - 1].first, smoothed[j - 1].second)
 						  : ground_y;
 			const int next_ground =
 					j + 1 < smoothed.size()
 							? editor.get_ground_level(
-									  get<0>(smoothed[j + 1]), get<2>(smoothed[j + 1]))
+									  smoothed[j + 1].first, smoothed[j + 1].second)
 							: ground_y;
 
 			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx) {
@@ -680,21 +798,20 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 			}
 
 			optional<pair<int, int>> prev_xz =
-					j > 0 ? optional<pair<int, int>>(pair<int, int>{
-									get<0>(smoothed[j - 1]), get<2>(smoothed[j - 1])})
+					j > 0 ? optional<pair<int, int>>(smoothed[j - 1])
 						  : nullopt;
 			optional<pair<int, int>> next_xz =
 					j + 1 < smoothed.size()
-							? optional<pair<int, int>>(pair<int, int>{
-									  get<0>(smoothed[j + 1]), get<2>(smoothed[j + 1])})
+							? optional<pair<int, int>>(smoothed[j + 1])
 							: nullopt;
-			const Block rail_block = determine_rail_with_slope(
-					{bx, bz}, prev_xz, next_xz, prev_ground, ground_y, next_ground);
+			const Block rail_block = connected_advtrains_rail(smoothed, j)
+									 .value_or(determine_rail_with_slope({bx, bz},
+											 prev_xz, next_xz, prev_ground, ground_y,
+											 next_ground));
 			editor.set_block_absolute(rail_block, bx, floor_y + 1, bz,
 					std::optional<std::vector<Block>>(
 							{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
 					std::optional<std::vector<Block>>());
-		}
 	}
 }
 
@@ -779,7 +896,7 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 	} else {
 		generate_at_grade_rail(editor, element);
 		if (catenary_wanted(element))
-			generate_catenary(editor, build_smoothed_centerline(element), road_mask,
+			generate_catenary(editor, build_connected_centerline(element), road_mask,
 					building_footprints, rail_mask);
 	}
 }
