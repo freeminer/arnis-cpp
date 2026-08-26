@@ -476,6 +476,54 @@ optional<Block> connected_advtrains_rail(const vector<pair<int, int>> &line,
 	return advtrains_rail_for_connections((direction + 8) % 16, direction);
 }
 
+// Advtrains' slope nodes join elevations differing by exactly one node.  Keep
+// the generated rail formation within that constraint instead of flattening a
+// whole OSM way at its highest terrain sample.
+vector<int> advtrains_height_profile(WorldEditor &editor,
+		const vector<pair<int, int>> &line)
+{
+	vector<int> profile;
+	if (line.empty())
+		return profile;
+	profile.reserve(line.size());
+	for (const auto &[x, z] : line)
+		profile.push_back(editor.get_ground_level(x, z));
+	// The minimum profile above terrain whose neighbours differ by no more than
+	// one block. Diagonal Advtrains pieces have no slope node, so they remain
+	// level and let nearby cardinal pieces perform the elevation transition.
+	auto step_limit = [&line](std::size_t left, std::size_t right) {
+		auto direction = adv_direction_between(line[left], line[right]);
+		return direction && (*direction % 4) == 0 ? 1 : 0;
+	};
+	for (std::size_t i = 1; i < profile.size(); ++i)
+		profile[i] = std::max(profile[i], profile[i - 1] - step_limit(i - 1, i));
+	for (std::size_t i = profile.size(); i-- > 1;)
+		profile[i - 1] = std::max(profile[i - 1],
+				profile[i] - step_limit(i - 1, i));
+	return profile;
+}
+
+optional<Block> advtrains_slope_rail(const vector<pair<int, int>> &line,
+		const vector<int> &heights, std::size_t index)
+{
+	if (!ADVTRAINS_SLOPES_AVAILABLE || index >= line.size() || index >= heights.size())
+		return nullopt;
+	optional<int> direction_to_high;
+	bool rising_forward = false;
+	if (index + 1 < line.size() && heights[index + 1] == heights[index] + 1) {
+		direction_to_high = adv_direction_between(line[index], line[index + 1]);
+		rising_forward = true;
+	} else if (index > 0 && heights[index - 1] == heights[index] + 1) {
+		direction_to_high = adv_direction_between(line[index], line[index - 1]);
+	}
+	if (!direction_to_high || (*direction_to_high % 4) != 0)
+		return nullopt;
+	Block slope = rising_forward ? ADV_RAIL_SLOPE_UP : ADV_RAIL_SLOPE_DOWN;
+	// Advtrains slope param2 uses the four cardinal horizontal directions.
+	slope.setParam2(static_cast<std::uint8_t>(*direction_to_high / 4));
+	return slope;
+}
+
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		const XZBBox &xzbbox, CoordinateBitmap &footprint)
 {
@@ -574,10 +622,8 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 	const auto centerline = build_connected_centerline(element);
 	if (centerline.empty())
 		return;
-	int adv_base_y = std::numeric_limits<int>::min();
-	if (ADVTRAINS_AVAILABLE)
-		for (const auto &[x, z] : centerline)
-			adv_base_y = std::max(adv_base_y, editor.get_ground_level(x, z));
+	const vector<int> adv_heights = ADVTRAINS_AVAILABLE
+			? advtrains_height_profile(editor, centerline) : vector<int>{};
 	std::size_t tds = 0;
 	for (size_t j = 0; j < centerline.size(); ++j) {
 			const auto [bx, bz] = centerline[j];
@@ -592,9 +638,10 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 									  centerline[j + 1].second)
 							: editor.get_ground_level(bx, bz);
 			const int current_ground = editor.get_ground_level(bx, bz);
+			const int rail_y = ADVTRAINS_AVAILABLE ? adv_heights[j] : current_ground;
 
 			if (ADVTRAINS_AVAILABLE) {
-				for (int fill_y = current_ground; fill_y <= adv_base_y; ++fill_y)
+				for (int fill_y = current_ground; fill_y <= rail_y; ++fill_y)
 					editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
 			} else {
 				if (prev_ground < current_ground)
@@ -611,20 +658,24 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 			if (j + 1 < centerline.size())
 				next_opt = centerline[j + 1];
 
-			const Block rail_block = connected_advtrains_rail(centerline, j)
-									 .value_or(determine_rail_with_slope({bx, bz}, prev_opt,
-											 next_opt, prev_ground, current_ground,
-											 next_ground));
+			const Block rail_block = ADVTRAINS_AVAILABLE
+							? advtrains_slope_rail(centerline, adv_heights, j)
+									  .value_or(connected_advtrains_rail(centerline, j)
+													.value_or(determine_rail_with_slope({bx, bz}, prev_opt,
+															next_opt, prev_ground, current_ground,
+															next_ground)))
+							: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
+										prev_ground, current_ground, next_ground);
 			if (ADVTRAINS_AVAILABLE)
 				editor.set_block_absolute(
-						rail_block, bx, adv_base_y + 1, bz, nullopt, nullopt);
+						rail_block, bx, rail_y + 1, bz, nullopt, nullopt);
 			else
 				editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
 
 			if ((tds % 4) == 0) {
 				if (ADVTRAINS_AVAILABLE)
 					editor.set_block_absolute(
-							OAK_LOG, bx, adv_base_y, bz, nullopt, nullopt);
+							OAK_LOG, bx, rail_y, bz, nullopt, nullopt);
 				else
 					editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
 			}

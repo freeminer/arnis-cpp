@@ -4,11 +4,63 @@
 #include "../decals/pictograms.h"
 #include "../bresenham.h"
 #include <charconv>
+#include <cctype>
+#include <limits>
+#include <map>
 #include <set>
+namespace arnis::highways
+{
+int highway_block_range(const std::string &, const tags_t &, double);
+}
 namespace arnis::signage
 {
+namespace arnis_highways = ::arnis::highways;
 namespace
 {
+std::shared_ptr<const IntersectionIndex> active_intersections;
+decals::SignRegion active_region{decals::SignRegion::Europe};
+
+std::string clean_street_name(const std::string &raw)
+{
+	std::string out;
+	bool pending_space = false;
+	for (unsigned char ch : raw) {
+		if (std::isspace(ch)) {
+			pending_space = !out.empty();
+			continue;
+		}
+		if (pending_space && out.size() < 60)
+			out.push_back(' ');
+		pending_space = false;
+		if (out.size() < 60)
+			out.push_back(static_cast<char>(ch));
+	}
+	return out;
+}
+
+bool named_street(const std::string &highway)
+{
+	static const std::set<std::string> kinds{"motorway", "trunk", "primary",
+			"secondary", "tertiary", "motorway_link", "trunk_link", "primary_link",
+			"secondary_link", "tertiary_link", "unclassified", "residential",
+			"living_street", "pedestrian", "service", "road"};
+	return kinds.contains(highway);
+}
+
+std::optional<std::pair<double, double>> way_direction_at(
+		const std::vector<ProcessedNode> &nodes, std::size_t i)
+{
+	if (nodes.empty() || i >= nodes.size())
+		return std::nullopt;
+	const auto &prev = nodes[i ? i - 1 : i];
+	const auto &next = nodes[i + 1 < nodes.size() ? i + 1 : i];
+	double dx = next.x - prev.x, dz = next.z - prev.z;
+	const double length = std::hypot(dx, dz);
+	if (length <= 0.0)
+		return std::nullopt;
+	return std::pair{dx / length, dz / length};
+}
+
 bool signed_road(const std::string &h)
 {
 	static const std::set<std::string> kinds{"motorway", "motorway_link", "trunk",
@@ -150,6 +202,97 @@ void place_roadside_sign(world_editor::WorldEditor &editor, const char *kind,
 }
 
 } // anonymous namespace
+
+IntersectionIndex build_intersection_index(
+		const std::vector<ProcessedElement> &elements, double scale)
+{
+	struct Street
+	{
+		const ProcessedWay *way;
+		std::string name;
+		int half_width;
+	};
+	struct Hit
+	{
+		std::uint64_t way_id;
+		std::string name;
+		std::pair<double, double> direction;
+		int half_width;
+	};
+	std::vector<Street> streets;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto highway = way.tags.get("highway");
+		if (!named_street(highway) || way.tags.get("area") == "yes" ||
+				(!way.tags.get("tunnel").empty() && way.tags.get("tunnel") != "no") ||
+				way.tags.get("indoor") == "yes")
+			continue;
+		auto name = clean_street_name(way.tags.get("name"));
+		if (name.empty() || !decals::font::supports(name))
+			continue;
+		streets.push_back({&way, std::move(name),
+				arnis_highways::highway_block_range(highway, way.tags, scale)});
+	}
+
+	std::unordered_map<std::uint64_t, unsigned> counts;
+	for (const auto &street : streets)
+		for (const auto &node : street.way->nodes)
+			++counts[node.id];
+	std::unordered_map<std::uint64_t, std::vector<Hit>> by_node;
+	for (const auto &street : streets) {
+		for (std::size_t i = 0; i < street.way->nodes.size(); ++i) {
+			const auto &node = street.way->nodes[i];
+			if (counts[node.id] < 2)
+				continue;
+			if (auto direction = way_direction_at(street.way->nodes, i))
+				by_node[node.id].push_back({street.way->id, street.name, *direction,
+						street.half_width});
+		}
+	}
+
+	IntersectionIndex result;
+	for (auto &[node_id, hits] : by_node) {
+		std::map<std::string, std::vector<const Hit *>> names;
+		std::uint64_t owner = std::numeric_limits<std::uint64_t>::max();
+		for (const auto &hit : hits) {
+			names[hit.name].push_back(&hit);
+			owner = std::min(owner, hit.way_id);
+		}
+		if (names.size() < 2)
+			continue;
+		IntersectionPost post;
+		post.owner_way = owner;
+		for (const auto &[name, same_name] : names) {
+			if (post.blades.size() == 3)
+				break;
+			std::pair<double, double> sum{0.0, 0.0};
+			int half_width = 0;
+			for (const Hit *hit : same_name) {
+				auto direction = hit->direction;
+				if (direction.first * sum.first + direction.second * sum.second < 0.0) {
+					direction.first = -direction.first;
+					direction.second = -direction.second;
+				}
+				sum.first += direction.first;
+				sum.second += direction.second;
+				half_width = std::max(half_width, hit->half_width);
+			}
+			const double length = std::hypot(sum.first, sum.second);
+			if (length > 0.0) {
+				sum.first /= length;
+				sum.second /= length;
+			} else {
+				sum = {1.0, 0.0};
+			}
+			post.blades.push_back({name, sum, half_width});
+		}
+		result.emplace(node_id, std::move(post));
+	}
+	return result;
+}
+
 WaySigns highway_way_signs(const tags_t &tags, decals::SignRegion region)
 {
 	WaySigns out;
@@ -249,10 +392,16 @@ std::optional<decals::DecalKey> furniture_pictogram(const tags_t &tags)
 }
 std::shared_ptr<const decals::DecalRegistry> build_registry(
 		const std::vector<ProcessedElement> &elements, SignageLevel level,
-		decals::SignRegion region)
+		decals::SignRegion region, double scale)
 {
-	if (level == SignageLevel::None)
+	if (level == SignageLevel::None) {
+		active_intersections.reset();
 		return {};
+	}
+	auto intersections = std::make_shared<IntersectionIndex>(
+			build_intersection_index(elements, scale));
+	active_intersections = intersections;
+	active_region = region;
 	std::set<decals::DecalKey> keys;
 	for (const auto &element : elements) {
 		if (element.is_way()) {
@@ -303,6 +452,13 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 			else if (railway == "subway_entrance")
 				keys.insert(decals::PictogramKey{decals::metro_logo(region)});
 		}
+	}
+	const decals::TextStyle blade_style{
+			decals::TextStyleKind::StreetName, decals::blade_style(region)};
+	for (const auto &[node_id, post] : *intersections) {
+		(void)node_id;
+		for (const auto &blade : post.blades)
+			keys.insert(decals::DecalKey::text(blade_style, blade.name, 1));
 	}
 	return keys.empty() ? std::shared_ptr<const decals::DecalRegistry>{}
 						: std::make_shared<const decals::DecalRegistry>(
@@ -564,6 +720,91 @@ void generate_power_signage(world_editor::WorldEditor &editor, const ProcessedWa
 	editor.place_decal_panel(x, head, z, 3, *sign, true, false);
 	editor.place_decal_panel(x, head, z, 5, *sign, true, false);
 }
+
+static void place_street_name_post(world_editor::WorldEditor &editor,
+		const ProcessedNode &node, const std::pair<double, double> &own_direction,
+		const IntersectionPost &post, const BuildingFootprintBitmap &footprints,
+		const RoadMaskBitmap &road_mask)
+{
+	if (!editor.decal_registry)
+		return;
+	int widest = 1, width_x = 0, width_z = 0;
+	for (const auto &blade : post.blades) {
+		widest = std::max(widest, blade.half_width);
+		if (std::abs(blade.direction.second) > std::abs(blade.direction.first))
+			width_x = std::max(width_x, blade.half_width);
+		else
+			width_z = std::max(width_z, blade.half_width);
+	}
+	if (!width_x) width_x = widest;
+	if (!width_z) width_z = widest;
+	auto cross = std::pair{-own_direction.second, own_direction.first};
+	for (const auto &blade : post.blades) {
+		const double dot = blade.direction.first * own_direction.first +
+				blade.direction.second * own_direction.second;
+		if (std::abs(dot) < 0.9) {
+			cross = blade.direction;
+			break;
+		}
+	}
+	const int qx = -(own_direction.first + cross.first) >= 0.0 ? 1 : -1;
+	const int qz = -(own_direction.second + cross.second) >= 0.0 ? 1 : -1;
+	std::vector<std::pair<int, int>> offsets;
+	for (int dx = 1; dx <= 9; ++dx)
+		for (int dz = 1; dz <= 9; ++dz)
+			offsets.emplace_back(dx, dz);
+	std::sort(offsets.begin(), offsets.end(), [](const auto &a, const auto &b) {
+		return a.first * a.first + a.second * a.second <
+				b.first * b.first + b.second * b.second;
+	});
+	std::optional<std::pair<int, int>> position;
+	for (const auto [sx, sz] : std::array<std::pair<int, int>, 4>{
+			 {qx, qz}, {qx, -qz}, {-qx, qz}, {-qx, -qz}}) {
+		for (const auto [dx, dz] : offsets) {
+			const int x = node.x + sx * (width_x + dx);
+			const int z = node.z + sz * (width_z + dz);
+			if (!editor.owns(x, z) || road_mask.contains(x, z) ||
+					footprints.contains(x, z) || editor.is_lc_water(x, z))
+				continue;
+			const int ground = editor.get_ground_level(x, z);
+			bool clear = true;
+			for (int dy = 1; dy <= static_cast<int>(post.blades.size()) + 2; ++dy)
+				clear &= editor.cell_open_at(x, ground + dy, z) &&
+						!editor.cell_has_frame(x, ground + dy, z);
+			if (clear) {
+				position = {x, z};
+				break;
+			}
+		}
+		if (position)
+			break;
+	}
+	if (!position)
+		return;
+	const auto [x, z] = *position;
+	const int ground = editor.get_ground_level(x, z);
+	editor.set_block_absolute(block_definitions::STONE_BRICK_WALL, x, ground + 1, z,
+			std::nullopt, std::nullopt);
+	editor.set_block_absolute(block_definitions::STONE_BRICK_WALL, x, ground + 2, z,
+			std::nullopt, std::nullopt);
+	const decals::TextStyle style{
+			decals::TextStyleKind::StreetName, decals::blade_style(active_region)};
+	int row = 0;
+	for (const auto &blade : post.blades) {
+		const auto key = decals::DecalKey::text(style, blade.name, 1);
+		if (!editor.decal_registry->contains(key))
+			continue;
+		const int y = ground + 3 + row++;
+		editor.set_block_absolute(block_definitions::POLISHED_ANDESITE, x, y, z,
+				std::nullopt, std::nullopt);
+		const bool along_x = std::abs(blade.direction.first) >=
+				std::abs(blade.direction.second);
+		const std::int8_t first = along_x ? 2 : 4;
+		editor.place_decal_panel(x, y, z, first, key, false, false);
+		editor.place_decal_panel(x, y, z, opposite(first), key, false, false);
+	}
+}
+
 void generate_highway_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,
 		const BuildingFootprintBitmap &footprints, const RoadMaskBitmap &road_mask)
 {
@@ -589,24 +830,17 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 			way.tags.get("oneway") == "true";
 	const bool reversed = way.tags.get("oneway") == "-1";
 
-	// Rust adds street-name blades at owned intersections.  The C++ signage
-	// context does not yet expose the intersection index, so place the same
-	// readable name plate at the way's first terrain-level node as a fallback.
-	std::optional<std::string> way_name;
-	for (const char *key : {"name", "official:name"}) {
-		const auto it_name = way.tags.find(key);
-		if (it_name != way.tags.end() && !it_name->second.empty()) {
-			way_name = it_name->second;
-			break;
-		}
-	}
-	if (way_name) {
-		const auto &node = way.nodes.front();
-		if (editor.owns(node.x, node.z) && !road_mask.contains(node.x, node.z)) {
-			const int ground = editor.get_ground_level(node.x, node.z);
-			editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE,
-					node.x, ground + 2, node.z, std::nullopt, std::nullopt);
-			editor.place_text_sign(node.x, ground + 3, node.z, 3, *way_name, true);
+	// A single owner way places each shared-node post, preventing duplicate
+	// blades when OSM splits the same intersection into several ways.
+	if (active_intersections) {
+		for (std::size_t i = 0; i < way.nodes.size(); ++i) {
+			const auto found = active_intersections->find(way.nodes[i].id);
+			if (found == active_intersections->end() ||
+					found->second.owner_way != way.id)
+				continue;
+			if (auto direction = way_direction_at(way.nodes, i))
+				place_street_name_post(editor, way.nodes[i], *direction, found->second,
+						footprints, road_mask);
 		}
 	}
 
@@ -620,7 +854,7 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 			cells.emplace_back(std::get<0>(pt), std::get<2>(pt));
 	}
 
-	const auto signs = highway_way_signs(way.tags, decals::SignRegion::Europe);
+	const auto signs = highway_way_signs(way.tags, active_region);
 	if (!signs.speed.has_value() && !signs.shield.has_value() &&
 			!signs.no_entry.has_value() && !signs.cycleway.has_value())
 		return;

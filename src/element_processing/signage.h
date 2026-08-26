@@ -5,9 +5,23 @@
 #include "../osm_parser.h"
 #include "world_editor.h"
 #include <memory>
+#include <unordered_map>
 #include <unordered_set>
 namespace arnis::signage
 {
+struct StreetNameBlade
+{
+	std::string name;
+	std::pair<double, double> direction{1.0, 0.0};
+	int half_width{1};
+};
+struct IntersectionPost
+{
+	std::uint64_t owner_way{0};
+	std::vector<StreetNameBlade> blades;
+};
+using IntersectionIndex = std::unordered_map<std::uint64_t, IntersectionPost>;
+
 struct WaySigns
 {
 	std::optional<decals::DecalKey> speed, shield, no_entry, cycleway;
@@ -20,7 +34,9 @@ std::optional<decals::DecalKey> information_key(const ProcessedNode &node);
 std::optional<decals::DecalKey> furniture_pictogram(const tags_t &tags);
 std::shared_ptr<const decals::DecalRegistry> build_registry(
 		const std::vector<ProcessedElement> &elements, SignageLevel level,
-		decals::SignRegion region);
+		decals::SignRegion region, double scale);
+IntersectionIndex build_intersection_index(
+		const std::vector<ProcessedElement> &elements, double scale);
 void place_node_signage(world_editor::WorldEditor &editor, const ProcessedNode &node,
 		SignageLevel level, decals::SignRegion region);
 void place_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,

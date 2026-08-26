@@ -379,8 +379,12 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					if (water_y - 2 > world_editor::min_y())
 						editor.set_block_absolute(
 								SANDSTONE, x, water_y - 2, z, std::nullopt, std::nullopt);
+					// Match Rust: only skip normal ground generation when this
+					// column was actually converted to water.  A classified cell
+					// above its water surface must remain terrain, otherwise the
+					// later water/depth pass leaves false flooded areas.
+					continue;
 				}
-				continue;
 			}
 
 			if (!in_tunnel && !is_protected_surface(editor, x, ground_y, z) &&

@@ -1,5 +1,7 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -7,8 +9,22 @@
 #include <utility>
 #include "elevation.h"
 #include "providers.h"
+namespace arnis::land_cover
+{
+struct LandCoverData;
+}
 namespace arnis::elevation
 {
+struct LandCoverRepairConfig
+{
+	land_cover::LandCoverData *data{nullptr};
+	double bbox_width_m{0.0};
+	double bbox_height_m{0.0};
+	double built_up_sigma_m{30.0};
+	double coastal_pull_m{25.0};
+	std::function<void(double)> report;
+	explicit operator bool() const { return data != nullptr; }
+};
 struct Tile
 {
 	int lat = 0, lon = 0;
@@ -50,7 +66,7 @@ ElevationData build_grid(const std::vector<Tile> &, double min_lat, double min_l
 		double max_lat, double max_lon, std::size_t width, std::size_t height);
 ElevationData build_processed_grid(const std::vector<Tile> &, double min_lat,
 		double min_lon, double max_lat, double max_lon, std::size_t width,
-		std::size_t height);
+		std::size_t height, const LandCoverRepairConfig &repair = {});
 void normalize_grid(ElevationData &, double sea_level, double scale, double min_height,
 		double max_height);
 ElevationData resample_grid(const ElevationData &, std::size_t width, std::size_t height);

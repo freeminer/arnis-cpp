@@ -176,7 +176,10 @@ ElevationData build_grid(const std::vector<Tile> &tiles, double a, double b, dou
 	ElevationData out;
 	out.width = w;
 	out.height = h;
-	out.heights.assign(h, std::vector<double>(w, 0.0));
+	out.world_width = w;
+	out.world_height = h;
+	out.heights.assign(h,
+			std::vector<double>(w, std::numeric_limits<double>::quiet_NaN()));
 	if (!w || !h)
 		return out;
 	for (std::size_t y = 0; y < h; ++y)
@@ -189,15 +192,30 @@ ElevationData build_grid(const std::vector<Tile> &tiles, double a, double b, dou
 	return out;
 }
 ElevationData build_processed_grid(const std::vector<Tile> &tiles, double a, double b,
-		double c, double d, std::size_t w, std::size_t h)
+		double c, double d, std::size_t w, std::size_t h,
+		const LandCoverRepairConfig &repair)
 {
 	auto out = build_grid(tiles, a, b, c, d, w, h);
-	fill_nan_values(out.heights);
+	// Rust order is significant: filters must see missing provider samples as
+	// NaN, otherwise a missing tile becomes a synthetic sea-level plateau.
 	filter_elevation_outliers(out.heights);
-	// Match the Rust elevation pipeline's final spatial anomaly repair.  Keep
-	// this after interpolation/outlier removal so the neighbourhood statistics
-	// see a complete finite grid.
 	repair_terrain_anomalies(out.heights);
+	fill_nan_values(out.heights);
+	if (repair && w && h) {
+		const double meters_per_cell =
+				(repair.bbox_width_m / static_cast<double>(w) +
+						repair.bbox_height_m / static_cast<double>(h)) *
+				0.5;
+		const double sigma_cells = meters_per_cell > 0.0
+								 ? repair.built_up_sigma_m / meters_per_cell
+								 : 0.0;
+		const auto pull_cells = meters_per_cell > 0.0
+							? static_cast<std::uint32_t>(std::max(
+									 0.0, std::round(repair.coastal_pull_m / meters_per_cell)))
+							: 0;
+		apply_land_cover_repair(out.heights, *repair.data, sigma_cells, pull_cells,
+				meters_per_cell, repair.report);
+	}
 	return out;
 }
 void normalize_grid(ElevationData &g, double sea, double scale, double lo, double hi)
@@ -213,8 +231,11 @@ void normalize_grid(ElevationData &g, double sea, double scale, double lo, doubl
 ElevationData resample_grid(const ElevationData &in, std::size_t w, std::size_t h)
 {
 	ElevationData out;
+	out = in;
 	out.width = w;
 	out.height = h;
+	out.world_width = w;
+	out.world_height = h;
 	out.heights.assign(h, std::vector<double>(w, 0.0));
 	if (!w || !h || !in.width || !in.height)
 		return out;

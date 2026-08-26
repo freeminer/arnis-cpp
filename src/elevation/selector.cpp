@@ -18,32 +18,41 @@ std::optional<double> Selector::sample(double lat, double lon)
 	return std::nullopt;
 }
 ElevationData Selector::grid(
-		double a, double b, double c, double d, std::size_t w, std::size_t h)
+		double a, double b, double c, double d, std::size_t w, std::size_t h,
+		const LandCoverRepairConfig &repair)
 {
 	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root());
-	return build_processed_grid(tiles, a, b, c, d, w, h);
+	return build_processed_grid(tiles, a, b, c, d, w, h, repair);
 }
 ElevationData Selector::normalized_grid(double a, double b, double c, double d,
-		std::size_t w, std::size_t h, double sea, double scale, double lo, double hi)
+		std::size_t w, std::size_t h, double sea, double scale, double lo, double hi,
+		const LandCoverRepairConfig &repair)
 {
-	auto g = grid(a, b, c, d, w, h);
+	auto g = grid(a, b, c, d, w, h, repair);
 	normalize_grid(g, sea, scale, lo, hi);
 	return g;
 }
 ElevationData Selector::pipeline(double a, double b, double c, double d, std::size_t sw,
 		std::size_t sh, std::size_t ow, std::size_t oh, double sea, double scale,
-		double lo, double hi)
+		double lo, double hi, const LandCoverRepairConfig &repair)
 {
 	auto key = grid_cache_key(a, b, c, d, sw, sh) + "_" + std::to_string(ow) + "x" +
 			   std::to_string(oh);
-	if (auto cached = cache_.load(key))
-		return *cached;
-	if (auto compact = cache_.load_compact(key))
-		return *compact;
-	auto g = normalized_grid(a, b, c, d, sw, sh, sea, scale, lo, hi);
+	// Land-cover repair mutates both elevation and classification. Loading only
+	// the cached heights would skip those classification updates, so this path
+	// deliberately bypasses the old height-only cache.
+	if (!repair) {
+		if (auto cached = cache_.load(key))
+			return *cached;
+		if (auto compact = cache_.load_compact(key))
+			return *compact;
+	}
+	auto g = normalized_grid(a, b, c, d, sw, sh, sea, scale, lo, hi, repair);
 	auto out = resample_grid(g, ow, oh);
-	cache_.save(key, out);
-	cache_.save_compact(key, out);
+	if (!repair) {
+		cache_.save(key, out);
+		cache_.save_compact(key, out);
+	}
 	return out;
 }
 SourceGrid Selector::source_pipeline(double a, double b, double c, double d,

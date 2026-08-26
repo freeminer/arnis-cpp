@@ -14,12 +14,15 @@ public:
 	}
 	std::optional<double> sample(double lat, double lon);
 	ElevationData grid(
-			double a, double b, double c, double d, std::size_t w, std::size_t h);
+			double a, double b, double c, double d, std::size_t w, std::size_t h,
+			const LandCoverRepairConfig &repair = {});
 	ElevationData normalized_grid(double a, double b, double c, double d, std::size_t w,
-			std::size_t h, double sea, double scale, double lo, double hi);
+			std::size_t h, double sea, double scale, double lo, double hi,
+			const LandCoverRepairConfig &repair = {});
 	ElevationData pipeline(double a, double b, double c, double d, std::size_t source_w,
 			std::size_t source_h, std::size_t out_w, std::size_t out_h, double sea,
-			double scale, double lo, double hi);
+			double scale, double lo, double hi,
+			const LandCoverRepairConfig &repair = {});
 	SourceGrid source_pipeline(double a, double b, double c, double d, std::size_t width,
 			std::size_t height, double sigma, double fallback);
 	SourceGrid source_pipeline_normalized(double a, double b, double c, double d,

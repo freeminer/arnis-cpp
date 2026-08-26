@@ -796,7 +796,8 @@ bool generate_world(WorldEditor &editor,
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
 	if (editor.map_decals && !editor.decal_registry)
 		editor.set_decal_registry(signage::build_registry(
-				elements, args_.signage, decals::detect_region(centre_lat, centre_lon)));
+				elements, args_.signage, decals::detect_region(centre_lat, centre_lon),
+				args_.scale));
 	if (editor.decal_registry && !editor.decal_frame_sink) {
 		editor.set_decal_frame_sink([&editor](const WorldEditor::DecalFrame &frame) {
 			const auto texture = decal_texture(*editor.decal_registry, frame.map_id);
