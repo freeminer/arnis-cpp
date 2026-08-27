@@ -6,7 +6,6 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
-#include <mutex>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
@@ -778,10 +777,6 @@ bool generate_world(WorldEditor &editor,
 		FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints)
 {
-	// The floor is process-global because every chunk serializer must share one
-	// dimension span. Serialize overlapping library generations around it.
-	static std::mutex generation_floor_mutex;
-	const std::lock_guard floor_lock(generation_floor_mutex);
 	if (!valid_scale(args_.scale))
 		return false;
 	world_editor::set_world_bounds(
