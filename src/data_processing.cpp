@@ -1,5 +1,6 @@
 #include "data_processing.h"
 #include "element_processing/signage.h"
+#include "element_processing/advtrains.h"
 #include <sys/types.h>
 #include <unordered_set>
 #include <algorithm>
@@ -962,6 +963,7 @@ bool generate_world(WorldEditor &editor,
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	auto rail_bridge_internal_endpoints =
 			railways::collect_rail_bridge_internal_endpoints(elements);
+	railways::advtrains::prepare_network(elements);
 	// Centreline bitmap prevents catenary masts from being stamped into a
 	// neighbouring parallel track, matching the Rust railway pass.
 	auto rail_mask = railways::collect_at_grade_rail_mask(elements, xzbbox);

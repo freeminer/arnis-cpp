@@ -22,6 +22,7 @@ using std::vector;
 #include "../world_editor/floor_state.h"
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
+#include "advtrains.h"
 #undef stoi
 namespace arnis
 {
@@ -329,6 +330,7 @@ vector<pair<int, int>> build_smoothed_centerline(const ProcessedWay &way)
 	return out;
 }
 
+#if 0 // Legacy implementation moved to advtrains.cpp.
 // Advtrains uses sixteen connection directions. Odd directions advance two
 // cells on one axis and one on the other; this is why treating every raster
 // cell as an independently rotated straight rail cannot produce a connected
@@ -414,13 +416,15 @@ vector<pair<int, int>> build_advtrains_centerline(const ProcessedWay &way)
 	}
 	return out;
 }
+#endif
 
 vector<pair<int, int>> build_connected_centerline(const ProcessedWay &way)
 {
-	return ADVTRAINS_AVAILABLE ? build_advtrains_centerline(way)
+	return advtrains::available() ? advtrains::build_centerline(way)
 								 : build_smoothed_centerline(way);
 }
 
+#if 0 // Legacy implementation moved to advtrains.cpp.
 bool unordered_connections_match(int a, int b, int c, int d)
 {
 	return (a == c && b == d) || (a == d && b == c);
@@ -448,32 +452,12 @@ optional<Block> advtrains_rail_for_connections(int first, int second)
 		}
 	return nullopt;
 }
+#endif
 
 optional<Block> connected_advtrains_rail(const vector<pair<int, int>> &line,
 		std::size_t index)
 {
-	if (!ADVTRAINS_AVAILABLE || line.size() < 2)
-		return nullopt;
-	optional<int> incoming;
-	optional<int> outgoing;
-	if (index > 0)
-		if (auto forward = adv_direction_between(line[index - 1], line[index]))
-			incoming = (*forward + 8) % 16;
-	if (index + 1 < line.size())
-		outgoing = adv_direction_between(line[index], line[index + 1]);
-	if (!incoming && !outgoing)
-		return nullopt;
-	if (!incoming)
-		incoming = (*outgoing + 8) % 16;
-	if (!outgoing)
-		outgoing = (*incoming + 8) % 16;
-	if (auto exact = advtrains_rail_for_connections(*incoming, *outgoing))
-		return exact;
-	// Defensive fallback for malformed/overlapping OSM geometry: remain inside
-	// the Advtrains family and preserve one bound end instead of injecting a
-	// carts rail into an otherwise Advtrains path.
-	const int direction = outgoing.value_or((*incoming + 8) % 16);
-	return advtrains_rail_for_connections((direction + 8) % 16, direction);
+	return advtrains::connected_rail(line, index);
 }
 
 // Advtrains' slope nodes join elevations differing by exactly one node.  Keep
@@ -482,46 +466,13 @@ optional<Block> connected_advtrains_rail(const vector<pair<int, int>> &line,
 vector<int> advtrains_height_profile(WorldEditor &editor,
 		const vector<pair<int, int>> &line)
 {
-	vector<int> profile;
-	if (line.empty())
-		return profile;
-	profile.reserve(line.size());
-	for (const auto &[x, z] : line)
-		profile.push_back(editor.get_ground_level(x, z));
-	// The minimum profile above terrain whose neighbours differ by no more than
-	// one block. Diagonal Advtrains pieces have no slope node, so they remain
-	// level and let nearby cardinal pieces perform the elevation transition.
-	auto step_limit = [&line](std::size_t left, std::size_t right) {
-		auto direction = adv_direction_between(line[left], line[right]);
-		return direction && (*direction % 4) == 0 ? 1 : 0;
-	};
-	for (std::size_t i = 1; i < profile.size(); ++i)
-		profile[i] = std::max(profile[i], profile[i - 1] - step_limit(i - 1, i));
-	for (std::size_t i = profile.size(); i-- > 1;)
-		profile[i - 1] = std::max(profile[i - 1],
-				profile[i] - step_limit(i - 1, i));
-	return profile;
+	return advtrains::height_profile(editor, line);
 }
 
 optional<Block> advtrains_slope_rail(const vector<pair<int, int>> &line,
 		const vector<int> &heights, std::size_t index)
 {
-	if (!ADVTRAINS_SLOPES_AVAILABLE || index >= line.size() || index >= heights.size())
-		return nullopt;
-	optional<int> direction_to_high;
-	bool rising_forward = false;
-	if (index + 1 < line.size() && heights[index + 1] == heights[index] + 1) {
-		direction_to_high = adv_direction_between(line[index], line[index + 1]);
-		rising_forward = true;
-	} else if (index > 0 && heights[index - 1] == heights[index] + 1) {
-		direction_to_high = adv_direction_between(line[index], line[index - 1]);
-	}
-	if (!direction_to_high || (*direction_to_high % 4) != 0)
-		return nullopt;
-	Block slope = rising_forward ? ADV_RAIL_SLOPE_UP : ADV_RAIL_SLOPE_DOWN;
-	// Advtrains slope param2 uses the four cardinal horizontal directions.
-	slope.setParam2(static_cast<std::uint8_t>(*direction_to_high / 4));
-	return slope;
+	return advtrains::slope_rail(line, heights, index);
 }
 
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
@@ -660,7 +611,7 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 
 			const Block rail_block = ADVTRAINS_AVAILABLE
 							? advtrains_slope_rail(centerline, adv_heights, j)
-									  .value_or(connected_advtrains_rail(centerline, j)
+									  .value_or(advtrains::connected_rail(centerline, j, true)
 													.value_or(determine_rail_with_slope({bx, bz}, prev_opt,
 															next_opt, prev_ground, current_ground,
 															next_ground)))
