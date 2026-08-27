@@ -11,7 +11,8 @@ namespace arnis::railways::advtrains
 {
 
 bool available();
-void prepare_network(const std::vector<ProcessedElement> &elements);
+void prepare_network(const std::vector<ProcessedElement> &elements,
+		world_editor::WorldEditor &editor);
 std::vector<std::pair<int, int>> build_centerline(const ProcessedWay &way);
 std::optional<Block> connected_rail(
 		const std::vector<std::pair<int, int>> &line, std::size_t index,

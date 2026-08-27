@@ -810,12 +810,17 @@ bool generate_world(WorldEditor &editor,
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc++11-narrowing"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnarrowing"
 #endif
 			return editor.mg && editor.mg->queueGeneratedDecal(
 					{frame.x, frame.y, frame.z},
 					*texture, frame.map_id, frame.facing, frame.rotation, frame.glow);
 #if defined(__clang__)
 #pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
 #endif
 		});
 	}
@@ -963,7 +968,7 @@ bool generate_world(WorldEditor &editor,
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	auto rail_bridge_internal_endpoints =
 			railways::collect_rail_bridge_internal_endpoints(elements);
-	railways::advtrains::prepare_network(elements);
+	railways::advtrains::prepare_network(elements, editor);
 	// Centreline bitmap prevents catenary masts from being stamped into a
 	// neighbouring parallel track, matching the Rust railway pass.
 	auto rail_mask = railways::collect_at_grade_rail_mask(elements, xzbbox);
