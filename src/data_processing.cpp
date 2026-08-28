@@ -595,9 +595,11 @@ void generate_building_from_relation(WorldEditor &editor,
 		const ProcessedRelation &relation, const Args &args,
 		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
 		const CoordinateBitmap &building_passages);
-void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
+std::optional<building_facade::FacadeAnchor> generate_buildings(
+		WorldEditor *editor, const ProcessedWay &element,
 		const Args &args, const std::optional<int> &relation_levels);
-void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
+std::optional<building_facade::FacadeAnchor> generate_buildings(
+		WorldEditor *editor, const ProcessedWay &element,
 		const Args &args, const std::optional<int> &relation_levels,
 		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons,
@@ -791,35 +793,6 @@ bool generate_world(WorldEditor &editor,
 	const auto &elements = args_.skip_objects() ? no_elements : input_elements;
 	const auto geo = editor.geographic_bounds();
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
-	if (editor.map_decals && !editor.decal_registry)
-		editor.set_decal_registry(signage::build_registry(
-				elements, args_.signage, decals::detect_region(centre_lat, centre_lon),
-				args_.scale));
-	if (editor.decal_registry && !editor.decal_frame_sink) {
-		editor.set_decal_frame_sink([&editor](const WorldEditor::DecalFrame &frame) {
-			const auto texture = decal_texture(*editor.decal_registry, frame.map_id);
-			if (!texture)
-				return false;
-			Block node = block_definitions::DECAL_FRAME;
-			editor.set_block_absolute(node, frame.x, frame.y, frame.z,
-					std::nullopt, std::nullopt);
-#if defined(__clang__)
-#pragma clang diagnostic push
-#pragma clang diagnostic ignored "-Wc++11-narrowing"
-#elif defined(__GNUC__)
-#pragma GCC diagnostic push
-#pragma GCC diagnostic ignored "-Wnarrowing"
-#endif
-			return editor.mg && editor.mg->queueGeneratedDecal(
-					{frame.x, frame.y, frame.z},
-					*texture, frame.map_id, frame.facing, frame.rotation, frame.glow);
-#if defined(__clang__)
-#pragma clang diagnostic pop
-#elif defined(__GNUC__)
-#pragma GCC diagnostic pop
-#endif
-		});
-	}
 	if (auto selector = trees::RegionSelector::load_for_location(centre_lat, centre_lon,
 				std::filesystem::path("assets/trees"), args_.scale, base_level)) {
 		auto shared_selector =
@@ -941,6 +914,37 @@ bool generate_world(WorldEditor &editor,
 	}
 	auto road_mask = highways::collect_road_surface_coords(elements, editor, xzbbox,
 			args_.scale);
+	if (editor.map_decals) {
+		auto context = signage::build_context(elements, args_.signage,
+				decals::detect_region(centre_lat, centre_lon), args_.scale, road_mask);
+		editor.set_signage_context(context);
+		editor.set_decal_registry(context ? context->registry : nullptr);
+	}
+	if (editor.decal_registry && !editor.decal_frame_sink) {
+		editor.set_decal_frame_sink([&editor](const WorldEditor::DecalFrame &frame) {
+			const auto texture = decal_texture(*editor.decal_registry, frame.map_id);
+			if (!texture)
+				return false;
+			Block node = block_definitions::DECAL_FRAME;
+			editor.set_block_absolute(node, frame.x, frame.y, frame.z,
+					std::nullopt, std::nullopt);
+#if defined(__clang__)
+#pragma clang diagnostic push
+#pragma clang diagnostic ignored "-Wc++11-narrowing"
+#elif defined(__GNUC__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wnarrowing"
+#endif
+			return editor.mg && editor.mg->queueGeneratedDecal(
+					{frame.x, frame.y, frame.z}, *texture, frame.map_id,
+					frame.facing, frame.rotation, frame.glow);
+#if defined(__clang__)
+#pragma clang diagnostic pop
+#elif defined(__GNUC__)
+#pragma GCC diagnostic pop
+#endif
+		});
+	}
 	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
 	// Pre-scan still water surfaces for consistent water levels across tiles
 	auto still_surfaces =
@@ -1058,13 +1062,15 @@ bool generate_world(WorldEditor &editor,
 				if (suppressed_building_outlines.find(way.id) ==
 						suppressed_building_outlines.end()) {
 					auto group = building_part_groups.find(way.id);
-					buildings::generate_buildings(&editor, way, args,
+					auto anchor = buildings::generate_buildings(&editor, way, args,
 							std::optional<int>{}, flood_fill_cache, building_passages,
 							nullptr,
 							group == building_part_groups.end()
 									? std::nullopt
 									: std::optional<std::uint64_t>(group->second),
 							&road_mask, &building_footprints, &building_group_members);
+					if (editor.signage_enabled())
+						signage::generate_building_signage(editor, way, anchor);
 				}
 			} else if (way.tags.contains("highway")) {
 				const bool tunnel_rendered =
@@ -1072,12 +1078,12 @@ bool generate_world(WorldEditor &editor,
 						highways::generate_highway_tunnel_shell(editor, way, args,
 								tunnel_internal_endpoints, tunnel_portals,
 								highway_tunnel_cells);
-				if (editor.signage_enabled())
-					signage::generate_highway_way_signage(
-							editor, way, building_footprints, road_mask);
 				if (!tunnel_rendered)
 					highways::generate_highways(editor, element, args, elements, {},
 							road_mask, bridge_structures, bridge_surface, tunnel_portals);
+				if (editor.signage_enabled())
+					signage::generate_highway_way_signage(
+							editor, way, building_footprints);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
@@ -1135,16 +1141,10 @@ bool generate_world(WorldEditor &editor,
 				power::generate_power(editor, element, building_footprints,
 						flood_fill_cache, args.timeout);
 			} else if (way.tags.contains("place")) {
-				if (editor.signage_enabled()) {
-					signage::generate_power_signage(editor, way, road_mask);
-				}
 				landuse::generate_place(editor, way, args, flood_fill_cache);
 			}
-			// Highway-specific signage was already placed above with roadside
-			// positioning. The generic pass would duplicate it at the first node.
-			if (!way.tags.contains("highway"))
-				signage::place_way_signage(
-						editor, way, decals::detect_region(centre_lat, centre_lon));
+			if (editor.signage_enabled() && signage::power_sign(way.tags))
+				signage::generate_power_signage(editor, way, road_mask);
 		} else if (element.is_node()) {
 			auto const &node = element.as_node();
 			if (std::find(landmark_plan.suppressed.begin(),
@@ -1255,6 +1255,14 @@ bool generate_world(WorldEditor &editor,
 		// member ways, so eviction before dispatch would cause a refill.
 		release_finished_fills(flood_fill_cache, last_fill_use, element, element_index);
 	}
+	// Tagged nodes precede ways in OSM input.  Defer address and POI facade
+	// plates until every building wall exists; traffic/rail signs stay in the
+	// normal node dispatcher because they do not depend on building hosts.
+	if (editor.signage_enabled())
+		for (const auto &element : render_elements)
+			if (element.is_node())
+				signage::generate_node_facade_signage(
+						editor, element.as_node(), building_footprints, road_mask);
 
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
 	ground_generation::generate_ground_layer(editor, args_, xzbbox, building_footprints,

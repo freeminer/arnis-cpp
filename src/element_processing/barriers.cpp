@@ -26,6 +26,7 @@ void generate_barriers(world_editor::WorldEditor &editor,
 {
 	block_definitions::Block barrier_material = block_definitions::COBBLESTONE_WALL;
 	int barrier_height = 2;
+	bool single_height = false;
 
 	{
 		const std::unordered_map<std::string, std::string> &tags = element.tags();
@@ -33,8 +34,13 @@ void generate_barriers(world_editor::WorldEditor &editor,
 		if (it != tags.end()) {
 			const std::string &val = it->second;
 			if (val == "bollard") {
-				barrier_material = block_definitions::COBBLESTONE_WALL;
+				barrier_material = block_definitions::STREETS_BOLLARD;
 				barrier_height = 1;
+				single_height = true;
+			} else if (val == "guard_rail" || val == "guardrail") {
+				barrier_material = block_definitions::STREETS_GUARDRAIL;
+				barrier_height = 1;
+				single_height = true;
 			} else if (val == "kerb") {
 				return;
 			} else if (val == "hedge") {
@@ -115,9 +121,9 @@ void generate_barriers(world_editor::WorldEditor &editor,
 				wall_height = barrier_height;
 			}
 		}
-		// Ensure minimum height of 2
-		if (wall_height < 2) {
-			wall_height = 2;
+		const int minimum_height = single_height ? 1 : 2;
+		if (wall_height < minimum_height) {
+			wall_height = minimum_height;
 		}
 	}
 
@@ -201,7 +207,7 @@ void generate_barrier_nodes(world_editor::WorldEditor &editor,
 	const std::string &val = it->second;
 	if (val == "bollard") {
 		place_barrier_node_block(
-				editor, node, bridge_surface, block_definitions::COBBLESTONE_WALL, 1);
+				editor, node, bridge_surface, block_definitions::STREETS_BOLLARD, 1);
 	} else if (val == "stile" || val == "gate" || val == "swing_gate" ||
 			   val == "lift_gate") {
 		/* Future implementation for gates:

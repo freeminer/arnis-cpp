@@ -1,4 +1,5 @@
 #include "emergency.h"
+#include "signage.h"
 #include <algorithm>
 
 namespace arnis
@@ -57,9 +58,14 @@ void generate_fire_hydrant(WorldEditor &editor, const ProcessedNode &node)
 		return;
 	}
 
-	// Match the Rust fallback geometry. Java map decals are not exposed by the
-	// embedded WorldEditor, so the portable representation is one ground block.
 	editor.set_block(REDSTONE_BLOCK, x, 1, z, std::nullopt, std::nullopt);
+	if (const auto key = signage::furniture_pictogram(node.tags);
+			key && editor.signage_context && editor.signage_context->has(*key)) {
+		const int y = editor.get_ground_level(x, z) + 1;
+		for (const std::int8_t facing : {std::int8_t(2), std::int8_t(3),
+				 std::int8_t(4), std::int8_t(5)})
+			editor.place_decal(x, y, z, facing, *key);
+	}
 }
 
 }

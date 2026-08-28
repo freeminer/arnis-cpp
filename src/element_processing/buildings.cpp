@@ -1859,16 +1859,18 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		std::vector<std::pair<int32_t, int32_t>> const &cached_floor_area,
 		int32_t abs_terrain_offset);
 
-void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
+std::optional<building_facade::FacadeAnchor> generate_buildings(
+		WorldEditor *editor, const ProcessedWay &element,
 		const Args &args, const std::optional<int> &relation_levels)
 {
 	FloodFillCache empty_cache;
 	CoordinateBitmap empty_passages = CoordinateBitmap::new_empty();
-	generate_buildings(
+	return generate_buildings(
 			editor, element, args, relation_levels, empty_cache, empty_passages, nullptr);
 }
 
-void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
+std::optional<building_facade::FacadeAnchor> generate_buildings(
+		WorldEditor *editor, const ProcessedWay &element,
 		const Args &args, const std::optional<int> &relation_levels,
 		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons,
@@ -1883,12 +1885,12 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 			osm_parser::seed_with_hint(element.id, osm_parser::building_style_hint(element.tags)));
 	const auto clean_visual_seed = osm_parser::variant_seed(visual_seed);
 	if (should_skip_underground_tags(element.tags)) {
-		return;
+		return std::nullopt;
 	}
 
 	if (element.tags.get("tomb") == "pyramid") {
 		historic::generate_pyramid(*editor, element, args);
-		return;
+		return std::nullopt;
 	}
 
 	// min_level
@@ -1907,12 +1909,12 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 	static const std::unordered_set<uint64_t> skip_way_ids = {
 			5013364, 204068874, 32920861};
 	if (skip_way_ids.find(element.id) != skip_way_ids.end())
-		return;
+		return std::nullopt;
 
 	if (arnis::man_made::is_tank_structure(element)) {
 		arnis::man_made::generate_tank_structure(
 				*editor, ProcessedElement(element), args);
-		return;
+		return std::nullopt;
 	}
 
 	int abs_terrain_offset = (!args.terrain) ? args.ground_level : 0;
@@ -1976,7 +1978,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 	}
 	std::size_t cached_footprint_size = cached_floor_area.size();
 	if (cached_footprint_size == 0)
-		return;
+		return std::nullopt;
 	building_facade::PointSet current_footprint(
 			cached_floor_area.begin(), cached_floor_area.end());
 	building_facade::FacadePlan facade_plan = building_facade::FacadePlan::empty();
@@ -2297,7 +2299,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 			for (const auto &p : roof_area) {
 				editor->set_block(roof_block, p.first, 5, p.second);
 			}
-			return;
+			return std::nullopt;
 		}
 	}
 
@@ -2328,7 +2330,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 					for (const auto &p : floor_area) {
 						editor->set_block(roof_block, p.first, 5, p.second);
 					}
-					return;
+					return std::nullopt;
 				}
 			} else if (btype == "parking" ||
 					   (element.tags.find("parking") != element.tags.end() &&
@@ -2382,10 +2384,10 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 						prev_outline = std::make_pair(x, z);
 					}
 				}
-				return;
+				return std::nullopt;
 			} else if (btype == "roof") {
 				generate_roof_only_structure(*editor, element, cached_floor_area, args);
-				return;
+				return std::nullopt;
 			} else if (btype == "apartments") {
 				if (building_height ==
 						std::max(3, static_cast<int>(6.0 * scale_factor))) {
@@ -2398,7 +2400,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 				}
 			} else if (btype == "bridge") {
 				generate_bridge(*editor, element, args.timeout_ref());
-				return;
+				return std::nullopt;
 			}
 		}
 	}
@@ -2654,6 +2656,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 		previous_node = std::make_pair(x, z);
 	}
 
+	std::optional<building_facade::FacadeAnchor> signage_anchor;
 	if (min_level_offset == 0 && condition != BuildingCondition::Construction &&
 			condition != BuildingCondition::Ruined &&
 			category != BuildingCategory::Greenhouse &&
@@ -2697,6 +2700,10 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 				editor->set_block_absolute(formal ? DARK_OAK_DOOR_UPPER : OAK_DOOR_UPPER, node.x,
 						start_y_offset + abs_terrain_offset + 2, node.z);
 				if (entrance_façade) {
+					if (!signage_anchor)
+						signage_anchor = building_facade::FacadeAnchor{node.x, node.z,
+								entrance_façade->normal, 0, 0,
+								std::pair{node.x, node.z}};
 					const Block threshold = base_course_block != wall_block ? base_course_block : STONE_BRICKS;
 					editor->set_block_absolute(threshold,
 							node.x + entrance_façade->normal.first,
@@ -2740,6 +2747,9 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 						}
 					}
 					if (door) {
+						if (!signage_anchor)
+							signage_anchor = building_facade::FacadeAnchor{door->first,
+									door->second, segment.normal, 0, 0, *door};
 						const bool formal = category == BuildingCategory::Commercial ||
 											category == BuildingCategory::Office ||
 											category == BuildingCategory::Hotel ||
@@ -2805,38 +2815,25 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 		}
 	}
 
-	if (editor->signage_enabled() && !element.tags.contains("building:part") &&
-			facade_plan.front_segment &&
-			*facade_plan.front_segment + 1 < element.nodes.size()) {
+	if (!signage_anchor && facade_plan.front_segment &&
+			*facade_plan.front_segment + 1 < element.nodes.size() &&
+			facade_plan.segments[*facade_plan.front_segment]) {
 		const auto index = *facade_plan.front_segment;
 		const auto &a = element.nodes[index], &b = element.nodes[index + 1];
 		const auto &segment = *facade_plan.segments[index];
-		const int anchor_x = (a.x + b.x) / 2, anchor_z = (a.z + b.z) / 2;
-		const auto facing = WorldEditor::facing_for_normal(
-				segment.normal.first, segment.normal.second);
-		if (args.signage == SignageLevel::Full &&
-				decals::pictograms::business_kind(element.tags)) {
-			const auto name = element.tags.get("name");
-			if (!name.empty() && decals::font::supports(name)) {
-				const std::uint8_t cols = name.size() <= 26	  ? 2
-										  : name.size() <= 44 ? 3
-															  : 4;
-				const decals::DecalKey key = decals::DecalKey::text(
-						{decals::TextStyleKind::Fascia}, name, cols);
-				const auto [left_x, left_z] =
-						WorldEditor::panel_left_anchor(anchor_x, anchor_z, facing, cols);
-				editor->place_decal_panel(left_x, start_y_offset + abs_terrain_offset + 3,
-						left_z, facing, key, false, true);
-			}
+		const auto cells = bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
+		if (!cells.empty()) {
+			const auto &middle = cells[cells.size() / 2];
+			signage_anchor = building_facade::FacadeAnchor{std::get<0>(middle),
+					std::get<2>(middle), segment.normal, 0, 0, std::nullopt};
 		}
-		const auto number = element.tags.get("addr:housenumber");
-		if (args.signage == SignageLevel::Full && !number.empty() && number.size() <= 8 &&
-				decals::font::supports(number)) {
-			const decals::DecalKey key = decals::DecalKey::text(
-					{decals::TextStyleKind::HouseNumber}, number, 1);
-			editor->place_decal(anchor_x, start_y_offset + abs_terrain_offset + 2,
-					anchor_z, facing, key);
-		}
+	}
+	if (signage_anchor) {
+		const int door_y = start_y_offset + abs_terrain_offset + 1;
+		signage_anchor->fascia_y = std::max(
+				start_y_offset + grammar_anchor + floor_cycle + abs_terrain_offset,
+				door_y + 3);
+		signage_anchor->number_y = door_y + 1;
 	}
 
 	if (std::get<2>(corner_addup) != 0) {
@@ -3055,6 +3052,7 @@ void generate_buildings(WorldEditor *editor, const ProcessedWay &element,
 				generated_sloped_roof, start_y_offset, building_height,
 				abs_terrain_offset, floor_cycle, wall_block, clean_visual_seed,
 				covered_by_sibling);
+	return signage_anchor;
 }
 
 

@@ -1,6 +1,7 @@
 #include "historic.h"
 #include "../deterministic_rng.h"
 #include "../floodfill.h"
+#include "signage.h"
 #include <algorithm>
 #include <cmath>
 
@@ -61,9 +62,17 @@ void generate_memorial(WorldEditor &editor, const ProcessedNode &node)
 			(it_memorial != node.tags.end()) ? it_memorial->second : "yes";
 
 	if (memorial_type == "plaque") {
-		// Simple plaque on a small stand
+		// Prefer the Rust wall-mounted plaque; retain the small stand as fallback.
+		if (signage::generate_plaque(editor, node))
+			return;
 		editor.set_block(STONE_BRICKS, x, 1, z, std::nullopt, std::nullopt);
 		editor.set_block(STONE_BRICK_SLAB, x, 2, z, std::nullopt, std::nullopt);
+		if (const auto key = signage::plaque_key(node.tags)) {
+			const int y = editor.get_ground_level(x, z) + 1;
+			for (const std::int8_t facing : {std::int8_t(2), std::int8_t(3),
+					 std::int8_t(4), std::int8_t(5)})
+				editor.place_decal(x, y, z, facing, *key);
+		}
 	} else if (memorial_type == "statue" || memorial_type == "sculpture" ||
 			   memorial_type == "bust") {
 		// Statue on a pedestal
