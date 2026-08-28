@@ -505,21 +505,40 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				int x = element.as_node().x;
 				int z = element.as_node().z;
 				const int base = node_feature_base_y(editor, bridge_surface, element.tags(), x, z);
-				for (int dy = 1; dy <= 3; ++dy) {
-					editor.set_block_absolute(crate::block_definitions::STREETS_POLE,
-							x, base + dy, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				}
 				auto signal_rng = coord_rng(x, z, 0x54524146464943ULL);
 				auto light = crate::block_definitions::STREETS_TRAFFIC_LIGHTS[
 						signal_rng.uniform(crate::block_definitions::STREETS_TRAFFIC_LIGHTS.size())];
 				if (light.id() != CONTENT_AIR) {
-					light.setParam2(0);
-					editor.set_block_absolute(light, x, base + 4, z,
+					// Streets traffic-light nodeboxes are deliberately outside their
+					// node and attach to a pole in the neighbouring cell.  Keep the
+					// support at the OSM point, extend it to head height, and place the
+					// head one cell in front of it so the mounting bracket meets it.
+					std::uint8_t facing = static_cast<std::uint8_t>(signal_rng.uniform(4));
+					constexpr std::array<std::pair<int, int>, 4> head_offsets{{
+							{0, -1}, {-1, 0}, {0, 1}, {1, 0}}};
+					auto [head_dx, head_dz] = head_offsets[facing];
+					if (!editor.owns(x + head_dx, z + head_dz)) {
+						facing = static_cast<std::uint8_t>((facing + 2) % 4);
+						std::tie(head_dx, head_dz) = head_offsets[facing];
+					}
+					for (int dy = 1; dy <= 4; ++dy) {
+						auto pole = crate::block_definitions::STREETS_POLE;
+						pole.setParam2(facing);
+						editor.set_block_absolute(pole, x, base + dy, z,
+								std::optional<std::vector<Block>>(),
+								std::optional<std::vector<Block>>());
+					}
+					light.setParam2(facing);
+					editor.set_block_absolute(light, x + head_dx, base + 4, z + head_dz,
 							std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
 				} else {
+					for (int dy = 1; dy <= 3; ++dy) {
+						editor.set_block_absolute(crate::block_definitions::STREETS_POLE,
+								x, base + dy, z,
+								std::optional<std::vector<Block>>(),
+								std::optional<std::vector<Block>>());
+					}
 					editor.set_block_absolute(GREEN_WOOL, x, base + 4, z,
 							std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
