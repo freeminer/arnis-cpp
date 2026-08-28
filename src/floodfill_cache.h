@@ -5,6 +5,7 @@
 #include <memory>
 #include <chrono>
 #include <optional>
+#include <mutex>
 
 #include "mapgen/earth/arnis_adapter.h"
 #include "osm_parser.h"
@@ -111,7 +112,9 @@ class FloodFillCache
 {
 private:
 	/// Cached results: element_id -> filled coordinates
-	std::unordered_map<uint64_t, std::vector<std::pair<int32_t, int32_t>>> way_cache;
+	mutable std::unordered_map<uint64_t, std::vector<std::pair<int32_t, int32_t>>>
+			way_cache;
+	mutable std::mutex way_cache_mutex;
 
 	/// Determines if a way element needs flood fill based on its tags.
 	static bool way_needs_flood_fill(const ProcessedWay &way);
@@ -123,6 +126,10 @@ private:
 public:
 	/// Creates an empty cache.
 	FloodFillCache() = default;
+	FloodFillCache(const FloodFillCache &) = delete;
+	FloodFillCache &operator=(const FloodFillCache &) = delete;
+	FloodFillCache(FloodFillCache &&other) noexcept;
+	FloodFillCache &operator=(FloodFillCache &&other) noexcept;
 
 	/// Pre-computes flood fills for all elements that need them.
 	static FloodFillCache precompute(const std::vector<ProcessedElement> &elements,

@@ -10,6 +10,21 @@
 namespace arnis
 {
 
+FloodFillCache::FloodFillCache(FloodFillCache &&other) noexcept
+{
+	std::lock_guard<std::mutex> lock(other.way_cache_mutex);
+	way_cache = std::move(other.way_cache);
+}
+
+FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
+{
+	if (this == &other)
+		return *this;
+	std::scoped_lock lock(way_cache_mutex, other.way_cache_mutex);
+	way_cache = std::move(other.way_cache);
+	return *this;
+}
+
 namespace
 {
 
@@ -98,7 +113,7 @@ void for_relation_ring_cells(
 		coords.reserve(ring.size());
 		for (const auto &node : ring)
 			coords.emplace_back(node.x, node.z);
-		for (const auto &[x, z] : flood_fill_area(coords, std::nullopt))
+		for (const auto &[x, z] : flood_fill_area(coords, nullptr))
 			apply(x, z);
 	}
 }
@@ -399,24 +414,31 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::get_or_compute(
 		const std::optional<std::chrono::milliseconds> &timeout) const
 {
 
-	auto it = way_cache.find(way.id);
-	if (it != way_cache.end()) {
-		// Return a copy as in Rust implementation
-		return it->second;
-	} else {
-		// Fallback: compute on demand for synthetic/combined ways from relations
-		std::vector<std::pair<int32_t, int32_t>> polygon_coords;
-		polygon_coords.reserve(way.nodes.size());
-		for (const auto &n : way.nodes) {
-			polygon_coords.emplace_back(n.x, n.z);
-		}
-		return flood_fill_area(polygon_coords, timeout);
+	{
+		std::lock_guard<std::mutex> lock(way_cache_mutex);
+		auto it = way_cache.find(way.id);
+		if (it != way_cache.end())
+			return it->second;
 	}
+
+	// Compute without holding the cache lock so different polygons can be
+	// filled concurrently. If another thread wins the insertion race, reuse its
+	// result and discard this duplicate computation.
+	std::vector<std::pair<int32_t, int32_t>> polygon_coords;
+	polygon_coords.reserve(way.nodes.size());
+	for (const auto &n : way.nodes)
+		polygon_coords.emplace_back(n.x, n.z);
+	auto filled = flood_fill_area(polygon_coords, timeout);
+
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
+	auto it = way_cache.try_emplace(way.id, std::move(filled)).first;
+	return it->second;
 }
 
 const std::vector<std::pair<int32_t, int32_t>> *FloodFillCache::get_cached(
 		uint64_t way_id) const
 {
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
 	auto it = way_cache.find(way_id);
 	return it == way_cache.end() ? nullptr : &it->second;
 }
@@ -468,8 +490,9 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 
 			if ((it_building != way.tags.end() || it_building_part != way.tags.end()) &&
 					!is_underground_building(way.tags)) {
-				if (const auto *cached = get_cached(way.id)) {
-					for (const auto &coord : *cached) {
+				std::lock_guard<std::mutex> lock(way_cache_mutex);
+				if (auto cached = way_cache.find(way.id); cached != way_cache.end()) {
+					for (const auto &coord : cached->second) {
 						footprints.set(coord.first, coord.second);
 					}
 				}
@@ -485,6 +508,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 {
 
 	std::vector<std::pair<int32_t, int32_t>> centroids;
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
 
 	for (const auto &element : elements) {
 		if (element.is_way()) {
@@ -538,11 +562,13 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 
 void FloodFillCache::remove_way(uint64_t way_id)
 {
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
 	way_cache.erase(way_id);
 }
 
 void FloodFillCache::remove_relation_ways(const std::vector<uint64_t> &way_ids)
 {
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
 	for (uint64_t id : way_ids) {
 		way_cache.erase(id);
 	}

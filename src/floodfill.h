@@ -26,12 +26,21 @@ inline std::vector<std::pair<int, int>> flood_fill_area(
 
 inline std::vector<std::pair<int, int>> flood_fill_area(
 		const std::vector<std::pair<int, int>> &polygon_coords,
+		const std::optional<std::chrono::milliseconds> &timeout)
+{
+	return timeout ? flood_fill_area(polygon_coords, &*timeout)
+				   : flood_fill_area(polygon_coords, nullptr);
+}
+
+inline std::vector<std::pair<int, int>> flood_fill_area(
+		const std::vector<std::pair<int, int>> &polygon_coords,
 		const std::optional<std::chrono::duration<double>> &timeout)
 {
-	std::chrono::milliseconds t{
-			timeout.has_value() ? (int64_t)timeout.value().count() : 200};
-
-	return flood_fill_area(polygon_coords, &t);
+	if (!timeout)
+		return flood_fill_area(polygon_coords, nullptr);
+	const auto milliseconds =
+			std::chrono::duration_cast<std::chrono::milliseconds>(*timeout);
+	return flood_fill_area(polygon_coords, &milliseconds);
 }
 }
 using namespace floodfill;
