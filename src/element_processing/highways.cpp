@@ -928,6 +928,32 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					previous_bridge_y = current_y;
 				}
 
+				// The perpendicular median depends on only one coordinate: X for a
+				// horizontal segment and Z for a vertical segment. The old inner loop
+				// recomputed the same median once for every cell on the other axis
+				// (2r+1 times), including three allocations/nth_element calls each time.
+				std::vector<int> flattened_ground_profile;
+				if (flatten_width && !use_absolute_y) {
+					flattened_ground_profile.reserve(
+							static_cast<std::size_t>(block_range * 2 + 1));
+					for (int offset = -block_range; offset <= block_range; ++offset) {
+						const int sample_x = dir_horizontal ? x + offset : x;
+						const int sample_z = dir_horizontal ? z : z + offset;
+						flattened_ground_profile.push_back(perpendicular_median_ground_y(
+								editor, sample_x, sample_z, x, z, block_range,
+								dir_horizontal));
+					}
+				}
+				auto flattened_ground_y_at = [&](int sample_x, int sample_z) {
+					const int offset = dir_horizontal ? sample_x - x : sample_z - z;
+					if (!flattened_ground_profile.empty() && offset >= -block_range &&
+							offset <= block_range)
+						return flattened_ground_profile[static_cast<std::size_t>(
+								offset + block_range)];
+					return perpendicular_median_ground_y(editor, sample_x, sample_z, x, z,
+							block_range, dir_horizontal);
+				};
+
 				for (int dx = -block_range; dx <= block_range; ++dx) {
 					for (int dz = -block_range; dz <= block_range; ++dz) {
 						int set_x = x + dx;
@@ -935,9 +961,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						const bool surface_absolute = use_absolute_y || flatten_width;
 						const int surface_y = surface_absolute
 								? (use_absolute_y ? current_y
-														  : perpendicular_median_ground_y(editor, set_x, set_z,
-																	x, z, block_range, dir_horizontal) +
-																	current_y)
+													  : flattened_ground_y_at(set_x, set_z) +
+															current_y)
 									: current_y;
 						if (flatten_width && current_y == 0 && tunnel_approach_offset == 0)
 							editor.register_road_surface_y(set_x, set_z, surface_y);
@@ -1181,9 +1206,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 							const bool stripe_absolute = use_absolute_y || flatten_width;
 							const int stripe_y = stripe_absolute
 									? (use_absolute_y ? current_y
-														  : perpendicular_median_ground_y(editor, stripe_x,
-																	stripe_z, x, z, block_range,
-																	dir_horizontal) + current_y)
+													  : flattened_ground_y_at(stripe_x, stripe_z) +
+															current_y)
 									: current_y;
 							if (stripe_absolute) {
 								editor.set_block_absolute(crate::block_definitions::WHITE_CONCRETE,

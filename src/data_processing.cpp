@@ -779,6 +779,7 @@ bool generate_world(WorldEditor &editor,
 {
 	if (!valid_scale(args_.scale))
 		return false;
+	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
 			args_.disable_height_limit && !args_.bedrock ? -2032 : -64,
 			args_.disable_height_limit && !args_.bedrock ? 2031 : 319);
