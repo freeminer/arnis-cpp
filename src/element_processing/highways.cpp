@@ -496,10 +496,11 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					std::optional<std::vector<Block>>());
 		}
 		return;
-	} else if (highway_type == "crossing") {
+	} else if (highway_type == "crossing" || highway_type == "traffic_signals") {
 		auto it_crossing = element.tags().find("crossing");
-		if (it_crossing != element.tags().end() &&
-				it_crossing->second == "traffic_signals") {
+		if (highway_type == "traffic_signals" ||
+				(it_crossing != element.tags().end() &&
+						it_crossing->second == "traffic_signals")) {
 			if (element.is_node()) {
 				int x = element.as_node().x;
 				int z = element.as_node().z;
@@ -510,8 +511,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 							std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
 				}
-				if (crate::block_definitions::STREETS_TRAFFIC_LIGHT.id() != CONTENT_AIR) {
-					auto light = crate::block_definitions::STREETS_TRAFFIC_LIGHT;
+				auto signal_rng = coord_rng(x, z, 0x54524146464943ULL);
+				auto light = crate::block_definitions::STREETS_TRAFFIC_LIGHTS[
+						signal_rng.uniform(crate::block_definitions::STREETS_TRAFFIC_LIGHTS.size())];
+				if (light.id() != CONTENT_AIR) {
 					light.setParam2(0);
 					editor.set_block_absolute(light, x, base + 4, z,
 							std::optional<std::vector<Block>>(),
