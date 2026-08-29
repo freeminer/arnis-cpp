@@ -14,6 +14,7 @@ FloodFillCache::FloodFillCache(FloodFillCache &&other) noexcept
 {
 	std::lock_guard<std::mutex> lock(other.way_cache_mutex);
 	way_cache = std::move(other.way_cache);
+	retain_entries_ = other.retain_entries_;
 }
 
 FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
@@ -22,6 +23,7 @@ FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
 		return *this;
 	std::scoped_lock lock(way_cache_mutex, other.way_cache_mutex);
 	way_cache = std::move(other.way_cache);
+	retain_entries_ = other.retain_entries_;
 	return *this;
 }
 
@@ -562,16 +564,27 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 
 void FloodFillCache::remove_way(uint64_t way_id)
 {
+	if (retain_entries_)
+		return;
 	std::lock_guard<std::mutex> lock(way_cache_mutex);
 	way_cache.erase(way_id);
 }
 
 void FloodFillCache::remove_relation_ways(const std::vector<uint64_t> &way_ids)
 {
+	if (retain_entries_)
+		return;
 	std::lock_guard<std::mutex> lock(way_cache_mutex);
 	for (uint64_t id : way_ids) {
 		way_cache.erase(id);
 	}
+}
+
+void FloodFillCache::clear()
+{
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
+	way_cache.clear();
+	way_cache.rehash(0);
 }
 
 void configure_thread_pool(double cpu_fraction)

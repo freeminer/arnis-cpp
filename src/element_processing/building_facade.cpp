@@ -146,12 +146,13 @@ FacadePlan compute_facade_plan(const ProcessedWay &element,
 			continue;
 		}
 		std::vector<std::pair<int, int>> points;
-		for (const auto [x, y, z] : bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
+		for (const auto &[x, y, z] :
+				bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
 			(void)y;
 			points.emplace_back(x, z);
 		}
 		std::size_t party_count = 0;
-		for (const auto [x, z] : points) {
+		for (const auto &[x, z] : points) {
 			bool party = false;
 			for (int depth = 1; depth <= 2; ++depth) {
 				const std::pair candidate{
@@ -211,7 +212,7 @@ FacadePlan compute_facade_plan(const ProcessedWay &element,
 				segment->facade_class = FacadeClass::Rear;
 	for (std::size_t i = 0; i < plan.segments.size(); ++i)
 		if (plan.segments[i] && plan.segments[i]->facade_class == FacadeClass::Street)
-			for (const auto [x, z] : segment_columns[i])
+			for (const auto &[x, z] : segment_columns[i])
 				if (!plan.is_party(x, z))
 					plan.add_street_column(x, z);
 	for (std::size_t i = 0; i < plan.segments.size(); ++i) {

@@ -227,7 +227,11 @@ void release_finished_fills(FloodFillCache &cache,
 std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
 		const std::vector<ProcessedElement> &elements);
 
+// Sorts broad ground-cover polygons once before a parsed extract is shared.
+void prepare_elements_for_generation(std::vector<ProcessedElement> &elements);
+
 bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &elements,
 		const Args &args, FloodFillCache &flood_fill_cache,
-		BuildingFootprintBitmap const &building_footprints);
+		BuildingFootprintBitmap const &building_footprints,
+		bool elements_prepared = false);
 }

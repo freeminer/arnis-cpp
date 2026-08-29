@@ -115,6 +115,7 @@ private:
 	mutable std::unordered_map<uint64_t, std::vector<std::pair<int32_t, int32_t>>>
 			way_cache;
 	mutable std::mutex way_cache_mutex;
+	bool retain_entries_{false};
 
 	/// Determines if a way element needs flood fill based on its tags.
 	static bool way_needs_flood_fill(const ProcessedWay &way);
@@ -137,6 +138,13 @@ public:
 
 	/// Gets cached flood fill result for a way, or computes it if not cached.
 	const std::vector<std::pair<int32_t, int32_t>> *get_cached(uint64_t way_id) const;
+
+	/// Keeps precomputed entries after a generation pass. Cached Earth extracts
+	/// use this because the same horizontal area is rendered by many Y chunks.
+	void retain_entries() { retain_entries_ = true; }
+
+	/// Releases all filled-cell vectors while retaining the cache object.
+	void clear();
 
 	/// Gets cached flood fill result for a way, or computes it if not cached.
 	std::vector<std::pair<int32_t, int32_t>> get_or_compute(const ProcessedWay &way,

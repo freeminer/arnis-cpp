@@ -372,7 +372,7 @@ void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
 	for (size_t i = 0; i < elements.size(); ++i) {
 		if (ground_fill_area(elements[i])) {
 			slots.push_back(i);
-			areas.push_back(elements[i]);
+			areas.push_back(std::move(elements[i]));
 		}
 	}
 	std::stable_sort(areas.begin(), areas.end(), [](const auto &a, const auto &b) {
@@ -586,6 +586,11 @@ land_cover::LandCoverData build_osm_water_land_cover(
 
 }
 
+void prepare_elements_for_generation(std::vector<ProcessedElement> &elements)
+{
+	sort_ground_fill_areas(elements);
+}
+
 // Forward declarations for all element processing functions
 namespace buildings
 {
@@ -777,7 +782,7 @@ void generate_advertising(WorldEditor &editor, const ProcessedNode &node);
 bool generate_world(WorldEditor &editor,
 		const std::vector<ProcessedElement> &input_elements, const Args &args_,
 		FloodFillCache &flood_fill_cache,
-		BuildingFootprintBitmap const &building_footprints)
+		BuildingFootprintBitmap const &building_footprints, bool elements_prepared)
 {
 	if (!valid_scale(args_.scale))
 		return false;
@@ -868,9 +873,12 @@ bool generate_world(WorldEditor &editor,
 					: std::nullopt;
 	// Match Rust's specificity ordering: broad ground-cover polygons render
 	// first, allowing smaller nested areas to overwrite them later.
-	auto ordered_elements = elements;
-	sort_ground_fill_areas(ordered_elements);
-	const auto &render_elements = ordered_elements;
+	std::vector<ProcessedElement> ordered_elements;
+	if (!elements_prepared) {
+		ordered_elements = elements;
+		sort_ground_fill_areas(ordered_elements);
+	}
+	const auto &render_elements = elements_prepared ? elements : ordered_elements;
 	// A fill may be shared by its standalone way and a later relation.  Keep it
 	// only through its last reader, then release it just as the Rust sequential
 	// path does; this prevents large worlds retaining every polygon fill.

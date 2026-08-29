@@ -427,7 +427,7 @@ std::optional<CanopyData> assemble_cached_canopy(const std::filesystem::path &ba
 		return std::nullopt;
 	std::vector<std::uint8_t> grid(width * height, CANOPY_NODATA);
 	bool any = false;
-	for (const auto [xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon))
+	for (const auto &[xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon))
 		if (fill_from_cached_tile(base, xt, yt, min_lat, min_lon, max_lat, max_lon, width,
 					height, grid))
 			any = true;
@@ -627,7 +627,7 @@ std::vector<std::pair<int, int>> fetch_tiles_for_bbox(
 		const std::filesystem::path &base, double a, double b, double c, double d)
 {
 	std::vector<std::pair<int, int>> available;
-	for (const auto tile : tiles_for_bbox(a, b, c, d))
+	for (const auto &tile : tiles_for_bbox(a, b, c, d))
 		if (fetch_tile(base, tile.first, tile.second))
 			available.push_back(tile);
 	return available;
@@ -663,7 +663,7 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 			!std::isfinite(min_lon) || !std::isfinite(max_lat) || !std::isfinite(max_lon))
 		return std::nullopt;
 	std::vector<std::uint8_t> grid(grid_width * grid_height, CANOPY_NODATA);
-	for (const auto [xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon))
+	for (const auto &[xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon))
 		fill_from_remote_tile(base, fetch_range, xt, yt, min_lat, min_lon, max_lat,
 				max_lon, grid_width, grid_height, grid);
 	CanopyData data(std::move(grid), grid_width, grid_height);

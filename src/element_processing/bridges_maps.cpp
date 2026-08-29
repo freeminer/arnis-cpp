@@ -471,7 +471,7 @@ BridgeStructureMap BridgeStructureMap::build(
 
 		std::vector<int> terrain_samples;
 		for (const auto idx : group_indices) {
-			for (const auto sample : centerline_samples(*bridge_ways[idx]))
+			for (const auto &sample : centerline_samples(*bridge_ways[idx]))
 				terrain_samples.push_back(
 						editor.get_ground_level(sample.first, sample.second));
 		}
