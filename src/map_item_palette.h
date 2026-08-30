@@ -1,6 +1,9 @@
 #pragma once
 #include <cstdint>
 #include <tuple>
+
+#undef TRANSPARENT // mingw/x86_64-w64-mingw32/include/wingdi.h:1412:21: note: expanded from macro 'TRANSPARENT'
+
 namespace arnis::map_palette
 {
 constexpr std::uint8_t map_color_id(std::uint8_t base, std::uint8_t shade)

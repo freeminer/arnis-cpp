@@ -1,4 +1,6 @@
 #include "bresenham.h"
+#include <cmath>
+
 namespace arnis
 {
 namespace bresenham
