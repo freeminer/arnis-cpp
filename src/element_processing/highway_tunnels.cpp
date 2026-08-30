@@ -328,9 +328,9 @@ TunnelPortalMap collect_tunnel_portals(const std::vector<ProcessedElement> &elem
 					chain.emplace_back(index, at_start, distance);
 					taken.insert(candidate.id);
 					distance += static_cast<int>(way_bresenham_len(candidate) - 1);
-					const auto &far =
+					const auto &far_n =
 							at_start ? candidate.nodes.back() : candidate.nodes.front();
-					at = {far.x, far.z};
+					at = {far_n.x, far_n.z};
 					if (distance >= budget || chain.size() >= 8 ||
 							portal_nodes.contains(at))
 						break;
