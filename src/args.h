@@ -5,6 +5,8 @@
 #include <optional>
 #include <string>
 
+#include "celestial.h"
+
 namespace arnis
 {
 
@@ -59,6 +61,11 @@ struct Args
 
 	// World scale to use, in blocks per meter (1.0 = real size)
 	double scale{1.0};
+	// Moon and Mars use the same geographic projection but a body-specific
+	// terrain scale/palette. Latitude is supplied by library callers for Mars'
+	// polar caps when no geographic bbox is retained in Args.
+	CelestialBody body{CelestialBody::Earth};
+	double celestial_latitude_degrees{0.0};
 
 	// Ground level to use in the Minecraft world
 	int ground_level{-62};
@@ -70,11 +77,18 @@ struct Args
 	bool legacy_terrain{false};
 	bool skip_objects() const
 	{
-		return mode == GenerationMode::TerrainOnly || scale < OBJECT_SKIP_SCALE;
+		return mode == GenerationMode::TerrainOnly || !is_earth(body) ||
+			   scale < OBJECT_SKIP_SCALE;
 	}
 	bool skip_objects_due_to_scale() const
 	{
-		return mode != GenerationMode::TerrainOnly && scale < OBJECT_SKIP_SCALE;
+		return mode != GenerationMode::TerrainOnly &&
+			   (!is_earth(body) || scale < OBJECT_SKIP_SCALE);
+	}
+	void apply_body_defaults()
+	{
+		if (!is_earth(body))
+			scale = celestial_world_scale(body);
 	}
 
 	// Enable interior generation (optional)

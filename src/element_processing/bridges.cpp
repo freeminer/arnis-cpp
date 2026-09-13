@@ -275,6 +275,9 @@ bool BridgeSurfaceMap::contains(int x, int z) const {
 }
 
 bool is_bridge_way(const ProcessedWay &way) {
+	if (way.tags.get("indoor") == std::optional<std::string>("yes") ||
+			way.tags.get("aeroway") == std::optional<std::string>("jet_bridge"))
+		return false;
 	return way.tags.contains("bridge") || way.tags.contains("layer");
 }
 

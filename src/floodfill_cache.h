@@ -68,6 +68,7 @@ public:
 
 	/// Checks if a coordinate is set.
 	bool contains(int32_t x, int32_t z) const;
+	bool is_unset_in_bounds(int32_t x, int32_t z) const;
 
 	/// Returns true if no coordinates are marked.
 	bool is_empty() const { return count_ == 0; }
@@ -98,6 +99,7 @@ public:
 /// Type alias for building footprint bitmap (for backwards compatibility).
 using BuildingFootprintBitmap = CoordinateBitmap;
 using RoadMaskBitmap = CoordinateBitmap;
+using SealedSurfaceBitmap = CoordinateBitmap;
 
 // A closed ring whose bounding box exceeds the bitmap-fill cap.  Consumers
 // distinguish this deliberate refusal from an open way or a thin ring with no
@@ -127,6 +129,9 @@ private:
 public:
 	/// Creates an empty cache.
 	FloodFillCache() = default;
+	std::optional<SealedSurfaceBitmap> collect_sealed_surfaces(
+			const std::vector<ProcessedElement> &elements,
+			const RoadMaskBitmap &roads) const;
 	FloodFillCache(const FloodFillCache &) = delete;
 	FloodFillCache &operator=(const FloodFillCache &) = delete;
 	FloodFillCache(FloodFillCache &&other) noexcept;

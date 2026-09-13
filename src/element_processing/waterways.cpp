@@ -11,6 +11,7 @@
 #include <tuple>
 #include <algorithm>
 #include <stdexcept>
+#include <cstdint>
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -109,15 +110,28 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &element)
 	for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
 		auto prev_node = element.nodes[i].xz();
 		auto current_node = element.nodes[i + 1].xz();
-		int seg_water_y = std::min(editor.get_water_level(prev_node.x, prev_node.z),
-				editor.get_water_level(current_node.x, current_node.z));
+		const int y0 = editor.get_water_level(prev_node.x, prev_node.z);
+		const int y1 = editor.get_water_level(current_node.x, current_node.z);
 
 		std::vector<std::tuple<int, int, int>> bresenham_points = bresenham_line(
 				prev_node.x, 0, prev_node.z, current_node.x, 0, current_node.z);
 
-		for (const auto &pt : bresenham_points) {
+		// Rust waterways.rs: ramp between endpoints, rounding half steps away
+		// from zero, then clamp to the local surface to avoid floating sheets.
+		const auto last = static_cast<std::int64_t>(bresenham_points.size()) - 1;
+		const auto dy = static_cast<std::int64_t>(y1) - y0;
+		for (std::size_t point_index = 0; point_index < bresenham_points.size();
+				++point_index) {
+			const auto &pt = bresenham_points[point_index];
 			int bx = std::get<0>(pt);
 			int bz = std::get<2>(pt);
+			const auto num = dy * static_cast<std::int64_t>(point_index);
+			const int ramped =
+					last > 0 ? static_cast<int>(
+									   y0 + (2 * num + last * ((dy > 0) - (dy < 0))) /
+													(2 * last))
+							 : std::min(y0, y1);
+			const int seg_water_y = std::min(ramped, editor.get_water_level(bx, bz));
 			create_water_channel(editor, bx, bz, waterway_width, seg_water_y);
 		}
 	}

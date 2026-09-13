@@ -212,6 +212,7 @@ struct RegionSelector::Data
 	std::vector<Entry> entries;
 	Pack realm, vanilla;
 	double scale = 1.;
+	double blocks_per_meter = 0.;
 	int ground_level = 0;
 	SizeFilter sizes{};
 	bool allowed(TreeSize s) const
@@ -242,10 +243,12 @@ struct RegionSelector::Data
 };
 
 std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
-		double scale, int ground_level, const SizeFilter &sizes, bool exclude_palms)
+		double scale, int ground_level, const SizeFilter &sizes, bool exclude_palms,
+		double blocks_per_meter)
 {
 	auto data = std::make_shared<Data>();
 	data->scale = scale;
+	data->blocks_per_meter = blocks_per_meter;
 	data->ground_level = ground_level;
 	data->sizes = sizes;
 	auto load_pack = [&](const std::filesystem::path &manifest, Data::Pack &out) {
@@ -315,10 +318,11 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 }
 std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
 		double longitude, const std::filesystem::path &root, double scale,
-		int ground_level, const SizeFilter &sizes)
+		int ground_level, const SizeFilter &sizes, double blocks_per_meter)
 {
 	TreePackSource source(realm_for_latlon(latitude, longitude), root);
-	return load(source, scale, ground_level, sizes, !subtropical_latitude(latitude));
+	return load(source, scale, ground_level, sizes, !subtropical_latitude(latitude),
+			blocks_per_meter);
 }
 
 bool RegionSelector::empty() const
@@ -346,8 +350,11 @@ std::optional<SlotSelection> RegionSelector::pick_slot(
 		return std::nullopt;
 	const int spacing = base_spacing();
 	auto [sx, sz] = trunk_slot_s(x, z, spacing);
+	// Invert the vertical affine, including terrain compression, as in region.rs.
+	const double per_metre =
+			data_->blocks_per_meter > 0.0 ? data_->blocks_per_meter : data_->scale;
 	const bool montane =
-			(double(elevation - data_->ground_level) / std::max(.001, data_->scale) >
+			((double(elevation) - data_->ground_level) / std::max(.001, per_metre) >
 					450.) &&
 			smooth_noise(sx, sz, 64) < .6;
 	if (montane && (hint == Habitat::Lowland || hint == Habitat::Wet))

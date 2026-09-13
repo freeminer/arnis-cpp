@@ -5,7 +5,10 @@
 #include <stdexcept>
 #include <unordered_map>
 #include <algorithm>
+#include <cmath>
 #include <fstream>
+#include <limits>
+#include <map>
 #include <zlib.h>
 
 namespace arnis::structures
@@ -448,6 +451,30 @@ Block resolve_schem_block(const std::string &name)
 		return MUD;
 	if (n == "nether_bricks")
 		return NETHER_BRICK;
+	// Aeroplane liveries and the jetbridge use these newer Java materials.  The
+	// Luanti host does not expose every slab/stair variant, so retain each
+	// palette family with its closest available base node instead of dropping it
+	// through the old generic-stone fallback.
+	if (n == "purpur_block" || n == "purpur_slab" || n == "purpur_stairs")
+		return PURPUR_BLOCK;
+	if (n == "crimson_planks" || n == "crimson_slab" || n == "crimson_stairs")
+		return CRIMSON_PLANKS;
+	if (n == "cherry_planks" || n == "cherry_slab" || n == "cherry_stairs")
+		return OAK_PLANKS;
+	if (n == "dark_prismarine" || n == "dark_prismarine_slab" ||
+			n == "dark_prismarine_stairs")
+		return PRISMARINE;
+	if (n == "waxed_exposed_cut_copper" || n == "waxed_exposed_cut_copper_slab" ||
+			n == "waxed_exposed_cut_copper_stairs")
+		return WAXED_EXPOSED_CUT_COPPER;
+	if (n == "pale_oak_trapdoor")
+		return BIRCH_TRAPDOOR;
+	if (n == "coal_block")
+		return BLACKSTONE;
+	if (n == "blackstone_slab")
+		return BLACKSTONE;
+	if (n == "iron_door")
+		return IRON_BARS;
 	if (n == "cut_red_sandstone")
 		return RED_TERRACOTTA;
 	if (n == "white_stained_glass" || n == "tinted_glass" || n == "brown_stained_glass" ||
@@ -564,6 +591,92 @@ BlockWithProperties resolve_schem_block_with_properties(const std::string &name)
 	return BlockWithProperties{resolve_schem_block(name), std::move(properties)};
 }
 
+bool place_schem_document_yaw(world_editor::WorldEditor &editor,
+		const SchemDocument &document, int base_x, int base_y, int base_z,
+		double yaw_degrees, double pitch_degrees)
+{
+	if (document.width <= 0 || document.length <= 0 || document.voxels.empty())
+		return false;
+	const double quarter = yaw_degrees / 90.0;
+	const auto quarter_turn = std::llround(quarter);
+	const unsigned state_rotation = static_cast<unsigned>((quarter_turn % 4 + 4) % 4);
+	double sine, cosine;
+	if (std::abs(quarter - double(quarter_turn)) < 1e-9) {
+		switch ((quarter_turn % 4 + 4) % 4) {
+		case 0:
+			sine = 0;
+			cosine = 1;
+			break;
+		case 1:
+			sine = 1;
+			cosine = 0;
+			break;
+		case 2:
+			sine = 0;
+			cosine = -1;
+			break;
+		default:
+			sine = -1;
+			cosine = 0;
+			break;
+		}
+	} else {
+		sine = std::sin(yaw_degrees * M_PI / 180.0);
+		cosine = std::cos(yaw_degrees * M_PI / 180.0);
+	}
+	const double cx = double(document.width) * .5, cz = double(document.length) * .5;
+	const auto pitch_lift = [&](int z) {
+		if (pitch_degrees == 0.0)
+			return 0;
+		return int(std::lround((double(document.length - 1) * .5 - z) *
+							   std::tan(pitch_degrees * M_PI / 180.0)));
+	};
+	int lift_floor = std::numeric_limits<int>::max();
+	for (const auto &voxel : document.voxels)
+		lift_floor = std::min(lift_floor, voxel.y + pitch_lift(voxel.z));
+	std::map<std::pair<int, int>, std::vector<const SchemVoxel *>> columns;
+	for (const auto &voxel : document.voxels)
+		columns[{voxel.x, voxel.z}].push_back(&voxel);
+	int min_x = std::numeric_limits<int>::max(), max_x = std::numeric_limits<int>::min();
+	int min_z = std::numeric_limits<int>::max(), max_z = std::numeric_limits<int>::min();
+	for (const auto &[mx, mz] : {std::pair{0.0, 0.0}, {double(document.width), 0.0},
+				 {0.0, double(document.length)},
+				 {double(document.width), double(document.length)}}) {
+		const double dx = mx - cx, dz = mz - cz;
+		const double wx = base_x + dx * cosine - dz * sine;
+		const double wz = base_z + dx * sine + dz * cosine;
+		min_x = std::min(min_x, int(std::floor(wx)));
+		max_x = std::max(max_x, int(std::ceil(wx)));
+		min_z = std::min(min_z, int(std::floor(wz)));
+		max_z = std::max(max_z, int(std::ceil(wz)));
+	}
+	bool placed = false;
+	for (int wz = min_z; wz <= max_z; ++wz)
+		for (int wx = min_x; wx <= max_x; ++wx) {
+			const double dx = wx - base_x, dz = wz - base_z;
+			const int mx = int(std::floor(cx + dx * cosine + dz * sine));
+			const int mz = int(std::floor(cz - dx * sine + dz * cosine));
+			auto column = columns.find({mx, mz});
+			if (column == columns.end())
+				continue;
+			const int lift = pitch_lift(mz) - lift_floor;
+			for (const auto *voxel : column->second) {
+				// State has no arbitrary-angle representation. Snap it to the
+				// nearest cardinal while preserving the hull's true free yaw.
+				BlockWithProperties block{resolve_schem_block(voxel->block),
+						state_rotation ? rotate_schem_properties(
+												 voxel->properties, state_rotation)
+									   : voxel->properties};
+				if (block.block == block_definitions::AIR)
+					continue;
+				editor.set_block_with_properties_absolute(std::move(block), wx,
+						base_y + voxel->y + lift, wz, nullptr, nullptr);
+				placed = true;
+			}
+		}
+	return placed;
+}
+
 bool place_schem_file(world_editor::WorldEditor &editor,
 		const std::filesystem::path &file, int ox, int oy, int oz)
 {
@@ -604,7 +717,7 @@ bool place_schem_file_rotated(world_editor::WorldEditor &editor,
 	}
 	for (const auto &v : doc.voxels) {
 		BlockWithProperties b{resolve_schem_block(v.block),
-					rotate_schem_properties(v.properties, rotation & 3)};
+				rotate_schem_properties(v.properties, rotation & 3)};
 		if (b.block == block_definitions::AIR)
 			continue;
 		int x = v.x + doc.offset_x, z = v.z + doc.offset_z;
@@ -666,7 +779,7 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 	}
 	for (const auto &v : doc.voxels) {
 		BlockWithProperties b{resolve_schem_block(v.block),
-					rotate_schem_properties(v.properties, rotation & 3)};
+				rotate_schem_properties(v.properties, rotation & 3)};
 		if (b.block == block_definitions::AIR)
 			continue;
 		int x = v.x + doc.offset_x, z = v.z + doc.offset_z;
@@ -693,9 +806,8 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 bool place_named_schem(world_editor::WorldEditor &editor, const std::string &name, int ox,
 		int oy, int oz, unsigned rotation, const Block *ground)
 {
-	const auto file =
-		std::filesystem::path(__FILE__).parent_path().parent_path() /
-			("assets/structures/" + name + ".schem");
+	const auto file = std::filesystem::path(__FILE__).parent_path().parent_path() /
+					  ("assets/structures/" + name + ".schem");
 	return place_schem_file_rotated(editor, file, ox, oy, oz, rotation, ground);
 }
 }

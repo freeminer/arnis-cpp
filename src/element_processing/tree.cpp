@@ -11,8 +11,8 @@ namespace arnis
 static std::uint64_t leaf_hash(int x, int y, int z)
 {
 	return std::uint64_t(std::int64_t(x) * 73856093LL) ^
-			std::uint64_t(std::int64_t(y) * 19349663LL) ^
-			std::uint64_t(std::int64_t(z) * 83492791LL);
+		   std::uint64_t(std::int64_t(y) * 19349663LL) ^
+		   std::uint64_t(std::int64_t(z) * 83492791LL);
 }
 
 static bool leaf_gap_at(std::uint64_t hash)
@@ -623,6 +623,8 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 
 	// A trunk rooted below a bridge would grow through its deck.
 	if (bridge_surface && bridge_surface->contains(pos.x, pos.z))
+		return;
+	if (!allow_on_paved && editor.surface_is_sealed(pos.x, pos.z))
 		return;
 
 	const std::optional<std::vector<Block>> protected_surface_blocks(

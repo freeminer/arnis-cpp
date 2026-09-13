@@ -10,7 +10,9 @@ namespace arnis::models_3d::custom::plane
 namespace
 {
 constexpr double plane_length_m = 90, climb_pitch = 12, climb_min_m = 1500,
-				 parked_min_m = 120;
+				 parked_min_m = 120, stand_occupancy_probability = .55,
+				 min_plane_separation_blocks = 55;
+constexpr std::size_t max_planes = 2000;
 struct Seg
 {
 	std::uint64_t id;
@@ -24,6 +26,12 @@ struct Strip
 	std::uint64_t id;
 	bool runway;
 	double cx, cz, dx, dz, length, perp, min_a, max_a;
+};
+struct Stand
+{
+	std::uint64_t id;
+	int nose_x, nose_z;
+	double dx, dz;
 };
 struct UF
 {
@@ -46,6 +54,74 @@ bool close(double a, double b)
 {
 	double d = std::abs(a - b);
 	return std::min(d, M_PI - d) < .349;
+}
+
+std::vector<Stand> collect_stands(const std::vector<ProcessedElement> &elements)
+{
+	std::vector<Stand> out;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		auto aeroway = way.tags.find("aeroway");
+		if (aeroway == way.tags.end() || aeroway->second != "parking_position" ||
+				way.tags.get("area") == "yes" || way.nodes.size() < 2)
+			continue;
+		const auto &from = way.nodes[way.nodes.size() - 2];
+		const auto &nose = way.nodes.back();
+		if (from.id == nose.id)
+			continue;
+		const double dx = double(nose.x - from.x), dz = double(nose.z - from.z);
+		const double length = std::hypot(dx, dz);
+		if (length < 1.0)
+			continue;
+		out.push_back({way.id, nose.x, nose.z, dx / length, dz / length});
+	}
+	return out;
+}
+
+std::vector<Placement> thin_by_spacing(std::vector<Placement> placements)
+{
+	const int cell = int(std::ceil(min_plane_separation_blocks));
+	const double minimum_squared =
+			min_plane_separation_blocks * min_plane_separation_blocks;
+	std::map<std::pair<int, int>, std::vector<std::pair<int, int>>> grid;
+	std::vector<Placement> kept;
+	kept.reserve(placements.size());
+	for (const auto &placement : placements) {
+		// A climbing aircraft has cleared every ground-level stand and strip.
+		if (placement.kind == Kind::Ascending) {
+			kept.push_back(placement);
+			continue;
+		}
+		const auto floor_div = [cell](int value) {
+			return value >= 0 ? value / cell : -(((-value) + cell - 1) / cell);
+		};
+		const int cx = floor_div(placement.anchor_x);
+		const int cz = floor_div(placement.anchor_z);
+		bool crowded = false;
+		for (int gx = -1; gx <= 1 && !crowded; ++gx)
+			for (int gz = -1; gz <= 1 && !crowded; ++gz) {
+				auto found = grid.find({cx + gx, cz + gz});
+				if (found == grid.end())
+					continue;
+				for (const auto &[x, z] : found->second) {
+					const double dx = placement.anchor_x - x;
+					const double dz = placement.anchor_z - z;
+					if (dx * dx + dz * dz < minimum_squared) {
+						crowded = true;
+						break;
+					}
+				}
+			}
+		if (crowded)
+			continue;
+		grid[{cx, cz}].emplace_back(placement.anchor_x, placement.anchor_z);
+		kept.push_back(placement);
+	}
+	if (kept.size() > max_planes)
+		kept.resize(max_planes);
+	return kept;
 }
 }
 
@@ -154,7 +230,22 @@ std::vector<Placement> prescan(
 			make(Kind::Parked, lo + plane * .5 + (hi - lo - plane) * unit, 0, 0);
 		}
 	}
-	return out;
+	// Parking-position ways identify the nose-wheel point and heading much more
+	// precisely than an airport polygon. Add them after strips so the latter win
+	// collision thinning, matching the Rust prescan ordering.
+	for (const auto &stand : collect_stands(elements)) {
+		auto rng = element_rng(stand.id);
+		if (!rng.random_bool(stand_occupancy_probability))
+			continue;
+		const double back = plane * .5 - 6.0 * scale;
+		const int x = std::lround(stand.nose_x - stand.dx * back);
+		const int z = std::lround(stand.nose_z - stand.dz * back);
+		const int r = int(std::ceil(plane * .5)) + 4;
+		const double yaw = std::atan2(-stand.dx, stand.dz) * 180.0 / M_PI;
+		out.push_back({stand.id, Kind::Parked, x, z, 0, yaw, 0.0,
+				{x - r, z - r, x + r, z + r}});
+	}
+	return thin_by_spacing(std::move(out));
 }
 std::vector<std::pair<int, int>> deferred_regions(
 		const std::vector<Placement> &p, double scale)

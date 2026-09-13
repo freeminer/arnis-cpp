@@ -280,6 +280,8 @@ bool is_bridge_way(const ProcessedWay &way)
 {
 	if (way.tags.get("indoor") == "yes")
 		return false;
+	if (way.tags.get("aeroway") == "jet_bridge")
+		return false;
 	const auto it = way.tags.find("bridge");
 	return it != way.tags.end() && it->second != "no";
 }

@@ -169,7 +169,10 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 				SMOOTH_STONE,
 				WATER,
 		});
-		const bool is_protected = editor.check_for_block(x, 0, z, protected_blocks);
+		// The persistent surface mask covers tracks and paved areas whose material
+		// is not distinguishable through the legacy block palette alone.
+		const bool is_protected = editor.surface_is_sealed(x, z) ||
+								  editor.check_for_block(x, 0, z, protected_blocks);
 
 		if (landuse_tag == "traffic_island") {
 			editor.set_block(actual_block, x, 1, z, std::optional<std::vector<Block>>(),

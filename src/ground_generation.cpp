@@ -5,6 +5,7 @@
 #include "land_cover/land_cover.h"
 #include "trees/schematic.h"
 #include "climate.h"
+#include "celestial.h"
 #include "deterministic_rng.h"
 #include "world_editor/floor_state.h"
 
@@ -250,7 +251,7 @@ std::optional<bool> canopy_tree_verdict(
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z)
 {
-	if (building_footprints.contains(x, z) ||
+	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
 			editor.check_for_block_absolute(x, ground_y + 1, z))
 		return;
 	if (!editor.check_for_block_absolute(x, ground_y, z,
@@ -357,7 +358,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			const int ground_y = editor.get_ground_level(x, z);
 			const int slope = local_slope(editor, x, z);
 			const auto relative = XZPoint{x - xzbbox.min_x(), z - xzbbox.min_z()};
-			const bool has_cover = editor.ground && editor.ground->has_land_cover();
+			const bool planetary = !is_earth(args.body);
+			const bool has_cover =
+					!planetary && editor.ground && editor.ground->has_land_cover();
 			const double water_blend =
 					has_cover ? editor.ground->water_blend(relative) : 0.0;
 			const bool grid_water =
@@ -368,20 +371,26 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				const int neighbour_ground = editor.get_ground_level(wx, wz);
 				for (int dy = 0; dy <= 2; ++dy)
 					if (editor.check_for_block_absolute(wx, neighbour_ground + dy, wz,
-							std::optional<std::vector<Block>>(std::vector<Block>{WATER})))
+								std::optional<std::vector<Block>>(
+										std::vector<Block>{WATER})))
 						return true;
 				return false;
 			};
 			const bool existing_water = has_water_in_column(x, z);
-			const bool osm_gap = !existing_water &&
-				((has_water_in_column(x, z - 1) && has_water_in_column(x, z + 1)) ||
-				 (has_water_in_column(x - 1, z) && has_water_in_column(x + 1, z)) ||
-				 (has_water_in_column(x + 1, z - 1) && has_water_in_column(x - 1, z + 1)) ||
-				 (has_water_in_column(x - 1, z - 1) && has_water_in_column(x + 1, z + 1)));
+			const bool osm_gap =
+					!existing_water &&
+					((has_water_in_column(x, z - 1) && has_water_in_column(x, z + 1)) ||
+							(has_water_in_column(x - 1, z) &&
+									has_water_in_column(x + 1, z)) ||
+							(has_water_in_column(x + 1, z - 1) &&
+									has_water_in_column(x - 1, z + 1)) ||
+							(has_water_in_column(x - 1, z - 1) &&
+									has_water_in_column(x + 1, z + 1)));
 
 			// Rust uses a smoothed ESA water mask, but never retracts a hard water
 			// cell.  Keep OSM water too, and avoid flooding cliff faces.
-			if (!in_tunnel && (grid_water || existing_water || osm_gap || water_blend > .5) &&
+			if (!planetary && !in_tunnel &&
+					(grid_water || existing_water || osm_gap || water_blend > .5) &&
 					slope <= 4) {
 				const int water_y = editor.get_water_level(x, z);
 				if (ground_y <= water_y && !is_protected_surface(editor, x, water_y, z)) {
@@ -403,7 +412,14 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 
 			if (!in_tunnel && !is_protected_surface(editor, x, ground_y, z) &&
 					is_replaceable_surface(editor, x, ground_y, z)) {
-				const Block surface = natural_surface_for(editor, x, ground_y, z);
+				const auto planetary_palette =
+						planetary
+								? celestial_surface_palette(args.body, slope,
+										  args.celestial_latitude_degrees, ground_y, x, z)
+								: std::pair<Block, Block>{};
+				const Block surface =
+						planetary ? planetary_palette.first
+								  : natural_surface_for(editor, x, ground_y, z);
 				std::optional<Block> climate_under;
 				if (has_cover && editor.ground) {
 					auto palette = climate::surface_palette(editor.ground->climate(),
@@ -414,7 +430,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				editor.set_block_absolute(
 						surface, x, ground_y, z, std::nullopt, std::nullopt);
 
-				if (climate_under) {
+				if (planetary) {
+					editor.set_block_absolute(planetary_palette.second, x, ground_y - 1,
+							z, std::nullopt, std::nullopt);
+				} else if (climate_under) {
 					editor.set_block_absolute(*climate_under, x, ground_y - 1, z,
 							std::nullopt, std::nullopt);
 				} else if (surface == SAND) {
@@ -430,7 +449,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				}
 			}
 
-			if (!in_tunnel)
+			if (!planetary && !in_tunnel)
 				maybe_place_vegetation(editor, x, ground_y, z, building_footprints,
 						xzbbox.min_x(), xzbbox.min_z());
 
@@ -453,13 +472,13 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 
 			// Snow is a separate cap, so climate/land-cover material selection is
 			// preserved below it just as in the Rust ground pass.
-			if (!in_tunnel && editor.ground && editor.ground->snow_capped(ground_y) &&
-					water_blend <= .5 &&
+			if (!planetary && !in_tunnel && editor.ground &&
+					editor.ground->snow_capped(ground_y) && water_blend <= .5 &&
 					!editor.check_for_block_absolute(x, ground_y, z,
 							std::optional<std::vector<Block>>(std::vector<Block>{WATER})))
 				editor.set_block_if_absent_absolute(SNOW_LAYER, x, ground_y + 1, z);
 
-			if (!in_tunnel)
+			if (!planetary && !in_tunnel)
 				clear_road_vegetation(editor, x, ground_y, z);
 
 			if (!in_tunnel && args.fillground) {

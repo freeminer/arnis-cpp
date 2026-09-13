@@ -123,6 +123,7 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				// Add decorative elements for parks and gardens
 				if ((leisure_type == "park" || leisure_type == "garden" ||
 							leisure_type == "nature_reserve") &&
+						!editor.surface_is_sealed(x, z) && !editor.is_lc_water(x, z) &&
 						editor.check_for_block(x, 0, z,
 								std::optional<std::vector<Block>>({GRASS_BLOCK}))) {
 

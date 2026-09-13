@@ -21,7 +21,6 @@ namespace arnis
 namespace natural
 {
 
-
 uint64_t coord_hash(int x, int z)
 {
 	return land_cover::coord_hash(x, z);
@@ -295,7 +294,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			for (const auto &t : bres) {
 				int bx = std::get<0>(t);
 				int bz = std::get<2>(t);
-				if (!editor.check_for_block(bx, 0, bz, protected_surface_blocks)) {
+				if (!editor.surface_is_sealed(bx, bz) &&
+						!editor.check_for_block(bx, 0, bz, protected_surface_blocks)) {
 					Block block = rock_variation ? vary_rock_block(block_type, bx, bz)
 												 : block_type;
 					editor.set_block(block, bx, 0, bz, std::nullopt, std::nullopt);
@@ -364,11 +364,14 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		for (const auto &p : filled_area) {
 			int x = p.first;
 			int z = p.second;
-			if (!editor.check_for_block(x, 0, z, protected_fill_blocks)) {
+			const bool sealed = editor.surface_is_sealed(x, z);
+			if (!sealed && !editor.check_for_block(x, 0, z, protected_fill_blocks)) {
 				Block block =
 						rock_variation ? vary_rock_block(block_type, x, z) : block_type;
 				editor.set_block(block, x, 0, z, std::nullopt, std::nullopt);
 			}
+			if (sealed)
+				continue;
 
 			// Generate custom layer instead of dirt, must be stone on the lowest level
 			if (natural_type == "beach" || natural_type == "sand" ||
@@ -531,7 +534,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					continue;
 				}
 				const bool wet = wetland_wet_zone(x, z);
-	if (wetland_puddle_at(x, z)) {
+				if (wetland_puddle_at(x, z)) {
 					if (try_place_wetland_puddle(editor, x, z))
 						wetland_puddles.emplace_back(x, z);
 					continue;

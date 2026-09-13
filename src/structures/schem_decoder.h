@@ -44,6 +44,11 @@ enum class SchemAnchor
 SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data);
 Block resolve_schem_block(const std::string &name);
 BlockWithProperties resolve_schem_block_with_properties(const std::string &name);
+// Free-yaw counterpart of the quarter-turn schematic placement path.  It
+// samples destination columns so oblique placements remain gap-free.
+bool place_schem_document_yaw(world_editor::WorldEditor &, const SchemDocument &,
+		int base_x, int base_y, int base_z, double yaw_degrees,
+		double pitch_degrees = 0.0);
 std::unordered_map<std::string, std::string> rotate_schem_properties(
 		const std::unordered_map<std::string, std::string> &input, unsigned rotation);
 bool place_schem_file(world_editor::WorldEditor &editor,

@@ -1,12 +1,59 @@
 #include "schematic.h"
 #include "../../../arnis_adapter.h"
 #include "../land_cover/land_cover.h"
+#include "../block_definitions.h"
 #include <fstream>
 #include <algorithm>
 #include <limits>
 #include <map>
+#include <bit>
 namespace arnis::trees
 {
+namespace
+{
+// Tree assets deliberately collapse decorative states to the Rust tree palette.
+std::optional<std::string> tree_block_name(std::string name)
+{
+	name = name.substr(0, name.find('['));
+	if (name.starts_with("minecraft:"))
+		name.erase(0, 10);
+	if (name.starts_with("stripped_"))
+		name.erase(0, 9);
+	if (name == "vine" || name == "moss_block" || name == "moss_carpet")
+		return "minecraft:oak_leaves";
+	if (name == "flowering_azalea_leaves" || name == "azalea_leaves")
+		return "minecraft:azalea_leaves";
+	if (name == "mangrove_roots" || name == "muddy_mangrove_roots")
+		return "minecraft:mangrove_log";
+	if (name == "mangrove_propagule")
+		return "minecraft:mangrove_leaves";
+	if (name == "bamboo_block")
+		return "minecraft:jungle_log";
+	if (name == "warped_stem" || name == "warped_hyphae")
+		return "minecraft:spruce_log";
+	if (name == "pale_oak_leaves")
+		return "minecraft:birch_leaves";
+	if (name == "pale_oak_log" || name == "pale_oak_wood")
+		return "minecraft:birch_log";
+	for (const auto *species : {"oak", "birch", "spruce", "dark_oak", "jungle", "acacia",
+				 "cherry", "mangrove"}) {
+		const std::string prefix(species);
+		if (name == prefix + "_log" || name == prefix + "_wood")
+			return "minecraft:" + prefix + "_log";
+		if (name == prefix + "_leaves")
+			return "minecraft:" + name;
+	}
+	return std::nullopt;
+}
+}
+
+std::optional<Block> map_block(const std::string &name)
+{
+	const auto canonical = tree_block_name(name);
+	if (!canonical)
+		return std::nullopt;
+	return structures::resolve_schem_block(*canonical);
+}
 Schematic load_schem(const std::filesystem::path &file)
 {
 	std::ifstream in(file, std::ios::binary);
@@ -28,19 +75,10 @@ Schematic tree_only(const Schematic &in)
 {
 	Schematic out = in;
 	out.voxels.clear();
+	out.entities.clear();
 	for (const auto &v : in.voxels) {
-		const auto &n = v.block;
-		if (n.find("_log") != std::string::npos || n.find("_wood") != std::string::npos ||
-				n.find("_leaves") != std::string::npos ||
-				n.find("_roots") != std::string::npos ||
-				n.find("leaves") != std::string::npos ||
-				n.find("vine") != std::string::npos || n == "minecraft:moss_block" ||
-				n == "minecraft:moss_carpet" ||
-				n.find("mangrove_propagule") != std::string::npos ||
-				n.find("bamboo_block") != std::string::npos ||
-				n.find("warped_stem") != std::string::npos ||
-				n.find("warped_hyphae") != std::string::npos)
-			out.voxels.push_back(v);
+		if (auto name = tree_block_name(v.block))
+			out.voxels.push_back({v.x, v.y, v.z, std::move(*name), {}});
 	}
 	// Sponge schematics frequently carry an air pad below the root. Rust removes
 	// it at load time so every tree has a stable y=0 floor independent of the
@@ -52,7 +90,7 @@ Schematic tree_only(const Schematic &in)
 		if (min_y) {
 			for (auto &v : out.voxels)
 				v.y -= min_y;
-			out.height = std::max(0, out.height - min_y);
+			// Rust retains the original asset height for size classification.
 		}
 	}
 	return out;
@@ -67,10 +105,20 @@ std::pair<int, int> trunk_slot_s(int x, int z, int spacing)
 	// Preserve Rust's Euclidean cell division and its deliberately tiny (0/1)
 	// jitter.  A modulo-spread jitter looks reasonable locally but produces a
 	// different global lattice and consequently visible tile-seam divergence.
-	auto euclid_div = [s](int v) { return v >= 0 ? v / s : -(((-v) + s - 1) / s); };
-	const int cx = euclid_div(x), cz = euclid_div(z);
-	const auto h = land_cover::coord_hash(cx * 0x1f1f + 17, cz * 0x2b2b + 91);
-	return {cx * s + int(h & 1U), cz * s + int((h >> 1) & 1U)};
+	auto euclid_div = [s](int v) {
+		const auto wide = static_cast<std::int64_t>(v);
+		return static_cast<std::int32_t>(wide >= 0 ? wide / s : -((-wide + s - 1) / s));
+	};
+	const auto cx = euclid_div(x), cz = euclid_div(z);
+	// Rust's wrapped seed arithmetic is unsigned arithmetic in C++, then a
+	// bit-preserving conversion back to the signed coordinate hash input.
+	const auto hx = std::bit_cast<std::int32_t>(std::uint32_t(cx) * 0x1f1fu + 17u);
+	const auto hz = std::bit_cast<std::int32_t>(std::uint32_t(cz) * 0x2b2bu + 91u);
+	const auto h = land_cover::coord_hash(hx, hz);
+	return {std::bit_cast<std::int32_t>(
+					std::uint32_t(cx) * std::uint32_t(s) + std::uint32_t(h & 1U)),
+			std::bit_cast<std::int32_t>(
+					std::uint32_t(cz) * std::uint32_t(s) + std::uint32_t((h >> 1) & 1U))};
 }
 bool place_schematic(world_editor::WorldEditor &editor, const Schematic &s, int x, int y,
 		int z, unsigned rot)
@@ -107,6 +155,107 @@ bool place_schematic(world_editor::WorldEditor &editor, const Schematic &s, int 
 	}
 	return placed;
 }
+bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
+		int anchor_x, int anchor_z, int base_y, unsigned rot,
+		const std::vector<Block> &blacklist, const BuildingFootprintBitmap *footprints,
+		int y_offset)
+{
+	using namespace block_definitions;
+	const int fw = (rot & 1) ? s.length : s.width;
+	const int fl = (rot & 1) ? s.width : s.length;
+	if (fw <= 0 || fl <= 0)
+		return false;
+	const int cx = (fw - 1) / 2, cz = (fl - 1) / 2;
+	const auto position = [&](const auto &v) {
+		int rx = v.x, rz = v.z;
+		switch (rot & 3) {
+		case 1:
+			rx = s.length - 1 - v.z;
+			rz = v.x;
+			break;
+		case 2:
+			rx = s.width - 1 - v.x;
+			rz = s.length - 1 - v.z;
+			break;
+		case 3:
+			rx = v.z;
+			rz = s.width - 1 - v.x;
+			break;
+		default:
+			break;
+		}
+		return std::pair{anchor_x + rx - cx, anchor_z + rz - cz};
+	};
+	const auto is_log = [](const std::string &name) {
+		const auto base = name.substr(0, name.find('['));
+		return base.ends_with("_log") || base.ends_with("_wood") ||
+			   base.ends_with("_roots") || base.ends_with("_stem") ||
+			   base.ends_with("_hyphae") || base.ends_with("bamboo_block");
+	};
+	// Snapshot before stamping: tree voxels must never count as their own roof.
+	std::map<std::pair<int, int>, int> roof_tops;
+	if (footprints)
+		for (int rx = 0; rx < fw; ++rx)
+			for (int rz = 0; rz < fl; ++rz) {
+				const int wx = anchor_x + rx - cx, wz = anchor_z + rz - cz;
+				if (footprints->contains(wx, wz))
+					roof_tops[{wx, wz}] = editor.highest_block_between(
+														wx, wz, base_y, base_y + s.height)
+												  .value_or(base_y + s.height);
+			}
+	int min_log_vy = s.height;
+	for (const auto &v : s.voxels)
+		if (is_log(v.block))
+			min_log_vy = std::min(min_log_vy, v.y);
+	struct Root
+	{
+		int top;
+		Block block;
+	};
+	std::map<std::pair<int, int>, Root> trunk_bottom;
+	bool placed = false;
+	for (const auto &v : s.voxels) {
+		const auto cell = position(v);
+		const auto [wx, wz] = cell;
+		const int wy = base_y + v.y;
+		const auto roof = roof_tops.find(cell);
+		if (roof != roof_tops.end() && wy <= roof->second)
+			continue;
+		const bool log = is_log(v.block);
+		if (log && (editor.check_for_block(
+							wx, 0, wz, std::optional<std::vector<Block>>({WATER})) ||
+						   (v.y <= min_log_vy + 2 && editor.is_lc_water(wx, wz))))
+			continue;
+		const Block block = structures::resolve_schem_block(v.block);
+		if (block == Block{})
+			continue;
+		placed |=
+				editor.try_set_block_absolute(block, wx, wy, wz, std::nullopt, blacklist);
+		if (log) {
+			const auto it = trunk_bottom.find(cell);
+			if (it == trunk_bottom.end() || wy < it->second.top)
+				trunk_bottom[cell] = {wy, block};
+		}
+	}
+	int lowest = std::numeric_limits<int>::max();
+	for (const auto &[cell, root] : trunk_bottom)
+		lowest = std::min(lowest, root.top);
+	auto root_blacklist = blacklist;
+	root_blacklist.insert(
+			root_blacklist.end(), {BLACK_CONCRETE, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA,
+										  GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, DIRT_PATH});
+	for (const auto &[cell, root] : trunk_bottom) {
+		const auto [wx, wz] = cell;
+		if (root.top > lowest + 2 || editor.is_lc_water(wx, wz))
+			continue;
+		const int from = std::max(root.top - 65, editor.get_absolute_y(wx, y_offset, wz));
+		for (int wy = from; wy < root.top; ++wy)
+			placed |= editor.try_set_block_absolute(
+					root.block, wx, wy, wz, std::nullopt, root_blacklist);
+	}
+	return placed;
+}
+
 bool place_schematic_rooted(world_editor::WorldEditor &editor, const Schematic &s, int x,
 		int ground_y, int z, unsigned rotation)
 {

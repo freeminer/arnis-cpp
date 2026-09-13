@@ -29,6 +29,7 @@
 #include "structures/boat.h"
 #include "structures/starship.h"
 #include "structures/helicopter.h"
+#include "structures/jetbridge.h"
 #include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "models_3d/pipeline.h"
@@ -600,13 +601,13 @@ void generate_building_from_relation(WorldEditor &editor,
 		const ProcessedRelation &relation, const Args &args,
 		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
 		const CoordinateBitmap &building_passages);
-std::optional<building_facade::FacadeAnchor> generate_buildings(
-		WorldEditor *editor, const ProcessedWay &element,
-		const Args &args, const std::optional<int> &relation_levels);
-std::optional<building_facade::FacadeAnchor> generate_buildings(
-		WorldEditor *editor, const ProcessedWay &element,
-		const Args &args, const std::optional<int> &relation_levels,
-		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
+std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
+		const ProcessedWay &element, const Args &args,
+		const std::optional<int> &relation_levels);
+std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
+		const ProcessedWay &element, const Args &args,
+		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
+		const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons,
 		std::optional<std::uint64_t> style_seed, const CoordinateBitmap *road_mask,
 		const CoordinateBitmap *building_footprints,
@@ -707,9 +708,9 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &way);
 namespace water_areas
 {
 void generate_water_areas_from_relation(WorldEditor &editor, const ProcessedRelation &rel,
-		const XZBBox &xzbbox,
-		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface);
+		const XZBBox &xzbbox, const water_depth::BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint,
+		std::optional<int> precomputed_surface);
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
 		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface);
@@ -784,30 +785,42 @@ bool generate_world(WorldEditor &editor,
 		FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints, bool elements_prepared)
 {
-	if (!valid_scale(args_.scale))
+	Args effective_args = args_;
+	effective_args.apply_body_defaults();
+	const Args &args = effective_args;
+	if (!valid_scale(args.scale))
 		return false;
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
-			args_.disable_height_limit && !args_.bedrock ? -2032 : -64,
-			args_.disable_height_limit && !args_.bedrock ? 2031 : 319);
-	const int base_level = editor.ground ? editor.ground->base_level(args_.ground_level)
-										 : args_.ground_level;
+			args.disable_height_limit && !args.bedrock ? -2032 : -64,
+			args.disable_height_limit && !args.bedrock ? 2031 : 319);
+	if (editor.ground) {
+		editor.ground->set_celestial_body(args.body);
+		editor.ground->set_extended_ceiling(args.disable_height_limit && !args.bedrock);
+	}
+	const int base_level = editor.ground ? editor.ground->base_level(args.ground_level)
+										 : args.ground_level;
 	world_editor::set_terrain_floor_y(base_level);
 	world_editor::set_base_chunk_y(base_level);
 	static const std::vector<ProcessedElement> no_elements;
-	const auto &elements = args_.skip_objects() ? no_elements : input_elements;
+	const auto &elements = args.skip_objects() ? no_elements : input_elements;
 	const auto geo = editor.geographic_bounds();
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
-	if (auto selector = trees::RegionSelector::load_for_location(centre_lat, centre_lon,
-				std::filesystem::path("assets/trees"), args_.scale, base_level)) {
-		auto shared_selector =
-				std::make_shared<trees::RegionSelector>(std::move(*selector));
+	if (editor.ground)
+		editor.ground->set_snow_line_for_latitude(centre_lat);
+	editor.set_regional_tree_placer({});
+	std::shared_ptr<trees::RegionSelector> shared_selector;
+	if (auto selector =
+					args_.legacy_trees
+							? std::optional<trees::RegionSelector>{}
+							: trees::RegionSelector::load_for_location(centre_lat,
+									  centre_lon, std::filesystem::path("assets/trees"),
+									  args_.scale, base_level, trees::SizeFilter{},
+									  editor.ground
+											  ? editor.ground->elevation_blocks_per_meter
+											  : 0.0)) {
+		shared_selector = std::make_shared<trees::RegionSelector>(std::move(*selector));
 		editor.set_tree_slot_spacing(shared_selector->base_spacing());
-		editor.set_regional_tree_placer(
-				[&editor, shared_selector](int x, int y, int z, std::uint8_t cover) {
-					return trees::place_selected_region_tree_for_cover(
-							editor, *shared_selector, x, z, cover, y);
-				});
 	}
 	models_3d::RemoteModelProvider wikidata_provider(
 			std::filesystem::path(".arnis_wikidata_cache"));
@@ -920,8 +933,20 @@ bool generate_world(WorldEditor &editor,
 		land_cover::apply_bridge_land_cover_repair(land_cover, cover_heights, world_width,
 				world_height, elements, xzbbox, args_.scale);
 	}
-	auto road_mask = highways::collect_road_surface_coords(elements, editor, xzbbox,
-			args_.scale);
+	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
+			highways::collect_road_surface_coords(elements, editor, xzbbox, args_.scale));
+	const auto &road_mask = *road_mask_owner;
+	// Share the road bitmap when no additional paved area contributes cells.
+	// The scope guard releases the generation mask on every exit path.
+	auto sealed = flood_fill_cache.collect_sealed_surfaces(elements, road_mask);
+	editor.set_sealed_surface(
+			sealed ? std::make_shared<const CoordinateBitmap>(std::move(*sealed))
+				   : road_mask_owner);
+	struct SealedSurfaceScope
+	{
+		WorldEditor &editor;
+		~SealedSurfaceScope() { editor.release_sealed_surface(); }
+	} sealed_surface_scope{editor};
 	if (editor.map_decals) {
 		auto context = signage::build_context(elements, args_.signage,
 				decals::detect_region(centre_lat, centre_lon), args_.scale, road_mask);
@@ -934,8 +959,8 @@ bool generate_world(WorldEditor &editor,
 			if (!texture)
 				return false;
 			Block node = block_definitions::DECAL_FRAME;
-			editor.set_block_absolute(node, frame.x, frame.y, frame.z,
-					std::nullopt, std::nullopt);
+			editor.set_block_absolute(
+					node, frame.x, frame.y, frame.z, std::nullopt, std::nullopt);
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc++11-narrowing"
@@ -943,9 +968,9 @@ bool generate_world(WorldEditor &editor,
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnarrowing"
 #endif
-			return editor.mg && editor.mg->queueGeneratedDecal(
-					{frame.x, frame.y, frame.z}, *texture, frame.map_id,
-					frame.facing, frame.rotation, frame.glow);
+			return editor.mg &&
+				   editor.mg->queueGeneratedDecal({frame.x, frame.y, frame.z}, *texture,
+						   frame.map_id, frame.facing, frame.rotation, frame.glow);
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
@@ -963,6 +988,19 @@ bool generate_world(WorldEditor &editor,
 			bridges::BridgeStructureMap::build(elements, editor, bridge_outlines);
 	auto bridge_surface =
 			bridges::BridgeSurfaceMap::build(elements, bridge_structures, args_.scale);
+	if (shared_selector) {
+		editor.set_regional_tree_placer([&editor, shared_selector, &building_footprints,
+												&bridge_surface](
+												int x, int y, int z, std::uint8_t cover) {
+			return trees::place_selected_region_tree_for_cover(editor, *shared_selector,
+					x, z, cover, y, {}, &building_footprints, &bridge_surface);
+		});
+	}
+	struct RegionalTreeScope
+	{
+		WorldEditor &editor;
+		~RegionalTreeScope() { editor.set_regional_tree_placer({}); }
+	} regional_tree_scope{editor};
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, xzbbox, args_.scale);
 	std::vector<std::pair<int, int>> subway_points;
@@ -1028,8 +1066,7 @@ bool generate_world(WorldEditor &editor,
 				std::find(model_pipeline->suppressed().begin(),
 						model_pipeline->suppressed().end(),
 						std::pair<std::string, std::uint64_t>{std::string(element.kind()),
-								element.id()}) !=
-						model_pipeline->suppressed().end()) {
+								element.id()}) != model_pipeline->suppressed().end()) {
 			release_finished_fills(
 					flood_fill_cache, last_fill_use, element, element_index);
 			continue;
@@ -1039,8 +1076,7 @@ bool generate_world(WorldEditor &editor,
 			auto const &way = element.as_way();
 			if (std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::uint64_t>{
-								"way", way.id}) !=
+						std::pair<std::string, std::uint64_t>{"way", way.id}) !=
 					landmark_plan.suppressed.end()) {
 				release_finished_fills(
 						flood_fill_cache, last_fill_use, element, element_index);
@@ -1080,6 +1116,10 @@ bool generate_world(WorldEditor &editor,
 					if (editor.signage_enabled())
 						signage::generate_building_signage(editor, way, anchor);
 				}
+			} else if (structures::jetbridge::claims(way)) {
+				// Must precede highway: many jet bridges also have corridor/highway tags.
+				structures::jetbridge::generate_jet_bridge(
+						editor, way, building_footprints);
 			} else if (way.tags.contains("highway")) {
 				const bool tunnel_rendered =
 						highways::renders_as_highway_tunnel(way) &&
@@ -1157,8 +1197,7 @@ bool generate_world(WorldEditor &editor,
 			auto const &node = element.as_node();
 			if (std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::uint64_t>{
-								"node", node.id}) !=
+						std::pair<std::string, std::uint64_t>{"node", node.id}) !=
 					landmark_plan.suppressed.end()) {
 				release_finished_fills(
 						flood_fill_cache, last_fill_use, element, element_index);
@@ -1209,8 +1248,7 @@ bool generate_world(WorldEditor &editor,
 			auto const &rel = element.as_relation();
 			if (std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::uint64_t>{
-								"relation", rel.id}) !=
+						std::pair<std::string, std::uint64_t>{"relation", rel.id}) !=
 					landmark_plan.suppressed.end()) {
 				release_finished_fills(
 						flood_fill_cache, last_fill_use, element, element_index);
@@ -1239,8 +1277,7 @@ bool generate_world(WorldEditor &editor,
 				std::optional<int> surface_level;
 				if (still_surfaces.has("relation", rel.id))
 					surface_level = still_surfaces.get("relation", rel.id);
-				water_areas::generate_water_areas_from_relation(editor, rel,
-						xzbbox,
+				water_areas::generate_water_areas_from_relation(editor, rel, xzbbox,
 						big_water_field, road_mask,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 						surface_level);

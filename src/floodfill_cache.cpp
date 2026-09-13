@@ -234,6 +234,58 @@ bool CoordinateBitmap::contains(int32_t x, int32_t z) const
 	return ((bits_[byte_index] >> bit_offset) & 1U) == 1U;
 }
 
+bool CoordinateBitmap::is_unset_in_bounds(int32_t x, int32_t z) const
+{
+	const auto lx = static_cast<int64_t>(x) - min_x_;
+	const auto lz = static_cast<int64_t>(z) - min_z_;
+	return lx >= 0 && lz >= 0 && static_cast<uint64_t>(lx) < width_ &&
+		   static_cast<uint64_t>(lz) < height_ && !contains(x, z);
+}
+
+bool WorldEditor::surface_is_sealed(int x, int z) const
+{
+	return sealed_surface && sealed_surface->contains(x, z);
+}
+
+std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
+		const std::vector<ProcessedElement> &elements, const RoadMaskBitmap &roads) const
+{
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
+	std::optional<SealedSurfaceBitmap> mask;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto matches = [&](const char *key,
+									 std::initializer_list<const char *> values) {
+			const auto it = way.tags.find(key);
+			return it != way.tags.end() &&
+				   std::any_of(values.begin(), values.end(),
+						   [&](const char *value) { return it->second == value; });
+		};
+		if (!matches("leisure",
+					{"pitch", "track", "playground", "recreation_ground", "schoolyard",
+							"ice_rink", "water_park", "slipway", "outdoor_seating",
+							"bathing_place", "fitness_station"}) &&
+				!matches("amenity",
+						{"parking", "parking_space", "bicycle_parking",
+								"motorcycle_parking", "fuel", "charging_station",
+								"car_wash", "taxi", "marketplace"}) &&
+				!(way.tags.contains("highway") && matches("area", {"yes"})))
+			continue;
+		const auto fill = way_cache.find(way.id);
+		if (fill == way_cache.end())
+			continue;
+		for (const auto &[x, z] : fill->second) {
+			if (!mask && roads.is_unset_in_bounds(x, z))
+				mask = roads;
+			if (mask)
+				mask->set(x, z);
+		}
+	}
+	return mask;
+}
+
 std::pair<size_t, size_t> CoordinateBitmap::count_in_range(int32_t min_x_range,
 		int32_t min_z_range, int32_t max_x_range, int32_t max_z_range) const
 {

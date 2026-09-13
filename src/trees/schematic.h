@@ -3,10 +3,16 @@
 #include <vector>
 #include "../structures/schem_decoder.h"
 #include "tree_library.h"
+#include "../floodfill_cache.h"
 namespace arnis::trees
 {
 using Schematic = structures::SchemDocument;
+std::optional<Block> map_block(const std::string &name);
 int min_log_y(const Schematic &schem);
+bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &schem,
+		int anchor_x, int anchor_z, int base_y, unsigned rot,
+		const std::vector<Block> &blacklist, const BuildingFootprintBitmap *footprints,
+		int y_offset);
 Schematic tree_only(const Schematic &schem);
 Schematic load_schem(const std::filesystem::path &file);
 TreeSize schematic_size(const Schematic &schem);
