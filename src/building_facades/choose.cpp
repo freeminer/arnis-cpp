@@ -16,6 +16,58 @@ std::uint64_t pair_hash(long long a, long long b)
 {
 	return hash64(hash64(std::uint64_t(a)) ^ (std::uint64_t(b) * 0x9E3779B97F4A7C15ULL));
 }
+
+std::vector<buildings::BuildingCategory> related(buildings::BuildingCategory c)
+{
+	using C = buildings::BuildingCategory;
+	switch (c) {
+	case C::Residential:
+		return {C::House, C::TallBuilding, C::Hotel};
+	case C::House:
+		return {C::Residential, C::Farm};
+	case C::Farm:
+		return {C::House, C::Warehouse, C::Shed};
+	case C::Commercial:
+		return {C::Office, C::Residential};
+	case C::Office:
+		return {C::Commercial, C::TallBuilding};
+	case C::Hotel:
+		return {C::Residential, C::Office};
+	case C::Industrial:
+		return {C::Warehouse, C::Garage};
+	case C::Warehouse:
+		return {C::Industrial, C::Garage};
+	case C::School:
+		return {C::Office, C::Historic};
+	case C::Hospital:
+		return {C::Office, C::School};
+	case C::Religious:
+		return {C::Historic};
+	case C::TallBuilding:
+		return {C::Office, C::Residential};
+	case C::GlassySkyscraper:
+	case C::GlassCornerSkyscraper:
+	case C::GridSkyscraper:
+	case C::ContemporarySkyscraper:
+	case C::ModernSkyscraper:
+		return {C::TallBuilding, C::Office};
+	case C::MasonrySkyscraper:
+		return {C::TallBuilding, C::Historic, C::Office};
+	case C::Historic:
+		return {C::Religious, C::Residential};
+	case C::Tower:
+		return {C::Historic, C::TallBuilding};
+	case C::Garage:
+		return {C::Warehouse, C::Shed, C::Industrial};
+	case C::Shed:
+		return {C::Garage, C::Warehouse};
+	case C::Greenhouse:
+		return {C::Warehouse, C::Shed};
+	case C::Default:
+		return {C::Residential, C::Commercial, C::House};
+	}
+	return {};
+}
 }
 }
 namespace arnis::building_facades
@@ -43,6 +95,13 @@ std::vector<std::size_t> shortlist(
 		if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
 					category) != entries[i].categories.end())
 			out.push_back(i);
+	if (out.empty())
+		for (const auto related_category : related(category))
+			for (std::size_t i = 0; i < entries.size(); ++i)
+				if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
+							related_category) != entries[i].categories.end() &&
+						std::find(out.begin(), out.end(), i) == out.end())
+					out.push_back(i);
 	if (out.empty())
 		for (std::size_t i = 0; i < entries.size(); ++i)
 			if (std::find(entries[i].categories.begin(), entries[i].categories.end(),

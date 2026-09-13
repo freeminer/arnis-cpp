@@ -8,8 +8,10 @@
 #include "palette.h"
 #include "../colors.h"
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
+#include <optional>
 
 namespace arnis::models_3d
 {
@@ -21,6 +23,110 @@ std::vector<Voxel> voxelize_asset(
 	return asset.format == ModelFormat::GLB
 				   ? voxelize_glb(asset.bytes, transform)
 				   : voxelize_stl(parse_binary_stl(asset.bytes), transform);
+}
+
+// Rust's Wikidata STL path treats STL as an interchange format rather than
+// assuming its axes or unit scale.  Most files are Z-up, but scanned landmarks
+// are commonly Y-up; infer the exceptional axis from the dimensions and fit
+// the horizontal footprint and height independently when OSM supplies both.
+struct StlFit
+{
+	std::array<std::pair<std::size_t, float>, 3> axes{};
+	std::array<float, 3> scale{};
+};
+
+std::size_t stl_up_axis(const std::array<float, 3> &extent)
+{
+	std::array<std::pair<std::size_t, float>, 3> sorted{
+			{{0, extent[0]}, {1, extent[1]}, {2, extent[2]}}};
+	std::sort(sorted.begin(), sorted.end(),
+			[](const auto &a, const auto &b) { return a.second < b.second; });
+	const auto [min_axis, min_extent] = sorted[0];
+	const auto [unused, median_extent] = sorted[1];
+	const auto [max_axis, max_extent] = sorted[2];
+	(void)unused;
+	if (median_extent <= 1e-3f)
+		return 2;
+	if (max_extent / median_extent > 1.10f)
+		return max_axis;
+	if (min_extent / median_extent < .5f)
+		return min_axis;
+	return 2;
+}
+
+std::optional<StlFit> derive_stl_fit(const std::array<float, 3> &minimum,
+		const std::array<float, 3> &maximum, const wikidata::Placement &placement,
+		double blocks_per_meter)
+{
+	std::array<float, 3> raw{};
+	for (std::size_t i = 0; i < raw.size(); ++i)
+		raw[i] = maximum[i] - minimum[i];
+	if (std::all_of(raw.begin(), raw.end(), [](float v) { return v < 1e-3f; }))
+		return {};
+	const auto up = stl_up_axis(raw);
+	StlFit fit;
+	if (up == 0)
+		fit.axes = {{{1, -1}, {0, 1}, {2, 1}}};
+	else if (up == 1)
+		fit.axes = {{{0, 1}, {1, 1}, {2, 1}}};
+	else
+		fit.axes = {{{0, 1}, {2, 1}, {1, -1}}};
+	std::array<float, 3> world_extent{};
+	for (std::size_t i = 0; i < world_extent.size(); ++i)
+		world_extent[i] = raw[fit.axes[i].first];
+	std::optional<float> xz, y;
+	if (placement.xz_extent_m && *placement.xz_extent_m > 0) {
+		const auto widest = std::max(world_extent[0], world_extent[2]);
+		if (widest > 1e-3f)
+			xz = float(*placement.xz_extent_m * blocks_per_meter) / widest;
+	}
+	if (placement.height_m && *placement.height_m > 0 && world_extent[1] > 1e-3f)
+		y = float(*placement.height_m * blocks_per_meter) / world_extent[1];
+	if (!xz && !y)
+		return {};
+	const float sx = xz.value_or(*y), sy = y.value_or(*xz), sz = xz.value_or(*y);
+	if (!std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(sz) || sx <= 0 ||
+			sy <= 0 || sz <= 0)
+		return {};
+	fit.scale = {sx, sy, sz};
+	return fit;
+}
+
+std::array<float, 3> apply_stl_fit(const std::array<float, 3> &point, const StlFit &fit)
+{
+	std::array<float, 3> out{};
+	for (std::size_t axis = 0; axis < out.size(); ++axis)
+		out[axis] = point[fit.axes[axis].first] * fit.axes[axis].second * fit.scale[axis];
+	return out;
+}
+
+std::vector<Voxel> voxelize_fitted_stl(const ModelAsset &asset,
+		const wikidata::Placement &placement, double blocks_per_meter,
+		const WorldTransform &transform)
+{
+	const auto triangles = parse_binary_stl(asset.bytes);
+	const auto bounds = stl_bbox(triangles);
+	auto fit = derive_stl_fit(bounds.first, bounds.second, placement, blocks_per_meter);
+	if (!fit)
+		return {};
+	const auto centre = [&](std::size_t axis) {
+		const auto [source, sign] = fit->axes[axis];
+		return (bounds.first[source] + bounds.second[source]) * .5f * sign *
+			   fit->scale[axis];
+	};
+	const float centre_x = centre(0), centre_z = centre(2);
+	std::vector<Triangle> fitted;
+	fitted.reserve(triangles.size());
+	for (const auto &triangle : triangles) {
+		Triangle out{};
+		for (std::size_t v = 0; v < triangle.size(); ++v) {
+			out[v] = apply_stl_fit(triangle[v], *fit);
+			out[v][0] -= centre_x;
+			out[v][2] -= centre_z;
+		}
+		fitted.push_back(out);
+	}
+	return voxelize_uniform_triangles(fitted, transform, block_definitions::STONE_BRICKS);
 }
 
 Block named_palette_block(const std::string &name)
@@ -163,13 +269,12 @@ std::vector<std::pair<float, std::vector<Block>>> resolve_layers(
 	return out;
 }
 
-bool place_grounded(world_editor::WorldEditor &editor, const ModelAsset &asset,
-		const WorldTransform &transform, int ground_y, int elevation,
-		ModelPlacementStats &stats, const std::vector<Block> *fallback_palette = nullptr,
+bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel> voxels,
+		int ground_y, int elevation, ModelPlacementStats &stats,
+		const std::vector<Block> *fallback_palette = nullptr,
 		const std::vector<std::pair<float, std::vector<Block>>> *layers = nullptr,
 		std::uint64_t palette_seed = 0)
 {
-	auto voxels = voxelize_asset(asset, transform);
 	if (voxels.empty())
 		return false;
 	if (layers && !layers->empty()) {
@@ -212,6 +317,16 @@ bool place_grounded(world_editor::WorldEditor &editor, const ModelAsset &asset,
 	return true;
 }
 
+bool place_grounded(world_editor::WorldEditor &editor, const ModelAsset &asset,
+		const WorldTransform &transform, int ground_y, int elevation,
+		ModelPlacementStats &stats, const std::vector<Block> *fallback_palette = nullptr,
+		const std::vector<std::pair<float, std::vector<Block>>> *layers = nullptr,
+		std::uint64_t palette_seed = 0)
+{
+	return place_grounded_voxels(editor, voxelize_asset(asset, transform), ground_y,
+			elevation, stats, fallback_palette, layers, palette_seed);
+}
+
 int ground_for(
 		world_editor::WorldEditor &editor, int min_x, int min_z, int max_x, int max_z)
 {
@@ -234,6 +349,38 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 		const int ground =
 				ground_for(editor, placement.footprint.min_x, placement.footprint.min_z,
 						placement.footprint.max_x, placement.footprint.max_z);
+		if (asset->format == ModelFormat::BinarySTL) {
+			const auto triangles = parse_binary_stl(asset->bytes);
+			const auto bounds = stl_bbox(triangles);
+			auto fit = derive_stl_fit(
+					bounds.first, bounds.second, placement, blocks_per_meter);
+			if (!fit)
+				continue;
+			std::array<float, 3> raw{};
+			std::array<float, 3> extent{};
+			for (std::size_t i = 0; i < raw.size(); ++i)
+				raw[i] = bounds.second[i] - bounds.first[i];
+			for (std::size_t i = 0; i < extent.size(); ++i)
+				extent[i] = std::abs(raw[fit->axes[i].first] * fit->scale[i]) /
+							float(blocks_per_meter);
+			const float largest = std::max({extent[0], extent[1], extent[2]});
+			if (!std::isfinite(largest) || std::max(extent[0], extent[2]) > 225.0f ||
+					extent[1] > 600.0f || largest < 2.0f)
+				continue;
+			WorldTransform transform(0, 1, {0, 0, 0}, {1, 1, 1}, placement.yaw_degrees,
+					float(placement.anchor_x), float(ground), float(placement.anchor_z));
+			const auto layers = resolve_layers(placement.palette_layers);
+			std::uint64_t qid_seed = 0xcbf29ce484222325ULL;
+			for (unsigned char c : placement.qid) {
+				qid_seed ^= c;
+				qid_seed *= 0x100000001b3ULL;
+			}
+			place_grounded_voxels(editor,
+					voxelize_fitted_stl(*asset, placement, blocks_per_meter, transform),
+					ground, 0, stats, &placement.palette,
+					layers.empty() ? nullptr : &layers, qid_seed);
+			continue;
+		}
 		float scale = 1.0f;
 		if (placement.height_m && *placement.height_m > 0)
 			scale = wikidata::scale_for_height(

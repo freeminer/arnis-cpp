@@ -900,11 +900,23 @@ bool generate_world(WorldEditor &editor,
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
 	if (editor.ground && !editor.ground->has_land_cover()) {
-		auto land_cover = build_osm_water_land_cover(elements, xzbbox);
+		// Rust obtains ESA WorldCover before applying OSM water/land overrides.
+		// Keep its grid bounded for the library host: Ground interpolates the
+		// grid over the complete world, while a denser grid only multiplies COG
+		// range sampling and retained memory. OSM remains the offline fallback.
+		const auto geographic = editor.geographic_bounds();
+		const auto world_width = static_cast<std::size_t>(max_x - min_x + 1);
+		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
+		const auto grid_width = std::clamp<std::size_t>(world_width / 4 + 1, 64, 1024);
+		const auto grid_height = std::clamp<std::size_t>(world_height / 4 + 1, 64, 1024);
+		auto land_cover = land_cover::fetch_land_cover_data(
+				{geographic[0], geographic[2], geographic[1], geographic[3]}, grid_width,
+				grid_height);
+		if (land_cover.width == 0 || land_cover.height == 0)
+			land_cover = build_osm_water_land_cover(elements, xzbbox);
 		if (land_cover.width > 0 && land_cover.height > 0) {
-			editor.ground->set_land_cover_data(std::move(land_cover),
-					static_cast<std::size_t>(max_x - min_x + 1),
-					static_cast<std::size_t>(max_z - min_z + 1));
+			editor.ground->set_land_cover_data(
+					std::move(land_cover), world_width, world_height);
 		}
 	}
 	if (editor.ground && editor.ground->has_land_cover()) {
@@ -932,6 +944,10 @@ bool generate_world(WorldEditor &editor,
 				land_cover, world_width, world_height, elements, xzbbox, args_.scale);
 		land_cover::apply_bridge_land_cover_repair(land_cover, cover_heights, world_width,
 				world_height, elements, xzbbox, args_.scale);
+		// Each override deliberately invalidates the interpolated shoreline
+		// field. Rebuild it only after the complete Rust-equivalent override
+		// sequence so the ground pass sees OSM-correct water and smooth coasts.
+		land_cover.refresh_water_blend_grid();
 	}
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
 			highways::collect_road_surface_coords(elements, editor, xzbbox, args_.scale));

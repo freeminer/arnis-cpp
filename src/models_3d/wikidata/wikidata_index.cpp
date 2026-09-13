@@ -115,11 +115,9 @@ bool wikidata_url_supported(const std::string &q)
 	auto *e = lookup_wikidata(q);
 	if (!e)
 		return false;
-	auto u = e->url;
-	std::transform(u.begin(), u.end(), u.begin(),
-			[](unsigned char c) { return char(std::tolower(c)); });
-	return u.ends_with(".glb") || u.ends_with(".stl") ||
-		   u.find(".glb?") != std::string::npos || u.find(".stl?") != std::string::npos;
+	// A P4896/Commons URL can be a redirect or have no useful suffix. Rust
+	// detects GLB by magic after download and validates everything else as STL.
+	return e->url.starts_with("https://");
 }
 std::optional<std::string> wikidata_url(const std::string &q)
 {

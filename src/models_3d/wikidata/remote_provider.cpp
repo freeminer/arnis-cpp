@@ -13,12 +13,10 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 	auto *e = lookup_wikidata(q);
 	if (!e)
 		return memo_[q] = {};
-	const auto format = wikidata_model_format(q);
-	if (!format)
-		return memo_[q] = {};
-	auto ext = *format == ModelFormat::BinarySTL ? ".stl" : ".glb";
 	auto cached = wikidata_client::load_cached(cache_, e->url);
-	auto p = cache_ / (wikidata_client::url_hash(e->url) + ext);
+	// Rust's cache is keyed solely by URL; select GLB/STL from downloaded bytes.
+	auto p = cache_ / (wikidata_client::url_hash(e->url) + ".bin");
+	std::filesystem::create_directories(cache_);
 	if (!cached) {
 		std::vector<std::uint8_t> bytes;
 		if (fetch_bytes_) {
@@ -57,7 +55,7 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 				std::streamsize(cached->size()));
 	}
 	try {
-		return memo_[q] = load_model_asset(p, *format);
+		return memo_[q] = load_model_asset_auto(p);
 	} catch (...) {
 		return memo_[q] = {};
 	}
