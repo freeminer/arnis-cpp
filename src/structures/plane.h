@@ -2,13 +2,16 @@
 
 #include "../../../arnis_adapter.h"
 
+#include <cstddef>
 #include <cstdint>
 #include <utility>
+#include <unordered_map>
 #include <vector>
 
 namespace arnis::structures::plane
 {
 inline constexpr double PLANE_LENGTH_BLOCKS = 40.0;
+inline constexpr double NOSE_GEAR_OFFSET_BLOCKS = 6.0;
 inline constexpr double PLANE_WINGSPAN_BLOCKS = 45.0;
 inline constexpr double MIN_PLANE_SEPARATION_BLOCKS = 55.0;
 inline constexpr double STAND_OCCUPANCY_PROBABILITY = 0.55;
@@ -79,6 +82,7 @@ void cap_placements(std::vector<Placement> &placements);
 void sort_placements(std::vector<Placement> &placements);
 bool placement_separated(
 		const Placement &candidate, const std::vector<Placement> &accepted);
+void thin_by_spacing(std::vector<Placement> &placements);
 void finalize_placements(std::vector<Placement> &placements);
 void filter_and_finalize_strips(std::vector<AerowayStrip> &strips, double scale);
 bool make_centerline_placement(const AerowayStrip &strip, double scale, Placement &out);
@@ -87,10 +91,15 @@ std::vector<Placement> build_strip_placements(
 		const std::vector<AerowayStrip> &strips, double scale);
 std::vector<Placement> prescan_placements(
 		const std::vector<ProcessedElement> &elements, double scale);
+bool place_plane_placement(WorldEditor &editor, const Placement &placement);
+std::size_t place_plane_placements(
+		WorldEditor &editor, const std::vector<Placement> &placements);
 
 bool collinear(double a, double b, double tolerance = 0.349);
 bool extract_aeroway_segment(const ProcessedElement &element, Segment &out);
 bool extract_parking_stand(const ProcessedElement &element, Stand &out);
+std::vector<Stand> collect_parking_stands(const std::vector<ProcessedElement> &elements);
+bool make_stand_placement(const Stand &stand, Placement &out);
 std::vector<Segment> collect_aeroway_segments(
 		const std::vector<ProcessedElement> &elements);
 bool principal_geometry(const std::vector<std::pair<double, double>> &points,

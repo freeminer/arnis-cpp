@@ -34,6 +34,16 @@ struct SchemDocument
 	std::vector<SchemVoxel> voxels;
 	std::vector<SchemEntity> entities;
 };
+// Rust schematic::StructureSchematic equivalent, retaining the source voxel
+// list while exposing deterministic anchor/extent calculations.
+struct StructureSchematic
+{
+	int width = 0, length = 0;
+	std::vector<SchemVoxel> voxels;
+	int anchor_x = 0, anchor_z = 0, max_extent = 0;
+	StructureSchematic centered() const;
+	StructureSchematic base_anchored() const;
+};
 enum class SchemAnchor
 {
 	Offset,
@@ -42,6 +52,9 @@ enum class SchemAnchor
 };
 
 SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data);
+SchemDocument load_palettized(const std::vector<std::uint8_t> &gzip_data);
+StructureSchematic load_structure(const std::vector<std::uint8_t> &gzip_data);
+StructureSchematic structure_schematic(const SchemDocument &document);
 Block resolve_schem_block(const std::string &name);
 BlockWithProperties resolve_schem_block_with_properties(const std::string &name);
 // Free-yaw counterpart of the quarter-turn schematic placement path.  It

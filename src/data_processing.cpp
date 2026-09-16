@@ -30,6 +30,7 @@
 #include "structures/starship.h"
 #include "structures/helicopter.h"
 #include "structures/jetbridge.h"
+#include "structures/plane.h"
 #include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "models_3d/pipeline.h"
@@ -892,6 +893,10 @@ bool generate_world(WorldEditor &editor,
 		sort_ground_fill_areas(ordered_elements);
 	}
 	const auto &render_elements = elements_prepared ? elements : ordered_elements;
+	const auto plane_candidates =
+			args_.use_3d
+					? structures::plane::prescan_placements(render_elements, args_.scale)
+					: std::vector<structures::plane::Placement>{};
 	// A fill may be shared by its standalone way and a later relation.  Keep it
 	// only through its last reader, then release it just as the Rust sequential
 	// path does; this prevents large worlds retaining every polygon fill.
@@ -1328,6 +1333,7 @@ bool generate_world(WorldEditor &editor,
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
 	ground_generation::generate_ground_layer(editor, args_, xzbbox, building_footprints,
 			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint, &bridge_surface);
+	structures::plane::place_plane_placements(editor, plane_candidates);
 	if (args_.fillground)
 		ore_generation::generate_ores(
 				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());

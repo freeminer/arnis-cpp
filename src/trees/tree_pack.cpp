@@ -1,5 +1,6 @@
 #include "tree_pack.h"
 #include "region.h"
+#include <cmath>
 #include <utility>
 namespace arnis::trees
 {
@@ -38,9 +39,22 @@ std::string realm_for_latlon(double lat, double lon)
 			return x.n;
 	return "vanilla-plus";
 }
+bool exclude_palms_for_latitude(double lat)
+{
+	return std::abs(lat) > 35.0;
+}
 TreePackSource::TreePackSource(std::string r, std::filesystem::path root) :
 		realm_(std::move(r)), root_(std::move(root))
 {
+}
+TreePackSource TreePackSource::embedded(
+		const std::string &realm, std::filesystem::path root)
+{
+	if (root.empty()) {
+		root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+			   "assets" / "tree-packs";
+	}
+	return TreePackSource(realm, std::move(root));
 }
 std::string TreePackSource::realm_file(const std::string &r) const
 {
@@ -57,6 +71,16 @@ std::filesystem::path TreePackSource::realm_path(const std::string &r) const
 std::filesystem::path TreePackSource::vanilla_path(const std::string &r) const
 {
 	return root_ / "vanilla-plus" / r;
+}
+std::optional<std::filesystem::path> TreePackSource::realm_manifest() const
+{
+	const auto p = realm_path("region.json");
+	return std::filesystem::is_regular_file(p) ? std::optional{p} : std::nullopt;
+}
+std::optional<std::filesystem::path> TreePackSource::vanilla_manifest() const
+{
+	const auto p = vanilla_path("region.json");
+	return std::filesystem::is_regular_file(p) ? std::optional{p} : std::nullopt;
 }
 bool TreePackSource::has_realm_file(const std::string &r) const
 {

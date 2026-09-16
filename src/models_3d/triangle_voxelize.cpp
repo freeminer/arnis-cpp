@@ -3,12 +3,29 @@
 #include "../block_definitions.h"
 #include <algorithm>
 #include <cmath>
+#include <functional>
 #include <string>
 #include <unordered_map>
 namespace arnis::models_3d
 {
 namespace
 {
+struct VoxelKey
+{
+	int x, y, z;
+	bool operator==(const VoxelKey &o) const { return x == o.x && y == o.y && z == o.z; }
+};
+struct VoxelKeyHash
+{
+	std::size_t operator()(const VoxelKey &k) const noexcept
+	{
+		std::size_t h = std::hash<int>{}(k.x);
+		h ^= std::hash<int>{}(k.y) + 0x9e3779b9u + (h << 6) + (h >> 2);
+		h ^= std::hash<int>{}(k.z) + 0x9e3779b9u + (h << 6) + (h >> 2);
+		return h;
+	}
+};
+
 float distance3(const std::array<float, 3> &a, const std::array<float, 3> &b)
 {
 	return std::hypot(std::hypot(b[0] - a[0], b[1] - a[1]), b[2] - a[2]);
@@ -107,14 +124,12 @@ std::vector<Voxel> voxelize_colored_triangles(
 				uncolored.push_back(q.uncolored);
 			}
 	}
-	std::unordered_map<long long, std::size_t> seen;
+	std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> seen;
 	std::vector<Voxel> out;
 	for (std::size_t i = 0; i < p.size(); ++i) {
 		auto w = t.apply(p[i]);
 		const int x = std::lround(w[0]), y = std::lround(w[1]), z = std::lround(w[2]);
-		const long long key = (static_cast<long long>(x) << 42) ^
-							  (static_cast<long long>(y) << 21) ^
-							  static_cast<std::uint32_t>(z);
+		const VoxelKey key{x, y, z};
 		if (seen.count(key))
 			continue;
 		Block block;

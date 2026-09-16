@@ -5,6 +5,10 @@
 
 namespace arnis::models_3d::custom::stadium
 {
+static int region_floor(int coordinate)
+{
+	return coordinate >= 0 ? coordinate / 512 : -1 - ((-coordinate - 1) / 512);
+}
 namespace
 {
 using P = std::pair<double, double>;
@@ -200,8 +204,9 @@ std::vector<std::pair<int, int>> deferred_regions(
 	std::vector<std::pair<int, int>> o;
 	for (auto &a : p) {
 		int d = std::ceil(.5 * std::hypot(a.long_m, a.short_m) * scale);
-		for (int z = (a.anchor_z - d) >> 9; z <= (a.anchor_z + d) >> 9; ++z)
-			for (int x = (a.anchor_x - d) >> 9; x <= (a.anchor_x + d) >> 9; ++x)
+		for (int z = region_floor(a.anchor_z - d); z <= region_floor(a.anchor_z + d); ++z)
+			for (int x = region_floor(a.anchor_x - d); x <= region_floor(a.anchor_x + d);
+					++x)
 				o.push_back({x, z});
 	}
 	std::sort(o.begin(), o.end());

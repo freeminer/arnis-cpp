@@ -279,9 +279,6 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 	else
 		for (const auto &s : model.scenes)
 			roots.insert(roots.end(), s.nodes.begin(), s.nodes.end());
-	if (roots.empty())
-		for (std::size_t i = 0; i < model.nodes.size(); ++i)
-			roots.push_back(int(i));
 	std::vector<std::pair<int, Matrix>> stack;
 	for (int n : roots)
 		stack.push_back({n, identity});

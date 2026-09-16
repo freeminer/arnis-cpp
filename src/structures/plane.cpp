@@ -1,12 +1,20 @@
 #include "plane.h"
 
 #include "../deterministic_rng.h"
+#include "schem_decoder.h"
+
+#include <fstream>
+#include <iterator>
 
 #include <algorithm>
 #include <cmath>
 
 namespace arnis::structures::plane
 {
+static int region_floor(int coordinate)
+{
+	return coordinate >= 0 ? coordinate / 512 : -1 - ((-coordinate - 1) / 512);
+}
 bool collinear(double a, double b, double tolerance)
 {
 	const double d = std::abs(a - b);
@@ -45,15 +53,44 @@ bool extract_parking_stand(const ProcessedElement &element, Stand &out)
 	if (!element.is_way())
 		return false;
 	const auto &way = element.as_way();
-	if (way.tags.get("aeroway") != "parking_position" || way.nodes.size() < 2)
+	if (way.tags.get("aeroway") != "parking_position" || way.tags.get("area") == "yes" ||
+			way.nodes.size() < 2)
 		return false;
 	const auto &a = way.nodes[way.nodes.size() - 2];
 	const auto &b = way.nodes.back();
+	if (a.id == b.id)
+		return false;
 	const double dx = double(b.x - a.x), dz = double(b.z - a.z);
 	const double length = std::hypot(dx, dz);
 	if (length <= 0.0)
 		return false;
 	out = {way.id, b.x, b.z, dx / length, dz / length};
+	return true;
+}
+
+std::vector<Stand> collect_parking_stands(const std::vector<ProcessedElement> &elements)
+{
+	std::vector<Stand> stands;
+	for (const auto &element : elements) {
+		Stand stand;
+		if (extract_parking_stand(element, stand))
+			stands.push_back(stand);
+	}
+	return stands;
+}
+
+bool make_stand_placement(const Stand &stand, Placement &out)
+{
+	auto rng = element_rng(stand.way_id);
+	if (!rng.random_bool(STAND_OCCUPANCY_PROBABILITY))
+		return false;
+	const double yaw = std::atan2(stand.direction_z, stand.direction_x) * 180.0 / M_PI;
+	const int anchor_x = static_cast<int>(
+			std::lround(stand.x - stand.direction_x * NOSE_GEAR_OFFSET_BLOCKS));
+	const int anchor_z = static_cast<int>(
+			std::lround(stand.z - stand.direction_z * NOSE_GEAR_OFFSET_BLOCKS));
+	out = make_placement(
+			stand.way_id, PlaneKind::Parked, anchor_x, anchor_z, yaw, 0.0, 0);
 	return true;
 }
 
@@ -151,10 +188,10 @@ std::vector<std::pair<int, int>> deferred_region_keys(
 {
 	std::vector<std::pair<int, int>> keys;
 	for (const auto &placement : placements)
-		for (int rx = (placement.anchor_x - PLANE_REACH_BLOCKS) >> 9;
-				rx <= (placement.anchor_x + PLANE_REACH_BLOCKS) >> 9; ++rx)
-			for (int rz = (placement.anchor_z - PLANE_REACH_BLOCKS) >> 9;
-					rz <= (placement.anchor_z + PLANE_REACH_BLOCKS) >> 9; ++rz)
+		for (int rx = region_floor(placement.anchor_x - PLANE_REACH_BLOCKS);
+				rx <= region_floor(placement.anchor_x + PLANE_REACH_BLOCKS); ++rx)
+			for (int rz = region_floor(placement.anchor_z - PLANE_REACH_BLOCKS);
+					rz <= region_floor(placement.anchor_z + PLANE_REACH_BLOCKS); ++rz)
 				keys.emplace_back(rx, rz);
 	std::sort(keys.begin(), keys.end());
 	keys.erase(std::unique(keys.begin(), keys.end()), keys.end());
@@ -196,19 +233,50 @@ bool placement_separated(
 	return true;
 }
 
+void thin_by_spacing(std::vector<Placement> &placements)
+{
+	const int cell = static_cast<int>(std::ceil(MIN_PLANE_SEPARATION_BLOCKS));
+	const double min_sq = MIN_PLANE_SEPARATION_BLOCKS * MIN_PLANE_SEPARATION_BLOCKS;
+	std::unordered_map<std::uint64_t, std::vector<std::pair<int, int>>> grid;
+	std::vector<Placement> kept;
+	kept.reserve(placements.size());
+	auto floor_div = [cell](int value) {
+		return value >= 0 ? value / cell : -(((-value) + cell - 1) / cell);
+	};
+	for (const auto &candidate : placements) {
+		{
+			const int cx = floor_div(candidate.anchor_x),
+					  cz = floor_div(candidate.anchor_z);
+			bool crowded = false;
+			for (int dx = -1; dx <= 1 && !crowded; ++dx)
+				for (int dz = -1; dz <= 1 && !crowded; ++dz) {
+					const std::uint64_t key =
+							(std::uint64_t(std::uint32_t(cx + dx)) << 32) |
+							std::uint32_t(cz + dz);
+					auto it = grid.find(key);
+					if (it == grid.end())
+						continue;
+					for (const auto &[x, z] : it->second) {
+						const double ddx = double(candidate.anchor_x - x);
+						const double ddz = double(candidate.anchor_z - z);
+						crowded |= ddx * ddx + ddz * ddz < min_sq;
+					}
+				}
+			if (crowded)
+				continue;
+			grid[(std::uint64_t(std::uint32_t(cx)) << 32) | std::uint32_t(cz)]
+					.emplace_back(candidate.anchor_x, candidate.anchor_z);
+		}
+		kept.push_back(candidate);
+	}
+	placements.swap(kept);
+}
+
 void finalize_placements(std::vector<Placement> &placements)
 {
 	sort_placements(placements);
-	std::vector<Placement> accepted;
-	accepted.reserve(std::min(placements.size(), MAX_PLANES));
-	for (const auto &candidate : placements) {
-		if (!placement_separated(candidate, accepted))
-			continue;
-		accepted.push_back(candidate);
-		if (accepted.size() == MAX_PLANES)
-			break;
-	}
-	placements.swap(accepted);
+	thin_by_spacing(placements);
+	cap_placements(placements);
 }
 
 void filter_and_finalize_strips(std::vector<AerowayStrip> &strips, double scale)
@@ -247,7 +315,7 @@ bool make_ascending_placement(const AerowayStrip &strip, double scale, Placement
 	out = make_placement(strip.rep_id, PlaneKind::Ascending,
 			static_cast<int>(std::lround(x)), static_cast<int>(std::lround(z)), yaw,
 			ASCENDING_PITCH_DEG,
-			static_cast<int>(std::lround(PLANE_LENGTH_BLOCKS * 0.45)));
+			static_cast<int>(std::lround(PLANE_LENGTH_BLOCKS * 0.45 + 20.0 / scale)));
 	return true;
 }
 
@@ -278,7 +346,56 @@ std::vector<Placement> prescan_placements(
 {
 	auto strips = collect_aeroway_strips(elements);
 	filter_and_finalize_strips(strips, scale);
-	return build_strip_placements(strips, scale);
+	auto placements = build_strip_placements(strips, scale);
+	for (const auto &stand : collect_parking_stands(elements)) {
+		Placement candidate;
+		if (make_stand_placement(stand, candidate) &&
+				placement_separated(candidate, placements))
+			placements.push_back(candidate);
+	}
+	finalize_placements(placements);
+	return placements;
+}
+
+bool place_plane_placement(WorldEditor &editor, const Placement &placement)
+{
+	if (!editor.place_schematics())
+		return false;
+	const bool gear_down = placement.kind == PlaneKind::Parked;
+	auto rng = element_rng(placement.representative_id * 31 + 7);
+	const unsigned livery = rng.uniform(6) + 1;
+	const auto path =
+			std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
+					"assets/structures/planes/plane_gear_" +
+			(gear_down ? std::string("down_") : std::string("up_")) +
+			std::to_string(livery) + ".schem";
+	std::ifstream stream(path, std::ios::binary);
+	if (!stream)
+		return false;
+	std::vector<std::uint8_t> bytes(
+			(std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+	try {
+		const auto document = decode_sponge_schem(bytes);
+		int ground_y = editor.get_ground_level(placement.anchor_x, placement.anchor_z);
+		for (int x = placement.footprint.min_x; x <= placement.footprint.max_x; ++x)
+			for (int z = placement.footprint.min_z; z <= placement.footprint.max_z; ++z)
+				ground_y = std::min(ground_y, editor.get_ground_level(x, z));
+		return place_schem_document_yaw(editor, document, placement.anchor_x,
+				ground_y + placement.elevation_blocks, placement.anchor_z,
+				placement.yaw_degrees, placement.pitch_degrees);
+	} catch (...) {
+		return false;
+	}
+}
+
+std::size_t place_plane_placements(
+		WorldEditor &editor, const std::vector<Placement> &placements)
+{
+	std::size_t placed = 0;
+	for (const auto &placement : placements)
+		if (place_plane_placement(editor, placement))
+			++placed;
+	return placed;
 }
 
 std::vector<AerowayStrip> merge_aeroways(const std::vector<Segment> &segments)
@@ -290,6 +407,8 @@ std::vector<AerowayStrip> merge_aeroways(const std::vector<Segment> &segments)
 			continue;
 		used[i] = true;
 		std::vector<std::pair<double, double>> points = segments[i].points;
+		std::vector<std::uint64_t> endpoints{
+				segments[i].first_node, segments[i].last_node};
 		std::uint64_t rep = segments[i].way_id;
 		bool changed = true;
 		while (changed) {
@@ -298,15 +417,17 @@ std::vector<AerowayStrip> merge_aeroways(const std::vector<Segment> &segments)
 				if (used[j] || segments[j].kind != segments[i].kind ||
 						!collinear(segments[i].angle, segments[j].angle))
 					continue;
-				const bool joined = segments[i].first_node == segments[j].first_node ||
-									segments[i].first_node == segments[j].last_node ||
-									segments[i].last_node == segments[j].first_node ||
-									segments[i].last_node == segments[j].last_node;
+				const bool joined = std::find(endpoints.begin(), endpoints.end(),
+											segments[j].first_node) != endpoints.end() ||
+									std::find(endpoints.begin(), endpoints.end(),
+											segments[j].last_node) != endpoints.end();
 				if (!joined)
 					continue;
 				used[j] = true;
 				points.insert(points.end(), segments[j].points.begin(),
 						segments[j].points.end());
+				endpoints.push_back(segments[j].first_node);
+				endpoints.push_back(segments[j].last_node);
 				rep = std::min(rep, segments[j].way_id);
 				changed = true;
 			}

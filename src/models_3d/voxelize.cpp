@@ -1,5 +1,6 @@
 #include "voxelize.h"
 #include <cmath>
+#include <functional>
 #include <stdexcept>
 #include <algorithm>
 #include <unordered_map>
@@ -10,6 +11,34 @@
 #include "palette.h"
 namespace arnis::models_3d
 {
+namespace
+{
+struct VoxelKey
+{
+	int x, y, z;
+	bool operator==(const VoxelKey &o) const { return x == o.x && y == o.y && z == o.z; }
+};
+struct VoxelKeyHash
+{
+	std::size_t operator()(const VoxelKey &k) const noexcept
+	{
+		std::size_t h = std::hash<int>{}(k.x);
+		h ^= std::hash<int>{}(k.y) + 0x9e3779b9u + (h << 6) + (h >> 2);
+		h ^= std::hash<int>{}(k.z) + 0x9e3779b9u + (h << 6) + (h >> 2);
+		return h;
+	}
+};
+}
+
+WorldTransform WorldTransform::with_world_scale_xyz(double intrinsic_yaw,
+		double intrinsic_scale, std::array<double, 3> intrinsic_translation,
+		std::array<float, 3> world_scale, double world_yaw, float anchor_x,
+		float anchor_y, float anchor_z)
+{
+	return WorldTransform(intrinsic_yaw, intrinsic_scale, intrinsic_translation,
+			world_scale, world_yaw, anchor_x, anchor_y, anchor_z);
+}
+
 Block block_for_model_color(std::array<float, 3> c)
 {
 	if (std::abs(c[0] - 1.f) < .001f && std::abs(c[1]) < .001f &&
@@ -27,13 +56,12 @@ void place_voxels(world_editor::WorldEditor &e, const std::vector<Voxel> &v)
 std::vector<Voxel> voxelize_points(const std::vector<std::array<float, 3>> &points,
 		const std::vector<std::array<float, 3>> &colors, const WorldTransform &t)
 {
-	std::unordered_map<long long, std::size_t> seen;
+	std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> seen;
 	std::vector<Voxel> out;
 	for (std::size_t i = 0; i < points.size(); ++i) {
 		auto q = t.apply(points[i]);
 		int x = std::lround(q[0]), y = std::lround(q[1]), z = std::lround(q[2]);
-		long long k = (static_cast<long long>(x) << 42) ^
-					  (static_cast<long long>(y) << 21) ^ static_cast<std::uint32_t>(z);
+		VoxelKey k{x, y, z};
 		if (seen.count(k))
 			continue;
 		auto c = i < colors.size() ? colors[i] : std::array<float, 3>{1, 1, 1};
@@ -69,6 +97,16 @@ WorldTransform::WorldTransform(double yaw, double scale, std::array<double, 3> t
 	wsn_ = std::sin(b);
 	for (int i = 0; i < 3; ++i)
 		ws_[i] = w[i];
+}
+
+WorldTransform::WorldTransform(double intrinsic_yaw, double intrinsic_scale,
+		std::array<double, 3> intrinsic_translation, double world_scale, double world_yaw,
+		float anchor_x, float anchor_y, float anchor_z) :
+		WorldTransform(intrinsic_yaw, intrinsic_scale, intrinsic_translation,
+				std::array<float, 3>{static_cast<float>(world_scale),
+						static_cast<float>(world_scale), static_cast<float>(world_scale)},
+				world_yaw, anchor_x, anchor_y, anchor_z)
+{
 }
 WorldTransform WorldTransform::pitched(double d) const
 {

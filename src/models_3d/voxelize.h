@@ -35,8 +35,16 @@ class WorldTransform
 											wty_, wtz_;
 
 public:
+	static WorldTransform with_world_scale_xyz(double intrinsic_yaw,
+			double intrinsic_scale, std::array<double, 3> intrinsic_translation,
+			std::array<float, 3> world_scale, double world_yaw, float anchor_x,
+			float anchor_y, float anchor_z);
 	WorldTransform(double, double, std::array<double, 3>, std::array<float, 3>, double,
 			float, float, float);
+	// Rust-compatible isotropic constructor (world_scale applied to all axes).
+	WorldTransform(double intrinsic_yaw, double intrinsic_scale,
+			std::array<double, 3> intrinsic_translation, double world_scale,
+			double world_yaw, float anchor_x, float anchor_y, float anchor_z);
 	WorldTransform pitched(double) const;
 	std::array<float, 3> apply(std::array<float, 3>) const;
 };

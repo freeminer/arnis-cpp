@@ -13,6 +13,45 @@
 
 namespace arnis::structures
 {
+StructureSchematic structure_schematic(const SchemDocument &document)
+{
+	StructureSchematic out{document.width, document.length, document.voxels};
+	for (const auto &v : out.voxels)
+		out.max_extent = std::max(out.max_extent,
+				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
+	return out;
+}
+StructureSchematic StructureSchematic::centered() const
+{
+	auto out = *this;
+	out.anchor_x = out.width / 2;
+	out.anchor_z = out.length / 2;
+	out.max_extent = 0;
+	for (const auto &v : out.voxels)
+		out.max_extent = std::max(out.max_extent,
+				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
+	return out;
+}
+StructureSchematic StructureSchematic::base_anchored() const
+{
+	auto out = *this;
+	long long sx = 0, sz = 0, count = 0;
+	for (const auto &v : out.voxels)
+		if (v.y == 0) {
+			sx += v.x;
+			sz += v.z;
+			++count;
+		}
+	if (count) {
+		out.anchor_x = int(sx / count);
+		out.anchor_z = int(sz / count);
+	}
+	out.max_extent = 0;
+	for (const auto &v : out.voxels)
+		out.max_extent = std::max(out.max_extent,
+				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
+	return out;
+}
 namespace
 {
 struct Reader
@@ -190,6 +229,228 @@ void decode_palette(Reader &r, std::unordered_map<int, std::string> &palette)
 	}
 }
 
+void decode_block_entities(Reader &r, SchemDocument &doc)
+{
+	const auto element_type = r.u8();
+	const auto count = r.u32();
+	if (element_type != 10)
+		throw std::runtime_error("schem block entities are not compounds");
+	for (std::uint32_t i = 0; i < count; ++i) {
+		const auto begin = r.p;
+		SchemEntity entity;
+		for (;;) {
+			const auto type = r.u8();
+			if (!type)
+				break;
+			const auto name = r.str();
+			if (type == 3 && (name == "x" || name == "y" || name == "z")) {
+				const auto value = r.i32();
+				if (name == "x")
+					entity.x = value;
+				else if (name == "y")
+					entity.y = value;
+				else
+					entity.z = value;
+			} else {
+				skip_payload(r, type);
+			}
+		}
+		entity.nbt.assign(r.b.begin() + begin, r.b.begin() + r.p);
+		doc.entities.push_back(std::move(entity));
+	}
+}
+
+std::vector<std::tuple<std::string, int, int>> entity_items(
+		const std::vector<std::uint8_t> &bytes)
+{
+	std::vector<std::tuple<std::string, int, int>> out;
+	try {
+		Reader r{bytes};
+		std::string id;
+		for (;;) {
+			const auto type = r.u8();
+			if (!type)
+				break;
+			const auto name = r.str();
+			if (type == 8) {
+				const auto value = r.str();
+				if (name == "id")
+					id = value;
+			} else if (type == 9 && name == "Items") {
+				const auto item_type = r.u8();
+				const auto count = r.u32();
+				if (item_type != 10) {
+					skip_payload(r, item_type);
+					continue;
+				}
+				for (std::uint32_t i = 0; i < count; ++i) {
+					std::string item_id;
+					int slot = static_cast<int>(i), amount = 1;
+					for (;;) {
+						const auto t = r.u8();
+						if (!t)
+							break;
+						const auto n = r.str();
+						if (t == 8 && n == "id")
+							item_id = r.str();
+						else if (t == 1 && n == "Count")
+							amount = static_cast<int>(r.u8());
+						else if (t == 1 && n == "Slot")
+							slot = static_cast<int>(r.u8());
+						else
+							skip_payload(r, t);
+					}
+					if (!item_id.empty())
+						out.emplace_back(item_id, slot, amount);
+				}
+			} else {
+				skip_payload(r, type);
+			}
+		}
+	} catch (...) {
+	}
+	return out;
+}
+
+std::string entity_string(
+		const std::vector<std::uint8_t> &bytes, const std::string &wanted)
+{
+	try {
+		Reader r{bytes};
+		for (;;) {
+			const auto type = r.u8();
+			if (!type)
+				break;
+			const auto name = r.str();
+			if (type == 8) {
+				auto value = r.str();
+				if (name == wanted)
+					return value;
+			} else
+				skip_payload(r, type);
+		}
+	} catch (...) {
+	}
+	return {};
+}
+
+std::vector<std::pair<std::string, std::string>> entity_banner_patterns(
+		const std::vector<std::uint8_t> &bytes)
+{
+	std::vector<std::pair<std::string, std::string>> out;
+	try {
+		Reader r{bytes};
+		for (;;) {
+			const auto type = r.u8();
+			if (!type)
+				break;
+			const auto name = r.str();
+			if (type != 9 || name != "Patterns") {
+				skip_payload(r, type);
+				continue;
+			}
+			const auto element_type = r.u8();
+			const auto count = r.u32();
+			if (element_type != 10)
+				continue;
+			for (std::uint32_t i = 0; i < count; ++i) {
+				std::string pattern, color;
+				for (;;) {
+					const auto t = r.u8();
+					if (!t)
+						break;
+					const auto n = r.str();
+					if (t == 8 && n == "Pattern")
+						pattern = r.str();
+					else if (t == 3 && n == "Color")
+						color = std::to_string(r.u32());
+					else
+						skip_payload(r, t);
+				}
+				if (!pattern.empty())
+					out.emplace_back(pattern, color);
+			}
+		}
+	} catch (...) {
+	}
+	return out;
+}
+
+std::string entity_item_id(const std::vector<std::uint8_t> &bytes)
+{
+	try {
+		Reader r{bytes};
+		for (;;) {
+			const auto type = r.u8();
+			if (!type)
+				break;
+			const auto name = r.str();
+			if (type == 10 && name == "Item") {
+				for (;;) {
+					const auto t = r.u8();
+					if (!t)
+						break;
+					const auto n = r.str();
+					if (t == 8 && n == "id")
+						return r.str();
+					skip_payload(r, t);
+				}
+			} else
+				skip_payload(r, type);
+		}
+	} catch (...) {
+	}
+	return {};
+}
+
+void place_native_entity(
+		world_editor::WorldEditor &editor, int x, int y, int z, const SchemEntity &entity)
+{
+	const auto items = entity_items(entity.nbt);
+	const auto id = entity_string(entity.nbt, "id");
+	if (id.find("chest") != std::string::npos) {
+		editor.set_chest_with_items_absolute(x, y, z, items);
+		return;
+	}
+	if (id.find("barrel") != std::string::npos) {
+		editor.set_barrel_with_items_absolute(x, y, z, items);
+		return;
+	}
+	if (id.find("sign") != std::string::npos ||
+			id.find("hanging_sign") != std::string::npos) {
+		std::string text;
+		for (int line = 1; line <= 4; ++line) {
+			const auto value = entity_string(entity.nbt, "Text" + std::to_string(line));
+			if (!value.empty()) {
+				if (!text.empty())
+					text += '\n';
+				text += value;
+			}
+		}
+		if (editor.place_sign_node(block_definitions::SIGN, x, y, z, 0, text))
+			return;
+	}
+	if (id.find("item_frame") != std::string::npos) {
+		if (editor.item_frame_sink) {
+			editor.item_frame_sink(x, y, z, entity_item_id(entity.nbt));
+			return;
+		}
+	}
+	if (id.find("banner") != std::string::npos) {
+		if (editor.banner_sink) {
+			editor.banner_sink(x, y, z, entity_string(entity.nbt, "Base"),
+					entity_banner_patterns(entity.nbt));
+			return;
+		}
+	}
+	if (id.find("bed") != std::string::npos) {
+		editor.set_bed_block_entity_absolute(x, y, z);
+		return;
+	}
+	if (editor.schem_entity_sink)
+		editor.schem_entity_sink(x, y, z, entity.nbt);
+}
+
 // Sponge v3 nests its palette/data beneath `Blocks`, and some writers wrap
 // every field in a `Schematic` compound.  Accept both arrangements, sharing
 // the same strict byte-stream decoder as the v2 top-level form.
@@ -224,6 +485,8 @@ void decode_schematic_fields(Reader &r, SchemDocument &doc,
 			decode_palette(r, palette);
 		} else if ((name == "BlockData" || name == "Data") && type == 7) {
 			decode_block_data(r, data);
+		} else if ((name == "BlockEntities" || name == "TileEntities") && type == 9) {
+			decode_block_entities(r, doc);
 		} else if ((name == "Schematic" || name == "Blocks") && type == 10) {
 			decode_schematic_fields(r, doc, palette, data);
 		} else {
@@ -290,6 +553,8 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 			}
 		} else if (name == "BlockData" && type == 7) {
 			decode_block_data(r, data);
+		} else if ((name == "BlockEntities" || name == "TileEntities") && type == 9) {
+			decode_block_entities(r, doc);
 		} else
 			skip_payload(r, type);
 	}
@@ -307,21 +572,52 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 				  y = i / (doc.width * doc.length);
 		std::unordered_map<std::string, std::string> properties;
 		const auto open = it->second.find('['), close = it->second.rfind(']');
-		if (open != std::string::npos && close != std::string::npos && close > open + 1)
-			for (std::size_t start = open + 1, end; start < close; start = end + 1) {
-				end = it->second.find(',', start);
-				if (end == std::string::npos || end > close)
-					end = close;
+		if (open != std::string::npos && close != std::string::npos && close > open + 1) {
+			std::size_t start = open + 1;
+			while (start < close) {
+				std::size_t end = start;
+				int depth = 0;
+				bool quoted = false;
+				for (; end < close; ++end) {
+					const char ch = it->second[end];
+					if (ch == '"' && (end == start || it->second[end - 1] != '\\'))
+						quoted = !quoted;
+					if (!quoted && (ch == '[' || ch == '{'))
+						++depth;
+					else if (!quoted && (ch == ']' || ch == '}') && depth)
+						--depth;
+					else if (!quoted && ch == ',' && depth == 0)
+						break;
+				}
 				const auto equals = it->second.find('=', start);
-				if (equals != std::string::npos && equals < end)
-					properties.emplace(it->second.substr(start, equals - start),
-							it->second.substr(equals + 1, end - equals - 1));
-				if (end == close)
-					break;
+				if (equals != std::string::npos && equals < end) {
+					auto key = it->second.substr(start, equals - start);
+					auto value = it->second.substr(equals + 1, end - equals - 1);
+					const auto trim = [](std::string &s) {
+						const auto a = s.find_first_not_of(" \t");
+						const auto b = s.find_last_not_of(" \t");
+						s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
+					};
+					trim(key);
+					trim(value);
+					properties.emplace(std::move(key), std::move(value));
+				}
+				start = end < close ? end + 1 : close;
 			}
+		}
 		doc.voxels.push_back({x, y, z, it->second, std::move(properties)});
 	}
 	return doc;
+}
+
+SchemDocument load_palettized(const std::vector<std::uint8_t> &gzip_bytes)
+{
+	return decode_sponge_schem(gzip_bytes);
+}
+
+StructureSchematic load_structure(const std::vector<std::uint8_t> &gzip_bytes)
+{
+	return structure_schematic(decode_sponge_schem(gzip_bytes));
 }
 
 Block resolve_schem_block(const std::string &name)
@@ -518,7 +814,9 @@ Block resolve_schem_block(const std::string &name)
 		return COBBLESTONE_WALL;
 	if (n == "gray_concrete_powder")
 		return GRAY_CONCRETE_POWDER;
-	return STONE;
+	// Rust's map_structure_block returns None for unmodelled palette entries;
+	// do not invent stone geometry for unsupported blocks.
+	return AIR;
 }
 
 namespace
@@ -698,6 +996,10 @@ bool place_schem_file(world_editor::WorldEditor &editor,
 				ox + doc.offset_x + v.x, oy + doc.offset_y + v.y, oz + doc.offset_z + v.z,
 				nullptr, nullptr);
 	}
+	if (editor.schem_entity_sink)
+		for (const auto &e : doc.entities)
+			place_native_entity(editor, ox + doc.offset_x + e.x, oy + doc.offset_y + e.y,
+					oz + doc.offset_z + e.z, e);
 	return true;
 }
 
@@ -743,6 +1045,25 @@ bool place_schem_file_rotated(world_editor::WorldEditor &editor,
 		if (ground)
 			editor.set_block_absolute(*ground, wx, wy - 1, wz, nullptr, nullptr);
 	}
+	if (editor.schem_entity_sink)
+		for (const auto &e : doc.entities) {
+			int x = e.x + doc.offset_x, z = e.z + doc.offset_z;
+			switch (rotation & 3) {
+			case 1:
+				std::swap(x, z);
+				x = -x;
+				break;
+			case 2:
+				x = -x;
+				z = -z;
+				break;
+			case 3:
+				std::swap(x, z);
+				z = -z;
+				break;
+			}
+			place_native_entity(editor, ox + x, oy + doc.offset_y + e.y, oz + z, e);
+		}
 	return true;
 }
 
@@ -800,6 +1121,25 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 		editor.set_block_with_properties_absolute(
 				std::move(b), ox + x, oy + doc.offset_y + v.y, oz + z, nullptr, nullptr);
 	}
+	if (editor.schem_entity_sink)
+		for (const auto &e : doc.entities) {
+			int x = e.x + doc.offset_x, z = e.z + doc.offset_z;
+			switch (rotation & 3) {
+			case 1:
+				std::swap(x, z);
+				x = -x;
+				break;
+			case 2:
+				x = -x;
+				z = -z;
+				break;
+			case 3:
+				std::swap(x, z);
+				z = -z;
+				break;
+			}
+			place_native_entity(editor, ox + x, oy + doc.offset_y + e.y, oz + z, e);
+		}
 	return true;
 }
 
