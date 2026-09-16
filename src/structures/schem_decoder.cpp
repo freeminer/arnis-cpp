@@ -438,7 +438,8 @@ void place_native_entity(
 	}
 	if (id.find("banner") != std::string::npos) {
 		if (editor.banner_sink) {
-			editor.banner_sink(x, y, z, entity_string(entity.nbt, "Base"),
+			editor.banner_sink(x, y, z, entity_string(entity.nbt, "Facing"),
+					entity_string(entity.nbt, "Base"),
 					entity_banner_patterns(entity.nbt));
 			return;
 		}

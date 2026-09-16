@@ -364,11 +364,12 @@ bool place_plane_placement(WorldEditor &editor, const Placement &placement)
 	const bool gear_down = placement.kind == PlaneKind::Parked;
 	auto rng = element_rng(placement.representative_id * 31 + 7);
 	const unsigned livery = rng.uniform(6) + 1;
+	const auto filename = std::string("assets/structures/planes/plane_gear_") +
+						  (gear_down ? "down_" : "up_") + std::to_string(livery) +
+						  ".schem";
 	const auto path =
 			std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
-					"assets/structures/planes/plane_gear_" +
-			(gear_down ? std::string("down_") : std::string("up_")) +
-			std::to_string(livery) + ".schem";
+			filename;
 	std::ifstream stream(path, std::ios::binary);
 	if (!stream)
 		return false;

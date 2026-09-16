@@ -8,6 +8,7 @@
 #include <optional>
 namespace arnis::ore_generation
 {
+constexpr int MAX_ORE_DEPTH = 384;
 const std::array<OreRule, 6> &rules()
 {
 	static const std::array<OreRule, 6> r{{{block_definitions::COAL_ORE, 3, 45, 8, 17, 8},
@@ -28,10 +29,11 @@ void generate_ores(
 						   0xC0DE);
 			const int ground = e.get_ground_level((cx << 4) + 8, (cz << 4) + 8);
 			for (const auto &r : rules()) {
-				const int y_max = std::max(min_y, ground - r.depth_min);
-				if (y_max < min_y)
+				const int y_min = std::max(min_y, ground - MAX_ORE_DEPTH);
+				const int y_max = std::max(y_min, ground - r.depth_min);
+				if (y_min > y_max)
 					continue;
-				const unsigned span = unsigned(y_max - min_y + 1),
+				const unsigned span = unsigned(y_max - y_min + 1),
 							   original = unsigned(r.depth_max - r.depth_min + 1);
 				const unsigned max_veins =
 						original ? std::min<unsigned>(
@@ -42,7 +44,7 @@ void generate_ores(
 				for (unsigned i = 0; i < n; ++i) {
 					int x = (cx << 4) + int(rng.uniform(16)),
 						z = (cz << 4) + int(rng.uniform(16)),
-						y = min_y + int(rng.uniform(span));
+						y = y_min + int(rng.uniform(span));
 					const unsigned length =
 							r.vein_min + rng.uniform(r.vein_max - r.vein_min + 1);
 					for (unsigned j = 0; j < length; ++j) {

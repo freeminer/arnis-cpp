@@ -12,6 +12,18 @@ namespace
 {
 using Cell = std::pair<int, int>;
 using Points = std::vector<Cell>;
+// Rust's div_euclid: cell coordinates must round toward negative infinity,
+// rather than C++'s truncation toward zero.
+int floor_div(int value, int divisor)
+{
+	if (divisor <= 0)
+		return 0;
+	int quotient = value / divisor;
+	int remainder = value % divisor;
+	if (remainder != 0 && ((remainder < 0) != (divisor < 0)))
+		--quotient;
+	return quotient;
+}
 std::uint64_t urban_key(int x, int z)
 {
 	return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
@@ -112,8 +124,8 @@ UrbanGroundLookup UrbanGroundLookup::empty()
 }
 bool UrbanGroundLookup::is_urban(int x, int z) const
 {
-	return !cells_.empty() && cells_.contains(urban_key((x - min_x_) / cell_size_,
-									  (z - min_z_) / cell_size_));
+	return !cells_.empty() && cells_.contains(urban_key(floor_div(x - min_x_, cell_size_),
+									  floor_div(z - min_z_, cell_size_)));
 }
 void UrbanGroundLookup::add_cell(int x, int z)
 {
@@ -150,8 +162,8 @@ UrbanGroundLookup UrbanGroundComputer::compute_lookup() const
 		return result;
 	Grid grid;
 	for (auto [x, z] : building_centroids_)
-		grid[{(x - bbox_.min_x()) / config_.cell_size,
-					 (z - bbox_.min_z()) / config_.cell_size}]
+		grid[{floor_div(x - bbox_.min_x(), config_.cell_size),
+					 floor_div(z - bbox_.min_z(), config_.cell_size)}]
 				.push_back({x, z});
 	for (const auto &cluster : clusters(config_, grid))
 		for (const auto &cell : cluster.cells)
@@ -166,8 +178,8 @@ Points UrbanGroundComputer::compute() const
 		return out;
 	Grid grid;
 	for (auto [x, z] : building_centroids_)
-		grid[{(x - bbox_.min_x()) / config_.cell_size,
-					 (z - bbox_.min_z()) / config_.cell_size}]
+		grid[{floor_div(x - bbox_.min_x(), config_.cell_size),
+					 floor_div(z - bbox_.min_z(), config_.cell_size)}]
 				.push_back({x, z});
 	for (const auto &cluster : clusters(config_, grid))
 		for (auto [cx, cz] : cluster.cells) {
