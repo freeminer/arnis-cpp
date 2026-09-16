@@ -12,6 +12,7 @@
 #include <algorithm>
 #include <cmath>
 #include <optional>
+#include <limits>
 #include <vector>
 
 namespace arnis::ground_generation
@@ -561,8 +562,17 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 
 			// Snow is a separate cap, so climate/land-cover material selection is
 			// preserved below it just as in the Rust ground pass.
+			// Match Rust's softened climatic snow edge.  A small deterministic
+			// jitter avoids an artificial contour line at exactly the threshold;
+			// MAX_INT disables snow for low/flat worlds.
+			constexpr double SNOW_EDGE_JITTER = 6.0;
+			const int snow_threshold = editor.ground ? editor.ground->snow_threshold()
+													 : std::numeric_limits<int>::max();
+			const double snow_edge = (value_noise_01(x, z, 8) - .5) * SNOW_EDGE_JITTER;
 			if (!planetary && !in_tunnel && editor.ground &&
-					editor.ground->snow_capped(ground_y) && water_blend <= .5 &&
+					snow_threshold != std::numeric_limits<int>::max() &&
+					static_cast<double>(ground_y) >= snow_threshold + snow_edge &&
+					water_blend <= .5 &&
 					!editor.check_for_block_absolute(x, ground_y, z,
 							std::optional<std::vector<Block>>(std::vector<Block>{WATER})))
 				editor.set_block_if_absent_absolute(SNOW_LAYER, x, ground_y + 1, z);

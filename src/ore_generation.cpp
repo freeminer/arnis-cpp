@@ -8,7 +8,6 @@
 #include <optional>
 namespace arnis::ore_generation
 {
-constexpr int MAX_ORE_DEPTH = 384;
 const std::array<OreRule, 6> &rules()
 {
 	static const std::array<OreRule, 6> r{{{block_definitions::COAL_ORE, 3, 45, 8, 17, 8},

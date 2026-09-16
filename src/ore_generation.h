@@ -7,6 +7,7 @@ struct WorldEditor;
 }
 namespace arnis::ore_generation
 {
+inline constexpr int MAX_ORE_DEPTH = 384;
 struct OreRule
 {
 	Block block;

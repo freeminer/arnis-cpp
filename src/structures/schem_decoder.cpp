@@ -16,10 +16,42 @@ namespace arnis::structures
 StructureSchematic structure_schematic(const SchemDocument &document)
 {
 	StructureSchematic out{document.width, document.length, document.voxels};
+	out.entities = document.entities;
 	for (const auto &v : out.voxels)
 		out.max_extent = std::max(out.max_extent,
 				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
 	return out;
+}
+namespace
+{
+SchemDocument document_from_structure(const StructureSchematic &structure)
+{
+	SchemDocument document;
+	document.width = structure.width;
+	document.length = structure.length;
+	document.height = 1;
+	document.offset_x = -structure.anchor_x;
+	document.offset_z = -structure.anchor_z;
+	document.voxels = structure.voxels;
+	document.entities = structure.entities;
+	for (const auto &voxel : document.voxels)
+		document.height = std::max(document.height, voxel.y + 1);
+	return document;
+}
+}
+bool place_structure_yaw(world_editor::WorldEditor &editor,
+		const StructureSchematic &structure, int base_x, int base_y, int base_z,
+		double yaw_degrees, double pitch_degrees)
+{
+	return place_schem_document_yaw(editor, document_from_structure(structure), base_x,
+			base_y, base_z, yaw_degrees, pitch_degrees);
+}
+bool place_structure(world_editor::WorldEditor &editor,
+		const StructureSchematic &structure, int base_x, int base_y, int base_z,
+		unsigned rotation)
+{
+	return place_structure_yaw(editor, structure, base_x, base_y, base_z,
+			90.0 * static_cast<double>(rotation & 3));
 }
 StructureSchematic StructureSchematic::centered() const
 {

@@ -10,18 +10,27 @@
 #include "../block_definitions.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
+#include "starship.h"
+#include "tombstone.h"
 
 namespace arnis::structures
 {
-namespace boat { void scatter_boats(WorldEditor &, int, int, int, int); }
-namespace helicopter { void maybe_place_helicopter(WorldEditor &, int, int); }
-namespace starship { void place_on_launch_mount(WorldEditor &, const ProcessedWay &); }
-namespace tombstone { void maybe_place(WorldEditor &, int, int, const RoadMaskBitmap &); }
+namespace boat
+{
+void scatter_boats(WorldEditor &, int, int, int, int);
+}
+namespace helicopter
+{
+void maybe_place_helicopter(WorldEditor &, int, int);
+}
+namespace tombstone
+{
+void maybe_place(WorldEditor &, int, int, const RoadMaskBitmap &);
+}
 const std::vector<StructureAsset> &rust_structure_assets()
 {
 	static const std::vector<StructureAsset> a = {{"car", "car.schem", 0, 0, 0, 0},
-			{"boat", "boat.schem", 0, 0, 0, 0},
-			{"crane", "crane.schem", 0, 0, 0, 0},
+			{"boat", "boat.schem", 0, 0, 0, 0}, {"crane", "crane.schem", 0, 0, 0, 0},
 			{"excavator", "excavator.schem", 0, 0, 0, 0},
 			{"fountain", "fountain.schem", 0, 0, 0, 0},
 			{"helicopter", "helicopter.schem", 0, 0, 0, 0},
@@ -227,10 +236,10 @@ bool structure_registry_valid()
 }
 bool structure_has_procedural_generator(const std::string &n)
 {
-	return n == "boat" || n == "fountain" || n == "helicopter" ||
-		   n == "lighthouse" || n == "windturbine" ||
-		   n == "playground" || n == "excavator" || n == "tractor" || n == "crane" ||
-		   n == "car" || n == "starship" || n == "tombstone";
+	return n == "boat" || n == "fountain" || n == "helicopter" || n == "lighthouse" ||
+		   n == "windturbine" || n == "playground" || n == "excavator" ||
+		   n == "tractor" || n == "crane" || n == "car" || n == "starship" ||
+		   n == "tombstone";
 }
 std::vector<StructureAsset> procedural_structure_assets()
 {
@@ -359,6 +368,18 @@ bool place_named_structure(
 		boat::scatter_boats(e, x - 1, z - 1, x + 1, z + 1);
 		return true;
 	}
+	if (name == "starship") {
+		ProcessedWay launch_mount{};
+		launch_mount.nodes.push_back(ProcessedNode{0, {}, x, z});
+		// Rust places the bundled starship schematic here; the launch-mount
+		// helper is reserved for OSM launch-ring relations.
+		place_starship(e, launch_mount);
+		return true;
+	}
+	if (name == "tombstone") {
+		scatter_tombstones(e, x - 1, z - 1, x + 1, z + 1);
+		return true;
+	}
 	const auto p = structure_asset_path(e, name);
 	return !p.empty() && place_schem_file(e, p, x, e.get_ground_level(x, z), z);
 }
@@ -416,6 +437,16 @@ PlacementResult place_named_structure_rotated(WorldEditor &e, const std::string 
 	if (name == "crane") {
 		crane::maybe_place_crane(e, {{x, z}});
 		return {true, true, "crane.schem"};
+	}
+	if (name == "starship") {
+		ProcessedWay launch_mount{};
+		launch_mount.nodes.push_back(ProcessedNode{0, {}, x, z});
+		place_starship(e, launch_mount);
+		return {true, true, "starship.schem"};
+	}
+	if (name == "tombstone") {
+		scatter_tombstones(e, x - 1, z - 1, x + 1, z + 1);
+		return {true, true, "tombstone.schem"};
 	}
 	const auto p = structure_asset_path(e, name);
 	const bool ok = !p.empty() && place_schem_file_rotated(e, p, x,

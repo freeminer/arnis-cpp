@@ -40,6 +40,7 @@ struct StructureSchematic
 {
 	int width = 0, length = 0;
 	std::vector<SchemVoxel> voxels;
+	std::vector<SchemEntity> entities;
 	int anchor_x = 0, anchor_z = 0, max_extent = 0;
 	StructureSchematic centered() const;
 	StructureSchematic base_anchored() const;
@@ -60,6 +61,13 @@ BlockWithProperties resolve_schem_block_with_properties(const std::string &name)
 // Free-yaw counterpart of the quarter-turn schematic placement path.  It
 // samples destination columns so oblique placements remain gap-free.
 bool place_schem_document_yaw(world_editor::WorldEditor &, const SchemDocument &,
+		int base_x, int base_y, int base_z, double yaw_degrees,
+		double pitch_degrees = 0.0);
+// Rust schematic API counterparts for callers that already decoded a
+// StructureSchematic instead of retaining the Sponge document wrapper.
+bool place_structure(world_editor::WorldEditor &, const StructureSchematic &, int base_x,
+		int base_y, int base_z, unsigned rotation = 0);
+bool place_structure_yaw(world_editor::WorldEditor &, const StructureSchematic &,
 		int base_x, int base_y, int base_z, double yaw_degrees,
 		double pitch_degrees = 0.0);
 std::unordered_map<std::string, std::string> rotate_schem_properties(
