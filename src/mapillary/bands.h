@@ -4,6 +4,7 @@
 #include <cmath>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <vector>
 namespace arnis::mapillary::bands
 {
@@ -29,6 +30,7 @@ struct Lattice
 inline Lattice column_lattice(const std::vector<double> &share)
 {
 	Lattice result;
+	result.model_columns.assign(share.size(), false);
 	if (share.empty())
 		return result;
 	double total = 0;
@@ -98,6 +100,8 @@ inline std::vector<Band> segment(
 		const std::vector<double> &weights, double tau = band_tau)
 {
 	std::size_t n = rows.size();
+	if (weights.size() != n)
+		throw std::invalid_argument("band row weights must match row colours");
 	if (!n)
 		return {};
 	std::vector<double> s0(n + 1);
@@ -160,6 +164,89 @@ inline std::vector<Band> segment(
 		j = i;
 	}
 	std::reverse(out.begin(), out.end());
+	// bands.rs::segment_bands: missing rows inherit their nearest band colour.
+	const auto original = out;
+	for (auto &band : out) {
+		if (band.lab)
+			continue;
+		std::size_t nearest = std::numeric_limits<std::size_t>::max();
+		for (const auto &candidate : original) {
+			if (!candidate.lab)
+				continue;
+			auto gap = [](std::size_t a, std::size_t b) { return a > b ? a - b : b - a; };
+			const auto distance = std::min(
+					gap(candidate.first, band.last), gap(band.first, candidate.last));
+			if (distance < nearest) {
+				nearest = distance;
+				band.lab = candidate.lab;
+			}
+		}
+	}
+	auto distance = [](const auto &a, const auto &b) {
+		return std::sqrt((a[0] - b[0]) * (a[0] - b[0]) + (a[1] - b[1]) * (a[1] - b[1]) +
+						 (a[2] - b[2]) * (a[2] - b[2]));
+	};
+	auto merge = [&](const Band &a, const Band &b) {
+		Band joined{a.first, b.last, a.lab ? a.lab : b.lab,
+				a.rows_with_wall + b.rows_with_wall};
+		const double weight = s0[b.last + 1] - s0[a.first];
+		if (weight > 1e-9) {
+			std::array<double, 3> colour{};
+			for (unsigned c = 0; c < 3; ++c)
+				colour[c] = (s1[b.last + 1][c] - s1[a.first][c]) / weight / (c ? 1 : .5);
+			joined.lab = colour;
+		}
+		return joined;
+	};
+	// Merge shading changes, retaining sharp material boundaries.
+	for (std::size_t k = 0; k + 1 < out.size();) {
+		const auto a = out[k], b = out[k + 1];
+		const double step = b.first && rows[b.first - 1] && rows[b.first]
+									? distance(*rows[b.first - 1], *rows[b.first])
+									: 0;
+		if (a.lab && b.lab &&
+				std::hypot((*a.lab)[1] - (*b.lab)[1], (*a.lab)[2] - (*b.lab)[2]) < .02 &&
+				std::abs((*a.lab)[0] - (*b.lab)[0]) < .12 && step < tau) {
+			out[k] = merge(a, b);
+			out.erase(out.begin() + k + 1);
+			k = 0;
+		} else {
+			++k;
+		}
+	}
+	for (std::size_t k = 1; k + 1 < out.size();) {
+		const auto band = out[k];
+		if (band.first != band.last || !band.lab) {
+			++k;
+			continue;
+		}
+		const double before = out[k - 1].lab ? distance(*out[k - 1].lab, *band.lab) : 9;
+		const double after = out[k + 1].lab ? distance(*out[k + 1].lab, *band.lab) : 9;
+		const bool use_previous = before <= after;
+		if (!(use_previous ? out[k - 1].lab : out[k + 1].lab) ||
+				std::min(before, after) > 2 * tau) {
+			++k;
+			continue;
+		}
+		if (use_previous)
+			out[k - 1] = merge(out[k - 1], band);
+		else
+			out[k + 1] = merge(band, out[k + 1]);
+		out.erase(out.begin() + k);
+		k = 1;
+	}
+	if (out.size() >= 2) {
+		auto &last = out.back();
+		const auto &previous = out[out.size() - 2];
+		if (last.last - last.first < 2 && last.lab && previous.lab &&
+				(*last.lab)[0] < .35 && (*previous.lab)[0] - (*last.lab)[0] > .25)
+			last.lab = previous.lab;
+		auto &first = out.front();
+		const auto &second = out[1];
+		if (first.last - first.first < 2 && first.lab && second.lab &&
+				(*first.lab)[0] < .4 && (*second.lab)[0] - (*first.lab)[0] > .25)
+			first.lab = second.lab;
+	}
 	return out;
 }
 } // namespace arnis::mapillary::bands

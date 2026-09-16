@@ -249,9 +249,11 @@ std::optional<bool> canopy_tree_verdict(
 }
 
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
-		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z)
+		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
+		const bridges::BridgeSurfaceMap *bridge_surface, double scale)
 {
 	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
+			(bridge_surface && bridge_surface->contains(x, z)) ||
 			editor.check_for_block_absolute(x, ground_y + 1, z))
 		return;
 	if (!editor.check_for_block_absolute(x, ground_y, z,
@@ -264,54 +266,104 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 										 z - editor.mg->node_min.Z})
 							   : 0;
 	const auto h = land_cover::coord_hash(x, z);
+	auto rng = coord_rng(x, z, 0);
 	if (cover == land_cover::LC_TREE_COVER) {
 		// Measured canopy owns density where available.  On no-data cells retain
 		// the old land-cover-only probability, matching Rust's fallback contract.
 		const auto canopy_wants_tree =
 				canopy_tree_verdict(editor, x, z, origin_x, origin_z);
-		if (canopy_wants_tree.value_or(h % 30 == 0)) {
+		constexpr double micro_tree_max_scale = 0.35;
+		const auto tree_rate = scale < micro_tree_max_scale ? 4u : 30u;
+		const auto choice = rng.uniform(tree_rate);
+		if (canopy_wants_tree.value_or(choice == 0)) {
 			if (!editor.place_regional_tree(x, ground_y + 1, z, cover))
-				Tree::create(editor, Coord{x, 1, z}, &building_footprints);
+				Tree::create(
+						editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
+		} else if (choice == 1) {
+			const auto flower_choice = rng.uniform(4);
+			const Block flower = flower_choice == 0	  ? RED_FLOWER
+								 : flower_choice == 1 ? BLUE_FLOWER
+								 : flower_choice == 2 ? YELLOW_FLOWER
+													  : WHITE_FLOWER;
+			editor.set_block_absolute(
+					flower, x, ground_y + 1, z, std::nullopt, std::nullopt);
+		} else if (choice <= 13) {
+			editor.set_block_absolute(
+					GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
 		}
 	} else if (cover == land_cover::LC_CROPLAND) {
-		// The Rust pass uses deterministic crop/irrigation choices.  Keep water
-		// only at the sparse lattice; arbitrary irrigation would flow through a
-		// library host's terrain policy.
-		if (x % 9 == 0 && z % 9 == 0)
+		const bool farmland = editor.check_for_block_absolute(
+				x, ground_y, z, std::optional<std::vector<Block>>({FARMLAND}));
+		const bool enclosed = editor.get_ground_level(x + 1, z) >= ground_y &&
+							  editor.get_ground_level(x - 1, z) >= ground_y &&
+							  editor.get_ground_level(x, z + 1) >= ground_y &&
+							  editor.get_ground_level(x, z - 1) >= ground_y;
+		if (farmland && x % 9 == 0 && z % 9 == 0 && enclosed)
 			editor.set_block_absolute(WATER, x, ground_y, z,
 					std::optional<std::vector<Block>>(std::vector<Block>{FARMLAND}),
 					std::nullopt);
-		else if (h % 76 == 0 && h % 10 < 4)
+		else if (farmland && rng.uniform(76) == 0 && rng.uniform(10) < 4)
 			editor.set_block_absolute(
 					HAY_BALE, x, ground_y + 1, z, std::nullopt, std::nullopt);
-		else {
-			const Block crop = (h % 3 == 0 ? WHEAT : h % 3 == 1 ? CARROTS : POTATOES);
+		else if (farmland) {
+			const auto crop_choice = rng.uniform(3);
+			const Block crop = crop_choice == 0	  ? WHEAT
+							   : crop_choice == 1 ? CARROTS
+												  : POTATOES;
 			editor.set_block_absolute(
 					crop, x, ground_y + 1, z, std::nullopt, std::nullopt);
 		}
-	} else if ((cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES) &&
-			   h % 100 < 30) {
-		editor.set_block_absolute(WATER, x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{MUD, GRASS_BLOCK}),
-				std::nullopt);
-	} else if ((cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES) &&
-			   h % 100 < 75) {
-		editor.set_block_absolute(GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
-	} else if (cover == land_cover::LC_BARE && h % 100 == 0) {
-		editor.set_block_absolute(
-				DEAD_BUSH, x, ground_y + 1, z, std::nullopt, std::nullopt);
-	} else if (cover == land_cover::LC_SHRUBLAND && h % 100 < 2) {
+	} else if (cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES) {
+		const auto choice = rng.uniform(100);
+		if (choice < 30)
+			editor.set_block_absolute(WATER, x, ground_y, z,
+					std::optional<std::vector<Block>>({MUD, GRASS_BLOCK}), std::nullopt);
+		else if (choice < 65)
+			editor.set_block_absolute(
+					GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
+		else if (choice < 75) {
+			editor.set_block_absolute(
+					TALL_GRASS_BOTTOM, x, ground_y + 1, z, std::nullopt, std::nullopt);
+			editor.set_block_absolute(
+					TALL_GRASS_TOP, x, ground_y + 2, z, std::nullopt, std::nullopt);
+		}
+	} else if (cover == land_cover::LC_BARE) {
+		const bool coarse = editor.check_for_block_absolute(
+				x, ground_y, z, std::optional<std::vector<Block>>({COARSE_DIRT}));
+		const auto choice = rng.uniform(100);
+		if (coarse && choice < 6)
+			editor.set_block_absolute(
+					GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
+		else if (coarse && choice < 9)
+			editor.set_block_absolute(
+					OAK_LEAVES, x, ground_y + 1, z, std::nullopt, std::nullopt);
+		else if ((!coarse && choice == 0) || (coarse && choice == 9))
+			editor.set_block_absolute(
+					DEAD_BUSH, x, ground_y + 1, z, std::nullopt, std::nullopt);
+	} else if (cover == land_cover::LC_SHRUBLAND && rng.uniform(100) < 2) {
 		editor.set_block_absolute(
 				OAK_LEAVES, x, ground_y + 1, z, std::nullopt, std::nullopt);
-	} else if (cover == land_cover::LC_GRASSLAND && h % 100 == 55) {
-		const Block flower = h % 4 == 0	  ? RED_FLOWER
-							 : h % 4 == 1 ? BLUE_FLOWER
-							 : h % 4 == 2 ? YELLOW_FLOWER
-										  : WHITE_FLOWER;
-		editor.set_block_absolute(flower, x, ground_y + 1, z, std::nullopt, std::nullopt);
-	} else if ((cover == land_cover::LC_GRASSLAND && h % 100 < 55) ||
-			   (cover == land_cover::LC_SHRUBLAND && h % 100 < 30) ||
-			   (cover == land_cover::LC_TREE_COVER && h % 30 <= 13)) {
+	} else if (cover == land_cover::LC_GRASSLAND) {
+		const auto choice = rng.uniform(100);
+		if (choice < 50)
+			editor.set_block_absolute(
+					GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
+		else if (choice < 55) {
+			editor.set_block_absolute(
+					TALL_GRASS_BOTTOM, x, ground_y + 1, z, std::nullopt, std::nullopt);
+			editor.set_block_absolute(
+					TALL_GRASS_TOP, x, ground_y + 2, z, std::nullopt, std::nullopt);
+		} else if (choice == 55) {
+			const auto flower_choice = rng.uniform(4);
+			const Block flower = flower_choice == 0	  ? RED_FLOWER
+								 : flower_choice == 1 ? BLUE_FLOWER
+								 : flower_choice == 2 ? YELLOW_FLOWER
+													  : WHITE_FLOWER;
+			editor.set_block_absolute(
+					flower, x, ground_y + 1, z, std::nullopt, std::nullopt);
+		}
+	} else if ((cover == land_cover::LC_SHRUBLAND && rng.uniform(100) < 30) ||
+			   (cover == land_cover::LC_TREE_COVER && rng.uniform(30) <= 13)) {
 		editor.set_block_absolute(GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
 	}
 }
@@ -341,7 +393,8 @@ double value_noise_01(int x, int z, int scale)
 void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints, int iter_min_x,
 		int iter_max_x, int iter_min_z, int iter_max_z,
-		const CoordinateBitmap *tunnel_footprint)
+		const CoordinateBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	// Rust parity: src/ground_generation.rs::generate_ground_layer ordering.
 	// xzbbox remains the shared-grid origin; callers may supply strict tile
@@ -417,9 +470,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								? celestial_surface_palette(args.body, slope,
 										  args.celestial_latitude_degrees, ground_y, x, z)
 								: std::pair<Block, Block>{};
-				const Block surface =
-						planetary ? planetary_palette.first
-								  : natural_surface_for(editor, x, ground_y, z);
+				Block surface = planetary ? planetary_palette.first
+										  : natural_surface_for(editor, x, ground_y, z);
 				std::optional<Block> climate_under;
 				if (has_cover && editor.ground) {
 					auto palette = climate::surface_palette(editor.ground->climate(),
@@ -427,31 +479,68 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					if (palette)
 						climate_under = palette->second;
 				}
+				// Rust shoreline parity: blend the immediate ring around ESA or
+				// already-rendered OSM water to sand on gentle terrain. This keeps
+				// water boundaries from exposing abrupt grass/clay edges.
+				if (!planetary && surface != WATER && slope <= 3) {
+					bool near_esa_water = false;
+					if (has_cover) {
+						for (int dz = -1; dz <= 1 && !near_esa_water; ++dz)
+							for (int dx = -1; dx <= 1; ++dx)
+								if ((dx || dz) &&
+										editor.ground->cover_class(
+												{x + dx - xzbbox.min_x(),
+														z + dz - xzbbox.min_z()}) ==
+												land_cover::LC_WATER) {
+									near_esa_water = true;
+									break;
+								}
+					}
+					bool near_placed_water = false;
+					for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
+								 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
+						if (editor.check_for_block_absolute(x + dx, ground_y, z + dz,
+									std::optional<std::vector<Block>>(
+											std::vector<Block>{WATER}))) {
+							near_placed_water = true;
+							break;
+						}
+					if (near_esa_water || near_placed_water) {
+						surface = SAND;
+						climate_under = SANDSTONE;
+					}
+				}
 				editor.set_block_absolute(
 						surface, x, ground_y, z, std::nullopt, std::nullopt);
+				const bool surface_is_water = editor.check_for_block_absolute(x, ground_y,
+						z, std::optional<std::vector<Block>>(std::vector<Block>{WATER}));
+				auto set_under_if_absent = [&](Block block) {
+					if (!editor.check_for_block_absolute(x, ground_y - 1, z))
+						editor.set_block_absolute(
+								block, x, ground_y - 1, z, std::nullopt, std::nullopt);
+				};
 
-				if (planetary) {
-					editor.set_block_absolute(planetary_palette.second, x, ground_y - 1,
-							z, std::nullopt, std::nullopt);
-				} else if (climate_under) {
-					editor.set_block_absolute(*climate_under, x, ground_y - 1, z,
-							std::nullopt, std::nullopt);
-				} else if (surface == SAND) {
-					editor.set_block_absolute(
-							SANDSTONE, x, ground_y - 1, z, std::nullopt, std::nullopt);
-				} else if (surface == STONE || surface == ANDESITE ||
-						   surface == COBBLESTONE || surface == TUFF) {
-					editor.set_block_absolute(
-							STONE, x, ground_y - 1, z, std::nullopt, std::nullopt);
-				} else {
-					editor.set_block_absolute(
-							DIRT, x, ground_y - 1, z, std::nullopt, std::nullopt);
+				// Rust leaves authored/placed water untouched: under-materials must
+				// not be written below a water surface and expose through shallow
+				// rivers or lakes.
+				if (!surface_is_water && planetary) {
+					set_under_if_absent(planetary_palette.second);
+				} else if (!surface_is_water && climate_under) {
+					set_under_if_absent(*climate_under);
+				} else if (!surface_is_water && surface == SAND) {
+					set_under_if_absent(SANDSTONE);
+				} else if (!surface_is_water &&
+						   (surface == STONE || surface == ANDESITE ||
+								   surface == COBBLESTONE || surface == TUFF)) {
+					set_under_if_absent(STONE);
+				} else if (!surface_is_water) {
+					set_under_if_absent(DIRT);
 				}
 			}
 
 			if (!planetary && !in_tunnel)
 				maybe_place_vegetation(editor, x, ground_y, z, building_footprints,
-						xzbbox.min_x(), xzbbox.min_z());
+						xzbbox.min_x(), xzbbox.min_z(), bridge_surface, args.scale);
 
 			// Rust's universal depth pass closes visible gaps below all terrain
 			// columns, including ones whose surface was supplied by OSM.
@@ -497,10 +586,12 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 
 void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints,
-		const CoordinateBitmap *tunnel_footprint)
+		const CoordinateBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	generate_ground_region(editor, args, xzbbox, building_footprints, xzbbox.min_x(),
-			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z(), tunnel_footprint);
+			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z(), tunnel_footprint,
+			bridge_surface);
 }
 
 }

@@ -1327,7 +1327,7 @@ bool generate_world(WorldEditor &editor,
 
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
 	ground_generation::generate_ground_layer(editor, args_, xzbbox, building_footprints,
-			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
+			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint, &bridge_surface);
 	if (args_.fillground)
 		ore_generation::generate_ores(
 				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());

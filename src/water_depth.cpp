@@ -262,9 +262,10 @@ void place_underwater_vegetation(
 					avail);
 			const int plant_top = plant_bottom + used;
 			for (int y = plant_bottom; y < plant_top; ++y)
-				editor.set_block_absolute(
-						KELP_PLANT, x, y, z, std::nullopt, std::nullopt);
-			editor.set_block_absolute(KELP, x, plant_top, z, std::nullopt, std::nullopt);
+				editor.set_block_absolute(KELP_PLANT, x, y, z, std::nullopt,
+						std::optional<std::vector<Block>>({AIR}));
+			editor.set_block_absolute(KELP, x, plant_top, z, std::nullopt,
+					std::optional<std::vector<Block>>({AIR}));
 		}
 		return;
 	}
@@ -280,14 +281,16 @@ void place_underwater_vegetation(
 
 	const int pick = static_cast<int>(land_cover::coord_hash(x + 211, z + 73) % 100);
 	if (pick < 50) {
-		editor.set_block_absolute(SEAGRASS, x, plant_y, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(SEAGRASS, x, plant_y, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
 	} else if (pick < 85 && plant_y + 1 < water_y) {
-		editor.set_block_absolute(
-				TALL_SEAGRASS_BOTTOM, x, plant_y, z, std::nullopt, std::nullopt);
-		editor.set_block_absolute(
-				TALL_SEAGRASS_TOP, x, plant_y + 1, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(TALL_SEAGRASS_BOTTOM, x, plant_y, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
+		editor.set_block_absolute(TALL_SEAGRASS_TOP, x, plant_y + 1, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
 	} else {
-		editor.set_block_absolute(SEA_PICKLE, x, plant_y, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(SEA_PICKLE, x, plant_y, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
 	}
 }
 
@@ -478,35 +481,42 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 		top_block = (value_noise_01(x, z, 6) < 0.4 && depth <= 3) ? SAND : GRAVEL;
 		under_block = STONE;
 	} else if (depth >= 2) {
-		const double jn = value_noise_01(x + 7, z + 13, 22);
-		const int jitter = jn < .34 ? -1 : jn > .66 ? 1 : 0;
-		const int d = std::max(1, depth + jitter);
-		const double warp_x = value_noise_01(x + 901, z + 33, 52);
-		const double warp_z = value_noise_01(x + 17, z + 811, 52);
-		const int wx = x + static_cast<int>((warp_x - 0.5) * 28.0);
-		const int wz = z + static_cast<int>((warp_z - 0.5) * 28.0);
-		auto vn = [&](int dx, int dz, int scale) {
-			return value_noise_01(wx + dx, wz + dz, scale);
-		};
-		if (d <= 1)
-			top_block = SAND;
-		else if (d == 2)
-			top_block = vn(53, 97, 56) > 0.50 ? SAND : GRAVEL;
-		else if (d >= 5 && vn(401, 503, 8) > 0.96)
-			top_block = MAGMA_BLOCK;
-		else if (d >= 5 && vn(727, 911, 8) > 0.96)
-			top_block = SOUL_SAND;
-		else if (vn(73, 109, 64) > 0.74)
-			top_block = CLAY;
-		else if (vn(53, 97, 56) > 0.81)
-			top_block = SAND;
-		else if (vn(211, 41, 44) > 0.88)
-			top_block = DIRT;
-		else if (vn(311, 17, 50) > 0.90)
-			top_block = COARSE_DIRT;
-		else
+		// Rust limits the noise-patched bed palette to depths 2..=6; deeper
+		// columns use a stable gravel cap instead of repeating shoreline tiers.
+		if (depth > 6) {
 			top_block = GRAVEL;
-		under_block = STONE;
+			under_block = STONE;
+		} else {
+			const double jn = value_noise_01(x + 7, z + 13, 22);
+			const int jitter = jn < .34 ? -1 : jn > .66 ? 1 : 0;
+			const int d = std::max(1, depth + jitter);
+			const double warp_x = value_noise_01(x + 901, z + 33, 52);
+			const double warp_z = value_noise_01(x + 17, z + 811, 52);
+			const int wx = x + static_cast<int>((warp_x - 0.5) * 28.0);
+			const int wz = z + static_cast<int>((warp_z - 0.5) * 28.0);
+			auto vn = [&](int dx, int dz, int scale) {
+				return value_noise_01(wx + dx, wz + dz, scale);
+			};
+			if (d <= 1)
+				top_block = SAND;
+			else if (d == 2)
+				top_block = vn(53, 97, 56) > 0.50 ? SAND : GRAVEL;
+			else if (d >= 5 && vn(401, 503, 8) > 0.96)
+				top_block = MAGMA_BLOCK;
+			else if (d >= 5 && vn(727, 911, 8) > 0.96)
+				top_block = SOUL_SAND;
+			else if (vn(73, 109, 64) > 0.74)
+				top_block = CLAY;
+			else if (vn(53, 97, 56) > 0.81)
+				top_block = SAND;
+			else if (vn(211, 41, 44) > 0.88)
+				top_block = DIRT;
+			else if (vn(311, 17, 50) > 0.90)
+				top_block = COARSE_DIRT;
+			else
+				top_block = GRAVEL;
+			under_block = STONE;
+		}
 	}
 
 	if (bed_y > world_editor::min_y())
