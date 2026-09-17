@@ -2,6 +2,7 @@
 #include "bresenham.h"
 #include "../osm_parser.h"
 #include "world_editor.h"
+#include "waterways.h"
 
 #include <vector>
 #include <string>
@@ -12,6 +13,7 @@
 #include <algorithm>
 #include <stdexcept>
 #include <cstdint>
+#include <sstream>
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -39,6 +41,41 @@ int get_waterway_width(const std::string &waterway_type)
 	if (waterway_type == "drain")
 		return 1;
 	return 4;
+}
+
+bool is_channel_waterway(const std::string &type)
+{
+	static const std::vector<std::string> excluded{"dam", "weir", "lock_gate",
+			"waterfall", "rapids", "boatyard", "fuel", "dock", "riverbank", "water_point",
+			"turning_point", "sluice_gate", "fish_pass", "security_lock", "milestone",
+			"check_dam", "floating_barrier"};
+	return std::find(excluded.begin(), excluded.end(), type) == excluded.end();
+}
+
+bool is_underground_waterway(const tags_t &tags)
+{
+	if (const auto it = tags.find("tunnel"); it != tags.end() && it->second != "no" &&
+											 it->second != "0" && it->second != "false")
+		return true;
+	if (const auto it = tags.find("layer"); it != tags.end()) {
+		try {
+			return std::stoi(it->second) < 0;
+		} catch (...) {
+		}
+	}
+	return false;
+}
+
+int waterway_width(const std::string &type, const tags_t &tags)
+{
+	if (const auto it = tags.find("width"); it != tags.end()) {
+		std::istringstream in(it->second);
+		double width = 0;
+		if (in >> width && std::isfinite(width))
+			return width >= 1 ? std::min(MAX_WATERWAY_WIDTH, int(std::lround(width)))
+							  : get_waterway_width(type);
+	}
+	return get_waterway_width(type);
 }
 
 void create_water_channel(
@@ -81,23 +118,10 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &element)
 	if (it == element.tags.end()) {
 		return;
 	}
+	if (!is_channel_waterway(it->second) || is_underground_waterway(element.tags))
+		return;
 
-	int waterway_width = get_waterway_width(it->second);
-
-	auto width_it = element.tags.find("width");
-	if (width_it != element.tags.end()) {
-		const std::string &width_str = width_it->second;
-		try {
-			waterway_width = std::stoi(width_str);
-		} catch (const std::exception &) {
-			try {
-				float f = std::stof(width_str);
-				waterway_width = static_cast<int>(f);
-			} catch (const std::exception &) {
-				// keep default width
-			}
-		}
-	}
+	int channel_width = waterway_width(it->second, element.tags);
 
 	auto layer_it = element.tags.find("layer");
 	if (layer_it != element.tags.end()) {
@@ -132,7 +156,7 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &element)
 													(2 * last))
 							 : std::min(y0, y1);
 			const int seg_water_y = std::min(ramped, editor.get_water_level(bx, bz));
-			create_water_channel(editor, bx, bz, waterway_width, seg_water_y);
+			create_water_channel(editor, bx, bz, channel_width, seg_water_y);
 		}
 	}
 }
