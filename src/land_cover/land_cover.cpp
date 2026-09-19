@@ -7,6 +7,7 @@
 #include "../../arnis_adapter.h"
 #include "../element_processing/bridges.h"
 #include "../bresenham.h"
+#include "../clipping.h"
 #include <queue>
 
 #include <algorithm>
@@ -29,6 +30,40 @@ namespace arnis::land_cover
 {
 namespace
 {
+void merge_ring_segments(std::vector<std::vector<ProcessedNode>> &rings)
+{
+	bool changed = true;
+	while (changed) {
+		changed = false;
+		for (std::size_t i = 0; i < rings.size() && !changed; ++i) {
+			if (rings[i].empty())
+				continue;
+			for (std::size_t j = i + 1; j < rings.size(); ++j) {
+				if (rings[j].empty())
+					continue;
+				auto same = [](const ProcessedNode &a, const ProcessedNode &b) {
+					return a.id == b.id || (a.x == b.x && a.z == b.z);
+				};
+				auto &a = rings[i];
+				auto &b = rings[j];
+				if (same(a.back(), b.front()))
+					a.insert(a.end(), std::next(b.begin()), b.end());
+				else if (same(a.back(), b.back()))
+					a.insert(a.end(), std::next(b.rbegin()), b.rend());
+				else if (same(a.front(), b.back()))
+					a.insert(a.begin(), b.begin(), std::prev(b.end()));
+				else if (same(a.front(), b.front()))
+					a.insert(a.begin(), std::next(b.rbegin()), b.rend());
+				else
+					continue;
+				rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(j));
+				changed = true;
+				break;
+			}
+		}
+	}
+}
+
 double cells_per_meter(const GeographicBounds &bbox, std::size_t grid_width)
 {
 	constexpr double earth_radius_m = 6371000.0;
@@ -489,22 +524,28 @@ void apply_osm_water_override(LandCoverData &data,
 			const auto &rel = e.as_relation();
 			if (!is_water_tags(rel.tags))
 				continue;
-			std::vector<std::vector<std::pair<int, int>>> outer, inner;
+			std::vector<std::vector<ProcessedNode>> outer_nodes, inner_nodes;
 			for (const auto &m : rel.members) {
 				if (m.way.nodes.size() < 3)
 					continue;
-				std::vector<std::pair<int, int>> ring;
-				for (const auto &n : m.way.nodes)
-					ring.push_back(grid(n.x, n.z));
-				const bool closed =
-						ring.front() == ring.back() ||
-						(std::abs(ring.front().first - ring.back().first) <= 1 &&
-								std::abs(ring.front().second - ring.back().second) <= 1);
-				if (!closed)
-					continue;
-				(m.role == ProcessedMemberRole::Inner ? inner : outer)
-						.push_back(std::move(ring));
+				(m.role == ProcessedMemberRole::Inner ? inner_nodes : outer_nodes)
+						.push_back(m.way.nodes);
 			}
+			merge_ring_segments(outer_nodes);
+			merge_ring_segments(inner_nodes);
+			std::vector<std::vector<std::pair<int, int>>> outer, inner;
+			auto convert_rings = [&](const auto &source, auto &dest) {
+				for (const auto &nodes : source) {
+					auto clipped = clipping::clip_water_ring_to_bbox(nodes, bbox);
+					if (!clipped)
+						continue;
+					dest.emplace_back();
+					for (const auto &n : *clipped)
+						dest.back().push_back(grid(n.x, n.z));
+				}
+			};
+			convert_rings(outer_nodes, outer);
+			convert_rings(inner_nodes, inner);
 			for (int z = 0; z < (int)data.height; ++z)
 				for (int x = 0; x < (int)data.width; ++x) {
 					bool in_outer = false;
@@ -547,8 +588,15 @@ void apply_osm_water_override(LandCoverData &data,
 			if (underground || !channel)
 				continue;
 		}
+		const auto clipped_ring =
+				(is_water(w) && w.nodes.size() >= 3)
+						? clipping::clip_water_ring_to_bbox(w.nodes, bbox)
+						: std::optional<std::vector<ProcessedNode>>{};
+		if (is_water(w) && w.nodes.size() >= 3 && !clipped_ring)
+			continue;
+		const auto &source_nodes = clipped_ring ? *clipped_ring : w.nodes;
 		std::vector<std::pair<int, int>> pts;
-		for (const auto &n : w.nodes)
+		for (const auto &n : source_nodes)
 			pts.push_back(grid(n.x, n.z));
 		const bool closed =
 				pts.size() >= 3 &&

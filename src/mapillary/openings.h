@@ -1,11 +1,38 @@
 #pragma once
 #include "project.h"
+#include <cmath>
 #include <cstddef>
 #include <queue>
+#include <string>
 #include <vector>
 namespace arnis::mapillary::openings
 {
 inline constexpr std::size_t pixels_per_metre = 8;
+inline constexpr std::size_t subcell_pixels = 4;
+inline constexpr std::size_t reference_window_subcells = 7;
+inline constexpr double dark_threshold = .12;
+inline constexpr double chroma_threshold = .045;
+inline constexpr double min_width_m = .5, min_height_m = .4, min_fill = .45;
+inline constexpr double door_min_width_m = .8, door_max_width_m = 2.2;
+inline constexpr double door_min_height_m = 1.5, shop_min_height_m = 1.2;
+inline constexpr double shop_max_height_m = 5.0, plinth_max_height_m = 2.0;
+inline constexpr double base_tolerance_m = 1.5;
+inline constexpr double large_width_m = 4.5, large_height_m = 3.5;
+inline constexpr double split_width_m = 2.5, split_height_m = 2.8;
+inline constexpr double narrow_width_m = 1.8, deep_glass = .32;
+inline constexpr double faint_contrast = .10, shadow_chroma = .025;
+inline constexpr double shadow_contrast = .22, lively_lightness_std = .07;
+inline constexpr double floor_gap_m = 1.2, bay_gap_m = .5;
+inline constexpr double unknown_valid = .7, minimum_evidence = .12;
+inline constexpr double rhythm_tolerance_m = .35;
+inline constexpr std::size_t rhythm_min_windows = 4;
+inline constexpr double rhythm_min_support = .6, extend_min_support = .5;
+inline constexpr double extend_evidence = .03;
+inline constexpr bool template_pass = false;
+inline constexpr double template_score = .70;
+inline constexpr std::size_t PPM = pixels_per_metre;
+inline constexpr bool TEMPLATE_PASS = template_pass;
+inline constexpr double TM_SCORE = template_score;
 inline constexpr unsigned char cls_wall = 255, cls_window = 192, cls_door = 128,
 							   cls_unknown = 64, cls_nodata = 0;
 enum class Kind
@@ -15,6 +42,30 @@ enum class Kind
 	Shop,
 	Rejected
 };
+inline const char *kind_name(Kind kind)
+{
+	switch (kind) {
+	case Kind::Window:
+		return "window";
+	case Kind::Door:
+		return "door";
+	case Kind::Shop:
+		return "shop";
+	case Kind::Rejected:
+		return "rejected";
+	}
+	return "rejected";
+}
+inline Kind parse_kind(const std::string &value)
+{
+	if (value == "window")
+		return Kind::Window;
+	if (value == "door")
+		return Kind::Door;
+	if (value == "shop")
+		return Kind::Shop;
+	return Kind::Rejected;
+}
 struct Rect
 {
 	Kind kind{Kind::Rejected};
@@ -24,6 +75,11 @@ struct Rect
 	std::size_t columns{}, rows{};
 	double width_m() const { return (x1 - x0) / pixels_per_metre; }
 	double height_m() const { return (y1 - y0) / pixels_per_metre; }
+	bool valid() const
+	{
+		return x1 > x0 && y1 > y0 && std::isfinite(x0) && std::isfinite(y0) &&
+			   std::isfinite(x1) && std::isfinite(y1);
+	}
 };
 struct Texture
 {
@@ -43,6 +99,12 @@ struct Result
 	std::vector<double> evidence;
 	std::vector<Rect> rectangles;
 	std::vector<bool> mask;
+	bool consistent() const
+	{
+		const auto cells = rows * columns;
+		return colours.size() == cells && classes.size() == cells &&
+			   evidence.size() == cells && mask.size() == cells;
+	}
 };
 inline bool opening_candidate(const projection::Rgb &pixel, const projection::Rgb &wall)
 {
@@ -53,7 +115,9 @@ inline bool opening_candidate(const projection::Rgb &pixel, const projection::Rg
 		reference = [](const projection::Rgb &p) {
 			return (299 * p[0] + 587 * p[1] + 114 * p[2]) / 1000;
 		}(wall);
-	return light < reference * .88 || std::abs(int(pixel[2]) - int(wall[2])) > 35;
+	const double local_lightness = reference / 255.0;
+	return light < reference * (1.0 - dark_threshold * local_lightness) ||
+		   std::abs(int(pixel[2]) - int(wall[2])) > chroma_threshold * 255.0;
 }
 inline std::vector<Rect> components(
 		const std::vector<bool> &mask, std::size_t width, std::size_t height)
@@ -134,8 +198,33 @@ inline Result classify_grid(const std::vector<projection::Rgb> &colours,
 			}
 		}
 	out.rectangles = components(out.mask, columns, rows);
-	for (auto &rect : out.rectangles)
-		rect.kind = Kind::Window;
+	for (auto &rect : out.rectangles) {
+		if (rect.width_m() < min_width_m || rect.height_m() < min_height_m ||
+				rect.fill < min_fill) {
+			rect.kind = Kind::Rejected;
+			rect.reason = "small";
+			continue;
+		}
+		const bool at_base =
+				rect.y1 >= double(rows) - base_tolerance_m * pixels_per_metre;
+		if (at_base && rect.height_m() >= door_min_height_m &&
+				rect.width_m() >= door_min_width_m && rect.width_m() <= door_max_width_m)
+			rect.kind = Kind::Door;
+		else if (at_base && rect.height_m() >= shop_min_height_m &&
+				 rect.height_m() <= shop_max_height_m &&
+				 rect.width_m() > door_max_width_m)
+			rect.kind = Kind::Shop;
+		else
+			rect.kind = Kind::Window;
+		const auto cls = rect.kind == Kind::Door ? cls_door : cls_window;
+		if (rect.kind != Kind::Rejected)
+			for (std::size_t y = std::size_t(rect.y0);
+					y < std::size_t(rect.y1) && y < rows; ++y)
+				for (std::size_t x = std::size_t(rect.x0);
+						x < std::size_t(rect.x1) && x < columns; ++x)
+					if (out.mask[y * columns + x])
+						out.classes[y * columns + x] = cls;
+	}
 	return out;
 }
 } // namespace arnis::mapillary::openings

@@ -409,6 +409,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const bool terrain_enabled = generation_mode_terrain(args.mode);
 	for (int x = min_x; x <= max_x; ++x) {
 		for (int z = min_z; z <= max_z; ++z) {
+			// Rotation expands the output AABB. Rust masks columns whose inverse
+			// rotated coordinate lies outside the original source bbox; otherwise
+			// the expanded corners receive fabricated terrain and vegetation.
+			if (editor.ground && !editor.ground->inside_rotation_mask(x, z))
+				continue;
 			const bool in_tunnel = tunnel_footprint && tunnel_footprint->contains(x, z);
 			// Rust's geo-only mode deliberately bypasses elevation and uses the
 			// configured flat level.  Keep all downstream surface/water decisions

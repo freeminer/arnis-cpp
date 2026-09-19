@@ -94,6 +94,77 @@ std::optional<cache::ImageRecord> parse_image_record(
 		return {};
 	}
 }
+std::optional<PanoMeta> parse_pano_meta(const std::vector<std::uint8_t> &bytes)
+{
+	try {
+		auto j = nlohmann::json::parse(bytes.begin(), bytes.end());
+		PanoMeta result;
+		if (!j.contains("id"))
+			return {};
+		if (j["id"].is_string())
+			result.id = j["id"].get<std::string>();
+		else if (j["id"].is_number_integer())
+			result.id = std::to_string(j["id"].get<std::int64_t>());
+		else
+			return {};
+		const auto *geometry =
+				j.contains("computed_geometry") && !j["computed_geometry"].is_null()
+						? &j["computed_geometry"]
+						: (j.contains("geometry") ? &j["geometry"] : nullptr);
+		if (!geometry || !geometry->contains("coordinates") ||
+				!(*geometry)["coordinates"].is_array() ||
+				(*geometry)["coordinates"].size() < 2)
+			return {};
+		result.lon = (*geometry)["coordinates"][0].get<double>();
+		result.lat = (*geometry)["coordinates"][1].get<double>();
+		auto number = [&](const char *key, double fallback = 0.0) {
+			return j.contains(key) && j[key].is_number() ? j[key].get<double>()
+														 : fallback;
+		};
+		result.alt = number("computed_altitude");
+		const auto compass_key = j.contains("computed_compass_angle") &&
+												 j["computed_compass_angle"].is_number()
+										 ? "computed_compass_angle"
+										 : "compass_angle";
+		result.compass = std::fmod(number(compass_key), 360.0);
+		if (result.compass < 0.0)
+			result.compass += 360.0;
+		if (j.contains("computed_rotation") && j["computed_rotation"].is_array() &&
+				j["computed_rotation"].size() >= 3)
+			result.rotation =
+					std::array<double, 3>{j["computed_rotation"][0].get<double>(),
+							j["computed_rotation"][1].get<double>(),
+							j["computed_rotation"][2].get<double>()};
+		if (j.contains("atomic_scale") && j["atomic_scale"].is_number())
+			result.atomic_scale = j["atomic_scale"].get<double>();
+		result.captured_at = j.value("captured_at", std::int64_t{0});
+		result.sequence = j.value("sequence", std::string{});
+		result.quality = number("quality_score");
+		result.width = j.value("width", 0U);
+		result.height = j.value("height", 0U);
+		if (j.contains("sfm_cluster") && j["sfm_cluster"].is_object() &&
+				j["sfm_cluster"].contains("id"))
+			result.cluster_id = j["sfm_cluster"]["id"].is_string()
+										? j["sfm_cluster"]["id"].get<std::string>()
+										: j["sfm_cluster"]["id"].dump();
+		result.geometry_source =
+				j.contains("computed_geometry") && !j["computed_geometry"].is_null()
+						? GeometrySource::Computed
+						: GeometrySource::Gps;
+		const auto camera = j.value("camera_type", std::string{});
+		result.camera_type =
+				camera.empty() ? (j.value("is_pano", false) ? CameraModel::Spherical
+															: CameraModel::Perspective)
+							   : parse_camera_model(camera);
+		if (j.contains("camera_parameters") && j["camera_parameters"].is_array())
+			for (const auto &value : j["camera_parameters"])
+				if (value.is_number())
+					result.camera_params.push_back(value.get<double>());
+		return result.valid() ? std::optional<PanoMeta>{std::move(result)} : std::nullopt;
+	} catch (...) {
+		return {};
+	}
+}
 std::optional<cache::ImageRecord> Client::image(
 		const std::string &id, const std::string &url) const
 {

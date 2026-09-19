@@ -4,11 +4,14 @@
 #include <cmath>
 #include <limits>
 #include <variant>
+#include <cstdint>
+#include <utility>
 
 namespace arnis::map_transformation::rotate
 {
 
-void Rotator::operate(std::vector<ProcessedElement> &elements, cartesian::XZBBox &bbox, Ground &ground)
+void Rotator::operate(
+		std::vector<ProcessedElement> &elements, cartesian::XZBBox &bbox, Ground &ground)
 {
 	rotate_world_with_ground(angle_degrees, elements, bbox, ground);
 }
@@ -45,8 +48,8 @@ std::pair<int, int> rotate_xz_point(
 	return {static_cast<int>(std::round(rx)), static_cast<int>(std::round(rz))};
 }
 
-void rotate_world(
-		double angle_degrees, std::vector<ProcessedElement> &elements, cartesian::XZBBox &xzbbox)
+void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
+		cartesian::XZBBox &xzbbox)
 {
 	if (std::abs(angle_degrees) < std::numeric_limits<double>::epsilon())
 		return;
@@ -102,12 +105,90 @@ void rotate_world_with_ground(double angle_degrees,
 {
 	if (std::abs(angle_degrees) < std::numeric_limits<double>::epsilon())
 		return;
+	const auto original_bbox = bbox;
+	const bool had_elevation = ground.elevation_enabled;
+	const bool had_land_cover = ground.has_land_cover();
+	const bool had_canopy = ground.has_canopy();
 	const double rad = -angle_degrees * M_PI / 180.0;
 	const double cx = (bbox.min_x() + bbox.max_x()) / 2.0;
 	const double cz = (bbox.min_z() + bbox.max_z()) / 2.0;
 	const Ground::RotationMask mask{cx, cz, -std::sin(rad), std::cos(rad), bbox.min_x(),
 			bbox.max_x(), bbox.min_z(), bbox.max_z()};
 	rotate_world(angle_degrees, elements, bbox);
+	const auto new_width = static_cast<std::size_t>(bbox.max_x() - bbox.min_x() + 1);
+	const auto new_height = static_cast<std::size_t>(bbox.max_z() - bbox.min_z() + 1);
+	if (new_width == 0 || new_height == 0)
+		return;
+
+	// Re-sample every optional raster through the inverse rotation.  This is
+	// the same source-coordinate mapping used by Rust's rotator: generated
+	// columns are expressed in the enlarged output bbox, while Ground accessors
+	// continue to receive coordinates relative to the original bbox.
+	std::vector<std::vector<double>> heights;
+	if (had_elevation)
+		heights.assign(new_height, std::vector<double>(new_width));
+	std::vector<std::vector<std::uint8_t>> cover, water;
+	if (had_land_cover) {
+		cover.assign(new_height, std::vector<std::uint8_t>(new_width));
+		water.assign(new_height, std::vector<std::uint8_t>(new_width));
+	}
+	std::vector<std::uint8_t> canopy;
+	if (had_canopy)
+		canopy.assign(new_width * new_height, canopy::CANOPY_NODATA);
+	for (std::size_t zi = 0; zi < new_height; ++zi) {
+		for (std::size_t xi = 0; xi < new_width; ++xi) {
+			const int wx = bbox.min_x() +
+						   static_cast<int>(std::llround(
+								   double(xi) / std::max<std::size_t>(1, new_width - 1) *
+								   (new_width - 1)));
+			const int wz = bbox.min_z() +
+						   static_cast<int>(std::llround(
+								   double(zi) / std::max<std::size_t>(1, new_height - 1) *
+								   (new_height - 1)));
+			auto [ox, oz] = rotate_point(wx, wz, cx, cz, -std::sin(rad), std::cos(rad));
+			const XZPoint source{
+					static_cast<int>(std::llround(ox)) - original_bbox.min_x(),
+					static_cast<int>(std::llround(oz)) - original_bbox.min_z()};
+			if (had_elevation)
+				heights[zi][xi] = ground.level(source);
+			if (had_land_cover) {
+				cover[zi][xi] = ground.cover_class(source);
+				water[zi][xi] = ground.water_distance(source);
+			}
+			if (had_canopy) {
+				canopy[zi * new_width + xi] =
+						ground.canopy_height_m(source).value_or(canopy::CANOPY_NODATA);
+			}
+		}
+	}
+	// Integer coordinate resampling introduces stair-steps. Rust smooths the
+	// rotated relief, but never across water or a water-adjacent shoreline.
+	if (had_elevation && new_width > 2 && new_height > 2)
+		for (int pass = 0; pass < 3; ++pass) {
+			auto previous = heights;
+			for (std::size_t z = 1; z + 1 < new_height; ++z)
+				for (std::size_t x = 1; x + 1 < new_width; ++x) {
+					if (had_land_cover &&
+							(cover[z][x] == land_cover::LC_WATER ||
+									cover[z - 1][x] == land_cover::LC_WATER ||
+									cover[z + 1][x] == land_cover::LC_WATER ||
+									cover[z][x - 1] == land_cover::LC_WATER ||
+									cover[z][x + 1] == land_cover::LC_WATER))
+						continue;
+					const double neighbours = previous[z - 1][x] + previous[z + 1][x] +
+											  previous[z][x - 1] + previous[z][x + 1];
+					heights[z][x] = .7 * previous[z][x] + .075 * neighbours;
+				}
+		}
+	if (had_elevation)
+		ground.set_elevation_data(heights, new_width, new_height, new_width, new_height);
+	ground.set_world_dims(new_width, new_height);
+	if (had_land_cover)
+		ground.set_land_cover_data(cover, water, new_width, new_height);
+	if (had_canopy)
+		ground.set_canopy_data(
+				canopy::CanopyData(std::move(canopy), new_width, new_height), new_width,
+				new_height);
 	// Ground's source grids remain in their original orientation; the mask
 	// inverse-transforms generated points to that source footprint.  This is
 	// the important safety half of Rust's rotation flow and prevents the

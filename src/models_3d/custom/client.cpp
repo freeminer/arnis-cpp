@@ -1,8 +1,8 @@
 #include "client.h"
 #include "archetypes.h"
 #include "../model_asset.h"
+#include "../../world_utils.h"
 #include <algorithm>
-#include <fstream>
 namespace arnis::models_3d::custom
 {
 std::optional<ModelAsset> Client::fetch(const std::string &key)
@@ -41,15 +41,8 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	if (!bytes || bytes->empty() || bytes->size() > max_glb_bytes)
 		return std::nullopt;
 	const auto cached = root_ / (base + ".glb");
-	{
-		std::ofstream out(cached, std::ios::binary | std::ios::trunc);
-		if (!out)
-			return std::nullopt;
-		out.write(reinterpret_cast<const char *>(bytes->data()),
-				static_cast<std::streamsize>(bytes->size()));
-		if (!out)
-			return std::nullopt;
-	}
+	if (!arnis::world_utils::replace_file_atomically(cached, *bytes))
+		return std::nullopt;
 	try {
 		auto asset = load_model_asset_auto(cached);
 		if (asset.max[0] > asset.min[0] && asset.max[1] > asset.min[1] &&

@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <numeric>
 #include <optional>
 
 namespace arnis::mapillary::pose
@@ -35,6 +36,11 @@ inline Vec3 sub(const Vec3 &a, const Vec3 &b)
 {
 	return {a[0] - b[0], a[1] - b[1], a[2] - b[2]};
 }
+inline Vec3 cross(const Vec3 &a, const Vec3 &b)
+{
+	return {a[1] * b[2] - a[2] * b[1], a[2] * b[0] - a[0] * b[2],
+			a[0] * b[1] - a[1] * b[0]};
+}
 
 inline Mat3 axes_from_rotation(const Vec3 &rotation)
 {
@@ -62,6 +68,43 @@ inline Mat3 level_axes(double compass_deg, double roll_deg = 0, double pitch_deg
 	double r = roll_deg * .017453292519943295769;
 	return {add(scale(right, std::cos(r)), scale(d2, std::sin(r))),
 			sub(scale(d2, std::cos(r)), scale(right, std::sin(r))), f2};
+}
+inline double heading_of(const Mat3 &axes)
+{
+	double heading = std::atan2(axes[2][0], axes[2][1]) * 57.295779513082320876;
+	heading = std::fmod(heading, 360.0);
+	return heading < 0.0 ? heading + 360.0 : heading;
+}
+inline std::pair<double, double> roll_pitch_of(const Mat3 &axes, double compass_deg)
+{
+	const auto level = level_axes(compass_deg);
+	const Vec3 forward_local{
+			dot(level[0], axes[2]), dot(level[1], axes[2]), dot(level[2], axes[2])};
+	const Vec3 right_local{
+			dot(level[0], axes[0]), dot(level[1], axes[0]), dot(level[2], axes[0])};
+	const double pitch =
+			std::asin(std::clamp(-forward_local[1], -1.0, 1.0)) * 57.295779513082320876;
+	const Vec3 down{0.0, 1.0, 0.0};
+	const auto right0_raw = cross(down, forward_local);
+	const double right0_norm = norm(right0_raw);
+	if (right0_norm < 1e-9)
+		return {0.0, pitch};
+	const auto right0 = scale(right0_raw, 1.0 / right0_norm);
+	const auto down0 = cross(forward_local, right0);
+	const double roll = std::atan2(dot(right_local, down0), dot(right_local, right0)) *
+						57.295779513082320876;
+	return {roll, pitch};
+}
+inline Mat3 rotate_axes_about_z(const Mat3 &axes, double theta_deg)
+{
+	const double angle = theta_deg * .017453292519943295769;
+	const double s = std::sin(angle), c = std::cos(angle);
+	const Mat3 rotation{{{c, -s, 0.0}, {s, c, 0.0}, {0.0, 0.0, 1.0}}};
+	Mat3 result{};
+	for (unsigned i = 0; i < 3; ++i)
+		for (unsigned j = 0; j < 3; ++j)
+			result[i][j] = dot(axes[i], rotation[j]);
+	return result;
 }
 inline double radial_limit(CameraModel model, const std::vector<double> &parameters)
 {
@@ -174,4 +217,120 @@ public:
 					   : std::nullopt;
 	}
 };
+
+inline Projection project_depth(const Camera &camera, const Vec3 &point)
+{
+	return Projector(camera).project(point);
+}
+
+// Construct the initial camera state from Graph metadata.  SfM rotation is
+// preferred when it passes the same finite/roll sanity gates as Rust; callers
+// that later resolve sequence or cluster poses can replace axes and sources.
+inline Camera camera_from_meta(const PanoMeta &meta, const Frame &frame,
+		const Params &params, const std::optional<Vec3> &shot_rotation = std::nullopt)
+{
+	const auto xy = frame.to_enu(meta.lon, meta.lat);
+	const double compass = std::fmod(meta.compass + 360.0, 360.0);
+	const double height = params.height_prior(meta.camera_type);
+	Camera camera;
+	camera.pano_id = meta.id;
+	camera.model = meta.camera_type;
+	camera.centre = {xy[0], xy[1], meta.alt};
+	camera.axes = level_axes(compass);
+	camera.pose_source = PoseSource::Heading;
+	camera.ground_z = meta.alt - height;
+	camera.cam_height_m = height;
+	camera.ground_source = GroundSource::Default;
+	camera.cluster_id = meta.cluster_id;
+	camera.compass_deg = compass;
+	camera.pose_factor = pose_factor(PoseSource::Heading);
+	camera.width = meta.width;
+	camera.height = meta.height;
+	camera.parameters = meta.camera_params;
+	const auto try_rotation = [&](const std::optional<Vec3> &rotation) {
+		if (!rotation)
+			return false;
+		const auto axes = axes_from_rotation(*rotation);
+		for (const auto &axis : axes)
+			if (!finite(axis))
+				return false;
+		const auto roll_pitch = roll_pitch_of(axes, heading_of(axes));
+		if (meta.is_spherical() && std::abs(roll_pitch.first) > params.roll_max_deg)
+			return false;
+		camera.axes = axes;
+		camera.roll_deg = roll_pitch.first;
+		camera.pitch_deg = roll_pitch.second;
+		camera.pose_source = PoseSource::Sfm;
+		camera.pose_factor = pose_factor(PoseSource::Sfm);
+		return true;
+	};
+	if (!try_rotation(meta.rotation))
+		try_rotation(shot_rotation);
+	return camera;
+}
+
+inline std::optional<std::pair<double, double>> sequence_roll_pitch(const PanoMeta &meta,
+		const std::vector<const PanoMeta *> &sequence_metas, const Params &params,
+		std::size_t *used = nullptr, double *deviation = nullptr)
+{
+	std::vector<double> rolls, pitches;
+	for (const auto *candidate : sequence_metas) {
+		if (!candidate || candidate->id == meta.id ||
+				candidate->sequence != meta.sequence || !candidate->rotation ||
+				std::abs(candidate->captured_at - meta.captured_at) >
+						static_cast<std::int64_t>(params.seq_window_s * 1000.0))
+			continue;
+		const auto axes = axes_from_rotation(*candidate->rotation);
+		const auto rp = roll_pitch_of(axes, heading_of(axes));
+		if (std::abs(rp.first) <= params.roll_max_deg) {
+			rolls.push_back(rp.first);
+			pitches.push_back(rp.second);
+		}
+	}
+	if (used)
+		*used = rolls.size();
+	if (rolls.size() < params.seq_min_panos)
+		return std::nullopt;
+	const double mean = std::accumulate(rolls.begin(), rolls.end(), 0.0) / rolls.size();
+	double variance = 0.0;
+	for (const double roll : rolls)
+		variance += (roll - mean) * (roll - mean);
+	if (deviation)
+		*deviation = std::sqrt(variance / rolls.size());
+	const auto median = [](std::vector<double> values) {
+		std::sort(values.begin(), values.end());
+		const auto middle = values.size() / 2;
+		return values.size() % 2 ? values[middle]
+								 : .5 * (values[middle - 1] + values[middle]);
+	};
+	return std::make_pair(median(rolls), median(pitches));
+}
+
+inline Camera camera_from_meta(const PanoMeta &meta, const Frame &frame,
+		const std::vector<const PanoMeta *> &sequence_metas, const Params &params,
+		const std::optional<Vec3> &shot_rotation = std::nullopt)
+{
+	Camera camera = camera_from_meta(meta, frame, params, shot_rotation);
+	if (camera.pose_source == PoseSource::Sfm || !meta.is_spherical())
+		return camera;
+	double deviation = 0.0;
+	if (const auto sequence = sequence_roll_pitch(
+				meta, sequence_metas, params, nullptr, &deviation)) {
+		const double spread = std::max(deviation, params.roll_sd_floor_deg);
+		// Rust rejects an outlying panorama relative to the sequence median.
+		const auto own_axes = meta.rotation ? axes_from_rotation(*meta.rotation)
+											: level_axes(camera.compass_deg);
+		const auto own = roll_pitch_of(own_axes, heading_of(own_axes));
+		if (!meta.rotation ||
+				std::abs(own.first - sequence->first) <= params.roll_sd_mult * spread) {
+			camera.axes =
+					level_axes(camera.compass_deg, sequence->first, sequence->second);
+			camera.roll_deg = sequence->first;
+			camera.pitch_deg = sequence->second;
+			camera.pose_source = PoseSource::Sequence;
+			camera.pose_factor = pose_factor(PoseSource::Sequence);
+		}
+	}
+	return camera;
+}
 } // namespace arnis::mapillary::pose

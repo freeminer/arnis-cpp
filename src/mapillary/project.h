@@ -102,6 +102,15 @@ inline std::array<double, 2> project(const CameraPose &camera, const Vec3 &point
 			.5 - std::atan2(d[1], horizontal) * 57.295779513082320876 / 180.0};
 }
 
+// Rust's projection API accepts scalar world coordinates at call sites.  Keep
+// that form as a forwarding overload so facade code does not need temporary
+// arrays (and so the C++ API has the same coordinate convention as project.rs).
+inline std::array<double, 2> project(
+		const CameraPose &camera, double x, double y, double z)
+{
+	return project(camera, Vec3{x, y, z});
+}
+
 struct Image
 {
 	unsigned width{}, height{};
@@ -117,6 +126,11 @@ struct Image
 		return pixels[std::size_t(y) * width + x];
 	}
 };
+
+inline std::optional<Rgb> sample_pixel(const Image &image, double u, double v)
+{
+	return image.sample(u, v);
+}
 enum class Reject
 {
 	TooDark,

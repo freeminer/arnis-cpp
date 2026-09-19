@@ -29,8 +29,8 @@ struct WorldMetadata
 };
 struct GenerationBounds
 {
-	int min_x = 0, min_y = world_editor::min_y(), min_z = 0, max_x = 0, max_y = MAX_Y,
-		max_z = 0;
+	int min_x = 0, min_y = world_editor::min_y(), min_z = 0, max_x = 0,
+		max_y = world_editor::world_max_y(), max_z = 0;
 	bool contains(int x, int y, int z) const
 	{
 		return x >= min_x && x <= max_x && y >= min_y && y <= max_y && z >= min_z &&
@@ -50,8 +50,8 @@ inline bool intersects(const GenerationBounds &a, const GenerationBounds &b)
 }
 inline GenerationBounds clamp_bounds(GenerationBounds b)
 {
-	b.min_y = std::clamp(b.min_y, min_y(), MAX_Y);
-	b.max_y = std::clamp(b.max_y, min_y(), MAX_Y);
+	b.min_y = std::clamp(b.min_y, min_y(), world_max_y());
+	b.max_y = std::clamp(b.max_y, min_y(), world_max_y());
 	return b;
 }
 inline WorldMetadata merge_metadata(const WorldMetadata &a, const WorldMetadata &b)
@@ -68,7 +68,7 @@ inline WorldMetadata merge_metadata(const WorldMetadata &a, const WorldMetadata 
 	return m;
 }
 inline GenerationBounds tile_bounds(int tile_x, int tile_z, int tile_size,
-		int min_y_value = world_editor::min_y(), int max_y = MAX_Y)
+		int min_y_value = world_editor::min_y(), int max_y = world_editor::world_max_y())
 {
 	return clamp_bounds({tile_x * tile_size, min_y_value, tile_z * tile_size,
 			(tile_x + 1) * tile_size - 1, max_y, (tile_z + 1) * tile_size - 1});
@@ -516,13 +516,17 @@ struct ChunkToModify
 	}
 	Block get_block(int x, int y, int z) const
 	{
-		y = std::clamp(y, world_editor::min_y(), MAX_Y);
+		if (y > world_editor::world_max_y())
+			return Block{};
+		y = std::max(y, world_editor::min_y());
 		auto *s = find_section(y);
 		return s ? s->get_block(x & 15, y & 15, z & 15) : Block{};
 	}
 	void set_block(int x, int y, int z, Block b)
 	{
-		y = std::clamp(y, world_editor::min_y(), MAX_Y);
+		if (y > world_editor::world_max_y())
+			return;
+		y = std::max(y, world_editor::min_y());
 		section(y).set_block(x & 15, y & 15, z & 15, b);
 	}
 	void prune_empty_sections()
@@ -615,8 +619,10 @@ struct WorldToModify
 	void fill_column(
 			int x, int z, int y_min, int y_max, Block b, bool skip_existing = false)
 	{
-		y_min = std::clamp(y_min, world_editor::min_y(), MAX_Y);
-		y_max = std::clamp(y_max, world_editor::min_y(), MAX_Y);
+		if (y_min > world_editor::world_max_y())
+			return;
+		y_min = std::clamp(y_min, world_editor::min_y(), world_editor::world_max_y());
+		y_max = std::clamp(y_max, world_editor::min_y(), world_editor::world_max_y());
 		if (y_min > y_max)
 			return;
 		for (int y = y_min; y <= y_max; ++y) {
@@ -728,8 +734,10 @@ struct WorldToModify
 	}
 	void fill_chunk(int chunk_x, int chunk_z, int min_y, int max_y, Block b)
 	{
-		min_y = std::clamp(min_y, world_editor::min_y(), MAX_Y);
-		max_y = std::clamp(max_y, world_editor::min_y(), MAX_Y);
+		if (min_y > world_editor::world_max_y())
+			return;
+		min_y = std::clamp(min_y, world_editor::min_y(), world_editor::world_max_y());
+		max_y = std::clamp(max_y, world_editor::min_y(), world_editor::world_max_y());
 		if (min_y > max_y)
 			return;
 		for (int z = 0; z < 16; ++z)
@@ -740,8 +748,10 @@ struct WorldToModify
 	void fill_box(int min_x, int min_y, int min_z, int max_x, int max_y, int max_z,
 			Block b, bool skip_existing = false)
 	{
-		min_y = std::clamp(min_y, world_editor::min_y(), MAX_Y);
-		max_y = std::clamp(max_y, world_editor::min_y(), MAX_Y);
+		if (min_y > world_editor::world_max_y())
+			return;
+		min_y = std::clamp(min_y, world_editor::min_y(), world_editor::world_max_y());
+		max_y = std::clamp(max_y, world_editor::min_y(), world_editor::world_max_y());
 		if (min_x > max_x || min_y > max_y || min_z > max_z)
 			return;
 		for (int z = min_z; z <= max_z; ++z)
@@ -772,8 +782,8 @@ struct WorldToModify
 			int min_x, int min_y, int min_z, int max_x, int max_y, int max_z) const
 	{
 		std::size_t n = 0;
-		min_y = std::clamp(min_y, world_editor::min_y(), MAX_Y);
-		max_y = std::clamp(max_y, world_editor::min_y(), MAX_Y);
+		min_y = std::clamp(min_y, world_editor::min_y(), world_editor::world_max_y());
+		max_y = std::clamp(max_y, world_editor::min_y(), world_editor::world_max_y());
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = min_y; y <= max_y; ++y) {
@@ -792,8 +802,8 @@ struct WorldToModify
 			int min_x, int min_z, int max_x, int max_z, int min_y, int max_y) const
 	{
 		std::vector<int> out;
-		min_y = std::clamp(min_y, world_editor::min_y(), MAX_Y);
-		max_y = std::clamp(max_y, world_editor::min_y(), MAX_Y);
+		min_y = std::clamp(min_y, world_editor::min_y(), world_editor::world_max_y());
+		max_y = std::clamp(max_y, world_editor::min_y(), world_editor::world_max_y());
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x) {
 				int h = min_y - 1;
@@ -1126,7 +1136,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = get_block(x, y, z);
 					if (b && b->id() == from.id()) {
 						set_block(x, y, z, to);
@@ -1141,7 +1151,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = get_block(x, y, z);
 					if (b)
 						set_block(x, y, z, fn(*b));
@@ -1154,7 +1164,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
 						continue;
@@ -1168,7 +1178,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
 						continue;
@@ -1183,7 +1193,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
 						continue;
@@ -1198,7 +1208,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
 						continue;
@@ -1213,7 +1223,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
 						continue;
@@ -1230,7 +1240,7 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
-						y <= std::min(max_y, MAX_Y); ++y) {
+						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
 						continue;
@@ -1272,7 +1282,7 @@ struct WorldToModify
 			int min_x, int min_y, int min_z, int max_x, int max_y, int max_z) const
 	{
 		return min_x <= max_x && min_z <= max_z && min_y <= max_y &&
-			   max_y >= world_editor::min_y() && min_y <= MAX_Y;
+			   max_y >= world_editor::min_y() && min_y <= world_editor::world_max_y();
 	}
 	void copy_box_transform_clipped(const WorldToModify &src, int min_x, int min_y,
 			int min_z, int max_x, int max_y, int max_z, int dst_x, int dst_y, int dst_z,
@@ -1307,7 +1317,7 @@ struct WorldToModify
 						oz = c;
 					}
 					int wy = dst_y + (y - min_y);
-					if (wy < world_editor::min_y() || wy > MAX_Y)
+					if (wy < world_editor::min_y() || wy > world_editor::world_max_y())
 						continue;
 					auto b = src.get_block(x, y, z);
 					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
@@ -1361,7 +1371,8 @@ struct WorldToModify
 					int wy = dst_y + y - min_y;
 					auto b = src.get_block(x, y, z);
 					if (!b || b->id() == block_definitions::AIR.id() ||
-							wy < world_editor::min_y() || wy > MAX_Y)
+							wy < world_editor::min_y() ||
+							wy > world_editor::world_max_y())
 						continue;
 					if (occupied_at(dst_x + ox, wy, dst_z + oz)) {
 						++skipped;
@@ -1403,7 +1414,7 @@ struct WorldToModify
 						oz = c;
 					}
 					int wy = dst_y + y - min_y;
-					if (wy < world_editor::min_y() || wy > MAX_Y) {
+					if (wy < world_editor::min_y() || wy > world_editor::world_max_y()) {
 						++skipped;
 						continue;
 					}
@@ -1453,10 +1464,12 @@ struct WorldToModify
 		return c ? c->find_section(y) : nullptr;
 	}
 	std::array<int, 6> chunk_bounds(int cx, int cz,
-			int min_y_value = world_editor::min_y(), int max_y = MAX_Y) const
+			int min_y_value = world_editor::min_y(),
+			int max_y = world_editor::world_max_y()) const
 	{
 		return {cx << 4, min_y_value, cz << 4, (cx << 4) + 15,
-				std::clamp(max_y, world_editor::min_y(), MAX_Y), (cz << 4) + 15};
+				std::clamp(max_y, world_editor::min_y(), world_editor::world_max_y()),
+				(cz << 4) + 15};
 	}
 	void transform_blocks(const std::function<Block(Block)> &fn)
 	{
@@ -1580,7 +1593,7 @@ struct WorldToModify
 	std::optional<int> highest_block_between(int x, int z, int min_y, int max_y) const
 	{
 		min_y = std::max(min_y, world_editor::min_y());
-		max_y = std::min(max_y, MAX_Y);
+		max_y = std::min(max_y, world_editor::world_max_y());
 		if (min_y > max_y)
 			return std::nullopt;
 		int cx = x >> 4, cz = z >> 4;

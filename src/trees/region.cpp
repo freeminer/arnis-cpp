@@ -263,6 +263,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		}
 		const auto communities = root.value("communities", nlohmann::json::array());
 		const std::string fallback = root.value("default_community", "");
+		bool explicit_fallback = false;
 		for (const auto &json : communities) {
 			Data::Community community;
 			community.habitat = habitat_from_string(json.value("habitat", "lowland"));
@@ -303,11 +304,19 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 				continue;
 			community.species = std::move(species);
 			const auto idx = out.communities.size();
-			if (json.value("name", "") == fallback)
+			if (!fallback.empty() && json.value("name", "") == fallback) {
 				out.fallback = idx;
+				explicit_fallback = true;
+			}
 			out.by_habitat[habitat_index(community.habitat)].push_back(idx);
 			out.communities.push_back(std::move(community));
 		}
+		if (!explicit_fallback)
+			for (std::size_t i = 0; i < out.communities.size(); ++i)
+				if (out.communities[i].habitat == Habitat::Lowland) {
+					out.fallback = i;
+					break;
+				}
 	};
 	load_pack(source.realm_path("region.json"), data->realm);
 	if (data->realm.empty())

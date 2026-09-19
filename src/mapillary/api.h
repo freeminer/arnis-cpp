@@ -1,5 +1,6 @@
 #pragma once
 #include "cache.h"
+#include "types.h"
 #include <functional>
 #include <map>
 namespace arnis::mapillary
@@ -18,6 +19,7 @@ std::optional<std::vector<SearchCell>> search_cells(
 		const SearchCell &bounds, std::size_t maximum = mapillary_max_cells);
 std::vector<cache::ImageRecord> parse_search_response(const std::vector<std::uint8_t> &);
 std::optional<cache::ImageRecord> parse_image_record(const std::vector<std::uint8_t> &);
+std::optional<PanoMeta> parse_pano_meta(const std::vector<std::uint8_t> &);
 class Client
 {
 	cache::Layout cache_;

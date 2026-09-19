@@ -1,4 +1,5 @@
 #include "client.h"
+#include "../../world_utils.h"
 #include <fstream>
 #include <cstdio>
 namespace arnis::models_3d::wikidata_client
@@ -52,16 +53,7 @@ bool save_cached(const std::filesystem::path &b, const std::string &u,
 		return false;
 	auto p = cache_path(b, u);
 	std::filesystem::create_directories(p.parent_path());
-	auto t = p;
-	t += ".tmp";
-	std::ofstream out(t, std::ios::binary);
-	if (!out)
-		return false;
-	out.write(reinterpret_cast<const char *>(v.data()), std::streamsize(v.size()));
-	out.close();
-	std::error_code ec;
-	std::filesystem::rename(t, p, ec);
-	return !ec;
+	return arnis::world_utils::replace_file_atomically(p, v);
 }
 std::size_t clear_cache(const std::filesystem::path &b)
 {
@@ -70,7 +62,10 @@ std::size_t clear_cache(const std::filesystem::path &b)
 		return 0;
 	std::size_t n = 0;
 	for (auto &e : std::filesystem::directory_iterator(d)) {
-		if (e.path().extension() == ".bin" || e.path().extension() == ".tmp") {
+		const auto filename = e.path().filename().string();
+		if (e.path().extension() == ".bin" ||
+				filename.find(".bin.tmp") != std::string::npos ||
+				e.path().extension() == ".tmp") {
 			std::error_code ec;
 			std::filesystem::remove(e.path(), ec);
 			if (!ec)
