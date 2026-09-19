@@ -28,6 +28,8 @@ bool usgs_3dep_covers(const GeoBBox &bbox)
 }
 std::vector<Source> select_sources(const GeoBBox &bbox, SourceMode mode)
 {
+	if (mode == SourceMode::Planetary)
+		return {};
 	if (mode == SourceMode::AwsOnly)
 		return {Source::AWS};
 	if (mode == SourceMode::GlobalOnly)

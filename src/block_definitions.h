@@ -68,7 +68,8 @@ Block get_random_floor_block();
 // remains for older callers that deliberately use the host-global palette RNG.
 Block get_random_floor_block(ChaCha8Rng &rng);
 Block get_window_block_for_building_type(const std::string &building_type);
-Block get_window_block_for_building_type(const std::string &building_type, ChaCha8Rng &rng);
+Block get_window_block_for_building_type(
+		const std::string &building_type, ChaCha8Rng &rng);
 Block get_stair_block_for_material(const Block &material);
 BlockWithProperties create_stair_with_properties(
 		const Block &base_stair_block, StairFacing facing, StairShape shape);
@@ -106,6 +107,7 @@ extern Block DEEPSLATE_BRICKS;
 extern Block DIORITE;
 extern Block DIRT;
 extern Block END_STONE_BRICKS;
+extern Block END_STONE;
 extern Block FARMLAND;
 extern Block GLASS;
 extern Block GLOWSTONE;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 namespace arnis::building_facades
 {
@@ -20,8 +21,17 @@ struct Choice
 	std::size_t entry = 0;
 	double phase_m = 0;
 };
+enum class Fallback
+{
+	Own,
+	Related,
+	Default,
+	WholeSet
+};
 std::uint64_t hash64(std::uint64_t);
 double score(const Entry &, double wall_height_m);
+std::pair<std::vector<std::size_t>, Fallback> candidates(
+		const std::vector<Entry> &, buildings::BuildingCategory);
 std::vector<std::size_t> shortlist(
 		const std::vector<Entry> &, buildings::BuildingCategory, double wall_height_m);
 std::size_t slot(int x, int z, std::size_t count);

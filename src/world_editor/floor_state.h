@@ -22,6 +22,8 @@ struct FloorState
 	int world_min_y = DEFAULT_MIN_Y;
 	int world_max_y = DEFAULT_MAX_Y;
 	int terrain_floor_y = DEFAULT_MIN_Y;
+	int terrain_top_y = DEFAULT_GROUND_LEVEL;
+	std::uint16_t base_chunk_block_id = 0;
 	int base_chunk_y = DEFAULT_GROUND_LEVEL;
 };
 
@@ -51,6 +53,11 @@ inline std::pair<std::int8_t, std::int8_t> world_section_range()
 			static_cast<std::int8_t>(world_max_y() >> 4)};
 }
 
+inline std::int8_t min_section_y()
+{
+	return static_cast<std::int8_t>(min_y() >> 4);
+}
+
 inline void set_terrain_floor_y(int ground_level)
 {
 	const int floor = std::max(min_y(), ground_level - TERRAIN_FLOOR_DEPTH);
@@ -63,6 +70,16 @@ inline int terrain_floor_y()
 	return FLOOR_STATE.terrain_floor_y;
 }
 
+inline void set_terrain_top_y(int y)
+{
+	FLOOR_STATE.terrain_top_y = std::clamp(y, min_y(), world_max_y());
+}
+
+inline int terrain_top_y()
+{
+	return FLOOR_STATE.terrain_top_y;
+}
+
 inline void set_base_chunk_y(int y)
 {
 	FLOOR_STATE.base_chunk_y = y;
@@ -71,5 +88,17 @@ inline void set_base_chunk_y(int y)
 inline int base_chunk_y()
 {
 	return FLOOR_STATE.base_chunk_y;
+}
+
+// Backend-neutral equivalent of Rust's base_chunk_block state.  Exporters can
+// translate the numeric block id to their native Block representation.
+inline void set_base_chunk_block_id(std::uint16_t id)
+{
+	FLOOR_STATE.base_chunk_block_id = id;
+}
+
+inline std::uint16_t base_chunk_block_id()
+{
+	return FLOOR_STATE.base_chunk_block_id;
 }
 }

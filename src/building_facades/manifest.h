@@ -16,5 +16,6 @@ public:
 	static std::optional<FacadeSet> load_directory(
 			const std::filesystem::path &, std::vector<std::string> *rejected = nullptr);
 	const std::vector<Entry> &entries() const { return entries_; }
+	std::vector<std::size_t> in_category(buildings::BuildingCategory) const;
 };
 }

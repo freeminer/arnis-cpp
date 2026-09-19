@@ -87,30 +87,36 @@ double score(const Entry &e, double h)
 		   PARTIAL * std::abs(h / sm - std::round(h / sm)) +
 		   (e.has_ground_floor ? 0 : NO_GROUND);
 }
+std::pair<std::vector<std::size_t>, Fallback> candidates(
+		const std::vector<Entry> &entries, buildings::BuildingCategory category)
+{
+	std::vector<std::size_t> out;
+	const auto append = [&](buildings::BuildingCategory wanted) {
+		for (std::size_t i = 0; i < entries.size(); ++i)
+			if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
+						wanted) != entries[i].categories.end() &&
+					std::find(out.begin(), out.end(), i) == out.end())
+				out.push_back(i);
+	};
+	append(category);
+	if (!out.empty())
+		return {std::move(out), Fallback::Own};
+	for (const auto fallback : related(category))
+		append(fallback);
+	if (!out.empty())
+		return {std::move(out), Fallback::Related};
+	append(buildings::BuildingCategory::Default);
+	if (!out.empty())
+		return {std::move(out), Fallback::Default};
+	for (std::size_t i = 0; i < entries.size(); ++i)
+		out.push_back(i);
+	return {std::move(out), Fallback::WholeSet};
+}
 std::vector<std::size_t> shortlist(
 		const std::vector<Entry> &entries, buildings::BuildingCategory category, double h)
 {
-	std::vector<std::size_t> out;
-	for (std::size_t i = 0; i < entries.size(); ++i)
-		if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
-					category) != entries[i].categories.end())
-			out.push_back(i);
-	if (out.empty())
-		for (const auto related_category : related(category))
-			for (std::size_t i = 0; i < entries.size(); ++i)
-				if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
-							related_category) != entries[i].categories.end() &&
-						std::find(out.begin(), out.end(), i) == out.end())
-					out.push_back(i);
-	if (out.empty())
-		for (std::size_t i = 0; i < entries.size(); ++i)
-			if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
-						buildings::BuildingCategory::Default) !=
-					entries[i].categories.end())
-				out.push_back(i);
-	if (out.empty())
-		for (std::size_t i = 0; i < entries.size(); ++i)
-			out.push_back(i);
+	auto [out, fallback] = candidates(entries, category);
+	(void)fallback;
 	std::sort(out.begin(), out.end(), [&](auto a, auto b) {
 		auto sa = score(entries[a], h), sb = score(entries[b], h);
 		return sa == sb ? entries[a].file < entries[b].file : sa < sb;

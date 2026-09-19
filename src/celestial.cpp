@@ -6,6 +6,8 @@
 #include "../../arnis_adapter.h"
 
 #include <cmath>
+#include <cctype>
+#include <string>
 
 namespace arnis
 {
@@ -21,6 +23,50 @@ std::string_view celestial_body_name(CelestialBody body)
 		return "mars";
 	}
 	return "earth";
+}
+
+std::string_view celestial_body_display_name(CelestialBody body)
+{
+	switch (body) {
+	case CelestialBody::Earth:
+		return "Earth";
+	case CelestialBody::Moon:
+		return "Moon";
+	case CelestialBody::Mars:
+		return "Mars";
+	}
+	return "Earth";
+}
+
+CelestialBody celestial_body_from_string(std::string_view value)
+{
+	std::string normalized(value);
+	for (char &c : normalized)
+		c = static_cast<char>(std::tolower(static_cast<unsigned char>(c)));
+	const auto first = normalized.find_first_not_of(" \t\r\n");
+	if (first != std::string::npos)
+		normalized.erase(0, first);
+	const auto last = normalized.find_last_not_of(" \t\r\n");
+	if (last != std::string::npos)
+		normalized.erase(last + 1);
+	if (normalized == "moon" || normalized == "luna")
+		return CelestialBody::Moon;
+	if (normalized == "mars")
+		return CelestialBody::Mars;
+	return CelestialBody::Earth;
+}
+
+std::string_view celestial_body_biome(CelestialBody body)
+{
+	switch (body) {
+	case CelestialBody::Moon:
+		return "minecraft:stony_peaks";
+	case CelestialBody::Mars:
+		return "minecraft:badlands";
+	case CelestialBody::Earth:
+		return "minecraft:plains";
+	}
+	return "minecraft:plains";
 }
 
 bool is_earth(CelestialBody body)
@@ -82,11 +128,8 @@ std::pair<Block, Block> celestial_surface_palette(CelestialBody body, int slope,
 	using namespace block_definitions;
 	if (body == CelestialBody::Earth)
 		return {GRASS_BLOCK, DIRT};
-	// The Luanti host does not expose an end-stone node.  Its stonebrick is the
-	// established nearest material in the host palette and retains one uniform
-	// regolith surface as the Rust path intends.
 	if (body == CelestialBody::Moon)
-		return {END_STONE_BRICKS, END_STONE_BRICKS};
+		return {END_STONE, END_STONE};
 
 	const auto h = land_cover::coord_hash(x, z);
 	if (std::abs(latitude_degrees) > 74.0 && slope <= 4) {

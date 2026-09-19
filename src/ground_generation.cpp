@@ -406,11 +406,16 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const int max_z = std::min(iter_max_z, xzbbox.max_z());
 	if (min_x > max_x || min_z > max_z)
 		return;
+	const bool terrain_enabled = generation_mode_terrain(args.mode);
 	for (int x = min_x; x <= max_x; ++x) {
 		for (int z = min_z; z <= max_z; ++z) {
 			const bool in_tunnel = tunnel_footprint && tunnel_footprint->contains(x, z);
-			const int ground_y = editor.get_ground_level(x, z);
-			const int slope = local_slope(editor, x, z);
+			// Rust's geo-only mode deliberately bypasses elevation and uses the
+			// configured flat level.  Keep all downstream surface/water decisions
+			// on that same height rather than merely disabling the provider fetch.
+			const int ground_y =
+					terrain_enabled ? editor.get_ground_level(x, z) : args.ground_level;
+			const int slope = terrain_enabled ? local_slope(editor, x, z) : 0;
 			const auto relative = XZPoint{x - xzbbox.min_x(), z - xzbbox.min_z()};
 			const bool planetary = !is_earth(args.body);
 			const bool has_cover =
@@ -422,7 +427,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			// Probe each column at its own terrain level. Using the outer
 			// ground_y for neighbours misses OSM water on sloped terrain.
 			auto has_water_in_column = [&](int wx, int wz) {
-				const int neighbour_ground = editor.get_ground_level(wx, wz);
+				const int neighbour_ground = terrain_enabled
+													 ? editor.get_ground_level(wx, wz)
+													 : args.ground_level;
 				for (int dy = 0; dy <= 2; ++dy)
 					if (editor.check_for_block_absolute(wx, neighbour_ground + dy, wz,
 								std::optional<std::vector<Block>>(
@@ -552,8 +559,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				for (int dx = -1; dx <= 1; ++dx)
 					for (int dz = -1; dz <= 1; ++dz)
 						if (dx || dz)
-							lowest = std::min(
-									lowest, editor.get_ground_level(x + dx, z + dz));
+							lowest = std::min(lowest,
+									terrain_enabled
+											? editor.get_ground_level(x + dx, z + dz)
+											: args.ground_level);
 				const int depth = std::clamp(ground_y - lowest + 1, 2, 64);
 				editor.fill_column_absolute(STONE, x, z,
 						std::max(world_editor::terrain_floor_y() + 1, ground_y - depth),

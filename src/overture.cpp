@@ -816,6 +816,30 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 			http_pmtiles_building_source(fallback_archive), bbox, scale);
 }
 
+std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
+		double max_lat, double max_lng, double scale, bool debug, OvertureSource source)
+{
+	const geographic::LLBBox bbox(min_lat, min_lng, max_lat, max_lng);
+	if (source == OvertureSource::Parquet) {
+#if defined(USE_ARROW) && USE_ARROW
+		// The embedding application supplies the cached partition path; the
+		// default path keeps this overload deterministic for library callers.
+		return fetch_overture_buildings_from(
+				parquet_building_source(
+						std::filesystem::path("overture-buildings.parquet")),
+				bbox, scale);
+#else
+		if (debug)
+			std::cerr
+					<< "Overture Maps: GeoParquet requested but Arrow support is disabled.\n";
+		return {};
+#endif
+	}
+	// Tiles and Auto both use the range-backed PMTiles provider here. Auto's
+	// higher-level caller can retry with Parquet when it has a partition path.
+	return fetch_overture_buildings(min_lat, min_lng, max_lat, max_lng, scale, debug);
+}
+
 std::vector<ProcessedElement> deduplicate_against_osm(
 		std::vector<ProcessedElement> overture_elements,
 		const std::vector<ProcessedElement> &osm_elements)

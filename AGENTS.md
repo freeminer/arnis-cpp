@@ -20,6 +20,7 @@ These instructions apply to all work under `src/mapgen/earth/arnis-cpp/`.
 - Prefer larger end-to-end chunks: API, implementation, call-site wiring, lifecycle handling, and focused verification together.
 - Extract shared helpers (for example `process_element`) before duplicating logic across sequential and tiled paths.
 - Keep the sequential path working while adding parallel/tiled behavior; both paths must call the same element dispatcher.
+- Try keep classes, functions, variables naming from rust.
 
 ## Parity requirements
 

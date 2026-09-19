@@ -124,11 +124,16 @@ void fill_nan_values(std::vector<std::vector<double>> &heights)
 						const int nx = static_cast<int>(x) + dx;
 						const int nz = static_cast<int>(z) + dz;
 						if (nx < 0 || nz < 0 || nz >= static_cast<int>(snapshot.size()) ||
-							nx >= static_cast<int>(snapshot[static_cast<std::size_t>(nz)].size()))
+								nx >= static_cast<int>(
+											  snapshot[static_cast<std::size_t>(nz)]
+													  .size()))
 							continue;
 						const double value = snapshot[static_cast<std::size_t>(nz)]
-									[static_cast<std::size_t>(nx)];
-						if (!std::isnan(value)) { sum += value; ++count; }
+													 [static_cast<std::size_t>(nx)];
+						if (!std::isnan(value)) {
+							sum += value;
+							++count;
+						}
 					}
 				if (count > 0) {
 					heights[z][x] = sum / count;
@@ -143,41 +148,15 @@ void filter_elevation_outliers(std::vector<std::vector<double>> &heights)
 {
 	if (heights.empty() || heights.front().empty())
 		return;
-
-	std::vector<double> values;
-	for (const auto &row : heights)
-		for (double value : row)
-			if (std::isfinite(value))
-				values.push_back(value);
-	if (values.size() < 4)
-		return;
-
-	auto nth = [&values](std::size_t index) {
-		std::nth_element(values.begin(), values.begin() + index, values.end());
-		return values[index];
-	};
-	const double q1 = nth(values.size() / 4);
-	const double q3 = nth((values.size() * 3) / 4);
-	const double iqr = q3 - q1;
-	const double lower = q1 - 3.0 * iqr;
-	const double upper = q3 + 3.0 * iqr;
-
-	std::size_t below = 0, above = 0;
-	for (double value : values) {
-		below += value < lower;
-		above += value > upper;
-	}
-	const std::size_t threshold = static_cast<std::size_t>(values.size() * 0.05);
-	const bool filter_lower = below > 0 && below <= threshold;
-	const bool filter_upper = above > 0 && above <= threshold;
-	if (!filter_lower && !filter_upper)
-		return;
-
+	// Rust deliberately uses a fixed physical validity gate.  A statistical
+	// IQR filter incorrectly removes genuine isolated peaks and islands.
+	constexpr double MIN_REASONABLE_M = -500.0;
+	constexpr double MAX_REASONABLE_M = 9000.0;
 	std::size_t filtered = 0;
 	for (auto &row : heights)
 		for (double &value : row)
 			if (std::isfinite(value) &&
-					((filter_lower && value < lower) || (filter_upper && value > upper))) {
+					(value < MIN_REASONABLE_M || value > MAX_REASONABLE_M)) {
 				value = std::numeric_limits<double>::quiet_NaN();
 				++filtered;
 			}

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <optional>
 #include <vector>
+#include "../celestial.h"
 #include <array>
 namespace arnis::elevation::providers
 {
@@ -18,8 +19,16 @@ enum class SourceMode
 {
 	Auto,
 	GlobalOnly,
-	AwsOnly
+	AwsOnly,
+	// Non-terrestrial DEMs are fetched by planetary.cpp.  Keeping this mode in
+	// the common selector prevents an accidental Earth-provider fallback when a
+	// caller is generating a Moon or Mars world.
+	Planetary
 };
+constexpr bool allows_earth_fallback(SourceMode mode)
+{
+	return mode != SourceMode::Planetary;
+}
 // Ordered fetch plan.  Auto deliberately exposes both the regional primary
 // and global fallbacks, mirroring Rust's fetch-time fallback chain.
 std::vector<Source> select_sources(const GeoBBox &, SourceMode = SourceMode::Auto);

@@ -1,6 +1,7 @@
 #pragma once
 #include "../../arnis_adapter.h"
 #include "floodfill_cache.h"
+#include "args.h"
 #include <unordered_map>
 #include <algorithm>
 #include <filesystem>
@@ -35,6 +36,9 @@ struct GenerationOptions
 	std::filesystem::path output_path;
 	std::string level_name;
 	bool map_preview = false, map_item = true, bake_lighting = false, use_3d = true;
+	// Rust's provider selection is carried with generation options so callers
+	// can choose PMTiles, GeoParquet, or the automatic policy explicitly.
+	OvertureSource overture_source = OvertureSource::Auto;
 	int ground_level = 0;
 	int spawn_x = 0, spawn_y = 0, spawn_z = 0;
 	std::string projection_name;
@@ -86,8 +90,14 @@ inline std::filesystem::path generation_output_path(const GenerationOptions &o)
 }
 inline bool valid_generation_options(const GenerationOptions &o)
 {
-	return o.ground_level >= -64 && o.ground_level <= 319 &&
-		   (!o.output_path.empty() || o.level_name.empty());
+	if (o.ground_level < -64 || o.ground_level > 319 ||
+			(!o.output_path.empty() || o.level_name.empty()))
+		return false;
+#if !defined(USE_ARROW) || !USE_ARROW
+	if (o.overture_source == OvertureSource::Parquet)
+		return false;
+#endif
+	return true;
 }
 inline void apply_generation_options(WorldEditor &editor, const GenerationOptions &o)
 {
@@ -129,8 +139,9 @@ struct GenerationProgress
 /// Water surface Y of every still OSM water body, resolved once per element.
 struct StillWaterSurfaces
 {
-	std::unordered_map<std::pair<std::string, std::uint64_t>, int, PairHashStringUint> surfaces;
-	
+	std::unordered_map<std::pair<std::string, std::uint64_t>, int, PairHashStringUint>
+			surfaces;
+
 	int get(const std::string &kind, std::uint64_t id) const
 	{
 		auto it = surfaces.find({kind, id});
@@ -143,8 +154,8 @@ struct StillWaterSurfaces
 };
 
 /// Pre-scan water polygon surfaces so a body spanning many tiles is measured once.
-StillWaterSurfaces prescan_still_surfaces(
-		const std::vector<ProcessedElement> &elements, const Ground *ground, const XZBBox &xzbbox);
+StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &elements,
+		const Ground *ground, const XZBBox &xzbbox);
 inline double generation_stage_progress(const GenerationProgress &p,
 		double world_fraction, double ground_fraction, bool saving)
 {

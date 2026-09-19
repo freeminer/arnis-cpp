@@ -20,6 +20,9 @@ enum class CelestialBody
 constexpr double EARTH_RADIUS_M = 6'371'000.0;
 
 std::string_view celestial_body_name(CelestialBody body);
+std::string_view celestial_body_display_name(CelestialBody body);
+CelestialBody celestial_body_from_string(std::string_view value);
+std::string_view celestial_body_biome(CelestialBody body);
 double celestial_radius_m(CelestialBody body);
 double celestial_meters_per_block(CelestialBody body);
 double celestial_scale_ratio(CelestialBody body);

@@ -178,8 +178,8 @@ ElevationData build_grid(const std::vector<Tile> &tiles, double a, double b, dou
 	out.height = h;
 	out.world_width = w;
 	out.world_height = h;
-	out.heights.assign(h,
-			std::vector<double>(w, std::numeric_limits<double>::quiet_NaN()));
+	out.heights.assign(
+			h, std::vector<double>(w, std::numeric_limits<double>::quiet_NaN()));
 	if (!w || !h)
 		return out;
 	for (std::size_t y = 0; y < h; ++y)
@@ -199,20 +199,20 @@ ElevationData build_processed_grid(const std::vector<Tile> &tiles, double a, dou
 	// Rust order is significant: filters must see missing provider samples as
 	// NaN, otherwise a missing tile becomes a synthetic sea-level plateau.
 	filter_elevation_outliers(out.heights);
-	repair_terrain_anomalies(out.heights);
+	const double meters_per_cell = (w && h)
+			? (repair.bbox_width_m / static_cast<double>(w) +
+					repair.bbox_height_m / static_cast<double>(h)) * 0.5
+			: 0.0;
+	repair_terrain_anomalies(out.heights, meters_per_cell);
 	fill_nan_values(out.heights);
 	if (repair && w && h) {
-		const double meters_per_cell =
-				(repair.bbox_width_m / static_cast<double>(w) +
-						repair.bbox_height_m / static_cast<double>(h)) *
-				0.5;
-		const double sigma_cells = meters_per_cell > 0.0
-								 ? repair.built_up_sigma_m / meters_per_cell
-								 : 0.0;
-		const auto pull_cells = meters_per_cell > 0.0
-							? static_cast<std::uint32_t>(std::max(
-									 0.0, std::round(repair.coastal_pull_m / meters_per_cell)))
-							: 0;
+		const double sigma_cells =
+				meters_per_cell > 0.0 ? repair.built_up_sigma_m / meters_per_cell : 0.0;
+		const auto pull_cells =
+				meters_per_cell > 0.0
+						? static_cast<std::uint32_t>(std::max(0.0,
+								  std::round(repair.coastal_pull_m / meters_per_cell)))
+						: 0;
 		apply_land_cover_repair(out.heights, *repair.data, sigma_cells, pull_cells,
 				meters_per_cell, repair.report);
 	}

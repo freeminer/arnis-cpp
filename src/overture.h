@@ -8,6 +8,7 @@
 #include <cstdint>
 
 #include "../../arnis_adapter.h"
+#include "args.h"
 #include "coordinate_system/geographic/llbbox.h"
 #include "overture/pmtiles.h"
 
@@ -99,6 +100,8 @@ BuildingSource http_pmtiles_building_source(std::string archive_url,
 
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
 		double max_lat, double max_lng, double scale, bool debug);
+std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
+		double max_lat, double max_lng, double scale, bool debug, OvertureSource source);
 
 std::vector<ProcessedElement> deduplicate_against_osm(
 		std::vector<ProcessedElement> overture_elements,

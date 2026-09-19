@@ -11,7 +11,8 @@ struct LandCoverData;
 
 namespace arnis::elevation
 {
-void repair_terrain_anomalies(std::vector<std::vector<double>> &heights);
+void repair_terrain_anomalies(
+		std::vector<std::vector<double>> &heights, double meters_per_cell = 0.0);
 void apply_land_cover_repair(std::vector<std::vector<double>> &heights,
 		land_cover::LandCoverData &land_cover, double built_up_sigma_cells,
 		std::uint32_t coastal_pull_distance_cells, double meters_per_cell,

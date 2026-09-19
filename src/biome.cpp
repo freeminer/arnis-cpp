@@ -1,4 +1,5 @@
 #include "biome.h"
+#include "celestial.h"
 #include "land_cover/land_cover.h"
 #include "../../arnis_adapter.h"
 #include <cmath>
@@ -129,9 +130,8 @@ ChunkBiomeData build_chunk_biomes_for_ground(int chunk_x, int chunk_z,
 	// classification is Earth-only and must not leak into Moon/Mars chunks.
 	if (!ground->is_earth()) {
 		ChunkBiomeData out;
-		const std::string name = ground->celestial_body() == CelestialBody::Moon
-										 ? "minecraft:stony_peaks"
-										 : "minecraft:badlands";
+		const std::string name =
+				std::string(celestial_body_biome(ground->celestial_body()));
 		out.palette.push_back(name);
 		out.horizontal_indices.fill(0);
 		out.bits_per_index = 0;

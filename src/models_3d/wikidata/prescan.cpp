@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <unordered_set>
+#include <utility>
 namespace arnis::models_3d::wikidata
 {
 namespace
@@ -15,6 +16,35 @@ std::string tag(const ProcessedElement &e, const char *n)
 {
 	auto i = e.tags().find(n);
 	return i == e.tags().end() ? std::string{} : i->second;
+}
+std::string trim(std::string value)
+{
+	const auto first = value.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return {};
+	const auto last = value.find_last_not_of(" \t\r\n");
+	return value.substr(first, last - first + 1);
+}
+std::string normalized_name(std::string value)
+{
+	value = trim(std::move(value));
+	std::transform(value.begin(), value.end(), value.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	for (char &c : value)
+		if (c == '_' || c == '-')
+			c = ' ';
+	return value;
+}
+std::string qid_for_name(const std::string &name)
+{
+	const auto wanted = normalized_name(name);
+	if (wanted.empty())
+		return {};
+	for (const auto &qid : wikidata_ids())
+		if (const auto *entry = lookup_wikidata(qid);
+				entry && normalized_name(entry->label) == wanted)
+			return qid;
+	return {};
 }
 bool has(const std::vector<std::pair<std::string, std::uint64_t>> &v,
 		const std::pair<std::string, std::uint64_t> &k)
@@ -146,7 +176,9 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		auto key = std::make_pair(std::string(e.kind()), e.id());
 		if (has(already, key))
 			continue;
-		auto qid = tag(e, "wikidata");
+		auto qid = trim(tag(e, "wikidata"));
+		if (qid.empty())
+			qid = qid_for_name(tag(e, "name"));
 		auto *entry = lookup_wikidata(qid);
 		if (!entry)
 			continue;

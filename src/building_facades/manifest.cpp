@@ -31,6 +31,15 @@ std::optional<buildings::BuildingCategory> category(const std::string &name)
 	return {};
 }
 } // namespace
+std::vector<std::size_t> FacadeSet::in_category(buildings::BuildingCategory wanted) const
+{
+	std::vector<std::size_t> result;
+	for (std::size_t i = 0; i < entries_.size(); ++i)
+		if (std::find(entries_[i].categories.begin(), entries_[i].categories.end(),
+					wanted) != entries_[i].categories.end())
+			result.push_back(i);
+	return result;
+}
 std::optional<FacadeSet> FacadeSet::validate(std::vector<Entry> entries)
 {
 	entries.erase(std::remove_if(entries.begin(), entries.end(),

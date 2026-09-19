@@ -33,6 +33,7 @@
 #include "structures/plane.h"
 #include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
+#include "canopy/canopy.h"
 #include "models_3d/pipeline.h"
 #include "models_3d/placement_executor.h"
 #include "models_3d/custom/client.h"
@@ -787,9 +788,10 @@ bool generate_world(WorldEditor &editor,
 		BuildingFootprintBitmap const &building_footprints, bool elements_prepared)
 {
 	Args effective_args = args_;
+	effective_args.apply_mode_defaults();
 	effective_args.apply_body_defaults();
 	const Args &args = effective_args;
-	if (!valid_scale(args.scale))
+	if (!args.valid())
 		return false;
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
@@ -803,6 +805,12 @@ bool generate_world(WorldEditor &editor,
 										 : args.ground_level;
 	world_editor::set_terrain_floor_y(base_level);
 	world_editor::set_base_chunk_y(base_level);
+	// Match Rust's filler palette for out-of-bounds chunks on non-Earth bodies.
+	const Block filler =
+			args.body == CelestialBody::Moon
+					? END_STONE
+					: (args.body == CelestialBody::Mars ? RED_TERRACOTTA : GRASS_BLOCK);
+	world_editor::set_base_chunk_block_id(filler.id());
 	static const std::vector<ProcessedElement> no_elements;
 	const auto &elements = args.skip_objects() ? no_elements : input_elements;
 	const auto geo = editor.geographic_bounds();
@@ -812,11 +820,11 @@ bool generate_world(WorldEditor &editor,
 	editor.set_regional_tree_placer({});
 	std::shared_ptr<trees::RegionSelector> shared_selector;
 	if (auto selector =
-					args_.legacy_trees
+					args.legacy_trees
 							? std::optional<trees::RegionSelector>{}
 							: trees::RegionSelector::load_for_location(centre_lat,
 									  centre_lon, std::filesystem::path("assets/trees"),
-									  args_.scale, base_level, trees::SizeFilter{},
+									  args.scale, base_level, trees::SizeFilter{},
 									  editor.ground
 											  ? editor.ground->elevation_blocks_per_meter
 											  : 0.0)) {
@@ -834,13 +842,21 @@ bool generate_world(WorldEditor &editor,
 	// projection plumbing while preserving the same suppression/late-placement
 	// ordering.
 	std::vector<landmarks::WorldAnchor> landmark_anchors;
+	auto normalize_qid = [](std::string value) {
+		const auto first = value.find_first_not_of(" \t\r\n");
+		if (first == std::string::npos)
+			return std::string{};
+		const auto last = value.find_last_not_of(" \t\r\n");
+		value = value.substr(first, last - first + 1);
+		return value;
+	};
 	for (const auto &landmark : landmarks::catalogue()) {
 		for (const auto &element : elements) {
 			auto wikidata = element.tags().find("wikidata");
 			const auto key = std::pair<std::string, std::uint64_t>{
 					std::string(element.kind()), element.id()};
-			const bool named_match =
-					wikidata != element.tags().end() && wikidata->second == landmark.qid;
+			const bool named_match = wikidata != element.tags().end() &&
+									 normalize_qid(wikidata->second) == landmark.qid;
 			const bool osm_match =
 					std::find(landmark.osm_ids.begin(), landmark.osm_ids.end(), key) !=
 					landmark.osm_ids.end();
@@ -869,12 +885,12 @@ bool generate_world(WorldEditor &editor,
 			break;
 		}
 	}
-	auto landmark_plan = landmarks::prescan(elements, landmark_anchors, args_.scale);
+	auto landmark_plan = landmarks::prescan(elements, landmark_anchors, args.scale);
 	const auto model_pipeline =
-			args_.use_3d
+			args.use_3d
 					? std::optional<models_3d::Models3dPipeline>(
 							  models_3d::Models3dPipeline::prescan_fetchable_models(
-									  elements, args_.scale,
+									  elements, args.scale,
 									  [&](const std::string &key) {
 										  return wikidata_provider.fetch(key).has_value();
 									  },
@@ -894,8 +910,8 @@ bool generate_world(WorldEditor &editor,
 	}
 	const auto &render_elements = elements_prepared ? elements : ordered_elements;
 	const auto plane_candidates =
-			args_.use_3d
-					? structures::plane::prescan_placements(render_elements, args_.scale)
+			args.use_3d
+					? structures::plane::prescan_placements(render_elements, args.scale)
 					: std::vector<structures::plane::Placement>{};
 	// A fill may be shared by its standalone way and a later relation.  Keep it
 	// only through its last reader, then release it just as the Rust sequential
@@ -924,6 +940,22 @@ bool generate_world(WorldEditor &editor,
 					std::move(land_cover), world_width, world_height);
 		}
 	}
+	// Rust fetches canopy alongside land cover and only enables it for Earth.
+	// Keep the acquisition optional for library hosts: a missing canopy tile
+	// must not prevent terrain generation, while a successful raster is shared
+	// by tree placement and the natural-surface pass.
+	if (editor.ground && args.canopy_height && args.body == CelestialBody::Earth &&
+			!editor.ground->has_canopy()) {
+		const auto geographic = editor.geographic_bounds();
+		const auto world_width = static_cast<std::size_t>(max_x - min_x + 1);
+		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
+		const auto grid_width = std::clamp<std::size_t>(world_width / 4 + 1, 64, 1024);
+		const auto grid_height = std::clamp<std::size_t>(world_height / 4 + 1, 64, 1024);
+		if (auto canopy = canopy::fetch_canopy_data(
+					std::filesystem::path(".arnis_canopy_cache"), geographic[0],
+					geographic[2], geographic[1], geographic[3], grid_width, grid_height))
+			editor.ground->set_canopy_data(std::move(*canopy), world_width, world_height);
+	}
 	if (editor.ground && editor.ground->has_land_cover()) {
 		auto &land_cover = *editor.ground->land_cover;
 		const auto [world_width, world_height] = editor.ground->world_dims();
@@ -946,16 +978,16 @@ bool generate_world(WorldEditor &editor,
 		land_cover::apply_osm_water_override(
 				land_cover, cover_heights, world_width, world_height, elements, xzbbox);
 		land_cover::apply_osm_land_override(
-				land_cover, world_width, world_height, elements, xzbbox, args_.scale);
+				land_cover, world_width, world_height, elements, xzbbox, args.scale);
 		land_cover::apply_bridge_land_cover_repair(land_cover, cover_heights, world_width,
-				world_height, elements, xzbbox, args_.scale);
+				world_height, elements, xzbbox, args.scale);
 		// Each override deliberately invalidates the interpolated shoreline
 		// field. Rebuild it only after the complete Rust-equivalent override
 		// sequence so the ground pass sees OSM-correct water and smooth coasts.
 		land_cover.refresh_water_blend_grid();
 	}
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
-			highways::collect_road_surface_coords(elements, editor, xzbbox, args_.scale));
+			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
 	const auto &road_mask = *road_mask_owner;
 	// Share the road bitmap when no additional paved area contributes cells.
 	// The scope guard releases the generation mask on every exit path.
@@ -969,8 +1001,8 @@ bool generate_world(WorldEditor &editor,
 		~SealedSurfaceScope() { editor.release_sealed_surface(); }
 	} sealed_surface_scope{editor};
 	if (editor.map_decals) {
-		auto context = signage::build_context(elements, args_.signage,
-				decals::detect_region(centre_lat, centre_lon), args_.scale, road_mask);
+		auto context = signage::build_context(elements, args.signage,
+				decals::detect_region(centre_lat, centre_lon), args.scale, road_mask);
 		editor.set_signage_context(context);
 		editor.set_decal_registry(context ? context->registry : nullptr);
 	}
@@ -1008,7 +1040,7 @@ bool generate_world(WorldEditor &editor,
 	auto bridge_structures =
 			bridges::BridgeStructureMap::build(elements, editor, bridge_outlines);
 	auto bridge_surface =
-			bridges::BridgeSurfaceMap::build(elements, bridge_structures, args_.scale);
+			bridges::BridgeSurfaceMap::build(elements, bridge_structures, args.scale);
 	if (shared_selector) {
 		editor.set_regional_tree_placer([&editor, shared_selector, &building_footprints,
 												&bridge_surface](
@@ -1023,15 +1055,15 @@ bool generate_world(WorldEditor &editor,
 		~RegionalTreeScope() { editor.set_regional_tree_placer({}); }
 	} regional_tree_scope{editor};
 	auto building_passages =
-			highways::collect_building_passage_coords(elements, xzbbox, args_.scale);
+			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
 	std::vector<std::pair<int, int>> subway_points;
 	std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
 	auto tunnel_internal_endpoints =
 			highways::collect_tunnel_internal_endpoints(elements, xzbbox);
 	auto tunnel_portals = highways::collect_tunnel_portals(
-			elements, editor, bridge_structures, tunnel_internal_endpoints, args_.scale);
+			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
-			elements, editor, tunnel_internal_endpoints, xzbbox, args_.scale);
+			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	auto rail_bridge_internal_endpoints =
 			railways::collect_rail_bridge_internal_endpoints(elements);
@@ -1331,10 +1363,10 @@ bool generate_world(WorldEditor &editor,
 						editor, element.as_node(), building_footprints, road_mask);
 
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
-	ground_generation::generate_ground_layer(editor, args_, xzbbox, building_footprints,
+	ground_generation::generate_ground_layer(editor, args, xzbbox, building_footprints,
 			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint, &bridge_surface);
 	structures::plane::place_plane_placements(editor, plane_candidates);
-	if (args_.fillground)
+	if (args.fillground)
 		ore_generation::generate_ores(
 				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
 
@@ -1342,13 +1374,13 @@ bool generate_world(WorldEditor &editor,
 			editor, big_water_field, road_mask, tunnel_footprint);
 	if (model_pipeline) {
 		models_3d::place_three_dmr_prescan(
-				three_dmr_provider, editor, model_pipeline->three_dmr(), args_.scale);
+				three_dmr_provider, editor, model_pipeline->three_dmr(), args.scale);
 		models_3d::place_wikidata_prescan(
-				wikidata_provider, editor, model_pipeline->wikidata(), args_.scale);
+				wikidata_provider, editor, model_pipeline->wikidata(), args.scale);
 		models_3d::place_custom_models(
-				*model_pipeline, custom_model_provider, editor, args_.scale);
+				*model_pipeline, custom_model_provider, editor, args.scale);
 	}
-	landmarks::place_all(editor, landmark_plan, args_.scale);
+	landmarks::place_all(editor, landmark_plan, args.scale);
 	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 
 	if (!subway_points.empty()) {
