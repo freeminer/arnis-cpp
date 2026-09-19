@@ -1788,6 +1788,53 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		}
 	}
 }
+// Rust adds a deterministic cap/edge treatment to plain flat roofs.
+void generate_flat_roof_edge_variation(WorldEditor &editor, const ProcessedWay &element,
+		int start_y, int building_height, int abs_offset, Block wall_block,
+		Block accent_block, std::uint64_t seed)
+{
+	if (element.nodes.size() < 2 || element.tags.contains("building:part") ||
+			element.tags.contains("roof:shape"))
+		return;
+	auto rng = element_rng_salted(seed, 0xF1A7E001ULL);
+	if (!rng.random_bool(.55))
+		return;
+	const unsigned variation = rng.uniform(3);
+	const int y = start_y + building_height + abs_offset + 2;
+	std::unordered_set<std::pair<int, int>, PairHash> placed;
+	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+		const auto &a = element.nodes[i];
+		const auto &b = element.nodes[(i + 1) % element.nodes.size()];
+		for (const auto &[x, unused_y, z] :
+				bresenham_line(a.x, start_y, a.z, b.x, start_y, b.z)) {
+			if (!placed.insert({x, z}).second)
+				continue;
+			const Block cap = variation == 0   ? wall_block
+							  : variation == 1 ? STONE_BRICK_SLAB
+											   : accent_block;
+			editor.set_block_absolute(cap, x, y, z, std::vector<Block>{AIR});
+		}
+	}
+}
+
+// Rust extends pitched roofs one and two cells beyond exposed eaves.
+void place_eave_overhang(WorldEditor &editor,
+		const std::vector<std::pair<int, int>> &area, int base_y, int offset,
+		Block roof_block)
+{
+	std::unordered_set<std::pair<int, int>, PairHash> footprint(area.begin(), area.end());
+	for (const auto &[x, z] : area)
+		for (const auto [dx, dz] :
+				{std::pair{1, 0}, std::pair{-1, 0}, std::pair{0, 1}, std::pair{0, -1}})
+			if (!footprint.contains({x + dx, z + dz}))
+				for (int distance = 1; distance <= 2; ++distance) {
+					const int ox = x + dx * distance, oz = z + dz * distance;
+					if (footprint.contains({ox, oz}))
+						break;
+					editor.set_block_absolute(
+							roof_block, ox, base_y + offset, oz, std::vector<Block>{AIR});
+				}
+}
 
 struct PodiumTowerPlan
 {
@@ -1835,6 +1882,84 @@ RoofDistanceGrid roof_edge_distances(const std::vector<std::pair<int, int>> &roo
 		}
 	}
 	return distances;
+}
+
+// Sparse exterior downpipes on eligible convex building corners.
+void generate_corner_downpipes(WorldEditor &editor, const ProcessedWay &element,
+		const building_facade::FacadePlan &facade, BuildingCategory category,
+		BuildingCondition condition, int start_y, int building_height, int abs_offset,
+		std::uint64_t seed)
+{
+	if (element.nodes.size() < 3 || building_height < 10 ||
+			condition != BuildingCondition::Normal ||
+			!(category == BuildingCategory::House ||
+					category == BuildingCategory::Residential ||
+					category == BuildingCategory::Commercial ||
+					category == BuildingCategory::Hotel ||
+					category == BuildingCategory::Historic) ||
+			!element_rng_salted(seed, 0xD0DA1290D0FFAA01ULL).random_bool(.35))
+		return;
+	long long sx = 0, sz = 0;
+	for (const auto &n : element.nodes) {
+		sx += n.x;
+		sz += n.z;
+	}
+	const int cx = static_cast<int>(sx / element.nodes.size());
+	const int cz = static_cast<int>(sz / element.nodes.size());
+	auto rng = element_rng_salted(seed, 0xD0DA1290D0FFAA02ULL);
+	const std::size_t start =
+			rng.uniform(static_cast<std::uint32_t>(element.nodes.size()));
+	for (std::size_t k = 0; k < 2 && k < element.nodes.size(); ++k) {
+		const auto &n = element.nodes[(start + k * element.nodes.size() / 2) %
+									  element.nodes.size()];
+		if (facade.is_party(n.x, n.z))
+			continue;
+		const int ox = n.x + (n.x >= cx ? 1 : -1);
+		const int oz = n.z + (n.z >= cz ? 1 : -1);
+		const int ground = editor.get_ground_level(ox, oz);
+		const int pipe_start = std::min(start_y + 1, ground + 1);
+		for (int h = pipe_start; h <= start_y + building_height; ++h)
+			editor.set_block_absolute(
+					COBBLESTONE_WALL, ox, h + abs_offset, oz, std::vector<Block>{AIR});
+	}
+}
+
+// Hospital wall marker corresponding to Rust's green-cross banner pass.  The
+// C++ backend has no banner block-entity writer, so render the same symbol as
+// a small durable concrete cross on the longest exterior wall.
+void generate_hospital_wall_cross(WorldEditor &editor, const ProcessedWay &element,
+		BuildingCategory category, int start_y, int building_height, int abs_offset)
+{
+	if (category != BuildingCategory::Hospital || element.nodes.size() < 3 ||
+			building_height < 8)
+		return;
+	const ProcessedNode *a = nullptr, *b = nullptr;
+	int best = 0;
+	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+		const auto &p = element.nodes[i];
+		const auto &q = element.nodes[(i + 1) % element.nodes.size()];
+		const int len = std::max(std::abs(q.x - p.x), std::abs(q.z - p.z));
+		if (len > best) {
+			best = len;
+			a = &p;
+			b = &q;
+		}
+	}
+	if (!a || best < 5)
+		return;
+	const int mx = (a->x + b->x) / 2, mz = (a->z + b->z) / 2;
+	const int cx = (element.nodes.front().x + mx) / 2;
+	const int cz = (element.nodes.front().z + mz) / 2;
+	const int nx = std::abs(b->z - a->z) >= std::abs(b->x - a->x) ? 1 : 0;
+	const int nz = nx ? 0 : 1;
+	const int y = start_y + building_height * 2 / 3 + abs_offset;
+	for (int i = -2; i <= 2; ++i) {
+		for (int j = -2; j <= 2; ++j) {
+			if (std::abs(i) == 2 || (j == 0 && std::abs(i) <= 2))
+				editor.set_block_absolute(LIME_CONCRETE, cx + i * nx, y + j, cz + i * nz,
+						std::vector<Block>{AIR});
+		}
+	}
 }
 
 std::optional<PodiumTowerPlan> plan_podium_tower(const ProcessedWay &element,
@@ -2269,6 +2394,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					facade_plan.front_segment.has_value());
 	const WallDepthStyle wall_depth_style = wall_depth_style_for(
 			category, era, detail, cached_footprint_size, clean_visual_seed);
+	const bool wall_depth_piers_active =
+			(wall_depth_style == WallDepthStyle::ModernPillars ||
+					wall_depth_style == WallDepthStyle::InstitutionalBands ||
+					wall_depth_style == WallDepthStyle::HistoricOrnate ||
+					wall_depth_style == WallDepthStyle::SkyscraperFins) ||
+			(wall_depth_style == WallDepthStyle::SubtlePilasters &&
+					element_rng_salted(clean_visual_seed, 7919).uniform(100) < 60);
 	const auto climate = editor->get_ground() ? editor->get_ground()->climate()
 											  : biome::Climate::Temperate;
 	if (!explicit_wall && condition != BuildingCondition::Construction)
@@ -2639,6 +2771,55 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							window_block, has_windows, condition, category, era,
 							clean_visual_seed);
 					editor->set_block_absolute(chosen, bx, h + abs_terrain_offset, bz);
+					// Rust storefronts receive a shallow projecting awning above
+					// street-facing ground-floor glass.  Slabs are used here as the
+					// C++ backend's portable horizontal equivalent of trapdoors.
+					if (chosen == GLASS && storefront && facade_plan.is_street(bx, bz) &&
+							outward != std::pair<int, int>{0, 0} && h == ground_top &&
+							!facade_plan.is_door(bx, bz))
+						editor->set_block_absolute(OAK_SLAB, bx + outward.first,
+								h + 1 + abs_terrain_offset, bz + outward.second,
+								std::vector<Block>{AIR});
+					if (chosen == window_block &&
+							window_archetype == WindowArchetype::ArchedTraditional &&
+							condition == BuildingCondition::Normal &&
+							outward != std::pair<int, int>{0, 0} && above_floor &&
+							floor_row == floor_cycle - 1 && window_col != 1 &&
+							!facade_plan.is_door(bx, bz) && !party_wall)
+						editor->set_block_absolute(STONE_BRICK_SLAB, bx + outward.first,
+								h + abs_terrain_offset, bz + outward.second,
+								std::vector<Block>{AIR});
+					if (category == BuildingCategory::Historic &&
+							condition == BuildingCondition::Normal &&
+							h == start_y_offset + building_height &&
+							outward != std::pair<int, int>{0, 0} && !party_wall)
+						editor->set_block_absolute(STONE_BRICK_SLAB, bx + outward.first,
+								h + abs_terrain_offset + 1, bz + outward.second,
+								std::vector<Block>{AIR});
+					// Residential Rust facades add a shallow sill below ordinary
+					// glazed columns. Keep it outside the wall and clear of doors.
+					if (chosen == window_block && outward != std::pair<int, int>{0, 0} &&
+							(category == BuildingCategory::House ||
+									category == BuildingCategory::Residential) &&
+							condition == BuildingCondition::Normal && h > wall_start &&
+							(h - start_y_offset) % floor_cycle == 1 &&
+							!facade_plan.is_door(bx, bz))
+						editor->set_block_absolute(OAK_SLAB, bx + outward.first,
+								h - 1 + abs_terrain_offset, bz + outward.second,
+								std::vector<Block>{AIR});
+					if (chosen == window_block && (window_col == 0 || window_col == 2) &&
+							h > wall_start && (h - start_y_offset) % floor_cycle == 1 &&
+							(category == BuildingCategory::House ||
+									category == BuildingCategory::Residential) &&
+							condition == BuildingCondition::Normal &&
+							outward != std::pair<int, int>{0, 0} &&
+							!facade_plan.is_door(bx, bz)) {
+						const Block shutter =
+								(clean_visual_seed & 1) ? OAK_TRAPDOOR : SPRUCE_TRAPDOOR;
+						editor->set_block_absolute(shutter, bx + outward.first,
+								h + abs_terrain_offset, bz + outward.second,
+								std::vector<Block>{AIR});
+					}
 					if (window_frame && outward != std::pair<int, int>{0, 0} &&
 							!is_passage && !party_wall && depth_clear &&
 							!facade_plan.is_door(bx, bz) &&
@@ -2663,7 +2844,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						bool relief = false;
 						switch (wall_depth_style) {
 						case WallDepthStyle::SubtlePilasters:
-							relief = window_col == 3;
+							relief = wall_depth_piers_active && window_col == 3;
 							break;
 						case WallDepthStyle::ModernPillars:
 							relief = window_col == 0 || window_col == 5 ||
@@ -2696,6 +2877,17 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							const int ox = bx + outward.first, oz = bz + outward.second;
 							editor->set_block_absolute(accent_block, ox,
 									h + abs_terrain_offset, oz, std::vector<Block>{AIR});
+							// Rust carries low wall-depth details down to the lower
+							// of the wall and protrusion terrain cells on sloped ground.
+							if (h <= start_y_offset + 2) {
+								const int ground =
+										std::min(editor->get_ground_level(bx, bz),
+												editor->get_ground_level(ox, oz));
+								for (int y = ground; y < start_y_offset; ++y)
+									editor->set_block_absolute(accent_block, ox,
+											y + abs_terrain_offset, oz,
+											std::vector<Block>{AIR});
+							}
 							if (wall_depth_style == WallDepthStyle::ReligiousButtress &&
 									h <= start_y_offset + 2)
 								editor->set_block_absolute(accent_block,
@@ -2994,6 +3186,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			}
 		}
 
+		if (!element.tags.contains("building:part"))
+			generate_corner_downpipes(*editor, element, facade_plan, category, condition,
+					start_y_offset, building_height, abs_terrain_offset,
+					clean_visual_seed);
+		generate_hospital_wall_cross(*editor, element, category, start_y_offset,
+				building_height, abs_terrain_offset);
+
 		if (args.interior) {
 			std::string btype = "yes";
 			auto it = element.tags.find("building");
@@ -3120,6 +3319,17 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	} else {
 		// flat roof default - already applied
 	}
+	if (!generated_sloped_roof && args.roof && !podium_tower)
+		generate_flat_roof_edge_variation(*editor, element, start_y_offset,
+				building_height, abs_terrain_offset, wall_block, accent_block,
+				clean_visual_seed);
+	if (generated_sloped_roof && args.roof) {
+		auto overhang_rng = element_rng_salted(clean_visual_seed, 0xEA7E0001ULL);
+		const Block overhang_block =
+				roof_block_from_tags(element, overhang_rng).value_or(floor_block);
+		place_eave_overhang(*editor, cached_floor_area, start_y_offset + building_height,
+				abs_terrain_offset, overhang_block);
+	}
 	// Rust places a small deterministic chimney on pitched residential/farm
 	// roofs. Keep it inside the actual footprint and out of the wall ring.
 	if (generated_sloped_roof &&
@@ -3206,6 +3416,24 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 {
 	using std::int32_t;
 	const auto &floor_area = cached_floor_area;
+	auto fill_shell = [&](const std::unordered_map<std::pair<int32_t, int32_t>, int32_t,
+								  pair_hash> &surface,
+							  Block roof_block, int base_y) {
+		for (const auto &[cell, top] : surface) {
+			const auto [x, z] = cell;
+			int bottom = top;
+			for (const auto &[nx, nz] :
+					{std::pair{x - 1, z}, {x + 1, z}, {x, z - 1}, {x, z + 1}}) {
+				auto it = surface.find({nx, nz});
+				if (it != surface.end())
+					bottom = std::min(bottom, it->second - 1);
+			}
+			bottom = std::max(base_y, bottom);
+			for (int y = bottom; y <= top; ++y)
+				editor.set_block_absolute(
+						roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+		}
+	};
 
 	// Pre-calculate bounds
 	int32_t min_x = std::numeric_limits<int32_t>::max();
@@ -3247,6 +3475,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		int32_t length = max_z - min_z;
 		int32_t building_size = std::max(width, length);
 		bool is_wider_than_long = width > length;
+		std::optional<double> mapped_slope_bearing;
 		if (auto it = element.tags.find("roof:orientation"); it != element.tags.end()) {
 			if (it->second == "along")
 				is_wider_than_long = width >= length;
@@ -3255,6 +3484,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		}
 		if (auto it = element.tags.find("roof:direction"); it != element.tags.end()) {
 			if (auto degrees = parse_roof_direction_degrees(it->second)) {
+				mapped_slope_bearing = *degrees;
 				const double radians = *degrees * std::numbers::pi / 180.0;
 				// OSM bearings use north=0 and east=90.  The ridge is
 				// perpendicular to the requested downhill direction.
@@ -3262,15 +3492,51 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 						std::abs(std::cos(radians)) >= std::abs(std::sin(radians));
 			}
 		}
+		// For rotated near-rectangular footprints, infer the downhill bearing
+		// from the longest boundary edge when no explicit direction is mapped.
+		if (!mapped_slope_bearing && element.nodes.size() > 2) {
+			double best_len = 0.0, best_angle = 0.0;
+			for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+				const auto &a = element.nodes[i];
+				const auto &b = element.nodes[(i + 1) % element.nodes.size()];
+				const double dx = b.x - a.x, dz = b.z - a.z;
+				const double len = dx * dx + dz * dz;
+				if (len > best_len) {
+					best_len = len;
+					best_angle = std::atan2(dz, dx) * 180.0 / std::numbers::pi + 90.0;
+				}
+			}
+			const double nearest_axis = std::fmod(std::abs(best_angle), 90.0);
+			if (best_len > 16.0 && nearest_axis > 5.0 && nearest_axis < 85.0)
+				mapped_slope_bearing = best_angle;
+		}
+		int32_t max_distance = is_wider_than_long ? (length >> 1) : (width >> 1);
+		if (mapped_slope_bearing) {
+			const double radians = *mapped_slope_bearing * std::numbers::pi / 180.0;
+			max_distance = std::max(
+					1, int(std::lround(std::abs(std::sin(radians)) * width / 2.0 +
+									   std::abs(std::cos(radians)) * length / 2.0)));
+		}
 
 		int32_t roof_height_boost = static_cast<int32_t>(
 				3.0 + std::max(1.0, std::log(std::max(1.0,
 											static_cast<double>(building_size) * 0.15))));
 		if (tagged_roof_height)
 			roof_height_boost = *tagged_roof_height;
+		else if (auto it = element.tags.find("roof:angle"); it != element.tags.end()) {
+			std::string angle = it->second;
+			if (angle.size() >= 2 && angle.compare(angle.size() - 2, 2, "\xC2\xB0") == 0)
+				angle.resize(angle.size() - 2);
+			try {
+				const double degrees = std::stod(angle);
+				if (degrees > 0.0 && degrees < 90.0)
+					roof_height_boost = std::max(1,
+							int(std::lround(std::tan(degrees * std::numbers::pi / 180.0) *
+											(max_distance + 1.0))));
+			} catch (...) {
+			}
+		}
 		int32_t roof_peak_height = base_height + roof_height_boost;
-
-		int32_t max_distance = is_wider_than_long ? (length >> 1) : (width >> 1);
 
 		Block roof_block = tagged_roof_block.value_or(
 				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
@@ -3281,8 +3547,16 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		for (auto const &p : floor_area) {
 			int32_t x = p.first;
 			int32_t z = p.second;
-			int32_t distance_to_ridge =
-					is_wider_than_long ? std::abs(z - center_z) : std::abs(x - center_x);
+			int32_t distance_to_ridge;
+			if (mapped_slope_bearing) {
+				const double radians = *mapped_slope_bearing * std::numbers::pi / 180.0;
+				distance_to_ridge =
+						int(std::lround(std::abs((x - center_x) * std::sin(radians) +
+												 (z - center_z) * std::cos(radians))));
+			} else {
+				distance_to_ridge = is_wider_than_long ? std::abs(z - center_z)
+													   : std::abs(x - center_x);
+			}
 
 			int32_t roof_height;
 			if (distance_to_ridge == 0 &&
@@ -3410,9 +3684,36 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		// semicircle over the short axis, rather than a four-sided hip.
 		const int width = std::max(1, max_x - min_x);
 		const int length = std::max(1, max_z - min_z);
-		const bool axis_x = width >= length;
+		bool axis_x = width >= length;
+		if (auto it = element.tags.find("roof:orientation"); it != element.tags.end()) {
+			if (it->second == "along")
+				axis_x = width >= length;
+			else if (it->second == "across")
+				axis_x = width < length;
+		}
+		if (auto it = element.tags.find("roof:direction"); it != element.tags.end())
+			if (auto degrees = parse_roof_direction_degrees(it->second)) {
+				const double radians = *degrees * std::numbers::pi / 180.0;
+				axis_x = std::abs(std::cos(radians)) >= std::abs(std::sin(radians));
+			}
 		const int radius = std::max(1, (axis_x ? length : width) / 2);
-		const int peak = tagged_roof_height.value_or(std::max(2, radius));
+		int peak = tagged_roof_height.value_or(std::max(2, radius));
+		if (!tagged_roof_height)
+			if (auto it = element.tags.find("roof:angle"); it != element.tags.end()) {
+				std::string angle = it->second;
+				if (angle.size() >= 2 &&
+						angle.compare(angle.size() - 2, 2, "\xC2\xB0") == 0)
+					angle.resize(angle.size() - 2);
+				try {
+					const double degrees = std::stod(angle);
+					if (degrees > 0.0 && degrees < 90.0)
+						peak = std::max(
+								1, int(std::lround(
+										   std::tan(degrees * std::numbers::pi / 180.0) *
+										   radius)));
+				} catch (...) {
+				}
+			}
 		const Block roof_block = tagged_roof_block.value_or(
 				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
 		for (const auto &p : floor_area) {
@@ -3439,6 +3740,24 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				base_height + (tagged_roof_height
 											  ? *tagged_roof_height
 											  : ((std::max(width, length) > 20) ? 7 : 5));
+		if (!tagged_roof_height)
+			if (auto it = element.tags.find("roof:angle"); it != element.tags.end()) {
+				std::string angle = it->second;
+				if (angle.size() >= 2 &&
+						angle.compare(angle.size() - 2, 2, "\xC2\xB0") == 0)
+					angle.resize(angle.size() - 2);
+				try {
+					const double degrees = std::stod(angle);
+					if (degrees > 0.0 && degrees < 90.0)
+						roof_peak_height =
+								base_height +
+								std::max(1, int(std::lround(
+													std::tan(degrees * std::numbers::pi /
+															 180.0) *
+													(std::min(width, length) / 2.0))));
+				} catch (...) {
+				}
+			}
 
 		Block roof_block = tagged_roof_block.value_or(
 				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
@@ -3668,22 +3987,27 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		int32_t max_roof_height =
 				tagged_roof_height
 						? std::clamp(*tagged_roof_height, 1, 12)
-						: std::min(std::clamp(int(std::lround(
-								(std::abs(downhill_x) * width + std::abs(downhill_z) * length) /
-								3.0)),
-										2, 10),
+						: std::min(std::clamp(
+										   int(std::lround((std::abs(downhill_x) * width +
+																   std::abs(downhill_z) *
+																		   length) /
+														   3.0)),
+										   2, 10),
 								  std::max(1, int(std::lround(building_height * .9))));
 		if (!tagged_roof_height)
 			if (auto it = element.tags.find("roof:angle"); it != element.tags.end()) {
 				std::string angle = it->second;
-				if (!angle.empty() && angle.back() == '\u00b0')
-					angle.pop_back();
+				if (angle.size() >= 2 &&
+						angle.compare(angle.size() - 2, 2, "\xC2\xB0") == 0)
+					angle.resize(angle.size() - 2);
 				try {
 					const double degrees = std::stod(angle);
 					if (degrees > 0.0 && degrees < 90.0)
-						max_roof_height = std::clamp(int(std::lround(
-								std::tan(degrees * std::numbers::pi / 180.0) *
-								(std::abs(downhill_x) * width + std::abs(downhill_z) * length))),
+						max_roof_height = std::clamp(
+								int(std::lround(
+										std::tan(degrees * std::numbers::pi / 180.0) *
+										(std::abs(downhill_x) * width +
+												std::abs(downhill_z) * length))),
 								1, std::max(1, building_height));
 				} catch (...) {
 				}
@@ -3694,22 +4018,20 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 
 		std::unordered_map<std::pair<int32_t, int32_t>, int32_t, pair_hash> roof_heights;
 		roof_heights.reserve(floor_area.size() * 2);
+		double min_projection = std::numeric_limits<double>::max();
+		double max_projection = std::numeric_limits<double>::lowest();
+		for (const auto &[px, pz] : floor_area) {
+			const double value = px * downhill_x + pz * downhill_z;
+			min_projection = std::min(min_projection, value);
+			max_projection = std::max(max_projection, value);
+		}
 
 		for (auto const &p : floor_area) {
 			int32_t x = p.first;
 			int32_t z = p.second;
 			double projection = x * downhill_x + z * downhill_z;
-			static double min_projection = 0.0, max_projection = 0.0;
-			if (p == floor_area.front()) {
-				min_projection = max_projection = projection;
-				for (const auto &[px, pz] : floor_area) {
-					const double value = px * downhill_x + pz * downhill_z;
-					min_projection = std::min(min_projection, value);
-					max_projection = std::max(max_projection, value);
-				}
-			}
 			double slope_progress = (max_projection - projection) /
-					std::max(1.0, max_projection - min_projection);
+									std::max(1.0, max_projection - min_projection);
 			int32_t roof_height =
 					base_height +
 					static_cast<int32_t>(
@@ -3718,6 +4040,12 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		}
 
 		Block stair_block_material = get_stair_block_for_material(roof_block);
+		const int cardinal =
+				static_cast<int>(std::floor((downhill_degrees + 45.0) / 90.0)) & 3;
+		const StairFacing stair_facing = cardinal == 0	 ? StairFacing::South
+										 : cardinal == 1 ? StairFacing::West
+										 : cardinal == 2 ? StairFacing::North
+														 : StairFacing::East;
 
 		for (auto const &p : floor_area) {
 			int32_t x = p.first;
@@ -3740,7 +4068,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					if (has_lower_neighbor) {
 						BlockWithProperties stair_block_with_props =
 								create_stair_with_properties(stair_block_material,
-										StairFacing::East, StairShape::Straight);
+										stair_facing, StairShape::Straight);
 						editor.set_block_with_properties_absolute(stair_block_with_props,
 								x, y + abs_terrain_offset, z, nullptr, nullptr);
 					} else {
@@ -3903,14 +4231,27 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 								  building_height * 2);
 		const Block roof_block = tagged_roof_block.value_or(
 				rng.random_bool() ? accent_block : roof_friendly_block(wall_block));
+		const auto edge_distances = roof_edge_distances(floor_area);
+		int max_edge_distance = 1;
+		for (const auto &[cell, distance] : edge_distances)
+			max_edge_distance = std::max(max_edge_distance, distance);
+		std::unordered_map<std::pair<int32_t, int32_t>, int32_t, pair_hash> surface;
+		surface.reserve(floor_area.size() * 2);
 		for (const auto &[x, z] : floor_area) {
 			const double nx = double(x - center_x) / half_w;
 			const double nz = double(z - center_z) / half_l;
-			const double normalized = std::min(1.0, std::sqrt(nx * nx + nz * nz));
-			const int surface = base_height + int((1.0 - normalized) * peak_height);
-			for (int y = base_height; y <= surface; ++y)
-				editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z);
+			// Polygon-aware radial fraction matches Rust's footprint-based
+			// cone profile better than relying solely on the bounding box.
+			const auto edge = edge_distances.find({x, z});
+			const double polygon_fraction =
+					edge == edge_distances.end()
+							? 0.0
+							: double(edge->second) / double(max_edge_distance);
+			const double normalized = std::max(
+					polygon_fraction, std::min(1.0, std::sqrt(nx * nx + nz * nz)));
+			surface[{x, z}] = base_height + int((1.0 - normalized) * peak_height);
 		}
+		fill_shell(surface, roof_block, base_height);
 		return;
 	}
 
@@ -3956,7 +4297,10 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					if (double(dx * dx + dz * dz) > radius_sq)
 						continue;
 					const int x = center_x + dx, z = center_z + dz;
-					if (t < .15 && !footprint.contains({x, z}))
+					// Rust keeps onion layers clipped to the actual footprint;
+					// otherwise concave buildings receive a circular roof outside
+					// their walls at the upper layers.
+					if (!footprint.contains({x, z}))
 						continue;
 					editor.set_block_absolute(roof_block, x, y, z);
 				}
@@ -3973,24 +4317,30 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 
 		Block roof_block = tagged_roof_block.value_or(
 				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
-
+		const auto edge_distances = roof_edge_distances(floor_area);
+		int max_edge_distance = 1;
+		for (const auto &[cell, distance] : edge_distances)
+			max_edge_distance = std::max(max_edge_distance, distance);
+		std::unordered_map<std::pair<int32_t, int32_t>, int32_t, pair_hash> surface;
+		surface.reserve(floor_area.size() * 2);
 		for (auto const &p : floor_area) {
 			int32_t x = p.first;
 			int32_t z = p.second;
 			const double nx = double(x - center_x) / half_w;
 			const double nz = double(z - center_z) / half_l;
-			double normalized_distance = std::min(1.0, std::sqrt(nx * nx + nz * nz));
+			const auto edge = edge_distances.find({x, z});
+			const double polygon_fraction =
+					edge == edge_distances.end()
+							? 0.0
+							: double(edge->second) / double(max_edge_distance);
+			double normalized_distance = std::max(
+					polygon_fraction, std::min(1.0, std::sqrt(nx * nx + nz * nz)));
 
 			double height_factor = std::sqrt(
 					std::max(0.0, 1.0 - normalized_distance * normalized_distance));
-			int32_t surface_height =
-					base_height + static_cast<int32_t>(height_factor * rise);
-
-			for (int32_t y = base_height; y <= surface_height; ++y) {
-				editor.set_block_absolute(
-						roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
-			}
+			surface[{x, z}] = base_height + static_cast<int32_t>(height_factor * rise);
 		}
+		fill_shell(surface, roof_block, base_height);
 
 		return;
 	}
