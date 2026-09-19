@@ -15,38 +15,27 @@ int sign(int value)
 	return (value > 0) - (value < 0);
 }
 
-std::optional<std::pair<double, double>> centroid(const std::vector<ProcessedNode> &nodes)
+int outward_side(const std::vector<ProcessedNode> &nodes)
 {
+	std::int64_t area2 = 0;
 	if (nodes.empty())
-		return std::nullopt;
-	double x = 0.0, z = 0.0;
-	std::size_t count = nodes.size();
-	if (count > 1 && nodes.front().x == nodes.back().x &&
-			nodes.front().z == nodes.back().z)
-		--count;
-	if (!count)
-		return std::nullopt;
-	for (std::size_t i = 0; i < count; ++i) {
-		x += nodes[i].x;
-		z += nodes[i].z;
+		return 1;
+	for (std::size_t i = 0; i < nodes.size(); ++i) {
+		const auto &a = nodes[i];
+		const auto &b = nodes[(i + 1) % nodes.size()];
+		area2 += std::int64_t(a.x) * b.z - std::int64_t(b.x) * a.z;
 	}
-	return std::pair{x / count, z / count};
+	return area2 > 0 ? -1 : 1;
 }
 
-std::pair<int, int> outward_normal(
-		int x1, int z1, int x2, int z2, const std::pair<double, double> &center)
+std::pair<int, int> outward_normal(int x1, int z1, int x2, int z2, int outward)
 {
 	const int dx = x2 - x1, dz = z2 - z1;
-	if (!dx && !dz)
+	const int raw_x = -dz * outward, raw_z = dx * outward;
+	if (!raw_x && !raw_z)
 		return {};
-	std::pair<int, int> first{sign(dz), -sign(dx)};
-	std::pair<int, int> second{-first.first, -first.second};
-	const double mx = (x1 + x2) * 0.5, mz = (z1 + z2) * 0.5;
-	const auto score = [&](const auto &normal) {
-		return (mx + normal.first - center.first) * normal.first +
-			   (mz + normal.second - center.second) * normal.second;
-	};
-	return score(first) >= score(second) ? first : second;
+	return std::abs(raw_x) >= std::abs(raw_z) ? std::pair{sign(raw_x), 0}
+											  : std::pair{0, sign(raw_z)};
 }
 
 int setback(double scale)
@@ -132,14 +121,14 @@ void FacadePlan::add_street_column(int x, int z)
 FacadePlan compute_facade_plan(const ProcessedWay &element,
 		const BuildingContext &context, double scale, const PointSet &own_cells)
 {
-	const auto center = centroid(element.nodes);
-	if (!center)
+	if (element.nodes.size() < 3)
 		return FacadePlan::empty();
+	const int outward = outward_side(element.nodes);
 	FacadePlan plan;
 	std::vector<std::vector<std::pair<int, int>>> segment_columns;
 	for (std::size_t i = 1; i < element.nodes.size(); ++i) {
 		const auto &a = element.nodes[i - 1], &b = element.nodes[i];
-		const auto normal = outward_normal(a.x, a.z, b.x, b.z, *center);
+		const auto normal = outward_normal(a.x, a.z, b.x, b.z, outward);
 		if (normal == std::pair<int, int>{}) {
 			plan.segments.emplace_back();
 			segment_columns.emplace_back();

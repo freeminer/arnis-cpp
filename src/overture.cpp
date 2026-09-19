@@ -768,6 +768,11 @@ std::vector<ProcessedElement> convert_overture_buildings(
 	for (const auto &building : buildings) {
 		if (out.size() >= maximum)
 			break;
+		// Known transient ML false positive (temporary stage/tent at
+		// Königsplatz, Munich).  Rust filters this stable GERS id before
+		// converting it into a generated building.
+		if (building.id == "f8c0757e-c059-49e4-9757-7e278751926f")
+			continue;
 		if (!include_osm_sourced && building.is_osm_sourced)
 			continue;
 		if (auto way = overture_building_to_way(building, bbox, scale))

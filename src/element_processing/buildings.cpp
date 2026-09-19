@@ -45,6 +45,35 @@ void generate_tank_structure(
 namespace buildings
 {
 
+std::optional<double> parse_roof_direction_degrees(const std::string &value)
+{
+	std::string s;
+	for (const unsigned char c : value)
+		if (!std::isspace(c))
+			s.push_back(static_cast<char>(std::tolower(c)));
+	if (s == "n" || s == "north")
+		return 0.0;
+	if (s == "ne" || s == "northeast")
+		return 45.0;
+	if (s == "e" || s == "east")
+		return 90.0;
+	if (s == "se" || s == "southeast")
+		return 135.0;
+	if (s == "s" || s == "south")
+		return 180.0;
+	if (s == "sw" || s == "southwest")
+		return 225.0;
+	if (s == "w" || s == "west")
+		return 270.0;
+	if (s == "nw" || s == "northwest")
+		return 315.0;
+	try {
+		double degrees = std::fmod(std::stod(s), 360.0);
+		return degrees < 0.0 ? degrees + 360.0 : degrees;
+	} catch (...) {
+		return std::nullopt;
+	}
+}
 
 // RoofType enum
 enum class RoofType
@@ -59,10 +88,27 @@ enum class RoofType
 	Dome,
 	Cone,
 	Onion,
+	Round,
 	Flat
 };
 
 constexpr int BUILDING_PASSAGE_HEIGHT = 4;
+constexpr std::size_t THIN_RING_MAX_CELLS = 4;
+
+std::vector<std::pair<int, int>> thin_ring_cells(const ProcessedWay &way)
+{
+	if (way.nodes.size() < 4 || way.nodes.front().x != way.nodes.back().x ||
+			way.nodes.front().z != way.nodes.back().z)
+		return {};
+	std::vector<std::pair<int, int>> cells;
+	for (std::size_t i = 1; i < way.nodes.size(); ++i)
+		for (const auto &[x, unused_y, z] : bresenham_line(way.nodes[i - 1].x, 0,
+					 way.nodes[i - 1].z, way.nodes[i].x, 0, way.nodes[i].z))
+			cells.emplace_back(x, z);
+	std::sort(cells.begin(), cells.end());
+	cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+	return cells;
+}
 
 inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		int32_t start_y_offset, int32_t building_height, Block floor_block,
@@ -273,8 +319,9 @@ ArchEra building_arch_era(const tags_t &tags)
 			architecture == "classicism")
 		return ArchEra::HistoricOrnate;
 	if (architecture == "brutalist" || architecture == "brutalism" ||
-			architecture == "constructivism" || architecture == "stalinistneoclassicism" ||
-			architecture == "prefabricated" || architecture == "panel")
+			architecture == "constructivism" ||
+			architecture == "stalinistneoclassicism" || architecture == "prefabricated" ||
+			architecture == "panel")
 		return ArchEra::PostWarPanel;
 	if (architecture == "modern" || architecture == "modernism" ||
 			architecture == "contemporary" || architecture == "functionalism" ||
@@ -474,55 +521,93 @@ Block category_wall_block(
 	// (and hot-climate commercial buildings).  Keep explicit material tags out
 	// of this path; this only shapes otherwise inferred building appearance.
 	const bool residential = category == BuildingCategory::House ||
-						 category == BuildingCategory::Residential;
+							 category == BuildingCategory::Residential;
 	const bool hot_commercial = (category == BuildingCategory::Commercial ||
-							 category == BuildingCategory::Office ||
-							 category == BuildingCategory::Hotel) &&
-			(climate == biome::Climate::HotDesert || climate == biome::Climate::HotSteppe ||
-			 climate == biome::Climate::TropicalSavanna);
+										category == BuildingCategory::Office ||
+										category == BuildingCategory::Hotel) &&
+								(climate == biome::Climate::HotDesert ||
+										climate == biome::Climate::HotSteppe ||
+										climate == biome::Climate::TropicalSavanna);
 	if (climate != biome::Climate::Temperate && (residential || hot_commercial)) {
-		if (residential && (climate == biome::Climate::Boreal ||
-							climate == biome::Climate::Tundra ||
-							climate == biome::Climate::IceCap))
+		if (residential &&
+				(climate == biome::Climate::Boreal || climate == biome::Climate::Tundra ||
+						climate == biome::Climate::IceCap))
 			palette.insert(palette.end(), {SPRUCE_PLANKS, OAK_PLANKS, DARK_OAK_PLANKS});
 		auto weight = [&](Block b) -> int {
 			auto residential_weight = [&](int value) {
-				return category == BuildingCategory::Residential ? std::max(1, value / 2) : value;
+				return category == BuildingCategory::Residential ? std::max(1, value / 2)
+																 : value;
 			};
 			switch (climate) {
 			case biome::Climate::HotDesert:
 			case biome::Climate::HotSteppe:
-				if (b == SANDSTONE || b == SMOOTH_SANDSTONE || b == MUD_BRICKS || b == WHITE_TERRACOTTA) return 4;
-				if (b == WHITE_CONCRETE || b == END_STONE_BRICKS || b == TERRACOTTA) return 3;
-				if (b == LIGHT_GRAY_CONCRETE || b == QUARTZ_BRICKS || b == QUARTZ_BLOCK || b == ORANGE_TERRACOTTA || b == BROWN_TERRACOTTA) return 2;
-				if (b == RED_TERRACOTTA || b == SPRUCE_PLANKS || b == OAK_PLANKS || b == DARK_OAK_PLANKS || b == DEEPSLATE_BRICKS || b == POLISHED_DEEPSLATE || b == POLISHED_BLACKSTONE || b == NETHER_BRICK) return 0;
+				if (b == SANDSTONE || b == SMOOTH_SANDSTONE || b == MUD_BRICKS ||
+						b == WHITE_TERRACOTTA)
+					return 4;
+				if (b == WHITE_CONCRETE || b == END_STONE_BRICKS || b == TERRACOTTA)
+					return 3;
+				if (b == LIGHT_GRAY_CONCRETE || b == QUARTZ_BRICKS || b == QUARTZ_BLOCK ||
+						b == ORANGE_TERRACOTTA || b == BROWN_TERRACOTTA)
+					return 2;
+				if (b == RED_TERRACOTTA || b == SPRUCE_PLANKS || b == OAK_PLANKS ||
+						b == DARK_OAK_PLANKS || b == DEEPSLATE_BRICKS ||
+						b == POLISHED_DEEPSLATE || b == POLISHED_BLACKSTONE ||
+						b == NETHER_BRICK)
+					return 0;
 				return 1;
 			case biome::Climate::TropicalSavanna:
-				if (b == WHITE_CONCRETE) return 4;
-				if (b == WHITE_TERRACOTTA || b == LIGHT_GRAY_CONCRETE || b == BRICK) return 3;
-				if (b == GRAY_CONCRETE || b == TERRACOTTA || b == ORANGE_TERRACOTTA || b == QUARTZ_BRICKS || b == SMOOTH_SANDSTONE || b == MUD_BRICKS) return 2;
-				if (b == SPRUCE_PLANKS || b == OAK_PLANKS || b == DARK_OAK_PLANKS || b == DEEPSLATE_BRICKS || b == POLISHED_DEEPSLATE || b == POLISHED_BLACKSTONE || b == NETHER_BRICK) return 0;
+				if (b == WHITE_CONCRETE)
+					return 4;
+				if (b == WHITE_TERRACOTTA || b == LIGHT_GRAY_CONCRETE || b == BRICK)
+					return 3;
+				if (b == GRAY_CONCRETE || b == TERRACOTTA || b == ORANGE_TERRACOTTA ||
+						b == QUARTZ_BRICKS || b == SMOOTH_SANDSTONE || b == MUD_BRICKS)
+					return 2;
+				if (b == SPRUCE_PLANKS || b == OAK_PLANKS || b == DARK_OAK_PLANKS ||
+						b == DEEPSLATE_BRICKS || b == POLISHED_DEEPSLATE ||
+						b == POLISHED_BLACKSTONE || b == NETHER_BRICK)
+					return 0;
 				return 1;
 			case biome::Climate::Boreal:
-				if (b == SPRUCE_PLANKS) return residential_weight(5);
-				if (b == OAK_PLANKS) return residential_weight(3);
-				if (b == DARK_OAK_PLANKS) return residential_weight(2);
-				if (b == RED_TERRACOTTA) return 3;
-				if (b == WHITE_CONCRETE || b == WHITE_TERRACOTTA || b == BRICK) return 2;
-				return (b == SANDSTONE || b == SMOOTH_SANDSTONE || b == MUD_BRICKS) ? 0 : 1;
+				if (b == SPRUCE_PLANKS)
+					return residential_weight(5);
+				if (b == OAK_PLANKS)
+					return residential_weight(3);
+				if (b == DARK_OAK_PLANKS)
+					return residential_weight(2);
+				if (b == RED_TERRACOTTA)
+					return 3;
+				if (b == WHITE_CONCRETE || b == WHITE_TERRACOTTA || b == BRICK)
+					return 2;
+				return (b == SANDSTONE || b == SMOOTH_SANDSTONE || b == MUD_BRICKS) ? 0
+																					: 1;
 			case biome::Climate::Tundra:
 			case biome::Climate::IceCap:
-				if (b == SPRUCE_PLANKS) return residential_weight(3);
-				if (b == OAK_PLANKS) return residential_weight(2);
-				if (b == RED_TERRACOTTA || b == WHITE_CONCRETE || b == GRAY_CONCRETE || b == LIGHT_GRAY_CONCRETE) return 2;
-				return (b == SANDSTONE || b == SMOOTH_SANDSTONE || b == MUD_BRICKS || b == DARK_OAK_PLANKS) ? 0 : 1;
+				if (b == SPRUCE_PLANKS)
+					return residential_weight(3);
+				if (b == OAK_PLANKS)
+					return residential_weight(2);
+				if (b == RED_TERRACOTTA || b == WHITE_CONCRETE || b == GRAY_CONCRETE ||
+						b == LIGHT_GRAY_CONCRETE)
+					return 2;
+				return (b == SANDSTONE || b == SMOOTH_SANDSTONE || b == MUD_BRICKS ||
+							   b == DARK_OAK_PLANKS)
+							   ? 0
+							   : 1;
 			case biome::Climate::ColdSteppe:
 			case biome::Climate::ColdDesert:
 			case biome::Climate::DryContinental:
-				if (b == BRICK) return 3;
-				if (b == WHITE_TERRACOTTA || b == WHITE_CONCRETE || b == LIGHT_GRAY_CONCRETE || b == GRAY_CONCRETE || b == STONE_BRICKS || b == MUD_BRICKS) return 2;
-				return (b == SPRUCE_PLANKS || b == OAK_PLANKS || b == DARK_OAK_PLANKS) ? 0 : 1;
-			case biome::Climate::Temperate: return 1;
+				if (b == BRICK)
+					return 3;
+				if (b == WHITE_TERRACOTTA || b == WHITE_CONCRETE ||
+						b == LIGHT_GRAY_CONCRETE || b == GRAY_CONCRETE ||
+						b == STONE_BRICKS || b == MUD_BRICKS)
+					return 2;
+				return (b == SPRUCE_PLANKS || b == OAK_PLANKS || b == DARK_OAK_PLANKS)
+							   ? 0
+							   : 1;
+			case biome::Climate::Temperate:
+				return 1;
 			}
 			return 1;
 		};
@@ -1167,8 +1252,10 @@ RoofType parse_roof_type(const std::string &roof_shape)
 		return RoofType::Gambrel;
 	if (roof_shape == "half-hipped" || roof_shape == "side_half-hipped")
 		return RoofType::HalfHipped;
-	if (roof_shape == "hipped" || roof_shape == "hip" || roof_shape == "round" ||
-			roof_shape == "side_hipped" || roof_shape == "side_half-hipped")
+	if (roof_shape == "round" || roof_shape == "barrel" || roof_shape == "vault")
+		return RoofType::Round;
+	if (roof_shape == "hipped" || roof_shape == "hip" || roof_shape == "side_hipped" ||
+			roof_shape == "side_half-hipped")
 		return RoofType::Hipped;
 	if (roof_shape == "skillion" || roof_shape == "shed" || roof_shape == "lean_to" ||
 			roof_shape == "monopitch")
@@ -1324,6 +1411,7 @@ std::pair<int, bool> calculate_building_height(const ProcessedWay &element,
 	if (const auto tagged = parse_meter_tag(element.tags, "height")) {
 		explicit_height = has_source = true;
 		double effective = *tagged;
+		const bool is_part = element.tags.contains("building:part");
 		bool elevated = false;
 		if (const auto min_height = parse_meter_tag(element.tags, "min_height")) {
 			elevated = *min_height > 0;
@@ -1335,9 +1423,9 @@ std::pair<int, bool> calculate_building_height(const ProcessedWay &element,
 		}
 		if (element.tags.get("roof:shape") != "flat")
 			if (const auto roof_height = parse_meter_tag(element.tags, "roof:height"))
-				effective = std::max(std::min(3.0, effective),
-						effective - std::max(0.0, *roof_height));
-		height = std::max(elevated ? 1 : 3, int(effective * scale));
+				effective = std::max(
+						(is_part ? 1.0 : 3.0), effective - std::max(0.0, *roof_height));
+		height = std::max((elevated || is_part) ? 1 : 3, int(effective * scale));
 		tall = *tagged > 28;
 	}
 	if (!explicit_height && relation_levels) {
@@ -1397,8 +1485,8 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 		std::optional<int> max_ground_level;
 		for (const auto &node : element.nodes) {
 			const int level = editor.get_ground_level(node.x, node.z);
-			max_ground_level = max_ground_level
-					? std::max(*max_ground_level, level) : level;
+			max_ground_level =
+					max_ground_level ? std::max(*max_ground_level, level) : level;
 		}
 		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
 	}
@@ -1427,7 +1515,8 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if ((roof_type == RoofType::Dome || roof_type == RoofType::Hipped ||
 				roof_type == RoofType::HalfHipped || roof_type == RoofType::Gambrel ||
 				roof_type == RoofType::Mansard || roof_type == RoofType::Pyramidal ||
-				roof_type == RoofType::Cone || roof_type == RoofType::Onion) &&
+				roof_type == RoofType::Cone || roof_type == RoofType::Onion ||
+				roof_type == RoofType::Round) &&
 			!cached_floor_area.empty()) {
 		const int springing = start_y_offset + roof_thickness;
 		for (const auto &node : element.nodes) {
@@ -1507,7 +1596,8 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		if (category != BuildingCategory::House || area.size() < 30 ||
 				!element_rng_salted(seed, 0x04E7E44AULL).random_bool(.05))
 			return;
-		const std::unordered_set<std::pair<int, int>, PairHash> footprint(area.begin(), area.end());
+		const std::unordered_set<std::pair<int, int>, PairHash> footprint(
+				area.begin(), area.end());
 		std::vector<std::pair<int, int>> interior;
 		for (const auto &p : area)
 			if (footprint.contains({p.first - 1, p.second}) &&
@@ -1517,14 +1607,16 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 				interior.push_back(p);
 		if (interior.empty())
 			return;
-		auto best = std::min_element(interior.begin(), interior.end(), [&](const auto &a, const auto &b) {
-				return std::hypot(a.first - center_x, a.second - center_z) <
-						std::hypot(b.first - center_x, b.second - center_z);
-			});
+		auto best = std::min_element(
+				interior.begin(), interior.end(), [&](const auto &a, const auto &b) {
+					return std::hypot(a.first - center_x, a.second - center_z) <
+						   std::hypot(b.first - center_x, b.second - center_z);
+				});
 		const int rise = std::min(std::max(1, std::min(max_x - min_x, max_z - min_z) / 2),
-				std::max(1, int(std::lround(building_height * .6)))) + 1;
-		editor.set_block_absolute(LIGHTNING_ROD, best->first,
-				roof_y + rise + 2, best->second, std::vector<Block>{AIR});
+								 std::max(1, int(std::lround(building_height * .6)))) +
+						 1;
+		editor.set_block_absolute(LIGHTNING_ROD, best->first, roof_y + rise + 2,
+				best->second, std::vector<Block>{AIR});
 		return;
 	}
 	if (covered_by_sibling)
@@ -1859,9 +1951,9 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		std::vector<std::pair<int32_t, int32_t>> const &cached_floor_area,
 		int32_t abs_terrain_offset);
 
-std::optional<building_facade::FacadeAnchor> generate_buildings(
-		WorldEditor *editor, const ProcessedWay &element,
-		const Args &args, const std::optional<int> &relation_levels)
+std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
+		const ProcessedWay &element, const Args &args,
+		const std::optional<int> &relation_levels)
 {
 	FloodFillCache empty_cache;
 	CoordinateBitmap empty_passages = CoordinateBitmap::new_empty();
@@ -1869,10 +1961,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			editor, element, args, relation_levels, empty_cache, empty_passages, nullptr);
 }
 
-std::optional<building_facade::FacadeAnchor> generate_buildings(
-		WorldEditor *editor, const ProcessedWay &element,
-		const Args &args, const std::optional<int> &relation_levels,
-		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
+std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
+		const ProcessedWay &element, const Args &args,
+		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
+		const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons,
 		std::optional<std::uint64_t> style_seed, const CoordinateBitmap *road_mask,
 		const CoordinateBitmap *building_footprints,
@@ -1881,8 +1973,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 {
 	// Match Rust's packed style hint: relation-provided seeds remain authoritative,
 	// while standalone buildings carry their tag-derived facade hint in the top bits.
-	const auto visual_seed = style_seed.value_or(
-			osm_parser::seed_with_hint(element.id, osm_parser::building_style_hint(element.tags)));
+	const auto visual_seed = style_seed.value_or(osm_parser::seed_with_hint(
+			element.id, osm_parser::building_style_hint(element.tags)));
 	const auto clean_visual_seed = osm_parser::variant_seed(visual_seed);
 	if (should_skip_underground_tags(element.tags)) {
 		return std::nullopt;
@@ -1947,6 +2039,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 
 	std::vector<std::pair<int, int>> cached_floor_area =
 			compute_floor_area(&flood_fill_cache, element, args);
+	// Very thin building parts (columns, beams, mapped pylons) have no
+	// interior lattice cell for flood fill.  Rust keeps their outline cells
+	// instead of dropping the feature entirely.
+	if (cached_floor_area.empty() && element.tags.contains("building:part"))
+		cached_floor_area = thin_ring_cells(element);
 	if (hole_polygons && !hole_polygons->empty() && !cached_floor_area.empty()) {
 		std::unordered_set<std::pair<int, int>, PairHash> outer_area(
 				cached_floor_area.begin(), cached_floor_area.end());
@@ -2011,8 +2108,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 		std::optional<int> max_ground_level;
 		for (const auto &node : element.nodes) {
 			const int level = editor->get_ground_level(node.x, node.z);
-			max_ground_level = max_ground_level
-					? std::max(*max_ground_level, level) : level;
+			max_ground_level =
+					max_ground_level ? std::max(*max_ground_level, level) : level;
 		}
 
 		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
@@ -2137,14 +2234,15 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 	if (condition == BuildingCondition::Construction)
 		wall_block = SCAFFOLDING;
 	const bool has_windows = condition != BuildingCondition::Construction &&
-							 condition != BuildingCondition::Ruined;
+							 condition != BuildingCondition::Ruined &&
+							 cached_footprint_size > THIN_RING_MAX_CELLS;
 
 	std::unordered_set<std::pair<int, int>, PairHash> processed_points;
 	int floor_cycle = floor_cycle_for(building_type, element.tags);
 	const int grammar_anchor = min_level_offset == 0 ? 2 : 0;
-	auto [building_height, is_tall_building] =
-			calculate_building_height(element, building_type, min_level, scale_factor,
-					relation_levels, floor_cycle, cached_footprint_size, clean_visual_seed);
+	auto [building_height, is_tall_building] = calculate_building_height(element,
+			building_type, min_level, scale_factor, relation_levels, floor_cycle,
+			cached_footprint_size, clean_visual_seed);
 	if (building_type == "yes" && !element.tags.contains("building:part") &&
 			is_tall_building && floor_cycle != 4) {
 		const int old_cycle = floor_cycle;
@@ -2155,9 +2253,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			min_level_offset += lift_delta;
 			start_y_offset += lift_delta;
 		}
-		std::tie(building_height, is_tall_building) =
-				calculate_building_height(element, building_type, min_level, scale_factor,
-						relation_levels, floor_cycle, cached_footprint_size, clean_visual_seed);
+		std::tie(building_height, is_tall_building) = calculate_building_height(element,
+				building_type, min_level, scale_factor, relation_levels, floor_cycle,
+				cached_footprint_size, clean_visual_seed);
 	}
 	if (condition == BuildingCondition::Construction)
 		building_height = std::max(3, building_height / 2);
@@ -2207,9 +2305,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 					(!part_has_explicit_top &&
 							(category == BuildingCategory::House ||
 									category == BuildingCategory::Residential)));
-	const auto podium_tower =
-			plan_podium_tower(element, is_tall_building, building_height, floor_cycle,
-						condition, !sloped_roof, args.roof, cached_floor_area, clean_visual_seed);
+	const auto podium_tower = plan_podium_tower(element, is_tall_building,
+			building_height, floor_cycle, condition, !sloped_roof, args.roof,
+			cached_floor_area, clean_visual_seed);
 	if (podium_tower)
 		building_height = podium_tower->podium_height;
 	const bool top_treatment =
@@ -2224,7 +2322,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			(category == BuildingCategory::House ||
 					category == BuildingCategory::Residential ||
 					category == BuildingCategory::Historic) &&
-			 element_rng_salted(clean_visual_seed, 0xF10A401E00000002ULL).random_bool(.55);
+			element_rng_salted(clean_visual_seed, 0xF10A401E00000002ULL).random_bool(.55);
 	const bool piano_nobile =
 			has_windows && building_height >= 3 * floor_cycle &&
 			((category == BuildingCategory::Historic &&
@@ -2243,7 +2341,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			category != BuildingCategory::Shed && category != BuildingCategory::Garage &&
 			category != BuildingCategory::GlassySkyscraper &&
 			base_course_block != wall_block &&
-							element_rng_salted(clean_visual_seed, 0xBA5EC0A25E110001ULL).random_bool(.7);
+			element_rng_salted(clean_visual_seed, 0xBA5EC0A25E110001ULL).random_bool(.7);
 	const int base_course_rows = building_height >= 3 * floor_cycle ? 2 : 1;
 	const bool rustication =
 			min_level_offset == 0 && condition == BuildingCondition::Normal &&
@@ -2558,7 +2656,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 					}
 					if (outward != std::pair<int, int>{0, 0} && !is_passage &&
 							!party_wall && depth_clear &&
-							condition == BuildingCondition::Normal) {
+							condition == BuildingCondition::Normal &&
+							!facade_plan.is_door(bx, bz)) {
 						const bool corner = (bx == prev.first && bz == prev.second) ||
 											(bx == x && bz == z);
 						bool relief = false;
@@ -2663,7 +2762,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			category != BuildingCategory::Shed && category != BuildingCategory::Garage) {
 		bool mapped_entrance = false;
 		std::unordered_set<std::pair<int, int>, PairHash> rendered_entrances;
-		for (std::size_t node_index = 0; node_index < element.nodes.size(); ++node_index) {
+		for (std::size_t node_index = 0; node_index < element.nodes.size();
+				++node_index) {
 			const auto &node = element.nodes[node_index];
 			if ((!node.tags.get("entrance").empty() &&
 						node.tags.get("entrance") != "no") ||
@@ -2676,13 +2776,16 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 				// An outline node belongs to the segment before and/or after it.
 				// Rust uses the longer side to decide the exterior normal; that
 				// avoids putting thresholds into a short return wall at corners.
-				const building_facade::SegmentFacade *before = node_index > 0 &&
-						node_index - 1 < facade_plan.segments.size() &&
-						facade_plan.segments[node_index - 1]
-							? &*facade_plan.segments[node_index - 1] : nullptr;
-				const building_facade::SegmentFacade *after = node_index < facade_plan.segments.size() &&
-						facade_plan.segments[node_index]
-							? &*facade_plan.segments[node_index] : nullptr;
+				const building_facade::SegmentFacade *before =
+						node_index > 0 && node_index - 1 < facade_plan.segments.size() &&
+										facade_plan.segments[node_index - 1]
+								? &*facade_plan.segments[node_index - 1]
+								: nullptr;
+				const building_facade::SegmentFacade *after =
+						node_index < facade_plan.segments.size() &&
+										facade_plan.segments[node_index]
+								? &*facade_plan.segments[node_index]
+								: nullptr;
 				const building_facade::SegmentFacade *entrance_façade =
 						before && after ? (before->len >= after->len ? before : after)
 										: (before ? before : after);
@@ -2695,16 +2798,17 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 									category == BuildingCategory::Hospital ||
 									category == BuildingCategory::Historic ||
 									category == BuildingCategory::Religious;
-				editor->set_block_absolute(formal ? DARK_OAK_DOOR_LOWER : OAK_DOOR, node.x,
-						start_y_offset + abs_terrain_offset + 1, node.z);
-				editor->set_block_absolute(formal ? DARK_OAK_DOOR_UPPER : OAK_DOOR_UPPER, node.x,
-						start_y_offset + abs_terrain_offset + 2, node.z);
+				editor->set_block_absolute(formal ? DARK_OAK_DOOR_LOWER : OAK_DOOR,
+						node.x, start_y_offset + abs_terrain_offset + 1, node.z);
+				editor->set_block_absolute(formal ? DARK_OAK_DOOR_UPPER : OAK_DOOR_UPPER,
+						node.x, start_y_offset + abs_terrain_offset + 2, node.z);
 				if (entrance_façade) {
 					if (!signage_anchor)
 						signage_anchor = building_facade::FacadeAnchor{node.x, node.z,
-								entrance_façade->normal, 0, 0,
-								std::pair{node.x, node.z}};
-					const Block threshold = base_course_block != wall_block ? base_course_block : STONE_BRICKS;
+								entrance_façade->normal, 0, 0, std::pair{node.x, node.z}};
+					const Block threshold = base_course_block != wall_block
+													? base_course_block
+													: STONE_BRICKS;
 					editor->set_block_absolute(threshold,
 							node.x + entrance_façade->normal.first,
 							start_y_offset + abs_terrain_offset,
@@ -2765,7 +2869,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 						editor->set_block_absolute(upper, door->first,
 								start_y_offset + abs_terrain_offset + 2, door->second);
 						if ((formal || storefront) &&
-								element_rng_salted(clean_visual_seed, 0xD00E57E900000013ULL)
+								element_rng_salted(
+										clean_visual_seed, 0xD00E57E900000013ULL)
 										.random_bool(.6))
 							editor->set_block_absolute(OAK_SLAB,
 									door->first + segment.normal.first,
@@ -2782,7 +2887,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 	// normal façade-door planner (which deliberately excludes these categories).
 	if (min_level_offset == 0 && condition != BuildingCondition::Construction &&
 			condition != BuildingCondition::Ruined &&
-			(category == BuildingCategory::Garage || category == BuildingCategory::Shed)) {
+			(category == BuildingCategory::Garage ||
+					category == BuildingCategory::Shed)) {
 		const int door_y = start_y_offset + abs_terrain_offset + 1;
 		if (category == BuildingCategory::Garage) {
 			for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
@@ -2941,8 +3047,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			if (it != element.tags.end())
 				btype = it->second;
 
-			const bool auto_roof_type = btype == "apartments" || btype == "residential" ||
-					btype == "house" || btype == "yes" || btype == "detached" ||
+			const bool auto_roof_type =
+					btype == "apartments" || btype == "residential" || btype == "house" ||
+					btype == "yes" || btype == "detached" ||
 					btype == "semidetached_house" || btype == "terrace" ||
 					btype == "bungalow" || btype == "villa" || btype == "cabin" ||
 					btype == "hut" || btype == "farm" || btype == "farm_auxiliary" ||
@@ -2951,29 +3058,42 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 			if (auto_roof_type) {
 				std::size_t footprint_size = cached_footprint_size;
 				const std::size_t max_footprint_for_gabled = 800;
-				auto roof_rng = element_rng_salted(clean_visual_seed, 0x0F1E2D3C4B5A6907ULL);
-				const bool big_block = footprint_size > max_footprint_for_gabled || building_height >= 15;
+				auto roof_rng =
+						element_rng_salted(clean_visual_seed, 0x0F1E2D3C4B5A6907ULL);
+				const bool big_block = footprint_size > max_footprint_for_gabled ||
+									   building_height >= 15;
 				RoofType automatic_roof = RoofType::Flat;
 				bool make_roof = false;
 				if (btype == "apartments" && big_block) {
-					const bool prewar = era == ArchEra::HistoricOrnate || era == ArchEra::TraditionalPreWar;
+					const bool prewar = era == ArchEra::HistoricOrnate ||
+										era == ArchEra::TraditionalPreWar;
 					const auto roll = roof_rng.uniform(100);
 					const int hip_limit = prewar ? 65 : 80;
 					if (roll >= 45) {
-						automatic_roof = roll < hip_limit ? RoofType::Hipped : RoofType::Mansard;
+						automatic_roof =
+								roll < hip_limit ? RoofType::Hipped : RoofType::Mansard;
 						make_roof = true;
 					}
-				} else if ((era == ArchEra::HistoricOrnate || era == ArchEra::TraditionalPreWar) &&
-						footprint_size >= 100 && footprint_size <= max_footprint_for_gabled &&
-						roof_rng.random_bool(.30)) {
+				} else if ((era == ArchEra::HistoricOrnate ||
+								   era == ArchEra::TraditionalPreWar) &&
+						   footprint_size >= 100 &&
+						   footprint_size <= max_footprint_for_gabled &&
+						   roof_rng.random_bool(.30)) {
 					automatic_roof = RoofType::Mansard;
 					make_roof = true;
 				} else {
 					const double gable_probability =
-							(climate == biome::Climate::HotDesert || climate == biome::Climate::HotSteppe) ? .35 :
-							climate == biome::Climate::TropicalSavanna ? .60 :
-							(climate == biome::Climate::Boreal || climate == biome::Climate::Tundra || climate == biome::Climate::IceCap) ? .95 : .90;
-					if (footprint_size <= max_footprint_for_gabled && roof_rng.random_bool(gable_probability)) {
+							(climate == biome::Climate::HotDesert ||
+									climate == biome::Climate::HotSteppe)
+									? .35
+							: climate == biome::Climate::TropicalSavanna ? .60
+							: (climate == biome::Climate::Boreal ||
+									  climate == biome::Climate::Tundra ||
+									  climate == biome::Climate::IceCap)
+									? .95
+									: .90;
+					if (footprint_size <= max_footprint_for_gabled &&
+							roof_rng.random_bool(gable_probability)) {
 						automatic_roof = RoofType::Gabled;
 						make_roof = true;
 					}
@@ -2984,9 +3104,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 							floor_block, wall_block, accent_block, automatic_roof,
 							cached_floor_area, abs_terrain_offset);
 				}
-			} else if ((btype == "industrial" || btype == "warehouse" || btype == "hangar") &&
-					cached_footprint_size > 800) {
-				auto roof_rng = element_rng_salted(clean_visual_seed, 0x0F1E2D3C4B5A6907ULL);
+			} else if ((btype == "industrial" || btype == "warehouse" ||
+							   btype == "hangar") &&
+					   cached_footprint_size > 800) {
+				auto roof_rng =
+						element_rng_salted(clean_visual_seed, 0x0F1E2D3C4B5A6907ULL);
 				if (roof_rng.random_bool(.55)) {
 					generated_sloped_roof = true;
 					generate_roof(*editor, element, start_y_offset, building_height,
@@ -3001,31 +3123,37 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 	// Rust places a small deterministic chimney on pitched residential/farm
 	// roofs. Keep it inside the actual footprint and out of the wall ring.
 	if (generated_sloped_roof &&
-			(category == BuildingCategory::House || category == BuildingCategory::Residential ||
-			 category == BuildingCategory::Farm || category == BuildingCategory::Historic) &&
+			(category == BuildingCategory::House ||
+					category == BuildingCategory::Residential ||
+					category == BuildingCategory::Farm ||
+					category == BuildingCategory::Historic) &&
 			cached_floor_area.size() >= 25 &&
-			element_rng_salted(clean_visual_seed, 0xC41A0E700000001ULL).random_bool(.55)) {
+			element_rng_salted(clean_visual_seed, 0xC41A0E700000001ULL)
+					.random_bool(.55)) {
 		std::vector<std::pair<int, int>> chimney_spots;
 		const std::unordered_set<std::pair<int, int>, PairHash> footprint(
 				cached_floor_area.begin(), cached_floor_area.end());
 		for (const auto &[x, z] : cached_floor_area) {
 			bool inside = true;
 			for (const auto &[dx, dz] : {std::pair{-1, 0}, std::pair{1, 0},
-						std::pair{0, -1}, std::pair{0, 1}})
+						 std::pair{0, -1}, std::pair{0, 1}})
 				inside = inside && footprint.contains({x + dx, z + dz});
 			if (inside)
 				chimney_spots.emplace_back(x, z);
 		}
 		if (!chimney_spots.empty()) {
-			auto chimney_rng = element_rng_salted(clean_visual_seed, 0xC41A0E700000002ULL);
+			auto chimney_rng =
+					element_rng_salted(clean_visual_seed, 0xC41A0E700000002ULL);
 			const auto [cx, cz] = chimney_spots[chimney_rng.uniform(
 					static_cast<std::uint32_t>(chimney_spots.size()))];
-			const int chimney_base = start_y_offset + building_height + abs_terrain_offset + 2;
+			const int chimney_base =
+					start_y_offset + building_height + abs_terrain_offset + 2;
 			for (int y = 0; y < 4; ++y)
-				editor->set_block_absolute(BRICK, cx, chimney_base + y, cz,
-						std::vector<Block>{AIR});
-			editor->set_block_absolute(chimney_rng.random_bool(.4) ? FLOWER_POT : STONE_BRICK_SLAB,
-					cx, chimney_base + 4, cz, std::vector<Block>{AIR});
+				editor->set_block_absolute(
+						BRICK, cx, chimney_base + y, cz, std::vector<Block>{AIR});
+			editor->set_block_absolute(
+					chimney_rng.random_bool(.4) ? FLOWER_POT : STONE_BRICK_SLAB, cx,
+					chimney_base + 4, cz, std::vector<Block>{AIR});
 		}
 	}
 	if (podium_tower) {
@@ -3054,7 +3182,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(
 				covered_by_sibling);
 	return signage_anchor;
 }
-
 
 // multiply_scale implementation
 inline int32_t multiply_scale(int32_t value, double scale_factor)
@@ -3119,6 +3246,22 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		int32_t width = max_x - min_x;
 		int32_t length = max_z - min_z;
 		int32_t building_size = std::max(width, length);
+		bool is_wider_than_long = width > length;
+		if (auto it = element.tags.find("roof:orientation"); it != element.tags.end()) {
+			if (it->second == "along")
+				is_wider_than_long = width >= length;
+			else if (it->second == "across")
+				is_wider_than_long = width < length;
+		}
+		if (auto it = element.tags.find("roof:direction"); it != element.tags.end()) {
+			if (auto degrees = parse_roof_direction_degrees(it->second)) {
+				const double radians = *degrees * std::numbers::pi / 180.0;
+				// OSM bearings use north=0 and east=90.  The ridge is
+				// perpendicular to the requested downhill direction.
+				is_wider_than_long =
+						std::abs(std::cos(radians)) >= std::abs(std::sin(radians));
+			}
+		}
 
 		int32_t roof_height_boost = static_cast<int32_t>(
 				3.0 + std::max(1.0, std::log(std::max(1.0,
@@ -3127,7 +3270,6 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			roof_height_boost = *tagged_roof_height;
 		int32_t roof_peak_height = base_height + roof_height_boost;
 
-		bool is_wider_than_long = width > length;
 		int32_t max_distance = is_wider_than_long ? (length >> 1) : (width >> 1);
 
 		Block roof_block = tagged_roof_block.value_or(
@@ -3176,18 +3318,19 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			int32_t roof_height = kv.second;
 
 			bool has_lower_neighbor = false;
+			bool steep_drop = false;
 			std::pair<int32_t, int32_t> ncoords[4] = {
 					{x - 1, z}, {x + 1, z}, {x, z - 1}, {x, z + 1}};
 			for (auto const &nc : ncoords) {
 				auto it = roof_map.find(nc);
 				if (it != roof_map.end() && it->second < roof_height) {
 					has_lower_neighbor = true;
-					break;
+					steep_drop |= roof_height - it->second > 2;
 				}
 			}
 
 			for (int32_t y = base_height; y <= roof_height; ++y) {
-				if (y == roof_height && has_lower_neighbor) {
+				if (y == roof_height && has_lower_neighbor && !steep_drop) {
 					BlockWithProperties stair_block_with_props;
 					if (is_wider_than_long) {
 						if (z < center_z) {
@@ -3259,6 +3402,27 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			}
 		}
 
+		return;
+	}
+
+	if (roof_type == RoofType::Round) {
+		// Rust's round roof is a barrel vault: the cross-section is a
+		// semicircle over the short axis, rather than a four-sided hip.
+		const int width = std::max(1, max_x - min_x);
+		const int length = std::max(1, max_z - min_z);
+		const bool axis_x = width >= length;
+		const int radius = std::max(1, (axis_x ? length : width) / 2);
+		const int peak = tagged_roof_height.value_or(std::max(2, radius));
+		const Block roof_block = tagged_roof_block.value_or(
+				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		for (const auto &p : floor_area) {
+			const int distance =
+					axis_x ? std::abs(p.second - center_z) : std::abs(p.first - center_x);
+			const double t = std::clamp(double(distance) / double(radius), 0.0, 1.0);
+			const int rise = std::max(0, int(std::lround(peak * std::sqrt(1.0 - t * t))));
+			editor.set_block_absolute(roof_block, p.first,
+					base_height + abs_terrain_offset + rise, p.second, nullptr, nullptr);
+		}
 		return;
 	}
 
@@ -3493,12 +3657,37 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 	}
 
 	if (roof_type == RoofType::Skillion) {
-		int32_t width = std::max(1, max_x - min_x);
+		const int32_t width = std::max(1, max_x - min_x);
+		const int32_t length = std::max(1, max_z - min_z);
+		double downhill_degrees = 90.0;
+		if (auto it = element.tags.find("roof:direction"); it != element.tags.end())
+			if (auto degrees = parse_roof_direction_degrees(it->second))
+				downhill_degrees = *degrees;
+		const double radians = downhill_degrees * std::numbers::pi / 180.0;
+		const double downhill_x = std::sin(radians), downhill_z = -std::cos(radians);
 		int32_t max_roof_height =
 				tagged_roof_height
 						? std::clamp(*tagged_roof_height, 1, 12)
-						: std::min(std::clamp(width / 3, 2, 10),
+						: std::min(std::clamp(int(std::lround(
+								(std::abs(downhill_x) * width + std::abs(downhill_z) * length) /
+								3.0)),
+										2, 10),
 								  std::max(1, int(std::lround(building_height * .9))));
+		if (!tagged_roof_height)
+			if (auto it = element.tags.find("roof:angle"); it != element.tags.end()) {
+				std::string angle = it->second;
+				if (!angle.empty() && angle.back() == '\u00b0')
+					angle.pop_back();
+				try {
+					const double degrees = std::stod(angle);
+					if (degrees > 0.0 && degrees < 90.0)
+						max_roof_height = std::clamp(int(std::lround(
+								std::tan(degrees * std::numbers::pi / 180.0) *
+								(std::abs(downhill_x) * width + std::abs(downhill_z) * length))),
+								1, std::max(1, building_height));
+				} catch (...) {
+				}
+			}
 
 		Block roof_block = tagged_roof_block.value_or(
 				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
@@ -3509,8 +3698,18 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		for (auto const &p : floor_area) {
 			int32_t x = p.first;
 			int32_t z = p.second;
-			double slope_progress =
-					static_cast<double>(x - min_x) / static_cast<double>(width);
+			double projection = x * downhill_x + z * downhill_z;
+			static double min_projection = 0.0, max_projection = 0.0;
+			if (p == floor_area.front()) {
+				min_projection = max_projection = projection;
+				for (const auto &[px, pz] : floor_area) {
+					const double value = px * downhill_x + pz * downhill_z;
+					min_projection = std::min(min_projection, value);
+					max_projection = std::max(max_projection, value);
+				}
+			}
+			double slope_progress = (max_projection - projection) /
+					std::max(1.0, max_projection - min_projection);
 			int32_t roof_height =
 					base_height +
 					static_cast<int32_t>(
@@ -3797,7 +3996,6 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 	}
 }
 
-
 void generate_building_from_relation(
 		WorldEditor &editor, const ProcessedRelation &relation, const Args &args)
 {
@@ -3844,15 +4042,16 @@ void generate_building_from_relation(WorldEditor &editor,
 	for (std::size_t i = 0; i < inner_rings.size(); ++i) {
 		ProcessedWay way;
 		way.id = (1ULL << 63) |
-				((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
-				(0x8000ULL | (i & 0x7FFFULL));
+				 ((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
+				 (0x8000ULL | (i & 0x7FFFULL));
 		way.nodes = std::move(inner_rings[i]);
 		hole_polygons.push_back(HolePolygon{std::move(way), true});
 	}
 
 	for (std::size_t i = 0; i < outer_rings.size(); ++i) {
 		ProcessedWay merged_way;
-		merged_way.id = (1ULL << 63) |
+		merged_way.id =
+				(1ULL << 63) |
 				((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
 				(i & 0xFFFFULL);
 		merged_way.tags = relation.tags;
