@@ -76,12 +76,11 @@ std::uint64_t Fit::region_key_at(
 	};
 	add(source_width, 4);
 	add(source_height, 4);
-	add(out_width, 8);
-	add(out_height, 8);
+	add(out_width, sizeof(std::size_t));
+	add(out_height, sizeof(std::size_t));
 	for (std::uint32_t i = 0; i < out_width; ++i)
 		add(static_cast<std::uint64_t>(at.source_x(
-					x0_m + (static_cast<double>(i) + .5) / ppm, source_width)) *
-						3,
+					x0_m + (static_cast<double>(i) + .5) / ppm, source_width)),
 				8);
 	for (std::uint32_t j = 0; j < out_height; ++j)
 		add(at.source_y(y1_m - (static_cast<double>(j) + .5) / ppm, source_height), 4);
@@ -140,7 +139,6 @@ double Fit::map_v(double metres) const
 	const auto texture_height = std::max(0.001, entry.metres_tall);
 	if (height <= texture_height)
 		return metres;
-	const auto storey = entry.storey_m();
 	const auto ground = entry.ground_m();
 	// Repeat a whole number of storeys above the optional ground-floor band;
 	// `upper_m` is the shared Rust/C++ manifest invariant.

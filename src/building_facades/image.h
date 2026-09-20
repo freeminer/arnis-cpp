@@ -7,6 +7,11 @@
 #include <optional>
 #include <vector>
 
+namespace arnis::world_editor
+{
+struct WorldEditor;
+}
+
 namespace arnis::building_facades
 {
 struct RgbImage
@@ -27,4 +32,7 @@ std::optional<RgbImage> load_image(const std::filesystem::path &directory,
 // pixels and preserves Rust's bottom-anchored vertical mapping.
 std::optional<RgbImage> gather_region(const Fit &, const RgbImage &, double x0_m,
 		double x1_m, double y0_m, double y1_m);
+
+bool submit_panel(arnis::world_editor::WorldEditor &, int x, int y, int z,
+		std::int8_t facing, const RgbImage &);
 }

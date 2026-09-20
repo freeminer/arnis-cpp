@@ -19,6 +19,8 @@
 #include "element_processing/bridges.h"
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/buildings.h"
+#include "building_facades/registry.h"
+#include "mapillary/atlas.h"
 #include "floodfill_cache.h"
 #include "ground_generation.h"
 #include "land_cover/land_cover.h"
@@ -793,6 +795,13 @@ bool generate_world(WorldEditor &editor,
 	const Args &args = effective_args;
 	if (!args.valid())
 		return false;
+	editor.clear_facade_panels();
+	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
+	building_facades::reset(args.building_facades,
+			args.building_facades_dir
+					? std::optional<std::filesystem::path>(*args.building_facades_dir)
+					: std::nullopt,
+			args.facade_px, args.scale);
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
 			args.disable_height_limit && !args.bedrock ? -2032 : -64,
@@ -920,6 +929,8 @@ bool generate_world(WorldEditor &editor,
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	building_facades::set_world_extent(
+			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	if (editor.ground && !editor.ground->has_land_cover()) {
 		// Rust obtains ESA WorldCover before applying OSM water/land overrides.
 		// Keep its grid bounded for the library host: Ground interpolates the

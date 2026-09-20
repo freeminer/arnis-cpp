@@ -24,6 +24,7 @@
 #include "../floodfill_cache.h"
 #include "buildings.h"
 #include "building_facade.h"
+#include "../building_facades/registry.h"
 #include "signage.h"
 #include "../decals/pictograms.h"
 #include "../decals/font.h"
@@ -2385,6 +2386,12 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		building_height = std::max(3, int(building_height * .6));
 	const BuildingCategory category = building_category(
 			element, is_tall_building, building_height, scale_factor, clean_visual_seed);
+	// Rust records preset facade candidates after category/height selection.  The
+	// backend-native registry performs the equivalent crop and submission here;
+	// it is a no-op unless --building-facades was enabled and a backend sink is
+	// installed.
+	building_facades::collect(*editor, element.nodes, element.id, category, facade_plan,
+			start_y_offset + abs_terrain_offset + 1, building_height, scale_factor);
 	// Rust's glass-curtain presets use the facade itself as the window field;
 	// ordinary procedural window slots would punch a mismatched rhythm into
 	// the curtain wall. Keep the structural corner-pier logic separate.
