@@ -1630,6 +1630,7 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 								 category == BuildingCategory::Hospital ||
 								 category == BuildingCategory::TallBuilding ||
 								 category == BuildingCategory::GlassySkyscraper ||
+								 category == BuildingCategory::GlassCornerSkyscraper ||
 								 category == BuildingCategory::ModernSkyscraper);
 	if (parapet)
 		for (const auto &[x, z] : area)
@@ -2358,10 +2359,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	Block window_block = get_window_block_for_building_type(building_type, rng);
 	if (condition == BuildingCondition::Construction)
 		wall_block = SCAFFOLDING;
-	const bool has_windows = condition != BuildingCondition::Construction &&
-							 condition != BuildingCondition::Ruined &&
-							 cached_footprint_size > THIN_RING_MAX_CELLS;
-
 	std::unordered_set<std::pair<int, int>, PairHash> processed_points;
 	int floor_cycle = floor_cycle_for(building_type, element.tags);
 	const int grammar_anchor = min_level_offset == 0 ? 2 : 0;
@@ -2388,6 +2385,21 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		building_height = std::max(3, int(building_height * .6));
 	const BuildingCategory category = building_category(
 			element, is_tall_building, building_height, scale_factor, clean_visual_seed);
+	// Rust's glass-curtain presets use the facade itself as the window field;
+	// ordinary procedural window slots would punch a mismatched rhythm into
+	// the curtain wall. Keep the structural corner-pier logic separate.
+	const bool curtain_glass_category =
+			category == BuildingCategory::GlassySkyscraper ||
+			category == BuildingCategory::GlassCornerSkyscraper;
+	const bool curtain_glass_material =
+			wall_block == GLASS || wall_block == TINTED_GLASS ||
+			wall_block == WHITE_STAINED_GLASS || wall_block == LIGHT_GRAY_STAINED_GLASS ||
+			wall_block == CYAN_STAINED_GLASS || wall_block == BLUE_STAINED_GLASS ||
+			wall_block == LIGHT_BLUE_STAINED_GLASS || wall_block == GRAY_STAINED_GLASS;
+	const bool has_windows = condition != BuildingCondition::Construction &&
+							 condition != BuildingCondition::Ruined &&
+							 !curtain_glass_category && !curtain_glass_material &&
+							 cached_footprint_size > THIN_RING_MAX_CELLS;
 	const ArchEra era = building_arch_era(element.tags);
 	const DetailTier detail =
 			compute_detail_tier(element, category, cached_footprint_size, building_height,
@@ -2767,6 +2779,16 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							 (h - start_y_offset) % 2 == 0 && chosen != window_block &&
 							 chosen != GLASS)
 						chosen = base_course_block;
+					// Rust's glass-corner skyscraper preset puts a solid pier at
+					// every exterior corner, including corners on otherwise glass
+					// window rows. Keep the corner structural instead of allowing a
+					// continuous pane to wrap around it.
+					if (category == BuildingCategory::GlassCornerSkyscraper &&
+							!party_wall && outward != std::pair<int, int>{0, 0} &&
+							((bx == prev.first && bz == prev.second) ||
+									(bx == x && bz == z)) &&
+							(chosen == window_block || chosen == GLASS))
+						chosen = LIGHT_GRAY_CONCRETE;
 					chosen = apply_condition_variation(chosen, bx, h, bz, wall_block,
 							window_block, has_windows, condition, category, era,
 							clean_visual_seed);
@@ -2998,13 +3020,22 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					if (!signage_anchor)
 						signage_anchor = building_facade::FacadeAnchor{node.x, node.z,
 								entrance_façade->normal, 0, 0, std::pair{node.x, node.z}};
-					const Block threshold = base_course_block != wall_block
-													? base_course_block
-													: STONE_BRICKS;
-					editor->set_block_absolute(threshold,
-							node.x + entrance_façade->normal.first,
-							start_y_offset + abs_terrain_offset,
-							node.z + entrance_façade->normal.second,
+					const int step_x = node.x + entrance_façade->normal.first;
+					const int step_z = node.z + entrance_façade->normal.second;
+					// Rust only emits a threshold when the exterior run actually
+					// reaches terrain; suppress floating steps on sloped entrances.
+					if (editor->get_ground_level(step_x, step_z) <= start_y_offset) {
+						const Block threshold = base_course_block != wall_block
+														? base_course_block
+														: STONE_BRICKS;
+						editor->set_block_absolute(threshold, step_x,
+								start_y_offset + abs_terrain_offset, step_z,
+								std::vector<Block>{AIR});
+					}
+					// Rust hangs a small lantern over mapped entrances. Keep it on
+					// the facade's outward side so it does not occupy the doorway.
+					editor->set_block_absolute(SEA_LANTERN, step_x,
+							start_y_offset + abs_terrain_offset + 3, step_z,
 							std::vector<Block>{AIR});
 				}
 			}
@@ -3069,6 +3100,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									start_y_offset + abs_terrain_offset + 3,
 									door->second + segment.normal.second,
 									std::vector<Block>{AIR});
+						editor->set_block_absolute(SEA_LANTERN,
+								door->first + segment.normal.first,
+								start_y_offset + abs_terrain_offset + 3,
+								door->second + segment.normal.second,
+								std::vector<Block>{AIR});
 					}
 				}
 			}
@@ -3461,6 +3497,20 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 	// Random generator
 	auto rng = element_rng_salted(static_cast<std::uint64_t>(element.id), 0x726f6f66);
 	const std::optional<Block> tagged_roof_block = roof_block_from_tags(element, rng);
+	// Curtain-wall buildings continue their glazing over the roof. Rust passes
+	// the window material separately; the C++ facade signal is the wall block.
+	const auto default_roof_block = [&]() {
+		const bool curtain_wall = wall_block == GLASS || wall_block == TINTED_GLASS ||
+								  wall_block == WHITE_STAINED_GLASS ||
+								  wall_block == LIGHT_GRAY_STAINED_GLASS ||
+								  wall_block == CYAN_STAINED_GLASS ||
+								  wall_block == BLUE_STAINED_GLASS ||
+								  wall_block == LIGHT_BLUE_STAINED_GLASS ||
+								  wall_block == GRAY_STAINED_GLASS;
+		if (curtain_wall)
+			return wall_block;
+		return roof_friendly_block(rng.random_bool() ? accent_block : wall_block);
+	};
 
 	if (roof_type == RoofType::Flat) {
 		for (auto const &p : floor_area) {
@@ -3538,8 +3588,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		}
 		int32_t roof_peak_height = base_height + roof_height_boost;
 
-		Block roof_block = tagged_roof_block.value_or(
-				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		Block roof_block = tagged_roof_block.value_or(default_roof_block());
 
 		std::vector<std::pair<std::pair<int32_t, int32_t>, int32_t>> roof_heights;
 		roof_heights.reserve(floor_area.size());
@@ -3655,7 +3704,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		for (const auto &[cell, roof_height] : roof_heights) {
 			const auto [rx, rz] = cell;
 			for (const int sign : {-1, 1}) {
-				const bool at_end = is_wider_than_long
+				const bool at_end = !mapped_slope_bearing && is_wider_than_long
 											? (sign < 0 ? rx == min_x : rx == max_x)
 											: (sign < 0 ? rz == min_z : rz == max_z);
 				if (!at_end)
@@ -3675,6 +3724,48 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 						tx, roof_height + abs_terrain_offset, tz, nullptr, nullptr);
 			}
 		}
+		// Basic dormer glazing for residential pitched roofs.  Rust places
+		// dormers on the lower slope bands; use the computed roof surface so
+		// the C++ version remains grounded on irregular footprints.
+		const auto building_tag = element.tags.find("building");
+		const bool dormer_candidate = building_tag != element.tags.end() &&
+									  (building_tag->second == "house" ||
+											  building_tag->second == "residential" ||
+											  building_tag->second == "detached" ||
+											  building_tag->second == "terrace");
+		const bool dormer_roll = element_rng_salted(
+				static_cast<std::uint64_t>(element.id), 0xD0A4E20000000001ULL)
+										 .random_bool(.45);
+		if (dormer_candidate && dormer_roll && floor_area.size() >= 30 &&
+				roof_height_boost >= 4) {
+			std::vector<std::pair<int32_t, int32_t>> dormer_cells;
+			for (const auto &[cell, height] : roof_heights)
+				if (height < roof_peak_height - 1 && height > base_height + 1)
+					dormer_cells.push_back(cell);
+			const std::size_t count = dormer_cells.size() > 100 ? 2 : 1;
+			for (std::size_t i = 0; i < count && !dormer_cells.empty(); ++i) {
+				const auto cell =
+						dormer_cells[(i + 1) * dormer_cells.size() / (count + 1)];
+				const int roof_y = roof_map[cell];
+				// The dormer front follows the ridge direction. This keeps the
+				// opening aligned for north/south gables instead of always using
+				// an east/west three-block frame.
+				const int along_x = is_wider_than_long ? 1 : 0;
+				const int along_z = is_wider_than_long ? 0 : 1;
+				editor.set_block_absolute(GLASS, cell.first,
+						roof_y + abs_terrain_offset + 1, cell.second, nullptr, nullptr);
+				editor.set_block_absolute(OAK_PLANKS, cell.first,
+						roof_y + abs_terrain_offset + 2, cell.second, nullptr, nullptr);
+				editor.set_block_absolute(OAK_PLANKS, cell.first - along_x,
+						roof_y + abs_terrain_offset + 1, cell.second - along_z, nullptr,
+						nullptr);
+				editor.set_block_absolute(OAK_PLANKS, cell.first + along_x,
+						roof_y + abs_terrain_offset + 1, cell.second + along_z, nullptr,
+						nullptr);
+				editor.set_block_absolute(OAK_STAIRS, cell.first,
+						roof_y + abs_terrain_offset + 3, cell.second, nullptr, nullptr);
+			}
+		}
 
 		return;
 	}
@@ -3685,6 +3776,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		const int width = std::max(1, max_x - min_x);
 		const int length = std::max(1, max_z - min_z);
 		bool axis_x = width >= length;
+		std::optional<double> mapped_bearing;
 		if (auto it = element.tags.find("roof:orientation"); it != element.tags.end()) {
 			if (it->second == "along")
 				axis_x = width >= length;
@@ -3693,10 +3785,17 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		}
 		if (auto it = element.tags.find("roof:direction"); it != element.tags.end())
 			if (auto degrees = parse_roof_direction_degrees(it->second)) {
+				mapped_bearing = *degrees;
 				const double radians = *degrees * std::numbers::pi / 180.0;
 				axis_x = std::abs(std::cos(radians)) >= std::abs(std::sin(radians));
 			}
-		const int radius = std::max(1, (axis_x ? length : width) / 2);
+		int radius = std::max(1, (axis_x ? length : width) / 2);
+		if (mapped_bearing) {
+			const double radians = *mapped_bearing * std::numbers::pi / 180.0;
+			radius = std::max(
+					1, int(std::lround(std::abs(std::sin(radians)) * width / 2.0 +
+									   std::abs(std::cos(radians)) * length / 2.0)));
+		}
 		int peak = tagged_roof_height.value_or(std::max(2, radius));
 		if (!tagged_roof_height)
 			if (auto it = element.tags.find("roof:angle"); it != element.tags.end()) {
@@ -3714,11 +3813,18 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				} catch (...) {
 				}
 			}
-		const Block roof_block = tagged_roof_block.value_or(
-				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		const Block roof_block = tagged_roof_block.value_or(default_roof_block());
 		for (const auto &p : floor_area) {
-			const int distance =
-					axis_x ? std::abs(p.second - center_z) : std::abs(p.first - center_x);
+			int distance;
+			if (mapped_bearing) {
+				const double radians = *mapped_bearing * std::numbers::pi / 180.0;
+				distance = int(
+						std::lround(std::abs((p.first - center_x) * std::sin(radians) +
+											 (p.second - center_z) * std::cos(radians))));
+			} else {
+				distance = axis_x ? std::abs(p.second - center_z)
+								  : std::abs(p.first - center_x);
+			}
 			const double t = std::clamp(double(distance) / double(radius), 0.0, 1.0);
 			const int rise = std::max(0, int(std::lround(peak * std::sqrt(1.0 - t * t))));
 			editor.set_block_absolute(roof_block, p.first,
@@ -3759,8 +3865,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				}
 			}
 
-		Block roof_block = tagged_roof_block.value_or(
-				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		Block roof_block = tagged_roof_block.value_or(default_roof_block());
 
 		if (is_rectangular) {
 			std::unordered_map<std::pair<int32_t, int32_t>, int32_t, pair_hash>
@@ -4013,8 +4118,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				}
 			}
 
-		Block roof_block = tagged_roof_block.value_or(
-				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		Block roof_block = tagged_roof_block.value_or(default_roof_block());
 
 		std::unordered_map<std::pair<int32_t, int32_t>, int32_t, pair_hash> roof_heights;
 		roof_heights.reserve(floor_area.size() * 2);
@@ -4092,8 +4196,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				base_height + (tagged_roof_height ? *tagged_roof_height
 												  : std::clamp(building_size / 3, 3, 8));
 
-		Block roof_block = tagged_roof_block.value_or(
-				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		Block roof_block = tagged_roof_block.value_or(default_roof_block());
 
 		//std::unordered_map<std::pair<int32_t,int32_t>, int32_t, pair_hash> roof_heights;
 		std::unordered_map<std::pair<int32_t, int32_t>, int32_t, PairHash> roof_heights;
@@ -4229,8 +4332,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 						? *tagged_roof_height
 						: std::min(std::max(2, int(std::min(half_w, half_l) * 1.2)),
 								  building_height * 2);
-		const Block roof_block = tagged_roof_block.value_or(
-				rng.random_bool() ? accent_block : roof_friendly_block(wall_block));
+		const Block roof_block = tagged_roof_block.value_or(default_roof_block());
 		const auto edge_distances = roof_edge_distances(floor_area);
 		int max_edge_distance = 1;
 		for (const auto &[cell, distance] : edge_distances)
@@ -4263,8 +4365,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 										 : std::min(std::max(6, int(base_radius * 1.8)),
 												   building_height * 2);
 		const int max_search = int(std::ceil(base_radius * 1.25)) + 1;
-		const Block roof_block = tagged_roof_block.value_or(
-				rng.random_bool() ? accent_block : roof_friendly_block(wall_block));
+		const Block roof_block = tagged_roof_block.value_or(default_roof_block());
 		std::unordered_set<std::pair<int, int>, PairHash> footprint(
 				floor_area.begin(), floor_area.end());
 		auto radius_factor = [](double t) {
@@ -4315,8 +4416,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 									? double(*tagged_roof_height)
 									: std::max(1.0, std::min(half_w, half_l) * .8);
 
-		Block roof_block = tagged_roof_block.value_or(
-				roof_friendly_block(rng.random_bool() ? accent_block : wall_block));
+		Block roof_block = tagged_roof_block.value_or(default_roof_block());
 		const auto edge_distances = roof_edge_distances(floor_area);
 		int max_edge_distance = 1;
 		for (const auto &[cell, distance] : edge_distances)
