@@ -3,6 +3,7 @@
 #include <functional>
 #include <stdexcept>
 #include <algorithm>
+#include <limits>
 #include <unordered_map>
 #include <tiny_gltf.h>
 #include "../../../arnis_adapter.h"
@@ -13,6 +14,13 @@ namespace arnis::models_3d
 {
 namespace
 {
+int round_block_coordinate(float value)
+{
+	const float lo = static_cast<float>(std::numeric_limits<int>::min());
+	const float hi = static_cast<float>(std::numeric_limits<int>::max());
+	return static_cast<int>(std::lround(std::clamp(value, lo, hi)));
+}
+
 struct VoxelKey
 {
 	int x, y, z;
@@ -60,7 +68,10 @@ std::vector<Voxel> voxelize_points(const std::vector<std::array<float, 3>> &poin
 	std::vector<Voxel> out;
 	for (std::size_t i = 0; i < points.size(); ++i) {
 		auto q = t.apply(points[i]);
-		int x = std::lround(q[0]), y = std::lround(q[1]), z = std::lround(q[2]);
+		if (!std::all_of(q.begin(), q.end(), [](float v) { return std::isfinite(v); }))
+			continue;
+		int x = round_block_coordinate(q[0]), y = round_block_coordinate(q[1]),
+			z = round_block_coordinate(q[2]);
 		VoxelKey k{x, y, z};
 		if (seen.count(k))
 			continue;
@@ -82,7 +93,8 @@ std::pair<std::array<float, 3>, std::array<float, 3>> glb_model_bbox(
 					lo[j] = std::min(lo[j], p[j]);
 					hi[j] = std::max(hi[j], p[j]);
 				}
-	if (!std::isfinite(lo[0]))
+	if (!std::all_of(lo.begin(), lo.end(), [](float v) { return std::isfinite(v); }) ||
+			!std::all_of(hi.begin(), hi.end(), [](float v) { return std::isfinite(v); }))
 		throw std::runtime_error("GLB has no positions");
 	return {lo, hi};
 }
@@ -90,7 +102,10 @@ WorldTransform::WorldTransform(double yaw, double scale, std::array<double, 3> t
 		std::array<float, 3> w, double wy, float x, float y, float z) :
 		is_(scale), itx_(t[0]), ity_(t[1]), itz_(t[2]), wtx_(x), wty_(y), wtz_(z)
 {
-	double a = yaw * 3.141592653589793 / 180, b = wy * 3.141592653589793 / 180;
+	// Rust casts angles to f32 before to_radians()/sin()/cos(); preserve that
+	// order so model placement remains numerically stable across backends.
+	const float a = static_cast<float>(yaw) * 3.14159265358979323846f / 180.0f;
+	const float b = static_cast<float>(wy) * 3.14159265358979323846f / 180.0f;
 	ic_ = std::cos(a);
 	isn_ = std::sin(a);
 	wc_ = std::cos(b);
@@ -111,7 +126,7 @@ WorldTransform::WorldTransform(double intrinsic_yaw, double intrinsic_scale,
 WorldTransform WorldTransform::pitched(double d) const
 {
 	auto r = *this;
-	double a = d * 3.141592653589793 / 180;
+	const float a = static_cast<float>(d) * 3.14159265358979323846f / 180.0f;
 	r.pc_ = std::cos(a);
 	r.ps_ = std::sin(a);
 	return r;

@@ -180,7 +180,8 @@ int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y, int b
 		const int y = bed_y + dy;
 		if (y >= water_y)
 			return dy - 1;
-		editor.set_block_absolute(bed_block, x, y, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(bed_block, x, y, z, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
 	}
 	return bump;
 }
@@ -221,7 +222,8 @@ void clear_tree_from(WorldEditor &editor, int x, int y, int z)
 		stack.pop_back();
 		if (!editor.check_for_block_absolute(cx, cy, cz, tree_parts()))
 			continue;
-		editor.set_block_absolute(AIR, cx, cy, cz, std::nullopt, std::nullopt);
+		editor.set_block_absolute(AIR, cx, cy, cz,
+				std::optional<std::vector<Block>>(tree_parts()), std::nullopt);
 		++cleared;
 		for (const auto &[dx, dy, dz] :
 				std::array<std::tuple<int, int, int>, 6>{{{1, 0, 0}, {-1, 0, 0},
@@ -234,7 +236,9 @@ void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 {
 	for (int y = water_y + 1; y <= water_y + 2; ++y)
 		if (editor.check_for_block_absolute(x, y, z, surface_vegetation()))
-			editor.set_block_absolute(AIR, x, y, z, std::nullopt, std::nullopt);
+			editor.set_block_absolute(AIR, x, y, z,
+					std::optional<std::vector<Block>>(surface_vegetation()),
+					std::nullopt);
 	if (editor.check_for_block_absolute(x, water_y + 1, z, tree_trunks()))
 		clear_tree_from(editor, x, water_y + 1, z);
 }
@@ -469,7 +473,8 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	depth = std::min(depth, std::max(0, water_y - world_editor::min_y() - 2));
 
 	for (int dy = 0; dy <= depth; ++dy)
-		editor.set_block_absolute(WATER, x, water_y - dy, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(WATER, x, water_y - dy, z, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
 	clear_stranded_vegetation(editor, x, z, water_y);
 
 	const int bed_y = water_y - depth - 1;
@@ -501,8 +506,6 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 				top_block = SAND;
 			else if (d == 2)
 				top_block = vn(53, 97, 56) > 0.50 ? SAND : GRAVEL;
-			else if (d >= 5 && vn(401, 503, 8) > 0.96)
-				top_block = MAGMA_BLOCK;
 			else if (d >= 5 && vn(727, 911, 8) > 0.96)
 				top_block = SOUL_SAND;
 			else if (vn(73, 109, 64) > 0.74)
@@ -520,10 +523,11 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	}
 
 	if (bed_y > world_editor::min_y())
-		editor.set_block_absolute(top_block, x, bed_y, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(top_block, x, bed_y, z, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
 	if (bed_y - 1 > world_editor::min_y())
-		editor.set_block_absolute(
-				under_block, x, bed_y - 1, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(under_block, x, bed_y - 1, z, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
 
 	const int fill_to = std::max(bed_y - 2, world_editor::min_y() + 1);
 	const int fill_from = std::max(bed_y - 12, world_editor::min_y() + 1);
@@ -555,9 +559,16 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 			if (road_mask.contains(x, z) || tunnel_footprint.contains(x, z) ||
 					!editor.is_lc_water(x, z))
 				continue;
-			const int water_y = editor.get_water_level(x, z);
-			if (editor.get_ground_level(x, z) > water_y)
-				continue;
+			int water_y = editor.get_water_level(x, z);
+			if (editor.get_ground_level(x, z) > water_y) {
+				// Rust keeps a classified interior-water cell at its own terrain
+				// level when the shoreline snap falls below a local step.  Only
+				// banks are skipped; otherwise deep water develops dry seams.
+				if (!editor.get_ground() || !editor.get_ground()->is_interior_water(
+													editor.ground_point(x, z)))
+					continue;
+				water_y = editor.get_ground_level(x, z);
+			}
 			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
 		}
 	}
@@ -578,10 +589,14 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 			if (road_mask.contains(x, z) || tunnel_footprint.contains(x, z) ||
 					!editor.is_lc_water(x, z))
 				continue;
-			const int water_y = editor.get_water_level(x, z);
-			if (editor.get_ground_level(x, z) <= water_y)
-				carve_water_column(
-						editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
+			int water_y = editor.get_water_level(x, z);
+			if (editor.get_ground_level(x, z) > water_y) {
+				if (!editor.get_ground() || !editor.get_ground()->is_interior_water(
+													editor.ground_point(x, z)))
+					continue;
+				water_y = editor.get_ground_level(x, z);
+			}
+			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
 		}
 }
 

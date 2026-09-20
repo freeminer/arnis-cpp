@@ -2,11 +2,18 @@
 #include "../../world_utils.h"
 #include <fstream>
 #include <cstdio>
+#include <cstdlib>
 namespace arnis::models_3d::wikidata_client
 {
 std::filesystem::path cache_root(const std::filesystem::path &b)
 {
-	return b.empty() ? std::filesystem::path("./.arnis_wikidata_cache") : b;
+	if (!b.empty())
+		return b;
+	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+		return std::filesystem::path(xdg) / "arnis" / "wikidata_models";
+	if (const char *home = std::getenv("HOME"); home && *home)
+		return std::filesystem::path(home) / ".cache" / "arnis" / "wikidata_models";
+	return std::filesystem::path("./.arnis_wikidata_cache");
 }
 std::string url_hash(const std::string &u)
 {

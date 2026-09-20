@@ -1,5 +1,6 @@
 #pragma once
 #include "../provider.h"
+#include "client.h"
 #include "wikidata_index.h"
 #include <unordered_map>
 #include <functional>
@@ -15,14 +16,16 @@ class RemoteModelProvider : public ModelProvider
 			fetch_bytes_;
 
 public:
-	explicit RemoteModelProvider(std::filesystem::path cache) : cache_(std::move(cache))
+	explicit RemoteModelProvider(std::filesystem::path cache) :
+			cache_(wikidata_client::cache_root(cache))
 	{
 	}
 	RemoteModelProvider(std::filesystem::path cache,
 			std::function<std::optional<std::vector<std::uint8_t>>(
 					const std::string &, std::size_t)>
 					fetch_bytes) :
-			cache_(std::move(cache)), fetch_bytes_(std::move(fetch_bytes))
+			cache_(wikidata_client::cache_root(cache)),
+			fetch_bytes_(std::move(fetch_bytes))
 	{
 	}
 	void set_fetcher(std::function<std::optional<std::vector<std::uint8_t>>(

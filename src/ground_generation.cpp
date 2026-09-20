@@ -421,6 +421,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			const int ground_y =
 					terrain_enabled ? editor.get_ground_level(x, z) : args.ground_level;
 			const int slope = terrain_enabled ? local_slope(editor, x, z) : 0;
+			// Rust treats slopes above four as an explicit rock override.  This
+			// deliberately bypasses authored surface blocks (quarry/park/etc.) so
+			// steep faces cannot retain grass or paving, while still allowing the
+			// lower tiers of the slope palette to choose scree materials.
+			const bool steep_override = terrain_enabled && slope > 4;
 			const auto relative = XZPoint{x - xzbbox.min_x(), z - xzbbox.min_z()};
 			const bool planetary = !is_earth(args.body);
 			const bool has_cover =
@@ -452,10 +457,13 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									has_water_in_column(x - 1, z + 1)) ||
 							(has_water_in_column(x - 1, z - 1) &&
 									has_water_in_column(x + 1, z + 1)));
+			const bool has_existing_stone = editor.check_for_block_absolute(x, ground_y,
+					z, std::optional<std::vector<Block>>(std::vector<Block>{STONE}));
+			const bool process_surface = steep_override || !has_existing_stone;
 
 			// Rust uses a smoothed ESA water mask, but never retracts a hard water
 			// cell.  Keep OSM water too, and avoid flooding cliff faces.
-			if (!planetary && !in_tunnel &&
+			if (process_surface && !planetary && !in_tunnel && !steep_override &&
 					(grid_water || existing_water || osm_gap || water_blend > .5) &&
 					slope <= 4) {
 				const int water_y = editor.get_water_level(x, z);
@@ -475,9 +483,23 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					continue;
 				}
 			}
+			// On a steep DEM edge a snapped water level may sit below the
+			// current column.  Rust keeps an interior water cell in that case;
+			// otherwise the ground pass paints a grass/rock line through the
+			// middle of a lake and the later depth pass cannot restore it.
+			if (process_surface && !planetary && !in_tunnel && steep_override &&
+					grid_water && editor.ground->is_interior_water(relative)) {
+				const int water_y = ground_y;
+				if (!is_protected_surface(editor, x, water_y, z)) {
+					editor.set_block_absolute(
+							WATER, x, water_y, z, std::nullopt, std::nullopt);
+					continue;
+				}
+			}
 
-			if (!in_tunnel && !is_protected_surface(editor, x, ground_y, z) &&
-					is_replaceable_surface(editor, x, ground_y, z)) {
+			if (process_surface && !in_tunnel &&
+					!is_protected_surface(editor, x, ground_y, z) &&
+					(steep_override || is_replaceable_surface(editor, x, ground_y, z))) {
 				const auto planetary_palette =
 						planetary
 								? celestial_surface_palette(args.body, slope,
@@ -523,8 +545,19 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						climate_under = SANDSTONE;
 					}
 				}
-				editor.set_block_absolute(
-						surface, x, ground_y, z, std::nullopt, std::nullopt);
+				if (steep_override) {
+					// Match Rust's steep-face blacklist: roads, structures, bedrock,
+					// and water remain authored even when terrain rock is forced.
+					editor.set_block_absolute(surface, x, ground_y, z, std::nullopt,
+							std::optional<std::vector<Block>>(std::vector<Block>{WATER,
+									BEDROCK, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA,
+									GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE,
+									DIRT_PATH, STONE_BRICKS, BRICK, OAK_PLANKS,
+									BLACK_CONCRETE}));
+				} else {
+					editor.set_block_absolute(
+							surface, x, ground_y, z, std::nullopt, std::nullopt);
+				}
 				const bool surface_is_water = editor.check_for_block_absolute(x, ground_y,
 						z, std::optional<std::vector<Block>>(std::vector<Block>{WATER}));
 				auto set_under_if_absent = [&](Block block) {

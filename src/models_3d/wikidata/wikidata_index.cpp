@@ -4,6 +4,7 @@
 #include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cctype>
+#include <tuple>
 namespace arnis::models_3d
 {
 static const std::unordered_map<std::string, WikidataEntry> &index_data()
@@ -56,11 +57,19 @@ const WikidataEntry *lookup_wikidata(const std::string &q)
 }
 std::vector<WikidataEntry> wikidata_attributions()
 {
-	std::vector<WikidataEntry> out;
+	// Rust orders by label and then QID, making equal-label attribution lists
+	// stable across hash-map iteration order.
+	std::vector<std::pair<std::string, WikidataEntry>> entries;
+	entries.reserve(index_data().size());
 	for (const auto &[q, e] : index_data())
-		out.push_back(e);
-	std::sort(out.begin(), out.end(),
-			[](const auto &a, const auto &b) { return a.label < b.label; });
+		entries.emplace_back(q, e);
+	std::sort(entries.begin(), entries.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.second.label, a.first) < std::tie(b.second.label, b.first);
+	});
+	std::vector<WikidataEntry> out;
+	out.reserve(entries.size());
+	for (auto &entry : entries)
+		out.push_back(std::move(entry.second));
 	return out;
 }
 std::vector<std::string> wikidata_ids()
@@ -148,8 +157,9 @@ std::vector<WikidataModel> wikidata_models_named(const std::string &label)
 		if (l.find(n) != std::string::npos)
 			out.push_back(m);
 	}
-	std::sort(out.begin(), out.end(),
-			[](const auto &a, const auto &b) { return a.entry.label < b.entry.label; });
+	std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.entry.label, a.id) < std::tie(b.entry.label, b.id);
+	});
 	return out;
 }
 std::vector<WikidataModel> wikidata_models_up_to(double maxh)
@@ -173,10 +183,9 @@ std::vector<WikidataModel> wikidata_models_between(
 std::vector<WikidataEntry> wikidata_attributions_named(const std::string &text)
 {
 	std::vector<WikidataEntry> out;
-	for (const auto &m : wikidata_models_named(text))
+	const auto models = wikidata_models_named(text);
+	for (const auto &m : models)
 		out.push_back(m.entry);
-	std::sort(out.begin(), out.end(),
-			[](const auto &a, const auto &b) { return a.label < b.label; });
 	return out;
 }
 std::optional<ModelFormat> wikidata_model_format(const std::string &q)

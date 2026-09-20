@@ -1,6 +1,7 @@
 #include "prescan.h"
 #include "../../../../arnis_adapter.h"
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 namespace arnis::models_3d::three_dmr
 {
@@ -32,10 +33,15 @@ std::vector<std::pair<int, int>> points(const ProcessedElement &e)
 }
 bool direction(const std::string &s, double &o)
 {
+	const auto first = s.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return false;
+	const auto last = s.find_last_not_of(" \t\r\n");
+	const std::string value = s.substr(first, last - first + 1);
 	try {
 		std::size_t i = 0;
-		o = std::stod(s, &i);
-		if (i == s.size()) {
+		o = std::stod(value, &i);
+		if (i == value.size() && std::isfinite(o)) {
 			o = std::fmod(std::fmod(o, 360) + 360, 360);
 			return true;
 		}
@@ -46,8 +52,9 @@ bool direction(const std::string &s, double &o)
 			{"ESE", 112.5}, {"SE", 135}, {"SSE", 157.5}, {"S", 180}, {"SOUTH", 180},
 			{"SSW", 202.5}, {"SW", 225}, {"WSW", 247.5}, {"W", 270}, {"WEST", 270},
 			{"WNW", 292.5}, {"NW", 315}, {"NNW", 337.5}};
-	std::string u = s;
-	std::transform(u.begin(), u.end(), u.begin(), ::toupper);
+	std::string u = value;
+	std::transform(u.begin(), u.end(), u.begin(),
+			[](unsigned char c) { return static_cast<char>(std::toupper(c)); });
 	for (auto [n, d] : names)
 		if (u == n) {
 			o = d;
@@ -67,10 +74,19 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			continue;
 		std::uint64_t model = 0;
 		try {
-			std::size_t n = 0;
 			auto raw = tag(e, "3dmr");
-			model = std::stoll(raw, &n);
-			if (n != raw.size() || model < 0)
+			const auto first = raw.find_first_not_of(" \t\r\n");
+			if (first == std::string::npos)
+				continue;
+			const auto last = raw.find_last_not_of(" \t\r\n");
+			raw = raw.substr(first, last - first + 1);
+			if (raw.empty() || !std::all_of(raw.begin(), raw.end(), [](unsigned char c) {
+					return c >= '0' && c <= '9';
+				}))
+				continue;
+			std::size_t n = 0;
+			model = std::stoull(raw, &n);
+			if (n != raw.size() || model == 0)
 				continue;
 		} catch (...) {
 			continue;

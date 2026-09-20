@@ -73,7 +73,7 @@ bool direction(const std::string &s, double &o)
 	try {
 		std::size_t n = 0;
 		o = std::stod(value, &n);
-		if (n == value.size()) {
+		if (n == value.size() && std::isfinite(o)) {
 			o = std::fmod(std::fmod(o, 360) + 360, 360);
 			return true;
 		}

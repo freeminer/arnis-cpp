@@ -194,8 +194,19 @@ double way_bearing_degrees(const ProcessedWay &w)
 float parse_height_m(const std::string &v, bool &valid)
 {
 	try {
-		const float h = std::stof(v);
-		valid = h > 0 && h <= 200;
+		std::string value = v;
+		const auto first = value.find_first_not_of(" \t\r\n");
+		const auto last = value.find_last_not_of(" \t\r\n");
+		if (first == std::string::npos) {
+			valid = false;
+			return 0.0f;
+		}
+		value = value.substr(first, last - first + 1);
+		if (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
+			value.pop_back();
+		std::size_t consumed = 0;
+		const float h = std::stof(value, &consumed);
+		valid = consumed == value.size() && std::isfinite(h) && h > 0 && h <= 200;
 		return valid ? h : 0.0f;
 	} catch (...) {
 		valid = false;

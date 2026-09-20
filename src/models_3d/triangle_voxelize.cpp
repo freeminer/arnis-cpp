@@ -6,10 +6,18 @@
 #include <functional>
 #include <string>
 #include <unordered_map>
+#include <limits>
 namespace arnis::models_3d
 {
 namespace
 {
+int round_block_coordinate(float value)
+{
+	const float lo = static_cast<float>(std::numeric_limits<int>::min());
+	const float hi = static_cast<float>(std::numeric_limits<int>::max());
+	return static_cast<int>(std::lround(std::clamp(value, lo, hi)));
+}
+
 struct VoxelKey
 {
 	int x, y, z;
@@ -91,8 +99,9 @@ std::vector<Voxel> voxelize_uniform_triangles(
 				auto p = t.apply({w * q[0][0] + u * q[1][0] + v * q[2][0],
 						w * q[0][1] + u * q[1][1] + v * q[2][1],
 						w * q[0][2] + u * q[1][2] + v * q[2][2]});
-				const int x = std::lround(p[0]), y = std::lround(p[1]),
-						  z = std::lround(p[2]);
+				const int x = round_block_coordinate(p[0]),
+						  y = round_block_coordinate(p[1]),
+						  z = round_block_coordinate(p[2]);
 				const auto key = std::to_string(x) + ':' + std::to_string(y) + ':' +
 								 std::to_string(z);
 				if (seen.emplace(key, true).second)
@@ -128,7 +137,8 @@ std::vector<Voxel> voxelize_colored_triangles(
 	std::vector<Voxel> out;
 	for (std::size_t i = 0; i < p.size(); ++i) {
 		auto w = t.apply(p[i]);
-		const int x = std::lround(w[0]), y = std::lround(w[1]), z = std::lround(w[2]);
+		const int x = round_block_coordinate(w[0]), y = round_block_coordinate(w[1]),
+				  z = round_block_coordinate(w[2]);
 		const VoxelKey key{x, y, z};
 		if (seen.count(key))
 			continue;

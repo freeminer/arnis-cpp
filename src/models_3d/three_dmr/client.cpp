@@ -2,12 +2,19 @@
 #include "../model_asset.h"
 #include <fstream>
 #include <cmath>
+#include <cstdlib>
 #include <nlohmann/json.hpp>
 namespace arnis::models_3d::three_dmr
 {
 std::filesystem::path cache_root(const std::filesystem::path &base)
 {
-	return base.empty() ? std::filesystem::path("./.arnis_3dmr_cache") : base;
+	if (!base.empty())
+		return base;
+	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+		return std::filesystem::path(xdg) / "arnis" / "3dmr";
+	if (const char *home = std::getenv("HOME"); home && *home)
+		return std::filesystem::path(home) / ".cache" / "arnis" / "3dmr";
+	return std::filesystem::path("./.arnis_3dmr_cache");
 }
 std::string info_url(std::uint64_t id)
 {
@@ -100,8 +107,9 @@ std::optional<ModelInfo> parse_model_info(const std::vector<std::uint8_t> &b)
 		if (const auto it = j.find("license"); it != j.end() && !it->is_null()) {
 			if (it->is_string())
 				m.license = it->get<std::string>();
-			else if (it->is_number_integer() || it->is_number_unsigned() ||
-					 it->is_number_float())
+			else
+				// Rust's deserialize_license stringifies every non-null JSON
+				// value, not only numeric license codes.
 				m.license = it->dump();
 		}
 		auto number = [&](const char *key, double fallback) {

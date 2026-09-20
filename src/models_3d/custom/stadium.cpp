@@ -119,12 +119,23 @@ bool placement(const ProcessedElement &e, double scale, Placement &o)
 	o = {e.id(), int(std::lround(cx)), int(std::lround(cz)), {minx, minz, maxx, maxz}, lm,
 			sm, theta * 180 / M_PI, 0, false};
 	auto hs = tag(e, "height");
-	if (!hs.empty())
+	if (!hs.empty()) {
+		std::string value = hs;
+		const auto first = value.find_first_not_of(" \t\r\n");
+		const auto last = value.find_last_not_of(" \t\r\n");
+		if (first != std::string::npos)
+			value = value.substr(first, last - first + 1);
+		if (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
+			value.pop_back();
 		try {
-			o.osm_height_m = std::min(200.f, float(std::stod(hs)));
+			std::size_t consumed = 0;
+			const float parsed = std::stof(value, &consumed);
+			if (consumed == value.size() && std::isfinite(parsed) && parsed > 0)
+				o.osm_height_m = std::min(200.f, parsed);
 			o.has_osm_height = o.osm_height_m > 0;
 		} catch (...) {
 		}
+	}
 	return true;
 }
 
