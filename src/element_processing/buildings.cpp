@@ -2406,13 +2406,18 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					facade_plan.front_segment.has_value());
 	const WallDepthStyle wall_depth_style = wall_depth_style_for(
 			category, era, detail, cached_footprint_size, clean_visual_seed);
+	const bool wall_depth_span_ok = max_x - min_x >= 4 && max_z - min_z >= 4;
+	const bool wall_depth_height_ok = building_height >= floor_cycle + 2 ||
+									  wall_depth_style == WallDepthStyle::HistoricOrnate;
 	const bool wall_depth_piers_active =
-			(wall_depth_style == WallDepthStyle::ModernPillars ||
-					wall_depth_style == WallDepthStyle::InstitutionalBands ||
-					wall_depth_style == WallDepthStyle::HistoricOrnate ||
-					wall_depth_style == WallDepthStyle::SkyscraperFins) ||
-			(wall_depth_style == WallDepthStyle::SubtlePilasters &&
-					element_rng_salted(clean_visual_seed, 7919).uniform(100) < 60);
+			wall_depth_span_ok && wall_depth_height_ok &&
+			((wall_depth_style == WallDepthStyle::ModernPillars ||
+					 wall_depth_style == WallDepthStyle::InstitutionalBands ||
+					 wall_depth_style == WallDepthStyle::HistoricOrnate ||
+					 wall_depth_style == WallDepthStyle::SkyscraperFins) ||
+					(wall_depth_style == WallDepthStyle::SubtlePilasters &&
+							element_rng_salted(clean_visual_seed, 7919).uniform(100) <
+									60));
 	const auto climate = editor->get_ground() ? editor->get_ground()->climate()
 											  : biome::Climate::Temperate;
 	if (!explicit_wall && condition != BuildingCondition::Construction)
@@ -2835,7 +2840,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									category == BuildingCategory::Residential) &&
 							condition == BuildingCondition::Normal &&
 							outward != std::pair<int, int>{0, 0} &&
-							!facade_plan.is_door(bx, bz)) {
+							(!facade_plan.is_door(bx, bz) || h > start_y_offset + 3)) {
 						const Block shutter =
 								(clean_visual_seed & 1) ? OAK_TRAPDOOR : SPRUCE_TRAPDOOR;
 						editor->set_block_absolute(shutter, bx + outward.first,
@@ -2860,7 +2865,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					if (outward != std::pair<int, int>{0, 0} && !is_passage &&
 							!party_wall && depth_clear &&
 							condition == BuildingCondition::Normal &&
-							!facade_plan.is_door(bx, bz)) {
+							(!facade_plan.is_door(bx, bz) || h > start_y_offset + 3)) {
 						const bool corner = (bx == prev.first && bz == prev.second) ||
 											(bx == x && bz == z);
 						bool relief = false;
@@ -3034,9 +3039,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					}
 					// Rust hangs a small lantern over mapped entrances. Keep it on
 					// the facade's outward side so it does not occupy the doorway.
-					editor->set_block_absolute(SEA_LANTERN, step_x,
-							start_y_offset + abs_terrain_offset + 3, step_z,
-							std::vector<Block>{AIR});
+					if (editor->get_ground_level(step_x, step_z) <= start_y_offset)
+						editor->set_block_absolute(SEA_LANTERN, step_x,
+								start_y_offset + abs_terrain_offset + 3, step_z,
+								std::vector<Block>{AIR});
 				}
 			}
 		}
@@ -3100,11 +3106,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									start_y_offset + abs_terrain_offset + 3,
 									door->second + segment.normal.second,
 									std::vector<Block>{AIR});
-						editor->set_block_absolute(SEA_LANTERN,
-								door->first + segment.normal.first,
-								start_y_offset + abs_terrain_offset + 3,
-								door->second + segment.normal.second,
-								std::vector<Block>{AIR});
+						const int lantern_x = door->first + segment.normal.first;
+						const int lantern_z = door->second + segment.normal.second;
+						if (editor->get_ground_level(lantern_x, lantern_z) <=
+								start_y_offset)
+							editor->set_block_absolute(SEA_LANTERN, lantern_x,
+									start_y_offset + abs_terrain_offset + 3, lantern_z,
+									std::vector<Block>{AIR});
 					}
 				}
 			}

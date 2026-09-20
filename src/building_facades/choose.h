@@ -1,6 +1,8 @@
 #pragma once
 #include "../element_processing/buildings.h"
 #include <algorithm>
+#include <cmath>
+#include <cstdint>
 #include <optional>
 #include <string>
 #include <utility>
@@ -15,6 +17,14 @@ struct Entry
 	unsigned storeys = 1;
 	bool tiles_horizontally = false, has_ground_floor = false;
 	double storey_m() const { return metres_tall / std::max(1u, storeys); }
+	double ground_m() const { return has_ground_floor ? storey_m() : 0.0; }
+	double upper_m() const { return std::max(storey_m(), metres_tall - ground_m()); }
+	std::pair<std::uint32_t, std::uint32_t> scaled_size(double pixels_per_metre) const
+	{
+		const auto ppm = std::max(0.0, pixels_per_metre);
+		return {static_cast<std::uint32_t>(std::llround(metres_wide * ppm)),
+				static_cast<std::uint32_t>(std::llround(metres_tall * ppm))};
+	}
 };
 struct Choice
 {

@@ -2,9 +2,12 @@
 
 #include <algorithm>
 #include <array>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
+#include <fstream>
+#include <iterator>
 #include <unordered_set>
 
 #include "../block_definitions.h"
