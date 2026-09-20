@@ -27,8 +27,10 @@ struct Entry
 	std::pair<std::uint32_t, std::uint32_t> scaled_size(double pixels_per_metre) const
 	{
 		const auto ppm = std::max(0.0, pixels_per_metre);
-		return {static_cast<std::uint32_t>(std::llround(metres_wide * ppm)),
-				static_cast<std::uint32_t>(std::llround(metres_tall * ppm))};
+		return {std::max<std::uint32_t>(
+						1, static_cast<std::uint32_t>(std::llround(metres_wide * ppm))),
+				std::max<std::uint32_t>(
+						1, static_cast<std::uint32_t>(std::llround(metres_tall * ppm)))};
 	}
 };
 struct Choice

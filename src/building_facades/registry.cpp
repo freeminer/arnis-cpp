@@ -95,6 +95,8 @@ void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode>
 {
 	if (nodes.size() < 3 || building_height < 4)
 		return;
+	if (!editor.map_decals_enabled())
+		return;
 	std::filesystem::path directory;
 	std::optional<FacadeSet> set;
 	std::uint32_t ppm = 16;
@@ -143,11 +145,14 @@ void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode>
 			const auto &anchor = cells[first];
 			const auto &end = cells[last - 1];
 			if (extent) {
-				const auto inside = [&](const auto &cell) {
-					return cell.first >= (*extent)[0] && cell.second >= (*extent)[1] &&
-						   cell.first <= (*extent)[2] && cell.second <= (*extent)[3];
+				const auto inside = [&](const auto &cell, int outward_x, int outward_z) {
+					const int x = cell.first + outward_x;
+					const int z = cell.second + outward_z;
+					return x >= (*extent)[0] && z >= (*extent)[1] && x <= (*extent)[2] &&
+						   z <= (*extent)[3];
 				};
-				if (!inside(anchor) || !inside(end))
+				if (!inside(anchor, segment->normal.first, segment->normal.second) ||
+						!inside(end, segment->normal.first, segment->normal.second))
 					continue;
 			}
 			submit_panel(editor, anchor.first + segment->normal.first, base_y,

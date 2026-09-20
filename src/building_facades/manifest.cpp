@@ -3,12 +3,23 @@
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 namespace arnis::building_facades
 {
 namespace
 {
+constexpr unsigned SCHEMA_VERSION = 1;
+bool safe_name(const std::string &name)
+{
+	if (name.empty() || name.size() > 128 || name.find("..") != std::string::npos)
+		return false;
+	return std::all_of(name.begin(), name.end(), [](unsigned char c) {
+		return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			   (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
+	});
+}
 std::optional<buildings::BuildingCategory> category(const std::string &name)
 {
 	using C = buildings::BuildingCategory;
@@ -53,13 +64,8 @@ std::optional<FacadeSet> FacadeSet::validate(std::vector<Entry> entries)
 			entries.end());
 	if (entries.empty())
 		return {};
-	std::vector<Entry> unique;
-	for (auto &entry : entries)
-		if (std::none_of(unique.begin(), unique.end(),
-					[&](const Entry &known) { return known.file == entry.file; }))
-			unique.push_back(std::move(entry));
 	FacadeSet set;
-	set.entries_ = std::move(unique);
+	set.entries_ = std::move(entries);
 	return set;
 }
 
@@ -79,15 +85,18 @@ std::optional<FacadeSet> FacadeSet::load_directory(
 			manifest["version"].get<unsigned>() == 0 || !manifest.contains("textures") ||
 			!manifest["textures"].is_array())
 		return {};
+	const auto version = manifest["version"].get<unsigned>();
+	if (version > SCHEMA_VERSION)
+		std::cerr << "Warning: preset facade manifest is version " << version
+				  << " and this build knows version " << SCHEMA_VERSION
+				  << "; reading it and ignoring anything newer.\n";
 	std::vector<Entry> entries;
 	for (const auto &raw : manifest["textures"]) {
 		try {
 			Entry entry;
 			entry.file = raw.at("file").get<std::string>();
 			const std::filesystem::path file(entry.file);
-			if (entry.file.empty() || entry.file.size() > 128 || file.is_absolute() ||
-					file.has_parent_path() ||
-					entry.file.find("..") != std::string::npos ||
+			if (!safe_name(entry.file) || file.is_absolute() || file.has_parent_path() ||
 					!std::filesystem::is_regular_file(directory / file)) {
 				if (rejected)
 					rejected->push_back(entry.file + ": missing or unsafe image");

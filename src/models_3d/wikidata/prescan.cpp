@@ -67,10 +67,13 @@ std::vector<std::pair<int, int>> points(const ProcessedElement &e)
 }
 bool direction(const std::string &s, double &o)
 {
+	const auto value = trim(s);
+	if (value.empty())
+		return false;
 	try {
 		std::size_t n = 0;
-		o = std::stod(s, &n);
-		if (n == s.size()) {
+		o = std::stod(value, &n);
+		if (n == value.size()) {
 			o = std::fmod(std::fmod(o, 360) + 360, 360);
 			return true;
 		}
@@ -81,7 +84,7 @@ bool direction(const std::string &s, double &o)
 			{"SW", 225}, {"W", 270}, {"WEST", 270}, {"NW", 315}, {"NNE", 22.5},
 			{"ENE", 67.5}, {"ESE", 112.5}, {"SSE", 157.5}, {"SSW", 202.5}, {"WSW", 247.5},
 			{"WNW", 292.5}, {"NNW", 337.5}};
-	std::string u = s;
+	std::string u = value;
 	std::transform(u.begin(), u.end(), u.begin(),
 			[](unsigned char c) { return std::toupper(c); });
 	for (auto [n, d] : v)
@@ -116,6 +119,30 @@ std::optional<double> meters(std::string s)
 }
 std::vector<Block> palette_for(const ProcessedElement &e)
 {
+	// Keep these pools in lockstep with models_3d/wikidata/placement.rs.  They
+	// are intentionally broad: voxelized models have no material information
+	// after STL conversion, so deterministic variation from the contextual pool
+	// is preferable to a single generic stone block.
+	static const std::vector<Block> tower = {STONE_BRICKS, COBBLESTONE,
+			CRACKED_STONE_BRICKS, POLISHED_ANDESITE, ANDESITE, DEEPSLATE_BRICKS,
+			SMOOTH_STONE, CHISELED_STONE_BRICKS};
+	static const std::vector<Block> historic = {STONE_BRICKS, CRACKED_STONE_BRICKS,
+			CHISELED_STONE_BRICKS, COBBLESTONE, POLISHED_BLACKSTONE_BRICKS,
+			MOSSY_STONE_BRICKS, MOSSY_COBBLESTONE, COBBLED_DEEPSLATE, ANDESITE,
+			DEEPSLATE_BRICKS};
+	static const std::vector<Block> religious = {STONE_BRICKS, CHISELED_STONE_BRICKS,
+			QUARTZ_BLOCK, WHITE_CONCRETE, SANDSTONE, SMOOTH_SANDSTONE, POLISHED_DIORITE,
+			END_STONE_BRICKS};
+	static const std::vector<Block> statue = {
+			STONE, SMOOTH_STONE, ANDESITE, POLISHED_ANDESITE, DIORITE, POLISHED_DIORITE};
+	static const std::vector<Block> residential = {BRICK, STONE_BRICKS, OAK_PLANKS,
+			MUD_BRICKS, SANDSTONE, TERRACOTTA, BROWN_TERRACOTTA};
+	static const std::vector<Block> industrial = {GRAY_CONCRETE, LIGHT_GRAY_CONCRETE,
+			STONE, SMOOTH_STONE, POLISHED_ANDESITE, DEEPSLATE_BRICKS};
+	static const std::vector<Block> lighthouse = {
+			WHITE_CONCRETE, QUARTZ_BLOCK, SMOOTH_QUARTZ, POLISHED_DIORITE};
+	static const std::vector<Block> fallback = {
+			STONE_BRICKS, ANDESITE, POLISHED_ANDESITE, COBBLESTONE, SMOOTH_STONE};
 	auto rgb = [&](const char *key) -> std::optional<RGBTuple> {
 		auto value = tag(e, key);
 		return value.empty() ? std::nullopt : color_text_to_rgb_tuple(value);
@@ -144,20 +171,55 @@ std::vector<Block> palette_for(const ProcessedElement &e)
 		return closest_blocks(RGBTuple{128, 127, 128}, 5);
 	if (lower == "wood" || lower == "timber")
 		return closest_blocks(RGBTuple{162, 131, 79}, 5);
+	if (lower == "marble")
+		return closest_blocks(RGBTuple{230, 226, 220}, 5);
+	if (lower == "granite")
+		return closest_blocks(RGBTuple{149, 103, 86}, 5);
+	if (lower == "limestone")
+		return closest_blocks(RGBTuple{210, 195, 165}, 5);
 	if (lower == "metal" || lower == "steel" || lower == "iron")
 		return closest_blocks(RGBTuple{180, 180, 180}, 5);
-	if (tag(e, "man_made") == "lighthouse")
-		return {WHITE_CONCRETE, QUARTZ_BLOCK, SMOOTH_QUARTZ, POLISHED_DIORITE};
-	if (tag(e, "man_made") == "tower" || tag(e, "historic") == "castle")
-		return {STONE_BRICKS, COBBLESTONE, CRACKED_STONE_BRICKS, POLISHED_ANDESITE,
-				ANDESITE, DEEPSLATE_BRICKS};
-	if (tag(e, "amenity") == "place_of_worship")
-		return {STONE_BRICKS, CHISELED_STONE_BRICKS, QUARTZ_BLOCK, WHITE_CONCRETE,
-				SANDSTONE};
-	if (tag(e, "building") == "industrial" || tag(e, "building") == "warehouse")
-		return {GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, STONE, SMOOTH_STONE,
-				POLISHED_ANDESITE};
-	return {STONE_BRICKS, ANDESITE, POLISHED_ANDESITE, COBBLESTONE, SMOOTH_STONE};
+	if (lower == "glass")
+		return closest_blocks(RGBTuple{180, 200, 215}, 5);
+	if (lower == "copper")
+		return closest_blocks(RGBTuple{192, 108, 80}, 5);
+
+	const auto man_made = tag(e, "man_made");
+	if (man_made == "tower" || man_made == "obelisk" || man_made == "chimney")
+		return tower;
+	if (man_made == "lighthouse")
+		return lighthouse;
+	if (man_made == "monument")
+		return statue;
+
+	const auto historic_tag = tag(e, "historic");
+	if (historic_tag == "castle" || historic_tag == "fort" || historic_tag == "ruins" ||
+			historic_tag == "city_gate" || historic_tag == "archaeological_site")
+		return historic;
+	if (historic_tag == "memorial" || historic_tag == "monument")
+		return statue;
+
+	const auto amenity = tag(e, "amenity");
+	if (amenity == "place_of_worship")
+		return religious;
+	if (amenity == "fountain")
+		return lighthouse;
+	if (tag(e, "tourism") == "artwork")
+		return statue;
+
+	const auto building = tag(e, "building");
+	if (building == "industrial" || building == "warehouse")
+		return industrial;
+	if (building == "house" || building == "detached" || building == "residential" ||
+			building == "apartments" || building == "terrace")
+		return residential;
+	if (building == "church" || building == "cathedral" || building == "mosque" ||
+			building == "temple" || building == "synagogue" || building == "chapel" ||
+			building == "religious")
+		return religious;
+	if (building == "tower" || building == "clock_tower")
+		return tower;
+	return fallback;
 }
 }
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rotation,
@@ -206,8 +268,12 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		if (h && *h > 600.0)
 			continue;
 		std::optional<double> extent;
-		if (!entry->height_m)
-			extent = std::max(maxx - minx, maxz - minz) / scale;
+		if (!entry->height_m) {
+			// Match Rust's synthetic footprint for point landmarks.  Using the
+			// raw one-point bbox here produces a zero extent and incorrectly
+			// suppresses otherwise valid statue/tower models.
+			extent = std::max(fp.max_x - fp.min_x, fp.max_z - fp.min_z) / scale;
+		}
 		if (extent && (*extent > 225.0 || *extent < 2.0))
 			continue;
 		r.placements.push_back({e.id(), std::string(e.kind()), raw, qid, ax, az, fp,

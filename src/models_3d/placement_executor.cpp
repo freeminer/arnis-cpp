@@ -17,6 +17,21 @@ namespace arnis::models_3d
 {
 namespace
 {
+std::uint64_t palette_hash(std::uint64_t seed, const std::array<int, 3> &position)
+{
+	// Exact counterpart of Rust's splitmix-style pick_voxel_block.  Using the
+	// shared land-cover hash here caused visible repeating patterns and made
+	// palette selection differ between the two generators.
+	std::uint64_t h = seed;
+	for (const int coordinate : position) {
+		h ^= static_cast<std::uint64_t>(static_cast<std::int64_t>(coordinate));
+		h = (h ^ (h >> 30)) * 0xbf58476d1ce4e5b9ULL;
+		h = (h ^ (h >> 27)) * 0x94d049bb133111ebULL;
+		h ^= h >> 31;
+	}
+	return h;
+}
+
 std::vector<Voxel> voxelize_asset(
 		const ModelAsset &asset, const WorldTransform &transform)
 {
@@ -234,6 +249,69 @@ Block named_palette_block(const std::string &name)
 		return IRON_BLOCK;
 	if (n == "SNOW_BLOCK")
 		return SNOW_BLOCK;
+	// Keep palette-layer names aligned with Rust's block_by_const_name table.
+	if (n == "BLACK_TERRACOTTA")
+		return BLACK_TERRACOTTA;
+	if (n == "BLACK_WOOL")
+		return BLACK_WOOL;
+	if (n == "BLUE_TERRACOTTA")
+		return BLUE_TERRACOTTA;
+	if (n == "BLUE_WOOL")
+		return BLUE_WOOL;
+	if (n == "BROWN_CONCRETE")
+		return BROWN_CONCRETE;
+	if (n == "COARSE_DIRT")
+		return COARSE_DIRT;
+	if (n == "CYAN_CONCRETE")
+		return CYAN_CONCRETE;
+	if (n == "END_STONE_BRICKS")
+		return END_STONE_BRICKS;
+	if (n == "GRAY_TERRACOTTA")
+		return GRAY_TERRACOTTA;
+	if (n == "GREEN_CONCRETE")
+		return GREEN_CONCRETE;
+	if (n == "GREEN_WOOL")
+		return GREEN_WOOL;
+	if (n == "HAY_BALE")
+		return HAY_BALE;
+	if (n == "LIGHT_BLUE_CONCRETE")
+		return LIGHT_BLUE_CONCRETE;
+	if (n == "LIGHT_BLUE_TERRACOTTA")
+		return LIGHT_BLUE_TERRACOTTA;
+	if (n == "LIGHT_GRAY_TERRACOTTA")
+		return LIGHT_GRAY_TERRACOTTA;
+	if (n == "LIME_CONCRETE")
+		return LIME_CONCRETE;
+	if (n == "MAGENTA_CONCRETE")
+		return MAGENTA_CONCRETE;
+	if (n == "MOSS_BLOCK")
+		return MOSS_BLOCK;
+	if (n == "MOSSY_COBBLESTONE")
+		return MOSSY_COBBLESTONE;
+	if (n == "MOSSY_STONE_BRICKS")
+		return MOSSY_STONE_BRICKS;
+	if (n == "NETHER_BRICK")
+		return NETHER_BRICK;
+	if (n == "NETHERITE_BLOCK")
+		return NETHERITE_BLOCK;
+	if (n == "PURPLE_CONCRETE")
+		return PURPLE_CONCRETE;
+	if (n == "QUARTZ_BRICKS")
+		return QUARTZ_BRICKS;
+	if (n == "RED_NETHER_BRICKS")
+		return RED_NETHER_BRICKS;
+	if (n == "WAXED_COPPER_BLOCK")
+		return WAXED_COPPER_BLOCK;
+	if (n == "WAXED_EXPOSED_COPPER")
+		return WAXED_EXPOSED_COPPER;
+	if (n == "WAXED_OXIDIZED_COPPER")
+		return WAXED_OXIDIZED_COPPER;
+	if (n == "WHITE_WOOL")
+		return WHITE_WOOL;
+	if (n == "YELLOW_TERRACOTTA")
+		return YELLOW_TERRACOTTA;
+	if (n == "YELLOW_WOOL")
+		return YELLOW_WOOL;
 	return Block{};
 }
 
@@ -291,17 +369,13 @@ bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel>
 				auto it = std::find_if(layers->begin(), layers->end(),
 						[frac](const auto &l) { return frac <= l.first; });
 				const auto &pool = (it == layers->end() ? layers->back() : *it).second;
-				const auto h =
-						land_cover::coord_hash(voxel.position[0], voxel.position[2]) ^
-						palette_seed;
+				const auto h = palette_hash(palette_seed, voxel.position);
 				voxel.block = pool[h % pool.size()];
 			}
 	} else if (fallback_palette && !fallback_palette->empty())
 		for (auto &voxel : voxels)
 			if (voxel.block == block_definitions::STONE_BRICKS) {
-				const auto h =
-						land_cover::coord_hash(voxel.position[0], voxel.position[2]) ^
-						palette_seed;
+				const auto h = palette_hash(palette_seed, voxel.position);
 				voxel.block = (*fallback_palette)[h % fallback_palette->size()];
 			}
 	int min_y = voxels.front().position[1];
