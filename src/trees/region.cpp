@@ -321,7 +321,11 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	load_pack(source.realm_path("region.json"), data->realm);
 	if (data->realm.empty())
 		return std::nullopt;
-	if (source.realm() != "vanilla-plus")
+	// The directory name is `vanilla-plus`, while its manifest identifies the
+	// realm as `vnplus`.  Rust checks the manifest value; accept both spellings
+	// so callers constructing a source directly do not load the vanilla pack
+	// twice.
+	if (source.realm() != "vanilla-plus" && source.realm() != "vnplus")
 		load_pack(source.vanilla_path("region.json"), data->vanilla);
 	return RegionSelector{std::move(data)};
 }
@@ -329,7 +333,11 @@ std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
 		double longitude, const std::filesystem::path &root, double scale,
 		int ground_level, const SizeFilter &sizes, double blocks_per_meter)
 {
-	TreePackSource source(realm_for_latlon(latitude, longitude), root);
+	// Rust always reads the compiled tree-pack bundle.  Preserve the C++
+	// override when supplied, but resolve the bundled asset root for the common
+	// empty-root call path as well.
+	TreePackSource source =
+			TreePackSource::embedded(realm_for_latlon(latitude, longitude), root);
 	return load(source, scale, ground_level, sizes, !subtropical_latitude(latitude),
 			blocks_per_meter);
 }

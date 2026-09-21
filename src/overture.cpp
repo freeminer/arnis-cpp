@@ -453,6 +453,11 @@ std::vector<OvertureBuilding> decode_overture_building_tile(
 			const auto id = attribute_string(layer, feature, "id");
 			if (!id)
 				continue;
+			// Keep the tile transport's pre-budget filtering identical to the
+			// Rust PMTiles path: known transient ML false positives must not
+			// consume a slot that could be used by a real footprint.
+			if (*id == "f8c0757e-c059-49e4-9757-7e278751926f")
+				continue;
 			const mvt::Ring *ring = nullptr;
 			for (const auto &candidate : feature.rings)
 				if (candidate.exterior() && candidate.points.size() >= 3 &&
@@ -641,6 +646,9 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 		auto value_id = string_at(id, row);
 		auto value_geometry = binary_at(geometry, row);
 		if (!value_id || !value_geometry)
+			continue;
+		// Filter before the source budget cap, matching Rust's Parquet path.
+		if (*value_id == "f8c0757e-c059-49e4-9757-7e278751926f")
 			continue;
 		auto ring = parse_overture_wkb_polygon(*value_geometry);
 		if (!ring || ring->size() < 3)

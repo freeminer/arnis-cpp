@@ -16,7 +16,7 @@ RegionLibrary load_region_library(
 		double lat, double lon, const std::filesystem::path &root)
 {
 	const auto realm = realm_for_latlon(lat, lon);
-	TreePackSource source(realm, root);
+	TreePackSource source = TreePackSource::embedded(realm, root);
 	auto manifest = source.realm_path("region.json");
 	if (!std::filesystem::exists(manifest))
 		manifest = source.vanilla_path("region.json");
@@ -101,7 +101,7 @@ std::filesystem::path resolve_tree_asset(const TreePackSource &s, const std::str
 RegionLibrary load_combined_region_library(
 		double lat, double lon, const std::filesystem::path &root)
 {
-	TreePackSource s(realm_for_latlon(lat, lon), root);
+	TreePackSource s = TreePackSource::embedded(realm_for_latlon(lat, lon), root);
 	const auto realm = s.realm_path("region.json"),
 			   vanilla = s.vanilla_path("region.json");
 	if (std::filesystem::is_regular_file(realm) &&

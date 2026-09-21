@@ -1590,6 +1590,42 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		max_z = std::max(max_z, z);
 	}
 	const int center_x = (min_x + max_x) / 2, center_z = (min_z + max_z) / 2;
+	// Rust's footprint_radial_fractions measures distance from the footprint
+	// centroid to the actual polygon boundary.  Keep the ellipse as a fallback
+	// for malformed/degenerate ways, but use the polygon ray for rotated and
+	// concave footprints so domes/cones meet their eaves uniformly.
+	auto polygon_radial_fraction = [&](int x, int z) {
+		if (element.nodes.size() < 3)
+			return 0.0;
+		const double dx = double(x - center_x), dz = double(z - center_z);
+		const double distance = std::hypot(dx, dz);
+		if (distance <= 1e-9)
+			return 0.0;
+		const double rx = dx / distance, rz = dz / distance;
+		double boundary = std::numeric_limits<double>::infinity();
+		for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+			const auto &a = element.nodes[i];
+			const auto &b = element.nodes[(i + 1) % element.nodes.size()];
+			const double ex = double(b.x - a.x), ez = double(b.z - a.z);
+			const double qx = double(a.x - center_x), qz = double(a.z - center_z);
+			const double cross = rx * ez - rz * ex;
+			if (std::abs(cross) < 1e-9)
+				continue;
+			const double t = (qx * ez - qz * ex) / cross;
+			const double u = (qx * rz - qz * rx) / cross;
+			if (t >= 0.0 && u >= 0.0 && u <= 1.0)
+				boundary = std::min(boundary, t);
+		}
+		return std::isfinite(boundary) && boundary > 1e-9
+				? std::clamp(distance / boundary, 0.0, 1.0)
+				: 0.0;
+	};
+	// Rust rooftop details use an empty blacklist: generated roof equipment is
+	// allowed to replace the generated roof overlay beneath it.
+	auto force_rooftop_block = [&](Block block, int x, int y, int z) {
+		editor.set_block_absolute(block, x, y, z, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
+	};
 	if (sloped) {
 		// Rust's separate antenna pass is intentionally rare and only applies
 		// to normal detached houses on peaked roofs.  Chimneys are handled by
@@ -1649,7 +1685,8 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 				for (int dx = -3; dx <= 3; ++dx) {
 					const bool h = std::abs(dx) == 2 || (dz == 0 && std::abs(dx) <= 2);
 					editor.set_block_absolute(h ? WHITE_CONCRETE : YELLOW_CONCRETE,
-							center_x + dx, roof_y + 1, center_z + dz);
+							center_x + dx, roof_y + 1, center_z + dz, std::nullopt,
+							std::optional<std::vector<Block>>(std::vector<Block>{}));
 				}
 	}
 
@@ -1670,22 +1707,22 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 							seed) %
 					100;
 			if (roll < 3) {
-				editor.set_block_absolute(IRON_BLOCK, x, roof_y + 1, z);
-				editor.set_block_absolute(SMOOTH_STONE_SLAB, x, roof_y + 2, z);
+				force_rooftop_block(IRON_BLOCK, x, roof_y + 1, z);
+				force_rooftop_block(SMOOTH_STONE_SLAB, x, roof_y + 2, z);
 			} else if (roll < 6) {
-				editor.set_block_absolute(CAULDRON, x, roof_y + 1, z);
-				editor.set_block_absolute(SPRUCE_LEAVES, x, roof_y + 2, z);
+				force_rooftop_block(CAULDRON, x, roof_y + 1, z);
+				force_rooftop_block(SPRUCE_LEAVES, x, roof_y + 2, z);
 			} else if (roll < 9) {
-				editor.set_block_absolute(OAK_FENCE, x, roof_y + 1, z);
-				editor.set_block_absolute(OAK_SLAB, x, roof_y + 2, z);
+				force_rooftop_block(OAK_FENCE, x, roof_y + 1, z);
+				force_rooftop_block(OAK_SLAB, x, roof_y + 2, z);
 			} else if (roll < 11)
-				editor.set_block_absolute(OAK_STAIRS, x, roof_y + 1, z);
+				force_rooftop_block(OAK_STAIRS, x, roof_y + 1, z);
 			else if (roll < 13)
-				editor.set_block_absolute(LIGHTNING_ROD, x, roof_y + 1, z);
+				force_rooftop_block(LIGHTNING_ROD, x, roof_y + 1, z);
 			else if (roll == 13)
-				editor.set_block_absolute(CAULDRON, x, roof_y + 1, z);
+				force_rooftop_block(CAULDRON, x, roof_y + 1, z);
 			else if (roll == 14)
-				editor.set_block_absolute(SEA_LANTERN, x, roof_y + 1, z);
+				force_rooftop_block(SEA_LANTERN, x, roof_y + 1, z);
 		}
 		if (!terrace_interior.empty()) {
 			const auto best = std::min_element(terrace_interior.begin(),
@@ -1696,10 +1733,9 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 									   std::abs(b.second - center_z);
 					});
 			for (int dy = 0; dy < 6; ++dy)
-				editor.set_block_absolute(
+				force_rooftop_block(
 						IRON_BARS, best->first, roof_y + 1 + dy, best->second);
-			editor.set_block_absolute(
-					LIGHTNING_ROD, best->first, roof_y + 7, best->second);
+			force_rooftop_block(LIGHTNING_ROD, best->first, roof_y + 7, best->second);
 		}
 		return;
 	}
@@ -1734,17 +1770,15 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 			for (const auto [dx, dz] : {std::pair{-1, -1}, std::pair{1, -1},
 						 std::pair{-1, 1}, std::pair{1, 1}})
 				for (int h = 0; h < 2; ++h)
-					editor.set_block_absolute(OAK_FENCE, cx + dx, base + h, cz + dz);
+					force_rooftop_block(OAK_FENCE, cx + dx, base + h, cz + dz);
 			for (int dz = -1; dz <= 1; ++dz)
 				for (int dx = -1; dx <= 1; ++dx) {
 					for (int h = 2; h < 5; ++h)
-						editor.set_block_absolute(
-								SPRUCE_PLANKS, cx + dx, base + h, cz + dz);
-					editor.set_block_absolute(
-							dx == 0 && dz == 0 ? SPRUCE_PLANKS : OAK_SLAB, cx + dx,
-							base + 5, cz + dz);
+						force_rooftop_block(SPRUCE_PLANKS, cx + dx, base + h, cz + dz);
+					force_rooftop_block(dx == 0 && dz == 0 ? SPRUCE_PLANKS : OAK_SLAB,
+							cx + dx, base + 5, cz + dz);
 				}
-			editor.set_block_absolute(OAK_SLAB, cx, base + 6, cz);
+			force_rooftop_block(OAK_SLAB, cx, base + 6, cz);
 		}
 	}
 
@@ -1781,7 +1815,8 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 			editor.set_block_absolute(
 					LIGHTNING_ROD, x, roof_y + 3, z, std::vector<Block>{AIR});
 		} else if (roll < 9) {
-			editor.set_block_absolute(BARREL, x, roof_y + 2, z, std::vector<Block>{AIR});
+			editor.set_block_absolute(BARREL, x, roof_y + 2, z, std::nullopt,
+					std::optional<std::vector<Block>>(std::vector<Block>{}));
 			editor.set_block_absolute(
 					CAULDRON, x, roof_y + 3, z, std::vector<Block>{AIR});
 		} else if (roll < 12) {
@@ -1814,7 +1849,8 @@ void generate_flat_roof_edge_variation(WorldEditor &editor, const ProcessedWay &
 			const Block cap = variation == 0   ? wall_block
 							  : variation == 1 ? STONE_BRICK_SLAB
 											   : accent_block;
-			editor.set_block_absolute(cap, x, y, z, std::vector<Block>{AIR});
+			editor.set_block_absolute(cap, x, y, z, std::nullopt,
+					std::optional<std::vector<Block>>(std::vector<Block>{}));
 		}
 	}
 }
@@ -3481,8 +3517,9 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			}
 			bottom = std::max(base_y, bottom);
 			for (int y = bottom; y <= top; ++y)
-				editor.set_block_absolute(
-						roof_block, x, y + abs_terrain_offset, z, nullptr, nullptr);
+				editor.set_block_absolute(roof_block, x, y + abs_terrain_offset, z,
+						std::nullopt,
+						std::optional<std::vector<Block>>(std::vector<Block>{}));
 		}
 	};
 
@@ -4355,8 +4392,6 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		std::unordered_map<std::pair<int32_t, int32_t>, int32_t, pair_hash> surface;
 		surface.reserve(floor_area.size() * 2);
 		for (const auto &[x, z] : floor_area) {
-			const double nx = double(x - center_x) / half_w;
-			const double nz = double(z - center_z) / half_l;
 			// Polygon-aware radial fraction matches Rust's footprint-based
 			// cone profile better than relying solely on the bounding box.
 			const auto edge = edge_distances.find({x, z});
@@ -4365,7 +4400,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 							? 0.0
 							: double(edge->second) / double(max_edge_distance);
 			const double normalized = std::max(
-					polygon_fraction, std::min(1.0, std::sqrt(nx * nx + nz * nz)));
+					polygon_fraction, polygon_radial_fraction(x, z));
 			surface[{x, z}] = base_height + int((1.0 - normalized) * peak_height);
 		}
 		fill_shell(surface, roof_block, base_height);
@@ -4399,12 +4434,14 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			const double radius = base_radius * radius_factor(t);
 			const int y = base_height + layer + abs_terrain_offset;
 			if (radius < .6 && t > .85) {
-				editor.set_block_absolute(roof_block, center_x, y, center_z);
+				editor.set_block_absolute(roof_block, center_x, y, center_z, std::nullopt,
+						std::optional<std::vector<Block>>(std::vector<Block>{}));
 				continue;
 			}
 			if (t < .05) {
 				for (const auto &[x, z] : floor_area)
-					editor.set_block_absolute(roof_block, x, y, z);
+					editor.set_block_absolute(roof_block, x, y, z, std::nullopt,
+							std::optional<std::vector<Block>>(std::vector<Block>{}));
 				continue;
 			}
 			const double radius_sq = radius * radius;
@@ -4418,7 +4455,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					// their walls at the upper layers.
 					if (!footprint.contains({x, z}))
 						continue;
-					editor.set_block_absolute(roof_block, x, y, z);
+					editor.set_block_absolute(roof_block, x, y, z, std::nullopt,
+							std::optional<std::vector<Block>>(std::vector<Block>{}));
 				}
 		}
 		return;
@@ -4441,15 +4479,13 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		for (auto const &p : floor_area) {
 			int32_t x = p.first;
 			int32_t z = p.second;
-			const double nx = double(x - center_x) / half_w;
-			const double nz = double(z - center_z) / half_l;
 			const auto edge = edge_distances.find({x, z});
 			const double polygon_fraction =
 					edge == edge_distances.end()
 							? 0.0
 							: double(edge->second) / double(max_edge_distance);
 			double normalized_distance = std::max(
-					polygon_fraction, std::min(1.0, std::sqrt(nx * nx + nz * nz)));
+					polygon_fraction, polygon_radial_fraction(x, z));
 
 			double height_factor = std::sqrt(
 					std::max(0.0, 1.0 - normalized_distance * normalized_distance));
