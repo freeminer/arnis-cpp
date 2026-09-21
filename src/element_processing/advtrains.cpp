@@ -384,6 +384,13 @@ std::vector<int> height_profile(WorldEditor &editor, const std::vector<XZ> &line
 			}
 		}
 	} while (changed);
+	// This profile is used only for at-grade ways.  Do not turn a large DEM
+	// discontinuity into a massive gravel viaduct: bridge ways are handled by
+	// the bridge generator, while ordinary rail should stay close to its local
+	// terrain and use Advtrains slope pieces for small transitions.
+	for (std::size_t i = 0; i < profile.size(); ++i)
+		profile[i] = std::min(
+				profile[i], editor.get_ground_level(line[i].first, line[i].second) + 2);
 	return profile;
 }
 
