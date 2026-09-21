@@ -19,14 +19,13 @@ struct XZHash
 	std::size_t operator()(const XZ &p) const noexcept
 	{
 		return std::hash<long long>{}((static_cast<long long>(p.first) << 32) ^
-				static_cast<unsigned int>(p.second));
+									  static_cast<unsigned int>(p.second));
 	}
 };
 
-constexpr std::array<XZ, 16> DIR_VECTORS{{
-		{0, 1}, {1, 2}, {1, 1}, {2, 1}, {1, 0}, {2, -1}, {1, -1}, {1, -2},
-		{0, -1}, {-1, -2}, {-1, -1}, {-2, -1}, {-1, 0}, {-2, 1}, {-1, 1},
-		{-1, 2}}};
+constexpr std::array<XZ, 16> DIR_VECTORS{
+		{{0, 1}, {1, 2}, {1, 1}, {2, 1}, {1, 0}, {2, -1}, {1, -1}, {1, -2}, {0, -1},
+				{-1, -2}, {-1, -1}, {-2, -1}, {-1, 0}, {-2, 1}, {-1, 1}, {-1, 2}}};
 
 using DirectionSet = std::array<bool, 16>;
 thread_local std::unordered_map<XZ, DirectionSet, XZHash> network_connections;
@@ -38,14 +37,6 @@ bool available()
 	return ADVTRAINS_AVAILABLE;
 }
 
-int circular_delta(int from, int to)
-{
-	int delta = (to - from + 16) % 16;
-	if (delta > 8)
-		delta -= 16;
-	return delta;
-}
-
 int closest_direction(int dx, int dz)
 {
 	if (!dx && !dz)
@@ -55,7 +46,8 @@ int closest_direction(int dx, int dz)
 	double best_dot = -std::numeric_limits<double>::infinity();
 	for (int direction = 0; direction < 16; ++direction) {
 		const auto [vx, vz] = DIR_VECTORS[direction];
-		const double dot = (dx * vx + dz * vz) /
+		const double dot =
+				(dx * vx + dz * vz) /
 				(length * std::hypot(static_cast<double>(vx), static_cast<double>(vz)));
 		if (dot > best_dot) {
 			best_dot = dot;
@@ -81,16 +73,14 @@ std::vector<XZ> build_centerline(const ProcessedWay &way)
 		return out;
 	XZ current{way.nodes.front().x, way.nodes.front().z};
 	out.push_back(current);
-	std::optional<int> heading;
 	for (std::size_t target_index = 1; target_index < way.nodes.size(); ++target_index) {
 		const XZ target{way.nodes[target_index].x, way.nodes[target_index].z};
-		const bool must_hit_target = target_index + 1 == way.nodes.size() ||
-				network_anchors.contains(target);
-		if (must_hit_target)
-			heading.reset();
-		const std::size_t max_steps = 64 +
-				static_cast<std::size_t>(std::abs(target.first - current.first) +
-						std::abs(target.second - current.second)) * 8;
+		const bool must_hit_target =
+				target_index + 1 == way.nodes.size() || network_anchors.contains(target);
+		const std::size_t max_steps =
+				64 + static_cast<std::size_t>(std::abs(target.first - current.first) +
+											  std::abs(target.second - current.second)) *
+							 8;
 		for (std::size_t step = 0; step < max_steps; ++step) {
 			const int dx = target.first - current.first;
 			const int dz = target.second - current.second;
@@ -101,16 +91,17 @@ std::vector<XZ> build_centerline(const ProcessedWay &way)
 			if (distance2 == 0 || (!must_hit_target && distance2 <= 4))
 				break;
 			const int desired = closest_direction(dx, dz);
-			int chosen = desired;
-			if (heading) {
-				const int turn = circular_delta(*heading, desired);
-				chosen = (*heading + (turn > 0 ? 1 : turn < 0 ? -1 : 0) + 16) % 16;
-			}
+			// The direction vectors are not equal-length (30/60-degree entries
+			// advance two blocks on one axis). Incremental one-sector heading
+			// changes therefore overshoot and oscillate around straight OSM ways,
+			// producing the saw-tooth tracks seen in generated worlds. Follow the
+			// nearest target direction directly; the connection resolver still
+			// selects the appropriate straight/curve asset at each cell.
+			const int chosen = desired;
 			const auto [vx, vz] = DIR_VECTORS[chosen];
 			current = {current.first + vx, current.second + vz};
 			if (out.back() != current)
 				out.push_back(current);
-			heading = chosen;
 		}
 	}
 	return out;
@@ -122,19 +113,18 @@ bool is_track_way(const ProcessedWay &way)
 			"tram", "narrow_gauge", "monorail", "funicular", "miniature", "preserved",
 			"disused"};
 	return way.nodes.size() >= 2 && types.contains(way.tags.get("railway")) &&
-			way.tags.get("area") != "yes";
+		   way.tags.get("area") != "yes";
 }
 
 bool is_at_grade(const ProcessedWay &way)
 {
 	const auto railway = way.tags.get("railway");
 	return railway != "subway" && way.tags.get("subway") != "yes" &&
-			way.tags.get("tunnel") != "yes" && way.tags.get("bridge") != "yes" &&
-			way.tags.get("bridge") != "viaduct";
+		   way.tags.get("tunnel") != "yes" && way.tags.get("bridge") != "yes" &&
+		   way.tags.get("bridge") != "viaduct";
 }
 
-void prepare_network(
-		const std::vector<ProcessedElement> &elements, WorldEditor &editor)
+void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor &editor)
 {
 	network_connections.clear();
 	network_heights.clear();
@@ -202,10 +192,10 @@ bool connections_match(int a, int b, int c, int d)
 
 std::optional<Block> two_connection_rail(int first, int second)
 {
-	const std::array<Block, 4> straights{{ADV_RAIL_STRAIGHT_0,
-			ADV_RAIL_STRAIGHT_30, ADV_RAIL_STRAIGHT_45, ADV_RAIL_STRAIGHT_60}};
-	const std::array<Block, 4> curves{{ADV_RAIL_CURVE_0, ADV_RAIL_CURVE_30,
-			ADV_RAIL_CURVE_45, ADV_RAIL_CURVE_60}};
+	const std::array<Block, 4> straights{{ADV_RAIL_STRAIGHT_0, ADV_RAIL_STRAIGHT_30,
+			ADV_RAIL_STRAIGHT_45, ADV_RAIL_STRAIGHT_60}};
+	const std::array<Block, 4> curves{
+			{ADV_RAIL_CURVE_0, ADV_RAIL_CURVE_30, ADV_RAIL_CURVE_45, ADV_RAIL_CURVE_60}};
 	for (int suffix = 0; suffix < 4; ++suffix)
 		for (int param2 = 0; param2 < 4; ++param2) {
 			const int base = (suffix + param2 * 4) % 16;
@@ -270,21 +260,20 @@ std::optional<Block> junction_rail(const DirectionSet &directions)
 			for (std::size_t variant = 0; variant < ninety_delta.size(); ++variant) {
 				const int base = rotation * 4;
 				const int branch = base + ninety_delta[variant];
-				if (set_equals(directions,
-							{base, base + 8, branch, branch + 8})) {
+				if (set_equals(directions, {base, base + 8, branch, branch + 8})) {
 					Block rail = ADV_RAIL_90_PLUS_CROSSING[variant];
 					rail.setParam2(rotation);
 					return rail;
 				}
 			}
-		constexpr std::array<std::pair<int, int>, 7> diagonal_axes{{
-				{1, 6}, {1, 3}, {3, 6}, {3, 5}, {2, 5}, {5, 7}, {2, 7}}};
+		constexpr std::array<std::pair<int, int>, 7> diagonal_axes{
+				{{1, 6}, {1, 3}, {3, 6}, {3, 5}, {2, 5}, {5, 7}, {2, 7}}};
 		for (int rotation = 0; rotation < 4; ++rotation)
 			for (std::size_t variant = 0; variant < diagonal_axes.size(); ++variant) {
 				const auto [first, second] = diagonal_axes[variant];
-				if (set_equals(directions, {first + rotation * 4,
-							first + rotation * 4 + 8, second + rotation * 4,
-							second + rotation * 4 + 8})) {
+				if (set_equals(directions,
+							{first + rotation * 4, first + rotation * 4 + 8,
+									second + rotation * 4, second + rotation * 4 + 8})) {
 					Block rail = ADV_RAIL_DIAGONAL_CROSSING[variant];
 					rail.setParam2(rotation);
 					return rail;
@@ -324,15 +313,15 @@ std::optional<Block> connected_rail(
 	return two_connection_rail((present.front() + 8) % 16, present.front());
 }
 
-std::vector<int> height_profile(
-		WorldEditor &editor, const std::vector<XZ> &line)
+std::vector<int> height_profile(WorldEditor &editor, const std::vector<XZ> &line)
 {
 	std::vector<int> profile;
 	profile.reserve(line.size());
 	for (const auto &[x, z] : line)
 		profile.push_back(editor.get_ground_level(x, z));
 	for (std::size_t i = 0; i < line.size(); ++i)
-		if (const auto found = network_heights.find(line[i]); found != network_heights.end())
+		if (const auto found = network_heights.find(line[i]);
+				found != network_heights.end())
 			profile[i] = std::max(profile[i], found->second);
 	// Advtrains ramps occupy consecutive cells at the lower node Y, followed by
 	// level track one node up. Prefer its gentler three-piece family and retain
@@ -370,8 +359,8 @@ std::vector<int> height_profile(
 				bool has_lead_in = true;
 				for (std::size_t offset = 1; offset < ramp_cells; ++offset)
 					has_lead_in &= i >= offset && profile[i - offset] == profile[i] &&
-							direction_between(line[i - offset], line[i - offset + 1]) ==
-									direction;
+								   direction_between(line[i - offset],
+										   line[i - offset + 1]) == direction;
 				if (!has_lead_in) {
 					profile[i] = profile[i + 1];
 					changed = true;
@@ -380,9 +369,9 @@ std::vector<int> height_profile(
 				bool has_run_out = true;
 				for (std::size_t offset = 1; offset < ramp_cells; ++offset)
 					has_run_out &= i + 1 + offset < profile.size() &&
-							profile[i + 1] == profile[i + 1 + offset] &&
-							direction_between(line[i + offset], line[i + 1 + offset]) ==
-									direction;
+								   profile[i + 1] == profile[i + 1 + offset] &&
+								   direction_between(line[i + offset],
+										   line[i + 1 + offset]) == direction;
 				if (!has_run_out) {
 					profile[i + 1] = profile[i];
 					changed = true;
@@ -398,8 +387,8 @@ std::vector<int> height_profile(
 	return profile;
 }
 
-std::optional<Block> slope_rail(const std::vector<XZ> &line,
-		const std::vector<int> &heights, std::size_t index)
+std::optional<Block> slope_rail(
+		const std::vector<XZ> &line, const std::vector<int> &heights, std::size_t index)
 {
 	if (!ADVTRAINS_SLOPES_AVAILABLE || index >= line.size() || index >= heights.size())
 		return std::nullopt;
@@ -428,8 +417,9 @@ std::optional<Block> slope_rail(const std::vector<XZ> &line,
 				}
 				if (matches && direction && (*direction % 4) == 0) {
 					Block slope = ADVTRAINS_GENTLE_SLOPES_AVAILABLE
-							? ADV_RAIL_GENTLE_SLOPE[piece]
-							: (piece == 0 ? ADV_RAIL_SLOPE_UP : ADV_RAIL_SLOPE_DOWN);
+										  ? ADV_RAIL_GENTLE_SLOPE[piece]
+										  : (piece == 0 ? ADV_RAIL_SLOPE_UP
+														: ADV_RAIL_SLOPE_DOWN);
 					slope.setParam2(static_cast<std::uint8_t>(*direction / 4));
 					return slope;
 				}
@@ -455,9 +445,9 @@ std::optional<Block> slope_rail(const std::vector<XZ> &line,
 				if (matches && travel && (*travel % 4) == 0) {
 					const std::size_t reversed = ramp_cells - piece - 1;
 					Block slope = ADVTRAINS_GENTLE_SLOPES_AVAILABLE
-							? ADV_RAIL_GENTLE_SLOPE[reversed]
-							: (reversed == 0 ? ADV_RAIL_SLOPE_UP
-											 : ADV_RAIL_SLOPE_DOWN);
+										  ? ADV_RAIL_GENTLE_SLOPE[reversed]
+										  : (reversed == 0 ? ADV_RAIL_SLOPE_UP
+														   : ADV_RAIL_SLOPE_DOWN);
 					const int direction_to_high = (*travel + 8) % 16;
 					slope.setParam2(static_cast<std::uint8_t>(direction_to_high / 4));
 					return slope;
