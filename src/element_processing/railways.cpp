@@ -296,9 +296,9 @@ CoordinateBitmap collect_at_grade_rail_mask(
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		if (way.nodes.size() < 2 || way.tags.get("railway") != "rail" || is_rail_bridge(way) ||
-				way.tags.get("tunnel") == "yes" || way.tags.get("subway") == "yes" ||
-				way.tags.get("railway") == "subway")
+		if (way.nodes.size() < 2 || way.tags.get("railway") != "rail" ||
+				is_rail_bridge(way) || way.tags.get("tunnel") == "yes" ||
+				way.tags.get("subway") == "yes" || way.tags.get("railway") == "subway")
 			continue;
 		for (const auto &[x, z] : build_connected_centerline(way))
 			mask.set(x, z);
@@ -421,7 +421,7 @@ vector<pair<int, int>> build_advtrains_centerline(const ProcessedWay &way)
 vector<pair<int, int>> build_connected_centerline(const ProcessedWay &way)
 {
 	return advtrains::available() ? advtrains::build_centerline(way)
-								 : build_smoothed_centerline(way);
+								  : build_smoothed_centerline(way);
 }
 
 #if 0 // Legacy implementation moved to advtrains.cpp.
@@ -454,8 +454,8 @@ optional<Block> advtrains_rail_for_connections(int first, int second)
 }
 #endif
 
-optional<Block> connected_advtrains_rail(const vector<pair<int, int>> &line,
-		std::size_t index)
+optional<Block> connected_advtrains_rail(
+		const vector<pair<int, int>> &line, std::size_t index)
 {
 	return advtrains::connected_rail(line, index);
 }
@@ -463,14 +463,14 @@ optional<Block> connected_advtrains_rail(const vector<pair<int, int>> &line,
 // Advtrains' slope nodes join elevations differing by exactly one node.  Keep
 // the generated rail formation within that constraint instead of flattening a
 // whole OSM way at its highest terrain sample.
-vector<int> advtrains_height_profile(WorldEditor &editor,
-		const vector<pair<int, int>> &line)
+vector<int> advtrains_height_profile(
+		WorldEditor &editor, const vector<pair<int, int>> &line)
 {
 	return advtrains::height_profile(editor, line);
 }
 
-optional<Block> advtrains_slope_rail(const vector<pair<int, int>> &line,
-		const vector<int> &heights, std::size_t index)
+optional<Block> advtrains_slope_rail(
+		const vector<pair<int, int>> &line, const vector<int> &heights, std::size_t index)
 {
 	return advtrains::slope_rail(line, heights, index);
 }
@@ -483,10 +483,13 @@ void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		if (element.is_way()) {
 			const auto &way = element.as_way();
 			const auto railway = way.tags.get("railway");
-			static const std::unordered_set<std::string> tracks{"rail", "light_rail", "subway",
-					"tram", "narrow_gauge", "monorail", "funicular", "miniature", "preserved", "disused"};
-			if (way.nodes.size() >= 2 && tracks.contains(railway) && way.tags.get("area") != "yes" &&
-					(railway == "subway" || way.tags.get("subway") == "yes" || way.tags.get("tunnel") == "yes")) {
+			static const std::unordered_set<std::string> tracks{"rail", "light_rail",
+					"subway", "tram", "narrow_gauge", "monorail", "funicular",
+					"miniature", "preserved", "disused"};
+			if (way.nodes.size() >= 2 && tracks.contains(railway) &&
+					way.tags.get("area") != "yes" &&
+					(railway == "subway" || way.tags.get("subway") == "yes" ||
+							way.tags.get("tunnel") == "yes")) {
 				has_tunnel = true;
 				break;
 			}
@@ -570,67 +573,68 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 {
+	const auto *plan = advtrains::get_plan(element);
 	const auto centerline = build_connected_centerline(element);
 	if (centerline.empty())
 		return;
-	const vector<int> adv_heights = ADVTRAINS_AVAILABLE
-			? advtrains_height_profile(editor, centerline) : vector<int>{};
+	const vector<int> adv_heights =
+			ADVTRAINS_AVAILABLE ? (plan ? plan->heights
+										: advtrains_height_profile(editor, centerline))
+								: vector<int>{};
 	std::size_t tds = 0;
 	for (size_t j = 0; j < centerline.size(); ++j) {
-			const auto [bx, bz] = centerline[j];
+		const auto [bx, bz] = centerline[j];
 
-			const int prev_ground =
-					j > 0 ? editor.get_ground_level(centerline[j - 1].first,
-									centerline[j - 1].second)
-						  : editor.get_ground_level(bx, bz);
-			const int next_ground =
-					j + 1 < centerline.size()
-							? editor.get_ground_level(centerline[j + 1].first,
-									  centerline[j + 1].second)
-							: editor.get_ground_level(bx, bz);
-			const int current_ground = editor.get_ground_level(bx, bz);
-			const int rail_y = ADVTRAINS_AVAILABLE ? adv_heights[j] : current_ground;
+		const int prev_ground = j > 0 ? editor.get_ground_level(centerline[j - 1].first,
+												centerline[j - 1].second)
+									  : editor.get_ground_level(bx, bz);
+		const int next_ground = j + 1 < centerline.size()
+										? editor.get_ground_level(centerline[j + 1].first,
+												  centerline[j + 1].second)
+										: editor.get_ground_level(bx, bz);
+		const int current_ground = editor.get_ground_level(bx, bz);
+		const int rail_y = ADVTRAINS_AVAILABLE ? adv_heights[j] : current_ground;
 
-			if (ADVTRAINS_AVAILABLE) {
-				for (int fill_y = current_ground; fill_y <= rail_y; ++fill_y)
+		if (ADVTRAINS_AVAILABLE) {
+			for (int fill_y = current_ground; fill_y <= rail_y; ++fill_y)
+				editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
+		} else {
+			if (prev_ground < current_ground)
+				for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
 					editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
-			} else {
-				if (prev_ground < current_ground)
-					for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
-						editor.set_block_absolute(
-								GRAVEL, bx, fill_y, bz, nullopt, nullopt);
-				editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
-			}
+			editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
+		}
 
-			optional<pair<int, int>> prev_opt = nullopt;
-			optional<pair<int, int>> next_opt = nullopt;
-			if (j > 0)
-				prev_opt = centerline[j - 1];
-			if (j + 1 < centerline.size())
-				next_opt = centerline[j + 1];
+		optional<pair<int, int>> prev_opt = nullopt;
+		optional<pair<int, int>> next_opt = nullopt;
+		if (j > 0)
+			prev_opt = centerline[j - 1];
+		if (j + 1 < centerline.size())
+			next_opt = centerline[j + 1];
 
-			const Block rail_block = ADVTRAINS_AVAILABLE
-							? advtrains_slope_rail(centerline, adv_heights, j)
-									  .value_or(advtrains::connected_rail(centerline, j, true)
-													.value_or(determine_rail_with_slope({bx, bz}, prev_opt,
-															next_opt, prev_ground, current_ground,
-															next_ground)))
-							: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
-										prev_ground, current_ground, next_ground);
+		const Block rail_block =
+				plan ? plan->rails[j]
+				: ADVTRAINS_AVAILABLE
+						? advtrains_slope_rail(centerline, adv_heights, j)
+								  .value_or(advtrains::connected_rail(centerline, j, true)
+												  .value_or(determine_rail_with_slope(
+														  {bx, bz}, prev_opt, next_opt,
+														  prev_ground, current_ground,
+														  next_ground)))
+						: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
+								  prev_ground, current_ground, next_ground);
+		if (ADVTRAINS_AVAILABLE)
+			editor.set_block_absolute(rail_block, bx, rail_y + 1, bz, nullopt, nullopt);
+		else
+			editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
+
+		if ((tds % 4) == 0) {
 			if (ADVTRAINS_AVAILABLE)
-				editor.set_block_absolute(
-						rail_block, bx, rail_y + 1, bz, nullopt, nullopt);
+				editor.set_block_absolute(OAK_LOG, bx, rail_y, bz, nullopt, nullopt);
 			else
-				editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
-
-			if ((tds % 4) == 0) {
-				if (ADVTRAINS_AVAILABLE)
-					editor.set_block_absolute(
-							OAK_LOG, bx, rail_y, bz, nullopt, nullopt);
-				else
-					editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
-			}
-			++tds;
+				editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
+		}
+		++tds;
 	}
 }
 
@@ -640,6 +644,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 {
 	if (way.nodes.size() < 2)
 		return;
+	const auto *plan = advtrains::get_plan(way);
 
 	const bridge_styles::BridgeStyle style =
 			bridge_styles::resolve_bridge_style_with_outline(way, bridge_outlines);
@@ -705,7 +710,9 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		bridge_ys.push_back(
 				std::max(std::min(start_ramp_y, end_ramp_y), terrain_ys[tds]));
 	}
-	if (ADVTRAINS_AVAILABLE) {
+	if (plan) {
+		bridge_ys = plan->heights;
+	} else if (ADVTRAINS_AVAILABLE) {
 		const int connected_deck_y =
 				*std::max_element(bridge_ys.begin(), bridge_ys.end());
 		std::fill(bridge_ys.begin(), bridge_ys.end(), connected_deck_y);
@@ -724,9 +731,11 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 				i + 1 < total ? optional<pair<int, int>>(all_points[i + 1]) : nullopt;
 		const int prev_y = i > 0 ? bridge_ys[i - 1] : y;
 		const int next_y = i + 1 < total ? bridge_ys[i + 1] : y;
-		const Block rail_block = connected_advtrains_rail(all_points, i)
-								 .value_or(determine_rail_with_slope(
-										 {bx, bz}, prev_xz, next_xz, prev_y, y, next_y));
+		const Block rail_block =
+				plan ? plan->rails[i]
+					 : connected_advtrains_rail(all_points, i)
+								.value_or(determine_rail_with_slope(
+										{bx, bz}, prev_xz, next_xz, prev_y, y, next_y));
 
 		editor.set_block_absolute(foundation_block, bx, y - 1, bz, nullopt, nullopt);
 		editor.set_block_absolute(
@@ -758,62 +767,62 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 		vector<pair<int, int>> &subway_points)
 {
+	const auto *plan = advtrains::get_plan(element);
 	const auto smoothed = build_connected_centerline(element);
 	for (size_t j = 0; j < smoothed.size(); ++j) {
-			int bx = smoothed[j].first;
-			int bz = smoothed[j].second;
-			if (subway_points.empty() || subway_points.back() != pair<int, int>{bx, bz})
-				subway_points.emplace_back(bx, bz);
+		int bx = smoothed[j].first;
+		int bz = smoothed[j].second;
+		if (subway_points.empty() || subway_points.back() != pair<int, int>{bx, bz})
+			subway_points.emplace_back(bx, bz);
 
-			const int ground_y = editor.get_ground_level(bx, bz);
-			const int ceil_y = ground_y - SUBWAY_DEPTH;
-			const int floor_y = ceil_y - INTERIOR_HEIGHT - 1;
-			if (floor_y <= world_editor::min_y())
-				continue;
+		const int ground_y = editor.get_ground_level(bx, bz);
+		const pos_t floor_y =
+				plan ? plan->heights[j] : ground_y - SUBWAY_DEPTH - INTERIOR_HEIGHT - 1;
+		const pos_t ceil_y = floor_y + INTERIOR_HEIGHT + 1;
+		if (floor_y <= world_editor::min_y())
+			continue;
+		if (ADVTRAINS_AVAILABLE)
+			advtrains::tunnel_floors.emplace_back(bx, floor_y, bz);
 
-			const int prev_ground =
-					j > 0 ? editor.get_ground_level(
-								smoothed[j - 1].first, smoothed[j - 1].second)
-						  : ground_y;
-			const int next_ground =
-					j + 1 < smoothed.size()
-							? editor.get_ground_level(
-									  smoothed[j + 1].first, smoothed[j + 1].second)
-							: ground_y;
+		const int prev_ground = j > 0 ? editor.get_ground_level(smoothed[j - 1].first,
+												smoothed[j - 1].second)
+									  : ground_y;
+		const int next_ground = j + 1 < smoothed.size()
+										? editor.get_ground_level(smoothed[j + 1].first,
+												  smoothed[j + 1].second)
+										: ground_y;
 
-			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx) {
-				for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz) {
-					for (int y = floor_y; y <= ceil_y; ++y) {
-						const bool wall_or_ceiling =
-								dx == -WALL_RADIUS || dx == WALL_RADIUS ||
-								dz == -WALL_RADIUS || dz == WALL_RADIUS || y == ceil_y;
-						Block block =
-								y == floor_y
-										? POLISHED_DEEPSLATE
-										: (wall_or_ceiling ? subway_shell_block(
-																	 bx + dx, y, bz + dz)
-														   : STONE_BRICKS);
-						editor.set_block_absolute(
-								block, bx + dx, y, bz + dz, nullopt, nullopt);
-					}
+		for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx) {
+			for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz) {
+				for (int y = floor_y; y <= ceil_y; ++y) {
+					const bool wall_or_ceiling =
+							dx == -WALL_RADIUS || dx == WALL_RADIUS ||
+							dz == -WALL_RADIUS || dz == WALL_RADIUS || y == ceil_y;
+					Block block = y == floor_y
+										  ? POLISHED_DEEPSLATE
+										  : (wall_or_ceiling ? subway_shell_block(bx + dx,
+																	   y, bz + dz)
+															 : STONE_BRICKS);
+					editor.set_block_absolute(
+							block, bx + dx, y, bz + dz, nullopt, nullopt);
 				}
 			}
+		}
 
-			optional<pair<int, int>> prev_xz =
-					j > 0 ? optional<pair<int, int>>(smoothed[j - 1])
-						  : nullopt;
-			optional<pair<int, int>> next_xz =
-					j + 1 < smoothed.size()
-							? optional<pair<int, int>>(smoothed[j + 1])
-							: nullopt;
-			const Block rail_block = connected_advtrains_rail(smoothed, j)
-									 .value_or(determine_rail_with_slope({bx, bz},
-											 prev_xz, next_xz, prev_ground, ground_y,
-											 next_ground));
-			editor.set_block_absolute(rail_block, bx, floor_y + 1, bz,
-					std::optional<std::vector<Block>>(
-							{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
-					std::optional<std::vector<Block>>());
+		optional<pair<int, int>> prev_xz =
+				j > 0 ? optional<pair<int, int>>(smoothed[j - 1]) : nullopt;
+		optional<pair<int, int>> next_xz =
+				j + 1 < smoothed.size() ? optional<pair<int, int>>(smoothed[j + 1])
+										: nullopt;
+		const Block rail_block =
+				plan ? plan->rails[j]
+					 : connected_advtrains_rail(smoothed, j)
+								.value_or(determine_rail_with_slope({bx, bz}, prev_xz,
+										next_xz, prev_ground, ground_y, next_ground));
+		editor.set_block_absolute(rail_block, bx, floor_y + 1, bz,
+				std::optional<std::vector<Block>>(
+						{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
+				std::optional<std::vector<Block>>());
 	}
 }
 
@@ -822,11 +831,19 @@ void carve_subway_interior(
 {
 	const std::optional<std::vector<Block>> carve_whitelist(std::vector<Block>{
 			STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, STONE});
-	for (std::size_t idx = 0; idx < subway_points.size(); ++idx) {
-		const auto [bx, bz] = subway_points[idx];
-		const int ground_y = editor.get_ground_level(bx, bz);
-		const int ceil_y = ground_y - SUBWAY_DEPTH;
-		const int floor_y = ceil_y - INTERIOR_HEIGHT - 1;
+	std::vector<v3pos_t> floors;
+	if (ADVTRAINS_AVAILABLE) {
+		floors = advtrains::tunnel_floors;
+	} else {
+		for (const auto &[x, z] : subway_points)
+			floors.emplace_back(x,
+					editor.get_ground_level(x, z) - SUBWAY_DEPTH - INTERIOR_HEIGHT - 1,
+					z);
+	}
+	for (std::size_t idx = 0; idx < floors.size(); ++idx) {
+		const auto &p = floors[idx];
+		const pos_t bx = p.X, bz = p.Z, floor_y = p.Y;
+		const pos_t ceil_y = floor_y + INTERIOR_HEIGHT + 1;
 		if (floor_y <= world_editor::min_y())
 			continue;
 		for (int dx = -AIR_RADIUS; dx <= AIR_RADIUS; ++dx) {
@@ -859,6 +876,9 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 	static const std::unordered_set<std::string> track_types{"rail", "light_rail",
 			"subway", "tram", "narrow_gauge", "monorail", "funicular", "miniature",
 			"preserved", "disused"};
+	if (ADVTRAINS_AVAILABLE && track_types.contains(railway_type) &&
+			element.tags.get("area") != "yes")
+		advtrains::mark_generated(element);
 	const bool tunnel_requested = railway_type == "subway" ||
 								  element.tags.get("subway") == "yes" ||
 								  element.tags.get("tunnel") == "yes";
@@ -905,12 +925,17 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 
 void generate_railways(WorldEditor &editor, const ProcessedWay &element)
 {
+	if (ADVTRAINS_AVAILABLE)
+		advtrains::prepare_network({ProcessedElement(element)}, editor);
 	vector<pair<int, int>> subway_points;
 	RailBridgeInternalEndpoints internal_endpoints;
 	bridge_styles::BridgeOutlineIndex bridge_outlines;
 	CoordinateBitmap empty = CoordinateBitmap::new_empty();
 	generate_railways(editor, element, subway_points, internal_endpoints, bridge_outlines,
 			empty, empty, empty);
+	if (!subway_points.empty())
+		carve_subway_interior(editor, subway_points);
+	advtrains::finish_network(editor);
 }
 
 void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &element)

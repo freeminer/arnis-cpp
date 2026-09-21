@@ -1093,10 +1093,10 @@ bool generate_world(WorldEditor &editor,
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
+	railways::advtrains::prepare_network(elements, editor);
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	auto rail_bridge_internal_endpoints =
 			railways::collect_rail_bridge_internal_endpoints(elements);
-	railways::advtrains::prepare_network(elements, editor);
 	// Centreline bitmap prevents catenary masts from being stamped into a
 	// neighbouring parallel track, matching the Rust railway pass.
 	auto rail_mask = railways::collect_at_grade_rail_mask(elements, xzbbox);
@@ -1417,6 +1417,7 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (!highway_tunnel_cells.empty())
 		highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
+	railways::advtrains::finish_network(editor);
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.

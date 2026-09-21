@@ -12,25 +12,9 @@
 namespace arnis::railways::advtrains
 {
 using namespace block_definitions;
-using XZ = std::pair<int, int>;
-
-struct XZHash
-{
-	std::size_t operator()(const XZ &p) const noexcept
-	{
-		return std::hash<long long>{}((static_cast<long long>(p.first) << 32) ^
-									  static_cast<unsigned int>(p.second));
-	}
-};
-
-constexpr std::array<XZ, 16> DIR_VECTORS{
+const std::array<XZ, 16> DIR_VECTORS{
 		{{0, 1}, {1, 2}, {1, 1}, {2, 1}, {1, 0}, {2, -1}, {1, -1}, {1, -2}, {0, -1},
 				{-1, -2}, {-1, -1}, {-2, -1}, {-1, 0}, {-2, 1}, {-1, 1}, {-1, 2}}};
-
-using DirectionSet = std::array<bool, 16>;
-thread_local std::unordered_map<XZ, DirectionSet, XZHash> network_connections;
-thread_local std::unordered_map<XZ, int, XZHash> network_heights;
-thread_local std::unordered_set<XZ, XZHash> network_anchors;
 
 bool available()
 {
@@ -64,125 +48,6 @@ std::optional<int> direction_between(const XZ &from, const XZ &to)
 		if (DIR_VECTORS[direction] == delta)
 			return direction;
 	return std::nullopt;
-}
-
-std::vector<XZ> build_centerline(const ProcessedWay &way)
-{
-	std::vector<XZ> out;
-	if (way.nodes.empty())
-		return out;
-	XZ current{way.nodes.front().x, way.nodes.front().z};
-	out.push_back(current);
-	for (std::size_t target_index = 1; target_index < way.nodes.size(); ++target_index) {
-		const XZ target{way.nodes[target_index].x, way.nodes[target_index].z};
-		const bool must_hit_target =
-				target_index + 1 == way.nodes.size() || network_anchors.contains(target);
-		const std::size_t max_steps =
-				64 + static_cast<std::size_t>(std::abs(target.first - current.first) +
-											  std::abs(target.second - current.second)) *
-							 8;
-		for (std::size_t step = 0; step < max_steps; ++step) {
-			const int dx = target.first - current.first;
-			const int dz = target.second - current.second;
-			const int distance2 = dx * dx + dz * dz;
-			// Ordinary shape points may be rounded for a smooth heading change.
-			// Shared OSM vertices are topology anchors and must be reached exactly,
-			// otherwise a branch can stop beside the main line instead of on it.
-			if (distance2 == 0 || (!must_hit_target && distance2 <= 4))
-				break;
-			const int desired = closest_direction(dx, dz);
-			// The direction vectors are not equal-length (30/60-degree entries
-			// advance two blocks on one axis). Incremental one-sector heading
-			// changes therefore overshoot and oscillate around straight OSM ways,
-			// producing the saw-tooth tracks seen in generated worlds. Follow the
-			// nearest target direction directly; the connection resolver still
-			// selects the appropriate straight/curve asset at each cell.
-			const int chosen = desired;
-			const auto [vx, vz] = DIR_VECTORS[chosen];
-			current = {current.first + vx, current.second + vz};
-			if (out.back() != current)
-				out.push_back(current);
-		}
-	}
-	return out;
-}
-
-bool is_track_way(const ProcessedWay &way)
-{
-	static const std::unordered_set<std::string> types{"rail", "light_rail", "subway",
-			"tram", "narrow_gauge", "monorail", "funicular", "miniature", "preserved",
-			"disused"};
-	return way.nodes.size() >= 2 && types.contains(way.tags.get("railway")) &&
-		   way.tags.get("area") != "yes";
-}
-
-bool is_at_grade(const ProcessedWay &way)
-{
-	const auto railway = way.tags.get("railway");
-	return railway != "subway" && way.tags.get("subway") != "yes" &&
-		   way.tags.get("tunnel") != "yes" && way.tags.get("bridge") != "yes" &&
-		   way.tags.get("bridge") != "viaduct";
-}
-
-void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor &editor)
-{
-	network_connections.clear();
-	network_heights.clear();
-	network_anchors.clear();
-	if (!available())
-		return;
-	std::unordered_map<XZ, std::size_t, XZHash> vertex_ways;
-	for (const auto &element : elements) {
-		if (!element.is_way() || !is_track_way(element.as_way()) ||
-				!is_at_grade(element.as_way()))
-			continue;
-		std::unordered_set<XZ, XZHash> seen_in_way;
-		for (const auto &node : element.as_way().nodes)
-			seen_in_way.emplace(node.x, node.z);
-		for (const auto &position : seen_in_way)
-			++vertex_ways[position];
-	}
-	for (const auto &[position, ways] : vertex_ways)
-		if (ways > 1)
-			network_anchors.insert(position);
-
-	std::vector<std::vector<XZ>> lines;
-	for (const auto &element : elements) {
-		if (!element.is_way() || !is_track_way(element.as_way()) ||
-				!is_at_grade(element.as_way()))
-			continue;
-		auto line = build_centerline(element.as_way());
-		for (std::size_t i = 1; i < line.size(); ++i) {
-			const auto direction = direction_between(line[i - 1], line[i]);
-			if (!direction)
-				continue;
-			network_connections[line[i - 1]][*direction] = true;
-			network_connections[line[i]][(*direction + 8) % 16] = true;
-		}
-		lines.push_back(std::move(line));
-	}
-
-	// Reconcile profiles after collecting the complete topology. Doing this in
-	// the element loop makes the result depend on OSM way order and lets ways
-	// choose different elevations for a shared turnout. Whole-line rounds only
-	// visit rail cells and propagate a raised junction through its slope pair.
-	for (int round = 0; round < 4; ++round) {
-		auto reconciled = network_heights;
-		bool changed = false;
-		for (const auto &line : lines) {
-			const auto heights = height_profile(editor, line);
-			for (std::size_t i = 0; i < line.size() && i < heights.size(); ++i) {
-				const auto old = network_heights.find(line[i]);
-				changed |= old == network_heights.end() || heights[i] > old->second;
-				auto [entry, inserted] = reconciled.emplace(line[i], heights[i]);
-				if (!inserted)
-					entry->second = std::max(entry->second, heights[i]);
-			}
-		}
-		network_heights.swap(reconciled);
-		if (!changed)
-			break;
-	}
 }
 
 bool connections_match(int a, int b, int c, int d)
@@ -283,185 +148,137 @@ std::optional<Block> junction_rail(const DirectionSet &directions)
 	return std::nullopt;
 }
 
-std::optional<Block> connected_rail(
-		const std::vector<XZ> &line, std::size_t index, bool use_network)
+std::optional<Block> rail_for_directions(const DirectionSet &directions)
 {
-	if (!available() || line.size() < 2 || index >= line.size())
-		return std::nullopt;
-	DirectionSet directions{};
-	if (use_network)
-		if (const auto found = network_connections.find(line[index]);
-				found != network_connections.end())
-			directions = found->second;
-	if (index > 0)
-		if (auto forward = direction_between(line[index - 1], line[index]))
-			directions[(*forward + 8) % 16] = true;
-	if (index + 1 < line.size())
-		if (auto outgoing = direction_between(line[index], line[index + 1]))
-			directions[*outgoing] = true;
 	if (auto junction = junction_rail(directions))
 		return junction;
 	std::vector<int> present;
 	for (int direction = 0; direction < 16; ++direction)
 		if (directions[direction])
 			present.push_back(direction);
-	if (present.size() >= 2)
-		if (auto exact = two_connection_rail(present[0], present[1]))
-			return exact;
-	if (present.empty())
-		return std::nullopt;
-	return two_connection_rail((present.front() + 8) % 16, present.front());
+	if (present.size() == 2)
+		return two_connection_rail(present[0], present[1]);
+	if (present.size() == 1)
+		return two_connection_rail((present.front() + 8) % 16, present.front());
+	// Unsupported geometry must be rerouted, never replaced with a straight.
+	return std::nullopt;
 }
 
-std::vector<int> height_profile(WorldEditor &editor, const std::vector<XZ> &line)
+std::optional<Block> connected_rail(const std::vector<XZ> &line, std::size_t index, bool)
 {
-	std::vector<int> profile;
-	profile.reserve(line.size());
-	for (const auto &[x, z] : line)
-		profile.push_back(editor.get_ground_level(x, z));
-	for (std::size_t i = 0; i < line.size(); ++i)
-		if (const auto found = network_heights.find(line[i]);
-				found != network_heights.end())
-			profile[i] = std::max(profile[i], found->second);
-	// Advtrains ramps occupy consecutive cells at the lower node Y, followed by
-	// level track one node up. Prefer its gentler three-piece family and retain
-	// the two-piece family as a compatibility fallback. Raise the formation until
-	// each transition has enough collinear runway. Non-cardinal pieces stay level.
-	const std::size_t ramp_cells = ADVTRAINS_GENTLE_SLOPES_AVAILABLE ? 3 : 2;
+	if (!available() || index >= line.size())
+		return std::nullopt;
+	DirectionSet directions{};
+	if (index > 0)
+		if (auto d = direction_between(line[index], line[index - 1]))
+			directions[*d] = true;
+	if (index + 1 < line.size())
+		if (auto d = direction_between(line[index], line[index + 1]))
+			directions[*d] = true;
+	return rail_for_directions(directions);
+}
+
+std::size_t slope_length(int direction)
+{
+	if (direction % 4 == 0)
+		return ADVTRAINS_GENTLE_SLOPES_AVAILABLE ? 3 : ADVTRAINS_SLOPES_AVAILABLE ? 2 : 0;
+	return direction % 4 == 2 && ADVTRAINS_DIAGONAL_SLOPES_AVAILABLE ? 2 : 0;
+}
+
+// The maximum input height bounds convergence. Never clamp afterwards:
+// doing so destroys complete ramps and recreates disconnected height jumps.
+void fit_profile(const std::vector<XZ> &line, std::vector<int> &profile,
+		const std::vector<bool> &flat)
+{
 	bool changed;
 	do {
 		changed = false;
-		// A turnout or crossing must remain a flat rail node. Make it a local
-		// high point so any required ramp starts on an incident branch instead
-		// of replacing the junction itself with vst1/vst2.
-		for (std::size_t i = 0; i < profile.size(); ++i) {
-			const auto found = network_connections.find(line[i]);
-			if (found == network_connections.end() ||
-					std::count(found->second.begin(), found->second.end(), true) <= 2)
-				continue;
-			int level = profile[i];
-			if (i > 0)
-				level = std::max(level, profile[i - 1]);
-			if (i + 1 < profile.size())
-				level = std::max(level, profile[i + 1]);
-			changed |= profile[i] != level;
-			profile[i] = level;
-		}
 		for (std::size_t i = 0; i + 1 < profile.size(); ++i) {
-			const auto direction = direction_between(line[i], line[i + 1]);
-			if (!direction || (*direction % 4) != 0) {
-				const int level = std::max(profile[i], profile[i + 1]);
-				changed |= profile[i] != level || profile[i + 1] != level;
-				profile[i] = profile[i + 1] = level;
+			if (profile[i] == profile[i + 1])
 				continue;
-			}
-			if (profile[i + 1] > profile[i]) {
-				bool has_lead_in = true;
-				for (std::size_t offset = 1; offset < ramp_cells; ++offset)
-					has_lead_in &= i >= offset && profile[i - offset] == profile[i] &&
-								   direction_between(line[i - offset],
-										   line[i - offset + 1]) == direction;
-				if (!has_lead_in) {
-					profile[i] = profile[i + 1];
-					changed = true;
+			const bool ascending = profile[i] < profile[i + 1];
+			const std::size_t low_index = ascending ? i : i + 1;
+			const int low = profile[low_index];
+			const int high = profile[ascending ? i + 1 : i];
+			const auto dir = direction_between(line[i], line[i + 1]);
+			const std::size_t count = dir ? slope_length(*dir) : 0;
+			bool valid = count && high == low + 1;
+			for (std::size_t offset = 0; valid && offset < count; ++offset) {
+				if ((ascending && i < offset) ||
+						(!ascending && i + 1 + offset >= profile.size())) {
+					valid = false;
+					break;
 				}
-			} else if (profile[i] > profile[i + 1]) {
-				bool has_run_out = true;
-				for (std::size_t offset = 1; offset < ramp_cells; ++offset)
-					has_run_out &= i + 1 + offset < profile.size() &&
-								   profile[i + 1] == profile[i + 1 + offset] &&
-								   direction_between(line[i + offset],
-										   line[i + 1 + offset]) == direction;
-				if (!has_run_out) {
-					profile[i + 1] = profile[i];
-					changed = true;
+				const std::size_t cell = ascending ? i - offset : i + 1 + offset;
+				valid = !flat[cell] && profile[cell] == low;
+				if (cell > 0)
+					valid &= direction_between(line[cell - 1], line[cell]) == dir;
+				if (cell + 1 < line.size())
+					valid &= direction_between(line[cell], line[cell + 1]) == dir;
+				// The low end must not overlap an opposite ramp or a curve.
+				if (offset + 1 == count) {
+					for (std::size_t clearance = 1; clearance <= count; ++clearance) {
+						if (ascending && cell >= clearance)
+							valid &= profile[cell - clearance] <= low;
+						if (!ascending && cell + clearance < profile.size())
+							valid &= profile[cell + clearance] <= low;
+					}
 				}
 			}
-			if (std::abs(profile[i + 1] - profile[i]) > 1) {
-				const int level = std::max(profile[i], profile[i + 1]);
-				profile[i] = profile[i + 1] = level;
+			if (!valid) {
+				profile[low_index] = high - (high - low > 1 ? 1 : 0);
 				changed = true;
 			}
 		}
 	} while (changed);
-	// This profile is used only for at-grade ways.  Do not turn a large DEM
-	// discontinuity into a massive gravel viaduct: bridge ways are handled by
-	// the bridge generator, while ordinary rail should stay close to its local
-	// terrain and use Advtrains slope pieces for small transitions.
-	for (std::size_t i = 0; i < profile.size(); ++i)
-		profile[i] = std::min(
-				profile[i], editor.get_ground_level(line[i].first, line[i].second) + 2);
-	return profile;
+}
+
+std::vector<int> height_profile(WorldEditor &editor, const std::vector<XZ> &line)
+{
+	std::vector<int> heights;
+	for (const auto &[x, z] : line)
+		heights.push_back(editor.get_ground_level(x, z));
+	fit_profile(line, heights, std::vector<bool>(line.size(), false));
+	return heights;
 }
 
 std::optional<Block> slope_rail(
 		const std::vector<XZ> &line, const std::vector<int> &heights, std::size_t index)
 {
-	if (!ADVTRAINS_SLOPES_AVAILABLE || index >= line.size() || index >= heights.size())
+	if (line.size() != heights.size() || index >= line.size())
 		return std::nullopt;
-	if (const auto found = network_connections.find(line[index]);
-			found != network_connections.end() &&
-			std::count(found->second.begin(), found->second.end(), true) > 2)
-		return std::nullopt;
-
-	const std::size_t ramp_cells = ADVTRAINS_GENTLE_SLOPES_AVAILABLE ? 3 : 2;
-	for (std::size_t piece = 0; piece < ramp_cells; ++piece) {
-		// Ascending in vector order: [h:vst31, h:vst32, h:vst33,
-		// h+1:level], or the equivalent two-piece fallback.
-		if (index >= piece) {
-			const std::size_t start = index - piece;
-			if (start + ramp_cells < line.size()) {
-				const int low = heights[start];
-				bool matches = heights[start + ramp_cells] == low + 1;
-				std::optional<int> direction;
-				for (std::size_t offset = 0; matches && offset < ramp_cells; ++offset) {
-					matches &= heights[start + offset] == low;
-					const auto edge = direction_between(
-							line[start + offset], line[start + offset + 1]);
-					if (!direction)
-						direction = edge;
-					matches &= edge && edge == direction;
+	for (std::size_t count : {2, 3})
+		for (std::size_t piece = 0; piece < count; ++piece)
+			for (bool ascending : {true, false}) {
+				const std::size_t back = piece + (ascending ? 0 : 1);
+				if (index < back)
+					continue;
+				const std::size_t start = index - back;
+				if (start + count >= line.size())
+					continue;
+				const auto travel = direction_between(line[start], line[start + 1]);
+				if (!travel || slope_length(*travel) != count)
+					continue;
+				const int low = heights[start + (ascending ? 0 : 1)];
+				if (heights[start + (ascending ? count : 0)] != low + 1)
+					continue;
+				bool matches = true;
+				for (std::size_t offset = 0; offset < count; ++offset) {
+					matches &= heights[start + offset + (ascending ? 0 : 1)] == low;
+					matches &= direction_between(line[start + offset],
+									   line[start + offset + 1]) == travel;
 				}
-				if (matches && direction && (*direction % 4) == 0) {
-					Block slope = ADVTRAINS_GENTLE_SLOPES_AVAILABLE
-										  ? ADV_RAIL_GENTLE_SLOPE[piece]
-										  : (piece == 0 ? ADV_RAIL_SLOPE_UP
-														: ADV_RAIL_SLOPE_DOWN);
-					slope.setParam2(static_cast<std::uint8_t>(*direction / 4));
-					return slope;
-				}
+				if (!matches)
+					continue;
+				const int direction = ascending ? *travel : (*travel + 8) % 16;
+				const std::size_t part = ascending ? piece : count - piece - 1;
+				Block rail = direction % 4 == 2 ? ADV_RAIL_DIAGONAL_SLOPE[part]
+							 : count == 3		? ADV_RAIL_GENTLE_SLOPE[part]
+							 : part == 0		? ADV_RAIL_SLOPE_UP
+												: ADV_RAIL_SLOPE_DOWN;
+				rail.setParam2(direction / 4);
+				return rail;
 			}
-		}
-
-		// Descending in vector order uses the pieces in reverse order, all
-		// oriented back toward the preceding high level node.
-		if (index > piece) {
-			const std::size_t start = index - piece - 1;
-			if (start + ramp_cells < line.size()) {
-				const int low = heights[start + 1];
-				bool matches = heights[start] == low + 1;
-				std::optional<int> travel;
-				for (std::size_t offset = 0; matches && offset < ramp_cells; ++offset) {
-					matches &= heights[start + 1 + offset] == low;
-					const auto edge = direction_between(
-							line[start + offset], line[start + offset + 1]);
-					if (!travel)
-						travel = edge;
-					matches &= edge && edge == travel;
-				}
-				if (matches && travel && (*travel % 4) == 0) {
-					const std::size_t reversed = ramp_cells - piece - 1;
-					Block slope = ADVTRAINS_GENTLE_SLOPES_AVAILABLE
-										  ? ADV_RAIL_GENTLE_SLOPE[reversed]
-										  : (reversed == 0 ? ADV_RAIL_SLOPE_UP
-														   : ADV_RAIL_SLOPE_DOWN);
-					const int direction_to_high = (*travel + 8) % 16;
-					slope.setParam2(static_cast<std::uint8_t>(direction_to_high / 4));
-					return slope;
-				}
-			}
-		}
-	}
 	return std::nullopt;
 }
 
