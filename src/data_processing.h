@@ -90,8 +90,7 @@ inline std::filesystem::path generation_output_path(const GenerationOptions &o)
 }
 inline bool valid_generation_options(const GenerationOptions &o)
 {
-	if (o.ground_level < -64 || o.ground_level > 319 ||
-			(!o.output_path.empty() || o.level_name.empty()))
+	if (o.ground_level < -64 || o.ground_level > 319 || !valid_scale(o.projection_scale))
 		return false;
 #if !defined(USE_ARROW) || !USE_ARROW
 	if (o.overture_source == OvertureSource::Parquet)
@@ -245,4 +244,11 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 		const Args &args, FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
 		bool elements_prepared = false);
+// Options-aware entry point matching Rust's generate_world_with_options for
+// library callers that already own the backend editor instance.
+bool generate_world_with_options(WorldEditor &editor,
+		const std::vector<ProcessedElement> &elements, Args args,
+		FloodFillCache &flood_fill_cache,
+		BuildingFootprintBitmap const &building_footprints,
+		const GenerationOptions &options, bool elements_prepared = false);
 }

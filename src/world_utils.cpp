@@ -1,4 +1,5 @@
 #include "world_utils.h"
+#include "retrieve_data.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
@@ -12,19 +13,37 @@ static std::filesystem::path home()
 {
 	if (const char *h = std::getenv("HOME"))
 		return h;
+	if (const char *h = std::getenv("USERPROFILE"))
+		return h;
 	return ".";
 }
 std::filesystem::path get_bedrock_output_directory()
 {
-	auto p = home() / "Desktop";
-	return std::filesystem::exists(p) ? p : home();
+	std::filesystem::path p;
+	if (const char *desktop = std::getenv("XDG_DESKTOP_DIR"))
+		p = desktop;
+	else
+		p = home() / "Desktop";
+	// Rust's directory resolver returns the preferred Desktop path even on a
+	// first run; the caller creates the output directory when exporting.
+	return p;
 }
 std::filesystem::path get_luanti_worlds_directory()
 {
-	auto p = home() / ".minetest" / "worlds";
-	if (std::filesystem::exists(p.parent_path()))
-		return p;
-	return get_bedrock_output_directory() / "Arnis Luanti Worlds";
+	std::filesystem::path base;
+#if defined(_WIN32)
+	if (const char *appdata = std::getenv("APPDATA"))
+		base = std::filesystem::path(appdata) / "Minetest";
+	else
+		base = home() / "AppData" / "Roaming" / "Minetest";
+#elif defined(__APPLE__)
+	base = home() / "Library" / "Application Support" / "minetest";
+#else
+	base = home() / ".minetest";
+#endif
+	// Match Rust: a resolvable platform data directory is authoritative even
+	// before the worlds directory exists; callers create it during world setup.
+	return base / "worlds";
 }
 bool replace_file_atomically(
 		const std::filesystem::path &path, const std::vector<std::uint8_t> &bytes)
@@ -62,19 +81,51 @@ std::string sanitize_for_filename(const std::string &name)
 	out.reserve(std::min(name.size(), max_bytes));
 	for (const unsigned char c : name)
 		out.push_back(c < 32 || std::strchr(invalid, c) ? '_' : char(c));
-	while (!out.empty() && std::isspace(static_cast<unsigned char>(out.front())))
-		out.erase(out.begin());
-	while (!out.empty() &&
-			(std::isspace(static_cast<unsigned char>(out.back())) || out.back() == '.'))
-		out.pop_back();
+	const auto trim = [](std::string &value) {
+		std::size_t first = 0;
+		while (first < value.size() &&
+				std::isspace(static_cast<unsigned char>(value[first])))
+			++first;
+		std::size_t last = value.size();
+		while (last > first &&
+				(std::isspace(static_cast<unsigned char>(value[last - 1])) ||
+						value[last - 1] == '.'))
+			--last;
+		value = value.substr(first, last - first);
+	};
+	trim(out);
 	if (out.size() > max_bytes) {
 		out.resize(max_bytes);
-		while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xC0) == 0x80)
+		// Do not leave a partial UTF-8 sequence after the byte cap. This mirrors
+		// Rust's char-boundary truncation and keeps generated world paths valid.
+		while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xc0) == 0x80)
 			out.pop_back();
-		while (!out.empty() && (std::isspace(static_cast<unsigned char>(out.back())) ||
-									   out.back() == '.'))
-			out.pop_back();
+		if (!out.empty() && static_cast<unsigned char>(out.back()) >= 0xc0) {
+			const auto lead = static_cast<unsigned char>(out.back());
+			const std::size_t width = (lead & 0xe0) == 0xc0	  ? 2
+									  : (lead & 0xf0) == 0xe0 ? 3
+									  : (lead & 0xf8) == 0xf0 ? 4
+															  : 1;
+			if (out.size() - 1 + width > max_bytes)
+				out.pop_back();
+		}
+		trim(out);
 	}
 	return out.empty() ? "Unknown Location" : out;
+}
+
+std::string get_area_name_for_bedrock(const geographic::LLBBox &bbox)
+{
+	const double lat = (bbox.min().lat() + bbox.max().lat()) * 0.5;
+	const double lon = (bbox.min().lng() + bbox.max().lng()) * 0.5;
+	return retrieve_data::fetch_area_name(lat, lon).value_or("Unknown Location");
+}
+
+std::pair<std::filesystem::path, std::string> build_bedrock_output(
+		const geographic::LLBBox &bbox, const std::filesystem::path &output_dir)
+{
+	const auto safe_name = sanitize_for_filename(get_area_name_for_bedrock(bbox));
+	return {output_dir / ("Arnis " + safe_name + ".mcworld"),
+			"Arnis World: " + safe_name};
 }
 }

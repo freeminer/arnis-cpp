@@ -1,6 +1,7 @@
 #include "retrieve_data.h"
 #include <algorithm>
 #include <cctype>
+#include <curl/curl.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
 #include <random>
@@ -9,6 +10,15 @@
 
 namespace arnis::retrieve_data
 {
+namespace
+{
+size_t area_name_write(void *contents, size_t size, size_t count, void *user)
+{
+	auto *out = static_cast<std::string *>(user);
+	out->append(static_cast<const char *>(contents), size * count);
+	return size * count;
+}
+}
 std::string url_host(const std::string &url)
 {
 	const auto scheme = url.find("://");
@@ -125,5 +135,29 @@ std::optional<std::string> area_name_from_nominatim_json(const std::string &body
 		return name;
 	}
 	return std::nullopt;
+}
+
+std::optional<std::string> fetch_area_name(double lat, double lon)
+{
+	const auto url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=" +
+					 std::to_string(lat) + "&lon=" + std::to_string(lon) +
+					 "&addressdetails=1";
+	CURL *curl = curl_easy_init();
+	if (!curl)
+		return std::nullopt;
+	std::string body;
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, area_name_write);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, "Arnis/Cpp");
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	long status = 0;
+	const auto result = curl_easy_perform(curl);
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+	curl_easy_cleanup(curl);
+	if (result != CURLE_OK || status < 200 || status >= 300)
+		return std::nullopt;
+	return area_name_from_nominatim_json(body);
 }
 }

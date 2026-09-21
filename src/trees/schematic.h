@@ -14,6 +14,9 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &sc
 		const std::vector<Block> &blacklist, const BuildingFootprintBitmap *footprints,
 		int y_offset);
 Schematic tree_only(const Schematic &schem);
+// Rust's schematic contract rejects log-only assets (snags/cacti) from the
+// regional tree selector; keep this predicate available to pack loaders.
+bool has_leaves(const Schematic &schem);
 Schematic load_schem(const std::filesystem::path &file);
 TreeSize schematic_size(const Schematic &schem);
 // One deterministic trunk position per lattice cell; shared by regional and

@@ -11,9 +11,10 @@
 #include <utility>
 #include <tuple>
 #include <algorithm>
+#include <cmath>
+#include <cctype>
 #include <stdexcept>
 #include <cstdint>
-#include <sstream>
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -69,9 +70,19 @@ bool is_underground_waterway(const tags_t &tags)
 int waterway_width(const std::string &type, const tags_t &tags)
 {
 	if (const auto it = tags.find("width"); it != tags.end()) {
-		std::istringstream in(it->second);
-		double width = 0;
-		if (in >> width && std::isfinite(width))
+		// Match Rust: parse only the first space-delimited token.  In
+		// particular, reject unit-suffixed values such as `10m` instead of
+		// silently accepting their numeric prefix.
+		const auto first = it->second.find_first_of(" \t\r\n");
+		const auto token = it->second.substr(0, first);
+		std::size_t consumed = 0;
+		double width = 0.0;
+		try {
+			width = std::stod(token, &consumed);
+		} catch (...) {
+			consumed = 0;
+		}
+		if (consumed == token.size() && std::isfinite(width))
 			return width >= 1 ? std::min(MAX_WATERWAY_WIDTH, int(std::lround(width)))
 							  : get_waterway_width(type);
 	}

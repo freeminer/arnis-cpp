@@ -378,17 +378,10 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 			any_water = wmin_x <= wmax_x && wmin_z <= wmax_z;
 		}
 	} else {
-		for (int z = min_z; z <= max_z; ++z) {
-			for (int x = min_x; x <= max_x; ++x) {
-				if (!editor.is_lc_water(x, z))
-					continue;
-				any_water = true;
-				wmin_x = std::min(wmin_x, x);
-				wmax_x = std::max(wmax_x, x);
-				wmin_z = std::min(wmin_z, z);
-				wmax_z = std::max(wmax_z, z);
-			}
-		}
+		// Rust requires both land-cover and elevation-backed Ground data for
+		// the bounded depth field; without it the caller falls back to flat
+		// water rather than scanning the entire world.
+		return {};
 	}
 	if (!any_water)
 		return {};

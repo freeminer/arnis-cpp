@@ -1,11 +1,14 @@
 #include "floodfill_cache.h"
 #include "floodfill.h"
+#include "clipping.h"
 #include <algorithm>
 #include <thread>
 #include <future>
 #include <numeric>
 #include <cmath>
 #include <iterator>
+#include <stdexcept>
+#include <cstdlib>
 
 namespace arnis
 {
@@ -29,6 +32,8 @@ FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
 
 namespace
 {
+
+std::size_t configured_workers = 0;
 
 bool same_ring_point(const ProcessedNode &a, const ProcessedNode &b)
 {
@@ -90,8 +95,8 @@ void merge_relation_segments(std::vector<std::vector<ProcessedNode>> &rings)
 }
 
 template <typename Apply>
-void for_relation_ring_cells(
-		const ProcessedRelation &relation, ProcessedMemberRole role, Apply apply)
+void for_relation_ring_cells(const ProcessedRelation &relation, ProcessedMemberRole role,
+		const XZBBox &xzbbox, Apply apply)
 {
 	std::vector<std::vector<ProcessedNode>> rings;
 	for (const auto &member : relation.members) {
@@ -101,6 +106,7 @@ void for_relation_ring_cells(
 	merge_relation_segments(rings);
 
 	for (auto &ring : rings) {
+		ring = clipping::clip_way_to_bbox(ring, xzbbox);
 		if (ring.size() < 3)
 			continue;
 		if (!same_ring_point(ring.front(), ring.back())) {
@@ -152,8 +158,14 @@ CoordinateBitmap::CoordinateBitmap(const XZBBox &xzbbox)
 	height_ = static_cast<size_t>(
 			static_cast<int64_t>(xzbbox.max_z()) - static_cast<int64_t>(min_z_) + 1);
 
-	// Calculate number of bytes needed (round up to nearest byte)
+	// Match Rust's checked width*height calculation rather than allowing size_t
+	// overflow to produce a truncated bitmap and out-of-bounds bit accesses.
+	if (height_ != 0 && width_ > std::numeric_limits<size_t>::max() / height_)
+		throw std::length_error("CoordinateBitmap: world size too large");
+	// Calculate number of bytes needed (round up to nearest byte).
 	size_t total_bits = width_ * height_;
+	if (total_bits > std::numeric_limits<size_t>::max() - 7)
+		throw std::length_error("CoordinateBitmap: bitmap size too large");
 	size_t num_bytes = (total_bits + 7) / 8; // Ceiling division
 
 	bits_.resize(num_bytes, 0);
@@ -446,18 +458,33 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		}
 	}
 
-	// Compute all way flood fills (sequentially since we don't have parallel processing library)
+	// Compute fills concurrently, as Rayon does in Rust.  Keep the number of
+	// in-flight jobs bounded so a large extract cannot create one native thread
+	// per OSM way.
 	FloodFillCache cache;
-	for (const ProcessedWay *way : ways_needing_fill) {
-		std::vector<std::pair<int32_t, int32_t>> polygon_coords;
-		polygon_coords.reserve(way->nodes.size());
-		for (const auto &n : way->nodes) {
-			polygon_coords.emplace_back(n.x, n.z);
+	const std::size_t workers =
+			configured_workers ? configured_workers
+							   : std::max(1u, std::thread::hardware_concurrency());
+	for (std::size_t base = 0; base < ways_needing_fill.size(); base += workers) {
+		const std::size_t end = std::min(base + workers, ways_needing_fill.size());
+		std::vector<std::future<
+				std::pair<uint64_t, std::vector<std::pair<int32_t, int32_t>>>>>
+				jobs;
+		jobs.reserve(end - base);
+		for (std::size_t i = base; i < end; ++i) {
+			const ProcessedWay *way = ways_needing_fill[i];
+			jobs.push_back(std::async(std::launch::async, [way, timeout] {
+				std::vector<std::pair<int32_t, int32_t>> polygon_coords;
+				polygon_coords.reserve(way->nodes.size());
+				for (const auto &n : way->nodes)
+					polygon_coords.emplace_back(n.x, n.z);
+				return std::make_pair(way->id, flood_fill_area(polygon_coords, timeout));
+			}));
 		}
-
-		std::vector<std::pair<int32_t, int32_t>> filled =
-				flood_fill_area(polygon_coords, timeout);
-		cache.way_cache[way->id] = std::move(filled);
+		for (auto &job : jobs) {
+			auto result = job.get();
+			cache.way_cache.emplace(result.first, std::move(result.second));
+		}
 	}
 
 	return cache;
@@ -529,9 +556,9 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 					(it_type != rel.tags.end() && it_type->second == "building");
 			if (!is_building || is_underground_building(rel.tags))
 				continue;
-			for_relation_ring_cells(rel, ProcessedMemberRole::Outer,
+			for_relation_ring_cells(rel, ProcessedMemberRole::Outer, xzbbox,
 					[&footprints](int32_t x, int32_t z) { footprints.set(x, z); });
-			for_relation_ring_cells(rel, ProcessedMemberRole::Inner,
+			for_relation_ring_cells(rel, ProcessedMemberRole::Inner, xzbbox,
 					[&footprints](int32_t x, int32_t z) { footprints.clear(x, z); });
 		}
 	}
@@ -641,9 +668,12 @@ void FloodFillCache::clear()
 
 void configure_thread_pool(double cpu_fraction)
 {
-	// Flood-fill work is currently synchronous; retain the Rust API's tuning
-	// hook without pretending to configure a nonexistent global pool.
-	(void)cpu_fraction;
+	if (std::getenv("RAYON_NUM_THREADS"))
+		return;
+	cpu_fraction = std::clamp(cpu_fraction, 0.1, 1.0);
+	const auto available = std::max(1u, std::thread::hardware_concurrency());
+	configured_workers =
+			std::max<std::size_t>(1, static_cast<std::size_t>(available * cpu_fraction));
 }
 
 } // namespace arnis

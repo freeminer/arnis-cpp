@@ -283,12 +283,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 									manifest.parent_path() / relative.get<std::string>();
 							try {
 								auto schem = load_schem(path);
-								bool leaves = std::any_of(schem.voxels.begin(),
-										schem.voxels.end(), [](const auto &v) {
-											return v.block.find("leaves") !=
-												   std::string::npos;
-										});
-								if (leaves) {
+								if (has_leaves(schem)) {
 									const auto size = schematic_size(schem);
 									data->entries.push_back({std::move(schem), size,
 											std::uint8_t(width)});

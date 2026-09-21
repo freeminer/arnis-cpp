@@ -32,6 +32,65 @@ namespace arnis::overture
 namespace
 {
 
+// Keep the closed Overture enums aligned between the Parquet and tile
+// transports.  Unknown values are deliberately discarded, matching the Rust
+// interning helpers: a newly introduced provider value must not leak through
+// as an unrecognised material/shape in the generated world.
+std::optional<std::string> intern_roof_shape(const std::optional<std::string> &value)
+{
+	if (!value)
+		return std::nullopt;
+	const auto &v = *value;
+	if (v == "gabled" || v == "gable")
+		return "gabled";
+	if (v == "hipped" || v == "hip")
+		return "hipped";
+	if (v == "flat")
+		return "flat";
+	if (v == "pyramidal")
+		return "pyramidal";
+	if (v == "dome" || v == "onion")
+		return "dome";
+	if (v == "skillion" || v == "shed")
+		return "skillion";
+	if (v == "gambrel" || v == "mansard" || v == "round" || v == "half_hipped" ||
+			v == "saltbox" || v == "sawtooth" || v == "spherical")
+		return v;
+	return std::nullopt;
+}
+
+std::optional<std::string> intern_roof_material(const std::optional<std::string> &value)
+{
+	if (!value)
+		return std::nullopt;
+	static constexpr std::array<const char *, 14> values = {"concrete", "copper",
+			"eternit", "glass", "grass", "gravel", "metal", "plastic", "roof_tiles",
+			"slate", "solar_panels", "thatch", "tar_paper", "wood"};
+	if (std::find(values.begin(), values.end(), *value) == values.end())
+		return std::nullopt;
+	return value;
+}
+
+std::optional<std::string> intern_roof_orientation(
+		const std::optional<std::string> &value)
+{
+	if (value && (*value == "along" || *value == "across"))
+		return value;
+	return std::nullopt;
+}
+
+std::optional<std::string> intern_facade_material(const std::optional<std::string> &value)
+{
+	if (!value)
+		return std::nullopt;
+	static constexpr std::array<const char *, 11> values = {"brick", "cement_block",
+			"clay", "concrete", "glass", "metal", "plaster", "plastic", "stone",
+			"timber_framing", "wood"};
+	if (std::find(values.begin(), values.end(), *value) == values.end())
+		return std::nullopt;
+	return value;
+}
+
 uint32_t read_u32(
 		const std::vector<uint8_t> &bytes, std::size_t offset, bool little_endian)
 {
@@ -486,15 +545,17 @@ std::vector<OvertureBuilding> decode_overture_building_tile(
 				building.num_floors = static_cast<int>(*floors);
 			building.subtype = attribute_string(layer, feature, "subtype");
 			building.clazz = attribute_string(layer, feature, "class");
-			building.roof_shape = attribute_string(layer, feature, "roof_shape");
-			building.roof_material = attribute_string(layer, feature, "roof_material");
-			building.roof_orientation =
-					attribute_string(layer, feature, "roof_orientation");
+			building.roof_shape =
+					intern_roof_shape(attribute_string(layer, feature, "roof_shape"));
+			building.roof_material = intern_roof_material(
+					attribute_string(layer, feature, "roof_material"));
+			building.roof_orientation = intern_roof_orientation(
+					attribute_string(layer, feature, "roof_orientation"));
 			building.facade_color = attribute_string(layer, feature, "facade_color");
 			building.roof_color = attribute_string(layer, feature, "roof_color");
 			building.roof_height = attribute_number(layer, feature, "roof_height");
-			building.facade_material =
-					attribute_string(layer, feature, "facade_material");
+			building.facade_material = intern_facade_material(
+					attribute_string(layer, feature, "facade_material"));
 			buildings.push_back(std::move(building));
 		}
 	}
@@ -534,8 +595,6 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 						continue;
 					const auto previous = by_id.find(building.id);
 					if (previous == by_id.end()) {
-						if (buildings.size() == maximum)
-							return buildings;
 						by_id.emplace(building.id, buildings.size());
 						buildings.push_back(std::move(building));
 					} else if (ring_area2(building.exterior_ring) >
@@ -543,8 +602,22 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 						buildings[previous->second] = std::move(building);
 					}
 				}
+				// Stop at the same point as the Rust tile collector: after a tile
+				// completes the budget, but not halfway through that tile. This lets
+				// duplicate copies still replace clipped footprints with their larger
+				// intact ring while bounding memory for dense areas.
+				if (buildings.size() >= maximum)
+					break;
 			}
+			if (buildings.size() >= maximum)
+				break;
 		}
+		std::sort(buildings.begin(), buildings.end(),
+				[](const OvertureBuilding &a, const OvertureBuilding &b) {
+					return a.id < b.id;
+				});
+		if (buildings.size() > maximum)
+			buildings.resize(maximum);
 		return buildings;
 	};
 }
@@ -669,9 +742,11 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 				source_text ? parse_osm_reference(*source_text) : std::nullopt,
 				number_at(height, row), number_at(min_height, row),
 				integer_at(floors, row), string_at(subtype, row), string_at(clazz, row),
-				string_at(roof_shape, row), string_at(roof_material, row),
-				string_at(roof_orientation, row), string_at(facade_color, row),
-				string_at(roof_color, row), string_at(facade_material, row),
+				intern_roof_shape(string_at(roof_shape, row)),
+				intern_roof_material(string_at(roof_material, row)),
+				intern_roof_orientation(string_at(roof_orientation, row)),
+				string_at(facade_color, row), string_at(roof_color, row),
+				intern_facade_material(string_at(facade_material, row)),
 				number_at(roof_height, row)});
 	}
 	return buildings;

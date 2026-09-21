@@ -119,25 +119,68 @@ double polygon_radial_fraction(
 {
 	if (element.nodes.size() < 3)
 		return 0.0;
-	const double dx = double(x - center_x), dz = double(z - center_z);
+	double area2 = 0.0, centroid_x = 0.0, centroid_z = 0.0;
+	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+		const auto &a = element.nodes[i];
+		const auto &b = element.nodes[(i + 1) % element.nodes.size()];
+		const double cross = double(a.x) * double(b.z) - double(b.x) * double(a.z);
+		area2 += cross;
+		centroid_x += (double(a.x) + double(b.x)) * cross;
+		centroid_z += (double(a.z) + double(b.z)) * cross;
+	}
+	if (std::abs(area2) > 1e-9) {
+		centroid_x /= 3.0 * area2;
+		centroid_z /= 3.0 * area2;
+	} else {
+		centroid_x = center_x;
+		centroid_z = center_z;
+	}
+	// The radial profile is only valid when the area centroid is inside the
+	// footprint.  For a courtyard/L-shaped footprint, using the far wall would
+	// raise the roof over the open courtyard; the caller's edge-distance profile
+	// is the Rust fallback for those cells.
+	bool inside = false;
+	for (std::size_t i = 0, j = element.nodes.size() - 1; i < element.nodes.size();
+			j = i++) {
+		const auto &a = element.nodes[i];
+		const auto &b = element.nodes[j];
+		if ((double(a.z) > centroid_z) != (double(b.z) > centroid_z)) {
+			const double crossing = double(a.x) + (centroid_z - double(a.z)) *
+														  (double(b.x - a.x)) /
+														  (double(b.z - a.z));
+			if (crossing > centroid_x)
+				inside = !inside;
+		}
+	}
+	if (!inside)
+		return 0.0;
+	const double dx = double(x) - centroid_x, dz = double(z) - centroid_z;
 	const double distance = std::hypot(dx, dz);
 	if (distance <= 1e-9)
 		return 0.0;
 	const double rx = dx / distance, rz = dz / distance;
 	double boundary = std::numeric_limits<double>::infinity();
+	std::vector<double> crossings_before;
 	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
 		const auto &a = element.nodes[i];
 		const auto &b = element.nodes[(i + 1) % element.nodes.size()];
 		const double ex = double(b.x - a.x), ez = double(b.z - a.z);
-		const double qx = double(a.x - center_x), qz = double(a.z - center_z);
+		const double qx = double(a.x) - centroid_x, qz = double(a.z) - centroid_z;
 		const double cross = rx * ez - rz * ex;
 		if (std::abs(cross) < 1e-9)
 			continue;
 		const double t = (qx * ez - qz * ex) / cross;
 		const double u = (qx * rz - qz * rx) / cross;
 		if (t >= 0.0 && u >= 0.0 && u <= 1.0)
-			boundary = std::min(boundary, t);
+			if (t + 0.5 >= distance)
+				boundary = std::min(boundary, t);
+			else
+				crossings_before.push_back(t);
 	}
+	std::sort(crossings_before.begin(), crossings_before.end());
+	for (std::size_t i = 1; i < crossings_before.size(); i += 2)
+		if (crossings_before[i] - crossings_before[i - 1] > 1.0)
+			return 0.0;
 	return std::isfinite(boundary) && boundary > 1e-9
 				   ? std::clamp(distance / boundary, 0.0, 1.0)
 				   : 0.0;
@@ -1964,9 +2007,7 @@ void generate_corner_downpipes(WorldEditor &editor, const ProcessedWay &element,
 	}
 }
 
-// Hospital wall marker corresponding to Rust's green-cross banner pass.  The
-// C++ backend has no banner block-entity writer, so render the same symbol as
-// a small durable concrete cross on the longest exterior wall.
+// Hospital wall marker corresponding to Rust's green-cross banner pass.
 void generate_hospital_wall_cross(WorldEditor &editor, const ProcessedWay &element,
 		BuildingCategory category, int start_y, int building_height, int abs_offset)
 {
@@ -1988,16 +2029,115 @@ void generate_hospital_wall_cross(WorldEditor &editor, const ProcessedWay &eleme
 	if (!a || best < 5)
 		return;
 	const int mx = (a->x + b->x) / 2, mz = (a->z + b->z) / 2;
-	const int cx = (element.nodes.front().x + mx) / 2;
-	const int cz = (element.nodes.front().z + mz) / 2;
-	const int nx = std::abs(b->z - a->z) >= std::abs(b->x - a->x) ? 1 : 0;
-	const int nz = nx ? 0 : 1;
+	int sx = 0, sz = 0;
+	for (const auto &node : element.nodes) {
+		sx += node.x;
+		sz += node.z;
+	}
+	const int cx = sx / static_cast<int>(element.nodes.size());
+	const int cz = sz / static_cast<int>(element.nodes.size());
+	const int dx = b->x - a->x, dz = b->z - a->z;
+	const int n1x = dz, n1z = -dx;
+	const int outward = (mx - cx) * n1x + (mz - cz) * n1z >= 0 ? 1 : -1;
+	const int nx = (n1x * outward > 0) - (n1x * outward < 0);
+	const int nz = (n1z * outward > 0) - (n1z * outward < 0);
 	const int y = start_y + building_height * 2 / 3 + abs_offset;
-	for (int i = -2; i <= 2; ++i) {
-		for (int j = -2; j <= 2; ++j) {
-			if (std::abs(i) == 2 || (j == 0 && std::abs(i) <= 2))
-				editor.set_block_absolute(LIME_CONCRETE, cx + i * nx, y + j, cz + i * nz,
-						std::vector<Block>{AIR});
+	const std::string facing = std::abs(nx) >= std::abs(nz)
+									   ? (nx > 0 ? "east" : "west")
+									   : (nz > 0 ? "south" : "north");
+	const int bx = mx + nx, bz = mz + nz;
+	const std::vector<std::pair<std::string, std::string>> patterns = {
+			{"green", "minecraft:straight_cross"}, {"white", "minecraft:stripe_top"},
+			{"white", "minecraft:stripe_bottom"}, {"white", "minecraft:border"}};
+	editor.place_wall_banner(WHITE_WALL_BANNER, bx, y, bz, facing, "white", patterns);
+}
+
+// Rust's corner-quoin pass: accent columns at true ring vertices, omitted on
+// party walls and passage openings.  This uses the C++ facade plan directly so
+// the result remains deterministic across streamed generation regions.
+void generate_corner_quoins(WorldEditor &editor, const ProcessedWay &element,
+		const building_facade::FacadePlan &facade, BuildingCategory category,
+		BuildingCondition condition, Block wall_block, Block accent_block, int start_y,
+		int building_height, int abs_offset, const CoordinateBitmap *passages,
+		std::uint64_t seed)
+{
+	if (wall_block == accent_block || condition == BuildingCondition::Construction ||
+			condition == BuildingCondition::Ruined || element.nodes.size() < 3)
+		return;
+	int min_x = INT_MAX, max_x = INT_MIN, min_z = INT_MAX, max_z = INT_MIN;
+	for (const auto &n : element.nodes) {
+		min_x = std::min(min_x, n.x);
+		max_x = std::max(max_x, n.x);
+		min_z = std::min(min_z, n.z);
+		max_z = std::max(max_z, n.z);
+	}
+	if (max_x - min_x < 4 || max_z - min_z < 4)
+		return;
+	const bool public_corner = category == BuildingCategory::Commercial ||
+							   category == BuildingCategory::Hotel ||
+							   category == BuildingCategory::Office ||
+							   category == BuildingCategory::Historic;
+	const double chance = category == BuildingCategory::Historic ? .9 : .6;
+	const bool rolled = element_rng(seed + 3571).random_bool(chance);
+	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+		const auto &prev =
+				element.nodes[(i + element.nodes.size() - 1) % element.nodes.size()];
+		const auto &corner = element.nodes[i];
+		const auto &next = element.nodes[(i + 1) % element.nodes.size()];
+		const auto cross = std::int64_t(corner.x - prev.x) * (next.z - corner.z) -
+						   std::int64_t(corner.z - prev.z) * (next.x - corner.x);
+		if (cross == 0 || facade.is_party(corner.x, corner.z) ||
+				(!rolled &&
+						!(public_corner && facade.corner &&
+								facade.corner->vertex == std::pair{corner.x, corner.z})))
+			continue;
+		const int first_y = start_y + 1 +
+							((passages && passages->contains(corner.x, corner.z))
+											? BUILDING_PASSAGE_HEIGHT
+											: 0);
+		for (int y = first_y; y <= start_y + building_height; ++y)
+			editor.set_block_absolute(accent_block, corner.x, y + abs_offset, corner.z,
+					std::vector<Block>{wall_block});
+	}
+}
+
+void generate_facade_cornice(WorldEditor &editor, const ProcessedWay &element,
+		const building_facade::FacadePlan &facade, BuildingCondition condition,
+		Block accent_block, int start_y, int building_height, int abs_offset,
+		int floor_cycle, const CoordinateBitmap *passages, bool sloped)
+{
+	if (condition != BuildingCondition::Normal || sloped ||
+			building_height < floor_cycle * 2 || accent_block == AIR ||
+			element.nodes.size() < 3)
+		return;
+	if (element_rng(element.id ^ 0xC0A211CE000077ABULL).uniform(100) >= 55)
+		return;
+	const int top = start_y + building_height;
+	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+		const auto &a = element.nodes[i];
+		const auto &b = element.nodes[(i + 1) % element.nodes.size()];
+		const int dx = b.x - a.x, dz = b.z - a.z;
+		const int nx = (dz > 0) - (dz < 0), nz = (dx < 0) - (dx > 0);
+		if (nx == 0 && nz == 0)
+			continue;
+		const std::string facing = std::abs(nx) >= std::abs(nz)
+										   ? (nx > 0 ? "east" : "west")
+										   : (nz > 0 ? "south" : "north");
+		const auto cornice =
+				create_stair_with_properties(get_stair_block_for_material(accent_block),
+						facing == "east"	? StairFacing::East
+						: facing == "west"	? StairFacing::West
+						: facing == "south" ? StairFacing::South
+											: StairFacing::North,
+						StairShape::Straight);
+		for (const auto &[x, unused_y, z] :
+				bresenham_line(a.x, top, a.z, b.x, top, b.z)) {
+			(void)unused_y;
+			if ((passages && passages->contains(x, z)) || facade.is_party(x, z))
+				continue;
+			const std::vector<Block> cornice_variants{AIR};
+			editor.set_block_with_properties_absolute(cornice, x + nx, top + abs_offset,
+					z + nz, &cornice_variants, nullptr);
 		}
 	}
 }
@@ -3279,6 +3419,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			generate_corner_downpipes(*editor, element, facade_plan, category, condition,
 					start_y_offset, building_height, abs_terrain_offset,
 					clean_visual_seed);
+		if (!element.tags.contains("building:part"))
+			generate_corner_quoins(*editor, element, facade_plan, category, condition,
+					wall_block, accent_block, start_y_offset, building_height,
+					abs_terrain_offset, effective_passages, element.id);
 		generate_hospital_wall_cross(*editor, element, category, start_y_offset,
 				building_height, abs_terrain_offset);
 
@@ -3412,6 +3556,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		generate_flat_roof_edge_variation(*editor, element, start_y_offset,
 				building_height, abs_terrain_offset, wall_block, accent_block,
 				clean_visual_seed);
+	if (!element.tags.contains("building:part"))
+		generate_facade_cornice(*editor, element, facade_plan, condition, accent_block,
+				start_y_offset, building_height, abs_terrain_offset, floor_cycle,
+				effective_passages, generated_sloped_roof);
 	if (generated_sloped_roof && args.roof) {
 		auto overhang_rng = element_rng_salted(clean_visual_seed, 0xEA7E0001ULL);
 		const Block overhang_block =

@@ -95,6 +95,15 @@ Schematic tree_only(const Schematic &in)
 	}
 	return out;
 }
+bool has_leaves(const Schematic &s)
+{
+	for (const auto &v : s.voxels) {
+		const auto canonical = tree_block_name(v.block);
+		if (canonical && canonical->find("_leaves") != std::string::npos)
+			return true;
+	}
+	return false;
+}
 TreeSize schematic_size(const Schematic &s)
 {
 	return size_for_height(s.height);

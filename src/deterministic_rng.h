@@ -55,10 +55,18 @@ public:
 	explicit ChaCha8Rng(std::uint64_t seed)
 	{
 		state_ = {0x61707865, 0x3320646e, 0x79622d32, 0x6b206574};
+		// rand_core::SeedableRng::seed_from_u64 (used by Rust's
+		// rand_chacha::ChaCha8Rng) expands a u64 with SplitMix64, then writes
+		// the resulting 32-byte seed little-endian into the ChaCha key.  The
+		// previous LCG expansion produced deterministic but incompatible worlds.
 		for (std::size_t i = 0; i < 4; ++i) {
-			seed = seed * 6364136223846793005ULL + 11634580027462260723ULL;
-			state_[4 + i * 2] = static_cast<std::uint32_t>(seed);
-			state_[5 + i * 2] = static_cast<std::uint32_t>(seed >> 32);
+			seed += 0x9e3779b97f4a7c15ULL;
+			std::uint64_t z = seed;
+			z = (z ^ (z >> 30)) * 0xbf58476d1ce4e5b9ULL;
+			z = (z ^ (z >> 27)) * 0x94d049bb133111ebULL;
+			z ^= z >> 31;
+			state_[4 + i * 2] = static_cast<std::uint32_t>(z);
+			state_[5 + i * 2] = static_cast<std::uint32_t>(z >> 32);
 		}
 	}
 	static constexpr result_type min() { return std::numeric_limits<result_type>::min(); }
@@ -69,8 +77,31 @@ public:
 			refill();
 		return block_[next_++];
 	}
-	bool random_bool(double probability = 0.5) { return (*this)() / 4294967296.0 < probability; }
-	std::uint32_t uniform(std::uint32_t upper_exclusive) { return upper_exclusive ? (*this)() % upper_exclusive : 0; }
+	bool random_bool(double probability = 0.5)
+	{
+		// rand::Rng::random_bool delegates to random::<f64>(); the standard
+		// f64 sampler consumes a u64 and keeps its top 53 bits.  Consuming two
+		// ChaCha words here preserves both the Rust sequence and probability.
+		const std::uint64_t raw = (std::uint64_t((*this)()) << 32) | (*this)();
+		const std::uint64_t mantissa = raw >> 11;
+		return static_cast<long double>(mantissa) / 9007199254740992.0L < probability;
+	}
+	std::uint32_t uniform(std::uint32_t upper_exclusive)
+	{
+		// rand's UniformInt sampler uses Lemire's multiply-and-reject method,
+		// rather than `%`, for random_range(0..upper_exclusive).
+		if (upper_exclusive <= 1)
+			return 0;
+		const std::uint64_t range = upper_exclusive;
+		const std::uint32_t threshold =
+				static_cast<std::uint32_t>(-upper_exclusive) % upper_exclusive;
+		for (;;) {
+			const std::uint64_t product = std::uint64_t((*this)()) * range;
+			const auto low = static_cast<std::uint32_t>(product);
+			if (low >= threshold)
+				return static_cast<std::uint32_t>(product >> 32);
+		}
+	}
 };
 
 inline ChaCha8Rng element_rng(std::uint64_t id)

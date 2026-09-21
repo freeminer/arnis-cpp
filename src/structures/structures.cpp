@@ -723,7 +723,9 @@ void scatter_playgrounds(
 			continue;
 		const bool too_close =
 				std::any_of(placed.begin(), placed.end(), [ax, az](const auto &p) {
-					return std::abs(p.first - ax) < 16 && std::abs(p.second - az) < 16;
+					const auto dx = static_cast<long long>(p.first) - ax;
+					const auto dz = static_cast<long long>(p.second) - az;
+					return dx > -16 && dx < 16 && dz > -16 && dz < 16;
 				});
 		if (too_close)
 			continue;
@@ -795,7 +797,9 @@ void scatter_excavators(
 			continue;
 		const bool too_close =
 				std::any_of(placed.begin(), placed.end(), [ax, az](const auto &p) {
-					return std::abs(p.first - ax) < 24 && std::abs(p.second - az) < 24;
+					const auto dx = static_cast<long long>(p.first) - ax;
+					const auto dz = static_cast<long long>(p.second) - az;
+					return dx > -24 && dx < 24 && dz > -24 && dz < 24;
 				});
 		if (too_close)
 			continue;

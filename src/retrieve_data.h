@@ -35,4 +35,5 @@ std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &,
 		const OverpassFetcher &, std::uint64_t seed = 0,
 		bool probe_official_first = false);
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body);
+std::optional<std::string> fetch_area_name(double lat, double lon);
 }

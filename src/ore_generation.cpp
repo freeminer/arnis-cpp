@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <limits>
 #include <optional>
+#include <iostream>
 namespace arnis::ore_generation
 {
 const std::array<OreRule, 6> &rules()
@@ -18,9 +19,11 @@ const std::array<OreRule, 6> &rules()
 			{block_definitions::DIAMOND_ORE, 50, 65, 4, 7, 1}}};
 	return r;
 }
-void generate_ores(
-		world_editor::WorldEditor &e, int min_x, int max_x, int min_z, int max_z)
+void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z,
+		int max_z, bool show_progress)
 {
+	if (show_progress)
+		std::cout << "[6b/7] Sprinkling ore veins...\n";
 	const int min_y = world_editor::terrain_floor_y() + 1;
 	for (int cx = min_x >> 4; cx <= (max_x >> 4); ++cx)
 		for (int cz = min_z >> 4; cz <= (max_z >> 4); ++cz) {

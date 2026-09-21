@@ -14,6 +14,7 @@
 #include <optional>
 #include <limits>
 #include <vector>
+#include <iostream>
 
 namespace arnis::ground_generation
 {
@@ -92,6 +93,12 @@ std::pair<Block, Block> slope_palette(int slope, int x, int z)
 
 int local_slope(WorldEditor &editor, int x, int z)
 {
+	// Ground::slope is the Rust terrain metric: cardinal samples at a four
+	// block step, corrected from compressed elevation space into the documented
+	// world-scale threshold units.  Keep the small fallback for library callers
+	// that construct an editor without a Ground object.
+	if (editor.ground)
+		return editor.ground->slope({x, z});
 	const int center = editor.get_ground_level(x, z);
 	int max_delta = 0;
 	for (int dx = -1; dx <= 1; ++dx) {
@@ -395,7 +402,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		const BuildingFootprintBitmap &building_footprints, int iter_min_x,
 		int iter_max_x, int iter_min_z, int iter_max_z,
 		const CoordinateBitmap *tunnel_footprint,
-		const bridges::BridgeSurfaceMap *bridge_surface)
+		const bridges::BridgeSurfaceMap *bridge_surface, bool show_progress)
 {
 	// Rust parity: src/ground_generation.rs::generate_ground_layer ordering.
 	// xzbbox remains the shared-grid origin; callers may supply strict tile
@@ -406,6 +413,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const int max_z = std::min(iter_max_z, xzbbox.max_z());
 	if (min_x > max_x || min_z > max_z)
 		return;
+	if (show_progress)
+		std::cout << "[6/7] Generating ground...\n";
 	const bool terrain_enabled = generation_mode_terrain(args.mode);
 	for (int x = min_x; x <= max_x; ++x) {
 		for (int z = min_z; z <= max_z; ++z) {
@@ -644,11 +653,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints,
 		const CoordinateBitmap *tunnel_footprint,
-		const bridges::BridgeSurfaceMap *bridge_surface)
+		const bridges::BridgeSurfaceMap *bridge_surface, bool show_progress)
 {
 	generate_ground_region(editor, args, xzbbox, building_footprints, xzbbox.min_x(),
 			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z(), tunnel_footprint,
-			bridge_surface);
+			bridge_surface, show_progress);
 }
 
 }

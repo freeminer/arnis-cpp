@@ -1410,4 +1410,27 @@ bool generate_world(WorldEditor &editor,
 	return true;
 }
 
+bool generate_world_with_options(WorldEditor &editor,
+		const std::vector<ProcessedElement> &elements, Args args,
+		FloodFillCache &flood_fill_cache,
+		BuildingFootprintBitmap const &building_footprints,
+		const GenerationOptions &options, bool elements_prepared)
+{
+	if (!valid_generation_options(options))
+		return false;
+	apply_generation_options(editor, options);
+	args.ground_level = options.ground_level;
+	args.bedrock = is_bedrock(options.format);
+	args.luanti = is_luanti(options.format);
+	args.overture_source = options.overture_source;
+	if (!options.output_path.empty())
+		args.path = options.output_path.string();
+	args.scale = options.projection_scale;
+	args.map_item = options.map_item;
+	args.map_preview = options.map_preview;
+	args.use_3d = options.use_3d;
+	return generate_world(editor, elements, args, flood_fill_cache, building_footprints,
+			elements_prepared);
+}
+
 }
