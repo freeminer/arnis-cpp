@@ -124,6 +124,7 @@ LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t wi
 		return out;
 	out.width = width;
 	out.height = height;
+	out.source_bounds = bbox;
 	out.cells_per_meter = cells_per_meter(bbox, width);
 	out.grid.assign(height, std::vector<uint8_t>(width));
 	const auto fetch = [](const std::string &url, std::uint64_t offset,
@@ -159,8 +160,14 @@ uint8_t EsaRasterTile::sample(double lat, double lng) const
 		return 0;
 	// ESA COG scanlines run north to south. Clamp the north/east edge to the
 	// final pixel: neighbouring 3-degree tiles share that geometric boundary.
-	const double u = std::clamp((lng - double(west_lng)) / 3.0, 0.0, 1.0);
-	const double v = std::clamp((double(south_lat + 3) - lat) / 3.0, 0.0, 1.0);
+	const double south = min_lat != max_lat ? min_lat : south_lat;
+	const double north = min_lat != max_lat ? max_lat : south_lat + 3.0;
+	const double west = min_lng != max_lng ? min_lng : west_lng;
+	const double east = min_lng != max_lng ? max_lng : west_lng + 3.0;
+	const double u =
+			east != west ? std::clamp((lng - west) / (east - west), 0.0, 1.0) : 0.0;
+	const double v =
+			north != south ? std::clamp((north - lat) / (north - south), 0.0, 1.0) : 0.0;
 	const auto x =
 			std::min(width - 1, static_cast<std::size_t>(std::floor(u * double(width))));
 	const auto z = std::min(
@@ -257,6 +264,8 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 	LandCoverData out;
 	if (!bbox.valid() || width == 0 || height == 0)
 		return out;
+	out.source_bounds = bbox;
+	out.source_tiles = tiles;
 	out.width = width;
 	out.height = height;
 	out.cells_per_meter = cells_per_meter(bbox, width);

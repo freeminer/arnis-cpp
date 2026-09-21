@@ -4,6 +4,7 @@
 #include "overture/mvt.h"
 #include "overture/cache.h"
 #include "overture/pmtiles.h"
+#include "retrieve_data.h"
 #include "../../http.h"
 
 #if defined(USE_ARROW) && USE_ARROW
@@ -14,6 +15,7 @@
 
 #include <algorithm>
 #include <array>
+#include <curl/curl.h>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -23,6 +25,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <regex>
 #include <string>
 #include <unordered_map>
 #include <unordered_set>
@@ -30,8 +33,63 @@
 namespace arnis::overture
 {
 
+elevation::CacheClearStats clear_overture_cache()
+{
+	return cache::clear_overture_cache();
+}
+
 namespace
 {
+
+size_t release_listing_write(void *data, size_t size, size_t count, void *opaque)
+{
+	auto *body = static_cast<std::string *>(opaque);
+	body->append(static_cast<const char *>(data), size * count);
+	return size * count;
+}
+
+std::vector<std::string> discover_overture_releases()
+{
+	constexpr const char *listing_url =
+			"https://overturemaps-us-west-2.s3.amazonaws.com/?delimiter=/&prefix=release/";
+	CURL *curl = curl_easy_init();
+	if (!curl)
+		return {};
+	std::string body;
+	curl_easy_setopt(curl, CURLOPT_URL, listing_url);
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, release_listing_write);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, retrieve_data::OSM_USER_AGENT);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
+	long status = 0;
+	const auto result = curl_easy_perform(curl);
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+	curl_easy_cleanup(curl);
+	if (result != CURLE_OK || status < 200 || status >= 300)
+		return {};
+	std::vector<std::string> releases;
+	const std::regex prefix(
+			R"(<Prefix>release/([0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9]+)/</Prefix>)");
+	for (std::sregex_iterator it(body.begin(), body.end(), prefix), end; it != end; ++it)
+		releases.push_back((*it)[1].str());
+	std::sort(releases.begin(), releases.end(), [](const auto &a, const auto &b) {
+		const auto pa = a.rfind('.');
+		const auto pb = b.rfind('.');
+		const auto da = pa == std::string::npos ? a : a.substr(0, pa);
+		const auto db = pb == std::string::npos ? b : b.substr(0, pb);
+		if (da != db)
+			return da > db;
+		try {
+			return std::stoull(pa == std::string::npos ? "0" : a.substr(pa + 1)) >
+				   std::stoull(pb == std::string::npos ? "0" : b.substr(pb + 1));
+		} catch (...) {
+			return a > b;
+		}
+	});
+	releases.erase(std::unique(releases.begin(), releases.end()), releases.end());
+	return releases;
+}
 
 // Keep the closed Overture enums aligned between the Parquet and tile
 // transports.  Unknown values are deliberately discarded, matching the Rust
@@ -900,28 +958,62 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 	// recompiling (Rust's release selector likewise avoids hard-coding transport
 	// policy into the geometry decoder).
 	const char *release_env = std::getenv("ARNIS_OVERTURE_RELEASE");
-	const std::string release = release_env && *release_env
-										? release_env
-										: cache::last_good_release(cache::cache_root())
-												  .value_or("2026-08-19.0");
-	if (release.empty() || release.size() > 64 ||
-			release.find_first_not_of(
-					"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") !=
-					std::string::npos)
-		return {};
-	const std::string fallback_archive =
-			"https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/" +
-			release + "/buildings.pmtiles";
-	if (debug)
-		std::cerr << "Overture Maps: reading PMTiles ranges for "
-				  << overture_building_budget(bbox) << " building budget." << std::endl;
-	auto result = fetch_overture_buildings_from(
-			http_pmtiles_building_source(fallback_archive, 14,
-					cache::cache_root() / release / "tiles" / "buildings"),
-			bbox, scale);
-	if (!result.empty() && !release_env)
-		cache::set_last_good_release(cache::cache_root(), release);
-	return result;
+	std::vector<std::string> releases;
+	if (release_env && *release_env)
+		releases.emplace_back(release_env);
+	else {
+		releases = discover_overture_releases();
+		if (const auto remembered = cache::last_good_release(cache::cache_root());
+				remembered && std::find(releases.begin(), releases.end(), *remembered) ==
+									  releases.end())
+			releases.push_back(*remembered);
+		releases.push_back("2026-08-19.0");
+	}
+	// Keep a slow or unexpectedly long bucket listing from turning one map
+	// generation into an unbounded sequence of remote archive attempts. Rust
+	// reserves room for the remembered and bundled fallbacks; retain that
+	// guarantee here while removing duplicate release names.
+	std::vector<std::string> candidates;
+	const std::size_t discovered_limit = releases.size() > 2 ? releases.size() - 2 : 0;
+	for (std::size_t i = 0; i < releases.size(); ++i) {
+		if (i >= discovered_limit && discovered_limit != 0)
+			break;
+		const auto &release = releases[i];
+		if (!cache::valid_release(release) ||
+				std::find(candidates.begin(), candidates.end(), release) !=
+						candidates.end())
+			continue;
+		candidates.push_back(release);
+		if (candidates.size() >= 2)
+			break;
+	}
+	for (std::size_t i = discovered_limit; i < releases.size(); ++i) {
+		const auto &release = releases[i];
+		if (cache::valid_release(release) &&
+				std::find(candidates.begin(), candidates.end(), release) ==
+						candidates.end())
+			candidates.push_back(release);
+	}
+	for (const auto &release : candidates) {
+		const std::string archive =
+				"https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/" +
+				release + "/buildings.pmtiles";
+		if (debug)
+			std::cerr << "Overture Maps: trying release " << release << " for "
+					  << overture_building_budget(bbox) << " buildings.\n";
+		auto result = fetch_overture_buildings_from(
+				http_pmtiles_building_source(archive, 14,
+						cache::cache_root() / release / "tiles" / "buildings"),
+				bbox, scale);
+		if (!result.empty()) {
+			if (!release_env) {
+				cache::set_last_good_release(cache::cache_root(), release);
+				cache::prune_releases_older_than(cache::cache_root(), release);
+			}
+			return result;
+		}
+	}
+	return {};
 }
 
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,

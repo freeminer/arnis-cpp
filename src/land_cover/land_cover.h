@@ -38,18 +38,6 @@ inline constexpr uint8_t LC_WETLAND = 90;
 inline constexpr uint8_t LC_MANGROVES = 95;
 inline constexpr uint8_t LC_MOSS = 100;
 
-struct LandCoverData
-{
-	std::vector<std::vector<uint8_t>> grid;
-	std::vector<std::vector<uint8_t>> water_distance;
-	std::vector<std::vector<float>> water_blend_grid;
-	std::size_t width{0};
-	std::size_t height{0};
-	double cells_per_meter{1.0};
-
-	void refresh_water_blend_grid();
-};
-
 // A decoded ESA WorldCover tile.  Pixels are row-major, with (0, 0) at the
 // north-west corner, exactly as in the COG.  Keeping decoding separate from
 // assembly lets embedders use their own HTTP/cache/TIFF implementation.
@@ -57,6 +45,12 @@ struct EsaRasterTile
 {
 	int south_lat{0};
 	int west_lng{0};
+	// Optional exact extent for a cropped COG window.  When unset, the
+	// canonical 3x3-degree ESA tile extent is used.
+	double min_lat{0.0};
+	double max_lat{0.0};
+	double min_lng{0.0};
+	double max_lng{0.0};
 	std::size_t width{0};
 	std::size_t height{0};
 	std::vector<uint8_t> pixels;
@@ -67,8 +61,11 @@ struct EsaRasterTile
 	}
 	bool contains(double lat, double lng) const
 	{
-		return lat >= south_lat && lat <= south_lat + 3 && lng >= west_lng &&
-			   lng <= west_lng + 3;
+		const double south = min_lat != max_lat ? min_lat : south_lat;
+		const double north = min_lat != max_lat ? max_lat : south_lat + 3.0;
+		const double west = min_lng != max_lng ? min_lng : west_lng;
+		const double east = min_lng != max_lng ? max_lng : west_lng + 3.0;
+		return lat >= south && lat <= north && lng >= west && lng <= east;
 	}
 	uint8_t sample(double lat, double lng) const;
 };
@@ -82,6 +79,22 @@ struct GeographicBounds
 	double max_lat{0.0};
 	double max_lng{0.0};
 	bool valid() const { return min_lat <= max_lat && min_lng <= max_lng; }
+};
+
+struct LandCoverData
+{
+	std::vector<std::vector<uint8_t>> grid;
+	std::vector<std::vector<uint8_t>> water_distance;
+	std::vector<std::vector<float>> water_blend_grid;
+	std::size_t width{0};
+	std::size_t height{0};
+	double cells_per_meter{1.0};
+	// Retain source data for shoreline/vector operations, matching Rust's
+	// raster-plus-mapping lifetime through shoreline reconstruction.
+	GeographicBounds source_bounds{};
+	std::vector<EsaRasterTile> source_tiles;
+
+	void refresh_water_blend_grid();
 };
 
 // Assemble an elevation-aligned classification grid from decoded ESA rasters.

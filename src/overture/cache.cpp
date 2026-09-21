@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <utility>
 
 namespace arnis::overture::cache
 {
@@ -20,9 +21,16 @@ bool digits(const std::string &value)
 	});
 }
 
-std::string sort_key(const std::string &release)
+std::pair<std::string, unsigned long long> sort_key(const std::string &release)
 {
-	return release;
+	const auto dot = release.rfind('.');
+	if (dot == std::string::npos)
+		return {release, 0};
+	try {
+		return {release.substr(0, dot), std::stoull(release.substr(dot + 1))};
+	} catch (...) {
+		return {release, 0};
+	}
 }
 } // namespace
 
@@ -30,16 +38,23 @@ std::filesystem::path cache_root()
 {
 #if defined(_WIN32)
 	if (const char *local = std::getenv("LOCALAPPDATA"); local && *local)
-		return std::filesystem::path(local) / "arnis" / "overture";
+		return std::filesystem::path(local) / "arnis-overture-cache";
 #elif defined(__APPLE__)
 	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / "Library" / "Caches" / "arnis" / "overture";
+		return std::filesystem::path(home) / "Library" / "Caches" /
+			   "arnis-overture-cache";
 #endif
 	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-		return std::filesystem::path(xdg) / "arnis" / "overture";
+		return std::filesystem::path(xdg) / "arnis-overture-cache";
 	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / ".cache" / "arnis" / "overture";
+		return std::filesystem::path(home) / ".cache" / "arnis-overture-cache";
 	return std::filesystem::path("./arnis-overture-cache");
+}
+
+elevation::CacheClearStats clear_overture_cache()
+{
+	const auto root = cache_root();
+	return root.empty() ? elevation::CacheClearStats{} : elevation::clear_cache_dir(root);
 }
 
 bool valid_release(const std::string &release)
@@ -114,6 +129,10 @@ std::optional<std::string> last_good_release(const std::filesystem::path &root)
 	if (!bytes)
 		return std::nullopt;
 	std::string release(bytes->begin(), bytes->end());
+	const auto first = release.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return std::nullopt;
+	release.erase(0, first);
 	while (!release.empty() && std::isspace(static_cast<unsigned char>(release.back())))
 		release.pop_back();
 	return valid_release(release) ? std::optional<std::string>(release) : std::nullopt;

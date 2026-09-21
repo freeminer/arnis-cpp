@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include "../elevation/cache.h"
 
 namespace arnis::overture::cache
 {
@@ -12,6 +13,7 @@ namespace arnis::overture::cache
 // in the cache module makes release selection and range caching use the same
 // location instead of each caller inventing a path.
 std::filesystem::path cache_root();
+elevation::CacheClearStats clear_overture_cache();
 
 bool valid_release(const std::string &release);
 std::optional<std::filesystem::path> release_dir(

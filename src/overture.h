@@ -10,10 +10,14 @@
 #include "../../arnis_adapter.h"
 #include "args.h"
 #include "coordinate_system/geographic/llbbox.h"
+#include "elevation/cache.h"
 #include "overture/pmtiles.h"
 
 namespace arnis::overture
 {
+
+// Clears the immutable release/range cache used by Overture providers.
+elevation::CacheClearStats clear_overture_cache();
 
 inline constexpr uint64_t OVERTURE_ID_HIGH_BIT = 0x8000000000000000ULL;
 inline constexpr double OVERTURE_BUILDINGS_PER_KM2 = 1000.0;
