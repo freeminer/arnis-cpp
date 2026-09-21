@@ -10,6 +10,7 @@
 
 #include "celestial.h"
 #include "projection/web_mercator.h"
+#include "trees/tree_library.h"
 
 namespace arnis
 {
@@ -184,6 +185,9 @@ struct Args
 
 	// Downloader method (requests/curl/wget) (optional)
 	std::string downloader{std::string("requests")};
+	// OSM tile archive source. Rust tries this before Overpass unless disabled.
+	std::string osm_tiles_url{"https://tiles.arnisproject.com/v1"};
+	bool no_tile_archive{false};
 
 	// World scale to use, in blocks per meter (1.0 = real size)
 	double scale{1.0};
@@ -202,6 +206,8 @@ struct Args
 	GenerationMode mode{GenerationMode::GeoTerrain};
 	bool terrain{true};
 	bool legacy_terrain{false};
+	// Largest schematic tree tier permitted by the Rust tree-pack selector.
+	trees::TreeSize max_tree_size{trees::TreeSize::Giant};
 	bool terrain_enabled() const { return mode != GenerationMode::GeoOnly; }
 	bool skip_objects() const
 	{
@@ -267,6 +273,8 @@ struct Args
 	std::optional<bool> mapillary_facades{std::nullopt};
 	bool mapillary_probe{false};
 	std::optional<std::string> mapillary_token{std::nullopt};
+	// Probe output directory, matching Rust's --mapillary-debug-dir.
+	std::optional<std::string> mapillary_debug_dir{std::nullopt};
 	std::optional<std::string> mapillary_facades_dir{std::nullopt};
 	std::optional<std::string> mapillary_facade_debug_dir{std::nullopt};
 	std::string mapillary_facade_debug_walls;
@@ -333,6 +341,8 @@ struct Args
 			return false;
 		if ((mapillary_facades == std::optional<bool>(true) || mapillary_probe) &&
 				!mapillary_api_token().has_value())
+			return false;
+		if (mapillary_debug_dir && !mapillary_probe)
 			return false;
 		if (facade_px != 4 && facade_px != 8 && facade_px != 16 && facade_px != 32)
 			return false;

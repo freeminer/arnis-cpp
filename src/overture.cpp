@@ -16,6 +16,7 @@
 #include <array>
 #include <cmath>
 #include <cstring>
+#include <cstdlib>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -894,14 +895,33 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 	// Kept as a conservative fallback just as in Rust. An application with a
 	// newer release can use http_pmtiles_building_source() directly; this API
 	// remains useful for existing callers that only supplied a bounding box.
-	constexpr const char *fallback_archive =
-			"https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/"
-			"2026-08-19.0/buildings.pmtiles";
+	// Keep the library usable while release discovery is unavailable, but allow
+	// embedders and deployments to select the current immutable release without
+	// recompiling (Rust's release selector likewise avoids hard-coding transport
+	// policy into the geometry decoder).
+	const char *release_env = std::getenv("ARNIS_OVERTURE_RELEASE");
+	const std::string release = release_env && *release_env
+										? release_env
+										: cache::last_good_release(cache::cache_root())
+												  .value_or("2026-08-19.0");
+	if (release.empty() || release.size() > 64 ||
+			release.find_first_not_of(
+					"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789.-") !=
+					std::string::npos)
+		return {};
+	const std::string fallback_archive =
+			"https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/" +
+			release + "/buildings.pmtiles";
 	if (debug)
 		std::cerr << "Overture Maps: reading PMTiles ranges for "
 				  << overture_building_budget(bbox) << " building budget." << std::endl;
-	return fetch_overture_buildings_from(
-			http_pmtiles_building_source(fallback_archive), bbox, scale);
+	auto result = fetch_overture_buildings_from(
+			http_pmtiles_building_source(fallback_archive, 14,
+					cache::cache_root() / release / "tiles" / "buildings"),
+			bbox, scale);
+	if (!result.empty() && !release_env)
+		cache::set_last_good_release(cache::cache_root(), release);
+	return result;
 }
 
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,

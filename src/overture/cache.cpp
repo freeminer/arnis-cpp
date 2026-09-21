@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cstdlib>
 #include <fstream>
 
 namespace arnis::overture::cache
@@ -24,6 +25,22 @@ std::string sort_key(const std::string &release)
 	return release;
 }
 } // namespace
+
+std::filesystem::path cache_root()
+{
+#if defined(_WIN32)
+	if (const char *local = std::getenv("LOCALAPPDATA"); local && *local)
+		return std::filesystem::path(local) / "arnis" / "overture";
+#elif defined(__APPLE__)
+	if (const char *home = std::getenv("HOME"); home && *home)
+		return std::filesystem::path(home) / "Library" / "Caches" / "arnis" / "overture";
+#endif
+	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+		return std::filesystem::path(xdg) / "arnis" / "overture";
+	if (const char *home = std::getenv("HOME"); home && *home)
+		return std::filesystem::path(home) / ".cache" / "arnis" / "overture";
+	return std::filesystem::path("./arnis-overture-cache");
+}
 
 bool valid_release(const std::string &release)
 {

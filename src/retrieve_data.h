@@ -1,6 +1,7 @@
 #pragma once
 
 #include "coordinate_system/geographic/llbbox.h"
+#include "osm_tiles.h"
 #include "osm_parser.h"
 #include <cstdint>
 #include <filesystem>
@@ -9,8 +10,14 @@
 #include <string>
 #include <vector>
 
+namespace arnis
+{
+struct Args;
+}
 namespace arnis::retrieve_data
 {
+inline constexpr const char *OSM_USER_AGENT =
+		"Arnis/Cpp (+https://github.com/louis-e/arnis)";
 struct OverpassEndpoint
 {
 	std::string url;
@@ -31,8 +38,19 @@ std::string overpass_query(const geographic::LLBBox &bbox);
 std::vector<OverpassEndpoint> overpass_request_plan(
 		std::uint64_t seed = 0, bool probe_official_first = false);
 bool remark_means_truncated(const std::string &remark);
+// Coarse, coordinate-free bucket for tile/archive fallback diagnostics.
+const char *fallback_reason(const std::string &error);
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &,
 		const OverpassFetcher &, std::uint64_t seed = 0,
+		bool probe_official_first = false);
+// Rust's unified source-selection entry point: try the archive first, then
+// fall back to the caller-provided Overpass transport.
+std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &,
+		const OverpassFetcher &, bool use_tile_archive = true,
+		const std::string &tiles_url = osm_tiles::DEFAULT_OSM_TILES_URL,
+		std::uint64_t seed = 0, bool probe_official_first = false);
+std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &,
+		const OverpassFetcher &, const arnis::Args &, std::uint64_t seed = 0,
 		bool probe_official_first = false);
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body);
 std::optional<std::string> fetch_area_name(double lat, double lon);

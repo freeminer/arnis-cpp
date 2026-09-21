@@ -9,6 +9,14 @@
 #include <iostream>
 namespace arnis::ore_generation
 {
+namespace
+{
+int chunk_floor(int value)
+{
+	const long long wide = value;
+	return static_cast<int>(wide >= 0 ? wide / 16 : -((-wide + 15) / 16));
+}
+}
 const std::array<OreRule, 6> &rules()
 {
 	static const std::array<OreRule, 6> r{{{block_definitions::COAL_ORE, 3, 45, 8, 17, 8},
@@ -25,11 +33,12 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 	if (show_progress)
 		std::cout << "[6b/7] Sprinkling ore veins...\n";
 	const int min_y = world_editor::terrain_floor_y() + 1;
-	for (int cx = min_x >> 4; cx <= (max_x >> 4); ++cx)
-		for (int cz = min_z >> 4; cz <= (max_z >> 4); ++cz) {
+	for (int cx = chunk_floor(min_x); cx <= chunk_floor(max_x); ++cx)
+		for (int cz = chunk_floor(min_z); cz <= chunk_floor(max_z); ++cz) {
 			ChaCha8Rng rng((std::uint64_t(std::uint32_t(cx)) << 32) ^ std::uint32_t(cz) ^
 						   0xC0DE);
-			const int ground = e.get_ground_level((cx << 4) + 8, (cz << 4) + 8);
+			const int chunk_origin_x = cx * 16, chunk_origin_z = cz * 16;
+			const int ground = e.get_ground_level(chunk_origin_x + 8, chunk_origin_z + 8);
 			for (const auto &r : rules()) {
 				const int y_min = std::max(min_y, ground - MAX_ORE_DEPTH);
 				const int y_max = std::max(y_min, ground - r.depth_min);
@@ -44,8 +53,8 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 								 : 0;
 				const unsigned n = rng.uniform(max_veins + 1);
 				for (unsigned i = 0; i < n; ++i) {
-					int x = (cx << 4) + int(rng.uniform(16)),
-						z = (cz << 4) + int(rng.uniform(16)),
+					int x = chunk_origin_x + int(rng.uniform(16)),
+						z = chunk_origin_z + int(rng.uniform(16)),
 						y = y_min + int(rng.uniform(span));
 					const unsigned length =
 							r.vein_min + rng.uniform(r.vein_max - r.vein_min + 1);

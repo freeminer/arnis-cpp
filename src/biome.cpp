@@ -119,6 +119,29 @@ ChunkBiomeData build_chunk_biomes(int chunk_x, int chunk_z, const BiomeSampler &
 	return out;
 }
 
+std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
+		const ::arnis::Ground *ground, double center_latitude, int world_origin_x,
+		int world_origin_z)
+{
+	std::array<std::string, 16> names;
+	names.fill("minecraft:plains");
+	if (!ground)
+		return names;
+	if (!ground->is_earth()) {
+		names.fill(std::string(celestial_body_biome(ground->celestial_body())));
+		return names;
+	}
+	for (int zi = 0; zi < 4; ++zi)
+		for (int xi = 0; xi < 4; ++xi) {
+			const int world_x = chunk_x * 16 + xi * 4 + 2;
+			const int world_z = chunk_z * 16 + zi * 4 + 2;
+			const XZPoint local{world_x - world_origin_x, world_z - world_origin_z};
+			names[std::size_t(zi * 4 + xi)] = biome_for_class(ground->cover_class(local),
+					ground->climate(), center_latitude, ground->water_distance(local));
+		}
+	return names;
+}
+
 ChunkBiomeData build_chunk_biomes_for_ground(int chunk_x, int chunk_z,
 		const ::arnis::Ground *ground, double center_latitude, int world_origin_x,
 		int world_origin_z)
@@ -126,23 +149,23 @@ ChunkBiomeData build_chunk_biomes_for_ground(int chunk_x, int chunk_z,
 	if (!ground)
 		return build_chunk_biomes(
 				chunk_x, chunk_z, {}, Climate::Temperate, center_latitude);
-	// Rust uses one barren biome for non-terrestrial bodies; land-cover
-	// classification is Earth-only and must not leak into Moon/Mars chunks.
-	if (!ground->is_earth()) {
-		ChunkBiomeData out;
-		const std::string name =
-				std::string(celestial_body_biome(ground->celestial_body()));
-		out.palette.push_back(name);
-		out.horizontal_indices.fill(0);
-		out.bits_per_index = 0;
-		return out;
+	const auto names = chunk_biome_names(
+			chunk_x, chunk_z, ground, center_latitude, world_origin_x, world_origin_z);
+	ChunkBiomeData out;
+	for (std::size_t i = 0; i < names.size(); ++i) {
+		auto it = std::find(out.palette.begin(), out.palette.end(), names[i]);
+		if (it == out.palette.end()) {
+			out.horizontal_indices[i] = static_cast<std::uint8_t>(out.palette.size());
+			out.palette.push_back(names[i]);
+		} else {
+			out.horizontal_indices[i] =
+					static_cast<std::uint8_t>(std::distance(out.palette.begin(), it));
+		}
 	}
-	const BiomeSampler sample = [ground, world_origin_x, world_origin_z](
-										int world_x, int world_z) {
-		const XZPoint local{world_x - world_origin_x, world_z - world_origin_z};
-		return BiomeSample{ground->cover_class(local), ground->water_distance(local)};
-	};
-	return build_chunk_biomes(
-			chunk_x, chunk_z, sample, ground->climate(), center_latitude);
+	out.bits_per_index = biome_bits_per_index(out.palette.size());
+	if (out.bits_per_index)
+		out.packed_indices =
+				pack_chunk_biome_indices(out.horizontal_indices, out.bits_per_index);
+	return out;
 }
 }

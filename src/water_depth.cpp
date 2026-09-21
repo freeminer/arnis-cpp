@@ -16,6 +16,21 @@
 namespace arnis::water_depth
 {
 
+std::pair<int, int> grid_span_to_block_span(std::size_t grid_lo, std::size_t grid_hi,
+		std::size_t world_dim, std::size_t grid_dim)
+{
+	if (grid_dim <= 1 || world_dim <= 1)
+		return {0, static_cast<int>(world_dim ? world_dim - 1 : 0)};
+	grid_lo = std::min(grid_lo, grid_dim - 1);
+	grid_hi = std::min(grid_hi, grid_dim - 1);
+	if (grid_lo > grid_hi)
+		std::swap(grid_lo, grid_hi);
+	const double f = double(world_dim - 1) / double(grid_dim - 1);
+	const auto lo = static_cast<int>(std::floor((double(grid_lo) - .5) * f)) - 1;
+	const auto hi = static_cast<int>(std::ceil((double(grid_hi) + .5) * f)) + 1;
+	return {std::max(0, lo), std::min(static_cast<int>(world_dim - 1), hi)};
+}
+
 namespace
 {
 

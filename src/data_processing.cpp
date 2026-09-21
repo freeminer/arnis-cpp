@@ -850,7 +850,8 @@ bool generate_world(WorldEditor &editor,
 							? std::optional<trees::RegionSelector>{}
 							: trees::RegionSelector::load_for_location(centre_lat,
 									  centre_lon, std::filesystem::path("assets/trees"),
-									  args.scale, base_level, trees::SizeFilter{},
+									  args.scale, base_level,
+									  trees::SizeFilter::up_to(args.max_tree_size),
 									  editor.ground
 											  ? editor.ground->elevation_blocks_per_meter
 											  : 0.0)) {

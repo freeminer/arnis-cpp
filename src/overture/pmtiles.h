@@ -5,6 +5,9 @@
 #include <vector>
 namespace arnis::overture::pmtiles
 {
+// PMTiles type 0 means the archive carries a private payload rather than MVT.
+// Arnis OSM archives use this for AOT1 tiles.
+inline constexpr std::uint8_t TILE_TYPE_UNKNOWN = 0;
 struct Header
 {
 	std::uint64_t root_offset = 0, root_length = 0, leaf_offset = 0, tile_data_offset = 0;

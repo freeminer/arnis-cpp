@@ -8,6 +8,11 @@
 namespace arnis::overture::cache
 {
 
+// Shared per-user cache root, matching the Rust cache layout.  Keeping this
+// in the cache module makes release selection and range caching use the same
+// location instead of each caller inventing a path.
+std::filesystem::path cache_root();
+
 bool valid_release(const std::string &release);
 std::optional<std::filesystem::path> release_dir(
 		const std::filesystem::path &root, const std::string &release);

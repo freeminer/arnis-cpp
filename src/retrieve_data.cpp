@@ -1,4 +1,6 @@
 #include "retrieve_data.h"
+#include "args.h"
+#include "osm_tiles.h"
 #include <algorithm>
 #include <cctype>
 #include <curl/curl.h>
@@ -7,6 +9,7 @@
 #include <random>
 #include <sstream>
 #include <stdexcept>
+#include <utility>
 
 namespace arnis::retrieve_data
 {
@@ -90,6 +93,23 @@ bool remark_means_truncated(const std::string &remark)
 		   lower.find("out of memory") != std::string::npos;
 }
 
+const char *fallback_reason(const std::string &error)
+{
+	static constexpr std::pair<const char *, const char *> buckets[] = {
+			{"has no data for this area", "no_data_for_area"},
+			{"that area needs", "area_too_large"},
+			{"index unreachable", "index_unreachable"},
+			{"bad archive index", "bad_index"}, {"unusable name", "bad_index"},
+			{"archive is zoom", "zoom_mismatch"}, {"expected 206", "range_http"},
+			{"range request to", "network"}, {"could not be read", "network"},
+			{"not an Arnis tile payload", "tile_decode"},
+			{"truncated tile", "tile_decode"}, {"implausible", "tile_decode"}};
+	for (const auto &[needle, bucket] : buckets)
+		if (error.find(needle) != std::string::npos)
+			return bucket;
+	return "other";
+}
+
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, std::uint64_t seed, bool probe)
 {
@@ -116,6 +136,30 @@ std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &bbox,
 	}
 	(void)answered;
 	return std::nullopt;
+}
+
+std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
+		const OverpassFetcher &fetcher, bool use_tile_archive,
+		const std::string &tiles_url, std::uint64_t seed, bool probe)
+{
+	if (use_tile_archive && !tiles_url.empty()) {
+		std::string archive_error;
+		if (auto document =
+						osm_tiles::fetch_data_from_tiles(bbox, tiles_url, &archive_error))
+			return FetchResult{std::move(*document), tiles_url};
+		// Archive misses intentionally fall through to the configured Overpass
+		// transport; keep the detailed reason available for debugger callers.
+		(void)archive_error;
+	}
+	return fetch_overpass(bbox, fetcher, seed, probe);
+}
+
+std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
+		const OverpassFetcher &fetcher, const arnis::Args &args, std::uint64_t seed,
+		bool probe)
+{
+	return fetch_osm_data(
+			bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url, seed, probe);
 }
 
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body)
@@ -149,7 +193,10 @@ std::optional<std::string> fetch_area_name(double lat, double lon)
 	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, area_name_write);
 	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
-	curl_easy_setopt(curl, CURLOPT_USERAGENT, "Arnis/Cpp");
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, OSM_USER_AGENT);
+	// Match reqwest/curl --compressed in the Rust downloader.  libcurl then
+	// advertises compression and transparently decodes gzip/zstd responses.
+	curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	long status = 0;

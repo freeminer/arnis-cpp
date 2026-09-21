@@ -2,12 +2,19 @@
 
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 #include "../../arnis_adapter.h"
 #include "floodfill_cache.h"
 
 namespace arnis::water_depth
 {
+
+// Convert an inclusive grid-cell interval into a conservative inclusive block
+// interval. This mirrors Rust's mapping helper and is used when carving only
+// the water sub-region instead of scanning the complete world rectangle.
+std::pair<int, int> grid_span_to_block_span(std::size_t grid_lo, std::size_t grid_hi,
+		std::size_t world_dim, std::size_t grid_dim);
 
 class BigWaterField
 {

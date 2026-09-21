@@ -5,27 +5,37 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <optional>
 
 namespace arnis::land_cover
 {
 namespace
 {
-std::uint8_t nearest_land(const std::vector<std::vector<std::uint8_t>> &grid,
-		std::size_t width, std::size_t height, int x, int z, int radius)
+// Keep these thresholds in lockstep with shoreline.rs.  The C++ land-cover
+// reader currently receives the sampled grid rather than the raw ESA raster,
+// but it must retain the same scale and area-safety decisions.
+constexpr double MIN_CELLS_PER_PIXEL = 2.0;
+constexpr double MAX_AREA_CHANGE_FRACTION = 0.10;
+
+std::optional<std::uint8_t> nearest_land(
+		const std::vector<std::vector<std::uint8_t>> &grid, std::size_t width,
+		std::size_t height, int x, int z, int radius)
 {
 	for (int r = 1; r <= radius; ++r)
-		for (int dz = -r; dz <= r; ++dz)
-			for (int dx = -r; dx <= r; ++dx) {
-				if (std::abs(dx) != r && std::abs(dz) != r)
-					continue;
+		for (int dz = -r; dz <= r; ++dz) {
+			// Rust scans complete top/bottom edges left-to-right, and only the
+			// two corners for side edges. Preserve that deterministic tie-break.
+			const int step = std::abs(dz) == r ? 1 : 2 * r;
+			for (int dx = -r; dx <= r; dx += step) {
 				const int nx = x + dx, nz = z + dz;
-				if (nx >= 0 && nz >= 0 && nx < int(width) && nz < int(height)) {
-					const auto value = grid[nz][nx];
-					if (value && value != LC_WATER)
-						return value;
-				}
+				if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height))
+					continue;
+				const auto value = grid[nz][nx];
+				if (value && value != LC_WATER)
+					return value;
 			}
-	return LC_GRASSLAND;
+		}
+	return std::nullopt;
 }
 }
 
@@ -36,7 +46,7 @@ bool reconstruct_water_shoreline(std::vector<std::vector<std::uint8_t>> &grid,
 	height = std::min(height, grid.size());
 	const double cells_per_pixel = 10.0 * cells_per_meter;
 	if (width < 3 || height < 3 || !std::isfinite(cells_per_pixel) ||
-			cells_per_pixel < 2.0)
+			cells_per_pixel < MIN_CELLS_PER_PIXEL)
 		return false;
 	const auto source = grid;
 	std::vector<std::pair<int, int>> to_water, to_land;
@@ -76,7 +86,8 @@ bool reconstruct_water_shoreline(std::vector<std::vector<std::uint8_t>> &grid,
 	for (std::size_t z = 0; z < height; ++z)
 		for (std::size_t x = 0; x < width; ++x)
 			after += mask[z][x] == LC_WATER;
-	const double allowed = 0.10 * before + 4.0 * cells_per_pixel * cells_per_pixel;
+	const double allowed =
+			MAX_AREA_CHANGE_FRACTION * before + 4.0 * cells_per_pixel * cells_per_pixel;
 	if (std::abs(double(after) - double(before)) > allowed)
 		return false;
 
@@ -93,7 +104,8 @@ bool reconstruct_water_shoreline(std::vector<std::vector<std::uint8_t>> &grid,
 	for (const auto [x, z] : to_water)
 		grid[z][x] = LC_WATER;
 	for (const auto [x, z] : to_land)
-		grid[z][x] = nearest_land(source, width, height, x, z, radius);
+		if (const auto replacement = nearest_land(source, width, height, x, z, radius))
+			grid[z][x] = *replacement;
 	return !to_water.empty() || !to_land.empty();
 }
 }
