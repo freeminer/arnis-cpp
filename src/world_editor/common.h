@@ -1524,9 +1524,34 @@ struct WorldToModify
 		return n;
 	}
 	void clear() { regions.clear(); }
-	static std::pair<int, int> world_to_region(int x, int z) { return {x >> 9, z >> 9}; }
-	static std::pair<int, int> world_to_chunk(int x, int z) { return {x >> 4, z >> 4}; }
-	static std::pair<int, int> local_block(int x, int z) { return {x & 15, z & 15}; }
+	// fm: Rust's div_euclid(512) semantics are required for negative world coordinates.
+	static int world_to_region_axis(int value)
+	{
+		const long long wide = value;
+		return static_cast<int>(wide >= 0 ? wide / 512 : -((-wide + 511) / 512));
+	}
+	static std::pair<int, int> world_to_region(int x, int z)
+	{
+		return {world_to_region_axis(x), world_to_region_axis(z)};
+	}
+	static int world_to_chunk_axis(int value)
+	{
+		const long long wide = value;
+		return static_cast<int>(wide >= 0 ? wide / 16 : -((-wide + 15) / 16));
+	}
+	static int local_block_axis(int value)
+	{
+		const int remainder = value % 16;
+		return remainder < 0 ? remainder + 16 : remainder;
+	}
+	static std::pair<int, int> world_to_chunk(int x, int z)
+	{
+		return {world_to_chunk_axis(x), world_to_chunk_axis(z)};
+	}
+	static std::pair<int, int> local_block(int x, int z)
+	{
+		return {local_block_axis(x), local_block_axis(z)};
+	}
 	void for_each_non_air(const std::function<void(int, int, int, Block)> &fn) const
 	{
 		for (const auto &rk : regions) {

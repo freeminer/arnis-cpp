@@ -5,6 +5,7 @@
 #include "three_dmr/prescan.h"
 #include "wikidata/prescan.h"
 #include "../../../arnis_adapter.h"
+#include "../tile.h"
 #include <array>
 #include <cmath>
 #include <limits>
@@ -139,8 +140,10 @@ int lowest_ground_in_bbox(const world_editor::WorldEditor &editor, int min_x, in
 std::vector<std::pair<int, int>> region_keys_around(int cx, int cz, int radius)
 {
 	radius = std::max(0, radius);
-	const int rx0 = ((cx - radius) >> 9) - 1, rx1 = ((cx + radius) >> 9) + 1;
-	const int rz0 = ((cz - radius) >> 9) - 1, rz1 = ((cz + radius) >> 9) + 1;
+	const int rx0 = tiles::region_floor(cx - radius) - 1,
+			  rx1 = tiles::region_floor(cx + radius) + 1;
+	const int rz0 = tiles::region_floor(cz - radius) - 1,
+			  rz1 = tiles::region_floor(cz + radius) + 1;
 	std::vector<std::pair<int, int>> out;
 	out.reserve(std::size_t(rx1 - rx0 + 1) * std::size_t(rz1 - rz0 + 1));
 	for (int rx = rx0; rx <= rx1; ++rx)

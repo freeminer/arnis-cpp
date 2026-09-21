@@ -1,6 +1,7 @@
 #include "plane.h"
 #include "../../../../arnis_adapter.h"
 #include "../../deterministic_rng.h"
+#include "../../tile.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -253,8 +254,10 @@ std::vector<std::pair<int, int>> deferred_regions(
 	std::vector<std::pair<int, int>> o;
 	int r = std::ceil(plane_length_m * scale);
 	for (auto &a : p)
-		for (int z = (a.anchor_z - r) >> 9; z <= (a.anchor_z + r) >> 9; ++z)
-			for (int x = (a.anchor_x - r) >> 9; x <= (a.anchor_x + r) >> 9; ++x)
+		for (int z = tiles::region_floor(a.anchor_z - r);
+				z <= tiles::region_floor(a.anchor_z + r); ++z)
+			for (int x = tiles::region_floor(a.anchor_x - r);
+					x <= tiles::region_floor(a.anchor_x + r); ++x)
 				o.push_back({x, z});
 	std::sort(o.begin(), o.end());
 	o.erase(std::unique(o.begin(), o.end()), o.end());
