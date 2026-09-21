@@ -792,9 +792,26 @@ bool generate_world(WorldEditor &editor,
 	Args effective_args = args_;
 	effective_args.apply_mode_defaults();
 	effective_args.apply_body_defaults();
+	// Rust no longer exposes a roof-generation toggle: roof handling is always
+	// part of building generation. Keep the legacy C++ field for source
+	// compatibility, but normalize it at the pipeline boundary.
+	effective_args.roof = true;
 	const Args &args = effective_args;
 	if (!args.valid())
 		return false;
+	// Rust uses the same 3D toggle for bundled schematic props and model
+	// placements.  Direct callers of generate_world do not pass through the
+	// GenerationOptions adapter, so set the editor policy here as well.
+	editor.set_place_schematics(args.use_3d);
+	// Keep direct generation calls consistent with Rust's editor setup. Decals
+	// are Java-only; the editor still receives the requested map-item policy,
+	// while the format-specific exporter decides whether to emit it.
+	const bool java_format = !args.bedrock && !args.luanti;
+	// Voxy/Lod output also requires baked light data in the Rust pipeline,
+	// even when the user did not explicitly request Java lighting.
+	editor.set_bake_lighting(args.bake_lighting || args.voxy_lod);
+	editor.set_start_with_map(args.map_item);
+	editor.set_map_decals(java_format);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
 	building_facades::reset(args.building_facades,

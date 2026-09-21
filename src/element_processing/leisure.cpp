@@ -153,8 +153,14 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 						// Oak leaves
 						editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
 					} else if (random_choice >= 105 && random_choice < 120) {
-						// Tree
-						Tree::create(editor, {x, 1, z});
+						// Match Rust's land-cover guard: a park meadow may only
+						// receive a tree where the source cover supports woody growth,
+						// with the one-in-1000 specimen exception retained.
+						if (random_choice == 105 || editor.land_cover_backs_trees(x, z))
+							Tree::create(editor, {x, 1, z}, &building_footprints,
+									&bridge_surface);
+						else
+							editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					}
 				}
 

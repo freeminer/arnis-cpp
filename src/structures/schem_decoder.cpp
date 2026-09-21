@@ -593,8 +593,16 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 	}
 	if (!doc.width || !doc.height || !doc.length)
 		throw std::runtime_error("schem dimensions missing");
-	const std::size_t cells =
-			static_cast<std::size_t>(doc.width) * doc.height * doc.length;
+	// Rust rejects volumes beyond the signed 32-bit index range before
+	// allocating or iterating BlockData.  Besides matching that contract, the
+	// checked multiplication prevents hostile dimensions from wrapping size_t.
+	constexpr std::uint64_t max_cells = std::numeric_limits<std::int32_t>::max();
+	const auto volume = static_cast<std::uint64_t>(doc.width) *
+						static_cast<std::uint64_t>(doc.height) *
+						static_cast<std::uint64_t>(doc.length);
+	if (volume > max_cells)
+		throw std::runtime_error("schem volume exceeds the supported range");
+	const std::size_t cells = static_cast<std::size_t>(volume);
 	if (data.size() != cells)
 		throw std::runtime_error("schem BlockData size mismatch");
 	for (std::size_t i = 0; i < cells; i++) {
