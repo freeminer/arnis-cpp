@@ -1590,36 +1590,6 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		max_z = std::max(max_z, z);
 	}
 	const int center_x = (min_x + max_x) / 2, center_z = (min_z + max_z) / 2;
-	// Rust's footprint_radial_fractions measures distance from the footprint
-	// centroid to the actual polygon boundary.  Keep the ellipse as a fallback
-	// for malformed/degenerate ways, but use the polygon ray for rotated and
-	// concave footprints so domes/cones meet their eaves uniformly.
-	auto polygon_radial_fraction = [&](int x, int z) {
-		if (element.nodes.size() < 3)
-			return 0.0;
-		const double dx = double(x - center_x), dz = double(z - center_z);
-		const double distance = std::hypot(dx, dz);
-		if (distance <= 1e-9)
-			return 0.0;
-		const double rx = dx / distance, rz = dz / distance;
-		double boundary = std::numeric_limits<double>::infinity();
-		for (std::size_t i = 0; i < element.nodes.size(); ++i) {
-			const auto &a = element.nodes[i];
-			const auto &b = element.nodes[(i + 1) % element.nodes.size()];
-			const double ex = double(b.x - a.x), ez = double(b.z - a.z);
-			const double qx = double(a.x - center_x), qz = double(a.z - center_z);
-			const double cross = rx * ez - rz * ex;
-			if (std::abs(cross) < 1e-9)
-				continue;
-			const double t = (qx * ez - qz * ex) / cross;
-			const double u = (qx * rz - qz * rx) / cross;
-			if (t >= 0.0 && u >= 0.0 && u <= 1.0)
-				boundary = std::min(boundary, t);
-		}
-		return std::isfinite(boundary) && boundary > 1e-9
-				? std::clamp(distance / boundary, 0.0, 1.0)
-				: 0.0;
-	};
 	// Rust rooftop details use an empty blacklist: generated roof equipment is
 	// allowed to replace the generated roof overlay beneath it.
 	auto force_rooftop_block = [&](Block block, int x, int y, int z) {
@@ -3538,6 +3508,35 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 
 	int32_t center_x = (min_x + max_x) >> 1;
 	int32_t center_z = (min_z + max_z) >> 1;
+	// Rust's footprint_radial_fractions measures distance from the footprint
+	// centroid to the actual polygon boundary.  Use a polygon ray for rotated
+	// and concave footprints so domes/cones meet their eaves uniformly.
+	auto polygon_radial_fraction = [&](int x, int z) {
+		if (element.nodes.size() < 3)
+			return 0.0;
+		const double dx = double(x - center_x), dz = double(z - center_z);
+		const double distance = std::hypot(dx, dz);
+		if (distance <= 1e-9)
+			return 0.0;
+		const double rx = dx / distance, rz = dz / distance;
+		double boundary = std::numeric_limits<double>::infinity();
+		for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+			const auto &a = element.nodes[i];
+			const auto &b = element.nodes[(i + 1) % element.nodes.size()];
+			const double ex = double(b.x - a.x), ez = double(b.z - a.z);
+			const double qx = double(a.x - center_x), qz = double(a.z - center_z);
+			const double cross = rx * ez - rz * ex;
+			if (std::abs(cross) < 1e-9)
+				continue;
+			const double t = (qx * ez - qz * ex) / cross;
+			const double u = (qx * rz - qz * rx) / cross;
+			if (t >= 0.0 && u >= 0.0 && u <= 1.0)
+				boundary = std::min(boundary, t);
+		}
+		return std::isfinite(boundary) && boundary > 1e-9
+					   ? std::clamp(distance / boundary, 0.0, 1.0)
+					   : 0.0;
+	};
 
 	int32_t base_height = start_y_offset + building_height + 1;
 	const auto roof_height_tag = parse_meter_tag(element.tags, "roof:height");
@@ -4399,8 +4398,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					edge == edge_distances.end()
 							? 0.0
 							: double(edge->second) / double(max_edge_distance);
-			const double normalized = std::max(
-					polygon_fraction, polygon_radial_fraction(x, z));
+			const double normalized =
+					std::max(polygon_fraction, polygon_radial_fraction(x, z));
 			surface[{x, z}] = base_height + int((1.0 - normalized) * peak_height);
 		}
 		fill_shell(surface, roof_block, base_height);
@@ -4484,8 +4483,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					edge == edge_distances.end()
 							? 0.0
 							: double(edge->second) / double(max_edge_distance);
-			double normalized_distance = std::max(
-					polygon_fraction, polygon_radial_fraction(x, z));
+			double normalized_distance =
+					std::max(polygon_fraction, polygon_radial_fraction(x, z));
 
 			double height_factor = std::sqrt(
 					std::max(0.0, 1.0 - normalized_distance * normalized_distance));
