@@ -82,8 +82,12 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 		std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> queue;
 		const State start{from.first, from.second, departure};
 		visits.emplace(start, Visit{0, start});
-		queue.emplace(distance(from.first, from.second), 0, start);
-		while (!queue.empty() && visits.size() < 200000) {
+		// A mildly weighted heuristic keeps long, almost straight OSM ways from
+		// flooding the open-set with detours. The cost remains the same for the
+		// selected route; only search ordering is changed.
+		constexpr double heuristic_weight = 1.15;
+		queue.emplace(heuristic_weight * distance(from.first, from.second), 0, start);
+		while (!queue.empty() && visits.size() < 300000) {
 			const auto [estimate, cost, state] = queue.top();
 			queue.pop();
 			if (cost != visits.at(state).cost)
@@ -126,8 +130,9 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 				if (!inserted && next_cost >= it->second.cost)
 					continue;
 				it->second = {next_cost, state};
-				queue.emplace(next_cost + distance(next.first, next.second), next_cost,
-						next_state);
+				queue.emplace(
+						next_cost + heuristic_weight * distance(next.first, next.second),
+						next_cost, next_state);
 			}
 		}
 	}
