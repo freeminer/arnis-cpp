@@ -1548,7 +1548,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
 		min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
 	} else if (auto it = element.tags.find("building:min_level");
-			   it != element.tags.end()) {
+			it != element.tags.end()) {
 		if (auto level = parse_i32_tag(element.tags, "building:min_level"))
 			min_level_offset = scaled_blocks(*level * 4, scale_factor);
 	} else if (auto it = element.tags.find("layer"); it != element.tags.end()) {
@@ -2187,8 +2187,8 @@ std::optional<int> generate_inset_tiers(WorldEditor &editor,
 		placed = true;
 		for (const auto &[x, z] : tier_cells) {
 			const std::pair<int, int> offsets[] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-			const bool wall = std::any_of(
-					std::begin(offsets), std::end(offsets), [&](const auto &offset) {
+			const bool wall = std::any_of(std::begin(offsets), std::end(offsets),
+					[&, x = x, z = z](const auto &offset) {
 						const auto it =
 								distances.find({x + offset.first, z + offset.second});
 						return it == distances.end() || it->second < tier.inset;
@@ -2507,7 +2507,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					wall_block = get_fallback_building_block(rng);
 				}
 			} else if (auto it_material = element.tags.find("building:material");
-					   it_material != element.tags.end()) {
+					it_material != element.tags.end()) {
 				auto material_rng = element_rng_salted(clean_visual_seed, 0x6d617465);
 				wall_block =
 						get_wall_block_for_material_cpp(it_material->second, material_rng)
@@ -2628,7 +2628,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			OAK_TRAPDOOR, SPRUCE_TRAPDOOR, DARK_OAK_TRAPDOOR, BIRCH_TRAPDOOR};
 	const Block awning_block =
 			awning_options[element_rng_salted(clean_visual_seed, 0x0A3B11B60000000BULL)
-								   .uniform(4)];
+							.uniform(4)];
 	const auto roof_shape = element.tags.get("roof:shape");
 	const bool part_has_explicit_top =
 			element.tags.contains("building:part") &&
@@ -2698,7 +2698,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	Block accent_blocks_arr[] = {
 			//POLISHED_ANDESITE,
-			SMOOTH_STONE, STONE_BRICKS,
+			SMOOTH_STONE,
+			STONE_BRICKS,
 			//MUD_BRICKS,
 			//ANDESITE,
 			//CHISELED_STONE_BRICKS

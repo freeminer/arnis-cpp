@@ -18,7 +18,7 @@ void scatter_playgrounds(
 				static_cast<int>(t) + 1, static_cast<int>(cells.size()));
 		const auto [x, z] = cells[h % cells.size()];
 		if (editor.is_lc_water(x, z) ||
-				std::any_of(placed.begin(), placed.end(), [x, z](const auto &p) {
+				std::any_of(placed.begin(), placed.end(), [x = x, z = z](const auto &p) {
 					const auto dx = static_cast<long long>(p.first) - x;
 					const auto dz = static_cast<long long>(p.second) - z;
 					return dx > -16 && dx < 16 && dz > -16 && dz < 16;

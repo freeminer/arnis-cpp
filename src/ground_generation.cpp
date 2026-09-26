@@ -301,7 +301,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		}
 	} else if (cover == land_cover::LC_CROPLAND) {
 		const bool farmland = editor.check_for_block_absolute(
-				x, ground_y, z, std::optional<std::vector<Block>>({FARMLAND}));
+				x, ground_y, z, std::optional<std::vector<Block>>(std::vector<Block>{FARMLAND}));
 		const bool enclosed = editor.get_ground_level(x + 1, z) >= ground_y &&
 							  editor.get_ground_level(x - 1, z) >= ground_y &&
 							  editor.get_ground_level(x, z + 1) >= ground_y &&
@@ -325,7 +325,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const auto choice = rng.uniform(100);
 		if (choice < 30)
 			editor.set_block_absolute(WATER, x, ground_y, z,
-					std::optional<std::vector<Block>>({MUD, GRASS_BLOCK}), std::nullopt);
+					std::optional<std::vector<Block>>(std::vector<Block>{MUD, GRASS_BLOCK}), std::nullopt);
 		else if (choice < 65)
 			editor.set_block_absolute(
 					GRASS, x, ground_y + 1, z, std::nullopt, std::nullopt);
@@ -337,7 +337,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		}
 	} else if (cover == land_cover::LC_BARE) {
 		const bool coarse = editor.check_for_block_absolute(
-				x, ground_y, z, std::optional<std::vector<Block>>({COARSE_DIRT}));
+				x, ground_y, z, std::optional<std::vector<Block>>(std::vector<Block>{COARSE_DIRT}));
 		const auto choice = rng.uniform(100);
 		if (coarse && choice < 6)
 			editor.set_block_absolute(
