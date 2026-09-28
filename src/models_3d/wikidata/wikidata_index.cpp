@@ -23,7 +23,9 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 				continue;
 			nlohmann::json j;
 			f >> j;
-			for (auto &[id, v] : j.value("models", nlohmann::json::object()).items()) {
+			// Keep the JSON owner alive while items() iterates over it.
+			const auto models = j.value("models", nlohmann::json::object());
+			for (const auto &[id, v] : models.items()) {
 				WikidataEntry e;
 				e.label = v.value("label", "");
 				e.url = v.value("url", "");
