@@ -3,6 +3,7 @@
 #include "floodfill_cache.h"
 #include "args.h"
 #include <unordered_map>
+#include <unordered_set>
 #include <algorithm>
 #include <filesystem>
 #include <string>
@@ -30,9 +31,20 @@ enum class WorldFormat
 	BedrockMcWorld,
 	LuantiWorld
 };
+using OutlineSuppression =
+		std::unordered_set<std::pair<std::string, std::uint64_t>, PairHashStringUint>;
+using PartGroups = std::unordered_map<std::uint64_t, std::uint64_t>;
+
+struct PreparedBuildingData
+{
+	OutlineSuppression outline_suppression;
+	PartGroups part_groups;
+};
+
 struct GenerationOptions
 {
 	WorldFormat format = WorldFormat::JavaAnvil;
+	std::optional<PreparedBuildingData> prepared_buildings;
 	std::filesystem::path output_path;
 	std::string level_name;
 	bool map_preview = false, map_item = true, bake_lighting = false, use_3d = true;
@@ -243,7 +255,8 @@ void prepare_elements_for_generation(std::vector<ProcessedElement> &elements);
 bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &elements,
 		const Args &args, FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
-		bool elements_prepared = false);
+		bool elements_prepared = false,
+		const PreparedBuildingData *prepared_buildings = nullptr);
 // Options-aware entry point matching Rust's generate_world_with_options for
 // library callers that already own the backend editor instance.
 bool generate_world_with_options(WorldEditor &editor,

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../arnis_adapter.h"
+#include "../floodfill_cache.h"
 
 namespace arnis
 {
@@ -11,7 +12,8 @@ void generate_memorial(WorldEditor &editor, const ProcessedNode &node);
 void generate_monument(WorldEditor &editor, const ProcessedNode &node);
 void generate_wayside_cross(WorldEditor &editor, const ProcessedNode &node);
 void generate_cross(WorldEditor &editor, int x, int z, int height);
-void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Args &args);
+void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Args &args,
+		const FloodFillCache &flood_fill_cache);
 
 }
 }

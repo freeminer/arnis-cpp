@@ -1,6 +1,5 @@
 #include "historic.h"
 #include "../deterministic_rng.h"
-#include "../floodfill.h"
 #include "signage.h"
 #include <algorithm>
 #include <cmath>
@@ -69,8 +68,8 @@ void generate_memorial(WorldEditor &editor, const ProcessedNode &node)
 		editor.set_block(STONE_BRICK_SLAB, x, 2, z, std::nullopt, std::nullopt);
 		if (const auto key = signage::plaque_key(node.tags)) {
 			const int y = editor.get_ground_level(x, z) + 1;
-			for (const std::int8_t facing : {std::int8_t(2), std::int8_t(3),
-					 std::int8_t(4), std::int8_t(5)})
+			for (const std::int8_t facing :
+					{std::int8_t(2), std::int8_t(3), std::int8_t(4), std::int8_t(5)})
 				editor.place_decal(x, y, z, facing, *key);
 		}
 	} else if (memorial_type == "statue" || memorial_type == "sculpture" ||
@@ -206,22 +205,16 @@ void generate_cross(WorldEditor &editor, int x, int z, int height)
 	}
 }
 
-void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Args &args)
+void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Args &args,
+		const FloodFillCache &flood_fill_cache)
 {
 	if (element.nodes.size() < 3) {
 		return;
 	}
 
-	// Convert nodes to polygon coordinates
-	std::vector<std::pair<int, int>> polygon_coords;
-	polygon_coords.reserve(element.nodes.size());
-	for (const auto &n : element.nodes) {
-		polygon_coords.emplace_back(n.x, n.z);
-	}
-
 	// Get the footprint via flood fill
 	std::vector<std::pair<int, int>> footprint =
-			flood_fill_area(polygon_coords, args.timeout_ref());
+			flood_fill_cache.get_or_compute(element, args.timeout);
 
 	if (footprint.empty()) {
 		return;

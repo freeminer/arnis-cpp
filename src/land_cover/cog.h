@@ -8,6 +8,7 @@
 
 namespace arnis::land_cover
 {
+struct EsaRasterTile;
 // Minimal Cloud-Optimized GeoTIFF reader for the single-band ESA WorldCover
 // products. Network/cache ownership remains with the embedding application.
 struct CogInfo
@@ -41,4 +42,10 @@ std::vector<std::uint8_t> lzw_decompress_tiff(
 bool read_esa_cog_into_grid(const std::string &url, int tile_south_lat, int tile_west_lng,
 		double min_lat, double min_lng, double max_lat, double max_lng,
 		std::vector<std::vector<std::uint8_t>> &grid, const CogRangeFetcher &fetch_range);
+
+// Preserve every source pixel in the bbox, including pixels not touched by
+// the elevation grid. Shoreline boundary tracing needs the original topology.
+bool read_esa_cog_into_raster(const std::string &url, int tile_south_lat,
+		int tile_west_lng, double min_lat, double min_lng, double max_lat, double max_lng,
+		EsaRasterTile &raster, const CogRangeFetcher &fetch_range);
 }

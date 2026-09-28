@@ -309,6 +309,39 @@ bool tag_is(const tags_t &tags, const std::string &key, const std::string &value
 	return it != tags.end() && it->second == value;
 }
 
+// osm_parser.rs::part_covers_ground: accept a leading decimal, not an
+// exponent or a unit suffix, when deciding whether a part covers its outline.
+bool part_covers_ground(const tags_t &tags)
+{
+	for (const char *key : {"min_height", "building:min_level"}) {
+		const auto it = tags.find(key);
+		if (it == tags.end())
+			continue;
+		const auto &s = it->second;
+		const auto start = s.find_first_not_of(" \t\r\n\f\v");
+		if (start == std::string::npos)
+			continue;
+		std::size_t end = start;
+		bool dot = false;
+		for (; end < s.size(); ++end) {
+			const char c = s[end];
+			if ((c >= '0' && c <= '9') || ((c == '+' || c == '-') && end == start))
+				continue;
+			if (c == '.' && !dot) {
+				dot = true;
+				continue;
+			}
+			break;
+		}
+		try {
+			if (std::stod(s.substr(start, end - start)) > 0.0)
+				return false;
+		} catch (const std::exception &) {
+		}
+	}
+	return true;
+}
+
 double ring_area(const std::vector<ProcessedNode> &nodes)
 {
 	if (nodes.size() < 3)
@@ -763,7 +796,8 @@ void generate_doors(WorldEditor &editor, const ProcessedNode &rel);
 
 namespace historic
 {
-void generate_pyramid(WorldEditor &editor, const ProcessedWay &way, const Args &args);
+void generate_pyramid(WorldEditor &editor, const ProcessedWay &way, const Args &args,
+		const FloodFillCache &flood_fill_cache);
 void generate_historic(WorldEditor &editor, const ProcessedNode &node);
 }
 
@@ -787,7 +821,8 @@ void generate_advertising(WorldEditor &editor, const ProcessedNode &node);
 bool generate_world(WorldEditor &editor,
 		const std::vector<ProcessedElement> &input_elements, const Args &args_,
 		FloodFillCache &flood_fill_cache,
-		BuildingFootprintBitmap const &building_footprints, bool elements_prepared)
+		BuildingFootprintBitmap const &building_footprints, bool elements_prepared,
+		const PreparedBuildingData *prepared_buildings)
 {
 	Args effective_args = args_;
 	effective_args.apply_mode_defaults();
@@ -814,11 +849,21 @@ bool generate_world(WorldEditor &editor,
 	editor.set_map_decals(java_format);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
-	building_facades::reset(args.building_facades,
+	std::optional<std::filesystem::path> facade_directory =
 			args.building_facades_dir
 					? std::optional<std::filesystem::path>(*args.building_facades_dir)
-					: std::nullopt,
-			args.facade_px, args.scale);
+					: std::nullopt;
+	if (!facade_directory && args.mapillary_facades_dir)
+		facade_directory = std::filesystem::path(*args.mapillary_facades_dir);
+	if (!facade_directory && args.building_facades) {
+		const std::filesystem::path packaged_facades("assets/building-facades");
+		if (std::filesystem::exists(packaged_facades))
+			facade_directory = packaged_facades;
+	}
+	const bool facade_set_enabled =
+			args.building_facades || args.mapillary_facades_dir.has_value();
+	building_facades::reset(
+			facade_set_enabled, facade_directory, args.facade_px, args.scale);
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
 			args.disable_height_limit && !args.bedrock ? -2032 : -64,
@@ -1109,17 +1154,28 @@ bool generate_world(WorldEditor &editor,
 	std::unordered_map<uint64_t, uint64_t> building_part_groups;
 	std::unordered_map<uint64_t, std::vector<uint64_t>> building_group_members;
 	for (const auto &element : elements) {
-		if (element.is_relation()) {
+		if (!prepared_buildings && element.is_relation()) {
 			const auto &rel = element.as_relation();
 			auto it_type = rel.tags.find("type");
 			bool is_building_type =
 					(it_type != rel.tags.end() && it_type->second == "building");
 
 			if (is_building_type) {
+				auto hint = osm_parser::building_style_hint(rel.tags);
+				if (hint == osm_parser::StyleHint::None)
+					for (const auto &member : rel.members) {
+						hint = osm_parser::building_style_hint(member.way.tags);
+						if (hint != osm_parser::StyleHint::None)
+							break;
+					}
+				const auto seed = osm_parser::seed_with_hint(
+						(std::uint64_t{1} << 63) | rel.id, hint);
+				double part_area = 0.0;
 				for (const auto &member : rel.members)
 					if (member.role == ProcessedMemberRole::Part) {
-						building_part_groups.emplace(member.way.id, rel.id);
-						building_group_members[rel.id].push_back(member.way.id);
+						building_part_groups[member.way.id] = seed;
+						if (part_covers_ground(member.way.tags))
+							part_area += ring_area(member.way.nodes);
 					}
 				bool has_parts = false;
 				for (const auto &member : rel.members) {
@@ -1132,6 +1188,9 @@ bool generate_world(WorldEditor &editor,
 				if (has_parts) {
 					for (const auto &member : rel.members) {
 						if (member.role == ProcessedMemberRole::Outer) {
+							const double outline_area = ring_area(member.way.nodes);
+							if (outline_area > 0.0 && part_area / outline_area < 0.5)
+								continue;
 							suppressed_building_outlines.insert(member.way.id);
 						}
 					}
@@ -1140,10 +1199,112 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 
+	// Host extracts provide projected ways. Apply Rust's spatial coverage and
+	// smallest-containing-outline grouping rules to those complete rings.
+	// ARNIS-PORT: osm_parser.rs raw geographic/relation-ring preparation remains
+	// necessary for exact coverage near projection rounding boundaries.
+	if (!prepared_buildings) {
+		std::unordered_set<std::uint64_t> relation_ways;
+		for (const auto &element : elements)
+			if (element.is_relation())
+				for (const auto &member : element.as_relation().members)
+					relation_ways.insert(member.way.id);
+		std::vector<const ProcessedWay *> outlines, parts;
+		for (const auto &element : elements) {
+			if (!element.is_way())
+				continue;
+			const auto &way = element.as_way();
+			if (relation_ways.count(way.id) || way.nodes.size() < 4 ||
+					way.nodes.front().id != way.nodes.back().id)
+				continue;
+			auto part = way.tags.find("building:part");
+			std::string value = part == way.tags.end() ? "no" : part->second;
+			std::transform(
+					value.begin(), value.end(), value.begin(), [](unsigned char c) {
+						return c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : char(c);
+					});
+			if (value != "no")
+				parts.push_back(&way);
+			else if (way.tags.contains("building"))
+				outlines.push_back(&way);
+		}
+		std::vector<double> coverage(outlines.size(), 0.0);
+		for (const auto *part : parts) {
+			const double area = ring_area(part->nodes);
+			if (area <= 0.0)
+				continue;
+			double x = 0.0, z = 0.0;
+			for (const auto &node : part->nodes) {
+				x += node.x;
+				z += node.z;
+			}
+			x /= part->nodes.size();
+			z /= part->nodes.size();
+			const bool ground = part_covers_ground(part->tags);
+			const ProcessedWay *best = nullptr;
+			double best_area = 0.0;
+			for (std::size_t k = 0; k < outlines.size(); ++k) {
+				const auto *outline = outlines[k];
+				const double oa = ring_area(outline->nodes);
+				if (oa <= 0.0)
+					continue;
+				bool inside = false;
+				for (std::size_t i = 0, j = outline->nodes.size() - 1;
+						i < outline->nodes.size(); j = i++) {
+					const auto &a = outline->nodes[i], &b = outline->nodes[j];
+					if ((a.z > z) != (b.z > z) &&
+							x < (double(b.x) - a.x) * (z - a.z) / (double(b.z) - a.z) +
+											a.x)
+						inside = !inside;
+				}
+				if (!inside)
+					continue;
+				if (ground)
+					coverage[k] += area;
+				if (!best ||
+						std::pair{oa, outline->id} < std::pair{best_area, best->id}) {
+					best = outline;
+					best_area = oa;
+				}
+			}
+			if (best) {
+				auto hint = osm_parser::building_style_hint(best->tags);
+				if (hint == osm_parser::StyleHint::None)
+					hint = osm_parser::building_style_hint(part->tags);
+				building_part_groups[part->id] =
+						osm_parser::seed_with_hint(best->id, hint);
+			}
+		}
+		for (std::size_t k = 0; k < outlines.size(); ++k)
+			if (const double area = ring_area(outlines[k]->nodes);
+					area > 0.0 && coverage[k] / area >= 0.5)
+				suppressed_building_outlines.insert(outlines[k]->id);
+	}
+	if (prepared_buildings)
+		building_part_groups = prepared_buildings->part_groups;
+	// Rust groups siblings by the seed without packed facade hints.
+	building_group_members.clear();
+	for (const auto &[way_id, seed] : building_part_groups)
+		building_group_members[osm_parser::seed_without_hint(seed)].push_back(way_id);
+	for (auto it = building_group_members.begin(); it != building_group_members.end();) {
+		if (it->second.size() < 2)
+			it = building_group_members.erase(it);
+		else {
+			std::sort(it->second.begin(), it->second.end());
+			++it;
+		}
+	}
+
 	for (std::size_t element_index = 0; element_index < render_elements.size();
 			++element_index) {
 		auto const &element = render_elements[element_index];
 		auto args = args_;
+		if (prepared_buildings && prepared_buildings->outline_suppression.count(
+										  {std::string(element.kind()), element.id()})) {
+			release_finished_fills(
+					flood_fill_cache, last_fill_use, element, element_index);
+			continue;
+		}
 		if (model_pipeline &&
 				std::find(model_pipeline->suppressed().begin(),
 						model_pipeline->suppressed().end(),
@@ -1209,8 +1370,9 @@ bool generate_world(WorldEditor &editor,
 								tunnel_internal_endpoints, tunnel_portals,
 								highway_tunnel_cells);
 				if (!tunnel_rendered)
-					highways::generate_highways(editor, element, args, elements, {},
-							road_mask, bridge_structures, bridge_surface, tunnel_portals);
+					highways::generate_highways(editor, element, args, elements,
+							args.timeout, road_mask, bridge_structures, bridge_surface,
+							tunnel_portals);
 				if (editor.signage_enabled())
 					signage::generate_highway_way_signage(
 							editor, way, building_footprints);
@@ -1235,8 +1397,9 @@ bool generate_world(WorldEditor &editor,
 				barriers::generate_barriers(editor, element, bridge_surface);
 			} else if (way.tags.contains("waterway")) {
 				auto it_val = way.tags.find("waterway");
-				if (it_val != way.tags.end() && it_val->second == "dock") {
-					// docks count as water areas
+				if (it_val != way.tags.end() &&
+						(it_val->second == "dock" || it_val->second == "riverbank")) {
+					// Rust treats dock and legacy riverbank polygons as water areas.
 					std::optional<int> surface_level;
 					if (still_surfaces.has("way", way.id))
 						surface_level = still_surfaces.get("way", way.id);
@@ -1264,7 +1427,7 @@ bool generate_world(WorldEditor &editor,
 				highways::generate_siding(editor, way, bridge_surface);
 			} else if (way.tags.get("tomb") ==
 					   std::optional<std::string>(std::string("pyramid"))) {
-				historic::generate_pyramid(editor, way, args);
+				historic::generate_pyramid(editor, way, args, flood_fill_cache);
 			} else if (way.tags.contains("man_made")) {
 				man_made::generate_man_made(editor, element, args);
 			} else if (way.tags.contains("power")) {
@@ -1285,6 +1448,11 @@ bool generate_world(WorldEditor &editor,
 						flood_fill_cache, last_fill_use, element, element_index);
 				continue;
 			}
+			// Rust resolves node signage before the feature dispatcher.  Keep
+			// this phase ordering so signage sees the same world state.
+			if (editor.signage_enabled())
+				signage::generate_node_signage(
+						editor, node, building_footprints, road_mask);
 			if (node.tags.get("aeroway") == std::optional<std::string>("helipad"))
 				structures::maybe_place_helicopter(editor, node.x, node.z);
 
@@ -1304,7 +1472,7 @@ bool generate_world(WorldEditor &editor,
 			} else if (node.tags.contains("barrier")) {
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
 			} else if (node.tags.contains("highway")) {
-				highways::generate_highways(editor, element, args, elements, {},
+				highways::generate_highways(editor, element, args, elements, args.timeout,
 						road_mask, bridge_structures, bridge_surface, tunnel_portals);
 			} else if (node.tags.get("aeroway") ==
 					   std::optional<std::string>(std::string("helipad"))) {
@@ -1321,10 +1489,6 @@ bool generate_world(WorldEditor &editor,
 				emergency::generate_emergency(editor, node);
 			} else if (node.tags.contains("advertising")) {
 				advertising::generate_advertising(editor, node, road_mask);
-			}
-			if (editor.signage_enabled()) {
-				signage::generate_node_signage(
-						editor, node, building_footprints, road_mask);
 			}
 		} else if (element.is_relation()) {
 			auto const &rel = element.as_relation();
@@ -1394,7 +1558,6 @@ bool generate_world(WorldEditor &editor,
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
 	ground_generation::generate_ground_layer(editor, args, xzbbox, building_footprints,
 			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint, &bridge_surface);
-	structures::plane::place_plane_placements(editor, plane_candidates);
 	if (args.fillground)
 		ore_generation::generate_ores(
 				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
@@ -1409,6 +1572,9 @@ bool generate_world(WorldEditor &editor,
 		models_3d::place_custom_models(
 				*model_pipeline, custom_model_provider, editor, args.scale);
 	}
+	// Rust places plane models after the other 3D providers and immediately
+	// before landmarks; preserve that ordering for overlap and suppression.
+	structures::plane::place_plane_placements(editor, plane_candidates);
 	landmarks::place_all(editor, landmark_plan, args.scale);
 	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 
@@ -1449,7 +1615,8 @@ bool generate_world_with_options(WorldEditor &editor,
 	args.map_preview = options.map_preview;
 	args.use_3d = options.use_3d;
 	return generate_world(editor, elements, args, flood_fill_cache, building_footprints,
-			elements_prepared);
+			elements_prepared,
+			options.prepared_buildings ? &*options.prepared_buildings : nullptr);
 }
 
 }

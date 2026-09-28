@@ -99,7 +99,12 @@ std::optional<StlFit> derive_stl_fit(const std::array<float, 3> &minimum,
 		y = float(*placement.height_m * blocks_per_meter) / world_extent[1];
 	if (!xz && !y)
 		return {};
-	const float sx = xz.value_or(*y), sy = y.value_or(*xz), sz = xz.value_or(*y);
+	// value_or evaluates its fallback even when the optional is populated.
+	// At least one scale is present, but height-only and footprint-only models
+	// must never dereference the other, empty optional.
+	const float sx = xz ? *xz : *y;
+	const float sy = y ? *y : *xz;
+	const float sz = sx;
 	if (!std::isfinite(sx) || !std::isfinite(sy) || !std::isfinite(sz) || sx <= 0 ||
 			sy <= 0 || sz <= 0)
 		return {};

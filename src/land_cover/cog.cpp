@@ -1,9 +1,11 @@
 #include "cog.h"
+#include "land_cover.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <new>
 #include <unordered_map>
 #include <zlib.h>
 
@@ -258,6 +260,82 @@ std::vector<std::uint8_t> decompress_cog_tile(const std::vector<std::uint8_t> &d
 		return {};
 	out.resize(stream.total_out);
 	return out;
+}
+
+bool read_esa_cog_into_raster(const std::string &url, int south, int west, double min_lat,
+		double min_lng, double max_lat, double max_lng, EsaRasterTile &raster,
+		const CogRangeFetcher &fetch)
+{
+	if (!fetch || !std::isfinite(min_lat) || !std::isfinite(max_lat) ||
+			!std::isfinite(min_lng) || !std::isfinite(max_lng) || min_lat > max_lat ||
+			min_lng > max_lng)
+		return false;
+	CogInfo info;
+	if (!read_cog_info(url, fetch(url, 0, 65536), fetch, info))
+		return false;
+	const double ppd = double(info.image_width) / 3.0;
+	if (!(ppd > 0.0) || std::abs(double(info.image_height) / 3.0 - ppd) > 1e-9)
+		return false;
+	// Match Rust's global pixel convention before clipping to this COG.
+	const double tile_x = std::round((west + 180.0) * ppd);
+	const double tile_y = std::round((90.0 - (south + 3.0)) * ppd);
+	const auto x0 = std::uint64_t(std::clamp(
+			std::floor((min_lng + 180.0) * ppd) - tile_x, 0.0, double(info.image_width)));
+	const auto x1 =
+			std::uint64_t(std::clamp(std::floor((max_lng + 180.0) * ppd) + 1.0 - tile_x,
+					0.0, double(info.image_width)));
+	const auto y0 = std::uint64_t(std::clamp(
+			std::floor((90.0 - max_lat) * ppd) - tile_y, 0.0, double(info.image_height)));
+	const auto y1 =
+			std::uint64_t(std::clamp(std::floor((90.0 - min_lat) * ppd) + 1.0 - tile_y,
+					0.0, double(info.image_height)));
+	if (x0 >= x1 || y0 >= y1)
+		return false;
+	constexpr std::uint64_t MAX_RASTER_PIXELS = std::uint64_t{1} << 31;
+	if (x1 - x0 > MAX_RASTER_PIXELS / (y1 - y0) ||
+			info.tile_width > std::numeric_limits<std::size_t>::max() / info.tile_height)
+		return false;
+	EsaRasterTile out;
+	out.south_lat = south;
+	out.west_lng = west;
+	out.width = x1 - x0;
+	out.height = y1 - y0;
+	out.min_lng = (tile_x + x0) / ppd - 180.0;
+	out.max_lng = (tile_x + x1) / ppd - 180.0;
+	out.max_lat = 90.0 - (tile_y + y0) / ppd;
+	out.min_lat = 90.0 - (tile_y + y1) / ppd;
+	try {
+		out.pixels.resize(out.width * out.height);
+	} catch (const std::bad_alloc &) {
+		return false;
+	}
+	const auto across = (info.image_width + info.tile_width - 1) / info.tile_width;
+	bool wrote = false;
+	for (auto ty = y0 / info.tile_height; ty <= (y1 - 1) / info.tile_height; ++ty)
+		for (auto tx = x0 / info.tile_width; tx <= (x1 - 1) / info.tile_width; ++tx) {
+			const auto index = ty * across + tx;
+			if (index >= info.tile_offsets.size() ||
+					index >= info.tile_byte_counts.size() || !info.tile_offsets[index] ||
+					!info.tile_byte_counts[index])
+				continue;
+			const auto pixels = decompress_cog_tile(
+					fetch(url, info.tile_offsets[index], info.tile_byte_counts[index]),
+					std::size_t(info.tile_width * info.tile_height), info.compression);
+			const auto tile_px = tx * info.tile_width, tile_py = ty * info.tile_height;
+			for (auto y = std::max(y0, tile_py);
+					y < std::min(y1, tile_py + info.tile_height); ++y)
+				for (auto x = std::max(x0, tile_px);
+						x < std::min(x1, tile_px + info.tile_width); ++x) {
+					const auto src = (y - tile_py) * info.tile_width + x - tile_px;
+					if (src < pixels.size()) {
+						out.pixels[(y - y0) * out.width + x - x0] = pixels[src];
+						wrote |= pixels[src] != 0;
+					}
+				}
+		}
+	if (wrote)
+		raster = std::move(out);
+	return wrote;
 }
 
 bool read_esa_cog_into_grid(const std::string &url, int south, int west, double min_lat,

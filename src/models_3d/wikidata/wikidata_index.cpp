@@ -16,6 +16,7 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 			std::ifstream f(std::filesystem::path(__FILE__)
 									.parent_path()
 									.parent_path()
+									.parent_path()
 									.parent_path() /
 							"assets" / file);
 			if (!f)

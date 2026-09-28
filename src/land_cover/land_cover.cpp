@@ -119,33 +119,22 @@ std::vector<std::tuple<int, int, std::string>> esa_tiles_for_bbox(
 LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t width,
 		std::size_t height, bool smooth_boundaries)
 {
-	LandCoverData out;
 	if (!bbox.valid() || width == 0 || height == 0)
-		return out;
-	out.width = width;
-	out.height = height;
-	out.source_bounds = bbox;
-	out.cells_per_meter = cells_per_meter(bbox, width);
-	out.grid.assign(height, std::vector<uint8_t>(width));
+		return {};
 	const auto fetch = [](const std::string &url, std::uint64_t offset,
 							   std::uint64_t length) {
 		const auto bytes = http_get_range(url, offset, length);
 		return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
 	};
-	bool any = false;
+	std::vector<EsaRasterTile> tiles;
 	for (const auto &[lat, lng, url] :
-			esa_tiles_for_bbox(bbox.min_lat, bbox.min_lng, bbox.max_lat, bbox.max_lng))
-		any |= read_esa_cog_into_grid(url, lat, lng, bbox.min_lat, bbox.min_lng,
-				bbox.max_lat, bbox.max_lng, out.grid, fetch);
-	if (!any)
-		return {};
-	reconstruct_water_shoreline(out.grid, width, height, out.cells_per_meter);
-	fill_land_cover_gaps(out.grid, width, height);
-	if (smooth_boundaries)
-		smooth_land_cover_boundaries(out.grid, width, height, out.cells_per_meter);
-	out.water_distance = compute_water_distance(out.grid, width, height);
-	out.refresh_water_blend_grid();
-	return out;
+			esa_tiles_for_bbox(bbox.min_lat, bbox.min_lng, bbox.max_lat, bbox.max_lng)) {
+		EsaRasterTile tile;
+		if (read_esa_cog_into_raster(url, lat, lng, bbox.min_lat, bbox.min_lng,
+					bbox.max_lat, bbox.max_lng, tile, fetch))
+			tiles.push_back(std::move(tile));
+	}
+	return assemble_land_cover_data(bbox, width, height, tiles, smooth_boundaries);
 }
 bool fetch_esa_tile(const std::string &url, const std::filesystem::path &file)
 {
