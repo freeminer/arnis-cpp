@@ -176,7 +176,7 @@ void fill_land_cover_gaps(
 			for (std::size_t x = 0; x < width; ++x) {
 				if (snapshot[z][x] != 0)
 					continue;
-				for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+				for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 							 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 					const int nx = int(x) + dx, nz = int(z) + dz;
 					if (nx >= 0 && nz >= 0 && nx < int(width) && nz < int(height) &&
@@ -214,7 +214,7 @@ void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 			if (center == 0)
 				continue;
 			bool boundary = false;
-			for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 				const int nx = int(x) + dx, nz = int(z) + dz;
 				if (nx >= 0 && nz >= 0 && nx < int(width) && nz < int(height) &&
@@ -297,7 +297,8 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(heights.begin(), heights.begin() + data.height,
+			std::any_of(
+					heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
@@ -372,7 +373,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 	// precedence over neighbouring built-up terrain.
 	for (const auto cell : bridge_cells) {
 		const int x = cell % data.width, z = cell / data.width;
-		for (const auto [dx, dz] : neighbours) {
+		for (const auto &[dx, dz] : neighbours) {
 			const int nx = x + dx, nz = z + dz;
 			if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
 				continue;
@@ -391,7 +392,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 	for (const auto cell : bridge_cells)
 		if (!assigned.contains(cell)) {
 			const int x = cell % data.width, z = cell / data.width;
-			for (const auto [dx, dz] : neighbours) {
+			for (const auto &[dx, dz] : neighbours) {
 				const int nx = x + dx, nz = z + dz;
 				if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
 					continue;
@@ -410,7 +411,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 			auto [cell, cls, level] = current.front();
 			current.pop_front();
 			const int x = cell % data.width, z = cell / data.width;
-			for (const auto [dx, dz] : neighbours) {
+			for (const auto &[dx, dz] : neighbours) {
 				const int nx = x + dx, nz = z + dz;
 				if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
 					continue;
@@ -454,7 +455,8 @@ void apply_osm_water_override(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(heights.begin(), heights.begin() + data.height,
+			std::any_of(
+					heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	const double sx = double(data.width - 1) / double(world_width - 1);

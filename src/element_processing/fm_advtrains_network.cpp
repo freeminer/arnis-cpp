@@ -363,7 +363,7 @@ void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor 
 		for (auto &[key, s] : segments) {
 			if (s.line.empty())
 				continue;
-			for (const auto [a, i] :
+			for (const auto &[a, i] :
 					{std::pair{s.a, std::size_t{0}}, std::pair{s.b, s.line.size() - 1}}) {
 				const int height = std::max(anchor_heights[a], s.heights[i]);
 				changed |= anchor_heights[a] != height || s.heights[i] != height;

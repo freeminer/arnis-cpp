@@ -164,7 +164,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 			if (geometry.empty())
 				continue;
 			long long sum_x = 0, sum_z = 0;
-			for (const auto [x, z] : geometry) {
+			for (const auto &[x, z] : geometry) {
 				sum_x += x;
 				sum_z += z;
 			}

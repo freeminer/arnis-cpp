@@ -72,7 +72,7 @@ void stamp_line(std::vector<std::uint64_t> &mask, const std::vector<ProcessedNod
 	const int rx = std::max(0, int(std::ceil(half_width * map.sx)));
 	const int rz = std::max(0, int(std::ceil(half_width * map.sz)));
 	for (std::size_t i = 1; i < nodes.size(); ++i)
-		for (const auto [x, y, z] : bresenham::bresenham_line(map.x(nodes[i - 1].x), 0,
+		for (const auto &[x, y, z] : bresenham::bresenham_line(map.x(nodes[i - 1].x), 0,
 					 map.z(nodes[i - 1].z), map.x(nodes[i].x), 0, map.z(nodes[i].z))) {
 			(void)y;
 			for (int dz = -rz; dz <= rz; ++dz)
@@ -128,7 +128,7 @@ std::vector<std::uint64_t> dilate(const std::vector<std::uint64_t> &seeds,
 		if (depth >= distance)
 			continue;
 		const int x = index % width, z = index / width;
-		for (const auto [dx, dz] : neighbours) {
+		for (const auto &[dx, dz] : neighbours) {
 			const int nx = x + dx, nz = z + dz;
 			if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height))
 				continue;

@@ -63,10 +63,10 @@ std::uint8_t fascia_cols(const std::string &name)
 
 bool named_street(const std::string &highway)
 {
-	static const std::set<std::string> kinds{"motorway", "trunk", "primary",
-			"secondary", "tertiary", "motorway_link", "trunk_link", "primary_link",
-			"secondary_link", "tertiary_link", "unclassified", "residential",
-			"living_street", "pedestrian", "service", "road"};
+	static const std::set<std::string> kinds{"motorway", "trunk", "primary", "secondary",
+			"tertiary", "motorway_link", "trunk_link", "primary_link", "secondary_link",
+			"tertiary_link", "unclassified", "residential", "living_street", "pedestrian",
+			"service", "road"};
 	return kinds.contains(highway);
 }
 
@@ -136,11 +136,16 @@ struct NativeSign
 std::int8_t streets_facedir(std::int8_t facing)
 {
 	switch (facing) {
-	case 2: return 0;
-	case 3: return 2;
-	case 4: return 1;
-	case 5: return 3;
-	default: return 0;
+	case 2:
+		return 0;
+	case 3:
+		return 2;
+	case 4:
+		return 1;
+	case 5:
+		return 3;
+	default:
+		return 0;
 	}
 }
 
@@ -151,8 +156,8 @@ std::optional<NativeSign> native_street_sign(
 	Block block = AIR;
 	std::string text;
 	const bool eu = region == decals::SignRegion::Europe ||
-			region == decals::SignRegion::Germanic ||
-			region == decals::SignRegion::UkIreland;
+					region == decals::SignRegion::Germanic ||
+					region == decals::SignRegion::UkIreland;
 	const bool us = region == decals::SignRegion::NorthAmerica;
 	if (STREETS_AVAILABLE && (eu || us) &&
 			std::holds_alternative<decals::TrafficKey>(key)) {
@@ -179,8 +184,7 @@ std::optional<NativeSign> native_street_sign(
 		if (block.id() != CONTENT_AIR)
 			return NativeSign{block, {}, true};
 	}
-	if (STREETS_AVAILABLE && eu &&
-			std::holds_alternative<decals::SpeedLimitKey>(key)) {
+	if (STREETS_AVAILABLE && eu && std::holds_alternative<decals::SpeedLimitKey>(key)) {
 		const auto &speed = std::get<decals::SpeedLimitKey>(key);
 		if (!speed.mph) {
 			constexpr std::array<std::uint16_t, 6> values{{10, 30, 50, 70, 100, 120}};
@@ -244,11 +248,16 @@ std::int8_t facing_for_dir(double dx, double dz)
 std::int8_t opposite(std::int8_t f)
 {
 	switch (f) {
-		case 2: return 3;
-		case 3: return 2;
-		case 4: return 5;
-		case 5: return 4;
-		default: return f;
+	case 2:
+		return 3;
+	case 3:
+		return 2;
+	case 4:
+		return 5;
+	case 5:
+		return 4;
+	default:
+		return f;
 	}
 }
 
@@ -257,16 +266,21 @@ std::pair<int, int> right_dir(std::int8_t facing)
 	// facing: 2=N, 3=S, 4=W, 5=E
 	// right perpendicular direction
 	switch (facing) {
-		case 2: return {1, 0};   // N -> E
-		case 3: return {-1, 0};  // S -> W  
-		case 4: return {0, -1};  // W -> S
-		case 5: return {0, 1};   // E -> N
-		default: return {0, 1};
+	case 2:
+		return {1, 0}; // N -> E
+	case 3:
+		return {-1, 0}; // S -> W
+	case 4:
+		return {0, -1}; // W -> S
+	case 5:
+		return {0, 1}; // E -> N
+	default:
+		return {0, 1};
 	}
 }
 
-std::optional<std::pair<int, int>> get_nearest_road_block(int x, int z, int radius,
-		const RoadMaskBitmap &road_mask)
+std::optional<std::pair<int, int>> get_nearest_road_block(
+		int x, int z, int radius, const RoadMaskBitmap &road_mask)
 {
 	// Search in expanding squares from the given position
 	for (int r = 1; r <= radius; ++r) {
@@ -286,8 +300,8 @@ std::optional<std::pair<int, int>> get_nearest_road_block(int x, int z, int radi
 }
 
 void place_roadside_sign(world_editor::WorldEditor &editor, const char *kind,
-		const std::vector<std::pair<int, int>> &cells, std::size_t idx,
-		int half_width, const decals::DecalKey &key, bool reverse,
+		const std::vector<std::pair<int, int>> &cells, std::size_t idx, int half_width,
+		const decals::DecalKey &key, bool reverse,
 		const BuildingFootprintBitmap &footprints)
 {
 	(void)kind;
@@ -373,8 +387,8 @@ IntersectionIndex build_intersection_index(
 			if (counts[node.id] < 2)
 				continue;
 			if (auto direction = way_direction_at(street.way->nodes, i))
-				by_node[node.id].push_back({street.way->id, street.name, *direction,
-						street.half_width});
+				by_node[node.id].push_back(
+						{street.way->id, street.name, *direction, street.half_width});
 		}
 	}
 
@@ -533,8 +547,9 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 				if (decals::pictograms::business_kind(way.tags)) {
 					const auto name = clean_name(way.tags.get("name"));
 					if (!name.empty() && decals::font::supports(name)) {
-						keys.insert(decals::DecalKey::text(
-								{decals::TextStyleKind::Fascia}, name, fascia_cols(name)));
+						keys.insert(
+								decals::DecalKey::text({decals::TextStyleKind::Fascia},
+										name, fascia_cols(name)));
 					}
 				}
 				const auto number = way.tags.get("addr:housenumber");
@@ -559,9 +574,9 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 			const auto &tags = node.tags;
 			if (level == SignageLevel::Full &&
 					(tags.contains("shop") || tags.contains("amenity") ||
-						tags.contains("office") || tags.contains("tourism") ||
-						tags.contains("leisure") || tags.contains("healthcare") ||
-						tags.contains("craft")) &&
+							tags.contains("office") || tags.contains("tourism") ||
+							tags.contains("leisure") || tags.contains("healthcare") ||
+							tags.contains("craft")) &&
 					decals::pictograms::business_kind(tags)) {
 				const auto name = clean_name(tags.get("name"));
 				if (!name.empty() && decals::font::supports(name))
@@ -589,7 +604,8 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 							{decals::TextStyleKind::StopName}, name, 1));
 			}
 			const auto railway = tags.get("railway");
-			const bool subway = (railway == "station" || railway == "halt") &&
+			const bool subway =
+					(railway == "station" || railway == "halt") &&
 					(tags.get("station") == "subway" || tags.get("subway") == "yes");
 			if ((railway == "station" || railway == "halt") && !subway) {
 				keys.insert(decals::PictogramKey{"train"});
@@ -601,17 +617,16 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 				keys.insert(decals::PictogramKey{"tram"});
 				const auto name = clean_name(tags.get("name"));
 				if (!name.empty() && decals::font::supports(name))
-					keys.insert(decals::DecalKey::text(
-							{decals::TextStyleKind::StopName}, name,
-							name.size() <= 10 ? 1 : 2));
-			}
-			else if (railway == "subway_entrance")
+					keys.insert(decals::DecalKey::text({decals::TextStyleKind::StopName},
+							name, name.size() <= 10 ? 1 : 2));
+			} else if (railway == "subway_entrance")
 				keys.insert(decals::PictogramKey{decals::metro_logo(region)});
 			else if (subway)
 				keys.insert(decals::PictogramKey{decals::metro_logo(region)});
 			if (tags.get("historic") == "memorial" && tags.get("memorial") == "plaque") {
 				const auto text = clean_name(!tags.get("inscription").empty()
-						? tags.get("inscription") : tags.get("name"));
+													 ? tags.get("inscription")
+													 : tags.get("name"));
 				if (!text.empty() && decals::font::supports(text))
 					keys.insert(decals::DecalKey::text(
 							{decals::TextStyleKind::Plaque}, text, 1));
@@ -661,18 +676,17 @@ bool place_post(world_editor::WorldEditor &editor, int x, int z,
 		if (!editor.cell_open_at(x, ground + dy, z) ||
 				editor.cell_has_frame(x, ground + dy, z))
 			return false;
-	const auto region = editor.signage_context
-			? editor.signage_context->region : decals::SignRegion::Europe;
+	const auto region = editor.signage_context ? editor.signage_context->region
+											   : decals::SignRegion::Europe;
 	if (!all_faces && block_definitions::STREETS_RRXING_AVAILABLE &&
 			std::holds_alternative<decals::TrafficKey>(key) &&
 			std::get<decals::TrafficKey>(key).sign ==
 					decals::TrafficSign::LevelCrossing) {
 		const auto param2 = streets_facedir(selected_facing);
-		for (const auto [dy, source] :
-				std::array<std::pair<int, Block>, 3>{{
-						{1, block_definitions::STREETS_RRXING_BOTTOM},
-						{2, block_definitions::STREETS_RRXING_MIDDLE},
-						{3, block_definitions::STREETS_RRXING_TOP}}}) {
+		for (const auto &[dy, source] : std::array<std::pair<int, Block>, 3>{
+					 {{1, block_definitions::STREETS_RRXING_BOTTOM},
+							 {2, block_definitions::STREETS_RRXING_MIDDLE},
+							 {3, block_definitions::STREETS_RRXING_TOP}}}) {
 			auto block = source;
 			block.setParam2(static_cast<std::uint8_t>(param2));
 			editor.set_block_absolute(block, x, ground + dy, z);
@@ -689,9 +703,9 @@ bool place_post(world_editor::WorldEditor &editor, int x, int z,
 	if (!all_faces)
 		if (const auto native = native_street_sign(key, region);
 				native && editor.place_sign_node(native->block, x, head, z,
-						native->facedir ? streets_facedir(selected_facing)
-										: selected_facing,
-						native->text))
+								  native->facedir ? streets_facedir(selected_facing)
+												  : selected_facing,
+								  native->text))
 			return true;
 	editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE, x, head, z,
 			std::nullopt, std::nullopt);
@@ -754,7 +768,8 @@ void place_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &wa
 }
 
 // Building and POI signage implementation
-namespace {
+namespace
+{
 
 std::optional<std::string> get_name(const tags_t &tags)
 {
@@ -766,8 +781,8 @@ std::optional<std::string> get_name(const tags_t &tags)
 	return std::nullopt;
 }
 
-std::optional<NameSign> make_name_sign(const tags_t &tags, decals::TextStyle style,
-		std::uint8_t cols)
+std::optional<NameSign> make_name_sign(
+		const tags_t &tags, decals::TextStyle style, std::uint8_t cols)
 {
 	auto raw = get_name(tags);
 	if (!raw)
@@ -782,14 +797,14 @@ std::optional<NameSign> make_name_sign(const tags_t &tags, decals::TextStyle sty
 	return result;
 }
 
-bool place_name_sign(WorldEditor &editor, int x, int y, int z,
-		std::int8_t facing, const NameSign &name, bool require_hosts = true)
+bool place_name_sign(WorldEditor &editor, int x, int y, int z, std::int8_t facing,
+		const NameSign &name, bool require_hosts = true)
 {
 	if (name.key) {
 		const auto [cols, rows] = name.key->dims();
 		(void)rows;
-		const auto [left_x, left_z] = WorldEditor::panel_left_anchor(
-				x, z, facing, static_cast<int>(cols));
+		const auto [left_x, left_z] =
+				WorldEditor::panel_left_anchor(x, z, facing, static_cast<int>(cols));
 		return editor.place_decal_panel(
 				left_x, y, left_z, facing, *name.key, false, require_hosts);
 	}
@@ -797,11 +812,20 @@ bool place_name_sign(WorldEditor &editor, int x, int y, int z,
 	// name the backing block.  Offset to the exterior cell like Rust's
 	// place_wall_sign so the sign does not collide with its host wall.
 	switch (facing) {
-	case 2: --z; break;
-	case 3: ++z; break;
-	case 4: --x; break;
-	case 5: ++x; break;
-	default: break;
+	case 2:
+		--z;
+		break;
+	case 3:
+		++z;
+		break;
+	case 4:
+		--x;
+		break;
+	case 5:
+		++x;
+		break;
+	default:
+		break;
 	}
 	return editor.place_text_sign(x, y, z, facing, name.text, true);
 }
@@ -844,8 +868,7 @@ std::optional<decals::DecalKey> house_number(const tags_t &tags, SignageLevel le
 	auto num = get_house_number(tags);
 	if (!num || num->empty() || num->size() > 8 || !decals::font::supports(*num))
 		return std::nullopt;
-	return decals::DecalKey::text(
-			{decals::TextStyleKind::HouseNumber}, *num, 1);
+	return decals::DecalKey::text({decals::TextStyleKind::HouseNumber}, *num, 1);
 }
 
 void generate_building_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,
@@ -855,23 +878,24 @@ void generate_building_signage(world_editor::WorldEditor &editor, const Processe
 			way.tags.contains("building:part") || !editor.owns(anchor->x, anchor->z))
 		return;
 	const auto level = editor.signage_context->level;
-	const auto facing = WorldEditor::facing_for_normal(
-			anchor->normal.first, anchor->normal.second);
+	const auto facing =
+			WorldEditor::facing_for_normal(anchor->normal.first, anchor->normal.second);
 	if (const auto name = poi_name(way.tags, level)) {
 		if (!name->key || editor.signage_context->has(*name->key))
 			for (int dy = 0; dy < 2; ++dy)
-				if (place_name_sign(editor, anchor->x, anchor->fascia_y + dy,
-						anchor->z, facing, *name))
+				if (place_name_sign(editor, anchor->x, anchor->fascia_y + dy, anchor->z,
+							facing, *name))
 					break;
 	}
 	if (const auto number = house_number(way.tags, level);
 			number && editor.signage_context->has(*number)) {
-		const auto [rx, rz] = right_dir(facing);
-		const auto first = anchor->door
-				? std::pair{anchor->door->first + rx, anchor->door->second + rz}
-				: std::pair{anchor->x - rx * 2, anchor->z - rz * 2};
-		for (const auto [x, z] : {first,
-				 std::pair{first.first - rx * 2, first.second - rz * 2}})
+		const auto &[rx, rz] = right_dir(facing);
+		const auto first =
+				anchor->door
+						? std::pair{anchor->door->first + rx, anchor->door->second + rz}
+						: std::pair{anchor->x - rx * 2, anchor->z - rz * 2};
+		for (const auto &[x, z] :
+				{first, std::pair{first.first - rx * 2, first.second - rz * 2}})
 			if (editor.place_decal_panel(
 						x, anchor->number_y, z, facing, *number, false, true))
 				break;
@@ -883,7 +907,7 @@ std::optional<std::tuple<int, int, std::int8_t>> nearest_wall_from_inside(
 		const BuildingFootprintBitmap &footprints, const RoadMaskBitmap &road_mask)
 {
 	std::optional<std::pair<int, std::tuple<int, int, std::int8_t>>> best;
-	for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 				 std::pair{0, -1}, {0, 1}, {-1, 0}, {1, 0}}) {
 		bool left_footprint = false;
 		for (int k = 1; k <= 24; ++k) {
@@ -914,8 +938,8 @@ std::optional<std::tuple<int, int, std::int8_t>> nearest_wall_from_inside(
 }
 
 void generate_node_facade_signage(world_editor::WorldEditor &editor,
-		const ProcessedNode &node,
-		const BuildingFootprintBitmap &footprints, const RoadMaskBitmap &road_mask)
+		const ProcessedNode &node, const BuildingFootprintBitmap &footprints,
+		const RoadMaskBitmap &road_mask)
 {
 	if (!editor.signage_enabled() || !editor.signage_context ||
 			!editor.owns(node.x, node.z))
@@ -923,10 +947,11 @@ void generate_node_facade_signage(world_editor::WorldEditor &editor,
 	const auto &ctx = *editor.signage_context;
 	const auto &tags = node.tags;
 	const bool poi = tags.contains("shop") || tags.contains("amenity") ||
-			tags.contains("office") || tags.contains("tourism") ||
-			tags.contains("leisure") || tags.contains("healthcare") ||
-			tags.contains("craft");
-	if (footprints.contains(node.x, node.z) && (poi || tags.contains("addr:housenumber"))) {
+					 tags.contains("office") || tags.contains("tourism") ||
+					 tags.contains("leisure") || tags.contains("healthcare") ||
+					 tags.contains("craft");
+	if (footprints.contains(node.x, node.z) &&
+			(poi || tags.contains("addr:housenumber"))) {
 		const int row = editor.get_ground_level(node.x, node.z) + 3;
 		if (const auto wall = nearest_wall_from_inside(
 					editor, node.x, node.z, row, footprints, road_mask)) {
@@ -936,13 +961,11 @@ void generate_node_facade_signage(world_editor::WorldEditor &editor,
 				if (const auto name = poi_name(tags, ctx.level);
 						name && (!name->key || ctx.has(*name->key)))
 					for (int dy = 0; dy < 2; ++dy)
-						if (place_name_sign(
-								editor, hx, wall_row + dy, hz, facing, *name))
+						if (place_name_sign(editor, hx, wall_row + dy, hz, facing, *name))
 							break;
 			if (const auto number = house_number(tags, ctx.level);
 					number && ctx.has(*number))
-				editor.place_decal_panel(
-						hx, editor.get_ground_level(hx, hz) + 2, hz,
+				editor.place_decal_panel(hx, editor.get_ground_level(hx, hz) + 2, hz,
 						facing, *number, false, true);
 		}
 	}
@@ -987,10 +1010,10 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 	if (railway == "level_crossing" || railway.empty())
 		return;
 	const bool subway = (railway == "station" || railway == "halt") &&
-			(tags.get("station") == "subway" || tags.get("subway") == "yes");
+						(tags.get("station") == "subway" || tags.get("subway") == "yes");
 	if (railway == "station" || railway == "halt") {
-		const decals::DecalKey icon = decals::PictogramKey{
-				subway ? decals::metro_logo(ctx.region) : "train"};
+		const decals::DecalKey icon =
+				decals::PictogramKey{subway ? decals::metro_logo(ctx.region) : "train"};
 		if (!ctx.has(icon))
 			return;
 		if (subway) {
@@ -1009,18 +1032,17 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 				editor.set_block_absolute(block_definitions::STONE_BRICK_WALL,
 						node.x + dx, ground + dy, node.z);
 		for (int dx = -1; dx <= 1; ++dx)
-			editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE,
-					node.x + dx, beam, node.z);
-		const auto name = make_name_sign(tags,
-				{decals::TextStyleKind::StationBoard}, 3);
+			editor.set_block_absolute(
+					block_definitions::LIGHT_GRAY_CONCRETE, node.x + dx, beam, node.z);
+		const auto name = make_name_sign(tags, {decals::TextStyleKind::StationBoard}, 3);
 		bool named = false;
 		if (name && (!name->key || ctx.has(*name->key)))
 			for (const std::int8_t facing : {std::int8_t(2), std::int8_t(3)})
 				named |= place_name_sign(
 						editor, node.x, beam, node.z, facing, *name, true);
 		if (!named)
-			for (const std::int8_t facing : {std::int8_t(2), std::int8_t(3),
-					 std::int8_t(4), std::int8_t(5)})
+			for (const std::int8_t facing :
+					{std::int8_t(2), std::int8_t(3), std::int8_t(4), std::int8_t(5)})
 				editor.place_decal(node.x, beam, node.z, facing, icon);
 		return;
 	}
@@ -1035,8 +1057,8 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 					clean_name(tags.get("name")).size() <= 10 ? 1 : 2);
 			if (name && (!name->key || ctx.has(*name->key)))
 				place_name_sign(editor, node.x,
-						editor.get_ground_level(node.x, node.z) + 4,
-						node.z, 3, *name, false);
+						editor.get_ground_level(node.x, node.z) + 4, node.z, 3, *name,
+						false);
 		}
 	}
 }
@@ -1085,12 +1107,14 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 		else
 			width_z = std::max(width_z, blade.half_width);
 	}
-	if (!width_x) width_x = widest;
-	if (!width_z) width_z = widest;
+	if (!width_x)
+		width_x = widest;
+	if (!width_z)
+		width_z = widest;
 	auto cross = std::pair{-own_direction.second, own_direction.first};
 	for (const auto &blade : post.blades) {
 		const double dot = blade.direction.first * own_direction.first +
-				blade.direction.second * own_direction.second;
+						   blade.direction.second * own_direction.second;
 		if (std::abs(dot) < 0.9) {
 			cross = blade.direction;
 			break;
@@ -1104,12 +1128,12 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 			offsets.emplace_back(dx, dz);
 	std::sort(offsets.begin(), offsets.end(), [](const auto &a, const auto &b) {
 		return a.first * a.first + a.second * a.second <
-				b.first * b.first + b.second * b.second;
+			   b.first * b.first + b.second * b.second;
 	});
 	std::optional<std::pair<int, int>> position;
-	for (const auto [sx, sz] : std::array<std::pair<int, int>, 4>{{
-			 {qx, qz}, {qx, -qz}, {-qx, qz}, {-qx, -qz}}}) {
-		for (const auto [dx, dz] : offsets) {
+	for (const auto &[sx, sz] : std::array<std::pair<int, int>, 4>{
+				 {{qx, qz}, {qx, -qz}, {-qx, qz}, {-qx, -qz}}}) {
+		for (const auto &[dx, dz] : offsets) {
 			const int x = node.x + sx * (width_x + dx);
 			const int z = node.z + sz * (width_z + dz);
 			if (!editor.owns(x, z) || road_mask.contains(x, z) ||
@@ -1119,7 +1143,7 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 			bool clear = true;
 			for (int dy = 1; dy <= static_cast<int>(post.blades.size()) + 2; ++dy)
 				clear &= editor.cell_open_at(x, ground + dy, z) &&
-						!editor.cell_has_frame(x, ground + dy, z);
+						 !editor.cell_has_frame(x, ground + dy, z);
 			if (clear) {
 				position = {x, z};
 				break;
@@ -1144,16 +1168,15 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 		}
 		const std::int8_t facedir =
 				std::abs(own_direction.first) >= std::abs(own_direction.second) ? 0 : 1;
-		if (editor.place_sign_node(block_definitions::STREET_SIGN_BASIC,
-					x, ground + 1, z, facedir, text))
+		if (editor.place_sign_node(block_definitions::STREET_SIGN_BASIC, x, ground + 1, z,
+					facedir, text))
 			return;
 	}
 	editor.set_block_absolute(block_definitions::STONE_BRICK_WALL, x, ground + 1, z,
 			std::nullopt, std::nullopt);
 	editor.set_block_absolute(block_definitions::STONE_BRICK_WALL, x, ground + 2, z,
 			std::nullopt, std::nullopt);
-	const decals::TextStyle style{
-			decals::TextStyleKind::StreetName,
+	const decals::TextStyle style{decals::TextStyleKind::StreetName,
 			decals::blade_style(editor.signage_context->region)};
 	int row = 0;
 	for (const auto &blade : post.blades) {
@@ -1163,16 +1186,16 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 		const int y = ground + 3 + row++;
 		editor.set_block_absolute(block_definitions::POLISHED_ANDESITE, x, y, z,
 				std::nullopt, std::nullopt);
-		const bool along_x = std::abs(blade.direction.first) >=
-				std::abs(blade.direction.second);
+		const bool along_x =
+				std::abs(blade.direction.first) >= std::abs(blade.direction.second);
 		const std::int8_t first = along_x ? 2 : 4;
 		editor.place_decal_panel(x, y, z, first, key, false, false);
 		editor.place_decal_panel(x, y, z, opposite(first), key, false, false);
 	}
 }
 
-void generate_highway_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,
-		const BuildingFootprintBitmap &footprints)
+void generate_highway_way_signage(world_editor::WorldEditor &editor,
+		const ProcessedWay &way, const BuildingFootprintBitmap &footprints)
 {
 	// Highway signage: speed limit signs, route shields, cycleway signs, no-entry and periodic signs
 	if (!editor.signage_enabled() || !editor.signage_context || way.nodes.size() < 2)
@@ -1184,8 +1207,7 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 	const auto bridge = way.tags.get("bridge");
 	const auto tunnel = way.tags.get("tunnel");
 	const auto layer = way.tags.get("layer");
-	if ((!bridge.empty() && bridge != "no") ||
-			(!tunnel.empty() && tunnel != "no") ||
+	if ((!bridge.empty() && bridge != "no") || (!tunnel.empty() && tunnel != "no") ||
 			(!layer.empty() && layer != "0"))
 		return;
 
@@ -1194,8 +1216,7 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 		return;
 
 	const std::string highway = way.tags.get("highway");
-	const bool oneway = way.tags.get("oneway") == "yes" ||
-			way.tags.get("oneway") == "-1";
+	const bool oneway = way.tags.get("oneway") == "yes" || way.tags.get("oneway") == "-1";
 	const bool reversed = way.tags.get("oneway") == "-1";
 	const int half_width =
 			arnis_highways::highway_block_range(highway, way.tags, ctx.scale);
@@ -1205,8 +1226,7 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 	{
 		for (std::size_t i = 0; i < way.nodes.size(); ++i) {
 			const auto found = ctx.intersections.find(way.nodes[i].id);
-			if (found == ctx.intersections.end() ||
-					found->second.owner_way != way.id)
+			if (found == ctx.intersections.end() || found->second.owner_way != way.id)
 				continue;
 			if (auto direction = way_direction_at(way.nodes, i))
 				place_street_name_post(editor, way.nodes[i], *direction, found->second,
@@ -1244,8 +1264,8 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 			place_roadside_sign(editor, "speed limits", cells, 8, half_width,
 					signs.speed.value(), reversed, footprints);
 			if (!oneway && cells.size() >= 60) {
-				place_roadside_sign(editor, "speed limits", cells,
-						cells.size() - 9, half_width, signs.speed.value(), true, footprints);
+				place_roadside_sign(editor, "speed limits", cells, cells.size() - 9,
+						half_width, signs.speed.value(), true, footprints);
 			}
 		}
 	}
@@ -1256,8 +1276,8 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor, const Proce
 			place_roadside_sign(editor, "no-entry signs", cells, 4, half_width,
 					signs.no_entry.value(), false, footprints);
 		} else if (oneway) {
-			place_roadside_sign(editor, "no-entry signs", cells,
-					cells.size() - 5, half_width, signs.no_entry.value(), true, footprints);
+			place_roadside_sign(editor, "no-entry signs", cells, cells.size() - 5,
+					half_width, signs.no_entry.value(), true, footprints);
 		}
 	}
 
@@ -1343,12 +1363,13 @@ void generate_parking_signage(world_editor::WorldEditor &editor, const Processed
 place_signs:
 	// Place parking pictogram on both sides
 	editor.place_decal_panel(x, head, z, facing, key, false, false);
-	editor.place_decal_panel(x, head, z, facing == 2 ? 3 : (facing == 3 ? 2 :
-			(facing == 4 ? 5 : 4)), key, false, false);
+	editor.place_decal_panel(x, head, z,
+			facing == 2 ? 3 : (facing == 3 ? 2 : (facing == 4 ? 5 : 4)), key, false,
+			false);
 }
 
-bool generate_billboard(WorldEditor &editor, const ProcessedNode &node,
-		const RoadMaskBitmap &road_mask)
+bool generate_billboard(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask)
 {
 	if (!editor.signage_enabled())
 		return false;
@@ -1388,9 +1409,8 @@ bool generate_billboard(WorldEditor &editor, const ProcessedNode &node,
 
 	for (int k : {-1, 1}) {
 		for (int dy = 1; dy <= height - 2; ++dy) {
-			editor.set_block_absolute(STONE_BRICK_WALL,
-					x + rx * k, ground + dy, z + rz * k,
-					std::nullopt, std::nullopt);
+			editor.set_block_absolute(STONE_BRICK_WALL, x + rx * k, ground + dy,
+					z + rz * k, std::nullopt, std::nullopt);
 		}
 	}
 	for (int k = -1; k <= 1; ++k) {
@@ -1418,15 +1438,17 @@ bool generate_column(WorldEditor &editor, const ProcessedNode &node)
 	int z = node.z;
 	int ground = editor.get_ground_level(x, z);
 	for (int dy = 1; dy <= 3; ++dy) {
-		editor.set_block_absolute(GRAY_CONCRETE, x, ground + dy, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				GRAY_CONCRETE, x, ground + dy, z, std::nullopt, std::nullopt);
 	}
-	editor.set_block_absolute(STONE_BRICK_SLAB, x, ground + 4, z, std::nullopt, std::nullopt);
+	editor.set_block_absolute(
+			STONE_BRICK_SLAB, x, ground + 4, z, std::nullopt, std::nullopt);
 
 	bool any = false;
 	for (int f = 0; f < 4; ++f) {
 		std::int8_t facing = static_cast<std::int8_t>(f + 2);
-		decals::DecalKey key = decals::ColumnPosterKey{
-				static_cast<std::uint8_t>((node.id + f) % 5)};
+		decals::DecalKey key =
+				decals::ColumnPosterKey{static_cast<std::uint8_t>((node.id + f) % 5)};
 		if (editor.decal_registry->contains(key)) {
 			any |= editor.place_decal_panel(x, ground + 3, z, facing, key, false, false);
 		}
@@ -1444,8 +1466,8 @@ bool generate_poster_box_posters(WorldEditor &editor, const ProcessedNode &node)
 	int ground = editor.get_ground_level(x, z);
 
 	decals::DecalKey a = decals::ColumnPosterKey{static_cast<std::uint8_t>(node.id % 5)};
-	decals::DecalKey b = decals::ColumnPosterKey{
-			static_cast<std::uint8_t>((node.id + 2) % 5)};
+	decals::DecalKey b =
+			decals::ColumnPosterKey{static_cast<std::uint8_t>((node.id + 2) % 5)};
 
 	if (!editor.decal_registry->contains(a) || !editor.decal_registry->contains(b))
 		return false;
@@ -1458,8 +1480,8 @@ bool generate_poster_box_posters(WorldEditor &editor, const ProcessedNode &node)
 	return true;
 }
 
-bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
-		const RoadMaskBitmap &road_mask)
+bool generate_information_board(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask)
 {
 	if (!editor.signage_enabled())
 		return false;
@@ -1469,15 +1491,15 @@ bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
 	auto it_tourism = node.tags.find("tourism");
 	if (it_tourism == node.tags.end() || it_tourism->second != "information")
 		return false;
-	
+
 	auto it_info = node.tags.find("information");
 	if (it_info != node.tags.end()) {
 		if (it_info->second == "map" || it_info->second == "board" ||
-			it_info->second == "terminal") {
-		key = decals::DecalKey(decals::LocalMapKey{node.x, node.z});
-	} else {
-		key = decals::DecalKey(decals::PictogramKey{"information"});
-	}
+				it_info->second == "terminal") {
+			key = decals::DecalKey(decals::LocalMapKey{node.x, node.z});
+		} else {
+			key = decals::DecalKey(decals::PictogramKey{"information"});
+		}
 	}
 	if (!key.has_value())
 		return false;
@@ -1504,19 +1526,25 @@ bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
 		for (int c = 0; c < 2; ++c) {
 			int bx = lx + rx * c;
 			int bz = lz + rz * c;
-			editor.set_block_absolute(OAK_FENCE, bx, ground + 1, bz, std::nullopt, std::nullopt);
+			editor.set_block_absolute(
+					OAK_FENCE, bx, ground + 1, bz, std::nullopt, std::nullopt);
 			for (int y = ground + 2; y <= ground + 3; ++y) {
-				editor.set_block_absolute(DARK_OAK_PLANKS, bx, y, bz, std::nullopt, std::nullopt);
+				editor.set_block_absolute(
+						DARK_OAK_PLANKS, bx, y, bz, std::nullopt, std::nullopt);
 			}
 		}
-		bool ok = editor.place_decal_panel(lx, ground + 3, lz, facing, key.value(), false, false);
+		bool ok = editor.place_decal_panel(
+				lx, ground + 3, lz, facing, key.value(), false, false);
 		return ok;
 	} else {
 		// "i" post
 		int head = ground + 3;
-		editor.set_block_absolute(STONE_BRICK_WALL, x, ground + 1, z, std::nullopt, std::nullopt);
-		editor.set_block_absolute(STONE_BRICK_WALL, x, ground + 2, z, std::nullopt, std::nullopt);
-		editor.set_block_absolute(LIGHT_GRAY_CONCRETE, x, head, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				STONE_BRICK_WALL, x, ground + 1, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				STONE_BRICK_WALL, x, ground + 2, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				LIGHT_GRAY_CONCRETE, x, head, z, std::nullopt, std::nullopt);
 
 		bool any = false;
 		for (std::int8_t f : {2, 3, 4, 5}) {
@@ -1530,8 +1558,9 @@ std::optional<decals::DecalKey> plaque_key(const tags_t &tags)
 {
 	if (tags.get("historic") != "memorial" || tags.get("memorial") != "plaque")
 		return std::nullopt;
-	const auto text = clean_name(!tags.get("inscription").empty()
-			? tags.get("inscription") : tags.get("name"));
+	const auto text =
+			clean_name(!tags.get("inscription").empty() ? tags.get("inscription")
+														: tags.get("name"));
 	if (text.empty() || !decals::font::supports(text))
 		return std::nullopt;
 	return decals::DecalKey::text({decals::TextStyleKind::Plaque}, text, 1);
@@ -1546,10 +1575,9 @@ bool generate_plaque(WorldEditor &editor, const ProcessedNode &node)
 		return false;
 	const int x = node.x, z = node.z;
 	const int y = editor.get_ground_level(x, z) + 2;
-	for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 				 std::pair{0, -1}, {0, 1}, {-1, 0}, {1, 0}}) {
-		if (!editor.cell_open_at(x + dx, y, z + dz) &&
-				editor.cell_open_at(x, y, z)) {
+		if (!editor.cell_open_at(x + dx, y, z + dz) && editor.cell_open_at(x, y, z)) {
 			const auto facing = WorldEditor::facing_for_normal(-dx, -dz);
 			return editor.place_decal(x + dx, y, z + dz, facing, *key);
 		}
@@ -1557,8 +1585,8 @@ bool generate_plaque(WorldEditor &editor, const ProcessedNode &node)
 	return false;
 }
 
-void place_bus_stop_signs(WorldEditor &editor, const tags_t &tags,
-		int x, int sign_y, int z)
+void place_bus_stop_signs(
+		WorldEditor &editor, const tags_t &tags, int x, int sign_y, int z)
 {
 	if (!editor.signage_enabled() || !editor.signage_context)
 		return;

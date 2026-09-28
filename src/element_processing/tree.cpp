@@ -672,7 +672,7 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 		editor.set_block_absolute(tree.leaves_block, pos.x, top, pos.z, std::nullopt,
 				std::optional<const std::vector<Block>>(blacklist));
 		if (height >= 3)
-			for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
 				editor.set_block_absolute(tree.leaves_block, pos.x + dx, top, pos.z + dz,
 						std::nullopt, std::optional<const std::vector<Block>>(blacklist));

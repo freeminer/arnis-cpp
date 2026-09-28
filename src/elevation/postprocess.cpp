@@ -141,7 +141,7 @@ std::vector<double> smooth_sparse_water_field(
 bool has_non_water_neighbor(const CoverGrid &cover, std::size_t x, std::size_t y)
 {
 	const auto h = cover.size(), w = cover.front().size();
-	for (const auto [dx, dy] : CARDINAL) {
+	for (const auto &[dx, dy] : CARDINAL) {
 		const int nx = static_cast<int>(x) + dx, ny = static_cast<int>(y) + dy;
 		if (!inside(nx, ny, w, h) ||
 				cover[static_cast<std::size_t>(ny)][static_cast<std::size_t>(nx)] !=
@@ -174,7 +174,7 @@ std::optional<std::uint8_t> nearest_non_water_class(
 
 double histogram_mode(const std::vector<double> &values, double bin_size)
 {
-	const auto [lo, hi] = std::minmax_element(values.begin(), values.end());
+	const auto &[lo, hi] = std::minmax_element(values.begin(), values.end());
 	if (*hi - *lo < bin_size)
 		return *lo;
 	const auto count = static_cast<std::size_t>(std::ceil((*hi - *lo) / bin_size)) + 1;
@@ -195,8 +195,8 @@ double clamp_by_adjacent_land(double proposed, const std::vector<Cell> &componen
 	const auto h = heights.size(), w = heights.front().size();
 	std::unordered_set<std::uint64_t> seen;
 	std::vector<double> adjacent;
-	for (const auto [x, y] : component)
-		for (const auto [dx, dy] : CARDINAL) {
+	for (const auto &[x, y] : component)
+		for (const auto &[dx, dy] : CARDINAL) {
 			const int nx = static_cast<int>(x) + dx, ny = static_cast<int>(y) + dy;
 			if (!inside(nx, ny, w, h) || cover[ny][nx] == land_cover::LC_WATER)
 				continue;
@@ -235,7 +235,7 @@ std::optional<double> lowest_adjacent_land(
 {
 	const auto h = heights.size(), w = heights.front().size();
 	double lowest = std::numeric_limits<double>::infinity();
-	for (const auto [dx, dy] : CARDINAL) {
+	for (const auto &[dx, dy] : CARDINAL) {
 		const int nx = static_cast<int>(x) + dx, ny = static_cast<int>(y) + dy;
 		if (!inside(nx, ny, w, h) || cover[ny][nx] == land_cover::LC_WATER)
 			continue;
@@ -269,7 +269,7 @@ std::size_t drop_water_on_steep_terrain(
 				auto [x, y] = queue.front();
 				queue.pop_front();
 				component.emplace_back(x, y);
-				for (const auto [dx, dy] : CARDINAL) {
+				for (const auto &[dx, dy] : CARDINAL) {
 					const int nx = static_cast<int>(x) + dx,
 							  ny = static_cast<int>(y) + dy;
 					if (inside(nx, ny, w, h) && !visited[ny][nx] &&
@@ -282,13 +282,13 @@ std::size_t drop_water_on_steep_terrain(
 			if (component.size() > max_cells)
 				continue;
 			std::vector<double> slopes;
-			for (const auto [x, y] : component) {
+			for (const auto &[x, y] : component) {
 				const double here = heights[y][x];
 				if (!std::isfinite(here))
 					continue;
 				double gx = 0.0, gy = 0.0;
 				int axes = 0;
-				for (const auto [dx, dy] :
+				for (const auto &[dx, dy] :
 						std::array<std::pair<int, int>, 2>{{{1, 0}, {0, 1}}}) {
 					const int lo_x = static_cast<int>(x) - dx * step;
 					const int lo_y = static_cast<int>(y) - dy * step;
@@ -312,13 +312,13 @@ std::size_t drop_water_on_steep_terrain(
 			if (slopes.empty() || median(std::move(slopes)) <= MIN_STEEP_WATER_SLOPE)
 				continue;
 			std::unordered_set<std::uint64_t> own;
-			for (const auto [x, y] : component)
+			for (const auto &[x, y] : component)
 				own.insert(static_cast<std::uint64_t>(y) * w + x);
 			std::size_t edge = 0, perched = 0;
-			for (const auto [x, y] : component) {
+			for (const auto &[x, y] : component) {
 				const double here = heights[y][x];
 				double lowest = std::numeric_limits<double>::infinity();
-				for (const auto [dx, dy] : CARDINAL) {
+				for (const auto &[dx, dy] : CARDINAL) {
 					const int nx = static_cast<int>(x) + dx * step;
 					const int ny = static_cast<int>(y) + dy * step;
 					if (!inside(nx, ny, w, h) ||
@@ -336,10 +336,10 @@ std::size_t drop_water_on_steep_terrain(
 				dropped.insert(dropped.end(), component.begin(), component.end());
 		}
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint8_t>> replacements;
-	for (const auto [x, y] : dropped)
+	for (const auto &[x, y] : dropped)
 		replacements.emplace_back(x, y,
 				nearest_non_water_class(cover, x, y, 8).value_or(land_cover::LC_BARE));
-	for (const auto [x, y, value] : replacements)
+	for (const auto &[x, y, value] : replacements)
 		cover[y][x] = value;
 	return replacements.size();
 }
@@ -366,7 +366,7 @@ MaskGrid level_water_surfaces(
 				component.emplace_back(x, y);
 				if (std::isfinite(snapshot[y][x]))
 					values.push_back(snapshot[y][x]);
-				for (const auto [dx, dy] : CARDINAL) {
+				for (const auto &[dx, dy] : CARDINAL) {
 					const int nx = static_cast<int>(x) + dx,
 							  ny = static_cast<int>(y) + dy;
 					if (inside(nx, ny, w, h) && !visited[ny][nx] &&
@@ -385,7 +385,7 @@ MaskGrid level_water_surfaces(
 					component, snapshot, cover);
 			std::vector<double> local_levels;
 			std::vector<Cell> flowing_cells;
-			for (const auto [x, y] : component) {
+			for (const auto &[x, y] : component) {
 				const double original = snapshot[y][x];
 				if (!std::isfinite(original))
 					continue;
@@ -403,7 +403,7 @@ MaskGrid level_water_surfaces(
 						flowing_cells, local_levels, sigma_cells);
 			}
 			for (std::size_t i = 0; i < flowing_cells.size(); ++i) {
-				const auto [x, y] = flowing_cells[i];
+				const auto &[x, y] = flowing_cells[i];
 				const double original = snapshot[y][x];
 				double level = local_levels[i];
 				if (flowing)
@@ -431,7 +431,7 @@ std::size_t reclassify_non_surface_water_cells(CoverGrid &cover, const MaskGrid 
 				replacements.emplace_back(x, y,
 						nearest_non_water_class(cover, x, y, 8)
 								.value_or(land_cover::LC_BARE));
-	for (const auto [x, y, value] : replacements)
+	for (const auto &[x, y, value] : replacements)
 		cover[y][x] = value;
 	return replacements.size();
 }
@@ -459,7 +459,7 @@ void pull_coastal_land_toward_water(
 		queue.pop_front();
 		if (distance[y][x] >= max_distance)
 			continue;
-		for (const auto [dx, dy] : CARDINAL) {
+		for (const auto &[dx, dy] : CARDINAL) {
 			const int nx = static_cast<int>(x) + dx, ny = static_cast<int>(y) + dy;
 			if (inside(nx, ny, w, h) && distance[y][x] + 1 < distance[ny][nx]) {
 				distance[ny][nx] = distance[y][x] + 1;
