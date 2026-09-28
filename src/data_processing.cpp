@@ -355,6 +355,132 @@ double ring_area(const std::vector<ProcessedNode> &nodes)
 	return std::abs(twice_area * 0.5);
 }
 
+bool building_is_part(const tags_t &tags)
+{
+	const auto it = tags.find("building:part");
+	if (it == tags.end())
+		return false;
+	const auto &v = it->second;
+	return !(v.size() == 2 && (v[0] == 'n' || v[0] == 'N') &&
+			 (v[1] == 'o' || v[1] == 'O'));
+}
+
+bool point_in_building_ring(double x, double z, const std::vector<ProcessedNode> &ring)
+{
+	if (ring.size() < 3)
+		return false;
+	bool inside = false;
+	for (std::size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+		const auto &a = ring[i], &b = ring[j];
+		if ((a.z > z) != (b.z > z) &&
+				x < (double(b.x) - a.x) * (z - a.z) / (double(b.z) - a.z) + a.x)
+			inside = !inside;
+	}
+	return inside;
+}
+
+// osm_parser.rs::stitch_rings: endpoint IDs, not rounded coordinates, decide
+// connectivity. Preserve pop/swap-remove order and discard unclosed chains.
+std::vector<std::vector<ProcessedNode>> building_outer_rings(
+		const ProcessedRelation &relation)
+{
+	std::vector<std::vector<ProcessedNode>> open, rings;
+	for (const auto &member : relation.members)
+		if (member.role == ProcessedMemberRole::Outer && member.way.nodes.size() >= 2)
+			open.push_back(member.way.nodes);
+	while (!open.empty()) {
+		auto ring = std::move(open.back());
+		open.pop_back();
+		for (;;) {
+			const auto head = ring.front().id, tail = ring.back().id;
+			if (ring.size() >= 4 && head == tail)
+				break;
+			auto it = std::find_if(open.begin(), open.end(), [&](const auto &segment) {
+				return segment.front().id == tail || segment.back().id == tail ||
+					   segment.front().id == head || segment.back().id == head;
+			});
+			if (it == open.end())
+				break;
+			auto segment = std::move(*it);
+			if (it != open.end() - 1)
+				*it = std::move(open.back());
+			open.pop_back();
+			if (segment.front().id == tail || segment.back().id == tail) {
+				if (segment.front().id != tail)
+					std::reverse(segment.begin(), segment.end());
+				ring.insert(ring.end(), segment.begin() + 1, segment.end());
+			} else {
+				if (segment.back().id != head)
+					std::reverse(segment.begin(), segment.end());
+				segment.pop_back();
+				segment.insert(segment.end(), ring.begin(), ring.end());
+				ring = std::move(segment);
+			}
+		}
+		if (ring.size() >= 4 && ring.front().id == ring.back().id)
+			rings.push_back(std::move(ring));
+	}
+	return rings;
+}
+
+std::unordered_set<std::uint64_t> compute_spatial_relation_part_suppression(
+		const std::vector<ProcessedElement> &elements)
+{
+	struct RelOutline
+	{
+		std::uint64_t id;
+		std::vector<std::vector<ProcessedNode>> rings;
+		double area, coverage = 0;
+	};
+	struct RelPart
+	{
+		double area, x, z;
+	};
+	std::vector<RelOutline> outlines;
+	std::vector<RelPart> parts;
+	for (const auto &element : elements) {
+		if (!element.is_relation())
+			continue;
+		const auto &relation = element.as_relation();
+		if (!tag_is(relation.tags, "type", "multipolygon") &&
+				!tag_is(relation.tags, "type", "building"))
+			continue;
+		const bool part = building_is_part(relation.tags);
+		if ((!part && !relation.tags.contains("building")) ||
+				(part && !part_covers_ground(relation.tags)))
+			continue;
+		auto rings = building_outer_rings(relation);
+		double area = 0, x = 0, z = 0;
+		std::size_t count = 0;
+		for (const auto &ring : rings) {
+			area += ring_area(ring);
+			for (const auto &node : ring) {
+				x += node.x;
+				z += node.z;
+				++count;
+			}
+		}
+		if (area <= 0 || !count)
+			continue;
+		if (part)
+			parts.push_back({area, x / count, z / count});
+		else
+			outlines.push_back({relation.id, std::move(rings), area});
+	}
+	for (const auto &part : parts)
+		for (auto &outline : outlines)
+			if (std::any_of(outline.rings.begin(), outline.rings.end(),
+						[&](const auto &ring) {
+							return point_in_building_ring(part.x, part.z, ring);
+						}))
+				outline.coverage += part.area;
+	std::unordered_set<std::uint64_t> suppressed;
+	for (const auto &outline : outlines)
+		if (outline.coverage / outline.area >= 0.5)
+			suppressed.insert(outline.id);
+	return suppressed;
+}
+
 bool landuse_paints_ground(const tags_t &tags)
 {
 	const auto it = tags.find("landuse");
@@ -1206,7 +1332,9 @@ bool generate_world(WorldEditor &editor,
 	if (!prepared_buildings) {
 		std::unordered_set<std::uint64_t> relation_ways;
 		for (const auto &element : elements)
-			if (element.is_relation())
+			// Only type=building membership owns the grouping decision. A way
+			// in a route or multipolygon must still participate in spatial grouping.
+			if (element.is_relation() && tag_is(element.tags(), "type", "building"))
 				for (const auto &member : element.as_relation().members)
 					relation_ways.insert(member.way.id);
 		std::vector<const ProcessedWay *> outlines, parts;
@@ -1217,18 +1345,31 @@ bool generate_world(WorldEditor &editor,
 			if (relation_ways.count(way.id) || way.nodes.size() < 4 ||
 					way.nodes.front().id != way.nodes.back().id)
 				continue;
-			auto part = way.tags.find("building:part");
-			std::string value = part == way.tags.end() ? "no" : part->second;
-			std::transform(
-					value.begin(), value.end(), value.begin(), [](unsigned char c) {
-						return c >= 'A' && c <= 'Z' ? char(c + ('a' - 'A')) : char(c);
-					});
-			if (value != "no")
+			if (building_is_part(way.tags))
 				parts.push_back(&way);
 			else if (way.tags.contains("building"))
 				outlines.push_back(&way);
 		}
 		std::vector<double> coverage(outlines.size(), 0.0);
+		struct OutlineGeom
+		{
+			double area;
+			int min_x, min_z, max_x, max_z;
+		};
+		std::vector<OutlineGeom> geoms;
+		geoms.reserve(outlines.size());
+		for (const auto *outline : outlines) {
+			const auto &first = outline->nodes.front();
+			OutlineGeom geom{
+					ring_area(outline->nodes), first.x, first.z, first.x, first.z};
+			for (const auto &node : outline->nodes) {
+				geom.min_x = std::min(geom.min_x, node.x);
+				geom.min_z = std::min(geom.min_z, node.z);
+				geom.max_x = std::max(geom.max_x, node.x);
+				geom.max_z = std::max(geom.max_z, node.z);
+			}
+			geoms.push_back(geom);
+		}
 		for (const auto *part : parts) {
 			const double area = ring_area(part->nodes);
 			if (area <= 0.0)
@@ -1245,19 +1386,12 @@ bool generate_world(WorldEditor &editor,
 			double best_area = 0.0;
 			for (std::size_t k = 0; k < outlines.size(); ++k) {
 				const auto *outline = outlines[k];
-				const double oa = ring_area(outline->nodes);
-				if (oa <= 0.0)
+				const auto &geom = geoms[k];
+				const double oa = geom.area;
+				if (oa <= 0.0 || x < geom.min_x || x > geom.max_x || z < geom.min_z ||
+						z > geom.max_z)
 					continue;
-				bool inside = false;
-				for (std::size_t i = 0, j = outline->nodes.size() - 1;
-						i < outline->nodes.size(); j = i++) {
-					const auto &a = outline->nodes[i], &b = outline->nodes[j];
-					if ((a.z > z) != (b.z > z) &&
-							x < (double(b.x) - a.x) * (z - a.z) / (double(b.z) - a.z) +
-											a.x)
-						inside = !inside;
-				}
-				if (!inside)
+				if (!point_in_building_ring(x, z, outline->nodes))
 					continue;
 				if (ground)
 					coverage[k] += area;
@@ -1276,12 +1410,17 @@ bool generate_world(WorldEditor &editor,
 			}
 		}
 		for (std::size_t k = 0; k < outlines.size(); ++k)
-			if (const double area = ring_area(outlines[k]->nodes);
+			if (const double area = geoms[k].area;
 					area > 0.0 && coverage[k] / area >= 0.5)
 				suppressed_building_outlines.insert(outlines[k]->id);
 	}
 	if (prepared_buildings)
 		building_part_groups = prepared_buildings->part_groups;
+	// The host supplies projected coordinates; raw geographic preparation is
+	// still needed for exact Rust decisions at rounding-sensitive boundaries.
+	const auto suppressed_relations =
+			prepared_buildings ? std::unordered_set<std::uint64_t>{}
+							   : compute_spatial_relation_part_suppression(elements);
 	// Rust groups siblings by the seed without packed facade hints.
 	building_group_members.clear();
 	for (const auto &[way_id, seed] : building_part_groups)
@@ -1299,6 +1438,11 @@ bool generate_world(WorldEditor &editor,
 			++element_index) {
 		auto const &element = render_elements[element_index];
 		auto args = args_;
+		if (element.is_relation() && suppressed_relations.count(element.id())) {
+			release_finished_fills(
+					flood_fill_cache, last_fill_use, element, element_index);
+			continue;
+		}
 		if (prepared_buildings && prepared_buildings->outline_suppression.count(
 										  {std::string(element.kind()), element.id()})) {
 			release_finished_fills(
