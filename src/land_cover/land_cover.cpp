@@ -281,7 +281,7 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 		}
 	if (!has_data)
 		return {};
-	reconstruct_water_shoreline(out.grid, width, height, out.cells_per_meter);
+	reconstruct_water_shoreline(out);
 	fill_land_cover_gaps(out.grid, width, height);
 	if (smooth_boundaries)
 		smooth_land_cover_boundaries(out.grid, width, height, out.cells_per_meter);

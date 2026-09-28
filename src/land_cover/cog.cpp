@@ -299,6 +299,7 @@ bool read_esa_cog_into_raster(const std::string &url, int south, int west, doubl
 	out.south_lat = south;
 	out.west_lng = west;
 	out.width = x1 - x0;
+	out.pixels_per_degree = ppd;
 	out.height = y1 - y0;
 	out.min_lng = (tile_x + x0) / ppd - 180.0;
 	out.max_lng = (tile_x + x1) / ppd - 180.0;

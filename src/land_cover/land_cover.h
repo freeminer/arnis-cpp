@@ -54,6 +54,8 @@ struct EsaRasterTile
 	std::size_t width{0};
 	std::size_t height{0};
 	std::vector<uint8_t> pixels;
+	// Exact COG resolution; avoids recovering it from rounded crop extents.
+	double pixels_per_degree{0.0};
 
 	bool valid() const
 	{
@@ -116,8 +118,7 @@ void fill_land_cover_gaps(
 		std::vector<std::vector<uint8_t>> &grid, std::size_t width, std::size_t height);
 void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 		std::size_t width, std::size_t height, double cells_per_meter = 1.0);
-bool reconstruct_water_shoreline(std::vector<std::vector<std::uint8_t>> &grid,
-		std::size_t width, std::size_t height, double cells_per_meter);
+bool reconstruct_water_shoreline(LandCoverData &data);
 
 uint64_t coord_hash(int32_t x, int32_t z);
 
