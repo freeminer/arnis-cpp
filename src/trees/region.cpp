@@ -14,14 +14,22 @@ namespace arnis::trees
 {
 bool is_palm(const std::string &s)
 {
-	std::string n = s;
-	for (char &c : n)
-		c = char(std::tolower((unsigned char)c));
-	for (const char *p : {"palm", "cocos", "roystonea", "sabal", "acrocomia", "phoenix",
-				 "washingtonia", "borassus", "elaeis"})
-		if (n.find(p) != std::string::npos)
+	// Rust classifies by the genus prefix, not by an arbitrary substring.  This
+	// keeps names such as "palmetto_oak" from being stripped while covering the
+	// complete palm list used by the realm packs.
+	const auto end = s.find('_');
+	std::string genus = s.substr(0, end == std::string::npos ? s.size() : end);
+	for (char &c : genus)
+		c = char(std::tolower(static_cast<unsigned char>(c)));
+	static constexpr const char *genera[] = {"acrocomia", "archontophoenix", "areca",
+			"astrocarym", "attalea", "beccariophoenix", "bismarckia", "borassus",
+			"calyptronoma", "ceroxylon", "cocos", "cyrtostachys", "elaeis", "euterpe",
+			"hyphaene", "jubaea", "livistona", "mauritia", "nypa", "phoenix", "raphia",
+			"rhopalostylis", "roystonea", "sabal", "serenoa", "socratea", "washingtonia"};
+	for (const auto *p : genera)
+		if (genus == p)
 			return true;
-	return false;
+	return genus == "palm" || genus == "palms";
 }
 bool subtropical_latitude(double lat)
 {
@@ -360,6 +368,36 @@ std::optional<SlotSelection> RegionSelector::pick_slot(
 {
 	if (empty())
 		return std::nullopt;
+	// An explicit ecoregion is authoritative for untagged slots, matching the
+	// Rust selector's EcoMix request.  Tag-derived/wetland hints remain stronger
+	// and are refined below by the montane and wet-ground rules.
+	if (request.eco && !request.tagged && !request.wet_ground) {
+		switch (request.eco->biome) {
+		case ecoregion::EcoBiome::MoistTropical:
+		case ecoregion::EcoBiome::DryTropical:
+		case ecoregion::EcoBiome::TropicalConifer:
+		case ecoregion::EcoBiome::TropicalGrassland:
+			hint = Habitat::Tropical;
+			break;
+		case ecoregion::EcoBiome::TemperateConifer:
+		case ecoregion::EcoBiome::Boreal:
+		case ecoregion::EcoBiome::MontaneGrassland:
+		case ecoregion::EcoBiome::Tundra:
+			hint = Habitat::Conifer;
+			break;
+		case ecoregion::EcoBiome::Flooded:
+		case ecoregion::EcoBiome::Mangroves:
+			hint = Habitat::Wet;
+			break;
+		case ecoregion::EcoBiome::Desert:
+		case ecoregion::EcoBiome::Mediterranean:
+			hint = Habitat::Dry;
+			break;
+		default:
+			hint = Habitat::Lowland;
+			break;
+		}
+	}
 	const int spacing = base_spacing();
 	auto [sx, sz] = trunk_slot_s(x, z, spacing);
 	// Invert the vertical affine, including terrain compression, as in region.rs.
@@ -369,6 +407,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot(
 			((double(elevation) - data_->ground_level) / std::max(.001, per_metre) >
 					450.) &&
 			smooth_noise(sx, sz, 64) < .6;
+	if (request.wet_ground)
+		hint = Habitat::Wet;
 	if (montane && (hint == Habitat::Lowland || hint == Habitat::Wet))
 		hint = Habitat::Conifer;
 	const auto blend = land_cover::coord_hash(sx + 7, sz + 13) % 100;

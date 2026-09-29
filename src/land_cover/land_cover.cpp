@@ -297,8 +297,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(
-					heights.begin(), heights.begin() + data.height,
+			std::any_of(heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
@@ -371,7 +370,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 	};
 	// Water-adjacent cells seed first, deliberately giving river crossings water
 	// precedence over neighbouring built-up terrain.
-	for (const auto cell : bridge_cells) {
+	for (const auto &cell : bridge_cells) {
 		const int x = cell % data.width, z = cell / data.width;
 		for (const auto &[dx, dz] : neighbours) {
 			const int nx = x + dx, nz = z + dz;
@@ -389,7 +388,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 			}
 		}
 	}
-	for (const auto cell : bridge_cells)
+	for (const auto &cell : bridge_cells)
 		if (!assigned.contains(cell)) {
 			const int x = cell % data.width, z = cell / data.width;
 			for (const auto &[dx, dz] : neighbours) {
@@ -428,7 +427,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 		current.swap(next);
 	}
 	bool water_changed = false;
-	for (const auto cell : bridge_cells)
+	for (const auto &cell : bridge_cells)
 		if (const auto it = assigned.find(cell); it != assigned.end()) {
 			const int x = cell % data.width, z = cell / data.width;
 			const auto old = data.grid[z][x];
@@ -455,8 +454,7 @@ void apply_osm_water_override(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(
-					heights.begin(), heights.begin() + data.height,
+			std::any_of(heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	const double sx = double(data.width - 1) / double(world_width - 1);
@@ -894,6 +892,54 @@ std::vector<std::vector<uint8_t>> compute_water_distance(
 void LandCoverData::refresh_water_blend_grid()
 {
 	water_blend_grid = compute_water_blend_smooth(grid, width, height, cells_per_meter);
+}
+
+void mark_beaches(LandCoverData &data)
+{
+	if (data.width == 0 || data.height == 0)
+		return;
+	const auto reach = std::clamp<int>(
+			static_cast<int>(std::lround(50.0 * data.cells_per_meter)), 1, 255);
+	std::vector<std::uint8_t> distance(data.width * data.height, 255);
+	std::queue<std::pair<int, int>> frontier;
+	for (std::size_t z = 0; z < data.height; ++z)
+		for (std::size_t x = 0; x < data.width; ++x) {
+			if (data.grid[z][x] != LC_WATER)
+				continue;
+			for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+				const int nx = static_cast<int>(x) + dx, nz = static_cast<int>(z) + dz;
+				if (nx < 0 || nz < 0 || nx >= static_cast<int>(data.width) ||
+						nz >= static_cast<int>(data.height) ||
+						data.grid[nz][nx] != LC_BARE)
+					continue;
+				const auto i = static_cast<std::size_t>(nz) * data.width + nx;
+				if (distance[i] == 255) {
+					distance[i] = 1;
+					frontier.emplace(nx, nz);
+				}
+			}
+		}
+	while (!frontier.empty()) {
+		const auto [x, z] = frontier.front();
+		frontier.pop();
+		const auto i = static_cast<std::size_t>(z) * data.width + x;
+		data.grid[z][x] = LC_BEACH;
+		if (distance[i] >= reach)
+			continue;
+		for (const auto [dx, dz] :
+				std::array<std::pair<int, int>, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+			const int nx = x + dx, nz = z + dz;
+			if (nx < 0 || nz < 0 || nx >= static_cast<int>(data.width) ||
+					nz >= static_cast<int>(data.height) || data.grid[nz][nx] != LC_BARE)
+				continue;
+			const auto ni = static_cast<std::size_t>(nz) * data.width + nx;
+			if (distance[ni] == 255) {
+				distance[ni] = static_cast<std::uint8_t>(distance[i] + 1);
+				frontier.emplace(nx, nz);
+			}
+		}
+	}
 }
 
 std::size_t clear_land_cover_cache(const std::filesystem::path &cache_dir)

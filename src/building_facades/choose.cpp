@@ -101,7 +101,7 @@ std::pair<std::vector<std::size_t>, Fallback> candidates(
 	append(category);
 	if (!out.empty())
 		return {std::move(out), Fallback::Own};
-	for (const auto fallback : related(category))
+	for (const auto &fallback : related(category))
 		append(fallback);
 	if (!out.empty())
 		return {std::move(out), Fallback::Related};

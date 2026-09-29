@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cmath>
 #include <string>
+#include <limits>
 #include <unordered_set>
 #include <vector>
 
@@ -249,7 +250,7 @@ bridge_styles::BridgeStyle majority_style(const std::vector<std::size_t> &group_
 		const bridge_styles::BridgeOutlineIndex &outlines)
 {
 	std::unordered_map<bridge_styles::BridgeStyle, std::size_t> counts;
-	for (const auto idx : group_indices) {
+	for (const auto &idx : group_indices) {
 		const auto style = bridge_styles::resolve_bridge_style_with_outline(
 				*bridge_ways[idx], outlines);
 		++counts[style];
@@ -265,7 +266,7 @@ bridge_styles::BridgeStyle majority_style(const std::vector<std::size_t> &group_
 	};
 	bridge_styles::BridgeStyle best = bridge_styles::BridgeStyle::Beam;
 	std::size_t best_count = 0;
-	for (const auto style : priority) {
+	for (const auto &style : priority) {
 		const auto count = counts[style];
 		if (count > best_count) {
 			best = style;
@@ -364,7 +365,7 @@ BridgeStructureMap BridgeStructureMap::build(
 		if (indices.size() < 2)
 			continue;
 		std::unordered_map<int, std::vector<std::size_t>> by_layer;
-		for (const auto idx : indices)
+		for (const auto &idx : indices)
 			by_layer[effective_layer(*bridge_ways[idx])].push_back(idx);
 		for (const auto &layer_entry : by_layer) {
 			const auto &group = layer_entry.second;
@@ -387,7 +388,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			continue;
 		std::vector<std::pair<int, int>> centroids;
 		centroids.reserve(group.size());
-		for (const auto idx : group)
+		for (const auto &idx : group)
 			centroids.push_back(centroid(*bridge_ways[idx]));
 		for (std::size_t i = 0; i < group.size(); ++i) {
 			for (std::size_t j = i + 1; j < group.size(); ++j) {
@@ -444,7 +445,7 @@ BridgeStructureMap BridgeStructureMap::build(
 		const auto &group_indices = group_entry.second;
 		const auto group_style = majority_style(group_indices, bridge_ways, outlines);
 		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> endpoint_counts;
-		for (const auto idx : group_indices) {
+		for (const auto &idx : group_indices) {
 			const auto &way = *bridge_ways[idx];
 			const auto &s = way.nodes.front();
 			const auto &e = way.nodes.back();
@@ -455,7 +456,7 @@ BridgeStructureMap BridgeStructureMap::build(
 
 		int max_layer = 0;
 		bool had_unlabelled = false;
-		for (const auto idx : group_indices) {
+		for (const auto &idx : group_indices) {
 			const auto &way = *bridge_ways[idx];
 			const auto it = way.tags.find("layer");
 			if (it == way.tags.end()) {
@@ -472,7 +473,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			max_layer = 1;
 
 		std::vector<int> terrain_samples;
-		for (const auto idx : group_indices) {
+		for (const auto &idx : group_indices) {
 			for (const auto &sample : centerline_samples(*bridge_ways[idx]))
 				terrain_samples.push_back(
 						editor.get_ground_level(sample.first, sample.second));
@@ -485,7 +486,7 @@ BridgeStructureMap BridgeStructureMap::build(
 		const int terrain_max = *terrain_max_it;
 		const int dip = terrain_max - terrain_min;
 		std::size_t total_length = 0;
-		for (const auto idx : group_indices)
+		for (const auto &idx : group_indices)
 			total_length += way_length_blocks(*bridge_ways[idx]);
 		const int style_clearance =
 				group_style == bridge_styles::BridgeStyle::Arch ? 8 : 0;
@@ -510,7 +511,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			}
 
 			bool found_ramp = false;
-			for (const auto oi : other_it->second) {
+			for (const auto &oi : other_it->second) {
 				const auto &candidate = *other_highway_ways[oi];
 				if (!is_ramp_candidate(candidate))
 					continue;
@@ -534,7 +535,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			boundary_with_external_ramp[xz] = found_ramp;
 		}
 
-		for (const auto idx : group_indices) {
+		for (const auto &idx : group_indices) {
 			const auto &way = *bridge_ways[idx];
 			const auto &s = way.nodes.front();
 			const auto &e = way.nodes.back();
@@ -607,12 +608,43 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 							 : ramp->y_at(tds, total_bresenham);
 				for (int dx = -block_range; dx <= block_range; ++dx) {
 					for (int dz = -block_range; dz <= block_range; ++dz) {
-						auto &existing = result.deck_y_[{x + dx, z + dz}];
-						existing = std::max(existing, cell_y);
+						const std::pair<int, int> cell{x + dx, z + dz};
+						auto existing = result.deck_y_.find(cell);
+						if (existing == result.deck_y_.end())
+							result.deck_y_.emplace(cell, cell_y);
+						else
+							existing->second = std::max(existing->second, cell_y);
+						auto low = result.deck_low_y_.find(cell);
+						if (low == result.deck_low_y_.end())
+							result.deck_low_y_.emplace(cell, cell_y);
+						else
+							low->second = std::min(low->second, cell_y);
 					}
 				}
 				++tds;
 			}
+		}
+	}
+	// Mark roads/tracks running at grade below a raised deck, including a
+	// one-cell shoulder around their rasterized centreline.
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		if (is_bridge_way(way) ||
+				(!way.tags.contains("highway") && !way.tags.contains("railway")))
+			continue;
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const auto points = bresenham_line(way.nodes[i - 1].x, 0, way.nodes[i - 1].z,
+					way.nodes[i].x, 0, way.nodes[i].z);
+			for (const auto &p : points)
+				for (int dx = -1; dx <= 1; ++dx)
+					for (int dz = -1; dz <= 1; ++dz) {
+						const std::pair<int, int> cell{
+								std::get<0>(p) + dx, std::get<2>(p) + dz};
+						if (result.deck_y_.contains(cell))
+							result.grade_crossings_.insert(cell);
+					}
 		}
 	}
 	return result;
@@ -642,6 +674,53 @@ std::optional<int> BridgeSurfaceMap::nearby_deck_y(int x, int z, int radius) con
 		}
 	}
 	return found;
+}
+
+bool BridgeSurfaceMap::deck_near(int x, int z, int y, int tolerance) const
+{
+	const auto high = deck_y_.find({x, z});
+	const auto low = deck_low_y_.find({x, z});
+	return high != deck_y_.end() && low != deck_low_y_.end() &&
+		   low->second <= y + tolerance && high->second >= y - tolerance;
+}
+
+bool BridgeSurfaceMap::support_blocked(int x, int z, int deck_y) const
+{
+	if (grade_crossings_.contains({x, z}))
+		return true;
+	const auto lower = deck_low_y_.find({x, z});
+	return lower != deck_low_y_.end() && lower->second <= deck_y - 6;
+}
+
+std::optional<int> BridgeSurfaceMap::supported_top(
+		const WorldEditor &editor, int x, int z, int radius) const
+{
+	int low = std::numeric_limits<int>::max();
+	int high = std::numeric_limits<int>::min();
+	for (int dx = -radius; dx <= radius; ++dx)
+		for (int dz = -radius; dz <= radius; ++dz) {
+			if (const auto it = deck_low_y_.find({x + dx, z + dz});
+					it != deck_low_y_.end()) {
+				low = std::min(low, it->second);
+				high = std::max(high, deck_y_.at({x + dx, z + dz}));
+			}
+		}
+	if (low > high)
+		return std::nullopt;
+	return editor.highest_block_between(x, z, low - 3, high);
+}
+
+bool BridgeSurfaceMap::deck_clears(int x, int z, int water_y) const
+{
+	// A bridge's lowest girder is three blocks below its deck in the Rust
+	// structural model; water may be carved only below that clearance.
+	const auto deck = deck_low_y_.find({x, z});
+	return deck != deck_low_y_.end() && deck->second - 3 > water_y;
+}
+
+bool BridgeSurfaceMap::over_grade_way(int x, int z) const
+{
+	return grade_crossings_.contains({x, z});
 }
 
 }

@@ -39,7 +39,7 @@ std::optional<std::vector<std::array<double, 2>>> ring_xy(
 {
 	std::vector<std::array<double, 2>> result;
 	result.reserve(ids.size());
-	for (const auto id : ids) {
+	for (const auto &id : ids) {
 		const auto it = nodes.find(id);
 		if (it == nodes.end())
 			return std::nullopt;
@@ -185,7 +185,7 @@ std::vector<Building> parse_overpass(const std::string &json, const Frame &frame
 				}
 			}
 		}
-		for (const auto id : way_order) {
+		for (const auto &id : way_order) {
 			if (relation_members.count(id))
 				continue;
 			const auto way = ways.find(id);

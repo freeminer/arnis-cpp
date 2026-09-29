@@ -150,7 +150,7 @@ public:
 	void testRoutes()
 	{
 		TrackDefinitions definitions;
-		for (const auto target :
+		for (const auto &target :
 				{at::XZ{11, 31}, at::XZ{-17, 9}, at::XZ{40, 0}, at::XZ{2, 3}}) {
 			const int d = at::closest_direction(target.first, target.second);
 			at::RailPlan plan;

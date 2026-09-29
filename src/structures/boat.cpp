@@ -19,7 +19,10 @@ const StructureSchematic *boat_schematic()
 			return;
 		try {
 			std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-			schematic = load_structure(bytes).centered();
+			// Rust places the boat with the schematic's native anchor; do not
+			// recenter it here, since that shifts the hull relative to the water
+			// cell chosen by the global lattice.
+			schematic = load_structure(bytes);
 		} catch (...) {
 			schematic.reset();
 		}
@@ -51,6 +54,19 @@ void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max
 				continue;
 			int ax = x + h % 7, az = z + (h >> 3) % 7;
 			if (!editor.is_lc_water(ax, az) || editor.water_distance(ax, az) != 0)
+				continue;
+			// Keep hulls out of shallow/covered cells.  Rust checks the complete
+			// schematic footprint rather than only its anchor, which also avoids
+			// bridges or shore structures intersecting a boat.
+			const int radius = schematic->max_extent;
+			bool open = true;
+			for (int dx = -radius; dx <= radius && open; ++dx)
+				for (int dz = -radius; dz <= radius; ++dz)
+					if (editor.surface_is_sealed(ax + dx, az + dz)) {
+						open = false;
+						break;
+					}
+			if (!open)
 				continue;
 			int y = editor.get_water_level(ax, az) - 1;
 			place_structure(editor, *schematic, ax, y, az, (h >> 5) & 3);

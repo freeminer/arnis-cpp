@@ -414,7 +414,7 @@ inline std::array<std::uint8_t, 3> median_rgb(
 	std::array<std::uint8_t, 3> result{};
 	for (unsigned channel = 0; channel < 3; ++channel) {
 		std::vector<std::uint8_t> values;
-		for (const auto index : indices)
+		for (const auto &index : indices)
 			if (index < rgb.size())
 				values.push_back(rgb[index][channel]);
 		if (values.empty())
@@ -459,10 +459,10 @@ apply_bands(const std::vector<std::array<std::uint8_t, 3>> &rgb,
 				band_windows.push_back(i);
 		}
 		band.window_rgb = median_rgb(rgb, band_windows, all_windows);
-		for (const auto i : band_windows)
+		for (const auto &i : band_windows)
 			output[i] = *band.window_rgb;
 	}
-	for (const auto i : doors)
+	for (const auto &i : doors)
 		if (i < output.size())
 			output[i] = door_color;
 	return {std::move(output), door_color};

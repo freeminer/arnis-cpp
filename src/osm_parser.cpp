@@ -158,7 +158,7 @@ RawOsmDocument::Completeness analyze_completeness(const RawOsmDocument &document
 	RawOsmDocument::Completeness result;
 	for (const auto &way : document.ways) {
 		bool missing = false;
-		for (const auto ref : way.node_refs) {
+		for (const auto &ref : way.node_refs) {
 			++result.total_node_refs;
 			if (!node_ids.contains(ref)) {
 				++result.unresolved_node_refs;

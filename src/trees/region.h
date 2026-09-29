@@ -5,6 +5,7 @@
 #include "tree_library.h"
 #include "tree_pack.h"
 #include "schematic.h"
+#include "../ecoregion.h"
 #include <filesystem>
 #include <memory>
 #include <optional>
@@ -52,6 +53,21 @@ struct SlotRequest
 {
 	std::optional<TreeSize> want_size;
 	bool density_decided = false;
+	// Rust's selector receives these context hints from the mapped-tree and
+	// ground passes.  Keep them in the C++ request even when a caller has no
+	// ecoregion grid available.
+	std::optional<ecoregion::Ecoregion> eco;
+	bool tagged = false;
+	bool wet_ground = false;
+	bool beach = false;
+};
+struct MappedRequest
+{
+	std::optional<std::string> genus;
+	std::optional<bool> conifer;
+	std::optional<TreeSize> want_size;
+	std::optional<ecoregion::Ecoregion> eco;
+	bool beach = false;
 };
 struct SlotSelection
 {

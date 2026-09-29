@@ -181,10 +181,10 @@ std::optional<cache::ImageRecord> Client::image(
 	return cache_.save_metadata(*record) ? record : std::optional<cache::ImageRecord>{};
 }
 std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
-		const std::string &endpoint, const std::string &token) const
+		const std::string &endpoint, const std::string &token, std::size_t maximum) const
 {
 	std::vector<cache::ImageRecord> result;
-	auto cells = search_cells(bounds);
+	auto cells = search_cells(bounds, maximum);
 	if (!fetch_ || !cells)
 		return result;
 	for (const auto &cell : *cells) {

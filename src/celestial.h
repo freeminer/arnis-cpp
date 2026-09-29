@@ -28,7 +28,9 @@ double celestial_meters_per_block(CelestialBody body);
 double celestial_scale_ratio(CelestialBody body);
 double celestial_height_gain(CelestialBody body);
 double celestial_vertical_exaggeration(CelestialBody body);
+double celestial_terrain_gain(CelestialBody body);
 double celestial_world_scale(CelestialBody body);
+double celestial_vanilla_relief_headroom_m(CelestialBody body);
 bool is_earth(CelestialBody body);
 
 // Surface/sub-surface palette for bodies without terrestrial land-cover data.

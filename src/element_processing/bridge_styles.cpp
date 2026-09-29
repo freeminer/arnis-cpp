@@ -1,6 +1,7 @@
 #include "bridge_styles.h"
 #include "../structures/schem_decoder.h"
 #include "bridge_modules.h"
+#include "connected_blocks.h"
 #include <fstream>
 #include <cmath>
 
@@ -77,6 +78,7 @@ bool sweep_bridge_schematic(WorldEditor &editor,
 			const int bz =
 					static_cast<int>(std::lround(sample.z + sample.perp_z * offset));
 			const int bottom = sample.y + lowest - street_y;
+			editor.register_support_column(bx, bz, shaft);
 			for (int yy = editor.get_ground_level(bx, bz);
 					yy < bottom && yy < editor.get_ground_level(bx, bz) + 48; ++yy)
 				editor.set_block_absolute(shaft, bx, yy, bz);
@@ -385,7 +387,7 @@ void decorate_suspension(WorldEditor &editor, const std::vector<BridgePathSample
 		pylons.push_back(
 				first + (last - first) * i / std::max<std::size_t>(1, n_pylons - 1));
 
-	for (const auto p : pylons) {
+	for (const auto &p : pylons) {
 		const auto &s = path[p];
 		const auto [left, right] =
 				side_offsets(s.x, s.z, s.perp_x, s.perp_z, block_range);
@@ -420,10 +422,10 @@ void decorate_suspension(WorldEditor &editor, const std::vector<BridgePathSample
 					std::nullopt, std::nullopt);
 			if ((tds - a) % SUSPENSION_HANGER_INTERVAL == 0 && tds != a && tds != b) {
 				for (int hy = s.y + 2; hy < cable_y; ++hy) {
-					editor.set_block_absolute(IRON_BARS, left.first, hy, left.second,
-							std::nullopt, std::nullopt);
-					editor.set_block_absolute(IRON_BARS, right.first, hy, right.second,
-							std::nullopt, std::nullopt);
+					connected_blocks::place_connected(
+							editor, IRON_BARS, left.first, hy, left.second);
+					connected_blocks::place_connected(
+							editor, IRON_BARS, right.first, hy, right.second);
 				}
 			}
 		}

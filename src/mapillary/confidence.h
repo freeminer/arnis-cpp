@@ -1,6 +1,12 @@
 #pragma once
 #include <algorithm>
+#include <cctype>
 #include <cmath>
+#include <optional>
+#include <string>
+#include <set>
+#include <utility>
+#include <vector>
 #include "types.h"
 namespace arnis::mapillary
 {
@@ -156,6 +162,58 @@ inline Tier score_tier(const Factors &factors, double tier_a, double tier_b,
 	if ((tier == Tier::A || tier == Tier::B) && unknown > tier_b_max_unknown)
 		tier = Tier::C;
 	return tier;
+}
+inline std::pair<double, Tier> score(const Factors &factors, const Params &params)
+{
+	const double value = confidence_score(factors);
+	return {value, score_tier(factors, params.tier_a, params.tier_b, params.tier_c,
+						   params.tier_a_max_unknown, params.tier_b_max_unknown)};
+}
+inline Tier tier_for_confidence(double value, const Params &params)
+{
+	return tier_for_confidence(value, params.tier_a, params.tier_b, params.tier_c);
+}
+inline std::string gate_code(const std::string &reason)
+{
+	const auto begin = reason.find_first_not_of(" \t\r\n");
+	if (begin == std::string::npos)
+		return "GATE_REJECTED";
+	const auto end = reason.find_first_of(" <\t\r\n", begin);
+	std::string token =
+			reason.substr(begin, end == std::string::npos ? end : end - begin);
+	for (char &c : token) {
+		if (c == '-')
+			c = '_';
+		else
+			c = static_cast<char>(std::toupper(static_cast<unsigned char>(c)));
+	}
+	return "GATE_" + (token.empty() ? std::string("REJECTED") : token);
+}
+inline std::vector<std::string> reason_codes(const std::vector<ViewCandidate> &candidates,
+		const std::optional<WallDecision> &decision,
+		const std::vector<std::string> &refinement_flags,
+		const RegResult *registration = nullptr,
+		const std::vector<std::string> &extra = {})
+{
+	std::set<std::string> codes;
+	if (decision)
+		codes.insert(decision->flags.begin(), decision->flags.end());
+	codes.insert(refinement_flags.begin(), refinement_flags.end());
+	if (registration) {
+		if (registration->source == RegSource::Global)
+			codes.insert("REG_GLOBAL");
+		else if (registration->source == RegSource::Unregistered)
+			codes.insert("REG_NONE");
+		else if (registration->source == RegSource::NoCluster)
+			codes.insert("REG_NO_CLUSTER");
+		if (registration->scale_suspect)
+			codes.insert("SCALE_SUSPECT");
+	}
+	for (const auto &candidate : candidates)
+		if (candidate.rejected_reason)
+			codes.insert(gate_code(*candidate.rejected_reason));
+	codes.insert(extra.begin(), extra.end());
+	return {codes.begin(), codes.end()};
 }
 struct ViewQuality
 {

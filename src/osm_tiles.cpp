@@ -20,6 +20,154 @@
 
 namespace arnis::osm_tiles
 {
+namespace
+{
+bool building_tags(const tags_t &tags)
+{
+	return tags.contains("building") || tags.contains("building:part") ||
+		   (tags.get("type") == "building");
+}
+
+struct TileExtent
+{
+	std::int32_t min_lat = 0, min_lon = 0, max_lat = 0, max_lon = 0;
+	bool valid = false;
+};
+
+TileExtent way_extent(const DecodedWay &way)
+{
+	TileExtent e;
+	for (const auto &[lat, lon] : way.points) {
+		e.min_lat = e.valid ? std::min(e.min_lat, lat) : lat;
+		e.max_lat = e.valid ? std::max(e.max_lat, lat) : lat;
+		e.min_lon = e.valid ? std::min(e.min_lon, lon) : lon;
+		e.max_lon = e.valid ? std::max(e.max_lon, lon) : lon;
+		e.valid = true;
+	}
+	return e;
+}
+
+bool intersects(const TileExtent &a, const TileExtent &b)
+{
+	return a.valid && b.valid && a.max_lat >= b.min_lat && a.min_lat <= b.max_lat &&
+		   a.max_lon >= b.min_lon && a.min_lon <= b.max_lon;
+}
+
+std::vector<DecodedTile> select_for_bbox(
+		const std::vector<DecodedTile> &input, const geographic::LLBBox &bbox)
+{
+	const TileExtent area{static_cast<std::int32_t>(bbox.min().lat() * COORD_SCALE),
+			static_cast<std::int32_t>(bbox.min().lng() * COORD_SCALE),
+			static_cast<std::int32_t>(bbox.max().lat() * COORD_SCALE),
+			static_cast<std::int32_t>(bbox.max().lng() * COORD_SCALE), true};
+	std::unordered_map<std::uint64_t, DecodedWay> ways;
+	std::unordered_map<std::uint64_t, DecodedRelation> relations;
+	for (const auto &tile : input) {
+		for (const auto &way : tile.ways)
+			ways.emplace(way.id, way);
+		for (const auto &relation : tile.relations)
+			relations.emplace(relation.id, relation);
+	}
+	std::unordered_set<std::uint64_t> keep_ways, keep_relations;
+	std::vector<TileExtent> building_extents;
+	for (const auto &[id, way] : ways)
+		if (intersects(way_extent(way), area)) {
+			keep_ways.insert(id);
+			if (building_tags(way.tags))
+				building_extents.push_back(way_extent(way));
+		}
+	for (const auto &[id, relation] : relations) {
+		TileExtent extent;
+		for (const auto &member : relation.members) {
+			auto it = ways.find(member.ref);
+			if (it == ways.end())
+				continue;
+			auto part = way_extent(it->second);
+			if (!part.valid)
+				continue;
+			if (!extent.valid)
+				extent = part;
+			else {
+				extent.min_lat = std::min(extent.min_lat, part.min_lat);
+				extent.min_lon = std::min(extent.min_lon, part.min_lon);
+				extent.max_lat = std::max(extent.max_lat, part.max_lat);
+				extent.max_lon = std::max(extent.max_lon, part.max_lon);
+			}
+		}
+		if (intersects(extent, area)) {
+			keep_relations.insert(id);
+			for (const auto &member : relation.members)
+				keep_ways.insert(member.ref);
+			if (building_tags(relation.tags) && extent.valid)
+				building_extents.push_back(extent);
+		}
+	}
+	// Keep building parts belonging to selected or straddling building outlines.
+	for (const auto &[id, way] : ways)
+		if (!keep_ways.contains(id) && building_tags(way.tags)) {
+			const auto extent = way_extent(way);
+			if (std::any_of(building_extents.begin(), building_extents.end(),
+						[&](const TileExtent &building) {
+							return intersects(extent, building);
+						}))
+				keep_ways.insert(id);
+		}
+	for (const auto &[id, relation] : relations)
+		if (!keep_relations.contains(id) && building_tags(relation.tags)) {
+			TileExtent extent;
+			for (const auto &member : relation.members) {
+				auto it = ways.find(member.ref);
+				if (it == ways.end())
+					continue;
+				auto part = way_extent(it->second);
+				if (!part.valid)
+					continue;
+				if (!extent.valid)
+					extent = part;
+				else {
+					extent.min_lat = std::min(extent.min_lat, part.min_lat);
+					extent.min_lon = std::min(extent.min_lon, part.min_lon);
+					extent.max_lat = std::max(extent.max_lat, part.max_lat);
+					extent.max_lon = std::max(extent.max_lon, part.max_lon);
+				}
+			}
+			if (std::any_of(building_extents.begin(), building_extents.end(),
+						[&](const TileExtent &building) {
+							return intersects(extent, building);
+						})) {
+				keep_relations.insert(id);
+				for (const auto &member : relation.members)
+					keep_ways.insert(member.ref);
+			}
+		}
+	std::vector<DecodedTile> selected;
+	for (const auto &tile : input) {
+		DecodedTile out;
+		for (const auto &way : tile.ways)
+			if (keep_ways.contains(way.id)) {
+				out.ways.push_back(way);
+			}
+		for (const auto &relation : tile.relations)
+			if (keep_relations.contains(relation.id))
+				out.relations.push_back(relation);
+		std::vector<std::pair<std::int32_t, std::int32_t>> vertices;
+		for (const auto &way : out.ways)
+			for (const auto &point : way.points)
+				vertices.push_back(point);
+		for (const auto &node : tile.nodes) {
+			const bool in_area = node.lat >= area.min_lat && node.lat <= area.max_lat &&
+								 node.lon >= area.min_lon && node.lon <= area.max_lon;
+			if (in_area || std::find(vertices.begin(), vertices.end(),
+								   std::pair{node.lat, node.lon}) != vertices.end())
+				out.nodes.push_back(node);
+		}
+		if (!out.ways.empty() || !out.relations.empty())
+			selected.push_back(std::move(out));
+	}
+	return selected;
+}
+}
+
 std::filesystem::path cache_root()
 {
 #if defined(_WIN32)
@@ -162,7 +310,7 @@ std::optional<std::vector<std::uint8_t>> zstd_decode(
 std::string cache_key(const std::string &value)
 {
 	std::uint64_t hash = 0xcbf29ce484222325ULL;
-	for (const auto byte : value) {
+	for (const auto &byte : value) {
 		hash ^= static_cast<std::uint8_t>(byte);
 		hash *= 0x100000001b3ULL;
 	}
@@ -367,7 +515,7 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	for (const auto &[id, _] : nodes)
 		ni.push_back(id);
 	std::sort(ni.begin(), ni.end());
-	for (const auto id : ni) {
+	for (const auto &id : ni) {
 		const auto &n = nodes.at(id);
 		coord_ids.emplace(std::make_pair(n.lat, n.lon), id);
 		out.nodes.push_back(
@@ -564,6 +712,12 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			*error = "the tile archive has no data for this area";
 		return std::nullopt;
 	}
-	return assemble(decoded);
+	const auto selected = select_for_bbox(decoded, bbox);
+	if (selected.empty()) {
+		if (error)
+			*error = "the tile archive has no intersecting OSM elements";
+		return std::nullopt;
+	}
+	return assemble(selected);
 }
 } // namespace arnis::osm_tiles

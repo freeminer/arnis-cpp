@@ -14,6 +14,7 @@
 #include "../bresenham.h"
 #include "../structures/structures.h"
 #include "bridges.h"
+#include "../ground_decoration.h"
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -35,8 +36,8 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 
 	Block block_type = GRASS_BLOCK;
 	if (landuse_tag == "greenfield" || landuse_tag == "meadow" ||
-			landuse_tag == "grass" || landuse_tag == "orchard" ||
-			landuse_tag == "forest") {
+			landuse_tag == "grass" || landuse_tag == "flowerbed" ||
+			landuse_tag == "orchard" || landuse_tag == "forest") {
 		block_type = GRASS_BLOCK;
 	} else if (landuse_tag == "farmland") {
 		block_type = FARMLAND;
@@ -258,21 +259,8 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 					Tree::create_of_type(editor, Coord{x, 1, z}, tree_type,
 							&building_footprints, &bridge_surface);
 				} else if (random_choice == 2) {
-					int pick = 1 + static_cast<int>(rng.uniform(6));
-					Block flower_block = OAK_LEAVES;
-					if (pick == 2)
-						flower_block = RED_FLOWER;
-					else if (pick == 3)
-						flower_block = BLUE_FLOWER;
-					else if (pick == 4)
-						flower_block = YELLOW_FLOWER;
-					else if (pick == 5)
-						flower_block = FERN;
-					else if (pick == 6)
-						flower_block = WHITE_FLOWER;
-					editor.set_block(flower_block, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					ground_decoration::place_scattered_flower(
+							editor, x, z, ground_decoration::FlowerSetting::Forest);
 				} else if (random_choice <= 12) {
 					if (rng.uniform(100) < 12) {
 						editor.set_block(FERN, x, 1, z,
@@ -302,6 +290,10 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 							std::optional<std::vector<Block>>());
 				}
 			}
+		} else if (landuse_tag == "flowerbed") {
+			if (editor.check_for_block(x, 0, z,
+						std::optional<std::vector<Block>>{std::vector<Block>{DIRT}}))
+				ground_decoration::place_bed_flower(editor, x, z);
 		} else if (landuse_tag == "greenfield") {
 			if (editor.check_for_block(x, 0, z,
 						std::optional<std::vector<Block>>{
@@ -328,9 +320,8 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 					Tree::create(editor, Coord{x, 1, z}, &building_footprints,
 							&bridge_surface);
 				} else if (random_choice < 6) {
-					editor.set_block(RED_FLOWER, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					ground_decoration::place_scattered_flower(
+							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (random_choice < 9) {
 					editor.set_block(OAK_LEAVES, x, 1, z,
 							std::optional<std::vector<Block>>(),

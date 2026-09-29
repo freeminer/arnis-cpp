@@ -274,6 +274,20 @@ bool BridgeSurfaceMap::contains(int x, int z) const {
 	return deck_y_at(x, z).has_value();
 }
 
+bool BridgeSurfaceMap::deck_clears(int x, int z, int water_y) const
+{
+	constexpr int DECK_STRUCTURE_DEPTH = 3;
+	const auto deck = deck_y_at(x, z);
+	return deck && *deck - DECK_STRUCTURE_DEPTH > water_y;
+}
+
+bool BridgeSurfaceMap::over_grade_way(int, int) const
+{
+	// The C++ bridge bitmap currently stores deck elevations only.  A future
+	// grade-crossing index can make this exact; false preserves raised decks.
+	return false;
+}
+
 bool is_bridge_way(const ProcessedWay &way) {
 	if (way.tags.get("indoor") == std::optional<std::string>("yes") ||
 			way.tags.get("aeroway") == std::optional<std::string>("jet_bridge"))

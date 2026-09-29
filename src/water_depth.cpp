@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "land_cover/land_cover.h"
+#include "element_processing/bridges.h"
 #include "world_editor/floor_state.h"
 
 namespace arnis::water_depth
@@ -206,7 +207,8 @@ const std::vector<Block> &surface_vegetation()
 	using namespace block_definitions;
 	static const std::vector<Block> blocks{GRASS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, FERN,
 			LARGE_FERN_LOWER, LARGE_FERN_UPPER, DEAD_BUSH, RED_FLOWER, YELLOW_FLOWER,
-			BLUE_FLOWER, WHITE_FLOWER, OAK_LEAVES};
+			BLUE_FLOWER, WHITE_FLOWER, OAK_LEAVES, MOSS_CARPET, SWEET_BERRY_BUSH,
+			LILY_PAD};
 	return blocks;
 }
 
@@ -249,13 +251,18 @@ void clear_tree_from(WorldEditor &editor, int x, int y, int z)
 
 void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 {
-	for (int y = water_y + 1; y <= water_y + 2; ++y)
+	for (int y = water_y + 1; y <= water_y + 3; ++y)
 		if (editor.check_for_block_absolute(x, y, z, surface_vegetation()))
 			editor.set_block_absolute(AIR, x, y, z,
 					std::optional<std::vector<Block>>(surface_vegetation()),
 					std::nullopt);
 	if (editor.check_for_block_absolute(x, water_y + 1, z, tree_trunks()))
 		clear_tree_from(editor, x, water_y + 1, z);
+	else if (editor.check_for_block_absolute(x, water_y + 1, z,
+					 std::optional<std::vector<Block>>(tree_parts()),
+					 std::optional<std::vector<Block>>(tree_trunks())))
+		editor.set_block_absolute(AIR, x, water_y + 1, z,
+				std::optional<std::vector<Block>>(tree_parts()), std::nullopt);
 }
 
 void place_underwater_vegetation(
@@ -479,6 +486,15 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 {
 	depth = std::clamp(depth, 0, MAX_WATER_DEPTH);
 	depth = std::min(depth, std::max(0, water_y - world_editor::min_y() - 2));
+	// Bridge piers are registered by the bridge pass before water carving.  Rust
+	// keeps the pier material all the way to the bed instead of replacing it
+	// with a water column.
+	if (const auto pier = editor.support_column(x, z)) {
+		for (int dy = 0; dy <= depth; ++dy)
+			editor.set_block_absolute(*pier, x, water_y - dy, z, std::nullopt,
+					std::optional<std::vector<Block>>(std::vector<Block>{}));
+		return;
+	}
 
 	for (int dy = 0; dy <= depth; ++dy)
 		editor.set_block_absolute(WATER, x, water_y - dy, z, std::nullopt,
@@ -560,12 +576,18 @@ void carve_lc_water_pass(
 void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint)
 {
+	carve_lc_water_pass(editor, bwf, road_mask, tunnel_footprint, nullptr);
+}
+
+void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
+		const bridges::BridgeSurfaceMap *bridge_surface)
+{
 	if (bwf.empty())
 		return;
 	for (int z = bwf.min_z(); z <= bwf.max_z(); ++z) {
 		for (int x = bwf.min_x(); x <= bwf.max_x(); ++x) {
-			if (road_mask.contains(x, z) || tunnel_footprint.contains(x, z) ||
-					!editor.is_lc_water(x, z))
+			if (tunnel_footprint.contains(x, z) || !editor.is_lc_water(x, z))
 				continue;
 			int water_y = editor.get_water_level(x, z);
 			if (editor.get_ground_level(x, z) > water_y) {
@@ -577,6 +599,10 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 					continue;
 				water_y = editor.get_ground_level(x, z);
 			}
+			if (road_mask.contains(x, z) &&
+					(!bridge_surface || !bridge_surface->deck_clears(x, z, water_y) ||
+							bridge_surface->over_grade_way(x, z)))
+				continue;
 			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
 		}
 	}
@@ -585,6 +611,16 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
 		int min_x, int max_x, int min_z, int max_z)
+
+{
+	carve_lc_water_region(editor, bwf, road_mask, tunnel_footprint, min_x, max_x, min_z,
+			max_z, nullptr);
+}
+
+void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
+		int min_x, int max_x, int min_z, int max_z,
+		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	if (bwf.empty())
 		return;
@@ -594,8 +630,7 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 		return;
 	for (int z = z0; z <= z1; ++z)
 		for (int x = x0; x <= x1; ++x) {
-			if (road_mask.contains(x, z) || tunnel_footprint.contains(x, z) ||
-					!editor.is_lc_water(x, z))
+			if (tunnel_footprint.contains(x, z) || !editor.is_lc_water(x, z))
 				continue;
 			int water_y = editor.get_water_level(x, z);
 			if (editor.get_ground_level(x, z) > water_y) {
@@ -604,6 +639,10 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 					continue;
 				water_y = editor.get_ground_level(x, z);
 			}
+			if (road_mask.contains(x, z) &&
+					(!bridge_surface || !bridge_surface->deck_clears(x, z, water_y) ||
+							bridge_surface->over_grade_way(x, z)))
+				continue;
 			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
 		}
 }

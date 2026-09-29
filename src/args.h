@@ -11,6 +11,7 @@
 #include "celestial.h"
 #include "projection/web_mercator.h"
 #include "trees/tree_library.h"
+#include "caves_biomes.h"
 
 namespace arnis
 {
@@ -308,6 +309,11 @@ struct Args
 
 	// Enable filling ground (optional)
 	bool fillground{false};
+	// Minecraft-style cave generation options.  The CLI adapter may populate these;
+	// the generator keeps them optional so existing library callers remain stable.
+	bool caves{false};
+	std::optional<std::string> cave_biomes{std::nullopt};
+	std::optional<std::string> cave_asset_pack{std::nullopt};
 
 	// Enable city boundary ground generation (optional)
 	// When enabled, detects building clusters and places stone ground in urban areas.
@@ -352,6 +358,15 @@ struct Args
 				facade_mode_places_displays(mapillary_facade_mode))
 			return false;
 		if (building_facades && (bedrock || luanti))
+			return false;
+		if (cave_biomes && !caves)
+			return false;
+		if (cave_biomes) {
+			std::string error;
+			if (caves::BiomeAmounts::parse(*cave_biomes, &error), !error.empty())
+				return false;
+		}
+		if (cave_asset_pack && !caves)
 			return false;
 		if (!mapillary_facade_debug_walls.empty() && !mapillary_facade_debug_dir)
 			return false;

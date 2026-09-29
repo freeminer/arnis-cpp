@@ -2390,7 +2390,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const auto &groups = group_members ? *group_members : empty_groups;
 	if (style_seed) {
 		if (const auto group = groups.find(*style_seed); group != groups.end()) {
-			for (const auto sibling_id : group->second) {
+			for (const auto &sibling_id : group->second) {
 				if (sibling_id == element.id)
 					continue;
 				if (const auto *fill = flood_fill_cache.get_cached(sibling_id))

@@ -399,7 +399,7 @@ inline std::vector<Wall> walls_from_building(
 				(endpoint[0] - a[0]) / length, (endpoint[1] - a[1]) / length};
 		const auto normal = outward_normal(tangent, ccw);
 		std::vector<WallEdge> edges;
-		for (const auto edge : group) {
+		for (const auto &edge : group) {
 			const auto p0 = ring[edge], p1 = ring[(edge + 1) % ring.size()];
 			edges.push_back({edge, ids[edge], ids[(edge + 1) % ring.size()],
 					(p0[0] - a[0]) * tangent[0] + (p0[1] - a[1]) * tangent[1],

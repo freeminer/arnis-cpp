@@ -33,6 +33,7 @@ public:
 	std::optional<cache::ImageRecord> image(
 			const std::string &id, const std::string &url) const;
 	std::vector<cache::ImageRecord> search(const SearchCell &,
-			const std::string &endpoint, const std::string &token) const;
+			const std::string &endpoint, const std::string &token,
+			std::size_t maximum = mapillary_max_cells) const;
 };
 }

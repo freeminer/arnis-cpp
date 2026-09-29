@@ -20,11 +20,16 @@
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/buildings.h"
 #include "building_facades/registry.h"
+#include "ground_decoration.h"
 #include "mapillary/atlas.h"
 #include "floodfill_cache.h"
 #include "ground_generation.h"
+#include "ecoregion.h"
 #include "land_cover/land_cover.h"
 #include "ore_generation.h"
+#include "caves_deepslate.h"
+#include "caves_carver.h"
+#include "caves_water.h"
 #include "water_depth.h"
 #include "world_editor/floor_state.h"
 #include "clipping.h"
@@ -36,6 +41,7 @@
 #include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
+#include "trees/mapped.h"
 #include "models_3d/pipeline.h"
 #include "models_3d/placement_executor.h"
 #include "models_3d/custom/client.h"
@@ -1030,10 +1036,31 @@ bool generate_world(WorldEditor &editor,
 	world_editor::set_base_chunk_block_id(filler.id());
 	static const std::vector<ProcessedElement> no_elements;
 	const auto &elements = args.skip_objects() ? no_elements : input_elements;
+	// Build the authored-trunk index once per generation.  Ground decoration
+	// can then suppress only procedural crowns overlapping mapped trees, while
+	// preserving deterministic results for streamed tiles.
+	editor.mapped_trunks = std::make_shared<trees::mapped::MappedTrunks>(
+			trees::mapped::MappedTrunks::collect(elements, args.scale));
 	const auto geo = editor.geographic_bounds();
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
 	if (editor.ground)
 		editor.ground->set_snow_line_for_latitude(centre_lat);
+	// Rust loads the global ecoregion raster for Earth runs and keeps it on
+	// Ground so vegetation and climate decoration can query it per column.
+	if (editor.ground && args.body == CelestialBody::Earth) {
+		for (const auto &candidate :
+				{std::filesystem::path("assets/climate/ecoregions.grid"),
+						std::filesystem::path(__FILE__)
+										.parent_path()
+										.parent_path()
+										.parent_path() /
+								"assets/climate/ecoregions.grid"}) {
+			if (auto map = ecoregion::EcoMap::load(candidate)) {
+				editor.ground->set_ecoregion_map(std::move(*map));
+				break;
+			}
+		}
+	}
 	editor.set_regional_tree_placer({});
 	std::shared_ptr<trees::RegionSelector> shared_selector;
 	if (auto selector =
@@ -1201,6 +1228,7 @@ bool generate_world(WorldEditor &editor,
 				land_cover, world_width, world_height, elements, xzbbox, args.scale);
 		land_cover::apply_bridge_land_cover_repair(land_cover, cover_heights, world_width,
 				world_height, elements, xzbbox, args.scale);
+		land_cover::mark_beaches(land_cover);
 		// Each override deliberately invalidates the interpolated shoreline
 		// field. Rebuild it only after the complete Rust-equivalent override
 		// sequence so the ground pass sees OSM-correct water and smooth coasts.
@@ -1719,12 +1747,37 @@ bool generate_world(WorldEditor &editor,
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
 	ground_generation::generate_ground_layer(editor, args, xzbbox, building_footprints,
 			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint, &bridge_surface);
-	if (args.fillground)
+	// Rust runs a separate chunk-stable patch pass after the ground surface is
+	// laid out; keep it separate so streamed generation has identical origins.
+	ground_decoration::decorate_region(editor, args, xzbbox, xzbbox.min_x(),
+			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+	if (args.fillground) {
+		if (args.caves) {
+			caves::carve_region(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					(static_cast<std::int64_t>(xzbbox.min_x()) << 32) ^
+							static_cast<std::uint32_t>(xzbbox.min_z()),
+					world_editor::terrain_floor_y());
+			caves::generate_water_features(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					(static_cast<std::int64_t>(xzbbox.min_x()) << 32) ^
+							static_cast<std::uint32_t>(xzbbox.min_z()),
+					world_editor::terrain_floor_y());
+			// Rust's cave pipeline establishes the deepslate host transition before ore blobs.
+			caves::apply_deepslate(editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(),
+					xzbbox.max_z());
+			caves::decorate_region(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					(static_cast<std::int64_t>(xzbbox.min_x()) << 32) ^
+							static_cast<std::uint32_t>(xzbbox.min_z()),
+					world_editor::terrain_floor_y(), args);
+		}
 		ore_generation::generate_ores(
 				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+	}
 
 	water_depth::carve_lc_water_pass(
-			editor, big_water_field, road_mask, tunnel_footprint);
+			editor, big_water_field, road_mask, tunnel_footprint, &bridge_surface);
 	// Rust releases ground-surface protection after the ground/ore/water
 	// passes. Models and landmarks own their final footprints.
 	editor.release_sealed_surface();

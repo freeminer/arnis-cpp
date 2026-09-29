@@ -57,7 +57,7 @@ std::tuple<std::size_t, std::size_t, double, std::uint8_t> CanopyData::stats() c
 	std::size_t covered = 0, canopy = 0;
 	std::uint64_t sum = 0;
 	std::uint8_t maximum = 0;
-	for (const auto h : grid_) {
+	for (const auto &h : grid_) {
 		if (h == CANOPY_NODATA)
 			continue;
 		++covered;
@@ -285,7 +285,7 @@ bool read_strip_rows(const std::filesystem::path &path, const StripIndex &index,
 		return false;
 	compressed_rows.clear();
 	compressed_rows.reserve(rows.size());
-	for (const auto row : rows) {
+	for (const auto &row : rows) {
 		if (row >= TILE_PX || index.counts[row] == 0 ||
 				index.counts[row] > 64 * 1024 * 1024)
 			return false;

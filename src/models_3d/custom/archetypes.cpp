@@ -85,7 +85,7 @@ bool valid_placement(const ArchetypePrescan &p, PlacementRef r)
 std::vector<PlacementRef> valid_placement_refs(const ArchetypePrescan &p)
 {
 	std::vector<PlacementRef> out;
-	for (const auto r : placement_refs(p))
+	for (const auto &r : placement_refs(p))
 		if (valid_placement(p, r))
 			out.push_back(r);
 	return out;
@@ -102,7 +102,7 @@ std::vector<PlacementPlan> build_placement_plans(
 		const ArchetypePrescan &p, const ArchetypeModels &m, double s)
 {
 	std::vector<PlacementPlan> out;
-	for (const auto r : valid_placement_refs(p)) {
+	for (const auto &r : valid_placement_refs(p)) {
 		const auto k = model_key_for(r);
 		const auto sc = model_scale_for(p, r, m, s);
 		if (sc <= 0)

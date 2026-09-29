@@ -12,6 +12,7 @@ inline constexpr int MAX_ORE_DEPTH = 384;
 struct OreRule
 {
 	Block block;
+	Block deep_block = Block{};
 	int depth_min, depth_max;
 	unsigned vein_min, vein_max, avg_veins_per_chunk;
 };

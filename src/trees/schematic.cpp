@@ -129,6 +129,21 @@ std::pair<int, int> trunk_slot_s(int x, int z, int spacing)
 			std::bit_cast<std::int32_t>(
 					std::uint32_t(cz) * std::uint32_t(s) + std::uint32_t((h >> 1) & 1U))};
 }
+
+std::pair<int, int> rotate_xz(int x, int z, int width, int length, unsigned rotation)
+{
+	switch (rotation & 3u) {
+	case 1:
+		return {length - 1 - z, x};
+	case 2:
+		return {width - 1 - x, length - 1 - z};
+	case 3:
+		return {z, width - 1 - x};
+	default:
+		return {x, z};
+	}
+}
+
 bool place_schematic(world_editor::WorldEditor &editor, const Schematic &s, int x, int y,
 		int z, unsigned rot)
 {
@@ -139,23 +154,7 @@ bool place_schematic(world_editor::WorldEditor &editor, const Schematic &s, int 
 	const int center_x = (final_w - 1) / 2;
 	const int center_z = (final_l - 1) / 2;
 	for (const auto &v : s.voxels) {
-		int px = v.x, pz = v.z;
-		switch (rot & 3u) {
-		case 1:
-			px = s.length - 1 - v.z;
-			pz = v.x;
-			break;
-		case 2:
-			px = s.width - 1 - v.x;
-			pz = s.length - 1 - v.z;
-			break;
-		case 3:
-			px = v.z;
-			pz = s.width - 1 - v.x;
-			break;
-		default:
-			break;
-		}
+		const auto [px, pz] = rotate_xz(v.x, v.z, s.width, s.length, rot);
 		Block b = structures::resolve_schem_block(v.block);
 		if (b != Block{}) {
 			editor.set_block_absolute(b, x + px - center_x, y + v.y, z + pz - center_z);
@@ -176,23 +175,7 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		return false;
 	const int cx = (fw - 1) / 2, cz = (fl - 1) / 2;
 	const auto position = [&](const auto &v) {
-		int rx = v.x, rz = v.z;
-		switch (rot & 3) {
-		case 1:
-			rx = s.length - 1 - v.z;
-			rz = v.x;
-			break;
-		case 2:
-			rx = s.width - 1 - v.x;
-			rz = s.length - 1 - v.z;
-			break;
-		case 3:
-			rx = v.z;
-			rz = s.width - 1 - v.x;
-			break;
-		default:
-			break;
-		}
+		const auto [rx, rz] = rotate_xz(v.x, v.z, s.width, s.length, rot);
 		return std::pair{anchor_x + rx - cx, anchor_z + rz - cz};
 	};
 	const auto is_log = [](const std::string &name) {

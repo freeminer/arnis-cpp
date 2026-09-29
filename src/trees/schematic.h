@@ -22,6 +22,9 @@ TreeSize schematic_size(const Schematic &schem);
 // One deterministic trunk position per lattice cell; shared by regional and
 // canopy-driven placement so streamed tiles cannot disagree at their seam.
 std::pair<int, int> trunk_slot_s(int x, int z, int spacing);
+// Rotate a schematic-local X/Z coordinate clockwise, preserving the Rust
+// convention that dimensions refer to the unrotated asset.
+std::pair<int, int> rotate_xz(int x, int z, int width, int length, unsigned rotation);
 bool place_schematic(world_editor::WorldEditor &editor, const Schematic &schem, int x,
 		int y, int z, unsigned rotation = 0);
 bool place_schematic_rooted(world_editor::WorldEditor &editor, const Schematic &schem,

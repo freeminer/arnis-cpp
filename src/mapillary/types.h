@@ -451,7 +451,7 @@ struct Params
 		d(persp_margin);
 		u(persp_landscape_only);
 		d(perspective_penalty);
-		for (const auto model : camera_types)
+		for (const auto &model : camera_types)
 			u(static_cast<int>(model));
 		d(seq_window_s);
 		u(seq_min_panos);

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "../../../arnis_adapter.h"
@@ -55,7 +56,15 @@ public:
 
 	std::optional<int> deck_y_at(int x, int z) const;
 	std::optional<int> nearby_deck_y(int x, int z, int radius) const;
+	bool deck_near(int x, int z, int y, int tolerance) const;
+	bool support_blocked(int x, int z, int deck_y) const;
+	std::optional<int> supported_top(
+			const WorldEditor &editor, int x, int z, int radius) const;
 	bool contains(int x, int z) const { return deck_y_at(x, z).has_value(); }
+	// Rust water-carving contract: a deck clears the water only when its lowest
+	// structural block (including girders) is above the water surface.
+	bool deck_clears(int x, int z, int water_y) const;
+	bool over_grade_way(int x, int z) const;
 
 private:
 	struct PairHash
@@ -67,6 +76,8 @@ private:
 		}
 	};
 	std::unordered_map<std::pair<int, int>, int, PairHash> deck_y_;
+	std::unordered_map<std::pair<int, int>, int, PairHash> deck_low_y_;
+	std::unordered_set<std::pair<int, int>, PairHash> grade_crossings_;
 };
 
 bool is_bridge_way(const ProcessedWay &way);

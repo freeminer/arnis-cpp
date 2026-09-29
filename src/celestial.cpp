@@ -115,11 +115,23 @@ double celestial_vertical_exaggeration(CelestialBody body)
 	return is_earth(body) ? 1.0 : 4.0;
 }
 
+double celestial_terrain_gain(CelestialBody body)
+{
+	return celestial_height_gain(body) * celestial_vertical_exaggeration(body);
+}
+
 double celestial_world_scale(CelestialBody body)
 {
 	return is_earth(body)
 				   ? 1.0
 				   : celestial_scale_ratio(body) / celestial_meters_per_block(body);
+}
+
+double celestial_vanilla_relief_headroom_m(CelestialBody body)
+{
+	constexpr double vanilla_headroom_blocks = 366.0;
+	return vanilla_headroom_blocks * celestial_meters_per_block(body) /
+		   celestial_vertical_exaggeration(body);
 }
 
 std::pair<Block, Block> celestial_surface_palette(CelestialBody body, int slope,
@@ -128,10 +140,88 @@ std::pair<Block, Block> celestial_surface_palette(CelestialBody body, int slope,
 	using namespace block_definitions;
 	if (body == CelestialBody::Earth)
 		return {GRASS_BLOCK, DIRT};
-	if (body == CelestialBody::Moon)
-		return {END_STONE, END_STONE};
-
 	const auto h = land_cover::coord_hash(x, z);
+	if (body == CelestialBody::Moon) {
+		if (slope > 6) {
+			switch (h % 10) {
+			case 0:
+			case 1:
+			case 2:
+			case 3:
+			case 4:
+				return {ANDESITE, STONE};
+			case 5:
+			case 6:
+			case 7:
+				return {STONE, STONE};
+			default:
+				return {GRAVEL, STONE};
+			}
+		}
+		const double patch = ground_generation::value_noise_01(x, z, 7);
+		if (patch > .72) {
+			switch (h % 10) {
+			case 0:
+			case 1:
+			case 2:
+			case 3:
+			case 4:
+			case 5:
+			case 6:
+				return {GRAVEL, STONE};
+			case 7:
+			case 8:
+				return {ANDESITE, STONE};
+			default:
+				return {GRAY_CONCRETE_POWDER, STONE};
+			}
+		}
+		if (patch < .24) {
+			switch (h % 10) {
+			case 0:
+			case 1:
+			case 2:
+			case 3:
+			case 4:
+			case 5:
+				return {ANDESITE, STONE};
+			case 6:
+			case 7:
+			case 8:
+				return {STONE, STONE};
+			default:
+				return {GRAVEL, STONE};
+			}
+		}
+		switch (h % 20) {
+		case 0:
+		case 1:
+		case 2:
+		case 3:
+		case 4:
+		case 5:
+		case 6:
+		case 7:
+		case 8:
+		case 9:
+		case 10:
+		case 11:
+		case 12:
+		case 13:
+			return {GRAY_CONCRETE_POWDER, STONE};
+		case 14:
+		case 15:
+		case 16:
+			return {GRAVEL, STONE};
+		case 17:
+		case 18:
+			return {ANDESITE, STONE};
+		default:
+			return {STONE, STONE};
+		}
+	}
+
+	// Mars: rusty dust over red regolith, with polar caps and layered scarps.
 	if (std::abs(latitude_degrees) > 74.0 && slope <= 4) {
 		switch (h % 12) {
 		case 0:

@@ -212,7 +212,7 @@ UsgsResolution choose_usgs_resolution(
 					 180. * MERCATOR_RADIUS_M;
 	const double cell = std::min(w / double(std::max<std::size_t>(1, width - 1)),
 			h / double(std::max<std::size_t>(1, height - 1)));
-	for (const auto r : {UsgsResolution::M1, UsgsResolution::M3, UsgsResolution::M10,
+	for (const auto &r : {UsgsResolution::M1, UsgsResolution::M3, UsgsResolution::M10,
 				 UsgsResolution::M30})
 		if (!std::isfinite(cell) || cell <= 0. || meters_per_pixel(r) * 1.5 >= cell)
 			return r;

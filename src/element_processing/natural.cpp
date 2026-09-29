@@ -15,6 +15,8 @@
 #include "../ground_generation.h"
 #include "../land_cover/land_cover.h"
 #include "../deterministic_rng.h"
+#include "../trees/mapped.h"
+#include "../ground_decoration.h"
 namespace arnis
 {
 
@@ -107,6 +109,32 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	if (it_nat == tags.end())
 		return;
 	const std::string natural_type = it_nat->second;
+	// Rust maps tree_row ways at a fixed 8 m spacing (including both ends),
+	// rather than scattering trees from the entire filled polygon.  Handle the
+	// mapped row before the generic natural-area decoration pass.
+	if (natural_type == "tree_row" && element.is_way()) {
+		const auto &nodes = element.as_way().nodes;
+		const auto mapped_row =
+				trees::mapped::from_tags(tags, static_cast<std::uint64_t>(element.id()));
+		std::vector<std::pair<int, int>> row_nodes;
+		row_nodes.reserve(nodes.size());
+		for (const auto &node : nodes)
+			row_nodes.emplace_back(node.x, node.z);
+		for (const auto [x, z] :
+				trees::mapped::tree_row_positions(row_nodes, args.scale)) {
+			if (editor.check_for_block(
+						x, 0, z, std::optional<std::vector<Block>>{{GRASS_BLOCK}})) {
+				TreeType row_kind = mapped_row.kind;
+				if (mapped_row.height_m > 0.0 && mapped_row.height_m < 4.0)
+					row_kind = TreeType::Bush;
+				else if (mapped_row.height_m > 24.0 && row_kind == TreeType::Oak)
+					row_kind = TreeType::TallOak;
+				Tree::create_of_type(editor, {x, 1, z}, row_kind, &building_footprints,
+						&bridge_surface, true);
+			}
+		}
+		return;
+	}
 
 	if (natural_type == "tree") {
 		if (element.is_node()) {
@@ -194,6 +222,54 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					}
 				}
 			}
+			// Rust's mapped-tree selection recognizes the broader OSM genus pools;
+			// retain the older fast paths above, then fill in newer named genera.
+			if (trees_ok_to_generate.empty()) {
+				std::string genus;
+				for (const char *key : {"genus", "species", "taxon"}) {
+					auto it = tags.find(key);
+					if (it != tags.end()) {
+						genus = it->second;
+						const auto sep = genus.find_first_of(" /_- ");
+						if (sep != std::string::npos)
+							genus.resize(sep);
+						break;
+					}
+				}
+				if (genus == "Betula")
+					trees_ok_to_generate = {TreeType::Birch};
+				else if (genus == "Quercus")
+					trees_ok_to_generate = {TreeType::Oak};
+				else if (genus == "Salix")
+					trees_ok_to_generate = {TreeType::Willow};
+				else if (genus == "Picea" || genus == "Pinus" || genus == "Larix" ||
+						 genus == "Cedrus")
+					trees_ok_to_generate = {TreeType::Spruce, TreeType::Pine};
+				else if (genus == "Acacia" || genus == "Vachellia" || genus == "Albizia")
+					trees_ok_to_generate = {TreeType::Acacia};
+				else if (genus == "Phoenix" || genus == "Cocos" || genus == "Sabal")
+					trees_ok_to_generate = {TreeType::Jungle};
+				else if (genus == "Rhizophora" || genus == "Avicennia" ||
+						 genus == "Laguncularia" || genus == "Bruguiera" ||
+						 genus == "Sonneratia")
+					trees_ok_to_generate = {TreeType::Mangrove};
+				else if (genus == "Prunus" || genus == "Malus" || genus == "Pyrus" ||
+						 genus == "Magnolia" || genus == "Cercis" ||
+						 genus == "Crataegus" || genus == "Sorbus" ||
+						 genus == "Amelanchier" || genus == "Jacaranda" ||
+						 genus == "Lagerstroemia")
+					trees_ok_to_generate = {TreeType::FloweringOak};
+				else if (genus == "Abies" || genus == "Araucaria" ||
+						 genus == "Callitris" || genus == "Calocedrus" ||
+						 genus == "Chamaecyparis" || genus == "Cryptomeria" ||
+						 genus == "Cunninghamia" || genus == "Cupressus" ||
+						 genus == "Juniperus" || genus == "Keteleeria" ||
+						 genus == "Metasequoia" || genus == "Pseudotsuga" ||
+						 genus == "Sequoia" || genus == "Sequoiadendron" ||
+						 genus == "Taxodium" || genus == "Taxus" || genus == "Thuja" ||
+						 genus == "Tsuga")
+					trees_ok_to_generate = {TreeType::Spruce};
+			}
 
 			// Ensure we have at least one tree type
 			if (trees_ok_to_generate.empty()) {
@@ -205,6 +281,19 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			// Select a random tree type
 			TreeType tree_type = trees_ok_to_generate[rng.uniform(
 					static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
+			// Use the shared Rust-parity mapped selector whenever OSM supplies
+			// species/genus information; this keeps node and regional selection
+			// on the same deterministic pool.
+			if (tags.contains("genus") || tags.contains("species") ||
+					tags.contains("taxon") || tags.contains("genus:wikidata")) {
+				const auto mapped = trees::mapped::from_tags(
+						tags, static_cast<std::uint64_t>(element.id()));
+				tree_type = mapped.kind;
+				if (mapped.height_m > 0.0 && mapped.height_m < 4.0)
+					tree_type = TreeType::Bush;
+				else if (mapped.height_m > 24.0 && tree_type == TreeType::Oak)
+					tree_type = TreeType::TallOak;
+			}
 
 			// Create the tree
 			Tree::create_of_type(editor, Coord{x, 1, z}, tree_type, &building_footprints,
@@ -441,17 +530,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					Tree::create(
 							editor, {x, 1, z}, &building_footprints, &bridge_surface);
 				} else if (random_choice == 1) {
-					int f = 1 + static_cast<int>(rng.uniform(4));
-					Block flower_block = RED_FLOWER;
-					if (f == 1)
-						flower_block = RED_FLOWER;
-					else if (f == 2)
-						flower_block = BLUE_FLOWER;
-					else if (f == 3)
-						flower_block = YELLOW_FLOWER;
-					else
-						flower_block = WHITE_FLOWER;
-					editor.set_block(flower_block, x, 1, z, std::nullopt, std::nullopt);
+					ground_decoration::place_scattered_flower(
+							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (random_choice < 40) {
 					editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
 					if (random_choice < 15) {
@@ -488,17 +568,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 								editor, {x, 1, z}, &building_footprints, &bridge_surface);
 					}
 				} else if (random_choice == 1) {
-					int f = 1 + static_cast<int>(rng.uniform(4));
-					Block flower_block = RED_FLOWER;
-					if (f == 1)
-						flower_block = RED_FLOWER;
-					else if (f == 2)
-						flower_block = BLUE_FLOWER;
-					else if (f == 3)
-						flower_block = YELLOW_FLOWER;
-					else
-						flower_block = WHITE_FLOWER;
-					editor.set_block(flower_block, x, 1, z, std::nullopt, std::nullopt);
+					ground_decoration::place_scattered_flower(
+							editor, x, z, ground_decoration::FlowerSetting::Forest);
 				} else if (random_choice <= 12) {
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				}
@@ -755,17 +826,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 							editor, {x, 1, z}, &building_footprints, &bridge_surface);
 				} else if (hill_chance < 50) {
 					// 5% chance for flowers
-					int f = 1 + static_cast<int>(rng.uniform(4));
-					Block flower_block = RED_FLOWER;
-					if (f == 1)
-						flower_block = RED_FLOWER;
-					else if (f == 2)
-						flower_block = BLUE_FLOWER;
-					else if (f == 3)
-						flower_block = YELLOW_FLOWER;
-					else
-						flower_block = WHITE_FLOWER;
-					editor.set_block(flower_block, x, 1, z, std::nullopt, std::nullopt);
+					ground_decoration::place_scattered_flower(
+							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (hill_chance < 600) {
 					// 55% chance for grass
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);

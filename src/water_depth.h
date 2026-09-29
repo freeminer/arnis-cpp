@@ -7,6 +7,11 @@
 #include "../../arnis_adapter.h"
 #include "floodfill_cache.h"
 
+namespace arnis::bridges
+{
+class BridgeSurfaceMap;
+}
+
 namespace arnis::water_depth
 {
 
@@ -53,8 +58,15 @@ void carve_lc_water_pass(
 		WorldEditor &editor, const BigWaterField &bwf, const RoadMaskBitmap &road_mask);
 void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint);
+void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
+		const bridges::BridgeSurfaceMap *bridge_surface);
 void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
 		int min_x, int max_x, int min_z, int max_z);
+void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
+		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
+		int min_x, int max_x, int min_z, int max_z,
+		const bridges::BridgeSurfaceMap *bridge_surface);
 
 }

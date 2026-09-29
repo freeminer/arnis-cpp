@@ -56,8 +56,8 @@ void generate_barriers(world_editor::WorldEditor &editor,
 						barrier_material = block_definitions::EARTH_FENCE_BARBED;
 						barrier_height = 2;
 					} else if (f == "chain_link" || f == "metal" || f == "wire" ||
-							   f == "corrugated_metal" ||
-							   f == "electric" || f == "metal_bars") {
+							   f == "corrugated_metal" || f == "electric" ||
+							   f == "metal_bars") {
 						barrier_material = block_definitions::EARTH_FENCE_CHAINLINK;
 						barrier_height = 2;
 					} else if (f == "slatted" || f == "paling") {
@@ -141,8 +141,8 @@ void generate_barriers(world_editor::WorldEditor &editor,
 			int bx = std::get<0>(pt);
 			int bz = std::get<2>(pt);
 
-			if (auto deck_y = bridge_surface.nearby_deck_y(
-						bx, bz, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+			if (auto deck_y = bridge_surface.supported_top(
+						editor, bx, bz, BRIDGE_BARRIER_NEARBY_RADIUS)) {
 				for (int y = 1; y <= wall_height; ++y) {
 					editor.set_block_absolute(barrier_material, bx, *deck_y + y, bz,
 							std::optional<std::vector<block_definitions::Block>>(),
@@ -183,15 +183,14 @@ void place_barrier_node_block(world_editor::WorldEditor &editor,
 		const bridges::BridgeSurfaceMap &bridge_surface, block_definitions::Block block,
 		int dy)
 {
-	if (auto deck_y = bridge_surface.nearby_deck_y(
-				node.x, node.z, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+	if (auto deck_y = bridge_surface.supported_top(
+				editor, node.x, node.z, BRIDGE_BARRIER_NEARBY_RADIUS)) {
 		editor.set_block_absolute(block, node.x, *deck_y + dy, node.z,
 				std::optional<std::vector<block_definitions::Block>>(),
 				std::optional<std::vector<block_definitions::Block>>());
 	} else {
 		editor.set_block(block, node.x, dy, node.z,
-				std::optional<std::vector<block_definitions::Block>>(),
-				std::nullopt);
+				std::optional<std::vector<block_definitions::Block>>(), std::nullopt);
 	}
 }
 

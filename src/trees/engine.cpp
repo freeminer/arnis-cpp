@@ -2,10 +2,52 @@
 #include "../element_processing/bridges.h"
 #include "../block_definitions.h"
 #include "../element_processing/tree.h"
+#include "mapped.h"
+#include "../ecoregion.h"
+#include "../land_cover/land_cover.h"
 #include <array>
 #include <algorithm>
 namespace arnis::trees
 {
+namespace
+{
+std::optional<Habitat> ecoregion_habitat(
+		const world_editor::WorldEditor &editor, int x, int z, std::uint8_t cover)
+{
+	if (!editor.ground || !editor.mg)
+		return std::nullopt;
+	// Match Rust's rule that water/built/bare covers keep their explicit
+	// habitat; the climate map refines only vegetation-bearing cells.
+	using namespace land_cover;
+	if (cover == LC_WATER || cover == LC_BUILT_UP || cover == LC_BARE ||
+			cover == LC_SNOW_ICE)
+		return std::nullopt;
+	const auto eco = editor.ground->ecoregion_at(
+			{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+	if (!eco)
+		return std::nullopt;
+	switch (eco->biome) {
+	case ecoregion::EcoBiome::MoistTropical:
+	case ecoregion::EcoBiome::DryTropical:
+	case ecoregion::EcoBiome::TropicalConifer:
+	case ecoregion::EcoBiome::TropicalGrassland:
+		return Habitat::Tropical;
+	case ecoregion::EcoBiome::TemperateConifer:
+	case ecoregion::EcoBiome::Boreal:
+	case ecoregion::EcoBiome::MontaneGrassland:
+	case ecoregion::EcoBiome::Tundra:
+		return Habitat::Conifer;
+	case ecoregion::EcoBiome::Flooded:
+	case ecoregion::EcoBiome::Mangroves:
+		return Habitat::Wet;
+	case ecoregion::EcoBiome::Desert:
+	case ecoregion::EcoBiome::Mediterranean:
+		return Habitat::Dry;
+	default:
+		return Habitat::Lowland;
+	}
+}
+}
 std::uint64_t tree_seed(int x, int z)
 {
 	std::uint64_t h = 1469598103934665603ull;
@@ -49,6 +91,7 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 {
 	const auto blocked = [&](int sx, int sz) {
 		return editor.surface_is_sealed(sx, sz) || editor.is_lc_water(sx, sz) ||
+			   (editor.mapped_trunks && editor.mapped_trunks->under_crown(sx, sz)) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,
@@ -94,8 +137,9 @@ bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		SlotRequest request, const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
-	return place_selected_region_tree(editor, selector, x, z,
-			habitat_for_land_cover(cover), elevation_y, request, building_footprints,
-			bridge_surface);
+	const auto habitat = ecoregion_habitat(editor, x, z, cover)
+								 .value_or(habitat_for_land_cover(cover));
+	return place_selected_region_tree(editor, selector, x, z, habitat, elevation_y,
+			request, building_footprints, bridge_surface);
 }
 }

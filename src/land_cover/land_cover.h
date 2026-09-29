@@ -32,6 +32,7 @@ inline constexpr uint8_t LC_GRASSLAND = 30;
 inline constexpr uint8_t LC_CROPLAND = 40;
 inline constexpr uint8_t LC_BUILT_UP = 50;
 inline constexpr uint8_t LC_BARE = 60;
+inline constexpr uint8_t LC_BEACH = 61;
 inline constexpr uint8_t LC_SNOW_ICE = 70;
 inline constexpr uint8_t LC_WATER = 80;
 inline constexpr uint8_t LC_WETLAND = 90;
@@ -98,6 +99,9 @@ struct LandCoverData
 
 	void refresh_water_blend_grid();
 };
+
+// Reclassify bare cells connected to water within the Rust beach reach.
+void mark_beaches(LandCoverData &data);
 
 // Assemble an elevation-aligned classification grid from decoded ESA rasters.
 // Missing/no-data pixels remain zero until `fill_land_cover_gaps`; an empty

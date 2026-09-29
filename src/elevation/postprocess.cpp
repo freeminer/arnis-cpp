@@ -121,7 +121,7 @@ std::vector<double> smooth_sparse_water_field(
 				auto found = bins.find(bin_key(xx, yy));
 				if (found == bins.end())
 					continue;
-				for (const auto j : found->second) {
+				for (const auto &j : found->second) {
 					const double dx = static_cast<double>(cells[j].first) - x;
 					const double dy = static_cast<double>(cells[j].second) - y;
 					const double distance = std::hypot(dx, dy);

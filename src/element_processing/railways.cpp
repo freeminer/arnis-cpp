@@ -23,6 +23,7 @@ using std::vector;
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
 #include "advtrains.h"
+#include "connected_blocks.h"
 #undef stoi
 namespace arnis
 {
@@ -562,7 +563,7 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 		const int ground = editor.get_ground_level(mx, mz);
 		editor.set_block_absolute(GRAY_CONCRETE, mx, ground, mz, nullopt, nullopt);
 		for (int y = ground + 1; y <= wire_y; ++y)
-			editor.set_block_absolute(COBBLESTONE_WALL, mx, y, mz, nullopt, nullopt);
+			connected_blocks::place_connected(editor, COBBLESTONE_WALL, mx, y, mz);
 		for (int d = 1; d < CATENARY_MAST_OFFSET; ++d)
 			editor.set_block_absolute(sx ? CHAIN_X : CHAIN_Z, cx + sx * d, wire_y,
 					cz + sz * d, nullopt, nullopt);

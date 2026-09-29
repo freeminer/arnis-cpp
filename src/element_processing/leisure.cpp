@@ -15,6 +15,7 @@
 #include "surfaces.h"
 #include "sport_pitches.h"
 #include "bridges.h"
+#include "../ground_decoration.h"
 #include "../structures/structures.h"
 #include "../deterministic_rng.h"
 #include "../../../arnis_adapter.h"
@@ -130,22 +131,8 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 					int random_choice = static_cast<int>(rng.uniform(1000));
 
 					if (random_choice >= 0 && random_choice < 30) {
-						// Plants
-						Block plant_choice = WHITE_FLOWER;
-						if (random_choice < 5) {
-							plant_choice = RED_FLOWER;
-						} else if (random_choice < 10) {
-							plant_choice = YELLOW_FLOWER;
-						} else if (random_choice < 16) {
-							plant_choice = BLUE_FLOWER;
-						} else if (random_choice < 22) {
-							plant_choice = WHITE_FLOWER;
-						} else {
-							plant_choice =
-									GRASS; // Use GRASS instead of FERN since FERN is not defined
-						}
-						editor.set_block(
-								plant_choice, x, 1, z, std::nullopt, std::nullopt);
+						ground_decoration::place_scattered_flower(
+								editor, x, z, ground_decoration::FlowerSetting::Garden);
 					} else if (random_choice >= 30 && random_choice < 90) {
 						// Grass
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
