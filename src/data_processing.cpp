@@ -180,7 +180,11 @@ bool should_stream_to_disk(std::size_t tile_count)
 		if (std::string(v) == "0")
 			return false;
 	}
-	constexpr std::uint64_t base_mb = 500, per_region_mb = 26;
+	// Keep the estimate in lockstep with Rust's should_stream_to_disk: the
+	// fixed editor/decoder footprint is about 800 MiB, while each resident
+	// region contributes roughly 14 MiB.  The previous inverse weighting
+	// enabled streaming for small worlds and missed large ones.
+	constexpr std::uint64_t base_mb = 800, per_region_mb = 14;
 	std::uint64_t available_mb = 0;
 	std::ifstream mem("/proc/meminfo");
 	std::string key;
@@ -218,7 +222,10 @@ GenerationFeatureFlags generation_features(
 GenerationTilePolicy generation_tile_policy(std::size_t tile_count, bool java_format)
 {
 	return {should_use_parallel_tiles(tile_count, java_format),
-			should_stream_to_disk(tile_count)};
+			// Rust's eviction path is Java-region specific.  Bedrock and Luanti
+			// keep their native writers ordered and must never inherit the Java
+			// stream-to-disk decision.
+			java_format && should_stream_to_disk(tile_count)};
 }
 
 void release_finished_fills(FloodFillCache &cache,
@@ -979,15 +986,28 @@ bool generate_world(WorldEditor &editor,
 			args.building_facades_dir
 					? std::optional<std::filesystem::path>(*args.building_facades_dir)
 					: std::nullopt;
-	if (!facade_directory && args.mapillary_facades_dir)
-		facade_directory = std::filesystem::path(*args.mapillary_facades_dir);
 	if (!facade_directory && args.building_facades) {
-		const std::filesystem::path packaged_facades("assets/building-facades");
-		if (std::filesystem::exists(packaged_facades))
-			facade_directory = packaged_facades;
+		// Match Rust's executable/repository asset search instead of depending
+		// on the caller's current working directory.
+		const std::array<std::filesystem::path, 3> candidates = {
+				std::filesystem::path("assets/building-facades"),
+				std::filesystem::path(__FILE__)
+								.parent_path()
+								.parent_path()
+								.parent_path()
+								.parent_path() /
+						"assets/building-facades",
+				std::filesystem::current_path() / "assets/building-facades"};
+		for (const auto &candidate : candidates)
+			if (std::filesystem::is_directory(candidate)) {
+				facade_directory = candidate;
+				break;
+			}
 	}
-	const bool facade_set_enabled =
-			args.building_facades || args.mapillary_facades_dir.has_value();
+	// Mapillary exports and preset building textures are different schemas.
+	// Do not feed a Mapillary export directory to FacadeSet::load_directory;
+	// Rust installs that export into its own facade store first.
+	const bool facade_set_enabled = args.building_facades;
 	building_facades::reset(
 			facade_set_enabled, facade_directory, args.facade_px, args.scale);
 	editor.reserve_ground_level_cache();

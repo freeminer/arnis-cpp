@@ -190,7 +190,11 @@ std::optional<Header> parse_header(const std::vector<std::uint8_t> &b)
 		return {};
 	Header h{le64(b, 8), le64(b, 16), le64(b, 40), le64(b, 56), b[97], b[98], b[100],
 			b[101]};
-	if (!h.root_length || h.root_length > MAX_DIRECTORY_BYTES || b[99] != 1)
+	// Overture archives commonly leave tile type unspecified (0) because
+	// their payload is a private MVT-compatible stream. Rust accepts both the
+	// declared MVT type and PMTiles' "unknown" type.
+	if (!h.root_length || h.root_length > MAX_DIRECTORY_BYTES ||
+			(b[99] != 0 && b[99] != 1))
 		return {};
 	return h;
 }
@@ -305,7 +309,8 @@ std::optional<std::vector<std::uint8_t>> read_tile(const Header &header,
 			return decompress(*raw, header.tile_compression, MAX_TILE_BYTES);
 		}
 		if (!entry->length || entry->length > MAX_DIRECTORY_BYTES ||
-				UINT64_MAX - header.leaf_offset < entry->offset)
+				UINT64_MAX - header.leaf_offset < entry->offset ||
+				UINT64_MAX - header.leaf_offset - entry->offset < entry->length)
 			return {};
 		auto raw = read_range(header.leaf_offset + entry->offset, entry->length);
 		if (!raw || raw->size() != entry->length)

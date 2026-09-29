@@ -3,16 +3,24 @@
 #include "../../../../http.h"
 #include <filesystem>
 #include <fstream>
+#include <cctype>
 namespace arnis::models_3d
 {
 std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 {
-	auto it = memo_.find(q);
+	std::string key = q;
+	const auto first = key.find_first_not_of(" \t\r\n");
+	const auto last = key.find_last_not_of(" \t\r\n");
+	key = first == std::string::npos ? std::string{}
+									 : key.substr(first, last - first + 1);
+	if (key.size() >= 1 && key[0] == 'q')
+		key[0] = 'Q';
+	auto it = memo_.find(key);
 	if (it != memo_.end())
 		return it->second;
-	auto *e = lookup_wikidata(q);
+	auto *e = lookup_wikidata(key);
 	if (!e)
-		return memo_[q] = {};
+		return memo_[key] = {};
 	auto cached = wikidata_client::load_cached(cache_, e->url);
 	// Rust's cache is keyed solely by URL; select GLB/STL from downloaded bytes.
 	auto p = cache_ / (wikidata_client::url_hash(e->url) + ".bin");
@@ -22,32 +30,32 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 		if (fetch_bytes_) {
 			auto fetched = fetch_bytes_(e->url, wikidata_client::MAX_MODEL_BYTES);
 			if (!fetched || fetched->size() > wikidata_client::MAX_MODEL_BYTES)
-				return memo_[q] = {};
+				return memo_[key] = {};
 			bytes = std::move(*fetched);
 		} else {
 			// Compatibility fallback for the in-engine mapgen host.
 			if (!http_to_file(e->url, p.string()))
-				return memo_[q] = {};
+				return memo_[key] = {};
 			std::ifstream in(p, std::ios::binary);
 			in.seekg(0, std::ios::end);
 			auto n = in.tellg();
 			in.seekg(0);
 			if (n < 0 || std::uint64_t(n) > wikidata_client::MAX_MODEL_BYTES)
-				return memo_[q] = {};
+				return memo_[key] = {};
 			bytes.resize(static_cast<std::size_t>(n));
 			in.read(reinterpret_cast<char *>(bytes.data()),
 					std::streamsize(bytes.size()));
 			if (!in)
-				return memo_[q] = {};
+				return memo_[key] = {};
 		}
 		if (!wikidata_client::save_cached(cache_, e->url, bytes))
-			return memo_[q] = {};
+			return memo_[key] = {};
 		std::filesystem::create_directories(cache_);
 		std::ofstream out(p, std::ios::binary);
 		out.write(reinterpret_cast<const char *>(bytes.data()),
 				std::streamsize(bytes.size()));
 		if (!out)
-			return memo_[q] = {};
+			return memo_[key] = {};
 	} else {
 		std::filesystem::create_directories(cache_);
 		std::ofstream out(p, std::ios::binary);
@@ -55,9 +63,9 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 				std::streamsize(cached->size()));
 	}
 	try {
-		return memo_[q] = load_model_asset_auto(p);
+		return memo_[key] = load_model_asset_auto(p);
 	} catch (...) {
-		return memo_[q] = {};
+		return memo_[key] = {};
 	}
 }
 }

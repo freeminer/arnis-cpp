@@ -5,6 +5,7 @@
 #include <cctype>
 #include <cstdlib>
 #include <fstream>
+#include <thread>
 #include <utility>
 
 namespace arnis::overture::cache
@@ -98,7 +99,9 @@ bool write_atomic(
 		return false;
 	const auto temporary =
 			parent / ("." + path.filename().string() + "." +
-							 std::to_string(write_sequence.fetch_add(1)) + ".tmp");
+							 std::to_string(std::hash<std::thread::id>{}(
+									 std::this_thread::get_id())) +
+							 "." + std::to_string(write_sequence.fetch_add(1)) + ".tmp");
 	{
 		std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
 		if (!output)

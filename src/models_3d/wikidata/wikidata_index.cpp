@@ -22,7 +22,15 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 			if (!f)
 				continue;
 			nlohmann::json j;
-			f >> j;
+			try {
+				f >> j;
+			} catch (const nlohmann::json::exception &) {
+				// An optional/generated index must not disable the manual index
+				// or prevent world generation when it is truncated or malformed.
+				continue;
+			}
+			if (!j.is_object())
+				continue;
 			// Keep the JSON owner alive while items() iterates over it.
 			const auto models = j.value("models", nlohmann::json::object());
 			for (const auto &[id, v] : models.items()) {

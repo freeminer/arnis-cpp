@@ -2,6 +2,9 @@
 #include "archetypes.h"
 #include "../model_asset.h"
 #include "../../world_utils.h"
+#include "../../../../http.h"
+#include <fstream>
+#include <thread>
 #include <algorithm>
 namespace arnis::models_3d::custom
 {
@@ -14,17 +17,21 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	if (key.find("..") != std::string::npos || key.find('/') != std::string::npos ||
 			key.find('\\') != std::string::npos)
 		return std::nullopt;
-	if (root_.empty())
-		return std::nullopt;
+	// Match Rust's cache_root() fallback for library callers that construct the
+	// provider without an application-specific cache directory.  An empty
+	// root must not disable remote archetypes: the Rust client still downloads
+	// into ./.arnis_custom_cache when the platform cache directory is absent.
+	const std::filesystem::path root =
+			root_.empty() ? std::filesystem::path(".arnis_custom_cache") : root_;
 	std::error_code ec;
-	std::filesystem::create_directories(root_, ec);
+	std::filesystem::create_directories(root, ec);
 	std::string base = key;
 	std::replace(base.begin(), base.end(), ':', '_');
 	if (base.size() > 4 && (base.ends_with(".glb") || base.ends_with(".stl") ||
 								   base.ends_with(".GLB") || base.ends_with(".STL")))
 		base.resize(base.size() - 4);
 	for (const auto &ext : {".glb", ".stl"}) {
-		auto p = root_ / (base + ext);
+		auto p = root / (base + ext);
 		if (std::filesystem::exists(p))
 			try {
 				auto a = load_model_asset_auto(p);
@@ -33,14 +40,38 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 			} catch (...) {
 			}
 	}
-	if (!fetcher_ || (base != "plane" && base != "stadium"))
+	if (base != "plane" && base != "stadium")
 		return std::nullopt;
 	const std::string url = base == "plane" ? PLANE_MODEL_URL : STADIUM_MODEL_URL;
 	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
-	auto bytes = fetcher_(url, max_glb_bytes);
+	std::optional<std::vector<std::uint8_t>> bytes;
+	if (fetcher_) {
+		bytes = fetcher_(url, max_glb_bytes);
+	} else {
+		const auto download = (root / (base + "." +
+											  std::to_string(std::hash<std::thread::id>{}(
+													  std::this_thread::get_id())) +
+											  ".download"))
+									  .string();
+		if (http_to_file(url, download)) {
+			std::ifstream input(download, std::ios::binary);
+			input.seekg(0, std::ios::end);
+			const auto size = input.tellg();
+			if (size >= 0 && static_cast<std::uint64_t>(size) <= max_glb_bytes) {
+				input.seekg(0);
+				std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
+				input.read(reinterpret_cast<char *>(data.data()),
+						std::streamsize(data.size()));
+				if (input)
+					bytes = std::move(data);
+			}
+		}
+		std::error_code remove_error;
+		std::filesystem::remove(download, remove_error);
+	}
 	if (!bytes || bytes->empty() || bytes->size() > max_glb_bytes)
 		return std::nullopt;
-	const auto cached = root_ / (base + ".glb");
+	const auto cached = root / (base + ".glb");
 	if (!arnis::world_utils::replace_file_atomically(cached, *bytes))
 		return std::nullopt;
 	try {

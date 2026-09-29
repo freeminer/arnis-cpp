@@ -1,6 +1,8 @@
 #include "client.h"
 #include "../model_asset.h"
+#include "../../../../http.h"
 #include <fstream>
+#include <thread>
 #include <cmath>
 #include <cstdlib>
 #include <nlohmann/json.hpp>
@@ -281,9 +283,19 @@ std::optional<ModelInfo> Client::fetch_info(std::uint64_t id) const
 		return std::nullopt;
 	if (auto cached = load_valid_info_cache(config_, id))
 		return cached;
-	if (!fetch_bytes_)
-		return std::nullopt;
-	auto bytes = fetch_bytes_(info_url(config_, id), 1024 * 1024);
+	std::optional<std::vector<std::uint8_t>> bytes;
+	if (fetch_bytes_) {
+		bytes = fetch_bytes_(info_url(config_, id), 1024 * 1024);
+	} else {
+		const auto temp =
+				info_cache_path(config_, id).string() + "." +
+				std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+				".download";
+		if (http_to_file(info_url(config_, id), temp))
+			bytes = read_capped(temp, 1024 * 1024);
+		std::error_code ec;
+		std::filesystem::remove(temp, ec);
+	}
 	if (!bytes || bytes->empty())
 		return std::nullopt;
 	auto info = parse_model_info(*bytes);
@@ -302,9 +314,19 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_glb(std::uint64_t id) con
 		return std::nullopt;
 	if (auto cached = load_valid_glb_cache(config_, id))
 		return cached;
-	if (!fetch_bytes_)
-		return std::nullopt;
-	auto bytes = fetch_bytes_(model_url(config_, id), MAX_GLB_BYTES);
+	std::optional<std::vector<std::uint8_t>> bytes;
+	if (fetch_bytes_) {
+		bytes = fetch_bytes_(model_url(config_, id), MAX_GLB_BYTES);
+	} else {
+		const auto temp =
+				model_cache_path(config_, id).string() + "." +
+				std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+				".download";
+		if (http_to_file(model_url(config_, id), temp))
+			bytes = read_capped(temp, MAX_GLB_BYTES);
+		std::error_code ec;
+		std::filesystem::remove(temp, ec);
+	}
 	if (!bytes || bytes->size() > MAX_GLB_BYTES || !valid_glb_bytes(*bytes))
 		return std::nullopt;
 	if (!save_glb_cache(config_.cache, id, *bytes))
