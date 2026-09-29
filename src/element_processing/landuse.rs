@@ -38,10 +38,11 @@ pub fn generate_landuse(
         "residential" | "commercial" => return,
         "education" => POLISHED_ANDESITE,
         "religious" => POLISHED_ANDESITE,
-        "industrial" => STONE,       // Randomized per-block below
-        "military" => GRAY_CONCRETE, // Randomized per-block below
+        "industrial" => STONE,     // Randomized per-block below
+        "military" => GRASS_BLOCK, // Chosen per block by military_ground below
         "railway" => GRAVEL,
         "vineyard" => COARSE_DIRT,
+        "flowerbed" => DIRT,
         "brownfield" => COARSE_DIRT,
         "farmyard" => COARSE_DIRT,
         "landfill" => {
@@ -60,6 +61,10 @@ pub fn generate_landuse(
     // Get the area of the landuse element using cache
     let floor_area = flood_fill_cache.get_or_compute(element, args.timeout.as_ref());
 
+    let leaf_type_tagged = matches!(
+        element.tags.get("leaf_type").map(String::as_str),
+        Some("broadleaved" | "needleleaved")
+    );
     // Cherry/FloweringOak only via the random Tree::create pool (rare).
     let trees_ok_to_generate: Vec<TreeType> = {
         let mut trees: Vec<TreeType> = vec![];
@@ -100,6 +105,14 @@ pub fn generate_landuse(
     };
 
     let is_cemetery = landuse_tag == "cemetery";
+    let is_military = landuse_tag == "military";
+    // Training grounds and ranges are churned up far more than a barracks lawn.
+    let military_rough = is_military
+        && matches!(
+            element.tags.get("military").map(String::as_str),
+            Some("training_area" | "range" | "danger_area" | "trench")
+        );
+    let climate = editor.climate();
 
     for &(x, z) in floor_area.iter() {
         // Apply per-block randomness for certain landuse types
@@ -113,15 +126,10 @@ pub fn generate_landuse(
             } else {
                 SMOOTH_STONE
             }
-        } else if landuse_tag == "military" {
-            // Military: primarily gray concrete, with some stone bricks and cobblestone
-            let random_value = rng.random_range(0..100);
-            if random_value < 89 {
-                GRAY_CONCRETE
-            } else if random_value < 99 {
-                STONE_BRICKS
-            } else {
-                COBBLESTONE
+        } else if is_military {
+            match military_ground(editor, climate, x, z, military_rough) {
+                Some(block) => block,
+                None => continue,
             }
         } else if landuse_tag == "quarry" {
             // Quarry: mix of stone, gravel, cobblestone, andesite
@@ -170,8 +178,11 @@ pub fn generate_landuse(
         }
 
         // Nothing is scattered on land-cover water: the depth carve turns these
-        // cells into lake after this runs, leaving plants floating on top.
-        if editor.is_lc_water(x, z) {
+        // cells into lake after this runs, leaving plants floating on top. And
+        // only this tile's own cells get plants and trees: a neighbouring tile's
+        // halo copy draws its own random sequence, so its plants and trees would
+        // land on this tile's water and under its trunks.
+        if editor.is_lc_water(x, z) || !editor.owns(x, z) {
             continue;
         }
 
@@ -185,7 +196,7 @@ pub fn generate_landuse(
                     if editor.check_for_block(x, 0, z, Some(&[PODZOL])) {
                         editor.set_block(RED_FLOWER, x, 1, z, None, None);
                     }
-                } else if (30..33).contains(&random_choice) {
+                } else if (30..33).contains(&random_choice) && editor.land_cover_backs_trees(x, z) {
                     Tree::create(
                         editor,
                         (x, 1, z),
@@ -216,19 +227,21 @@ pub fn generate_landuse(
                         Some(building_footprints),
                         Some(bridge_surface),
                         false,
+                        leaf_type_tagged,
                     );
                 } else {
                     let random_choice: i32 = rng.random_range(0..30);
                     if random_choice == 2 {
-                        let flower_block: Block = match rng.random_range(1..=6) {
-                            1 => OAK_LEAVES,
-                            2 => RED_FLOWER,
-                            3 => BLUE_FLOWER,
-                            4 => YELLOW_FLOWER,
-                            5 => FERN,
-                            _ => WHITE_FLOWER,
-                        };
-                        editor.set_block(flower_block, x, 1, z, None, None);
+                        match rng.random_range(1..=6) {
+                            1 => editor.set_block(OAK_LEAVES, x, 1, z, None, None),
+                            5 => editor.set_block(FERN, x, 1, z, None, None),
+                            _ => crate::ground_decoration::place_scattered_flower(
+                                editor,
+                                x,
+                                z,
+                                crate::ground_decoration::FlowerSetting::Forest,
+                            ),
+                        }
                     } else if random_choice <= 12 {
                         if rng.random_range(0..100) < 12 {
                             editor.set_block(FERN, x, 1, z, None, None);
@@ -337,6 +350,9 @@ pub fn generate_landuse(
                     _ => {}
                 }
             }
+            "flowerbed" if editor.check_for_block(x, 0, z, Some(&[DIRT])) => {
+                crate::ground_decoration::place_bed_flower(editor, x, z);
+            }
             "greenfield" if editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK])) => {
                 match rng.random_range(0..200) {
                     0 => editor.set_block(OAK_LEAVES, x, 1, z, None, None),
@@ -347,7 +363,7 @@ pub fn generate_landuse(
             }
             "meadow" if editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK])) => {
                 let random_choice: i32 = rng.random_range(0..1001);
-                if random_choice < 5 {
+                if random_choice < 5 && editor.land_cover_backs_trees(x, z) {
                     Tree::create(
                         editor,
                         (x, 1, z),
@@ -355,7 +371,12 @@ pub fn generate_landuse(
                         Some(bridge_surface),
                     );
                 } else if random_choice < 6 {
-                    editor.set_block(RED_FLOWER, x, 1, z, None, None);
+                    crate::ground_decoration::place_scattered_flower(
+                        editor,
+                        x,
+                        z,
+                        crate::ground_decoration::FlowerSetting::Meadow,
+                    );
                 } else if random_choice < 9 {
                     editor.set_block(OAK_LEAVES, x, 1, z, None, None);
                 } else if random_choice < 40 {
@@ -447,6 +468,68 @@ pub fn generate_landuse(
     // Farmland fields rarely get a tractor.
     if landuse_tag == "farmland" {
         crate::structures::tractor::maybe_place_tractor(editor, floor_area.as_slice());
+    }
+}
+
+/// Ground for `landuse=military`. A base is mown grass and worn training ground around a
+/// paved core, and the land cover says which of those a cell is, so a base that is really a
+/// forest, a heath or a desert keeps looking like one instead of turning into a concrete slab.
+/// Water, wetland, beach and ice give `None` and stay with the land cover. Positional only, so the
+/// tiles agree at their seams.
+fn military_ground(
+    editor: &WorldEditor,
+    climate: crate::climate::Climate,
+    x: i32,
+    z: i32,
+    rough: bool,
+) -> Option<Block> {
+    use crate::ground_generation::value_noise_01;
+    use crate::land_cover::{
+        coord_hash, LC_BARE, LC_BEACH, LC_BUILT_UP, LC_MANGROVES, LC_SNOW_ICE, LC_WATER, LC_WETLAND,
+    };
+
+    let cover = editor.cover_class(x, z);
+    let h = coord_hash(x, z);
+    match cover {
+        LC_WATER | LC_WETLAND | LC_MANGROVES | LC_SNOW_ICE | LC_BEACH => None,
+        LC_BUILT_UP => {
+            // Concrete yards with gravel hardstands for the vehicles and strips of lawn.
+            let n = value_noise_01(x + 211, z + 17, 7);
+            Some(if n < 0.25 {
+                GRASS_BLOCK
+            } else if n > 0.8 {
+                GRAVEL
+            } else {
+                match h % 10 {
+                    0..=6 => POLISHED_ANDESITE,
+                    7..=8 => ANDESITE,
+                    _ => STONE,
+                }
+            })
+        }
+        _ => {
+            // Arid and polar bases sit on the region's own ground.
+            if let Some((surface, _)) = climate.surface_palette(cover, x, z) {
+                return Some(surface);
+            }
+            // Vehicle tracks and training ground as organic patches in the grass: about a
+            // seventh of a lawn, a third of a training area, most of bare land.
+            let worn_share = if cover == LC_BARE {
+                0.7
+            } else if rough {
+                0.4
+            } else {
+                0.25
+            };
+            if value_noise_01(x + 97, z + 31, 9) >= worn_share {
+                return Some(GRASS_BLOCK);
+            }
+            Some(match h % 10 {
+                0..=5 => COARSE_DIRT,
+                6..=7 => DIRT,
+                _ => GRAVEL,
+            })
+        }
     }
 }
 
@@ -554,7 +637,7 @@ mod sealed_surface_tests {
         editor.set_sealed_surface(Arc::new(mask));
 
         let outlines = BridgeOutlineIndex::build(&[]);
-        let structures = BridgeStructureMap::build(&[], &editor, &outlines);
+        let structures = BridgeStructureMap::build(&[], &editor, &outlines, 1.0);
         let surface = BridgeSurfaceMap::build(&[], &structures, 1.0);
 
         let args = Args::parse_from([
@@ -593,13 +676,176 @@ mod sealed_surface_tests {
     }
 
     #[test]
+    fn a_flowerbed_is_planted_soil() {
+        let xzbbox = XZBBox::rect_from_xz_lengths(40.0, 40.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+        let outlines = BridgeOutlineIndex::build(&[]);
+        let structures = BridgeStructureMap::build(&[], &editor, &outlines, 1.0);
+        let surface = BridgeSurfaceMap::build(&[], &structures, 1.0);
+        let args = Args::parse_from([
+            "arnis",
+            "--bbox",
+            "1,2,3,4",
+            "--mode",
+            "geo-only",
+            "--ground-level",
+            "0",
+        ]);
+        let way = rect_way(3, 5, 5, 34, 34, &[("landuse", "flowerbed")]);
+        generate_landuse(
+            &mut editor,
+            &way,
+            &args,
+            &FloodFillCache::new(),
+            &BuildingFootprintBitmap::new_empty(),
+            &RoadMaskBitmap::new_empty(),
+            &surface,
+        );
+
+        let (mut soil, mut flowers, mut cells) = (0, 0, 0);
+        for x in 10..30 {
+            for z in 10..30 {
+                cells += 1;
+                soil += editor.check_for_block(x, 0, z, Some(&[DIRT])) as i32;
+                flowers +=
+                    editor.block_exists_absolute(x, editor.get_absolute_y(x, 1, z), z) as i32;
+            }
+        }
+        assert_eq!(soil, cells, "the bed is soil, not lawn");
+        assert!(
+            flowers * 10 > cells * 8,
+            "nearly every cell is planted ({flowers}/{cells})"
+        );
+    }
+
+    /// Paints one `landuse=military` square over x/z 5..=114 and counts the ground blocks
+    /// of the inner 10..110 square as (grass, worn, paved, anything else).
+    fn paint_military(
+        editor: &mut WorldEditor,
+        tags: &[(&str, &str)],
+    ) -> (usize, usize, usize, usize) {
+        let outlines = BridgeOutlineIndex::build(&[]);
+        let structures = BridgeStructureMap::build(&[], editor, &outlines, 1.0);
+        let surface = BridgeSurfaceMap::build(&[], &structures, 1.0);
+        let args = Args::parse_from([
+            "arnis",
+            "--bbox",
+            "1,2,3,4",
+            "--mode",
+            "geo-only",
+            "--ground-level",
+            "0",
+        ]);
+        let way = rect_way(7, 5, 5, 114, 114, tags);
+        generate_landuse(
+            editor,
+            &way,
+            &args,
+            &FloodFillCache::new(),
+            &BuildingFootprintBitmap::new_empty(),
+            &RoadMaskBitmap::new_empty(),
+            &surface,
+        );
+        let (mut grass, mut worn, mut paved, mut other) = (0, 0, 0, 0);
+        for x in 10..110 {
+            for z in 10..110 {
+                if editor.check_for_block(x, 0, z, Some(&[GRASS_BLOCK])) {
+                    grass += 1;
+                } else if editor.check_for_block(x, 0, z, Some(&[COARSE_DIRT, DIRT, GRAVEL])) {
+                    worn += 1;
+                } else if editor.check_for_block(
+                    x,
+                    0,
+                    z,
+                    Some(&[POLISHED_ANDESITE, ANDESITE, STONE]),
+                ) {
+                    paved += 1;
+                } else {
+                    other += 1;
+                }
+            }
+        }
+        (grass, worn, paved, other)
+    }
+
+    #[test]
+    fn military_ground_is_grass_with_worn_patches_not_concrete() {
+        let xzbbox = XZBBox::rect_from_xz_lengths(120.0, 120.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+        let (grass, worn, paved, other) = paint_military(&mut editor, &[("landuse", "military")]);
+        let total = (grass + worn + paved + other) as f64;
+        assert_eq!(
+            other, 0,
+            "every cell is painted, and none of it gray concrete"
+        );
+        assert_eq!(paved, 0, "without land cover nothing says built-up");
+        let worn_share = worn as f64 / total;
+        assert!(
+            (0.05..0.3).contains(&worn_share),
+            "worn patches stay a minority of a base's lawns ({worn_share:.2})"
+        );
+
+        let mut training = test_editor(&xzbbox);
+        let (_, training_worn, _, _) = paint_military(
+            &mut training,
+            &[("landuse", "military"), ("military", "training_area")],
+        );
+        assert!(
+            training_worn > worn,
+            "a training area is more churned up than a plain base ({training_worn} vs {worn})"
+        );
+    }
+
+    #[test]
+    fn military_ground_follows_the_land_cover() {
+        use crate::land_cover::{LandCoverData, LC_BUILT_UP, LC_WATER};
+        let xzbbox = XZBBox::rect_from_xz_lengths(120.0, 120.0).unwrap();
+        let mut editor = test_editor(&xzbbox);
+        // West half built up, east half water.
+        let lc = LandCoverData {
+            grid: vec![vec![LC_BUILT_UP, LC_WATER]; 2],
+            water_distance: vec![vec![0, 1]; 2],
+            water_blend_cache: once_cell::sync::OnceCell::with_value(vec![vec![0.0, 1.0]; 2]),
+            width: 2,
+            height: 2,
+            cells_per_meter: 1.0,
+        };
+        editor.set_ground(Arc::new(crate::ground::Ground::new_flat_land_cover_test(
+            lc, 120, 120,
+        )));
+        paint_military(&mut editor, &[("landuse", "military")]);
+
+        let (mut paved, mut west) = (0, 0);
+        for x in 10..55 {
+            for z in 10..110 {
+                west += 1;
+                if editor.check_for_block(x, 0, z, Some(&[POLISHED_ANDESITE, ANDESITE, STONE])) {
+                    paved += 1;
+                }
+            }
+        }
+        assert!(
+            paved * 2 > west,
+            "the built-up core is mostly paved ({paved} of {west})"
+        );
+        for x in 65..110 {
+            for z in 10..110 {
+                assert!(
+                    !editor.block_exists_absolute(x, 0, z),
+                    "water at ({x}, {z}) is left to the land cover"
+                );
+            }
+        }
+    }
+
+    #[test]
     fn quarry_ore_roll_handles_deep_terrain_without_panicking() {
         let xzbbox = XZBBox::rect_from_xz_lengths(60.0, 60.0).unwrap();
         let mut editor = test_editor(&xzbbox);
         editor.set_ground(Arc::new(crate::ground::Ground::new_flat(-250)));
 
         let outlines = BridgeOutlineIndex::build(&[]);
-        let structures = BridgeStructureMap::build(&[], &editor, &outlines);
+        let structures = BridgeStructureMap::build(&[], &editor, &outlines, 1.0);
         let surface = BridgeSurfaceMap::build(&[], &structures, 1.0);
 
         let args = Args::parse_from(["arnis", "--bbox", "1,2,3,4", "--mode", "geo-only"]);

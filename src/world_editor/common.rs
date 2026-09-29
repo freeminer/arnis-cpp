@@ -1300,6 +1300,18 @@ impl WorldToModify {
         )
     }
 
+    /// Stored properties of the block at (x, y, z), if any.
+    #[cfg(test)]
+    pub fn get_properties(&self, x: i32, y: i32, z: i32) -> Option<Arc<Value>> {
+        let chunk_x = x >> 4;
+        let chunk_z = z >> 4;
+        let region = self.get_region(chunk_x >> 5, chunk_z >> 5)?;
+        let chunk = region.get_chunk(chunk_x & 31, chunk_z & 31)?;
+        let section = chunk.sections.get(&((y >> 4) as i8))?;
+        let index = SectionToModify::index((x & 15) as u8, (y & 15) as u8, (z & 15) as u8);
+        section.properties.get(&index).cloned()
+    }
+
     /// Finds the highest non-AIR block in one column and Y range.
     ///
     /// Column probes are used while placing tree canopies over buildings. The
@@ -1550,6 +1562,12 @@ impl WorldToModify {
         None
     }
 
+    /// Per-chunk lists a tile carries into the merged world. Fluid ticks ride along so cave
+    /// water and lava placed in a tile still flow once its chunk meets another tile's data.
+    fn merges_as_list(key: &str) -> bool {
+        matches!(key, "block_entities" | "entities" | "fluid_ticks")
+    }
+
     /// Appends `other_list` into `self_list`, skipping entries already present at a coordinate.
     /// Tile halos process boundary features twice, so this drops the duplicate copies instead of
     /// retaining both (which also spared the save path from stripping them later).
@@ -1607,7 +1625,7 @@ impl WorldToModify {
                                 );
                             }
                             for (key, value) in other_chunk.other {
-                                if key == "block_entities" || key == "entities" {
+                                if Self::merges_as_list(&key) {
                                     match self_chunk.other.entry(key) {
                                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                                             if let Value::List(self_list) = entry.get_mut() {
@@ -1675,7 +1693,7 @@ impl WorldToModify {
                                 );
                             }
                             for (key, value) in other_chunk.other {
-                                if key == "block_entities" || key == "entities" {
+                                if Self::merges_as_list(&key) {
                                     match self_chunk.other.entry(key) {
                                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                                             if let Value::List(self_list) = entry.get_mut() {
@@ -1729,7 +1747,7 @@ impl WorldToModify {
 
                 // Merge block entities and entities
                 for (key, value) in other_chunk.other {
-                    if key == "block_entities" || key == "entities" {
+                    if Self::merges_as_list(&key) {
                         match self_chunk.other.entry(key) {
                             std::collections::hash_map::Entry::Occupied(mut entry) => {
                                 if let Value::List(self_list) = entry.get_mut() {
@@ -1762,7 +1780,7 @@ impl WorldToModify {
 
             // Append entities/block_entities from halo
             for (key, value) in other_chunk.other {
-                if key == "block_entities" || key == "entities" {
+                if Self::merges_as_list(&key) {
                     match self_chunk.other.entry(key) {
                         std::collections::hash_map::Entry::Occupied(mut entry) => {
                             if let Value::List(self_list) = entry.get_mut() {
@@ -2151,7 +2169,7 @@ mod to_section_tests {
         let mut s = SectionToModify::default();
         s.storage.set(5, STONE);
         s.storage.set(0, COBBLESTONE);
-        s.storage.set(2, END_STONE);
+        s.storage.set(2, LIGHT_GRAY_CONCRETE_POWDER);
 
         let (want_blocks, want_indices) = reference_palette(&s);
         let got = s.to_section(0);
@@ -2337,11 +2355,11 @@ mod tests {
         let mut s = BlockStorage::Uniform(AIR);
         s.set(0, STONE);
         assert!(matches!(s, BlockStorage::Dense(_)));
-        s.set(1, END_STONE);
+        s.set(1, LIGHT_GRAY_CONCRETE_POWDER);
         assert!(matches!(s, BlockStorage::Paletted(_)));
         assert_eq!(s.get(0), STONE);
-        assert_eq!(s.get(1), END_STONE);
-        assert_eq!(s.iter().nth(1), Some(END_STONE));
+        assert_eq!(s.get(1), LIGHT_GRAY_CONCRETE_POWDER);
+        assert_eq!(s.iter().nth(1), Some(LIGHT_GRAY_CONCRETE_POWDER));
 
         let mut w = BlockStorage::Uniform(AIR);
         w.set(0, LEVER);
