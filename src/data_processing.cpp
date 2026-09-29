@@ -1554,9 +1554,6 @@ bool generate_world(WorldEditor &editor,
 				} else {
 					waterways::generate_waterways(editor, way);
 				}
-			} else if (way.tags.contains("bridge")) {
-				// Bridge members are rendered by the highway/rail passes, which also
-				// apply relation-aware deck heights and schematic modules.
 			} else if (way.tags.contains("railway")) {
 				railways::generate_railways(editor, way, subway_points,
 						rail_bridge_internal_endpoints, bridge_outlines, road_mask,
@@ -1708,6 +1705,15 @@ bool generate_world(WorldEditor &editor,
 
 	water_depth::carve_lc_water_pass(
 			editor, big_water_field, road_mask, tunnel_footprint);
+	// Rust releases ground-surface protection after the ground/ore/water
+	// passes. Models and landmarks own their final footprints.
+	editor.release_sealed_surface();
+	// Tunnel interiors must be reopened after underground fill, but before
+	// models: a late carve can cut holes into an already placed landmark.
+	if (!subway_points.empty())
+		railways::carve_subway_interior(editor, subway_points);
+	if (!highway_tunnel_cells.empty())
+		highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
 	if (model_pipeline) {
 		models_3d::place_three_dmr_prescan(
 				three_dmr_provider, editor, model_pipeline->three_dmr(), args.scale);
@@ -1722,11 +1728,6 @@ bool generate_world(WorldEditor &editor,
 	landmarks::place_all(editor, landmark_plan, args.scale);
 	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 
-	if (!subway_points.empty()) {
-		railways::carve_subway_interior(editor, subway_points);
-	}
-	if (!highway_tunnel_cells.empty())
-		highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
 	railways::advtrains::finish_network(editor);
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
