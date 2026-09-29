@@ -23,6 +23,7 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	// into ./.arnis_custom_cache when the platform cache directory is absent.
 	const std::filesystem::path root =
 			root_.empty() ? std::filesystem::path(".arnis_custom_cache") : root_;
+	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
 	std::error_code ec;
 	std::filesystem::create_directories(root, ec);
 	std::string base = key;
@@ -32,18 +33,24 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 		base.resize(base.size() - 4);
 	for (const auto &ext : {".glb", ".stl"}) {
 		auto p = root / (base + ext);
-		if (std::filesystem::exists(p))
+		if (std::filesystem::exists(p)) {
+			// Rust's fetch_glb applies the same hard cap to cache hits and
+			// network responses.  Reject oversized stale files before parsing.
+			ec.clear();
+			const auto size = std::filesystem::file_size(p, ec);
+			if (ec || size > max_glb_bytes)
+				continue;
 			try {
 				auto a = load_model_asset_auto(p);
 				if (a.max[0] > a.min[0] && a.max[1] > a.min[1] && a.max[2] > a.min[2])
 					return a;
 			} catch (...) {
 			}
+		}
 	}
 	if (base != "plane" && base != "stadium")
 		return std::nullopt;
 	const std::string url = base == "plane" ? PLANE_MODEL_URL : STADIUM_MODEL_URL;
-	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
 	std::optional<std::vector<std::uint8_t>> bytes;
 	if (fetcher_) {
 		bytes = fetcher_(url, max_glb_bytes);

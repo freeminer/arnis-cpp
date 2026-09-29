@@ -1,6 +1,5 @@
 #include "block_definitions.h"
 #include "bresenham.h"
-#include "../osm_parser.h"
 #include "world_editor.h"
 
 #include <string>
