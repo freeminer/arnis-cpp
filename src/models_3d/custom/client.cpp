@@ -5,9 +5,21 @@
 #include "../../../../http.h"
 #include <fstream>
 #include <thread>
+#include <cstdlib>
 #include <algorithm>
 namespace arnis::models_3d::custom
 {
+static std::filesystem::path cache_root(const std::filesystem::path &configured)
+{
+	if (!configured.empty())
+		return configured;
+	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
+		return std::filesystem::path(xdg) / "arnis" / "custom_models";
+	if (const char *home = std::getenv("HOME"); home && *home)
+		return std::filesystem::path(home) / ".cache" / "arnis" / "custom_models";
+	return std::filesystem::path("./.arnis_custom_cache");
+}
+
 std::optional<ModelAsset> Client::fetch(const std::string &key)
 {
 	if (key.empty())
@@ -21,8 +33,7 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	// provider without an application-specific cache directory.  An empty
 	// root must not disable remote archetypes: the Rust client still downloads
 	// into ./.arnis_custom_cache when the platform cache directory is absent.
-	const std::filesystem::path root =
-			root_.empty() ? std::filesystem::path(".arnis_custom_cache") : root_;
+	const std::filesystem::path root = cache_root(root_);
 	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
 	std::error_code ec;
 	std::filesystem::create_directories(root, ec);

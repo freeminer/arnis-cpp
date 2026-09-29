@@ -72,7 +72,12 @@ bool write_atomic(const std::filesystem::path &p, const std::vector<std::uint8_t
 	if (!p.parent_path().empty())
 		std::filesystem::create_directories(p.parent_path());
 	auto t = p;
-	t += ".tmp";
+	// Fetches fan out across generation workers.  A shared ``file.tmp`` lets
+	// concurrent IDs overwrite one another before rename; Rust's cache writer
+	// uses independent temporary files.  Keep the target basename for easy
+	// cleanup while making each writer unique to its thread/process.
+	t += "." + std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+		 ".tmp";
 	std::ofstream out(t, std::ios::binary);
 	if (!out)
 		return false;

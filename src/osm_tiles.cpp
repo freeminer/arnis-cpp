@@ -1,6 +1,7 @@
 #include "osm_tiles.h"
 #include "overture/pmtiles.h"
 #include "retrieve_data.h"
+#include "world_utils.h"
 
 #include <algorithm>
 #include <array>
@@ -107,10 +108,7 @@ std::optional<std::vector<std::uint8_t>> http_range(const std::string &url,
 	if (!cached.empty() && body.size() == length) {
 		std::error_code ec;
 		std::filesystem::create_directories(cached.parent_path(), ec);
-		std::ofstream out(cached, std::ios::binary | std::ios::trunc);
-		if (out)
-			out.write(reinterpret_cast<const char *>(body.data()),
-					static_cast<std::streamsize>(body.size()));
+		arnis::world_utils::replace_file_atomically(cached, body);
 	}
 	return body;
 }
@@ -361,7 +359,16 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	std::map<std::pair<std::int32_t, std::int32_t>, std::uint64_t> coord_ids;
 	std::uint64_t next = SYNTHETIC_ID_BASE;
 	std::vector<DecodedNode> synthetic;
-	for (const auto &[id, n] : nodes) {
+	// Rust sorts archive nodes by ID before exposing them to the parser.  Do
+	// the same here: unordered_map iteration otherwise changes element order
+	// between processes, which changes seeded tree/structure decisions.
+	std::vector<std::uint64_t> ni;
+	ni.reserve(nodes.size());
+	for (const auto &[id, _] : nodes)
+		ni.push_back(id);
+	std::sort(ni.begin(), ni.end());
+	for (const auto id : ni) {
+		const auto &n = nodes.at(id);
 		coord_ids.emplace(std::make_pair(n.lat, n.lon), id);
 		out.nodes.push_back(
 				{id, double(n.lat) / COORD_SCALE, double(n.lon) / COORD_SCALE, n.tags});
@@ -460,10 +467,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		if (!cache_manifest.empty()) {
 			std::error_code ec;
 			std::filesystem::create_directories(cache_manifest.parent_path(), ec);
-			std::ofstream out(cache_manifest, std::ios::binary | std::ios::trunc);
-			if (out)
-				out.write(reinterpret_cast<const char *>(manifest_bytes.data()),
-						static_cast<std::streamsize>(manifest_bytes.size()));
+			arnis::world_utils::replace_file_atomically(cache_manifest, manifest_bytes);
 		}
 	}
 	const auto json = nlohmann::json::parse(manifest_bytes, nullptr, false);

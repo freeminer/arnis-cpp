@@ -1,6 +1,7 @@
 #include "remote_provider.h"
 #include "client.h"
 #include "../../../../http.h"
+#include "../../../../world_utils.h"
 #include <filesystem>
 #include <fstream>
 #include <cctype>
@@ -50,17 +51,14 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 		}
 		if (!wikidata_client::save_cached(cache_, e->url, bytes))
 			return memo_[key] = {};
-		std::filesystem::create_directories(cache_);
-		std::ofstream out(p, std::ios::binary);
-		out.write(reinterpret_cast<const char *>(bytes.data()),
-				std::streamsize(bytes.size()));
-		if (!out)
+		if (!arnis::world_utils::replace_file_atomically(p, bytes))
 			return memo_[key] = {};
 	} else {
-		std::filesystem::create_directories(cache_);
-		std::ofstream out(p, std::ios::binary);
-		out.write(reinterpret_cast<const char *>(cached->data()),
-				std::streamsize(cached->size()));
+		// Materialize the validated cache entry through the same atomic path;
+		// concurrent prescan workers must never observe a partially rewritten
+		// model file.
+		if (!arnis::world_utils::replace_file_atomically(p, *cached))
+			return memo_[key] = {};
 	}
 	try {
 		return memo_[key] = load_model_asset_auto(p);
