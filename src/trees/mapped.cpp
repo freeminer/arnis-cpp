@@ -65,8 +65,7 @@ MappedTree from_tags(
 		pool = {TreeType::Birch};
 	else if (out.genus == "Quercus")
 		pool = {TreeType::Oak};
-	else if (out.genus == "Picea" || out.genus == "Pinus" || out.genus == "Larix" ||
-			 out.genus == "Cedrus")
+	else if (out.genus == "Pinus" || out.genus == "Larix" || out.genus == "Cedrus")
 		pool = {TreeType::Pine};
 	else if (out.genus == "Salix")
 		pool = {TreeType::Willow};

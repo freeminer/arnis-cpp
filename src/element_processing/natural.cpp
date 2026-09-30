@@ -16,6 +16,7 @@
 #include "../land_cover/land_cover.h"
 #include "../deterministic_rng.h"
 #include "../trees/mapped.h"
+#include "../trees/region.h"
 #include "../ground_decoration.h"
 namespace arnis
 {
@@ -288,6 +289,18 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					tags.contains("taxon") || tags.contains("genus:wikidata")) {
 				const auto mapped = trees::mapped::from_tags(
 						tags, static_cast<std::uint64_t>(element.id()));
+				trees::MappedRequest mapped_request;
+				if (!mapped.genus.empty())
+					mapped_request.genus = mapped.genus;
+				mapped_request.conifer = mapped.conifer;
+				if (mapped.height_m > 0.0)
+					mapped_request.want_size = trees::size_for_height(
+							static_cast<int>(std::lround(mapped.height_m * 3.0)));
+				if (editor.ground && editor.mg)
+					mapped_request.eco = editor.ground->ecoregion_at(
+							{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+				if (editor.place_mapped_regional_tree(x, 1, z, 0, mapped_request))
+					return;
 				tree_type = mapped.kind;
 				if (mapped.height_m > 0.0 && mapped.height_m < 4.0)
 					tree_type = TreeType::Bush;

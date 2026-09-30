@@ -186,4 +186,46 @@ std::optional<std::uint16_t> EcoMap::id_at(double latitude, double longitude) co
 		return {};
 	return grid_->value(*tile, grid_->index_in_tile(cell));
 }
+std::vector<std::pair<std::uint16_t, std::size_t>> EcoMap::by_area() const
+{
+	std::map<std::uint16_t, std::size_t> counts;
+	if (!grid_)
+		return {};
+	for (std::size_t tile = 0; tile < grid_->tile_count(); ++tile) {
+		auto decoded = grid_->decode(tile);
+		if (!decoded)
+			continue;
+		for (std::size_t i = 0; i < grid_->cells_per_tile(); ++i) {
+			++counts[grid_->value(*decoded, i)];
+		}
+	}
+	std::vector<std::pair<std::uint16_t, std::size_t>> out(counts.begin(), counts.end());
+	std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+		return a.second != b.second ? a.second > b.second : a.first < b.first;
+	});
+	return out;
+}
+bool EcoMap::has_gaps() const
+{
+	if (!grid_)
+		return true;
+	for (std::size_t tile = 0; tile < grid_->tile_count(); ++tile) {
+		const auto decoded = grid_->decode(tile);
+		if (!decoded)
+			return true;
+		for (std::size_t i = 0; i < grid_->cells_per_tile(); ++i)
+			if (!lookup(grid_->value(*decoded, i)))
+				return true;
+	}
+	return false;
+}
+std::optional<std::string> EcoMap::dominant_tree_pack() const
+{
+	for (const auto &[id, count] : by_area()) {
+		(void)count;
+		if (const auto mix = tree_mix(id))
+			return std::string(mix->first);
+	}
+	return std::nullopt;
+}
 }

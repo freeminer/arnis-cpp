@@ -8,6 +8,7 @@
 #include <unordered_set>
 #include <cstring>
 #include <cctype>
+#include <functional>
 #include <nlohmann/json.hpp>
 
 namespace arnis::osm_parser
@@ -19,7 +20,8 @@ std::string norm_style(std::string v)
 {
 	std::string out;
 	for (unsigned char c : v)
-		if (!std::isspace(c) && c != '_' && c != '-') out.push_back(std::tolower(c));
+		if (!std::isspace(c) && c != '_' && c != '-')
+			out.push_back(std::tolower(c));
 	return out;
 }
 
@@ -34,16 +36,64 @@ std::string decode_xml(std::string value)
 			pos += std::strlen(to);
 		}
 	}
+	// OSM exports commonly encode non-ASCII tag values as numeric XML
+	// entities.  Rust's XML reader decodes both decimal and hexadecimal forms;
+	// preserve that behavior before the parser stores tags.
+	for (std::size_t pos = 0; (pos = value.find("&#", pos)) != std::string::npos;) {
+		const auto end = value.find(';', pos + 2);
+		if (end == std::string::npos)
+			break;
+		const auto token = value.substr(pos + 2, end - pos - 2);
+		try {
+			const int base =
+					token.size() > 1 && (token[0] == 'x' || token[0] == 'X') ? 16 : 10;
+			const auto digits = base == 16 ? token.substr(1) : token;
+			const auto codepoint = std::stoul(digits, nullptr, base);
+			if (codepoint <= 0x10ffff && !(codepoint >= 0xd800 && codepoint <= 0xdfff)) {
+				std::string encoded;
+				if (codepoint <= 0x7f)
+					encoded.push_back(static_cast<char>(codepoint));
+				else if (codepoint <= 0x7ff) {
+					encoded.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+					encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+				} else if (codepoint <= 0xffff) {
+					encoded.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+					encoded.push_back(
+							static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+					encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+				} else {
+					encoded.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+					encoded.push_back(
+							static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+					encoded.push_back(
+							static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+					encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+				}
+				value.replace(pos, end - pos + 1, encoded);
+				pos += encoded.size();
+				continue;
+			}
+		} catch (...) {
+		}
+		pos = end + 1;
+	}
 	return value;
 }
 
 std::unordered_map<std::string, std::string> attrs(const std::string &text)
 {
 	std::unordered_map<std::string, std::string> out;
-	static const std::regex attr_re(
+	// XML permits either quote delimiter.  OSM normally emits double quotes,
+	// but Rust's XML reader accepts both and hand-written extracts often use
+	// single quotes.
+	static const std::regex double_attr(
 			R"ATTR(([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*"([^"]*)")ATTR");
-	for (std::sregex_iterator it(text.begin(), text.end(), attr_re), end; it != end; ++it)
-		out[(*it)[1].str()] = decode_xml((*it)[2].str());
+	static const std::regex single_attr(
+			R"ATTR(([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*'([^']*)')ATTR");
+	for (const auto &attr_re : {std::cref(double_attr), std::cref(single_attr)})
+		for (std::sregex_iterator it(text.begin(), text.end(), attr_re.get()), end;
+				it != end; ++it)
+			out[(*it)[1].str()] = decode_xml((*it)[2].str());
 	return out;
 }
 
@@ -71,28 +121,31 @@ void read_tags(const std::string &body, tags_t &tags)
 
 void filter_tags(tags_t &tags)
 {
-	static constexpr const char *ignored[] = {
-			"created_by", "note", "fixme", "FIXME", "todo", "TODO", "wikipedia",
-			"wikimedia_commons", "import_uuid", "import", "old_name", "loc_name",
-			"official_name", "alt_name", "operator", "phone", "fax", "email", "url",
-			"website", "opening_hours", "description", "attribution", "check_date",
-			"survey:date", "ref:bag", "ref:bygningsnr"};
-		const bool building = tags.contains("building") || tags.contains("building:part");
-		for (auto it = tags.begin(); it != tags.end();) {
-			const auto &k = it->first;
-			bool remove = k == "start_date" ? !building : false;
-			for (const auto *name : ignored)
-				remove = remove || k == name;
-			if (k != "addr:housenumber") {
-				static constexpr const char *prefixes[] = {"addr:", "source", "name:",
-						"alt_name:", "contact:", "is_in:", "operator:", "tiger:", "NHD:",
-						"lacounty:", "nysgissam:", "ref:ruian:", "building:ruian:", "osak:",
-						"gnis:", "yh:", "check_date:"};
-				for (const auto *prefix : prefixes)
-					if (k.starts_with(prefix)) remove = true;
-			}
-			if (remove) it = tags.erase(it); else ++it;
+	static constexpr const char *ignored[] = {"created_by", "note", "fixme", "FIXME",
+			"todo", "TODO", "wikipedia", "wikimedia_commons", "import_uuid", "import",
+			"old_name", "loc_name", "official_name", "alt_name", "operator", "phone",
+			"fax", "email", "url", "website", "opening_hours", "description",
+			"attribution", "check_date", "survey:date", "ref:bag", "ref:bygningsnr"};
+	const bool building = tags.contains("building") || tags.contains("building:part");
+	for (auto it = tags.begin(); it != tags.end();) {
+		const auto &k = it->first;
+		bool remove = k == "start_date" ? !building : false;
+		for (const auto *name : ignored)
+			remove = remove || k == name;
+		if (k != "addr:housenumber") {
+			static constexpr const char *prefixes[] = {"addr:", "source",
+					"name:", "alt_name:", "contact:", "is_in:", "operator:", "tiger:",
+					"NHD:", "lacounty:", "nysgissam:", "ref:ruian:", "building:ruian:",
+					"osak:", "gnis:", "yh:", "check_date:"};
+			for (const auto *prefix : prefixes)
+				if (k.starts_with(prefix))
+					remove = true;
 		}
+		if (remove)
+			it = tags.erase(it);
+		else
+			++it;
+	}
 }
 
 } // namespace
@@ -100,27 +153,54 @@ void filter_tags(tags_t &tags)
 StyleHint building_style_hint(const tags_t &tags)
 {
 	const auto material = norm_style(!tags.get("building:material").empty()
-			? tags.get("building:material")
-			: !tags.get("building:facade:material").empty()
-					? tags.get("building:facade:material") : tags.get("facade:material"));
-	if (material == "glass" || material == "mirror" || norm_style(tags.get("roof:material")) == "glass")
+											 ? tags.get("building:material")
+									 : !tags.get("building:facade:material").empty()
+											 ? tags.get("building:facade:material")
+											 : tags.get("facade:material"));
+	if (material == "glass" || material == "mirror" ||
+			norm_style(tags.get("roof:material")) == "glass")
 		return StyleHint::Glass;
-	auto present = [&](const char *k) { return !tags.get(k).empty() && norm_style(tags.get(k)) != "no"; };
-	if (present("historic") || present("heritage") || tags.contains("ref:nrhp") || present("listed_status"))
+	auto present = [&](const char *k) {
+		return !tags.get(k).empty() && norm_style(tags.get(k)) != "no";
+	};
+	if (present("historic") || present("heritage") || tags.contains("ref:nrhp") ||
+			present("listed_status"))
 		return StyleHint::Masonry;
-	static constexpr const char *masonry[] = {"brick","bricks","redbrick","silicatebrick","stone","naturalstone","sandstone","limestone","masonry","granite","marble","terracotta","adobe","stucco","pebbledash"};
-	for (const auto *v : masonry) if (material == v) return StyleHint::Masonry;
-	const auto cladding = norm_style(tags.get("building:cladding").empty() ?
-			tags.get("cladding") : tags.get("building:cladding"));
-	static constexpr const char *cladding_types[] = {"brick", "brickmonolith", "plaster", "rendered", "rendering", "stone", "tiling"};
-	for (const auto *v : cladding_types) if (cladding == v) return StyleHint::Masonry;
-	const auto arch = norm_style(!tags.get("building:architecture").empty() ? tags.get("building:architecture") : tags.get("architecture"));
-	static constexpr const char *ornate[] = {"artdeco","artnouveau","gothic","neogothic","gothicrevival","baroque","neobaroque","rococo","renaissance","neorenaissance","romanesque","victorian","georgian","federal","italianate","beauxarts","queenanne","classicism","neoclassical"};
-	for (const auto *v : ornate) if (arch == v) return StyleHint::Masonry;
-	static constexpr const char *brutalist[] = {"brutalist", "constructivism", "stalinistneoclassicism"};
-	for (const auto *v : brutalist) if (arch == v) return StyleHint::Masonry;
-	static constexpr const char *modern[] = {"modern","contemporary","modernism","functionalism","newobjectivity","bauhaus","postmodern"};
-	for (const auto *v : modern) if (arch == v) return StyleHint::Contemporary;
+	static constexpr const char *masonry[] = {"brick", "bricks", "redbrick",
+			"silicatebrick", "stone", "naturalstone", "sandstone", "limestone", "masonry",
+			"granite", "marble", "terracotta", "adobe", "stucco", "pebbledash"};
+	for (const auto *v : masonry)
+		if (material == v)
+			return StyleHint::Masonry;
+	const auto cladding = norm_style(tags.get("building:cladding").empty()
+											 ? tags.get("cladding")
+											 : tags.get("building:cladding"));
+	static constexpr const char *cladding_types[] = {"brick", "brickmonolith", "plaster",
+			"rendered", "rendering", "stone", "tiling"};
+	for (const auto *v : cladding_types)
+		if (cladding == v)
+			return StyleHint::Masonry;
+	const auto arch = norm_style(!tags.get("building:architecture").empty()
+										 ? tags.get("building:architecture")
+										 : tags.get("architecture"));
+	static constexpr const char *ornate[] = {"artdeco", "artnouveau", "gothic",
+			"neogothic", "gothicrevival", "baroque", "neobaroque", "rococo",
+			"renaissance", "neorenaissance", "romanesque", "victorian", "georgian",
+			"federal", "italianate", "beauxarts", "queenanne", "classicism",
+			"neoclassical"};
+	for (const auto *v : ornate)
+		if (arch == v)
+			return StyleHint::Masonry;
+	static constexpr const char *brutalist[] = {
+			"brutalist", "constructivism", "stalinistneoclassicism"};
+	for (const auto *v : brutalist)
+		if (arch == v)
+			return StyleHint::Masonry;
+	static constexpr const char *modern[] = {"modern", "contemporary", "modernism",
+			"functionalism", "newobjectivity", "bauhaus", "postmodern"};
+	for (const auto *v : modern)
+		if (arch == v)
+			return StyleHint::Contemporary;
 	for (const char *key : {"start_date", "construction_date", "year_of_construction"}) {
 		const auto value = tags.get(key);
 		for (std::size_t i = 0; i + 3 < value.size(); ++i) {
@@ -128,12 +208,14 @@ StyleHint building_style_hint(const tags_t &tags)
 					std::isdigit(static_cast<unsigned char>(value[i + 1])) &&
 					std::isdigit(static_cast<unsigned char>(value[i + 2])) &&
 					std::isdigit(static_cast<unsigned char>(value[i + 3]))) {
-				if (std::stoi(value.substr(i, 4)) < 1945) return StyleHint::Masonry;
+				if (std::stoi(value.substr(i, 4)) < 1945)
+					return StyleHint::Masonry;
 				break;
 			}
 		}
 	}
-	if (material == "concrete" || material == "reinforcedconcrete" || material == "concretereinforced" || material == "concretemasonryunit")
+	if (material == "concrete" || material == "reinforcedconcrete" ||
+			material == "concretereinforced" || material == "concretemasonryunit")
 		return StyleHint::Contemporary;
 	return StyleHint::None;
 }
@@ -141,10 +223,13 @@ StyleHint building_style_hint(const tags_t &tags)
 ArchEra arch_era_from_hint(StyleHint hint)
 {
 	switch (hint) {
-	case StyleHint::Masonry: return ArchEra::TraditionalPreWar;
+	case StyleHint::Masonry:
+		return ArchEra::TraditionalPreWar;
 	case StyleHint::Contemporary:
-	case StyleHint::Glass: return ArchEra::Contemporary;
-	case StyleHint::None: return ArchEra::Unknown;
+	case StyleHint::Glass:
+		return ArchEra::Contemporary;
+	case StyleHint::None:
+		return ArchEra::Unknown;
 	}
 	return ArchEra::Unknown;
 }
@@ -171,6 +256,33 @@ RawOsmDocument::Completeness analyze_completeness(const RawOsmDocument &document
 	return result;
 }
 
+std::optional<std::array<double, 4>> resolve_bbox(const RawOsmDocument &document)
+{
+	if (document.bounds) {
+		const auto &b = *document.bounds;
+		if (std::all_of(b.begin(), b.end(),
+					[](double value) { return std::isfinite(value); }) &&
+				b[0] <= b[2] && b[1] <= b[3])
+			return document.bounds;
+	}
+	if (document.nodes.empty())
+		return std::nullopt;
+	std::optional<std::array<double, 4>> result;
+	for (const auto &node : document.nodes) {
+		if (!std::isfinite(node.lat) || !std::isfinite(node.lon))
+			continue;
+		if (!result) {
+			result = std::array<double, 4>{node.lat, node.lon, node.lat, node.lon};
+			continue;
+		}
+		(*result)[0] = std::min((*result)[0], node.lat);
+		(*result)[1] = std::min((*result)[1], node.lon);
+		(*result)[2] = std::max((*result)[2], node.lat);
+		(*result)[3] = std::max((*result)[3], node.lon);
+	}
+	return result;
+}
+
 void report_incomplete_source(const RawOsmDocument::Completeness &completeness)
 {
 	if (completeness.unresolved_node_refs == 0)
@@ -189,7 +301,17 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 {
 	std::ostringstream buffer;
 	buffer << input.rdbuf();
-	const std::string xml = buffer.str();
+	std::string xml = buffer.str();
+	// Do not let tag-like text inside XML comments become OSM elements.  The
+	// Rust XML reader discards comments before exposing start/end events.
+	for (std::size_t begin = 0; (begin = xml.find("<!--", begin)) != std::string::npos;) {
+		const auto end = xml.find("-->", begin + 4);
+		if (end == std::string::npos) {
+			xml.erase(begin);
+			break;
+		}
+		xml.erase(begin, end + 3 - begin);
+	}
 	RawOsmDocument document;
 
 	static const std::regex bounds_re(R"(<bounds\b([^>]*)/?>)");
@@ -204,7 +326,7 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 	}
 
 	static const std::regex node_re(
-			R"(<node\b([^>]*?)(?:/>|>(.*?)</node>))", std::regex::icase);
+			R"(<node\b([^>]*?)(?:/>|>([\s\S]*?)</node>))", std::regex::icase);
 	for (std::sregex_iterator it(xml.begin(), xml.end(), node_re), end; it != end; ++it) {
 		auto a = attrs((*it)[1].str());
 		RawNode node;
@@ -217,13 +339,14 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 		document.nodes.push_back(std::move(node));
 	}
 
-	static const std::regex way_re(R"(<way\b([^>]*?)>(.*?)</way>)", std::regex::icase);
+	static const std::regex way_re(
+			R"(<way\b([^>]*?)(?:/>|>([\s\S]*?)</way>))", std::regex::icase);
 	static const std::regex nd_re(R"(<nd\b([^>]*)/?>)");
 	for (std::sregex_iterator it(xml.begin(), xml.end(), way_re), end; it != end; ++it) {
 		auto a = attrs((*it)[1].str());
 		RawWay way;
 		way.id = integer(a, "id");
-		const std::string body = (*it)[2].str();
+		const std::string body = (*it).size() > 2 ? (*it)[2].str() : std::string{};
 		for (std::sregex_iterator ni(body.begin(), body.end(), nd_re), ne; ni != ne; ++ni)
 			way.node_refs.push_back(integer(attrs((*ni)[1].str()), "ref"));
 		read_tags(body, way.tags);
@@ -232,14 +355,14 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 	}
 
 	static const std::regex relation_re(
-			R"(<relation\b([^>]*?)>(.*?)</relation>)", std::regex::icase);
+			R"(<relation\b([^>]*?)(?:/>|>([\s\S]*?)</relation>))", std::regex::icase);
 	static const std::regex member_re(R"(<member\b([^>]*)/?>)");
 	for (std::sregex_iterator it(xml.begin(), xml.end(), relation_re), end; it != end;
 			++it) {
 		auto a = attrs((*it)[1].str());
 		RawRelation relation;
 		relation.id = integer(a, "id");
-		const std::string body = (*it)[2].str();
+		const std::string body = (*it).size() > 2 ? (*it)[2].str() : std::string{};
 		for (std::sregex_iterator mi(body.begin(), body.end(), member_re), me; mi != me;
 				++mi) {
 			auto m = attrs((*mi)[1].str());
@@ -254,6 +377,8 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 		document.relations.push_back(std::move(relation));
 	}
 	document.completeness = analyze_completeness(document);
+	if (!document.bounds)
+		document.bounds = resolve_bbox(document);
 	report_incomplete_source(document.completeness);
 	return document;
 }
@@ -267,6 +392,16 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 	RawOsmDocument document;
 	if (root.contains("remark") && root["remark"].is_string())
 		document.remark = root["remark"].get<std::string>();
+	if (root.contains("bounds") && root["bounds"].is_object()) {
+		const auto &b = root["bounds"];
+		if (b.contains("minlat") && b.contains("minlon") && b.contains("maxlat") &&
+				b.contains("maxlon") && b["minlat"].is_number() &&
+				b["minlon"].is_number() && b["maxlat"].is_number() &&
+				b["maxlon"].is_number())
+			document.bounds = std::array<double, 4>{b["minlat"].get<double>(),
+					b["minlon"].get<double>(), b["maxlat"].get<double>(),
+					b["maxlon"].get<double>()};
+	}
 	auto parse_tags = [](const nlohmann::json &element) {
 		tags_t tags;
 		if (element.contains("tags") && element["tags"].is_object())
@@ -278,7 +413,8 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 	for (const auto &element : root["elements"]) {
 		if (!element.is_object() || !element.contains("type") ||
 				!element["type"].is_string() || !element.contains("id") ||
-				!element["id"].is_number_integer())
+				(!element["id"].is_number_integer() &&
+						!element["id"].is_number_unsigned()))
 			continue;
 		const auto type = element["type"].get<std::string>();
 		const auto id = element["id"].get<std::uint64_t>();
@@ -293,18 +429,18 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 		} else if (type == "way") {
 			RawWay way;
 			way.id = id;
-		way.tags = parse_tags(element);
-		filter_tags(way.tags);
+			way.tags = parse_tags(element);
+			filter_tags(way.tags);
 			if (element.contains("nodes") && element["nodes"].is_array())
 				for (const auto &node : element["nodes"])
-					if (node.is_number_integer())
+					if (node.is_number_integer() || node.is_number_unsigned())
 						way.node_refs.push_back(node.get<std::uint64_t>());
 			document.ways.push_back(std::move(way));
 		} else if (type == "relation") {
 			RawRelation relation;
 			relation.id = id;
-		relation.tags = parse_tags(element);
-		filter_tags(relation.tags);
+			relation.tags = parse_tags(element);
+			filter_tags(relation.tags);
 			if (element.contains("members") && element["members"].is_array())
 				for (const auto &value : element["members"]) {
 					if (!value.is_object())
@@ -312,8 +448,10 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 					RawRelationMember member;
 					if (value.contains("type") && value["type"].is_string())
 						member.type = value["type"].get<std::string>();
-					if (value.contains("ref") && value["ref"].is_number_integer())
-							member.ref = value["ref"].get<std::uint64_t>();
+					if (value.contains("ref") &&
+							(value["ref"].is_number_integer() ||
+									value["ref"].is_number_unsigned()))
+						member.ref = value["ref"].get<std::uint64_t>();
 					if (value.contains("role") && value["role"].is_string())
 						member.role = value["role"].get<std::string>();
 					relation.members.push_back(std::move(member));
@@ -322,6 +460,8 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 		}
 	}
 	document.completeness = analyze_completeness(document);
+	if (!document.bounds)
+		document.bounds = resolve_bbox(document);
 	report_incomplete_source(document.completeness);
 	return document;
 }

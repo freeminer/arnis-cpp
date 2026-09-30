@@ -4,8 +4,95 @@
 #include "../../arnis_adapter.h"
 #include <cmath>
 #include <algorithm>
+#include <limits>
 namespace arnis::biome
 {
+std::optional<std::string> ecoregion_biome(
+		std::uint8_t lc, Climate climate, const std::optional<ecoregion::Ecoregion> &eco)
+{
+	if (!eco || climate == Climate::HotDesert || climate == Climate::ColdDesert ||
+			climate == Climate::Boreal || climate == Climate::Tundra ||
+			climate == Climate::IceCap)
+		return std::nullopt;
+	using namespace land_cover;
+	using ecoregion::EcoBiome;
+	const bool dry_warm = climate != Climate::ColdSteppe;
+	switch (eco->biome) {
+	case EcoBiome::MoistTropical:
+		if (lc == LC_TREE_COVER)
+			return "minecraft:jungle";
+		if (lc == LC_SHRUBLAND)
+			return "minecraft:sparse_jungle";
+		break;
+	case EcoBiome::DryTropical:
+		if (lc == LC_TREE_COVER)
+			return "minecraft:sparse_jungle";
+		if (lc == LC_SHRUBLAND)
+			return "minecraft:sparse_jungle";
+		break;
+	case EcoBiome::TropicalConifer:
+	case EcoBiome::TemperateBroadleaf:
+	case EcoBiome::TemperateGrassland:
+	case EcoBiome::Mediterranean:
+		if (lc == LC_TREE_COVER)
+			return "minecraft:forest";
+		break;
+	case EcoBiome::MontaneGrassland:
+		if (lc == LC_TREE_COVER)
+			return "minecraft:forest";
+		if (lc == LC_SHRUBLAND || lc == LC_GRASSLAND)
+			return "minecraft:meadow";
+		break;
+	case EcoBiome::TemperateConifer:
+	case EcoBiome::Boreal:
+		if (lc == LC_TREE_COVER || lc == LC_MOSS)
+			return "minecraft:taiga";
+		if (lc == LC_SHRUBLAND)
+			return "minecraft:taiga";
+		break;
+	case EcoBiome::TropicalGrassland:
+	case EcoBiome::Desert:
+		if (dry_warm && (lc == LC_TREE_COVER || lc == LC_SHRUBLAND || lc == LC_GRASSLAND))
+			return "minecraft:savanna";
+		break;
+	default:
+		break;
+	}
+	return std::nullopt;
+}
+
+std::optional<std::string> mountain_biome(std::uint8_t lc, Climate climate,
+		std::uint8_t water_distance, double above_m, int slope, double alpine_band_metres)
+{
+	using namespace land_cover;
+	if (lc == LC_WATER)
+		return (above_m >= 0.0 && water_distance < 8)
+					   ? std::optional<std::string>{"minecraft:frozen_river"}
+					   : std::nullopt;
+	if (above_m >= 0.0) {
+		if (slope <= 1)
+			return "minecraft:snowy_plains";
+		if (slope <= 6)
+			return "minecraft:snowy_slopes";
+		return "minecraft:jagged_peaks";
+	}
+	if (above_m < -alpine_band_metres || climate == Climate::HotDesert ||
+			climate == Climate::ColdDesert)
+		return std::nullopt;
+	switch (lc) {
+	case LC_GRASSLAND:
+	case LC_SHRUBLAND:
+	case LC_MOSS:
+		return "minecraft:meadow";
+	case LC_BARE:
+		return "minecraft:stony_peaks";
+	case LC_SNOW_ICE:
+		return "minecraft:snowy_slopes";
+	default:
+		return std::nullopt;
+	}
+}
+
 std::string biome_for_class(std::uint8_t lc, Climate c, double lat, std::uint8_t wd)
 {
 	const double a = std::abs(lat);
@@ -41,8 +128,9 @@ std::string biome_for_class(std::uint8_t lc, Climate c, double lat, std::uint8_t
 	case Climate::IceCap:
 		return "minecraft:snowy_plains";
 	case Climate::Boreal:
-		return lc == land_cover::LC_WETLAND
-					   ? "minecraft:swamp"
+		return lc == land_cover::LC_WETLAND ? "minecraft:swamp"
+			   : lc == land_cover::LC_BEACH
+					   ? "minecraft:snowy_beach"
 					   : (lc == land_cover::LC_TREE_COVER || lc == land_cover::LC_MOSS
 										 ? "minecraft:taiga"
 										 : "minecraft:snowy_plains");
@@ -54,8 +142,13 @@ std::string biome_for_class(std::uint8_t lc, Climate c, double lat, std::uint8_t
 					  : (a < 23.5 ? "minecraft:jungle" : "minecraft:forest");
 	if (lc == land_cover::LC_SHRUBLAND)
 		return a < 23.5 ? "minecraft:sparse_jungle" : "minecraft:savanna";
+	if (lc == land_cover::LC_GRASSLAND || lc == land_cover::LC_CROPLAND ||
+			lc == land_cover::LC_BUILT_UP)
+		return "minecraft:plains";
 	if (lc == land_cover::LC_BARE)
 		return "minecraft:desert";
+	if (lc == land_cover::LC_BEACH)
+		return "minecraft:beach";
 	if (lc == land_cover::LC_SNOW_ICE)
 		return "minecraft:snowy_plains";
 	if (lc == land_cover::LC_WETLAND)
@@ -136,8 +229,20 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 			const int world_x = chunk_x * 16 + xi * 4 + 2;
 			const int world_z = chunk_z * 16 + zi * 4 + 2;
 			const XZPoint local{world_x - world_origin_x, world_z - world_origin_z};
-			names[std::size_t(zi * 4 + xi)] = biome_for_class(ground->cover_class(local),
-					ground->climate(), center_latitude, ground->water_distance(local));
+			const auto lc = ground->cover_class(local);
+			const auto climate = ground->climate();
+			const auto eco = ground->ecoregion_at(local);
+			const auto water_distance = ground->water_distance(local);
+			std::optional<std::string> selected;
+			const auto bpm = ground->blocks_per_meter();
+			if (ground->snow_threshold() != std::numeric_limits<int>::max() && bpm > 0.0)
+				selected = mountain_biome(lc, climate, water_distance,
+						(ground->level_exact(local) - ground->snow_threshold()) / bpm,
+						ground->slope(local));
+			if (!selected)
+				selected = ecoregion_biome(lc, climate, eco);
+			names[std::size_t(zi * 4 + xi)] = selected.value_or(
+					biome_for_class(lc, climate, center_latitude, water_distance));
 		}
 	return names;
 }

@@ -22,6 +22,7 @@
 #include "building_facades/registry.h"
 #include "ground_decoration.h"
 #include "mapillary/atlas.h"
+#include "mapillary/facades.h"
 #include "floodfill_cache.h"
 #include "ground_generation.h"
 #include "ecoregion.h"
@@ -30,6 +31,7 @@
 #include "caves_deepslate.h"
 #include "caves_carver.h"
 #include "caves_water.h"
+#include "trees/region.h"
 #include "water_depth.h"
 #include "world_editor/floor_state.h"
 #include "clipping.h"
@@ -38,6 +40,7 @@
 #include "structures/helicopter.h"
 #include "structures/jetbridge.h"
 #include "structures/plane.h"
+#include "../../../../filesys.h"
 #include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
@@ -59,6 +62,12 @@ namespace arnis
 // Helper functions for ground fill area detection
 namespace
 {
+
+// Rust's cave module deliberately uses one fixed, world-independent seed so
+// streamed/tiled generation produces the same cave geometry at every entry
+// point.  Deriving this from the current bbox makes neighboring generation
+// requests disagree at their seams.
+constexpr std::int64_t CAVE_SEED = 0xCA7ECA7E;
 
 std::optional<std::string> decal_texture(
 		const decals::DecalRegistry &registry, int map_id)
@@ -977,6 +986,22 @@ bool generate_world(WorldEditor &editor,
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.
 	editor.set_place_schematics(args.use_3d);
+	// Keep the Rust cave-pack option connected to the backend schematic loader.
+	// Cave feature selection can then use the configured pack without relying on
+	// the process working directory.
+	if (args.cave_asset_pack)
+		editor.set_schematic_asset_root(*args.cave_asset_pack);
+	else if (args.caves) {
+		const std::array<std::filesystem::path, 3> cave_pack_candidates = {
+				std::filesystem::path("cave-pack"),
+				std::filesystem::path(__FILE__).parent_path().parent_path() / "cave-pack",
+				std::filesystem::current_path() / "cave-pack"};
+		for (const auto &candidate : cave_pack_candidates)
+			if (std::filesystem::is_directory(candidate)) {
+				editor.set_schematic_asset_root(candidate);
+				break;
+			}
+	}
 	// Keep direct generation calls consistent with Rust's editor setup. Decals
 	// are Java-only; the editor still receives the requested map-item policy,
 	// while the format-specific exporter decides whether to emit it.
@@ -1016,6 +1041,13 @@ bool generate_world(WorldEditor &editor,
 	const bool facade_set_enabled = args.building_facades;
 	building_facades::reset(
 			facade_set_enabled, facade_directory, args.facade_px, args.scale);
+	mapillary::facades::clear();
+	if (args.mapillary_facades_dir) {
+		std::string facade_error;
+		if (auto export_data = mapillary::facades::load_export(
+					*args.mapillary_facades_dir, &facade_error))
+			mapillary::facades::install_export(std::move(*export_data));
+	}
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
 			args.disable_height_limit && !args.bedrock ? -2032 : -64,
@@ -1050,10 +1082,7 @@ bool generate_world(WorldEditor &editor,
 	if (editor.ground && args.body == CelestialBody::Earth) {
 		for (const auto &candidate :
 				{std::filesystem::path("assets/climate/ecoregions.grid"),
-						std::filesystem::path(__FILE__)
-										.parent_path()
-										.parent_path()
-										.parent_path() /
+						std::filesystem::path(__FILE__).parent_path().parent_path() /
 								"assets/climate/ecoregions.grid"}) {
 			if (auto map = ecoregion::EcoMap::load(candidate)) {
 				editor.ground->set_ecoregion_map(std::move(*map));
@@ -1062,26 +1091,39 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 	editor.set_regional_tree_placer({});
+	editor.set_mapped_regional_tree_placer({});
 	std::shared_ptr<trees::RegionSelector> shared_selector;
+	const auto tree_pack_root =
+			std::filesystem::is_directory("assets/tree-packs")
+					? std::filesystem::path("assets/tree-packs")
+					: std::filesystem::path(__FILE__).parent_path().parent_path() /
+							  "assets/tree-packs";
+	std::optional<std::string> dominant_tree_realm;
+	if (editor.ground && editor.ground->ecoregion_map)
+		dominant_tree_realm = editor.ground->ecoregion_map->dominant_tree_pack();
 	if (auto selector =
 					args.legacy_trees
 							? std::optional<trees::RegionSelector>{}
 							: trees::RegionSelector::load_for_location(centre_lat,
-									  centre_lon, std::filesystem::path("assets/trees"),
-									  args.scale, base_level,
+									  centre_lon, tree_pack_root, args.scale, base_level,
 									  trees::SizeFilter::up_to(args.max_tree_size),
 									  editor.ground
 											  ? editor.ground->elevation_blocks_per_meter
-											  : 0.0)) {
+											  : 0.0,
+									  dominant_tree_realm)) {
 		shared_selector = std::make_shared<trees::RegionSelector>(std::move(*selector));
 		editor.set_tree_slot_spacing(shared_selector->base_spacing());
 	}
-	models_3d::RemoteModelProvider wikidata_provider(
-			std::filesystem::path(".arnis_wikidata_cache"));
-	models_3d::three_dmr::Client three_dmr_provider(
-			std::filesystem::path(".arnis_3dmr_cache"));
-	models_3d::custom::Client custom_model_provider(
-			std::filesystem::path("assets/models"));
+	const auto model_cache_root =
+			std::filesystem::path(porting::path_cache) / "arnis-tile-cache";
+	models_3d::RemoteModelProvider wikidata_provider(model_cache_root / "wikidata");
+	models_3d::three_dmr::Client three_dmr_provider(model_cache_root / "3dmr");
+	const auto model_asset_root =
+			std::filesystem::is_directory("assets/models")
+					? std::filesystem::path("assets/models")
+					: std::filesystem::path(__FILE__).parent_path().parent_path() /
+							  "assets/models";
+	models_3d::custom::Client custom_model_provider(model_asset_root);
 	// Landmarks use their matched OSM feature's projected centre as the world
 	// anchor.  This keeps the C++ mapgen host independent of Rust's geographic
 	// projection plumbing while preserving the same suppression/late-placement
@@ -1199,8 +1241,10 @@ bool generate_world(WorldEditor &editor,
 		const auto grid_width = std::clamp<std::size_t>(world_width / 4 + 1, 64, 1024);
 		const auto grid_height = std::clamp<std::size_t>(world_height / 4 + 1, 64, 1024);
 		if (auto canopy = canopy::fetch_canopy_data(
-					std::filesystem::path(".arnis_canopy_cache"), geographic[0],
-					geographic[2], geographic[1], geographic[3], grid_width, grid_height))
+					std::filesystem::path(porting::path_cache) / "arnis-tile-cache" /
+							"canopy",
+					geographic[0], geographic[2], geographic[1], geographic[3],
+					grid_width, grid_height))
 			editor.ground->set_canopy_data(std::move(*canopy), world_width, world_height);
 	}
 	if (editor.ground && editor.ground->has_land_cover()) {
@@ -1296,11 +1340,35 @@ bool generate_world(WorldEditor &editor,
 			return trees::place_selected_region_tree_for_cover(editor, *shared_selector,
 					x, z, cover, y, {}, &building_footprints, &bridge_surface);
 		});
+		editor.set_mapped_regional_tree_placer(
+				[&editor, shared_selector, &building_footprints, &bridge_surface](int x,
+						int y, int z, std::uint8_t cover,
+						const trees::MappedRequest &request) {
+					const auto habitat = trees::habitat_for_land_cover(cover);
+					return trees::place_selected_region_tree(
+							editor, *shared_selector, x, z, habitat, y,
+							[&request] {
+								trees::SlotRequest out;
+								out.eco = request.eco;
+								out.want_size = request.want_size;
+								out.genus = request.genus;
+								out.conifer = request.conifer;
+								out.beach = request.beach;
+								out.tagged = true;
+								out.density_decided = true;
+								return out;
+							}(),
+							&building_footprints, &bridge_surface);
+				});
 	}
 	struct RegionalTreeScope
 	{
 		WorldEditor &editor;
-		~RegionalTreeScope() { editor.set_regional_tree_placer({}); }
+		~RegionalTreeScope()
+		{
+			editor.set_regional_tree_placer({});
+			editor.set_mapped_regional_tree_placer({});
+		}
 	} regional_tree_scope{editor};
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
@@ -1753,24 +1821,21 @@ bool generate_world(WorldEditor &editor,
 			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
 	if (args.fillground) {
 		if (args.caves) {
-			caves::carve_region(editor,
-					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					(static_cast<std::int64_t>(xzbbox.min_x()) << 32) ^
-							static_cast<std::uint32_t>(xzbbox.min_z()),
-					world_editor::terrain_floor_y());
-			caves::generate_water_features(editor,
-					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					(static_cast<std::int64_t>(xzbbox.min_x()) << 32) ^
-							static_cast<std::uint32_t>(xzbbox.min_z()),
-					world_editor::terrain_floor_y());
-			// Rust's cave pipeline establishes the deepslate host transition before ore blobs.
+			// Rust establishes the deepslate host transition on the filled
+			// terrain before any cave carving.  Applying it afterwards leaves
+			// carved cells untouched (and changes the host set seen by cave
+			// decoration), so keep this phase ahead of both cave passes.
 			caves::apply_deepslate(editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(),
 					xzbbox.max_z());
+			caves::carve_region(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					CAVE_SEED, world_editor::terrain_floor_y());
+			caves::generate_water_features(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					CAVE_SEED, world_editor::terrain_floor_y());
 			caves::decorate_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					(static_cast<std::int64_t>(xzbbox.min_x()) << 32) ^
-							static_cast<std::uint32_t>(xzbbox.min_z()),
-					world_editor::terrain_floor_y(), args);
+					CAVE_SEED, world_editor::terrain_floor_y(), args);
 		}
 		ore_generation::generate_ores(
 				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
@@ -1826,6 +1891,7 @@ bool generate_world_with_options(WorldEditor &editor,
 	args.bedrock = is_bedrock(options.format);
 	args.luanti = is_luanti(options.format);
 	args.overture_source = options.overture_source;
+	args.world_name = options.world_name;
 	if (!options.output_path.empty())
 		args.path = options.output_path.string();
 	args.scale = options.projection_scale;

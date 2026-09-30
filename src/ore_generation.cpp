@@ -1,6 +1,6 @@
 #include "ore_generation.h"
 #include "block_definitions.h"
-#include "caves_rng.h"
+#include "deterministic_rng.h"
 #include "../../arnis_adapter.h"
 #include "world_editor/floor_state.h"
 #include <algorithm>
@@ -21,22 +21,20 @@ struct Ore
 };
 int chunk_floor(int v)
 {
-	return v >= 0 ? v / 16 : -((-v + 15) / 16);
+	// Rust's `>> 4` is an arithmetic shift, therefore negative coordinates
+	// belong to the chunk below them rather than truncating toward zero.
+	return v >= 0 ? v / 16 : -(((-v) + 15) / 16);
 }
-std::int64_t chunk_seed(std::int64_t seed, int cx, int cz)
-{
-	return seed ^ std::int64_t(cx) * 341873128712LL ^ std::int64_t(cz) * 132897987541LL ^
-		   0xC0DELL;
-}
-void blob(world_editor::WorldEditor &e, int cx, int cy, int cz, const Ore &o,
-		caves::XoroRandom &r)
+void blob(
+		world_editor::WorldEditor &e, int cx, int cy, int cz, const Ore &o, ChaCha8Rng &r)
 {
 	for (int i = 0; i < o.size; ++i) {
-		if (e.check_for_block_absolute(
-					cx, cy, cz, std::optional<std::vector<Block>>({STONE})))
+		if (e.check_for_block_absolute(cx, cy, cz,
+					std::optional<std::vector<Block>>(std::vector<Block>{STONE})))
 			e.set_block_absolute(o.stone, cx, cy, cz,
-					std::optional<std::vector<Block>>({STONE}), std::nullopt);
-		switch (r.next_int(6)) {
+					std::optional<std::vector<Block>>(std::vector<Block>{STONE}),
+					std::nullopt);
+		switch (r.uniform(6)) {
 		case 0:
 			++cx;
 			break;
@@ -73,11 +71,10 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 {
 	if (show_progress)
 		std::cout << "[6b/7] Sprinkling ore veins...\n";
-	const auto seed = (std::int64_t(min_x) << 32) ^ std::uint32_t(min_z);
 	int floor = world_editor::terrain_floor_y();
 	for (int cx = chunk_floor(min_x); cx <= chunk_floor(max_x); ++cx)
 		for (int cz = chunk_floor(min_z); cz <= chunk_floor(max_z); ++cz) {
-			caves::XoroRandom r = caves::XoroRandom::from_seed(chunk_seed(seed, cx, cz));
+			ChaCha8Rng r = coord_rng(cx, cz, 0xC0DE);
 			int ground = e.get_ground_level(cx * 16 + 8, cz * 16 + 8);
 			for (const auto &rule : rules()) {
 				int lo = std::max(floor + 1, ground - MAX_ORE_DEPTH),
@@ -88,15 +85,17 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 							orig_span > 0
 									? int(rule.avg_veins_per_chunk * span * 2 / orig_span)
 									: 0,
-					n = r.next_int(max_veins + 1);
+					n = static_cast<int>(
+							r.uniform(static_cast<std::uint32_t>(max_veins + 1)));
 				for (int i = 0; i < n; ++i) {
 					Ore o{rule.block, rule.deep_block,
 							static_cast<int>(
 									rule.vein_min +
-									r.next_int(rule.vein_max - rule.vein_min + 1))};
-					blob(e, cx * 16 + r.next_int(16),
-							lo + r.next_int(std::max(0, hi - lo + 1)),
-							cz * 16 + r.next_int(16), o, r);
+									r.uniform(rule.vein_max - rule.vein_min + 1))};
+					blob(e, cx * 16 + r.uniform(16),
+							lo + r.uniform(static_cast<std::uint32_t>(
+										 std::max(0, hi - lo + 1))),
+							cz * 16 + r.uniform(16), o, r);
 				}
 			}
 		}

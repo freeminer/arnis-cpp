@@ -60,6 +60,8 @@ struct SlotRequest
 	bool tagged = false;
 	bool wet_ground = false;
 	bool beach = false;
+	std::optional<std::string> genus;
+	std::optional<bool> conifer;
 };
 struct MappedRequest
 {
@@ -89,12 +91,15 @@ public:
 	static std::optional<RegionSelector> load_for_location(double latitude,
 			double longitude, const std::filesystem::path &root, double scale,
 			int ground_level, const SizeFilter &sizes = SizeFilter{},
-			double blocks_per_meter = 0.0);
+			double blocks_per_meter = 0.0,
+			const std::optional<std::string> &preferred_realm = std::nullopt);
 	bool empty() const;
 	std::size_t entry_count() const;
 	int base_spacing() const;
 	std::optional<SlotSelection> pick_slot(
 			int x, int z, Habitat, int elevation_y, SlotRequest request = {}) const;
+	std::optional<SlotSelection> pick_mapped(
+			int x, int z, Habitat, int elevation_y, const MappedRequest &) const;
 	const Schematic *schematic(std::size_t index) const;
 };
 }

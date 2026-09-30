@@ -8,6 +8,9 @@ namespace arnis::mapillary
 PipelineResult acquire_images(const Client &client, const PipelineConfig &config)
 {
 	PipelineResult result;
+	// Keep the selected cache root visible to later facade stages and library
+	// hosts, even when acquisition returns early (cache-only or cancelled).
+	result.export_dir = config.facade_cache;
 	const auto started = std::chrono::steady_clock::now();
 	// Cache-only runs must never fall through to the Graph client.  The full
 	// facade cache reader is supplied by the host, so an empty result here is

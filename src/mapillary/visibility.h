@@ -34,7 +34,8 @@ public:
 	{
 		if (covered_.empty())
 			return 0;
-		return double(std::count(covered_.begin(), covered_.end(), unsigned char{1})) /
+		return double(std::count(
+					   covered_.begin(), covered_.end(), static_cast<unsigned char>(1))) /
 			   double(covered_.size());
 	}
 	bool usable(double minimum = .10) const { return fraction() >= minimum; }

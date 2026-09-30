@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../arnis_adapter.h"
+#include <array>
 #include <cstdint>
 #include <istream>
 #include <optional>
@@ -13,16 +14,26 @@ namespace arnis::osm_parser
 // The top two seed bits carry the Rust building-facade hint.  Keeping these
 // helpers in the parser API ensures relation and way processing consume the
 // same packed seed without perturbing the lower-bit variant RNG.
-enum class StyleHint : std::uint8_t { None = 0, Masonry = 1, Contemporary = 2, Glass = 3 };
+enum class StyleHint : std::uint8_t
+{
+	None = 0,
+	Masonry = 1,
+	Contemporary = 2,
+	Glass = 3
+};
 inline constexpr std::uint64_t STYLE_HINT_SHIFT = 61;
 inline constexpr std::uint64_t STYLE_HINT_MASK = 0b11ULL << STYLE_HINT_SHIFT;
 inline StyleHint style_hint_from_seed(std::uint64_t seed)
 {
 	switch ((seed & STYLE_HINT_MASK) >> STYLE_HINT_SHIFT) {
-	case 1: return StyleHint::Masonry;
-	case 2: return StyleHint::Contemporary;
-	case 3: return StyleHint::Glass;
-	default: return StyleHint::None;
+	case 1:
+		return StyleHint::Masonry;
+	case 2:
+		return StyleHint::Contemporary;
+	case 3:
+		return StyleHint::Glass;
+	default:
+		return StyleHint::None;
 	}
 }
 inline std::uint64_t seed_without_hint(std::uint64_t seed)
@@ -38,10 +49,17 @@ inline std::uint64_t variant_seed(std::uint64_t seed)
 inline std::uint64_t seed_with_hint(std::uint64_t seed, StyleHint hint)
 {
 	return seed_without_hint(seed) |
-			(static_cast<std::uint64_t>(hint) << STYLE_HINT_SHIFT);
+		   (static_cast<std::uint64_t>(hint) << STYLE_HINT_SHIFT);
 }
 StyleHint building_style_hint(const tags_t &tags);
-enum class ArchEra : std::uint8_t { Unknown, HistoricOrnate, TraditionalPreWar, PostWarPanel, Contemporary };
+enum class ArchEra : std::uint8_t
+{
+	Unknown,
+	HistoricOrnate,
+	TraditionalPreWar,
+	PostWarPanel,
+	Contemporary
+};
 ArchEra arch_era_from_hint(StyleHint hint);
 
 struct RawNode
@@ -96,5 +114,8 @@ RawOsmDocument::Completeness analyze_completeness(const RawOsmDocument &document
 // the responsibility of the existing processed-element pipeline.
 RawOsmDocument parse_osm_xml(std::istream &input);
 RawOsmDocument parse_overpass_json(std::istream &input);
+// Return source bounds when supplied, otherwise derive minlat/minlon/maxlat/maxlon
+// from decoded nodes, matching Rust's resolve_bbox fallback.
+std::optional<std::array<double, 4>> resolve_bbox(const RawOsmDocument &document);
 
 } // namespace arnis::osm_parser

@@ -8,6 +8,7 @@
 
 namespace arnis::mapillary::cache
 {
+std::filesystem::path default_root();
 enum class ImageSize
 {
 	W1024,
@@ -28,7 +29,9 @@ class Layout
 	std::filesystem::path root_;
 
 public:
-	explicit Layout(std::filesystem::path root) : root_(std::move(root)) {}
+	explicit Layout(std::filesystem::path root = default_root()) : root_(std::move(root))
+	{
+	}
 	const std::filesystem::path &root() const { return root_; }
 	std::optional<std::filesystem::path> meta_path(const std::string &) const;
 	std::optional<std::filesystem::path> image_path(const std::string &, ImageSize) const;

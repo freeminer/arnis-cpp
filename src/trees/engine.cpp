@@ -74,8 +74,10 @@ bool place_region_tree_for_cover(world_editor::WorldEditor &e, double lat, doubl
 		const std::filesystem::path &root, std::uint8_t lc, unsigned width,
 		std::uint64_t seed, int x, int ground_y, int z, unsigned rotation)
 {
-	return place_region_tree(e, lat, lon, root, habitat_for_land_cover(lc), width, seed,
-			x, ground_y, z, rotation);
+	const auto habitat =
+			ecoregion_habitat(e, x, z, lc).value_or(habitat_for_land_cover(lc));
+	return place_region_tree(
+			e, lat, lon, root, habitat, width, seed, x, ground_y, z, rotation);
 }
 bool place_region_tree_at(world_editor::WorldEditor &e, double lat, double lon,
 		const std::filesystem::path &root, std::uint8_t lc, unsigned width, int x,
@@ -137,6 +139,9 @@ bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		SlotRequest request, const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
+	if (!request.eco && editor.ground && editor.mg)
+		request.eco = editor.ground->ecoregion_at(
+				{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
 	const auto habitat = ecoregion_habitat(editor, x, z, cover)
 								 .value_or(habitat_for_land_cover(cover));
 	return place_selected_region_tree(editor, selector, x, z, habitat, elevation_y,

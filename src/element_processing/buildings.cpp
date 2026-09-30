@@ -23,6 +23,7 @@
 #include "../floodfill.h"
 #include "../floodfill_cache.h"
 #include "buildings.h"
+#include "../mapillary/facades.h"
 #include "building_facade.h"
 #include "../building_facades/registry.h"
 #include "signage.h"
@@ -1548,7 +1549,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
 		min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
 	} else if (auto it = element.tags.find("building:min_level");
-			it != element.tags.end()) {
+			   it != element.tags.end()) {
 		if (auto level = parse_i32_tag(element.tags, "building:min_level"))
 			min_level_offset = scaled_blocks(*level * 4, scale_factor);
 	} else if (auto it = element.tags.find("layer"); it != element.tags.end()) {
@@ -2495,19 +2496,25 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				architecture == "modern" || architecture == "contemporary" ||
 				architecture == "modernism" || architecture == "functionalism" ||
 				material == "concrete" || material == "reinforcedconcrete";
+		const auto exported_facade_color = mapillary::facades::building_color(element.id);
 		if (it_hist != element.tags.end() && it_hist->second == "castle") {
 			wall_block = get_castle_wall_block(rng);
 		} else {
 			auto it_col = element.tags.find("building:colour");
-			if (it_col != element.tags.end()) {
-				auto rgb = color_text_to_rgb_tuple(it_col->second);
-				if (rgb.has_value()) {
-					wall_block = get_building_wall_block_for_color(rgb.value(), rng);
+			if (it_col != element.tags.end() || exported_facade_color) {
+				auto rgb = it_col != element.tags.end()
+								   ? color_text_to_rgb_tuple(it_col->second)
+								   : std::optional<RGB>{
+											 std::make_tuple((*exported_facade_color)[0],
+													 (*exported_facade_color)[1],
+													 (*exported_facade_color)[2])};
+				if (rgb) {
+					wall_block = get_building_wall_block_for_color(*rgb, rng);
 				} else {
 					wall_block = get_fallback_building_block(rng);
 				}
 			} else if (auto it_material = element.tags.find("building:material");
-					it_material != element.tags.end()) {
+					   it_material != element.tags.end()) {
 				auto material_rng = element_rng_salted(clean_visual_seed, 0x6d617465);
 				wall_block =
 						get_wall_block_for_material_cpp(it_material->second, material_rng)
@@ -2628,7 +2635,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			OAK_TRAPDOOR, SPRUCE_TRAPDOOR, DARK_OAK_TRAPDOOR, BIRCH_TRAPDOOR};
 	const Block awning_block =
 			awning_options[element_rng_salted(clean_visual_seed, 0x0A3B11B60000000BULL)
-							.uniform(4)];
+								   .uniform(4)];
 	const auto roof_shape = element.tags.get("roof:shape");
 	const bool part_has_explicit_top =
 			element.tags.contains("building:part") &&
@@ -2698,8 +2705,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	Block accent_blocks_arr[] = {
 			//POLISHED_ANDESITE,
-			SMOOTH_STONE,
-			STONE_BRICKS,
+			SMOOTH_STONE, STONE_BRICKS,
 			//MUD_BRICKS,
 			//ANDESITE,
 			//CHISELED_STONE_BRICKS

@@ -8,6 +8,11 @@
 #include <thread>
 #include <utility>
 
+namespace porting
+{
+extern std::string path_cache;
+}
+
 namespace arnis::overture::cache
 {
 namespace
@@ -37,19 +42,9 @@ std::pair<std::string, unsigned long long> sort_key(const std::string &release)
 
 std::filesystem::path cache_root()
 {
-#if defined(_WIN32)
-	if (const char *local = std::getenv("LOCALAPPDATA"); local && *local)
-		return std::filesystem::path(local) / "arnis-overture-cache";
-#elif defined(__APPLE__)
-	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / "Library" / "Caches" /
-			   "arnis-overture-cache";
-#endif
-	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-		return std::filesystem::path(xdg) / "arnis-overture-cache";
-	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / ".cache" / "arnis-overture-cache";
-	return std::filesystem::path("./arnis-overture-cache");
+	// Overture is another provider cache and belongs under the shared Rust
+	// cache tree so one cleanup operation covers all downloaded map data.
+	return std::filesystem::path(porting::path_cache) / "arnis-tile-cache" / "overture";
 }
 
 elevation::CacheClearStats clear_overture_cache()

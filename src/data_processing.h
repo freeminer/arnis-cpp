@@ -47,6 +47,9 @@ struct GenerationOptions
 	std::optional<PreparedBuildingData> prepared_buildings;
 	std::filesystem::path output_path;
 	std::string level_name;
+	// Rust-compatible optional custom world folder name.  Backends may use this
+	// with world_utils::unique_world_folder_name when allocating output paths.
+	std::optional<std::string> world_name;
 	bool map_preview = false, map_item = true, bake_lighting = false, use_3d = true;
 	// Rust's provider selection is carried with generation options so callers
 	// can choose PMTiles, GeoParquet, or the automatic policy explicitly.

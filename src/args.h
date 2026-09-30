@@ -178,6 +178,8 @@ struct Args
 	// Output directory for the generated world (required for Java, optional for Bedrock).
 	// Use --output-dir (or the deprecated --path alias) to specify where the world is created.
 	std::optional<std::string> path{std::nullopt};
+	// Optional custom world folder name (--world-name in the Rust CLI).
+	std::optional<std::string> world_name{std::nullopt};
 
 	// Generate a Bedrock Edition world (.mcworld) instead of Java Edition
 	bool bedrock{false};

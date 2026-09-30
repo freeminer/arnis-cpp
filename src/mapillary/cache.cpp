@@ -6,8 +6,26 @@
 #include <iterator>
 #include <nlohmann/json.hpp>
 
+// Keep this cache translation unit independent from the large porting header;
+// it pulls in log_types.h, whose forward-declared Address conflicts with the
+// JSON serializer's initializer-list deduction.  The cache root is the one
+// process-global value exported by porting.cpp.
+namespace porting
+{
+extern std::string path_cache;
+}
+
 namespace arnis::mapillary::cache
 {
+std::filesystem::path default_root()
+{
+	// Keep the Mapillary cache below the same shared tree as elevation and
+	// land-cover tiles.  This is the Rust layout (cache/arnis-tile-cache/
+	// mapillary) and lets the existing cache cleanup reach imagery, SfM
+	// clusters, and reconstructed facade products together.
+	return std::filesystem::path(porting::path_cache) / "arnis-tile-cache" / "mapillary";
+}
+
 namespace
 {
 const char *suffix(ImageSize size)

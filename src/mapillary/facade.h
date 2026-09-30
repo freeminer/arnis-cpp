@@ -7,12 +7,47 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <map>
 #include <tuple>
 #include <optional>
 #include <vector>
 namespace arnis::mapillary
 {
+// Rust's exported facade grids encode the semantic class in PNG alpha while
+// RGB carries the sampled wall colour.  Keep the mapping in the shared C++
+// contract so importers and block/display consumers cannot silently disagree.
+enum class FacadeClass : std::uint8_t
+{
+	Wall,
+	Window,
+	Door,
+	Unknown,
+	NoData,
+};
+
+inline FacadeClass facade_class_from_alpha(std::uint8_t alpha)
+{
+	switch (alpha) {
+	case 255:
+		return FacadeClass::Wall;
+	case 192:
+		return FacadeClass::Window;
+	case 128:
+		return FacadeClass::Door;
+	case 64:
+		return FacadeClass::Unknown;
+	default:
+		return FacadeClass::NoData;
+	}
+}
+
+struct FacadeCell
+{
+	imgops::Rgb color{};
+	FacadeClass type = FacadeClass::NoData;
+};
+
 inline std::optional<std::pair<imgops::Rgb, double>> dominant_color(
 		const std::vector<imgops::Rgb> &cells)
 {
@@ -24,7 +59,7 @@ inline std::optional<std::pair<imgops::Rgb, double>> dominant_color(
 			bins;
 	for (const auto &cell : cells) {
 		const auto lab = imgops::srgb_to_oklab(cell);
-		const auto quantize = [](double value) {
+		const auto quantize = [AB_RANGE](double value) {
 			const double normalized =
 					(std::clamp(value, -AB_RANGE, AB_RANGE) + AB_RANGE) /
 					(2.0 * AB_RANGE);

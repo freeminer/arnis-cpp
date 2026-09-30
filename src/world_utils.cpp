@@ -34,16 +34,25 @@ std::filesystem::path get_luanti_worlds_directory()
 #if defined(_WIN32)
 	if (const char *appdata = std::getenv("APPDATA"))
 		base = std::filesystem::path(appdata) / "Minetest";
-	else
-		base = home() / "AppData" / "Roaming" / "Minetest";
 #elif defined(__APPLE__)
-	base = home() / "Library" / "Application Support" / "minetest";
+	if (std::getenv("HOME"))
+		base = home() / "Library" / "Application Support" / "minetest";
 #else
-	base = home() / ".minetest";
+	if (std::getenv("HOME"))
+		base = home() / ".minetest";
 #endif
-	// Match Rust: a resolvable platform data directory is authoritative even
-	// before the worlds directory exists; callers create it during world setup.
-	return base / "worlds";
+	// Match Rust: only use the platform directory when it can be resolved;
+	// otherwise keep generated Luanti worlds in a visible desktop fallback.
+	if (!base.empty())
+		return base / "worlds";
+	std::filesystem::path desktop;
+	if (const char *xdg = std::getenv("XDG_DESKTOP_DIR"))
+		desktop = xdg;
+	else if (!home().empty())
+		desktop = home() / "Desktop";
+	if (desktop.empty())
+		desktop = ".";
+	return desktop / "Arnis Luanti Worlds";
 }
 bool replace_file_atomically(
 		const std::filesystem::path &path, const std::vector<std::uint8_t> &bytes)
@@ -112,6 +121,76 @@ std::string sanitize_for_filename(const std::string &name)
 		trim(out);
 	}
 	return out.empty() ? "Unknown Location" : out;
+}
+
+std::string world_folder_name(const std::string &raw)
+{
+	// Rust caps custom names by characters (not bytes), then applies the same
+	// filesystem-safe filtering used for export filenames.  Preserve UTF-8
+	// boundaries while enforcing the 48-character UI limit.
+	std::string capped;
+	std::size_t chars = 0;
+	for (std::size_t i = 0; i < raw.size() && chars < 48;) {
+		const auto c = static_cast<unsigned char>(raw[i]);
+		std::size_t width = c < 0x80 ? 1 : (c < 0xe0 ? 2 : (c < 0xf0 ? 3 : 4));
+		if (i + width > raw.size())
+			width = 1;
+		capped.append(raw, i, width);
+		i += width;
+		++chars;
+	}
+	static constexpr char invalid[] = "<>:\"/\\|?*";
+	std::string sanitized;
+	sanitized.reserve(capped.size());
+	for (const unsigned char c : capped)
+		sanitized.push_back(c < 32 || std::strchr(invalid, c) ? '_' : char(c));
+	const auto trim = [](std::string &value) {
+		std::size_t first = 0;
+		while (first < value.size() &&
+				std::isspace(static_cast<unsigned char>(value[first])))
+			++first;
+		std::size_t last = value.size();
+		while (last > first &&
+				(std::isspace(static_cast<unsigned char>(value[last - 1])) ||
+						value[last - 1] == '.'))
+			--last;
+		value = value.substr(first, last - first);
+	};
+	trim(sanitized);
+	return sanitized;
+}
+
+std::string unique_world_folder_name(
+		const std::filesystem::path &base_path, const std::string &custom_name)
+{
+	const auto usable = world_folder_name(custom_name);
+	if (!usable.empty()) {
+		if (!std::filesystem::exists(base_path / usable))
+			return usable;
+		for (std::uint32_t n = 2;; ++n) {
+			const auto candidate = usable + " (" + std::to_string(n) + ")";
+			if (!std::filesystem::exists(base_path / candidate))
+				return candidate;
+		}
+	}
+	for (std::uint32_t n = 1;; ++n) {
+		const auto candidate = "Arnis World " + std::to_string(n);
+		if (std::filesystem::exists(base_path / candidate))
+			continue;
+		bool location_collision = false;
+		std::error_code error;
+		for (const auto &entry : std::filesystem::directory_iterator(base_path, error)) {
+			if (error)
+				break;
+			const auto name = entry.path().filename().string();
+			if (name.rfind(candidate + ": ", 0) == 0) {
+				location_collision = true;
+				break;
+			}
+		}
+		if (!location_collision)
+			return candidate;
+	}
 }
 
 std::string get_area_name_for_bedrock(const geographic::LLBBox &bbox)

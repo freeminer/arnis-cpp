@@ -8,6 +8,7 @@
 #include <memory>
 #include <filesystem>
 #include <vector>
+#include <map>
 #include "geo_grid.h"
 
 namespace arnis::ecoregion
@@ -62,5 +63,8 @@ class EcoMap
 public:
 	static std::optional<EcoMap> load(const std::filesystem::path &path);
 	std::optional<std::uint16_t> id_at(double latitude, double longitude) const;
+	std::vector<std::pair<std::uint16_t, std::size_t>> by_area() const;
+	bool has_gaps() const;
+	std::optional<std::string> dominant_tree_pack() const;
 };
 }

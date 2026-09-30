@@ -19,6 +19,9 @@ class TiledGrid
 public:
 	static std::optional<TiledGrid> parse(const std::vector<std::uint8_t> &data);
 	std::size_t tile_count() const;
+	std::size_t columns() const { return cols_; }
+	std::size_t rows() const { return rows_; }
+	std::size_t cells_per_tile() const { return tile_ * tile_; }
 	double cells_per_degree() const { return 1.0 / cell_deg_; }
 	std::pair<double, double> position(double lat, double lon) const;
 	std::pair<std::size_t, std::size_t> cell(double col, double row) const;

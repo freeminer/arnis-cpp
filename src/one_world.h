@@ -36,6 +36,17 @@ struct GeneratedArea
 		return x0 <= min_x && z0 <= min_z && x1 >= max_x && z1 >= max_z;
 	}
 };
+struct SoftTop
+{
+	double knee_m = 0;
+	double width_blocks = 0;
+};
+struct ElevationAffine
+{
+	double min_height_m = 0;
+	double blocks_per_meter = 0;
+	std::optional<SoftTop> soft_top;
+};
 struct Manifest
 {
 	std::uint32_t version = MANIFEST_VERSION;
@@ -45,6 +56,7 @@ struct Manifest
 	int ground_level = 0;
 	bool terrain = true, disable_height_limit = false, aws_only_elevation = false;
 	double height_multiplier = 1;
+	std::optional<ElevationAffine> elevation;
 	std::uint32_t next_area_id = 1;
 	std::vector<GeneratedArea> areas;
 	static std::filesystem::path path_in(const std::filesystem::path &world);
@@ -61,6 +73,7 @@ struct RunContext
 {
 	std::filesystem::path world_dir;
 	double origin_lat = 0, origin_lon = 0;
+	std::optional<ElevationAffine> elevation;
 	bool extending = false;
 	std::uint64_t replaced_chunks = 0;
 	std::uint32_t area_id = 0;
