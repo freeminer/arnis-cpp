@@ -3,8 +3,10 @@
 #include <algorithm>
 #include <bit>
 #include <charconv>
+#include <chrono>
 #include <cmath>
 #include <map>
+#include <mutex>
 #include <queue>
 #include <set>
 #include <tuple>
@@ -156,6 +158,29 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 
 namespace
 {
+void report_route_failures(std::size_t count, std::uint64_t example_way)
+{
+	if (!count)
+		return;
+	// All emerge workers share one reporting interval. Keep diagnostics without
+	// formatting and flushing a log line for every segment of every chunk.
+	static std::mutex mutex;
+	static std::size_t pending = 0;
+	static auto next_report = std::chrono::steady_clock::time_point::min();
+	std::lock_guard lock(mutex);
+	pending += count;
+	const auto now = std::chrono::steady_clock::now();
+	if (now < next_report)
+		return;
+	warningstream << "Advtrains: " << pending
+				  << " segment routing failures since last report (example OSM way "
+				  << example_way
+				  << "); unsupported anchors or no route using available tracks. "
+				  << "Further failures are aggregated for 10 seconds." << std::endl;
+	pending = 0;
+	next_report = now + std::chrono::seconds(10);
+}
+
 bool track_way(const ProcessedWay &way)
 {
 	static const std::set<std::string> types{"rail", "light_rail", "subway", "tram",
@@ -330,6 +355,8 @@ void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor 
 			invalid.insert(i);
 	using SegmentKey = std::tuple<std::size_t, std::size_t, std::string>;
 	std::map<SegmentKey, Segment> segments;
+	std::size_t failed_routes = 0;
+	std::uint64_t example_failed_way = 0;
 	std::map<std::string, std::set<XZ>> occupied;
 	for (const auto &[id, ids] : way_anchors)
 		for (auto a : ids)
@@ -350,8 +377,11 @@ void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor 
 					occupied[segment.level].insert(p);
 			}
 			if (segment.line.empty()) {
-				errorstream << "Advtrains: cannot route way " << id
-							<< " between OSM anchors using available tracks" << std::endl;
+				// Shared segments are already cached, including failed routes.
+				if (inserted) {
+					++failed_routes;
+					example_failed_way = id;
+				}
 				continue;
 			}
 			std::vector<int> seed;
@@ -371,6 +401,7 @@ void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor 
 					segment.heights[j] = std::max(segment.heights[j], seed[j]);
 		}
 	}
+	report_route_failures(failed_routes, example_failed_way);
 	std::vector<int> anchor_heights(anchors.size(), std::numeric_limits<int>::min());
 	bool changed;
 	do {
