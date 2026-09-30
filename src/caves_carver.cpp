@@ -52,9 +52,12 @@ void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, 
 	const int max_x = std::min(region.max_x, int(std::floor(ox + radius)));
 	const int min_z = std::max(region.min_z, int(std::floor(oz - radius)));
 	const int max_z = std::min(region.max_z, int(std::floor(oz + radius)));
-	const int min_y = std::max(
-			oy - int(std::ceil(vertical)) - 1, world_editor::terrain_floor_y() + 1);
-	const int max_y = oy + int(std::ceil(vertical)) + 1;
+	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
+	const int min_y = std::max({oy - int(std::ceil(vertical)) - 1,
+			world_editor::terrain_floor_y() + 1, write_min_y});
+	const int max_y = std::min(oy + int(std::ceil(vertical)) + 1, write_max_y);
+	if (min_y > max_y || min_x > max_x || min_z > max_z)
+		return;
 	const std::vector<Block> hosts{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,
 			DIORITE, ANDESITE, DIRT, COARSE_DIRT, GRAVEL};
 	const auto host_options = std::optional<std::vector<Block>>(hosts);
@@ -72,7 +75,7 @@ void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, 
 					continue;
 				const double dy = (double(y) - .5 - oy) / vertical;
 				if (dy > floor_level && dx * dx + dy * dy + dz * dz < 1.0 &&
-						editor.check_for_block_absolute(x, y, z, hosts))
+						editor.check_for_block_absolute(x, y, z, host_options))
 					editor.set_block_absolute(AIR, x, y, z, host_options, std::nullopt);
 			}
 		}
@@ -87,13 +90,16 @@ void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	// protected by the whitelist.
 	const std::vector<Block> hosts{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,
 			DIORITE, ANDESITE, DIRT, COARSE_DIRT, GRAVEL};
+	const std::optional<std::vector<Block>> host_options{hosts};
+	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	for (int z = region.min_z; z <= region.max_z; ++z)
 		for (int x = region.min_x; x <= region.max_x; ++x) {
 			const int surface = editor.get_ground_level(x, z);
 			const int top = surface - 8;
 			if (top <= floor_y + 12)
 				continue;
-			for (int y = floor_y + 8; y <= top; ++y) {
+			for (int y = std::max(floor_y + 8, write_min_y);
+					y <= std::min(top, write_max_y); ++y) {
 				const double n = noise(seed, x * .055, y * .075, z * .055);
 				const double band =
 						std::abs(noise(seed ^ 0x5deece66dLL, x * .11, y * .025, z * .11));
@@ -101,7 +107,7 @@ void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				// the depth taper keeps the surface and bedrock intact.
 				const double depth = double(y - floor_y) / std::max(1, top - floor_y);
 				if (n < -.72 && band < .58 && depth > .08 && depth < .94 &&
-						editor.check_for_block_absolute(x, y, z, hosts))
+						editor.check_for_block_absolute(x, y, z, host_options))
 					editor.set_block_absolute(AIR, x, y, z, std::nullopt, std::nullopt);
 			}
 		}
@@ -207,25 +213,28 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		amounts = BiomeAmounts::parse(*args.cave_biomes);
 	const std::vector<Block> rocks{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,
 			DIORITE, ANDESITE, GRAVEL, DIRT};
+	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
+	const std::optional<std::vector<Block>> rock_options{rocks};
+	// Candidates can write one node above or below their own height.
 	// Keep decoration independent of traversal order: each candidate is keyed
 	// by its absolute column and height, matching the Rust cave decoration pass.
 	for (int z = region.min_z; z <= region.max_z; ++z)
 		for (int x = region.min_x; x <= region.max_x; ++x) {
 			const int top = editor.get_ground_level(x, z) - 8;
-			for (int y = floor_y + 9; y < top; ++y) {
-				if (!editor.check_for_block_absolute(x, y, z,
-							std::optional<std::vector<Block>>(std::vector<Block>{AIR})))
+			for (int y = std::max(floor_y + 9, write_min_y - 1);
+					y < std::min(top, write_max_y + 2); ++y) {
+				if (!editor.check_for_block_type_absolute(x, y, z, AIR))
 					continue;
 				const auto h = hash3(seed ^ 0x6a09e667f3bcc909LL, x, y, z);
 				const bool adjacent_rock =
-						editor.check_for_block_absolute(x + 1, y, z, rocks) ||
-						editor.check_for_block_absolute(x - 1, y, z, rocks) ||
-						editor.check_for_block_absolute(x, y, z + 1, rocks) ||
-						editor.check_for_block_absolute(x, y, z - 1, rocks);
+						editor.check_for_block_absolute(x + 1, y, z, rock_options) ||
+						editor.check_for_block_absolute(x - 1, y, z, rock_options) ||
+						editor.check_for_block_absolute(x, y, z + 1, rock_options) ||
+						editor.check_for_block_absolute(x, y, z - 1, rock_options);
 				if (!adjacent_rock)
 					continue;
 				const bool floor_rock =
-						editor.check_for_block_absolute(x, y - 1, z, rocks);
+						editor.check_for_block_absolute(x, y - 1, z, rock_options);
 				const auto theme = h % 1000;
 				if (theme < 7 && amounts.lush > 0 && floor_rock)
 					editor.set_block_absolute(MOSS_BLOCK, x, y - 1, z,
@@ -233,15 +242,15 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 									std::vector<Block>{STONE, DEEPSLATE, TUFF, DIRT}),
 							std::nullopt);
 				else if (theme >= 40 && theme < 44 && amounts.volcanic > 0 && floor_rock)
-					editor.set_block_absolute(MAGMA_BLOCK, x, y - 1, z,
-							std::optional<std::vector<Block>>(rocks), std::nullopt);
+					editor.set_block_absolute(
+							MAGMA_BLOCK, x, y - 1, z, rock_options, std::nullopt);
 				else if (theme >= 44 && theme < 48 && amounts.deepdark > 0 && floor_rock)
-					editor.set_block_absolute(BLACKSTONE, x, y - 1, z,
-							std::optional<std::vector<Block>>(rocks), std::nullopt);
+					editor.set_block_absolute(
+							BLACKSTONE, x, y - 1, z, rock_options, std::nullopt);
 				else if (theme >= 48 && theme < 51 && amounts.ice > 0 && floor_rock &&
 						 y > top - 20)
-					editor.set_block_absolute(ICE, x, y - 1, z,
-							std::optional<std::vector<Block>>(rocks), std::nullopt);
+					editor.set_block_absolute(
+							ICE, x, y - 1, z, rock_options, std::nullopt);
 				else if (theme == 777 && amounts.mushroom > 0 && y + 1 < top)
 					editor.set_block_absolute(BROWN_MUSHROOM, x, y + 1, z,
 							std::optional<std::vector<Block>>(std::vector<Block>{AIR}),

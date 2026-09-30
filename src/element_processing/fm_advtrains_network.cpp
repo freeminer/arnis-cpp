@@ -8,6 +8,7 @@
 #include <queue>
 #include <set>
 #include <tuple>
+#include <unordered_map>
 
 #include "log.h"
 
@@ -68,6 +69,17 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 		const std::function<bool(const XZ &)> &blocked)
 {
 	using State = std::tuple<pos_t, pos_t, int>;
+	struct StateHash
+	{
+		std::size_t operator()(const State &state) const noexcept
+		{
+			const auto [x, z, heading] = state;
+			auto hash = std::hash<pos_t>{}(x);
+			hash ^= std::hash<pos_t>{}(z) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
+			return hash ^
+				   (std::hash<int>{}(heading) + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+		}
+	};
 	struct Visit
 	{
 		double cost;
@@ -77,7 +89,10 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 		return std::hypot(double(x - to.first), double(z - to.second));
 	};
 	for (pos_t margin : {16, 48}) {
-		std::map<State, Visit> visits;
+		// Visits are only looked up by key, never iterated. Keep the ordered
+		// priority queue and its tie-breaks unchanged for identical route choices.
+		std::unordered_map<State, Visit, StateHash> visits;
+		visits.reserve(4096);
 		using Entry = std::tuple<double, double, State>;
 		std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> queue;
 		const State start{from.first, from.second, departure};

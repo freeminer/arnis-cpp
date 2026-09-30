@@ -18,7 +18,7 @@ void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &
 		const BuildingFootprintBitmap &building_footprints,
 		const CoordinateBitmap *tunnel_footprint = nullptr,
 		const bridges::BridgeSurfaceMap *bridge_surface = nullptr,
-		bool show_progress = true);
+		bool show_progress = false);
 // Tile/streaming entry point.  The shared land-cover grid remains referenced
 // to xzbbox while only the inclusive iteration bounds are generated.
 void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
@@ -26,6 +26,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		int iter_max_x, int iter_min_z, int iter_max_z,
 		const CoordinateBitmap *tunnel_footprint = nullptr,
 		const bridges::BridgeSurfaceMap *bridge_surface = nullptr,
-		bool show_progress = true);
+		bool show_progress = false);
 
 }

@@ -76,6 +76,10 @@ BlockWithProperties create_stair_with_properties(
 BlockWithProperties top_stair(BlockWithProperties stair);
 Block get_slab_block_for_material(const Block &material);
 Block get_wall_piece_for_material(const Block &material);
+// Java snow layers use one node plus a `layers` state.  Keep the Rust
+// SNOW_LAYERS[0..7] concept available to terrain and structure code without
+// inventing separate node IDs in the Luanti palette.
+BlockWithProperties snow_layer_with_depth(unsigned layers);
 
 namespace block_definitions
 {

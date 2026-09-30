@@ -12,8 +12,8 @@
 #include <array>
 #include <memory>
 #include <unordered_map>
+#include <unordered_set>
 #include <tuple>
-#include <set>
 namespace arnis::trees
 {
 bool is_palm(const std::string &s)
@@ -279,6 +279,7 @@ struct RegionSelector::Data
 	std::vector<Entry> entries;
 	Pack realm, vanilla;
 	std::unordered_map<std::uint16_t, std::vector<EcoChoice>> eco_choices;
+	std::unordered_map<std::uint16_t, std::vector<std::size_t>> eco_communities;
 	double scale = 1.;
 	double blocks_per_meter = 0.;
 	int ground_level = 0;
@@ -404,37 +405,13 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	// twice.
 	if (source.realm() != "vanilla-plus" && source.realm() != "vnplus")
 		load_pack(source.vanilla_path("region.json"), data->vanilla, "vanilla-plus");
-	// Rust resolves mix entries against the referenced realm packs.  Load those
-	// manifests into the same indexed community pool so their schematics and
-	// weights remain available to the C++ selector as well.
-	std::set<std::string> referenced;
-	for (std::uint16_t id = 0; id < 900; ++id) {
-		const auto mix = ecoregion::tree_mix(id);
-		if (!mix)
-			continue;
-		std::size_t p = 0;
-		while (p < mix->second.size()) {
-			const auto e = mix->second.find(';', p);
-			const auto raw = mix->second.substr(
-					p, e == std::string_view::npos ? mix->second.size() - p : e - p);
-			const auto start = raw.find_first_not_of("^~");
-			const auto colon = raw.find(':', start == std::string_view::npos ? 0 : start);
-			if (colon != std::string_view::npos)
-				referenced.emplace(std::string(raw.substr(
-						start, colon - (start == std::string_view::npos ? 0 : start))));
-			if (e == std::string_view::npos)
-				break;
-			p = e + 1;
-		}
-	}
-	const auto root = source.realm_path("region.json").parent_path().parent_path();
-	for (const auto &pack : referenced) {
-		if (pack == source.realm() || pack == "vanilla-plus")
-			continue;
-		load_pack(root / pack / "region.json", data->realm, pack);
-	}
-	// Resolve Rust's ecoregion mixes up front.  Referenced packs were merged into
-	// the indexed pool above, so cross-realm communities retain their weights.
+	// Resolve mixes against the active realm and vanilla-plus pack.  Other realm
+	// packs are loaded on a separate location-specific selector rather than
+	// eagerly decoding every global pack (which stalls all emerge workers and
+	// consumes several gigabytes before the first chunk is ready).
+	// Match Rust's realm_pack.own: derived communities must never become
+	// sources for later mixes, or repeated exclusions multiply their copies.
+	const auto community_count = data->realm.communities.size();
 	for (std::uint16_t id = 0; id < 900; ++id) {
 		const auto mix = ecoregion::tree_mix(id);
 		if (!mix)
@@ -490,7 +467,6 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 								p = next + 1;
 							}
 						}
-						const auto community_count = data->realm.communities.size();
 						for (std::size_t ci = 0; ci < community_count; ++ci)
 							if (data->realm.communities[ci].pack == pack_name &&
 									data->realm.communities[ci].name == name) {
@@ -547,6 +523,13 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			if (end == std::string_view::npos)
 				break;
 			begin = end + 1;
+		}
+		if (auto it = data->eco_choices.find(id); it != data->eco_choices.end()) {
+			auto &communities = data->eco_communities[id];
+			std::unordered_set<std::size_t> known(communities.begin(), communities.end());
+			for (const auto &choice : it->second)
+				if (known.insert(choice.community).second)
+					communities.push_back(choice.community);
 		}
 	}
 	return RegionSelector{std::move(data)};
@@ -733,6 +716,25 @@ std::optional<SlotSelection> RegionSelector::pick_slot(
 										? true
 										: request.tagged && hint == Habitat::Lowland;
 	const bool want_beach_palm = request.beach && request.eco && !request.wet_ground;
+	if (want_beach_palm && palms_allowed) {
+		const auto mix = data_->eco_communities.find(request.eco->id);
+		if (mix != data_->eco_communities.end() &&
+				land_cover::coord_hash(sx ^ 0x0BEA, sz ^ 0x0C11) % 100 < 70) {
+			for (const auto ci_mix : mix->second) {
+				if (ci_mix >= data_->realm.communities.size())
+					continue;
+				const auto &candidate = data_->realm.communities[ci_mix];
+				for (std::size_t si = 0; si < candidate.species.size(); ++si) {
+					if (si >= candidate.species_palm.size() ||
+							!candidate.species_palm[si])
+						continue;
+					for (const auto i : candidate.species[si])
+						if (data_->allowed(data_->entries[i].size))
+							mapped.push_back(i);
+				}
+			}
+		}
+	}
 	for (std::size_t si = 0; si < community.species.size(); ++si)
 		for (auto i : community.species[si])
 			if (data_->allowed(data_->entries[i].size) &&

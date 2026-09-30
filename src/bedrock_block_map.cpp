@@ -569,4 +569,23 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return state("wall_banner", {{"facing_direction", 2}});
 	return simple("unknown");
 }
+
+BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
+{
+	using namespace block_definitions;
+	if (value.block == SNOW_LAYER) {
+		int layers = 1;
+		if (const auto it = value.properties.find("layers");
+				it != value.properties.end()) {
+			try {
+				layers = std::stoi(it->second);
+			} catch (...) {
+				layers = 1;
+			}
+		}
+		layers = std::clamp(layers, 1, 8);
+		return state("snow_layer", {{"height", layers - 1}, {"covered_bit", false}});
+	}
+	return to_bedrock_block(value.block);
+}
 }

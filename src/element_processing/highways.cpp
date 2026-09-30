@@ -7,6 +7,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cstddef>
+#include <cstdint>
 
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
@@ -17,21 +18,12 @@
 #include "signage.h"
 #include "../floodfill.h"
 #include "../structures/helicopter.h"
+#include "fm_highway_connectivity.h"
 namespace arnis
 {
 
 namespace highways
 {
-
-// Hash for pair<int,int> used in unordered_map
-struct PairHash
-{
-	std::size_t operator()(const std::pair<int, int> &p) const noexcept
-	{
-		return std::hash<long long>()((static_cast<long long>(p.first) << 32) ^
-									  static_cast<unsigned long long>(p.second));
-	}
-};
 
 // Minimum terrain dip (in blocks) below max endpoint elevation to classify a bridge as valley-spanning
 const int VALLEY_BRIDGE_THRESHOLD = 7;
@@ -63,8 +55,6 @@ std::vector<crate::block_definitions::Block> road_protected_surfaces()
 	}
 	return result;
 }
-
-#define ROAD_PROTECTED_SURFACES road_protected_surfaces()
 
 int perpendicular_median_raw(const crate::world_editor::WorldEditor &editor, int set_x,
 		int set_z, int centerline_x, int centerline_z, int block_range,
@@ -447,6 +437,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		const crate::bridges::BridgeSurfaceMap &bridge_surface,
 		const TunnelPortalMap &tunnel_portals)
 {
+	const std::optional<std::vector<crate::block_definitions::Block>> protected_surfaces{
+			road_protected_surfaces()};
 	using crate::block_definitions::Block;
 	using crate::block_definitions::COBBLESTONE_WALL;
 	using crate::block_definitions::GLOWSTONE;
@@ -508,9 +500,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				const int base =
 						node_feature_base_y(editor, bridge_surface, element.tags(), x, z);
 				auto signal_rng = coord_rng(x, z, 0x54524146464943ULL);
-				auto light = crate::block_definitions::STREETS_TRAFFIC_LIGHTS[signal_rng
-								.uniform(crate::block_definitions::STREETS_TRAFFIC_LIGHTS
-												.size())];
+				auto light = crate::block_definitions::STREETS_TRAFFIC_LIGHTS
+						[signal_rng.uniform(
+								crate::block_definitions::STREETS_TRAFFIC_LIGHTS.size())];
 				if (light.id() != CONTENT_AIR) {
 					// Streets traffic-light nodeboxes are deliberately outside their
 					// node and attach to a pole in the neighbouring cell.  Keep the
@@ -734,9 +726,13 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	}
 	auto block_types = crate::surfaces::get_blocks_for_surface_way(way, default_surface);
 	const auto surface_tag = way.tags.get("surface");
-	if (is_pedestrian_way_tags(way.tags) &&
-			(surface_tag == "concrete" || surface_tag == "paving_stones" ||
-					surface_tag == "sett"))
+	const bool pedestrian = is_pedestrian_way_tags(way.tags);
+	const bool marked_crossing = pedestrian && way.tags.get("footway") == "crossing" &&
+								 way.tags.get("crossing") != "no" &&
+								 way.tags.get("crossing") != "unmarked" &&
+								 way.tags.get("crossing:markings") != "no";
+	if (pedestrian && (surface_tag == "concrete" || surface_tag == "paving_stones" ||
+							  surface_tag == "sett"))
 		block_types = {crate::block_definitions::ROAD_SIDEWALK};
 
 	const int LAYER_HEIGHT_STEP = 6;
@@ -857,6 +853,13 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const auto bridge_style = bridge_member ? bridge_member->style
 											: crate::bridge_styles::BridgeStyle::Beam;
 	std::vector<crate::bridge_styles::BridgePathSample> bridge_path;
+	const auto [min_x, min_z] = editor.get_min_coords();
+	const auto [max_x, max_z] = editor.get_max_coords();
+	// The host generates one chunk from an extract containing complete ways.
+	// Keep a halo for road width, outlines and terrain median samples, but do
+	// not populate the ground cache for miles of road outside this chunk.
+	// Bridges retain their full path for whole-span decorations and rail joins.
+	const auto road_halo = std::int64_t(block_range) * 3 + 4;
 
 	for (const auto &node : way.nodes) {
 		if (previous_node.has_value()) {
@@ -900,6 +903,19 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				int x = std::get<0>(bresenham_points[point_index]);
 				int z = std::get<2>(bresenham_points[point_index]);
 				const std::size_t tds = cumulative_distance_from_start + point_index;
+				if (!bridge_like &&
+						(std::int64_t(x) < std::int64_t(min_x) - road_halo ||
+								std::int64_t(x) > std::int64_t(max_x) + road_halo ||
+								std::int64_t(z) < std::int64_t(min_z) - road_halo ||
+								std::int64_t(z) > std::int64_t(max_z) + road_halo)) {
+					// Preserve the original dash phase when the way enters the chunk.
+					if (add_stripe && segment_norm > 0.0f) {
+						++stripe_length_counter;
+						if (stripe_length_counter >= dash_length + gap_length)
+							stripe_length_counter = 0;
+					}
+					continue;
+				}
 
 				// Calculate Y elevation for this point
 				// Bridge structures drive absolute Y for full bridge groups and their ramps.
@@ -962,9 +978,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 												std::optional<std::vector<
 														crate::block_definitions::
 																Block>>(),
-												std::optional<std::vector<
-														crate::block_definitions::Block>>(
-														ROAD_PROTECTED_SURFACES));
+												protected_surfaces);
 									}
 								}
 							}
@@ -1017,11 +1031,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 
 						bool zebra = false;
 						bool crossing_horizontal = false;
-						if (is_pedestrian_way_tags(way.tags) &&
-								way.tags.get("footway") == "crossing" &&
-								way.tags.get("crossing") != "no" &&
-								way.tags.get("crossing") != "unmarked" &&
-								way.tags.get("crossing:markings") != "no") {
+						if (marked_crossing) {
 							crossing_horizontal =
 									(std::abs(x2 - x1) >= std::abs(z2 - z1));
 							if (crossing_horizontal) {
@@ -1071,16 +1081,12 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 										set_z,
 										std::optional<std::vector<
 												crate::block_definitions::Block>>(),
-										std::optional<std::vector<
-												crate::block_definitions::Block>>(
-												ROAD_PROTECTED_SURFACES));
+										protected_surfaces);
 							} else {
 								editor.set_block(road_block, set_x, surface_y, set_z,
 										std::optional<std::vector<
 												crate::block_definitions::Block>>(),
-										std::optional<std::vector<
-												crate::block_definitions::Block>>(
-												ROAD_PROTECTED_SURFACES));
+										protected_surfaces);
 							}
 						}
 
@@ -1184,9 +1190,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 							editor.set_block_absolute(rail_block, rx, current_y, rz,
 									std::optional<std::vector<
 											crate::block_definitions::Block>>(),
-									std::optional<
-											std::vector<crate::block_definitions::Block>>(
-											ROAD_PROTECTED_SURFACES));
+									protected_surfaces);
 							if (current_y > 0) {
 								editor.set_block_absolute(rail_foundation, rx,
 										current_y - 1, rz,
@@ -1364,6 +1368,8 @@ void generate_siding(crate::world_editor::WorldEditor &editor,
 		const crate::osm_parser::ProcessedWay &element,
 		const crate::bridges::BridgeSurfaceMap &bridge_surface)
 {
+	const std::optional<std::vector<crate::block_definitions::Block>> protected_surfaces{
+			road_protected_surfaces()};
 	std::optional<crate::coordinate_system::cartesian::XZPoint> previous_node;
 	crate::block_definitions::Block siding_block =
 			crate::block_definitions::STONE_BRICK_SLAB;
@@ -1377,20 +1383,15 @@ void generate_siding(crate::world_editor::WorldEditor &editor,
 				int bx = std::get<0>(p);
 				int bz = std::get<2>(p);
 				if (auto deck_y = bridge_surface.deck_y_at(bx, bz)) {
-					if (!editor.check_for_block_absolute(bx, *deck_y, bz,
-								std::optional<
-										std::vector<crate::block_definitions::Block>>(
-										ROAD_PROTECTED_SURFACES))) {
+					if (!editor.check_for_block_absolute(
+								bx, *deck_y, bz, protected_surfaces)) {
 						editor.set_block_absolute(siding_block, bx, *deck_y + 1, bz,
 								std::optional<
 										std::vector<crate::block_definitions::Block>>(),
 								std::optional<
 										std::vector<crate::block_definitions::Block>>());
 					}
-				} else if (!editor.check_for_block(bx, 0, bz,
-								   std::optional<
-										   std::vector<crate::block_definitions::Block>>(
-										   ROAD_PROTECTED_SURFACES))) {
+				} else if (!editor.check_for_block(bx, 0, bz, protected_surfaces)) {
 					editor.set_block(siding_block, bx, 1, bz,
 							std::optional<std::vector<crate::block_definitions::Block>>(),
 							std::optional<

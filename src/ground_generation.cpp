@@ -120,9 +120,8 @@ bool has_nearby_water(WorldEditor &editor, int x, int ground_y, int z)
 	for (int dx = -2; dx <= 2; ++dx) {
 		for (int dz = -2; dz <= 2; ++dz) {
 			for (int dy = -1; dy <= 1; ++dy) {
-				if (editor.check_for_block_absolute(x + dx, ground_y + dy, z + dz,
-							std::optional<std::vector<Block>>(
-									std::vector<Block>{WATER}))) {
+				if (editor.check_for_block_type_absolute(
+							x + dx, ground_y + dy, z + dz, WATER)) {
 					return true;
 				}
 			}
@@ -281,7 +280,6 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 							   ? editor.ground->cover_class({x - editor.mg->node_min.X,
 										 z - editor.mg->node_min.Z})
 							   : 0;
-	const auto h = land_cover::coord_hash(x, z);
 	auto rng = coord_rng(x, z, 0);
 	const int patch_x = x >= 0 ? x / 8 : -(((-x) + 7) / 8);
 	const int patch_z = z >= 0 ? z / 8 : -(((-z) + 7) / 8);
@@ -367,8 +365,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			place_decoration(GRASS, ground_y + 1);
 		}
 	} else if (cover == land_cover::LC_CROPLAND) {
-		const bool farmland = editor.check_for_block_absolute(x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{FARMLAND}));
+		const bool farmland =
+				editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND);
 		const bool enclosed = editor.get_ground_level(x + 1, z) >= ground_y &&
 							  editor.get_ground_level(x - 1, z) >= ground_y &&
 							  editor.get_ground_level(x, z + 1) >= ground_y &&
@@ -390,8 +388,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		}
 	} else if (cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES) {
 		const auto choice = rng.uniform(100);
-		const bool water_surface = editor.check_for_block_absolute(x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{WATER}));
+		const bool water_surface =
+				editor.check_for_block_type_absolute(x, ground_y, z, WATER);
 		if (water_surface && choice < 8) {
 			const bool kelp = choice == 0;
 			if (kelp) {
@@ -433,11 +431,10 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		else if (choice < 68)
 			place_decoration(FERN, ground_y + 1);
 	} else if (cover == land_cover::LC_BARE) {
-		const bool coarse = editor.check_for_block_absolute(x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{COARSE_DIRT}));
+		const bool coarse =
+				editor.check_for_block_type_absolute(x, ground_y, z, COARSE_DIRT);
 		const auto choice = rng.uniform(100);
-		const bool sandy = editor.check_for_block_absolute(x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{SAND}));
+		const bool sandy = editor.check_for_block_type_absolute(x, ground_y, z, SAND);
 		bool cactus_country = true;
 		if (editor.mg) {
 			const auto [lat, lon] = editor.mg->pos_to_ll(x, z);
@@ -615,9 +612,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 													 ? editor.get_ground_level(wx, wz)
 													 : args.ground_level;
 				for (int dy = 0; dy <= 2; ++dy)
-					if (editor.check_for_block_absolute(wx, neighbour_ground + dy, wz,
-								std::optional<std::vector<Block>>(
-										std::vector<Block>{WATER})))
+					if (editor.check_for_block_type_absolute(
+								wx, neighbour_ground + dy, wz, WATER))
 						return true;
 				return false;
 			};
@@ -631,8 +627,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									has_water_in_column(x - 1, z + 1)) ||
 							(has_water_in_column(x - 1, z - 1) &&
 									has_water_in_column(x + 1, z + 1)));
-			const bool has_existing_stone = editor.check_for_block_absolute(x, ground_y,
-					z, std::optional<std::vector<Block>>(std::vector<Block>{STONE}));
+			const bool has_existing_stone =
+					editor.check_for_block_type_absolute(x, ground_y, z, STONE);
 			const bool process_surface = steep_override || !has_existing_stone;
 
 			// Rust uses a smoothed ESA water mask, but never retracts a hard water
@@ -708,9 +704,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					bool near_placed_water = false;
 					for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 								 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
-						if (editor.check_for_block_absolute(x + dx, ground_y, z + dz,
-									std::optional<std::vector<Block>>(
-											std::vector<Block>{WATER}))) {
+						if (editor.check_for_block_type_absolute(
+									x + dx, ground_y, z + dz, WATER)) {
 							near_placed_water = true;
 							break;
 						}
@@ -732,8 +727,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					editor.set_block_absolute(
 							surface, x, ground_y, z, std::nullopt, std::nullopt);
 				}
-				const bool surface_is_water = editor.check_for_block_absolute(x, ground_y,
-						z, std::optional<std::vector<Block>>(std::vector<Block>{WATER}));
+				const bool surface_is_water =
+						editor.check_for_block_type_absolute(x, ground_y, z, WATER);
 				auto set_under_if_absent = [&](Block block) {
 					if (!editor.check_for_block_absolute(x, ground_y - 1, z))
 						editor.set_block_absolute(
@@ -764,9 +759,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 
 			// Rust's universal depth pass closes visible gaps below all terrain
 			// columns, including ones whose surface was supplied by OSM.
-			if (!in_tunnel && !editor.check_for_block_absolute(x, ground_y, z,
-									  std::optional<std::vector<Block>>(
-											  std::vector<Block>{WATER}))) {
+			if (!in_tunnel &&
+					!editor.check_for_block_type_absolute(x, ground_y, z, WATER)) {
 				int lowest = ground_y;
 				for (int dx = -1; dx <= 1; ++dx)
 					for (int dz = -1; dz <= 1; ++dz)
@@ -787,9 +781,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			// jitter avoids an artificial contour line at exactly the threshold;
 			// MAX_INT disables snow for low/flat worlds.
 			if (!planetary && !in_tunnel && editor.ground && water_blend <= .5 &&
-					!editor.check_for_block_absolute(x, ground_y, z,
-							std::optional<std::vector<Block>>(
-									std::vector<Block>{WATER}))) {
+					!editor.check_for_block_type_absolute(x, ground_y, z, WATER)) {
+				const auto surface_block =
+						editor.get_block_absolute(x, ground_y, z).value_or(AIR);
 				const terrain_surface::SnowLine snow_line(editor.ground->snow_threshold(),
 						editor.ground->blocks_per_meter());
 				double snow_depth = snow_line.depth(x, z, ground_y);
@@ -802,11 +796,17 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					const auto snow = terrain_surface::snow_cover(snow_depth,
 							editor.ground->slope_exact(relative),
 							editor.ground->convexity(relative), x, z);
-					if (snow == terrain_surface::Snow::Block)
+					// Snow on ice cannot be represented as a floating partial layer;
+					// Rust promotes any non-empty snow cover on ice to a full cap.
+					if ((snow == terrain_surface::Snow::Block ||
+								(snow != terrain_surface::Snow::None &&
+										terrain_surface::is_ice(surface_block))) &&
+							water_blend <= .5 && surface_block != WATER)
 						editor.set_block_if_absent_absolute(
 								SNOW_BLOCK, x, ground_y + 1, z);
-					else if (snow == terrain_surface::Snow::Layer)
-						terrain_surface::place_snow_layer(editor, x, ground_y, z);
+					else if (snow != terrain_surface::Snow::None)
+						terrain_surface::place_snow_layer(editor, x, ground_y, z,
+								terrain_surface::snow_eighths(snow));
 				}
 			}
 

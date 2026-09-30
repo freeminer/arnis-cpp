@@ -630,4 +630,11 @@ Block get_castle_wall_block(ChaCha8Rng &rng)
 	return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
 }
 
+BlockWithProperties snow_layer_with_depth(unsigned layers)
+{
+	BlockWithProperties result{SNOW_LAYER};
+	result.properties.emplace("layers", std::to_string(std::clamp(layers, 1u, 7u)));
+	return result;
+}
+
 }

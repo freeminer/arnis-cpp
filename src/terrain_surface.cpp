@@ -14,7 +14,8 @@ namespace
 constexpr uint32_t STRATA_WARP = 0x5157A7A1, LEDGE = 0x1ED6E5A1, SCREE = 0x5C4EE0B2,
 				   SCREE_EDGE = 0x5C4ED66E, WORN = 0x0B0A4E11, BARE_ROCK = 0xBA4E40C3,
 				   SNOW_LINE = 0x5A0E11A4, SNOW_DRIFT = 0xD41F7B05,
-				   SNOW_FIELD = 0xF1E1D5A0;
+				   SNOW_FIELD = 0xF1E1D5A0, STRATA_WAVE = 0x5157A7B2,
+				   BED_LENS = 0xB3D1E5A7;
 double noise(int x, int z, int scale, uint32_t salt)
 {
 	return ground_generation::patch_noise(x, z, scale, salt);
@@ -29,15 +30,23 @@ bool vegetated(uint8_t c)
 
 Strata Strata::at(int x, int z)
 {
-	return {(noise(x, z, 48, STRATA_WARP) - .5) * 7.0};
+	return {x, z,
+			(noise(x, z, 48, STRATA_WARP) - .5) * 7.0 +
+					(noise(x, z, 13, STRATA_WAVE) - .5) * 2.5};
 }
 Block Strata::block(int y) const
 {
 	const int layer = int(std::floor((double(y) + warp) / 4.0));
 	const auto h = land_cover::coord_hash(layer, 0x57A7) % 100;
-	return h < 70 ? STONE : h < 90 ? ANDESITE : TUFF;
+	const Block kind = h < 70 ? STONE : h < 90 ? ANDESITE : TUFF;
+	// Rust's beds contain long horizontal lenses rather than a single material
+	// selected independently at every column.  Keep the layer choice stable and
+	// use a low-frequency patch field to break up the non-stone beds.
+	if (kind != STONE && noise(x + layer * 97, z - layer * 61, 24, BED_LENS) >= .7)
+		return STONE;
+	return kind;
 }
-void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi)
+void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks)
 {
 	if (lo > hi)
 		return;
@@ -45,7 +54,14 @@ void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi)
 	int start = lo;
 	Block old = s.block(lo);
 	for (int y = lo + 1; y <= hi; ++y) {
-		const Block b = s.block(y);
+		Block b = s.block(y);
+		if (streaks) {
+			const auto streak = noise(x * 31 ^ z, y, 10, 0x57EA0A01);
+			if (streak < .08)
+				b = DEEPSLATE;
+			else if (streak < .22)
+				b = TUFF;
+		}
 		if (b != old) {
 			editor.fill_column_absolute(old, x, z, start, y - 1, true);
 			start = y;
@@ -122,11 +138,12 @@ double glacier_depth(double d)
 {
 	return std::max(d, -.2);
 }
-void place_snow_layer(WorldEditor &e, int x, int y, int z)
+void place_snow_layer(WorldEditor &e, int x, int y, int z, unsigned eighths)
 {
 	if (e.block_exists_absolute(x, y + 1, z))
 		return;
-	e.set_block_if_absent_absolute(SNOW_LAYER, x, y + 1, z);
+	const auto layer = snow_layer_with_depth(eighths);
+	e.set_block_with_properties_absolute(layer, x, y + 1, z, std::nullopt, std::nullopt);
 	if (e.check_for_block_absolute(
 				x, y, z, std::optional<std::vector<Block>>{{GRASS_BLOCK}}))
 		e.set_block_absolute(

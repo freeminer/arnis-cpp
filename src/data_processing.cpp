@@ -1,14 +1,21 @@
 #include "data_processing.h"
+#include "element_processing/fm_highway_connectivity.h"
+#include "fm_ecoregion_cache.h"
 #include "element_processing/signage.h"
 #include "element_processing/advtrains.h"
 #include <sys/types.h>
 #include <unordered_set>
 #include <algorithm>
 #include <cmath>
+#include <chrono>
 #include <memory>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
+#include <mutex>
+#include <future>
+#include <unordered_map>
+#include <thread>
 
 #include "../../arnis_adapter.h"
 #include "bresenham.h"
@@ -40,8 +47,7 @@
 #include "structures/helicopter.h"
 #include "structures/jetbridge.h"
 #include "structures/plane.h"
-#include "../../../../filesys.h"
-#include "models_3d/wikidata/osm_models.h"
+//#include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
 #include "trees/mapped.h"
@@ -58,6 +64,66 @@
 
 namespace arnis
 {
+
+namespace
+{
+std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
+		const std::filesystem::path &root, const std::string &realm, double latitude,
+		double longitude, double scale, int ground_level, arnis::trees::TreeSize max_size,
+		double blocks_per_meter)
+{
+	// Tree schematics are immutable after loading, but generate_world is called
+	// independently by every emerge thread.  Loading the pack in each call
+	// multiplied its several-gigabyte resident footprint by the number of
+	// workers.  Keep one selector per terrain palette/configuration instead.
+	static std::mutex mutex;
+	using Selector = std::shared_ptr<arnis::trees::RegionSelector>;
+	static std::unordered_map<std::string, std::shared_future<Selector>> selectors;
+	const auto key = root.string() + "|" + realm + "|" + std::to_string(scale) + "|" +
+					 std::to_string(ground_level) + "|" +
+					 std::to_string(static_cast<int>(max_size)) + "|" +
+					 std::to_string(blocks_per_meter);
+	std::shared_future<Selector> future;
+	std::shared_ptr<std::promise<Selector>> promise;
+	{
+		std::lock_guard lock(mutex);
+		if (const auto it = selectors.find(key); it != selectors.end())
+			future = it->second;
+		else {
+			promise = std::make_shared<std::promise<Selector>>();
+			future = promise->get_future().share();
+			selectors.emplace(key, future);
+		}
+	}
+	if (promise) {
+		// Schematic loading can take minutes and must not block all emerge
+		// workers.  The selector is immutable; publish it when ready and let
+		// subsequent chunks start using it.
+		std::thread([promise, root, realm, latitude, longitude, scale, ground_level,
+							max_size, blocks_per_meter] {
+			try {
+				auto loaded = arnis::trees::RegionSelector::load_for_location(latitude,
+						longitude, root, scale, ground_level,
+						arnis::trees::SizeFilter::up_to(max_size), blocks_per_meter,
+						realm.empty() ? std::nullopt : std::optional<std::string>(realm));
+				if (!loaded) {
+					promise->set_value({});
+					return;
+				}
+				auto result = std::make_shared<arnis::trees::RegionSelector>(
+						std::move(*loaded));
+				promise->set_value(result);
+			} catch (...) {
+				promise->set_exception(std::current_exception());
+			}
+		}).detach();
+		return {};
+	}
+	if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
+		return {};
+	return future.get();
+}
+}
 
 // Helper functions for ground fill area detection
 namespace
@@ -802,6 +868,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 namespace highways
 {
+void generate_highways_internal(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, const HighwayConnectivity &highway_connectivity,
+		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
+		const RoadMaskBitmap &road_mask,
+		const bridges::BridgeStructureMap &bridge_structures,
+		const bridges::BridgeSurfaceMap &bridge_surface,
+		const TunnelPortalMap &tunnel_portals);
+
 void generate_highways(WorldEditor &editor, const ProcessedElement &element,
 		const Args &args, const std::vector<ProcessedElement> &all_elements,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout);
@@ -1080,15 +1154,8 @@ bool generate_world(WorldEditor &editor,
 	// Rust loads the global ecoregion raster for Earth runs and keeps it on
 	// Ground so vegetation and climate decoration can query it per column.
 	if (editor.ground && args.body == CelestialBody::Earth) {
-		for (const auto &candidate :
-				{std::filesystem::path("assets/climate/ecoregions.grid"),
-						std::filesystem::path(__FILE__).parent_path().parent_path() /
-								"assets/climate/ecoregions.grid"}) {
-			if (auto map = ecoregion::EcoMap::load(candidate)) {
-				editor.ground->set_ecoregion_map(std::move(*map));
-				break;
-			}
-		}
+		if (const auto &map = ecoregion::generation_map().map)
+			editor.ground->set_ecoregion_map(*map);
 	}
 	editor.set_regional_tree_placer({});
 	editor.set_mapped_regional_tree_placer({});
@@ -1100,19 +1167,20 @@ bool generate_world(WorldEditor &editor,
 							  "assets/tree-packs";
 	std::optional<std::string> dominant_tree_realm;
 	if (editor.ground && editor.ground->ecoregion_map)
-		dominant_tree_realm = editor.ground->ecoregion_map->dominant_tree_pack();
-	if (auto selector =
-					args.legacy_trees
-							? std::optional<trees::RegionSelector>{}
-							: trees::RegionSelector::load_for_location(centre_lat,
-									  centre_lon, tree_pack_root, args.scale, base_level,
-									  trees::SizeFilter::up_to(args.max_tree_size),
-									  editor.ground
-											  ? editor.ground->elevation_blocks_per_meter
-											  : 0.0,
-									  dominant_tree_realm)) {
-		shared_selector = std::make_shared<trees::RegionSelector>(std::move(*selector));
-		editor.set_tree_slot_spacing(shared_selector->base_spacing());
+		dominant_tree_realm =
+				args.body == CelestialBody::Earth
+						? ecoregion::generation_map().dominant_tree_realm
+						: editor.ground->ecoregion_map->dominant_tree_pack();
+	if (!args.legacy_trees) {
+		const auto selector = cached_region_selector(tree_pack_root,
+				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
+				base_level, args.max_tree_size,
+				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0);
+		if (selector)
+			shared_selector = selector;
+		if (shared_selector) {
+			editor.set_tree_slot_spacing(shared_selector->base_spacing());
+		}
 	}
 	const auto model_cache_root =
 			std::filesystem::path(porting::path_cache) / "arnis-tile-cache";
@@ -1550,6 +1618,8 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 
+	// All roads share the same immutable connectivity for this pass.
+	std::optional<highways::HighwayConnectivity> highway_connectivity;
 	for (std::size_t element_index = 0; element_index < render_elements.size();
 			++element_index) {
 		auto const &element = render_elements[element_index];
@@ -1629,10 +1699,14 @@ bool generate_world(WorldEditor &editor,
 						highways::generate_highway_tunnel_shell(editor, way, args,
 								tunnel_internal_endpoints, tunnel_portals,
 								highway_tunnel_cells);
-				if (!tunnel_rendered)
-					highways::generate_highways(editor, element, args, elements,
-							args.timeout, road_mask, bridge_structures, bridge_surface,
-							tunnel_portals);
+				if (!tunnel_rendered) {
+					if (!highway_connectivity)
+						highway_connectivity =
+								highways::build_highway_connectivity_map(elements);
+					highways::generate_highways_internal(editor, element, args,
+							*highway_connectivity, args.timeout, road_mask,
+							bridge_structures, bridge_surface, tunnel_portals);
+				}
 				if (editor.signage_enabled())
 					signage::generate_highway_way_signage(
 							editor, way, building_footprints);
