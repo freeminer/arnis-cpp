@@ -2,6 +2,7 @@
 #include "../../arnis_block.h"
 #include <initializer_list>
 #include <optional>
+#include <tuple>
 namespace arnis
 {
 static BedrockBlock simple(const std::string &n)
@@ -255,6 +256,32 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("yellow_flower");
 	if (block == WHITE_FLOWER)
 		return state("red_flower", {{"flower_type", std::string("oxeye")}});
+	if (block == CORNFLOWER)
+		return state("red_flower", {{"flower_type", std::string("cornflower")}});
+	if (block == OXEYE_DAISY)
+		return state("red_flower", {{"flower_type", std::string("oxeye")}});
+	if (block == ALLIUM)
+		return state("red_flower", {{"flower_type", std::string("allium")}});
+	if (block == LILY_OF_THE_VALLEY)
+		return state("red_flower", {{"flower_type", std::string("lily_of_the_valley")}});
+	if (block == RED_TULIP)
+		return state("red_flower", {{"flower_type", std::string("tulip_red")}});
+	if (block == ORANGE_TULIP)
+		return state("red_flower", {{"flower_type", std::string("tulip_orange")}});
+	if (block == WHITE_TULIP)
+		return state("red_flower", {{"flower_type", std::string("tulip_white")}});
+	if (block == PINK_TULIP)
+		return state("red_flower", {{"flower_type", std::string("tulip_pink")}});
+	for (const auto &[lower, upper, plant] :
+			std::initializer_list<std::tuple<Block, Block, const char *>>{
+					{SUNFLOWER_LOWER, SUNFLOWER_UPPER, "sunflower"},
+					{LILAC_LOWER, LILAC_UPPER, "syringa"},
+					{ROSE_BUSH_LOWER, ROSE_BUSH_UPPER, "rose"},
+					{PEONY_LOWER, PEONY_UPPER, "paeonia"}}) {
+		if (block == lower || block == upper)
+			return state("double_plant", {{"double_plant_type", std::string(plant)},
+												 {"upper_block_bit", block == upper}});
+	}
 	if (block == SEA_PICKLE)
 		return state("sea_pickle", {{"cluster_count", 1}, {"dead_bit", false}});
 	if (block == TALL_GRASS_BOTTOM || block == TALL_GRASS_TOP)
@@ -346,6 +373,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("ice");
 	if (block == PACKED_ICE)
 		return simple("packed_ice");
+	if (block == BLUE_ICE)
+		return simple("blue_ice");
 	if (block == SNOW_BLOCK)
 		return simple("snow");
 	if (block == SPONGE)

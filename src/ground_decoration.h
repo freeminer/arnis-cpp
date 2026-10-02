@@ -1,5 +1,11 @@
 #pragma once
 
+#include "biome.h"
+#include "ecoregion.h"
+
+#include <cstdint>
+#include <optional>
+
 //#include "args.h"
 //#include "mapgen/earth/arnis_world_editor.h"
 
@@ -17,12 +23,31 @@ struct WorldEditor;
 
 namespace arnis::ground_decoration
 {
+enum class Habitat
+{
+	Meadow,
+	Alpine,
+	Forest,
+	Taiga,
+	Jungle,
+	Shrub,
+	Steppe,
+	Desert,
+	Tundra,
+	Wetland,
+	Prairie,
+	Maquis,
+	Savanna
+};
+
 enum class FlowerSetting
 {
 	Meadow,
 	Forest,
 	Garden
 };
+std::optional<Habitat> habitat(std::uint8_t cover, biome::Climate climate,
+		double absolute_latitude, bool alpine, std::optional<ecoregion::Ecoregion> eco);
 // Rust exposes these helpers to mapped-area processors.  Keeping them public
 // lets parks/meadows share the same deterministic flower fields as the main
 // ground-decoration pass.

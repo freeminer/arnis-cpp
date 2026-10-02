@@ -18,7 +18,7 @@ struct OreRule
 };
 const std::array<OreRule, 6> &rules();
 void generate_ores(
-		world_editor::WorldEditor &, int, int, int, int, bool show_progress = true);
+		world_editor::WorldEditor &, int, int, int, int, bool show_progress = false);
 inline void generate_ores(world_editor::WorldEditor &editor,
 		const cartesian::XZBBox &bounds, bool show_progress = false)
 {

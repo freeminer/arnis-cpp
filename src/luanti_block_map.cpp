@@ -7,6 +7,8 @@ LuantiNode to_luanti_node(
 		const Block &block, LuantiGame, const char *facing, bool open, bool top)
 {
 	const auto id = block.id();
+	if (block == BLUE_ICE)
+		return {"mcl_core:blue_ice", 0};
 	auto facedir = [&]() -> std::uint8_t {
 		if (!facing)
 			return static_cast<std::uint8_t>(top ? 20 : 0);
@@ -749,6 +751,44 @@ LuantiNode to_luanti_node(
 		return {"mcl_stairs:slab_blackstone", 0};
 	case 384:
 		return door("mcl_doors:iron_door_b_1", "mcl_doors:iron_door_t_1");
+	case 451:
+		return {"mcl_flowers:cornflower", 0};
+	case 452:
+		return {"mcl_flowers:oxeye_daisy", 0};
+	case 453:
+		return {"mcl_flowers:allium", 0};
+	case 454:
+		return {"mcl_flowers:lily_of_the_valley", 0};
+	case 455:
+		return {"mcl_flowers:tulip_red", 0};
+	case 456:
+		return {"mcl_flowers:tulip_orange", 0};
+	case 457:
+		return {"mcl_flowers:tulip_white", 0};
+	case 458:
+		return {"mcl_flowers:tulip_pink", 0};
+	case 459:
+		return {"mcl_flowers:sunflower", 0};
+	case 460:
+		return {"mcl_flowers:sunflower_top", 0};
+	case 461:
+		return {"mcl_flowers:lilac", 0};
+	case 462:
+		return {"mcl_flowers:lilac_top", 0};
+	case 463:
+		return {"mcl_flowers:rose_bush", 0};
+	case 464:
+		return {"mcl_flowers:rose_bush_top", 0};
+	case 465:
+		return {"mcl_flowers:peony", 0};
+	case 466:
+		return {"mcl_flowers:peony_top", 0};
+	case 467:
+		return {"mcl_farming:sweet_berry_bush_3", 0};
+	case 468:
+		return {"mcl_farming:pumpkin", 0};
+	case 469:
+		return {"mcl_flowers:waterlily", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

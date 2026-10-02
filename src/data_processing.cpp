@@ -7,13 +7,11 @@
 #include <unordered_set>
 #include <algorithm>
 #include <cmath>
-#include <chrono>
 #include <memory>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
 #include <mutex>
-#include <future>
 #include <unordered_map>
 #include <thread>
 
@@ -72,56 +70,48 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		double longitude, double scale, int ground_level, arnis::trees::TreeSize max_size,
 		double blocks_per_meter)
 {
-	// Tree schematics are immutable after loading, but generate_world is called
-	// independently by every emerge thread.  Loading the pack in each call
-	// multiplied its several-gigabyte resident footprint by the number of
-	// workers.  Keep one selector per terrain palette/configuration instead.
-	static std::mutex mutex;
+	// Tree pack loading eagerly opens every referenced schematic. Keep it out
+	// of the synchronous generation path so terrain and structures can proceed.
 	using Selector = std::shared_ptr<arnis::trees::RegionSelector>;
-	static std::unordered_map<std::string, std::shared_future<Selector>> selectors;
+	struct CacheState
+	{
+		std::mutex mutex;
+		std::unordered_map<std::string, Selector> selectors;
+		std::unordered_set<std::string> loading;
+	};
+	// The initializer is detached so process shutdown must not destroy its cache
+	// while the tree pack is still being read.
+	static CacheState *state = new CacheState;
 	const auto key = root.string() + "|" + realm + "|" + std::to_string(scale) + "|" +
 					 std::to_string(ground_level) + "|" +
 					 std::to_string(static_cast<int>(max_size)) + "|" +
 					 std::to_string(blocks_per_meter);
-	std::shared_future<Selector> future;
-	std::shared_ptr<std::promise<Selector>> promise;
 	{
-		std::lock_guard lock(mutex);
-		if (const auto it = selectors.find(key); it != selectors.end())
-			future = it->second;
-		else {
-			promise = std::make_shared<std::promise<Selector>>();
-			future = promise->get_future().share();
-			selectors.emplace(key, future);
-		}
+		std::lock_guard lock(state->mutex);
+		if (const auto it = state->selectors.find(key); it != state->selectors.end())
+			return it->second;
+		if (!state->loading.insert(key).second)
+			return {};
 	}
-	if (promise) {
-		// Schematic loading can take minutes and must not block all emerge
-		// workers.  The selector is immutable; publish it when ready and let
-		// subsequent chunks start using it.
-		std::thread([promise, root, realm, latitude, longitude, scale, ground_level,
-							max_size, blocks_per_meter] {
-			try {
-				auto loaded = arnis::trees::RegionSelector::load_for_location(latitude,
-						longitude, root, scale, ground_level,
-						arnis::trees::SizeFilter::up_to(max_size), blocks_per_meter,
-						realm.empty() ? std::nullopt : std::optional<std::string>(realm));
-				if (!loaded) {
-					promise->set_value({});
-					return;
-				}
-				auto result = std::make_shared<arnis::trees::RegionSelector>(
+	std::thread([root, realm, latitude, longitude, scale, ground_level, max_size,
+						blocks_per_meter, key] {
+		Selector result;
+		try {
+			auto loaded = arnis::trees::RegionSelector::load_for_location(latitude,
+					longitude, root, scale, ground_level,
+					arnis::trees::SizeFilter::up_to(max_size), blocks_per_meter,
+					realm.empty() ? std::nullopt : std::optional<std::string>(realm));
+			if (loaded)
+				result = std::make_shared<arnis::trees::RegionSelector>(
 						std::move(*loaded));
-				promise->set_value(result);
-			} catch (...) {
-				promise->set_exception(std::current_exception());
-			}
-		}).detach();
-		return {};
-	}
-	if (future.wait_for(std::chrono::seconds(0)) != std::future_status::ready)
-		return {};
-	return future.get();
+		} catch (...) {
+			// A missing or malformed regional pack disables this optional source.
+		}
+		std::lock_guard lock(state->mutex);
+		state->loading.erase(key);
+		state->selectors.emplace(key, std::move(result));
+	}).detach();
+	return {};
 }
 }
 

@@ -11,11 +11,14 @@
 #include "terrain_surface.h"
 #include "ecoregion.h"
 #include "trees/mapped.h"
+#include "biome.h"
+#include "ground_decoration.h"
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
 #include <limits>
+#include <map>
 #include <vector>
 #include <iostream>
 
@@ -24,6 +27,45 @@ namespace arnis::ground_generation
 
 namespace
 {
+
+constexpr std::uint32_t SALT_FOREST_FLOOR = 0xF0E57F10u;
+constexpr std::uint32_t SALT_SHRUB_FLOOR = 0x5B7BF10Au;
+constexpr std::uint32_t SALT_SWARD = 0x5A7D0001u;
+constexpr std::uint32_t SALT_TALL_SWARD = 0x5A7D0002u;
+constexpr std::uint32_t SALT_WETLAND_POOLS = 0x90015E75u;
+
+double climate_sward(const biome::Climate climate)
+{
+	switch (climate) {
+	case biome::Climate::HotDesert:
+		return .25;
+	case biome::Climate::ColdDesert:
+	case biome::Climate::IceCap:
+		return .3;
+	case biome::Climate::HotSteppe:
+		return .55;
+	case biome::Climate::ColdSteppe:
+	case biome::Climate::Tundra:
+		return .7;
+	case biome::Climate::DryContinental:
+		return .85;
+	case biome::Climate::Boreal:
+		return .9;
+	case biome::Climate::Temperate:
+	case biome::Climate::TropicalSavanna:
+		return 1.0;
+	}
+	return 1.0;
+}
+
+bool undergrowth_roll(int x, int z, double mean, std::uint32_t salt)
+{
+	const double density = std::min(.95, mean * (.3 + 1.4 * patch_noise(x, z, 11, salt)));
+	const auto roll = land_cover::coord_hash(x ^ static_cast<int>(salt),
+							  z ^ static_cast<int>((salt << 9) | (salt >> 23))) %
+					  1000;
+	return static_cast<double>(roll) < density * 1000.0;
+}
 
 Block rocky_surface_for(int x, int z)
 {
@@ -264,7 +306,8 @@ std::optional<bool> canopy_tree_verdict(
 
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
-		const bridges::BridgeSurfaceMap *bridge_surface, double scale)
+		const bridges::BridgeSurfaceMap *bridge_surface, double scale,
+		double absolute_latitude, int alpine_from_y)
 {
 	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
 			(bridge_surface && bridge_surface->contains(x, z)) ||
@@ -288,6 +331,14 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 							 ? editor.ground->ecoregion_at({x - editor.mg->node_min.X,
 									   z - editor.mg->node_min.Z})
 							 : std::nullopt;
+	const auto climate =
+			editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
+	const auto site_habitat = ground_decoration::habitat(
+			cover, climate, absolute_latitude, ground_y >= alpine_from_y, eco);
+	const double sward =
+			climate_sward(climate) *
+			(editor.check_for_block_type_absolute(x, ground_y, z, COARSE_DIRT) ? .5
+																			   : 1.0);
 	// Rust's decoration pass only installs a plant when the space above the
 	// finished surface is still open.  Keep this invariant for all lightweight
 	// vegetation choices below; structures and schematics remain authoritative.
@@ -361,8 +412,14 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 				   editor.highest_block_between(x, z, ground_y + 3, ground_y + 24)) {
 			place_decoration(
 					(patch_roll & 1) ? RED_MUSHROOM : BROWN_MUSHROOM, ground_y + 1);
-		} else if (choice <= 13 && patch_roll < 88) {
-			place_decoration(GRASS, ground_y + 1);
+		} else if (undergrowth_roll(x, z, .4 * sward, SALT_FOREST_FLOOR)) {
+			const double fern_share =
+					site_habitat == ground_decoration::Habitat::Taiga	 ? .45
+					: site_habitat == ground_decoration::Habitat::Jungle ? .3
+																		 : .12;
+			const double fern_roll =
+					double(land_cover::coord_hash(x ^ 0xfe, z ^ 0x4e) % 100) / 100.0;
+			place_decoration(fern_roll < fern_share ? FERN : GRASS, ground_y + 1);
 		}
 	} else if (cover == land_cover::LC_CROPLAND) {
 		const bool farmland =
@@ -410,17 +467,18 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 				place_decoration(SUGAR_CANE, ground_y + dy);
 		} else if (choice < 22 && water_surface) {
 			place_decoration(LILY_PAD, ground_y + 1);
-		} else if (choice < 30)
+		} else if (!water_surface && patch_noise(x, z, 5, SALT_WETLAND_POOLS) < .28 &&
+				   editor.water_source_is_enclosed(x, z))
 			editor.set_block_absolute(WATER, x, ground_y, z,
 					std::optional<std::vector<Block>>(
 							std::vector<Block>{MUD, GRASS_BLOCK}),
 					std::nullopt);
-		else if (choice < 65)
+		else if (choice < 50)
 			place_decoration(GRASS, ground_y + 1);
-		else if (choice < 75) {
+		else if (choice < 64) {
 			place_decoration(TALL_GRASS_BOTTOM, ground_y + 1);
 			place_decoration(TALL_GRASS_TOP, ground_y + 2);
-		} else if (choice < 82)
+		} else if (choice < 80)
 			place_decoration(MOSS_CARPET, ground_y + 1);
 	} else if (cover == land_cover::LC_MOSS) {
 		// Rust treats moss cover as its own tundra habitat rather than falling
@@ -453,22 +511,29 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			place_decoration(OAK_LEAVES, ground_y + 1);
 		else if ((!coarse && choice == 0) || (coarse && choice == 9))
 			place_decoration(DEAD_BUSH, ground_y + 1);
-	} else if (cover == land_cover::LC_SHRUBLAND && rng.uniform(100) < 2) {
-		if (eco && eco->biome == ecoregion::EcoBiome::Tundra)
-			place_decoration(MOSS_CARPET, ground_y + 1);
-		else if (eco && (eco->biome == ecoregion::EcoBiome::TemperateGrassland ||
-								eco->biome == ecoregion::EcoBiome::Boreal))
-			place_decoration(SWEET_BERRY_BUSH, ground_y + 1);
-		else
-			place_decoration(OAK_LEAVES, ground_y + 1);
-	} else if (cover == land_cover::LC_GRASSLAND) {
-		const auto choice = rng.uniform(100);
-		if (choice < 50)
+	} else if (cover == land_cover::LC_SHRUBLAND) {
+		if (rng.uniform(100) < 2) {
+			if (eco && eco->biome == ecoregion::EcoBiome::Tundra)
+				place_decoration(MOSS_CARPET, ground_y + 1);
+			else if (eco && (eco->biome == ecoregion::EcoBiome::TemperateGrassland ||
+									eco->biome == ecoregion::EcoBiome::Boreal))
+				place_decoration(SWEET_BERRY_BUSH, ground_y + 1);
+			else
+				place_decoration(OAK_LEAVES, ground_y + 1);
+		} else if (undergrowth_roll(x, z, .28 * sward, SALT_SHRUB_FLOOR)) {
 			place_decoration(GRASS, ground_y + 1);
-		else if (choice < 55) {
-			place_decoration(TALL_GRASS_BOTTOM, ground_y + 1);
-			place_decoration(TALL_GRASS_TOP, ground_y + 2);
-		} else if (choice == 55 && patch_roll < 82) {
+		}
+	} else if (cover == land_cover::LC_GRASSLAND) {
+		if (undergrowth_roll(x, z, .55 * sward, SALT_SWARD)) {
+			const bool stand = patch_noise(x, z, 9, SALT_TALL_SWARD) > .8;
+			const auto tall_share = stand ? 35u : 4u;
+			if (rng.uniform(100) < tall_share) {
+				place_decoration(TALL_GRASS_BOTTOM, ground_y + 1);
+				place_decoration(TALL_GRASS_TOP, ground_y + 2);
+			} else {
+				place_decoration(GRASS, ground_y + 1);
+			}
+		} else if (patch_roll < 82 && rng.uniform(100) < 6) {
 			const auto flower_choice =
 					eco && eco->biome == ecoregion::EcoBiome::TemperateGrassland ? 2u
 					: eco && eco->biome == ecoregion::EcoBiome::Mediterranean
@@ -479,22 +544,17 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 								 : flower_choice == 2 ? YELLOW_FLOWER
 													  : WHITE_FLOWER;
 			place_decoration(flower, ground_y + 1);
-		} else if (choice < 60 && patch_roll < 90) {
+		} else if (patch_roll < 90 && rng.uniform(100) < 5) {
 			// Rust's meadow/taiga habitat table reserves a small share of
 			// grassland patches for ferns.  Keep the upper half conditional so
 			// an existing canopy or authored block is never overwritten.
-			if (choice == 59 &&
+			if (rng.uniform(100) < 20 &&
 					editor.highest_block_between(x, z, ground_y + 3, ground_y + 24)) {
 				place_decoration(LARGE_FERN_LOWER, ground_y + 1);
 				place_decoration(LARGE_FERN_UPPER, ground_y + 2);
 			} else
 				place_decoration(FERN, ground_y + 1);
 		}
-	} else if ((cover == land_cover::LC_SHRUBLAND && rng.uniform(100) < 30 &&
-					   patch_roll < 92) ||
-			   (cover == land_cover::LC_TREE_COVER && rng.uniform(30) <= 13 &&
-					   patch_roll < 88)) {
-		place_decoration(GRASS, ground_y + 1);
 	}
 }
 
@@ -578,6 +638,24 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	if (show_progress)
 		std::cout << "[6/7] Generating ground...\n";
 	const bool terrain_enabled = generation_mode_terrain(args.mode);
+	const auto geographic_bounds = editor.geographic_bounds();
+	const double center_latitude = (geographic_bounds[0] + geographic_bounds[1]) * .5;
+	const terrain_surface::SnowLine snow_line(editor.ground
+													  ? editor.ground->snow_threshold()
+													  : std::numeric_limits<int>::max(),
+			editor.ground ? editor.ground->blocks_per_meter() : 0.0, center_latitude,
+			args.rotation);
+	const int snow_threshold = editor.ground ? editor.ground->snow_threshold()
+											 : std::numeric_limits<int>::max();
+	const int alpine_from_y =
+			snow_threshold == std::numeric_limits<int>::max() ||
+							snow_threshold == std::numeric_limits<int>::min()
+					? snow_threshold
+					: snow_threshold -
+							  static_cast<int>(std::lround(
+									  1000.0 * editor.ground->blocks_per_meter()));
+	std::map<std::pair<int, int>, std::optional<terrain_surface::TalusField>>
+			talus_fields;
 	for (int x = min_x; x <= max_x; ++x) {
 		for (int z = min_z; z <= max_z; ++z) {
 			// Rotation expands the output AABB. Rust masks columns whose inverse
@@ -601,6 +679,21 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			const bool planetary = !is_earth(args.body);
 			const bool has_cover =
 					!planetary && editor.ground && editor.ground->has_land_cover();
+			const std::uint8_t cover_here =
+					has_cover ? editor.ground->cover_class(relative) : 0;
+			std::optional<std::pair<Block, Block>> talus_block;
+			if (terrain_enabled && !planetary && editor.ground && slope <= 6 &&
+					terrain_surface::takes_talus(cover_here)) {
+				const std::pair<int, int> chunk{x >> 4, z >> 4};
+				auto [it, inserted] = talus_fields.try_emplace(chunk);
+				if (inserted)
+					it->second = terrain_surface::TalusField::build(*editor.ground,
+							chunk.first, chunk.second, xzbbox.min_x(), xzbbox.min_z());
+				if (it->second)
+					talus_block = terrain_surface::talus_palette(x, z,
+							it->second->near(x, z, editor.ground->level_exact(relative)),
+							cover_here);
+			}
 			const double water_blend =
 					has_cover ? editor.ground->water_blend(relative) : 0.0;
 			const bool grid_water =
@@ -630,6 +723,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			const bool has_existing_stone =
 					editor.check_for_block_type_absolute(x, ground_y, z, STONE);
 			const bool process_surface = steep_override || !has_existing_stone;
+			std::optional<Block> column_under;
 
 			// Rust uses a smoothed ESA water mask, but never retracts a hard water
 			// cell.  Keep OSM water too, and avoid flooding cliff faces.
@@ -676,9 +770,19 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										  args.celestial_latitude_degrees, ground_y, x, z)
 								: std::pair<Block, Block>{};
 				Block surface = planetary ? planetary_palette.first
-										  : natural_surface_for(editor, x, ground_y, z);
+										  : (talus_block ? talus_block->first
+														 : natural_surface_for(editor, x,
+																   ground_y, z));
 				std::optional<Block> climate_under;
-				if (has_cover && editor.ground) {
+				if (planetary)
+					climate_under = planetary_palette.second;
+				else if (talus_block)
+					climate_under = talus_block->second;
+				else if (steep_override)
+					climate_under = terrain_surface::steep_palette(
+							x, z, ground_y, slope, cover_here)
+											.second;
+				else if (has_cover && editor.ground) {
 					auto palette = climate::surface_palette(editor.ground->climate(),
 							editor.ground->cover_class(relative), x, z);
 					if (palette)
@@ -714,6 +818,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						climate_under = SANDSTONE;
 					}
 				}
+				if (surface == SAND && !climate_under)
+					climate_under = SANDSTONE;
+				else if (!climate_under &&
+						 (surface == STONE || surface == ANDESITE ||
+								 surface == COBBLESTONE || surface == TUFF))
+					climate_under = STONE;
+				else if (!climate_under)
+					climate_under = DIRT;
+				column_under = climate_under;
 				if (steep_override) {
 					// Match Rust's steep-face blacklist: roads, structures, bedrock,
 					// and water remain authored even when terrain rock is forced.
@@ -723,6 +836,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE,
 									DIRT_PATH, STONE_BRICKS, BRICK, OAK_PLANKS,
 									BLACK_CONCRETE}));
+				} else if (talus_block && surface == talus_block->first) {
+					editor.set_block_absolute(surface, x, ground_y, z,
+							std::optional<std::vector<Block>>(
+									terrain_surface::talus_buries()),
+							std::nullopt);
 				} else {
 					editor.set_block_absolute(
 							surface, x, ground_y, z, std::nullopt, std::nullopt);
@@ -738,24 +856,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				// Rust leaves authored/placed water untouched: under-materials must
 				// not be written below a water surface and expose through shallow
 				// rivers or lakes.
-				if (!surface_is_water && planetary) {
-					set_under_if_absent(planetary_palette.second);
-				} else if (!surface_is_water && climate_under) {
+				if (!surface_is_water && climate_under) {
 					set_under_if_absent(*climate_under);
-				} else if (!surface_is_water && surface == SAND) {
-					set_under_if_absent(SANDSTONE);
-				} else if (!surface_is_water &&
-						   (surface == STONE || surface == ANDESITE ||
-								   surface == COBBLESTONE || surface == TUFF)) {
-					set_under_if_absent(STONE);
-				} else if (!surface_is_water) {
-					set_under_if_absent(DIRT);
 				}
 			}
 
 			if (!planetary && !in_tunnel)
 				maybe_place_vegetation(editor, x, ground_y, z, building_footprints,
-						xzbbox.min_x(), xzbbox.min_z(), bridge_surface, args.scale);
+						xzbbox.min_x(), xzbbox.min_z(), bridge_surface, args.scale,
+						std::abs(center_latitude), alpine_from_y);
 
 			// Rust's universal depth pass closes visible gaps below all terrain
 			// columns, including ones whose surface was supplied by OSM.
@@ -770,9 +879,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 											? editor.get_ground_level(x + dx, z + dz)
 											: args.ground_level);
 				const int depth = std::clamp(ground_y - lowest + 1, 2, 64);
-				editor.fill_column_absolute(STONE, x, z,
-						std::max(world_editor::terrain_floor_y() + 1, ground_y - depth),
-						ground_y - 1, true);
+				const int fill_min =
+						std::max(world_editor::terrain_floor_y() + 1, ground_y - depth);
+				const int fill_max = ground_y - 1;
+				const Block under = column_under.value_or(STONE);
+				if (terrain_enabled && !planetary && steep_override && under == STONE)
+					terrain_surface::fill_strata(
+							editor, x, z, fill_min, fill_max, slope > 6);
+				else
+					editor.fill_column_absolute(under, x, z, fill_min, fill_max, true);
 			}
 
 			// Snow is a separate cap, so climate/land-cover material selection is
@@ -784,29 +899,37 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					!editor.check_for_block_type_absolute(x, ground_y, z, WATER)) {
 				const auto surface_block =
 						editor.get_block_absolute(x, ground_y, z).value_or(AIR);
-				const terrain_surface::SnowLine snow_line(editor.ground->snow_threshold(),
-						editor.ground->blocks_per_meter());
 				double snow_depth = snow_line.depth(x, z, ground_y);
 				const auto cover = editor.ground->cover_class(relative);
 				if (terrain_surface::is_glacier_cover(cover) &&
 						terrain_surface::is_plausible_ice(
 								snow_depth, editor.ground->climate()))
 					snow_depth = terrain_surface::glacier_depth(snow_depth);
-				if (snow_depth >= -1.0) {
-					const auto snow = terrain_surface::snow_cover(snow_depth,
-							editor.ground->slope_exact(relative),
-							editor.ground->convexity(relative), x, z);
+				if (snow_depth >= -1.5) {
+					const auto [snow_slope, gradient] =
+							editor.ground->slope_and_gradient(relative);
+					const auto snow = terrain_surface::snow_cover(
+							snow_depth, snow_slope,
+							[&] { return editor.ground->convexity(relative); },
+							snow_line.shade(gradient.first, gradient.second, snow_slope),
+							x, z);
 					// Snow on ice cannot be represented as a floating partial layer;
 					// Rust promotes any non-empty snow cover on ice to a full cap.
 					if ((snow == terrain_surface::Snow::Block ||
 								(snow != terrain_surface::Snow::None &&
 										terrain_surface::is_ice(surface_block))) &&
 							water_blend <= .5 && surface_block != WATER)
-						editor.set_block_if_absent_absolute(
-								SNOW_BLOCK, x, ground_y + 1, z);
+						editor.set_block_absolute(SNOW_BLOCK, x, ground_y, z,
+								std::optional<std::vector<Block>>(
+										std::vector<Block>{surface_block}),
+								std::nullopt);
 					else if (snow != terrain_surface::Snow::None)
 						terrain_surface::place_snow_layer(editor, x, ground_y, z,
-								terrain_surface::snow_eighths(snow));
+								terrain_surface::snow_eighths(snow,
+										terrain_enabled
+												? editor.ground->level_exact(relative) -
+														  ground_y + .5
+												: 0.0));
 				}
 			}
 
