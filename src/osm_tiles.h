@@ -17,7 +17,8 @@ std::filesystem::path cache_root();
 elevation::CacheClearStats clear_osm_tiles_cache();
 inline constexpr std::uint8_t ZOOM = 13;
 inline constexpr double COORD_SCALE = 1e6;
-inline constexpr std::uint64_t SYNTHETIC_ID_BASE = std::uint64_t{1} << 62;
+// Keep coordinate-backed tile vertices below the clipper's invented-node range.
+inline constexpr std::uint64_t SYNTHETIC_ID_BASE = std::uint64_t{1} << 61;
 
 struct DecodedNode
 {
@@ -65,6 +66,10 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles);
 // null result means the archive was unavailable or had no matching tiles;
 // callers can then use the existing Overpass fallback.
 std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
+		const geographic::LLBBox &bbox, const std::string &base_url,
+		std::string *error = nullptr);
+// Quiet spelling used by the optional facade fetch path; tile fetch is silent in C++.
+std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles_quietly(
 		const geographic::LLBBox &bbox, const std::string &base_url,
 		std::string *error = nullptr);
 

@@ -13,8 +13,7 @@ class ImprovedNoise
 	std::array<std::uint8_t, 256> permutation_{};
 	double x_offset_ = 0.0, y_offset_ = 0.0, z_offset_ = 0.0;
 	int p(int index) const;
-	double sample_and_lerp(int gx, int gy, int gz, double dx, double dy,
-			double dz) const;
+	double sample_and_lerp(int gx, int gy, int gz, double dx, double dy, double dz) const;
 
 public:
 	explicit ImprovedNoise(XoroRandom &random);
@@ -29,8 +28,8 @@ class PerlinNoise
 	double lowest_frequency_value_factor_ = 1.0;
 
 public:
-	static PerlinNoise create(XoroRandom &random, int first_octave,
-			const std::vector<double> &amplitudes);
+	static PerlinNoise create(
+			XoroRandom &random, int first_octave, const std::vector<double> &amplitudes);
 	double get_value(double x, double y, double z) const;
 };
 
@@ -43,8 +42,8 @@ class NormalNoise
 	NormalNoise(PerlinNoise first, PerlinNoise second, double value_factor);
 
 public:
-	static NormalNoise create(XoroRandom &random, int first_octave,
-			const std::vector<double> &amplitudes);
+	static NormalNoise create(
+			XoroRandom &random, int first_octave, const std::vector<double> &amplitudes);
 	double get_value(double x, double y, double z) const;
 };
 }

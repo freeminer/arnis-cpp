@@ -8,11 +8,10 @@ namespace arnis::caves
 {
 namespace
 {
-constexpr std::array<std::array<int, 3>, 16> GRADIENT{{
-		{1, 1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 0},
-		{1, 0, 1}, {-1, 0, 1}, {1, 0, -1}, {-1, 0, -1},
-		{0, 1, 1}, {0, -1, 1}, {0, 1, -1}, {0, -1, -1},
-		{1, 1, 0}, {0, -1, 1}, {-1, 1, 0}, {0, -1, -1}}};
+constexpr std::array<std::array<int, 3>, 16> GRADIENT{
+		{{1, 1, 0}, {-1, 1, 0}, {1, -1, 0}, {-1, -1, 0}, {1, 0, 1}, {-1, 0, 1},
+				{1, 0, -1}, {-1, 0, -1}, {0, 1, 1}, {0, -1, 1}, {0, 1, -1}, {0, -1, -1},
+				{1, 1, 0}, {0, -1, 1}, {-1, 1, 0}, {0, -1, -1}}};
 constexpr double ROUND_OFF = 3.3554432e7;
 constexpr double INPUT_FACTOR = 1.0181268882175227;
 
@@ -66,14 +65,13 @@ int ImprovedNoise::p(int index) const
 	return permutation_[static_cast<unsigned>(index) & 0xff];
 }
 
-double ImprovedNoise::sample_and_lerp(int gx, int gy, int gz, double dx,
-		double dy, double dz) const
+double ImprovedNoise::sample_and_lerp(
+		int gx, int gy, int gz, double dx, double dy, double dz) const
 {
 	const int i = p(gx), i1 = p(gx + 1);
 	const int i2 = p(i + gy), i3 = p(i + gy + 1);
 	const int i4 = p(i1 + gy), i5 = p(i1 + gy + 1);
-	const std::array<double, 8> corners{
-			grad_dot(p(i2 + gz), dx, dy, dz),
+	const std::array<double, 8> corners{grad_dot(p(i2 + gz), dx, dy, dz),
 			grad_dot(p(i4 + gz), dx - 1.0, dy, dz),
 			grad_dot(p(i3 + gz), dx, dy - 1.0, dz),
 			grad_dot(p(i5 + gz), dx - 1.0, dy - 1.0, dz),
@@ -93,8 +91,8 @@ double ImprovedNoise::noise(double x, double y, double z) const
 	return sample_and_lerp(fx, fy, fz, dx - fx, dy - fy, dz - fz);
 }
 
-PerlinNoise PerlinNoise::create(XoroRandom &random, int first_octave,
-		const std::vector<double> &amplitudes)
+PerlinNoise PerlinNoise::create(
+		XoroRandom &random, int first_octave, const std::vector<double> &amplitudes)
 {
 	PerlinNoise out;
 	out.levels_.resize(amplitudes.size());
@@ -109,8 +107,8 @@ PerlinNoise PerlinNoise::create(XoroRandom &random, int first_octave,
 		out.levels_[i].emplace(octave_random);
 	}
 	out.lowest_frequency_input_factor_ = std::pow(2.0, first_octave);
-	out.lowest_frequency_value_factor_ = std::pow(2.0,
-			static_cast<int>(amplitudes.size()) - 1) /
+	out.lowest_frequency_value_factor_ =
+			std::pow(2.0, static_cast<int>(amplitudes.size()) - 1) /
 			(std::pow(2.0, static_cast<int>(amplitudes.size())) - 1.0);
 	return out;
 }
@@ -122,21 +120,23 @@ double PerlinNoise::get_value(double x, double y, double z) const
 	double value_factor = lowest_frequency_value_factor_;
 	for (std::size_t i = 0; i < levels_.size(); ++i) {
 		if (levels_[i])
-			total += amplitudes_[i] * levels_[i]->noise(wrap(x * input_factor),
-					wrap(y * input_factor), wrap(z * input_factor)) * value_factor;
+			total += amplitudes_[i] *
+					 levels_[i]->noise(wrap(x * input_factor), wrap(y * input_factor),
+							 wrap(z * input_factor)) *
+					 value_factor;
 		input_factor *= 2.0;
 		value_factor /= 2.0;
 	}
 	return total;
 }
 
-NormalNoise::NormalNoise(PerlinNoise first, PerlinNoise second, double value_factor)
-		: first_(std::move(first)), second_(std::move(second)), value_factor_(value_factor)
+NormalNoise::NormalNoise(PerlinNoise first, PerlinNoise second, double value_factor) :
+		first_(std::move(first)), second_(std::move(second)), value_factor_(value_factor)
 {
 }
 
-NormalNoise NormalNoise::create(XoroRandom &random, int first_octave,
-		const std::vector<double> &amplitudes)
+NormalNoise NormalNoise::create(
+		XoroRandom &random, int first_octave, const std::vector<double> &amplitudes)
 {
 	auto first = PerlinNoise::create(random, first_octave, amplitudes);
 	auto second = PerlinNoise::create(random, first_octave, amplitudes);
@@ -153,9 +153,8 @@ NormalNoise NormalNoise::create(XoroRandom &random, int first_octave,
 
 double NormalNoise::get_value(double x, double y, double z) const
 {
-	return (first_.get_value(x, y, z) +
-				second_.get_value(x * INPUT_FACTOR, y * INPUT_FACTOR,
-						y == y ? z * INPUT_FACTOR : z)) *
-			value_factor_;
+	return (first_.get_value(x, y, z) + second_.get_value(x * INPUT_FACTOR,
+												y * INPUT_FACTOR, z * INPUT_FACTOR)) *
+		   value_factor_;
 }
 }

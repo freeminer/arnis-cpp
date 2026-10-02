@@ -2,6 +2,7 @@
 
 #include "api.h"
 #include "cache.h"
+#include "fetch.h"
 
 #include <cstddef>
 #include <atomic>
@@ -31,6 +32,9 @@ struct PipelineConfig
 	std::shared_ptr<std::atomic_bool> cancel;
 	std::optional<std::string> cache_only;
 	std::function<void(const cache::ImageRecord &)> image_sink;
+	// Optional OSM side of Rust's FetchConfig. Set through osm_fetch_config()
+	// to inherit --no-tile-archive and --osm-tiles-url from Args.
+	std::optional<OsmFetchConfig> osm_fetch;
 	bool cancelled() const { return cancel && cancel->load(std::memory_order_relaxed); }
 };
 
@@ -58,6 +62,8 @@ struct PipelineStats
 struct PipelineResult
 {
 	std::vector<cache::ImageRecord> images;
+	std::optional<nlohmann::json> osm;
+	std::optional<std::string> osm_error;
 	std::size_t cells = 0;
 	std::size_t failed_cells = 0;
 	bool cancelled = false;

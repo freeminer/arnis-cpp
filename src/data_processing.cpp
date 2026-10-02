@@ -35,6 +35,7 @@
 #include "ore_generation.h"
 #include "caves_deepslate.h"
 #include "caves_carver.h"
+#include "caves_ores.h"
 #include "caves_water.h"
 #include "trees/region.h"
 #include "water_depth.h"
@@ -1891,12 +1892,19 @@ bool generate_world(WorldEditor &editor,
 			caves::generate_water_features(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 					CAVE_SEED, world_editor::terrain_floor_y());
+			caves::stamp_schematics_region(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					CAVE_SEED, world_editor::terrain_floor_y(), args);
+			caves::place_ores_region(editor,
+					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+					CAVE_SEED, world_editor::terrain_floor_y());
 			caves::decorate_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 					CAVE_SEED, world_editor::terrain_floor_y(), args);
 		}
-		ore_generation::generate_ores(
-				editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+		if (!args.caves)
+			ore_generation::generate_ores(editor, xzbbox.min_x(), xzbbox.max_x(),
+					xzbbox.min_z(), xzbbox.max_z());
 	}
 
 	water_depth::carve_lc_water_pass(

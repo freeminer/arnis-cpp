@@ -4,6 +4,7 @@
 #include "wikidata_index.h"
 #include <unordered_map>
 #include <functional>
+#include <mutex>
 // QID-level memoization keeps multi-pass map generation deterministic and network-sparse.
 namespace arnis::models_3d
 {
@@ -11,6 +12,7 @@ class RemoteModelProvider : public ModelProvider
 {
 	std::filesystem::path cache_;
 	std::unordered_map<std::string, std::optional<ModelAsset>> memo_;
+	std::mutex memo_mutex_;
 	std::function<std::optional<std::vector<std::uint8_t>>(
 			const std::string &, std::size_t)>
 			fetch_bytes_;

@@ -18,8 +18,8 @@ class XoroRandom
 
 public:
 	static XoroRandom from_seed(std::int64_t seed);
-	static XoroRandom from_hash_of(std::int64_t factory_lo, std::int64_t factory_hi,
-			std::string_view name);
+	static XoroRandom from_hash_of(
+			std::int64_t factory_lo, std::int64_t factory_hi, std::string_view name);
 	std::int64_t next_long();
 	double next_double();
 	float next_float();

@@ -5,7 +5,10 @@
 #include <zlib.h>
 #include <fstream>
 #include <chrono>
+#include <map>
+#include <set>
 #include "../../../http.h"
+#include "../world_utils.h"
 
 namespace arnis::canopy
 {
@@ -15,6 +18,9 @@ constexpr double MERCATOR_WORLD = 20037508.342789244;
 constexpr double COLUMNS_PER_TREE = 52.0;
 constexpr double COLUMNS_PER_TREE_LEGACY = 25.0;
 constexpr double SLOT_P_MAX = 0.85;
+constexpr std::size_t ROW_BLOCK = 128;
+constexpr std::uint64_t FETCH_BATCH_BYTES = 16ULL << 20;
+constexpr auto ROW_CACHE_MAX_AGE = std::chrono::hours(24 * 30);
 }
 
 CanopyData::CanopyData(std::vector<std::uint8_t> grid, std::size_t w, std::size_t h) :
@@ -477,17 +483,123 @@ bool fill_from_remote_tile(const std::filesystem::path &base,
 	std::vector<std::size_t> unique_rows = win.rows;
 	unique_rows.erase(
 			std::unique(unique_rows.begin(), unique_rows.end()), unique_rows.end());
+	const auto key = quadkey_of(xt, yt);
+	auto block_rows = [](std::size_t block) {
+		const auto first = block * ROW_BLOCK;
+		return std::pair{first, std::min(first + ROW_BLOCK, TILE_PX) - 1};
+	};
+	auto strip_span = [&](std::size_t first, std::size_t last,
+			std::uint64_t &lo, std::uint64_t &hi) {
+		if (first > last || last >= index->offsets.size() ||
+				last >= index->counts.size())
+			return false;
+		lo = index->offsets[first];
+		if (index->counts[last] > UINT64_MAX - index->offsets[last])
+			return false;
+		hi = index->offsets[last] + index->counts[last];
+		return hi > lo;
+	};
+	auto row_block_path = [&](std::size_t block) {
+		return cache_dir(base) / "rows" / key / (std::to_string(block) + ".strips");
+	};
+	auto read_whole = [](const std::filesystem::path &path, std::uint64_t expected_size)
+			-> std::optional<std::vector<std::uint8_t>> {
+		std::ifstream in(path, std::ios::binary);
+		if (!in)
+			return std::nullopt;
+		in.seekg(0, std::ios::end);
+		const auto length = in.tellg();
+		if (length < 0 || std::uint64_t(length) != expected_size)
+			return std::nullopt;
+		in.seekg(0, std::ios::beg);
+		std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+		in.read(reinterpret_cast<char *>(bytes.data()), std::streamsize(bytes.size()));
+		return in ? std::optional<std::vector<std::uint8_t>>(std::move(bytes))
+				  : std::nullopt;
+	};
+	auto block_cache_valid = [&](std::size_t block) {
+		const auto [first, last] = block_rows(block);
+		std::uint64_t lo = 0, hi = 0;
+		if (!strip_span(first, last, lo, hi))
+			return false;
+		std::error_code ec;
+		return std::filesystem::file_size(row_block_path(block), ec) == hi - lo && !ec;
+	};
+	std::vector<std::size_t> blocks;
+	for (const auto row : unique_rows) {
+		if (row >= TILE_PX)
+			return false;
+		const auto block = row / ROW_BLOCK;
+		if (blocks.empty() || blocks.back() != block)
+			blocks.push_back(block);
+	}
+	std::map<std::size_t, std::pair<std::uint64_t, std::vector<std::uint8_t>>> block_data;
+	for (std::size_t i = 0; i < blocks.size();) {
+		const auto block = blocks[i];
+		const auto [r0, r1] = block_rows(block);
+		std::uint64_t lo = 0, hi = 0;
+		if (!strip_span(r0, r1, lo, hi))
+			return false;
+		if (block_cache_valid(block)) {
+			auto bytes = read_whole(row_block_path(block), hi - lo);
+			if (bytes)
+				block_data.emplace(block, std::pair{lo, std::move(*bytes)});
+			else
+				std::filesystem::remove(row_block_path(block));
+		}
+		if (block_data.contains(block)) {
+			++i;
+			continue;
+		}
+		const auto range_lo = lo;
+		auto range_hi = hi;
+		std::size_t count = 1;
+		while (i + count < blocks.size() && blocks[i + count] == block + count &&
+				!block_cache_valid(blocks[i + count])) {
+			const auto [next_first, next_last] = block_rows(blocks[i + count]);
+			std::uint64_t next_lo = 0, next_hi = 0;
+			if (!strip_span(next_first, next_last, next_lo, next_hi) ||
+					next_hi <= range_hi || next_hi - range_lo > FETCH_BATCH_BYTES)
+				break;
+			range_hi = next_hi;
+			++count;
+		}
+		auto fetched = fetch_range(url, range_lo, range_hi - range_lo);
+		if (!fetched || fetched->size() != range_hi - range_lo)
+			return false;
+		for (std::size_t n = 0; n < count; ++n) {
+			const auto current = blocks[i + n];
+			const auto [first, last] = block_rows(current);
+			std::uint64_t block_lo = 0, block_hi = 0;
+			if (!strip_span(first, last, block_lo, block_hi) || block_lo < range_lo ||
+					block_hi > range_hi)
+				return false;
+			const auto begin = static_cast<std::size_t>(block_lo - range_lo);
+			const auto end = static_cast<std::size_t>(block_hi - range_lo);
+			std::vector<std::uint8_t> bytes(fetched->begin() + begin, fetched->begin() + end);
+			arnis::world_utils::replace_file_atomically(row_block_path(current), bytes);
+			block_data.emplace(current, std::pair{block_lo, std::move(bytes)});
+		}
+		i += count;
+	}
 	std::vector<std::vector<std::uint8_t>> values(unique_rows.size());
 	for (std::size_t i = 0; i < unique_rows.size(); ++i) {
 		const auto row = unique_rows[i];
-		if (row >= TILE_PX || index->counts[row] == 0 ||
-				index->counts[row] > 64 * 1024 * 1024)
+		if (index->counts[row] == 0 || index->counts[row] > 64 * 1024 * 1024)
 			return false;
-		auto compressed = fetch_range(url, index->offsets[row], index->counts[row]);
-		if (!compressed || compressed->size() != index->counts[row])
+		const auto block = row / ROW_BLOCK;
+		const auto found = block_data.find(block);
+		if (found == block_data.end() || index->offsets[row] < found->second.first)
 			return false;
+		const auto offset = static_cast<std::size_t>(index->offsets[row] - found->second.first);
+		if (offset > found->second.second.size() ||
+				index->counts[row] > found->second.second.size() - offset)
+			return false;
+		std::vector<std::uint8_t> compressed(
+				found->second.second.begin() + offset,
+				found->second.second.begin() + offset + index->counts[row]);
 		std::vector<std::uint8_t> scratch;
-		if (!inflate_sampled_row(*compressed, win.columns, scratch, values[i]))
+		if (!inflate_sampled_row(compressed, win.columns, scratch, values[i]))
 			return false;
 	}
 	for (std::size_t out_row = 0; out_row < win.rows.size(); ++out_row) {
@@ -503,6 +615,83 @@ bool fill_from_remote_tile(const std::filesystem::path &base,
 			grid[gz * width + win.grid_x0 + x] = row[x];
 	}
 	return true;
+}
+} // namespace
+
+namespace
+{
+void prune_row_cache(const std::filesystem::path &base)
+{
+	const auto root = cache_dir(base) / "rows";
+	std::error_code ec;
+	std::filesystem::directory_iterator tile_it(root, ec), end;
+	if (ec)
+		return;
+	const auto now = std::filesystem::file_time_type::clock::now();
+	for (; tile_it != end; tile_it.increment(ec)) {
+		if (ec) {
+			ec.clear();
+			continue;
+		}
+		const auto tile_status = tile_it->symlink_status(ec);
+		if (ec || !std::filesystem::is_directory(tile_status)) {
+			ec.clear();
+			continue;
+		}
+		std::filesystem::directory_iterator file_it(tile_it->path(), ec), file_end;
+		if (ec) {
+			ec.clear();
+			continue;
+		}
+		for (; file_it != file_end; file_it.increment(ec)) {
+			if (ec) {
+				ec.clear();
+				continue;
+			}
+			const auto status = file_it->symlink_status(ec);
+			if (ec || !std::filesystem::is_regular_file(status)) {
+				ec.clear();
+				continue;
+			}
+			const auto modified = file_it->last_write_time(ec);
+			if (!ec && now - modified > ROW_CACHE_MAX_AGE)
+				std::filesystem::remove(file_it->path(), ec);
+			ec.clear();
+		}
+	}
+}
+
+std::size_t clear_cache_tree(const std::filesystem::path &directory)
+{
+	std::error_code ec;
+	std::filesystem::directory_iterator it(directory, ec), end;
+	if (ec)
+		return 0;
+	std::size_t removed = 0;
+	for (; it != end; it.increment(ec)) {
+		if (ec) {
+			ec.clear();
+			continue;
+		}
+		const auto path = it->path();
+		const auto status = it->symlink_status(ec);
+		if (ec) {
+			ec.clear();
+			continue;
+		}
+		if (std::filesystem::is_symlink(status)) {
+			if (std::filesystem::remove(path, ec))
+				++removed;
+		} else if (std::filesystem::is_directory(status)) {
+			removed += clear_cache_tree(path);
+			std::filesystem::remove(path, ec);
+		} else if (std::filesystem::is_regular_file(status) &&
+				std::filesystem::remove(path, ec)) {
+			++removed;
+		}
+		ec.clear();
+	}
+	return removed;
 }
 } // namespace
 
@@ -662,6 +851,7 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 	if (!fetch_range || grid_width == 0 || grid_height == 0 || !std::isfinite(min_lat) ||
 			!std::isfinite(min_lon) || !std::isfinite(max_lat) || !std::isfinite(max_lon))
 		return std::nullopt;
+	prune_row_cache(base);
 	std::vector<std::uint8_t> grid(grid_width * grid_height, CANOPY_NODATA);
 	for (const auto &[xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon))
 		fill_from_remote_tile(base, fetch_range, xt, yt, min_lat, min_lon, max_lat,
@@ -678,17 +868,7 @@ std::size_t clear_canopy_cache(const std::filesystem::path &base)
 	const auto dir = cache_dir(base);
 	if (!std::filesystem::exists(dir))
 		return 0;
-	std::size_t removed = 0;
-	for (const auto &entry : std::filesystem::directory_iterator(dir)) {
-		const auto ext = entry.path().extension();
-		if (ext == ".canopy" || ext == ".idx" || ext == ".tmp") {
-			std::error_code ec;
-			std::filesystem::remove(entry.path(), ec);
-			if (!ec)
-				++removed;
-		}
-	}
-	return removed;
+	return clear_cache_tree(dir);
 }
 bool canopy_cache_fresh(const std::filesystem::path &path, std::chrono::seconds age)
 {

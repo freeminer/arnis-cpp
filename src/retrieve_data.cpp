@@ -6,7 +6,6 @@
 #include <curl/curl.h>
 #include <fstream>
 #include <nlohmann/json.hpp>
-#include <random>
 #include <sstream>
 #include <stdexcept>
 #include <utility>
@@ -63,24 +62,9 @@ std::string overpass_query(const geographic::LLBBox &bbox)
 
 std::vector<OverpassEndpoint> overpass_request_plan(std::uint64_t seed, bool probe)
 {
-	std::vector<OverpassEndpoint> official{{"https://overpass-api.de/api/interpreter"},
-			{"https://lz4.overpass-api.de/api/interpreter"},
-			{"https://z.overpass-api.de/api/interpreter"}};
-	std::vector<OverpassEndpoint> fallback{
-			{"https://maps.mail.ru/osm/tools/overpass/api/interpreter", true, 360},
-			{"https://overpass.private.coffee/api/interpreter", true, 120}};
-	std::mt19937_64 rng(seed);
-	std::shuffle(official.begin(), official.end(), rng);
-	std::shuffle(fallback.begin(), fallback.end(), rng);
-	std::vector<OverpassEndpoint> plan;
-	if (probe && !official.empty()) {
-		plan.push_back(official.front());
-		official.erase(official.begin());
-	}
-	plan.push_back({"https://api.arnismc.com/overpass/api/interpreter"});
-	plan.insert(plan.end(), official.begin(), official.end());
-	plan.insert(plan.end(), fallback.begin(), fallback.end());
-	return plan;
+	(void)seed;
+	(void)probe;
+	return {{ARNIS_OVERPASS_URL}};
 }
 
 bool remark_means_truncated(const std::string &remark)

@@ -20,4 +20,8 @@ void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
 // Rust caves::decoration counterpart for post-carve cave flora/mineral accents.
 void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, const Args &args);
+// Rust caves::schems counterpart: load the configured cave-pack manifest and
+// deterministically stamp formations into carved cave openings.
+void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &region,
+		std::int64_t seed, int floor_y, const Args &args);
 }

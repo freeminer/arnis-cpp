@@ -1,5 +1,6 @@
 #include "caves_carver.h"
-#include "caves_biomes.h"
+#include "caves_density.h"
+#include "caves_theme.h"
 #include "caves_rng.h"
 #include "args.h"
 #include "block_definitions.h"
@@ -17,34 +18,20 @@ namespace
 {
 constexpr int CAVE_REACH_CHUNKS = 8;
 
-std::uint64_t hash3(std::int64_t seed, int x, int y, int z)
+std::uint64_t decor_hash(int x, int y, int z, std::uint64_t seed)
 {
-	std::uint64_t h = std::uint64_t(seed) ^ 0x9e3779b97f4a7c15ULL;
-	for (std::int64_t v : {std::int64_t(x), std::int64_t(y), std::int64_t(z)}) {
-		h ^= std::uint64_t(v) + 0x9e3779b97f4a7c15ULL + (h << 6) + (h >> 2);
-		h *= 0xbf58476d1ce4e5b9ULL;
-		h ^= h >> 27;
-	}
+	std::uint64_t h = seed ^ (std::uint64_t(std::int64_t(x)) * 0x9E3779B97F4A7C15ULL) ^
+					  (std::uint64_t(std::int64_t(y)) * 0xC2B2AE3D27D4EB4FULL) ^
+					  (std::uint64_t(std::int64_t(z)) * 0x165667B19E3779F9ULL);
+	h ^= h >> 30;
+	h *= 0xBF58476D1CE4E5B9ULL;
+	h ^= h >> 27;
 	return h;
 }
-double noise(std::int64_t seed, double x, double y, double z)
+
+bool decor_chance(int x, int y, int z, std::uint64_t seed, std::uint64_t per_thousand)
 {
-	const int ix = int(std::floor(x)), iy = int(std::floor(y)), iz = int(std::floor(z));
-	const double fx = x - ix, fy = y - iy, fz = z - iz;
-	auto sample = [&](int dx, int dy, int dz) {
-		return double(hash3(seed, ix + dx, iy + dy, iz + dz) >> 11) / double(1ULL << 53) *
-					   2.0 -
-			   1.0;
-	};
-	double out = 0;
-	for (int dz = 0; dz <= 1; ++dz)
-		for (int dy = 0; dy <= 1; ++dy)
-			for (int dx = 0; dx <= 1; ++dx) {
-				const double wx = dx ? fx : 1.0 - fx, wy = dy ? fy : 1.0 - fy,
-							 wz = dz ? fz : 1.0 - fz;
-				out += wx * wy * wz * sample(dx, dy, dz);
-			}
-	return out;
+	return decor_hash(x, y, z, seed) % 1000 < per_thousand;
 }
 
 void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, double ox,
@@ -57,7 +44,7 @@ void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, 
 	const int max_z = std::min(region.max_z, int(std::floor(oz + radius)));
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	const int min_y =
-			std::max({int(std::floor(oy - vertical)) - 1, floor_y + 1, write_min_y});
+			std::max({int(std::floor(oy - vertical)), floor_y + 2, write_min_y});
 	const int max_y = std::min(int(std::floor(oy + vertical)) + 1, write_max_y);
 	if (min_y > max_y || min_x > max_x || min_z > max_z)
 		return;
@@ -86,7 +73,6 @@ void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, 
 }
 
 constexpr int BRANCH_BUDGET = 112;
-constexpr int VANILLA_FLOOR = -64;
 
 bool can_reach(
 		int cx, int cz, double x, double z, int step, int branch_count, double width)
@@ -265,32 +251,9 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y)
 {
-	// Keep this in sync with the Rust cave host predicate: all natural
-	// underground rock variants are eligible, while authored blocks remain
-	// protected by the whitelist.
-	const std::vector<Block> hosts{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,
-			DIORITE, ANDESITE, DIRT, COARSE_DIRT, GRAVEL};
-	const std::optional<std::vector<Block>> host_options{hosts};
-	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	for (int z = region.min_z; z <= region.max_z; ++z)
-		for (int x = region.min_x; x <= region.max_x; ++x) {
-			const int surface = editor.get_ground_level(x, z);
-			const int top = surface - 8;
-			if (top <= floor_y + 12)
-				continue;
-			for (int y = std::max(floor_y + 8, write_min_y);
-					y <= std::min(top, write_max_y); ++y) {
-				const double n = noise(seed, x * .055, y * .075, z * .055);
-				const double band =
-						std::abs(noise(seed ^ 0x5deece66dLL, x * .11, y * .025, z * .11));
-				// The two fields form mostly horizontal, connected tunnels;
-				// the depth taper keeps the surface and bedrock intact.
-				const double depth = double(y - floor_y) / std::max(1, top - floor_y);
-				if (n < -.72 && band < .58 && depth > .08 && depth < .94 &&
-						editor.check_for_block_absolute(x, y, z, host_options))
-					editor.set_block_absolute(AIR, x, y, z, std::nullopt, std::nullopt);
-			}
-		}
+	CaveGen density(seed, floor_y, world_editor::world_max_y());
+	carve_density_region(density, editor, region.min_x, region.max_x, region.min_z,
+			region.max_z, floor_y);
 	// Random-walk carvers are origin-chunk features; use Rust's branching cave,
 	// extra-underground cave, and canyon walks with the same deterministic salts.
 	carve_random_walk_carvers(editor, region, seed, floor_y);
@@ -302,10 +265,13 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	BiomeAmounts amounts = BiomeAmounts::defaults();
 	if (args.cave_biomes)
 		amounts = BiomeAmounts::parse(*args.cave_biomes);
+	const ThemeSelector themes(seed, amounts, floor_y);
+	const auto decoration_seed = static_cast<std::uint64_t>(seed);
 	const std::vector<Block> rocks{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,
 			DIORITE, ANDESITE, GRAVEL, DIRT};
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	const std::optional<std::vector<Block>> rock_options{rocks};
+	const std::optional<std::vector<Block>> water_options{std::vector<Block>{WATER}};
 	// Candidates can write one node above or below their own height.
 	// Keep decoration independent of traversal order: each candidate is keyed
 	// by its absolute column and height, matching the Rust cave decoration pass.
@@ -316,7 +282,6 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 					y < std::min(top, write_max_y + 2); ++y) {
 				if (!editor.check_for_block_type_absolute(x, y, z, AIR))
 					continue;
-				const auto h = hash3(seed ^ 0x6a09e667f3bcc909LL, x, y, z);
 				const bool adjacent_rock =
 						editor.check_for_block_absolute(x + 1, y, z, rock_options) ||
 						editor.check_for_block_absolute(x - 1, y, z, rock_options) ||
@@ -326,26 +291,128 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 					continue;
 				const bool floor_rock =
 						editor.check_for_block_absolute(x, y - 1, z, rock_options);
-				const auto theme = h % 1000;
-				if (theme < 7 && amounts.lush > 0 && floor_rock)
-					editor.set_block_absolute(MOSS_BLOCK, x, y - 1, z,
-							std::optional<std::vector<Block>>(
-									std::vector<Block>{STONE, DEEPSLATE, TUFF, DIRT}),
-							std::nullopt);
-				else if (theme >= 40 && theme < 44 && amounts.volcanic > 0 && floor_rock)
-					editor.set_block_absolute(
-							MAGMA_BLOCK, x, y - 1, z, rock_options, std::nullopt);
-				else if (theme >= 44 && theme < 48 && amounts.deepdark > 0 && floor_rock)
+				const bool ceiling_rock =
+						editor.check_for_block_absolute(x, y + 1, z, rock_options);
+				const auto theme = themes.at(x, y, z, editor.get_ground_level(x, z));
+				if (theme == CaveTheme::Lush) {
+					if (floor_rock) {
+						const bool wet = editor.check_for_block_absolute(
+												 x + 1, y, z, water_options) ||
+										 editor.check_for_block_absolute(
+												 x - 1, y, z, water_options) ||
+										 editor.check_for_block_absolute(
+												 x, y, z + 1, water_options) ||
+										 editor.check_for_block_absolute(
+												 x, y, z - 1, water_options) ||
+										 editor.check_for_block_absolute(
+												 x + 1, y - 1, z, water_options) ||
+										 editor.check_for_block_absolute(
+												 x - 1, y - 1, z, water_options) ||
+										 editor.check_for_block_absolute(
+												 x, y - 1, z + 1, water_options) ||
+										 editor.check_for_block_absolute(
+												 x, y - 1, z - 1, water_options);
+						if (wet && decor_chance(x, 0, z, decoration_seed ^ 0x4D06, 600))
+							editor.set_block_absolute(
+									MUD, x, y - 1, z, rock_options, std::nullopt);
+						else if (decor_chance(x, 0, z, decoration_seed ^ 0x4D05, 780)) {
+							editor.set_block_absolute(
+									MOSS_BLOCK, x, y - 1, z, rock_options, std::nullopt);
+							if (decor_chance(x, y, z, decoration_seed ^ 0x7EE5, 800)) {
+								const auto vegetation =
+										decor_hash(x, y, z, decoration_seed ^ 0xA21E) %
+										96;
+								if (vegetation < 50)
+									editor.set_block_absolute(GRASS, x, y, z,
+											std::optional<std::vector<Block>>(
+													std::vector<Block>{AIR}),
+											std::nullopt);
+								else if (vegetation < 75)
+									editor.set_block_absolute(MOSS_CARPET, x, y, z,
+											std::optional<std::vector<Block>>(
+													std::vector<Block>{AIR}),
+											std::nullopt);
+								else if (vegetation < 85) {
+									if (editor.check_for_block_type_absolute(
+												x, y + 1, z, AIR)) {
+										editor.set_block_absolute(TALL_GRASS_BOTTOM, x, y,
+												z,
+												std::optional<std::vector<Block>>(
+														std::vector<Block>{AIR}),
+												std::nullopt);
+										editor.set_block_absolute(TALL_GRASS_TOP, x,
+												y + 1, z,
+												std::optional<std::vector<Block>>(
+														std::vector<Block>{AIR}),
+												std::nullopt);
+									}
+								}
+							}
+						}
+					} else if (ceiling_rock) {
+						if (decor_chance(x, 0, z, decoration_seed ^ 0x4D05, 650))
+							editor.set_block_absolute(
+									MOSS_BLOCK, x, y + 1, z, rock_options, std::nullopt);
+					}
+				} else if (theme == CaveTheme::Volcanic && floor_rock &&
+						   editor.check_for_block_absolute(x, y - 2, z, rock_options) &&
+						   decor_chance(x, 0, z, decoration_seed ^ 0xBA5A, 720)) {
+					const auto palette =
+							decor_hash(x, 0, z, decoration_seed ^ 0xBA5B) % 100;
+					if (palette >= 64 && palette < 78)
+						editor.set_block_absolute(
+								BLACKSTONE, x, y - 1, z, rock_options, std::nullopt);
+					else if (palette >= 78 && palette < 90)
+						editor.set_block_absolute(POLISHED_BLACKSTONE, x, y - 1, z,
+								rock_options, std::nullopt);
+					else if (palette >= 90)
+						editor.set_block_absolute(
+								MAGMA_BLOCK, x, y - 1, z, rock_options, std::nullopt);
+				} else if (theme == CaveTheme::DeepDark && floor_rock &&
+						   decor_chance(x, 0, z, decoration_seed ^ 0x5CA1, 720))
 					editor.set_block_absolute(
 							BLACKSTONE, x, y - 1, z, rock_options, std::nullopt);
-				else if (theme >= 48 && theme < 51 && amounts.ice > 0 && floor_rock &&
-						 y > top - 20)
+				else if (theme == CaveTheme::Ice) {
+					if (floor_rock &&
+							decor_chance(x, 0, z, decoration_seed ^ 0x1CE1, 700)) {
+						const auto ice =
+								decor_hash(x, 0, z, decoration_seed ^ 0x1CE2) % 10;
+						const Block floor_block =
+								ice < 6 ? ICE : (ice < 9 ? PACKED_ICE : BLUE_ICE);
+						editor.set_block_absolute(
+								floor_block, x, y - 1, z, rock_options, std::nullopt);
+						if (decor_chance(x, y, z, decoration_seed ^ 0x1CE3, 120))
+							editor.set_block_absolute(SNOW_LAYER, x, y, z,
+									std::optional<std::vector<Block>>(
+											std::vector<Block>{AIR}),
+									std::nullopt);
+					} else if (ceiling_rock &&
+							   decor_chance(x, 0, z, decoration_seed ^ 0x1CE4, 620)) {
+						const auto ice =
+								decor_hash(x, 1, z, decoration_seed ^ 0x1CE2) % 10;
+						const Block ceiling_block =
+								ice < 6 ? ICE : (ice < 9 ? PACKED_ICE : BLUE_ICE);
+						editor.set_block_absolute(
+								ceiling_block, x, y + 1, z, rock_options, std::nullopt);
+					}
+				} else if (theme == CaveTheme::Mushroom && floor_rock &&
+						   decor_chance(x, 0, z, decoration_seed ^ 0x54AD, 750) &&
+						   y < top) {
 					editor.set_block_absolute(
-							ICE, x, y - 1, z, rock_options, std::nullopt);
-				else if (theme == 777 && amounts.mushroom > 0 && y + 1 < top)
-					editor.set_block_absolute(BROWN_MUSHROOM, x, y + 1, z,
-							std::optional<std::vector<Block>>(std::vector<Block>{AIR}),
-							std::nullopt);
+							MYCELIUM, x, y - 1, z, rock_options, std::nullopt);
+					const auto mushroom =
+							decor_hash(x, y, z, decoration_seed ^ 0x54AE) % 1000;
+					if (mushroom < 30)
+						editor.set_block_absolute(RED_MUSHROOM, x, y, z,
+								std::optional<std::vector<Block>>(
+										std::vector<Block>{AIR}),
+								std::nullopt);
+					else if (mushroom < 65)
+						editor.set_block_absolute(BROWN_MUSHROOM, x, y, z,
+								std::optional<std::vector<Block>>(
+										std::vector<Block>{AIR}),
+								std::nullopt);
+				}
 			}
 		}
 }

@@ -35,17 +35,21 @@ struct CaveRect
 	}
 };
 
-// Stable signed-coordinate key, matching Rust's pack/unpack use for cave sets.
+// Compact cave-cell key matching Rust caves::pack (24-bit X/Z, 12-bit Y with
+// an offset that keeps the full supported terrain range nonnegative).
 inline std::int64_t pack_cave_pos(int x, int y, int z) noexcept
 {
-	return (std::int64_t(std::uint32_t(x)) << 32) ^
-		   (std::int64_t(std::uint16_t(y)) << 16) ^ std::uint16_t(z);
+	const auto ux = (std::uint64_t(std::int64_t(x) + (1 << 23)) & 0xFF'FFFFULL);
+	const auto uz = (std::uint64_t(std::int64_t(z) + (1 << 23)) & 0xFF'FFFFULL);
+	const auto uy = (std::uint64_t(std::int64_t(y) + 2048) & 0xFFFULL);
+	return static_cast<std::int64_t>((ux << 36) | (uz << 12) | uy);
 }
 inline std::tuple<int, int, int> unpack_cave_pos(std::int64_t value) noexcept
 {
-	return {int(std::uint32_t(std::uint64_t(value) >> 32)),
-			int(std::int16_t(std::uint16_t(std::uint64_t(value) >> 16))),
-			int(std::int16_t(std::uint16_t(value)))};
+	const auto packed = static_cast<std::uint64_t>(value);
+	return {static_cast<int>((packed >> 36) & 0xFF'FFFFULL) - (1 << 23),
+			static_cast<int>((packed & 0xFFFULL)) - 2048,
+			static_cast<int>((packed >> 12) & 0xFF'FFFFULL) - (1 << 23)};
 }
 
 }

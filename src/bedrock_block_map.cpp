@@ -375,6 +375,34 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("packed_ice");
 	if (block == BLUE_ICE)
 		return simple("blue_ice");
+	if (block == LAVA)
+		return state("lava", {{"liquid_depth", 0}});
+	if (block == POWDER_SNOW)
+		return simple("powder_snow");
+	if (block == AMETHYST_BLOCK)
+		return simple("amethyst_block");
+	if (block == BUDDING_AMETHYST)
+		return simple("budding_amethyst");
+	if (block == AMETHYST_CLUSTER)
+		return simple("amethyst_cluster");
+	if (block == SMALL_AMETHYST_BUD)
+		return simple("small_amethyst_bud");
+	if (block == MEDIUM_AMETHYST_BUD)
+		return simple("medium_amethyst_bud");
+	if (block == LARGE_AMETHYST_BUD)
+		return simple("large_amethyst_bud");
+	if (block == DRIPSTONE_BLOCK)
+		return simple("dripstone_block");
+	if (block == POINTED_DRIPSTONE)
+		return simple("pointed_dripstone");
+	if (block == GLOW_LICHEN)
+		return simple("glow_lichen");
+	if (block == BIG_DRIPLEAF)
+		return simple("big_dripleaf");
+	if (block == BIG_DRIPLEAF_STEM)
+		return simple("big_dripleaf_stem");
+	if (block == SMALL_DRIPLEAF_LOWER || block == SMALL_DRIPLEAF_UPPER)
+		return simple("small_dripleaf");
 	if (block == SNOW_BLOCK)
 		return simple("snow");
 	if (block == SPONGE)

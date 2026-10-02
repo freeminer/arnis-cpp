@@ -13,6 +13,7 @@
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
+#include <set>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -389,6 +390,17 @@ bool oid(std::int64_t v, std::uint64_t &out, std::string *e)
 	out = static_cast<std::uint64_t>(v);
 	return true;
 }
+
+std::uint64_t coordinate_node_id(const std::pair<std::int32_t, std::int32_t> &coordinate)
+{
+	constexpr std::int64_t max_lat_e6 = 90'000'000;
+	constexpr std::int64_t max_lon_e6 = 180'000'000;
+	const auto lat = static_cast<std::uint64_t>(
+			static_cast<std::int64_t>(coordinate.first) + max_lat_e6);
+	const auto lon = static_cast<std::uint64_t>(
+			static_cast<std::int64_t>(coordinate.second) + max_lon_e6);
+	return SYNTHETIC_ID_BASE | (lat << 29) | lon;
+}
 }
 
 bool decode(const std::vector<std::uint8_t> &b, DecodedTile &out, std::string *error)
@@ -504,9 +516,8 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 			relations.emplace(r.id, r);
 	}
 	osm_parser::RawOsmDocument out;
-	std::map<std::pair<std::int32_t, std::int32_t>, std::uint64_t> coord_ids;
-	std::uint64_t next = SYNTHETIC_ID_BASE;
-	std::vector<DecodedNode> synthetic;
+	using Coordinate = std::pair<std::int32_t, std::int32_t>;
+	std::map<Coordinate, std::uint64_t> lowest_source_id;
 	// Rust sorts archive nodes by ID before exposing them to the parser.  Do
 	// the same here: unordered_map iteration otherwise changes element order
 	// between processes, which changes seeded tree/structure decisions.
@@ -516,37 +527,48 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 		ni.push_back(id);
 	std::sort(ni.begin(), ni.end());
 	for (const auto &id : ni) {
-		const auto &n = nodes.at(id);
-		coord_ids.emplace(std::make_pair(n.lat, n.lon), id);
-		out.nodes.push_back(
-				{id, double(n.lat) / COORD_SCALE, double(n.lon) / COORD_SCALE, n.tags});
+		const auto &node = nodes.at(id);
+		const Coordinate coordinate{node.lat, node.lon};
+		lowest_source_id.emplace(coordinate, id);
 	}
 	std::vector<std::uint64_t> wi;
 	for (const auto &[id, _] : ways)
 		wi.push_back(id);
 	std::sort(wi.begin(), wi.end());
+	std::set<Coordinate> vertex_coordinates;
+	std::vector<Coordinate> synthetic;
+	for (const auto id : wi)
+		for (const auto &coordinate : ways.at(id).points)
+			if (vertex_coordinates.insert(coordinate).second &&
+					!lowest_source_id.contains(coordinate))
+				synthetic.push_back(coordinate);
+	for (const auto &id : ni) {
+		const auto &node = nodes.at(id);
+		const Coordinate coordinate{node.lat, node.lon};
+		const auto source = lowest_source_id.find(coordinate);
+		const auto promoted = vertex_coordinates.contains(coordinate) &&
+							  source != lowest_source_id.end() && source->second == id;
+		out.nodes.push_back({promoted ? coordinate_node_id(coordinate) : id,
+				double(node.lat) / COORD_SCALE, double(node.lon) / COORD_SCALE,
+				node.tags});
+	}
 	for (auto id : wi) {
 		const auto &w = ways.at(id);
 		osm_parser::RawWay rw;
 		rw.id = id;
 		rw.tags = w.tags;
 		for (const auto &p : w.points) {
-			auto it = coord_ids.find(p);
-			if (it == coord_ids.end()) {
-				it = coord_ids.emplace(p, next).first;
-				synthetic.push_back({next, p.first, p.second, {}});
-				++next;
-			}
-			rw.node_refs.push_back(it->second);
+			rw.node_refs.push_back(coordinate_node_id(p));
 		}
 		if (w.closed && rw.node_refs.size() > 1 &&
 				rw.node_refs.front() != rw.node_refs.back())
 			rw.node_refs.push_back(rw.node_refs.front());
 		out.ways.push_back(std::move(rw));
 	}
-	for (const auto &n : synthetic)
+	for (const auto &coordinate : synthetic)
 		out.nodes.push_back(
-				{n.id, double(n.lat) / COORD_SCALE, double(n.lon) / COORD_SCALE, {}});
+				{coordinate_node_id(coordinate), double(coordinate.first) / COORD_SCALE,
+						double(coordinate.second) / COORD_SCALE, {}});
 	std::vector<std::uint64_t> ri;
 	for (const auto &[id, _] : relations)
 		ri.push_back(id);
@@ -561,6 +583,12 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 		out.relations.push_back(std::move(rr));
 	}
 	return out;
+}
+
+std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles_quietly(
+		const geographic::LLBBox &bbox, const std::string &base_url, std::string *error)
+{
+	return fetch_data_from_tiles(bbox, base_url, error);
 }
 
 std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(

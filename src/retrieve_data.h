@@ -18,6 +18,8 @@ namespace arnis::retrieve_data
 {
 inline constexpr const char *OSM_USER_AGENT =
 		"Arnis/Cpp (+https://github.com/louis-e/arnis)";
+inline constexpr const char *ARNIS_OVERPASS_URL =
+		"https://api.arnismc.com/overpass/api/interpreter";
 struct OverpassEndpoint
 {
 	std::string url;
