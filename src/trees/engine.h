@@ -25,6 +25,11 @@ bool place_selected_region_tree(world_editor::WorldEditor &, const RegionSelecto
 		int x, int z, Habitat, int elevation_y, SlotRequest request = {},
 		const BuildingFootprintBitmap *building_footprints = nullptr,
 		const bridges::BridgeSurfaceMap *bridge_surface = nullptr);
+bool place_selected_mapped_region_tree(world_editor::WorldEditor &,
+		const RegionSelector &, int x, int z, int elevation_y, int y_offset,
+		const MappedRequest &,
+		const BuildingFootprintBitmap *building_footprints = nullptr,
+		const bridges::BridgeSurfaceMap *bridge_surface = nullptr);
 bool place_selected_region_tree_for_cover(world_editor::WorldEditor &,
 		const RegionSelector &, int x, int z, std::uint8_t land_cover, int elevation_y,
 		SlotRequest request = {},

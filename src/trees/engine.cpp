@@ -47,6 +47,30 @@ std::optional<Habitat> ecoregion_habitat(
 		return Habitat::Lowland;
 	}
 }
+
+bool place_selected_schematic(world_editor::WorldEditor &editor,
+		const RegionSelector &selector, int offset, const SlotSelection &selected,
+		const BuildingFootprintBitmap *building_footprints)
+{
+	const auto *schem = selector.schematic(selected.schematic_index);
+	if (!schem)
+		return false;
+	const int sx = selected.x, sz = selected.z;
+	const int center = editor.get_absolute_y(sx, offset, sz);
+	int fpmin = center;
+	const int half = std::clamp(std::max(schem->width, schem->length) / 2, 1, 6);
+	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 8>{
+				 {{-half, 0}, {half, 0}, {0, -half}, {0, half}, {-half, -half},
+						 {half, half}, {-half, half}, {half, -half}}})
+		fpmin = std::min(fpmin, editor.get_absolute_y(sx + dx, offset, sz + dz));
+	auto blacklist = Tree::get_building_wall_blocks();
+	for (const auto &blocks : {Tree::get_building_floor_blocks(),
+				 Tree::get_structural_blocks(), Tree::get_functional_blocks()})
+		blacklist.insert(blacklist.end(), blocks.begin(), blocks.end());
+	blacklist.push_back(block_definitions::WATER);
+	return place_schematic_tree(editor, *schem, sx, sz, std::min(center, fpmin + 2),
+			selected.rotation, blacklist, building_footprints, offset);
+}
 }
 std::uint64_t tree_seed(int x, int z)
 {
@@ -112,27 +136,32 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 	auto selected = selector.pick_slot(x, z, habitat, elevation_y, request);
 	if (!selected || blocked(selected->x, selected->z))
 		return false;
-	const auto *schem = selector.schematic(selected->schematic_index);
-	if (!schem)
+	return place_selected_schematic(editor, selector,
+			elevation_y - editor.get_ground_level(x, z), *selected, building_footprints);
+}
+bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
+		const RegionSelector &selector, int x, int z, int elevation_y, int y_offset,
+		const MappedRequest &request, const BuildingFootprintBitmap *building_footprints,
+		const bridges::BridgeSurfaceMap *bridge_surface)
+{
+	const auto blocked = [&](int sx, int sz) {
+		// Mapped OSM trees are explicitly allowed on paving in Rust; only water,
+		// hard obstacles, footprints, bridges and overlapping mapped crowns veto them.
+		return editor.is_lc_water(sx, sz) ||
+			   (editor.mapped_trunks && editor.mapped_trunks->under_crown(sx, sz)) ||
+			   (building_footprints && building_footprints->contains(sx, sz)) ||
+			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
+			   editor.check_for_block(sx, 0, sz,
+					   std::optional<std::vector<Block>>({block_definitions::WATER}));
+	};
+	if (blocked(x, z))
 		return false;
-	// The selected lattice slot can move the trunk off the requested column.
-	// Preserve the caller's ground offset while anchoring to that slot's terrain.
-	const int offset = elevation_y - editor.get_ground_level(x, z);
-	const int sx = selected->x, sz = selected->z;
-	const int center = editor.get_absolute_y(sx, offset, sz);
-	int fpmin = center;
-	const int half = std::clamp(std::max(schem->width, schem->length) / 2, 1, 6);
-	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 8>{
-				 {{-half, 0}, {half, 0}, {0, -half}, {0, half}, {-half, -half},
-						 {half, half}, {-half, half}, {half, -half}}})
-		fpmin = std::min(fpmin, editor.get_absolute_y(sx + dx, offset, sz + dz));
-	auto blacklist = Tree::get_building_wall_blocks();
-	for (const auto &blocks : {Tree::get_building_floor_blocks(),
-				 Tree::get_structural_blocks(), Tree::get_functional_blocks()})
-		blacklist.insert(blacklist.end(), blocks.begin(), blocks.end());
-	blacklist.push_back(block_definitions::WATER);
-	return place_schematic_tree(editor, *schem, sx, sz, std::min(center, fpmin + 2),
-			selected->rotation, blacklist, building_footprints, offset);
+	const auto selected =
+			selector.pick_mapped(x, z, request.habitat, elevation_y, request);
+	if (!selected || blocked(selected->x, selected->z))
+		return false;
+	return place_selected_schematic(
+			editor, selector, y_offset, *selected, building_footprints);
 }
 bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int x, int z, std::uint8_t cover, int elevation_y,

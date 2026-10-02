@@ -13,8 +13,7 @@ struct MappedTree
 {
 	TreeType kind{TreeType::Oak};
 	std::string genus;
-	bool has_conifer{false};
-	bool conifer{false};
+	std::optional<bool> conifer;
 	double height_m{0};
 };
 bool is_conifer_genus(const std::string &genus);

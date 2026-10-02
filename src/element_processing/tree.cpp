@@ -1,6 +1,7 @@
 #include "tree.h"
 #include "../deterministic_rng.h"
 #include <algorithm>
+#include <initializer_list>
 #include <limits>
 
 namespace arnis
@@ -61,14 +62,36 @@ static const std::array<std::pair<Coord, Coord>, 5> TALL_OAK_LEAVES_FILL = {{
 		{{0, 12, 0}, {0, 13, 0}},
 }};
 
-static const std::array<std::pair<Coord, Coord>, 6> PINE_LEAVES_FILL = {{
+static const std::array<std::pair<Coord, Coord>, 5> PINE_LEAVES_FILL = {{
 		{{-1, 5, 0}, {-1, 12, 0}},
 		{{0, 5, -1}, {0, 12, -1}},
 		{{1, 5, 0}, {1, 12, 0}},
-		{{0, 5, -1}, {0, 12, -1}},
 		{{0, 5, 1}, {0, 12, 1}},
 		{{0, 13, 0}, {0, 13, 0}},
 }};
+
+template <int SideLow, int SideHigh, int CrownLow, int CrownHigh>
+constexpr std::array<std::pair<Coord, Coord>, 5> cross_fill()
+{
+	return {{{{-1, SideLow, 0}, {-1, SideHigh, 0}}, {{1, SideLow, 0}, {1, SideHigh, 0}},
+			{{0, SideLow, -1}, {0, SideHigh, -1}}, {{0, SideLow, 1}, {0, SideHigh, 1}},
+			{{0, CrownLow, 0}, {0, CrownHigh, 0}}}};
+}
+
+static constexpr auto OAK_TALL_SLIM_FILL = cross_fill<6, 11, 11, 12>();
+static constexpr auto OAK_BUSHY_FILL = cross_fill<3, 7, 7, 8>();
+static constexpr auto OAK_COMPACT_FILL = cross_fill<2, 5, 5, 6>();
+static constexpr auto SPRUCE_TOWERING_FILL = cross_fill<4, 13, 14, 14>();
+static constexpr auto SPRUCE_SQUAT_FILL = cross_fill<2, 7, 8, 8>();
+static constexpr auto BIRCH_TALL_FILL = cross_fill<5, 10, 10, 11>();
+static constexpr auto BIRCH_CLUSTER_FILL = cross_fill<3, 5, 5, 6>();
+static constexpr auto DARK_OAK_TALL_BUSHY_FILL = cross_fill<4, 9, 9, 10>();
+static constexpr auto DARK_OAK_STUNTED_FILL = cross_fill<2, 4, 4, 5>();
+static constexpr auto JUNGLE_BROAD_FILL = cross_fill<8, 12, 12, 13>();
+static constexpr auto ACACIA_TALL_FILL = cross_fill<7, 10, 10, 10>();
+static constexpr auto CHERRY_WEEPING_FILL = cross_fill<3, 8, 8, 9>();
+static constexpr auto TALL_OAK_GIANT_FILL = cross_fill<9, 14, 14, 15>();
+static constexpr auto PINE_TALL_FILL = cross_fill<6, 15, 16, 16>();
 
 // Rust's wetland and understorey types.  Luanti has no separate mangrove or
 // willow blocks in the default game, so their geometry is retained while the
@@ -292,98 +315,120 @@ Tree Tree::get_tree(TreeType kind)
 Tree Tree::get_tree_variant(TreeType kind, std::uint32_t variant_idx)
 {
 	Tree t = get_tree(kind);
-	// The Rust definitions have 2–5 named silhouettes per common species.  The
-	// C++ tables share their material/layout primitives, so vary the vertical
-	// canopy/trunk profile deterministically while keeping those canonical
-	// blocks and collision bounds intact.
-	auto shift_rounds = [&](int delta) {
-		for (auto &range : t.round_ranges)
-			for (int &height : range)
-				height = std::max(1, height + delta);
-	};
+	const auto set_shape =
+			[&](int height, const auto &fill, std::initializer_list<int> first,
+					std::initializer_list<int> second, std::initializer_list<int> third,
+					float branch, bool drooping = false) {
+				t.log_height = height;
+				t.leaves_fill = std::span<const std::pair<Coord, Coord>>(fill);
+				t.round_ranges[0] = first;
+				t.round_ranges[1] = second;
+				t.round_ranges[2] = third;
+				t.branch_chance = branch;
+				t.drooping = drooping;
+			};
 	switch (kind) {
 	case TreeType::Oak:
 		switch (variant_idx % 5U) {
+		case 0:
+			set_shape(8, OAK_LEAVES_FILL, {8, 7, 6, 5, 4, 3}, {7, 6, 5, 4}, {6, 5}, .30f);
+			break;
 		case 1:
-			t.log_height += 2;
-			shift_rounds(2);
-			break; // tall/slim
+			set_shape(10, OAK_TALL_SLIM_FILL, {11, 10, 9, 8, 7}, {10, 9, 8}, {}, .40f);
+			break;
 		case 2:
-			t.log_height = std::max(4, t.log_height - 2);
-			shift_rounds(-1);
-			break; // bushy
+			set_shape(6, OAK_BUSHY_FILL, {7, 6, 5, 4, 3}, {6, 5, 4}, {5, 4}, .20f);
+			break;
 		case 3:
-			t.log_height = std::max(4, t.log_height - 3);
-			shift_rounds(-2);
-			break; // compact
+			set_shape(5, OAK_COMPACT_FILL, {5, 4, 3, 2}, {4, 3}, {}, 0.0f);
+			break;
 		case 4:
-			t.branch_chance = 1.0f;
-			break; // lopsided
+			set_shape(8, OAK_LEAVES_FILL, {8, 7, 6, 5, 4, 3}, {7, 6, 5, 4}, {6, 5}, 1.0f);
+			break;
 		default:
 			break;
 		}
 		break;
 	case TreeType::Spruce:
-		if (variant_idx % 3U == 1) {
-			t.log_height += 3;
-			shift_rounds(3);
-		} else if (variant_idx % 3U == 2) {
-			t.log_height = std::max(4, t.log_height - 3);
-			shift_rounds(-2);
+		switch (variant_idx % 3U) {
+		case 0:
+			set_shape(9, SPRUCE_LEAVES_FILL, {9, 7, 6, 4, 3}, {6, 3}, {}, 0.0f);
+			break;
+		case 1:
+			set_shape(12, SPRUCE_TOWERING_FILL, {12, 10, 8, 6, 4}, {9, 6, 4}, {}, 0.0f);
+			break;
+		default:
+			set_shape(6, SPRUCE_SQUAT_FILL, {6, 4, 3}, {4, 2}, {3}, 0.0f);
+			break;
 		}
 		break;
 	case TreeType::Birch:
-		if (variant_idx % 3U == 1) {
-			t.log_height += 3;
-			shift_rounds(3);
-		} else if (variant_idx % 3U == 2) {
-			t.log_height = std::max(3, t.log_height - 2);
-			shift_rounds(-1);
+		switch (variant_idx % 3U) {
+		case 0:
+			set_shape(6, BIRCH_LEAVES_FILL, {6, 5, 4, 3, 2}, {2, 3, 4}, {}, .20f);
+			break;
+		case 1:
+			set_shape(9, BIRCH_TALL_FILL, {9, 8, 7, 6, 5}, {8, 7, 6}, {}, .25f);
+			break;
+		default:
+			set_shape(4, BIRCH_CLUSTER_FILL, {4, 3, 2}, {3}, {}, 0.0f);
+			break;
 		}
 		break;
 	case TreeType::DarkOak:
-		if (variant_idx % 3U == 1) {
-			t.log_height += 3;
-			shift_rounds(3);
-			t.branch_chance = .50f;
-		} else if (variant_idx % 3U == 2) {
-			t.log_height = 3;
-			shift_rounds(-2);
-			t.branch_chance = 0;
+		switch (variant_idx % 3U) {
+		case 0:
+			set_shape(5, DARK_OAK_LEAVES_FILL, {6, 5, 4, 3}, {5, 4, 3}, {5, 4}, .40f);
+			break;
+		case 1:
+			set_shape(8, DARK_OAK_TALL_BUSHY_FILL, {9, 8, 7, 6, 5, 4}, {8, 7, 6, 5},
+					{7, 6}, .50f);
+			break;
+		default:
+			set_shape(3, DARK_OAK_STUNTED_FILL, {3, 2}, {2}, {}, 0.0f);
+			break;
 		}
 		break;
 	case TreeType::Jungle:
-		if (variant_idx & 1U) {
-			++t.log_height;
-			shift_rounds(1);
-			t.branch_chance = .60f;
-		}
+		if (variant_idx & 1U)
+			set_shape(11, JUNGLE_BROAD_FILL, {12, 11, 10, 9, 8}, {11, 10, 9}, {10}, .60f);
+		else
+			set_shape(10, JUNGLE_LEAVES_FILL, {11, 10, 9, 8, 7}, {10, 9, 8}, {}, .50f);
 		break;
 	case TreeType::Acacia:
-		if (variant_idx & 1U) {
-			t.log_height += 2;
-			shift_rounds(2);
-			t.branch_chance = .45f;
-		}
+		if (variant_idx & 1U)
+			set_shape(8, ACACIA_TALL_FILL, {10, 9, 8, 7}, {9, 8}, {9}, .45f);
+		else
+			set_shape(6, ACACIA_LEAVES_FILL, {8, 7, 6, 5}, {7, 6, 5}, {7, 6}, .35f);
 		break;
 	case TreeType::Cherry:
-		if (variant_idx & 1U) {
-			t.log_height = std::max(4, t.log_height - 1);
-			t.drooping = true;
-		}
+		if (variant_idx & 1U)
+			set_shape(6, CHERRY_WEEPING_FILL, {8, 7, 6, 5, 4, 3}, {7, 6, 5, 4}, {6, 5},
+					0.0f, true);
+		else
+			set_shape(7, CHERRY_LEAVES_FILL, {9, 8, 7, 6, 5, 4}, {8, 7, 6, 5}, {7, 6},
+					.30f);
 		break;
 	case TreeType::TallOak:
-		if (variant_idx & 1U) {
-			t.log_height += 2;
-			shift_rounds(2);
-			t.branch_chance = .60f;
-		}
+		if (variant_idx & 1U)
+			set_shape(13, TALL_OAK_GIANT_FILL, {14, 13, 12, 11, 10, 9}, {13, 12, 11, 10},
+					{12, 11}, .60f);
+		else
+			set_shape(11, TALL_OAK_LEAVES_FILL, {12, 11, 10, 9, 8}, {11, 10, 9}, {10},
+					.40f);
 		break;
 	case TreeType::Pine:
-		if (variant_idx & 1U) {
-			t.log_height += 3;
-			shift_rounds(3);
-		}
+		if (variant_idx & 1U)
+			set_shape(15, PINE_TALL_FILL, {14, 12, 10, 8, 6}, {11, 7}, {}, 0.0f);
+		else
+			set_shape(12, PINE_LEAVES_FILL, {11, 9, 7, 5}, {8, 5}, {}, 0.0f);
+		break;
+	case TreeType::Willow:
+		set_shape(5, WILLOW_LEAVES_FILL, {6, 5, 4}, {5, 4}, {5}, 0.0f, true);
+		break;
+	case TreeType::Mangrove:
+		set_shape(
+				8, MANGROVE_LEAVES_FILL, {10, 9, 8, 7, 6, 5}, {9, 8, 7, 6}, {8, 7}, .55f);
 		break;
 	default:
 		break;
@@ -612,8 +657,14 @@ bool Tree::canopy_might_intersect_building(
 
 void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_type,
 		const BuildingFootprintBitmap *building_footprints,
-		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved)
+		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved,
+		std::optional<double> mapped_height_m)
 {
+	// Tile halos may discover the same tree as their owner. Rust assigns tree
+	// placement to the tile containing the trunk so edge columns are generated once.
+	if (!editor.owns(pos.x, pos.z))
+		return;
+
 	// Skip if this coordinate is inside a building
 	if (building_footprints != nullptr) {
 		if (building_footprints->contains(pos.x, pos.z)) {
@@ -662,8 +713,10 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	// Fixed-size tree models dominate country-scale terrain. Keep the same
 	// species palette but scale a nominal 25 m tree into a compact shrub.
 	if (editor.scale() < 0.35) {
-		const int height =
-				std::clamp(static_cast<int>(std::lround(25.0 * editor.scale())), 1, 8);
+		const int height = std::clamp(
+				static_cast<int>(
+						std::lround(mapped_height_m.value_or(25.0) * editor.scale())),
+				1, 8);
 		const int trunk = std::max(0, height - 1);
 		for (int dy = 0; dy < trunk; ++dy)
 			editor.set_block_absolute(tree.log_block, pos.x, base_y + dy, pos.z,
@@ -684,9 +737,14 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	int canopy_top = 0;
 	for (const auto &range : tree.leaves_fill)
 		canopy_top = std::max(canopy_top, range.second.y);
-	for (const auto &range : tree.round_ranges)
-		for (const int y : range)
-			canopy_top = std::max(canopy_top, y);
+	// Rust jitters the trunk from the independent shape seed, then clamps it
+	// below the foliage cap. Bushes have no trunk; all other species retain at
+	// least a two-block trunk unless the foliage geometry itself is shorter.
+	const int height_jitter = int((variant_idx >> 8) & 0x3U) - 1;
+	const int min_trunk = tree.log_height == 0 ? 0 : 2;
+	const int trunk_cap = std::max(canopy_top - 1, min_trunk);
+	const int trunk_height =
+			std::clamp(tree.log_height + height_jitter, min_trunk, trunk_cap);
 
 	// Snapshot roof heights before foliage is emitted.  A footprint with no
 	// stamped building block deliberately culls the full column, matching the
@@ -729,9 +787,10 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	};
 
 	// Build the trunk without replacing structural/building blocks.
-	for (int y = base_y; y <= base_y + tree.log_height; ++y)
-		editor.set_block_absolute(tree.log_block, pos.x, y, pos.z, std::nullopt,
-				std::optional<const std::vector<Block>>(blacklist));
+	if (tree.log_height > 0)
+		for (int y = base_y; y <= base_y + trunk_height; ++y)
+			editor.set_block_absolute(tree.log_block, pos.x, y, pos.z, std::nullopt,
+					std::optional<const std::vector<Block>>(blacklist));
 
 	// Fill in the leaves
 	for (const auto &pr : tree.leaves_fill) {
@@ -775,10 +834,10 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	}
 
 	const float branch_roll = float((variant_idx >> 16) & 0xffU) / 255.0f;
-	if (branch_roll < tree.branch_chance && tree.log_height >= 5) {
+	if (branch_roll < tree.branch_chance && trunk_height >= 5) {
 		const std::array<std::pair<int, int>, 4> dirs{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
 		const auto [dx, dz] = dirs[(variant_idx >> 24) & 3U];
-		const int branch_y = base_y + tree.log_height - 2 - int((variant_idx >> 12) & 1U);
+		const int branch_y = base_y + trunk_height - 2 - int((variant_idx >> 12) & 1U);
 		for (int step = 1; step <= 2; ++step)
 			editor.set_block_absolute(tree.log_block, pos.x + dx * step, branch_y,
 					pos.z + dz * step, std::nullopt,

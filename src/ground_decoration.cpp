@@ -15,11 +15,31 @@
 #include <cmath>
 #include <cstdint>
 #include <limits>
+#include <vector>
 
 namespace arnis::ground_decoration
 {
 namespace
 {
+const std::vector<Block> &loose_plants()
+{
+	static const std::vector<Block> blocks{GRASS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, FERN,
+			LARGE_FERN_LOWER, LARGE_FERN_UPPER, DEAD_BUSH, RED_FLOWER, YELLOW_FLOWER,
+			BLUE_FLOWER, WHITE_FLOWER, CORNFLOWER, OXEYE_DAISY, ALLIUM,
+			LILY_OF_THE_VALLEY, RED_TULIP, ORANGE_TULIP, WHITE_TULIP, PINK_TULIP,
+			SUNFLOWER_LOWER, SUNFLOWER_UPPER, LILAC_LOWER, LILAC_UPPER, ROSE_BUSH_LOWER,
+			ROSE_BUSH_UPPER, PEONY_LOWER, PEONY_UPPER, SWEET_BERRY_BUSH, BROWN_MUSHROOM,
+			RED_MUSHROOM, MOSS_CARPET, SUGAR_CANE, PUMPKIN, CACTUS, OAK_LEAVES};
+	return blocks;
+}
+
+const std::vector<Block> &plant_lower_halves()
+{
+	static const std::vector<Block> blocks{TALL_GRASS_BOTTOM, LARGE_FERN_LOWER,
+			SUNFLOWER_LOWER, LILAC_LOWER, ROSE_BUSH_LOWER, PEONY_LOWER};
+	return blocks;
+}
+
 bool open_above(WorldEditor &e, int x, int y, int z)
 {
 	const bool first_open = !e.block_exists_absolute(x, y + 1, z) ||
@@ -28,6 +48,23 @@ bool open_above(WorldEditor &e, int x, int y, int z)
 	const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
 			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
 	return first_open && !e.check_for_block_absolute(x, y + 2, z, wood);
+}
+
+bool is_undergrowth_impl(const Block &block)
+{
+	return block != OAK_LEAVES && std::find(loose_plants().begin(), loose_plants().end(),
+										  block) != loose_plants().end();
+}
+
+void clear_undergrowth_under_trunk_impl(WorldEditor &editor, int x, int y, int z)
+{
+	const auto below = editor.get_block_absolute(x, y - 1, z);
+	if (!below || !is_undergrowth_impl(*below))
+		return;
+	const auto &loose = loose_plants();
+	const auto &lower = plant_lower_halves();
+	editor.set_block_absolute(AIR, x, y - 1, z, &loose, nullptr);
+	editor.set_block_absolute(AIR, x, y - 2, z, &lower, nullptr);
 }
 
 void plant(WorldEditor &e, int x, int y, int z, const Block &soil, const Block &block)
@@ -105,6 +142,16 @@ Block flower_for(int x, int z, FlowerSetting setting, int field_scale = 24)
 									  : static_cast<std::size_t>((h >> 8) % size);
 	return palette[index];
 }
+}
+
+bool is_undergrowth(const Block &block)
+{
+	return is_undergrowth_impl(block);
+}
+
+void clear_undergrowth_under_trunk(WorldEditor &editor, int x, int y, int z)
+{
+	clear_undergrowth_under_trunk_impl(editor, x, y, z);
 }
 
 std::optional<Habitat> habitat(std::uint8_t cover, biome::Climate climate,

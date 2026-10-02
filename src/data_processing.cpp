@@ -1391,7 +1391,10 @@ bool generate_world(WorldEditor &editor,
 			bridges::BridgeStructureMap::build(elements, editor, bridge_outlines);
 	auto bridge_surface =
 			bridges::BridgeSurfaceMap::build(elements, bridge_structures, args.scale);
-	if (shared_selector) {
+	// Rust switches to compact proportional trees before consulting schematic
+	// packs at very small world scales. Keep the selector callbacks disabled in
+	// that mode so both mapped and land-cover trees take the same micro path.
+	if (shared_selector && args.scale >= 0.35) {
 		editor.set_regional_tree_placer([&editor, shared_selector, &building_footprints,
 												&bridge_surface](
 												int x, int y, int z, std::uint8_t cover) {
@@ -1402,20 +1405,11 @@ bool generate_world(WorldEditor &editor,
 				[&editor, shared_selector, &building_footprints, &bridge_surface](int x,
 						int y, int z, std::uint8_t cover,
 						const trees::MappedRequest &request) {
-					const auto habitat = trees::habitat_for_land_cover(cover);
-					return trees::place_selected_region_tree(
-							editor, *shared_selector, x, z, habitat, y,
-							[&request] {
-								trees::SlotRequest out;
-								out.eco = request.eco;
-								out.want_size = request.want_size;
-								out.genus = request.genus;
-								out.conifer = request.conifer;
-								out.beach = request.beach;
-								out.tagged = true;
-								out.density_decided = true;
-								return out;
-							}(),
+					(void)cover;
+					const int elevation = editor.terrain_level(x, z).value_or(
+							editor.get_absolute_y(x, y, z));
+					return trees::place_selected_mapped_region_tree(editor,
+							*shared_selector, x, z, elevation, y, request,
 							&building_footprints, &bridge_surface);
 				});
 	}

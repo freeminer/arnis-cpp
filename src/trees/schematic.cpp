@@ -1,5 +1,6 @@
 #include "schematic.h"
 #include "../../../arnis_adapter.h"
+#include "../ground_decoration.h"
 #include "../land_cover/land_cover.h"
 #include "../block_definitions.h"
 #include <fstream>
@@ -205,6 +206,7 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		Block block;
 	};
 	std::map<std::pair<int, int>, Root> trunk_bottom;
+	std::map<std::pair<int, int>, Root> base_logs;
 	bool placed = false;
 	for (const auto &v : s.voxels) {
 		const auto cell = position(v);
@@ -214,6 +216,9 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		if (roof != roof_tops.end() && wy <= roof->second)
 			continue;
 		const bool log = is_log(v.block);
+		if (!log && editor.check_for_block_absolute(
+							wx, wy - 1, wz, std::optional<std::vector<Block>>({WATER})))
+			continue;
 		if (log && (editor.check_for_block(
 							wx, 0, wz, std::optional<std::vector<Block>>({WATER})) ||
 						   (v.y <= min_log_vy + 2 && editor.is_lc_water(wx, wz))))
@@ -224,9 +229,15 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		placed |=
 				editor.try_set_block_absolute(block, wx, wy, wz, std::nullopt, blacklist);
 		if (log) {
+			ground_decoration::clear_undergrowth_under_trunk(editor, wx, wy, wz);
 			const auto it = trunk_bottom.find(cell);
 			if (it == trunk_bottom.end() || wy < it->second.top)
 				trunk_bottom[cell] = {wy, block};
+			if (v.y >= 0) {
+				const auto base_it = base_logs.find(cell);
+				if (base_it == base_logs.end() || wy < base_it->second.top)
+					base_logs[cell] = {wy, block};
+			}
 		}
 	}
 	int lowest = std::numeric_limits<int>::max();
@@ -240,8 +251,26 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		const auto [wx, wz] = cell;
 		if (root.top > lowest + 2 || editor.is_lc_water(wx, wz))
 			continue;
-		const int from = std::max(root.top - 65, editor.get_absolute_y(wx, y_offset, wz));
+		const int from =
+				std::max(root.top - 1 - 64, editor.get_absolute_y(wx, y_offset, wz));
 		for (int wy = from; wy < root.top; ++wy)
+			placed |= editor.try_set_block_absolute(
+					root.block, wx, wy, wz, std::nullopt, root_blacklist);
+	}
+	// Rooted base columns that still start one to three blocks above local ground
+	// must bridge the gap; branches and raised root columns stay untouched.
+	int lowest_base_y = std::numeric_limits<int>::max();
+	for (const auto &[cell, root] : base_logs)
+		lowest_base_y = std::min(lowest_base_y, root.top);
+	for (const auto &[cell, root] : base_logs) {
+		const auto [wx, wz] = cell;
+		if (root.top != lowest_base_y || editor.is_lc_water(wx, wz))
+			continue;
+		const int ground_y = editor.get_absolute_y(wx, y_offset, wz);
+		const int gap = root.top - ground_y;
+		if (gap < 1 || gap > 3)
+			continue;
+		for (int wy = ground_y; wy < root.top; ++wy)
 			placed |= editor.try_set_block_absolute(
 					root.block, wx, wy, wz, std::nullopt, root_blacklist);
 	}
@@ -251,70 +280,8 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 bool place_schematic_rooted(world_editor::WorldEditor &editor, const Schematic &s, int x,
 		int ground_y, int z, unsigned rotation)
 {
-	// Tree assets are normalized to a floor at y=0. Keeping base_y on ground
-	// matches Rust's stamped canopy and leaves the root-extension pass free to
-	// follow local slopes instead of shifting the whole model upward.
-	const bool placed = place_schematic(editor, s, x, ground_y, z, rotation);
-	if (!placed)
-		return false;
-	const bool quarter = (rotation & 1u) != 0;
-	const int final_w = quarter ? s.length : s.width;
-	const int final_l = quarter ? s.width : s.length;
-	const int center_x = (final_w - 1) / 2, center_z = (final_l - 1) / 2;
-	struct Root
-	{
-		int top;
-		Block block;
-	};
-	std::map<std::pair<int, int>, Root> bottoms;
-	for (const auto &v : s.voxels) {
-		const auto base = v.block.substr(0, v.block.find('['));
-		if (base.find("_log") == std::string::npos &&
-				base.find("_wood") == std::string::npos &&
-				base.find("_roots") == std::string::npos &&
-				base.find("bamboo_block") == std::string::npos &&
-				base.find("warped_stem") == std::string::npos &&
-				base.find("warped_hyphae") == std::string::npos)
-			continue;
-		Block log = structures::resolve_schem_block(v.block);
-		if (log == Block{})
-			continue;
-		int px = v.x, pz = v.z;
-		switch (rotation & 3u) {
-		case 1:
-			px = s.length - 1 - v.z;
-			pz = v.x;
-			break;
-		case 2:
-			px = s.width - 1 - v.x;
-			pz = s.length - 1 - v.z;
-			break;
-		case 3:
-			px = v.z;
-			pz = s.width - 1 - v.x;
-			break;
-		default:
-			break;
-		}
-		const auto key = std::make_pair(x + px - center_x, z + pz - center_z);
-		const int top = ground_y + v.y;
-		auto it = bottoms.find(key);
-		if (it == bottoms.end() || top < it->second.top)
-			bottoms[key] = {top, log};
-	}
-	// Only low trunk columns root into terrain. Branches/canopy logs must not
-	// generate vertical pillars down through a slope.
-	int lowest = std::numeric_limits<int>::max();
-	for (const auto &[key, root] : bottoms)
-		lowest = std::min(lowest, root.top);
-	for (const auto &[key, root] : bottoms) {
-		if (root.top > lowest + 2 || editor.is_lc_water(key.first, key.second))
-			continue;
-		const int local_ground = editor.get_absolute_y(key.first, 0, key.second);
-		const int from = std::max(local_ground, root.top - 1 - 64);
-		for (int wy = from; wy < root.top; ++wy)
-			editor.set_block_absolute(root.block, key.first, wy, key.second);
-	}
-	return true;
+	// Keep this compatibility entry point on the same water, footprint, and
+	// root rules as the active tree pipeline.
+	return place_schematic_tree(editor, s, x, z, ground_y, rotation, {}, nullptr, 0);
 }
 }

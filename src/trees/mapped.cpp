@@ -1,5 +1,6 @@
 #include "mapped.h"
 #include "../deterministic_rng.h"
+#include "../mapillary/geometry.h"
 #include <algorithm>
 #include <cmath>
 #include <cctype>
@@ -19,13 +20,19 @@ std::string genus(const std::unordered_map<std::string, std::string> &tags)
 		auto it = tags.find(key);
 		if (it == tags.end())
 			continue;
-		auto value = it->second;
-		const auto p = value.find_first_of(" /_-");
-		if (p != std::string::npos)
-			value.resize(p);
-		if (!value.empty()) {
-			value[0] = char(std::toupper(value[0]));
-			return value;
+		const auto &value = it->second;
+		const auto first = std::find_if(value.begin(), value.end(),
+				[](unsigned char c) { return std::isalpha(c); });
+		if (first == value.end())
+			continue;
+		const auto last = std::find_if_not(
+				first, value.end(), [](unsigned char c) { return std::isalpha(c); });
+		std::string out(first, last);
+		if (!out.empty()) {
+			out[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(out[0])));
+			std::transform(out.begin() + 1, out.end(), out.begin() + 1,
+					[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			return out;
 		}
 	}
 	auto it = tags.find("genus:wikidata");
@@ -57,9 +64,13 @@ MappedTree from_tags(
 {
 	MappedTree out;
 	out.genus = genus(tags);
-	out.has_conifer = !out.genus.empty();
-	out.conifer = is_conifer_genus(out.genus);
 	const auto leaf = tags.find("leaf_type");
+	if (leaf != tags.end() && leaf->second == "needleleaved")
+		out.conifer = true;
+	else if (leaf != tags.end() && leaf->second == "broadleaved")
+		out.conifer = false;
+	else if (!out.genus.empty())
+		out.conifer = is_conifer_genus(out.genus);
 	std::vector<TreeType> pool;
 	if (out.genus == "Betula")
 		pool = {TreeType::Birch};
@@ -91,38 +102,25 @@ MappedTree from_tags(
 			 out.genus == "Laguncularia" || out.genus == "Bruguiera" ||
 			 out.genus == "Sonneratia")
 		pool = {TreeType::Mangrove};
+	else if (!out.genus.empty() && out.conifer.value_or(false))
+		pool = {TreeType::Spruce};
 	else if (leaf != tags.end() && leaf->second == "needleleaved")
 		pool = {TreeType::Spruce, TreeType::Pine};
 	else if (leaf != tags.end() && leaf->second == "broadleaved")
 		pool = {TreeType::Oak, TreeType::Birch, TreeType::TallOak};
-	else if (!out.genus.empty() && out.has_conifer && out.conifer)
-		pool = {TreeType::Spruce};
+	else if (leaf != tags.end())
+		pool = {TreeType::Oak, TreeType::Spruce, TreeType::Birch, TreeType::TallOak,
+				TreeType::Pine};
 	else if (!out.genus.empty())
 		pool = {TreeType::Oak, TreeType::TallOak};
 	else
 		pool = {TreeType::Oak, TreeType::Spruce, TreeType::Birch, TreeType::TallOak};
 	auto rng = element_rng(id);
 	out.kind = pool[rng.uniform(static_cast<std::uint32_t>(pool.size()))];
-	if (auto it = tags.find("height"); it != tags.end()) {
-		try {
-			std::string text = it->second;
-			const auto first = text.find_first_not_of(" \t");
-			const auto last = text.find_last_not_of(" \t");
-			if (first == std::string::npos)
-				throw std::invalid_argument("empty height");
-			text = text.substr(first, last - first + 1);
-			const bool feet = text.size() > 2 && text.substr(text.size() - 2) == "ft";
-			if (feet)
-				text.resize(text.size() - 2);
-			else if (!text.empty() && text.back() == 'm')
-				text.pop_back();
-			const auto h = std::stod(text) * (feet ? 0.3048 : 1.0);
-			if (std::isfinite(h) && h >= 1.0 && h <= 120.0)
-				out.height_m = h;
-		} catch (...) {
-			// Ignore malformed OSM heights, matching Rust's filtered parse.
-		}
-	}
+	if (auto it = tags.find("height"); it != tags.end())
+		if (const auto height = mapillary::geodesy::parse_length_m(it->second);
+				height && *height >= 1.0 && *height <= 120.0)
+			out.height_m = *height;
 	return out;
 }
 bool is_tree_row(const std::unordered_map<std::string, std::string> &tags)

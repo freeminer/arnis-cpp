@@ -6,6 +6,7 @@
 #include <tuple>
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <cstdint>
 
 #include "../../../arnis_adapter.h"
@@ -96,6 +97,36 @@ std::uint64_t cell_key(int x, int z)
 {
 	return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
 }
+
+trees::Habitat habitat_for_mapped_tree(TreeType type)
+{
+	switch (type) {
+	case TreeType::Spruce:
+	case TreeType::Pine:
+		return trees::Habitat::Conifer;
+	case TreeType::Willow:
+	case TreeType::Mangrove:
+		return trees::Habitat::Wet;
+	case TreeType::Acacia:
+		return trees::Habitat::Dry;
+	default:
+		return trees::Habitat::Lowland;
+	}
+}
+
+bool near_beach(const WorldEditor &editor, int x, int z)
+{
+	if (!editor.ground || !editor.mg)
+		return false;
+	const int radius =
+			std::clamp(static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
+	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
+				 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
+		if (editor.ground->cover_class({x + dx - editor.mg->node_min.X,
+					z + dz - editor.mg->node_min.Z}) == land_cover::LC_BEACH)
+			return true;
+	return false;
+}
 } // namespace
 
 // Generate natural area for single element
@@ -123,17 +154,51 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			row_nodes.emplace_back(node.x, node.z);
 		for (const auto [x, z] :
 				trees::mapped::tree_row_positions(row_nodes, args.scale)) {
-			if (editor.check_for_block(
-						x, 0, z, std::optional<std::vector<Block>>{{GRASS_BLOCK}})) {
-				TreeType row_kind = mapped_row.kind;
-				if (mapped_row.height_m > 0.0 && mapped_row.height_m < 4.0)
-					row_kind = TreeType::Bush;
-				else if (mapped_row.height_m > 24.0 && row_kind == TreeType::Oak)
-					row_kind = TreeType::TallOak;
-				Tree::create_of_type(editor, {x, 1, z}, row_kind, &building_footprints,
-						&bridge_surface, true);
-			}
+			trees::MappedRequest request;
+			request.habitat = habitat_for_mapped_tree(mapped_row.kind);
+			if (!mapped_row.genus.empty())
+				request.genus = mapped_row.genus;
+			request.conifer = mapped_row.conifer;
+			if (mapped_row.height_m > 0.0)
+				request.want_size = trees::size_for_height(
+						static_cast<int>(std::lround(mapped_row.height_m * 3.0)));
+			if (editor.ground && editor.mg)
+				request.eco = editor.ground->ecoregion_at(
+						{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+			request.beach = request.eco.has_value() && near_beach(editor, x, z);
+			if (editor.place_mapped_regional_tree(x, 1, z, 0, request))
+				continue;
+			Tree::create_of_type(editor, {x, 1, z}, mapped_row.kind, &building_footprints,
+					&bridge_surface, true,
+					mapped_row.height_m > 0.0 ? std::optional<double>(mapped_row.height_m)
+											  : std::nullopt);
 		}
+		return;
+	}
+
+	if (natural_type == "tree" && element.is_node()) {
+		const int x = element.as_node().x;
+		const int z = element.as_node().z;
+		const auto mapped =
+				trees::mapped::from_tags(tags, static_cast<std::uint64_t>(element.id()));
+		trees::MappedRequest request;
+		request.habitat = habitat_for_mapped_tree(mapped.kind);
+		if (!mapped.genus.empty())
+			request.genus = mapped.genus;
+		request.conifer = mapped.conifer;
+		if (mapped.height_m > 0.0)
+			request.want_size = trees::size_for_height(
+					static_cast<int>(std::lround(mapped.height_m * 3.0)));
+		if (editor.ground && editor.mg)
+			request.eco = editor.ground->ecoregion_at(
+					{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+		request.beach = request.eco.has_value() && near_beach(editor, x, z);
+		if (editor.place_mapped_regional_tree(x, 1, z, 0, request))
+			return;
+		Tree::create_of_type(editor, {x, 1, z}, mapped.kind, &building_footprints,
+				&bridge_surface, true,
+				mapped.height_m > 0.0 ? std::optional<double>(mapped.height_m)
+									  : std::nullopt);
 		return;
 	}
 
@@ -282,6 +347,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			// Select a random tree type
 			TreeType tree_type = trees_ok_to_generate[rng.uniform(
 					static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
+			std::optional<double> mapped_height_m;
 			// Use the shared Rust-parity mapped selector whenever OSM supplies
 			// species/genus information; this keeps node and regional selection
 			// on the same deterministic pool.
@@ -293,6 +359,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				if (!mapped.genus.empty())
 					mapped_request.genus = mapped.genus;
 				mapped_request.conifer = mapped.conifer;
+				if (mapped.height_m > 0.0)
+					mapped_height_m = mapped.height_m;
 				if (mapped.height_m > 0.0)
 					mapped_request.want_size = trees::size_for_height(
 							static_cast<int>(std::lround(mapped.height_m * 3.0)));
@@ -310,7 +378,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 
 			// Create the tree
 			Tree::create_of_type(editor, Coord{x, 1, z}, tree_type, &building_footprints,
-					&bridge_surface, true);
+					&bridge_surface, true, mapped_height_m);
 		}
 		return;
 	}

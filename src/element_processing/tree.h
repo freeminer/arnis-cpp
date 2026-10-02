@@ -77,11 +77,10 @@ static const std::array<std::pair<Coord, Coord>, 5> OAK_LEAVES_FILL = {{
 		{{0, 9, 0}, {0, 10, 0}},
 }};
 
-static const std::array<std::pair<Coord, Coord>, 6> SPRUCE_LEAVES_FILL = {{
+static const std::array<std::pair<Coord, Coord>, 5> SPRUCE_LEAVES_FILL = {{
 		{{-1, 3, 0}, {-1, 10, 0}},
 		{{0, 3, -1}, {0, 10, -1}},
 		{{1, 3, 0}, {1, 10, 0}},
-		{{0, 3, -1}, {0, 10, -1}},
 		{{0, 3, 1}, {0, 10, 1}},
 		{{0, 11, 0}, {0, 11, 0}},
 }};
@@ -158,7 +157,8 @@ struct Tree
 	static void create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_type,
 			const BuildingFootprintBitmap *building_footprints = nullptr,
 			const bridges::BridgeSurfaceMap *bridge_surface = nullptr,
-			bool allow_on_paved = false);
+			bool allow_on_paved = false,
+			std::optional<double> mapped_height_m = std::nullopt);
 
 	static std::vector<Block> get_building_wall_blocks();
 	static std::vector<Block> get_building_floor_blocks();

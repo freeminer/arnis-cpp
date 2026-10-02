@@ -14,6 +14,7 @@ struct XZBBox;
 namespace arnis
 {
 struct Args;
+class Block;
 
 namespace world_editor
 {
@@ -48,6 +49,11 @@ enum class FlowerSetting
 };
 std::optional<Habitat> habitat(std::uint8_t cover, biome::Climate climate,
 		double absolute_latitude, bool alpine, std::optional<ecoregion::Ecoregion> eco);
+// Used by schematic trees to remove ground plants displaced by a trunk, while
+// keeping the loose-plant classification shared with Rust's ground pass.
+bool is_undergrowth(const Block &block);
+void clear_undergrowth_under_trunk(
+		world_editor::WorldEditor &editor, int x, int y, int z);
 // Rust exposes these helpers to mapped-area processors.  Keeping them public
 // lets parks/meadows share the same deterministic flower fields as the main
 // ground-decoration pass.

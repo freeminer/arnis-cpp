@@ -65,6 +65,7 @@ struct SlotRequest
 };
 struct MappedRequest
 {
+	Habitat habitat = Habitat::Lowland;
 	std::optional<std::string> genus;
 	std::optional<bool> conifer;
 	std::optional<TreeSize> want_size;
