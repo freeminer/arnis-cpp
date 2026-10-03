@@ -5,8 +5,7 @@
 #include <zlib.h>
 #include <fstream>
 #include <chrono>
-#include <map>
-#include <set>
+#include <limits>
 #include "../../../http.h"
 #include "../world_utils.h"
 
@@ -488,19 +487,27 @@ bool fill_from_remote_tile(const std::filesystem::path &base,
 		const auto first = block * ROW_BLOCK;
 		return std::pair{first, std::min(first + ROW_BLOCK, TILE_PX) - 1};
 	};
-	auto strip_span = [&](std::size_t first, std::size_t last,
-			std::uint64_t &lo, std::uint64_t &hi) {
-		if (first > last || last >= index->offsets.size() ||
-				last >= index->counts.size())
+	auto strip_span = [&](std::size_t first, std::size_t last, std::uint64_t &lo,
+							  std::uint64_t &hi) {
+		if (first > last || last >= index->offsets.size() || last >= index->counts.size())
 			return false;
 		lo = index->offsets[first];
-		if (index->counts[last] > UINT64_MAX - index->offsets[last])
+		if (index->counts[last] >
+				std::numeric_limits<std::uint64_t>::max() - index->offsets[last])
 			return false;
 		hi = index->offsets[last] + index->counts[last];
 		return hi > lo;
 	};
 	auto row_block_path = [&](std::size_t block) {
 		return cache_dir(base) / "rows" / key / (std::to_string(block) + ".strips");
+	};
+	auto store_row_block = [&](std::size_t block,
+								   const std::vector<std::uint8_t> &bytes) {
+		const auto path = row_block_path(block);
+		std::error_code ec;
+		std::filesystem::create_directories(path.parent_path(), ec);
+		if (!ec)
+			arnis::world_utils::replace_file_atomically(path, bytes);
 	};
 	auto read_whole = [](const std::filesystem::path &path, std::uint64_t expected_size)
 			-> std::optional<std::vector<std::uint8_t>> {
@@ -533,86 +540,124 @@ bool fill_from_remote_tile(const std::filesystem::path &base,
 		if (blocks.empty() || blocks.back() != block)
 			blocks.push_back(block);
 	}
-	std::map<std::size_t, std::pair<std::uint64_t, std::vector<std::uint8_t>>> block_data;
-	for (std::size_t i = 0; i < blocks.size();) {
-		const auto block = blocks[i];
+	std::size_t first = 0, out_i = 0, bi = 0;
+	while (bi < blocks.size()) {
+		const auto block = blocks[bi];
 		const auto [r0, r1] = block_rows(block);
 		std::uint64_t lo = 0, hi = 0;
 		if (!strip_span(r0, r1, lo, hi))
 			return false;
-		if (block_cache_valid(block)) {
-			auto bytes = read_whole(row_block_path(block), hi - lo);
-			if (bytes)
-				block_data.emplace(block, std::pair{lo, std::move(*bytes)});
-			else
-				std::filesystem::remove(row_block_path(block));
-		}
-		if (block_data.contains(block)) {
-			++i;
-			continue;
-		}
-		const auto range_lo = lo;
-		auto range_hi = hi;
+		std::vector<std::uint8_t> blob;
 		std::size_t count = 1;
-		while (i + count < blocks.size() && blocks[i + count] == block + count &&
-				!block_cache_valid(blocks[i + count])) {
-			const auto [next_first, next_last] = block_rows(blocks[i + count]);
-			std::uint64_t next_lo = 0, next_hi = 0;
-			if (!strip_span(next_first, next_last, next_lo, next_hi) ||
-					next_hi <= range_hi || next_hi - range_lo > FETCH_BATCH_BYTES)
-				break;
-			range_hi = next_hi;
-			++count;
+		bool from_cache = false;
+		if (block_cache_valid(block)) {
+			auto cached = read_whole(row_block_path(block), hi - lo);
+			if (cached) {
+				blob = std::move(*cached);
+				from_cache = true;
+			} else {
+				std::error_code remove_error;
+				std::filesystem::remove(row_block_path(block), remove_error);
+			}
 		}
-		auto fetched = fetch_range(url, range_lo, range_hi - range_lo);
-		if (!fetched || fetched->size() != range_hi - range_lo)
-			return false;
-		for (std::size_t n = 0; n < count; ++n) {
-			const auto current = blocks[i + n];
-			const auto [first, last] = block_rows(current);
-			std::uint64_t block_lo = 0, block_hi = 0;
-			if (!strip_span(first, last, block_lo, block_hi) || block_lo < range_lo ||
-					block_hi > range_hi)
+		if (!from_cache) {
+			const auto range_lo = lo;
+			auto range_hi = hi;
+			while (bi + count < blocks.size() && blocks[bi + count] == block + count &&
+					!block_cache_valid(blocks[bi + count])) {
+				const auto [next_first, next_last] = block_rows(blocks[bi + count]);
+				std::uint64_t next_lo = 0, next_hi = 0;
+				if (!strip_span(next_first, next_last, next_lo, next_hi) ||
+						next_hi <= range_hi || next_hi - range_lo > FETCH_BATCH_BYTES)
+					break;
+				range_hi = next_hi;
+				++count;
+			}
+			auto fetched = fetch_range(url, range_lo, range_hi - range_lo);
+			if (!fetched || fetched->size() != range_hi - range_lo)
 				return false;
-			const auto begin = static_cast<std::size_t>(block_lo - range_lo);
-			const auto end = static_cast<std::size_t>(block_hi - range_lo);
-			std::vector<std::uint8_t> bytes(fetched->begin() + begin, fetched->begin() + end);
-			arnis::world_utils::replace_file_atomically(row_block_path(current), bytes);
-			block_data.emplace(current, std::pair{block_lo, std::move(bytes)});
+			for (std::size_t n = 0; n < count; ++n) {
+				const auto current = blocks[bi + n];
+				const auto [first_row, last_row] = block_rows(current);
+				std::uint64_t block_lo = 0, block_hi = 0;
+				if (!strip_span(first_row, last_row, block_lo, block_hi) ||
+						block_lo < range_lo || block_hi > range_hi)
+					return false;
+				const auto begin = static_cast<std::size_t>(block_lo - range_lo);
+				const auto end = static_cast<std::size_t>(block_hi - range_lo);
+				const auto block_bytes = std::vector<std::uint8_t>(
+						fetched->begin() + begin, fetched->begin() + end);
+				store_row_block(current, block_bytes);
+			}
+			blob = std::move(*fetched);
+			lo = range_lo;
 		}
-		i += count;
-	}
-	std::vector<std::vector<std::uint8_t>> values(unique_rows.size());
-	for (std::size_t i = 0; i < unique_rows.size(); ++i) {
-		const auto row = unique_rows[i];
-		if (index->counts[row] == 0 || index->counts[row] > 64 * 1024 * 1024)
+		const auto last = block_rows(blocks[bi + count - 1]).second;
+		std::size_t end = first;
+		while (end < unique_rows.size() && unique_rows[end] <= last)
+			++end;
+		if (end == first)
 			return false;
-		const auto block = row / ROW_BLOCK;
-		const auto found = block_data.find(block);
-		if (found == block_data.end() || index->offsets[row] < found->second.first)
+		auto inflate_batch = [&](const std::vector<std::uint8_t> &bytes)
+				-> std::optional<std::vector<std::uint8_t>> {
+			std::vector<std::uint8_t> output;
+			output.reserve((end - first) * win.columns.size());
+			for (std::size_t n = first; n < end; ++n) {
+				const auto row = unique_rows[n];
+				if (index->counts[row] == 0 || index->counts[row] > 64 * 1024 * 1024 ||
+						index->offsets[row] < lo)
+					return std::nullopt;
+				const auto offset = static_cast<std::size_t>(index->offsets[row] - lo);
+				if (offset > bytes.size() || index->counts[row] > bytes.size() - offset)
+					return std::nullopt;
+				const auto length = static_cast<std::size_t>(index->counts[row]);
+				std::vector<std::uint8_t> compressed(
+						bytes.begin() + offset, bytes.begin() + offset + length);
+				std::vector<std::uint8_t> scratch, values;
+				if (!inflate_sampled_row(compressed, win.columns, scratch, values))
+					return std::nullopt;
+				output.insert(output.end(), values.begin(), values.end());
+			}
+			return output;
+		};
+		auto batch = inflate_batch(blob);
+		if (!batch && from_cache) {
+			std::error_code remove_error;
+			std::filesystem::remove(row_block_path(block), remove_error);
+			count = 1;
+			const auto [first_row, last_row] = block_rows(block);
+			if (!strip_span(first_row, last_row, lo, hi))
+				return false;
+			auto replacement = fetch_range(url, lo, hi - lo);
+			if (!replacement || replacement->size() != hi - lo)
+				return false;
+			blob = std::move(*replacement);
+			end = first;
+			while (end < unique_rows.size() && unique_rows[end] <= last_row)
+				++end;
+			batch = inflate_batch(blob);
+			if (!batch)
+				return false;
+			store_row_block(block, blob);
+		}
+		if (!batch)
 			return false;
-		const auto offset = static_cast<std::size_t>(index->offsets[row] - found->second.first);
-		if (offset > found->second.second.size() ||
-				index->counts[row] > found->second.second.size() - offset)
-			return false;
-		std::vector<std::uint8_t> compressed(
-				found->second.second.begin() + offset,
-				found->second.second.begin() + offset + index->counts[row]);
-		std::vector<std::uint8_t> scratch;
-		if (!inflate_sampled_row(compressed, win.columns, scratch, values[i]))
-			return false;
-	}
-	for (std::size_t out_row = 0; out_row < win.rows.size(); ++out_row) {
-		const auto found = std::lower_bound(
-				unique_rows.begin(), unique_rows.end(), win.rows[out_row]);
-		if (found == unique_rows.end() || *found != win.rows[out_row])
-			return false;
-		const auto gz = win.grid_z0 + out_row;
-		if (gz >= height)
-			break;
-		const auto &row = values[std::size_t(found - unique_rows.begin())];
-		for (std::size_t x = 0; x < row.size() && win.grid_x0 + x < width; ++x)
-			grid[gz * width + win.grid_x0 + x] = row[x];
+		while (out_i < win.rows.size() && win.rows[out_i] <= last) {
+			const auto source = std::lower_bound(unique_rows.begin() + first,
+					unique_rows.begin() + end, win.rows[out_i]);
+			if (source == unique_rows.begin() + end || *source != win.rows[out_i])
+				return false;
+			const auto row_offset = std::size_t(source - (unique_rows.begin() + first)) *
+									win.columns.size();
+			const auto gz = win.grid_z0 + out_i;
+			if (gz >= height)
+				break;
+			std::copy_n(batch->begin() + row_offset, win.columns.size(),
+					grid.begin() + gz * width + win.grid_x0);
+			++out_i;
+		}
+		first = end;
+		bi += count;
 	}
 	return true;
 }
@@ -624,6 +669,9 @@ void prune_row_cache(const std::filesystem::path &base)
 {
 	const auto root = cache_dir(base) / "rows";
 	std::error_code ec;
+	const auto root_status = std::filesystem::symlink_status(root, ec);
+	if (ec || !std::filesystem::is_directory(root_status))
+		return;
 	std::filesystem::directory_iterator tile_it(root, ec), end;
 	if (ec)
 		return;
@@ -664,6 +712,10 @@ void prune_row_cache(const std::filesystem::path &base)
 std::size_t clear_cache_tree(const std::filesystem::path &directory)
 {
 	std::error_code ec;
+	const auto root_status = std::filesystem::symlink_status(directory, ec);
+	if (ec || std::filesystem::is_symlink(root_status) ||
+			!std::filesystem::is_directory(root_status))
+		return 0;
 	std::filesystem::directory_iterator it(directory, ec), end;
 	if (ec)
 		return 0;
@@ -686,7 +738,7 @@ std::size_t clear_cache_tree(const std::filesystem::path &directory)
 			removed += clear_cache_tree(path);
 			std::filesystem::remove(path, ec);
 		} else if (std::filesystem::is_regular_file(status) &&
-				std::filesystem::remove(path, ec)) {
+				   std::filesystem::remove(path, ec)) {
 			++removed;
 		}
 		ec.clear();
@@ -866,8 +918,6 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 std::size_t clear_canopy_cache(const std::filesystem::path &base)
 {
 	const auto dir = cache_dir(base);
-	if (!std::filesystem::exists(dir))
-		return 0;
 	return clear_cache_tree(dir);
 }
 bool canopy_cache_fresh(const std::filesystem::path &path, std::chrono::seconds age)

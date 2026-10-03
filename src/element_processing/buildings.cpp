@@ -1,4 +1,5 @@
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -20,6 +21,7 @@
 #include <vector>
 
 #include "../../../arnis_adapter.h"
+#include "../clipping.h"
 #include "../floodfill.h"
 #include "../floodfill_cache.h"
 #include "buildings.h"
@@ -274,48 +276,59 @@ std::vector<std::pair<int, int>> compute_floor_area(
 
 void merge_way_segments(std::vector<std::vector<ProcessedNode>> &rings)
 {
-	bool changed = true;
-	while (changed) {
-		changed = false;
-		for (std::size_t i = 0; i < rings.size() && !changed; ++i) {
-			if (rings[i].empty())
+	auto same_point = [](const ProcessedNode &a, const ProcessedNode &b) {
+		return a.id == b.id || (std::abs(a.x - b.x) <= 1 && std::abs(a.z - b.z) <= 1);
+	};
+	std::vector<bool> removed(rings.size(), false);
+	std::vector<std::vector<ProcessedNode>> merged;
+	for (std::size_t i = 0; i < rings.size(); ++i)
+		for (std::size_t j = 0; j < rings.size(); ++j) {
+			if (i == j || removed[i] || removed[j] || rings[i].empty() ||
+					rings[j].empty())
 				continue;
-			for (std::size_t j = i + 1; j < rings.size(); ++j) {
-				if (rings[j].empty())
-					continue;
-
-				auto &a = rings[i];
-				auto &b = rings[j];
-				auto same_point = [](const ProcessedNode &lhs, const ProcessedNode &rhs) {
-					return lhs.id == rhs.id || (lhs.x == rhs.x && lhs.z == rhs.z);
-				};
-
-				if (same_point(a.back(), b.front())) {
-					a.insert(a.end(), std::next(b.begin()), b.end());
-				} else if (same_point(a.back(), b.back())) {
-					a.insert(a.end(), std::next(b.rbegin()), b.rend());
-				} else if (same_point(a.front(), b.back())) {
-					a.insert(a.begin(), b.begin(), std::prev(b.end()));
-				} else if (same_point(a.front(), b.front())) {
-					a.insert(a.begin(), std::next(b.rbegin()), b.rend());
-				} else {
-					continue;
-				}
-
-				rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(j));
-				changed = true;
-				break;
+			const auto &x = rings[i];
+			const auto &y = rings[j];
+			if (same_point(x.front(), x.back()) || same_point(y.front(), y.back()))
+				continue;
+			if (same_point(x.front(), y.front())) {
+				removed[i] = removed[j] = true;
+				auto result = x;
+				std::reverse(result.begin(), result.end());
+				result.insert(result.end(), std::next(y.begin()), y.end());
+				merged.push_back(std::move(result));
+			} else if (same_point(x.back(), y.back())) {
+				removed[i] = removed[j] = true;
+				auto result = x;
+				result.insert(result.end(), std::next(y.rbegin()), y.rend());
+				merged.push_back(std::move(result));
+			} else if (same_point(x.front(), y.back())) {
+				removed[i] = removed[j] = true;
+				auto result = y;
+				result.insert(result.end(), std::next(x.begin()), x.end());
+				merged.push_back(std::move(result));
+			} else if (same_point(x.back(), y.front())) {
+				removed[i] = removed[j] = true;
+				auto result = x;
+				result.insert(result.end(), std::next(y.begin()), y.end());
+				merged.push_back(std::move(result));
 			}
 		}
-	}
+	for (std::size_t i = removed.size(); i > 0; --i)
+		if (removed[i - 1])
+			rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(i - 1));
+	const auto merged_count = merged.size();
+	for (auto &ring : merged)
+		rings.push_back(std::move(ring));
+	if (merged_count > 0)
+		merge_way_segments(rings);
 }
 
 bool close_ring_if_near(std::vector<ProcessedNode> &ring)
 {
 	if (ring.size() < 3)
 		return false;
-	const auto &first = ring.front();
-	const auto &last = ring.back();
+	const auto first = ring.front();
+	const auto last = ring.back();
 	if (first.id != last.id && std::abs(first.x - last.x) <= 1 &&
 			std::abs(first.z - last.z) <= 1)
 		ring.push_back(first);
@@ -325,20 +338,38 @@ bool close_ring_if_near(std::vector<ProcessedNode> &ring)
 }
 
 std::vector<std::vector<ProcessedNode>> collect_merged_rings(
-		const ProcessedRelation &relation, ProcessedMemberRole role)
+		const ProcessedRelation &relation, ProcessedMemberRole role, const XZBBox &xzbbox)
 {
+	static constexpr std::array<std::uint64_t, 5> skipped_outer_ids = {
+			5013364, 204068874, 32920861, 1352374225, 1486731987};
 	std::vector<std::vector<ProcessedNode>> rings;
 	for (const auto &member : relation.members) {
-		if (member.role == role)
+		const bool skip = role == ProcessedMemberRole::Outer &&
+						  std::find(skipped_outer_ids.begin(), skipped_outer_ids.end(),
+								  member.way.id) != skipped_outer_ids.end();
+		if (member.role == role && !skip)
 			rings.push_back(member.way.nodes);
 	}
 	merge_way_segments(rings);
 	std::vector<std::vector<ProcessedNode>> out;
 	for (auto &ring : rings) {
-		if (close_ring_if_near(ring) && ring.size() >= 4)
+		ring = clipping::clip_way_to_bbox(ring, xzbbox);
+		if (ring.size() < 4)
+			continue;
+		close_ring_if_near(ring);
+		if (ring.size() >= 4 &&
+				(ring.front().id == ring.back().id ||
+						(std::abs(ring.front().x - ring.back().x) <= 1 &&
+								std::abs(ring.front().z - ring.back().z) <= 1)))
 			out.push_back(std::move(ring));
 	}
 	return out;
+}
+
+std::uint64_t relation_ring_id(std::uint64_t relation_id, std::size_t ring_index)
+{
+	return (std::uint64_t{1} << 63) | (relation_id << 16) |
+		   (static_cast<std::uint64_t>(ring_index) & 0xffffULL);
 }
 
 bool passage_at(const CoordinateBitmap *building_passages, int x, int z)
@@ -4671,12 +4702,31 @@ void generate_building_from_relation(WorldEditor &editor,
 		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
 		const CoordinateBitmap &building_passages)
 {
-	(void)xzbbox;
 	if (should_skip_underground_tags(relation.tags)) {
 		return;
 	}
 
-	int relation_levels = parse_i32_tag(relation.tags, "building:levels").value_or(2);
+	std::optional<int> relation_levels;
+	if (const auto levels_tag = relation.tags.find("building:levels");
+			levels_tag != relation.tags.end()) {
+		std::string value = levels_tag->second;
+		const auto first = value.find_first_not_of(" \t\r\n");
+		const auto last = value.find_last_not_of(" \t\r\n");
+		if (first != std::string::npos) {
+			value = value.substr(first, last - first + 1);
+			try {
+				std::size_t parsed = 0;
+				const double levels = std::stod(value, &parsed);
+				if (parsed == value.size() && std::isfinite(levels)) {
+					const double rounded = std::round(levels);
+					relation_levels = static_cast<int>(
+							std::clamp(rounded, double(std::numeric_limits<int>::min()),
+									double(std::numeric_limits<int>::max())));
+				}
+			} catch (const std::exception &) {
+			}
+		}
+	}
 	const bool is_building_type = relation.tags.get("type") == "building";
 	bool has_parts = false;
 	if (is_building_type) {
@@ -4690,32 +4740,41 @@ void generate_building_from_relation(WorldEditor &editor,
 	if (has_parts) {
 		return;
 	}
+	bool has_outer = false;
+	bool all_outer_parts_are_standalone = true;
+	for (const auto &member : relation.members) {
+		if (member.role != ProcessedMemberRole::Outer)
+			continue;
+		has_outer = true;
+		const auto part = member.way.tags.find("building:part");
+		const bool building_part = part != member.way.tags.end() &&
+								   normalized_material(part->second) != "no";
+		const bool closed = member.way.nodes.size() >= 4 &&
+							member.way.nodes.front().id == member.way.nodes.back().id;
+		all_outer_parts_are_standalone &= building_part && closed;
+	}
+	if (has_outer && all_outer_parts_are_standalone)
+		return;
 
-	auto outer_rings = collect_merged_rings(relation, ProcessedMemberRole::Outer);
-	auto inner_rings = collect_merged_rings(relation, ProcessedMemberRole::Inner);
+	auto outer_rings = collect_merged_rings(relation, ProcessedMemberRole::Outer, xzbbox);
+	auto inner_rings = collect_merged_rings(relation, ProcessedMemberRole::Inner, xzbbox);
 
 	std::vector<HolePolygon> hole_polygons;
 	hole_polygons.reserve(inner_rings.size());
 	for (std::size_t i = 0; i < inner_rings.size(); ++i) {
 		ProcessedWay way;
-		way.id = (1ULL << 63) |
-				 ((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
-				 (0x8000ULL | (i & 0x7FFFULL));
+		way.id = relation_ring_id(relation.id, 0x8000ULL | (i & 0x7FFFULL));
 		way.nodes = std::move(inner_rings[i]);
 		hole_polygons.push_back(HolePolygon{std::move(way), true});
 	}
 
 	for (std::size_t i = 0; i < outer_rings.size(); ++i) {
 		ProcessedWay merged_way;
-		merged_way.id =
-				(1ULL << 63) |
-				((static_cast<std::uint64_t>(relation.id) & 0x7FFF'FFFFULL) << 16) |
-				(i & 0xFFFFULL);
+		merged_way.id = relation_ring_id(relation.id, i);
 		merged_way.tags = relation.tags;
 		merged_way.nodes = std::move(outer_rings[i]);
-		generate_buildings(&editor, merged_way, args, std::optional<int>(relation_levels),
-				flood_fill_cache, building_passages,
-				hole_polygons.empty() ? nullptr : &hole_polygons);
+		generate_buildings(&editor, merged_way, args, relation_levels, flood_fill_cache,
+				building_passages, hole_polygons.empty() ? nullptr : &hole_polygons);
 	}
 }
 

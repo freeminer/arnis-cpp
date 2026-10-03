@@ -29,6 +29,7 @@ public:
 	static TreePackSource embedded(
 			const std::string &realm, std::filesystem::path root = {});
 	const std::string &realm() const { return realm_; }
+	const std::filesystem::path &root() const { return root_; }
 	std::string realm_file(const std::string &relative) const;
 	std::string vanilla_file(const std::string &relative) const;
 	std::filesystem::path realm_path(const std::string &relative) const;

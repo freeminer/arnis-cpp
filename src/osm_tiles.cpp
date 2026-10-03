@@ -23,6 +23,10 @@ namespace arnis::osm_tiles
 {
 namespace
 {
+constexpr std::int64_t EDGE_MARGIN_E6 = 1'000;
+constexpr std::int64_t MAX_LAT_E6 = 90'000'000;
+constexpr std::int64_t MAX_LON_E6 = 180'000'000;
+
 bool building_tags(const tags_t &tags)
 {
 	return tags.contains("building") || tags.contains("building:part") ||
@@ -54,13 +58,37 @@ bool intersects(const TileExtent &a, const TileExtent &b)
 		   a.max_lon >= b.min_lon && a.min_lon <= b.max_lon;
 }
 
+TileExtent extent_union(const TileExtent &a, const TileExtent &b)
+{
+	if (!a.valid)
+		return b;
+	if (!b.valid)
+		return a;
+	return {std::min(a.min_lat, b.min_lat), std::min(a.min_lon, b.min_lon),
+			std::max(a.max_lat, b.max_lat), std::max(a.max_lon, b.max_lon), true};
+}
+
 std::vector<DecodedTile> select_for_bbox(
 		const std::vector<DecodedTile> &input, const geographic::LLBBox &bbox)
 {
-	const TileExtent area{static_cast<std::int32_t>(bbox.min().lat() * COORD_SCALE),
-			static_cast<std::int32_t>(bbox.min().lng() * COORD_SCALE),
-			static_cast<std::int32_t>(bbox.max().lat() * COORD_SCALE),
-			static_cast<std::int32_t>(bbox.max().lng() * COORD_SCALE), true};
+	// Match Rust's extent exactly: outward rounding plus the small margin keeps
+	// ways whose projected vertices land on the edge row/column available to the
+	// downstream bbox clipper.
+	const auto lower_e6 = [](double value, std::int64_t limit) {
+		return std::clamp(static_cast<std::int64_t>(std::floor(value * COORD_SCALE)) -
+								  EDGE_MARGIN_E6,
+				-limit, limit);
+	};
+	const auto upper_e6 = [](double value, std::int64_t limit) {
+		return std::clamp(static_cast<std::int64_t>(std::ceil(value * COORD_SCALE)) +
+								  EDGE_MARGIN_E6,
+				-limit, limit);
+	};
+	const TileExtent area{
+			static_cast<std::int32_t>(lower_e6(bbox.min().lat(), MAX_LAT_E6)),
+			static_cast<std::int32_t>(lower_e6(bbox.min().lng(), MAX_LON_E6)),
+			static_cast<std::int32_t>(upper_e6(bbox.max().lat(), MAX_LAT_E6)),
+			static_cast<std::int32_t>(upper_e6(bbox.max().lng(), MAX_LON_E6)), true};
 	std::unordered_map<std::uint64_t, DecodedWay> ways;
 	std::unordered_map<std::uint64_t, DecodedRelation> relations;
 	for (const auto &tile : input) {
@@ -70,12 +98,12 @@ std::vector<DecodedTile> select_for_bbox(
 			relations.emplace(relation.id, relation);
 	}
 	std::unordered_set<std::uint64_t> keep_ways, keep_relations;
-	std::vector<TileExtent> building_extents;
+	TileExtent building_extent = area;
 	for (const auto &[id, way] : ways)
 		if (intersects(way_extent(way), area)) {
 			keep_ways.insert(id);
 			if (building_tags(way.tags))
-				building_extents.push_back(way_extent(way));
+				building_extent = extent_union(building_extent, way_extent(way));
 		}
 	for (const auto &[id, relation] : relations) {
 		TileExtent extent;
@@ -100,46 +128,23 @@ std::vector<DecodedTile> select_for_bbox(
 			for (const auto &member : relation.members)
 				keep_ways.insert(member.ref);
 			if (building_tags(relation.tags) && extent.valid)
-				building_extents.push_back(extent);
+				building_extent = extent_union(building_extent, extent);
 		}
 	}
-	// Keep building parts belonging to selected or straddling building outlines.
+	// Rust unions the outlines of every selected way (including relation
+	// members) before selecting adjacent building parts.
+	for (const auto id : keep_ways)
+		if (const auto it = ways.find(id);
+				it != ways.end() && building_tags(it->second.tags))
+			building_extent = extent_union(building_extent, way_extent(it->second));
+	// Keep building parts intersecting the bbox or the footprint of a selected
+	// building. This is Rust's union of the requested area and selected outline
+	// extents; unrelated building relations are deliberately not pulled in.
 	for (const auto &[id, way] : ways)
 		if (!keep_ways.contains(id) && building_tags(way.tags)) {
 			const auto extent = way_extent(way);
-			if (std::any_of(building_extents.begin(), building_extents.end(),
-						[&](const TileExtent &building) {
-							return intersects(extent, building);
-						}))
+			if (intersects(extent, building_extent))
 				keep_ways.insert(id);
-		}
-	for (const auto &[id, relation] : relations)
-		if (!keep_relations.contains(id) && building_tags(relation.tags)) {
-			TileExtent extent;
-			for (const auto &member : relation.members) {
-				auto it = ways.find(member.ref);
-				if (it == ways.end())
-					continue;
-				auto part = way_extent(it->second);
-				if (!part.valid)
-					continue;
-				if (!extent.valid)
-					extent = part;
-				else {
-					extent.min_lat = std::min(extent.min_lat, part.min_lat);
-					extent.min_lon = std::min(extent.min_lon, part.min_lon);
-					extent.max_lat = std::max(extent.max_lat, part.max_lat);
-					extent.max_lon = std::max(extent.max_lon, part.max_lon);
-				}
-			}
-			if (std::any_of(building_extents.begin(), building_extents.end(),
-						[&](const TileExtent &building) {
-							return intersects(extent, building);
-						})) {
-				keep_relations.insert(id);
-				for (const auto &member : relation.members)
-					keep_ways.insert(member.ref);
-			}
 		}
 	std::vector<DecodedTile> selected;
 	for (const auto &tile : input) {
@@ -151,15 +156,14 @@ std::vector<DecodedTile> select_for_bbox(
 		for (const auto &relation : tile.relations)
 			if (keep_relations.contains(relation.id))
 				out.relations.push_back(relation);
-		std::vector<std::pair<std::int32_t, std::int32_t>> vertices;
+		std::set<std::pair<std::int32_t, std::int32_t>> vertices;
 		for (const auto &way : out.ways)
 			for (const auto &point : way.points)
-				vertices.push_back(point);
+				vertices.insert(point);
 		for (const auto &node : tile.nodes) {
 			const bool in_area = node.lat >= area.min_lat && node.lat <= area.max_lat &&
 								 node.lon >= area.min_lon && node.lon <= area.max_lon;
-			if (in_area || std::find(vertices.begin(), vertices.end(),
-								   std::pair{node.lat, node.lon}) != vertices.end())
+			if (in_area || vertices.contains({node.lat, node.lon}))
 				out.nodes.push_back(node);
 		}
 		if (!out.ways.empty() || !out.relations.empty())

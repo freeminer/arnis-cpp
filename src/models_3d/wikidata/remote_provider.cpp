@@ -12,19 +12,23 @@ namespace arnis::models_3d
 {
 namespace
 {
-std::shared_ptr<std::mutex> model_download_mutex(const std::filesystem::path &path)
+struct ModelFetchState
+{
+	std::mutex mutex;
+	// Remember the first successful cache file so providers constructed with
+	// different cache roots still share a single download for this URL.
+	std::filesystem::path cache_file;
+};
+
+std::shared_ptr<ModelFetchState> model_fetch_state(const std::string &url)
 {
 	static std::mutex registry_mutex;
-	static std::unordered_map<std::string, std::weak_ptr<std::mutex>> registry;
-	const auto key = path.lexically_normal().string();
+	static std::unordered_map<std::string, std::shared_ptr<ModelFetchState>> registry;
 	std::lock_guard<std::mutex> lock(registry_mutex);
-	auto &entry = registry[key];
-	auto mutex = entry.lock();
-	if (!mutex) {
-		mutex = std::make_shared<std::mutex>();
-		entry = mutex;
-	}
-	return mutex;
+	auto &state = registry[url];
+	if (!state)
+		state = std::make_shared<ModelFetchState>();
+	return state;
 }
 } // namespace
 
@@ -52,8 +56,11 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 	if (!e)
 		return remember({});
 	const auto p = cache_ / (wikidata_client::url_hash(e->url) + ".bin");
-	auto download_mutex = model_download_mutex(p);
-	std::lock_guard<std::mutex> download_lock(*download_mutex);
+	// Emerge threads may create independent provider instances (and cache roots
+	// may be expressed through different relative paths).  Coordinate by URL,
+	// not by provider or filename, so one in-flight request serves every caller.
+	auto fetch_state = model_fetch_state(e->url);
+	std::lock_guard<std::mutex> download_lock(fetch_state->mutex);
 	// Another provider instance may have completed this QID while we waited.
 	{
 		std::lock_guard<std::mutex> lock(memo_mutex_);
@@ -64,40 +71,52 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 	auto cached = wikidata_client::load_cached(cache_, e->url);
 	// Rust's cache is keyed solely by URL; select GLB/STL from downloaded bytes.
 	std::filesystem::create_directories(cache_);
-	if (!cached) {
-		std::vector<std::uint8_t> bytes;
-		if (fetch_bytes_) {
-			auto fetched = fetch_bytes_(e->url, wikidata_client::MAX_MODEL_BYTES);
-			if (!fetched || fetched->size() > wikidata_client::MAX_MODEL_BYTES)
+	std::vector<std::uint8_t> bytes;
+	if (cached) {
+		bytes = std::move(*cached);
+		fetch_state->cache_file = p;
+	} else {
+		// Reuse an earlier successful cache entry even when this provider has a
+		// different root.  This also prevents serialized redownloads on later
+		// chunk-generation calls, not just simultaneous requests.
+		if (!fetch_state->cache_file.empty())
+			if (auto shared = wikidata_client::load_cached(
+						fetch_state->cache_file.parent_path(), e->url))
+				bytes = std::move(*shared);
+		if (!bytes.empty()) {
+			if (!wikidata_client::save_cached(cache_, e->url, bytes))
 				return remember({});
-			bytes = std::move(*fetched);
 		} else {
-			// Compatibility fallback for the in-engine mapgen host.
-			if (!http_to_file(e->url, p.string()))
-				return remember({});
-			std::ifstream in(p, std::ios::binary);
-			in.seekg(0, std::ios::end);
-			auto n = in.tellg();
-			in.seekg(0);
-			if (n < 0 || std::uint64_t(n) > wikidata_client::MAX_MODEL_BYTES)
-				return remember({});
-			bytes.resize(static_cast<std::size_t>(n));
-			in.read(reinterpret_cast<char *>(bytes.data()),
-					std::streamsize(bytes.size()));
-			if (!in)
+			if (fetch_bytes_) {
+				auto fetched = fetch_bytes_(e->url, wikidata_client::MAX_MODEL_BYTES);
+				if (!fetched || fetched->size() > wikidata_client::MAX_MODEL_BYTES)
+					return remember({});
+				bytes = std::move(*fetched);
+			} else {
+				// Compatibility fallback for the in-engine mapgen host.
+				if (!http_to_file(e->url, p.string()))
+					return remember({});
+				std::ifstream in(p, std::ios::binary);
+				in.seekg(0, std::ios::end);
+				auto n = in.tellg();
+				in.seekg(0);
+				if (n < 0 || std::uint64_t(n) > wikidata_client::MAX_MODEL_BYTES)
+					return remember({});
+				bytes.resize(static_cast<std::size_t>(n));
+				in.read(reinterpret_cast<char *>(bytes.data()),
+						std::streamsize(bytes.size()));
+				if (!in)
+					return remember({});
+			}
+			if (!wikidata_client::save_cached(cache_, e->url, bytes))
 				return remember({});
 		}
-		if (!wikidata_client::save_cached(cache_, e->url, bytes))
-			return remember({});
-		if (!arnis::world_utils::replace_file_atomically(p, bytes))
-			return remember({});
-	} else {
-		// Materialize the validated cache entry through the same atomic path;
-		// concurrent prescan workers must never observe a partially rewritten
-		// model file.
-		if (!arnis::world_utils::replace_file_atomically(p, *cached))
-			return remember({});
+		fetch_state->cache_file = p;
 	}
+	// Materialize the validated cache entry through the same atomic path;
+	// callers can safely parse it while another cache root is being populated.
+	if (!arnis::world_utils::replace_file_atomically(p, bytes))
+		return remember({});
 	try {
 		return remember(load_model_asset_auto(p));
 	} catch (...) {

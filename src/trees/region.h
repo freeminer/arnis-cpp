@@ -83,6 +83,8 @@ class RegionSelector
 	struct Data;
 	std::shared_ptr<Data> data_;
 	explicit RegionSelector(std::shared_ptr<Data> data) : data_(std::move(data)) {}
+	std::optional<SlotSelection> pick_slot_impl(int x, int z, Habitat, int elevation_y,
+			SlotRequest request, bool mapped_selection) const;
 
 public:
 	RegionSelector() = default;
