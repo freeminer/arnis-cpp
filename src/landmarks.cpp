@@ -1,4 +1,5 @@
 #include "landmarks.h"
+#include "assets_root.h"
 #include "../../arnis_adapter.h"
 #include "structures/schem_decoder.h"
 
@@ -80,8 +81,7 @@ std::pair<double, double> rotate(double x, double z, unsigned quarter)
 
 std::filesystem::path asset_path(const Landmark &landmark)
 {
-	return std::filesystem::path(__FILE__).parent_path().parent_path() /
-		   landmark.schematic_path;
+	return assets::path(landmark.schematic_path);
 }
 
 int median_base_y(

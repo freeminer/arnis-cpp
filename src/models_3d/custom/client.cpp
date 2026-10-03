@@ -1,11 +1,11 @@
 #include "client.h"
+#include "../../cache_root.h"
 #include "archetypes.h"
 #include "../model_asset.h"
 #include "../../world_utils.h"
 #include "../../../../http.h"
 #include <fstream>
 #include <thread>
-#include <cstdlib>
 #include <algorithm>
 namespace arnis::models_3d::custom
 {
@@ -13,11 +13,7 @@ static std::filesystem::path cache_root(const std::filesystem::path &configured)
 {
 	if (!configured.empty())
 		return configured;
-	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-		return std::filesystem::path(xdg) / "arnis" / "custom_models";
-	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / ".cache" / "arnis" / "custom_models";
-	return std::filesystem::path("./.arnis_custom_cache");
+	return arnis::cache::provider_cache_root("custom_models");
 }
 
 std::optional<ModelAsset> Client::fetch(const std::string &key)
@@ -29,10 +25,8 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	if (key.find("..") != std::string::npos || key.find('/') != std::string::npos ||
 			key.find('\\') != std::string::npos)
 		return std::nullopt;
-	// Match Rust's cache_root() fallback for library callers that construct the
-	// provider without an application-specific cache directory.  An empty
-	// root must not disable remote archetypes: the Rust client still downloads
-	// into ./.arnis_custom_cache when the platform cache directory is absent.
+	// Resolve the shared Arnis cache base for library callers without an
+	// application-specific provider directory.
 	const std::filesystem::path root = cache_root(root_);
 	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
 	std::error_code ec;
@@ -42,9 +36,13 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	if (base.size() > 4 && (base.ends_with(".glb") || base.ends_with(".stl") ||
 								   base.ends_with(".GLB") || base.ends_with(".STL")))
 		base.resize(base.size() - 4);
-	for (const auto &ext : {".glb", ".stl"}) {
-		auto p = root / (base + ext);
-		if (std::filesystem::exists(p)) {
+	for (const auto &candidate_root : {root, asset_root_}) {
+		if (candidate_root.empty())
+			continue;
+		for (const auto &ext : {".glb", ".stl"}) {
+			auto p = candidate_root / (base + ext);
+			if (!std::filesystem::exists(p))
+				continue;
 			// Rust's fetch_glb applies the same hard cap to cache hits and
 			// network responses.  Reject oversized stale files before parsing.
 			ec.clear();

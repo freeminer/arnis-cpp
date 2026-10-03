@@ -1,4 +1,5 @@
 #include "structures.h"
+#include "../assets_root.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
 #include <array>
@@ -25,11 +26,13 @@ void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 	static std::array<bool, 10> available{};
 	static std::once_flag dimensions_loaded;
 	std::call_once(dimensions_loaded, [&] {
+		const auto root = editor.get_schematic_asset_root().empty()
+								  ? assets::path("structures")
+								  : editor.get_schematic_asset_root();
 		for (std::size_t i = 0; i < std::size(models); ++i) {
 			try {
-				std::ifstream input(editor.get_schematic_asset_root() /
-											(std::string(models[i]) + ".schem"),
-						std::ios::binary);
+				std::ifstream input(
+						root / (std::string(models[i]) + ".schem"), std::ios::binary);
 				std::vector<std::uint8_t> bytes(
 						(std::istreambuf_iterator<char>(input)), {});
 				if (!bytes.empty()) {
@@ -52,8 +55,10 @@ void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 	for (; model_index < available.size(); ++model_index)
 		if (available[model_index] && selected-- == 0)
 			break;
-	const auto file = editor.get_schematic_asset_root() /
-					  (std::string(models[model_index]) + ".schem");
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	const auto file = root / (std::string(models[model_index]) + ".schem");
 	const unsigned align = static_cast<unsigned>(alignments[model_index]);
 	const auto flip = ((h >> 16) & 1) ? 2 : 0;
 	place_schem_file_anchored(editor, file, cx, editor.get_absolute_y(cx, 1, cz), cz,

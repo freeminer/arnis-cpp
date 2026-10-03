@@ -1,4 +1,5 @@
 #include "font.h"
+#include "../assets_root.h"
 #include "../map_item_palette.h"
 #include "stb_image.h"
 #include <algorithm>
@@ -39,8 +40,7 @@ std::vector<char32_t> codepoints(const std::string &s)
 			cp = ((c & 15) << 12) | ((c1 & 63) << 6) | (c2 & 63);
 		} else if ((c & 0xf8) == 0xf0 && i + 2 < s.size()) {
 			const unsigned char c1 = s[i++], c2 = s[i++], c3 = s[i++];
-			cp = ((c & 7) << 18) | ((c1 & 63) << 12) | ((c2 & 63) << 6) |
-				 (c3 & 63);
+			cp = ((c & 7) << 18) | ((c1 & 63) << 12) | ((c2 & 63) << 6) | (c3 & 63);
 		}
 		out.push_back(cp);
 	}
@@ -68,8 +68,9 @@ std::optional<std::pair<std::string, std::string>> split_two(const std::string &
 std::optional<Font> Font::load(FontSize size, const std::filesystem::path &root)
 {
 	const std::string stem = "dejavu_bold_" + std::string(size_name(size));
-	std::ifstream index(root / (stem + ".bin"), std::ios::binary),
-			png(root / (stem + ".png"), std::ios::binary);
+	const auto &directory = root.empty() ? assets::path("decorations/font") : root;
+	std::ifstream index(directory / (stem + ".bin"), std::ios::binary),
+			png(directory / (stem + ".png"), std::ios::binary);
 	if (!index || !png)
 		return std::nullopt;
 	std::vector<unsigned char> idx((std::istreambuf_iterator<char>(index)), {}),

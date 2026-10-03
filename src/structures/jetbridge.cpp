@@ -1,4 +1,5 @@
 #include "jetbridge.h"
+#include "../assets_root.h"
 #include "schem_decoder.h"
 
 #include <cmath>
@@ -15,8 +16,7 @@ constexpr int FOOTPRINT_PROBE = 4;
 
 std::optional<SchemDocument> load_asset()
 {
-	const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
-					  "assets/structures/jetbridge.schem";
+	const auto path = assets::path("structures/jetbridge.schem");
 	std::ifstream stream(path, std::ios::binary);
 	if (!stream)
 		return std::nullopt;

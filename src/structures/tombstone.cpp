@@ -1,4 +1,5 @@
 #include "tombstone.h"
+#include "../assets_root.h"
 #include "schem_decoder.h"
 #include "../land_cover/land_cover.h"
 #include "../floodfill_cache.h"
@@ -14,8 +15,7 @@ namespace
 constexpr int SMALL_GRID = 4, LARGE_GRID = 32, LARGE_HALF = 6;
 std::filesystem::path asset(const std::string &name)
 {
-	return std::filesystem::path(__FILE__).parent_path().parent_path() /
-		   ("assets/structures/" + name + ".schem");
+	return assets::path(std::filesystem::path("structures") / (name + ".schem"));
 }
 bool near_large_crypt(int x, int z)
 {
@@ -66,8 +66,9 @@ void scatter_tombstones(WorldEditor &e, int minx, int minz, int maxx, int maxz)
 					static_cast<int>(static_cast<std::uint32_t>(z) + 0x3c3cU));
 			if (h % 100 >= 28 || e.is_lc_water(x, z))
 				continue;
-			auto p = std::filesystem::path(__FILE__).parent_path().parent_path() /
-					 ((h % 9 ? "tombstone1" : "tombstone10") + std::string(".schem"));
+			auto p = assets::path(
+					std::filesystem::path("structures") /
+					((h % 9 ? "tombstone1" : "tombstone10") + std::string(".schem")));
 			place_schem_file_anchored(e, p, x, e.get_absolute_y(x, 0, z), z,
 					(h >> 16) & 3, SchemAnchor::Centered);
 		}

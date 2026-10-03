@@ -1,10 +1,10 @@
 #include "client.h"
+#include "../../cache_root.h"
 #include "../model_asset.h"
 #include "../../../../http.h"
 #include <fstream>
 #include <thread>
 #include <cmath>
-#include <cstdlib>
 #include <nlohmann/json.hpp>
 namespace arnis::models_3d::three_dmr
 {
@@ -12,11 +12,7 @@ std::filesystem::path cache_root(const std::filesystem::path &base)
 {
 	if (!base.empty())
 		return base;
-	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-		return std::filesystem::path(xdg) / "arnis" / "3dmr";
-	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / ".cache" / "arnis" / "3dmr";
-	return std::filesystem::path("./.arnis_3dmr_cache");
+	return arnis::cache::provider_cache_root("3dmr");
 }
 std::string info_url(std::uint64_t id)
 {

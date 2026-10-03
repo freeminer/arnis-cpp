@@ -1,4 +1,5 @@
 #include "schem_decoder.h"
+#include "../assets_root.h"
 #include "../../../arnis_adapter.h"
 
 #include <cstring>
@@ -1187,13 +1188,13 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 bool place_named_schem(world_editor::WorldEditor &editor, const std::string &name, int ox,
 		int oy, int oz, unsigned rotation, const Block *ground)
 {
-	const auto configured = editor.get_schematic_asset_root() / (name + ".schem");
+	const auto configured =
+			editor.get_schematic_asset_root().empty()
+					? assets::path(
+							  std::filesystem::path("structures") / (name + ".schem"))
+					: editor.get_schematic_asset_root() / (name + ".schem");
 	if (std::filesystem::is_regular_file(configured))
 		return place_schem_file_rotated(editor, configured, ox, oy, oz, rotation, ground);
-	// Keep source-tree development builds working when no runtime asset root was
-	// configured, while installed/library hosts use the editor-owned root above.
-	const auto bundled = std::filesystem::path(__FILE__).parent_path().parent_path() /
-						 ("assets/structures/" + name + ".schem");
-	return place_schem_file_rotated(editor, bundled, ox, oy, oz, rotation, ground);
+	return false;
 }
 }

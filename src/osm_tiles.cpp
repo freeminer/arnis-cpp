@@ -1,4 +1,5 @@
 #include "osm_tiles.h"
+#include "cache_root.h"
 #include "overture/pmtiles.h"
 #include "retrieve_data.h"
 #include "world_utils.h"
@@ -7,7 +8,6 @@
 #include <array>
 #include <chrono>
 #include <curl/curl.h>
-#include <cstdlib>
 #include <fstream>
 #include <iomanip>
 #include <limits>
@@ -175,18 +175,7 @@ std::vector<DecodedTile> select_for_bbox(
 
 std::filesystem::path cache_root()
 {
-#if defined(_WIN32)
-	if (const char *local = std::getenv("LOCALAPPDATA"); local && *local)
-		return std::filesystem::path(local) / "arnis" / "osm-tiles";
-#elif defined(__APPLE__)
-	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / "Library" / "Caches" / "arnis" / "osm-tiles";
-#endif
-	if (const char *xdg = std::getenv("XDG_CACHE_HOME"); xdg && *xdg)
-		return std::filesystem::path(xdg) / "arnis" / "osm-tiles";
-	if (const char *home = std::getenv("HOME"); home && *home)
-		return std::filesystem::path(home) / ".cache" / "arnis" / "osm-tiles";
-	return {};
+	return arnis::cache::provider_cache_root("osm-tiles");
 }
 
 elevation::CacheClearStats clear_osm_tiles_cache()

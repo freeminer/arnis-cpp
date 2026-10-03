@@ -1,4 +1,5 @@
 #include "starship.h"
+#include "../assets_root.h"
 #include "schem_decoder.h"
 namespace arnis::structures
 {
@@ -12,8 +13,7 @@ void place_starship(WorldEditor &e, const ProcessedWay &w)
 		sz += n.z;
 	}
 	int x = sx / w.nodes.size(), z = sz / w.nodes.size();
-	auto p = std::filesystem::path(__FILE__).parent_path().parent_path() /
-			 "assets/structures/starship.schem";
+	auto p = assets::path("structures/starship.schem");
 	// Rust anchors the embedded model at the launch-mount centreline with an
 	// explicit upright rotation; use the rotated path so property-bearing
 	// schematic blocks follow the same placement contract.

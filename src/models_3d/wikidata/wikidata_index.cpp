@@ -1,4 +1,5 @@
 #include "wikidata_index.h"
+#include "../../assets_root.h"
 #include <fstream>
 #include <filesystem>
 #include <nlohmann/json.hpp>
@@ -13,12 +14,7 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 		std::unordered_map<std::string, WikidataEntry> m;
 		for (const char *file :
 				{"wikidata_3d_models.json", "wikidata_3d_models_manual.json"}) {
-			std::ifstream f(std::filesystem::path(__FILE__)
-									.parent_path()
-									.parent_path()
-									.parent_path()
-									.parent_path() /
-							"assets" / file);
+			std::ifstream f(assets::path(file));
 			if (!f)
 				continue;
 			nlohmann::json j;

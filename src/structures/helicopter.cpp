@@ -1,4 +1,5 @@
 #include "helicopter.h"
+#include "../assets_root.h"
 #include "schem_decoder.h"
 #include <fstream>
 #include <iterator>
@@ -15,8 +16,7 @@ void maybe_place_helicopter(WorldEditor &e, int x, int z)
 	static std::once_flag once;
 	static std::optional<StructureSchematic> schematic;
 	std::call_once(once, [] {
-		const auto p = std::filesystem::path(__FILE__).parent_path().parent_path() /
-					   "assets/structures/helicopter.schem";
+		const auto p = assets::path("structures/helicopter.schem");
 		std::ifstream in(p, std::ios::binary);
 		if (!in)
 			return;

@@ -1,4 +1,5 @@
 #include "climate.h"
+#include "assets_root.h"
 #include "land_cover/land_cover.h"
 #include "block_definitions.h"
 #include "ground_generation.h"
@@ -17,8 +18,7 @@ constexpr std::size_t KOPPEN_COLS = 3600, KOPPEN_ROWS = 1800;
 const std::vector<std::uint8_t> &koppen_grid()
 {
 	static const std::vector<std::uint8_t> grid = [] {
-		const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
-						  "assets/climate/koppen.grid";
+		const auto path = assets::path("climate/koppen.grid");
 		std::ifstream in(path, std::ios::binary);
 		if (!in)
 			return std::vector<std::uint8_t>{};

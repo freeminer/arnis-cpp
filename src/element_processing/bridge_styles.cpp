@@ -1,4 +1,5 @@
 #include "bridge_styles.h"
+#include "../assets_root.h"
 #include "../structures/schem_decoder.h"
 #include "bridge_modules.h"
 #include "connected_blocks.h"
@@ -26,8 +27,7 @@ bool sweep_bridge_schematic(WorldEditor &editor,
 	int street_y = index == 1 ? 8 : (index == 2 ? 16 : (index == 3 ? 2 : 3));
 	std::filesystem::path root = asset_root;
 	if (root.empty())
-		root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
-			   "assets/structures";
+		root = assets::path("structures");
 	std::ifstream in(root / ("bridge_segment_" + std::to_string(index) + ".schem"),
 			std::ios::binary);
 	if (!in)

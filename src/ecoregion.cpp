@@ -1,4 +1,5 @@
 #include "ecoregion.h"
+#include "assets_root.h"
 
 #include <algorithm>
 #include <array>
@@ -26,18 +27,9 @@ std::vector<std::optional<Row>> &rows()
 	static std::vector<std::optional<Row>> value;
 	static std::once_flag once;
 	std::call_once(once, [] {
-		std::array<std::filesystem::path, 3> paths = {
-				std::filesystem::path("assets/climate/ecoregions.tsv"),
-				std::filesystem::path(__FILE__).parent_path().parent_path() /
-						"assets/climate/ecoregions.tsv",
-				std::filesystem::current_path() / "assets/climate/ecoregions.tsv"};
+		const auto path = assets::path("climate/ecoregions.tsv");
 		std::ifstream in;
-		for (const auto &p : paths) {
-			in.clear();
-			in.open(p);
-			if (in)
-				break;
-		}
+		in.open(path);
 		if (!in)
 			return;
 		std::string line;

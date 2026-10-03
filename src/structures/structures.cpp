@@ -1,4 +1,5 @@
 #include "structures.h"
+#include "../assets_root.h"
 
 #include <algorithm>
 #include <array>
@@ -87,7 +88,9 @@ std::filesystem::path structure_asset_path(const WorldEditor &e, const std::stri
 	const auto *a = find_structure_asset_alias(n);
 	if (!a)
 		return {};
-	return e.get_schematic_asset_root() / a->schematic;
+	return e.get_schematic_asset_root().empty()
+				   ? assets::path(std::filesystem::path("structures") / a->schematic)
+				   : e.get_schematic_asset_root() / a->schematic;
 }
 bool structure_asset_available(const WorldEditor &e, const std::string &n)
 {
@@ -752,9 +755,7 @@ void place(WorldEditor &editor, int x, int z)
 	if (!editor.place_schematics())
 		return;
 	const auto h = coord_hash(x, z);
-	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path() /
-			"assets/structures/lighthouse.schem";
+	const auto file = assets::path("structures/lighthouse.schem");
 	place_schem_file_rotated(editor, file, x, editor.get_absolute_y(x, 1, z), z, h & 3);
 }
 }
@@ -876,9 +877,8 @@ void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 			"car_hotrod_blue", "car_hotrod_white", "car_pickup", "car_police",
 			"car_sedan", "car_suv", "car_uhaul", "car_workvan"}};
 	const auto model = models[(h >> 8) % models.size()];
-	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path() /
-			"assets/structures" / (std::string(model) + ".schem");
+	const auto file = assets::path(
+			std::filesystem::path("structures") / (std::string(model) + ".schem"));
 	unsigned align = 0;
 	if (std::ifstream in(file, std::ios::binary); in) {
 		std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), {});
@@ -939,9 +939,7 @@ void place(WorldEditor &editor, int x, int z)
 	if (!editor.place_schematics())
 		return;
 	const auto h = coord_hash(x, z);
-	const auto file =
-			std::filesystem::path(__FILE__).parent_path().parent_path() /
-			"assets/structures/windturbine.schem";
+	const auto file = assets::path("structures/windturbine.schem");
 	place_schem_file_anchored(editor, file, x, editor.get_absolute_y(x, 1, z), z, h & 3,
 			SchemAnchor::BaseCentroid);
 }

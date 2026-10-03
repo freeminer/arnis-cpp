@@ -1,5 +1,6 @@
 #include "tree_pack.h"
 #include "region.h"
+#include "../assets_root.h"
 #include <cmath>
 #include <utility>
 namespace arnis::trees
@@ -51,8 +52,7 @@ TreePackSource TreePackSource::embedded(
 		const std::string &realm, std::filesystem::path root)
 {
 	if (root.empty()) {
-		root = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
-			   "assets" / "tree-packs";
+		root = assets::path("tree-packs");
 	}
 	return TreePackSource(realm, std::move(root));
 }

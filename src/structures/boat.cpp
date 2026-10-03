@@ -1,4 +1,5 @@
 #include "boat.h"
+#include "../assets_root.h"
 #include "schem_decoder.h"
 #include <fstream>
 #include <iterator>
@@ -12,8 +13,7 @@ const StructureSchematic *boat_schematic()
 	static std::once_flag once;
 	static std::optional<StructureSchematic> schematic;
 	std::call_once(once, [] {
-		const auto path = std::filesystem::path(__FILE__).parent_path().parent_path() /
-						  "assets/structures/boat.schem";
+		const auto path = assets::path("structures/boat.schem");
 		std::ifstream input(path, std::ios::binary);
 		if (!input)
 			return;

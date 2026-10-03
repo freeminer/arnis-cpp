@@ -1,5 +1,6 @@
 #pragma once
 
+#include "assets_root.h"
 #include "ecoregion.h"
 
 namespace arnis::ecoregion
@@ -17,15 +18,9 @@ inline const GenerationMap &generation_map()
 	// prevents concurrent emerge workers from repeating the initial scan.
 	static const GenerationMap cached = [] {
 		GenerationMap result;
-		for (const auto &candidate :
-				{std::filesystem::path("assets/climate/ecoregions.grid"),
-						std::filesystem::path(__FILE__).parent_path().parent_path() /
-								"assets/climate/ecoregions.grid"}) {
-			if (auto map = EcoMap::load(candidate)) {
-				result.dominant_tree_realm = map->dominant_tree_pack();
-				result.map = std::move(map);
-				break;
-			}
+		if (auto map = EcoMap::load(assets::path("climate/ecoregions.grid"))) {
+			result.dominant_tree_realm = map->dominant_tree_pack();
+			result.map = std::move(map);
 		}
 		return result;
 	}();

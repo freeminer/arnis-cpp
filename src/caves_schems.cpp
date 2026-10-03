@@ -437,7 +437,7 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, const Args &args)
 {
-	const auto pack = get_pack(editor.get_schematic_asset_root());
+	const auto pack = get_pack(editor.get_cave_asset_root());
 	if (!pack || pack->families.empty())
 		return;
 	const std::vector<Block> rock{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,

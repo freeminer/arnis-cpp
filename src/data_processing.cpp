@@ -17,7 +17,9 @@
 #include <thread>
 
 #include "../../arnis_adapter.h"
+#include "assets_root.h"
 #include "bresenham.h"
+#include "cache_root.h"
 #include "element_processing/historic.h"
 #include "element_processing/power.h"
 #include "element_processing/emergency.h"
@@ -1052,19 +1054,21 @@ bool generate_world(WorldEditor &editor,
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.
 	editor.set_place_schematics(args.use_3d);
-	// Keep the Rust cave-pack option connected to the backend schematic loader.
-	// Cave feature selection can then use the configured pack without relying on
-	// the process working directory.
-	if (args.cave_asset_pack)
-		editor.set_schematic_asset_root(*args.cave_asset_pack);
-	else if (args.caves) {
+	// Structure schematics and cave packs are distinct asset families. Keep
+	// their roots separate so the installed Arnis assets directory can be
+	// supplied independently from an optional user cave pack.
+	editor.set_schematic_asset_root(assets::path("structures"));
+	editor.set_cave_asset_root({});
+	if (args.cave_asset_pack) {
+		editor.set_cave_asset_root(*args.cave_asset_pack);
+	} else if (args.caves) {
 		const std::array<std::filesystem::path, 3> cave_pack_candidates = {
-				std::filesystem::path("cave-pack"),
-				std::filesystem::path(__FILE__).parent_path().parent_path() / "cave-pack",
-				std::filesystem::current_path() / "cave-pack"};
+				assets::path("cave-pack"), std::filesystem::path("cave-pack"),
+				std::filesystem::path(__FILE__).parent_path().parent_path() /
+						"cave-pack"};
 		for (const auto &candidate : cave_pack_candidates)
 			if (std::filesystem::is_directory(candidate)) {
-				editor.set_schematic_asset_root(candidate);
+				editor.set_cave_asset_root(candidate);
 				break;
 			}
 	}
@@ -1086,15 +1090,8 @@ bool generate_world(WorldEditor &editor,
 	if (!facade_directory && args.building_facades) {
 		// Match Rust's executable/repository asset search instead of depending
 		// on the caller's current working directory.
-		const std::array<std::filesystem::path, 3> candidates = {
-				std::filesystem::path("assets/building-facades"),
-				std::filesystem::path(__FILE__)
-								.parent_path()
-								.parent_path()
-								.parent_path()
-								.parent_path() /
-						"assets/building-facades",
-				std::filesystem::current_path() / "assets/building-facades"};
+		const std::array<std::filesystem::path, 1> candidates = {
+				assets::path("building-facades")};
 		for (const auto &candidate : candidates)
 			if (std::filesystem::is_directory(candidate)) {
 				facade_directory = candidate;
@@ -1152,11 +1149,7 @@ bool generate_world(WorldEditor &editor,
 	editor.set_regional_tree_placer({});
 	editor.set_mapped_regional_tree_placer({});
 	std::shared_ptr<trees::RegionSelector> shared_selector;
-	const auto tree_pack_root =
-			std::filesystem::is_directory("assets/tree-packs")
-					? std::filesystem::path("assets/tree-packs")
-					: std::filesystem::path(__FILE__).parent_path().parent_path() /
-							  "assets/tree-packs";
+	const auto tree_pack_root = assets::path("tree-packs");
 	std::optional<std::string> dominant_tree_realm;
 	if (editor.ground && editor.ground->ecoregion_map)
 		dominant_tree_realm =
@@ -1174,16 +1167,12 @@ bool generate_world(WorldEditor &editor,
 			editor.set_tree_slot_spacing(shared_selector->base_spacing());
 		}
 	}
-	const auto model_cache_root =
-			std::filesystem::path(porting::path_cache) / "arnis-tile-cache";
-	models_3d::RemoteModelProvider wikidata_provider(model_cache_root / "wikidata");
-	models_3d::three_dmr::Client three_dmr_provider(model_cache_root / "3dmr");
-	const auto model_asset_root =
-			std::filesystem::is_directory("assets/models")
-					? std::filesystem::path("assets/models")
-					: std::filesystem::path(__FILE__).parent_path().parent_path() /
-							  "assets/models";
-	models_3d::custom::Client custom_model_provider(model_asset_root);
+	models_3d::RemoteModelProvider wikidata_provider(
+			cache::provider_cache_root("wikidata"));
+	models_3d::three_dmr::Client three_dmr_provider(cache::provider_cache_root("3dmr"));
+	const auto model_asset_root = assets::path("models");
+	models_3d::custom::Client custom_model_provider(
+			cache::provider_cache_root("custom_models"), {}, model_asset_root);
 	// Landmarks use their matched OSM feature's projected centre as the world
 	// anchor.  This keeps the C++ mapgen host independent of Rust's geographic
 	// projection plumbing while preserving the same suppression/late-placement
@@ -1300,9 +1289,7 @@ bool generate_world(WorldEditor &editor,
 		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
 		const auto grid_width = std::clamp<std::size_t>(world_width / 4 + 1, 64, 1024);
 		const auto grid_height = std::clamp<std::size_t>(world_height / 4 + 1, 64, 1024);
-		if (auto canopy = canopy::fetch_canopy_data(
-					std::filesystem::path(porting::path_cache) / "arnis-tile-cache" /
-							"canopy",
+		if (auto canopy = canopy::fetch_canopy_data(cache::provider_cache_root("canopy"),
 					geographic[0], geographic[2], geographic[1], geographic[3],
 					grid_width, grid_height))
 			editor.ground->set_canopy_data(std::move(*canopy), world_width, world_height);

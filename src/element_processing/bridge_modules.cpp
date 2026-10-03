@@ -1,4 +1,5 @@
 #include "bridge_modules.h"
+#include "../assets_root.h"
 #include "../block_definitions.h"
 #include "../structures/schem_decoder.h"
 #include <algorithm>
@@ -20,10 +21,10 @@ static bool is_pillar_material(const Block &block)
 {
 	using namespace block_definitions;
 	return block.id() == SANDSTONE.id() || block.id() == SMOOTH_SANDSTONE.id() ||
-			block.id() == STONE.id() || block.id() == STONE_BRICKS.id() ||
-			block.id() == ANDESITE.id() || block.id() == ANDESITE_WALL.id() ||
-			block.id() == COBBLESTONE.id() || block.id() == SMOOTH_STONE.id() ||
-			block.id() == structures::resolve_schem_block("minecraft:sandstone_wall").id();
+		   block.id() == STONE.id() || block.id() == STONE_BRICKS.id() ||
+		   block.id() == ANDESITE.id() || block.id() == ANDESITE_WALL.id() ||
+		   block.id() == COBBLESTONE.id() || block.id() == SMOOTH_STONE.id() ||
+		   block.id() == structures::resolve_schem_block("minecraft:sandstone_wall").id();
 }
 
 static void ensure_modules_loaded()
@@ -33,8 +34,7 @@ static void ensure_modules_loaded()
 
 	loaded_modules.clear();
 
-	const auto asset_dir = std::filesystem::path(__FILE__).parent_path().parent_path().parent_path() /
-			"assets/structures";
+	const auto asset_dir = assets::path("structures");
 	const auto build_module = [&](const char *name, int street_y, bool pillars) {
 		std::ifstream file(asset_dir / (std::string(name) + ".schem"), std::ios::binary);
 		if (!file)
@@ -45,14 +45,15 @@ static void ensure_modules_loaded()
 			const int length = std::max(1, schem.width);
 			const int center_w = schem.length / 2;
 			BridgeModule module{static_cast<size_t>(length), center_w, pillars,
-				std::vector<std::vector<BridgeModuleSlice>>(length),
-				std::vector<std::vector<BridgeModuleSlice>>(length)};
+					std::vector<std::vector<BridgeModuleSlice>>(length),
+					std::vector<std::vector<BridgeModuleSlice>>(length)};
 			for (const auto &voxel : schem.voxels) {
 				if (voxel.x < 0 || voxel.x >= length ||
 						(voxel.block == "minecraft:stone_button" && voxel.y < street_y))
 					continue;
 				module.slices[voxel.x].push_back({voxel.z - center_w, voxel.y - street_y,
-						BlockWithProperties{structures::resolve_schem_block(voxel.block), voxel.properties}});
+						BlockWithProperties{structures::resolve_schem_block(voxel.block),
+								voxel.properties}});
 			}
 			if (pillars) {
 				for (int l = 0; l < length; ++l) {
@@ -129,8 +130,8 @@ BlockWithProperties rotated_block(const BlockWithProperties &block, uint8_t k)
 {
 	if (k == 0)
 		return block;
-	return BlockWithProperties{block.block,
-			structures::rotate_schem_properties(block.properties, k)};
+	return BlockWithProperties{
+			block.block, structures::rotate_schem_properties(block.properties, k)};
 }
 
 void sweep_module(world_editor::WorldEditor *editor,
@@ -153,8 +154,8 @@ void sweep_module(world_editor::WorldEditor *editor,
 			int bz = static_cast<int>(std::round(z + pz * voxel.w));
 			int by = deck_y + voxel.dy;
 
-			editor->set_block_with_properties_absolute(rotated_block(voxel.block, k), bx, by, bz,
-				nullptr, nullptr);
+			editor->set_block_with_properties_absolute(
+					rotated_block(voxel.block, k), bx, by, bz, nullptr, nullptr);
 		}
 
 		// Place pillar feet
@@ -169,8 +170,9 @@ void sweep_module(world_editor::WorldEditor *editor,
 				if (bottom > ground) {
 					int limit = std::min(bottom, ground + PILLAR_GROUND_FILL_LIMIT);
 					for (int y = ground; y < limit; ++y) {
-					editor->set_block_with_properties_absolute(rotated_block(foot.block, k), bx, y, bz,
-						nullptr, nullptr);
+						editor->set_block_with_properties_absolute(
+								rotated_block(foot.block, k), bx, y, bz, nullptr,
+								nullptr);
 					}
 				}
 			}

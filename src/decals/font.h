@@ -33,7 +33,7 @@ class Font
 
 public:
 	static std::optional<Font> load(
-			FontSize size, const std::filesystem::path &root = "assets/decorations/font");
+			FontSize size, const std::filesystem::path &root = {});
 	static const Font &get(FontSize size);
 	int line_height() const { return line_height_; }
 	bool covers(const std::string &text) const;

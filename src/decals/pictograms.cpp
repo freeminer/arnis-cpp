@@ -1,4 +1,5 @@
 #include "pictograms.h"
+#include "../assets_root.h"
 #include <unordered_map>
 namespace arnis::decals::pictograms
 {
@@ -14,7 +15,8 @@ std::optional<std::filesystem::path> asset(
 {
 	if (std::find(names().begin(), names().end(), name) == names().end())
 		return std::nullopt;
-	auto path = root / (name + ".png");
+	const auto &directory = root.empty() ? assets::path("decorations/pictograms") : root;
+	auto path = directory / (name + ".png");
 	return std::filesystem::exists(path) ? std::optional{path} : std::nullopt;
 }
 std::optional<std::string> business_kind(const tags_t &tags)

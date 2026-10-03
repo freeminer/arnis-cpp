@@ -1,4 +1,5 @@
 #include "cache.h"
+#include "../cache_root.h"
 
 #include <algorithm>
 #include <atomic>
@@ -7,11 +8,6 @@
 #include <fstream>
 #include <thread>
 #include <utility>
-
-namespace porting
-{
-extern std::string path_cache;
-}
 
 namespace arnis::overture::cache
 {
@@ -42,9 +38,7 @@ std::pair<std::string, unsigned long long> sort_key(const std::string &release)
 
 std::filesystem::path cache_root()
 {
-	// Overture is another provider cache and belongs under the shared Rust
-	// cache tree so one cleanup operation covers all downloaded map data.
-	return std::filesystem::path(porting::path_cache) / "arnis-tile-cache" / "overture";
+	return arnis::cache::provider_cache_root("overture");
 }
 
 elevation::CacheClearStats clear_overture_cache()

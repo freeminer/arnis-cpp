@@ -11,6 +11,7 @@ namespace arnis::models_3d::custom
 class Client : public ModelProvider
 {
 	std::filesystem::path root_;
+	std::filesystem::path asset_root_;
 	// The caller owns networking.  This keeps map generation usable as a
 	// library, while preserving Rust's cache-first model acquisition policy.
 	using FetchBytes = std::function<std::optional<std::vector<std::uint8_t>>(
@@ -18,8 +19,10 @@ class Client : public ModelProvider
 	FetchBytes fetcher_;
 
 public:
-	explicit Client(std::filesystem::path root, FetchBytes fetcher = {}) :
-			root_(std::move(root)), fetcher_(std::move(fetcher))
+	explicit Client(std::filesystem::path root, FetchBytes fetcher = {},
+			std::filesystem::path asset_root = {}) :
+			root_(std::move(root)), asset_root_(std::move(asset_root)),
+			fetcher_(std::move(fetcher))
 	{
 	}
 	void set_fetcher(FetchBytes fetcher) { fetcher_ = std::move(fetcher); }
