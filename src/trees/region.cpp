@@ -650,36 +650,6 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 {
 	if (empty())
 		return std::nullopt;
-	// An explicit ecoregion is authoritative for untagged slots, matching the
-	// Rust selector's EcoMix request.  Tag-derived/wetland hints remain stronger
-	// and are refined below by the montane and wet-ground rules.
-	if (!mapped_selection && request.eco && !request.tagged && !request.wet_ground) {
-		switch (request.eco->biome) {
-		case ecoregion::EcoBiome::MoistTropical:
-		case ecoregion::EcoBiome::DryTropical:
-		case ecoregion::EcoBiome::TropicalConifer:
-		case ecoregion::EcoBiome::TropicalGrassland:
-			hint = Habitat::Tropical;
-			break;
-		case ecoregion::EcoBiome::TemperateConifer:
-		case ecoregion::EcoBiome::Boreal:
-		case ecoregion::EcoBiome::MontaneGrassland:
-		case ecoregion::EcoBiome::Tundra:
-			hint = Habitat::Conifer;
-			break;
-		case ecoregion::EcoBiome::Flooded:
-		case ecoregion::EcoBiome::Mangroves:
-			hint = Habitat::Wet;
-			break;
-		case ecoregion::EcoBiome::Desert:
-		case ecoregion::EcoBiome::Mediterranean:
-			hint = Habitat::Dry;
-			break;
-		default:
-			hint = Habitat::Lowland;
-			break;
-		}
-	}
 	const int spacing = base_spacing();
 	auto [sx, sz] = trunk_slot_s(x, z, spacing);
 	if (mapped_selection) {
@@ -696,20 +666,20 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	const Habitat tagged_hint = hint;
 	if (request.wet_ground)
 		hint = Habitat::Wet;
+	const auto eco_mix = request.eco ? data_->eco_choices.find(request.eco->id)
+									 : data_->eco_choices.end();
+	const bool has_eco_mix =
+			eco_mix != data_->eco_choices.end() && !eco_mix->second.empty();
 	const bool palms_allowed =
-			request.eco ? (data_->latitude_known ? ecoregion::palms_belong(
-														   *request.eco, data_->latitude)
-												 : data_->palms_default)
-						: data_->palms_default;
+			has_eco_mix && request.eco && data_->latitude_known
+					? ecoregion::palms_belong(*request.eco, data_->latitude)
+					: data_->palms_default;
 	if (montane && (hint == Habitat::Lowland || hint == Habitat::Wet))
 		hint = Habitat::Conifer;
 	const auto blend = land_cover::coord_hash(sx + 7, sz + 13) % 100;
-	const bool want_wet =
-			request.wet_ground || (request.tagged && tagged_hint == Habitat::Wet) ||
-			(mapped_selection && tagged_hint == Habitat::Wet) ||
-			(!mapped_selection && request.eco &&
-					(request.eco->biome == ecoregion::EcoBiome::Flooded ||
-							request.eco->biome == ecoregion::EcoBiome::Mangroves));
+	const bool want_wet = request.wet_ground ||
+						  (request.tagged && tagged_hint == Habitat::Wet) ||
+						  (mapped_selection && tagged_hint == Habitat::Wet);
 	const bool want_conifer =
 			request.conifer.value_or(request.tagged && tagged_hint == Habitat::Conifer);
 	const bool want_broadleaf =
