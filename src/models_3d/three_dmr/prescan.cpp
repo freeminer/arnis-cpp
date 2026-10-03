@@ -105,7 +105,9 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			z0 = std::min(z0, z);
 			z1 = std::max(z1, z);
 		}
-		int ax = sx / pts.size(), az = sz / pts.size();
+		// Keep the divisor signed, as in Rust's i64 centroid, for negative X/Z.
+		const auto count = static_cast<long long>(pts.size());
+		int ax = static_cast<int>(sx / count), az = static_cast<int>(sz / count);
 		Bounds raw{x0, z0, x1, z1},
 				fp = pts.size() == 1 ? Bounds{ax - 8, az - 8, ax + 8, az + 8} : raw;
 		double yaw = 0;
@@ -128,7 +130,8 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			sx += x;
 			sz += z;
 		}
-		int x = sx / p.size(), z = sz / p.size();
+		const auto count = static_cast<long long>(p.size());
+		int x = static_cast<int>(sx / count), z = static_cast<int>(sz / count);
 		if (std::any_of(footprints.begin(), footprints.end(),
 					[&](const Bounds &b) { return b.contains(x, z); }))
 			r.suppressed.push_back(key);

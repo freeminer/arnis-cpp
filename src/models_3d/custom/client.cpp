@@ -7,8 +7,15 @@
 #include <fstream>
 #include <thread>
 #include <algorithm>
+#include <mutex>
 namespace arnis::models_3d::custom
 {
+namespace
+{
+std::mutex plane_model_fetch_mutex;
+std::mutex stadium_model_fetch_mutex;
+} // namespace
+
 static std::filesystem::path cache_root(const std::filesystem::path &configured)
 {
 	if (!configured.empty())
@@ -29,13 +36,22 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 	// application-specific provider directory.
 	const std::filesystem::path root = cache_root(root_);
 	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
-	std::error_code ec;
-	std::filesystem::create_directories(root, ec);
 	std::string base = key;
 	std::replace(base.begin(), base.end(), ':', '_');
 	if (base.size() > 4 && (base.ends_with(".glb") || base.ends_with(".stl") ||
 								   base.ends_with(".GLB") || base.ends_with(".STL")))
 		base.resize(base.size() - 4);
+	// Emerge workers create separate Client instances, so per-instance locking
+	// still lets every worker observe the same cold-cache miss and download the
+	// same model. Serialize each remote archetype process-wide, including the
+	// cache lookup; the first caller publishes the file before waiters proceed.
+	std::unique_lock<std::mutex> fetch_lock;
+	if (base == "plane")
+		fetch_lock = std::unique_lock<std::mutex>(plane_model_fetch_mutex);
+	else if (base == "stadium")
+		fetch_lock = std::unique_lock<std::mutex>(stadium_model_fetch_mutex);
+	std::error_code ec;
+	std::filesystem::create_directories(root, ec);
 	for (const auto &candidate_root : {root, asset_root_}) {
 		if (candidate_root.empty())
 			continue;

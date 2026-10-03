@@ -258,7 +258,10 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			minz = std::min(minz, z);
 			maxz = std::max(maxz, z);
 		}
-		int ax = sx / p.size(), az = sz / p.size();
+		// Rust's centroid divides signed i64 sums by a signed i64 count.
+		// size_t would convert negative coordinates to unsigned before division.
+		const auto count = static_cast<long long>(p.size());
+		int ax = static_cast<int>(sx / count), az = static_cast<int>(sz / count);
 		bool raw = maxx > minx || maxz > minz;
 		Bounds fp = raw ? Bounds{minx, minz, maxx, maxz}
 						: Bounds{ax - 8, az - 8, ax + 8, az + 8};
@@ -297,7 +300,8 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			sx += x;
 			sz += z;
 		}
-		int x = sx / p.size(), z = sz / p.size();
+		const auto count = static_cast<long long>(p.size());
+		int x = static_cast<int>(sx / count), z = static_cast<int>(sz / count);
 		for (const auto &owner : footprints)
 			if (owner.bounds.contains(x, z)) {
 				r.suppressed.push_back(key);

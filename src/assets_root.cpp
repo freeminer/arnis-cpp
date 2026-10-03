@@ -46,6 +46,18 @@ std::filesystem::path path(std::filesystem::path relative_path)
 	if (relative_path.begin() != relative_path.end() &&
 			*relative_path.begin() == "assets")
 		relative_path = relative_path.lexically_relative("assets");
-	return base_directory() / relative_path;
+	const auto base = base_directory();
+	const auto direct = base / relative_path;
+	std::error_code error;
+	if (std::filesystem::exists(direct, error))
+		return direct;
+	// Development/package staging may pass the Arnis repository root
+	// (share/assets/arnis), whose payload is still nested under assets/.
+	// Installed flat roots (share/assets/arnis/climate, ... ) take precedence.
+	const auto nested = base / "assets" / relative_path;
+	error.clear();
+	if (std::filesystem::exists(nested, error))
+		return nested;
+	return direct;
 }
 } // namespace arnis::assets

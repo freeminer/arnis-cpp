@@ -42,7 +42,7 @@ std::filesystem::path base_directory()
 
 std::filesystem::path tile_cache_root()
 {
-	return base_directory() / "arnis-tile-cache";
+	return base_directory() / "tile";
 }
 
 std::filesystem::path provider_cache_root(const std::string &provider)
@@ -52,6 +52,6 @@ std::filesystem::path provider_cache_root(const std::string &provider)
 
 std::filesystem::path facade_cache_root()
 {
-	return base_directory() / "earth" / "facade";
+	return base_directory() / "facade";
 }
 } // namespace arnis::cache

@@ -1215,9 +1215,9 @@ bool generate_world(WorldEditor &editor,
 				sx += x;
 				sz += z;
 			}
-			landmark_anchors.push_back(
-					{landmark.qid, static_cast<int>(sx / points.size()),
-							static_cast<int>(sz / points.size())});
+			const auto count = static_cast<std::int64_t>(points.size());
+			landmark_anchors.push_back({landmark.qid, static_cast<int>(sx / count),
+					static_cast<int>(sz / count)});
 			break;
 		}
 	}

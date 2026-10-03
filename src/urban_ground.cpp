@@ -207,7 +207,8 @@ std::optional<Cell> compute_centroid(const Points &points)
 		x += p.first;
 		z += p.second;
 	}
-	return Cell{int(x / points.size()), int(z / points.size())};
+	const auto count = static_cast<long long>(points.size());
+	return Cell{static_cast<int>(x / count), static_cast<int>(z / count)};
 }
 Points compute_urban_ground(const Points &points, const cartesian::XZBBox &bbox)
 {
