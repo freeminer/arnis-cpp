@@ -39,7 +39,10 @@ struct PreparedBuildingData
 {
 	OutlineSuppression outline_suppression;
 	PartGroups part_groups;
+	std::unordered_set<std::uint64_t> suppressed_relations;
 };
+
+PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &elements);
 
 struct GenerationOptions
 {

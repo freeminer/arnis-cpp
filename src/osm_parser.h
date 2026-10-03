@@ -52,6 +52,7 @@ inline std::uint64_t seed_with_hint(std::uint64_t seed, StyleHint hint)
 		   (static_cast<std::uint64_t>(hint) << STYLE_HINT_SHIFT);
 }
 StyleHint building_style_hint(const tags_t &tags);
+void filter_tags(tags_t &tags);
 enum class ArchEra : std::uint8_t
 {
 	Unknown,

@@ -119,7 +119,7 @@ void read_tags(const std::string &body, tags_t &tags)
 	}
 }
 
-void filter_tags(tags_t &tags)
+void filter_tags_impl(tags_t &tags)
 {
 	static constexpr const char *ignored[] = {"created_by", "note", "fixme", "FIXME",
 			"todo", "TODO", "wikipedia", "wikimedia_commons", "import_uuid", "import",
@@ -149,6 +149,11 @@ void filter_tags(tags_t &tags)
 }
 
 } // namespace
+
+void filter_tags(tags_t &tags)
+{
+	filter_tags_impl(tags);
+}
 
 StyleHint building_style_hint(const tags_t &tags)
 {
@@ -335,7 +340,7 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 		node.lon = std::stod(a.at("lon"));
 		if ((*it).size() > 2)
 			read_tags((*it)[2].str(), node.tags);
-		filter_tags(node.tags);
+		filter_tags_impl(node.tags);
 		document.nodes.push_back(std::move(node));
 	}
 
@@ -350,7 +355,7 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 		for (std::sregex_iterator ni(body.begin(), body.end(), nd_re), ne; ni != ne; ++ni)
 			way.node_refs.push_back(integer(attrs((*ni)[1].str()), "ref"));
 		read_tags(body, way.tags);
-		filter_tags(way.tags);
+		filter_tags_impl(way.tags);
 		document.ways.push_back(std::move(way));
 	}
 
@@ -373,7 +378,7 @@ RawOsmDocument parse_osm_xml(std::istream &input)
 			relation.members.push_back(std::move(member));
 		}
 		read_tags(body, relation.tags);
-		filter_tags(relation.tags);
+		filter_tags_impl(relation.tags);
 		document.relations.push_back(std::move(relation));
 	}
 	document.completeness = analyze_completeness(document);
@@ -423,14 +428,14 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 					!element["lat"].is_number() || !element["lon"].is_number())
 				continue;
 			auto node_tags = parse_tags(element);
-			filter_tags(node_tags);
+			filter_tags_impl(node_tags);
 			document.nodes.push_back({id, element["lat"].get<double>(),
 					element["lon"].get<double>(), std::move(node_tags)});
 		} else if (type == "way") {
 			RawWay way;
 			way.id = id;
 			way.tags = parse_tags(element);
-			filter_tags(way.tags);
+			filter_tags_impl(way.tags);
 			if (element.contains("nodes") && element["nodes"].is_array())
 				for (const auto &node : element["nodes"])
 					if (node.is_number_integer() || node.is_number_unsigned())
@@ -440,7 +445,7 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 			RawRelation relation;
 			relation.id = id;
 			relation.tags = parse_tags(element);
-			filter_tags(relation.tags);
+			filter_tags_impl(relation.tags);
 			if (element.contains("members") && element["members"].is_array())
 				for (const auto &value : element["members"]) {
 					if (!value.is_object())

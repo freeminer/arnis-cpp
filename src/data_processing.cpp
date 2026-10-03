@@ -20,6 +20,7 @@
 #include "assets_root.h"
 #include "bresenham.h"
 #include "cache_root.h"
+#include "building_suppression.h"
 #include "element_processing/historic.h"
 #include "element_processing/power.h"
 #include "element_processing/emergency.h"
@@ -1523,10 +1524,8 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 
-	// Host extracts provide projected ways. Apply Rust's spatial coverage and
-	// smallest-containing-outline grouping rules to those complete rings.
-	// ARNIS-PORT: osm_parser.rs raw geographic/relation-ring preparation remains
-	// necessary for exact coverage near projection rounding boundaries.
+	// Direct callers without prepared source geometry retain the projected-space
+	// fallback. The Freeminer PBF path supplies geographic preparation above.
 	if (!prepared_buildings) {
 		std::unordered_set<std::uint64_t> relation_ways;
 		for (const auto &element : elements)
@@ -1612,12 +1611,16 @@ bool generate_world(WorldEditor &editor,
 					area > 0.0 && coverage[k] / area >= 0.5)
 				suppressed_building_outlines.insert(outlines[k]->id);
 	}
-	if (prepared_buildings)
+	if (prepared_buildings) {
 		building_part_groups = prepared_buildings->part_groups;
-	// The host supplies projected coordinates; raw geographic preparation is
-	// still needed for exact Rust decisions at rounding-sensitive boundaries.
+		for (const auto &[kind, id] : prepared_buildings->outline_suppression)
+			if (kind == "way")
+				suppressed_building_outlines.insert(id);
+	}
+	// Earth input prepares these decisions from retained geographic coordinates;
+	// direct callers without prepared input keep the projected fallback above.
 	const auto suppressed_relations =
-			prepared_buildings ? std::unordered_set<std::uint64_t>{}
+			prepared_buildings ? prepared_buildings->suppressed_relations
 							   : compute_spatial_relation_part_suppression(elements);
 	// Rust groups siblings by the seed without packed facade hints.
 	building_group_members.clear();
