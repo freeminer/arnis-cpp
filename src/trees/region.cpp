@@ -928,9 +928,11 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		if (grove * .82 + jitter * .18 >= keep)
 			return std::nullopt;
 	}
-	std::vector<std::size_t> all;
-	std::vector<std::size_t> typed;
-	std::vector<std::size_t> mapped;
+	using SpeciesPool = std::vector<std::vector<std::size_t>>;
+	SpeciesPool all_species;
+	SpeciesPool typed_species;
+	SpeciesPool mapped_species;
+	SpeciesPool beach_palm_species;
 	const bool want_beach_palm = request.beach && request.eco && !want_wet &&
 								 !want_conifer && !(mapped_selection && request.genus);
 	if (want_beach_palm && palms_allowed) {
@@ -945,42 +947,37 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					if (si >= candidate.species_palm.size() ||
 							!candidate.species_palm[si])
 						continue;
-					for (const auto i : candidate.species[si])
-						if (data_->allowed(data_->entries[i].size))
-							mapped.push_back(i);
+					beach_palm_species.push_back(candidate.species[si]);
 				}
 			}
 		}
 	}
-	for (std::size_t si = 0; si < community.species.size(); ++si)
-		for (auto i : community.species[si])
-			if (data_->allowed(data_->entries[i].size) &&
-					(palms_allowed || si >= community.species_palm.size() ||
-							!community.species_palm[si])) {
-				if (request.genus && !mapped_selection &&
-						si < community.species_names.size()) {
-					const auto &species = community.species_names[si];
-					const auto sep = species.find('_');
-					const auto species_genus = species.substr(
-							0, sep == std::string::npos ? species.size() : sep);
-					if (species_genus == *request.genus)
-						mapped.push_back(i);
-				}
-				if (want_beach_palm && si < community.species_palm.size() &&
-						community.species_palm[si])
-					typed.push_back(i);
-				else if ((want_conifer && si < community.species_conifer.size() &&
-								 community.species_conifer[si]) ||
-						 (want_broadleaf && si < community.species_conifer.size() &&
-								 !community.species_conifer[si]))
-					typed.push_back(i);
-				all.push_back(i);
-			}
+	for (std::size_t si = 0; si < community.species.size(); ++si) {
+		const bool palm =
+				si < community.species_palm.size() && community.species_palm[si];
+		if (palm && !palms_allowed)
+			continue;
+		all_species.push_back(community.species[si]);
+		if (request.genus && !mapped_selection && si < community.species_names.size()) {
+			const auto &species = community.species_names[si];
+			const auto sep = species.find('_');
+			const auto species_genus =
+					species.substr(0, sep == std::string::npos ? species.size() : sep);
+			if (species_genus == *request.genus)
+				mapped_species.push_back(community.species[si]);
+		}
+		if ((want_beach_palm && palm) ||
+				(want_conifer && si < community.species_conifer.size() &&
+						community.species_conifer[si]) ||
+				(want_broadleaf && si < community.species_conifer.size() &&
+						!community.species_conifer[si]))
+			typed_species.push_back(community.species[si]);
+	}
 	// Rust's mapped path searches every community in the active mix, then the
 	// complete realm and vanilla packs.  The initial community above is only a
 	// locality hint; do not replace a mapped genus with an unrelated species
 	// merely because that one grove lacks it.
-	if (request.genus && mapped_selection && mapped.empty()) {
+	if (request.genus && mapped_selection && mapped_species.empty()) {
 		auto same_genus = [&](const std::string &species) {
 			const auto sep = species.find('_');
 			auto genus =
@@ -1000,9 +997,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 			for (std::size_t si = 0; si < candidate.species.size(); ++si)
 				if (si < candidate.species_names.size() &&
 						same_genus(candidate.species_names[si]))
-					for (const auto i : candidate.species[si])
-						if (data_->allowed(data_->entries[i].size))
-							mapped.push_back(i);
+					mapped_species.push_back(candidate.species[si]);
 		};
 		if (request.eco) {
 			if (const auto it = data_->eco_communities.find(request.eco->id);
@@ -1013,25 +1008,20 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		auto scan_pack = [&](const Data::Pack &candidate) {
 			for (const auto &c : candidate.communities)
 				for (std::size_t si = 0; si < c.species.size(); ++si)
-					if (si < c.species_names.size() && same_genus(c.species_names[si]))
-						for (const auto i : c.species[si])
-							if (data_->allowed(data_->entries[i].size) &&
-									(mapped_selection || palms_allowed ||
-											si >= c.species_palm.size() ||
-											!c.species_palm[si]))
-								mapped.push_back(i);
+					if (si < c.species_names.size() && same_genus(c.species_names[si]) &&
+							(mapped_selection || palms_allowed ||
+									si >= c.species_palm.size() || !c.species_palm[si]))
+						mapped_species.push_back(c.species[si]);
 		};
-		if (mapped.empty()) {
+		if (mapped_species.empty()) {
 			scan_pack(data_->realm);
-			if (mapped.empty())
+			if (mapped_species.empty())
 				scan_pack(data_->vanilla);
 		}
 	}
-	const bool genus_selected = !mapped.empty();
-	if (genus_selected)
-		all = std::move(mapped);
-	if ((mapped_selection || all.empty()) && request.conifer && typed.empty() &&
-			!genus_selected) {
+	const bool genus_selected = !mapped_species.empty();
+	if ((mapped_selection || all_species.empty()) && request.conifer &&
+			typed_species.empty() && !genus_selected) {
 		if (mapped_selection && request.eco) {
 			if (const auto it = data_->eco_communities.find(request.eco->id);
 					it != data_->eco_communities.end())
@@ -1041,62 +1031,111 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					const auto &c = data_->realm.communities[ci_mix];
 					for (std::size_t si = 0; si < c.species.size(); ++si)
 						if (si < c.species_conifer.size() &&
-								c.species_conifer[si] == *request.conifer)
-							for (const auto i : c.species[si])
-								if (data_->allowed(data_->entries[i].size) &&
-										(palms_allowed || si >= c.species_palm.size() ||
-												!c.species_palm[si]))
-									typed.push_back(i);
+								c.species_conifer[si] == *request.conifer &&
+								(palms_allowed || si >= c.species_palm.size() ||
+										!c.species_palm[si]))
+							typed_species.push_back(c.species[si]);
 				}
 		}
 		auto scan_type = [&](const Data::Pack &candidate) {
 			for (const auto &c : candidate.communities)
 				for (std::size_t si = 0; si < c.species.size(); ++si)
 					if (si < c.species_conifer.size() &&
-							c.species_conifer[si] == *request.conifer)
-						for (const auto i : c.species[si])
-							if (data_->allowed(data_->entries[i].size) &&
-									(palms_allowed || si >= c.species_palm.size() ||
-											!c.species_palm[si]))
-								typed.push_back(i);
+							c.species_conifer[si] == *request.conifer &&
+							(palms_allowed || si >= c.species_palm.size() ||
+									!c.species_palm[si]))
+						typed_species.push_back(c.species[si]);
 		};
-		if (typed.empty())
+		if (typed_species.empty())
 			scan_type(data_->realm);
-		if (typed.empty())
+		if (typed_species.empty())
 			scan_type(data_->vanilla);
 	}
-	if (!genus_selected && !typed.empty())
-		all = std::move(typed);
-	if (all.empty())
+	SpeciesPool species_candidates = !beach_palm_species.empty()
+											 ? std::move(beach_palm_species)
+									 : genus_selected		  ? std::move(mapped_species)
+									 : !typed_species.empty() ? std::move(typed_species)
+															  : std::move(all_species);
+	if (species_candidates.empty())
 		return std::nullopt;
-	TreeSize target = request.want_size.value_or(data_->roll_size(sx, sz));
-	if (request.want_size) {
-		TreeSize best = TreeSize::Giant;
-		bool found = false;
-		for (auto i : all)
-			if (data_->entries[i].size <= target &&
-					(!found || data_->entries[i].size > best)) {
-				best = data_->entries[i].size;
-				found = true;
-			}
-		if (found)
-			target = best;
+	// Rust chooses a species in proportion to its usable schematic count, then
+	// applies width and preferred size within that species. Flattening the pack
+	// first skews the species mix and the width fallback.
+	std::optional<TreeSize> requested_tier;
+	for (const auto &species : species_candidates)
+		for (const auto i : species)
+			if (data_->allowed(data_->entries[i].size) &&
+					(!request.want_size ||
+							data_->entries[i].size <= *request.want_size) &&
+					(!requested_tier || data_->entries[i].size > *requested_tier))
+				requested_tier = data_->entries[i].size;
+	if (request.want_size && !requested_tier)
+		for (const auto &species : species_candidates)
+			for (const auto i : species)
+				if (data_->allowed(data_->entries[i].size) &&
+						(!requested_tier || data_->entries[i].size < *requested_tier))
+					requested_tier = data_->entries[i].size;
+	std::vector<std::vector<std::size_t>> usable_species;
+	std::size_t total = 0;
+	for (const auto &species : species_candidates) {
+		std::vector<std::size_t> usable;
+		for (const auto i : species)
+			if (data_->allowed(data_->entries[i].size) &&
+					(!request.want_size || !requested_tier ||
+							data_->entries[i].size == *requested_tier))
+				usable.push_back(i);
+		total += usable.size();
+		usable_species.push_back(std::move(usable));
 	}
-	std::vector<std::size_t> tier;
-	for (auto i : all)
-		if (data_->entries[i].size == target)
-			tier.push_back(i);
-	if (tier.empty())
-		tier = all;
+	if (!total) {
+		// Rust falls back to any non-excluded model if UI or scale filtering
+		// removes every candidate, bypassing width and size preferences.
+		std::size_t any = 0;
+		for (const auto &species : species_candidates)
+			any += species.size();
+		if (!any)
+			return std::nullopt;
+		std::size_t fallback = land_cover::coord_hash(sx + 31, sz + 57) % any;
+		for (const auto &species : species_candidates) {
+			if (fallback < species.size()) {
+				const auto index = species[land_cover::coord_hash(sx + 313, sz + 727) %
+										   species.size()];
+				return SlotSelection{sx, sz, index,
+						unsigned(land_cover::coord_hash(sx ^ 0x5bd1, sz ^ 0x9e37) % 4)};
+			}
+			fallback -= species.size();
+		}
+		return std::nullopt;
+	}
+	std::size_t pick = land_cover::coord_hash(sx + 31, sz + 57) % total;
+	std::vector<std::size_t> selected_species;
+	for (const auto &species : usable_species) {
+		if (pick < species.size()) {
+			selected_species = species;
+			break;
+		}
+		pick -= species.size();
+	}
+	if (selected_species.empty())
+		return std::nullopt;
 	const auto roll = land_cover::coord_hash(sx + 5, sz + 11) % 100;
 	const int wanted = roll < 78 ? 1 : roll < 96 ? 2 : 3;
 	std::vector<std::size_t> width;
 	for (int w = wanted; w >= 1 && width.empty(); --w)
-		for (auto i : tier)
+		for (auto i : selected_species)
 			if (data_->entries[i].width == w)
 				width.push_back(i);
 	if (width.empty())
-		width = tier;
+		width = selected_species;
+	if (!request.want_size) {
+		const auto target = data_->roll_size(sx, sz);
+		std::vector<std::size_t> size_matches;
+		for (const auto i : width)
+			if (data_->entries[i].size == target)
+				size_matches.push_back(i);
+		if (!size_matches.empty())
+			width = std::move(size_matches);
+	}
 	const auto index = width[land_cover::coord_hash(sx + 313, sz + 727) % width.size()];
 	return SlotSelection{sx, sz, index,
 			unsigned(land_cover::coord_hash(sx ^ 0x5bd1, sz ^ 0x9e37) % 4)};

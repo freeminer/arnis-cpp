@@ -158,7 +158,8 @@ struct Tree
 			const BuildingFootprintBitmap *building_footprints = nullptr,
 			const bridges::BridgeSurfaceMap *bridge_surface = nullptr,
 			bool allow_on_paved = false,
-			std::optional<double> mapped_height_m = std::nullopt);
+			std::optional<double> mapped_height_m = std::nullopt, bool from_tags = false,
+			bool use_region_pack = true, bool density_decided = false);
 
 	static std::vector<Block> get_building_wall_blocks();
 	static std::vector<Block> get_building_floor_blocks();

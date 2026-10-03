@@ -5,6 +5,7 @@
 #include "element_processing/advtrains.h"
 #include <sys/types.h>
 #include <unordered_set>
+#include <array>
 #include <algorithm>
 #include <cmath>
 #include <memory>
@@ -1396,16 +1397,57 @@ bool generate_world(WorldEditor &editor,
 	// packs at very small world scales. Keep the selector callbacks disabled in
 	// that mode so both mapped and land-cover trees take the same micro path.
 	if (shared_selector && args.scale >= 0.35) {
-		editor.set_regional_tree_placer([&editor, shared_selector, &building_footprints,
-												&bridge_surface](
-												int x, int y, int z, std::uint8_t cover) {
-			return trees::place_selected_region_tree_for_cover(editor, *shared_selector,
-					x, z, cover, y, {}, &building_footprints, &bridge_surface);
-		});
+		editor.set_regional_tree_placer(
+				[&editor, shared_selector, &building_footprints, &bridge_surface](int x,
+						int y, int z, std::uint8_t cover,
+						std::optional<trees::Habitat> habitat_hint, bool tagged,
+						bool wet_ground, bool allow_on_paved,
+						bool density_decided) -> std::optional<bool> {
+					trees::SlotRequest request;
+					request.density_decided = density_decided;
+					request.tagged = tagged;
+					const auto [slot_x, slot_z] =
+							trees::trunk_slot_s(x, z, shared_selector->base_spacing());
+					const auto slot_cover =
+							editor.ground ? editor.ground->cover_class(
+													editor.ground_point(slot_x, slot_z))
+										  : cover;
+					request.wet_ground =
+							editor.ground ? slot_cover == land_cover::LC_WETLAND ||
+													slot_cover == land_cover::LC_MANGROVES
+										  : wet_ground;
+					request.eco = editor.ground
+										  ? editor.ground->ecoregion_at(
+													editor.ground_point(slot_x, slot_z))
+										  : std::nullopt;
+					request.want_size = editor.canopy_size_hint(slot_x, slot_z);
+					if (request.eco) {
+						const int beach_radius = std::clamp(
+								static_cast<int>(std::lround(12.0 * editor.scale())), 2,
+								12);
+						for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
+									 {{0, 0}, {beach_radius, 0}, {-beach_radius, 0},
+											 {0, beach_radius}, {0, -beach_radius}}})
+							if (editor.ground &&
+									editor.ground->cover_class(editor.ground_point(
+											slot_x + dx, slot_z + dz)) ==
+											land_cover::LC_BEACH) {
+								request.beach = true;
+								break;
+							}
+					}
+					if (!habitat_hint)
+						return trees::place_selected_region_tree_for_cover(editor,
+								*shared_selector, x, z, slot_cover, y, request,
+								&building_footprints, &bridge_surface, allow_on_paved);
+					return trees::place_selected_region_tree(editor, *shared_selector, x,
+							z, *habitat_hint, y, request, &building_footprints,
+							&bridge_surface, allow_on_paved);
+				});
 		editor.set_mapped_regional_tree_placer(
 				[&editor, shared_selector, &building_footprints, &bridge_surface](int x,
 						int y, int z, std::uint8_t cover,
-						const trees::MappedRequest &request) {
+						const trees::MappedRequest &request) -> std::optional<bool> {
 					(void)cover;
 					const int elevation = editor.terrain_level(x, z).value_or(
 							editor.get_absolute_y(x, y, z));

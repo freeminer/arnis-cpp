@@ -279,11 +279,12 @@ Block natural_surface_for(WorldEditor &editor, int x, int ground_y, int z)
 	return GRASS_BLOCK;
 }
 
-std::optional<bool> canopy_tree_verdict(
+std::pair<bool, bool> canopy_verdict(
 		WorldEditor &editor, int x, int z, int origin_x, int origin_z)
 {
-	if (!editor.ground || !editor.ground->has_canopy())
-		return std::nullopt;
+	if (!editor.ground || !editor.ground->has_canopy() ||
+			!editor.ground->has_land_cover())
+		return {false, false};
 	const int spacing = std::max(1, editor.get_tree_slot_spacing());
 	const auto floor_div = [spacing](int v) {
 		return v >= 0 ? v / spacing : -(((-v) + spacing - 1) / spacing);
@@ -293,31 +294,37 @@ std::optional<bool> canopy_tree_verdict(
 	const auto fraction = editor.ground->canopy_fraction(
 			XZPoint{cell_x - origin_x, cell_z - origin_z}, spacing);
 	if (!fraction)
-		return std::nullopt;
+		return {false, false};
 	const auto [slot_x, slot_z] = trees::trunk_slot_s(x, z, spacing);
 	if (x != slot_x || z != slot_z)
-		return false;
+		return {true, false};
 	const double p =
 			canopy::slot_probability(*fraction, spacing, editor.place_schematics());
 	const double roll =
 			double(land_cover::coord_hash(x ^ 0x434d, z ^ 0x484d) % 10000) / 10000.0;
-	return roll < p;
+	return {true, roll < p};
 }
 
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale,
-		double absolute_latitude, int alpine_from_y)
+		double absolute_latitude, int alpine_from_y, int slope)
 {
 	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
 			(bridge_surface && bridge_surface->contains(x, z)) ||
-			(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z)) ||
 			editor.check_for_block_absolute(x, ground_y + 1, z))
 		return;
-	if (!editor.check_for_block_absolute(x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{GRASS_BLOCK, PODZOL,
-						COARSE_DIRT, DIRT, MUD, MYCELIUM, FARMLAND})))
-		return;
+	const auto natural_ground = [&] {
+		return editor.check_for_block_absolute(x, ground_y, z,
+				std::optional<std::vector<Block>>(std::vector<Block>{GRASS_BLOCK,
+						COARSE_DIRT, DIRT, MUD, FARMLAND, PODZOL, MOSS_BLOCK}));
+	};
+	const bool ground_is_natural = natural_ground();
+	const bool ground_allows_trees =
+			ground_is_natural ||
+			editor.check_for_block_absolute(x, ground_y, z,
+					std::optional<std::vector<Block>>(std::vector<Block>{
+							SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS}));
 
 	const auto cover = editor.ground
 							   ? editor.ground->cover_class({x - editor.mg->node_min.X,
@@ -335,6 +342,17 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
 	const auto site_habitat = ground_decoration::habitat(
 			cover, climate, absolute_latitude, ground_y >= alpine_from_y, eco);
+	const auto [canopy_covered, canopy_tree] =
+			canopy_verdict(editor, x, z, origin_x, origin_z);
+	if (canopy_tree && slope <= 4 && ground_allows_trees &&
+			!editor.check_for_block_absolute(x, ground_y + 1, z) &&
+			!(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z)))
+		Tree::create_from_canopy(
+				editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
+	// Rust runs its land-cover decoration after canopy trees. A placed canopy
+	// trunk now occupies this column; otherwise the same open-column gate applies.
+	if (editor.check_for_block_absolute(x, ground_y + 1, z))
+		return;
 	const double sward =
 			climate_sward(climate) *
 			(editor.check_for_block_type_absolute(x, ground_y, z, COARSE_DIRT) ? .5
@@ -346,73 +364,17 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		if (!editor.block_exists_absolute(x, y, z))
 			editor.set_block_if_absent_absolute(block, x, y, z);
 	};
-	if (cover == land_cover::LC_MANGROVES && eco &&
-			eco->biome == ecoregion::EcoBiome::Mangroves && rng.uniform(4) == 0) {
-		// Rust's ecoregion decorator gives mapped mangrove habitat priority
-		// over the generic canopy fallback.
-		Tree::create_of_type(editor, Coord{x, 1, z}, TreeType::Mangrove,
-				&building_footprints, bridge_surface, true);
-	} else if (cover == land_cover::LC_TREE_COVER) {
-		// Measured canopy owns density where available.  On no-data cells retain
-		// the old land-cover-only probability, matching Rust's fallback contract.
-		const auto canopy_wants_tree =
-				canopy_tree_verdict(editor, x, z, origin_x, origin_z);
+	if (cover == land_cover::LC_TREE_COVER && slope <= 4 && ground_allows_trees) {
+		// The canopy map adds a separately selected tree; it suppresses only the
+		// land-cover tree roll in measured cells, never the forest-floor plants.
 		constexpr double micro_tree_max_scale = 0.35;
 		const auto tree_rate = scale < micro_tree_max_scale ? 4u : 30u;
 		const auto choice = rng.uniform(tree_rate);
-		if (canopy_wants_tree.value_or(choice == 0)) {
-			bool placed = false;
-			if (eco) {
-				switch (eco->biome) {
-				case ecoregion::EcoBiome::TemperateConifer:
-				case ecoregion::EcoBiome::Boreal:
-					Tree::create_of_type(editor, Coord{x, 1, z}, TreeType::Spruce,
-							&building_footprints, bridge_surface);
-					placed = true;
-					break;
-				case ecoregion::EcoBiome::DryTropical:
-					Tree::create_of_type(editor, Coord{x, 1, z}, TreeType::Acacia,
-							&building_footprints, bridge_surface);
-					placed = true;
-					break;
-				case ecoregion::EcoBiome::MoistTropical:
-					Tree::create_of_type(editor, Coord{x, 1, z}, TreeType::Jungle,
-							&building_footprints, bridge_surface);
-					placed = true;
-					break;
-				case ecoregion::EcoBiome::TropicalGrassland:
-				case ecoregion::EcoBiome::Mediterranean:
-					Tree::create_of_type(editor, Coord{x, 1, z}, TreeType::Oak,
-							&building_footprints, bridge_surface);
-					placed = true;
-					break;
-				default:
-					break;
-				}
-			}
-			if (!placed && !editor.place_regional_tree(x, ground_y + 1, z, cover))
-				Tree::create(
-						editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
-		} else if (choice == 1 && patch_roll < 72) {
-			// Rust's habitat tables bias prairie and Mediterranean patches toward
-			// their characteristic flowers instead of using a global palette.
-			const auto flower_choice =
-					eco && eco->biome == ecoregion::EcoBiome::TemperateGrassland ? 2u
-					: eco && eco->biome == ecoregion::EcoBiome::Mediterranean
-							? 0u
-							: rng.uniform(4);
-			const Block flower = flower_choice == 0	  ? RED_FLOWER
-								 : flower_choice == 1 ? BLUE_FLOWER
-								 : flower_choice == 2 ? YELLOW_FLOWER
-													  : WHITE_FLOWER;
-			place_decoration(flower, ground_y + 1);
-		} else if (choice == 2 && eco &&
-				   (eco->biome == ecoregion::EcoBiome::Boreal ||
-						   eco->biome == ecoregion::EcoBiome::TemperateConifer) &&
-				   editor.highest_block_between(x, z, ground_y + 3, ground_y + 24)) {
-			place_decoration(
-					(patch_roll & 1) ? RED_MUSHROOM : BROWN_MUSHROOM, ground_y + 1);
-		} else if (undergrowth_roll(x, z, .4 * sward, SALT_FOREST_FLOOR)) {
+		if (choice == 0 && !canopy_covered &&
+				!(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z))) {
+			Tree::create(editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
+		} else if (ground_is_natural &&
+				   undergrowth_roll(x, z, .4 * sward, SALT_FOREST_FLOOR)) {
 			const double fern_share =
 					site_habitat == ground_decoration::Habitat::Taiga	 ? .45
 					: site_habitat == ground_decoration::Habitat::Jungle ? .3
@@ -861,10 +823,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				}
 			}
 
-			if (!planetary && !in_tunnel)
+			if (!planetary && !in_tunnel && has_cover)
 				maybe_place_vegetation(editor, x, ground_y, z, building_footprints,
 						xzbbox.min_x(), xzbbox.min_z(), bridge_surface, args.scale,
-						std::abs(center_latitude), alpine_from_y);
+						std::abs(center_latitude), alpine_from_y, slope);
 
 			// Rust's universal depth pass closes visible gaps below all terrain
 			// columns, including ones whose surface was supplied by OSM.

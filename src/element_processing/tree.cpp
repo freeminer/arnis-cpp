@@ -1,5 +1,7 @@
 #include "tree.h"
 #include "../deterministic_rng.h"
+#include "../land_cover/land_cover.h"
+#include "../trees/region.h"
 #include <algorithm>
 #include <initializer_list>
 #include <limits>
@@ -438,6 +440,22 @@ Tree Tree::get_tree_variant(TreeType kind, std::uint32_t variant_idx)
 
 namespace
 {
+trees::Habitat habitat_for_tree_type(TreeType type)
+{
+	switch (type) {
+	case TreeType::Spruce:
+	case TreeType::Pine:
+		return trees::Habitat::Conifer;
+	case TreeType::Willow:
+	case TreeType::Mangrove:
+		return trees::Habitat::Wet;
+	case TreeType::Acacia:
+		return trees::Habitat::Dry;
+	default:
+		return trees::Habitat::Lowland;
+	}
+}
+
 TreeType selected_tree_type(int x, int z)
 {
 	auto rng = coord_rng(x, z, 0);
@@ -482,7 +500,7 @@ void Tree::create(WorldEditor &editor, const Coord &pos,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	create_of_type(editor, pos, selected_tree_type(pos.x, pos.z), building_footprints,
-			bridge_surface, false);
+			bridge_surface, false, std::nullopt, false, true, false);
 }
 
 void Tree::create_from_canopy(WorldEditor &editor, const Coord &pos,
@@ -490,7 +508,7 @@ void Tree::create_from_canopy(WorldEditor &editor, const Coord &pos,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	create_of_type(editor, pos, selected_tree_type(pos.x, pos.z), building_footprints,
-			bridge_surface, false);
+			bridge_surface, false, std::nullopt, false, true, true);
 }
 
 std::vector<Block> Tree::get_building_wall_blocks()
@@ -658,7 +676,8 @@ bool Tree::canopy_might_intersect_building(
 void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_type,
 		const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved,
-		std::optional<double> mapped_height_m)
+		std::optional<double> mapped_height_m, bool from_tags, bool use_region_pack,
+		bool density_decided)
 {
 	// Tile halos may discover the same tree as their owner. Rust assigns tree
 	// placement to the tile containing the trunk so edge columns are generated once.
@@ -692,6 +711,21 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 							 });
 	if (editor.check_for_block(pos.x, 0, pos.z, protected_surface_blocks))
 		return;
+	const auto cover =
+			editor.ground ? editor.ground->cover_class(editor.ground_point(pos.x, pos.z))
+						  : std::uint8_t{0};
+	const bool wet_ground =
+			cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES;
+	if (use_region_pack && editor.scale() >= 0.35) {
+		const auto handled = editor.place_regional_tree(pos.x,
+				editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, cover,
+				habitat_for_tree_type(tree_type), from_tags, wet_ground, allow_on_paved,
+				density_decided);
+		// A present false result is still handled: Rust's active pack may choose
+		// a clearing, which must not fall through to a procedural tree.
+		if (handled.has_value())
+			return;
+	}
 
 	std::vector<Block> blacklist;
 	auto bw = get_building_wall_blocks();

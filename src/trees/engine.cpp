@@ -3,6 +3,7 @@
 #include "../block_definitions.h"
 #include "../element_processing/tree.h"
 #include "mapped.h"
+#include "schematic.h"
 #include "../ecoregion.h"
 #include "../land_cover/land_cover.h"
 #include <array>
@@ -113,28 +114,39 @@ bool place_region_tree_at(world_editor::WorldEditor &e, double lat, double lon,
 bool place_selected_region_tree(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int x, int z, Habitat habitat, int elevation_y,
 		SlotRequest request, const BuildingFootprintBitmap *building_footprints,
-		const bridges::BridgeSurfaceMap *bridge_surface)
+		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved)
 {
 	const auto blocked = [&](int sx, int sz) {
-		return editor.surface_is_sealed(sx, sz) || editor.is_lc_water(sx, sz) ||
-			   (editor.mapped_trunks && editor.mapped_trunks->under_crown(sx, sz)) ||
+		return (!allow_on_paved && editor.surface_is_sealed(sx, sz)) ||
+			   editor.is_lc_water(sx, sz) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,
-					   std::optional<std::vector<Block>>(
-							   {block_definitions::BLACK_CONCRETE,
-									   block_definitions::GRAY_CONCRETE_POWDER,
-									   block_definitions::CYAN_TERRACOTTA,
-									   block_definitions::GRAY_CONCRETE,
-									   block_definitions::LIGHT_GRAY_CONCRETE,
-									   block_definitions::DIRT_PATH,
-									   block_definitions::SMOOTH_STONE,
-									   block_definitions::WATER}));
+					   allow_on_paved
+							   ? std::optional<std::vector<Block>>(
+										 {block_definitions::WATER})
+							   : std::optional<std::vector<Block>>(
+										 {block_definitions::BLACK_CONCRETE,
+												 block_definitions::GRAY_CONCRETE_POWDER,
+												 block_definitions::CYAN_TERRACOTTA,
+												 block_definitions::GRAY_CONCRETE,
+												 block_definitions::LIGHT_GRAY_CONCRETE,
+												 block_definitions::DIRT_PATH,
+												 block_definitions::SMOOTH_STONE,
+												 block_definitions::WATER}));
 	};
-	if (blocked(x, z))
+	// Match Rust's tile ownership rule: halo requests are ignored, but if the
+	// deterministic schematic slot crosses an ownership seam, plant at the request.
+	if (!editor.owns(x, z) || blocked(x, z))
 		return false;
 	auto selected = selector.pick_slot(x, z, habitat, elevation_y, request);
-	if (!selected || blocked(selected->x, selected->z))
+	if (!selected)
+		return false;
+	if (!editor.owns(selected->x, selected->z)) {
+		selected->x = x;
+		selected->z = z;
+	}
+	if (blocked(selected->x, selected->z))
 		return false;
 	return place_selected_schematic(editor, selector,
 			elevation_y - editor.get_ground_level(x, z), *selected, building_footprints);
@@ -145,16 +157,15 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	const auto blocked = [&](int sx, int sz) {
-		// Mapped OSM trees are explicitly allowed on paving in Rust; only water,
-		// hard obstacles, footprints, bridges and overlapping mapped crowns veto them.
+		// Mapped OSM trees are explicitly allowed on paving in Rust. Mapped crown
+		// masks suppress nearby procedural vegetation, not the mapped trunk itself.
 		return editor.is_lc_water(sx, sz) ||
-			   (editor.mapped_trunks && editor.mapped_trunks->under_crown(sx, sz)) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,
 					   std::optional<std::vector<Block>>({block_definitions::WATER}));
 	};
-	if (blocked(x, z))
+	if (!editor.owns(x, z) || blocked(x, z))
 		return false;
 	const auto selected =
 			selector.pick_mapped(x, z, request.habitat, elevation_y, request);
@@ -166,7 +177,7 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int x, int z, std::uint8_t cover, int elevation_y,
 		SlotRequest request, const BuildingFootprintBitmap *building_footprints,
-		const bridges::BridgeSurfaceMap *bridge_surface)
+		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved)
 {
 	if (!request.eco && editor.ground && editor.mg)
 		request.eco = editor.ground->ecoregion_at(
@@ -174,6 +185,6 @@ bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 	const auto habitat = ecoregion_habitat(editor, x, z, cover)
 								 .value_or(habitat_for_land_cover(cover));
 	return place_selected_region_tree(editor, selector, x, z, habitat, elevation_y,
-			request, building_footprints, bridge_surface);
+			request, building_footprints, bridge_surface, allow_on_paved);
 }
 }

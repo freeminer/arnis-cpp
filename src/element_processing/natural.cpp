@@ -166,12 +166,13 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				request.eco = editor.ground->ecoregion_at(
 						{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
 			request.beach = request.eco.has_value() && near_beach(editor, x, z);
-			if (editor.place_mapped_regional_tree(x, 1, z, 0, request))
+			if (editor.place_mapped_regional_tree(x, 1, z, 0, request).has_value())
 				continue;
 			Tree::create_of_type(editor, {x, 1, z}, mapped_row.kind, &building_footprints,
 					&bridge_surface, true,
 					mapped_row.height_m > 0.0 ? std::optional<double>(mapped_row.height_m)
-											  : std::nullopt);
+											  : std::nullopt,
+					true, false, false);
 		}
 		return;
 	}
@@ -193,12 +194,13 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			request.eco = editor.ground->ecoregion_at(
 					{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
 		request.beach = request.eco.has_value() && near_beach(editor, x, z);
-		if (editor.place_mapped_regional_tree(x, 1, z, 0, request))
+		if (editor.place_mapped_regional_tree(x, 1, z, 0, request).has_value())
 			return;
 		Tree::create_of_type(editor, {x, 1, z}, mapped.kind, &building_footprints,
 				&bridge_surface, true,
 				mapped.height_m > 0.0 ? std::optional<double>(mapped.height_m)
-									  : std::nullopt);
+									  : std::nullopt,
+				true, false, false);
 		return;
 	}
 
@@ -348,11 +350,13 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			TreeType tree_type = trees_ok_to_generate[rng.uniform(
 					static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
 			std::optional<double> mapped_height_m;
+			bool mapped_kind = false;
 			// Use the shared Rust-parity mapped selector whenever OSM supplies
 			// species/genus information; this keeps node and regional selection
 			// on the same deterministic pool.
 			if (tags.contains("genus") || tags.contains("species") ||
 					tags.contains("taxon") || tags.contains("genus:wikidata")) {
+				mapped_kind = true;
 				const auto mapped = trees::mapped::from_tags(
 						tags, static_cast<std::uint64_t>(element.id()));
 				trees::MappedRequest mapped_request;
@@ -367,7 +371,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				if (editor.ground && editor.mg)
 					mapped_request.eco = editor.ground->ecoregion_at(
 							{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
-				if (editor.place_mapped_regional_tree(x, 1, z, 0, mapped_request))
+				if (editor.place_mapped_regional_tree(x, 1, z, 0, mapped_request)
+								.has_value())
 					return;
 				tree_type = mapped.kind;
 				if (mapped.height_m > 0.0 && mapped.height_m < 4.0)
@@ -378,7 +383,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 
 			// Create the tree
 			Tree::create_of_type(editor, Coord{x, 1, z}, tree_type, &building_footprints,
-					&bridge_surface, true, mapped_height_m);
+					&bridge_surface, true, mapped_height_m, mapped_kind, !mapped_kind);
 		}
 		return;
 	}
@@ -719,7 +724,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 										: (rng.random_bool(.6) ? TreeType::Willow
 															   : TreeType::Mangrove);
 						Tree::create_of_type(editor, {x, 1, z}, type,
-								&building_footprints, &bridge_surface);
+								&building_footprints, &bridge_surface, false,
+								std::nullopt, true);
 					} else if (r < 15)
 						place_grass_or_tall(editor, rng, x, z);
 				} else if (wetland_type == "bog") {
