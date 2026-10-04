@@ -4,8 +4,11 @@
 #include "cache.h"
 #include "fetch.h"
 #include "geometry.h"
+#include "register.h"
+#include "plane.h"
 #include "sfm.h"
 #include "types.h"
+#include "visibility.h"
 
 #include <cstddef>
 #include <atomic>
@@ -17,6 +20,8 @@
 #include <string>
 #include <vector>
 #include <unordered_map>
+#include <map>
+#include <set>
 
 namespace arnis::mapillary
 {
@@ -102,11 +107,102 @@ struct Geometry
 	std::vector<Wall> walls;
 	std::unordered_map<std::string, Camera> cameras;
 	std::unordered_map<std::string, PanoMeta> metas;
+	std::unordered_map<std::string, cache::ImageRecord> image_records;
 	std::unordered_map<std::string, sfm::Cluster> clusters;
 	std::array<double, 4> bbox_xy{};
+};
+
+struct RegistrationStats
+{
+	std::size_t panos = 0, with_cluster = 0, local = 0, global = 0, none = 0,
+				no_cluster = 0, theta_used = 0;
+	double acceptance_rate_local = 0.0, acceptance_rate_any = 0.0;
+	double median_shift_m = 0.0, median_inliers_after = 0.0, median_inliers_before = 0.0;
+	std::map<std::string, std::size_t> local_rejection_reasons;
+};
+
+struct RegistrationStage
+{
+	std::map<std::string, registration::Registration> registrations;
+	std::map<std::string, registration::Registration> local_attempts;
+	std::map<std::string, std::optional<std::array<double, 3>>> global_shifts;
+	std::map<std::string, Camera> cameras;
+	std::map<std::string, std::size_t> ground_points;
+	RegistrationStats stats;
+};
+
+struct CandidateStage
+{
+	Footprints footprints;
+	std::vector<Wall> walls;
+	std::map<std::string, std::vector<ViewCandidate>> by_wall;
+	std::set<std::string> requested_images;
+	std::size_t reachable = 0;
+};
+
+struct PlaneStage
+{
+	// Keys use Rust's stable "<wall key>__<pano id>" representation.
+	std::map<std::string, PlaneFit> per_view;
+	std::map<std::string, std::pair<double, std::string>> z_bases;
+};
+
+struct AlignedWall
+{
+	PlaneFit plane;
+	std::optional<std::string> best_pano;
+	std::vector<ViewCandidate> selected, candidates;
+	plane::EndSource corner_a{plane::EndSource::Osm}, corner_b{plane::EndSource::Osm};
+	bool single_view{};
+};
+struct AlignmentStage
+{
+	std::map<std::string, sfm::DepthMap> depths;
+	std::map<std::string, PlaneFit> planes, per_view;
+	std::map<std::string, std::pair<double, std::string>> z_bases;
+	std::map<std::string, plane::ViewOffset> per_view_offsets;
+	std::map<std::string, AlignedWall> walls;
+	std::size_t candidates_no_image{}, reachable{}, walls_with_views{};
+};
+
+struct AlignmentRun
+{
+	RegistrationStage registration;
+	CandidateStage candidates;
+	AlignmentStage alignment;
+	std::size_t images_requested{}, images_decoded{};
+	bool cancelled{};
+};
+
+struct AlignmentPipelineResult
+{
+	PipelineResult acquisition;
+	std::optional<Geometry> geometry;
+	std::optional<AlignmentRun> alignment;
+	std::string error;
+	bool succeeded() const
+	{
+		return geometry.has_value() && alignment.has_value() && error.empty();
+	}
 };
 
 PipelineResult acquire_images(const Client &, const PipelineConfig &);
 std::optional<Geometry> stage_geometry(const PipelineConfig &, const PipelineResult &,
 		const Client &, std::string *error = nullptr);
+RegistrationStage stage_registration(const PipelineConfig &, const Geometry &);
+CandidateStage stage_candidates(
+		const PipelineConfig &, const Geometry &, const RegistrationStage &);
+PlaneStage stage_planes(const PipelineConfig &, const Geometry &,
+		const RegistrationStage &, const CandidateStage &);
+AlignmentStage stage_align_visibility(const PipelineConfig &, const Geometry &,
+		const RegistrationStage &, CandidateStage, const PlaneStage &,
+		const std::map<std::string, projection::Image> &images);
+using ImageLoader = std::function<std::optional<projection::Image>(const std::string &)>;
+AlignmentStage stage_align_visibility(const PipelineConfig &, const Geometry &,
+		const RegistrationStage &, CandidateStage, const PlaneStage &,
+		const ImageLoader &load_image);
+std::optional<projection::Image> decode_cached_image(
+		const std::filesystem::path &, std::string *error = nullptr);
+AlignmentRun run_alignment(const Client &, const PipelineConfig &, const Geometry &);
+AlignmentPipelineResult run_alignment_pipeline(const Client &, const PipelineConfig &);
 } // namespace arnis::mapillary

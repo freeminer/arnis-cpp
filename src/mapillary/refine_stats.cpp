@@ -65,14 +65,4 @@ double weighted_median(
 	}
 	return interp_median(0.5, positions, sorted_values);
 }
-double geometric_score(double distance_m, double incidence_deg, double angular_width_deg)
-{
-	if (!std::isfinite(distance_m) || !std::isfinite(incidence_deg) ||
-			!std::isfinite(angular_width_deg))
-		return 0;
-	const double distance_term =
-			std::clamp(1.0 - std::abs(distance_m - 12.0) / 30.0, 0.2, 1.0);
-	return std::cos(incidence_deg * 3.141592653589793 / 180.0) * distance_term *
-		   std::min(angular_width_deg / 40.0, 1.0);
-}
 }

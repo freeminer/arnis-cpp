@@ -1,9 +1,16 @@
 #pragma once
 
+#include "imgops.h"
+#include "sfm.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <limits>
+#include <optional>
+#include <string>
+#include <tuple>
+#include <unordered_map>
 #include <vector>
 
 namespace arnis::mapillary::registration
@@ -101,17 +108,119 @@ inline std::vector<double> edt(const std::vector<bool> &mask, std::size_t n)
 	}
 	return out;
 }
+inline bool clip_line(std::int64_t width, std::int64_t height,
+		std::array<std::int64_t, 2> &a, std::array<std::int64_t, 2> &b)
+{
+	if (width <= 0 || height <= 0)
+		return false;
+	const auto right = width - 1, bottom = height - 1;
+	auto code = [&](std::int64_t x, std::int64_t y) {
+		return int(x < 0) + int(x > right) * 2 + int(y < 0) * 4 + int(y > bottom) * 8;
+	};
+	auto x1 = a[0], y1 = a[1], x2 = b[0], y2 = b[1];
+	int c1 = code(x1, y1), c2 = code(x2, y2);
+	if ((c1 & c2) == 0 && (c1 | c2) != 0) {
+		if (c1 & 12) {
+			const auto y = c1 < 8 ? 0 : bottom;
+			if (y2 == y1)
+				return false;
+			x1 += (y - y1) * (x2 - x1) / (y2 - y1);
+			y1 = y;
+			c1 = int(x1 < 0) + int(x1 > right) * 2;
+		}
+		if (c2 & 12) {
+			const auto y = c2 < 8 ? 0 : bottom;
+			if (y1 == y2)
+				return false;
+			x2 += (y - y2) * (x1 - x2) / (y1 - y2);
+			y2 = y;
+			c2 = int(x2 < 0) + int(x2 > right) * 2;
+		}
+		if ((c1 & c2) == 0 && (c1 | c2) != 0) {
+			if (c1) {
+				const auto x = c1 == 1 ? 0 : right;
+				if (x2 == x1)
+					return false;
+				y1 += (x - x1) * (y2 - y1) / (x2 - x1);
+				x1 = x;
+				c1 = 0;
+			}
+			if (c2) {
+				const auto x = c2 == 1 ? 0 : right;
+				if (x1 == x2)
+					return false;
+				y2 += (x - x2) * (y1 - y2) / (x1 - x2);
+				x2 = x;
+				c2 = 0;
+			}
+		}
+	}
+	if ((c1 | c2) != 0)
+		return false;
+	a = {x1, y1};
+	b = {x2, y2};
+	return true;
+}
+
+// Match cv::polylines(LINE_8, shift=3): clipping and fixed-point DDA matter
+// because the distance transform is sampled bilinearly afterward.
+inline void draw_line(std::vector<bool> &mask, std::size_t n,
+		std::array<std::int64_t, 2> a, std::array<std::int64_t, 2> b)
+{
+	constexpr std::int64_t shift = 16, one = std::int64_t{1} << shift;
+	constexpr std::int64_t poly_scale = std::int64_t{1} << (shift - 3);
+	a[0] *= poly_scale;
+	a[1] *= poly_scale;
+	b[0] *= poly_scale;
+	b[1] *= poly_scale;
+	const auto scaled = static_cast<std::int64_t>(n) << shift;
+	if (!clip_line(scaled, scaled, a, b))
+		return;
+	auto dx = b[0] - a[0], dy = b[1] - a[1];
+	const std::int64_t j = dx < 0 ? -1 : 0;
+	const auto ax = (dx ^ j) - j;
+	const std::int64_t i = dy < 0 ? -1 : 0;
+	const auto ay = (dy ^ i) - i;
+	std::int64_t x_step, y_step, count;
+	if (ax > ay) {
+		dy = (dy ^ j) - j;
+		if (j != 0)
+			std::swap(a, b);
+		x_step = one;
+		y_step = (dy * one) / (ax | 1);
+		count = (b[0] - a[0]) >> shift;
+	} else {
+		dx = (dx ^ i) - i;
+		if (i != 0)
+			std::swap(a, b);
+		x_step = (dx * one) / (ay | 1);
+		y_step = one;
+		count = (b[1] - a[1]) >> shift;
+	}
+	const auto half = one >> 1;
+	const std::array<std::int64_t, 2> end{(b[0] + half) >> shift, (b[1] + half) >> shift};
+	a[0] += half;
+	a[1] += half;
+	auto set = [&](std::int64_t x, std::int64_t y) {
+		if (x >= 0 && y >= 0 && x < static_cast<std::int64_t>(n) &&
+				y < static_cast<std::int64_t>(n))
+			mask[static_cast<std::size_t>(y) * n + static_cast<std::size_t>(x)] = true;
+	};
+	for (std::int64_t step = 0; step <= count; ++step) {
+		set(a[0] >> shift, a[1] >> shift);
+		a[0] += x_step;
+		a[1] += y_step;
+	}
+	set(end[0], end[1]);
+}
+
 inline void raster_line(std::vector<bool> &mask, std::size_t n, std::array<double, 2> a,
 		std::array<double, 2> b)
 {
-	double dx = b[0] - a[0], dy = b[1] - a[1];
-	unsigned steps = unsigned(std::ceil(std::max(std::abs(dx), std::abs(dy)) * 8));
-	for (unsigned i = 0; i <= steps; ++i) {
-		double t = steps ? double(i) / steps : 0;
-		long x = std::lround(a[0] + t * dx), y = std::lround(a[1] + t * dy);
-		if (x >= 0 && y >= 0 && x < long(n) && y < long(n))
-			mask[std::size_t(y) * n + x] = true;
-	}
+	const auto fixed = [](double value) {
+		return static_cast<std::int64_t>(imgops::round_half_even(value * 8.0));
+	};
+	draw_line(mask, n, {fixed(a[0]), fixed(a[1])}, {fixed(b[0]), fixed(b[1])});
 }
 inline OutlineDT outline_dt(const std::vector<std::vector<std::array<double, 2>>> &rings,
 		std::array<double, 2> centre, double size_m, double resolution)
@@ -158,4 +267,59 @@ inline std::array<double, 3> search_shift(const OutlineDT &dt,
 		}
 	return best;
 }
+
+inline constexpr std::size_t reg_max_points = 4000;
+inline constexpr std::size_t reg_min_points = 100;
+inline constexpr double cost_cap_m = 3.0;
+inline constexpr double inlier_m = 1.0;
+inline constexpr double distinct_min_m = 4.0;
+inline constexpr double max_shift_m = 12.0;
+inline constexpr double global_margin_m = 50.0;
+inline constexpr double global_range_m = 8.0;
+inline constexpr double global_step_m = 0.25;
+inline constexpr std::size_t global_max_points = 6000;
+inline constexpr double global_min_fraction = 0.08;
+inline constexpr double global_min_ratio = 2.0;
+
+enum class ThetaMode
+{
+	Auto,
+	Never,
+	Always
+};
+
+struct Registration
+{
+	std::string pano_id;
+	RegResult result;
+	std::optional<std::array<double, 3>> second_best;
+};
+
+std::vector<std::array<double, 3>> facade_band(const sfm::Cluster &cluster,
+		const std::array<double, 3> &centre, double ground_z, double radius_m,
+		const std::array<double, 2> &band);
+OutlineDT dt_for_cameras(const std::vector<Building> &buildings,
+		const std::unordered_map<std::string, Camera> &cameras, const Params &params);
+std::tuple<double, double, double, std::vector<std::array<double, 3>>> search_shift(
+		const std::vector<std::array<double, 2>> &points, const OutlineDT &dt,
+		const std::array<double, 2> &centre, const Params &params, double theta_deg);
+double inlier_share(const std::vector<std::array<double, 2>> &points, const OutlineDT &dt,
+		double dx, double dy, double theta_deg, const std::array<double, 2> &centre);
+Registration register_band(const std::string &pano_id,
+		const std::vector<std::array<double, 2>> &band, std::size_t band_points,
+		const std::array<double, 2> &centre, const OutlineDT &dt, const Params &params,
+		std::optional<std::array<double, 3>> global_shift = std::nullopt,
+		ThetaMode theta_mode = ThetaMode::Auto);
+Registration register_pano(const Camera &camera, const sfm::Cluster *cluster,
+		const OutlineDT &dt, const Params &params,
+		std::optional<std::array<double, 3>> global_shift = std::nullopt,
+		ThetaMode theta_mode = ThetaMode::Auto);
+Registration apply_global_fallback(const Registration &local, const Camera &camera,
+		const sfm::Cluster &cluster, const OutlineDT &dt, const Params &params,
+		std::optional<std::array<double, 3>> global_shift);
+std::optional<std::array<double, 3>> register_cluster_global(const sfm::Cluster &cluster,
+		const std::vector<Building> &buildings, const std::array<double, 4> &bbox_xy,
+		const Params &params, std::optional<double> ground_z = std::nullopt,
+		const OutlineDT *dt = nullptr);
+Camera apply_registration(const Camera &camera, const RegResult &registration);
 } // namespace arnis::mapillary::registration
