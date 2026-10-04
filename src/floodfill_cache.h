@@ -100,6 +100,7 @@ public:
 using BuildingFootprintBitmap = CoordinateBitmap;
 using RoadMaskBitmap = CoordinateBitmap;
 using SealedSurfaceBitmap = CoordinateBitmap;
+using FloodFillResult = std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>;
 
 // A closed ring whose bounding box exceeds the bitmap-fill cap.  Consumers
 // distinguish this deliberate refusal from an open way or a thin ring with no
@@ -114,7 +115,8 @@ class FloodFillCache
 {
 private:
 	/// Cached results: element_id -> filled coordinates
-	mutable std::unordered_map<uint64_t, std::vector<std::pair<int32_t, int32_t>>>
+	mutable std::unordered_map<uint64_t,
+			std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>>
 			way_cache;
 	mutable std::mutex way_cache_mutex;
 	bool retain_entries_{false};
@@ -142,7 +144,10 @@ public:
 			const std::optional<std::chrono::milliseconds> &timeout);
 
 	/// Gets cached flood fill result for a way, or computes it if not cached.
-	const std::vector<std::pair<int32_t, int32_t>> *get_cached(uint64_t way_id) const;
+	std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>> get_cached(
+			uint64_t way_id) const;
+	bool contains(uint64_t way_id) const;
+	void release(uint64_t way_id) const;
 
 	/// Keeps precomputed entries after a generation pass. Cached Earth extracts
 	/// use this because the same horizontal area is rendered by many Y chunks.
@@ -152,13 +157,12 @@ public:
 	void clear();
 
 	/// Gets cached flood fill result for a way, or computes it if not cached.
-	std::vector<std::pair<int32_t, int32_t>> get_or_compute(const ProcessedWay &way,
+	FloodFillResult get_or_compute(const ProcessedWay &way,
 			const std::optional<std::chrono::milliseconds> &timeout) const;
 
 	/// Gets cached flood fill result for a ProcessedElement (Way only).
 	/// For Nodes/Relations, returns empty vec.
-	std::vector<std::pair<int32_t, int32_t>> get_or_compute_element(
-			const ProcessedElement &element,
+	FloodFillResult get_or_compute_element(const ProcessedElement &element,
 			const std::optional<std::chrono::milliseconds> &timeout) const;
 
 	/// Collects all building footprint coordinates from the pre-computed cache.

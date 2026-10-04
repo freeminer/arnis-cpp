@@ -114,8 +114,9 @@ void generate_power(WorldEditor &editor, const ProcessedElement &element,
 					   element.is_way() &&
 					   (element.tags().find("location") == element.tags().end() ||
 							   element.tags().find("location")->second != "roof")) {
-				const auto cells =
+				const auto fill_result =
 						flood_fill_cache.get_or_compute(element.as_way(), timeout);
+				const auto &cells = *fill_result;
 				if (cells.size() < 60)
 					return;
 				int min_x = std::numeric_limits<int>::max(),

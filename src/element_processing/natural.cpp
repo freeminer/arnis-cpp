@@ -451,7 +451,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	const ProcessedWay &way = element.as_way();
 	// Resolve before the edge pass.  A closed ring that the capped fill
 	// refuses must not leave an outline around ground it cannot fill.
-	auto filled_area = flood_fill_cache.get_or_compute(way, args.timeout);
+	const auto fill_result = flood_fill_cache.get_or_compute(way, args.timeout);
+	const auto &filled_area = *fill_result;
 	if (filled_area.empty() && is_oversized_ring(way))
 		return;
 

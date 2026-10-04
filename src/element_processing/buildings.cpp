@@ -33,6 +33,8 @@
 #include "../decals/font.h"
 #include "historic.h"
 #include "subprocessor/buildings_interior.h"
+#include "../structures/structures.h"
+#include "../structures/starship.h"
 #include "../deterministic_rng.h"
 #include "../block_palette.h"
 #include "../osm_parser.h"
@@ -270,7 +272,7 @@ std::vector<std::pair<int, int>> compute_floor_area(
 		const FloodFillCache *flood_fill_cache, const ProcessedWay &way, const Args &args)
 {
 	if (flood_fill_cache)
-		return flood_fill_cache->get_or_compute(way, args.timeout);
+		return *flood_fill_cache->get_or_compute(way, args.timeout);
 	return flood_fill_area(way_polygon_coords(way), args.timeout_ref());
 }
 
@@ -2376,10 +2378,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	std::vector<std::pair<int, int>> cached_floor_area =
 			compute_floor_area(&flood_fill_cache, element, args);
-	// Very thin building parts (columns, beams, mapped pylons) have no
-	// interior lattice cell for flood fill.  Rust keeps their outline cells
-	// instead of dropping the feature entirely.
-	if (cached_floor_area.empty() && element.tags.contains("building:part"))
+	// Thin rings (including ordinary buildings at reduced map scales) may have
+	// no interior lattice cells. Rust keeps their outline unless the fill was
+	// deliberately refused as oversized or the building has explicit holes.
+	if (cached_floor_area.empty() && (!hole_polygons || hole_polygons->empty()) &&
+			!is_oversized_ring(element))
 		cached_floor_area = thin_ring_cells(element);
 	if (hole_polygons && !hole_polygons->empty() && !cached_floor_area.empty()) {
 		std::unordered_set<std::pair<int, int>, PairHash> outer_area(
@@ -2425,7 +2428,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			for (const auto &sibling_id : group->second) {
 				if (sibling_id == element.id)
 					continue;
-				if (const auto *fill = flood_fill_cache.get_cached(sibling_id))
+				if (const auto fill = flood_fill_cache.get_cached(sibling_id))
 					sibling_cells.insert(fill->begin(), fill->end());
 			}
 		}
@@ -4705,6 +4708,10 @@ void generate_building_from_relation(WorldEditor &editor,
 	if (should_skip_underground_tags(relation.tags)) {
 		return;
 	}
+	for (const auto &member : relation.members)
+		if (member.way.id == structures::starship::STARBASE_PAD2_INNER_RING_WAY &&
+				member.role == ProcessedMemberRole::Inner)
+			structures::place_starship(editor, member.way);
 
 	std::optional<int> relation_levels;
 	if (const auto levels_tag = relation.tags.find("building:levels");
@@ -4795,8 +4802,8 @@ void generate_bridge(WorldEditor &editor, const ProcessedWay &element,
 		// Get ground reference from editor
 		auto *ground = editor.get_ground();
 		if (ground) {
-			int start_y = ground->level(XZPoint(start_node.x, start_node.z));
-			int end_y = ground->level(XZPoint(end_node.x, end_node.z));
+			int start_y = editor.get_ground_level(start_node.x, start_node.z);
+			int end_y = editor.get_ground_level(end_node.x, end_node.z);
 			bridge_deck_ground_y = std::max(start_y, end_y);
 		}
 	}

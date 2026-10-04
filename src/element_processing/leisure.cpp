@@ -74,7 +74,8 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 
 		// Rust parity: decide whether the capped fill is usable before drawing
 		// the perimeter, otherwise a refused huge ring leaves an orphan border.
-		auto filled_area = flood_fill_cache.get_or_compute(element, args.timeout);
+		const auto fill_result = flood_fill_cache.get_or_compute(element, args.timeout);
+		const auto &filled_area = *fill_result;
 		if (filled_area.empty() && is_oversized_ring(element))
 			return;
 

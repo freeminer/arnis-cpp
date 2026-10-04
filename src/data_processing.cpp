@@ -9,6 +9,7 @@
 #include <algorithm>
 #include <cmath>
 #include <memory>
+#include <numeric>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
@@ -304,22 +305,23 @@ GenerationTilePolicy generation_tile_policy(std::size_t tile_count, bool java_fo
 			java_format && should_stream_to_disk(tile_count)};
 }
 
-void release_finished_fills(FloodFillCache &cache,
-		const std::unordered_map<std::uint64_t, std::size_t> &last_use,
-		const ProcessedElement &element, std::size_t index)
+using FillExpirations = std::unordered_map<std::size_t, std::vector<std::uint64_t>>;
+
+FillExpirations fills_expiring_at(
+		const std::unordered_map<std::uint64_t, std::size_t> &last_use)
 {
-	if (element.is_way()) {
-		const auto &way = element.as_way();
-		auto it = last_use.find(way.id);
-		if (it != last_use.end() && it->second == index)
-			cache.remove_way(way.id);
-	} else if (element.is_relation()) {
-		for (const auto &member : element.as_relation().members) {
-			auto it = last_use.find(member.way.id);
-			if (it != last_use.end() && it->second == index)
-				cache.remove_way(member.way.id);
-		}
-	}
+	FillExpirations result;
+	for (const auto &[way_id, index] : last_use)
+		result[index].push_back(way_id);
+	return result;
+}
+
+void release_finished_fills(
+		FloodFillCache &cache, const FillExpirations &expiring_at, std::size_t index)
+{
+	if (const auto found = expiring_at.find(index); found != expiring_at.end())
+		for (const auto way_id : found->second)
+			cache.release(way_id);
 }
 
 std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
@@ -583,10 +585,16 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 		bool fills = false;
 		if (tags.contains("landuse"))
 			fills = landuse_paints_ground(tags);
-		else if (tags.contains("natural"))
-			fills = !tag_is(tags, "amenity", "fountain");
-		else if (!tags.contains("amenity"))
-			fills = tags.contains("leisure");
+		else if (tags.contains("natural")) {
+			const auto natural = tags.find("natural");
+			fills = natural->second != "tree_row" && !tag_is(tags, "amenity", "fountain");
+		} else if (tags.contains("amenity")) {
+			fills = false;
+		} else if (tags.contains("leisure")) {
+			fills = true;
+		} else {
+			fills = tag_is(tags, "place", "square");
+		}
 		if (!fills)
 			return std::nullopt;
 		area = ring_area(way.nodes);
@@ -615,18 +623,36 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
 {
 	std::vector<size_t> slots;
-	std::vector<ProcessedElement> areas;
+	std::vector<double> areas;
 	for (size_t i = 0; i < elements.size(); ++i) {
-		if (ground_fill_area(elements[i])) {
+		if (const auto area = ground_fill_area(elements[i])) {
 			slots.push_back(i);
-			areas.push_back(std::move(elements[i]));
+			areas.push_back(*area);
 		}
 	}
-	std::stable_sort(areas.begin(), areas.end(), [](const auto &a, const auto &b) {
-		return ground_fill_area(a).value_or(0.0) > ground_fill_area(b).value_or(0.0);
+	const size_t count = slots.size();
+	if (count < 2)
+		return;
+
+	// src[k] is the compact area index that belongs at slots[k].
+	std::vector<size_t> src(count);
+	std::iota(src.begin(), src.end(), 0);
+	std::stable_sort(src.begin(), src.end(), [&](size_t a, size_t b) {
+		if (areas[a] != areas[b])
+			return areas[a] < areas[b];
+		return elements[slots[a]].id() < elements[slots[b]].id();
 	});
-	for (size_t i = 0; i < slots.size(); ++i)
-		elements[slots[i]] = std::move(areas[i]);
+
+	// Invert into "where does compact element j belong", then apply in place.
+	std::vector<size_t> dest(count);
+	for (size_t k = 0; k < count; ++k)
+		dest[src[k]] = k;
+	for (size_t k = 0; k < count; ++k)
+		while (dest[k] != k) {
+			const size_t target = dest[k];
+			std::swap(elements[slots[k]], elements[slots[target]]);
+			std::swap(dest[k], dest[target]);
+		}
 }
 
 bool is_water_polygon_way(const ProcessedWay &way)
@@ -835,6 +861,26 @@ land_cover::LandCoverData build_osm_water_land_cover(
 
 void prepare_elements_for_generation(std::vector<ProcessedElement> &elements)
 {
+	static constexpr std::array<const char *, 6> priority_tags = {
+			"entrance", "building", "highway", "waterway", "water", "barrier"};
+	std::vector<std::pair<std::size_t, std::size_t>> ranked;
+	ranked.reserve(elements.size());
+	for (std::size_t i = 0; i < elements.size(); ++i) {
+		std::size_t priority = priority_tags.size();
+		for (std::size_t p = 0; p < priority_tags.size(); ++p)
+			if (elements[i].tags().contains(priority_tags[p])) {
+				priority = p;
+				break;
+			}
+		ranked.emplace_back(priority, i);
+	}
+	std::stable_sort(ranked.begin(), ranked.end(),
+			[](const auto &a, const auto &b) { return a.first < b.first; });
+	std::vector<ProcessedElement> ordered;
+	ordered.reserve(elements.size());
+	for (const auto &rank : ranked)
+		ordered.push_back(std::move(elements[rank.second]));
+	elements = std::move(ordered);
 	sort_ground_fill_areas(elements);
 }
 
@@ -1102,11 +1148,14 @@ bool generate_world(WorldEditor &editor,
 	// Mapillary exports and preset building textures are different schemas.
 	// Do not feed a Mapillary export directory to FacadeSet::load_directory;
 	// Rust installs that export into its own facade store first.
-	const bool facade_set_enabled = args.building_facades;
+	const bool facade_set_enabled = args.building_facades && java_format;
 	building_facades::reset(
 			facade_set_enabled, facade_directory, args.facade_px, args.scale);
 	mapillary::facades::clear();
-	if (args.mapillary_facades_dir) {
+	// Rust treats an explicit off toggle as authoritative even when an export
+	// directory was also supplied (the GUI can set both independently).
+	if (args.mapillary_facades != std::optional<bool>(false) &&
+			args.mapillary_facades_dir) {
 		std::string facade_error;
 		if (auto export_data = mapillary::facades::load_export(
 					*args.mapillary_facades_dir, &facade_error))
@@ -1238,22 +1287,18 @@ bool generate_world(WorldEditor &editor,
 									  },
 									  0.0, landmark_plan.suppressed))
 					: std::nullopt;
-	// Match Rust's specificity ordering: broad ground-cover polygons render
-	// first, allowing smaller nested areas to overwrite them later.
+	// Match Rust's specificity ordering: smaller ground-cover polygons render
+	// first, then larger areas fill the remaining uncovered cells.
 	std::vector<ProcessedElement> ordered_elements;
 	if (!elements_prepared) {
 		ordered_elements = elements;
-		sort_ground_fill_areas(ordered_elements);
+		prepare_elements_for_generation(ordered_elements);
 	}
 	const auto &render_elements = elements_prepared ? elements : ordered_elements;
 	const auto plane_candidates =
 			args.use_3d
 					? structures::plane::prescan_placements(render_elements, args.scale)
 					: std::vector<structures::plane::Placement>{};
-	// A fill may be shared by its standalone way and a later relation.  Keep it
-	// only through its last reader, then release it just as the Rust sequential
-	// path does; this prevents large worlds retaining every polygon fill.
-	const auto last_fill_use = compute_last_fill_use(render_elements);
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
@@ -1634,6 +1679,22 @@ bool generate_world(WorldEditor &editor,
 			++it;
 		}
 	}
+	// A fill may be read by its way, by a relation containing it, and by every
+	// sibling part's shared building/facade context. Keep each group alive until
+	// the last member is processed, matching Rust's sequential eviction path.
+	auto last_fill_use = compute_last_fill_use(render_elements);
+	for (const auto &group : building_group_members) {
+		std::optional<std::size_t> last_group_reader;
+		for (const auto way_id : group.second)
+			if (const auto found = last_fill_use.find(way_id);
+					found != last_fill_use.end() &&
+					(!last_group_reader || found->second > *last_group_reader))
+				last_group_reader = found->second;
+		if (last_group_reader)
+			for (const auto way_id : group.second)
+				last_fill_use[way_id] = *last_group_reader;
+	}
+	const auto expiring_fills = fills_expiring_at(last_fill_use);
 
 	// All roads share the same immutable connectivity for this pass.
 	std::optional<highways::HighwayConnectivity> highway_connectivity;
@@ -1642,14 +1703,12 @@ bool generate_world(WorldEditor &editor,
 		auto const &element = render_elements[element_index];
 		auto args = args_;
 		if (element.is_relation() && suppressed_relations.count(element.id())) {
-			release_finished_fills(
-					flood_fill_cache, last_fill_use, element, element_index);
+			release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 			continue;
 		}
 		if (prepared_buildings && prepared_buildings->outline_suppression.count(
 										  {std::string(element.kind()), element.id()})) {
-			release_finished_fills(
-					flood_fill_cache, last_fill_use, element, element_index);
+			release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 			continue;
 		}
 		if (model_pipeline &&
@@ -1657,8 +1716,7 @@ bool generate_world(WorldEditor &editor,
 						model_pipeline->suppressed().end(),
 						std::pair<std::string, std::uint64_t>{std::string(element.kind()),
 								element.id()}) != model_pipeline->suppressed().end()) {
-			release_finished_fills(
-					flood_fill_cache, last_fill_use, element, element_index);
+			release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 			continue;
 		}
 
@@ -1668,15 +1726,9 @@ bool generate_world(WorldEditor &editor,
 						landmark_plan.suppressed.end(),
 						std::pair<std::string, std::uint64_t>{"way", way.id}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(
-						flood_fill_cache, last_fill_use, element, element_index);
+				release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 				continue;
 			}
-			// A successfully placed 3D model replaces the source OSM feature;
-			// rendering both was a C++-only duplication absent from Rust.
-			if (way.id == 1486752423ULL)
-				structures::place_starship(editor, way);
-
 			if (editor.ground && !way.nodes.empty()) {
 				args.ground_level = editor.ground->level(way.nodes.begin()->xz());
 			}
@@ -1792,8 +1844,7 @@ bool generate_world(WorldEditor &editor,
 						landmark_plan.suppressed.end(),
 						std::pair<std::string, std::uint64_t>{"node", node.id}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(
-						flood_fill_cache, last_fill_use, element, element_index);
+				release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 				continue;
 			}
 			// Rust resolves node signage before the feature dispatcher.  Keep
@@ -1844,8 +1895,7 @@ bool generate_world(WorldEditor &editor,
 						landmark_plan.suppressed.end(),
 						std::pair<std::string, std::uint64_t>{"relation", rel.id}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(
-						flood_fill_cache, last_fill_use, element, element_index);
+				release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 				continue;
 			}
 
@@ -1892,7 +1942,7 @@ bool generate_world(WorldEditor &editor,
 
 		// Do this after processing: a relation may consume fills belonging to
 		// member ways, so eviction before dispatch would cause a refill.
-		release_finished_fills(flood_fill_cache, last_fill_use, element, element_index);
+		release_finished_fills(flood_fill_cache, expiring_fills, element_index);
 	}
 	// Tagged nodes precede ways in OSM input.  Defer address and POI facade
 	// plates until every building wall exists; traffic/rail signs stay in the

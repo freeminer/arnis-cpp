@@ -4,7 +4,9 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <limits>
+#include <numeric>
 #include <vector>
 
 namespace arnis::elevation
@@ -50,6 +52,44 @@ static std::vector<double> gaussian_kernel(double sigma)
 	return kernel;
 }
 
+static std::vector<double> blur_line(
+		const std::vector<double> &values, const std::vector<double> &kernel, int radius)
+{
+	const auto len = values.size();
+	std::vector<std::size_t> nonfinite(len + 1, 0);
+	for (std::size_t i = 0; i < len; ++i)
+		nonfinite[i + 1] = nonfinite[i] + !std::isfinite(values[i]);
+	const double full_weight = std::accumulate(kernel.begin(), kernel.end(), 0.0);
+	std::vector<double> out(len);
+	for (std::size_t i = 0; i < len; ++i) {
+		const auto left = i >= static_cast<std::size_t>(radius)
+								  ? i - static_cast<std::size_t>(radius)
+								  : len;
+		const auto right = i + static_cast<std::size_t>(radius);
+		if (left < len && right < len && nonfinite[right + 1] == nonfinite[left]) {
+			double sum = 0.0;
+			for (std::size_t k = 0; k < kernel.size(); ++k)
+				sum += values[left + k] * kernel[k];
+			out[i] = sum / full_weight;
+			continue;
+		}
+		double sum = 0.0, weight = 0.0;
+		for (int k = -radius; k <= radius; ++k) {
+			const auto index = static_cast<std::int64_t>(i) + k;
+			if (index < 0 || index >= static_cast<std::int64_t>(len))
+				continue;
+			const double value = values[static_cast<std::size_t>(index)];
+			if (!std::isfinite(value))
+				continue;
+			const double w = kernel[static_cast<std::size_t>(k + radius)];
+			sum += value * w;
+			weight += w;
+		}
+		out[i] = weight > 0.0 ? sum / weight : values[i];
+	}
+	return out;
+}
+
 std::vector<std::vector<double>> gaussian_blur_grid(
 		const std::vector<std::vector<double>> &grid, double sigma)
 {
@@ -61,42 +101,22 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 	const int radius = static_cast<int>(kernel.size() / 2);
 
 	std::vector<std::vector<double>> tmp(height, std::vector<double>(width, 0.0));
-	for (std::size_t z = 0; z < height; ++z) {
-		for (std::size_t x = 0; x < width; ++x) {
-			double sum = 0.0;
-			double weight = 0.0;
-			for (int k = -radius; k <= radius; ++k) {
-				int sx = static_cast<int>(x) + k;
-				if (sx < 0 || sx >= static_cast<int>(width))
-					continue;
-				double v = grid[z][static_cast<std::size_t>(sx)];
-				if (!std::isfinite(v))
-					continue;
-				double w = kernel[static_cast<std::size_t>(k + radius)];
-				sum += v * w;
-				weight += w;
-			}
-			tmp[z][x] = weight > 0.0 ? sum / weight : grid[z][x];
-		}
-	}
+	for (std::size_t z = 0; z < height; ++z)
+		tmp[z] = blur_line(grid[z], kernel, radius);
 
 	std::vector<std::vector<double>> out(height, std::vector<double>(width, 0.0));
-	for (std::size_t z = 0; z < height; ++z) {
-		for (std::size_t x = 0; x < width; ++x) {
-			double sum = 0.0;
-			double weight = 0.0;
-			for (int k = -radius; k <= radius; ++k) {
-				int sz = static_cast<int>(z) + k;
-				if (sz < 0 || sz >= static_cast<int>(height))
-					continue;
-				double v = tmp[static_cast<std::size_t>(sz)][x];
-				if (!std::isfinite(v))
-					continue;
-				double w = kernel[static_cast<std::size_t>(k + radius)];
-				sum += v * w;
-				weight += w;
-			}
-			out[z][x] = weight > 0.0 ? sum / weight : tmp[z][x];
+	constexpr std::size_t COLUMN_GROUP = 8;
+	for (std::size_t x0 = 0; x0 < width; x0 += COLUMN_GROUP) {
+		const auto group_width = std::min(COLUMN_GROUP, width - x0);
+		std::vector<std::vector<double>> columns(
+				group_width, std::vector<double>(height));
+		for (std::size_t z = 0; z < height; ++z)
+			for (std::size_t c = 0; c < group_width; ++c)
+				columns[c][z] = tmp[z][x0 + c];
+		for (std::size_t c = 0; c < group_width; ++c) {
+			const auto blurred = blur_line(columns[c], kernel, radius);
+			for (std::size_t z = 0; z < height; ++z)
+				out[z][x0 + c] = blurred[z];
 		}
 	}
 	return out;

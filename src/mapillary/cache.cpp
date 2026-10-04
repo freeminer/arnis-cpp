@@ -88,9 +88,12 @@ std::optional<ImageRecord> Layout::load_metadata(const std::string &id) const
 		in >> j;
 		ImageRecord r;
 		r.id = j.value("id", "");
+		r.raw_json = j.value("raw_json", std::string{});
 		r.thumb_1024_url = j.value("thumb_1024_url", "");
 		r.thumb_2048_url = j.value("thumb_2048_url", "");
+		r.thumb_original_url = j.value("thumb_original_url", "");
 		r.creator = j.value("creator", "");
+		r.creator_id = j.value("creator_id", std::string{});
 		r.longitude = j.value("longitude", 0.0);
 		r.latitude = j.value("latitude", 0.0);
 		r.compass_angle = j.value("compass_angle", 0.0);
@@ -115,10 +118,12 @@ bool Layout::save_metadata(const ImageRecord &r) const
 	std::ofstream out(tmp, std::ios::trunc);
 	if (!out)
 		return false;
-	out << nlohmann::json{{"id", r.id}, {"thumb_1024_url", r.thumb_1024_url},
-			{"thumb_2048_url", r.thumb_2048_url}, {"creator", r.creator},
-			{"longitude", r.longitude}, {"latitude", r.latitude},
-			{"compass_angle", r.compass_angle}, {"is_pano", r.panorama}};
+	out << nlohmann::json{{"id", r.id}, {"raw_json", r.raw_json},
+			{"thumb_1024_url", r.thumb_1024_url}, {"thumb_2048_url", r.thumb_2048_url},
+			{"thumb_original_url", r.thumb_original_url}, {"creator", r.creator},
+			{"creator_id", r.creator_id}, {"longitude", r.longitude},
+			{"latitude", r.latitude}, {"compass_angle", r.compass_angle},
+			{"is_pano", r.panorama}};
 	out.close();
 	if (!out)
 		return false;

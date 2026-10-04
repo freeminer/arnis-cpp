@@ -2,8 +2,17 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
+#include <optional>
+#include <string>
+#include <vector>
 #include "project.h"
 #include "pose.h"
+#include "plane.h"
+namespace arnis::mapillary::sfm
+{
+struct DepthMap;
+}
 namespace arnis::mapillary::rectify
 {
 inline constexpr double max_elevation_deg = 80, bottom_margin_m = 1.5,
@@ -22,6 +31,89 @@ struct Crop
 	double s0{}, s1{}, z0{}, z1{}, pixels_per_metre{};
 	unsigned width{}, height{};
 };
+
+/// Metric bounds of a wall crop, expanded for neighbours and roof discovery,
+/// then clipped to the camera's maximum elevation cone.
+inline std::array<double, 4> crop_extent(const ::arnis::mapillary::Wall &wall,
+		const ::arnis::mapillary::PlaneFit &fit, double osm_height, const Params &params,
+		const Camera *camera = nullptr, std::optional<double> base_z = std::nullopt,
+		HeightSource height_source = HeightSource::Default)
+{
+	const auto fitted = plane::fitted_wall(wall, fit);
+	const double margin = std::max(3.0, 0.3 * fitted.length);
+	const double s_min = -margin, s_max = fitted.length + margin;
+	const double height = osm_height != 0.0 ? osm_height : params.default_height_m;
+	double h_top = std::max(params.top_margin[0] * height, height + params.top_margin[1]);
+	if (height_source == HeightSource::Default)
+		h_top = std::max(h_top, params.top_margin_default_m);
+	const double h_bottom = -bottom_margin_m;
+	if (camera && base_z) {
+		const auto relative = fitted.sh_of(camera->centre, *base_z);
+		const double ds = std::max({0.0, s_min - relative[0], relative[0] - s_max});
+		const double horizontal_distance = std::hypot(relative[2], ds);
+		const double cap = relative[1] +
+						   std::max(horizontal_distance, 0.5) *
+								   std::tan(max_elevation_deg * 0.017453292519943295769);
+		h_top = std::max(h_bottom + 1.0, std::min(h_top, cap));
+	}
+	return {s_min, s_max, h_bottom, h_top};
+}
+
+inline double choose_ppm(double distance_m, unsigned image_width, const Params &params)
+{
+	const double distance = std::max(distance_m, 0.5);
+	const double native =
+			static_cast<double>(image_width) / (6.2831853071795864769 * distance);
+	const double requested =
+			std::clamp(0.9 * native, params.loose_ppm[0], params.loose_ppm[1]);
+	return std::min(requested, std::max(native, params.loose_ppm[0]));
+}
+
+/// Rasterized loose facade crop consumed by the refinement stage.
+struct LooseCrop
+{
+	std::string wall_key, pano_id;
+	projection::Image rgb;
+	std::vector<std::uint8_t> occl;
+	double ppm{}, s0{}, h_bot{}, h_top{}, x_foot{}, y_cam{}, z_base{};
+	std::string z_base_source;
+	double s_to_x(double s) const { return (s - s0) * ppm; }
+	double h_to_y(double h) const { return (h_top - h) * ppm; }
+	double x_to_s(double x) const { return x / ppm + s0; }
+	double y_to_h(double y) const { return h_top - y / ppm; }
+};
+
+struct View
+{
+	const Camera *camera{};
+	const ::arnis::mapillary::PlaneFit *fit{};
+	double z_base{};
+	std::optional<double> distance_m;
+	std::optional<std::array<double, 2>> visible_s;
+};
+
+struct RectView
+{
+	projection::Image rgb;
+	std::vector<bool> valid;
+};
+
+RectView resample_rect(const ::arnis::mapillary::Wall &wall, const View &view,
+		const projection::Image &image, const std::array<double, 4> &rectangle,
+		const std::array<std::array<double, 3>, 3> *shear, unsigned pixels_per_block,
+		const LooseCrop *crop, const Params &params);
+
+std::vector<bool> vegetation_mask(
+		const projection::Image &image, double pixels_per_metre);
+std::vector<bool> footprint_columns(const ::arnis::mapillary::Wall &fitted_wall,
+		const std::array<double, 3> &camera_centre,
+		const std::vector<double> &wall_columns,
+		const std::vector<::arnis::mapillary::Building> &buildings,
+		const std::string &own_building_key, double setback_m);
+LooseCrop loose_crop(const ::arnis::mapillary::Wall &wall, const View &view,
+		const projection::Image &image, const sfm::DepthMap *depth,
+		const std::vector<::arnis::mapillary::Building> &buildings, const Params &params);
+
 inline Crop extent(double wall_length, double base_z, double top_z, double ppm,
 		double bottom_margin = bottom_margin_m)
 {

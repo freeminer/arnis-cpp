@@ -37,8 +37,8 @@ void generate_bridges(
 			// Get ground reference from editor
 			auto *ground = editor.get_ground();
 			if (ground) {
-				int start_y = ground->level(XZPoint(start_node.x, start_node.z));
-				int end_y = ground->level(XZPoint(end_node.x, end_node.z));
+				int start_y = editor.get_ground_level(start_node.x, start_node.z);
+				int end_y = editor.get_ground_level(end_node.x, end_node.z);
 				bridge_deck_ground_y = std::max(start_y, end_y);
 			}
 		}
@@ -166,10 +166,8 @@ BridgeStructureMap BridgeStructureMap::build(
 
 		BridgeMemberInfo info;
 		if (ground) {
-			info.deck_y = std::max(
-				ground->level(XZPoint(start.x, start.z)),
-				ground->level(XZPoint(end.x, end.z))
-			);
+			info.deck_y = std::max(editor.get_ground_level(start.x, start.z),
+					editor.get_ground_level(end.x, end.z));
 		}
 
 		// Determine bridge style

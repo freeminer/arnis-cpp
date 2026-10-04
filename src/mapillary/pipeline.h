@@ -3,6 +3,9 @@
 #include "api.h"
 #include "cache.h"
 #include "fetch.h"
+#include "geometry.h"
+#include "sfm.h"
+#include "types.h"
 
 #include <cstddef>
 #include <atomic>
@@ -13,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <vector>
+#include <unordered_map>
 
 namespace arnis::mapillary
 {
@@ -21,9 +25,13 @@ namespace arnis::mapillary
 struct PipelineConfig
 {
 	SearchCell bounds{};
+	Params params{};
 	std::string endpoint = "https://graph.mapillary.com/images";
 	std::string access_token;
 	std::size_t maximum_cells = mapillary_max_cells;
+	// Expand panorama coverage beyond the requested box, as Rust does, so
+	// views just outside the world bounds can still see facade walls inside.
+	double pano_margin_m = 45.0;
 	// Rust's later stages share these controls even when the caller uses a
 	// cache-only run.  Keeping them in the C++ contract avoids silently losing
 	// settings when a library host switches from acquisition to facades.
@@ -31,6 +39,8 @@ struct PipelineConfig
 	std::size_t threads = 0;
 	std::shared_ptr<std::atomic_bool> cancel;
 	std::optional<std::string> cache_only;
+	std::optional<std::string> area_label;
+	std::vector<CameraModel> camera_types;
 	std::function<void(const cache::ImageRecord &)> image_sink;
 	// Optional OSM side of Rust's FetchConfig. Set through osm_fetch_config()
 	// to inherit --no-tile-archive and --osm-tiles-url from Args.
@@ -62,6 +72,17 @@ struct PipelineStats
 struct PipelineResult
 {
 	std::vector<cache::ImageRecord> images;
+	std::vector<PanoMeta> metas;
+	struct Credit
+	{
+		std::string pano_id, title, creator, creator_url, image_url;
+	};
+	struct ClusterRef
+	{
+		std::string id, pano_id;
+	};
+	std::vector<Credit> credits;
+	std::vector<ClusterRef> clusters;
 	std::optional<nlohmann::json> osm;
 	std::optional<std::string> osm_error;
 	std::size_t cells = 0;
@@ -72,5 +93,20 @@ struct PipelineResult
 	std::filesystem::path export_dir;
 };
 
+// Geometry-stage output: owned data so subsequent alignment/texture stages do
+// not depend on the lifetime of the acquisition result or its JSON buffers.
+struct Geometry
+{
+	Frame frame;
+	std::vector<Building> buildings;
+	std::vector<Wall> walls;
+	std::unordered_map<std::string, Camera> cameras;
+	std::unordered_map<std::string, PanoMeta> metas;
+	std::unordered_map<std::string, sfm::Cluster> clusters;
+	std::array<double, 4> bbox_xy{};
+};
+
 PipelineResult acquire_images(const Client &, const PipelineConfig &);
+std::optional<Geometry> stage_geometry(const PipelineConfig &, const PipelineResult &,
+		const Client &, std::string *error = nullptr);
 } // namespace arnis::mapillary

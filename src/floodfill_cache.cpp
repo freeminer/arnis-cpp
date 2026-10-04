@@ -35,6 +35,13 @@ namespace
 
 std::size_t configured_workers = 0;
 
+FloodFillResult empty_flood_fill_result()
+{
+	static const auto empty =
+			std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>();
+	return empty;
+}
+
 bool same_ring_point(const ProcessedNode &a, const ProcessedNode &b)
 {
 	return a.id == b.id || (a.x == b.x && a.z == b.z);
@@ -288,7 +295,7 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		const auto fill = way_cache.find(way.id);
 		if (fill == way_cache.end())
 			continue;
-		for (const auto &[x, z] : fill->second) {
+		for (const auto &[x, z] : *fill->second) {
 			if (!mask && roads.is_unset_in_bounds(x, z))
 				mask = roads;
 			if (mask)
@@ -483,22 +490,23 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		}
 		for (auto &job : jobs) {
 			auto result = job.get();
-			cache.way_cache.emplace(result.first, std::move(result.second));
+			cache.way_cache.emplace(result.first,
+					std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
+							std::move(result.second)));
 		}
 	}
 
 	return cache;
 }
 
-std::vector<std::pair<int32_t, int32_t>> FloodFillCache::get_or_compute(
-		const ProcessedWay &way,
+FloodFillResult FloodFillCache::get_or_compute(const ProcessedWay &way,
 		const std::optional<std::chrono::milliseconds> &timeout) const
 {
 
 	{
 		std::lock_guard<std::mutex> lock(way_cache_mutex);
 		auto it = way_cache.find(way.id);
-		if (it != way_cache.end())
+		if (it != way_cache.end() && it->second)
 			return it->second;
 	}
 
@@ -510,29 +518,49 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::get_or_compute(
 	for (const auto &n : way.nodes)
 		polygon_coords.emplace_back(n.x, n.z);
 	auto filled = flood_fill_area(polygon_coords, timeout);
+	if (filled.empty())
+		return empty_flood_fill_result();
+	auto entry = std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
+			std::move(filled));
 
 	std::lock_guard<std::mutex> lock(way_cache_mutex);
-	auto it = way_cache.try_emplace(way.id, std::move(filled)).first;
-	return it->second;
+	auto it = way_cache.find(way.id);
+	if (it != way_cache.end())
+		return it->second ? it->second : entry;
+	return way_cache.emplace(way.id, std::move(entry)).first->second;
 }
 
-const std::vector<std::pair<int32_t, int32_t>> *FloodFillCache::get_cached(
-		uint64_t way_id) const
+std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>
+FloodFillCache::get_cached(uint64_t way_id) const
 {
 	std::lock_guard<std::mutex> lock(way_cache_mutex);
 	auto it = way_cache.find(way_id);
-	return it == way_cache.end() ? nullptr : &it->second;
+	return it == way_cache.end() ? nullptr : it->second;
 }
 
-std::vector<std::pair<int32_t, int32_t>> FloodFillCache::get_or_compute_element(
-		const ProcessedElement &element,
+bool FloodFillCache::contains(uint64_t way_id) const
+{
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
+	return way_cache.contains(way_id);
+}
+
+void FloodFillCache::release(uint64_t way_id) const
+{
+	if (retain_entries_)
+		return;
+	std::lock_guard<std::mutex> lock(way_cache_mutex);
+	if (const auto it = way_cache.find(way_id); it != way_cache.end())
+		it->second.reset();
+}
+
+FloodFillResult FloodFillCache::get_or_compute_element(const ProcessedElement &element,
 		const std::optional<std::chrono::milliseconds> &timeout) const
 {
 
 	if (element.is_way()) {
 		return get_or_compute(element.as_way(), timeout);
 	} else {
-		return std::vector<std::pair<int32_t, int32_t>>();
+		return empty_flood_fill_result();
 	}
 }
 
@@ -573,7 +601,7 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 					!is_underground_building(way.tags)) {
 				std::lock_guard<std::mutex> lock(way_cache_mutex);
 				if (auto cached = way_cache.find(way.id); cached != way_cache.end()) {
-					for (const auto &coord : cached->second) {
+					for (const auto &coord : *cached->second) {
 						footprints.set(coord.first, coord.second);
 					}
 				}
@@ -600,7 +628,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 			if (it_building != way.tags.end() || it_building_part != way.tags.end()) {
 				auto it = way_cache.find(way.id);
 				if (it != way_cache.end()) {
-					auto centroid = compute_centroid(it->second);
+					auto centroid = compute_centroid(*it->second);
 					if (centroid.has_value()) {
 						centroids.push_back(centroid.value());
 					}
@@ -624,8 +652,8 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 					if (member.role == ProcessedMemberRole::Outer) {
 						auto it = way_cache.find(member.way.id);
 						if (it != way_cache.end()) {
-							all_coords.insert(all_coords.end(), it->second.begin(),
-									it->second.end());
+							all_coords.insert(all_coords.end(), it->second->begin(),
+									it->second->end());
 						}
 					}
 				}

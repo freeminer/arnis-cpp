@@ -85,7 +85,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 
 	// Get the area of the landuse element using cache
 	std::vector<std::pair<int, int>> floor_area =
-			flood_fill_cache.get_or_compute(element, args.timeout_ref());
+			*flood_fill_cache.get_or_compute(element, args.timeout_ref());
 
 	// Trees ok to generate based on leaf_type
 	std::vector<TreeType> trees_ok_to_generate;
@@ -626,7 +626,7 @@ void generate_place(WorldEditor &editor, ProcessedWay const &element, Args const
 
 	// Get the area using flood fill cache
 	std::vector<std::pair<int, int>> floor_area =
-			flood_fill_cache.get_or_compute(element, args.timeout_ref());
+			*flood_fill_cache.get_or_compute(element, args.timeout_ref());
 
 	// Place ground blocks
 	for (auto const &coord : floor_area) {

@@ -195,7 +195,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 			return;
 
 		std::vector<std::pair<int, int>> floor_area =
-				flood_fill_cache.get_or_compute_element(element, args.timeout);
+				*flood_fill_cache.get_or_compute_element(element, args.timeout);
 
 		for (const auto &p : floor_area) {
 			editor.set_block(
@@ -254,7 +254,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 		for (const crate::osm_parser::ProcessedNode &n : element.nodes())
 			polygon_coords.emplace_back(n.x, n.z);
 		std::vector<std::pair<int, int>> roof_area =
-				flood_fill_cache.get_or_compute_element(element, args.timeout);
+				*flood_fill_cache.get_or_compute_element(element, args.timeout);
 
 		for (const crate::osm_parser::ProcessedNode &node : element.nodes()) {
 			int x = node.x;
@@ -290,7 +290,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 
 	if (amenity_type == "fountain") {
 		std::vector<std::pair<int, int>> flood_area =
-				flood_fill_cache.get_or_compute_element(element, args.timeout);
+				*flood_fill_cache.get_or_compute_element(element, args.timeout);
 		if (flood_area.empty()) {
 			if (first_node.has_value())
 				structures::fountain::place(editor, first_node->x, first_node->z, 0);
@@ -355,7 +355,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 
 		if (std::get<2>(corner_addup) > 0) {
 			std::vector<std::pair<int, int>> flood_area =
-					flood_fill_cache.get_or_compute_element(element, args.timeout);
+					*flood_fill_cache.get_or_compute_element(element, args.timeout);
 
 			for (const auto &p : flood_area) {
 				int x = p.first;

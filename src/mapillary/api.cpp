@@ -1,4 +1,5 @@
 #include "api.h"
+#include "sfm.h"
 
 #include <algorithm>
 #include <cmath>
@@ -67,21 +68,36 @@ std::optional<cache::ImageRecord> parse_image_record(
 	try {
 		auto j = nlohmann::json::parse(bytes.begin(), bytes.end());
 		cache::ImageRecord r;
+		r.raw_json = j.dump();
 		r.id = j.value("id", "");
 		r.thumb_1024_url = j.value("thumb_1024_url", "");
 		r.thumb_2048_url = j.value("thumb_2048_url", "");
-		if (j.contains("creator") && j["creator"].is_object())
+		r.thumb_original_url = j.value("thumb_original_url", "");
+		if (j.contains("creator") && j["creator"].is_object()) {
 			r.creator = j["creator"].value("username", "");
-		else
+			if (j["creator"].contains("id"))
+				r.creator_id = j["creator"]["id"].is_string()
+									   ? j["creator"]["id"].get<std::string>()
+									   : j["creator"]["id"].dump();
+		} else
 			r.creator = j.value("creator", "");
-		r.compass_angle =
-				j.value("computed_compass_angle", j.value("compass_angle", 0.0));
-		r.panorama = j.value("is_pano", false);
-		auto geometry = j.contains("computed_geometry")
-								? j["computed_geometry"]
-								: j.value("geometry", nlohmann::json{});
-		if (geometry.contains("coordinates")) {
-			auto c = geometry["coordinates"];
+		auto number = [&](const char *key) -> std::optional<double> {
+			const auto it = j.find(key);
+			return it != j.end() && it->is_number()
+						   ? std::optional<double>{it->get<double>()}
+						   : std::nullopt;
+		};
+		r.compass_angle = number("computed_compass_angle")
+								  .value_or(number("compass_angle").value_or(0.0));
+		const auto camera_type = j.value("camera_type", std::string{});
+		r.panorama = j.value("is_pano", false) || camera_type == "spherical" ||
+					 camera_type == "equirectangular";
+		const nlohmann::json *geometry =
+				j.contains("computed_geometry") && !j["computed_geometry"].is_null()
+						? &j["computed_geometry"]
+						: (j.contains("geometry") ? &j["geometry"] : nullptr);
+		if (geometry && geometry->is_object() && geometry->contains("coordinates")) {
+			auto c = (*geometry)["coordinates"];
 			if (c.size() >= 2) {
 				r.longitude = c[0].get<double>();
 				r.latitude = c[1].get<double>();
@@ -180,6 +196,108 @@ std::optional<cache::ImageRecord> Client::image(
 		return {};
 	return cache_.save_metadata(*record) ? record : std::optional<cache::ImageRecord>{};
 }
+std::optional<PanoMeta> Client::metadata(const cache::ImageRecord &record) const
+{
+	if (record.raw_json.empty())
+		return {};
+	const std::vector<std::uint8_t> bytes(record.raw_json.begin(), record.raw_json.end());
+	return parse_pano_meta(bytes);
+}
+std::optional<std::filesystem::path> Client::download_image(
+		const cache::ImageRecord &record, cache::ImageSize size) const
+{
+	const auto path = cache_.image_path(record.id, size);
+	if (!path)
+		return {};
+	if (std::filesystem::is_regular_file(*path))
+		return path;
+	if (!fetch_)
+		return {};
+	const auto &url = size == cache::ImageSize::W1024	? record.thumb_1024_url
+					  : size == cache::ImageSize::W2048 ? record.thumb_2048_url
+														: record.thumb_original_url;
+	if (url.empty())
+		return {};
+	constexpr std::size_t max_image_bytes = 96 * 1024 * 1024;
+	auto bytes = fetch_(url, max_image_bytes);
+	if (!bytes || bytes->empty() || bytes->size() > max_image_bytes ||
+			!cache_.save_image(record.id, size, *bytes))
+		return {};
+	return path;
+}
+std::optional<std::filesystem::path> Client::download_cluster(
+		const cache::ImageRecord &record) const
+{
+	if (record.raw_json.empty())
+		return {};
+	try {
+		const auto metadata = nlohmann::json::parse(record.raw_json);
+		if (!metadata.contains("sfm_cluster") || !metadata["sfm_cluster"].is_object())
+			return {};
+		const auto &cluster = metadata["sfm_cluster"];
+		const auto url = cluster.value("url", std::string{});
+		const auto id_value = cluster.value("id", nlohmann::json{});
+		const auto cluster_id = id_value.is_string() ? id_value.get<std::string>()
+								: id_value.is_number_integer() ? id_value.dump()
+															   : std::string{};
+		if (url.empty())
+			return {};
+		const auto cluster_path = cache_.cluster_path(cluster_id);
+		if (!cluster_path)
+			return {};
+		if (std::filesystem::is_regular_file(*cluster_path))
+			return cluster_path;
+		if (!fetch_)
+			return {};
+		constexpr std::size_t max_cluster_bytes = 96 * 1024 * 1024;
+		auto bytes = fetch_(url, max_cluster_bytes);
+		if (!bytes || bytes->empty() || bytes->size() > max_cluster_bytes ||
+				!cache_.save_cluster(cluster_id, *bytes))
+			return {};
+		return cluster_path;
+	} catch (...) {
+		return {};
+	}
+}
+std::optional<nlohmann::json> Client::cluster_document(
+		const cache::ImageRecord &record, std::string *error) const
+{
+	if (error)
+		error->clear();
+	try {
+		const auto metadata = nlohmann::json::parse(record.raw_json);
+		if (!metadata.contains("sfm_cluster") || !metadata["sfm_cluster"].is_object()) {
+			if (error)
+				*error = "image has no SfM cluster metadata";
+			return {};
+		}
+		const auto id_value = metadata["sfm_cluster"].value("id", nlohmann::json{});
+		const auto cluster_id = id_value.is_string() ? id_value.get<std::string>()
+								: id_value.is_number_integer() ? id_value.dump()
+															   : std::string{};
+		if (!cache::Layout::safe_key(cluster_id)) {
+			if (error)
+				*error = "image has an invalid SfM cluster id";
+			return {};
+		}
+		if (!download_cluster(record)) {
+			if (error)
+				*error = "SfM cluster download failed";
+			return {};
+		}
+		auto bytes = cache_.load_cluster(cluster_id);
+		if (!bytes) {
+			if (error)
+				*error = "SfM cluster cache entry is missing";
+			return {};
+		}
+		return sfm::parse_cluster_bytes(*bytes, error);
+	} catch (const std::exception &exception) {
+		if (error)
+			*error = std::string("invalid SfM metadata: ") + exception.what();
+		return {};
+	}
+}
 std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 		const std::string &endpoint, const std::string &token, std::size_t maximum) const
 {
@@ -194,12 +312,14 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						   std::to_string(cell.max_latitude);
 		std::string url =
 				endpoint + "?access_token=" + token +
-				"&is_pano=true&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,is_pano,thumb_1024_url,thumb_2048_url,creator&bbox=" +
+				"&is_pano=true&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +
 				bbox;
 		auto reply = fetch_(url, 16 * 1024 * 1024);
 		if (!reply)
 			continue;
 		auto records = parse_search_response(*reply);
+		for (const auto &record : records)
+			cache_.save_metadata(record);
 		result.insert(result.end(), std::make_move_iterator(records.begin()),
 				std::make_move_iterator(records.end()));
 	}

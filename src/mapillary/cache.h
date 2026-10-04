@@ -17,7 +17,10 @@ enum class ImageSize
 };
 struct ImageRecord
 {
-	std::string id, thumb_1024_url, thumb_2048_url, creator;
+	std::string id, thumb_1024_url, thumb_2048_url, thumb_original_url, creator,
+			creator_id;
+	// Preserve complete Graph entity metadata needed by geometry and SfM.
+	std::string raw_json;
 	double longitude = 0, latitude = 0, compass_angle = 0;
 	bool panorama = false;
 };

@@ -1,8 +1,10 @@
 #pragma once
 #include "cache.h"
 #include "types.h"
+#include <nlohmann/json.hpp>
 #include <functional>
 #include <map>
+#include <filesystem>
 namespace arnis::mapillary
 {
 using JsonFetcher = std::function<std::optional<std::vector<std::uint8_t>>(
@@ -32,6 +34,13 @@ public:
 	}
 	std::optional<cache::ImageRecord> image(
 			const std::string &id, const std::string &url) const;
+	std::optional<PanoMeta> metadata(const cache::ImageRecord &) const;
+	std::optional<std::filesystem::path> download_image(
+			const cache::ImageRecord &, cache::ImageSize) const;
+	std::optional<std::filesystem::path> download_cluster(
+			const cache::ImageRecord &) const;
+	std::optional<nlohmann::json> cluster_document(
+			const cache::ImageRecord &, std::string *error = nullptr) const;
 	std::vector<cache::ImageRecord> search(const SearchCell &,
 			const std::string &endpoint, const std::string &token,
 			std::size_t maximum = mapillary_max_cells) const;

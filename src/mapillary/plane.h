@@ -46,6 +46,30 @@ inline double dot(const std::array<double, 2> &a, const std::array<double, 2> &b
 {
 	return a[0] * b[0] + a[1] * b[1];
 }
+/// Move a typed OSM wall onto its fitted plane, preserving the fit's endpoints
+/// and identifiers. This is the wall geometry consumed by rectification.
+inline ::arnis::mapillary::Wall fitted_wall(
+		const ::arnis::mapillary::Wall &wall, const ::arnis::mapillary::PlaneFit &fit)
+{
+	auto project = [&](const std::array<double, 2> &point) {
+		const double offset = fit.d - dot(fit.normal, point);
+		return std::array<double, 2>{
+				point[0] + offset * fit.normal[0], point[1] + offset * fit.normal[1]};
+	};
+	auto result = wall;
+	result.a = project(fit.a_ref.value_or(wall.a));
+	result.b = project(fit.b_ref.value_or(wall.b));
+	result.length = std::hypot(result.b[0] - result.a[0], result.b[1] - result.a[1]);
+	if (result.length < 1e-6) {
+		const std::array<double, 2> tangent{-fit.normal[1], fit.normal[0]};
+		result.a = project(wall.a);
+		result.b = {result.a[0] + wall.length * tangent[0],
+				result.a[1] + wall.length * tangent[1]};
+		result.length = wall.length;
+	}
+	result.normal = fit.normal;
+	return result;
+}
 inline std::array<double, 2> project_onto(
 		const Fit &fit, const std::array<double, 2> &point)
 {

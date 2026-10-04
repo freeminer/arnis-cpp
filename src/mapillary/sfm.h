@@ -2,17 +2,23 @@
 
 #include "pose.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
 #include <limits>
 #include <map>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
 namespace arnis::mapillary::sfm
 {
+std::optional<nlohmann::json> parse_cluster_bytes(
+		const std::vector<std::uint8_t> &bytes, std::string *error = nullptr);
+
 inline constexpr double index_cell_m = 5.0;
 inline constexpr const char *z_base_foot = "foot";
 inline constexpr const char *z_base_pano = "pano";
@@ -48,6 +54,11 @@ class Cluster
 
 public:
 	std::string id;
+	std::array<double, 3> ref_lla{};
+	std::array<double, 2> offset{};
+	Frame frame{};
+	bool scale_ok = true;
+	double metric_ratio = std::numeric_limits<double>::quiet_NaN();
 	std::vector<std::array<double, 3>> points;
 	std::vector<std::array<std::uint8_t, 3>> colors;
 	std::vector<Shot> shots;
@@ -103,6 +114,32 @@ public:
 		return result;
 	}
 };
+
+std::pair<std::optional<double>, std::size_t> ground_level(const Cluster &cluster,
+		const std::array<double, 3> &centre, const Params &params);
+void camera_heights(std::unordered_map<std::string, Camera> &cameras,
+		const std::unordered_map<std::string, const PanoMeta *> &metas,
+		const std::unordered_map<std::string, Cluster> &clusters, const Params &params);
+std::pair<double, const char *> wall_foot_z(const Cluster &cluster, const Wall &wall,
+		const std::array<double, 3> &shift, double ground_z,
+		const std::array<double, 2> &registered_centre, const Params &params);
+std::vector<std::array<double, 3>> wall_points(const Cluster &cluster, const Wall &wall,
+		const std::array<double, 3> &shift, double ground_z,
+		const std::array<double, 2> &registered_centre, const Params &params);
+std::unordered_map<std::string, std::string> map_shots(const Cluster &cluster,
+		const std::vector<const PanoMeta *> &metas, const Params &params);
+void apply_shot_poses(std::unordered_map<std::string, Camera> &cameras,
+		const Cluster &cluster,
+		const std::unordered_map<std::string, std::string> &shot_map,
+		const std::unordered_map<std::string, const PanoMeta *> &metas,
+		const std::unordered_map<std::string, std::vector<const PanoMeta *>> &by_sequence,
+		const Params &params);
+std::pair<double, bool> metric_check(Cluster &cluster,
+		const std::vector<const PanoMeta *> &metas,
+		const std::unordered_map<std::string, std::string> &shot_map, const Frame &frame,
+		const Params &params);
+std::optional<Cluster> load_cluster(const nlohmann::json &document,
+		const std::string &cluster_id, const Frame &frame, std::string *error = nullptr);
 
 inline void shift_points(std::vector<std::array<double, 3>> &points,
 		const std::array<double, 3> &shift,
