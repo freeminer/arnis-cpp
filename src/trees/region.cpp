@@ -700,7 +700,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	// Rust selects a prepared ecoregion mix before falling back to the generic
 	// habitat community. Resolve its niche and leaf-type pools here so tagged
 	// forests and wet/montane sites do not randomly receive unrelated groves.
-	auto choose_vanilla = [&]() -> std::optional<std::size_t> {
+	auto choose_vanilla = [&, sx = sx, sz = sz]() -> std::optional<std::size_t> {
 		if (!request.eco || data_->vanilla.empty())
 			return std::nullopt;
 		const auto sprinkle = vanilla_sprinkle(request.eco->biome);

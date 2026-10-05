@@ -361,7 +361,7 @@ void project_export(const std::vector<arnis::ProcessedElement> &elements,
 	std::unordered_map<std::uint64_t, std::vector<arnis::ProcessedWay>> relation_rings;
 	for (const auto &[relation_id, relation] : relations) {
 		const bool has_export = std::any_of(store->buildings.begin(),
-				store->buildings.end(), [&](const ExportBuilding &building) {
+				store->buildings.end(), [&,relation_id=relation_id](const ExportBuilding &building) {
 					return building.owner.kind == OwnerKind::Relation &&
 						   building.owner.id == relation_id;
 				});
