@@ -362,9 +362,9 @@ std::pair<bool, bool> canopy_verdict(
 
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
-		const bridges::BridgeSurfaceMap *bridge_surface, double scale,
-		int slope, double forest_fern_share,
-		const ChunkGroundCache *ground_cache, bool terrain_enabled, int fallback_y)
+		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
+		double forest_fern_share, const ChunkGroundCache *ground_cache,
+		bool terrain_enabled, int fallback_y)
 {
 	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
 			(bridge_surface && bridge_surface->contains(x, z)) ||
@@ -428,8 +428,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 				   undergrowth_roll(x, z, .4 * sward, SALT_FOREST_FLOOR)) {
 			const double fern_roll =
 					double(land_cover::coord_hash(x ^ 0xfe, z ^ 0x4e) % 100) / 100.0;
-			place_decoration(fern_roll < forest_fern_share ? FERN : GRASS,
-					ground_y + 1);
+			place_decoration(fern_roll < forest_fern_share ? FERN : GRASS, ground_y + 1);
 		}
 	} else if (cover == land_cover::LC_CROPLAND) {
 		const bool farmland =
@@ -659,15 +658,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 													  : std::numeric_limits<int>::max(),
 			editor.ground ? editor.ground->blocks_per_meter() : 0.0, center_latitude,
 			args.rotation);
-	const int snow_threshold = editor.ground ? editor.ground->snow_threshold()
-											 : std::numeric_limits<int>::max();
-	const int alpine_from_y =
-			snow_threshold == std::numeric_limits<int>::max() ||
-							snow_threshold == std::numeric_limits<int>::min()
-					? snow_threshold
-					: snow_threshold -
-							  static_cast<int>(std::lround(
-									  1000.0 * editor.ground->blocks_per_meter()));
 	const auto chunk_of = [](int v) { return v >= 0 ? v / 16 : -(((-v) + 15) / 16); };
 	for (int chunk_x = chunk_of(min_x); chunk_x <= chunk_of(max_x); ++chunk_x) {
 		const int chunk_min_x = std::max(min_x, chunk_x * 16);
@@ -681,9 +671,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				const int sample_z = (chunk_z << 4) + 8;
 				const auto eco = editor.ground->ecoregion_at(
 						editor.ground_point(sample_x, sample_z));
-				const auto habitat = ground_decoration::habitat(
-						land_cover::LC_TREE_COVER, editor.ground->climate(),
-						std::abs(center_latitude), false, eco);
+				const auto habitat = ground_decoration::habitat(land_cover::LC_TREE_COVER,
+						editor.ground->climate(), std::abs(center_latitude), false, eco);
 				if (habitat == ground_decoration::Habitat::Taiga)
 					forest_fern_share = .45;
 				else if (habitat == ground_decoration::Habitat::Jungle)
