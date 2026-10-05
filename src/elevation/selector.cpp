@@ -17,11 +17,16 @@ std::optional<double> Selector::sample(double lat, double lon)
 			}
 	return std::nullopt;
 }
-ElevationData Selector::grid(
-		double a, double b, double c, double d, std::size_t w, std::size_t h,
-		const LandCoverRepairConfig &repair)
+ElevationData Selector::raw_grid(
+		double a, double b, double c, double d, std::size_t w, std::size_t h)
 {
-	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root());
+	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root(), cached_.mode());
+	return build_grid(tiles, a, b, c, d, w, h);
+}
+ElevationData Selector::grid(double a, double b, double c, double d, std::size_t w,
+		std::size_t h, const LandCoverRepairConfig &repair)
+{
+	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root(), cached_.mode());
 	return build_processed_grid(tiles, a, b, c, d, w, h, repair);
 }
 ElevationData Selector::normalized_grid(double a, double b, double c, double d,

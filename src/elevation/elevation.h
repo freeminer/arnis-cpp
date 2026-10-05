@@ -31,6 +31,8 @@ struct ElevationData
 
 std::tuple<std::size_t, std::size_t, std::size_t, std::size_t> compute_grid_dims(
 		const geographic::LLBBox &bbox, double scale);
+std::tuple<std::size_t, std::size_t, std::size_t, std::size_t>
+compute_grid_dims_for_world(std::size_t world_width, std::size_t world_height);
 
 std::vector<std::vector<double>> gaussian_blur_grid(
 		const std::vector<std::vector<double>> &grid, double sigma);

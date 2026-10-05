@@ -432,14 +432,42 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 				lon_sum / static_cast<double>(count)};
 		(part ? relation_parts : relation_outlines).push_back(std::move(footprint));
 	}
+	std::map<GridCell, std::vector<std::size_t>> relation_grid;
+	for (std::size_t i = 0; i < relation_outlines.size(); ++i) {
+		const auto &outline = relation_outlines[i];
+		double min_lat = std::numeric_limits<double>::infinity();
+		double min_lon = std::numeric_limits<double>::infinity();
+		double max_lat = -std::numeric_limits<double>::infinity();
+		double max_lon = -std::numeric_limits<double>::infinity();
+		for (const auto &ring : outline.rings)
+			for (const auto &point : ring) {
+				min_lat = std::min(min_lat, point.lat);
+				min_lon = std::min(min_lon, point.lon);
+				max_lat = std::max(max_lat, point.lat);
+				max_lon = std::max(max_lon, point.lon);
+			}
+		if (!std::isfinite(min_lat) || !std::isfinite(min_lon) ||
+				!std::isfinite(max_lat) || !std::isfinite(max_lon))
+			continue;
+		const auto [lat0, lon0] = grid_cell(min_lat, min_lon);
+		const auto [lat1, lon1] = grid_cell(max_lat, max_lon);
+		for (auto lat = lat0; lat <= lat1; ++lat)
+			for (auto lon = lon0; lon <= lon1; ++lon)
+				relation_grid[{lat, lon}].push_back(i);
+	}
 	std::vector<double> relation_coverage(relation_outlines.size(), 0.0);
-	for (const auto &part : relation_parts)
-		for (std::size_t i = 0; i < relation_outlines.size(); ++i)
+	for (const auto &part : relation_parts) {
+		const auto candidates =
+				relation_grid.find(grid_cell(part.center_lat, part.center_lon));
+		if (candidates == relation_grid.end())
+			continue;
+		for (const auto i : candidates->second)
 			if (std::any_of(relation_outlines[i].rings.begin(),
 						relation_outlines[i].rings.end(), [&](const auto &ring) {
 							return point_in_ring(part.center_lat, part.center_lon, ring);
 						}))
 				relation_coverage[i] += part.area;
+	}
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i)
 		if (relation_coverage[i] / relation_outlines[i].area >= MIN_PART_COVERAGE)
 			out.suppressed_relations.insert(relation_outlines[i].id);

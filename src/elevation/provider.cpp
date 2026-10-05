@@ -199,10 +199,11 @@ ElevationData build_processed_grid(const std::vector<Tile> &tiles, double a, dou
 	// Rust order is significant: filters must see missing provider samples as
 	// NaN, otherwise a missing tile becomes a synthetic sea-level plateau.
 	filter_elevation_outliers(out.heights);
-	const double meters_per_cell = (w && h)
-			? (repair.bbox_width_m / static_cast<double>(w) +
-					repair.bbox_height_m / static_cast<double>(h)) * 0.5
-			: 0.0;
+	const double meters_per_cell =
+			(w && h) ? (repair.bbox_width_m / static_cast<double>(w) +
+							   repair.bbox_height_m / static_cast<double>(h)) *
+							   0.5
+					 : 0.0;
 	repair_terrain_anomalies(out.heights, meters_per_cell);
 	fill_nan_values(out.heights);
 	if (repair && w && h) {
@@ -459,7 +460,7 @@ std::optional<Tile> CachedProvider::tile_for(double lat, double lon)
 	auto p = root_ / (std::string(1, ns) + std::to_string(std::abs(la)) +
 							 std::string(1, ew) + std::to_string(std::abs(lo)) + ".hgt");
 	if (!std::filesystem::is_regular_file(p)) {
-		if (!providers::fetch_with_fallback(la, lo, p))
+		if (!providers::fetch_with_fallback(la, lo, p, mode_))
 			return std::nullopt;
 	}
 	return Tile{la, lo, p};
@@ -470,7 +471,7 @@ providers::Source CachedProvider::source_for(double lat, double lon) const
 	char ns = la >= 0 ? 'N' : 'S', ew = lo >= 0 ? 'E' : 'W';
 	auto p = root_ / (std::string(1, ns) + std::to_string(std::abs(la)) +
 							 std::string(1, ew) + std::to_string(std::abs(lo)) + ".hgt");
-	return providers::select_source(la, lo, p);
+	return providers::select_source(la, lo, p, mode_);
 }
 std::optional<TileResult> CachedProvider::fetch_tile(double lat, double lon)
 {
@@ -479,13 +480,13 @@ std::optional<TileResult> CachedProvider::fetch_tile(double lat, double lon)
 		return std::nullopt;
 	return TileResult{*t, source_for(lat, lon)};
 }
-std::vector<Tile> tiles_for_bbox(
-		double a, double b, double c, double d, const std::filesystem::path &root)
+std::vector<Tile> tiles_for_bbox(double a, double b, double c, double d,
+		const std::filesystem::path &root, providers::SourceMode mode)
 {
 	std::vector<Tile> out;
 	for (int la = int(std::floor(a)); la <= int(std::floor(c)); ++la)
 		for (int lo = int(std::floor(b)); lo <= int(std::floor(d)); ++lo) {
-			CachedProvider p(root);
+			CachedProvider p(root, mode);
 			if (auto t = p.tile_for(la + 0.5, lo + 0.5))
 				out.push_back(*t);
 		}

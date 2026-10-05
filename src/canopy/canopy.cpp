@@ -1,4 +1,5 @@
 #include "canopy.h"
+#include "../grid_ops.h"
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +34,22 @@ std::uint8_t CanopyData::at(std::size_t gx, std::size_t gz) const
 				   ? CANOPY_NODATA
 				   : grid_[gz * width + gx];
 }
+
+void CanopyData::remap_rows_to_mercator(double lat_top, double lat_bottom)
+{
+	grid_ops::remap_flat_rows_nearest(grid_, width, [=](std::size_t z) {
+		return grid_ops::mercator_source_row(lat_top, lat_bottom, height, z);
+	});
+}
+
+void CanopyData::crop(
+		std::size_t x0, std::size_t z0, std::size_t new_width, std::size_t new_height)
+{
+	grid_ops::crop_flat(grid_, width, x0, z0, new_width, new_height);
+	width = new_width;
+	height = new_height;
+}
+
 std::optional<std::uint8_t> CanopyData::canopy_height_m(
 		std::size_t gx, std::size_t gz) const
 {

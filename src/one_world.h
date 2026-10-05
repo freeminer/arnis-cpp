@@ -45,7 +45,21 @@ struct ElevationAffine
 {
 	double min_height_m = 0;
 	double blocks_per_meter = 0;
+	int ground_level = 0;
 	std::optional<SoftTop> soft_top;
+	double y_for_metres(double height_m) const
+	{
+		if (soft_top && blocks_per_meter > 0.0) {
+			const double knee_y =
+					ground_level + (soft_top->knee_m - min_height_m) * blocks_per_meter;
+			if (height_m > soft_top->knee_m)
+				return knee_y +
+					   soft_top->width_blocks *
+							   std::asinh((height_m - soft_top->knee_m) *
+										  blocks_per_meter / soft_top->width_blocks);
+		}
+		return ground_level + (height_m - min_height_m) * blocks_per_meter;
+	}
 };
 struct Manifest
 {

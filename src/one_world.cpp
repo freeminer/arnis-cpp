@@ -38,6 +38,7 @@ std::optional<Manifest> Manifest::load(const std::filesystem::path &w, std::stri
 			const auto &ej = j.at("elevation");
 			e.min_height_m = ej.value("min_height_m", 0.);
 			e.blocks_per_meter = ej.value("blocks_per_meter", 0.);
+			e.ground_level = ej.value("ground_level", 0);
 			if (ej.contains("soft_top") && !ej["soft_top"].is_null())
 				e.soft_top = SoftTop{ej["soft_top"].value("knee_m", 0.),
 						ej["soft_top"].value("width_blocks", 0.)};
@@ -84,7 +85,8 @@ bool Manifest::save(const std::filesystem::path &w, std::string *error) const
 			{"areas", json::array()}};
 	if (elevation) {
 		json e = {{"min_height_m", elevation->min_height_m},
-				{"blocks_per_meter", elevation->blocks_per_meter}};
+				{"blocks_per_meter", elevation->blocks_per_meter},
+				{"ground_level", elevation->ground_level}};
 		if (elevation->soft_top)
 			e["soft_top"] = {{"knee_m", elevation->soft_top->knee_m},
 					{"width_blocks", elevation->soft_top->width_blocks}};
@@ -124,7 +126,8 @@ bool Manifest::valid(std::string *error) const
 	if (!std::isfinite(origin_lat) || std::abs(origin_lat) > 85.0 ||
 			!std::isfinite(origin_lon) || std::abs(origin_lon) > 180.0 ||
 			!valid_scale(scale) || !std::isfinite(height_multiplier) ||
-			height_multiplier <= 0.0 ||
+			height_multiplier < MIN_HEIGHT_MULTIPLIER ||
+			height_multiplier > MAX_HEIGHT_MULTIPLIER ||
 			(elevation &&
 					(!std::isfinite(elevation->min_height_m) ||
 							elevation->blocks_per_meter < 0.0 ||

@@ -5,11 +5,13 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <limits>
 #include <optional>
 #include <string>
 
 #include "celestial.h"
 #include "projection/web_mercator.h"
+#include "one_world.h"
 #include "trees/tree_library.h"
 #include "caves_biomes.h"
 
@@ -80,6 +82,8 @@ inline constexpr std::uint32_t facade_atlas_side(FacadeDetail detail)
 inline constexpr double OBJECT_SKIP_SCALE = 0.3;
 inline constexpr double MIN_SCALE = 0.05;
 inline constexpr double MAX_SCALE = 4.0;
+inline constexpr double MIN_HEIGHT_MULTIPLIER = 0.1;
+inline constexpr double MAX_HEIGHT_MULTIPLIER = 10.0;
 inline constexpr std::int64_t DEFAULT_WORLD_TIME = 6000;
 inline constexpr std::int64_t MIDNIGHT_TICKS = 18000;
 
@@ -194,12 +198,16 @@ struct Args
 
 	// World scale to use, in blocks per meter (1.0 = real size)
 	double scale{1.0};
+	// Vertical-only relief multiplier; horizontal geometry keeps using `scale`.
+	double height_multiplier{1.0};
 	// Moon and Mars use the same geographic projection but a body-specific
 	// terrain scale/palette. Latitude is supplied by library callers for Mars'
 	// polar caps when no geographic bbox is retained in Args.
 	CelestialBody body{CelestialBody::Earth};
 	projection::ProjectionKind projection{projection::ProjectionKind::Local};
 	double celestial_latitude_degrees{0.0};
+	// Fixed world frame inherited when this run extends a One World manifest.
+	std::optional<one_world::RunContext> one_world_run;
 
 	// Ground level to use in the Minecraft world
 	int ground_level{-62};
@@ -335,7 +343,10 @@ struct Args
 	{
 		// Planetary scales intentionally sit below the Earth object scale
 		// minimum; Rust validates scale only for geographic Earth worlds.
-		if ((is_earth(body) && !valid_scale(scale)) || timeout_ref().count() < 0)
+		if ((is_earth(body) && !valid_scale(scale)) ||
+				height_multiplier < MIN_HEIGHT_MULTIPLIER ||
+				height_multiplier > MAX_HEIGHT_MULTIPLIER ||
+				!std::isfinite(height_multiplier) || timeout_ref().count() < 0)
 			return false;
 		if (bedrock && luanti)
 			return false;
@@ -343,9 +354,14 @@ struct Args
 			return false;
 		if (map_preview && luanti)
 			return false;
-		// Web Mercator is retained for compatibility but Rust rejects it because
-		// its latitude scale distorts terrain and object placement.
-		if (projection == projection::ProjectionKind::WebMercator)
+		if (one_world_run &&
+				(bedrock || luanti || !is_earth(body) ||
+						std::abs(rotation) > std::numeric_limits<double>::epsilon() ||
+						mapillary_probe))
+			return false;
+		// Web Mercator is supported for the shared One World coordinate frame;
+		// for standalone generation the Rust CLI warns because scale varies with latitude.
+		if (projection == projection::ProjectionKind::WebMercator && !one_world_run)
 			return false;
 		if ((mapillary_facades == std::optional<bool>(true) || mapillary_probe) &&
 				!mapillary_api_token().has_value())

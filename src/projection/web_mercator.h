@@ -28,5 +28,12 @@ public:
 	WebMercatorProjection(double origin_lat, double origin_lon, double scale = 1.0);
 	std::pair<double, double> forward(double lat, double lon) const override;
 	std::pair<double, double> inverse(double x, double z) const override;
+	double x_for_lon(double longitude) const;
+	double z_for_lat(double latitude) const;
+	double lon_for_x(double x) const;
+	double lat_for_z(double z) const;
 };
+
+// Round near-integral projected edges consistently before applying floor/ceil.
+int snap_edge(double value, bool ceil);
 }

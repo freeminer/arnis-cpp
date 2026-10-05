@@ -98,6 +98,8 @@ struct LandCoverData
 	std::vector<EsaRasterTile> source_tiles;
 
 	void refresh_water_blend_grid();
+	void remap_rows_to_mercator(double lat_top, double lat_bottom);
+	void crop(std::size_t x0, std::size_t z0, std::size_t width, std::size_t height);
 };
 
 // Reclassify bare cells connected to water within the Rust beach reach.

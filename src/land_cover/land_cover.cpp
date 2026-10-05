@@ -1,4 +1,5 @@
 #include "land_cover.h"
+#include "../grid_ops.h"
 #include "bridge_repair.h"
 #include "cog.h"
 #include "shoreline.h"
@@ -297,8 +298,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(
-					heights.begin(), heights.begin() + data.height,
+			std::any_of(heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
@@ -455,14 +455,12 @@ void apply_osm_water_override(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(
-					heights.begin(), heights.begin() + data.height,
+			std::any_of(heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	const double sx = double(data.width - 1) / double(world_width - 1);
 	const double sz = double(data.height - 1) / double(world_height - 1);
-	const auto guard = build_water_override_guard(
-			data.grid, heights, data.cells_per_meter * data.cells_per_meter);
+	const auto guard = build_water_override_guard(data.grid, heights, sx * sz);
 	auto tag = [](const tags_t &tags, const char *name) -> const std::string * {
 		auto it = tags.find(name);
 		return it == tags.end() ? nullptr : &it->second;
@@ -526,10 +524,12 @@ void apply_osm_water_override(LandCoverData &data,
 				continue;
 			std::vector<std::vector<ProcessedNode>> outer_nodes, inner_nodes;
 			for (const auto &m : rel.members) {
-				if (m.way.nodes.size() < 3)
+				if (m.way.nodes.size() < 2)
 					continue;
-				(m.role == ProcessedMemberRole::Inner ? inner_nodes : outer_nodes)
-						.push_back(m.way.nodes);
+				if (m.role == ProcessedMemberRole::Outer)
+					outer_nodes.push_back(m.way.nodes);
+				else if (m.role == ProcessedMemberRole::Inner)
+					inner_nodes.push_back(m.way.nodes);
 			}
 			merge_ring_segments(outer_nodes);
 			merge_ring_segments(inner_nodes);
@@ -716,6 +716,17 @@ WaterOverrideGuard build_water_override_guard(
 	const std::size_t height = grid.size(), width = height ? grid.front().size() : 0;
 	if (width < 2 || height < 2)
 		return out;
+	// Rust returns no WaterContext when the source grid has no ESA-water seed.
+	// In that case OSM water must not be constrained by a land-component mask:
+	// with no reference water, every component would otherwise be classified as
+	// protected land and polygon/river overrides would silently do nothing.
+	const bool has_water_seed =
+			std::any_of(grid.begin(), grid.end(), [&](const auto &row) {
+				return row.size() >= width && std::find(row.begin(), row.begin() + width,
+													  LC_WATER) != row.begin() + width;
+			});
+	if (!has_water_seed)
+		return out;
 	out.width = width;
 	out.protected_mask.assign((width * height + 63) / 64, 0);
 	auto bit = [&](std::size_t i) {
@@ -894,6 +905,30 @@ std::vector<std::vector<uint8_t>> compute_water_distance(
 void LandCoverData::refresh_water_blend_grid()
 {
 	water_blend_grid = compute_water_blend_smooth(grid, width, height, cells_per_meter);
+}
+
+void LandCoverData::remap_rows_to_mercator(double lat_top, double lat_bottom)
+{
+	const auto rows = height;
+	const auto source = [=](std::size_t z) {
+		return grid_ops::mercator_source_row(lat_top, lat_bottom, rows, z);
+	};
+	const auto nearest = [](std::uint8_t a, std::uint8_t b, double t) {
+		return t < 0.5 ? a : b;
+	};
+	grid_ops::remap_rows_in_place(grid, source, nearest);
+	grid_ops::remap_rows_in_place(water_distance, source, nearest);
+	refresh_water_blend_grid();
+}
+
+void LandCoverData::crop(
+		std::size_t x0, std::size_t z0, std::size_t new_width, std::size_t new_height)
+{
+	grid_ops::crop_rows(grid, x0, z0, new_width, new_height);
+	grid_ops::crop_rows(water_distance, x0, z0, new_width, new_height);
+	width = new_width;
+	height = new_height;
+	refresh_water_blend_grid();
 }
 
 void mark_beaches(LandCoverData &data)

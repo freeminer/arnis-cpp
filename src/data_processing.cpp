@@ -1300,12 +1300,30 @@ bool generate_world(WorldEditor &editor,
 	}
 	const int base_level = editor.ground ? editor.ground->base_level(args.ground_level)
 										 : args.ground_level;
-	world_editor::set_terrain_floor_y(base_level);
-	world_editor::set_base_chunk_y(base_level);
+	int area_floor = base_level;
+	if (args.one_world_run && args.disable_height_limit && editor.ground &&
+			editor.ground->elevation_enabled) {
+		std::optional<int> lowest;
+		for (const auto &row : editor.ground->elevation_grid)
+			for (const float height : row)
+				if (std::isfinite(height)) {
+					const double floored = std::floor(static_cast<double>(height));
+					const int y = floored <= std::numeric_limits<int>::min()
+										  ? std::numeric_limits<int>::min()
+								  : floored >= std::numeric_limits<int>::max()
+										  ? std::numeric_limits<int>::max()
+										  : static_cast<int>(floored);
+					lowest = lowest ? std::min(*lowest, y) : y;
+				}
+		if (lowest)
+			area_floor = *lowest;
+	}
+	world_editor::set_terrain_floor_y(area_floor);
+	world_editor::set_base_chunk_y(area_floor);
 	// Match Rust's filler palette for out-of-bounds chunks on non-Earth bodies.
 	const Block filler =
 			args.body == CelestialBody::Moon
-					? END_STONE
+					? ANDESITE
 					: (args.body == CelestialBody::Mars ? RED_TERRACOTTA : GRASS_BLOCK);
 	world_editor::set_base_chunk_block_id(filler.id());
 	static const std::vector<ProcessedElement> no_elements;
@@ -1332,7 +1350,9 @@ bool generate_world(WorldEditor &editor,
 		editor.ground->set_snow_line_for_latitude(centre_lat);
 	// Rust loads the global ecoregion raster for Earth runs and keeps it on
 	// Ground so vegetation and climate decoration can query it per column.
-	if (editor.ground && args.body == CelestialBody::Earth) {
+	if (editor.ground && args.body == CelestialBody::Earth &&
+			(!editor.ground->ecoregion_map ||
+					!editor.ground->ecoregion_map->is_local())) {
 		if (const auto &map = ecoregion::generation_map().map)
 			editor.ground->set_ecoregion_map(*map);
 	}

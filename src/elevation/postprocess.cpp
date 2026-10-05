@@ -11,7 +11,6 @@
 #include <limits>
 #include <optional>
 #include <tuple>
-#include <unordered_map>
 #include <unordered_set>
 namespace arnis::elevation
 {
@@ -94,6 +93,12 @@ using CoverGrid = std::vector<std::vector<std::uint8_t>>;
 using MaskGrid = std::vector<std::vector<std::uint8_t>>;
 using Cell = std::pair<std::size_t, std::size_t>;
 
+struct FlowingWaterCell
+{
+	std::uint32_t x, y;
+	float local_surface;
+};
+
 constexpr std::array<std::pair<int, int>, 4> CARDINAL{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
 constexpr double MAX_STEEP_WATER_AREA_M2 = 250000.0;
 constexpr double MIN_STEEP_WATER_SLOPE = 0.35;
@@ -126,46 +131,79 @@ bool inside(int x, int y, std::size_t w, std::size_t h)
 		   static_cast<std::size_t>(y) < h;
 }
 
-std::vector<double> smooth_sparse_water_field(
-		const std::vector<Cell> &cells, const std::vector<double> &values, double sigma)
+std::size_t coarse_smoothing_step(
+		std::size_t bbox_width, std::size_t bbox_height, double sigma_cells)
 {
-	std::vector<double> out(values.size());
-	if (cells.size() != values.size() || values.empty() || sigma < 1.5)
-		return values;
-	const int radius = std::max(1, static_cast<int>(std::ceil(3.0 * sigma)));
-	const int bin_size = std::max(1, static_cast<int>(std::ceil(sigma)));
-	std::unordered_map<std::uint64_t, std::vector<std::size_t>> bins;
-	const auto bin_key = [](int x, int y) {
-		return (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) << 32) |
-			   static_cast<std::uint32_t>(y);
-	};
-	for (std::size_t i = 0; i < cells.size(); ++i)
-		bins[bin_key(static_cast<int>(cells[i].first) / bin_size,
-					 static_cast<int>(cells[i].second) / bin_size)]
-				.push_back(i);
-	for (std::size_t i = 0; i < cells.size(); ++i) {
-		const int x = static_cast<int>(cells[i].first),
-				  y = static_cast<int>(cells[i].second);
-		const int bx = x / bin_size, by = y / bin_size;
+	constexpr double COARSE_PER_SIGMA = 8.0;
+	constexpr double MAX_COARSE_CELLS = 4.0 * 1024.0 * 1024.0;
+	const double from_sigma = std::max(1.0, std::floor(sigma_cells / COARSE_PER_SIGMA));
+	const double from_budget =
+			std::max(1.0, std::ceil(std::sqrt(static_cast<double>(bbox_width) *
+											  bbox_height / MAX_COARSE_CELLS)));
+	return static_cast<std::size_t>(std::max(from_sigma, from_budget));
+}
+
+std::vector<double> smooth_sparse_water_field(
+		const std::vector<FlowingWaterCell> &cells, double sigma_cells)
+{
+	if (cells.empty())
+		return {};
+	std::uint32_t min_x = std::numeric_limits<std::uint32_t>::max();
+	std::uint32_t min_y = std::numeric_limits<std::uint32_t>::max();
+	std::uint32_t max_x = 0, max_y = 0;
+	for (const auto &cell : cells) {
+		min_x = std::min(min_x, cell.x);
+		min_y = std::min(min_y, cell.y);
+		max_x = std::max(max_x, cell.x);
+		max_y = std::max(max_y, cell.y);
+	}
+	const std::size_t bbox_width = static_cast<std::size_t>(max_x - min_x) + 1;
+	const std::size_t bbox_height = static_cast<std::size_t>(max_y - min_y) + 1;
+	const std::size_t step = coarse_smoothing_step(bbox_width, bbox_height, sigma_cells);
+	const std::size_t coarse_width = (bbox_width - 1) / step + 1;
+	const std::size_t coarse_height = (bbox_height - 1) / step + 1;
+	std::vector<std::vector<double>> sums(
+			coarse_height, std::vector<double>(coarse_width, 0.0));
+	std::vector<std::vector<std::uint32_t>> counts(
+			coarse_height, std::vector<std::uint32_t>(coarse_width, 0));
+	for (const auto &cell : cells) {
+		const std::size_t x = (cell.x - min_x) / step;
+		const std::size_t y = (cell.y - min_y) / step;
+		sums[y][x] += cell.local_surface;
+		++counts[y][x];
+	}
+	HeightGrid coarse(coarse_height, std::vector<double>(coarse_width));
+	for (std::size_t y = 0; y < coarse_height; ++y)
+		for (std::size_t x = 0; x < coarse_width; ++x)
+			coarse[y][x] = counts[y][x] ? sums[y][x] / counts[y][x]
+										: std::numeric_limits<double>::quiet_NaN();
+	std::vector<std::vector<double>>().swap(sums);
+	std::vector<std::vector<std::uint32_t>>().swap(counts);
+	const auto blurred = gaussian_blur_grid(coarse, sigma_cells / step);
+	std::vector<double> out;
+	out.reserve(cells.size());
+	for (const auto &cell : cells) {
+		const double fx = static_cast<double>(cell.x - min_x) / step - 0.5;
+		const double fy = static_cast<double>(cell.y - min_y) / step - 0.5;
+		const double ix = std::floor(fx), iy = std::floor(fy);
+		const double tx = fx - ix, ty = fy - iy;
 		double weighted = 0.0, weight_sum = 0.0;
-		for (int yy = by - 3; yy <= by + 3; ++yy)
-			for (int xx = bx - 3; xx <= bx + 3; ++xx) {
-				auto found = bins.find(bin_key(xx, yy));
-				if (found == bins.end())
+		for (int dy = 0; dy <= 1; ++dy)
+			for (int dx = 0; dx <= 1; ++dx) {
+				const auto x = static_cast<std::int64_t>(ix) + dx;
+				const auto y = static_cast<std::int64_t>(iy) + dy;
+				if (x < 0 || y < 0 || static_cast<std::size_t>(x) >= coarse_width ||
+						static_cast<std::size_t>(y) >= coarse_height)
 					continue;
-				for (const auto &j : found->second) {
-					const double dx = static_cast<double>(cells[j].first) - x;
-					const double dy = static_cast<double>(cells[j].second) - y;
-					const double distance = std::hypot(dx, dy);
-					if (distance > radius || !std::isfinite(values[j]))
-						continue;
-					const double weight =
-							std::exp(-0.5 * distance * distance / (sigma * sigma));
-					weighted += values[j] * weight;
+				const double weight = (dx ? tx : 1.0 - tx) * (dy ? ty : 1.0 - ty);
+				const double value =
+						blurred[static_cast<std::size_t>(y)][static_cast<std::size_t>(x)];
+				if (std::isfinite(value)) {
+					weighted += value * weight;
 					weight_sum += weight;
 				}
 			}
-		out[i] = weight_sum > 0.0 ? weighted / weight_sum : values[i];
+		out.push_back(weight_sum > 0.0 ? weighted / weight_sum : cell.local_surface);
 	}
 	return out;
 }
@@ -244,24 +282,6 @@ double clamp_by_adjacent_land(double proposed, const std::vector<Cell> &componen
 	return std::min(proposed, *q);
 }
 
-std::optional<double> local_water_median(const HeightGrid &heights,
-		const CoverGrid &cover, std::size_t x, std::size_t y, int radius)
-{
-	std::vector<double> samples;
-	samples.reserve(static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1)));
-	const auto h = heights.size(), w = heights.front().size();
-	for (int dy = -radius; dy <= radius; ++dy)
-		for (int dx = -radius; dx <= radius; ++dx) {
-			const int nx = static_cast<int>(x) + dx, ny = static_cast<int>(y) + dy;
-			if (inside(nx, ny, w, h) && cover[ny][nx] == land_cover::LC_WATER &&
-					std::isfinite(heights[ny][nx]))
-				samples.push_back(heights[ny][nx]);
-		}
-	if (samples.size() < 8)
-		return std::nullopt;
-	return median(std::move(samples));
-}
-
 std::optional<double> lowest_adjacent_land(
 		const HeightGrid &heights, const CoverGrid &cover, std::size_t x, std::size_t y)
 {
@@ -280,178 +300,281 @@ std::optional<double> lowest_adjacent_land(
 std::size_t drop_water_on_steep_terrain(
 		const HeightGrid &heights, CoverGrid &cover, double meters_per_cell)
 {
-	if (heights.empty() || heights.front().empty() || meters_per_cell <= 0.0 ||
-			!std::isfinite(meters_per_cell))
+	constexpr int SEARCH_RADIUS = 8;
+	if (heights.empty() || meters_per_cell <= 0.0 || !std::isfinite(meters_per_cell))
 		return 0;
-	const auto h = heights.size(), w = heights.front().size();
-	const int step =
-			std::clamp(static_cast<int>(std::llround(10.0 / meters_per_cell)), 1, 16);
-	const auto max_cells = static_cast<std::size_t>(
-			MAX_STEEP_WATER_AREA_M2 / (meters_per_cell * meters_per_cell));
-	MaskGrid visited(h, std::vector<std::uint8_t>(w));
-	std::vector<Cell> dropped;
+	const std::size_t h = heights.size(), w = heights.front().size();
+	if (!w || cover.size() != h || cover.front().size() != w)
+		return 0;
+	// Rust's float-to-usize cast saturates before the 1..=16 clamp. Bound
+	// before rounding so tiny but finite cell sizes cannot overflow llround.
+	const int step = std::clamp(
+			static_cast<int>(std::llround(std::clamp(10.0 / meters_per_cell, 0.0, 16.0))),
+			1, 16);
+	const double max_cell_count =
+			MAX_STEEP_WATER_AREA_M2 / (meters_per_cell * meters_per_cell);
+	const std::size_t max_cells =
+			max_cell_count >= double(std::numeric_limits<std::size_t>::max())
+					? std::numeric_limits<std::size_t>::max()
+					: static_cast<std::size_t>(max_cell_count);
+	const std::size_t cell_count = w * h;
+	std::vector<std::uint64_t> visited((cell_count + 63) / 64);
+	std::vector<std::uint64_t> in_component((cell_count + 63) / 64);
+	const auto get_bit = [](const std::vector<std::uint64_t> &mask, std::size_t i) {
+		return (mask[i >> 6] >> (i & 63)) & 1u;
+	};
+	const auto set_bit = [](std::vector<std::uint64_t> &mask, std::size_t i) {
+		mask[i >> 6] |= std::uint64_t{1} << (i & 63);
+	};
+	const auto clear_bit = [](std::vector<std::uint64_t> &mask, std::size_t i) {
+		mask[i >> 6] &= ~(std::uint64_t{1} << (i & 63));
+	};
+	const auto cell_slope = [&](std::size_t x, std::size_t y) -> std::optional<double> {
+		const double here = heights[y][x];
+		if (!std::isfinite(here))
+			return std::nullopt;
+		const auto at = [&](int dx, int dy) -> std::optional<std::pair<double, double>> {
+			for (int d = step; d >= 1; --d) {
+				const int nx = static_cast<int>(x) + dx * d;
+				const int ny = static_cast<int>(y) + dy * d;
+				if (!inside(nx, ny, w, h) || cover[ny][nx] != land_cover::LC_WATER)
+					continue;
+				const double value = heights[ny][nx];
+				if (std::isfinite(value))
+					return std::pair{value, d * meters_per_cell};
+			}
+			return std::nullopt;
+		};
+		const auto axis = [here](const auto &low,
+								  const auto &high) -> std::optional<double> {
+			if (low && high)
+				return (high->first - low->first) / (low->second + high->second);
+			if (low)
+				return (here - low->first) / low->second;
+			if (high)
+				return (high->first - here) / high->second;
+			return std::nullopt;
+		};
+		const auto gx = axis(at(-1, 0), at(1, 0));
+		const auto gz = axis(at(0, -1), at(0, 1));
+		if (!gx && !gz)
+			return std::nullopt;
+		return std::hypot(gx.value_or(0.0), gz.value_or(0.0));
+	};
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> component;
+	std::deque<Cell> queue;
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> dropped;
+	std::size_t dropped_components = 0;
 	for (std::size_t sy = 0; sy < h; ++sy)
 		for (std::size_t sx = 0; sx < w; ++sx) {
-			if (visited[sy][sx] || cover[sy][sx] != land_cover::LC_WATER)
+			const std::size_t start = sy * w + sx;
+			if (get_bit(visited, start) || cover[sy][sx] != land_cover::LC_WATER)
 				continue;
-			std::deque<Cell> queue{{sx, sy}};
-			std::vector<Cell> component;
-			visited[sy][sx] = 1;
+			component.clear();
+			queue.clear();
+			std::size_t size = 0;
+			queue.emplace_back(sx, sy);
+			set_bit(visited, start);
 			while (!queue.empty()) {
-				auto [x, y] = queue.front();
+				const auto [x, y] = queue.front();
 				queue.pop_front();
-				component.emplace_back(x, y);
+				++size;
+				if (max_cells == std::numeric_limits<std::size_t>::max() ||
+						size <= max_cells + 1)
+					component.emplace_back(
+							static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(y));
 				for (const auto &[dx, dy] : CARDINAL) {
-					const int nx = static_cast<int>(x) + dx,
-							  ny = static_cast<int>(y) + dy;
-					if (inside(nx, ny, w, h) && !visited[ny][nx] &&
-							cover[ny][nx] == land_cover::LC_WATER) {
-						visited[ny][nx] = 1;
-						queue.emplace_back(nx, ny);
+					const int nx = static_cast<int>(x) + dx;
+					const int ny = static_cast<int>(y) + dy;
+					if (!inside(nx, ny, w, h) || cover[ny][nx] != land_cover::LC_WATER)
+						continue;
+					const std::size_t index = static_cast<std::size_t>(ny) * w + nx;
+					if (!get_bit(visited, index)) {
+						set_bit(visited, index);
+						queue.emplace_back(static_cast<std::size_t>(nx),
+								static_cast<std::size_t>(ny));
 					}
 				}
 			}
-			if (component.size() > max_cells)
+			if (size > max_cells)
 				continue;
 			std::vector<double> slopes;
+			slopes.reserve(component.size());
+			for (const auto &[x, y] : component)
+				if (const auto slope = cell_slope(x, y))
+					slopes.push_back(*slope);
+			if (slopes.empty() || median(std::move(slopes)) <= MIN_STEEP_WATER_SLOPE)
+				continue;
+			for (const auto &[x, y] : component)
+				set_bit(in_component, y * w + x);
+			std::size_t edge_cells = 0, perched = 0;
 			for (const auto &[x, y] : component) {
 				const double here = heights[y][x];
 				if (!std::isfinite(here))
 					continue;
-				double gx = 0.0, gy = 0.0;
-				int axes = 0;
-				for (const auto &[dx, dy] :
-						std::array<std::pair<int, int>, 2>{{{1, 0}, {0, 1}}}) {
-					const int lo_x = static_cast<int>(x) - dx * step;
-					const int lo_y = static_cast<int>(y) - dy * step;
-					const int hi_x = static_cast<int>(x) + dx * step;
-					const int hi_y = static_cast<int>(y) + dy * step;
-					if (!inside(lo_x, lo_y, w, h) || !inside(hi_x, hi_y, w, h) ||
-							cover[lo_y][lo_x] != land_cover::LC_WATER ||
-							cover[hi_y][hi_x] != land_cover::LC_WATER)
-						continue;
-					const double gradient = (heights[hi_y][hi_x] - heights[lo_y][lo_x]) /
-											(2.0 * step * meters_per_cell);
-					if (dx)
-						gx = gradient;
-					else
-						gy = gradient;
-					++axes;
-				}
-				if (axes)
-					slopes.push_back(std::hypot(gx, gy));
-			}
-			if (slopes.empty() || median(std::move(slopes)) <= MIN_STEEP_WATER_SLOPE)
-				continue;
-			std::unordered_set<std::uint64_t> own;
-			for (const auto &[x, y] : component)
-				own.insert(static_cast<std::uint64_t>(y) * w + x);
-			std::size_t edge = 0, perched = 0;
-			for (const auto &[x, y] : component) {
-				const double here = heights[y][x];
 				double lowest = std::numeric_limits<double>::infinity();
 				for (const auto &[dx, dy] : CARDINAL) {
 					const int nx = static_cast<int>(x) + dx * step;
 					const int ny = static_cast<int>(y) + dy * step;
-					if (!inside(nx, ny, w, h) ||
-							own.contains(static_cast<std::uint64_t>(ny) * w + nx))
+					if (!inside(nx, ny, w, h))
+						continue;
+					const std::size_t index = static_cast<std::size_t>(ny) * w + nx;
+					if (get_bit(in_component, index))
 						continue;
 					if (std::isfinite(heights[ny][nx]))
 						lowest = std::min(lowest, heights[ny][nx]);
 				}
-				if (!std::isfinite(here) || !std::isfinite(lowest))
+				if (!std::isfinite(lowest))
 					continue;
-				++edge;
+				++edge_cells;
 				perched += lowest < here - STEEP_WATER_LAND_BELOW_M;
 			}
-			if (edge && static_cast<double>(perched) >= MIN_PERCHED_FRACTION * edge)
-				dropped.insert(dropped.end(), component.begin(), component.end());
+			for (const auto &[x, y] : component)
+				clear_bit(in_component, y * w + x);
+			if (!edge_cells ||
+					static_cast<double>(perched) < MIN_PERCHED_FRACTION * edge_cells)
+				continue;
+			++dropped_components;
+			dropped.insert(dropped.end(), component.begin(), component.end());
 		}
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint8_t>> replacements;
+	replacements.reserve(dropped.size());
 	for (const auto &[x, y] : dropped)
 		replacements.emplace_back(x, y,
-				nearest_non_water_class(cover, x, y, 8).value_or(land_cover::LC_BARE));
+				nearest_non_water_class(cover, x, y, SEARCH_RADIUS)
+						.value_or(land_cover::LC_BARE));
 	for (const auto &[x, y, value] : replacements)
 		cover[y][x] = value;
+	if (dropped_components)
+		std::clog << "Land cover repair: dropped " << dropped_components
+				  << " water blob(s) (" << replacements.size()
+				  << " cells) sitting on steep terrain (ESA shadow misclassification)\n";
 	return replacements.size();
+}
+
+std::optional<double> local_water_median_cover(const HeightGrid &heights,
+		const CoverGrid &cover, std::size_t x, std::size_t y, int radius)
+{
+	const auto h = heights.size(), w = heights.front().size();
+	std::vector<double> samples;
+	samples.reserve(static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1)));
+	for (int dy = -radius; dy <= radius; ++dy)
+		for (int dx = -radius; dx <= radius; ++dx) {
+			const int nx = static_cast<int>(x) + dx;
+			const int ny = static_cast<int>(y) + dy;
+			if (inside(nx, ny, w, h) && cover[ny][nx] == land_cover::LC_WATER &&
+					std::isfinite(heights[ny][nx]))
+				samples.push_back(heights[ny][nx]);
+		}
+	if (samples.size() < 8)
+		return std::nullopt;
+	return median(std::move(samples));
 }
 
 MaskGrid level_water_surfaces(
 		HeightGrid &heights, const CoverGrid &cover, double meters_per_cell)
 {
 	constexpr double UP_TOLERANCE = 2.0;
+	constexpr int LOCAL_SURFACE_RADIUS = 12;
+	constexpr double FLOWING_IQR_THRESHOLD = 5.0;
+	constexpr double FLOW_SMOOTH_SIGMA_M = 40.0;
+	constexpr double FLOW_SMOOTH_MAX_M = 1.5;
+	if (heights.empty() || heights.front().empty())
+		return {};
 	const auto h = heights.size(), w = heights.front().size();
-	const auto snapshot = heights;
+	HeightGrid snapshot = heights;
 	MaskGrid visited(h, std::vector<std::uint8_t>(w));
-	MaskGrid surface_mask(h, std::vector<std::uint8_t>(w));
+	MaskGrid surface(h, std::vector<std::uint8_t>(w));
+	std::vector<std::vector<FlowingWaterCell>> flowing_components;
 	for (std::size_t sy = 0; sy < h; ++sy)
 		for (std::size_t sx = 0; sx < w; ++sx) {
 			if (visited[sy][sx] || cover[sy][sx] != land_cover::LC_WATER)
 				continue;
-			std::deque<Cell> queue{{sx, sy}};
 			std::vector<Cell> component;
+			std::deque<Cell> queue{{sx, sy}};
 			std::vector<double> values;
 			visited[sy][sx] = 1;
 			while (!queue.empty()) {
-				auto [x, y] = queue.front();
+				const auto [x, y] = queue.front();
 				queue.pop_front();
 				component.emplace_back(x, y);
 				if (std::isfinite(snapshot[y][x]))
 					values.push_back(snapshot[y][x]);
 				for (const auto &[dx, dy] : CARDINAL) {
-					const int nx = static_cast<int>(x) + dx,
-							  ny = static_cast<int>(y) + dy;
+					const int nx = static_cast<int>(x) + dx;
+					const int ny = static_cast<int>(y) + dy;
 					if (inside(nx, ny, w, h) && !visited[ny][nx] &&
 							cover[ny][nx] == land_cover::LC_WATER) {
 						visited[ny][nx] = 1;
-						queue.emplace_back(nx, ny);
+						queue.emplace_back(static_cast<std::size_t>(nx),
+								static_cast<std::size_t>(ny));
 					}
 				}
 			}
 			if (values.empty())
 				continue;
+			const double iqr = interquartile_range(values);
 			const double fallback = median(values);
-			const bool flowing = interquartile_range(values) > 5.0;
-			const double still_surface = clamp_by_adjacent_land(
-					values.size() >= 16 ? histogram_mode(values, 1.0) : fallback,
-					component, snapshot, cover);
-			std::vector<double> local_levels;
-			std::vector<Cell> flowing_cells;
+			if (iqr > FLOWING_IQR_THRESHOLD) {
+				std::vector<FlowingWaterCell> cells;
+				cells.reserve(component.size());
+				for (const auto &[x, y] : component) {
+					const double original = snapshot[y][x];
+					if (!std::isfinite(original))
+						continue;
+					const double local = local_water_median_cover(
+							snapshot, cover, x, y, LOCAL_SURFACE_RADIUS)
+												 .value_or(fallback);
+					cells.push_back({static_cast<std::uint32_t>(x),
+							static_cast<std::uint32_t>(y), static_cast<float>(local)});
+				}
+				flowing_components.push_back(std::move(cells));
+				continue;
+			}
+			const double proposed =
+					values.size() >= 16 ? histogram_mode(values, 1.0) : fallback;
+			const double level =
+					clamp_by_adjacent_land(proposed, component, snapshot, cover);
 			for (const auto &[x, y] : component) {
 				const double original = snapshot[y][x];
 				if (!std::isfinite(original))
 					continue;
-				flowing_cells.push_back({x, y});
-				local_levels.push_back(
-						flowing ? local_water_median(snapshot, cover, x, y, 12)
-										  .value_or(fallback)
-								: still_surface);
-			}
-			if (flowing) {
-				const double sigma_cells =
-						meters_per_cell > 0.0 ? std::min(64.0, 40.0 / meters_per_cell)
-											  : 0.0;
-				local_levels = smooth_sparse_water_field(
-						flowing_cells, local_levels, sigma_cells);
-			}
-			for (std::size_t i = 0; i < flowing_cells.size(); ++i) {
-				const auto &[x, y] = flowing_cells[i];
-				const double original = snapshot[y][x];
-				double level = local_levels[i];
-				if (flowing)
-					level = original + std::clamp(level - original, -1.5, 1.5);
-				if (flowing)
-					if (auto land = lowest_adjacent_land(snapshot, cover, x, y))
-						level = std::min(level, std::max(original, *land));
 				if (original <= level + UP_TOLERANCE ||
 						!has_non_water_neighbor(cover, x, y)) {
 					heights[y][x] = level;
-					surface_mask[y][x] = 1;
+					surface[y][x] = 1;
 				}
 			}
 		}
-	(void)meters_per_cell;
-	return surface_mask;
+	HeightGrid().swap(snapshot);
+	MaskGrid().swap(visited);
+	const double sigma = meters_per_cell > 0.0 && std::isfinite(meters_per_cell)
+								 ? std::min(64.0, FLOW_SMOOTH_SIGMA_M / meters_per_cell)
+								 : 0.0;
+	for (const auto &component : flowing_components) {
+		if (component.empty())
+			continue;
+		const auto smoothed = sigma >= 1.5 ? smooth_sparse_water_field(component, sigma)
+										   : std::vector<double>{};
+		for (std::size_t i = 0; i < component.size(); ++i) {
+			const auto &cell = component[i];
+			const auto x = static_cast<std::size_t>(cell.x);
+			const auto y = static_cast<std::size_t>(cell.y);
+			const double original = heights[y][x];
+			const double local = cell.local_surface;
+			const double blurred = smoothed.empty() ? local : smoothed[i];
+			double level = local + std::clamp(blurred - local, -FLOW_SMOOTH_MAX_M,
+										   FLOW_SMOOTH_MAX_M);
+			if (const auto land = lowest_adjacent_land(heights, cover, x, y))
+				level = std::min(level, std::max(original, *land));
+			if (original <= level + UP_TOLERANCE ||
+					!has_non_water_neighbor(cover, x, y)) {
+				heights[y][x] = level;
+				surface[y][x] = 1;
+			}
+		}
+	}
+	return surface;
 }
 
 std::size_t reclassify_non_surface_water_cells(CoverGrid &cover, const MaskGrid &surface)
@@ -541,7 +664,8 @@ void smooth_built_up_gaussian(HeightGrid &heights, const CoverGrid &cover,
 		for (std::size_t x = 0; x < w; ++x) {
 			if (surface[y][x])
 				continue;
-			const double weight = std::clamp(feathered[y][x], 0.0, 1.0);
+			const double weight = static_cast<double>(
+					static_cast<float>(std::clamp(feathered[y][x], 0.0, 1.0)));
 			if (weight > 1e-4 && std::isfinite(heights[y][x]) &&
 					std::isfinite(blurred[y][x]))
 				heights[y][x] = heights[y][x] * (1.0 - weight) + blurred[y][x] * weight;
@@ -571,50 +695,191 @@ void apply_land_cover_repair(HeightGrid &heights, land_cover::LandCoverData &dat
 	pull_coastal_land_toward_water(heights, surface, coastal_pull_distance_cells);
 }
 
+namespace
+{
+constexpr double LOWEST_LAND_M = -430.0;
+constexpr double HIGHEST_LAND_M = 8849.0;
+constexpr double SOFT_TOP_BLOCKS = 800.0;
+constexpr double HEADROOM_MAX_BLOCKS = 96.0;
+constexpr int TERRAIN_HEIGHT_BUFFER = 15;
+
+int terrain_ceiling(bool disable_height_limit, int extended_max_y)
+{
+	return (disable_height_limit ? extended_max_y : 319) - TERRAIN_HEIGHT_BUFFER;
+}
+
+struct FitRange
+{
+	double height_range;
+	double scaled_range;
+};
+
+std::pair<ElevationAffine, FitRange> derive_affine(
+		const std::vector<std::vector<double>> &grid, double scale, int ground_level,
+		int min_ground_level, bool disable_height_limit, int extended_max_y)
+{
+	double lo = std::numeric_limits<double>::max();
+	double hi = std::numeric_limits<double>::lowest();
+	for (const auto &row : grid)
+		for (double value : row)
+			if (std::isfinite(value)) {
+				lo = std::min(lo, value);
+				hi = std::max(hi, value);
+			}
+	double height_range;
+	if (!std::isfinite(lo) || !std::isfinite(hi) || lo >= hi) {
+		const double real_min = std::isfinite(lo) && lo <= hi ? lo : 0.0;
+		lo = real_min;
+		height_range = 0.0;
+	} else {
+		height_range = hi - lo;
+	}
+	const double ideal_scaled_range = height_range * scale;
+	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y);
+	if (disable_height_limit && min_ground_level < ground_level &&
+			std::isfinite(ideal_scaled_range)) {
+		const double rounded = std::ceil(ideal_scaled_range);
+		const int needed = rounded >= std::numeric_limits<int>::max()
+								   ? std::numeric_limits<int>::max()
+						   : rounded <= std::numeric_limits<int>::min()
+								   ? std::numeric_limits<int>::min()
+								   : static_cast<int>(rounded);
+		const long long candidate = static_cast<long long>(ceiling) - needed;
+		ground_level = static_cast<int>(
+				std::clamp(candidate, static_cast<long long>(min_ground_level),
+						static_cast<long long>(ground_level)));
+	}
+	const double available_y_range = static_cast<double>(ceiling - ground_level);
+	const double scaled_range =
+			ideal_scaled_range <= available_y_range
+					? ideal_scaled_range
+					: height_range * (available_y_range / height_range);
+	const double blocks_per_meter =
+			height_range > 0.0 ? scaled_range / height_range : 0.0;
+	return {{lo, blocks_per_meter, ground_level, std::nullopt},
+			{height_range, scaled_range}};
+}
+} // namespace
+
+double ElevationAffine::y_for_metres(double height_m) const
+{
+	if (soft_top && height_m > soft_top->knee_m) {
+		const double knee_y =
+				ground_level + (soft_top->knee_m - min_height_m) * blocks_per_meter;
+		const double rise = (height_m - soft_top->knee_m) * blocks_per_meter;
+		return knee_y +
+			   soft_top->width_blocks * std::asinh(rise / soft_top->width_blocks);
+	}
+	return ground_level + (height_m - min_height_m) * blocks_per_meter;
+}
+
+ElevationAffine ElevationAffine::whole_earth(double scale, int floor, int extended_max_y)
+{
+	ElevationAffine affine{LOWEST_LAND_M, scale, floor, std::nullopt};
+	const double ceiling = terrain_ceiling(true, extended_max_y);
+	const double knee_y = ceiling - SOFT_TOP_BLOCKS;
+	if (affine.y_for_metres(HIGHEST_LAND_M) <= ceiling || knee_y <= floor)
+		return affine;
+	const double knee_m = LOWEST_LAND_M + (knee_y - floor) / scale;
+	const double rise = (HIGHEST_LAND_M - knee_m) * scale;
+	double lo = 1e-3, hi = 1e9;
+	for (int i = 0; i < 200; ++i) {
+		const double mid = (lo + hi) * 0.5;
+		if (mid * std::asinh(rise / mid) > SOFT_TOP_BLOCKS)
+			hi = mid;
+		else
+			lo = mid;
+	}
+	affine.soft_top = SoftTop{knee_m, lo};
+	return affine;
+}
+
+std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_with(
+		const std::vector<std::vector<double>> &in, double scale, int ground_level,
+		int min_ground_level, bool disable_height_limit, int extended_max_y,
+		const AffinePolicy &policy)
+{
+	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y);
+	std::optional<FitRange> fit;
+	ElevationAffine affine;
+	switch (policy.kind) {
+	case AffinePolicy::Kind::Fit: {
+		auto derived = derive_affine(in, scale, ground_level, min_ground_level,
+				disable_height_limit, extended_max_y);
+		affine = derived.first;
+		fit = derived.second;
+		break;
+	}
+	case AffinePolicy::Kind::FitWithHeadroom: {
+		auto derived = derive_affine(in, scale, ground_level, min_ground_level,
+				disable_height_limit, extended_max_y);
+		affine = derived.first;
+		fit = derived.second;
+		if (affine.blocks_per_meter <= 0.0)
+			affine.blocks_per_meter = scale;
+		const double free = (ceiling - affine.ground_level) - fit->scaled_range;
+		const double margin =
+				std::max(0.0, std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)));
+		if (margin > 0.0 && affine.blocks_per_meter > 0.0)
+			affine.min_height_m -= margin / affine.blocks_per_meter;
+		fit.reset();
+		break;
+	}
+	case AffinePolicy::Kind::Fixed:
+		affine = policy.fixed;
+		break;
+	}
+	const double base = affine.ground_level;
+	const double upper = ceiling;
+	std::vector<std::vector<double>> out = in;
+	for (std::size_t y = 0; y < in.size(); ++y)
+		for (std::size_t x = 0; x < in[y].size(); ++x) {
+			const double value = in[y][x];
+			double mapped;
+			if (fit) {
+				const double relative =
+						fit->height_range > 0.0
+								? (value - affine.min_height_m) / fit->height_range
+								: 0.0;
+				mapped = base + relative * fit->scaled_range;
+			} else {
+				mapped = affine.y_for_metres(value);
+			}
+			out[y][x] = std::clamp(mapped, base, upper);
+		}
+	if (policy.kind == AffinePolicy::Kind::Fixed) {
+		std::size_t total = 0, clamped = 0;
+		for (const auto &row : in)
+			for (double value : row)
+				if (std::isfinite(value)) {
+					++total;
+					const double mapped = affine.y_for_metres(value);
+					clamped += (mapped < base && value > LOWEST_LAND_M) || mapped > upper;
+				}
+		if (total && clamped * 200 > total)
+			std::clog
+					<< "Warning: " << (100.0 * clamped / total)
+					<< "% of this area lies outside the world's height band and is flattened there.\n";
+	}
+	double top = base;
+	if (fit)
+		top = affine.ground_level + fit->scaled_range;
+	else
+		for (const auto &row : out)
+			for (double value : row)
+				if (std::isfinite(value))
+					top = std::max(top, value);
+	world_editor::set_terrain_top_y(static_cast<int>(std::lround(std::min(top, upper))));
+	return {std::move(out), affine};
+}
+
 std::tuple<std::vector<std::vector<double>>, double, double, int> scale_to_minecraft(
 		const std::vector<std::vector<double>> &in, double scale, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y)
 {
-	double lo = 1e300, hi = -1e300;
-	for (auto &r : in)
-		for (double v : r)
-			if (std::isfinite(v)) {
-				lo = std::min(lo, v);
-				hi = std::max(hi, v);
-			}
-	if (!(lo <= hi) || !std::isfinite(lo)) {
-		lo = 0;
-		hi = 0;
-	}
-	const double range = hi - lo;
-	const int effective_max_y = disable_height_limit ? extended_max_y : 319;
-	const int ceiling = effective_max_y - 15;
-	const double ideal_scaled_range = range * scale;
-	if (disable_height_limit && min_ground_level < ground_level &&
-			std::isfinite(ideal_scaled_range)) {
-		const int needed = ideal_scaled_range >= double(std::numeric_limits<int>::max())
-								   ? std::numeric_limits<int>::max()
-								   : int(std::ceil(std::max(0.0, ideal_scaled_range)));
-		const long long candidate = static_cast<long long>(ceiling) - needed;
-		ground_level = std::clamp(
-				int(std::clamp(candidate,
-						static_cast<long long>(std::numeric_limits<int>::min()),
-						static_cast<long long>(std::numeric_limits<int>::max()))),
-				min_ground_level, ground_level);
-	}
-	const double available_y_range = std::max(0.0, double(ceiling - ground_level));
-	const double scaled_range = ideal_scaled_range <= available_y_range
-										? ideal_scaled_range
-										: (range > 0.0 ? available_y_range : 0.0);
-	const double factor = range > 0.0 ? scaled_range / range : 0.0;
-	std::vector<std::vector<double>> out = in;
-	for (auto &r : out)
-		for (double &v : r)
-			v = std::isfinite(v) ? std::clamp(ground_level + (v - lo) * factor,
-										   double(ground_level), double(ceiling))
-								 : ground_level;
-	world_editor::set_terrain_top_y(static_cast<int>(
-			std::lround(std::min(double(ceiling), double(ground_level) + scaled_range))));
-	return {std::move(out), lo, factor, ground_level};
+	auto [heights, affine] = scale_to_minecraft_with(in, scale, ground_level,
+			min_ground_level, disable_height_limit, extended_max_y, AffinePolicy::fit());
+	return {std::move(heights), affine.min_height_m, affine.blocks_per_meter,
+			affine.ground_level};
 }
 }

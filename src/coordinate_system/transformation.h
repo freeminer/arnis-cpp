@@ -27,6 +27,9 @@ public:
 			const ::arnis::geographic::LLBBox &, double scale);
 	static std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect> with_web_mercator(
 			const ::arnis::geographic::LLBBox &, double scale);
+	static std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect> with_web_mercator(
+			const ::arnis::geographic::LLBBox &, double scale, double origin_lat,
+			double origin_lng);
 };
 double lat_distance(double a, double b);
 double lon_distance(double lat, double a, double b);

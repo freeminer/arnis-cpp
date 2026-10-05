@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <limits>
 #include <numeric>
 #include <vector>
@@ -20,6 +21,12 @@ std::tuple<std::size_t, std::size_t, std::size_t, std::size_t> compute_grid_dims
 			static_cast<std::size_t>(std::max(0.0, std::floor(base_x) * scale)) + 1;
 	const auto world_height =
 			static_cast<std::size_t>(std::max(0.0, std::floor(base_z) * scale)) + 1;
+	return compute_grid_dims_for_world(world_width, world_height);
+}
+
+std::tuple<std::size_t, std::size_t, std::size_t, std::size_t>
+compute_grid_dims_for_world(std::size_t world_width, std::size_t world_height)
+{
 	std::size_t grid_width = std::max<std::size_t>(2, world_width);
 	std::size_t grid_height = std::max<std::size_t>(2, world_height);
 	const double cells = static_cast<double>(grid_width) * grid_height;
@@ -104,7 +111,6 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 	for (std::size_t z = 0; z < height; ++z)
 		tmp[z] = blur_line(grid[z], kernel, radius);
 
-	std::vector<std::vector<double>> out(height, std::vector<double>(width, 0.0));
 	constexpr std::size_t COLUMN_GROUP = 8;
 	for (std::size_t x0 = 0; x0 < width; x0 += COLUMN_GROUP) {
 		const auto group_width = std::min(COLUMN_GROUP, width - x0);
@@ -116,10 +122,10 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 		for (std::size_t c = 0; c < group_width; ++c) {
 			const auto blurred = blur_line(columns[c], kernel, radius);
 			for (std::size_t z = 0; z < height; ++z)
-				out[z][x0 + c] = blurred[z];
+				tmp[z][x0 + c] = blurred[z];
 		}
 	}
-	return out;
+	return tmp;
 }
 
 void fill_nan_values(std::vector<std::vector<double>> &heights)
@@ -175,13 +181,16 @@ void filter_elevation_outliers(std::vector<std::vector<double>> &heights)
 	std::size_t filtered = 0;
 	for (auto &row : heights)
 		for (double &value : row)
-			if (std::isfinite(value) &&
+			if (!std::isnan(value) &&
 					(value < MIN_REASONABLE_M || value > MAX_REASONABLE_M)) {
 				value = std::numeric_limits<double>::quiet_NaN();
 				++filtered;
 			}
-	if (filtered > 0)
+	if (filtered > 0) {
+		std::clog << "Filtered " << filtered << " impossible elevations (outside "
+				  << MIN_REASONABLE_M << "m.." << MAX_REASONABLE_M << "m)\n";
 		fill_nan_values(heights);
+	}
 }
 
 }

@@ -33,19 +33,46 @@ std::tuple<std::uint8_t, std::uint8_t, std::uint8_t> shaded(std::uint8_t id)
 			std::uint8_t(unsigned(c[2]) * m / 255)};
 }
 
+struct PaletteEntry
+{
+	std::uint8_t id;
+	Color rgb;
+	std::array<float, 3> lab;
+};
+
+const std::array<PaletteEntry, 61 * 4> &shaded_palette()
+{
+	static const auto palette = [] {
+		std::array<PaletteEntry, 61 * 4> result{};
+		for (std::size_t i = 0; i < result.size(); ++i) {
+			const auto id = static_cast<std::uint8_t>(i + 4);
+			const auto color = shaded(id);
+			const auto rgb =
+					Color{std::get<0>(color), std::get<1>(color), std::get<2>(color)};
+			result[i] = {id, rgb, oklab_components(RGBTuple{rgb[0], rgb[1], rgb[2]})};
+		}
+		return result;
+	}();
+	return palette;
+}
+
 std::uint8_t nearest_map_color_uncached(std::uint8_t r, std::uint8_t g, std::uint8_t b)
 {
-	const RGBTuple target{r, g, b};
+	const auto target_rgb = Color{r, g, b};
+	const auto target_lab =
+			oklab_components(RGBTuple{target_rgb[0], target_rgb[1], target_rgb[2]});
 	std::uint8_t best = 4;
 	float distance = std::numeric_limits<float>::max();
-	for (unsigned id = 4; id < base.size() * 4; ++id) {
-		const auto color = shaded(std::uint8_t(id));
-		if (color == target)
-			return std::uint8_t(id);
-		const float d = oklab_distance(target, color);
+	for (const auto &entry : shaded_palette()) {
+		if (entry.rgb == target_rgb)
+			return entry.id;
+		const float dl = target_lab[0] - entry.lab[0];
+		const float da = target_lab[1] - entry.lab[1];
+		const float db = target_lab[2] - entry.lab[2];
+		const float d = dl * dl + da * da + db * db;
 		if (d < distance) {
 			distance = d;
-			best = std::uint8_t(id);
+			best = entry.id;
 		}
 	}
 	return best;

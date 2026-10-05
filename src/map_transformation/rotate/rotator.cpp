@@ -110,6 +110,7 @@ void rotate_world_with_ground(double angle_degrees,
 	const bool had_elevation = ground.elevation_enabled;
 	const bool had_land_cover = ground.has_land_cover();
 	const bool had_canopy = ground.has_canopy();
+	const auto original_ecoregions = ground.ecoregion_map;
 	const double rad = -angle_degrees * M_PI / 180.0;
 	const double cx = (bbox.min_x() + bbox.max_x()) / 2.0;
 	const double cz = (bbox.min_z() + bbox.max_z()) / 2.0;
@@ -124,6 +125,21 @@ void rotate_world_with_ground(double angle_degrees,
 			std::min<std::size_t>(new_width, elevation::MAX_ELEVATION_GRID_DIM);
 	const auto grid_height =
 			std::min<std::size_t>(new_height, elevation::MAX_ELEVATION_GRID_DIM);
+	if (original_ecoregions && original_ecoregions->is_local()) {
+		if (auto rotated = original_ecoregions->resample(
+					new_width, new_height, [&](std::int32_t x, std::int32_t z) {
+						const double wx = double(bbox.min_x()) + x;
+						const double wz = double(bbox.min_z()) + z;
+						const auto [ox, oz] = rotate_point(
+								wx, wz, cx, cz, -std::sin(rad), std::cos(rad));
+						return std::pair<std::int32_t, std::int32_t>{
+								static_cast<std::int32_t>(std::lround(ox)) -
+										original_bbox.min_x(),
+								static_cast<std::int32_t>(std::lround(oz)) -
+										original_bbox.min_z()};
+					}))
+			ground.set_ecoregion_map(std::move(*rotated));
+	}
 
 	// Re-sample every optional raster through the inverse rotation.  This is
 	// the same source-coordinate mapping used by Rust's rotator: generated

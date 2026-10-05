@@ -333,6 +333,8 @@ static bool spans_contain(const std::vector<std::pair<int, int>> &spans, int x)
 			[x](const auto &span) { return x >= span.first && x <= span.second; });
 }
 
+static constexpr double STILL_SURFACE_MAX_BELOW_SHARE = .01;
+
 template <typename GroundPointAt, typename GroundLevelAt>
 static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
 		int min_z, int max_x, int max_z, const std::vector<std::vector<XZPoint>> &outers,
@@ -391,7 +393,15 @@ static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
 	const auto q3 = levels.size() * 3 / 4;
 	if (levels[q1] != levels[q3])
 		return std::nullopt;
-	return levels[levels.size() / 2];
+	const int surface = levels[levels.size() / 2];
+	const auto below = std::count_if(
+			levels.begin(), levels.end(), [surface](int y) { return y < surface - 1; });
+	// A still polygon can run across a waterfall. A small number of coarse-DEM
+	// outliers are harmless, but a meaningful lower reach must keep per-column
+	// water levels instead of flattening the whole gorge to the upper lake.
+	if (static_cast<double>(below) > STILL_SURFACE_MAX_BELOW_SHARE * levels.size())
+		return std::nullopt;
+	return surface;
 }
 
 // Rust parity: resolve one stable level for a body seen consistently by ESA.
@@ -433,6 +443,51 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 									  min_x - 4, max_x + 4),
 				x);
 	};
+	auto is_steep_land = [&editor](int x, int z) {
+		if (!editor.ground)
+			return false;
+		const auto point = editor.ground_point(x, z);
+		const auto cover = editor.ground->cover_class(point);
+		return cover != 0 && cover != land_cover::LC_WATER &&
+			   editor.ground->slope(point) > 4;
+	};
+	auto climbs_to_water = [&](int x, int z) {
+		constexpr int max_climb = 48;
+		constexpr int reach = 3;
+		int cx = x, cz = z;
+		int y = editor.get_ground_level(cx, cz);
+		for (int step = 0; step < max_climb; ++step) {
+			bool found = false;
+			int best_y = y, best_x = cx, best_z = cz;
+			for (const auto &[inner, outer] :
+					std::array<std::pair<int, int>, 2>{{{0, 1}, {1, reach}}}) {
+				for (int dz = -outer; dz <= outer; ++dz) {
+					for (int dx = -outer; dx <= outer; ++dx) {
+						if (std::abs(dx) <= inner && std::abs(dz) <= inner)
+							continue;
+						const int nx = cx + dx, nz = cz + dz;
+						const int ny = editor.get_ground_level(nx, nz);
+						if (ny >= y && editor.is_lc_water(nx, nz))
+							return true;
+						if (ny > best_y) {
+							best_y = ny;
+							best_x = nx;
+							best_z = nz;
+							found = true;
+						}
+					}
+				}
+				if (found)
+					break;
+			}
+			if (!found || !filled_at(best_x, best_z))
+				return false;
+			cx = best_x;
+			cz = best_z;
+			y = best_y;
+		}
+		return false;
+	};
 
 	for (int z = min_z; z <= max_z; ++z) {
 		std::vector<std::pair<int, int>> outer_spans;
@@ -458,11 +513,21 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 				const bool on_road = road_mask.contains(x, z);
 				if (on_road && !bridge_surface.contains(x, z))
 					continue;
-				int ground_y = editor.get_ground_level(x, z);
-				int water_y = still_surface.value_or(editor.get_water_level(x, z));
-				if (still_surface && (ground_y > water_y || water_y - ground_y > 20))
+				const int ground_y = editor.get_ground_level(x, z);
+				// ESA cells below the still-water surface belong to the lower
+				// reach, not the lake. Leave them to the per-column river fill.
+				const auto column_surface =
+						still_surface && editor.ground &&
+										(ground_y >= *still_surface - 1 ||
+												editor.ground->cover_class(
+														editor.ground_point(x, z)) !=
+														land_cover::LC_WATER)
+								? still_surface
+								: std::nullopt;
+				int water_y = column_surface.value_or(editor.get_water_level(x, z));
+				if (!column_surface && is_steep_land(x, z) && !climbs_to_water(x, z))
 					continue;
-				if (!still_surface && ground_y > water_y) {
+				if (!column_surface && ground_y > water_y) {
 					// A DEM step fully inside the water polygon remains water; a
 					// bank near its edge is left dry.  This is Rust's four-cell
 					// interior-margin test, evaluated from the same scanline edges.

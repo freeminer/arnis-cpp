@@ -26,17 +26,13 @@ bool usgs_3dep_covers(const GeoBBox &bbox)
 	return std::any_of(std::begin(coverage), std::end(coverage),
 			[&](const GeoBBox &area) { return bboxes_overlap(area, bbox); });
 }
-std::vector<Source> select_sources(const GeoBBox &bbox, SourceMode mode)
+std::vector<Source> select_sources(const GeoBBox &, SourceMode mode)
 {
 	if (mode == SourceMode::Planetary)
 		return {};
 	if (mode == SourceMode::AwsOnly)
 		return {Source::AWS};
-	if (mode == SourceMode::GlobalOnly)
-		return {Source::Mapterhorn, Source::AWS};
 	std::vector<Source> out;
-	if (g_usgs && usgs_3dep_covers(bbox))
-		out.push_back(Source::USGS);
 	if (g_mapterhorn)
 		out.push_back(Source::Mapterhorn);
 	if (g_aws)
@@ -428,13 +424,17 @@ ProviderConfig config()
 {
 	return {g_aws, g_usgs, g_mapterhorn, g_retries};
 }
-Source select_source(int lat, int lon, const std::filesystem::path &file)
+Source select_source(int lat, int lon, const std::filesystem::path &file, SourceMode mode)
 {
+	if (mode == SourceMode::Planetary)
+		return Source::None;
+	if (mode == SourceMode::AwsOnly)
+		return g_aws ? Source::AWS : Source::None;
 	if (std::filesystem::exists(file))
-		return Source::AWS;
-	const auto sources =
-			select_sources({double(lat), double(lon), double(lat + 1), double(lon + 1)});
-	return sources.empty() ? Source::None : sources.front();
+		return Source::Mapterhorn;
+	if (g_mapterhorn)
+		return Source::Mapterhorn;
+	return g_aws ? Source::AWS : Source::None;
 }
 const char *source_name(Source s)
 {
@@ -515,11 +515,14 @@ bool download_tile(const std::string &url, const std::filesystem::path &file)
 	}
 	return true;
 }
-bool fetch_with_fallback(int lat, int lon, const std::filesystem::path &file)
+bool fetch_with_fallback(
+		int lat, int lon, const std::filesystem::path &file, SourceMode mode)
 {
 	if (std::filesystem::exists(file))
 		return true;
-	if (g_fixed && g_fixed_enabled) {
+	if (mode == SourceMode::Planetary)
+		return false;
+	if (mode != SourceMode::AwsOnly && g_fixed && g_fixed_enabled) {
 		std::filesystem::create_directories(file.parent_path());
 		std::ofstream f(file, std::ios::binary);
 		if (f) {
@@ -534,12 +537,18 @@ bool fetch_with_fallback(int lat, int lon, const std::filesystem::path &file)
 		}
 	}
 	std::vector<std::pair<std::string, int>> urls;
-	if (g_aws)
-		urls.push_back({aws_terrain_url(lat, lon), 0});
-	if (g_usgs)
-		urls.push_back({usgs_3dep_url(lat, lon), 1});
-	if (g_mapterhorn)
-		urls.push_back({mapterhorn_url(lat, lon), 2});
+	if (mode == SourceMode::AwsOnly) {
+		if (g_aws)
+			urls.push_back({aws_terrain_url(lat, lon), 0});
+	} else {
+		// Match Rust's Auto source chain: Mapterhorn is the primary global
+		// provider, with AWS as a fallback. Mapterhorn includes regional DEM
+		// data such as USGS 3DEP in its own pyramid.
+		if (g_mapterhorn)
+			urls.push_back({mapterhorn_url(lat, lon), 2});
+		if (g_aws)
+			urls.push_back({aws_terrain_url(lat, lon), 0});
+	}
 	for (const auto &[u, kind] : urls)
 		for (unsigned i = 0; i <= g_retries; ++i) {
 			++g_stats.attempts;

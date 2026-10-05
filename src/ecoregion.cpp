@@ -1,15 +1,21 @@
 #include "ecoregion.h"
 #include "assets_root.h"
+#include "fm_ecoregion_cache.h"
+#include "coordinate_system/cartesian/xzpoint.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
+#include <limits>
 #include <mutex>
+#include <set>
 #include <sstream>
+#include <unordered_map>
 #include <vector>
 #include "land_cover/land_cover.h"
 
@@ -106,6 +112,20 @@ std::pair<double, double> warp(double col, double row)
 			octave(0xEC00003, 384, .9) + octave(0xEC00004, 96, .35) +
 					octave(0xEC00006, 16, .12)};
 }
+
+std::pair<std::size_t, std::size_t> warped_cell(
+		const geo_grid::TiledGrid &grid, double lat, double lon)
+{
+	const auto [col, row] = grid.position(lat, lon);
+	const auto offset = warp(col, row);
+	return grid.cell(col + offset.first, row + offset.second);
+}
+
+std::int32_t euclidean_remainder(std::int32_t value, std::int32_t divisor)
+{
+	const auto r = value % divisor;
+	return r < 0 ? r + divisor : r;
+}
 }
 std::optional<Ecoregion> lookup(std::uint16_t id)
 {
@@ -165,6 +185,138 @@ std::optional<EcoMap> EcoMap::load(const std::filesystem::path &path)
 		return {};
 	return out;
 }
+
+std::optional<EcoMap> EcoMap::build(std::size_t world_width, std::size_t world_height,
+		std::pair<std::int32_t, std::int32_t> align,
+		const std::function<std::pair<double, double>(double, double)> &geo)
+{
+	const auto &source = generation_map().map;
+	if (!source || !source->grid_ || !world_width || !world_height || !geo ||
+			world_width > std::size_t(std::numeric_limits<std::int32_t>::max()) ||
+			world_height > std::size_t(std::numeric_limits<std::int32_t>::max()))
+		return std::nullopt;
+	const auto &grid = *source->grid_;
+	const double lat0 = geo(0.0, 0.0).first;
+	const double lat1 = geo(0.0, double(world_height)).first;
+	if (!std::isfinite(lat0) || !std::isfinite(lat1))
+		return std::nullopt;
+	const double source_cells =
+			std::max(std::abs(lat0 - lat1) * grid.cells_per_degree(), 1e-6);
+	const double per_source = double(world_height) / source_cells;
+	const double quarter_estimate = per_source / 4.0;
+	const int quarter = quarter_estimate <= 4.0	   ? 4
+						: quarter_estimate >= 32.0 ? 32
+												   : static_cast<int>(quarter_estimate);
+	const auto base_cell =
+			std::int32_t{1} << (31 -
+								std::countl_zero(static_cast<std::uint32_t>(quarter)));
+	const auto dimension = std::max(world_width, world_height);
+	const auto cap_cell = static_cast<std::int32_t>((dimension + 511) / 512);
+	const std::int32_t cell = std::max(base_cell, cap_cell);
+	const std::int32_t ox = -euclidean_remainder(align.first, cell);
+	const std::int32_t oz = -euclidean_remainder(align.second, cell);
+	const auto span = [cell](std::size_t length, std::int32_t origin) {
+		const auto numerator = static_cast<std::int64_t>(length) - origin + cell - 1;
+		return static_cast<std::size_t>(std::max<std::int64_t>(1, numerator / cell));
+	};
+	const auto width = span(world_width, ox);
+	const auto height = span(world_height, oz);
+	if (width > std::numeric_limits<std::size_t>::max() / height)
+		return std::nullopt;
+	const auto count = width * height;
+	std::vector<std::pair<std::size_t, std::size_t>> cells;
+	cells.reserve(count);
+	const double half = double(cell) / 2.0;
+	std::set<std::size_t> tiles;
+	for (std::size_t i = 0; i < count; ++i) {
+		const double x = double(ox + static_cast<std::int32_t>(i % width) * cell) + half;
+		const double z = double(oz + static_cast<std::int32_t>(i / width) * cell) + half;
+		const auto [lat, lon] = geo(x, z);
+		cells.push_back(warped_cell(grid, lat, lon));
+		tiles.insert(grid.tile_of(cells.back()));
+	}
+	std::unordered_map<std::size_t, std::vector<std::uint8_t>> decoded;
+	decoded.reserve(tiles.size());
+	for (const auto tile : tiles)
+		if (auto data = grid.decode(tile))
+			decoded.emplace(tile, std::move(*data));
+
+	EcoMap out;
+	out.bytes_ = source->bytes_;
+	out.grid_ = source->grid_;
+	out.cell_ = cell;
+	out.origin_x_ = ox;
+	out.origin_z_ = oz;
+	out.align_x_ = align.first;
+	out.align_z_ = align.second;
+	out.width_ = width;
+	out.height_ = height;
+	out.ids_.reserve(count);
+	for (const auto &sample : cells) {
+		const auto tile_id = grid.tile_of(sample);
+		const auto decoded_tile = decoded.find(tile_id);
+		out.ids_.push_back(
+				decoded_tile == decoded.end()
+						? 0
+						: grid.value(decoded_tile->second, grid.index_in_tile(sample)));
+	}
+	return out;
+}
+
+std::uint16_t EcoMap::id_at_local(std::int32_t x, std::int32_t z) const
+{
+	const auto index = [](std::int32_t value, std::int32_t origin, std::int32_t cell_size,
+							   std::size_t count) {
+		const auto delta = std::int64_t(value) - origin;
+		const auto quotient =
+				delta >= 0 ? delta / cell_size : -((-delta + cell_size - 1) / cell_size);
+		return static_cast<std::size_t>(std::clamp<std::int64_t>(
+				quotient, 0, static_cast<std::int64_t>(count) - 1));
+	};
+	const auto cx = index(x, origin_x_, cell_, width_);
+	const auto cz = index(z, origin_z_, cell_, height_);
+	return ids_[cz * width_ + cx];
+}
+
+std::optional<Ecoregion> EcoMap::at(const cartesian::XZPoint &coord) const
+{
+	if (!is_local())
+		return std::nullopt;
+	return lookup(id_at_local(coord.x, coord.z));
+}
+
+std::optional<EcoMap> EcoMap::resample(std::size_t world_width, std::size_t world_height,
+		const std::function<std::pair<std::int32_t, std::int32_t>(
+				std::int32_t, std::int32_t)> &source) const
+{
+	if (!is_local() || !world_width || !world_height || !source)
+		return std::nullopt;
+	const auto width = std::max<std::size_t>(
+			1, (world_width + std::size_t(cell_) - 1) / std::size_t(cell_));
+	const auto height = std::max<std::size_t>(
+			1, (world_height + std::size_t(cell_) - 1) / std::size_t(cell_));
+	if (width > std::numeric_limits<std::size_t>::max() / height)
+		return std::nullopt;
+	EcoMap out;
+	out.bytes_ = bytes_;
+	out.grid_ = grid_;
+	out.cell_ = cell_;
+	out.origin_x_ = 0;
+	out.origin_z_ = 0;
+	out.width_ = width;
+	out.height_ = height;
+	out.ids_.reserve(width * height);
+	for (std::size_t i = 0; i < width * height; ++i) {
+		const auto x = static_cast<std::int32_t>(
+				i % width * std::size_t(cell_) + std::size_t(cell_ / 2));
+		const auto z = static_cast<std::int32_t>(
+				i / width * std::size_t(cell_) + std::size_t(cell_ / 2));
+		const auto [sx, sz] = source(x, z);
+		out.ids_.push_back(id_at_local(sx + align_x_, sz + align_z_));
+	}
+	return out;
+}
+
 std::optional<std::uint16_t> EcoMap::id_at(double latitude, double longitude) const
 {
 	if (!grid_)
@@ -181,6 +333,16 @@ std::optional<std::uint16_t> EcoMap::id_at(double latitude, double longitude) co
 std::vector<std::pair<std::uint16_t, std::size_t>> EcoMap::by_area() const
 {
 	std::map<std::uint16_t, std::size_t> counts;
+	if (is_local()) {
+		for (const auto id : ids_)
+			++counts[id];
+		std::vector<std::pair<std::uint16_t, std::size_t>> out(
+				counts.begin(), counts.end());
+		std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
+			return a.second != b.second ? a.second > b.second : a.first < b.first;
+		});
+		return out;
+	}
 	if (!grid_)
 		return {};
 	for (std::size_t tile = 0; tile < grid_->tile_count(); ++tile) {
@@ -199,6 +361,9 @@ std::vector<std::pair<std::uint16_t, std::size_t>> EcoMap::by_area() const
 }
 bool EcoMap::has_gaps() const
 {
+	if (is_local())
+		return std::any_of(ids_.begin(), ids_.end(),
+				[](std::uint16_t id) { return !lookup(id).has_value(); });
 	if (!grid_)
 		return true;
 	for (std::size_t tile = 0; tile < grid_->tile_count(); ++tile) {

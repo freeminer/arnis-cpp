@@ -12,6 +12,7 @@
 
 #include "land_cover/land_cover.h"
 #include "element_processing/bridges.h"
+#include "ground_generation.h"
 #include "world_editor/floor_state.h"
 
 namespace arnis::water_depth
@@ -68,10 +69,7 @@ void bit_set(std::vector<std::uint64_t> &bits, std::size_t i)
 
 double value_noise_01(int x, int z, int scale)
 {
-	const int sx = scale > 0 ? x / scale : x;
-	const int sz = scale > 0 ? z / scale : z;
-	return static_cast<double>(land_cover::coord_hash(sx, sz) & 0x00FF'FFFFULL) /
-		   static_cast<double>(0x0100'0000ULL);
+	return ground_generation::value_noise_01(x, z, scale);
 }
 
 void chamfer_3_4_dt(std::vector<std::uint8_t> &d, std::size_t w, std::size_t h)

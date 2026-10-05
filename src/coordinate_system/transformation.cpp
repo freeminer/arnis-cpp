@@ -1,4 +1,5 @@
 #include "transformation.h"
+#include "../projection/web_mercator.h"
 #include <cmath>
 #include <algorithm>
 #include <stdexcept>
@@ -24,10 +25,6 @@ double mercator_y_to_lat(double y)
 		   3.14159265358979323846;
 }
 static constexpr double R = 6371000.0, PI = 3.14159265358979323846;
-static double clamp_lat(double lat)
-{
-	return std::clamp(lat, -85.05112878, 85.05112878);
-}
 double lat_distance(double a, double b)
 {
 	double d = (b - a) * PI / 180.0, s = std::sin(d / 2);
@@ -49,11 +46,12 @@ std::pair<double, double> geo_distance(
 		::arnis::geographic::LLPoint p) const
 {
 	if (mercator_) {
-		const double lat = clamp_lat(p.lat());
-		double x = R * (p.lng() - origin_lng_) * PI / 180.0 * cos_ref_ * scale_;
-		double z =
-				-R * std::log(std::tan(PI / 4 + lat * PI / 360.0)) * scale_ + z_offset_;
-		return {int(x), int(z)};
+		const double lat = p.lat();
+		const double x = R * (p.lng() - origin_lng_) * PI / 180.0 * cos_ref_ * scale_;
+		const double z =
+				-R * std::log(std::tan(PI / 4 + lat * PI / 360.0)) * cos_ref_ * scale_ +
+				z_offset_;
+		return {static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z))};
 	}
 	double rx = len_lng_ == 0 ? 0 : (p.lng() - min_lng_) / len_lng_,
 		   rz = len_lat_ == 0 ? 0 : 1 - (p.lat() - min_lat_) / len_lat_;
@@ -62,40 +60,53 @@ std::pair<double, double> geo_distance(
 std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect>
 CoordTransformer::with_web_mercator(const ::arnis::geographic::LLBBox &b, double scale)
 {
+	return with_web_mercator(b, scale, (b.min().lat() + b.max().lat()) * 0.5,
+			(b.min().lng() + b.max().lng()) * 0.5);
+}
+
+std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect>
+CoordTransformer::with_web_mercator(const ::arnis::geographic::LLBBox &b, double scale,
+		double origin_lat, double origin_lng)
+{
 	if (scale <= 0)
 		throw std::invalid_argument("scale <= 0");
 	double la0 = b.min().lat(), la1 = b.max().lat(), lo0 = b.min().lng(),
 		   lo1 = b.max().lng();
-	const double origin_lat = (la0 + la1) * .5, origin_lng = (lo0 + lo1) * .5;
 	const double cos_ref = std::cos(origin_lat * PI / 180.0);
 	const double z_offset =
-			R * std::log(std::tan(PI / 4 + origin_lat * PI / 360.0)) * scale;
-	// This is deliberately the same local frame as WebMercatorProjection:
-	// easting is relative to bbox-centre longitude, and north maps to -Z.
+			R * std::log(std::tan(PI / 4 + origin_lat * PI / 360.0)) * cos_ref * scale;
+	// Keep this local frame identical to WebMercatorProjection: easting is
+	// relative to the selected origin longitude, and north maps to negative Z.
 	// Calculating bounds in global Mercator coordinates used to return an AABB
 	// thousands of kilometres away from transform_point's local coordinates.
 	auto project = [&](double lat, double lon) {
-		lat = clamp_lat(lat);
 		return std::pair<double, double>{
 				R * (lon - origin_lng) * PI / 180.0 * cos_ref * scale,
-				-R * std::log(std::tan(PI / 4 + lat * PI / 360.0)) * scale + z_offset};
+				-R * std::log(std::tan(PI / 4 + lat * PI / 360.0)) * cos_ref * scale +
+						z_offset};
 	};
-	const auto nw = project(la1, lo0), se = project(la0, lo1), ne = project(la1, lo1),
-			   sw = project(la0, lo0);
-	const double xmin = std::min({nw.first, se.first, ne.first, sw.first}),
-				 xmax = std::max({nw.first, se.first, ne.first, sw.first}),
-				 zmin = std::min({nw.second, se.second, ne.second, sw.second}),
-				 zmax = std::max({nw.second, se.second, ne.second, sw.second});
-	CoordTransformer t(la1 - la0, lo1 - lo0, xmax - xmin, zmax - zmin, la0, lo0);
+	const double x_west = project(la1, lo0).first;
+	const double x_east = project(la1, lo1).first;
+	const double z_north = project(la1, lo0).second;
+	const double z_south = project(la0, lo0).second;
+	constexpr double WORLD_BORDER = 29999984.0;
+	const double edges[] = {x_west, x_east, z_north, z_south};
+	for (const double edge : edges)
+		if (!std::isfinite(edge) || std::abs(edge) > WORLD_BORDER)
+			throw std::invalid_argument("projected bbox is outside the world border");
+	const int x_min = projection::snap_edge(x_west, false);
+	const int z_min = projection::snap_edge(z_north, false);
+	const int x_max = std::max(projection::snap_edge(x_east, true) - 1, x_min);
+	const int z_max = std::max(projection::snap_edge(z_south, true) - 1, z_min);
+	CoordTransformer t(
+			la1 - la0, lo1 - lo0, x_max - x_min + 1, z_max - z_min + 1, la0, lo0);
 	t.mercator_ = true;
 	t.origin_lat_ = origin_lat;
 	t.origin_lng_ = origin_lng;
 	t.scale_ = scale;
 	t.cos_ref_ = cos_ref;
 	t.z_offset_ = z_offset;
-	return {t,
-			::arnis::cartesian::XZBBoxRect({int(std::floor(xmin)), int(std::floor(zmin))},
-					{int(std::ceil(xmax)), int(std::ceil(zmax))})};
+	return {t, ::arnis::cartesian::XZBBoxRect({x_min, z_min}, {x_max, z_max})};
 }
 std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect>
 CoordTransformer::llbbox_to_xzbbox(const ::arnis::geographic::LLBBox &b, double scale)

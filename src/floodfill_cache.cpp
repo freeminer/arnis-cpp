@@ -9,6 +9,7 @@
 #include <iterator>
 #include <stdexcept>
 #include <cstdlib>
+#include <unordered_set>
 
 namespace arnis
 {
@@ -44,7 +45,10 @@ FloodFillResult empty_flood_fill_result()
 
 bool same_ring_point(const ProcessedNode &a, const ProcessedNode &b)
 {
-	return a.id == b.id || (a.x == b.x && a.z == b.z);
+	// Match Rust's merge_way_segments(): clipped/synthetic nodes can differ by
+	// one projected block even when they represent the same relation endpoint.
+	return a.id == b.id || (std::abs(static_cast<int64_t>(a.x) - b.x) <= 1 &&
+								   std::abs(static_cast<int64_t>(a.z) - b.z) <= 1);
 }
 
 template <typename Tags>
@@ -72,33 +76,53 @@ bool is_underground_building(const Tags &tags)
 
 void merge_relation_segments(std::vector<std::vector<ProcessedNode>> &rings)
 {
-	bool changed = true;
-	while (changed) {
-		changed = false;
-		for (size_t i = 0; i < rings.size() && !changed; ++i) {
-			if (rings[i].empty())
+	// Port of element_processing::merge_way_segments, including its merge
+	// orientation and recursion order, so all relation consumers see the same
+	// reconstructed rings as Rust.
+	std::vector<bool> removed(rings.size(), false);
+	std::vector<std::vector<ProcessedNode>> merged;
+	for (std::size_t i = 0; i < rings.size(); ++i) {
+		for (std::size_t j = 0; j < rings.size(); ++j) {
+			if (i == j || removed[i] || removed[j] || rings[i].empty() ||
+					rings[j].empty())
 				continue;
-			for (size_t j = i + 1; j < rings.size(); ++j) {
-				if (rings[j].empty())
-					continue;
-				auto &a = rings[i];
-				auto &b = rings[j];
-				if (same_ring_point(a.back(), b.front()))
-					a.insert(a.end(), std::next(b.begin()), b.end());
-				else if (same_ring_point(a.back(), b.back()))
-					a.insert(a.end(), std::next(b.rbegin()), b.rend());
-				else if (same_ring_point(a.front(), b.back()))
-					a.insert(a.begin(), b.begin(), std::prev(b.end()));
-				else if (same_ring_point(a.front(), b.front()))
-					a.insert(a.begin(), std::next(b.rbegin()), b.rend());
-				else
-					continue;
-				rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(j));
-				changed = true;
-				break;
+			const auto &a = rings[i];
+			const auto &b = rings[j];
+			if (same_ring_point(a.front(), a.back()) ||
+					same_ring_point(b.front(), b.back()))
+				continue;
+			if (same_ring_point(a.front(), b.front())) {
+				removed[i] = removed[j] = true;
+				auto joined = a;
+				std::reverse(joined.begin(), joined.end());
+				joined.insert(joined.end(), std::next(b.begin()), b.end());
+				merged.push_back(std::move(joined));
+			} else if (same_ring_point(a.back(), b.back())) {
+				removed[i] = removed[j] = true;
+				auto joined = a;
+				joined.insert(joined.end(), std::next(b.rbegin()), b.rend());
+				merged.push_back(std::move(joined));
+			} else if (same_ring_point(a.front(), b.back())) {
+				removed[i] = removed[j] = true;
+				auto joined = b;
+				joined.insert(joined.end(), std::next(a.begin()), a.end());
+				merged.push_back(std::move(joined));
+			} else if (same_ring_point(a.back(), b.front())) {
+				removed[i] = removed[j] = true;
+				auto joined = a;
+				joined.insert(joined.end(), std::next(b.begin()), b.end());
+				merged.push_back(std::move(joined));
 			}
 		}
 	}
+	for (std::size_t i = removed.size(); i > 0; --i)
+		if (removed[i - 1])
+			rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(i - 1));
+	const auto merged_count = merged.size();
+	for (auto &ring : merged)
+		rings.push_back(std::move(ring));
+	if (merged_count > 0)
+		merge_relation_segments(rings);
 }
 
 template <typename Apply>
@@ -114,11 +138,11 @@ void for_relation_ring_cells(const ProcessedRelation &relation, ProcessedMemberR
 
 	for (auto &ring : rings) {
 		ring = clipping::clip_way_to_bbox(ring, xzbbox);
-		if (ring.size() < 3)
+		if (ring.size() < 4)
 			continue;
 		if (!same_ring_point(ring.front(), ring.back())) {
-			if (std::abs(ring.front().x - ring.back().x) > 1 ||
-					std::abs(ring.front().z - ring.back().z) > 1)
+			if (std::abs(static_cast<int64_t>(ring.front().x) - ring.back().x) > 1 ||
+					std::abs(static_cast<int64_t>(ring.front().z) - ring.back().z) > 1)
 				continue;
 			ring.push_back(ring.front());
 		}
@@ -269,39 +293,116 @@ bool WorldEditor::surface_is_sealed(int x, int z) const
 std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		const std::vector<ProcessedElement> &elements, const RoadMaskBitmap &roads) const
 {
-	std::lock_guard<std::mutex> lock(way_cache_mutex);
-	std::optional<SealedSurfaceBitmap> mask;
-	for (const auto &element : elements) {
-		if (!element.is_way())
-			continue;
-		const auto &way = element.as_way();
-		const auto matches = [&](const char *key,
-									 std::initializer_list<const char *> values) {
-			const auto it = way.tags.find(key);
-			return it != way.tags.end() &&
-				   std::any_of(values.begin(), values.end(),
-						   [&](const char *value) { return it->second == value; });
-		};
-		if (!matches("leisure",
-					{"pitch", "track", "playground", "recreation_ground", "schoolyard",
-							"ice_rink", "water_park", "slipway", "outdoor_seating",
-							"bathing_place", "fitness_station"}) &&
-				!matches("amenity",
-						{"parking", "parking_space", "bicycle_parking",
-								"motorcycle_parking", "fuel", "charging_station",
-								"car_wash", "taxi", "marketplace"}) &&
-				!(way.tags.contains("highway") && matches("area", {"yes"})))
-			continue;
-		const auto fill = way_cache.find(way.id);
-		if (fill == way_cache.end())
-			continue;
-		for (const auto &[x, z] : *fill->second) {
-			if (!mask && roads.is_unset_in_bounds(x, z))
-				mask = roads;
-			if (mask)
-				mask->set(x, z);
+	static const std::unordered_set<std::string> sealed_leisure = {"pitch", "track",
+			"playground", "recreation_ground", "schoolyard", "ice_rink", "water_park",
+			"slipway", "outdoor_seating", "bathing_place", "fitness_station"};
+	static const std::unordered_set<std::string> sealed_amenity = {"parking",
+			"parking_space", "bicycle_parking", "motorcycle_parking", "fuel",
+			"charging_station", "car_wash", "taxi", "marketplace"};
+	static const std::unordered_set<std::string> planted_landuse = {"grass", "flowerbed",
+			"meadow", "greenfield", "village_green", "forest", "orchard", "allotments",
+			"plant_nursery"};
+
+	std::vector<FloodFillResult> managed;
+	std::vector<FloodFillResult> paving;
+	std::vector<FloodFillResult> planted;
+	// Copy shared results while holding the cache lock, then do the full bitmap
+	// pass without serializing other cache readers.
+	{
+		std::lock_guard<std::mutex> lock(way_cache_mutex);
+		for (const auto &element : elements) {
+			if (!element.is_way())
+				continue;
+			const auto &way = element.as_way();
+			const auto fill = way_cache.find(way.id);
+			if (fill == way_cache.end() || !fill->second)
+				continue;
+			const auto leisure = way.tags.find("leisure");
+			const auto amenity = way.tags.find("amenity");
+			const auto landuse = way.tags.find("landuse");
+			const auto natural = way.tags.find("natural");
+			const auto highway = way.tags.find("highway");
+			const auto area = way.tags.find("area");
+			const bool leisure_paving =
+					leisure != way.tags.end() && sealed_leisure.contains(leisure->second);
+			const bool amenity_paving =
+					amenity != way.tags.end() && sealed_amenity.contains(amenity->second);
+			const bool highway_area = highway != way.tags.end() &&
+									  area != way.tags.end() && area->second == "yes";
+			if (leisure_paving || amenity_paving || highway_area) {
+				const bool yields =
+						highway_area || amenity_paving ||
+						(leisure != way.tags.end() && leisure->second == "schoolyard");
+				(yields ? paving : managed).push_back(fill->second);
+			} else {
+				bool is_planted = false;
+				if (!way.tags.contains("building") &&
+						!way.tags.contains("building:part") &&
+						highway == way.tags.end()) {
+					if (landuse != way.tags.end()) {
+						is_planted = planted_landuse.contains(landuse->second);
+					} else if (natural != way.tags.end()) {
+						is_planted = natural->second != "tree" &&
+									 natural->second != "tree_row" &&
+									 !(amenity != way.tags.end() &&
+											 amenity->second == "fountain");
+					} else {
+						is_planted = amenity == way.tags.end() &&
+									 leisure != way.tags.end() &&
+									 (leisure->second == "park" ||
+											 leisure->second == "garden");
+					}
+				}
+				if (is_planted)
+					planted.push_back(fill->second);
+			}
 		}
 	}
+
+	// Avoid cloning the full-world road bitmap when fills are empty or only
+	// overlap roads, just as Rust does before constructing its second mask.
+	const auto contributes = [&roads](const auto &fills) {
+		return std::any_of(fills.begin(), fills.end(), [&roads](const auto &fill) {
+			return std::any_of(fill->begin(), fill->end(), [&roads](const auto &coord) {
+				return roads.is_unset_in_bounds(coord.first, coord.second);
+			});
+		});
+	};
+	if (!contributes(managed) && !contributes(paving))
+		return std::nullopt;
+
+	auto mask = roads;
+	std::size_t largest_paving = 0;
+	for (const auto &fill : paving)
+		largest_paving = std::max(largest_paving, fill->size());
+	struct Layer
+	{
+		std::size_t size;
+		bool paved;
+		const FloodFillResult *fill;
+	};
+	std::vector<Layer> layers;
+	layers.reserve(paving.size() + planted.size());
+	for (const auto &fill : paving)
+		layers.push_back({fill->size(), true, &fill});
+	for (const auto &fill : planted)
+		if (fill->size() < largest_paving)
+			layers.push_back({fill->size(), false, &fill});
+	std::sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
+		if (a.size != b.size)
+			return a.size > b.size;
+		return a.paved < b.paved;
+	});
+	for (const auto &layer : layers)
+		for (const auto &[x, z] : **layer.fill) {
+			if (layer.paved)
+				mask.set(x, z);
+			else if (!roads.contains(x, z))
+				mask.clear(x, z);
+		}
+	for (const auto &fill : managed)
+		for (const auto &[x, z] : *fill)
+			mask.set(x, z);
 	return mask;
 }
 
@@ -414,7 +515,8 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 	bool has_leisure = (it_leisure != way.tags.end());
 	bool has_amenity = (it_amenity != way.tags.end());
 	bool has_natural = (it_natural != way.tags.end());
-	bool natural_not_tree = has_natural && (it_natural->second != "tree");
+	bool natural_not_tree = has_natural && it_natural->second != "tree" &&
+							it_natural->second != "tree_row";
 	bool has_highway = (it_highway != way.tags.end());
 	bool has_area = (it_area != way.tags.end());
 	bool area_yes = has_area && (it_area->second == "yes");
@@ -464,6 +566,42 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 			}
 		}
 	}
+	// Relations that dispatch by filling their outer members (natural features,
+	// ground-painting landuse, and parks) can otherwise re-run the same large
+	// polygon fill once per relation/tile. Precompute each member way once, just
+	// like standalone fillable ways. Keep this predicate aligned with
+	// process_element's relation dispatch.
+	std::unordered_set<uint64_t> seen;
+	seen.reserve(ways_needing_fill.size());
+	for (const auto *way : ways_needing_fill)
+		seen.insert(way->id);
+	for (const auto &el : elements) {
+		if (!el.is_relation())
+			continue;
+		const auto &relation = el.as_relation();
+		const auto &tags = relation.tags;
+		const bool building = tags.contains("building") ||
+							  tags.contains("building:part") ||
+							  (tags.contains("type") && tags.at("type") == "building");
+		const bool water =
+				tags.contains("water") ||
+				(tags.contains("natural") &&
+						(tags.at("natural") == "water" || tags.at("natural") == "bay"));
+		if (building || water)
+			continue;
+		const auto landuse = tags.find("landuse");
+		const bool paints_landuse = landuse != tags.end() &&
+									landuse->second != "residential" &&
+									landuse->second != "commercial";
+		const auto leisure = tags.find("leisure");
+		const bool park = leisure != tags.end() && leisure->second == "park";
+		if (!tags.contains("natural") && !paints_landuse && !park)
+			continue;
+		for (const auto &member : relation.members)
+			if (member.role == ProcessedMemberRole::Outer &&
+					seen.insert(member.way.id).second)
+				ways_needing_fill.push_back(&member.way);
+	}
 
 	// Compute fills concurrently, as Rayon does in Rust.  Keep the number of
 	// in-flight jobs bounded so a large extract cannot create one native thread
@@ -490,9 +628,12 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		}
 		for (auto &job : jobs) {
 			auto result = job.get();
-			cache.way_cache.emplace(result.first,
-					std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
-							std::move(result.second)));
+			if (result.second.empty())
+				cache.way_cache.emplace(result.first, empty_flood_fill_result());
+			else
+				cache.way_cache.emplace(result.first,
+						std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
+								std::move(result.second)));
 		}
 	}
 

@@ -105,14 +105,21 @@ public:
 class CachedProvider : public Provider
 {
 	std::filesystem::path root_;
+	providers::SourceMode mode_{providers::SourceMode::Auto};
 
 public:
-	explicit CachedProvider(std::filesystem::path root) : root_(std::move(root)) {}
+	explicit CachedProvider(std::filesystem::path root,
+			providers::SourceMode mode = providers::SourceMode::Auto) :
+			root_(std::move(root)), mode_(mode)
+	{
+	}
 	const std::filesystem::path &root() const { return root_; }
+	providers::SourceMode mode() const { return mode_; }
 	std::optional<Tile> tile_for(double lat, double lon) override;
 	providers::Source source_for(double lat, double lon) const;
 	std::optional<TileResult> fetch_tile(double lat, double lon);
 };
 std::vector<Tile> tiles_for_bbox(double min_lat, double min_lon, double max_lat,
-		double max_lon, const std::filesystem::path &root);
+		double max_lon, const std::filesystem::path &root,
+		providers::SourceMode mode = providers::SourceMode::Auto);
 }

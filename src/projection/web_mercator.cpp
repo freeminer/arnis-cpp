@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cctype>
 #include <cmath>
+#include <limits>
 #include <stdexcept>
 namespace arnis::projection
 {
@@ -35,22 +36,48 @@ WebMercatorProjection::WebMercatorProjection(double lat, double lon, double scal
 {
 	if (!std::isfinite(lat) || !std::isfinite(lon) || !std::isfinite(scale) || scale <= 0)
 		throw std::invalid_argument("invalid Web Mercator projection origin or scale");
-	origin_lat_ = std::clamp(origin_lat_, -85.05112878, 85.05112878);
-	z_offset_ = R * std::log(std::tan(PI / 4 + rad(origin_lat_) / 2)) * scale_;
+	z_offset_ = R * std::log(std::tan(PI / 4 + rad(origin_lat_) / 2)) *
+				std::cos(rad(origin_lat_)) * scale_;
 }
 std::pair<double, double> WebMercatorProjection::forward(double lat, double lon) const
 {
-	lat = std::clamp(lat, -85.05112878, 85.05112878);
 	double x = R * rad(lon - origin_lon_) * std::cos(rad(origin_lat_)) * scale_;
-	double z = -R * std::log(std::tan(PI / 4 + rad(lat) / 2)) * scale_ + z_offset_;
+	double z = -R * std::log(std::tan(PI / 4 + rad(lat) / 2)) *
+					   std::cos(rad(origin_lat_)) * scale_ +
+			   z_offset_;
 	return {x, z};
 }
 std::pair<double, double> WebMercatorProjection::inverse(double x, double z) const
 {
 	double lon =
 			origin_lon_ + (x / (R * std::cos(rad(origin_lat_)) * scale_)) * 180.0 / PI;
-	double y = -(z - z_offset_) / (R * scale_);
+	double y = -(z - z_offset_) / (R * std::cos(rad(origin_lat_)) * scale_);
 	double lat = 2 * (std::atan(std::exp(y)) - PI / 4) * 180.0 / PI;
-	return {std::clamp(lat, -85.05112878, 85.05112878), lon};
+	return {lat, lon};
+}
+double WebMercatorProjection::x_for_lon(double longitude) const
+{
+	return forward(origin_lat_, longitude).first;
+}
+double WebMercatorProjection::z_for_lat(double latitude) const
+{
+	return forward(latitude, origin_lon_).second;
+}
+double WebMercatorProjection::lon_for_x(double x) const
+{
+	return inverse(x, 0.0).second;
+}
+double WebMercatorProjection::lat_for_z(double z) const
+{
+	return inverse(0.0, z).first;
+}
+int snap_edge(double value, bool round_up)
+{
+	const double nearest = std::round(value);
+	const double snapped = std::abs(value - nearest) < 1e-6
+								   ? nearest
+								   : (round_up ? std::ceil(value) : std::floor(value));
+	return static_cast<int>(std::clamp(snapped, double(std::numeric_limits<int>::min()),
+			double(std::numeric_limits<int>::max())));
 }
 }

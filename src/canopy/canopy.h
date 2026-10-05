@@ -27,6 +27,8 @@ public:
 	CanopyData() = default;
 	CanopyData(std::vector<std::uint8_t> grid, std::size_t width, std::size_t height);
 	std::uint8_t at(std::size_t gx, std::size_t gz) const;
+	void remap_rows_to_mercator(double lat_top, double lat_bottom);
+	void crop(std::size_t x0, std::size_t z0, std::size_t width, std::size_t height);
 	std::optional<std::uint8_t> canopy_height_m(std::size_t gx, std::size_t gz) const;
 	std::optional<double> canopy_fraction(
 			std::size_t gx, std::size_t gz, int spacing) const;

@@ -121,7 +121,8 @@ std::string aws_terrain_url(int lat, int lon);
 std::string usgs_3dep_url(double lat, double lon);
 std::string mapterhorn_url(double lat, double lon);
 bool download_tile(const std::string &url, const std::filesystem::path &file);
-bool fetch_with_fallback(int lat, int lon, const std::filesystem::path &file);
+bool fetch_with_fallback(int lat, int lon, const std::filesystem::path &file,
+		SourceMode mode = SourceMode::Auto);
 void set_download_retries(unsigned retries);
 void enable_aws(bool enabled);
 void enable_mapterhorn(bool enabled);
@@ -140,7 +141,8 @@ enum class Source
 	Fixed,
 	None
 };
-Source select_source(int lat, int lon, const std::filesystem::path &file);
+Source select_source(int lat, int lon, const std::filesystem::path &file,
+		SourceMode mode = SourceMode::Auto);
 const char *source_name(Source);
 struct ProviderStats
 {

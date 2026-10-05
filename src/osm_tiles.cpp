@@ -68,6 +68,18 @@ TileExtent extent_union(const TileExtent &a, const TileExtent &b)
 			std::max(a.max_lat, b.max_lat), std::max(a.max_lon, b.max_lon), true};
 }
 
+TileExtent relation_extent(const DecodedRelation &relation,
+		const std::unordered_map<std::uint64_t, DecodedWay> &ways)
+{
+	TileExtent extent;
+	for (const auto &member : relation.members) {
+		const auto it = ways.find(member.ref);
+		if (it != ways.end())
+			extent = extent_union(extent, way_extent(it->second));
+	}
+	return extent;
+}
+
 std::vector<DecodedTile> select_for_bbox(
 		const std::vector<DecodedTile> &input, const geographic::LLBBox &bbox)
 {
@@ -106,23 +118,7 @@ std::vector<DecodedTile> select_for_bbox(
 				building_extent = extent_union(building_extent, way_extent(way));
 		}
 	for (const auto &[id, relation] : relations) {
-		TileExtent extent;
-		for (const auto &member : relation.members) {
-			auto it = ways.find(member.ref);
-			if (it == ways.end())
-				continue;
-			auto part = way_extent(it->second);
-			if (!part.valid)
-				continue;
-			if (!extent.valid)
-				extent = part;
-			else {
-				extent.min_lat = std::min(extent.min_lat, part.min_lat);
-				extent.min_lon = std::min(extent.min_lon, part.min_lon);
-				extent.max_lat = std::max(extent.max_lat, part.max_lat);
-				extent.max_lon = std::max(extent.max_lon, part.max_lon);
-			}
-		}
+		const auto extent = relation_extent(relation, ways);
 		if (intersects(extent, area)) {
 			keep_relations.insert(id);
 			for (const auto &member : relation.members)
@@ -145,6 +141,16 @@ std::vector<DecodedTile> select_for_bbox(
 			const auto extent = way_extent(way);
 			if (intersects(extent, building_extent))
 				keep_ways.insert(id);
+		}
+	// Building relations can contain parts extending beyond their outer relation's
+	// initial selected extent. Rust includes those relations when any member
+	// overlaps the accumulated requested/selected-building extent.
+	for (const auto &[id, relation] : relations)
+		if (!keep_relations.contains(id) && building_tags(relation.tags) &&
+				intersects(relation_extent(relation, ways), building_extent)) {
+			keep_relations.insert(id);
+			for (const auto &member : relation.members)
+				keep_ways.insert(member.ref);
 		}
 	std::vector<DecodedTile> selected;
 	for (const auto &tile : input) {
