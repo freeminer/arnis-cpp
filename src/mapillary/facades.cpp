@@ -447,11 +447,11 @@ void project_export(const std::vector<arnis::ProcessedElement> &elements,
 				for (std::size_t i = 0; i < count; ++i) {
 					if (!covered[i])
 						continue;
-					for (std::size_t near = i > 0 ? i - 1 : i;
-							near <= std::min(count - 1, i + 1); ++near) {
+					for (std::size_t nearr = i > 0 ? i - 1 : i;
+							nearr <= std::min(count - 1, i + 1); ++nearr) {
 						projected_photo_cells.insert_or_assign(
-								CellKey{std::get<0>(points[near]),
-										std::get<2>(points[near])},
+								CellKey{std::get<0>(points[nearr]),
+										std::get<2>(points[nearr])},
 								way.id);
 					}
 				}
