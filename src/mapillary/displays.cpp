@@ -86,8 +86,8 @@ std::vector<Piece> pieces(const std::vector<std::pair<int, int>> &cells,
 	if (cells.empty() || total_height <= 0 || step <= 0)
 		return out;
 	const int max_cells = std::max(1, static_cast<int>(MAX_PANEL / step));
-	for (const auto [p0, p1] : cut(static_cast<int>(cells.size()), max_cells))
-		for (const auto [b0, b1] : cut(total_height, MAX_PANEL)) {
+	for (const auto &[p0, p1] : cut(static_cast<int>(cells.size()), max_cells))
+		for (const auto &[b0, b1] : cut(total_height, MAX_PANEL)) {
 			std::vector<std::pair<int, int>> footprint(
 					cells.begin() + p0, cells.begin() + p1);
 			out.push_back({p0, p1, b0, b1,

@@ -195,7 +195,7 @@ MappedTrunks MappedTrunks::collect(
 			points.reserve(way.nodes.size());
 			for (const auto &node : way.nodes)
 				points.emplace_back(node.x, node.z);
-			for (const auto [x, z] : tree_row_positions(points, scale))
+			for (const auto &[x, z] : tree_row_positions(points, scale))
 				add(x, z);
 		}
 	}

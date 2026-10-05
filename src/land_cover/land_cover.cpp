@@ -297,7 +297,8 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(heights.begin(), heights.begin() + data.height,
+			std::any_of(
+					heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
@@ -454,7 +455,8 @@ void apply_osm_water_override(LandCoverData &data,
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			heights.size() < data.height ||
-			std::any_of(heights.begin(), heights.begin() + data.height,
+			std::any_of(
+					heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
 	const double sx = double(data.width - 1) / double(world_width - 1);
@@ -906,7 +908,7 @@ void mark_beaches(LandCoverData &data)
 		for (std::size_t x = 0; x < data.width; ++x) {
 			if (data.grid[z][x] != LC_WATER)
 				continue;
-			for (const auto [dx, dz] : std::array<std::pair<int, int>, 4>{
+			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 				const int nx = static_cast<int>(x) + dx, nz = static_cast<int>(z) + dz;
 				if (nx < 0 || nz < 0 || nx >= static_cast<int>(data.width) ||
@@ -927,7 +929,7 @@ void mark_beaches(LandCoverData &data)
 		data.grid[z][x] = LC_BEACH;
 		if (distance[i] >= reach)
 			continue;
-		for (const auto [dx, dz] :
+		for (const auto &[dx, dz] :
 				std::array<std::pair<int, int>, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 			const int nx = x + dx, nz = z + dz;
 			if (nx < 0 || nz < 0 || nx >= static_cast<int>(data.width) ||

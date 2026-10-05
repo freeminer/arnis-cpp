@@ -236,8 +236,8 @@ double TalusField::nearr(int x, int z, double here) const
 				static_cast<int>(std::floor(double(value - origin + STEP / 2) / STEP)), 0,
 				static_cast<int>(SIDE) - 1));
 	};
-	for (const auto [reach, score] : reaches)
-		for (const auto [dx, dz] :
+	for (const auto &[reach, score] : reaches)
+		for (const auto &[dx, dz] :
 				std::array<std::pair<int, int>, 4>{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}}) {
 			const double wall =
 					heights[cell(z + dz * reach, z0) * SIDE + cell(x + dx * reach, x0)];

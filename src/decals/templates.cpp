@@ -247,13 +247,13 @@ void traffic_sign(Canvas &canvas, TrafficSign sign)
 			const float sine = std::sin(0.62f) * flip;
 			const float cosine = std::cos(0.62f);
 			std::vector<std::pair<float, float>> points;
-			for (const auto [x, y] : std::array<std::pair<float, float>, 4>{
+			for (const auto &[x, y] : std::array<std::pair<float, float>, 4>{
 						 {{-56, -8}, {56, -8}, {56, 8}, {-56, 8}}})
 				points.emplace_back(
 						64 + x * cosine - y * sine, 64 + x * sine + y * cosine);
 			canvas.polygon(points, WHITE);
 		}
-		for (const auto [x, y] : std::array<std::pair<int, int>, 4>{
+		for (const auto &[x, y] : std::array<std::pair<int, int>, 4>{
 					 {{14, 33}, {114, 33}, {14, 95}, {114, 95}}})
 			canvas.disc(x, y, 7, RED);
 		break;

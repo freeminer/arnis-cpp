@@ -21,6 +21,12 @@ namespace arnis::ground_decoration
 {
 namespace
 {
+using FlowerPalette = std::vector<std::pair<Block, std::uint32_t>>;
+using TallFlowerPalette = std::vector<std::pair<std::pair<Block, Block>, std::uint32_t>>;
+
+constexpr std::uint32_t SALT_SCATTER = 0x5CA77E11u;
+constexpr std::uint32_t SALT_BED = 0x0BEDF10Eu;
+
 const std::vector<Block> &loose_plants()
 {
 	static const std::vector<Block> blocks{GRASS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, FERN,
@@ -118,29 +124,31 @@ bool beside_water(WorldEditor &e, int x, int y, int z)
 		   e.check_for_block_absolute(x, y, z - 1, water);
 }
 
-Block flower_for(int x, int z, FlowerSetting setting, int field_scale = 24)
+template <typename T>
+T pick_weighted(const std::vector<std::pair<T, std::uint32_t>> &palette,
+		std::uint32_t roll_permille);
+
+Block flower_for(int x, int z, FlowerSetting setting, bool bed = false)
 {
-	const auto h = land_cover::coord_hash(x ^ 0x5ca7, z ^ 0x7e11);
-	static const Block meadow[] = {YELLOW_FLOWER, RED_FLOWER, WHITE_FLOWER, BLUE_FLOWER};
-	static const Block forest[] = {RED_FLOWER, YELLOW_FLOWER, WHITE_FLOWER, BLUE_FLOWER};
-	static const Block garden[] = {RED_FLOWER, BLUE_FLOWER, WHITE_FLOWER, YELLOW_FLOWER};
-	const Block *palette = meadow;
-	std::size_t size = std::size(meadow);
-	if (setting == FlowerSetting::Forest) {
-		palette = forest;
-		size = std::size(forest);
-	} else if (setting == FlowerSetting::Garden) {
-		palette = garden;
-		size = std::size(garden);
-	}
-	// Smooth fields make neighbouring flowers form drifts instead of white
-	// noise.  Keep the hash as a minority fallback, matching Rust's 85/15
-	// patch-vs-variation split.
-	const auto field = ground_generation::patch_noise(
-			x, z, field_scale, 0x9A7C4E11u ^ static_cast<std::uint32_t>(field_scale));
-	const auto index = (h % 100 < 85) ? static_cast<std::size_t>(field * size) % size
-									  : static_cast<std::size_t>((h >> 8) % size);
-	return palette[index];
+	static const FlowerPalette meadow{{YELLOW_FLOWER, 30}, {RED_FLOWER, 25},
+			{OXEYE_DAISY, 20}, {CORNFLOWER, 12}, {WHITE_FLOWER, 12}, {ALLIUM, 4},
+			{RED_TULIP, 3}, {ORANGE_TULIP, 2}, {WHITE_TULIP, 2}, {PINK_TULIP, 2}};
+	static const FlowerPalette forest{{RED_FLOWER, 30}, {YELLOW_FLOWER, 25},
+			{LILY_OF_THE_VALLEY, 25}, {ALLIUM, 5}, {OXEYE_DAISY, 5}};
+	static const FlowerPalette garden{{RED_TULIP, 18}, {PINK_TULIP, 14},
+			{WHITE_TULIP, 12}, {ORANGE_TULIP, 12}, {ALLIUM, 12}, {CORNFLOWER, 10},
+			{OXEYE_DAISY, 12}, {RED_FLOWER, 10}};
+	const FlowerPalette &palette = setting == FlowerSetting::Forest	  ? forest
+								   : setting == FlowerSetting::Garden ? garden
+																	  : meadow;
+	const int scale = bed ? 4 : 24;
+	const std::uint32_t salt = bed ? SALT_BED : SALT_SCATTER;
+	const auto zone = ground_generation::patch_noise(x, z, scale, salt);
+	const auto variation = land_cover::coord_hash(x ^ 0x5ca7, z ^ 0x7e11);
+	const auto roll = bed || variation % 100 < 85
+							  ? static_cast<std::uint32_t>(zone * 999.0)
+							  : static_cast<std::uint32_t>((variation >> 8) % 1000);
+	return pick_weighted(palette, roll);
 }
 }
 
@@ -289,9 +297,6 @@ struct WeightedFeature
 	std::uint32_t weight;
 };
 
-using FlowerPalette = std::vector<std::pair<Block, std::uint32_t>>;
-using TallFlowerPalette = std::vector<std::pair<std::pair<Block, Block>, std::uint32_t>>;
-
 std::vector<WeightedFeature> features(Habitat h)
 {
 	using F = PatchFeature;
@@ -353,8 +358,9 @@ FlowerPalette flower_palette(Habitat h)
 	case H::Jungle:
 		return {{RED_FLOWER, 45}, {BLUE_FLOWER, 30}, {YELLOW_FLOWER, 25}};
 	case H::Shrub:
-	case H::Maquis:
 		return {{YELLOW_FLOWER, 30}, {RED_FLOWER, 30}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+	case H::Maquis:
+		return {{RED_FLOWER, 35}, {YELLOW_FLOWER, 25}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
 	case H::Steppe:
 		return {{YELLOW_FLOWER, 40}, {ALLIUM, 30}, {RED_FLOWER, 30}};
 	case H::Tundra:
@@ -537,6 +543,9 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 			continue;
 		const auto current_habitat = point_habitat(x, z);
 		const auto cover = point_cover(x, z);
+		const auto eco = point_eco(x, z);
+		const bool point_cactus_country =
+				eco ? ecoregion::realm_is_americas(eco->realm) : cactus_country;
 		const bool in_feature_habitat =
 				selected.feature == PatchFeature::LilyPads
 						? cover == land_cover::LC_WETLAND ||
@@ -547,7 +556,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 						: current_habitat &&
 								  same_ground(*current_habitat, origin_habitat);
 		if (!in_feature_habitat ||
-				(selected.feature == PatchFeature::Cactus && !cactus_country))
+				(selected.feature == PatchFeature::Cactus && !point_cactus_country))
 			continue;
 		const int y = ground.elevation_enabled ? editor.get_ground_level(x, z)
 											   : args.ground_level;
@@ -612,7 +621,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 					open(x, y, z)) {
 				const int height = pick % 4 == 0 ? 1 : pick % 4 == 3 ? 3 : 2;
 				for (int dy = 1; dy <= height; ++dy) {
-					if (editor.block_exists_absolute(x, y + dy, z) ||
+					if ((dy > 1 && editor.block_exists_absolute(x, y + dy, z)) ||
 							editor.block_exists_absolute(x + 1, y + dy, z) ||
 							editor.block_exists_absolute(x - 1, y + dy, z) ||
 							editor.block_exists_absolute(x, y + dy, z + 1) ||
@@ -660,8 +669,8 @@ void place_bed_flower(WorldEditor &editor, int x, int z)
 	const int y = editor.get_ground_level(x, z);
 	if (editor.check_for_block_absolute(x, y, z,
 				std::optional<std::vector<Block>>({GRASS_BLOCK, DIRT, FARMLAND})))
-		editor.set_block_absolute(flower_for(x, z, FlowerSetting::Garden, 4), x, y + 1, z,
-				std::optional<std::vector<Block>>({GRASS, FARMLAND}), std::nullopt);
+		editor.set_block_absolute(flower_for(x, z, FlowerSetting::Garden, true), x, y + 1,
+				z, std::optional<std::vector<Block>>({GRASS, FARMLAND}), std::nullopt);
 }
 
 void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox,
@@ -696,12 +705,13 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 				const auto origin_coord =
 						XZPoint{origin_x - bbox.min_x(), origin_z - bbox.min_z()};
 				const auto origin_eco = editor.ground->ecoregion_at(origin_coord);
+				const int origin_y = editor.ground->elevation_enabled
+											 ? editor.ground->level(origin_coord)
+											 : args.ground_level;
 				const auto habitat_origin =
 						habitat(editor.ground->cover_class(origin_coord),
 								editor.ground->climate(), absolute_latitude,
-								editor.ground->level({origin_x - bbox.min_x(),
-										origin_z - bbox.min_z()}) >= alpine_from_y,
-								origin_eco);
+								origin_y >= alpine_from_y, origin_eco);
 				if (!habitat_origin)
 					continue;
 				const auto selected = choose_feature(features(*habitat_origin),

@@ -152,22 +152,6 @@ bool undergrowth_roll(int x, int z, double mean, std::uint32_t salt)
 	return static_cast<double>(roll) < density * 1000.0;
 }
 
-Block rocky_surface_for(int x, int z)
-{
-	const auto h = land_cover::coord_hash(x, z) % 12;
-	if (h <= 4)
-		return STONE;
-	if (h <= 6)
-		return ANDESITE;
-	if (h <= 8)
-		return COBBLESTONE;
-	if (h == 9)
-		return GRAVEL;
-	if (h == 10)
-		return TUFF;
-	return COARSE_DIRT;
-}
-
 double value_noise_01_impl(int x, int z, int scale)
 {
 	const int s = std::max(1, scale);
@@ -184,41 +168,6 @@ double value_noise_01_impl(int x, int z, int scale)
 	const double a = sample(x0, z0) * (1 - fx) + sample(x1, z0) * fx;
 	const double b = sample(x0, z1) * (1 - fx) + sample(x1, z1) * fx;
 	return a * (1 - fz) + b * fz;
-}
-
-std::pair<Block, Block> slope_palette(int slope, int x, int z)
-{
-	const auto h = land_cover::coord_hash(x, z);
-	if (slope > 8)
-		return h % 2 ? std::make_pair(DEEPSLATE, DEEPSLATE)
-					 : std::make_pair(COBBLED_DEEPSLATE, COBBLED_DEEPSLATE);
-	if (slope > 6) {
-		const auto k = h % 20;
-		return k < 12	? std::make_pair(STONE, DEEPSLATE)
-			   : k < 17 ? std::make_pair(COBBLESTONE, DEEPSLATE)
-						: std::make_pair(ANDESITE, DEEPSLATE);
-	}
-	if (slope > 4) {
-		switch (h % 12) {
-		case 0:
-		case 1:
-		case 2:
-		case 3:
-			return {ANDESITE, STONE};
-		case 4:
-		case 5:
-			return {TUFF, STONE};
-		case 6:
-		case 7:
-			return {STONE, STONE};
-		case 8:
-		case 9:
-			return {COBBLESTONE, STONE};
-		default:
-			return {GRAVEL, STONE};
-		}
-	}
-	return {GRASS_BLOCK, DIRT};
 }
 
 int local_slope(WorldEditor &editor, int x, int z, const ChunkGroundCache *ground_cache,
@@ -245,21 +194,6 @@ int local_slope(WorldEditor &editor, int x, int z, const ChunkGroundCache *groun
 	return max_delta;
 }
 
-bool has_nearby_water(WorldEditor &editor, int x, int ground_y, int z)
-{
-	for (int dx = -2; dx <= 2; ++dx) {
-		for (int dz = -2; dz <= 2; ++dz) {
-			for (int dy = -1; dy <= 1; ++dy) {
-				if (editor.check_for_block_type_absolute(
-							x + dx, ground_y + dy, z + dz, WATER)) {
-					return true;
-				}
-			}
-		}
-	}
-	return false;
-}
-
 bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 {
 	return editor.check_for_block_absolute(x, y, z,
@@ -276,62 +210,62 @@ bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 			}));
 }
 
-Block natural_surface_for(WorldEditor &editor, int x, int ground_y, int z)
+std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int z,
+		int ground_y, int slope, std::uint8_t cover, bool has_cover)
 {
-	const auto cover =
-			editor.ground ? editor.ground->cover_class(editor.ground_point(x, z)) : 0;
-	const int slope = local_slope(editor, x, z, nullptr, ground_y);
 	if (slope > 4)
-		return terrain_surface::steep_palette(x, z, ground_y, slope, cover).first;
-	if (cover == land_cover::LC_BEACH)
-		return SAND;
-	if (editor.ground) {
+		return terrain_surface::steep_palette(x, z, ground_y, slope, cover);
+	if (has_cover && editor.ground) {
 		auto climate_palette =
 				climate::surface_palette(editor.ground->climate(), cover, x, z);
 		if (climate_palette)
-			return climate_palette->first;
+			return *climate_palette;
 	}
+	if (cover == land_cover::LC_BEACH) {
+		const auto climate =
+				editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
+		if ((climate == biome::Climate::Tundra || climate == biome::Climate::IceCap) &&
+				value_noise_01(x + 41, z + 5, 6) < .7)
+			return {GRAVEL, STONE};
+		return {SAND, SANDSTONE};
+	}
+	if (cover == land_cover::LC_TREE_COVER || cover == land_cover::LC_GRASSLAND)
+		return {GRASS_BLOCK, DIRT};
 	if (cover == land_cover::LC_CROPLAND)
-		return FARMLAND;
+		return {FARMLAND, DIRT};
 	if (cover == land_cover::LC_BUILT_UP) {
 		const auto h = land_cover::coord_hash(x, z) % 100;
-		return h < 72	? STONE_BRICKS
-			   : h < 87 ? CRACKED_STONE_BRICKS
-			   : h < 92 ? STONE
-						: COBBLESTONE;
+		return {h < 72	 ? STONE_BRICKS
+				: h < 87 ? CRACKED_STONE_BRICKS
+				: h < 92 ? STONE
+						 : COBBLESTONE,
+				STONE};
 	}
-	if (cover == land_cover::LC_BARE || cover == land_cover::LC_BEACH ||
-			cover == land_cover::LC_SNOW_ICE) {
-		int nearby = 0;
-		if (editor.ground)
-			for (auto [dx, dz] :
-					std::vector<std::pair<int, int>>{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}) {
-				auto c = editor.ground->cover_class(editor.ground_point(x + dx, z + dz));
-				nearby += c == land_cover::LC_BARE || c == land_cover::LC_BEACH ||
-						  c == land_cover::LC_SNOW_ICE;
+	if (cover == land_cover::LC_BARE || cover == land_cover::LC_SNOW_ICE) {
+		int neighboring_bare = 0;
+		if (has_cover && editor.ground)
+			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
+						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
+				const auto neighbor =
+						editor.ground->cover_class(editor.ground_point(x + dx, z + dz));
+				neighboring_bare += neighbor == land_cover::LC_BARE ||
+									neighbor == land_cover::LC_SNOW_ICE ||
+									neighbor == land_cover::LC_BEACH;
 			}
-		if (!nearby)
-			return GRASS_BLOCK;
-		const auto h = land_cover::coord_hash(x, z);
-		if (patch_noise(x, z, 6, 0xBA4E40C3u) < .45)
-			return h % 10 < 8 ? COARSE_DIRT : STONE;
-		return rocky_surface_for(x, z);
+		if (neighboring_bare == 0)
+			return {GRASS_BLOCK, DIRT};
+		if (value_noise_01(x, z, 6) < .45)
+			return {COARSE_DIRT, DIRT};
+		return terrain_surface::bare_rock_palette(x, z);
 	}
 	if (cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES)
-		return MUD;
-	if (cover == land_cover::LC_SHRUBLAND)
-		return patch_noise(x, z, 5, 0x5EED0A11u) < .4 && land_cover::coord_hash(x, z) % 5
-					   ? COARSE_DIRT
-					   : GRASS_BLOCK;
-	if (has_nearby_water(editor, x, ground_y, z))
-		return SAND;
-
-	const auto h = land_cover::coord_hash(x, z) % 100;
-	if (h < 2)
-		return COARSE_DIRT;
-	if (h < 5)
-		return PODZOL;
-	return GRASS_BLOCK;
+		return {MUD, DIRT};
+	if (cover == land_cover::LC_SHRUBLAND) {
+		const auto h = land_cover::coord_hash(x, z);
+		return value_noise_01(x, z, 5) < .4 && h % 5 != 0 ? std::pair{COARSE_DIRT, DIRT}
+														  : std::pair{GRASS_BLOCK, DIRT};
+	}
+	return {GRASS_BLOCK, DIRT};
 }
 
 std::pair<bool, bool> canopy_verdict(
@@ -363,8 +297,7 @@ std::pair<bool, bool> canopy_verdict(
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
-		double forest_fern_share, const ChunkGroundCache *ground_cache,
-		bool terrain_enabled, int fallback_y)
+		double forest_fern_share)
 {
 	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
 			(bridge_surface && bridge_surface->contains(x, z)) ||
@@ -385,12 +318,6 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	const auto cover =
 			editor.ground ? editor.ground->cover_class(editor.ground_point(x, z)) : 0;
 	auto rng = coord_rng(x, z, 0);
-	const int patch_x = x >= 0 ? x / 8 : -(((-x) + 7) / 8);
-	const int patch_z = z >= 0 ? z / 8 : -(((-z) + 7) / 8);
-	const auto patch_roll = land_cover::coord_hash(patch_x, patch_z) % 100;
-	const auto eco = editor.ground
-							 ? editor.ground->ecoregion_at(editor.ground_point(x, z))
-							 : std::nullopt;
 	const auto climate =
 			editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
 	const auto [canopy_covered, canopy_tree] =
@@ -433,55 +360,25 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	} else if (cover == land_cover::LC_CROPLAND) {
 		const bool farmland =
 				editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND);
-		const bool enclosed = ground_level_at(editor, ground_cache, terrain_enabled,
-									  fallback_y, x + 1, z) >= ground_y &&
-							  ground_level_at(editor, ground_cache, terrain_enabled,
-									  fallback_y, x - 1, z) >= ground_y &&
-							  ground_level_at(editor, ground_cache, terrain_enabled,
-									  fallback_y, x, z + 1) >= ground_y &&
-							  ground_level_at(editor, ground_cache, terrain_enabled,
-									  fallback_y, x, z - 1) >= ground_y;
-		if (farmland && x % 9 == 0 && z % 9 == 0 && enclosed)
+		if (farmland && x % 9 == 0 && z % 9 == 0 && editor.water_source_is_enclosed(x, z))
 			editor.set_block_absolute(WATER, x, ground_y, z,
 					std::optional<std::vector<Block>>(std::vector<Block>{FARMLAND}),
 					std::nullopt);
-		else if (farmland && rng.uniform(76) == 0 && rng.uniform(10) < 4)
-			place_decoration(HAY_BALE, ground_y + 1);
-		else if (farmland && rng.uniform(40) == 0)
-			place_decoration(PUMPKIN, ground_y + 1);
-		else if (farmland) {
+		else if (farmland && rng.uniform(76) == 0) {
+			if (rng.uniform(10) < 4)
+				place_decoration(HAY_BALE, ground_y + 1);
+		} else if (farmland) {
 			const auto crop_choice = rng.uniform(3);
 			const Block crop = crop_choice == 0	  ? WHEAT
 							   : crop_choice == 1 ? CARROTS
 												  : POTATOES;
 			place_decoration(crop, ground_y + 1);
 		}
-	} else if (cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES) {
+	} else if ((cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES) &&
+			   ground_is_natural) {
 		const auto choice = rng.uniform(100);
-		const bool water_surface =
-				editor.check_for_block_type_absolute(x, ground_y, z, WATER);
-		if (water_surface && choice < 8) {
-			const bool kelp = choice == 0;
-			if (kelp) {
-				const int height = 2 + int(rng.uniform(3));
-				for (int dy = 1; dy <= height; ++dy)
-					place_decoration(KELP_PLANT, ground_y + dy);
-			} else {
-				place_decoration(
-						choice < 3 ? TALL_SEAGRASS_BOTTOM : SEAGRASS, ground_y + 1);
-			}
-			if (!kelp && choice < 3)
-				place_decoration(TALL_SEAGRASS_TOP, ground_y + 2);
-		} else if (choice < 12 && has_nearby_water(editor, x, ground_y, z)) {
-			// Rust's sugar-cane feature is a short stack next to water.  Keep
-			// every segment conditional so existing structures remain untouched.
-			const int height = 1 + int(rng.uniform(3));
-			for (int dy = 1; dy <= height; ++dy)
-				place_decoration(SUGAR_CANE, ground_y + dy);
-		} else if (choice < 22 && water_surface) {
-			place_decoration(LILY_PAD, ground_y + 1);
-		} else if (!water_surface && patch_noise(x, z, 5, SALT_WETLAND_POOLS) < .28 &&
-				   editor.water_source_is_enclosed(x, z))
+		if (patch_noise(x, z, 5, SALT_WETLAND_POOLS) < .28 &&
+				editor.water_source_is_enclosed(x, z))
 			editor.set_block_absolute(WATER, x, ground_y, z,
 					std::optional<std::vector<Block>>(
 							std::vector<Block>{MUD, GRASS_BLOCK}),
@@ -491,52 +388,27 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		else if (choice < 64) {
 			place_decoration(TALL_GRASS_BOTTOM, ground_y + 1);
 			place_decoration(TALL_GRASS_TOP, ground_y + 2);
-		} else if (choice < 80)
-			place_decoration(MOSS_CARPET, ground_y + 1);
-	} else if (cover == land_cover::LC_MOSS) {
-		// Rust treats moss cover as its own tundra habitat rather than falling
-		// through to bare-rock decoration.
-		const auto choice = rng.uniform(100);
-		if (choice < 55)
-			place_decoration(MOSS_CARPET, ground_y + 1);
-		else if (choice < 68)
-			place_decoration(FERN, ground_y + 1);
-	} else if (cover == land_cover::LC_BARE) {
+		}
+	} else if (cover == land_cover::LC_BARE && ground_is_natural) {
 		const bool coarse =
 				editor.check_for_block_type_absolute(x, ground_y, z, COARSE_DIRT);
-		const auto choice = rng.uniform(100);
-		const bool sandy = editor.check_for_block_type_absolute(x, ground_y, z, SAND);
-		bool cactus_country = true;
-		if (editor.mg) {
-			const auto [lat, lon] = editor.mg->pos_to_ll(x, z);
-			(void)lat;
-			cactus_country = lon >= -170.0 && lon <= -30.0;
-		}
-		if (eco)
-			cactus_country = ecoregion::realm_is_americas(eco->realm);
-		if (sandy && cactus_country && choice < 4) {
-			const int height = 1 + int(rng.uniform(3));
-			for (int dy = 1; dy <= height; ++dy)
-				place_decoration(CACTUS, ground_y + dy);
-		} else if (coarse && choice < 6)
-			place_decoration(GRASS, ground_y + 1);
-		else if (coarse && choice < 9)
-			place_decoration(OAK_LEAVES, ground_y + 1);
-		else if ((!coarse && choice == 0) || (coarse && choice == 9))
-			place_decoration(DEAD_BUSH, ground_y + 1);
-	} else if (cover == land_cover::LC_SHRUBLAND) {
-		if (rng.uniform(100) < 2) {
-			if (eco && eco->biome == ecoregion::EcoBiome::Tundra)
-				place_decoration(MOSS_CARPET, ground_y + 1);
-			else if (eco && (eco->biome == ecoregion::EcoBiome::TemperateGrassland ||
-									eco->biome == ecoregion::EcoBiome::Boreal))
-				place_decoration(SWEET_BERRY_BUSH, ground_y + 1);
-			else
+		if (coarse) {
+			const auto choice = rng.uniform(100);
+			if (choice < 6)
+				place_decoration(GRASS, ground_y + 1);
+			else if (choice < 9)
 				place_decoration(OAK_LEAVES, ground_y + 1);
+			else if (choice == 9)
+				place_decoration(DEAD_BUSH, ground_y + 1);
+		} else if (rng.uniform(100) == 0)
+			place_decoration(DEAD_BUSH, ground_y + 1);
+	} else if (cover == land_cover::LC_SHRUBLAND && ground_is_natural) {
+		if (rng.uniform(100) < 2) {
+			place_decoration(OAK_LEAVES, ground_y + 1);
 		} else if (undergrowth_roll(x, z, .28 * sward, SALT_SHRUB_FLOOR)) {
 			place_decoration(GRASS, ground_y + 1);
 		}
-	} else if (cover == land_cover::LC_GRASSLAND) {
+	} else if (cover == land_cover::LC_GRASSLAND && ground_is_natural) {
 		if (undergrowth_roll(x, z, .55 * sward, SALT_SWARD)) {
 			const bool stand = patch_noise(x, z, 9, SALT_TALL_SWARD) > .8;
 			const auto tall_share = stand ? 35u : 4u;
@@ -546,27 +418,6 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			} else {
 				place_decoration(GRASS, ground_y + 1);
 			}
-		} else if (patch_roll < 82 && rng.uniform(100) < 6) {
-			const auto flower_choice =
-					eco && eco->biome == ecoregion::EcoBiome::TemperateGrassland ? 2u
-					: eco && eco->biome == ecoregion::EcoBiome::Mediterranean
-							? 0u
-							: rng.uniform(4);
-			const Block flower = flower_choice == 0	  ? RED_FLOWER
-								 : flower_choice == 1 ? BLUE_FLOWER
-								 : flower_choice == 2 ? YELLOW_FLOWER
-													  : WHITE_FLOWER;
-			place_decoration(flower, ground_y + 1);
-		} else if (patch_roll < 90 && rng.uniform(100) < 5) {
-			// Rust's meadow/taiga habitat table reserves a small share of
-			// grassland patches for ferns.  Keep the upper half conditional so
-			// an existing canopy or authored block is never overwritten.
-			if (rng.uniform(100) < 20 &&
-					editor.highest_block_between(x, z, ground_y + 3, ground_y + 24)) {
-				place_decoration(LARGE_FERN_LOWER, ground_y + 1);
-				place_decoration(LARGE_FERN_UPPER, ground_y + 2);
-			} else
-				place_decoration(FERN, ground_y + 1);
 		}
 	}
 }
@@ -578,12 +429,15 @@ void clear_road_vegetation(WorldEditor &editor, int x, int y, int z)
 			DIRT_PATH, WATER};
 	const std::vector<Block> loose_plants{GRASS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, FERN,
 			LARGE_FERN_LOWER, LARGE_FERN_UPPER, DEAD_BUSH, RED_FLOWER, YELLOW_FLOWER,
-			BLUE_FLOWER, WHITE_FLOWER, SWEET_BERRY_BUSH, BROWN_MUSHROOM, RED_MUSHROOM,
-			MOSS_CARPET, SUGAR_CANE, PUMPKIN, CACTUS};
+			BLUE_FLOWER, WHITE_FLOWER, CORNFLOWER, OXEYE_DAISY, ALLIUM,
+			LILY_OF_THE_VALLEY, RED_TULIP, ORANGE_TULIP, WHITE_TULIP, PINK_TULIP,
+			SUNFLOWER_LOWER, SUNFLOWER_UPPER, LILAC_LOWER, LILAC_UPPER, ROSE_BUSH_LOWER,
+			ROSE_BUSH_UPPER, PEONY_LOWER, PEONY_UPPER, SWEET_BERRY_BUSH, BROWN_MUSHROOM,
+			RED_MUSHROOM, MOSS_CARPET, SUGAR_CANE, PUMPKIN, CACTUS, OAK_LEAVES};
 	const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
 			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
-	const std::vector<Block> stacked{
-			TALL_GRASS_TOP, LARGE_FERN_UPPER, SUGAR_CANE, CACTUS};
+	const std::vector<Block> stacked{TALL_GRASS_TOP, LARGE_FERN_UPPER, SUNFLOWER_UPPER,
+			LILAC_UPPER, ROSE_BUSH_UPPER, PEONY_UPPER, SUGAR_CANE, CACTUS};
 	const bool surface = editor.check_for_block_absolute(x, y, z, stray_surface);
 	const bool under_wood = editor.check_for_block_absolute(x, y + 2, z, wood);
 	if (!editor.check_for_block_absolute(x, y + 1, z, loose_plants) ||
@@ -828,38 +682,17 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 													args.celestial_latitude_degrees,
 													ground_y, x, z)
 										  : std::pair<Block, Block>{};
-						Block surface =
-								planetary
-										? planetary_palette.first
-										: (talus_block ? talus_block->first
-												  : slope > 4
-														  ? terrain_surface::
-																	steep_palette(x, z,
-																			ground_y,
-																			slope,
-																			cover_here)
-																			.first
-												  : glacier ? PACKED_ICE
-															: natural_surface_for(editor,
-																	  x, ground_y, z));
-						std::optional<Block> climate_under;
-						if (planetary)
-							climate_under = planetary_palette.second;
-						else if (talus_block)
-							climate_under = talus_block->second;
-						else if (slope > 4)
-							climate_under = terrain_surface::steep_palette(
-									x, z, ground_y, slope, cover_here)
-													.second;
-						else if (glacier)
-							climate_under = PACKED_ICE;
-						else if (has_cover && editor.ground) {
-							auto palette =
-									climate::surface_palette(editor.ground->climate(),
-											editor.ground->cover_class(relative), x, z);
-							if (palette)
-								climate_under = palette->second;
-						}
+						const std::pair<Block, Block> palette =
+								planetary	  ? planetary_palette
+								: talus_block ? *talus_block
+								: slope > 4	  ? terrain_surface::steep_palette(
+														x, z, ground_y, slope, cover_here)
+								: glacier
+										? std::pair{PACKED_ICE, PACKED_ICE}
+										: natural_surface_palette(editor, x, z, ground_y,
+												  slope, cover_here, has_cover);
+						Block surface = palette.first;
+						std::optional<Block> climate_under = palette.second;
 						// Rust shoreline parity: blend the immediate ring around ESA or
 						// already-rendered OSM water to sand on gentle terrain. This keeps
 						// water boundaries from exposing abrupt grass/clay edges.
@@ -960,14 +793,13 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					if (!planetary && !in_tunnel && has_cover)
 						maybe_place_vegetation(editor, x, ground_y, z,
 								building_footprints, xzbbox.min_x(), xzbbox.min_z(),
-								bridge_surface, args.scale, slope, forest_fern_share,
-								ground_cache ? &*ground_cache : nullptr, terrain_enabled,
-								args.ground_level);
+								bridge_surface, args.scale, slope, forest_fern_share);
 
 					// Rust's universal depth pass closes visible gaps below all terrain
 					// columns, including ones whose surface was supplied by OSM.
-					if (!in_tunnel && !editor.check_for_block_type_absolute(
-											  x, ground_y, z, WATER)) {
+					if (terrain_enabled && !in_tunnel &&
+							!editor.check_for_block_type_absolute(
+									x, ground_y, z, WATER)) {
 						int lowest = ground_y;
 						for (int dx = -1; dx <= 1; ++dx)
 							for (int dz = -1; dz <= 1; ++dz)
@@ -1031,16 +863,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					if (!planetary && !in_tunnel)
 						clear_road_vegetation(editor, x, ground_y, z);
 
-					if (!in_tunnel && args.fillground) {
-						const int floor_y = world_editor::terrain_floor_y();
-						for (int y = floor_y + 1; y < ground_y; ++y) {
-							if (!editor.check_for_block_absolute(x, y, z))
-								editor.set_block_absolute(y < ground_y - 8 ? STONE : DIRT,
-										x, y, z, std::nullopt, std::nullopt);
-						}
-						editor.set_block_absolute(
-								BEDROCK, x, floor_y, z, std::nullopt, std::nullopt);
-					}
+					if (args.fillground)
+						editor.fill_column_absolute(STONE, x, z,
+								world_editor::terrain_floor_y() + 1, ground_y - 3, true);
+					// Rust keeps bedrock as a flat floor independently of fillground,
+					// replacing any generated block there except existing bedrock.
+					editor.set_block_absolute(BEDROCK, x, world_editor::terrain_floor_y(),
+							z, std::nullopt,
+							std::optional<std::vector<Block>>(
+									std::vector<Block>{BEDROCK}));
 					// This column may now contain water placed by the ground pass; do not
 					// let a neighbour reuse the pre-write answer.
 					water_columns.forget(x, z);

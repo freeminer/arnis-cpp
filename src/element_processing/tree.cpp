@@ -808,6 +808,10 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	auto place_leaf = [&](int x, int y, int z, bool apex = false, bool surface = false) {
 		if (blocked_by_roof(x, y, z))
 			return;
+		// Rust suppresses ordinary canopy leaves directly above water; the apex
+		// cap is deliberately exempt so a short trunk is never left exposed.
+		if (!apex && editor.check_for_block_type_absolute(x, y - 1, z, WATER))
+			return;
 		// Rust's position hash leaves small deterministic organic gaps.  The
 		// apex is exempt so a short trunk is never visibly exposed.
 		const std::uint64_t h = leaf_hash(x, y, z);

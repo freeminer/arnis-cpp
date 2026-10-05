@@ -152,7 +152,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		row_nodes.reserve(nodes.size());
 		for (const auto &node : nodes)
 			row_nodes.emplace_back(node.x, node.z);
-		for (const auto [x, z] :
+		for (const auto &[x, z] :
 				trees::mapped::tree_row_positions(row_nodes, args.scale)) {
 			trees::MappedRequest request;
 			request.habitat = habitat_for_mapped_tree(mapped_row.kind);
