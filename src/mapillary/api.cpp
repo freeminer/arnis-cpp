@@ -209,7 +209,7 @@ std::optional<std::filesystem::path> Client::download_image(
 	const auto path = cache_.image_path(record.id, size);
 	if (!path)
 		return {};
-	if (std::filesystem::is_regular_file(*path))
+	if (cache::is_cached(*path))
 		return path;
 	if (!fetch_)
 		return {};
@@ -245,7 +245,7 @@ std::optional<std::filesystem::path> Client::download_cluster(
 		const auto cluster_path = cache_.cluster_path(cluster_id);
 		if (!cluster_path)
 			return {};
-		if (std::filesystem::is_regular_file(*cluster_path))
+		if (cache::is_cached(*cluster_path))
 			return cluster_path;
 		if (!fetch_)
 			return {};

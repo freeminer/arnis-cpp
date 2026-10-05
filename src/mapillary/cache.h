@@ -9,6 +9,11 @@
 namespace arnis::mapillary::cache
 {
 std::filesystem::path default_root();
+// Rust cache::is_cached: a non-empty regular file exists at this cache path.
+bool is_cached(const std::filesystem::path &path);
+// Write a complete cache entry by renaming a unique temporary sibling into place.
+bool write_atomic(
+		const std::filesystem::path &path, const std::vector<std::uint8_t> &bytes);
 enum class ImageSize
 {
 	W1024,

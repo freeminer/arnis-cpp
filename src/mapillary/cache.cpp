@@ -2,10 +2,19 @@
 #include "../cache_root.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <fstream>
 #include <iterator>
 #include <nlohmann/json.hpp>
+
+#if defined(_WIN32)
+#include <process.h>
+#define ARNIS_CACHE_GETPID _getpid
+#else
+#include <unistd.h>
+#define ARNIS_CACHE_GETPID getpid
+#endif
 
 namespace arnis::mapillary::cache
 {
@@ -20,6 +29,8 @@ std::filesystem::path default_root()
 
 namespace
 {
+std::atomic<std::uint64_t> temp_counter{0};
+
 const char *suffix(ImageSize size)
 {
 	switch (size) {
@@ -37,6 +48,44 @@ std::string shard(const std::string &key)
 	return key.size() < 2 ? key : key.substr(key.size() - 2);
 }
 } // namespace
+
+bool is_cached(const std::filesystem::path &path)
+{
+	std::error_code ec;
+	return std::filesystem::is_regular_file(path, ec) && !ec &&
+		   std::filesystem::file_size(path, ec) > 0 && !ec;
+}
+
+bool write_atomic(
+		const std::filesystem::path &path, const std::vector<std::uint8_t> &bytes)
+{
+	if (bytes.empty() || path.parent_path().empty())
+		return false;
+	std::error_code ec;
+	std::filesystem::create_directories(path.parent_path(), ec);
+	if (ec)
+		return false;
+	auto temporary = path;
+	temporary += ".tmp" + std::to_string(ARNIS_CACHE_GETPID()) +
+				 std::to_string(temp_counter.fetch_add(1, std::memory_order_relaxed));
+	{
+		std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+		if (!output)
+			return false;
+		output.write(reinterpret_cast<const char *>(bytes.data()),
+				static_cast<std::streamsize>(bytes.size()));
+		output.close();
+		if (!output) {
+			std::filesystem::remove(temporary, ec);
+			return false;
+		}
+	}
+	std::filesystem::rename(temporary, path, ec);
+	if (!ec)
+		return true;
+	std::filesystem::remove(temporary, ec);
+	return false;
+}
 
 bool Layout::safe_key(const std::string &key)
 {
@@ -109,29 +158,14 @@ bool Layout::save_metadata(const ImageRecord &r) const
 	auto p = meta_path(r.id);
 	if (!p)
 		return false;
-	std::error_code e;
-	std::filesystem::create_directories(p->parent_path(), e);
-	if (e)
-		return false;
-	auto tmp = *p;
-	tmp += ".tmp";
-	std::ofstream out(tmp, std::ios::trunc);
-	if (!out)
-		return false;
-	out << nlohmann::json{{"id", r.id}, {"raw_json", r.raw_json},
+	const auto serialized = nlohmann::json{{"id", r.id}, {"raw_json", r.raw_json},
 			{"thumb_1024_url", r.thumb_1024_url}, {"thumb_2048_url", r.thumb_2048_url},
 			{"thumb_original_url", r.thumb_original_url}, {"creator", r.creator},
 			{"creator_id", r.creator_id}, {"longitude", r.longitude},
 			{"latitude", r.latitude}, {"compass_angle", r.compass_angle},
-			{"is_pano", r.panorama}};
-	out.close();
-	if (!out)
-		return false;
-	std::filesystem::rename(tmp, *p, e);
-	if (!e)
-		return true;
-	std::filesystem::remove(tmp, e);
-	return false;
+			{"is_pano", r.panorama}}.dump();
+	return write_atomic(
+			*p, std::vector<std::uint8_t>(serialized.begin(), serialized.end()));
 }
 
 namespace
@@ -151,27 +185,7 @@ std::optional<std::vector<std::uint8_t>> read_bytes(
 bool write_bytes(
 		const std::optional<std::filesystem::path> &p, const std::vector<std::uint8_t> &b)
 {
-	if (!p || b.empty())
-		return false;
-	std::error_code e;
-	std::filesystem::create_directories(p->parent_path(), e);
-	if (e)
-		return false;
-	auto tmp = *p;
-	tmp += ".tmp";
-	{
-		std::ofstream out(tmp, std::ios::binary | std::ios::trunc);
-		if (!out)
-			return false;
-		out.write(reinterpret_cast<const char *>(b.data()), std::streamsize(b.size()));
-		if (!out)
-			return false;
-	}
-	std::filesystem::rename(tmp, *p, e);
-	if (!e)
-		return true;
-	std::filesystem::remove(tmp, e);
-	return false;
+	return p && write_atomic(*p, b);
 }
 }
 std::optional<std::vector<std::uint8_t>> Layout::load_image(

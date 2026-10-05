@@ -12,6 +12,8 @@ namespace arnis::mapillary
 {
 namespace
 {
+// Visibility scoring lives in visibility.cpp; keep refinement statistics free
+// of a second geometric_score definition.
 double interp_median(
 		double x, const std::vector<double> &xs, const std::vector<double> &ys)
 {
