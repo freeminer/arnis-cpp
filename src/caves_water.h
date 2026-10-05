@@ -6,13 +6,23 @@
 #include <functional>
 #include <vector>
 
+namespace arnis
+{
+struct Args;
+}
 namespace arnis::caves
 {
 
 // Rust caves::water::plan/apply counterpart. Features are keyed by origin
 // chunk so neighbouring generated regions agree on pools and rivers.
 void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y);
+		std::int64_t seed, int floor_y, const Args &args,
+		const CaveEllipsoids &ellipsoids);
+
+// Rust caves::seal_floating_fluid_region counterpart. Run after all cave,
+// surface-water, and tunnel carving passes so fluid columns cannot hang over air.
+void seal_floating_fluid_region(
+		world_editor::WorldEditor &editor, const CaveRect &region, int floor_y);
 
 struct WaterPlan
 {

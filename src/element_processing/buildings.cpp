@@ -3020,6 +3020,17 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									(bx == x && bz == z)) &&
 							(chosen == window_block || chosen == GLASS))
 						chosen = LIGHT_GRAY_CONCRETE;
+					if (mapillary::facades::photo_column(bx, bz, element.id))
+						chosen = wall_block;
+					if (const auto facade = mapillary::facades::block_at(
+								bx, h, bz, start_y_offset, element.id, window_block)) {
+						chosen = *facade;
+					} else if (chosen == wall_block &&
+							   condition != BuildingCondition::Construction) {
+						if (const auto band = mapillary::facades::band_block_at(
+									bx, h, bz, start_y_offset, element.id))
+							chosen = *band;
+					}
 					chosen = apply_condition_variation(chosen, bx, h, bz, wall_block,
 							window_block, has_windows, condition, category, era,
 							clean_visual_seed);
@@ -3668,6 +3679,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				generated_sloped_roof, start_y_offset, building_height,
 				abs_terrain_offset, floor_cycle, wall_block, clean_visual_seed,
 				covered_by_sibling);
+	mapillary::facades::collect_displays(*editor, element.id, start_y_offset,
+			abs_terrain_offset, building_height, args.facade_px);
 	return signage_anchor;
 }
 
@@ -4783,6 +4796,22 @@ void generate_building_from_relation(WorldEditor &editor,
 		generate_buildings(&editor, merged_way, args, relation_levels, flood_fill_cache,
 				building_passages, hole_polygons.empty() ? nullptr : &hole_polygons);
 	}
+}
+
+std::vector<ProcessedWay> facade_outer_rings(
+		const ProcessedRelation &relation, const XZBBox &xzbbox)
+{
+	auto nodes = collect_merged_rings(relation, ProcessedMemberRole::Outer, xzbbox);
+	std::vector<ProcessedWay> ways;
+	ways.reserve(nodes.size());
+	for (std::size_t i = 0; i < nodes.size(); ++i) {
+		ProcessedWay way;
+		way.id = relation_ring_id(relation.id, i);
+		way.tags = relation.tags;
+		way.nodes = std::move(nodes[i]);
+		ways.push_back(std::move(way));
+	}
+	return ways;
 }
 
 void generate_bridge(WorldEditor &editor, const ProcessedWay &element,

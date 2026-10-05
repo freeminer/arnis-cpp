@@ -36,8 +36,10 @@ bool decor_chance(int x, int y, int z, std::uint64_t seed, std::uint64_t per_tho
 
 void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, double ox,
 		double oy, double oz, double radius, double vertical, double floor_level,
-		int floor_y)
+		int floor_y, CaveEllipsoids *ellipsoids)
 {
+	if (ellipsoids)
+		ellipsoids->push_back({ox, oy, oz, radius, vertical, floor_level});
 	const int min_x = std::max(region.min_x, int(std::floor(ox - radius)));
 	const int max_x = std::min(region.max_x, int(std::floor(ox + radius)));
 	const int min_z = std::max(region.min_z, int(std::floor(oz - radius)));
@@ -94,7 +96,8 @@ double get_thickness(XoroRandom &r)
 void create_tunnel(std::int64_t tunnel_seed, double x, double y, double z, double h_mult,
 		double v_mult, double thickness, double yaw, double pitch, int branch_index,
 		int branch_count, double horizontal_vertical_ratio, double floor_level, int cx,
-		int cz, int floor_y, world_editor::WorldEditor &editor, const CaveRect &region)
+		int cz, int floor_y, world_editor::WorldEditor &editor, const CaveRect &region,
+		CaveEllipsoids *ellipsoids)
 {
 	XoroRandom r = XoroRandom::from_seed(tunnel_seed);
 	const int branch_point = r.next_int(branch_count / 2) + branch_count / 4;
@@ -122,24 +125,24 @@ void create_tunnel(std::int64_t tunnel_seed, double x, double y, double z, doubl
 			const double t2 = double(r.next_float()) * .5 + .5;
 			const auto s2 = r.next_long();
 			create_tunnel(s1, x, y, z, h_mult, v_mult, t1, yaw - M_PI / 2.0, pitch / 3.0,
-					step, branch_count, 1.0, floor_level, cx, cz, floor_y, editor,
-					region);
+					step, branch_count, 1.0, floor_level, cx, cz, floor_y, editor, region,
+					ellipsoids);
 			create_tunnel(s2, x, y, z, h_mult, v_mult, t2, yaw + M_PI / 2.0, pitch / 3.0,
-					step, branch_count, 1.0, floor_level, cx, cz, floor_y, editor,
-					region);
+					step, branch_count, 1.0, floor_level, cx, cz, floor_y, editor, region,
+					ellipsoids);
 			return;
 		}
 		if (r.next_int(4) != 0) {
 			if (!can_reach(cx, cz, x, z, step, branch_count, thickness))
 				return;
 			carve_ellipsoid(editor, region, x, y, z, d * h_mult, d1 * v_mult, floor_level,
-					floor_y);
+					floor_y, ellipsoids);
 		}
 	}
 }
 
 void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y)
+		std::int64_t seed, int floor_y, CaveEllipsoids *ellipsoids)
 {
 	const auto chunk_floor = [](int value) {
 		return value >= 0 ? value / 16 : -(((-value) + 15) / 16);
@@ -174,7 +177,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 						const double room_radius = 1.0 + double(r.next_float()) * 2.0;
 						const double d = 1.5 + room_radius;
 						carve_ellipsoid(editor, region, ox + 1.0, oy + shift, oz, d,
-								d * y_scale, floor_level, floor_y);
+								d * y_scale, floor_level, floor_y, ellipsoids);
 						tunnels += r.next_int(4);
 					}
 					for (int tunnel = 0; tunnel < tunnels; ++tunnel) {
@@ -186,7 +189,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 						const auto tunnel_seed = r.next_long();
 						create_tunnel(tunnel_seed, ox, oy + shift, oz, h_mult, v_mult,
 								thickness, yaw, pitch, 0, branch_count, 1.0, floor_level,
-								cx, cz, floor_y, editor, region);
+								cx, cz, floor_y, editor, region, ellipsoids);
 					}
 				}
 			}
@@ -240,7 +243,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 							break;
 						carve_ellipsoid(editor, region, x, y, z,
 								half * h_mult * std::sqrt(widths[step]),
-								half * v_mult * 2.2, floor_level, floor_y);
+								half * v_mult * 2.2, floor_level, floor_y, ellipsoids);
 					}
 				}
 			}
@@ -249,14 +252,16 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 }
 }
 void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y)
+		std::int64_t seed, int floor_y, CaveEllipsoids *ellipsoids)
 {
 	CaveGen density(seed, floor_y, world_editor::world_max_y());
 	carve_density_region(density, editor, region.min_x, region.max_x, region.min_z,
 			region.max_z, floor_y);
 	// Random-walk carvers are origin-chunk features; use Rust's branching cave,
 	// extra-underground cave, and canyon walks with the same deterministic salts.
-	carve_random_walk_carvers(editor, region, seed, floor_y);
+	if (ellipsoids)
+		ellipsoids->clear();
+	carve_random_walk_carvers(editor, region, seed, floor_y, ellipsoids);
 }
 
 void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,

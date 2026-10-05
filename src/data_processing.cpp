@@ -1088,6 +1088,10 @@ bool generate_world(WorldEditor &editor,
 		const PreparedBuildingData *prepared_buildings)
 {
 	Args effective_args = args_;
+	// Rust's CLI and GUI both make cave generation imply underground fill.
+	// Keep direct C++ library callers on the same path as well.
+	if (effective_args.caves)
+		effective_args.fillground = true;
 	effective_args.apply_mode_defaults();
 	effective_args.apply_body_defaults();
 	// Rust no longer exposes a roof-generation toggle: roof handling is always
@@ -1161,6 +1165,9 @@ bool generate_world(WorldEditor &editor,
 					*args.mapillary_facades_dir, &facade_error))
 			mapillary::facades::install_export(std::move(*export_data));
 	}
+	mapillary::facades::set_displays_enabled(
+			java_format && args.mapillary_facades != std::optional<bool>(false) &&
+			args.mapillary_facade_mode == FacadeMode::Photos);
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(
 			args.disable_height_limit && !args.bedrock ? -2032 : -64,
@@ -1302,6 +1309,7 @@ bool generate_world(WorldEditor &editor,
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	mapillary::facades::project_export(elements, xzbbox, args.scale);
 	building_facades::set_world_extent(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	if (editor.ground && !editor.ground->has_land_cover()) {
@@ -1960,6 +1968,7 @@ bool generate_world(WorldEditor &editor,
 	// laid out; keep it separate so streamed generation has identical origins.
 	ground_decoration::decorate_region(editor, args, xzbbox, xzbbox.min_x(),
 			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+	caves::CaveEllipsoids cave_ellipsoids;
 	if (args.fillground) {
 		if (args.caves) {
 			// Rust establishes the deepslate host transition on the filled
@@ -1970,10 +1979,10 @@ bool generate_world(WorldEditor &editor,
 					xzbbox.max_z());
 			caves::carve_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					CAVE_SEED, world_editor::terrain_floor_y());
+					CAVE_SEED, world_editor::terrain_floor_y(), &cave_ellipsoids);
 			caves::generate_water_features(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					CAVE_SEED, world_editor::terrain_floor_y());
+					CAVE_SEED, world_editor::terrain_floor_y(), args, cave_ellipsoids);
 			caves::stamp_schematics_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 					CAVE_SEED, world_editor::terrain_floor_y(), args);
@@ -2000,6 +2009,10 @@ bool generate_world(WorldEditor &editor,
 		railways::carve_subway_interior(editor, subway_points);
 	if (!highway_tunnel_cells.empty())
 		highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
+	if (args.caves)
+		caves::seal_floating_fluid_region(editor,
+				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
+				world_editor::terrain_floor_y());
 	if (model_pipeline) {
 		models_3d::place_three_dmr_prescan(
 				three_dmr_provider, editor, model_pipeline->three_dmr(), args.scale);

@@ -40,7 +40,7 @@ struct PipelineConfig
 	// Rust's later stages share these controls even when the caller uses a
 	// cache-only run.  Keeping them in the C++ contract avoids silently losing
 	// settings when a library host switches from acquisition to facades.
-	std::filesystem::path facade_cache = cache::default_root();
+	std::filesystem::path facade_cache = cache::Layout{}.facade_dir(params.digest(), 1);
 	std::size_t threads = 0;
 	std::shared_ptr<std::atomic_bool> cancel;
 	std::optional<std::string> cache_only;

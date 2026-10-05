@@ -16,7 +16,7 @@ namespace arnis::caves
 // region-local contract of Rust's carve_region entry point and is safe to run
 // after terrain fill but before ores and decorations.
 void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y);
+		std::int64_t seed, int floor_y, CaveEllipsoids *ellipsoids = nullptr);
 // Rust caves::decoration counterpart for post-carve cave flora/mineral accents.
 void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, const Args &args);

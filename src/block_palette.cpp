@@ -10,6 +10,11 @@ Block closest_block(RGBTuple color)
 	return models_3d::closest_block(color);
 }
 
+Block facade_block_for_color(RGBTuple color)
+{
+	return models_3d::facade_block_for_color(color);
+}
+
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k)
 {
 	return models_3d::closest_blocks(color, k);

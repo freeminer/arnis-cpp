@@ -495,6 +495,7 @@ extern Block WAXED_EXPOSED_CUT_COPPER;
 extern Block CHERRY_LOG;
 extern Block CHERRY_LEAVES;
 extern Block GRAY_CONCRETE_POWDER;
+extern Block BROWN_CONCRETE_POWDER;
 extern Block CYAN_TERRACOTTA;
 extern Block BLACK_WOOL;
 extern Block LIGHT_GRAY_WALL_BANNER;

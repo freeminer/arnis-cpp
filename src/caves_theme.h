@@ -4,6 +4,7 @@
 #include "caves_noise.h"
 #include "caves_rng.h"
 
+#include <cmath>
 #include <cstdint>
 #include <string_view>
 
@@ -38,6 +39,7 @@ struct ThemeSelector
 	NormalNoise shroom;
 	NormalNoise ice;
 	NormalNoise crystal;
+	NormalNoise coral;
 	NormalNoise volcanic;
 	BiomeAmounts amounts;
 	int y_shift;
@@ -49,9 +51,15 @@ struct ThemeSelector
 			shroom(cave_theme_noise(seed, "shroom_select")),
 			ice(cave_theme_noise(seed, "ice_select")),
 			crystal(cave_theme_noise(seed, "crystal_select")),
+			coral(cave_theme_noise(seed, "coral_select")),
 			volcanic(cave_theme_noise(seed, "volcanic_select")), amounts(biome_amounts),
 			y_shift(floor_y - VANILLA_FLOOR)
 	{
+	}
+	bool coral_zone(int x, int z) const
+	{
+		const double threshold = BiomeAmounts::effective_threshold(0.34, amounts.coral);
+		return std::isfinite(threshold) && coral.get_value(x, 0.0, z) > threshold;
 	}
 
 	bool hit(const NormalNoise &noise, double threshold, double amount, double x,

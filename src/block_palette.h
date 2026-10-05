@@ -14,6 +14,7 @@ inline constexpr std::uint8_t USE_WALL = 2;
 inline constexpr std::uint8_t USE_ROOF = 4;
 
 Block closest_block(RGBTuple color);
+Block facade_block_for_color(RGBTuple color);
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k);
 Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng);
 Block roof_block_for_color(RGBTuple color, ChaCha8Rng &rng);

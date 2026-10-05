@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <algorithm>
 #include <tuple>
+#include <vector>
 
 namespace arnis::caves
 {
@@ -34,6 +35,23 @@ struct CaveRect
 		return r < 0 ? q - 1 : q;
 	}
 };
+
+struct CaveEllipsoid
+{
+	double x = 0.0, y = 0.0, z = 0.0;
+	double horizontal_radius = 1.0, vertical_radius = 1.0;
+	double floor_level = -1.0;
+
+	bool contains(int bx, int by, int bz) const noexcept
+	{
+		const double dx = (double(bx) + 0.5 - x) / horizontal_radius;
+		const double dy = (double(by) - 0.5 - y) / vertical_radius;
+		const double dz = (double(bz) + 0.5 - z) / horizontal_radius;
+		return dy > floor_level && dx * dx + dy * dy + dz * dz < 1.0;
+	}
+};
+
+using CaveEllipsoids = std::vector<CaveEllipsoid>;
 
 // Compact cave-cell key matching Rust caves::pack (24-bit X/Z, 12-bit Y with
 // an offset that keeps the full supported terrain range nonnegative).
