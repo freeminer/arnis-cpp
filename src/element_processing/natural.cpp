@@ -540,6 +540,16 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		for (const auto &p : filled_area) {
 			int x = p.first;
 			int z = p.second;
+			// These surface types never consume randomness for rejected cells:
+			// their decorations are guarded by check_for_block. Avoid processing
+			// the rest of a tile-sized polygon for each individual mapchunk.
+			if (!editor.pos_ok(x, z) &&
+					(natural_type == "grassland" || natural_type == "heath" ||
+							natural_type == "scrub" || natural_type == "tree_row" ||
+							natural_type == "wood" || natural_type == "sand" ||
+							natural_type == "beach" || natural_type == "dune" ||
+							natural_type == "glacier" || natural_type == "bare_rock"))
+				continue;
 			const bool sealed = editor.surface_is_sealed(x, z);
 			if (!sealed && !editor.check_for_block(x, 0, z, protected_fill_blocks)) {
 				Block block =
@@ -930,9 +940,11 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		}
 		if (!wetland_puddles.empty()) {
 			std::unordered_set<std::uint64_t> area;
-			area.reserve(filled_area.size() * 2);
+			// Only owned cells can receive the puddle fringe. Do not duplicate
+			// millions of off-chunk polygon cells in an unordered_set.
 			for (const auto &[ax, az] : filled_area)
-				area.insert(cell_key(ax, az));
+				if (editor.pos_ok(ax, az))
+					area.insert(cell_key(ax, az));
 			for (const auto &[px, pz] : wetland_puddles)
 				for (int dx = -2; dx <= 2; ++dx)
 					for (int dz = -2; dz <= 2; ++dz) {

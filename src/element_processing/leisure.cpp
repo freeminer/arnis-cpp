@@ -87,7 +87,7 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				for (const std::tuple<int, int, int> &t : bresenham_points) {
 					int bx = std::get<0>(t);
 					int bz = std::get<2>(t);
-					if (bridge_surface.contains(bx, bz))
+					if (!editor.pos_ok(bx, bz) || bridge_surface.contains(bx, bz))
 						continue;
 					editor.set_block(block_type, bx, 0, bz,
 							std::optional<std::vector<Block>>({GRASS_BLOCK, STONE_BRICKS,
@@ -119,6 +119,16 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				int z = p.second;
 				if (bridge_surface.contains(x, z))
 					continue;
+				// Cached polygons cover the entire source tile, not just this chunk.
+				// Reject unwritable cells before querying elevation or land-cover water.
+				if (!editor.pos_ok(x, z)) {
+					// These features consume a draw even when their writes are rejected.
+					// Preserve the element's random stream for subsequent owned cells.
+					if (leisure_type == "playground" ||
+							leisure_type == "recreation_ground")
+						(void)rng.uniform(5000);
+					continue;
+				}
 				editor.set_block(block_type, x, 0, z,
 						std::optional<std::vector<Block>>({GRASS_BLOCK}), std::nullopt);
 
