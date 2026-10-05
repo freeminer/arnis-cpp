@@ -103,7 +103,7 @@ public:
 		std::sort(result.begin(), result.end());
 		return result;
 	}
-	std::vector<std::array<double, 3>> near(
+	std::vector<std::array<double, 3>> nearr(
 			const std::array<double, 2> &xy, double radius) const
 	{
 		auto indices = near_indices(xy, radius);
@@ -237,7 +237,7 @@ inline DepthMap depth_map(const Cluster &cluster, const Camera &camera, unsigned
 	DepthMap result(width, height);
 	if (!width || !height)
 		return result;
-	auto points = cluster.near(
+	auto points = cluster.nearr(
 			{camera.centre[0] - shift[0], camera.centre[1] - shift[1]}, radius_m);
 	shift_points(points, shift, {camera.centre[0], camera.centre[1]});
 	pose::Projector projector(camera);

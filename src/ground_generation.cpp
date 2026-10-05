@@ -16,9 +16,12 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <optional>
 #include <limits>
 #include <map>
+#include <utility>
+#include <unordered_map>
 #include <vector>
 #include <iostream>
 
@@ -27,6 +30,31 @@ namespace arnis::ground_generation
 
 namespace
 {
+
+class WaterColumnMemo
+{
+	std::unordered_map<std::uint64_t, bool> state_;
+
+	static std::uint64_t key(int x, int z)
+	{
+		return (std::uint64_t(static_cast<std::uint32_t>(x)) << 32) |
+			   static_cast<std::uint32_t>(z);
+	}
+
+public:
+	template <typename Probe>
+	bool get(int x, int z, Probe &&probe)
+	{
+		const auto encoded = key(x, z);
+		if (const auto found = state_.find(encoded); found != state_.end())
+			return found->second;
+		const bool has_water = std::forward<Probe>(probe)();
+		state_.emplace(encoded, has_water);
+		return has_water;
+	}
+
+	void forget(int x, int z) { state_.erase(key(x, z)); }
+};
 
 constexpr std::uint32_t SALT_FOREST_FLOOR = 0xF0E57F10u;
 constexpr std::uint32_t SALT_SHRUB_FLOOR = 0x5B7BF10Au;
@@ -582,13 +610,16 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									  1000.0 * editor.ground->blocks_per_meter()));
 	std::map<std::pair<int, int>, std::optional<terrain_surface::TalusField>>
 			talus_fields;
+	WaterColumnMemo water_columns;
 	for (int x = min_x; x <= max_x; ++x) {
 		for (int z = min_z; z <= max_z; ++z) {
 			// Rotation expands the output AABB. Rust masks columns whose inverse
 			// rotated coordinate lies outside the original source bbox; otherwise
 			// the expanded corners receive fabricated terrain and vegetation.
-			if (editor.ground && !editor.ground->inside_rotation_mask(x, z))
+			if (editor.ground && !editor.ground->inside_rotation_mask(x, z)) {
+				water_columns.forget(x, z);
 				continue;
+			}
 			const bool in_tunnel = tunnel_footprint && tunnel_footprint->contains(x, z);
 			// Rust's geo-only mode deliberately bypasses elevation and uses the
 			// configured flat level.  Keep all downstream surface/water decisions
@@ -641,14 +672,16 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			// Probe each column at its own terrain level. Using the outer
 			// ground_y for neighbours misses OSM water on sloped terrain.
 			auto has_water_in_column = [&](int wx, int wz) {
-				const int neighbour_ground = terrain_enabled
-													 ? editor.get_ground_level(wx, wz)
-													 : args.ground_level;
-				for (int dy = 0; dy <= 2; ++dy)
-					if (editor.check_for_block_type_absolute(
-								wx, neighbour_ground + dy, wz, WATER))
-						return true;
-				return false;
+				return water_columns.get(wx, wz, [&] {
+					const int neighbour_ground = terrain_enabled
+														 ? editor.get_ground_level(wx, wz)
+														 : args.ground_level;
+					for (int dy = 0; dy <= 2; ++dy)
+						if (editor.check_for_block_type_absolute(
+									wx, neighbour_ground + dy, wz, WATER))
+							return true;
+					return false;
+				});
 			};
 			const bool existing_water = has_water_in_column(x, z);
 			const bool osm_gap =
@@ -680,6 +713,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					// column was actually converted to water.  A classified cell
 					// above its water surface must remain terrain, otherwise the
 					// later water/depth pass leaves false flooded areas.
+					water_columns.forget(x, z);
 					continue;
 				}
 			}
@@ -692,6 +726,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				const int water_y = ground_y;
 				if (!is_protected_surface(editor, x, water_y, z)) {
 					editor.set_block_if_absent_absolute(WATER, x, water_y, z);
+					water_columns.forget(x, z);
 					continue;
 				}
 			}
@@ -903,6 +938,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				editor.set_block_absolute(
 						BEDROCK, x, floor_y, z, std::nullopt, std::nullopt);
 			}
+			// This column may now contain water placed by the ground pass; do not
+			// let a neighbour reuse the pre-write answer.
+			water_columns.forget(x, z);
 		}
 	}
 }

@@ -174,7 +174,7 @@ std::vector<std::array<double, 3>> facade_band(const sfm::Cluster &cluster,
 		const std::array<double, 2> &band)
 {
 	std::vector<std::array<double, 3>> result;
-	for (const auto &point : cluster.near({centre[0], centre[1]}, radius_m))
+	for (const auto &point : cluster.nearr({centre[0], centre[1]}, radius_m))
 		if (point[2] >= ground_z + band[0] && point[2] <= ground_z + band[1])
 			result.push_back(point);
 	return result;

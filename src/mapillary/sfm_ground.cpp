@@ -100,7 +100,7 @@ std::pair<double, const char *> wall_foot_z(const Cluster &cluster, const Wall &
 			midpoint[0] + wall.normal[0] * 0.5 * params.foot_search_m,
 			midpoint[1] + wall.normal[1] * 0.5 * params.foot_search_m};
 	const double radius = 0.5 * wall.length + params.foot_search_m + 2.0;
-	auto points = cluster.near(
+	auto points = cluster.nearr(
 			{search_centre[0] - shift[0], search_centre[1] - shift[1]}, radius);
 	if (points.empty())
 		return {ground_z, z_base_pano};
@@ -124,7 +124,7 @@ std::vector<std::array<double, 3>> wall_points(const Cluster &cluster, const Wal
 {
 	const auto midpoint = wall.midpoint();
 	const double radius = 0.5 * wall.length + params.plane_search_m + 2.0;
-	auto points = cluster.near({midpoint[0] - shift[0], midpoint[1] - shift[1]}, radius);
+	auto points = cluster.nearr({midpoint[0] - shift[0], midpoint[1] - shift[1]}, radius);
 	shift_points(points, shift, registered_centre);
 	points.erase(std::remove_if(points.begin(), points.end(),
 						 [&](const auto &point) {
