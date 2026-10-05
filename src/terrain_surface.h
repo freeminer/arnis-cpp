@@ -44,7 +44,7 @@ struct TalusField
 const std::vector<Block> &talus_buries();
 bool takes_talus(std::uint8_t cover);
 std::optional<std::pair<Block, Block>> talus_palette(
-		int x, int z, double near, std::uint8_t cover);
+		int x, int z, double nearr, std::uint8_t cover);
 std::pair<Block, Block> steep_palette(
 		int x, int z, int ground_y, int slope, uint8_t cover);
 std::pair<Block, Block> bare_rock_palette(int x, int z);

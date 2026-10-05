@@ -262,9 +262,9 @@ bool takes_talus(std::uint8_t cover)
 }
 
 std::optional<std::pair<Block, Block>> talus_palette(
-		int x, int z, double near, std::uint8_t cover)
+		int x, int z, double nearr, std::uint8_t cover)
 {
-	if (near <= 0.0 || !takes_talus(cover) || noise(x, z, 7, 0x07A105CE) >= .8 * near)
+	if (nearr <= 0.0 || !takes_talus(cover) || noise(x, z, 7, 0x07A105CE) >= .8 * nearr)
 		return std::nullopt;
 	const double rock = noise(x, z, 4, 0x07A10B0D);
 	if (rock < .55)
