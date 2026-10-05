@@ -254,8 +254,8 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (y >= lava_level)
 			continue;
-		const bool exposed = std::any_of(
-				neighbours.begin(), neighbours.end(), [&](const auto &offset) {
+		const bool exposed = std::any_of(neighbours.begin(), neighbours.end(),
+				[&, x = x, y = y, z = z](const auto &offset) {
 					return is_open(x + offset[0], y + offset[1], z + offset[2]);
 				});
 		if (!exposed)
@@ -277,8 +277,8 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 			STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE, DIORITE, ANDESITE};
 	for (const auto p : supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		const bool touches_water = std::any_of(
-				neighbours.begin(), neighbours.end(), [&](const auto &offset) {
+		const bool touches_water = std::any_of(neighbours.begin(), neighbours.end(),
+				[&, x = x, y = y, z = z](const auto &offset) {
 					return water_cells.contains(
 							pack_cave_pos(x + offset[0], y + offset[1], z + offset[2]));
 				});
