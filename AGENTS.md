@@ -22,6 +22,7 @@ These instructions apply to all work under `src/mapgen/earth/arnis-cpp/`.
 - Extract shared helpers (for example `process_element`) before duplicating logic across sequential and tiled paths.
 - Keep the sequential path working while adding parallel/tiled behavior; both paths must call the same element dispatcher.
 - Try keep classes, functions, variables naming from rust.
+- But dont use 'far' and 'near' names - they broke windows build.
 
 ## Parity requirements
 

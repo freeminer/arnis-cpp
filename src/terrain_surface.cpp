@@ -224,7 +224,7 @@ std::optional<TalusField> TalusField::build(
 	return field;
 }
 
-double TalusField::near(int x, int z, double here) const
+double TalusField::nearr(int x, int z, double here) const
 {
 	constexpr std::array<std::pair<int, double>, 3> reaches{
 			{{4, 1.0}, {8, .6}, {16, .3}}};

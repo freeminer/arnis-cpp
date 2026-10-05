@@ -38,7 +38,7 @@ struct TalusField
 	double highest{0}, correction{1};
 	static std::optional<TalusField> build(const ::arnis::Ground &, int chunk_x,
 			int chunk_z, int origin_x, int origin_z);
-	double near(int x, int z, double here) const;
+	double nearr(int x, int z, double here) const;
 };
 
 const std::vector<Block> &talus_buries();
