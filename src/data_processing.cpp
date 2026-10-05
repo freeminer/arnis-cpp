@@ -8,6 +8,8 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <iostream>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <utility>
@@ -51,6 +53,7 @@
 #include "structures/helicopter.h"
 #include "structures/jetbridge.h"
 #include "structures/plane.h"
+#include "tile.h"
 //#include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
@@ -119,6 +122,192 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 	}).detach();
 	return {};
 }
+
+struct AircraftStripSegment
+{
+	double ax, az, bx, bz, half;
+
+	bool contains(double x, double z) const
+	{
+		const double dx = bx - ax, dz = bz - az;
+		const double length_squared = dx * dx + dz * dz;
+		const double t =
+				length_squared > 0.0
+						? std::clamp(((x - ax) * dx + (z - az) * dz) / length_squared,
+								  0.0, 1.0)
+						: 0.0;
+		const double px = ax + t * dx - x, pz = az + t * dz - z;
+		return px * px + pz * pz <= half * half;
+	}
+};
+
+void append_aircraft_strip_segments(std::vector<AircraftStripSegment> &segments,
+		const ProcessedWay &way, double scale)
+{
+	double half_m = 12.0;
+	const auto width = way.tags.get("width");
+	if (!width.empty()) {
+		std::string raw = width;
+		const auto first = raw.find_first_not_of(" \t\r\n");
+		if (first != std::string::npos) {
+			raw.erase(0, first);
+			const auto last = raw.find_last_not_of(" \t\r\n");
+			raw.erase(last + 1);
+			while (!raw.empty() && raw.back() == 'm')
+				raw.pop_back();
+			const auto end = raw.find_last_not_of(" \t\r\n");
+			raw.erase(end == std::string::npos ? 0 : end + 1);
+			try {
+				std::size_t parsed = 0;
+				const double value = std::stod(raw, &parsed);
+				if (parsed == raw.size() && std::isfinite(value) && value > 0.0)
+					half_m = std::clamp(value * 0.5, 6.0, 40.0);
+			} catch (...) {
+				// Match Rust: malformed width falls back to the default strip width.
+			}
+		}
+	}
+	const double half = std::max(1.0, std::round(half_m * scale));
+	for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+		const auto &a = way.nodes[i - 1];
+		const auto &b = way.nodes[i];
+		segments.push_back({static_cast<double>(a.x), static_cast<double>(a.z),
+				static_cast<double>(b.x), static_cast<double>(b.z), half});
+	}
+}
+
+bool aircraft_area_contains(
+		const std::vector<std::pair<int, int>> &ring, double x, double z)
+{
+	bool inside = false;
+	for (std::size_t i = 1; i < ring.size(); ++i) {
+		const auto [x1i, z1i] = ring[i - 1];
+		const auto [x2i, z2i] = ring[i];
+		const double x1 = x1i, z1 = z1i, x2 = x2i, z2 = z2i;
+		if ((z1 > z) != (z2 > z) && x < x1 + (z - z1) * (x2 - x1) / (z2 - z1))
+			inside = !inside;
+	}
+	return inside;
+}
+
+std::size_t drop_buildings_on_aircraft_pavement(
+		const std::vector<ProcessedElement> &elements,
+		std::vector<ProcessedElement> &filtered_elements, double scale)
+{
+	std::vector<AircraftStripSegment> runways, taxiways;
+	std::vector<std::vector<std::pair<int, int>>> runway_areas, aprons;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const bool closed = way.nodes.size() >= 4 &&
+							way.nodes.front().x == way.nodes.back().x &&
+							way.nodes.front().z == way.nodes.back().z;
+		const auto aeroway = way.tags.get("aeroway");
+		const auto area_kind = way.tags.get("area:aeroway");
+		auto ring = [&] {
+			std::vector<std::pair<int, int>> points;
+			points.reserve(way.nodes.size());
+			for (const auto &node : way.nodes)
+				points.emplace_back(node.x, node.z);
+			return points;
+		};
+		if (area_kind == std::optional<std::string>("runway") && closed) {
+			runway_areas.push_back(ring());
+		} else if (area_kind == std::optional<std::string>("taxiway") && closed) {
+			aprons.push_back(ring());
+		} else if (aeroway == std::optional<std::string>("runway") && closed &&
+				   way.tags.get("area") == std::optional<std::string>("yes")) {
+			runway_areas.push_back(ring());
+		} else if (aeroway == std::optional<std::string>("runway")) {
+			append_aircraft_strip_segments(runways, way, scale);
+		} else if (aeroway == std::optional<std::string>("taxiway")) {
+			append_aircraft_strip_segments(taxiways, way, scale);
+		} else if (aeroway == std::optional<std::string>("apron") && closed) {
+			aprons.push_back(ring());
+		}
+	}
+	if (runways.empty() && taxiways.empty() && runway_areas.empty() && aprons.empty())
+		return 0;
+
+	double min_x = std::numeric_limits<double>::max();
+	double min_z = std::numeric_limits<double>::max();
+	double max_x = std::numeric_limits<double>::lowest();
+	double max_z = std::numeric_limits<double>::lowest();
+	for (const auto &strip : runways) {
+		min_x = std::min(min_x, std::min(strip.ax, strip.bx) - strip.half);
+		max_x = std::max(max_x, std::max(strip.ax, strip.bx) + strip.half);
+		min_z = std::min(min_z, std::min(strip.az, strip.bz) - strip.half);
+		max_z = std::max(max_z, std::max(strip.az, strip.bz) + strip.half);
+	}
+	for (const auto &strip : taxiways) {
+		min_x = std::min(min_x, std::min(strip.ax, strip.bx) - strip.half);
+		max_x = std::max(max_x, std::max(strip.ax, strip.bx) + strip.half);
+		min_z = std::min(min_z, std::min(strip.az, strip.bz) - strip.half);
+		max_z = std::max(max_z, std::max(strip.az, strip.bz) + strip.half);
+	}
+	for (const auto *areas : {&runway_areas, &aprons})
+		for (const auto &area : *areas)
+			for (const auto &[x, z] : area) {
+				min_x = std::min(min_x, static_cast<double>(x));
+				max_x = std::max(max_x, static_cast<double>(x));
+				min_z = std::min(min_z, static_cast<double>(z));
+				max_z = std::max(max_z, static_cast<double>(z));
+			}
+
+	auto should_drop = [&](const ProcessedElement &element) {
+		if (!element.is_way())
+			return false;
+		const auto &way = element.as_way();
+		if (way.nodes.size() < 3 ||
+				(!way.tags.contains("building") && !way.tags.contains("building:part")))
+			return false;
+		double cx = 0.0, cz = 0.0;
+		for (const auto &node : way.nodes) {
+			cx += node.x;
+			cz += node.z;
+		}
+		cx /= way.nodes.size();
+		cz /= way.nodes.size();
+		if (cx < min_x || cx > max_x || cz < min_z || cz > max_z)
+			return false;
+		if (std::any_of(runways.begin(), runways.end(),
+					[&](const auto &strip) { return strip.contains(cx, cz); }) ||
+				std::any_of(
+						runway_areas.begin(), runway_areas.end(), [&](const auto &ring) {
+							return aircraft_area_contains(ring, cx, cz);
+						}))
+			return true;
+		const bool traced_overture =
+				way.tags.get("source") == std::optional<std::string>("overture_maps");
+		return traced_overture &&
+			   (std::any_of(taxiways.begin(), taxiways.end(), [&](const auto &strip) {
+				   return strip.contains(cx, cz);
+			   }) || std::any_of(aprons.begin(), aprons.end(), [&](const auto &ring) {
+				   return aircraft_area_contains(ring, cx, cz);
+			   }));
+	};
+	if (std::none_of(elements.begin(), elements.end(), should_drop))
+		return 0;
+	auto candidate_elements = elements;
+	const auto before = candidate_elements.size();
+	candidate_elements.erase(std::remove_if(candidate_elements.begin(),
+									 candidate_elements.end(), should_drop),
+			candidate_elements.end());
+	const auto dropped = before - candidate_elements.size();
+	filtered_elements = std::move(candidate_elements);
+	return dropped;
+}
+}
+
+std::size_t drop_buildings_on_aircraft_pavement(
+		std::vector<ProcessedElement> &elements, double scale)
+{
+	std::vector<ProcessedElement> filtered;
+	const auto dropped = drop_buildings_on_aircraft_pavement(elements, filtered, scale);
+	if (dropped > 0)
+		elements = std::move(filtered);
+	return dropped;
 }
 
 // Helper functions for ground fill area detection
@@ -155,99 +344,7 @@ std::optional<std::string> decal_texture(
 	return "[png:" + base64_encode(png);
 }
 
-bool water_tag_is(const tags_t &tags, const std::string &key, const std::string &value)
-{
-	const auto it = tags.find(key);
-	return it != tags.end() && it->second == value;
-}
-
-bool is_water_area_way(const ProcessedWay &way)
-{
-	return water_tag_is(way.tags, "waterway", "dock") ||
-		   water_tag_is(way.tags, "waterway", "riverbank");
-}
-
-bool is_still_water_relation(const ProcessedRelation &rel)
-{
-	return rel.tags.contains("water") || water_tag_is(rel.tags, "natural", "water") ||
-		   water_tag_is(rel.tags, "natural", "bay") ||
-		   water_tag_is(rel.tags, "waterway", "riverbank") ||
-		   water_tag_is(rel.tags, "landuse", "reservoir");
-}
-
-/// Compute still water surface level for a water polygon
-int compute_still_surface_level(const Ground *ground,
-		const std::vector<ProcessedNode> &outer_ring, const XZBBox &xzbbox)
-{
-	if (!ground || !ground->has_land_cover())
-		return -1000;
-
-	if (outer_ring.empty())
-		return -1000;
-
-	// Sample points from the ring and compute average ground level
-	std::int64_t sum_level = 0;
-	int count = 0;
-	for (const auto &node : outer_ring) {
-		if (node.x >= xzbbox.min_x() && node.x <= xzbbox.max_x() &&
-				node.z >= xzbbox.min_z() && node.z <= xzbbox.max_z()) {
-			sum_level += ground->level({node.x, node.z});
-			count++;
-		}
-	}
-
-	if (count == 0)
-		return -1000;
-
-	return static_cast<int>(sum_level / count);
-}
-
 } // anonymous namespace
-
-StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &elements,
-		const Ground *ground, const XZBBox &xzbbox)
-{
-	StillWaterSurfaces result;
-
-	if (!ground || !ground->has_land_cover())
-		return result;
-
-	for (const auto &element : elements) {
-		std::pair<std::string, std::uint64_t> key;
-		std::vector<ProcessedNode> outer_ring;
-
-		if (element.is_way()) {
-			const auto &way = element.as_way();
-			if (!is_water_area_way(way))
-				continue;
-			key = {"way", way.id};
-			outer_ring = way.nodes;
-		} else if (element.is_relation()) {
-			const auto &rel = element.as_relation();
-			if (!is_still_water_relation(rel))
-				continue;
-			key = {"relation", rel.id};
-			// Collect outer ring from relation members
-			for (const auto &member : rel.members) {
-				if (member.role == ProcessedMemberRole::Outer) {
-					outer_ring.insert(outer_ring.end(), member.way.nodes.begin(),
-							member.way.nodes.end());
-				}
-			}
-		} else {
-			continue;
-		}
-
-		if (!outer_ring.empty()) {
-			int level = compute_still_surface_level(ground, outer_ring, xzbbox);
-			if (level > -1000) {
-				result.surfaces[key] = level;
-			}
-		}
-	}
-
-	return result;
-}
 
 bool should_stream_to_disk(std::size_t tile_count)
 {
@@ -325,16 +422,36 @@ void release_finished_fills(
 }
 
 std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
-		const std::vector<ProcessedElement> &elements)
+		const std::vector<ProcessedElement> &elements,
+		const std::unordered_map<std::uint64_t, std::uint64_t> &part_groups,
+		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
+				&group_members)
 {
 	std::unordered_map<std::uint64_t, std::size_t> result;
+	auto record_last_use = [&](std::uint64_t id, std::size_t index) {
+		auto [it, inserted] = result.emplace(id, index);
+		if (!inserted)
+			it->second = std::max(it->second, index);
+	};
+	auto record_with_siblings = [&](std::uint64_t id, std::size_t index) {
+		record_last_use(id, index);
+		const auto group = part_groups.find(id);
+		const auto seed = group == part_groups.end() ? id : group->second;
+		for (const auto key : {osm_parser::seed_without_hint(seed),
+					 osm_parser::seed_without_hint(id)}) {
+			if (const auto members = group_members.find(key);
+					members != group_members.end())
+				for (const auto sibling_id : members->second)
+					record_last_use(sibling_id, index);
+		}
+	};
 	for (std::size_t i = 0; i < elements.size(); ++i) {
 		const auto &element = elements[i];
 		if (element.is_way()) {
-			result[element.as_way().id] = i;
+			record_with_siblings(element.as_way().id, i);
 		} else if (element.is_relation()) {
 			for (const auto &member : element.as_relation().members)
-				result[member.way.id] = i;
+				record_with_siblings(member.way.id, i);
 		}
 	}
 	return result;
@@ -1007,13 +1124,18 @@ void generate_waterways(WorldEditor &editor, const ProcessedWay &way);
 
 namespace water_areas
 {
+StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &elements,
+		const Ground *ground, const XZBBox &xzbbox);
 void generate_water_areas_from_relation(WorldEditor &editor, const ProcessedRelation &rel,
 		const XZBBox &xzbbox, const water_depth::BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap &bridge_surface,
 		std::optional<int> precomputed_surface);
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface);
+		const RoadMaskBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap &bridge_surface,
+		std::optional<int> precomputed_surface);
 }
 
 namespace railways
@@ -1187,7 +1309,18 @@ bool generate_world(WorldEditor &editor,
 					: (args.body == CelestialBody::Mars ? RED_TERRACOTTA : GRASS_BLOCK);
 	world_editor::set_base_chunk_block_id(filler.id());
 	static const std::vector<ProcessedElement> no_elements;
-	const auto &elements = args.skip_objects() ? no_elements : input_elements;
+	std::vector<ProcessedElement> aircraft_filtered_elements;
+	const std::vector<ProcessedElement> *elements_source = &input_elements;
+	if (!args.skip_objects()) {
+		const auto dropped = drop_buildings_on_aircraft_pavement(
+				input_elements, aircraft_filtered_elements, args.scale);
+		if (dropped > 0) {
+			std::cout << "  Skipped " << dropped
+					  << " building(s) on runways, taxiways and aprons\n";
+			elements_source = &aircraft_filtered_elements;
+		}
+	}
+	const auto &elements = args.skip_objects() ? no_elements : *elements_source;
 	// Build the authored-trunk index once per generation.  Ground decoration
 	// can then suppress only procedural crowns overlapping mapped trees, while
 	// preserving deterministic results for streamed tiles.
@@ -1426,9 +1559,10 @@ bool generate_world(WorldEditor &editor,
 	}
 	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
 	// Pre-scan still water surfaces for consistent water levels across tiles
-	auto still_surfaces =
-			editor.ground ? prescan_still_surfaces(elements, editor.ground, xzbbox)
-						  : StillWaterSurfaces{};
+	StillWaterSurfaces still_surfaces;
+	if (editor.ground)
+		still_surfaces =
+				water_areas::prescan_still_surfaces(elements, editor.ground, xzbbox);
 	auto bridge_outlines = bridge_styles::BridgeOutlineIndex::build(elements);
 	auto bridge_structures =
 			bridges::BridgeStructureMap::build(elements, editor, bridge_outlines);
@@ -1690,18 +1824,8 @@ bool generate_world(WorldEditor &editor,
 	// A fill may be read by its way, by a relation containing it, and by every
 	// sibling part's shared building/facade context. Keep each group alive until
 	// the last member is processed, matching Rust's sequential eviction path.
-	auto last_fill_use = compute_last_fill_use(render_elements);
-	for (const auto &group : building_group_members) {
-		std::optional<std::size_t> last_group_reader;
-		for (const auto way_id : group.second)
-			if (const auto found = last_fill_use.find(way_id);
-					found != last_fill_use.end() &&
-					(!last_group_reader || found->second > *last_group_reader))
-				last_group_reader = found->second;
-		if (last_group_reader)
-			for (const auto way_id : group.second)
-				last_fill_use[way_id] = *last_group_reader;
-	}
+	auto last_fill_use = compute_last_fill_use(
+			render_elements, building_part_groups, building_group_members);
 	const auto expiring_fills = fills_expiring_at(last_fill_use);
 
 	// All roads share the same immutable connectivity for this pass.
@@ -1817,7 +1941,7 @@ bool generate_world(WorldEditor &editor,
 					water_areas::generate_water_area_from_way(editor, way,
 							big_water_field, road_mask,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
-							surface_level);
+							bridge_surface, surface_level);
 				} else {
 					waterways::generate_waterways(editor, way);
 				}
@@ -1841,11 +1965,11 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.contains("power")) {
 				power::generate_power(editor, element, building_footprints,
 						flood_fill_cache, args.timeout);
+				if (editor.signage_enabled() && signage::power_sign(way.tags))
+					signage::generate_power_signage(editor, way, road_mask);
 			} else if (way.tags.contains("place")) {
 				landuse::generate_place(editor, way, args, flood_fill_cache);
 			}
-			if (editor.signage_enabled() && signage::power_sign(way.tags))
-				signage::generate_power_signage(editor, way, road_mask);
 		} else if (element.is_node()) {
 			auto const &node = element.as_node();
 			if (std::find(landmark_plan.suppressed.begin(),
@@ -1860,8 +1984,6 @@ bool generate_world(WorldEditor &editor,
 			if (editor.signage_enabled())
 				signage::generate_node_signage(
 						editor, node, building_footprints, road_mask);
-			if (node.tags.get("aeroway") == std::optional<std::string>("helipad"))
-				structures::maybe_place_helicopter(editor, node.x, node.z);
 
 			if (editor.ground)
 				args.ground_level = editor.ground->level(node.xz());
@@ -1932,7 +2054,7 @@ bool generate_world(WorldEditor &editor,
 				water_areas::generate_water_areas_from_relation(editor, rel, xzbbox,
 						big_water_field, road_mask,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
-						surface_level);
+						bridge_surface, surface_level);
 			} else if (rel.tags.contains("natural")) {
 				natural::generate_natural_from_relation(editor, rel, args,
 						flood_fill_cache, building_footprints, bridge_surface);
@@ -1962,12 +2084,43 @@ bool generate_world(WorldEditor &editor,
 						editor, element.as_node(), building_footprints, road_mask);
 
 	// Rust ordering: ground_generation runs before water_depth::carve_lc_water_pass.
-	ground_generation::generate_ground_layer(editor, args, xzbbox, building_footprints,
-			tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint, &bridge_surface);
-	// Rust runs a separate chunk-stable patch pass after the ground surface is
-	// laid out; keep it separate so streamed generation has identical origins.
-	ground_decoration::decorate_region(editor, args, xzbbox, xzbbox.min_x(),
-			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+	// Match Rust's region-aligned ground pass. Strict ownership keeps each
+	// decoration/tree column deterministic at tile boundaries, while the shared
+	// bbox remains the origin for terrain, canopy and ecoregion sampling.
+	const auto ground_tiles = create_tiles(xzbbox, DEFAULT_TILE_SIZE);
+	const bool regional_ground_passes = java_format && ground_tiles.size() >= 3;
+	if (regional_ground_passes) {
+		for (const auto &tile : ground_tiles) {
+			const int min_x = std::max(tile.min_x, xzbbox.min_x());
+			const int max_x = std::min(tile.max_x - 1, xzbbox.max_x());
+			const int min_z = std::max(tile.min_z, xzbbox.min_z());
+			const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
+			if (min_x > max_x || min_z > max_z)
+				continue;
+			editor.set_strict_bounds(min_x, min_z, max_x, max_z);
+			ground_generation::generate_ground_region(editor, args, xzbbox,
+					building_footprints, min_x, max_x, min_z, max_z,
+					tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
+					&bridge_surface);
+			ground_decoration::decorate_region(
+					editor, args, xzbbox, min_x, max_x, min_z, max_z);
+			if (args.fillground && !args.caves)
+				ore_generation::generate_ores_region(
+						editor, min_x, max_x, min_z, max_z, false);
+			if (!args.caves)
+				water_depth::carve_lc_water_region(editor, big_water_field, road_mask,
+						tunnel_footprint, min_x, max_x, min_z, max_z, &bridge_surface);
+		}
+	}
+	editor.clear_strict_bounds();
+	if (!regional_ground_passes) {
+		ground_generation::generate_ground_layer(editor, args, xzbbox,
+				building_footprints,
+				tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
+				&bridge_surface);
+		ground_decoration::decorate_region(editor, args, xzbbox, xzbbox.min_x(),
+				xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z());
+	}
 	caves::CaveEllipsoids cave_ellipsoids;
 	if (args.fillground) {
 		if (args.caves) {
@@ -1992,14 +2145,15 @@ bool generate_world(WorldEditor &editor,
 			caves::decorate_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 					CAVE_SEED, world_editor::terrain_floor_y(), args);
-		}
-		if (!args.caves)
+		} else if (!regional_ground_passes) {
 			ore_generation::generate_ores(editor, xzbbox.min_x(), xzbbox.max_x(),
 					xzbbox.min_z(), xzbbox.max_z());
+		}
 	}
 
-	water_depth::carve_lc_water_pass(
-			editor, big_water_field, road_mask, tunnel_footprint, &bridge_surface);
+	if (args.caves || !regional_ground_passes)
+		water_depth::carve_lc_water_pass(
+				editor, big_water_field, road_mask, tunnel_footprint, &bridge_surface);
 	// Rust releases ground-surface protection after the ground/ore/water
 	// passes. Models and landmarks own their final footprints.
 	editor.release_sealed_surface();

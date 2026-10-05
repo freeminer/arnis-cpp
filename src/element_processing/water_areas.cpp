@@ -3,10 +3,12 @@
 
 #include "../structures/structures.h"
 #include "../water_depth.h"
+#include "bridges.h"
 #include <string>
 #include <map>
 #include <chrono>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <optional>
 #include <algorithm>
@@ -331,15 +333,13 @@ static bool spans_contain(const std::vector<std::pair<int, int>> &spans, int x)
 			[x](const auto &span) { return x >= span.first && x <= span.second; });
 }
 
-// Rust parity: water_areas.rs::still_surface_level.  ESA land-cover data often
-// sees a reservoir at one level while the OSM outline includes its exposed
-// banks.  Resolve one surface for a sufficiently large, consistently-levelled
-// water body instead of following each terrain cell independently.
-static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, int min_z,
-		int max_x, int max_z, const std::vector<std::vector<XZPoint>> &outers,
-		const std::vector<std::vector<XZPoint>> &inners)
+template <typename GroundPointAt, typename GroundLevelAt>
+static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
+		int min_z, int max_x, int max_z, const std::vector<std::vector<XZPoint>> &outers,
+		const std::vector<std::vector<XZPoint>> &inners, GroundPointAt ground_point_at,
+		GroundLevelAt ground_level_at)
 {
-	if (!editor.ground || !editor.ground->has_land_cover())
+	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
 		return std::nullopt;
 	constexpr std::size_t max_samples = 250000;
 	constexpr std::size_t min_lc_columns = 64;
@@ -359,27 +359,28 @@ static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, in
 	const auto inner_edges = collect_all_ring_edges(inners);
 	std::size_t total = 0;
 	std::vector<int> levels;
-	for (int z = min_z; z <= max_z; z += stride) {
+	auto lattice_start = [stride](int coordinate) {
+		const int remainder = ((coordinate % stride) + stride) % stride;
+		return coordinate + (stride - remainder) % stride;
+	};
+	for (int z = lattice_start(min_z); z <= max_z; z += stride) {
 		std::vector<std::pair<int, int>> outer_spans;
 		for (const auto &edges : outer_edge_groups)
 			outer_spans = union_spans(outer_spans,
 					compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x));
 		if (outer_spans.empty())
 			continue;
-		auto spans = inner_edges.empty()
-							 ? outer_spans
-							 : subtract_spans(outer_spans,
-									   compute_scanline_spans(inner_edges,
-											   static_cast<double>(z), min_x, max_x));
+		auto spans = outer_spans;
+		if (!inner_edges.empty())
+			spans = subtract_spans(
+					outer_spans, compute_scanline_spans(inner_edges,
+										 static_cast<double>(z), min_x, max_x));
 		for (const auto &[start, end] : spans) {
-			const int remainder = ((start % stride) + stride) % stride;
-			int x = start + (stride - remainder) % stride;
+			int x = lattice_start(start);
 			for (; x <= end; x += stride) {
 				++total;
-				const XZPoint relative{
-						x - editor.mg->node_min.X, z - editor.mg->node_min.Z};
-				if (editor.ground->cover_class(relative) == land_cover::LC_WATER)
-					levels.push_back(editor.get_ground_level(x, z));
+				if (ground->cover_class(ground_point_at(x, z)) == land_cover::LC_WATER)
+					levels.push_back(ground_level_at(x, z));
 			}
 		}
 	}
@@ -393,11 +394,25 @@ static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, in
 	return levels[levels.size() / 2];
 }
 
+// Rust parity: resolve one stable level for a body seen consistently by ESA.
+static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, int min_z,
+		int max_x, int max_z, const std::vector<std::vector<XZPoint>> &outers,
+		const std::vector<std::vector<XZPoint>> &inners)
+{
+	if (!editor.ground)
+		return std::nullopt;
+	return resolve_still_surface(
+			editor.ground, min_x, min_z, max_x, max_z, outers, inners,
+			[&editor](int x, int z) { return editor.ground_point(x, z); },
+			[&editor](int x, int z) { return editor.get_ground_level(x, z); });
+}
+
 static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 		const std::vector<std::vector<XZPoint>> &outers,
 		const std::vector<std::vector<XZPoint>> &inners, WorldEditor &editor,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint, std::optional<int> still_surface)
+		const RoadMaskBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap &bridge_surface, std::optional<int> still_surface)
 {
 	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
 	outer_edge_groups.reserve(outers.size());
@@ -440,7 +455,8 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 
 		for (const auto &[start, end] : fill_spans) {
 			for (int x = start; x <= end; ++x) {
-				if (road_mask.contains(x, z))
+				const bool on_road = road_mask.contains(x, z);
+				if (on_road && !bridge_surface.contains(x, z))
 					continue;
 				int ground_y = editor.get_ground_level(x, z);
 				int water_y = still_surface.value_or(editor.get_water_level(x, z));
@@ -455,6 +471,9 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 						continue;
 					water_y = ground_y;
 				}
+				if (on_road && (!bridge_surface.deck_clears(x, z, water_y) ||
+									   bridge_surface.over_grade_way(x, z)))
+					continue;
 				if (ground_y <= water_y) {
 					// Rust fills down to terrain over a tunnel bore, but never
 					// excavates or replaces the bore below the terrain surface.
@@ -476,7 +495,9 @@ static void generate_water_areas(WorldEditor &editor,
 		const std::vector<std::vector<ProcessedNode>> &outers,
 		const std::vector<std::vector<ProcessedNode>> &inners,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface)
+		const RoadMaskBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap &bridge_surface,
+		std::optional<int> precomputed_surface)
 {
 	// Calculate polygon bounding box to limit fill area
 	int32_t poly_min_x = std::numeric_limits<int32_t>::max();
@@ -531,11 +552,11 @@ static void generate_water_areas(WorldEditor &editor,
 
 	std::optional<int> still_surface = precomputed_surface;
 	if (!still_surface.has_value()) {
-		still_surface =
-			still_surface_level(editor, min_x, min_z, max_x, max_z, outers_xz, inners_xz);
+		still_surface = still_surface_level(
+				editor, min_x, min_z, max_x, max_z, outers_xz, inners_xz);
 	}
 	scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf,
-			road_mask, tunnel_footprint, still_surface);
+			road_mask, tunnel_footprint, bridge_surface, still_surface);
 	structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
 }
 
@@ -567,16 +588,19 @@ static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &r
 
 static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 {
-	std::vector<std::size_t> removed;
+	std::vector<bool> removed(loops.size(), false);
 	std::vector<std::vector<ProcessedNode>> merged;
+	auto nodes_match = [](const ProcessedNode &a, const ProcessedNode &b) {
+		if (a.id == b.id)
+			return true;
+		const auto dx = std::llabs(static_cast<long long>(a.x) - b.x);
+		const auto dz = std::llabs(static_cast<long long>(a.z) - b.z);
+		return dx <= 1 && dz <= 1;
+	};
 
 	for (std::size_t i = 0; i < loops.size(); ++i) {
 		for (std::size_t j = 0; j < loops.size(); ++j) {
-			if (i == j) {
-				continue;
-			}
-			if (std::find(removed.begin(), removed.end(), i) != removed.end() ||
-					std::find(removed.begin(), removed.end(), j) != removed.end()) {
+			if (i == j || removed[i] || removed[j]) {
 				continue;
 			}
 
@@ -587,40 +611,34 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 				continue;
 			}
 
-			if (x.front().id == x.back().id) {
+			if (nodes_match(x.front(), x.back())) {
 				continue;
 			}
-			if (y.front().id == y.back().id) {
+			if (nodes_match(y.front(), y.back())) {
 				continue;
 			}
 
-			if (x.front().id == y.front().id) {
-				removed.push_back(i);
-				removed.push_back(j);
+			if (nodes_match(x.front(), y.front())) {
+				removed[i] = removed[j] = true;
 
 				std::vector<ProcessedNode> r = x;
 				std::reverse(r.begin(), r.end());
 				r.insert(r.end(), y.begin() + 1, y.end());
 				merged.push_back(std::move(r));
-			} else if (x.back().id == y.back().id) {
-				removed.push_back(i);
-				removed.push_back(j);
+			} else if (nodes_match(x.back(), y.back())) {
+				removed[i] = removed[j] = true;
 
 				std::vector<ProcessedNode> r = x;
 				r.insert(r.end(), y.rbegin() + 1, y.rend());
-				std::reverse(r.begin() + x.size(),
-						r.end()); // correct ordering after insert from reverse iterator
 				merged.push_back(std::move(r));
-			} else if (x.front().id == y.back().id) {
-				removed.push_back(i);
-				removed.push_back(j);
+			} else if (nodes_match(x.front(), y.back())) {
+				removed[i] = removed[j] = true;
 
 				std::vector<ProcessedNode> r = y;
 				r.insert(r.end(), x.begin() + 1, x.end());
 				merged.push_back(std::move(r));
-			} else if (x.back().id == y.front().id) {
-				removed.push_back(i);
-				removed.push_back(j);
+			} else if (nodes_match(x.back(), y.front())) {
+				removed[i] = removed[j] = true;
 
 				std::vector<ProcessedNode> r = x;
 				r.insert(r.end(), y.begin() + 1, y.end());
@@ -629,12 +647,9 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 		}
 	}
 
-	std::sort(removed.begin(), removed.end());
-	for (auto it = removed.rbegin(); it != removed.rend(); ++it) {
-		if (*it < loops.size()) {
-			loops.erase(loops.begin() + *it);
-		}
-	}
+	for (std::size_t i = removed.size(); i > 0; --i)
+		if (removed[i - 1])
+			loops.erase(loops.begin() + static_cast<std::ptrdiff_t>(i - 1));
 
 	std::size_t merged_len = merged.size();
 	for (auto &m : merged) {
@@ -648,7 +663,9 @@ static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &element,
 		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
-		const RoadMaskBitmap *tunnel_footprint, std::optional<int> precomputed_surface)
+		const RoadMaskBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap &bridge_surface,
+		std::optional<int> precomputed_surface)
 {
 	std::vector<std::vector<ProcessedNode>> outers = {{element.nodes}};
 
@@ -658,13 +675,15 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &eleme
 		return;
 	}
 
-	generate_water_areas(editor, outers, {}, bwf, road_mask, tunnel_footprint, precomputed_surface);
+	generate_water_areas(editor, outers, {}, bwf, road_mask, tunnel_footprint,
+			bridge_surface, precomputed_surface);
 }
 
 void generate_water_areas_from_relation(WorldEditor &editor,
 		const ProcessedRelation &element, const XZBBox &xzbbox,
-		const water_depth::BigWaterField &bwf,
-		const RoadMaskBitmap &road_mask, const RoadMaskBitmap *tunnel_footprint,
+		const water_depth::BigWaterField &bwf, const RoadMaskBitmap &road_mask,
+		const RoadMaskBitmap *tunnel_footprint,
+		const bridges::BridgeSurfaceMap &bridge_surface,
 		std::optional<int> precomputed_surface)
 {
 	// Check if this is a water relation (either with water tag or natural=water or natural=bay)
@@ -764,7 +783,127 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 		return;
 	}
 
-	generate_water_areas(editor, outers, inners, bwf, road_mask, tunnel_footprint, precomputed_surface);
+	generate_water_areas(editor, outers, inners, bwf, road_mask, tunnel_footprint,
+			bridge_surface, precomputed_surface);
+}
+
+StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &elements,
+		const Ground *ground, const XZBBox &xzbbox)
+{
+	StillWaterSurfaces result;
+	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
+		return result;
+
+	const int origin_x = ground->mg ? ground->mg->node_min.X : xzbbox.min_x();
+	const int origin_z = ground->mg ? ground->mg->node_min.Z : xzbbox.min_z();
+	auto point_at = [=](int x, int z) { return XZPoint{x - origin_x, z - origin_z}; };
+	auto level_at = [=](int x, int z) {
+		return ground->level({x - origin_x, z - origin_z});
+	};
+
+	for (const auto &element : elements) {
+		std::string kind;
+		std::uint64_t id = 0;
+		std::vector<std::vector<ProcessedNode>> outers, inners;
+		if (element.is_way()) {
+			const auto &way = element.as_way();
+			const auto waterway = way.tags.get("waterway");
+			if (waterway != "dock" && waterway != "riverbank")
+				continue;
+			outers.push_back(way.nodes);
+			if (!verify_closed_rings(outers))
+				continue;
+			kind = "way";
+			id = way.id;
+		} else if (element.is_relation()) {
+			const auto &relation = element.as_relation();
+			const auto natural = relation.tags.get("natural");
+			if (!relation.tags.contains("water") &&
+					(natural != "water" && natural != "bay"))
+				continue;
+			const auto layer = relation.tags.get("layer");
+			if (!layer.empty()) {
+				try {
+					if (std::stoi(layer) < 0)
+						continue;
+				} catch (...) {
+					// A malformed layer tag does not make the water relation underground.
+				}
+			}
+			for (const auto &member : relation.members) {
+				if (member.role == ProcessedMemberRole::Outer)
+					outers.push_back(member.way.nodes);
+				else if (member.role == ProcessedMemberRole::Inner)
+					inners.push_back(member.way.nodes);
+			}
+			merge_loopy_loops(outers);
+			auto clip_rings = [&](std::vector<std::vector<ProcessedNode>> &rings) {
+				std::vector<std::vector<ProcessedNode>> clipped;
+				for (const auto &ring : rings)
+					if (auto part = clipping::clip_water_ring_to_bbox(ring, xzbbox))
+						clipped.push_back(std::move(*part));
+				rings = std::move(clipped);
+			};
+			clip_rings(outers);
+			auto invalid_outer = [](const auto &ring) {
+				if (ring.size() < 3)
+					return true;
+				const auto &first = ring.front();
+				const auto &last = ring.back();
+				return first.id != last.id &&
+					   (std::abs(first.x - last.x) > 1 || std::abs(first.z - last.z) > 1);
+			};
+			outers.erase(std::remove_if(outers.begin(), outers.end(), invalid_outer),
+					outers.end());
+			for (auto &ring : outers)
+				if (!ring.empty() && ring.front().id != ring.back().id)
+					ring.push_back(ring.front());
+			if (outers.empty() || !verify_closed_rings(outers))
+				continue;
+			merge_loopy_loops(inners);
+			clip_rings(inners);
+			if (!verify_closed_rings(inners))
+				continue;
+			kind = "relation";
+			id = relation.id;
+		} else {
+			continue;
+		}
+
+		int min_x = std::numeric_limits<int>::max();
+		int min_z = std::numeric_limits<int>::max();
+		int max_x = std::numeric_limits<int>::min();
+		int max_z = std::numeric_limits<int>::min();
+		std::vector<std::vector<XZPoint>> outer_points, inner_points;
+		auto convert = [&](const auto &rings, auto &output, bool include_bounds) {
+			for (const auto &ring : rings) {
+				std::vector<XZPoint> points;
+				points.reserve(ring.size());
+				for (const auto &node : ring) {
+					points.push_back(node.xz());
+					if (include_bounds) {
+						min_x = std::min(min_x, node.x);
+						min_z = std::min(min_z, node.z);
+						max_x = std::max(max_x, node.x);
+						max_z = std::max(max_z, node.z);
+					}
+				}
+				output.push_back(std::move(points));
+			}
+		};
+		convert(outers, outer_points, true);
+		convert(inners, inner_points, false);
+		min_x = std::max(min_x, xzbbox.min_x());
+		min_z = std::max(min_z, xzbbox.min_z());
+		max_x = std::min(max_x, xzbbox.max_x());
+		max_z = std::min(max_z, xzbbox.max_z());
+		if (min_x > max_x || min_z > max_z)
+			continue;
+		if (const auto surface = resolve_still_surface(ground, min_x, min_z, max_x, max_z,
+					outer_points, inner_points, point_at, level_at))
+			result.surfaces[{std::move(kind), id}] = *surface;
+	}
+	return result;
 }
 
 }

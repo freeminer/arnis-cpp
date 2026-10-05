@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <deque>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <tuple>
@@ -18,41 +19,72 @@ void repair_terrain_anomalies(std::vector<std::vector<double>> &h, double meters
 {
 	if (h.size() < 5 || h[0].size() < 5)
 		return;
-	const int H = h.size(), W = h[0].size();
+	const std::size_t H = h.size(), W = h[0].size();
 	const double abs_threshold = std::max(6.0, 0.25 * meters_per_cell);
 	const int passes = meters_per_cell > 4.0 ? 2 : 10;
+	std::vector<std::vector<double>> snapshot = h;
+	std::vector<double> neighbors;
+	std::vector<double> abs_devs;
+	neighbors.reserve(24);
+	abs_devs.reserve(24);
+	std::size_t total_repaired = 0;
+	int passes_ran = 0;
 	for (int pass = 0; pass < passes; ++pass) {
-		auto s = h;
+		if (pass > 0)
+			snapshot = h;
 		std::size_t changed = 0;
-		for (int y = 2; y < H - 2; ++y)
-			for (int x = 2; x < W - 2; ++x) {
-				double c = s[y][x];
+		for (std::size_t y = 2; y < H - 2; ++y)
+			for (std::size_t x = 2; x < W - 2; ++x) {
+				const double c = snapshot[y][x];
 				if (!std::isfinite(c))
 					continue;
-				std::vector<double> n;
-				for (int dy = -2; dy <= 2; ++dy)
-					for (int dx = -2; dx <= 2; ++dx)
-						if (dx || dy)
-							if (std::isfinite(s[y + dy][x + dx]))
-								n.push_back(s[y + dy][x + dx]);
-				if (n.size() < 8)
+				neighbors.clear();
+				double lo = std::numeric_limits<double>::infinity();
+				double hi = -std::numeric_limits<double>::infinity();
+				for (int dy = -2; dy <= 2; ++dy) {
+					for (int dx = -2; dx <= 2; ++dx) {
+						if (dx == 0 && dy == 0)
+							continue;
+						const double value = snapshot[static_cast<std::size_t>(
+								static_cast<int>(y) +
+								dy)][static_cast<std::size_t>(static_cast<int>(x) + dx)];
+						if (!std::isfinite(value))
+							continue;
+						neighbors.push_back(value);
+						lo = std::min(lo, value);
+						hi = std::max(hi, value);
+					}
+				}
+				if (neighbors.size() < 8)
 					continue;
-				std::nth_element(n.begin(), n.begin() + n.size() / 2, n.end());
-				double m = n[n.size() / 2];
-				std::vector<double> d;
-				for (double v : n)
-					d.push_back(std::abs(v - m));
-				std::nth_element(d.begin(), d.begin() + d.size() / 2, d.end());
-				double mad = d[d.size() / 2];
-				if (std::abs(c - m) > abs_threshold &&
-						std::abs(c - m) > 3.0 * std::max(1.0, mad)) {
-					h[y][x] = m;
+				// The median lies inside the neighbor range, so a center close to both
+				// extrema cannot exceed the absolute threshold. Skip both nth_element
+				// operations for the common smooth-terrain case.
+				if (c - lo <= abs_threshold && hi - c <= abs_threshold)
+					continue;
+				const auto mid = neighbors.begin() + neighbors.size() / 2;
+				std::nth_element(neighbors.begin(), mid, neighbors.end());
+				const double median = *mid;
+				abs_devs.clear();
+				for (const double value : neighbors)
+					abs_devs.push_back(std::abs(value - median));
+				const auto mad_mid = abs_devs.begin() + abs_devs.size() / 2;
+				std::nth_element(abs_devs.begin(), mad_mid, abs_devs.end());
+				const double mad = *mad_mid;
+				if (std::abs(c - median) > abs_threshold &&
+						std::abs(c - median) > 3.0 * std::max(1.0, mad)) {
+					h[y][x] = median;
 					++changed;
 				}
 			}
-		if (!changed)
+		if (changed == 0)
 			break;
+		total_repaired += changed;
+		passes_ran = pass + 1;
 	}
+	if (total_repaired > 0)
+		std::clog << "Repaired " << total_repaired << " terrain anomalies in "
+				  << passes_ran << " pass" << (passes_ran == 1 ? "" : "es") << '\n';
 }
 
 namespace

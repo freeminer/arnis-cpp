@@ -44,6 +44,11 @@ struct PreparedBuildingData
 
 PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &elements);
 
+// Remove generated building footprints occupying aircraft pavement before
+// flood-fill and prepared-building caches are constructed.
+std::size_t drop_buildings_on_aircraft_pavement(
+		std::vector<ProcessedElement> &elements, double scale);
+
 struct GenerationOptions
 {
 	WorldFormat format = WorldFormat::JavaAnvil;
@@ -170,9 +175,12 @@ struct StillWaterSurfaces
 	}
 };
 
-/// Pre-scan water polygon surfaces so a body spanning many tiles is measured once.
+namespace water_areas
+{
+/// Resolve fill surfaces before world generation so every consumer agrees.
 StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &elements,
 		const Ground *ground, const XZBBox &xzbbox);
+}
 inline double generation_stage_progress(const GenerationProgress &p,
 		double world_fraction, double ground_fraction, bool saving)
 {
