@@ -45,8 +45,12 @@ std::optional<std::string> ecoregion_biome(
 		break;
 	case EcoBiome::TemperateConifer:
 	case EcoBiome::Boreal:
-		if (lc == LC_TREE_COVER || lc == LC_MOSS)
+		if (lc == LC_TREE_COVER)
 			return "minecraft:taiga";
+		if (lc == LC_SHRUBLAND)
+			return "minecraft:taiga";
+		break;
+	case EcoBiome::Tundra:
 		if (lc == LC_SHRUBLAND)
 			return "minecraft:taiga";
 		break;
@@ -235,9 +239,15 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 			const auto water_distance = ground->water_distance(local);
 			std::optional<std::string> selected;
 			const auto bpm = ground->blocks_per_meter();
-			if (ground->snow_threshold() != std::numeric_limits<int>::max() && bpm > 0.0)
+			if (ground->elevation_enabled &&
+					ground->snow_threshold() != std::numeric_limits<int>::max() &&
+					bpm > 0.0)
 				selected = mountain_biome(lc, climate, water_distance,
-						(ground->level_exact(local) - ground->snow_threshold()) / bpm,
+						ground->snow_threshold() == std::numeric_limits<int>::min()
+								? std::numeric_limits<double>::infinity()
+								: (double(ground->level(local)) -
+										  ground->snow_threshold()) /
+										  bpm,
 						ground->slope(local));
 			if (!selected)
 				selected = ecoregion_biome(lc, climate, eco);

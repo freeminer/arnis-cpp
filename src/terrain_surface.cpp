@@ -35,24 +35,7 @@ const std::array<Block, 6> &face_ramp()
 
 double value_noise_salted(int x, int z, int scale, uint32_t salt)
 {
-	constexpr double COS = 0.891006524188368, SIN = 0.453990499739547;
-	const double s = std::max(scale, 1);
-	const double fx = x, fz = z;
-	const double u = (fx * COS - fz * SIN) / s;
-	const double v = (fx * SIN + fz * COS) / s;
-	const double u0 = std::floor(u), v0 = std::floor(v);
-	const double tu = u - u0, tv = v - v0;
-	const double su = tu * tu * (3.0 - 2.0 * tu);
-	const double sv = tv * tv * (3.0 - 2.0 * tv);
-	const auto cu = static_cast<int>(u0), cv = static_cast<int>(v0);
-	const auto salt_x = static_cast<int32_t>(salt);
-	const auto salt_z = static_cast<int32_t>((salt << 16) | (salt >> 16));
-	const auto sample = [&](int cx, int cz) {
-		return double(land_cover::coord_hash(cx ^ salt_x, cz ^ salt_z) % 1000) / 1000.0;
-	};
-	const double a = sample(cu, cv) * (1.0 - su) + sample(cu + 1, cv) * su;
-	const double b = sample(cu, cv + 1) * (1.0 - su) + sample(cu + 1, cv + 1) * su;
-	return a * (1.0 - sv) + b * sv;
+	return ground_generation::value_noise_salted(x, z, scale, salt);
 }
 
 const std::vector<int> &bed_starts()
@@ -387,17 +370,24 @@ double glacier_depth(double d)
 }
 void place_snow_layer(WorldEditor &e, int x, int y, int z, unsigned eighths)
 {
+	const auto top = e.get_block_absolute(x, y, z);
+	if (!top)
+		return;
 	if (e.block_exists_absolute(x, y + 1, z))
 		return;
-	const auto layer = snow_layer_with_depth(eighths);
-	e.set_block_with_properties_absolute(layer, x, y + 1, z, std::nullopt, std::nullopt);
-	if (e.check_for_block_absolute(
-				x, y, z, std::optional<std::vector<Block>>{{GRASS_BLOCK}}))
-		e.set_block_absolute(
-				GRASS_BLOCK, x, y, z, std::optional<std::vector<Block>>{{GRASS_BLOCK}});
-	else if (e.check_for_block_absolute(
-					 x, y, z, std::optional<std::vector<Block>>{{PODZOL}}))
-		e.set_block_absolute(
-				PODZOL, x, y, z, std::optional<std::vector<Block>>{{PODZOL}});
+	if (eighths != 0) {
+		const auto layer = snow_layer_with_depth(std::min(eighths, 7u));
+		e.set_block_with_properties_absolute(
+				layer, x, y + 1, z, std::nullopt, std::nullopt);
+	} else if (!is_ice(*top)) {
+		return;
+	}
+	const std::optional<std::vector<Block>> replacements{{*top}};
+	if (*top == GRASS_BLOCK || *top == PODZOL)
+		e.set_block_with_properties_absolute(
+				BlockWithProperties{*top, {{"snowy", "true"}}}, x, y, z, std::nullopt,
+				replacements);
+	else if (is_ice(*top))
+		e.set_block_absolute(SNOW_BLOCK, x, y, z, std::nullopt, replacements);
 }
 }

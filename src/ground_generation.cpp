@@ -299,21 +299,22 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
 		double forest_fern_share)
 {
-	if (editor.surface_is_sealed(x, z) || building_footprints.contains(x, z) ||
-			(bridge_surface && bridge_surface->contains(x, z)) ||
-			editor.check_for_block_absolute(x, ground_y + 1, z))
+	const bool sealed = editor.surface_is_sealed(x, z);
+	if (editor.check_for_block_absolute(x, ground_y + 1, z))
 		return;
 	const auto natural_ground = [&] {
-		return editor.check_for_block_absolute(x, ground_y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{GRASS_BLOCK,
-						COARSE_DIRT, DIRT, MUD, FARMLAND, PODZOL, MOSS_BLOCK}));
+		return !sealed &&
+			   editor.check_for_block_absolute(x, ground_y, z,
+					   std::optional<std::vector<Block>>(std::vector<Block>{GRASS_BLOCK,
+							   COARSE_DIRT, DIRT, MUD, FARMLAND, PODZOL, MOSS_BLOCK}));
 	};
 	const bool ground_is_natural = natural_ground();
 	const bool ground_allows_trees =
 			ground_is_natural ||
-			editor.check_for_block_absolute(x, ground_y, z,
-					std::optional<std::vector<Block>>(std::vector<Block>{
-							SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS}));
+			(!sealed &&
+					editor.check_for_block_absolute(x, ground_y, z,
+							std::optional<std::vector<Block>>(std::vector<Block>{
+									SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS})));
 
 	const auto cover =
 			editor.ground ? editor.ground->cover_class(editor.ground_point(x, z)) : 0;
@@ -329,7 +330,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 				editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
 	// Rust runs its land-cover decoration after canopy trees. A placed canopy
 	// trunk now occupies this column; otherwise the same open-column gate applies.
-	if (editor.check_for_block_absolute(x, ground_y + 1, z))
+	if (sealed || editor.check_for_block_absolute(x, ground_y + 1, z))
 		return;
 	const double sward =
 			climate_sward(climate) *
@@ -424,20 +425,13 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 
 void clear_road_vegetation(WorldEditor &editor, int x, int y, int z)
 {
-	const std::vector<Block> stray_surface{BLACK_CONCRETE, GRAY_CONCRETE_POWDER,
+	static const std::vector<Block> stray_surface{BLACK_CONCRETE, GRAY_CONCRETE_POWDER,
 			CYAN_TERRACOTTA, GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE,
 			DIRT_PATH, WATER};
-	const std::vector<Block> loose_plants{GRASS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, FERN,
-			LARGE_FERN_LOWER, LARGE_FERN_UPPER, DEAD_BUSH, RED_FLOWER, YELLOW_FLOWER,
-			BLUE_FLOWER, WHITE_FLOWER, CORNFLOWER, OXEYE_DAISY, ALLIUM,
-			LILY_OF_THE_VALLEY, RED_TULIP, ORANGE_TULIP, WHITE_TULIP, PINK_TULIP,
-			SUNFLOWER_LOWER, SUNFLOWER_UPPER, LILAC_LOWER, LILAC_UPPER, ROSE_BUSH_LOWER,
-			ROSE_BUSH_UPPER, PEONY_LOWER, PEONY_UPPER, SWEET_BERRY_BUSH, BROWN_MUSHROOM,
-			RED_MUSHROOM, MOSS_CARPET, SUGAR_CANE, PUMPKIN, CACTUS, OAK_LEAVES};
-	const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
+	const auto &loose_plants = ground_decoration::loose_plant_blocks();
+	static const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
 			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
-	const std::vector<Block> stacked{TALL_GRASS_TOP, LARGE_FERN_UPPER, SUNFLOWER_UPPER,
-			LILAC_UPPER, ROSE_BUSH_UPPER, PEONY_UPPER, SUGAR_CANE, CACTUS};
+	const auto &stacked = ground_decoration::stacked_plant_parts();
 	const bool surface = editor.check_for_block_absolute(x, y, z, stray_surface);
 	const bool under_wood = editor.check_for_block_absolute(x, y + 2, z, wood);
 	if (!editor.check_for_block_absolute(x, y + 1, z, loose_plants) ||
@@ -458,7 +452,7 @@ double value_noise_01(int x, int z, int scale)
 	return value_noise_01_impl(x, z, scale);
 }
 
-double patch_noise(int x, int z, int scale, std::uint32_t salt)
+double value_noise_salted(int x, int z, int scale, std::uint32_t salt)
 {
 	constexpr double c = 0.891006524188368, s = 0.453990499739547;
 	const double u = (x * c - z * s) / std::max(1, scale);
@@ -473,7 +467,12 @@ double patch_noise(int x, int z, int scale, std::uint32_t salt)
 	};
 	const double a = sample(u0, v0) * (1.0 - su) + sample(u0 + 1, v0) * su;
 	const double b = sample(u0, v0 + 1) * (1.0 - su) + sample(u0 + 1, v0 + 1) * su;
-	const double value = a * (1.0 - sv) + b * sv;
+	return a * (1.0 - sv) + b * sv;
+}
+
+double patch_noise(int x, int z, int scale, std::uint32_t salt)
+{
+	const double value = value_noise_salted(x, z, scale, salt);
 	constexpr std::array<std::pair<double, double>, 13> quantiles{
 			{{0.0, 0.0}, {0.15, 0.05}, {0.21, 0.1}, {0.30, 0.2}, {0.37, 0.3},
 					{0.435, 0.4}, {0.496, 0.5}, {0.558, 0.6}, {0.625, 0.7}, {0.702, 0.8},
@@ -589,6 +588,18 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 												 snow_depth, editor.ground->climate());
 					if (glacier)
 						snow_depth = terrain_surface::glacier_depth(snow_depth);
+					auto snow = terrain_surface::Snow::None;
+					if (!planetary && editor.ground && snow_depth >= -1.5) {
+						const auto [snow_slope, gradient] =
+								editor.ground->slope_and_gradient(relative);
+						snow = terrain_surface::snow_cover(
+								snow_depth, snow_slope,
+								[&] { return editor.ground->convexity(relative); },
+								snow_line.shade(
+										gradient.first, gradient.second, snow_slope),
+								x, z);
+					}
+					std::optional<Block> natural_snow_surface;
 					std::optional<std::pair<Block, Block>> talus_block;
 					if (terrain_enabled && !planetary && editor.ground && slope <= 6 &&
 							terrain_surface::takes_talus(cover_here)) {
@@ -733,6 +744,14 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						else if (!climate_under)
 							climate_under = DIRT;
 						column_under = climate_under;
+						// Select snow before the protected/absent-only surface write, so
+						// mapped roads and structures are not overwritten by a later cap.
+						if ((snow == terrain_surface::Snow::Block ||
+									(snow != terrain_surface::Snow::None &&
+											terrain_surface::is_ice(surface))) &&
+								water_blend <= .5 && surface != WATER)
+							surface = SNOW_BLOCK;
+						natural_snow_surface = surface;
 						if (steep_override) {
 							// Match Rust's steep-face blacklist: roads, structures, bedrock,
 							// and water remain authored even when terrain rock is forced.
@@ -829,34 +848,21 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									x, ground_y, z, WATER)) {
 						const auto surface_block =
 								editor.get_block_absolute(x, ground_y, z).value_or(AIR);
-						if (snow_depth >= -1.5) {
-							const auto [snow_slope, gradient] =
-									editor.ground->slope_and_gradient(relative);
-							const auto snow = terrain_surface::snow_cover(
-									snow_depth, snow_slope,
-									[&] { return editor.ground->convexity(relative); },
-									snow_line.shade(
-											gradient.first, gradient.second, snow_slope),
-									x, z);
-							// Snow on ice cannot be represented as a floating partial layer;
-							// Rust promotes any non-empty snow cover on ice to a full cap.
-							if ((snow == terrain_surface::Snow::Block ||
-										(snow != terrain_surface::Snow::None &&
-												terrain_surface::is_ice(
-														surface_block))) &&
-									water_blend <= .5 && surface_block != WATER)
-								editor.set_block_absolute(SNOW_BLOCK, x, ground_y, z,
-										std::optional<std::vector<Block>>(
-												std::vector<Block>{surface_block}),
-										std::nullopt);
-							else if (snow != terrain_surface::Snow::None)
-								terrain_surface::place_snow_layer(editor, x, ground_y, z,
-										terrain_surface::snow_eighths(snow,
-												terrain_enabled
-														? editor.ground->level_exact(
-																  relative) -
-																  ground_y + .5
-														: 0.0));
+						if (snow != terrain_surface::Snow::None) {
+							const bool natural_top =
+									natural_snow_surface == surface_block ||
+									surface_block == PACKED_ICE;
+							const unsigned eighths =
+									natural_top
+											? terrain_surface::snow_eighths(snow,
+													  terrain_enabled
+															  ? editor.ground->level_exact(
+																		relative) -
+																		ground_y + .5
+															  : 0.0)
+											: 1;
+							terrain_surface::place_snow_layer(
+									editor, x, ground_y, z, eighths);
 						}
 					}
 

@@ -128,6 +128,43 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 	return tmp;
 }
 
+std::vector<std::vector<double>> gaussian_blur_grid_masked(
+		const std::vector<std::vector<double>> &grid,
+		const std::vector<std::vector<std::uint8_t>> &masked, double sigma)
+{
+	const std::size_t height = std::min(grid.size(), masked.size());
+	if (height == 0)
+		return {};
+	const std::size_t width = std::min(grid.front().size(), masked.front().size());
+	if (width == 0)
+		return std::vector<std::vector<double>>(height);
+	const auto kernel = gaussian_kernel(sigma);
+	const int radius = static_cast<int>(kernel.size() / 2);
+	std::vector<std::vector<double>> after_h(height, std::vector<double>(width));
+	for (std::size_t y = 0; y < height; ++y) {
+		std::vector<double> row(grid[y].begin(), grid[y].begin() + width);
+		for (std::size_t x = 0; x < width; ++x)
+			if (masked[y][x])
+				row[x] = std::numeric_limits<double>::quiet_NaN();
+		after_h[y] = blur_line(row, kernel, radius);
+	}
+	constexpr std::size_t COLUMN_GROUP = 8;
+	for (std::size_t x0 = 0; x0 < width; x0 += COLUMN_GROUP) {
+		const auto group_width = std::min(COLUMN_GROUP, width - x0);
+		std::vector<std::vector<double>> columns(
+				group_width, std::vector<double>(height));
+		for (std::size_t y = 0; y < height; ++y)
+			for (std::size_t c = 0; c < group_width; ++c)
+				columns[c][y] = after_h[y][x0 + c];
+		for (std::size_t c = 0; c < group_width; ++c) {
+			const auto blurred = blur_line(columns[c], kernel, radius);
+			for (std::size_t y = 0; y < height; ++y)
+				after_h[y][x0 + c] = blurred[y];
+		}
+	}
+	return after_h;
+}
+
 void fill_nan_values(std::vector<std::vector<double>> &heights)
 {
 	if (heights.empty() || heights.front().empty())

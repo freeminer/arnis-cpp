@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <vector>
 
 //#include "args.h"
 //#include "mapgen/earth/arnis_world_editor.h"
@@ -52,6 +53,8 @@ std::optional<Habitat> habitat(std::uint8_t cover, biome::Climate climate,
 // Used by schematic trees to remove ground plants displaced by a trunk, while
 // keeping the loose-plant classification shared with Rust's ground pass.
 bool is_undergrowth(const Block &block);
+const std::vector<Block> &loose_plant_blocks();
+const std::vector<Block> &stacked_plant_parts();
 void clear_undergrowth_under_trunk(
 		world_editor::WorldEditor &editor, int x, int y, int z);
 // Rust exposes these helpers to mapped-area processors.  Keeping them public

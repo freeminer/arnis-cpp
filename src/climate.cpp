@@ -4,12 +4,15 @@
 #include "block_definitions.h"
 #include "ground_generation.h"
 #include "deterministic_rng.h"
+#include "geo_grid.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
 #include <utility>
+#include <memory>
+#include <mutex>
 namespace arnis::climate
 {
 namespace
@@ -25,6 +28,44 @@ const std::vector<std::uint8_t> &koppen_grid()
 		return std::vector<std::uint8_t>(std::istreambuf_iterator<char>(in), {});
 	}();
 	return grid;
+}
+
+std::uint8_t koppen_class(double latitude, double longitude)
+{
+	const auto &bytes = koppen_grid();
+	static const auto grid = geo_grid::TiledGrid::parse(bytes);
+	if (grid) {
+		struct Tile
+		{
+			std::once_flag once;
+			std::optional<std::vector<std::uint8_t>> data;
+		};
+		static const auto tiles = [] {
+			std::vector<std::unique_ptr<Tile>> result;
+			result.reserve(grid->tile_count());
+			for (std::size_t i = 0; i < grid->tile_count(); ++i)
+				result.push_back(std::make_unique<Tile>());
+			return result;
+		}();
+		const auto [col, row] = grid->position(latitude, longitude);
+		const auto cell = grid->cell(col, row);
+		const auto index = grid->tile_of(cell);
+		if (index >= tiles.size())
+			return 0;
+		auto &tile = *tiles[index];
+		std::call_once(tile.once, [&] { tile.data = grid->decode(index); });
+		return tile.data ? static_cast<std::uint8_t>(
+								   grid->value(*tile.data, grid->index_in_tile(cell)))
+						 : 0;
+	}
+	// Keep accepting older raw assets supplied by library users.
+	if (bytes.size() != KOPPEN_COLS * KOPPEN_ROWS)
+		return 0;
+	const auto col =
+			std::clamp<double>(std::floor((longitude + 180.) / .1), 0, KOPPEN_COLS - 1);
+	const auto row =
+			std::clamp<double>(std::floor((90. - latitude) / .1), 0, KOPPEN_ROWS - 1);
+	return bytes[std::size_t(row) * KOPPEN_COLS + std::size_t(col)];
 }
 }
 std::optional<std::pair<Block, Block>> surface_palette(
@@ -60,8 +101,8 @@ std::optional<std::pair<Block, Block>> surface_palette(
 										  : std::make_pair(SAND, SANDSTONE);
 	}
 	if (c == Climate::HotSteppe)
-		return bare ? pick({{.35, {SAND, SANDSTONE}}, {1., {COARSE_DIRT, DIRT}}})
-					: pick({{.15, {SAND, SANDSTONE}}, {.5, {COARSE_DIRT, DIRT}},
+		return bare ? pick({{.5, {SAND, SANDSTONE}}, {1., {COARSE_DIRT, DIRT}}})
+					: pick({{.3, {SAND, SANDSTONE}}, {.6, {COARSE_DIRT, DIRT}},
 							  {1., {GRASS_BLOCK, DIRT}}});
 	if (c == Climate::ColdDesert)
 		return bare ? pick({{.42, {GRAVEL, STONE}}, {.75, {COARSE_DIRT, DIRT}},
@@ -117,15 +158,9 @@ arnis::biome::Climate from_koppen_class(unsigned char c)
 }
 arnis::biome::Climate classify(double latitude, double longitude)
 {
-	const auto &grid = koppen_grid();
-	if (grid.size() != KOPPEN_COLS * KOPPEN_ROWS || !std::isfinite(latitude) ||
-			!std::isfinite(longitude))
+	if (!std::isfinite(latitude) || !std::isfinite(longitude))
 		return arnis::biome::Climate::Temperate;
-	const auto col = std::clamp<long>(
-			long(std::floor((longitude + 180.) / .1)), 0, long(KOPPEN_COLS - 1));
-	const auto row = std::clamp<long>(
-			long(std::floor((90. - latitude) / .1)), 0, long(KOPPEN_ROWS - 1));
-	return from_koppen_class(grid[std::size_t(row) * KOPPEN_COLS + std::size_t(col)]);
+	return from_koppen_class(koppen_class(latitude, longitude));
 }
 arnis::biome::Climate classify_bbox(double min_latitude, double min_longitude,
 		double max_latitude, double max_longitude)

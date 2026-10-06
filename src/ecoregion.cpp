@@ -312,7 +312,10 @@ std::optional<EcoMap> EcoMap::resample(std::size_t world_width, std::size_t worl
 		const auto z = static_cast<std::int32_t>(
 				i / width * std::size_t(cell_) + std::size_t(cell_ / 2));
 		const auto [sx, sz] = source(x, z);
-		out.ids_.push_back(id_at_local(sx + align_x_, sz + align_z_));
+		// source maps new local ground coordinates to old local coordinates.
+		// Alignment only chooses the lattice phase at construction; adding it
+		// here shifts rotated maps toward an unrelated/clamped source edge.
+		out.ids_.push_back(id_at_local(sx, sz));
 	}
 	return out;
 }

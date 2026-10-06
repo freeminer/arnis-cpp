@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <cstdint>
 #include <tuple>
 #include <vector>
 
@@ -36,6 +37,9 @@ compute_grid_dims_for_world(std::size_t world_width, std::size_t world_height);
 
 std::vector<std::vector<double>> gaussian_blur_grid(
 		const std::vector<std::vector<double>> &grid, double sigma);
+std::vector<std::vector<double>> gaussian_blur_grid_masked(
+		const std::vector<std::vector<double>> &grid,
+		const std::vector<std::vector<std::uint8_t>> &masked, double sigma);
 
 void fill_nan_values(std::vector<std::vector<double>> &heights);
 void filter_elevation_outliers(std::vector<std::vector<double>> &heights);

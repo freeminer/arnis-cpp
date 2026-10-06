@@ -104,14 +104,15 @@ void stack(WorldEditor &e, int x, int y, int z, const Block &soil,
 			!open_above(e, x, y, z))
 		return;
 	for (int dy = 1; dy <= height; ++dy) {
-		if (e.block_exists_absolute(x, y + dy, z))
+		if (dy > 1 && e.block_exists_absolute(x, y + dy, z))
 			break;
 		if (clear_sides && (e.block_exists_absolute(x + 1, y + dy, z) ||
 								   e.block_exists_absolute(x - 1, y + dy, z) ||
 								   e.block_exists_absolute(x, y + dy, z + 1) ||
 								   e.block_exists_absolute(x, y + dy, z - 1)))
 			break;
-		e.set_block_absolute(plant_block, x, y + dy, z, std::nullopt, std::nullopt);
+		e.set_block_absolute(plant_block, x, y + dy, z,
+				std::optional<std::vector<Block>>{{GRASS}}, std::nullopt);
 	}
 }
 
@@ -155,6 +156,19 @@ Block flower_for(int x, int z, FlowerSetting setting, bool bed = false)
 bool is_undergrowth(const Block &block)
 {
 	return is_undergrowth_impl(block);
+}
+
+const std::vector<Block> &loose_plant_blocks()
+{
+	return loose_plants();
+}
+
+const std::vector<Block> &stacked_plant_parts()
+{
+	static const std::vector<Block> blocks{TALL_GRASS_TOP, LARGE_FERN_UPPER,
+			SUNFLOWER_UPPER, LILAC_UPPER, ROSE_BUSH_UPPER, PEONY_UPPER, SUGAR_CANE,
+			CACTUS};
+	return blocks;
 }
 
 void clear_undergrowth_under_trunk(WorldEditor &editor, int x, int y, int z)
@@ -514,13 +528,12 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 			editor.set_block_absolute(plant, x, y + 1, z,
 					std::optional<std::vector<Block>>({GRASS}), std::nullopt);
 	};
-	const auto tall_on = [&](int x, int y, int z) {
+	const auto tall_on = [&](int x, int y, int z, Block lower, Block upper) {
 		if (editor.check_for_block_absolute(x, y, z, soil) && open(x, y, z) &&
 				!editor.block_exists_absolute(x, y + 2, z)) {
-			editor.set_block_absolute(TALL_GRASS_BOTTOM, x, y + 1, z,
+			editor.set_block_absolute(lower, x, y + 1, z,
 					std::optional<std::vector<Block>>({GRASS}), std::nullopt);
-			editor.set_block_absolute(
-					TALL_GRASS_TOP, x, y + 2, z, std::nullopt, std::nullopt);
+			editor.set_block_absolute(upper, x, y + 2, z, std::nullopt, std::nullopt);
 		}
 	};
 	const auto beside_water = [&](int x, int y, int z) {
@@ -537,7 +550,6 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 				origin_z + int(rng.uniform(spread + 1)) - int(rng.uniform(spread + 1));
 		const auto pick = rng.uniform(100);
 		const auto variant = rng.uniform(1000);
-		(void)variant;
 		if (x < min_x || x > max_x || z < min_z || z > max_z ||
 				!ground.inside_rotation_mask(x, z) || editor.surface_is_sealed(x, z))
 			continue;
@@ -566,25 +578,16 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 			break;
 		case PatchFeature::TallFlowers: {
 			const auto [lower, upper] = pick_weighted(tall_flowers, variant);
-			if (editor.check_for_block_absolute(x, y, z, soil) && open(x, y, z) &&
-					!editor.block_exists_absolute(x, y + 2, z)) {
-				editor.set_block_absolute(lower, x, y + 1, z,
-						std::optional<std::vector<Block>>({GRASS}), std::nullopt);
-				editor.set_block_absolute(upper, x, y + 2, z, std::nullopt, std::nullopt);
-			}
+			tall_on(x, y, z, lower, upper);
 			break;
 		}
 		case PatchFeature::TallGrass:
-			tall_on(x, y, z);
+			tall_on(x, y, z, TALL_GRASS_BOTTOM, TALL_GRASS_TOP);
 			break;
 		case PatchFeature::Ferns:
-			if (pick < 30 && editor.check_for_block_absolute(x, y, z, soil) &&
-					open(x, y, z) && !editor.block_exists_absolute(x, y + 2, z)) {
-				editor.set_block_absolute(LARGE_FERN_LOWER, x, y + 1, z,
-						std::optional<std::vector<Block>>({GRASS}), std::nullopt);
-				editor.set_block_absolute(
-						LARGE_FERN_UPPER, x, y + 2, z, std::nullopt, std::nullopt);
-			} else {
+			if (pick < 30)
+				tall_on(x, y, z, LARGE_FERN_LOWER, LARGE_FERN_UPPER);
+			else {
 				plant_on(x, y, z, soil, FERN);
 			}
 			break;
@@ -598,9 +601,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 					open(x, y, z)) {
 				const int height = 1 + int(pick % 3);
 				for (int dy = 1; dy <= height; ++dy) {
-					if (editor.block_exists_absolute(x, y + dy, z) &&
-							!editor.check_for_block_absolute(
-									x, y + dy, z, std::vector<Block>{GRASS}))
+					if (dy > 1 && editor.block_exists_absolute(x, y + dy, z))
 						break;
 					editor.set_block_absolute(SUGAR_CANE, x, y + dy, z,
 							std::optional<std::vector<Block>>({GRASS}), std::nullopt);
@@ -651,26 +652,19 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 
 void place_scattered_flower(WorldEditor &editor, int x, int z, FlowerSetting setting)
 {
-	if (ground_generation::patch_noise(x, z, 11, 0x00C10A9Fu) < .6 ||
-			editor.surface_is_sealed(x, z))
+	if (!editor.pos_ok(x, z) ||
+			ground_generation::patch_noise(x, z, 11, 0x00C10A9Fu) < .6)
 		return;
-	const int y = editor.get_ground_level(x, z);
-	if (editor.check_for_block_absolute(
-				x, y, z, std::optional<std::vector<Block>>({GRASS_BLOCK, DIRT})))
-		editor.set_block_absolute(flower_for(x, z, setting), x, y + 1, z,
-				std::optional<std::vector<Block>>({GRASS}), std::nullopt);
+	editor.set_block(flower_for(x, z, setting), x, 1, z, std::nullopt, std::nullopt);
 }
 
 void place_bed_flower(WorldEditor &editor, int x, int z)
 {
 	const auto h = land_cover::coord_hash(x ^ 0x0bed, z ^ 0x5eed);
-	if (h % 100 < 12 || editor.surface_is_sealed(x, z))
+	if (!editor.pos_ok(x, z) || h % 100 < 12)
 		return;
-	const int y = editor.get_ground_level(x, z);
-	if (editor.check_for_block_absolute(x, y, z,
-				std::optional<std::vector<Block>>({GRASS_BLOCK, DIRT, FARMLAND})))
-		editor.set_block_absolute(flower_for(x, z, FlowerSetting::Garden, true), x, y + 1,
-				z, std::optional<std::vector<Block>>({GRASS, FARMLAND}), std::nullopt);
+	editor.set_block(flower_for(x, z, FlowerSetting::Garden, true), x, 1, z, std::nullopt,
+			std::nullopt);
 }
 
 void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox,

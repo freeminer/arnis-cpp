@@ -2,6 +2,8 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <bit>
+#include <limits>
 #include <zstd.h>
 
 namespace arnis::geo_grid
@@ -9,6 +11,17 @@ namespace arnis::geo_grid
 namespace
 {
 constexpr std::size_t HEADER = 24;
+
+std::int64_t rust_i64(double value)
+{
+	if (std::isnan(value))
+		return 0;
+	if (value >= static_cast<double>(std::numeric_limits<std::int64_t>::max()))
+		return std::numeric_limits<std::int64_t>::max();
+	if (value <= static_cast<double>(std::numeric_limits<std::int64_t>::min()))
+		return std::numeric_limits<std::int64_t>::min();
+	return static_cast<std::int64_t>(value);
+}
 }
 std::uint32_t TiledGrid::u32(std::size_t p) const
 {
@@ -33,10 +46,12 @@ std::optional<TiledGrid> TiledGrid::parse(const std::vector<std::uint8_t> &data)
 	};
 	const auto cell_bytes = std::size_t(data[5]), tile = u16(6),
 			   cols = std::size_t(u32(8)), rows = std::size_t(u32(12));
-	double cell_deg = 0;
-	std::memcpy(&cell_deg, data.data() + 16, sizeof(cell_deg));
-	if ((cell_bytes != 1 && cell_bytes != 2) || !tile || cols % tile || rows % tile ||
-			!(cell_deg > 0))
+	std::uint64_t cell_bits = 0;
+	for (std::size_t i = 0; i < 8; ++i)
+		cell_bits |= std::uint64_t(data[16 + i]) << (8 * i);
+	const double cell_deg = std::bit_cast<double>(cell_bits);
+	if ((cell_bytes != 1 && cell_bytes != 2) || !tile || !cols || !rows || cols % tile ||
+			rows % tile || !(cell_deg > 0) || !std::isfinite(cell_deg))
 		return {};
 	TiledGrid g;
 	g.data_ = &data;
@@ -47,7 +62,7 @@ std::optional<TiledGrid> TiledGrid::parse(const std::vector<std::uint8_t> &data)
 	g.cell_deg_ = cell_deg;
 	g.frames_at_ = HEADER + 4 * (g.tile_count() + 1);
 	if (g.frames_at_ > data.size() ||
-			g.frames_at_ + g.offset(g.tile_count()) != data.size())
+			g.offset(g.tile_count()) != data.size() - g.frames_at_)
 		return {};
 	return g;
 }
@@ -61,11 +76,10 @@ std::pair<double, double> TiledGrid::position(double lat, double lon) const
 }
 std::pair<std::size_t, std::size_t> TiledGrid::cell(double col, double row) const
 {
-	auto c =
-			static_cast<std::int64_t>(std::floor(col)) % static_cast<std::int64_t>(cols_);
+	auto c = rust_i64(std::floor(col)) % static_cast<std::int64_t>(cols_);
 	if (c < 0)
 		c += static_cast<std::int64_t>(cols_);
-	auto r = std::clamp(static_cast<std::int64_t>(std::floor(row)), std::int64_t(0),
+	auto r = std::clamp(rust_i64(std::floor(row)), std::int64_t(0),
 			static_cast<std::int64_t>(rows_ - 1));
 	return {static_cast<std::size_t>(c), static_cast<std::size_t>(r)};
 }

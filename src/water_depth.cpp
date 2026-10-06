@@ -13,6 +13,7 @@
 #include "land_cover/land_cover.h"
 #include "element_processing/bridges.h"
 #include "ground_generation.h"
+#include "ground_decoration.h"
 #include "world_editor/floor_state.h"
 
 namespace arnis::water_depth
@@ -202,12 +203,7 @@ int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y, int b
 
 const std::vector<Block> &surface_vegetation()
 {
-	using namespace block_definitions;
-	static const std::vector<Block> blocks{GRASS, TALL_GRASS_BOTTOM, TALL_GRASS_TOP, FERN,
-			LARGE_FERN_LOWER, LARGE_FERN_UPPER, DEAD_BUSH, RED_FLOWER, YELLOW_FLOWER,
-			BLUE_FLOWER, WHITE_FLOWER, OAK_LEAVES, MOSS_CARPET, SWEET_BERRY_BUSH,
-			LILY_PAD};
-	return blocks;
+	return ground_decoration::loose_plant_blocks();
 }
 
 const std::vector<Block> &tree_parts()
@@ -249,11 +245,13 @@ void clear_tree_from(WorldEditor &editor, int x, int y, int z)
 
 void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 {
-	for (int y = water_y + 1; y <= water_y + 3; ++y)
-		if (editor.check_for_block_absolute(x, y, z, surface_vegetation()))
-			editor.set_block_absolute(AIR, x, y, z,
-					std::optional<std::vector<Block>>(surface_vegetation()),
-					std::nullopt);
+	for (int y = water_y + 1; y <= water_y + 3; ++y) {
+		if (!editor.get_block_absolute(x, y, z))
+			continue;
+		const auto &plants = y <= water_y + 2 ? surface_vegetation()
+											  : ground_decoration::stacked_plant_parts();
+		editor.set_block_absolute(AIR, x, y, z, &plants, nullptr);
+	}
 	if (editor.check_for_block_absolute(x, water_y + 1, z, tree_trunks()))
 		clear_tree_from(editor, x, water_y + 1, z);
 	else if (editor.check_for_block_absolute(x, water_y + 1, z,
@@ -364,9 +362,9 @@ int estimate_max_carve_depth(const std::vector<std::vector<std::uint8_t>> &grid,
 		return 0;
 	chamfer_3_4_dt(dt, width, height);
 	const auto grid_max = *std::max_element(dt.begin(), dt.end());
-	const double x_ratio = double(std::max<std::size_t>(1, world_width - 1)) /
+	const double x_ratio = double(world_width > 1 ? world_width - 1 : 1) /
 						   double(std::max<std::size_t>(1, width - 1));
-	const double z_ratio = double(std::max<std::size_t>(1, world_height - 1)) /
+	const double z_ratio = double(world_height > 1 ? world_height - 1 : 1) /
 						   double(std::max<std::size_t>(1, height - 1));
 	const double scaled = double(grid_max) * std::max({1., x_ratio, z_ratio});
 	return depth_from_dt(scaled + 2.,
@@ -437,42 +435,60 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 	out.min_z_ = smin_z;
 
 	std::vector<std::uint64_t> visited((total + 63) / 64, 0);
-	std::vector<std::uint32_t> comp;
+	std::vector<std::uint64_t> baked((total + 63) / 64, 0);
+	std::vector<std::uint32_t> cur, next;
+	const auto neighbors = [&](std::size_t idx, const auto &visit) {
+		const auto i = idx % sw, j = idx / sw;
+		if (i > 0)
+			visit(idx - 1);
+		if (i + 1 < sw)
+			visit(idx + 1);
+		if (j > 0)
+			visit(idx - sw);
+		if (j + 1 < sh)
+			visit(idx + sw);
+	};
 	for (std::size_t start = 0; start < total; ++start) {
 		if (dt[start] == 0 || bit_get(visited, start))
 			continue;
-		comp.clear();
-		comp.push_back(static_cast<std::uint32_t>(start));
+		cur.clear();
+		cur.push_back(static_cast<std::uint32_t>(start));
 		bit_set(visited, start);
 		std::uint8_t comp_max = 0;
-		for (std::size_t head = 0; head < comp.size(); ++head) {
-			const auto idx = static_cast<std::size_t>(comp[head]);
-			comp_max = std::max(comp_max, dt[idx]);
-			const auto i = idx % sw;
-			const auto j = idx / sw;
-			auto visit = [&](std::size_t n) {
-				if (dt[n] != 0 && !bit_get(visited, n)) {
-					bit_set(visited, n);
-					comp.push_back(static_cast<std::uint32_t>(n));
-				}
-			};
-			if (i > 0)
-				visit(idx - 1);
-			if (i + 1 < sw)
-				visit(idx + 1);
-			if (j > 0)
-				visit(idx - sw);
-			if (j + 1 < sh)
-				visit(idx + sw);
+		while (!cur.empty()) {
+			next.clear();
+			for (auto c : cur) {
+				const auto idx = static_cast<std::size_t>(c);
+				comp_max = std::max(comp_max, dt[idx]);
+				neighbors(idx, [&](std::size_t n) {
+					if (dt[n] != 0 && !bit_get(visited, n)) {
+						bit_set(visited, n);
+						next.push_back(static_cast<std::uint32_t>(n));
+					}
+				});
+			}
+			cur.swap(next);
 		}
 		const auto cm = static_cast<std::uint16_t>(comp_max);
-		for (auto c : comp) {
-			const auto idx = static_cast<std::size_t>(c);
-			const int x = smin_x + static_cast<int>(idx % sw);
-			const int z = smin_z + static_cast<int>(idx / sw);
-			const int depth =
-					ocean_depth_for_cell(x, z, static_cast<std::uint16_t>(dt[idx]), cm);
-			nibble_set(out.depth_, idx, static_cast<std::uint8_t>(depth));
+		bit_set(baked, start);
+		cur.push_back(static_cast<std::uint32_t>(start));
+		while (!cur.empty()) {
+			next.clear();
+			for (auto c : cur) {
+				const auto idx = static_cast<std::size_t>(c);
+				const int x = smin_x + static_cast<int>(idx % sw);
+				const int z = smin_z + static_cast<int>(idx / sw);
+				const int depth = ocean_depth_for_cell(
+						x, z, static_cast<std::uint16_t>(dt[idx]), cm);
+				nibble_set(out.depth_, idx, static_cast<std::uint8_t>(depth));
+				neighbors(idx, [&](std::size_t n) {
+					if (dt[n] != 0 && !bit_get(baked, n)) {
+						bit_set(baked, n);
+						next.push_back(static_cast<std::uint32_t>(n));
+					}
+				});
+			}
+			cur.swap(next);
 		}
 	}
 

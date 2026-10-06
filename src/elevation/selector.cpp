@@ -20,6 +20,38 @@ std::optional<double> Selector::sample(double lat, double lon)
 ElevationData Selector::raw_grid(
 		double a, double b, double c, double d, std::size_t w, std::size_t h)
 {
+	if (cached_.mode() == providers::SourceMode::AwsOnly) {
+		ElevationData out;
+		out.width = w;
+		out.height = h;
+		out.world_width = w;
+		out.world_height = h;
+		out.heights =
+				providers::fetch_aws_terrain_grid(cached_.root(), {a, b, c, d}, w, h);
+		return out;
+	}
+	if (cached_.mode() != providers::SourceMode::Planetary) {
+		if (auto heights = providers::fetch_mapterhorn_terrain_grid(
+					cached_.root(), {a, b, c, d}, w, h)) {
+			ElevationData out;
+			out.width = w;
+			out.height = h;
+			out.world_width = w;
+			out.world_height = h;
+			out.heights = std::move(*heights);
+			return out;
+		}
+		if (cached_.mode() == providers::SourceMode::Auto) {
+			ElevationData out;
+			out.width = w;
+			out.height = h;
+			out.world_width = w;
+			out.world_height = h;
+			out.heights =
+					providers::fetch_aws_terrain_grid(cached_.root(), {a, b, c, d}, w, h);
+			return out;
+		}
+	}
 	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root(), cached_.mode());
 	return build_grid(tiles, a, b, c, d, w, h);
 }

@@ -309,7 +309,8 @@ bool is_air(const world_editor::WorldEditor &editor, int x, int y, int z)
 
 bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &schem,
 		Orientation orientation, int sink, int ax, int ay, int az, unsigned rotation,
-		int floor_y, const CaveRect &region, const std::vector<Block> &rock)
+		int floor_y, const CaveRect &region, const std::vector<Block> &rock,
+		std::unordered_set<std::int64_t> *basin_fluid)
 {
 	const int fw = (rotation & 1) ? schem.length : schem.width;
 	const int fl = (rotation & 1) ? schem.width : schem.length;
@@ -403,6 +404,8 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 		if (editor.check_for_block_absolute(
 					wx, wy, wz, std::vector<Block>{entry.block})) {
 			placed_solids.emplace_back(wx, wy, wz, entry.block);
+			if (entry.fluid && basin_fluid)
+				basin_fluid->insert(pack_cave_pos(wx, wy, wz));
 			if (embedded && v.y == schem.height - 1 && !entry.fluid)
 				top_row.emplace_back(wx, wy, wz, entry.block);
 		}
@@ -435,7 +438,8 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 } // namespace
 
 void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y, const Args &args)
+		std::int64_t seed, int floor_y, const Args &args,
+		std::unordered_set<std::int64_t> *basin_fluid)
 {
 	const auto pack = get_pack(editor.get_cave_asset_root());
 	if (!pack || pack->families.empty())
@@ -555,7 +559,7 @@ void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &
 					break;
 				}
 				if (place_formation(editor, schem, family->orientation, family->sink, x,
-							anchor_y, z, rotation, floor_y, region, rock))
+							anchor_y, z, rotation, floor_y, region, rock, basin_fluid))
 					++placed;
 			}
 		}

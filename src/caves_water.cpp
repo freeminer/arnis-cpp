@@ -218,7 +218,8 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 }
 
 void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &region,
-		int floor_y, const std::unordered_set<std::int64_t> &water_cells)
+		int floor_y, const std::unordered_set<std::int64_t> &water_cells,
+		std::unordered_set<std::int64_t> *basin_fluid)
 {
 	const int lava_level = floor_y + 10;
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
@@ -289,6 +290,8 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 			continue;
 		}
 		editor.set_block_absolute(LAVA, x, y, z, std::vector<Block>{AIR}, std::nullopt);
+		if (basin_fluid)
+			basin_fluid->insert(p);
 	}
 	for (const auto p : supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
@@ -313,7 +316,8 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 
 void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, const Args &args,
-		const CaveEllipsoids &ellipsoids)
+		const CaveEllipsoids &ellipsoids, std::unordered_set<std::int64_t> *basin_fluid,
+		std::unordered_set<std::int64_t> *water_cells_out)
 {
 	BiomeAmounts amounts = BiomeAmounts::defaults();
 	if (args.cave_biomes)
@@ -483,7 +487,11 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 			editor.set_block_absolute(
 					WATER, x, y, z, std::vector<Block>{AIR}, std::nullopt);
 	}
-	generate_deep_lava_sea(editor, region, floor_y, water_cells);
+	if (water_cells_out)
+		water_cells_out->insert(water_cells.begin(), water_cells.end());
+	if (basin_fluid)
+		basin_fluid->insert(water_cells.begin(), water_cells.end());
+	generate_deep_lava_sea(editor, region, floor_y, water_cells, basin_fluid);
 }
 
 void seal_floating_fluid_region(

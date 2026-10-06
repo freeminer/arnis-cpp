@@ -666,6 +666,12 @@ std::vector<std::vector<float>> compute_water_blend_smooth(
 {
 	if (width == 0 || height == 0)
 		return {};
+	height = std::min(height, grid.size());
+	if (height == 0 || grid.front().empty())
+		return {};
+	width = std::min(width, grid.front().size());
+	if (width == 0)
+		return {};
 
 	const double sigma = std::max(3.0, 3.0 * cells_per_meter_value);
 	const auto kernel = gaussian_kernel(sigma);
@@ -673,7 +679,23 @@ std::vector<std::vector<float>> compute_water_blend_smooth(
 
 	std::vector<std::vector<double>> tmp(height, std::vector<double>(width, 0.0));
 	for (std::size_t z = 0; z < height; ++z) {
+		std::vector<std::uint32_t> water_prefix(width + 1, 0);
+		for (std::size_t x = 0; x < width; ++x)
+			water_prefix[x + 1] = water_prefix[x] + (grid[z][x] == LC_WATER ? 1u : 0u);
 		for (std::size_t x = 0; x < width; ++x) {
+			const auto lo = x > static_cast<std::size_t>(radius)
+									? x - static_cast<std::size_t>(radius)
+									: 0;
+			const auto hi = std::min(width, x + static_cast<std::size_t>(radius) + 1);
+			const auto hits = water_prefix[hi] - water_prefix[lo];
+			if (hits == 0) {
+				tmp[z][x] = 0.0;
+				continue;
+			}
+			if (hits == hi - lo) {
+				tmp[z][x] = 1.0;
+				continue;
+			}
 			double sum = 0.0;
 			double weight = 0.0;
 			for (int k = -radius; k <= radius; ++k) {
@@ -690,8 +712,27 @@ std::vector<std::vector<float>> compute_water_blend_smooth(
 	}
 
 	std::vector<std::vector<float>> out(height, std::vector<float>(width, 0.0f));
-	for (std::size_t z = 0; z < height; ++z) {
-		for (std::size_t x = 0; x < width; ++x) {
+	for (std::size_t x = 0; x < width; ++x) {
+		std::vector<std::uint32_t> ones_prefix(height + 1, 0),
+				zeros_prefix(height + 1, 0);
+		for (std::size_t y = 0; y < height; ++y) {
+			ones_prefix[y + 1] = ones_prefix[y] + (tmp[y][x] == 1.0 ? 1u : 0u);
+			zeros_prefix[y + 1] = zeros_prefix[y] + (tmp[y][x] == 0.0 ? 1u : 0u);
+		}
+		for (std::size_t z = 0; z < height; ++z) {
+			const auto lo = z > static_cast<std::size_t>(radius)
+									? z - static_cast<std::size_t>(radius)
+									: 0;
+			const auto hi = std::min(height, z + static_cast<std::size_t>(radius) + 1);
+			const auto window = static_cast<std::uint32_t>(hi - lo);
+			if (ones_prefix[hi] - ones_prefix[lo] == window) {
+				out[z][x] = 1.0f;
+				continue;
+			}
+			if (zeros_prefix[hi] - zeros_prefix[lo] == window) {
+				out[z][x] = 0.0f;
+				continue;
+			}
 			double sum = 0.0;
 			double weight = 0.0;
 			for (int k = -radius; k <= radius; ++k) {

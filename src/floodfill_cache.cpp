@@ -51,6 +51,25 @@ bool same_ring_point(const ProcessedNode &a, const ProcessedNode &b)
 								   std::abs(static_cast<int64_t>(a.z) - b.z) <= 1);
 }
 
+bool relation_fills_members(const ProcessedRelation &relation)
+{
+	const auto &tags = relation.tags;
+	const auto type = tags.find("type");
+	const auto natural = tags.find("natural");
+	if (tags.contains("building") || tags.contains("building:part") ||
+			(type != tags.end() && type->second == "building") ||
+			tags.contains("water") ||
+			(natural != tags.end() &&
+					(natural->second == "water" || natural->second == "bay")))
+		return false;
+	if (natural != tags.end())
+		return true;
+	if (const auto landuse = tags.find("landuse"); landuse != tags.end())
+		return landuse->second != "residential" && landuse->second != "commercial";
+	const auto leisure = tags.find("leisure");
+	return leisure != tags.end() && leisure->second == "park";
+}
+
 template <typename Tags>
 bool is_underground_building(const Tags &tags)
 {
@@ -140,14 +159,14 @@ void for_relation_ring_cells(const ProcessedRelation &relation, ProcessedMemberR
 		ring = clipping::clip_way_to_bbox(ring, xzbbox);
 		if (ring.size() < 4)
 			continue;
-		if (!same_ring_point(ring.front(), ring.back())) {
+		// Segment matching tolerates nearby endpoints, but the rasterizer needs
+		// an exactly closed coordinate ring after clipping, as in Rust.
+		if (ring.front().x != ring.back().x || ring.front().z != ring.back().z) {
 			if (std::abs(static_cast<int64_t>(ring.front().x) - ring.back().x) > 1 ||
 					std::abs(static_cast<int64_t>(ring.front().z) - ring.back().z) > 1)
 				continue;
 			ring.push_back(ring.front());
 		}
-		if (ring.size() < 4)
-			continue;
 		std::vector<std::pair<int32_t, int32_t>> coords;
 		coords.reserve(ring.size());
 		for (const auto &node : ring)
@@ -579,23 +598,7 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		if (!el.is_relation())
 			continue;
 		const auto &relation = el.as_relation();
-		const auto &tags = relation.tags;
-		const bool building = tags.contains("building") ||
-							  tags.contains("building:part") ||
-							  (tags.contains("type") && tags.at("type") == "building");
-		const bool water =
-				tags.contains("water") ||
-				(tags.contains("natural") &&
-						(tags.at("natural") == "water" || tags.at("natural") == "bay"));
-		if (building || water)
-			continue;
-		const auto landuse = tags.find("landuse");
-		const bool paints_landuse = landuse != tags.end() &&
-									landuse->second != "residential" &&
-									landuse->second != "commercial";
-		const auto leisure = tags.find("leisure");
-		const bool park = leisure != tags.end() && leisure->second == "park";
-		if (!tags.contains("natural") && !paints_landuse && !park)
+		if (!relation_fills_members(relation))
 			continue;
 		for (const auto &member : relation.members)
 			if (member.role == ProcessedMemberRole::Outer &&

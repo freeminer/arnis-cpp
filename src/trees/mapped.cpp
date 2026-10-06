@@ -14,6 +14,35 @@ namespace
 {
 constexpr double ROW_SPACING_M = 8.0;
 constexpr double CROWN_RADIUS_M = 5.0;
+std::optional<std::vector<TreeType>> genus_pool(const std::string &g)
+{
+	if (g == "Betula")
+		return std::vector<TreeType>{TreeType::Birch};
+	if (g == "Quercus")
+		return std::vector<TreeType>{TreeType::Oak};
+	if (g == "Salix")
+		return std::vector<TreeType>{TreeType::Willow};
+	if (g == "Pinus" || g == "Larix" || g == "Cedrus")
+		return std::vector<TreeType>{TreeType::Pine};
+	if (g == "Prunus" || g == "Malus" || g == "Pyrus" || g == "Magnolia" ||
+			g == "Cercis" || g == "Crataegus" || g == "Sorbus" || g == "Amelanchier" ||
+			g == "Jacaranda" || g == "Lagerstroemia")
+		return std::vector<TreeType>{TreeType::FloweringOak};
+	if (g == "Acacia" || g == "Vachellia" || g == "Senegalia" || g == "Albizia" ||
+			g == "Prosopis" || g == "Parkinsonia" || g == "Delonix")
+		return std::vector<TreeType>{TreeType::Acacia};
+	if (g == "Phoenix" || g == "Washingtonia" || g == "Cocos" || g == "Trachycarpus" ||
+			g == "Sabal" || g == "Roystonea" || g == "Syagrus" || g == "Butia" ||
+			g == "Livistona" || g == "Chamaerops" || g == "Elaeis" ||
+			g == "Archontophoenix")
+		return std::vector<TreeType>{TreeType::Jungle};
+	if (g == "Rhizophora" || g == "Avicennia" || g == "Laguncularia" ||
+			g == "Bruguiera" || g == "Sonneratia")
+		return std::vector<TreeType>{TreeType::Mangrove};
+	if (is_conifer_genus(g))
+		return std::vector<TreeType>{TreeType::Spruce};
+	return std::nullopt;
+}
 std::string genus(const std::unordered_map<std::string, std::string> &tags)
 {
 	for (const char *key : {"genus", "species", "taxon"}) {
@@ -72,49 +101,20 @@ MappedTree from_tags(
 	else if (!out.genus.empty())
 		out.conifer = is_conifer_genus(out.genus);
 	std::vector<TreeType> pool;
-	if (out.genus == "Betula")
-		pool = {TreeType::Birch};
-	else if (out.genus == "Quercus")
-		pool = {TreeType::Oak};
-	else if (out.genus == "Pinus" || out.genus == "Larix" || out.genus == "Cedrus")
-		pool = {TreeType::Pine};
-	else if (out.genus == "Salix")
-		pool = {TreeType::Willow};
-	else if (out.genus == "Prunus" || out.genus == "Malus" || out.genus == "Pyrus" ||
-			 out.genus == "Magnolia" || out.genus == "Cercis" ||
-			 out.genus == "Crataegus" || out.genus == "Sorbus" ||
-			 out.genus == "Amelanchier" || out.genus == "Jacaranda" ||
-			 out.genus == "Lagerstroemia")
-		pool = {TreeType::FloweringOak};
-	else if (out.genus == "Acacia" || out.genus == "Vachellia" ||
-			 out.genus == "Senegalia" || out.genus == "Albizia" ||
-			 out.genus == "Prosopis" || out.genus == "Parkinsonia" ||
-			 out.genus == "Delonix")
-		pool = {TreeType::Acacia};
-	else if (out.genus == "Phoenix" || out.genus == "Washingtonia" ||
-			 out.genus == "Cocos" || out.genus == "Trachycarpus" ||
-			 out.genus == "Sabal" || out.genus == "Roystonea" || out.genus == "Syagrus" ||
-			 out.genus == "Butia" || out.genus == "Livistona" ||
-			 out.genus == "Chamaerops" || out.genus == "Elaeis" ||
-			 out.genus == "Archontophoenix")
-		pool = {TreeType::Jungle};
-	else if (out.genus == "Rhizophora" || out.genus == "Avicennia" ||
-			 out.genus == "Laguncularia" || out.genus == "Bruguiera" ||
-			 out.genus == "Sonneratia")
-		pool = {TreeType::Mangrove};
-	else if (!out.genus.empty() && out.conifer.value_or(false))
-		pool = {TreeType::Spruce};
-	else if (leaf != tags.end() && leaf->second == "needleleaved")
-		pool = {TreeType::Spruce, TreeType::Pine};
-	else if (leaf != tags.end() && leaf->second == "broadleaved")
+	if (const auto known = genus_pool(out.genus)) {
+		pool = *known;
+	} else if (leaf != tags.end() && leaf->second == "broadleaved") {
 		pool = {TreeType::Oak, TreeType::Birch, TreeType::TallOak};
-	else if (leaf != tags.end())
+	} else if (leaf != tags.end() && leaf->second == "needleleaved") {
+		pool = {TreeType::Spruce, TreeType::Pine};
+	} else if (!out.genus.empty()) {
+		pool = {TreeType::Oak, TreeType::TallOak};
+	} else if (leaf != tags.end()) {
 		pool = {TreeType::Oak, TreeType::Spruce, TreeType::Birch, TreeType::TallOak,
 				TreeType::Pine};
-	else if (!out.genus.empty())
-		pool = {TreeType::Oak, TreeType::TallOak};
-	else
+	} else {
 		pool = {TreeType::Oak, TreeType::Spruce, TreeType::Birch, TreeType::TallOak};
+	}
 	auto rng = element_rng(id);
 	out.kind = pool[rng.uniform(static_cast<std::uint32_t>(pool.size()))];
 	if (auto it = tags.find("height"); it != tags.end())

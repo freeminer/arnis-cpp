@@ -1,5 +1,6 @@
 #include "providers.h"
 #include "../../../http.h"
+#include "stb_image.h"
 #include <iomanip>
 #include <sstream>
 #include <algorithm>
@@ -7,6 +8,11 @@
 #include <fstream>
 #include <cmath>
 #include <limits>
+#include <atomic>
+#include <chrono>
+#include <thread>
+#include <unordered_map>
+#include <numbers>
 namespace arnis::elevation::providers
 {
 static unsigned g_retries = 2;
@@ -247,6 +253,19 @@ XyzTileKey xyz_tile_at(double lat, double lon, unsigned zoom)
 			0, maximum);
 	return {zoom, unsigned(x), unsigned(y)};
 }
+namespace
+{
+std::size_t covering_xyz_tile_count(const GeoBBox &bbox, unsigned zoom)
+{
+	const auto a = xyz_tile_at(bbox.min_lat, bbox.min_lon, zoom),
+			   b = xyz_tile_at(bbox.max_lat, bbox.max_lon, zoom);
+	const auto cols = std::size_t(std::max(a.x, b.x) - std::min(a.x, b.x)) + 1;
+	const auto rows = std::size_t(std::max(a.y, b.y) - std::min(a.y, b.y)) + 1;
+	if (rows && cols > std::numeric_limits<std::size_t>::max() / rows)
+		return std::numeric_limits<std::size_t>::max();
+	return cols * rows;
+}
+} // namespace
 std::vector<XyzTileKey> covering_xyz_tiles(const GeoBBox &bbox, unsigned zoom)
 {
 	const auto a = xyz_tile_at(bbox.min_lat, bbox.min_lon, zoom),
@@ -254,12 +273,193 @@ std::vector<XyzTileKey> covering_xyz_tiles(const GeoBBox &bbox, unsigned zoom)
 	const auto x0 = std::min(a.x, b.x), x1 = std::max(a.x, b.x), y0 = std::min(a.y, b.y),
 			   y1 = std::max(a.y, b.y);
 	std::vector<XyzTileKey> out;
-	out.reserve(std::size_t(x1 - x0 + 1) * std::size_t(y1 - y0 + 1));
+	out.reserve(covering_xyz_tile_count(bbox, zoom));
 	for (unsigned x = x0; x <= x1; ++x)
 		for (unsigned y = y0; y <= y1; ++y)
 			out.push_back({zoom, x, y});
 	return out;
 }
+namespace
+{
+std::uint8_t choose_aws_terrain_zoom(const GeoBBox &bbox)
+{
+	const double span = std::max(
+			std::abs(bbox.max_lat - bbox.min_lat), std::abs(bbox.max_lon - bbox.min_lon));
+	const double raw = span > 0.0 ? 20.0 - std::log2(span) : 15.0;
+	unsigned zoom =
+			std::isfinite(raw) ? static_cast<unsigned>(std::clamp(raw, 10.0, 15.0)) : 10;
+	const auto tile_count = [&](unsigned z) {
+		const auto a = xyz_tile_at(bbox.min_lat, bbox.min_lon, z);
+		const auto b = xyz_tile_at(bbox.max_lat, bbox.max_lon, z);
+		const std::size_t cols = std::size_t(std::max(a.x, b.x) - std::min(a.x, b.x)) + 1;
+		const std::size_t rows = std::size_t(std::max(a.y, b.y) - std::min(a.y, b.y)) + 1;
+		return rows && cols > std::numeric_limits<std::size_t>::max() / rows
+					   ? std::numeric_limits<std::size_t>::max()
+					   : rows * cols;
+	};
+	while (zoom > 10 && tile_count(zoom) > 2048)
+		--zoom;
+	return static_cast<std::uint8_t>(zoom);
+}
+
+std::optional<RgbRaster> read_rgb_raster(const std::filesystem::path &path)
+{
+	int width = 0, height = 0, channels = 0;
+	const auto filename = path.string();
+	stbi_uc *image = stbi_load(filename.c_str(), &width, &height, &channels, 3);
+	if (!image || width <= 0 || height <= 0) {
+		if (image)
+			stbi_image_free(image);
+		return std::nullopt;
+	}
+	RgbRaster raster;
+	raster.width = static_cast<std::size_t>(width);
+	raster.height = static_cast<std::size_t>(height);
+	raster.pixels.resize(raster.width * raster.height);
+	for (std::size_t i = 0; i < raster.pixels.size(); ++i)
+		raster.pixels[i] = {image[i * 3], image[i * 3 + 1], image[i * 3 + 2]};
+	stbi_image_free(image);
+	return raster;
+}
+
+std::optional<double> sample_aws_tile_pixel(
+		const std::unordered_map<std::uint64_t, RgbRaster> &tiles, unsigned zoom,
+		unsigned base_x, unsigned base_y, int px, int py)
+{
+	std::int64_t tile_x = base_x, tile_y = base_y;
+	if (px < 0) {
+		--tile_x;
+		px += 256;
+	} else if (px >= 256) {
+		++tile_x;
+		px -= 256;
+	}
+	if (py < 0) {
+		--tile_y;
+		py += 256;
+	} else if (py >= 256) {
+		++tile_y;
+		py -= 256;
+	}
+	const auto count = std::int64_t{1} << zoom;
+	if (tile_x < 0 || tile_y < 0 || tile_x >= count || tile_y >= count)
+		return std::nullopt;
+	const std::uint64_t key = (std::uint64_t(zoom) << 58) |
+							  (std::uint64_t(tile_x) << 29) | std::uint64_t(tile_y);
+	const auto found = tiles.find(key);
+	if (found == tiles.end() || std::size_t(px) >= found->second.width ||
+			std::size_t(py) >= found->second.height)
+		return std::nullopt;
+	return terrarium_height(
+			found->second
+					.pixels[std::size_t(py) * found->second.width + std::size_t(px)]);
+}
+} // namespace
+
+std::vector<std::vector<double>> fetch_aws_terrain_grid(
+		const std::filesystem::path &cache_root, const GeoBBox &bbox, std::size_t width,
+		std::size_t height)
+{
+	const double nodata = std::numeric_limits<double>::quiet_NaN();
+	std::vector<std::vector<double>> grid(height, std::vector<double>(width, nodata));
+	if (!width || !height)
+		return grid;
+	const unsigned zoom = choose_aws_terrain_zoom(bbox);
+	const auto keys = covering_xyz_tiles(bbox, zoom);
+	const auto root = cache_root / "aws";
+	std::error_code ec;
+	std::filesystem::create_directories(root, ec);
+	std::vector<std::optional<RgbRaster>> decoded(keys.size());
+	std::atomic_size_t next{0};
+	const auto worker = [&] {
+		for (;;) {
+			const auto i = next.fetch_add(1, std::memory_order_relaxed);
+			if (i >= keys.size())
+				return;
+			const auto &key = keys[i];
+			std::error_code tile_ec;
+			const auto path =
+					root / ("z" + std::to_string(zoom) + "_x" + std::to_string(key.x) +
+								   "_y" + std::to_string(key.y) + ".png");
+			for (unsigned attempt = 0; attempt <= 3; ++attempt) {
+				tile_ec.clear();
+				if (std::filesystem::is_regular_file(path, tile_ec)) {
+					if (auto raster = read_rgb_raster(path)) {
+						decoded[i] = std::move(*raster);
+						break;
+					}
+					std::filesystem::remove(path, tile_ec);
+					tile_ec.clear();
+				}
+				if (download_tile(aws_terrarium_tile_url(key), path, 1)) {
+					if (auto raster = read_rgb_raster(path)) {
+						decoded[i] = std::move(*raster);
+						break;
+					}
+					std::filesystem::remove(path, tile_ec);
+					tile_ec.clear();
+				}
+				if (attempt < 3)
+					std::this_thread::sleep_for(
+							std::chrono::milliseconds(500u << attempt));
+			}
+		}
+	};
+	const auto workers = std::min<std::size_t>(8, keys.size());
+	std::vector<std::thread> threads;
+	threads.reserve(workers);
+	for (std::size_t i = 0; i < workers; ++i)
+		threads.emplace_back(worker);
+	for (auto &thread : threads)
+		thread.join();
+
+	std::unordered_map<std::uint64_t, RgbRaster> tiles;
+	for (std::size_t i = 0; i < keys.size(); ++i)
+		if (decoded[i]) {
+			const auto &key = keys[i];
+			const std::uint64_t packed = (std::uint64_t(zoom) << 58) |
+										 (std::uint64_t(key.x) << 29) |
+										 std::uint64_t(key.y);
+			tiles.emplace(packed, std::move(*decoded[i]));
+		}
+	const double n = std::ldexp(1.0, static_cast<int>(zoom));
+	for (std::size_t gy = 0; gy < height; ++gy) {
+		const double lat = bbox.max_lat - double(gy) /
+												  std::max<std::size_t>(1, height - 1) *
+												  (bbox.max_lat - bbox.min_lat);
+		const double lat_rad = lat * 3.14159265358979323846 / 180.0;
+		const double fy = (1.0 - std::asinh(std::tan(lat_rad)) / std::numbers::pi) * 0.5 *
+						  n * 256.0;
+		for (std::size_t gx = 0; gx < width; ++gx) {
+			const double lon =
+					bbox.min_lon + double(gx) / std::max<std::size_t>(1, width - 1) *
+										   (bbox.max_lon - bbox.min_lon);
+			const double fx = (lon + 180.0) / 360.0 * n * 256.0;
+			const auto tile_x = static_cast<unsigned>(
+					std::clamp(std::floor(fx / 256.0), 0.0, n - 1.0));
+			const auto tile_y = static_cast<unsigned>(
+					std::clamp(std::floor(fy / 256.0), 0.0, n - 1.0));
+			const double px = fx - tile_x * 256.0, py = fy - tile_y * 256.0;
+			const int x0 = static_cast<int>(std::floor(px));
+			const int y0 = static_cast<int>(std::floor(py));
+			const double dx = px - x0, dy = py - y0;
+			const auto v00 = sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0, y0);
+			const auto v10 =
+					sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0 + 1, y0);
+			const auto v01 =
+					sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0, y0 + 1);
+			const auto v11 =
+					sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0 + 1, y0 + 1);
+			if (v00 && v10 && v01 && v11) {
+				const double top = *v00 + (*v10 - *v00) * dx;
+				const double bottom = *v01 + (*v11 - *v01) * dx;
+				grid[gy][gx] = top + (bottom - top) * dy;
+			}
+		}
+	}
+	return grid;
+}
+
 std::optional<XyzTileKey> xyz_parent(XyzTileKey key)
 {
 	if (!key.zoom)
@@ -280,13 +480,14 @@ std::string mapterhorn_tile_url(const XyzTileKey &key)
 unsigned choose_mapterhorn_zoom(const GeoBBox &bbox, std::size_t width,
 		std::size_t height, unsigned min_zoom, unsigned max_zoom, std::size_t budget)
 {
-	const double lat = (bbox.min_lat + bbox.max_lat) * .5 * 3.14159265358979323846 / 180.;
+	constexpr double earth_radius_m = MERCATOR_RADIUS_M;
+	const double mid_lat = (bbox.min_lat + bbox.max_lat) * .5;
+	const double lat = mid_lat * 3.14159265358979323846 / 180.;
 	const double metres_x =
-			std::abs(lon_to_mercator_x(bbox.max_lon) - lon_to_mercator_x(bbox.min_lon)) *
-			std::max(.000001, std::cos(lat));
-	const double metres_y =
-			std::abs(lat_to_mercator_y(bbox.max_lat) - lat_to_mercator_y(bbox.min_lat)) *
-			std::max(.000001, std::cos(lat));
+			std::abs((bbox.max_lon - bbox.min_lon) * 3.14159265358979323846 / 180. *
+					 earth_radius_m * std::max(.000001, std::abs(std::cos(lat))));
+	const double metres_y = std::abs((bbox.max_lat - bbox.min_lat) *
+									 3.14159265358979323846 / 180. * earth_radius_m);
 	const double cell = std::max(
 			.05, std::min(metres_x / double(std::max<std::size_t>(1, width - 1)),
 						 metres_y / double(std::max<std::size_t>(1, height - 1))));
@@ -295,7 +496,7 @@ unsigned choose_mapterhorn_zoom(const GeoBBox &bbox, std::size_t width,
 	unsigned zoom = need <= 1 ? 0
 							  : unsigned(std::clamp<int>(int(std::ceil(std::log2(need))),
 										0, int(max_zoom)));
-	while (zoom > min_zoom && covering_xyz_tiles(bbox, zoom).size() > budget)
+	while (zoom > min_zoom && covering_xyz_tile_count(bbox, zoom) > budget)
 		--zoom;
 	return std::clamp(zoom, min_zoom, max_zoom);
 }
@@ -494,7 +695,8 @@ std::string mapterhorn_url(double lat, double lon)
 	return "https://mapterhorn.com/tiles/" + std::to_string(int(lat)) + "/" +
 		   std::to_string(int(lon)) + ".hgt";
 }
-bool download_tile(const std::string &url, const std::filesystem::path &file)
+bool download_tile(const std::string &url, const std::filesystem::path &file,
+		std::uint64_t minimum_bytes)
 {
 	std::filesystem::create_directories(file.parent_path());
 	auto tmp = file;
@@ -504,7 +706,7 @@ bool download_tile(const std::string &url, const std::filesystem::path &file)
 	if (!http_to_file(url, tmp.string()))
 		return false;
 	auto n = std::filesystem::file_size(tmp, ec);
-	if (ec || n < 1024) {
+	if (ec || n < minimum_bytes) {
 		std::filesystem::remove(tmp);
 		return false;
 	}

@@ -1,5 +1,6 @@
 #pragma once
 #include "caves_shape.h"
+#include <unordered_set>
 
 namespace arnis::world_editor
 {
@@ -19,9 +20,12 @@ void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, CaveEllipsoids *ellipsoids = nullptr);
 // Rust caves::decoration counterpart for post-carve cave flora/mineral accents.
 void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y, const Args &args);
+		std::int64_t seed, int floor_y, const Args &args,
+		const std::unordered_set<std::int64_t> *basin_fluid = nullptr,
+		const std::unordered_set<std::int64_t> *water_cells = nullptr);
 // Rust caves::schems counterpart: load the configured cave-pack manifest and
 // deterministically stamp formations into carved cave openings.
 void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y, const Args &args);
+		std::int64_t seed, int floor_y, const Args &args,
+		std::unordered_set<std::int64_t> *basin_fluid = nullptr);
 }

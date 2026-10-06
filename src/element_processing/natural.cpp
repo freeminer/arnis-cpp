@@ -160,8 +160,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				request.genus = mapped_row.genus;
 			request.conifer = mapped_row.conifer;
 			if (mapped_row.height_m > 0.0)
-				request.want_size = trees::size_for_height(
-						static_cast<int>(std::lround(mapped_row.height_m * 3.0)));
+				request.want_size = trees::size_for_height(static_cast<int>(
+						std::lround(mapped_row.height_m * editor.scale())));
 			if (editor.ground && editor.mg)
 				request.eco = editor.ground->ecoregion_at(
 						{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
@@ -189,7 +189,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		request.conifer = mapped.conifer;
 		if (mapped.height_m > 0.0)
 			request.want_size = trees::size_for_height(
-					static_cast<int>(std::lround(mapped.height_m * 3.0)));
+					static_cast<int>(std::lround(mapped.height_m * editor.scale())));
 		if (editor.ground && editor.mg)
 			request.eco = editor.ground->ecoregion_at(
 					{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
@@ -366,8 +366,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				if (mapped.height_m > 0.0)
 					mapped_height_m = mapped.height_m;
 				if (mapped.height_m > 0.0)
-					mapped_request.want_size = trees::size_for_height(
-							static_cast<int>(std::lround(mapped.height_m * 3.0)));
+					mapped_request.want_size = trees::size_for_height(static_cast<int>(
+							std::lround(mapped.height_m * editor.scale())));
 				if (editor.ground && editor.mg)
 					mapped_request.eco = editor.ground->ecoregion_at(
 							{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});

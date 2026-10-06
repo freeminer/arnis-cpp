@@ -17,7 +17,9 @@ namespace arnis::caves
 // chunk so neighbouring generated regions agree on pools and rivers.
 void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, const Args &args,
-		const CaveEllipsoids &ellipsoids);
+		const CaveEllipsoids &ellipsoids,
+		std::unordered_set<std::int64_t> *basin_fluid = nullptr,
+		std::unordered_set<std::int64_t> *water_cells_out = nullptr);
 
 // Rust caves::seal_floating_fluid_region counterpart. Run after all cave,
 // surface-water, and tunnel carving passes so fluid columns cannot hang over air.

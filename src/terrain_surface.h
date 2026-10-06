@@ -68,7 +68,9 @@ inline unsigned snow_eighths(Snow snow, double terrain_rise = 0.0)
 	if (snow == Snow::None)
 		return 0;
 	const unsigned smooth =
-			static_cast<unsigned>(std::clamp(std::round(terrain_rise * 8.0), 0.0, 7.0));
+			terrain_rise >= 0.0 && terrain_rise < 1.0
+					? static_cast<unsigned>(std::min(std::round(terrain_rise * 8.0), 7.0))
+					: 0;
 	if (snow == Snow::Block)
 		return smooth;
 	const unsigned max_layers =

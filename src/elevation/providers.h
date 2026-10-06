@@ -96,6 +96,14 @@ std::string mapterhorn_tile_url(const XyzTileKey &);
 unsigned choose_mapterhorn_zoom(const GeoBBox &, std::size_t grid_width,
 		std::size_t grid_height, unsigned min_zoom = 6, unsigned max_zoom = 17,
 		std::size_t tile_budget = 2048);
+// Fetch/sample the Rust-compatible AWS Terrarium XYZ provider. Missing tiles
+// remain NaN for the shared elevation post-processing pipeline to fill.
+std::vector<std::vector<double>> fetch_aws_terrain_grid(
+		const std::filesystem::path &cache_root, const GeoBBox &, std::size_t width,
+		std::size_t height);
+std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
+		const std::filesystem::path &cache_root, const GeoBBox &, std::size_t width,
+		std::size_t height);
 // Provider-neutral pieces of AWS/Mapterhorn Terrarium decoding.  Image and
 // HTTP backends only need to supply decoded RGB pixels to these routines.
 struct RgbRaster
@@ -120,7 +128,8 @@ std::vector<std::vector<double>> resample_raster_nearest(
 std::string aws_terrain_url(int lat, int lon);
 std::string usgs_3dep_url(double lat, double lon);
 std::string mapterhorn_url(double lat, double lon);
-bool download_tile(const std::string &url, const std::filesystem::path &file);
+bool download_tile(const std::string &url, const std::filesystem::path &file,
+		std::uint64_t minimum_bytes = 1024);
 bool fetch_with_fallback(int lat, int lon, const std::filesystem::path &file,
 		SourceMode mode = SourceMode::Auto);
 void set_download_retries(unsigned retries);
