@@ -1,21 +1,29 @@
 #include "bridge_modules.h"
 #include "../assets_root.h"
 #include "../block_definitions.h"
+#include "bridges.h"
 #include "../structures/schem_decoder.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
+#include <map>
+#include <mutex>
+#include <string_view>
 #include <unordered_map>
 
 namespace arnis::bridge_modules
 {
 
 const int PILLAR_FOOT_MIN_DEPTH = 3;
-const int PILLAR_GROUND_FILL_LIMIT = 48;
+const int PILLAR_GROUND_FILL_LIMIT = 512;
 
-static std::vector<BridgeModule> loaded_modules;
-static bool modules_loaded = false;
+// Keep one immutable module set per asset root. Generation workers may still
+// be sweeping a module while another world/editor initializes a different
+// asset root; replacing a process-global vector would invalidate those refs.
+static std::map<std::filesystem::path, std::vector<BridgeModule>> loaded_modules;
+static std::mutex modules_mutex;
 
 static bool is_pillar_material(const Block &block)
 {
@@ -27,14 +35,51 @@ static bool is_pillar_material(const Block &block)
 		   block.id() == structures::resolve_schem_block("minecraft:sandstone_wall").id();
 }
 
-static void ensure_modules_loaded()
+static bool is_street_block(const Block &block)
 {
-	if (modules_loaded)
-		return;
+	using namespace block_definitions;
+	return block == CYAN_TERRACOTTA || block == WHITE_CONCRETE ||
+		   block == YELLOW_CONCRETE;
+}
 
-	loaded_modules.clear();
+static bool name_ends_with(std::string_view name, std::string_view suffix)
+{
+	return name.size() >= suffix.size() &&
+		   name.substr(name.size() - suffix.size()) == suffix;
+}
 
-	const auto asset_dir = assets::path("structures");
+static bool is_railing_part(std::string_view name)
+{
+	for (const auto suffix : {"_wall", "_fence", "_fence_gate", "_bars", "_sign",
+				 "_button", "_trapdoor", "_pane", "lantern"})
+		if (name_ends_with(name, suffix))
+			return true;
+	return name.find("chain") != std::string_view::npos;
+}
+
+static bool side_faces_open(const bridges::BridgeSurfaceMap &surface,
+		std::pair<int, int> cell, std::pair<float, float> outward, int deck_y)
+{
+	for (int k = 0; k <= 2; ++k) {
+		const int x = static_cast<int>(std::lround(cell.first + outward.first * k));
+		const int z = static_cast<int>(std::lround(cell.second + outward.second * k));
+		if (surface.deck_near(x, z, deck_y, 2))
+			return false;
+	}
+	return true;
+}
+
+static const std::vector<BridgeModule> &modules_for_root(
+		const std::filesystem::path &requested_root = {})
+{
+	const auto asset_dir =
+			requested_root.empty() ? assets::path("structures") : requested_root;
+	const std::lock_guard<std::mutex> lock(modules_mutex);
+	if (const auto found = loaded_modules.find(asset_dir); found != loaded_modules.end())
+		return found->second;
+
+	std::vector<BridgeModule> modules;
+
 	const auto build_module = [&](const char *name, int street_y, bool pillars) {
 		std::ifstream file(asset_dir / (std::string(name) + ".schem"), std::ios::binary);
 		if (!file)
@@ -53,7 +98,8 @@ static void ensure_modules_loaded()
 					continue;
 				module.slices[voxel.x].push_back({voxel.z - center_w, voxel.y - street_y,
 						BlockWithProperties{structures::resolve_schem_block(voxel.block),
-								voxel.properties}});
+								voxel.properties},
+						voxel.block});
 			}
 			if (pillars) {
 				for (int l = 0; l < length; ++l) {
@@ -71,7 +117,7 @@ static void ensure_modules_loaded()
 							module.feet[l].push_back(voxel);
 				}
 			}
-			loaded_modules.push_back(std::move(module));
+			modules.push_back(std::move(module));
 		} catch (...) {
 			// A missing or invalid optional segment simply disables modular bridges.
 		}
@@ -80,13 +126,14 @@ static void ensure_modules_loaded()
 	build_module("bridge_segment_2", 16, true);
 	build_module("bridge_segment_3", 2, false);
 	build_module("bridge_segment_4", 3, false);
-	modules_loaded = true;
+	return loaded_modules.emplace(asset_dir, std::move(modules)).first->second;
 }
 
-std::optional<size_t> pick_module_index(int block_range, size_t bridge_len)
+std::optional<size_t> pick_module_index(
+		int block_range, size_t bridge_len, const std::filesystem::path &asset_root)
 {
-	ensure_modules_loaded();
-	if (bridge_len < MIN_MODULE_BRIDGE_LEN || loaded_modules.size() < 4) {
+	const auto &modules = modules_for_root(asset_root);
+	if (bridge_len < MIN_MODULE_BRIDGE_LEN || modules.size() < 4) {
 		return std::nullopt;
 	}
 
@@ -98,20 +145,20 @@ std::optional<size_t> pick_module_index(int block_range, size_t bridge_len)
 	return 3;
 }
 
-const BridgeModule *module_at(size_t idx)
+const BridgeModule *module_at(size_t idx, const std::filesystem::path &asset_root)
 {
-	ensure_modules_loaded();
-	if (idx >= loaded_modules.size())
+	const auto &modules = modules_for_root(asset_root);
+	if (idx >= modules.size())
 		return nullptr;
-	return &loaded_modules[idx];
+	return &modules[idx];
 }
 
-int module_half_width(size_t idx)
+int module_half_width(size_t idx, const std::filesystem::path &asset_root)
 {
-	ensure_modules_loaded();
-	if (idx >= loaded_modules.size())
+	const auto &modules = modules_for_root(asset_root);
+	if (idx >= modules.size())
 		return 0;
-	return loaded_modules[idx].half_width;
+	return modules[idx].half_width;
 }
 
 static uint8_t direction_quarter_turns(float px, float pz)
@@ -135,46 +182,87 @@ BlockWithProperties rotated_block(const BlockWithProperties &block, uint8_t k)
 }
 
 void sweep_module(world_editor::WorldEditor *editor,
+		const bridges::BridgeSurfaceMap &surface,
 		const std::vector<BridgePathSample> &path, const BridgeModule &module)
 {
-
+	if (!editor || path.empty() || module.length == 0)
+		return;
+	std::size_t open_left_count = 0, open_right_count = 0;
+	for (const auto &sample : path) {
+		const float edge =
+				module.half_width * (std::abs(sample.px) + std::abs(sample.pz)) + 1.0f;
+		for (const auto &[sign, count] : std::array<std::pair<float, std::size_t *>, 2>{
+					 {{1.0f, &open_left_count}, {-1.0f, &open_right_count}}}) {
+			const std::pair<int, int> cell{
+					static_cast<int>(std::lround(sample.x + sample.px * sign * edge)),
+					static_cast<int>(std::lround(sample.z + sample.pz * sign * edge))};
+			*count += side_faces_open(
+					surface, cell, {sample.px * sign, sample.pz * sign}, sample.deck_y);
+		}
+	}
+	const bool open_left = open_left_count * 2 >= path.size();
+	const bool open_right = open_right_count * 2 >= path.size();
+	const auto for_cells = [](const BridgePathSample &sample, int w, auto &&fn) {
+		const auto at = [&](int offset) {
+			return std::pair{static_cast<int>(std::lround(sample.x + sample.px * offset)),
+					static_cast<int>(std::lround(sample.z + sample.pz * offset))};
+		};
+		const auto [x, z] = at(w);
+		const int step = (w > 0) - (w < 0);
+		const auto [inner_x, inner_z] = at(w - step);
+		fn(x, z);
+		// A diagonal cross-section skips one cell on its inner edge. Fill that
+		// corner so the swept deck is continuous on both diagonal orientations.
+		if (w != 0 && inner_x != x && inner_z != z)
+			fn(x, inner_z);
+	};
 	for (size_t i = 0; i < path.size(); ++i) {
 		const auto &sample = path[i];
-		int x = sample.x;
-		int deck_y = sample.deck_y;
-		int z = sample.z;
-		float px = sample.px;
-		float pz = sample.pz;
-
-		uint8_t k = direction_quarter_turns(px, pz);
+		const int deck_y = sample.deck_y;
+		const std::uint8_t k = direction_quarter_turns(sample.px, sample.pz);
 		const auto &slice = module.slices[i % module.length];
-
 		for (const auto &voxel : slice) {
-			int bx = static_cast<int>(std::round(x + px * voxel.w));
-			int bz = static_cast<int>(std::round(z + pz * voxel.w));
-			int by = deck_y + voxel.dy;
-
-			editor->set_block_with_properties_absolute(
-					rotated_block(voxel.block, k), bx, by, bz, nullptr, nullptr);
+			const bool open = voxel.w > 0 ? open_left : open_right;
+			if (!open && voxel.dy > 0 && std::abs(voxel.w) * 2 >= module.half_width)
+				continue;
+			if (!open && voxel.dy == 0 && is_railing_part(voxel.source_name))
+				continue;
+			const bool kerb = !open && voxel.dy == 0 &&
+							  std::abs(voxel.w) >= module.half_width - 2 &&
+							  !is_street_block(voxel.block.block);
+			for_cells(sample, voxel.w, [&](int bx, int bz) {
+				if (kerb) {
+					editor->set_block_absolute(block_definitions::CYAN_TERRACOTTA, bx,
+							deck_y, bz, nullptr, nullptr);
+					return;
+				}
+				if (voxel.dy <= -PILLAR_FOOT_MIN_DEPTH &&
+						surface.support_blocked(bx, bz, deck_y))
+					return;
+				editor->set_block_with_properties_absolute(rotated_block(voxel.block, k),
+						bx, deck_y + voxel.dy, bz, std::nullopt,
+						std::optional<std::vector<Block>>{std::vector<Block>{}});
+			});
 		}
 
-		// Place pillar feet
 		if (module.has_pillars) {
 			const auto &feet_slice = module.feet[i % module.length];
 			for (const auto &foot : feet_slice) {
-				int bx = static_cast<int>(std::round(x + px * foot.w));
-				int bz = static_cast<int>(std::round(z + pz * foot.w));
-				int bottom = deck_y + foot.dy;
-				int ground = editor->get_ground_level(bx, bz);
-
-				if (bottom > ground) {
-					int limit = std::min(bottom, ground + PILLAR_GROUND_FILL_LIMIT);
-					for (int y = ground; y < limit; ++y) {
+				for_cells(sample, foot.w, [&](int bx, int bz) {
+					if (surface.support_blocked(bx, bz, deck_y))
+						return;
+					const int bottom = deck_y + foot.dy;
+					const int ground = editor->get_ground_level(bx, bz);
+					for (int offset = 1; offset <= PILLAR_GROUND_FILL_LIMIT &&
+										 offset <= bottom - ground;
+							++offset) {
+						const int y = bottom - offset;
 						editor->set_block_with_properties_absolute(
-								rotated_block(foot.block, k), bx, y, bz, nullptr,
-								nullptr);
+								rotated_block(foot.block, k), bx, y, bz, std::nullopt,
+								std::optional<std::vector<Block>>{std::vector<Block>{}});
 					}
-				}
+					editor->register_support_column(bx, bz, foot.block.block);
+				});
 			}
 		}
 	}

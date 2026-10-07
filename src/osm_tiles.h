@@ -16,7 +16,7 @@ inline constexpr const char *DEFAULT_OSM_TILES_URL = "https://tiles.arnisproject
 std::filesystem::path cache_root();
 elevation::CacheClearStats clear_osm_tiles_cache();
 inline constexpr std::uint8_t ZOOM = 13;
-inline constexpr double COORD_SCALE = 1e6;
+inline constexpr double COORD_SCALE = 1e7;
 // Keep coordinate-backed tile vertices below the clipper's invented-node range.
 inline constexpr std::uint64_t SYNTHETIC_ID_BASE = std::uint64_t{1} << 61;
 

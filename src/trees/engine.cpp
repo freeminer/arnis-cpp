@@ -15,7 +15,7 @@ namespace
 std::optional<Habitat> ecoregion_habitat(
 		const world_editor::WorldEditor &editor, int x, int z, std::uint8_t cover)
 {
-	if (!editor.ground || !editor.mg)
+	if (!editor.ground)
 		return std::nullopt;
 	// Match Rust's rule that water/built/bare covers keep their explicit
 	// habitat; the climate map refines only vegetation-bearing cells.
@@ -23,8 +23,7 @@ std::optional<Habitat> ecoregion_habitat(
 	if (cover == LC_WATER || cover == LC_BUILT_UP || cover == LC_BARE ||
 			cover == LC_SNOW_ICE)
 		return std::nullopt;
-	const auto eco = editor.ground->ecoregion_at(
-			{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+	const auto eco = editor.ground->ecoregion_at(editor.ground_point(x, z));
 	if (!eco)
 		return std::nullopt;
 	switch (eco->biome) {
@@ -179,9 +178,8 @@ bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		SlotRequest request, const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved)
 {
-	if (!request.eco && editor.ground && editor.mg)
-		request.eco = editor.ground->ecoregion_at(
-				{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+	if (!request.eco && editor.ground)
+		request.eco = editor.ground->ecoregion_at(editor.ground_point(x, z));
 	const auto habitat = ecoregion_habitat(editor, x, z, cover)
 								 .value_or(habitat_for_land_cover(cover));
 	return place_selected_region_tree(editor, selector, x, z, habitat, elevation_y,

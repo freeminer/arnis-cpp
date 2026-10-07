@@ -10,6 +10,11 @@
 
 #include "../../../arnis_adapter.h"
 
+namespace arnis::bridges
+{
+class BridgeSurfaceMap;
+}
+
 namespace arnis::bridge_styles
 {
 
@@ -27,6 +32,9 @@ enum class BridgeStyle
 Block foundation_block(BridgeStyle style);
 Block rail_block(BridgeStyle style);
 std::size_t pillar_interval(BridgeStyle style);
+std::size_t pillar_interval(BridgeStyle style, int half_width);
+std::vector<std::size_t> default_pylons(BridgeStyle style, std::size_t total,
+		bool start_is_boundary, bool end_is_boundary);
 bool has_side_railing(BridgeStyle style);
 std::optional<Block> parapet_block(BridgeStyle style);
 Block rail_foundation_block(BridgeStyle style);
@@ -71,13 +79,18 @@ void place_bridge_support_below_deck(WorldEditor &editor, BridgeStyle style, int
 		int cell_y, int set_z, int centerline_ground_y, std::size_t tds,
 		std::size_t total, bool use_absolute_y, bool is_centerline,
 		bool is_pillar_position);
+void place_pier_bent(WorldEditor &editor, const bridges::BridgeSurfaceMap &surface,
+		BridgeStyle style, int x, int z, int deck_y, std::pair<float, float> perp,
+		int half_width);
 
 void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
+		const bridges::BridgeSurfaceMap &surface,
 		const std::vector<BridgePathSample> &path, int block_range,
-		bool start_is_boundary, bool end_is_boundary);
+		bool start_is_boundary, bool end_is_boundary,
+		const std::vector<std::pair<int, int>> *pylon_points = nullptr);
 
-bool sweep_bridge_schematic(WorldEditor &editor,
-		const std::vector<BridgePathSample> &path, int block_range,
+bool sweep_bridge_schematic(WorldEditor &editor, const bridges::BridgeSurfaceMap &surface,
+		const std::vector<BridgePathSample> &path, std::optional<std::size_t> module_idx,
 		const std::filesystem::path &asset_root);
 
 }

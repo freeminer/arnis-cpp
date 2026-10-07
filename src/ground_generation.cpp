@@ -2,6 +2,7 @@
 
 #include "block_definitions.h"
 #include "element_processing/tree.h"
+#include "element_processing/bush.h"
 #include "land_cover/land_cover.h"
 #include "trees/schematic.h"
 #include "climate.h"
@@ -204,6 +205,7 @@ bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 					GRAY_CONCRETE,
 					LIGHT_GRAY_CONCRETE,
 					WHITE_CONCRETE,
+					YELLOW_CONCRETE,
 					DIRT_PATH,
 					SMOOTH_STONE,
 					WATER,
@@ -346,8 +348,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	if (cover == land_cover::LC_TREE_COVER && slope <= 4 && ground_allows_trees) {
 		// The canopy map adds a separately selected tree; it suppresses only the
 		// land-cover tree roll in measured cells, never the forest-floor plants.
-		constexpr double micro_tree_max_scale = 0.35;
-		const auto tree_rate = scale < micro_tree_max_scale ? 4u : 30u;
+		const auto tree_rate = scale < MICRO_TREE_MAX_SCALE ? 4u : 30u;
 		const auto choice = rng.uniform(tree_rate);
 		if (choice == 0 && !canopy_covered &&
 				!(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z))) {
@@ -398,14 +399,14 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			if (choice < 6)
 				place_decoration(GRASS, ground_y + 1);
 			else if (choice < 9)
-				place_decoration(OAK_LEAVES, ground_y + 1);
+				bush::place(editor, x, z, bush::Kind::Low);
 			else if (choice == 9)
 				place_decoration(DEAD_BUSH, ground_y + 1);
 		} else if (rng.uniform(100) == 0)
 			place_decoration(DEAD_BUSH, ground_y + 1);
 	} else if (cover == land_cover::LC_SHRUBLAND && ground_is_natural) {
 		if (rng.uniform(100) < 2) {
-			place_decoration(OAK_LEAVES, ground_y + 1);
+			bush::place(editor, x, z, bush::Kind::Wild);
 		} else if (undergrowth_roll(x, z, .28 * sward, SALT_SHRUB_FLOOR)) {
 			place_decoration(GRASS, ground_y + 1);
 		}
@@ -427,7 +428,7 @@ void clear_road_vegetation(WorldEditor &editor, int x, int y, int z)
 {
 	static const std::vector<Block> stray_surface{BLACK_CONCRETE, GRAY_CONCRETE_POWDER,
 			CYAN_TERRACOTTA, GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE,
-			DIRT_PATH, WATER};
+			YELLOW_CONCRETE, DIRT_PATH, WATER};
 	const auto &loose_plants = ground_decoration::loose_plant_blocks();
 	static const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
 			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
@@ -542,6 +543,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				return ground_level_at(editor, ground_cache ? &*ground_cache : nullptr,
 						terrain_enabled, args.ground_level, gx, gz);
 			};
+			int column_fill_y_min = world_editor::terrain_floor_y() + 1;
 			for (int x = chunk_min_x; x <= chunk_max_x; ++x) {
 				for (int z = chunk_min_z; z <= chunk_max_z; ++z) {
 					// Rotation expands the output AABB. Rust masks columns whose inverse
@@ -761,8 +763,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 											WATER, BEDROCK, GRAY_CONCRETE_POWDER,
 											CYAN_TERRACOTTA, GRAY_CONCRETE,
 											LIGHT_GRAY_CONCRETE, WHITE_CONCRETE,
-											DIRT_PATH, STONE_BRICKS, BRICK, OAK_PLANKS,
-											BLACK_CONCRETE}));
+											YELLOW_CONCRETE, DIRT_PATH, STONE_BRICKS,
+											BRICK, OAK_PLANKS, BLACK_CONCRETE}));
 						} else if (talus_block && surface == talus_block->first) {
 							editor.set_block_absolute(surface, x, ground_y, z,
 									std::optional<std::vector<Block>>(
@@ -870,8 +872,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						clear_road_vegetation(editor, x, ground_y, z);
 
 					if (args.fillground)
-						editor.fill_column_absolute(STONE, x, z,
-								world_editor::terrain_floor_y() + 1, ground_y - 3, true);
+						editor.fill_column_absolute(
+								STONE, x, z, column_fill_y_min, ground_y - 3, true);
 					// Rust keeps bedrock as a flat floor independently of fillground,
 					// replacing any generated block there except existing bedrock.
 					editor.set_block_absolute(BEDROCK, x, world_editor::terrain_floor_y(),

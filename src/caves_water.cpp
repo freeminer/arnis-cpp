@@ -317,7 +317,8 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &region,
 		std::int64_t seed, int floor_y, const Args &args,
 		const CaveEllipsoids &ellipsoids, std::unordered_set<std::int64_t> *basin_fluid,
-		std::unordered_set<std::int64_t> *water_cells_out)
+		std::unordered_set<std::int64_t> *water_cells_out,
+		std::unordered_set<std::int64_t> *cave_air_out)
 {
 	BiomeAmounts amounts = BiomeAmounts::defaults();
 	if (args.cave_biomes)
@@ -489,6 +490,8 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 	}
 	if (water_cells_out)
 		water_cells_out->insert(water_cells.begin(), water_cells.end());
+	if (cave_air_out)
+		cave_air_out->insert(carved_cells.begin(), carved_cells.end());
 	if (basin_fluid)
 		basin_fluid->insert(water_cells.begin(), water_cells.end());
 	generate_deep_lava_sea(editor, region, floor_y, water_cells, basin_fluid);

@@ -1,6 +1,8 @@
 #include "surfaces.h"
 
 #include <cstdint>
+#include <cctype>
+#include <algorithm>
 #include <unordered_map>
 
 namespace arnis::surfaces
@@ -65,6 +67,47 @@ std::vector<Block> get_blocks_for_surface_way(
 			return *blocks;
 	}
 	return default_blocks;
+}
+
+std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
+{
+	if (way.tags.get("cycleway") == "crossing" || way.tags.contains("crossing"))
+		return std::nullopt;
+	const auto colour = way.tags.get("surface:colour").empty()
+								? way.tags.get("colour")
+								: way.tags.get("surface:colour");
+	if (!colour.empty()) {
+		std::string value = colour;
+		std::transform(value.begin(), value.end(), value.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		bool red = value.find("red") != std::string::npos || value == "maroon" ||
+				   value == "crimson" || value == "brick";
+		if (!red && value.size() > 1 && value[0] == '#') {
+			const std::string hex = value.substr(1);
+			if ((hex.size() == 3 || hex.size() == 6) &&
+					std::all_of(hex.begin(), hex.end(),
+							[](unsigned char c) { return std::isxdigit(c); })) {
+				const int step = hex.size() == 3 ? 1 : 2;
+				auto channel = [&](std::size_t i) {
+					const int n = std::stoi(hex.substr(i * step, step), nullptr, 16);
+					return step == 1 ? n * 17 : n;
+				};
+				const int r = channel(0), g = channel(1), b = channel(2);
+				red = r >= 0x80 && 2 * r > 3 * g && 2 * r > 3 * b;
+			}
+		}
+		if (!red)
+			return std::nullopt;
+	}
+	const auto surface = way.tags.get("surface");
+	if (!surface.empty() && surface != "asphalt" && surface != "paved" &&
+			surface != "concrete" && surface != "concrete:plates" &&
+			surface != "concrete:lanes" && surface != "cement" && surface != "chipseal" &&
+			surface != "bitmac" && surface != "paving_stones" && surface != "sett" &&
+			surface != "bricks" && surface != "brick")
+		return std::nullopt;
+	return std::vector<Block>{block_definitions::RED_TERRACOTTA,
+			block_definitions::RED_TERRACOTTA, block_definitions::RED_CONCRETE};
 }
 
 Block semirandom_surface(int x, int z, const std::vector<Block> &block_types)

@@ -2,6 +2,7 @@
 
 #include "caves_noise.h"
 #include <cstdint>
+#include <unordered_set>
 #include <vector>
 
 namespace arnis::world_editor
@@ -32,5 +33,6 @@ public:
 
 // Rust's 4x8x4 global density-cell interpolation, including the full-resolution noodle term.
 void carve_density_region(const CaveGen &gen, world_editor::WorldEditor &editor,
-		int min_x, int max_x, int min_z, int max_z, int floor_y);
+		int min_x, int max_x, int min_z, int max_z, int floor_y,
+		std::unordered_set<std::int64_t> *carved = nullptr);
 }

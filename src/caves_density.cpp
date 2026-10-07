@@ -1,4 +1,5 @@
 #include "caves_density.h"
+#include "caves_shape.h"
 #include "block_definitions.h"
 #include "world_editor/floor_state.h"
 #include "../../arnis_world_editor.h"
@@ -254,7 +255,8 @@ double CaveGen::noodle_density(int x, int y, int z) const
 }
 
 void carve_density_region(const CaveGen &gen, world_editor::WorldEditor &editor,
-		int min_x, int max_x, int min_z, int max_z, int floor_y)
+		int min_x, int max_x, int min_z, int max_z, int floor_y,
+		std::unordered_set<std::int64_t> *carved)
 {
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	std::vector<Block> hosts{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRAVEL, DIRT,
@@ -314,12 +316,13 @@ void carve_density_region(const CaveGen &gen, world_editor::WorldEditor &editor,
 								continue;
 							const double fz = double(bz - wz0) / CELL_WIDTH;
 							const double combined = lerp(fz, z0, z1);
-							if ((combined <= 0.0 ||
-										gen.noodle_density(bx, by, bz) <= 0.0) &&
-									editor.check_for_block_absolute(
-											bx, by, bz, host_options))
+							if (combined <= 0.0 ||
+									gen.noodle_density(bx, by, bz) <= 0.0) {
 								editor.set_block_absolute(
 										AIR, bx, by, bz, host_options, std::nullopt);
+								if (carved)
+									carved->insert(pack_cave_pos(bx, by, bz));
+							}
 						}
 					}
 				}

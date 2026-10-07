@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <array>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -8,6 +10,8 @@
 #include "../floodfill_cache.h"
 #include "block_definitions.h"
 #include "tree.h"
+#include "bush.h"
+#include "construction_site.h"
 #include "../osm_parser.h"
 #include "world_editor.h"
 #include "../deterministic_rng.h"
@@ -15,13 +19,54 @@
 #include "../structures/structures.h"
 #include "bridges.h"
 #include "../ground_decoration.h"
+#include "../ground_generation.h"
+#include "../climate.h"
+#include "../land_cover/land_cover.h"
 
 #include "../../../arnis_adapter.h"
+#include "../../../arnis_ground.h"
 namespace arnis
 {
 
 namespace landuse
 {
+namespace
+{
+std::optional<Block> military_ground(
+		const WorldEditor &editor, biome::Climate climate_value, int x, int z, bool rough)
+{
+	const auto *ground = editor.get_ground();
+	const std::uint8_t cover =
+			ground ? ground->cover_class(editor.ground_point(x, z)) : std::uint8_t{0};
+	const auto hash = land_cover::coord_hash(x, z);
+	if (cover == land_cover::LC_WATER || cover == land_cover::LC_WETLAND ||
+			cover == land_cover::LC_MANGROVES || cover == land_cover::LC_SNOW_ICE ||
+			cover == land_cover::LC_BEACH)
+		return std::nullopt;
+	if (cover == land_cover::LC_BUILT_UP) {
+		const double noise = ground_generation::value_noise_01(x + 211, z + 17, 7);
+		if (noise < .25)
+			return GRASS_BLOCK;
+		if (noise > .8)
+			return GRAVEL;
+		if (hash % 10 <= 6)
+			return POLISHED_ANDESITE;
+		if (hash % 10 <= 8)
+			return ANDESITE;
+		return STONE;
+	}
+	if (const auto palette = climate::surface_palette(climate_value, cover, x, z))
+		return palette->first;
+	const double worn_share = cover == land_cover::LC_BARE ? .7 : rough ? .4 : .25;
+	if (ground_generation::value_noise_01(x + 97, z + 31, 9) >= worn_share)
+		return GRASS_BLOCK;
+	if (hash % 10 <= 5)
+		return COARSE_DIRT;
+	if (hash % 10 <= 7)
+		return DIRT;
+	return GRAVEL;
+}
+} // namespace
 
 void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args const &args,
 		FloodFillCache const &flood_fill_cache,
@@ -73,6 +118,15 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	} else {
 		block_type = GRASS_BLOCK;
 	}
+	const bool is_military = landuse_tag == "military";
+	const auto military_tag = element.tags.find("military");
+	const bool military_rough =
+			is_military && military_tag != element.tags.end() &&
+			(military_tag->second == "training_area" || military_tag->second == "range" ||
+					military_tag->second == "danger_area" ||
+					military_tag->second == "trench");
+	const auto climate = editor.climate();
+	const bool site_arid = construction_site::is_arid(climate);
 
 	std::vector<std::pair<int, int>> polygon_coords;
 	polygon_coords.reserve(element.nodes.size());
@@ -89,9 +143,11 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 
 	// Trees ok to generate based on leaf_type
 	std::vector<TreeType> trees_ok_to_generate;
+	bool leaf_type_tagged = false;
 	auto it_leaf_type = element.tags.find("leaf_type");
 	if (it_leaf_type != element.tags.end()) {
 		const std::string &leaf_type = it_leaf_type->second;
+		leaf_type_tagged = leaf_type == "broadleaved" || leaf_type == "needleleaved";
 		if (leaf_type == "broadleaved") {
 			trees_ok_to_generate.push_back(TreeType::Oak);
 			trees_ok_to_generate.push_back(TreeType::Birch);
@@ -127,7 +183,9 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 
 		// Apply per-block randomness for certain landuse types
 		Block actual_block = block_type;
-		if (landuse_tag == "industrial") {
+		if (landuse_tag == "construction") {
+			actual_block = construction_site::ground_block(x, z, site_arid);
+		} else if (landuse_tag == "industrial") {
 			// Industrial: primarily stone, with some stone bricks and smooth stone
 			int random_value = static_cast<int>(rng.uniform(100));
 			if (random_value < 70) {
@@ -137,15 +195,11 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 			} else {
 				actual_block = SMOOTH_STONE;
 			}
-		} else if (landuse_tag == "military") {
-			int random_value = static_cast<int>(rng.uniform(100));
-			if (random_value < 89) {
-				actual_block = GRAY_CONCRETE;
-			} else if (random_value < 99) {
-				actual_block = STONE_BRICKS;
-			} else {
-				actual_block = COBBLESTONE;
-			}
+		} else if (is_military) {
+			const auto surface = military_ground(editor, climate, x, z, military_rough);
+			if (!surface)
+				continue;
+			actual_block = *surface;
 		} else if (landuse_tag == "quarry") {
 			int random_value = static_cast<int>(rng.uniform(100));
 			if (random_value < 40) {
@@ -178,7 +232,12 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 		if (landuse_tag == "traffic_island") {
 			editor.set_block(actual_block, x, 1, z, std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>());
-		} else if (landuse_tag == "construction" || landuse_tag == "railway") {
+		} else if (landuse_tag == "construction") {
+			if (!is_protected)
+				editor.set_block(actual_block, x, 0, z,
+						std::optional<std::vector<Block>>(),
+						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
+		} else if (landuse_tag == "railway") {
 			editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
 		} else if (!is_protected) {
@@ -186,42 +245,17 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 					std::optional<std::vector<Block>>());
 		}
 
+		// Scatter only on the owning tile and never on land-cover water. The
+		// ground pass may include its halo, but plants there belong to that tile.
+		if (editor.is_lc_water(x, z) || !editor.owns(x, z))
+			continue;
+
 		if (landuse_tag == "cemetery") {
 			if ((x % 3 == 0) && (z % 3 == 0)) {
 				int random_choice = static_cast<int>(rng.uniform(100));
-				if (random_choice < 15) {
-					if (editor.check_for_block(x, 0, z,
-								std::optional<std::vector<Block>>{
-										std::vector<Block>{PODZOL}})) {
-						if (rng.uniform(2) == 0) {
-							editor.set_block(COBBLESTONE, x - 1, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-							editor.set_block(STONE_BRICK_SLAB, x - 1, 2, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-							editor.set_block(STONE_BRICK_SLAB, x, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-							editor.set_block(STONE_BRICK_SLAB, x + 1, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-						} else {
-							editor.set_block(COBBLESTONE, x, 1, z - 1,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-							editor.set_block(STONE_BRICK_SLAB, x, 2, z - 1,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-							editor.set_block(STONE_BRICK_SLAB, x, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-							editor.set_block(STONE_BRICK_SLAB, x, 1, z + 1,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-						}
-					}
-				} else if (random_choice < 30) {
+				// The first 15 values are intentionally empty; tombstones are
+				// placed by the separate tombstone pass below, not by this flora roll.
+				if (random_choice >= 15 && random_choice < 30) {
 					if (editor.check_for_block(x, 0, z,
 								std::optional<std::vector<Block>>{
 										std::vector<Block>{PODZOL}})) {
@@ -229,17 +263,16 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 								std::optional<std::vector<Block>>(),
 								std::optional<std::vector<Block>>());
 					}
-				} else if (random_choice < 33) {
+				} else if (random_choice >= 30 && random_choice < 33 &&
+						   editor.land_cover_backs_trees(x, z)) {
 					Tree::create(editor, Coord{x, 1, z}, &building_footprints,
 							&bridge_surface);
-				} else if (!is_protected && random_choice < 35) {
-					editor.set_block(OAK_LEAVES, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				} else if (!is_protected && random_choice < 37) {
+				} else if (!is_protected && random_choice >= 33 && random_choice < 35) {
+					bush::place(editor, x, z, bush::Kind::Garden);
+				} else if (!is_protected && random_choice >= 35 && random_choice < 37) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
-				} else if (!is_protected && random_choice < 41) {
+				} else if (!is_protected && random_choice >= 37 && random_choice < 41) {
 					editor.set_block(LARGE_FERN_LOWER, x, 1, z,
 							std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -252,24 +285,31 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 			if (editor.check_for_block(x, 0, z,
 						std::optional<std::vector<Block>>{
 								std::vector<Block>{GRASS_BLOCK}})) {
-				int random_choice = static_cast<int>(rng.uniform(30));
-				if (random_choice == 20) {
+				const double density = ground_generation::value_noise_01(x, z, 32);
+				const int tree_threshold =
+						std::max(5, static_cast<int>(60.0 - density * 45.0));
+				if (rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0) {
 					TreeType tree_type = trees_ok_to_generate[rng.uniform(
 							static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
 					Tree::create_of_type(editor, Coord{x, 1, z}, tree_type,
-							&building_footprints, &bridge_surface);
-				} else if (random_choice == 2) {
-					ground_decoration::place_scattered_flower(
-							editor, x, z, ground_decoration::FlowerSetting::Forest);
-				} else if (random_choice <= 12) {
-					if (rng.uniform(100) < 12) {
-						editor.set_block(FERN, x, 1, z,
-								std::optional<std::vector<Block>>(),
-								std::optional<std::vector<Block>>());
-					} else {
-						editor.set_block(GRASS, x, 1, z,
-								std::optional<std::vector<Block>>(),
-								std::optional<std::vector<Block>>());
+							&building_footprints, &bridge_surface, false, std::nullopt,
+							leaf_type_tagged);
+				} else {
+					const int random_choice = static_cast<int>(rng.uniform(30));
+					if (random_choice == 2) {
+						const int feature = 1 + static_cast<int>(rng.uniform(6));
+						if (feature == 1)
+							bush::place(editor, x, z, bush::Kind::Wild);
+						else if (feature == 5)
+							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
+						else
+							ground_decoration::place_scattered_flower(editor, x, z,
+									ground_decoration::FlowerSetting::Forest);
+					} else if (random_choice <= 12) {
+						if (rng.uniform(100) < 12)
+							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
+						else
+							editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					}
 				}
 			}
@@ -279,9 +319,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 								std::vector<Block>{GRASS_BLOCK}})) {
 				int r = static_cast<int>(rng.uniform(200));
 				if (r == 0) {
-					editor.set_block(OAK_LEAVES, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					bush::place(editor, x, z, bush::Kind::Garden);
 				} else if (r <= 8) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -300,13 +338,11 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 								std::vector<Block>{GRASS_BLOCK}})) {
 				int r = static_cast<int>(rng.uniform(200));
 				if (r == 0) {
-					editor.set_block(OAK_LEAVES, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (r <= 2) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
-				} else if (r <= 17) {
+				} else if (r < 17) {
 					editor.set_block(GRASS, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
 				}
@@ -316,16 +352,14 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 						std::optional<std::vector<Block>>{
 								std::vector<Block>{GRASS_BLOCK}})) {
 				int random_choice = static_cast<int>(rng.uniform(1001));
-				if (random_choice < 5) {
+				if (random_choice < 5 && editor.land_cover_backs_trees(x, z)) {
 					Tree::create(editor, Coord{x, 1, z}, &building_footprints,
 							&bridge_surface);
 				} else if (random_choice < 6) {
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (random_choice < 9) {
-					editor.set_block(OAK_LEAVES, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (random_choice < 40) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -350,9 +384,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 									   std::vector<Block>{GRASS_BLOCK}})) {
 				int r = static_cast<int>(rng.uniform(100));
 				if (r == 0) {
-					editor.set_block(OAK_LEAVES, x, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (r <= 2) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -368,7 +400,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 								   std::vector<Block>{COARSE_DIRT}})) {
 			int r = static_cast<int>(rng.uniform(150));
 			if (r <= 3) {
-				editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
+				bush::place(editor, x, z, bush::Kind::Low);
 			} else if (r == 4) {
 				editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
 			} else if (r <= 15) {
@@ -377,7 +409,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 		} else if (landuse_tag == "farmland") {
 			if (!editor.check_for_block(x, 0, z,
 						std::optional<std::vector<Block>>{std::vector<Block>{WATER}})) {
-				if (x % 9 == 0 && z % 9 == 0) {
+				if (x % 9 == 0 && z % 9 == 0 && editor.water_source_is_enclosed(x, z)) {
 					editor.set_block(WATER, x, 0, z,
 							std::optional<std::vector<Block>>{
 									std::vector<Block>{FARMLAND}},
@@ -392,10 +424,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 									std::optional<std::vector<Block>>{
 											std::vector<Block>{SPONGE}});
 						} else {
-							editor.set_block(OAK_LEAVES, x, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>{
-											std::vector<Block>{SPONGE}});
+							bush::place(editor, x, z, bush::Kind::Low);
 						}
 					} else {
 						if (editor.check_for_block(x, 0, z,
@@ -413,108 +442,6 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 						}
 					}
 				}
-			}
-		} else if (landuse_tag == "construction") {
-			int random_choice = static_cast<int>(rng.uniform(1501));
-			if (random_choice < 15) {
-				editor.set_block(SCAFFOLDING, x, 1, z,
-						std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>());
-				if (random_choice < 2) {
-					editor.set_block(SCAFFOLDING, x, 2, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 3, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				} else if (random_choice < 4) {
-					editor.set_block(SCAFFOLDING, x, 2, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 3, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 4, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 1, z + 1,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				} else {
-					editor.set_block(SCAFFOLDING, x, 2, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 3, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 4, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x, 5, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x - 1, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(SCAFFOLDING, x + 1, 1, z - 1,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				}
-			} else if (random_choice < 55) {
-				std::array<Block, 13> construction_items = {OAK_LOG, COBBLESTONE, GRAVEL,
-						GLOWSTONE, STONE, COBBLESTONE_WALL, BLACK_CONCRETE, SAND,
-						OAK_PLANKS, DIRT, BRICK, CRAFTING_TABLE, FURNACE};
-				editor.set_block(
-						construction_items[rng.uniform(
-								static_cast<std::uint32_t>(construction_items.size()))],
-						x, 1, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>());
-			} else if (random_choice < 65) {
-				if (random_choice < 60) {
-					editor.set_block(DIRT, x, 1, z, std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(DIRT, x, 2, z, std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(DIRT, x + 1, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(DIRT, x, 1, z + 1,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				} else {
-					editor.set_block(DIRT, x, 1, z, std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(DIRT, x, 2, z, std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(DIRT, x - 1, 1, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block(DIRT, x, 1, z - 1,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-				}
-			} else if (random_choice < 100) {
-				editor.set_block(GRAVEL, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
-			} else if (random_choice < 115) {
-				editor.set_block(SAND, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
-			} else if (random_choice < 125) {
-				editor.set_block(DIORITE, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
-			} else if (random_choice < 145) {
-				editor.set_block(BRICK, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
-			} else if (random_choice < 155) {
-				editor.set_block(GRANITE, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
-			} else if (random_choice < 180) {
-				editor.set_block(ANDESITE, x, 0, z, std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
-			} else if (random_choice < 565) {
-				editor.set_block(COBBLESTONE, x, 0, z,
-						std::optional<std::vector<Block>>(),
-						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
 			}
 		} else if (landuse_tag == "quarry") {
 			editor.set_block(STONE, x, -1, z,
@@ -574,6 +501,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	if (landuse_tag == "construction") {
 		structures::crane::maybe_place_crane(editor, floor_area);
 		structures::excavator::scatter_excavators(editor, floor_area);
+		construction_site::furnish(editor, element, floor_area, building_footprints);
 	}
 
 	if (landuse_tag == "farmland") {

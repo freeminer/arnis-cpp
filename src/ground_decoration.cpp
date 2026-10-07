@@ -1,4 +1,5 @@
 #include "ground_decoration.h"
+#include "element_processing/bush.h"
 
 #include "args.h"
 #include "block_definitions.h"
@@ -35,7 +36,9 @@ const std::vector<Block> &loose_plants()
 			LILY_OF_THE_VALLEY, RED_TULIP, ORANGE_TULIP, WHITE_TULIP, PINK_TULIP,
 			SUNFLOWER_LOWER, SUNFLOWER_UPPER, LILAC_LOWER, LILAC_UPPER, ROSE_BUSH_LOWER,
 			ROSE_BUSH_UPPER, PEONY_LOWER, PEONY_UPPER, SWEET_BERRY_BUSH, BROWN_MUSHROOM,
-			RED_MUSHROOM, MOSS_CARPET, SUGAR_CANE, PUMPKIN, CACTUS, OAK_LEAVES};
+			RED_MUSHROOM, MOSS_CARPET, SUGAR_CANE, PUMPKIN, CACTUS, OAK_LEAVES,
+			BIRCH_LEAVES, SPRUCE_LEAVES, DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES,
+			AZALEA_LEAVES, FLOWERING_AZALEA_LEAVES};
 	return blocks;
 }
 
@@ -52,14 +55,17 @@ bool open_above(WorldEditor &e, int x, int y, int z)
 							e.check_for_block_absolute(x, y + 1, z,
 									std::optional<std::vector<Block>>{{GRASS}});
 	const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
-			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
+			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG};
 	return first_open && !e.check_for_block_absolute(x, y + 2, z, wood);
 }
 
 bool is_undergrowth_impl(const Block &block)
 {
-	return block != OAK_LEAVES && std::find(loose_plants().begin(), loose_plants().end(),
-										  block) != loose_plants().end();
+	const auto &bush_leaves = bush::leaf_blocks();
+	return std::find(bush_leaves.begin(), bush_leaves.end(), block) ==
+				   bush_leaves.end() &&
+		   std::find(loose_plants().begin(), loose_plants().end(), block) !=
+				   loose_plants().end();
 }
 
 void clear_undergrowth_under_trunk_impl(WorldEditor &editor, int x, int y, int z)
@@ -520,7 +526,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 							   x, y + 1, z, std::vector<Block>{GRASS})) &&
 			   !editor.check_for_block_absolute(x, y + 2, z,
 					   std::vector<Block>{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
-							   JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG});
+							   JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG});
 	};
 	const auto plant_on = [&](int x, int y, int z, const std::vector<Block> &blocks,
 								  const Block &plant) {

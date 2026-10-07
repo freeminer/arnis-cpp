@@ -747,8 +747,10 @@ Block resolve_schem_block(const std::string &name)
 		return ACACIA_LEAVES;
 	if (n == "cherry_leaves")
 		return CHERRY_LEAVES;
-	if (n == "azalea_leaves" || n == "flowering_azalea_leaves")
-		return OAK_LEAVES;
+	if (n == "azalea_leaves")
+		return AZALEA_LEAVES;
+	if (n == "flowering_azalea_leaves")
+		return FLOWERING_AZALEA_LEAVES;
 	if (n == "water")
 		return WATER;
 	if (n == "redstone_lamp")

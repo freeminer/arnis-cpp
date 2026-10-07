@@ -16,6 +16,7 @@
 #include "sport_pitches.h"
 #include "bridges.h"
 #include "../ground_decoration.h"
+#include "bush.h"
 #include "../structures/structures.h"
 #include "../deterministic_rng.h"
 #include "../../../arnis_adapter.h"
@@ -148,8 +149,7 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 						// Grass
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					} else if (random_choice >= 90 && random_choice < 105) {
-						// Oak leaves
-						editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
+						bush::place(editor, x, z, bush::Kind::Garden);
 					} else if (random_choice >= 105 && random_choice < 120) {
 						// Match Rust's land-cover guard: a park meadow may only
 						// receive a tree where the source cover supports woody growth,

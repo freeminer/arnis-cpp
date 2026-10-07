@@ -15,6 +15,8 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <chrono>
 #include <curl/curl.h>
 #include <cmath>
 #include <cstring>
@@ -27,6 +29,7 @@
 #include <optional>
 #include <regex>
 #include <string>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -554,12 +557,20 @@ std::vector<OvertureBuilding> decode_overture_building_tile(
 		const std::vector<std::uint8_t> &tile, std::uint32_t tile_x, std::uint32_t tile_y,
 		std::uint8_t zoom, std::size_t maximum)
 {
+	auto decoded = try_decode_overture_building_tile(tile, tile_x, tile_y, zoom, maximum);
+	return decoded ? std::move(*decoded) : std::vector<OvertureBuilding>{};
+}
+
+std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
+		const std::vector<std::uint8_t> &tile, std::uint32_t tile_x, std::uint32_t tile_y,
+		std::uint8_t zoom, std::size_t maximum)
+{
 	std::vector<OvertureBuilding> buildings;
 	if (maximum == 0)
 		return buildings;
 	const auto layers = mvt::decode(tile);
 	if (!layers)
-		return buildings;
+		return std::nullopt;
 	for (const auto &layer : *layers) {
 		if (layer.name != "building" || layer.extent == 0)
 			continue;
@@ -623,11 +634,11 @@ std::vector<OvertureBuilding> decode_overture_building_tile(
 
 BuildingSource pmtiles_building_source(pmtiles::Header header,
 		std::vector<std::uint8_t> root_directory, pmtiles::RangeReader read_range,
-		std::uint8_t zoom)
+		std::uint8_t zoom, bool debug)
 {
 	return [header, root_directory = std::move(root_directory),
-				   read_range = std::move(read_range),
-				   zoom](const geographic::LLBBox &bbox, std::size_t maximum) {
+				   read_range = std::move(read_range), zoom,
+				   debug](const geographic::LLBBox &bbox, std::size_t maximum) {
 		std::vector<OvertureBuilding> buildings;
 		std::unordered_map<std::string, std::size_t> by_id;
 		if (maximum == 0 || !read_range || zoom < header.min_zoom ||
@@ -642,14 +653,89 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 		const auto height = std::uint64_t(max_y) - min_y + 1;
 		if (width > max_tiles || height > max_tiles || width * height > max_tiles)
 			return buildings;
-		for (std::uint32_t x = min_x; x <= max_x; ++x) {
-			for (std::uint32_t y = min_y; y <= max_y; ++y) {
-				const auto tile = pmtiles::read_tile(
-						header, root_directory, zoom, x, y, read_range);
-				if (!tile)
+		struct TileResult
+		{
+			pmtiles::TileReadStatus status = pmtiles::TileReadStatus::Error;
+			std::vector<OvertureBuilding> buildings;
+		};
+		struct LocatedTile
+		{
+			std::uint32_t x, y;
+			pmtiles::TileLocation location;
+		};
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> tiles;
+		tiles.reserve(static_cast<std::size_t>(width * height));
+		for (std::uint32_t x = min_x; x <= max_x; ++x)
+			for (std::uint32_t y = min_y; y <= max_y; ++y)
+				tiles.emplace_back(x, y);
+		std::vector<LocatedTile> located;
+		located.reserve(tiles.size());
+		pmtiles::LeafDirectoryCache leaf_cache;
+		std::size_t missing_tiles = 0;
+		std::size_t locate_failures = 0;
+		for (const auto &[x, y] : tiles) {
+			const auto result = pmtiles::locate_tile_checked(
+					header, root_directory, zoom, x, y, read_range, &leaf_cache);
+			if (result.status == pmtiles::TileReadStatus::Missing) {
+				++missing_tiles;
+			} else if (result.status == pmtiles::TileReadStatus::Error) {
+				++locate_failures;
+			} else {
+				located.push_back({x, y, result.location});
+			}
+		}
+		if (debug)
+			std::cerr << "Overture tiles: " << tiles.size() << " cover the bbox, "
+					  << located.size() << " hold data, " << missing_tiles
+					  << " are empty.\n";
+		const unsigned hardware_threads = std::thread::hardware_concurrency();
+		const std::size_t workers = std::clamp<std::size_t>(
+				hardware_threads == 0 ? 2 : hardware_threads, 2, 8);
+		constexpr std::size_t tile_batch_size = 64;
+		std::size_t lost_tiles = locate_failures;
+		for (std::size_t batch_start = 0; batch_start < located.size();
+				batch_start += tile_batch_size) {
+			const auto batch_count =
+					std::min(tile_batch_size, located.size() - batch_start);
+			std::vector<TileResult> results(batch_count);
+			std::atomic_size_t next{0};
+			auto read_batch_tile = [&]() {
+				for (;;) {
+					const auto index = next.fetch_add(1, std::memory_order_relaxed);
+					if (index >= batch_count)
+						return;
+					const auto &located_tile = located[batch_start + index];
+					auto &result = results[index];
+					auto tile = pmtiles::read_tile_payload_checked(
+							header, located_tile.location, read_range);
+					result.status = tile.status;
+					if (tile.status == pmtiles::TileReadStatus::Found &&
+							!tile.bytes.empty()) {
+						auto decoded = try_decode_overture_building_tile(
+								tile.bytes, located_tile.x, located_tile.y, zoom, maximum);
+						if (decoded)
+							result.buildings = std::move(*decoded);
+						else
+							result.status = pmtiles::TileReadStatus::Error;
+					}
+				}
+			};
+			std::vector<std::thread> pool;
+			pool.reserve(std::min(workers, batch_count));
+			for (std::size_t i = 0; i < std::min(workers, batch_count); ++i)
+				pool.emplace_back(read_batch_tile);
+			for (auto &worker : pool)
+				worker.join();
+
+			// Merge in tile order, independent of worker completion order. Keep
+			// the largest buffered footprint for each GERS id; tile-edge copies
+			// are clipped, while the full copy preserves more geometry.
+			for (auto &result : results) {
+				if (result.status == pmtiles::TileReadStatus::Error) {
+					++lost_tiles;
 					continue;
-				auto decoded = decode_overture_building_tile(*tile, x, y, zoom, maximum);
-				for (auto &building : decoded) {
+				}
+				for (auto &building : result.buildings) {
 					if (!ring_overlaps_bbox(building.exterior_ring, bbox))
 						continue;
 					const auto previous = by_id.find(building.id);
@@ -661,16 +747,15 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 						buildings[previous->second] = std::move(building);
 					}
 				}
-				// Stop at the same point as the Rust tile collector: after a tile
-				// completes the budget, but not halfway through that tile. This lets
-				// duplicate copies still replace clipped footprints with their larger
-				// intact ring while bounding memory for dense areas.
-				if (buildings.size() >= maximum)
-					break;
 			}
+			// Check the cap between bounded rounds, after every tile in this
+			// round had a chance to replace a clipped duplicate with its full ring.
 			if (buildings.size() >= maximum)
 				break;
 		}
+		if (debug && lost_tiles > 0)
+			std::cerr << "Warning: Overture tile data incomplete: " << lost_tiles
+					  << " tile read(s) failed.\n";
 		std::sort(buildings.begin(), buildings.end(),
 				[](const OvertureBuilding &a, const OvertureBuilding &b) {
 					return a.id < b.id;
@@ -681,8 +766,8 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 	};
 }
 
-BuildingSource http_pmtiles_building_source(
-		std::string archive_url, std::uint8_t zoom, std::filesystem::path cache_directory)
+BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_t zoom,
+		std::filesystem::path cache_directory, bool debug)
 {
 	struct State
 	{
@@ -691,8 +776,8 @@ BuildingSource http_pmtiles_building_source(
 	};
 	auto state = std::make_shared<State>();
 	return [url = std::move(archive_url), state, zoom,
-				   cache_directory = std::move(cache_directory)](
-				   const geographic::LLBBox &bbox, std::size_t maximum) {
+				   cache_directory = std::move(cache_directory),
+				   debug](const geographic::LLBBox &bbox, std::size_t maximum) {
 		const pmtiles::RangeReader range = [&url, &cache_directory](std::uint64_t offset,
 												   std::uint64_t length)
 				-> std::optional<std::vector<std::uint8_t>> {
@@ -707,7 +792,15 @@ BuildingSource http_pmtiles_building_source(
 						cached && cached->size() == length)
 					return cached;
 			}
-			const auto bytes = http_get_range(url, offset, length);
+			std::string bytes;
+			for (unsigned attempt = 0; attempt < 3; ++attempt) {
+				if (attempt > 0)
+					std::this_thread::sleep_for(
+							std::chrono::milliseconds(500U << (attempt - 1)));
+				bytes = http_get_range(url, offset, length);
+				if (bytes.size() == length)
+					break;
+			}
 			if (bytes.size() != length)
 				return {};
 			auto data = std::vector<std::uint8_t>(bytes.begin(), bytes.end());
@@ -727,7 +820,7 @@ BuildingSource http_pmtiles_building_source(
 		if (archive.root_directory.empty())
 			return std::vector<OvertureBuilding>{};
 		return pmtiles_building_source(archive.header, std::move(archive.root_directory),
-				range, zoom)(bbox, maximum);
+				range, zoom, debug)(bbox, maximum);
 	};
 }
 
@@ -1003,7 +1096,7 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 					  << overture_building_budget(bbox) << " buildings.\n";
 		auto result = fetch_overture_buildings_from(
 				http_pmtiles_building_source(archive, 14,
-						cache::cache_root() / release / "tiles" / "buildings"),
+						cache::cache_root() / release / "tiles" / "buildings", debug),
 				bbox, scale);
 		if (!result.empty()) {
 			if (!release_env) {

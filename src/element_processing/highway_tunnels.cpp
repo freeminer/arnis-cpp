@@ -5,6 +5,7 @@
 #include <limits>
 #include <tuple>
 #include <unordered_map>
+#include <utility>
 
 #include "../bresenham.h"
 #include "../world_editor/floor_state.h"
@@ -23,6 +24,13 @@ constexpr int CEIL_OFFSET = 5, COVER_DROP = 7, RAMP_RUN = 3, LAYER_DROP = 7;
 int min_road_y()
 {
 	return world_editor::terrain_floor_y() + 2;
+}
+
+int terrain_or_ground(const WorldEditor &editor, int x, int z)
+{
+	if (const auto terrain = editor.terrain_level(x, z))
+		return *terrain;
+	return editor.get_ground_level(x, z);
 }
 
 Block shell_block(int x, int y, int z)
@@ -100,8 +108,25 @@ int footprint_min_terrain(
 	int minimum = fallback;
 	for (int dx = -radius; dx <= radius; ++dx)
 		for (int dz = -radius; dz <= radius; ++dz)
-			minimum = std::min(minimum, editor.get_ground_level(x + dx, z + dz));
+			minimum = std::min(
+					minimum, editor.terrain_level(x + dx, z + dz).value_or(fallback));
 	return minimum;
+}
+
+std::pair<std::vector<int>, std::vector<int>> tunnel_cover_profile(
+		const WorldEditor &editor, const std::vector<std::pair<int, int>> &points,
+		int wall_offset)
+{
+	std::vector<int> terrain;
+	std::vector<int> cover;
+	terrain.reserve(points.size());
+	cover.reserve(points.size());
+	for (const auto &[x, z] : points)
+		terrain.push_back(terrain_or_ground(editor, x, z));
+	for (std::size_t i = 0; i < points.size(); ++i)
+		cover.push_back(footprint_min_terrain(
+				editor, points[i].first, points[i].second, wall_offset, terrain[i]));
+	return {std::move(terrain), std::move(cover)};
 }
 
 std::vector<PortalFace> portal_faces(const std::vector<std::pair<int, int>> &points,
@@ -132,18 +157,17 @@ bool beyond_portal(const std::vector<PortalFace> &faces, int x, int z)
 	return false;
 }
 
-bool tunnel_bore_fits_impl(const WorldEditor &editor, const ProcessedWay &way, double scale)
+bool tunnel_bore_fits_impl(
+		const WorldEditor &editor, const ProcessedWay &way, double scale)
 {
 	const auto points = way_centerline(way);
 	if (points.size() < 2)
 		return false;
 	const int wall = highway_half_width(way, scale) + 1;
-	return std::any_of(points.begin(), points.end(), [&](const auto &point) {
-		const int terrain = editor.get_ground_level(point.first, point.second);
-		return footprint_min_terrain(editor, point.first, point.second, wall, terrain) -
-					   min_road_y() >=
-			   CEIL_OFFSET + 1;
-	});
+	const auto [terrain, cover] = tunnel_cover_profile(editor, points, wall);
+	(void)terrain;
+	return std::any_of(cover.begin(), cover.end(),
+			[](int y) { return y - min_road_y() >= CEIL_OFFSET + 1; });
 }
 
 }
@@ -283,8 +307,9 @@ TunnelPortalMap collect_tunnel_portals(const std::vector<ProcessedElement> &elem
 			const std::pair portal{node->x, node->z};
 			if (internal.contains(portal) || portals.nodes_.contains(portal))
 				continue;
-			const int headroom =
-					editor.get_ground_level(portal.first, portal.second) - min_road_y();
+			const int portal_ground =
+					terrain_or_ground(editor, portal.first, portal.second);
+			const int headroom = portal_ground - min_road_y();
 			const int wanted_here = std::min(wanted, headroom);
 			if (wanted_here <= 0)
 				continue;
@@ -405,9 +430,9 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 	const auto pts = way_centerline(way);
 	if (pts.size() < 2)
 		return false;
-	std::vector<int> terrain;
-	for (auto [x, z] : pts)
-		terrain.push_back(editor.get_ground_level(x, z));
+	const int hw = highway_half_width(way, args.scale);
+	const int wall = hw + 1;
+	const auto [terrain, cover] = tunnel_cover_profile(editor, pts, wall);
 	const size_t last = pts.size() - 1;
 	const bool start_internal = internal.contains(pts.front()),
 			   end_internal = internal.contains(pts.back());
@@ -415,12 +440,6 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 	std::string type = way.tags.get("highway");
 	if (type.empty())
 		type = "road";
-	const int hw = highway_half_width(way, args.scale), wall = hw + 1;
-	std::vector<int> cover;
-	cover.reserve(pts.size());
-	for (size_t i = 0; i < pts.size(); ++i)
-		cover.push_back(footprint_min_terrain(
-				editor, pts[i].first, pts[i].second, wall, terrain[i]));
 	if (std::none_of(cover.begin(), cover.end(),
 				[](int y) { return y - min_road_y() >= CEIL_OFFSET + 1; }))
 		return false;
@@ -498,19 +517,37 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 					  type == "steps")
 					? std::vector<Block>{GRAY_CONCRETE}
 					: std::vector<Block>{GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA};
-	const auto palette = surfaces::get_blocks_for_surface_way(way, defaults);
+	auto palette = surfaces::get_blocks_for_surface_way(way, defaults);
+	if (way.tags.get("highway") == "cycleway")
+		if (const auto cycleway = surfaces::cycleway_palette(way))
+			palette = *cycleway;
 	for (size_t i = 0; i < pts.size(); ++i) {
 		auto [x, z] = pts[i];
 		const int ry = road[i], ty = terrain[i];
 		const bool cell_covered = covered[i];
-		const int top = cell_covered ? ry + CEIL_OFFSET : ty;
+		int carve_top = ry + CEIL_OFFSET - 1;
+		if (!cell_covered) {
+			carve_top = ty;
+			const size_t lo = i > static_cast<size_t>(hw) ? i - hw : 0;
+			const size_t hi = std::min(last, i + static_cast<size_t>(hw));
+			for (size_t j = lo; j <= hi; ++j)
+				if (covered[j])
+					carve_top = std::min(carve_top, road[j] + CEIL_OFFSET - 1);
+		}
+		const int top = cell_covered ? ry + CEIL_OFFSET : carve_top;
 		for (int dx = -wall; dx <= wall; ++dx) {
 			for (int dz = -wall; dz <= wall; ++dz) {
 				if (beyond_portal(faces, x + dx, z + dz))
 					continue;
+				const int column_terrain =
+						editor.terrain_level(x + dx, z + dz).value_or(terrain[i]);
+				const bool carries_road = std::abs(dx) <= hw && std::abs(dz) <= hw;
 				const int column_top =
-						std::min(top, editor.get_ground_level(x + dx, z + dz) - 1);
-				for (int y = ry - 1; y <= std::max(ry - 1, column_top); ++y) {
+						carries_road ? std::max(ry - 1, std::min(top, column_terrain - 1))
+									 : std::min(top, column_terrain - 1);
+				if (column_top < ry - 1)
+					continue;
+				for (int y = ry - 1; y <= column_top; ++y) {
 					const bool edge = std::abs(dx) == wall || std::abs(dz) == wall ||
 									  (cell_covered && y == ry + CEIL_OFFSET);
 					editor.set_block_absolute(
@@ -523,7 +560,7 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 				.z = z,
 				.road_y = ry,
 				.half_width = hw,
-				.terrain_y = ty,
+				.carve_top = carve_top,
 				.covered = cell_covered,
 				.light = cell_covered && i % 8 == 0,
 				.palette = palette,
@@ -537,19 +574,25 @@ void carve_highway_tunnel_interior(
 {
 	const std::vector<Block> carve{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS,
 			STONE, WATER, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA, GRAY_CONCRETE,
-			BLACK_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, GRASS_BLOCK, DIRT,
-			COARSE_DIRT, PODZOL, MUD, CLAY, SAND, SANDSTONE, GRAVEL, ANDESITE,
-			COBBLESTONE, TUFF, DEEPSLATE, SNOW_BLOCK, SNOW_LAYER, MOSS_BLOCK, FARMLAND};
+			BLACK_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, YELLOW_CONCRETE,
+			GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, MUD, CLAY, SAND, SANDSTONE, GRAVEL,
+			ANDESITE, COBBLESTONE, TUFF, DEEPSLATE, SNOW_BLOCK, SNOW_LAYER, MOSS_BLOCK,
+			FARMLAND};
 	const std::vector<Block> road_wl{AIR, STONE, STONE_BRICKS, CRACKED_STONE_BRICKS,
 			MOSSY_STONE_BRICKS, WATER, SEA_LANTERN};
 	for (const auto &c : cells) {
-		const int top = c.covered ? c.road_y + CEIL_OFFSET - 1 : c.terrain_y;
 		for (int dx = -c.half_width; dx <= c.half_width; ++dx)
 			for (int dz = -c.half_width; dz <= c.half_width; ++dz)
-				if (!beyond_portal(c.faces, c.x + dx, c.z + dz))
+				if (!beyond_portal(c.faces, c.x + dx, c.z + dz)) {
+					const int x = c.x + dx, z = c.z + dz;
+					const int top = c.covered
+											? c.carve_top
+											: std::min(c.carve_top,
+													  editor.terrain_level(x, z).value_or(
+															  c.carve_top));
 					for (int y = c.road_y + 1; y <= top; ++y)
-						editor.set_block_absolute(
-								AIR, c.x + dx, y, c.z + dz, carve, std::nullopt);
+						editor.set_block_absolute(AIR, x, y, z, carve, std::nullopt);
+				}
 		if (c.light)
 			editor.set_block_absolute(SEA_LANTERN, c.x, c.road_y + CEIL_OFFSET - 1, c.z);
 	}

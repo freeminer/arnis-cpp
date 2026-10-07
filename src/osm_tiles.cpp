@@ -23,9 +23,12 @@ namespace arnis::osm_tiles
 {
 namespace
 {
-constexpr std::int64_t EDGE_MARGIN_E6 = 1'000;
-constexpr std::int64_t MAX_LAT_E6 = 90'000'000;
-constexpr std::int64_t MAX_LON_E6 = 180'000'000;
+constexpr std::int64_t EDGE_MARGIN_E7 = 10'000;
+constexpr std::int64_t MAX_LAT_E7 = 900'000'000;
+constexpr std::int64_t MAX_LON_E7 = 1'800'000'000;
+constexpr std::uint64_t SPILL_LAT = (std::uint64_t{1} << 31) - 1;
+constexpr std::uint64_t RELATION_TILE_BASE = ((std::uint64_t{1} << 40) - 1) / 3;
+constexpr std::uint64_t MAX_RECORD_BYTES = 16 * 1024 * 1024;
 
 bool building_tags(const tags_t &tags)
 {
@@ -86,21 +89,21 @@ std::vector<DecodedTile> select_for_bbox(
 	// Match Rust's extent exactly: outward rounding plus the small margin keeps
 	// ways whose projected vertices land on the edge row/column available to the
 	// downstream bbox clipper.
-	const auto lower_e6 = [](double value, std::int64_t limit) {
+	const auto lower_e7 = [](double value, std::int64_t limit) {
 		return std::clamp(static_cast<std::int64_t>(std::floor(value * COORD_SCALE)) -
-								  EDGE_MARGIN_E6,
+								  EDGE_MARGIN_E7,
 				-limit, limit);
 	};
-	const auto upper_e6 = [](double value, std::int64_t limit) {
+	const auto upper_e7 = [](double value, std::int64_t limit) {
 		return std::clamp(static_cast<std::int64_t>(std::ceil(value * COORD_SCALE)) +
-								  EDGE_MARGIN_E6,
+								  EDGE_MARGIN_E7,
 				-limit, limit);
 	};
 	const TileExtent area{
-			static_cast<std::int32_t>(lower_e6(bbox.min().lat(), MAX_LAT_E6)),
-			static_cast<std::int32_t>(lower_e6(bbox.min().lng(), MAX_LON_E6)),
-			static_cast<std::int32_t>(upper_e6(bbox.max().lat(), MAX_LAT_E6)),
-			static_cast<std::int32_t>(upper_e6(bbox.max().lng(), MAX_LON_E6)), true};
+			static_cast<std::int32_t>(lower_e7(bbox.min().lat(), MAX_LAT_E7)),
+			static_cast<std::int32_t>(lower_e7(bbox.min().lng(), MAX_LON_E7)),
+			static_cast<std::int32_t>(upper_e7(bbox.max().lat(), MAX_LAT_E7)),
+			static_cast<std::int32_t>(upper_e7(bbox.max().lng(), MAX_LON_E7)), true};
 	std::unordered_map<std::uint64_t, DecodedWay> ways;
 	std::unordered_map<std::uint64_t, DecodedRelation> relations;
 	for (const auto &tile : input) {
@@ -172,7 +175,10 @@ std::vector<DecodedTile> select_for_bbox(
 			if (in_area || vertices.contains({node.lat, node.lon}))
 				out.nodes.push_back(node);
 		}
-		if (!out.ways.empty() || !out.relations.empty())
+		// Rust's assembler keeps in-bbox standalone nodes as well as ways and
+		// relations. Dropping a node-only tile here loses mapped POIs and other
+		// point features when no selected way shares their archive tile.
+		if (!out.nodes.empty() || !out.ways.empty() || !out.relations.empty())
 			selected.push_back(std::move(out));
 	}
 	return selected;
@@ -382,6 +388,13 @@ bool coord(std::int64_t v, std::int64_t limit, std::int32_t &out, std::string *e
 	out = static_cast<std::int32_t>(v);
 	return true;
 }
+bool scaled_coord(std::int64_t value, std::int64_t multiplier, std::int64_t limit,
+		std::int32_t &out, std::string *error)
+{
+	if (value < -limit / multiplier || value > limit / multiplier)
+		return fail(error, "tile coordinate out of range");
+	return coord(value * multiplier, limit, out, error);
+}
 bool oid(std::int64_t v, std::uint64_t &out, std::string *e)
 {
 	if (v < 0 || static_cast<std::uint64_t>(v) >= SYNTHETIC_ID_BASE)
@@ -392,20 +405,57 @@ bool oid(std::int64_t v, std::uint64_t &out, std::string *e)
 
 std::uint64_t coordinate_node_id(const std::pair<std::int32_t, std::int32_t> &coordinate)
 {
-	constexpr std::int64_t max_lat_e6 = 90'000'000;
-	constexpr std::int64_t max_lon_e6 = 180'000'000;
 	const auto lat = static_cast<std::uint64_t>(
-			static_cast<std::int64_t>(coordinate.first) + max_lat_e6);
-	const auto lon = static_cast<std::uint64_t>(
-			static_cast<std::int64_t>(coordinate.second) + max_lon_e6);
-	return SYNTHETIC_ID_BASE | (lat << 29) | lon;
+			static_cast<std::int64_t>(coordinate.first) + MAX_LAT_E7);
+	const auto lon = static_cast<std::uint64_t>(coordinate.second) &
+					 ((std::uint64_t{1} << 30) - 1);
+	return SYNTHETIC_ID_BASE | (lat << 30) | lon;
 }
+
+struct CoordinateNodeIds
+{
+	struct PairHash
+	{
+		std::size_t operator()(
+				const std::pair<std::int32_t, std::int32_t> &p) const noexcept
+		{
+			return (std::uint64_t(static_cast<std::uint32_t>(p.first)) << 32) ^
+				   static_cast<std::uint32_t>(p.second);
+		}
+	};
+	std::unordered_map<std::uint64_t, std::pair<std::int32_t, std::int32_t>> owners;
+	std::unordered_map<std::pair<std::int32_t, std::int32_t>, std::uint64_t, PairHash>
+			spills;
+
+	std::pair<std::uint64_t, bool> get(const std::pair<std::int32_t, std::int32_t> &point)
+	{
+		const auto id = coordinate_node_id(point);
+		const auto found = owners.find(id);
+		if (found == owners.end()) {
+			owners.emplace(id, point);
+			return {id, true};
+		}
+		if (found->second == point)
+			return {id, false};
+		if (const auto spilled = spills.find(point); spilled != spills.end())
+			return {spilled->second, false};
+		const auto spill_id = SYNTHETIC_ID_BASE | (SPILL_LAT << 30) | spills.size();
+		spills.emplace(point, spill_id);
+		return {spill_id, true};
+	}
+};
 }
 
 bool decode(const std::vector<std::uint8_t> &b, DecodedTile &out, std::string *error)
 {
 	out = {};
-	if (b.size() < 4 || !std::equal(b.begin(), b.begin() + 4, "AOT1"))
+	if (b.size() < 4)
+		return fail(error, "not an Arnis tile payload");
+	const std::int64_t coordinate_multiplier =
+			std::equal(b.begin(), b.begin() + 4, "AOT2")   ? 1
+			: std::equal(b.begin(), b.begin() + 4, "AOT1") ? 10
+														   : 0;
+	if (!coordinate_multiplier)
 		return fail(error, "not an Arnis tile payload");
 	Reader r{b};
 	r.p = 4;
@@ -448,8 +498,10 @@ bool decode(const std::vector<std::uint8_t> &b, DecodedTile &out, std::string *e
 	for (std::uint64_t i = 0; i < count; ++i) {
 		DecodedNode n;
 		if (!step(r, id, v, error) || !oid(v, n.id, error) || !step(r, lat, v, error) ||
-				!coord(v, 90000000, n.lat, error) || !step(r, lon, v, error) ||
-				!coord(v, 180000000, n.lon, error) || !read_tags(n.tags))
+				!scaled_coord(v, coordinate_multiplier, MAX_LAT_E7, n.lat, error) ||
+				!step(r, lon, v, error) ||
+				!scaled_coord(v, coordinate_multiplier, MAX_LON_E7, n.lon, error) ||
+				!read_tags(n.tags))
 			return false;
 		out.nodes.push_back(std::move(n));
 	}
@@ -469,8 +521,10 @@ bool decode(const std::vector<std::uint8_t> &b, DecodedTile &out, std::string *e
 		std::int64_t y = 0, x = 0;
 		for (std::uint64_t j = 0; j < np; ++j) {
 			std::int32_t yy, xx;
-			if (!step(r, y, v, error) || !coord(v, 90000000, yy, error) ||
-					!step(r, x, v, error) || !coord(v, 180000000, xx, error))
+			if (!step(r, y, v, error) ||
+					!scaled_coord(v, coordinate_multiplier, MAX_LAT_E7, yy, error) ||
+					!step(r, x, v, error) ||
+					!scaled_coord(v, coordinate_multiplier, MAX_LON_E7, xx, error))
 				return false;
 			w.points.emplace_back(yy, xx);
 		}
@@ -534,20 +588,25 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	for (const auto &[id, _] : ways)
 		wi.push_back(id);
 	std::sort(wi.begin(), wi.end());
-	std::set<Coordinate> vertex_coordinates;
+	CoordinateNodeIds node_ids;
+	std::map<Coordinate, std::uint64_t> vertex_ids;
 	std::vector<Coordinate> synthetic;
 	for (const auto id : wi)
-		for (const auto &coordinate : ways.at(id).points)
-			if (vertex_coordinates.insert(coordinate).second &&
-					!lowest_source_id.contains(coordinate))
+		for (const auto &coordinate : ways.at(id).points) {
+			if (vertex_ids.contains(coordinate))
+				continue;
+			const auto [node_id, first] = node_ids.get(coordinate);
+			vertex_ids.emplace(coordinate, node_id);
+			if (first && !lowest_source_id.contains(coordinate))
 				synthetic.push_back(coordinate);
+		}
 	for (const auto &id : ni) {
 		const auto &node = nodes.at(id);
 		const Coordinate coordinate{node.lat, node.lon};
 		const auto source = lowest_source_id.find(coordinate);
-		const auto promoted = vertex_coordinates.contains(coordinate) &&
-							  source != lowest_source_id.end() && source->second == id;
-		out.nodes.push_back({promoted ? coordinate_node_id(coordinate) : id,
+		const bool promoted = vertex_ids.contains(coordinate) &&
+							  (source == lowest_source_id.end() || source->second == id);
+		out.nodes.push_back({promoted ? vertex_ids.at(coordinate) : id,
 				double(node.lat) / COORD_SCALE, double(node.lon) / COORD_SCALE,
 				node.tags});
 	}
@@ -556,9 +615,8 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 		osm_parser::RawWay rw;
 		rw.id = id;
 		rw.tags = w.tags;
-		for (const auto &p : w.points) {
-			rw.node_refs.push_back(coordinate_node_id(p));
-		}
+		for (const auto &p : w.points)
+			rw.node_refs.push_back(vertex_ids.at(p));
 		if (w.closed && rw.node_refs.size() > 1 &&
 				rw.node_refs.front() != rw.node_refs.back())
 			rw.node_refs.push_back(rw.node_refs.front());
@@ -566,7 +624,7 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	}
 	for (const auto &coordinate : synthetic)
 		out.nodes.push_back(
-				{coordinate_node_id(coordinate), double(coordinate.first) / COORD_SCALE,
+				{vertex_ids.at(coordinate), double(coordinate.first) / COORD_SCALE,
 						double(coordinate.second) / COORD_SCALE, {}});
 	std::vector<std::uint64_t> ri;
 	for (const auto &[id, _] : relations)
@@ -680,6 +738,14 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	for (const auto &[x, y] : wanted)
 		wanted_cells.insert((y >> shift) * side + (x >> shift));
 	std::vector<DecodedTile> decoded;
+	struct OpenArchive
+	{
+		overture::pmtiles::Archive archive;
+		overture::pmtiles::RangeReader read_range;
+		std::unordered_set<std::uint64_t> relation_ids;
+		bool aot2 = false;
+	};
+	std::vector<OpenArchive> opened;
 	for (const auto &entry : json["archives"]) {
 		const auto file = entry.value("file", std::string{});
 		if (file.empty() || file.size() > 96 || file.find("..") != std::string::npos ||
@@ -715,12 +781,15 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		}
 		if (!covers)
 			continue;
-		auto range = [&](std::uint64_t off, std::uint64_t len) {
-			return http_range(root + "/" + file, off, len, &local_error);
+		const auto archive_url = root + "/" + file;
+		auto range = [archive_url](std::uint64_t off, std::uint64_t len) {
+			std::string ignored_error;
+			return http_range(archive_url, off, len, &ignored_error);
 		};
 		auto archive = overture::pmtiles::open_archive(range);
 		if (!archive)
 			continue;
+		OpenArchive archive_state{*archive, range, {}, false};
 		for (const auto &[x, y] : wanted) {
 			auto raw = overture::pmtiles::read_tile(
 					archive->header, archive->root_directory, ZOOM, x, y, range);
@@ -730,14 +799,88 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			if (!plain)
 				continue;
 			DecodedTile tile;
-			if (decode(*plain, tile, &local_error))
+			if (decode(*plain, tile, &local_error)) {
+				archive_state.aot2 |=
+						std::equal(plain->begin(), plain->begin() + 4, "AOT2");
+				for (const auto &relation : tile.relations)
+					archive_state.relation_ids.insert(relation.id);
 				decoded.push_back(std::move(tile));
+			}
 		}
+		opened.push_back(std::move(archive_state));
 	}
 	if (decoded.empty()) {
 		if (error)
 			*error = "the tile archive has no data for this area";
 		return std::nullopt;
+	}
+	// AOT2 tiles contain only relation members which touch that tile. If a
+	// selected relation has missing ways, retrieve its whole-record entry from
+	// each AOT2 archive that supplied one of its fragments before assembling.
+	std::unordered_map<std::uint64_t, DecodedWay> available_ways;
+	std::unordered_map<std::uint64_t, DecodedRelation> available_relations;
+	for (const auto &tile : decoded) {
+		for (const auto &way : tile.ways)
+			available_ways.emplace(way.id, way);
+		for (const auto &relation : tile.relations)
+			available_relations.emplace(relation.id, relation);
+	}
+	const auto lower = [](double v, std::int64_t limit) {
+		return static_cast<std::int32_t>(std::clamp(
+				static_cast<std::int64_t>(std::floor(v * COORD_SCALE)) - EDGE_MARGIN_E7,
+				-limit, limit));
+	};
+	const auto upper = [](double v, std::int64_t limit) {
+		return static_cast<std::int32_t>(std::clamp(
+				static_cast<std::int64_t>(std::ceil(v * COORD_SCALE)) + EDGE_MARGIN_E7,
+				-limit, limit));
+	};
+	const TileExtent area{lower(bbox.min().lat(), MAX_LAT_E7),
+			lower(bbox.min().lng(), MAX_LON_E7), upper(bbox.max().lat(), MAX_LAT_E7),
+			upper(bbox.max().lng(), MAX_LON_E7), true};
+	std::unordered_set<std::uint64_t> partial_relations;
+	for (const auto &[id, relation] : available_relations) {
+		bool missing_way = false;
+		for (const auto &member : relation.members)
+			missing_way |= !available_ways.contains(member.ref);
+		if (missing_way && intersects(relation_extent(relation, available_ways), area))
+			partial_relations.insert(id);
+	}
+	for (auto &archive : opened) {
+		if (!archive.aot2)
+			continue;
+		overture::pmtiles::LeafDirectoryCache leaves;
+		for (const auto id : partial_relations) {
+			if (!archive.relation_ids.contains(id))
+				continue;
+			const auto location = overture::pmtiles::locate_id_checked(
+					archive.archive.header, archive.archive.root_directory,
+					RELATION_TILE_BASE + id, archive.read_range, &leaves);
+			if (location.status != overture::pmtiles::TileReadStatus::Found ||
+					location.location.length > MAX_RECORD_BYTES)
+				continue;
+			const auto record = overture::pmtiles::read_tile_payload_checked(
+					archive.archive.header, location.location, archive.read_range);
+			if (record.status != overture::pmtiles::TileReadStatus::Found ||
+					record.bytes.empty())
+				continue;
+			const auto plain = zstd_decode(record.bytes, &local_error);
+			if (!plain)
+				continue;
+			DecodedTile whole_relation;
+			if (decode(*plain, whole_relation, &local_error)) {
+				std::unordered_set<std::uint64_t> completed_ids;
+				for (const auto &relation : whole_relation.relations)
+					completed_ids.insert(relation.id);
+				// Replace the tile's clipped member list with the authoritative record;
+				// retaining the first fragment would still leave multipolygons open.
+				for (auto &tile : decoded)
+					std::erase_if(tile.relations, [&](const DecodedRelation &relation) {
+						return completed_ids.contains(relation.id);
+					});
+				decoded.push_back(std::move(whole_relation));
+			}
+		}
 	}
 	const auto selected = select_for_bbox(decoded, bbox);
 	if (selected.empty()) {

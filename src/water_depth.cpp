@@ -206,21 +206,21 @@ const std::vector<Block> &surface_vegetation()
 	return ground_decoration::loose_plant_blocks();
 }
 
-const std::vector<Block> &tree_parts()
+bool has_suffix(const std::optional<std::string> &name, const char *suffix)
 {
-	using namespace block_definitions;
-	static const std::vector<Block> blocks{OAK_LOG, BIRCH_LOG, SPRUCE_LOG, DARK_OAK_LOG,
-			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, OAK_LEAVES, BIRCH_LEAVES, SPRUCE_LEAVES,
-			DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES};
-	return blocks;
+	return name && name->size() >= std::char_traits<char>::length(suffix) &&
+		   name->compare(name->size() - std::char_traits<char>::length(suffix),
+				   std::char_traits<char>::length(suffix), suffix) == 0;
 }
 
-const std::vector<Block> &tree_trunks()
+bool is_trunk(const std::optional<std::string> &name)
 {
-	using namespace block_definitions;
-	static const std::vector<Block> blocks{OAK_LOG, BIRCH_LOG, SPRUCE_LOG, DARK_OAK_LOG,
-			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
-	return blocks;
+	return has_suffix(name, "_log") || has_suffix(name, "_stem");
+}
+
+bool is_tree_part(const std::optional<std::string> &name)
+{
+	return is_trunk(name) || has_suffix(name, "_leaves");
 }
 
 void clear_tree_from(WorldEditor &editor, int x, int y, int z)
@@ -231,10 +231,9 @@ void clear_tree_from(WorldEditor &editor, int x, int y, int z)
 	while (!stack.empty() && cleared < max_tree_blocks) {
 		auto [cx, cy, cz] = stack.back();
 		stack.pop_back();
-		if (!editor.check_for_block_absolute(cx, cy, cz, tree_parts()))
+		if (!is_tree_part(editor.block_name_absolute(cx, cy, cz)))
 			continue;
-		editor.set_block_absolute(AIR, cx, cy, cz,
-				std::optional<std::vector<Block>>(tree_parts()), std::nullopt);
+		editor.set_block_absolute(AIR, cx, cy, cz);
 		++cleared;
 		for (const auto &[dx, dy, dz] :
 				std::array<std::tuple<int, int, int>, 6>{{{1, 0, 0}, {-1, 0, 0},
@@ -252,13 +251,11 @@ void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 											  : ground_decoration::stacked_plant_parts();
 		editor.set_block_absolute(AIR, x, y, z, &plants, nullptr);
 	}
-	if (editor.check_for_block_absolute(x, water_y + 1, z, tree_trunks()))
+	const auto above_name = editor.block_name_absolute(x, water_y + 1, z);
+	if (is_trunk(above_name))
 		clear_tree_from(editor, x, water_y + 1, z);
-	else if (editor.check_for_block_absolute(x, water_y + 1, z,
-					 std::optional<std::vector<Block>>(tree_parts()),
-					 std::optional<std::vector<Block>>(tree_trunks())))
-		editor.set_block_absolute(AIR, x, water_y + 1, z,
-				std::optional<std::vector<Block>>(tree_parts()), std::nullopt);
+	else if (has_suffix(above_name, "_leaves"))
+		editor.set_block_absolute(AIR, x, water_y + 1, z);
 }
 
 void place_underwater_vegetation(

@@ -101,8 +101,8 @@ std::optional<std::pair<Block, Block>> surface_palette(
 										  : std::make_pair(SAND, SANDSTONE);
 	}
 	if (c == Climate::HotSteppe)
-		return bare ? pick({{.5, {SAND, SANDSTONE}}, {1., {COARSE_DIRT, DIRT}}})
-					: pick({{.3, {SAND, SANDSTONE}}, {.6, {COARSE_DIRT, DIRT}},
+		return bare ? pick({{.35, {SAND, SANDSTONE}}, {1., {COARSE_DIRT, DIRT}}})
+					: pick({{.15, {SAND, SANDSTONE}}, {.5, {COARSE_DIRT, DIRT}},
 							  {1., {GRASS_BLOCK, DIRT}}});
 	if (c == Climate::ColdDesert)
 		return bare ? pick({{.42, {GRAVEL, STONE}}, {.75, {COARSE_DIRT, DIRT}},

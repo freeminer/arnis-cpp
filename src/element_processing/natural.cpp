@@ -11,6 +11,7 @@
 
 #include "../../../arnis_adapter.h"
 #include "tree.h"
+#include "bush.h"
 #include "bridges.h"
 #include "../floodfill.h"
 #include "../ground_generation.h"
@@ -116,14 +117,14 @@ trees::Habitat habitat_for_mapped_tree(TreeType type)
 
 bool near_beach(const WorldEditor &editor, int x, int z)
 {
-	if (!editor.ground || !editor.mg)
+	if (!editor.ground)
 		return false;
 	const int radius =
 			std::clamp(static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
 	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
 				 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
-		if (editor.ground->cover_class({x + dx - editor.mg->node_min.X,
-					z + dz - editor.mg->node_min.Z}) == land_cover::LC_BEACH)
+		if (editor.ground->cover_class(editor.ground_point(x + dx, z + dz)) ==
+				land_cover::LC_BEACH)
 			return true;
 	return false;
 }
@@ -162,9 +163,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			if (mapped_row.height_m > 0.0)
 				request.want_size = trees::size_for_height(static_cast<int>(
 						std::lround(mapped_row.height_m * editor.scale())));
-			if (editor.ground && editor.mg)
-				request.eco = editor.ground->ecoregion_at(
-						{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+			if (editor.ground)
+				request.eco = editor.ground->ecoregion_at(editor.ground_point(x, z));
 			request.beach = request.eco.has_value() && near_beach(editor, x, z);
 			if (editor.place_mapped_regional_tree(x, 1, z, 0, request).has_value())
 				continue;
@@ -190,9 +190,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		if (mapped.height_m > 0.0)
 			request.want_size = trees::size_for_height(
 					static_cast<int>(std::lround(mapped.height_m * editor.scale())));
-		if (editor.ground && editor.mg)
-			request.eco = editor.ground->ecoregion_at(
-					{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+		if (editor.ground)
+			request.eco = editor.ground->ecoregion_at(editor.ground_point(x, z));
 		request.beach = request.eco.has_value() && near_beach(editor, x, z);
 		if (editor.place_mapped_regional_tree(x, 1, z, 0, request).has_value())
 			return;
@@ -368,9 +367,9 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				if (mapped.height_m > 0.0)
 					mapped_request.want_size = trees::size_for_height(static_cast<int>(
 							std::lround(mapped.height_m * editor.scale())));
-				if (editor.ground && editor.mg)
-					mapped_request.eco = editor.ground->ecoregion_at(
-							{x - editor.mg->node_min.X, z - editor.mg->node_min.Z});
+				if (editor.ground)
+					mapped_request.eco =
+							editor.ground->ecoregion_at(editor.ground_point(x, z));
 				if (editor.place_mapped_regional_tree(x, 1, z, 0, mapped_request)
 								.has_value())
 					return;
@@ -537,6 +536,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		});
 
 		std::vector<std::pair<int, int>> wetland_puddles;
+		std::optional<Block> shrubbery_species;
 		for (const auto &p : filled_area) {
 			int x = p.first;
 			int z = p.second;
@@ -611,7 +611,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						editor.set_block(
 								COBBLESTONE, x, 0, z, std::nullopt, std::nullopt);
 					} else if (random_choice < 6) {
-						editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
+						bush::place(editor, x, z, bush::Kind::Low);
 					} else {
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					}
@@ -630,10 +630,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (random_choice < 40) {
-					editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
-					if (random_choice < 15) {
-						editor.set_block(OAK_LEAVES, x, 2, z, std::nullopt, std::nullopt);
-					}
+					bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (random_choice < 300) {
 					if (random_choice < 250) {
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
@@ -809,9 +806,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 													std::nullopt);
 										} else if (vegetation_chance < 25) {
 											// 10% chance for oak leaves
-											editor.set_block(OAK_LEAVES, cluster_x, 1,
-													cluster_z, std::nullopt,
-													std::nullopt);
+											bush::place(editor, cluster_x, cluster_z,
+													bush::Kind::Low);
 										}
 									}
 								}
@@ -861,13 +857,26 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					} else if (vegetation_chance < 25) {
 						// 5% chance for small shrubs
-						editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
+						bush::place(editor, x, z, bush::Kind::Low);
 					}
 				}
 			} else if (natural_type == "shrubbery") {
-				// Manicured shrubs and decorative vegetation
-				editor.set_block(OAK_LEAVES, x, 1, z, std::nullopt, std::nullopt);
-				editor.set_block(OAK_LEAVES, x, 2, z, std::nullopt, std::nullopt);
+				// Keep one regionally selected species across the shrubbery bed.
+				if (!shrubbery_species) {
+					const auto anchor = way.nodes.empty() ? std::pair{x, z}
+														  : std::pair{way.nodes.front().x,
+																	way.nodes.front().z};
+					shrubbery_species =
+							bush::shrubbery_species(editor, anchor.first, anchor.second);
+				}
+				for (int y = 1; y <= 2; ++y) {
+					BlockWithProperties leaf{
+							bush::shrubbery_leaf(*shrubbery_species, x, y, z),
+							{{"persistent", "true"}}};
+					editor.set_block_with_properties_absolute(leaf, x,
+							editor.get_absolute_y(x, y, z), z, std::nullopt,
+							std::nullopt);
+				}
 			} else if (natural_type == "tundra") {
 				// Treeless habitat with low vegetation, mosses, lichens
 				if (!editor.check_for_block(x, 0, z,

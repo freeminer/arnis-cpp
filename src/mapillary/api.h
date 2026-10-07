@@ -9,6 +9,15 @@ namespace arnis::mapillary
 {
 using JsonFetcher = std::function<std::optional<std::vector<std::uint8_t>>(
 		const std::string &, std::size_t)>;
+struct HttpReply
+{
+	int status = 200;
+	std::vector<std::uint8_t> body;
+};
+// Status-aware Graph fetch path, required to distinguish a dense-cell 500
+// (which Rust subdivides) from an unavailable response or rejected token.
+using GraphFetcher =
+		std::function<std::optional<HttpReply>(const std::string &, std::size_t)>;
 
 inline constexpr double mapillary_max_cell_deg = .008;
 inline constexpr std::size_t mapillary_max_cells = 4096;
@@ -26,10 +35,17 @@ class Client
 {
 	cache::Layout cache_;
 	JsonFetcher fetch_;
+	GraphFetcher graph_fetch_;
+	std::optional<std::vector<std::uint8_t>> fetch_bytes(
+			const std::string &url, std::size_t max_bytes) const;
 
 public:
 	Client(cache::Layout cache, JsonFetcher fetch) :
 			cache_(std::move(cache)), fetch_(std::move(fetch))
+	{
+	}
+	Client(cache::Layout cache, GraphFetcher fetch) :
+			cache_(std::move(cache)), graph_fetch_(std::move(fetch))
 	{
 	}
 	std::optional<cache::ImageRecord> image(

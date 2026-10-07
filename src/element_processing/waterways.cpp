@@ -3,6 +3,7 @@
 #include "../osm_parser.h"
 #include "world_editor.h"
 #include "waterways.h"
+#include "../strict_parse.h"
 
 #include <vector>
 #include <string>
@@ -59,10 +60,14 @@ bool is_underground_waterway(const tags_t &tags)
 											 it->second != "0" && it->second != "false")
 		return true;
 	if (const auto it = tags.find("layer"); it != tags.end()) {
-		try {
-			return std::stoi(it->second) < 0;
-		} catch (...) {
-		}
+		const auto &value = it->second;
+		const auto first = value.find_first_not_of(" \t\r\n\f\v");
+		if (first == std::string::npos)
+			return false;
+		const auto last = value.find_last_not_of(" \t\r\n\f\v");
+		if (const auto layer = strict_parse::i32(
+					std::string_view(value).substr(first, last - first + 1)))
+			return *layer < 0;
 	}
 	return false;
 }
@@ -70,11 +75,17 @@ bool is_underground_waterway(const tags_t &tags)
 int waterway_width(const std::string &type, const tags_t &tags)
 {
 	if (const auto it = tags.find("width"); it != tags.end()) {
-		// Match Rust: parse only the first space-delimited token.  In
-		// particular, reject unit-suffixed values such as `10m` instead of
-		// silently accepting their numeric prefix.
-		const auto first = it->second.find_first_of(" \t\r\n");
-		const auto token = it->second.substr(0, first);
+		// Rust trims the whole tag and splits only on a literal space. In
+		// particular, reject unit-suffixed values and tab-separated tokens
+		// instead of silently accepting a numeric prefix.
+		const auto first_nonspace = it->second.find_first_not_of(" \t\r\n\f\v");
+		if (first_nonspace == std::string::npos)
+			return get_waterway_width(type);
+		const auto last_nonspace = it->second.find_last_not_of(" \t\r\n\f\v");
+		const auto trimmed =
+				it->second.substr(first_nonspace, last_nonspace - first_nonspace + 1);
+		const auto first_space = trimmed.find(' ');
+		const auto token = trimmed.substr(0, first_space);
 		std::size_t consumed = 0;
 		double width = 0.0;
 		try {

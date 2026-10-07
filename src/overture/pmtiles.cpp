@@ -283,42 +283,96 @@ std::optional<std::vector<std::uint8_t>> read_tile(const Header &header,
 		const std::vector<std::uint8_t> &root_directory, std::uint8_t zoom,
 		std::uint32_t x, std::uint32_t y, const RangeReader &read_range)
 {
-	if (!read_range)
+	auto result = read_tile_checked(header, root_directory, zoom, x, y, read_range);
+	if (result.status != TileReadStatus::Found)
 		return {};
+	return std::move(result.bytes);
+}
+
+TileReadResult read_tile_checked(const Header &header,
+		const std::vector<std::uint8_t> &root_directory, std::uint8_t zoom,
+		std::uint32_t x, std::uint32_t y, const RangeReader &read_range)
+{
+	const auto located =
+			locate_tile_checked(header, root_directory, zoom, x, y, read_range);
+	if (located.status != TileReadStatus::Found)
+		return {located.status, {}};
+	return read_tile_payload_checked(header, located.location, read_range);
+}
+
+TileLocateResult locate_tile_checked(const Header &header,
+		const std::vector<std::uint8_t> &root_directory, std::uint8_t zoom,
+		std::uint32_t x, std::uint32_t y, const RangeReader &read_range,
+		LeafDirectoryCache *leaf_cache)
+{
+	if (!read_range)
+		return {TileReadStatus::Error, {}};
 	const auto tile_id = zxy_to_tile_id(zoom, x, y);
 	if (!tile_id || zoom < header.min_zoom || zoom > header.max_zoom)
-		return {};
+		return {TileReadStatus::Error, {}};
+	return locate_id_checked(header, root_directory, *tile_id, read_range, leaf_cache);
+}
+
+TileLocateResult locate_id_checked(const Header &header,
+		const std::vector<std::uint8_t> &root_directory, std::uint64_t tile_id,
+		const RangeReader &read_range, LeafDirectoryCache *leaf_cache)
+{
+	if (!read_range)
+		return {TileReadStatus::Error, {}};
 	auto directory =
 			decompress(root_directory, header.internal_compression, MAX_DIRECTORY_BYTES);
 	if (!directory)
-		return {};
+		return {TileReadStatus::Error, {}};
 	for (unsigned depth = 0; depth < 4; ++depth) {
 		const auto entries = decode_directory(*directory);
 		if (!entries)
-			return {};
-		const auto entry = entry_for(*entries, *tile_id);
+			return {TileReadStatus::Error, {}};
+		const auto entry = entry_for(*entries, tile_id);
 		if (!entry)
-			return {};
+			return {TileReadStatus::Missing, {}};
 		if (entry->run != 0) {
 			if (!entry->length || entry->length > MAX_TILE_BYTES ||
 					UINT64_MAX - header.tile_data_offset < entry->offset)
-				return {};
-			auto raw = read_range(header.tile_data_offset + entry->offset, entry->length);
-			if (!raw || raw->size() != entry->length)
-				return {};
-			return decompress(*raw, header.tile_compression, MAX_TILE_BYTES);
+				return {TileReadStatus::Error, {}};
+			return {TileReadStatus::Found,
+					TileLocation{header.tile_data_offset + entry->offset, entry->length}};
 		}
 		if (!entry->length || entry->length > MAX_DIRECTORY_BYTES ||
 				UINT64_MAX - header.leaf_offset < entry->offset ||
 				UINT64_MAX - header.leaf_offset - entry->offset < entry->length)
-			return {};
-		auto raw = read_range(header.leaf_offset + entry->offset, entry->length);
+			return {TileReadStatus::Error, {}};
+		const auto leaf_offset = header.leaf_offset + entry->offset;
+		if (leaf_cache) {
+			const auto cached = leaf_cache->find(leaf_offset);
+			if (cached != leaf_cache->end()) {
+				directory = cached->second;
+				continue;
+			}
+		}
+		auto raw = read_range(leaf_offset, entry->length);
 		if (!raw || raw->size() != entry->length)
-			return {};
+			return {TileReadStatus::Error, {}};
 		directory = decompress(*raw, header.internal_compression, MAX_DIRECTORY_BYTES);
 		if (!directory)
-			return {};
+			return {TileReadStatus::Error, {}};
+		if (leaf_cache)
+			leaf_cache->insert_or_assign(leaf_offset, *directory);
 	}
-	return {};
+	return {TileReadStatus::Error, {}};
+}
+
+TileReadResult read_tile_payload_checked(
+		const Header &header, const TileLocation &location, const RangeReader &read_range)
+{
+	if (!read_range || !location.length || location.length > MAX_TILE_BYTES ||
+			UINT64_MAX - location.offset < location.length)
+		return {TileReadStatus::Error, {}};
+	const auto raw = read_range(location.offset, location.length);
+	if (!raw || raw->size() != location.length)
+		return {TileReadStatus::Error, {}};
+	const auto tile = decompress(*raw, header.tile_compression, MAX_TILE_BYTES);
+	if (!tile)
+		return {TileReadStatus::Error, {}};
+	return {TileReadStatus::Found, std::move(*tile)};
 }
 } // namespace arnis::overture::pmtiles

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include "../../arnis_adapter.h"
 #include "../element_processing/bridges.h"
+#include "../element_processing/waterways.h"
 #include "../bresenham.h"
 #include "../clipping.h"
 #include <queue>
@@ -461,66 +462,164 @@ void apply_osm_water_override(LandCoverData &data,
 	const double sx = double(data.width - 1) / double(world_width - 1);
 	const double sz = double(data.height - 1) / double(world_height - 1);
 	const auto guard = build_water_override_guard(data.grid, heights, sx * sz);
-	auto tag = [](const tags_t &tags, const char *name) -> const std::string * {
+	const auto tag = [](const tags_t &tags, const char *name) -> const std::string * {
 		auto it = tags.find(name);
 		return it == tags.end() ? nullptr : &it->second;
 	};
-	auto is_water = [&](const ProcessedWay &w) {
+	const auto has_explicit_water = [&](const tags_t &tags) {
+		const auto *water = tag(tags, "water");
+		return water && *water != "no" && *water != "0" && *water != "false";
+	};
+	const auto is_water_polygon_way = [&](const ProcessedWay &w) {
+		if (w.nodes.size() < 3)
+			return false;
 		const auto *natural = tag(w.tags, "natural");
 		const auto *landuse = tag(w.tags, "landuse");
-		const auto *water = tag(w.tags, "water");
 		const auto *waterway = tag(w.tags, "waterway");
-		return (natural && *natural == "water") || (landuse && *landuse == "reservoir") ||
-			   (waterway && (*waterway == "dock" || *waterway == "riverbank")) ||
-			   (water && *water != "no" && *water != "0" && *water != "false");
-	};
-	auto is_water_tags = [&](const tags_t &tags) {
-		const auto *natural = tag(tags, "natural"), *landuse = tag(tags, "landuse"),
-				   *water = tag(tags, "water");
-		return (natural && (*natural == "water" || *natural == "bay")) ||
+		return (natural && *natural == "water") || has_explicit_water(w.tags) ||
 			   (landuse && *landuse == "reservoir") ||
-			   (water && *water != "no" && *water != "0" && *water != "false");
+			   (waterway && (*waterway == "dock" || *waterway == "riverbank"));
 	};
-	auto grid = [&](int x, int z) {
-		return std::pair<int, int>{std::lround((x - bbox.min_x()) * sx),
-				std::lround((z - bbox.min_z()) * sz)};
+	const auto is_water_relation = [&](const tags_t &tags) {
+		const auto *natural = tag(tags, "natural");
+		return (natural && (*natural == "water" || *natural == "bay")) ||
+			   has_explicit_water(tags);
 	};
-	auto contains = [](const std::vector<std::pair<int, int>> &ring, int x, int z) {
-		bool inside = false;
-		for (std::size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++)
-			if ((ring[i].second > z) != (ring[j].second > z) &&
-					x < (ring[j].first - ring[i].first) * (z - ring[i].second) /
-											double(ring[j].second - ring[i].second) +
-									ring[i].first)
-				inside = !inside;
-		return inside;
+	const auto closed_ring = [](const std::vector<ProcessedNode> &nodes) {
+		if (nodes.size() < 3)
+			return false;
+		const auto &first = nodes.front();
+		const auto &last = nodes.back();
+		return first.id == last.id ||
+			   (std::abs(first.x - last.x) <= 1 && std::abs(first.z - last.z) <= 1);
+	};
+	const auto to_world_ring = [](const std::vector<ProcessedNode> &nodes) {
+		std::vector<std::pair<int, int>> ring;
+		ring.reserve(nodes.size());
+		for (const auto &node : nodes)
+			ring.emplace_back(node.x, node.z);
+		return ring;
 	};
 	std::size_t changed = 0;
-	auto write_water = [&](int x, int z) {
-		if (data.grid[z][x] != LC_WATER && guard.allows(heights, x, z)) {
-			data.grid[z][x] = LC_WATER;
-			if (guard.has_elevation && z < int(guard.nearest_water_y.size()) &&
-					x < int(guard.nearest_water_y[z].size())) {
-				const float water = guard.nearest_water_y[z][x];
-				if (std::isfinite(water) && std::isfinite(heights[z][x]) &&
-						heights[z][x] > water)
-					heights[z][x] = water;
+	const auto write_water = [&](std::size_t x, std::size_t z) {
+		if (data.grid[z][x] == LC_WATER || !guard.allows(heights, x, z))
+			return std::size_t{0};
+		data.grid[z][x] = LC_WATER;
+		return std::size_t{1};
+	};
+	const auto edge_crossings = [](const std::vector<std::pair<int, int>> &ring, double z,
+										std::vector<double> &out) {
+		if (ring.size() < 3)
+			return;
+		std::size_t j = ring.size() - 1;
+		for (std::size_t i = 0; i < ring.size(); ++i) {
+			const double zi = ring[i].second, zj = ring[j].second;
+			if ((zi > z) != (zj > z)) {
+				const double t = (z - zi) / (zj - zi);
+				out.push_back(ring[i].first + (ring[j].first - ring[i].first) * t);
 			}
-			++changed;
+			j = i;
 		}
 	};
-	auto stamp = [&](int gx, int gz, int r) {
-		for (int dz = -r; dz <= r; ++dz)
-			for (int dx = -r; dx <= r; ++dx) {
-				int x = gx + dx, z = gz + dz;
-				if (x >= 0 && z >= 0 && x < (int)data.width && z < (int)data.height)
-					write_water(x, z);
+	const auto inside_ranges = [](double x, const std::vector<double> &ranges) {
+		for (std::size_t i = 0; i + 1 < ranges.size(); i += 2)
+			if (x > ranges[i] && x < ranges[i + 1])
+				return true;
+		return false;
+	};
+	const auto fill_rings =
+			[&](const std::vector<std::vector<std::pair<int, int>>> &outers,
+					const std::vector<std::vector<std::pair<int, int>>> &inners) {
+				if (outers.empty())
+					return std::size_t{0};
+				int p_min_z = INT32_MAX, p_max_z = INT32_MIN;
+				for (const auto &ring : outers)
+					for (const auto &[x, z] : ring) {
+						(void)x;
+						p_min_z = std::min(p_min_z, z);
+						p_max_z = std::max(p_max_z, z);
+					}
+				if (p_min_z == INT32_MAX || p_max_z < bbox.min_z() ||
+						p_min_z > bbox.max_z())
+					return std::size_t{0};
+				const double inv_x = 1.0 / sx, inv_z = 1.0 / sz;
+				const int gz_start = std::max(
+						0, int(std::floor(std::max(0, p_min_z - bbox.min_z()) * sz)));
+				const int gz_end = std::clamp(
+						int(std::ceil(std::max(0, p_max_z - bbox.min_z()) * sz)), 0,
+						int(data.height) - 1);
+				std::vector<double> outer_x, inner_x;
+				std::size_t count = 0;
+				for (int gz = gz_start; gz <= gz_end; ++gz) {
+					const double world_z = gz * inv_z + bbox.min_z();
+					outer_x.clear();
+					for (const auto &ring : outers)
+						edge_crossings(ring, world_z, outer_x);
+					if (outer_x.size() < 2)
+						continue;
+					std::sort(outer_x.begin(), outer_x.end());
+					inner_x.clear();
+					for (const auto &ring : inners)
+						edge_crossings(ring, world_z, inner_x);
+					std::sort(inner_x.begin(), inner_x.end());
+					for (std::size_t i = 0; i + 1 < outer_x.size(); i += 2) {
+						const double left = std::max(outer_x[i], double(bbox.min_x()));
+						const double right =
+								std::min(outer_x[i + 1], double(bbox.max_x()));
+						if (left > right)
+							continue;
+						const int gx0 =
+								std::max(0, int(std::ceil((left - bbox.min_x()) * sx)));
+						const int gx1 =
+								std::clamp(int(std::floor((right - bbox.min_x()) * sx)),
+										0, int(data.width) - 1);
+						for (int gx = gx0; gx <= gx1; ++gx) {
+							const double world_x = gx * inv_x + bbox.min_x();
+							if (!inside_ranges(world_x, inner_x))
+								count += write_water(gx, gz);
+						}
+					}
+				}
+				return count;
+			};
+	const auto rasterize_line = [&](const std::vector<ProcessedNode> &nodes,
+										int half_width) {
+		if (nodes.size() < 2 || half_width < 0)
+			return std::size_t{0};
+		std::size_t count = 0;
+		for (std::size_t i = 1; i < nodes.size(); ++i) {
+			const auto &a = nodes[i - 1];
+			const auto &b = nodes[i];
+			const int margin = std::max(0, half_width);
+			if (std::max(a.x, b.x) + margin < bbox.min_x() ||
+					std::min(a.x, b.x) - margin > bbox.max_x() ||
+					std::max(a.z, b.z) + margin < bbox.min_z() ||
+					std::min(a.z, b.z) - margin > bbox.max_z())
+				continue;
+			for (const auto &[bx, y, bz] :
+					bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
+				(void)y;
+				for (int dx = -half_width; dx <= half_width; ++dx)
+					for (int dz = -half_width; dz <= half_width; ++dz) {
+						const int wx = bx + dx, wz = bz + dz;
+						if (wx < bbox.min_x() || wz < bbox.min_z() || wx > bbox.max_x() ||
+								wz > bbox.max_z())
+							continue;
+						const auto gx = static_cast<std::size_t>(
+								std::llround((wx - bbox.min_x()) * sx));
+						const auto gz = static_cast<std::size_t>(
+								std::llround((wz - bbox.min_z()) * sz));
+						if (gx < data.width && gz < data.height)
+							count += write_water(gx, gz);
+					}
 			}
+		}
+		return count;
 	};
 	for (const auto &e : elements) {
 		if (e.is_relation()) {
 			const auto &rel = e.as_relation();
-			if (!is_water_tags(rel.tags))
+			if (!is_water_relation(rel.tags))
 				continue;
 			std::vector<std::vector<ProcessedNode>> outer_nodes, inner_nodes;
 			for (const auto &m : rel.members) {
@@ -534,103 +633,52 @@ void apply_osm_water_override(LandCoverData &data,
 			merge_ring_segments(outer_nodes);
 			merge_ring_segments(inner_nodes);
 			std::vector<std::vector<std::pair<int, int>>> outer, inner;
-			auto convert_rings = [&](const auto &source, auto &dest) {
-				for (const auto &nodes : source) {
-					auto clipped = clipping::clip_water_ring_to_bbox(nodes, bbox);
-					if (!clipped)
-						continue;
-					dest.emplace_back();
-					for (const auto &n : *clipped)
-						dest.back().push_back(grid(n.x, n.z));
-				}
-			};
-			convert_rings(outer_nodes, outer);
-			convert_rings(inner_nodes, inner);
-			for (int z = 0; z < (int)data.height; ++z)
-				for (int x = 0; x < (int)data.width; ++x) {
-					bool in_outer = false;
-					for (const auto &r : outer)
-						if (contains(r, x, z)) {
-							in_outer = true;
-							break;
-						}
-					bool in_inner = false;
-					for (const auto &r : inner)
-						if (contains(r, x, z)) {
-							in_inner = true;
-							break;
-						}
-					if (in_outer && !in_inner)
-						write_water(x, z);
-				}
+			for (const auto &ring : outer_nodes)
+				if (closed_ring(ring))
+					if (auto clipped = clipping::clip_water_ring_to_bbox(ring, bbox))
+						outer.push_back(to_world_ring(*clipped));
+			for (const auto &ring : inner_nodes)
+				if (closed_ring(ring))
+					if (auto clipped = clipping::clip_water_ring_to_bbox(ring, bbox))
+						inner.push_back(to_world_ring(*clipped));
+			changed += fill_rings(outer, inner);
 			continue;
 		}
 		if (!e.is_way() || e.as_way().nodes.size() < 2)
 			continue;
 		const auto &w = e.as_way();
 		const auto *waterway = tag(w.tags, "waterway");
-		if (!is_water(w) && !waterway)
-			continue;
-		if (waterway && !is_water(w)) {
-			const auto *layer = tag(w.tags, "layer"), *location = tag(w.tags, "location"),
-					   *tunnel = tag(w.tags, "tunnel"), *covered = tag(w.tags, "covered");
-			const bool underground =
-					(layer && !layer->empty() && layer->front() == '-') ||
-					(location &&
-							(*location == "underground" || *location == "underwater")) ||
-					(tunnel && *tunnel != "no" && *tunnel != "0" && *tunnel != "false") ||
-					(covered &&
-							(*covered == "yes" || *covered == "1" || *covered == "true"));
-			const bool channel = *waterway == "river" || *waterway == "canal" ||
-								 *waterway == "fairway" || *waterway == "stream" ||
-								 *waterway == "flowline" || *waterway == "brook" ||
-								 *waterway == "ditch" || *waterway == "drain";
-			if (underground || !channel)
+		if (is_water_polygon_way(w)) {
+			if (!closed_ring(w.nodes))
 				continue;
-		}
-		const auto clipped_ring =
-				(is_water(w) && w.nodes.size() >= 3)
-						? clipping::clip_water_ring_to_bbox(w.nodes, bbox)
-						: std::optional<std::vector<ProcessedNode>>{};
-		if (is_water(w) && w.nodes.size() >= 3 && !clipped_ring)
-			continue;
-		const auto &source_nodes = clipped_ring ? *clipped_ring : w.nodes;
-		std::vector<std::pair<int, int>> pts;
-		for (const auto &n : source_nodes)
-			pts.push_back(grid(n.x, n.z));
-		const bool closed =
-				pts.size() >= 3 &&
-				(pts.front() == pts.back() ||
-						(std::abs(pts.front().first - pts.back().first) <= 1 &&
-								std::abs(pts.front().second - pts.back().second) <= 1));
-		if (is_water(w) && closed) {
-			for (int z = 0; z < (int)data.height; ++z)
-				for (int x = 0; x < (int)data.width; ++x)
-					if (contains(pts, x, z))
-						write_water(x, z);
-		} else if (waterway) {
-			int r = (*waterway == "river"	  ? 4
-					 : *waterway == "canal"	  ? 3
-					 : *waterway == "fairway" ? 6
-					 : *waterway == "stream"  ? 2
-					 : (*waterway == "flowline" || *waterway == "brook" ||
-							   *waterway == "ditch")
-							 ? 1
-							 : 2);
-			if (const auto *width = tag(w.tags, "width"))
-				try {
-					r = std::max(1, int(std::lround(std::stod(*width) * 0.5 * sx)));
-				} catch (...) {
-				}
-			for (std::size_t i = 1; i < pts.size(); ++i)
-				for (auto [x, y, z] : bresenham::bresenham_line(pts[i - 1].first, 0,
-							 pts[i - 1].second, pts[i].first, 0, pts[i].second))
-					stamp(x, z, r);
+			auto clipped = clipping::clip_water_ring_to_bbox(w.nodes, bbox);
+			if (!clipped)
+				continue;
+			changed += fill_rings({to_world_ring(*clipped)}, {});
+		} else if (waterway && waterways::is_channel_waterway(*waterway) &&
+				   !waterways::is_underground_waterway(w.tags)) {
+			const int half_width = waterways::waterway_width(*waterway, w.tags) / 2;
+			changed += rasterize_line(w.nodes, half_width);
 		}
 	}
 	if (changed) {
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
 		data.water_blend_grid.clear();
+		// OSM water may extend ESA water slightly, but should not float on a raised
+		// bank. Sink only newly reachable cells that are within Rust's 1.5-block
+		// elevation guard; the ESA water seeds remain at their sampled heights.
+		if (guard.has_elevation)
+			for (std::size_t z = 0; z < data.height; ++z)
+				for (std::size_t x = 0; x < data.width; ++x) {
+					if (data.grid[z][x] != LC_WATER || !std::isfinite(heights[z][x]) ||
+							z >= guard.nearest_water_y.size() ||
+							x >= guard.nearest_water_y[z].size())
+						continue;
+					const float water_y = guard.nearest_water_y[z][x];
+					if (std::isfinite(water_y) && heights[z][x] > water_y &&
+							heights[z][x] <= water_y + 1.5f)
+						heights[z][x] = water_y;
+				}
 	}
 }
 

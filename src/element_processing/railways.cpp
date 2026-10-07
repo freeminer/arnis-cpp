@@ -22,6 +22,7 @@ using std::vector;
 #include "../world_editor/floor_state.h"
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
+#include "bridges.h"
 #include "advtrains.h"
 #include "connected_blocks.h"
 #undef stoi
@@ -618,10 +619,10 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 				: ADVTRAINS_AVAILABLE
 						? advtrains_slope_rail(centerline, adv_heights, j)
 								  .value_or(advtrains::connected_rail(centerline, j, true)
-												  .value_or(determine_rail_with_slope(
-														  {bx, bz}, prev_opt, next_opt,
-														  prev_ground, current_ground,
-														  next_ground)))
+													.value_or(determine_rail_with_slope(
+															{bx, bz}, prev_opt, next_opt,
+															prev_ground, current_ground,
+															next_ground)))
 						: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
 								  prev_ground, current_ground, next_ground);
 		if (ADVTRAINS_AVAILABLE)
@@ -641,7 +642,9 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 
 void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		const RailBridgeInternalEndpoints &internal_endpoints,
-		const bridge_styles::BridgeOutlineIndex &bridge_outlines)
+		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
+		const bridges::BridgeStructureMap &bridge_structures,
+		const bridges::BridgeSurfaceMap &bridge_surface)
 {
 	if (way.nodes.size() < 2)
 		return;
@@ -653,6 +656,33 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	vector<pair<int, int>> all_points = build_connected_centerline(way);
 	if (all_points.empty())
 		return;
+
+	// Rust skips structural supports for track carried by a road deck and follows
+	// that deck's sampled profile exactly.
+	if (const auto *rail_deck = bridge_structures.rail_deck(way.id);
+			rail_deck && rail_deck->kind == bridges::RailDeckKind::Carried) {
+		const auto carried_path = build_smoothed_centerline(way);
+		for (std::size_t i = 0; i < carried_path.size(); ++i) {
+			const auto [x, z] = carried_path[i];
+			const int y = rail_deck->ys.empty()
+								  ? editor.get_ground_level(x, z)
+								  : rail_deck->ys[std::min(i, rail_deck->ys.size() - 1)];
+			const optional<pair<int, int>> prev =
+					i ? optional<pair<int, int>>(carried_path[i - 1]) : nullopt;
+			const optional<pair<int, int>> next =
+					i + 1 < carried_path.size()
+							? optional<pair<int, int>>(carried_path[i + 1])
+							: nullopt;
+			const int prev_y =
+					i && i - 1 < rail_deck->ys.size() ? rail_deck->ys[i - 1] : y;
+			const int next_y = i + 1 < rail_deck->ys.size() ? rail_deck->ys[i + 1] : y;
+			const Block rail_block =
+					determine_rail_with_slope({x, z}, prev, next, prev_y, y, next_y);
+			editor.set_block_absolute(GRAVEL, x, y, z, nullopt, nullopt);
+			editor.set_block_absolute(rail_block, x, y + 1, z, nullopt, nullopt);
+		}
+		return;
+	}
 
 	vector<int> terrain_ys;
 	terrain_ys.reserve(all_points.size());
@@ -668,8 +698,11 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	const int flat_clearance = style == bridge_styles::BridgeStyle::Arch
 									   ? std::max(RAIL_BRIDGE_FLAT_CLEARANCE, 8)
 									   : RAIL_BRIDGE_FLAT_CLEARANCE;
-	const int deck_y =
+	int deck_y =
 			(max_y - min_y) < RAIL_BRIDGE_DIP_THRESHOLD ? max_y + flat_clearance : max_y;
+	if (const auto *rail_deck = bridge_structures.rail_deck(way.id);
+			rail_deck && rail_deck->kind == bridges::RailDeckKind::Level)
+		deck_y = rail_deck->level_y;
 	const std::size_t total = all_points.size();
 	const std::size_t last_idx = total - 1;
 	const int start_ground = terrain_ys.front();
@@ -714,14 +747,24 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	if (plan) {
 		bridge_ys = plan->heights;
 	} else if (ADVTRAINS_AVAILABLE) {
+		const auto *rail_deck = bridge_structures.rail_deck(way.id);
 		const int connected_deck_y =
-				*std::max_element(bridge_ys.begin(), bridge_ys.end());
+				rail_deck && rail_deck->kind == bridges::RailDeckKind::Level
+						? rail_deck->level_y
+						: *std::max_element(bridge_ys.begin(), bridge_ys.end());
 		std::fill(bridge_ys.begin(), bridge_ys.end(), connected_deck_y);
 	}
 
 	const Block foundation_block = bridge_styles::foundation_block(style);
 	vector<bridge_styles::BridgePathSample> bridge_path;
 	bridge_path.reserve(total);
+	const bool start_is_boundary =
+			!contains_endpoint(internal_endpoints, all_points.front());
+	const bool end_is_boundary =
+			!contains_endpoint(internal_endpoints, all_points.back());
+	const auto cable_pylons = bridge_styles::default_pylons(
+			style, total, start_is_boundary, end_is_boundary);
+	const bool cables_carry_deck = !cable_pylons.empty();
 
 	for (std::size_t i = 0; i < total; ++i) {
 		const auto [bx, bz] = all_points[i];
@@ -750,19 +793,15 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		const float mag = std::max(std::sqrt(dxp * dxp + dzp * dzp), 1.0e-6f);
 		bridge_path.push_back({bx, y, bz, -dzp / mag, dxp / mag});
 
-		const std::size_t pillar_interval =
-				std::max<std::size_t>(bridge_styles::pillar_interval(style), 1);
-		const bool is_pillar = (i % pillar_interval) == 0;
-		bridge_styles::place_bridge_support_below_deck(
-				editor, style, bx, y, bz, terrain_ys[i], i, total, true, true, is_pillar);
+		const std::size_t pillar_interval = bridge_styles::pillar_interval(style, 0);
+		const bool is_pillar =
+				pillar_interval > 0 && i % pillar_interval == pillar_interval / 2;
+		if (!cables_carry_deck && !bridge_surface.support_blocked(bx, bz, y))
+			bridge_styles::place_bridge_support_below_deck(editor, style, bx, y, bz,
+					terrain_ys[i], i, total, true, true, is_pillar);
 	}
-
-	const bool start_is_boundary =
-			!contains_endpoint(internal_endpoints, all_points.front());
-	const bool end_is_boundary =
-			!contains_endpoint(internal_endpoints, all_points.back());
-	bridge_styles::decorate_bridge_above_deck(
-			editor, style, bridge_path, 0, start_is_boundary, end_is_boundary);
+	bridge_styles::decorate_bridge_above_deck(editor, style, bridge_surface, bridge_path,
+			0, start_is_boundary, end_is_boundary);
 }
 
 void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
@@ -867,7 +906,9 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		const RailBridgeInternalEndpoints &rail_bridge_internal_endpoints,
 		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
 		const CoordinateBitmap &road_mask, const CoordinateBitmap &building_footprints,
-		const CoordinateBitmap &rail_mask)
+		const CoordinateBitmap &rail_mask,
+		const bridges::BridgeStructureMap &bridge_structures,
+		const bridges::BridgeSurfaceMap &bridge_surface)
 {
 	auto it = element.tags.find("railway");
 	if (it == element.tags.end())
@@ -914,8 +955,8 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 	if (element.nodes.size() < 2)
 		return;
 	if (is_rail_bridge(element)) {
-		generate_rail_bridge(
-				editor, element, rail_bridge_internal_endpoints, bridge_outlines);
+		generate_rail_bridge(editor, element, rail_bridge_internal_endpoints,
+				bridge_outlines, bridge_structures, bridge_surface);
 	} else {
 		generate_at_grade_rail(editor, element);
 		if (catenary_wanted(element))
@@ -932,8 +973,10 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element)
 	RailBridgeInternalEndpoints internal_endpoints;
 	bridge_styles::BridgeOutlineIndex bridge_outlines;
 	CoordinateBitmap empty = CoordinateBitmap::new_empty();
+	bridges::BridgeStructureMap bridge_structures;
+	bridges::BridgeSurfaceMap bridge_surface;
 	generate_railways(editor, element, subway_points, internal_endpoints, bridge_outlines,
-			empty, empty, empty);
+			empty, empty, empty, bridge_structures, bridge_surface);
 	if (!subway_points.empty())
 		carve_subway_interior(editor, subway_points);
 	advtrains::finish_network(editor);

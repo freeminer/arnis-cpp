@@ -506,6 +506,24 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return state("cherry_log", {{"pillar_axis", std::string("y")}});
 	if (block == CHERRY_LEAVES)
 		return state("cherry_leaves", {{"persistent_bit", true}, {"update_bit", false}});
+	if (block == FLOWERING_AZALEA_LEAVES)
+		return state("azalea_leaves_flowered",
+				{{"persistent_bit", true}, {"update_bit", false}});
+	if (block == MELON)
+		return simple("melon_block");
+	if (block == WHITE_BED)
+		return state("bed",
+				{{"direction", 2}, {"head_piece_bit", false}, {"occupied_bit", false}});
+	if (block == LECTERN)
+		return state("lectern",
+				{{"direction", 2}, {"minecraft:cardinal_direction", std::string("north")},
+						{"occupied", false}, {"powered_bit", false}});
+	if (block == CAKE)
+		return state("cake", {{"bite_counter", 0}});
+	if (block == LOOM)
+		return state("loom", {{"direction", 2}});
+	if (block == SMITHING_TABLE)
+		return simple("smithing_table");
 	if (block == SOUL_SAND)
 		return simple("soul_sand");
 	if (block == SNOW_LAYER)

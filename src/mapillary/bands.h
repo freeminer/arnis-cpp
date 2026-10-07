@@ -1,5 +1,7 @@
 #pragma once
 #include "../block_palette.h"
+#include "imgops.h"
+#include "openings.h"
 #include <array>
 #include <algorithm>
 #include <cmath>
@@ -485,6 +487,7 @@ struct Structure
 	std::vector<bool> added, removed;
 	std::array<std::uint8_t, 3> door_rgb{70, 50, 35};
 	std::size_t sky_rows{}, sky_cells{};
+	std::optional<openings::Result> openings;
 };
 
 // Cell-grid counterpart of Rust's bands::analyse.  Texture/Openings callers
@@ -492,7 +495,9 @@ struct Structure
 // shared with the no-texture path rather than being reimplemented by exporters.
 inline Structure analyse_cells(std::vector<std::array<std::uint8_t, 3>> rgb,
 		std::vector<std::uint8_t> classes, std::size_t rows, std::size_t cols,
-		const std::vector<bool> *observed_input = nullptr, double tau = band_tau)
+		const std::vector<bool> *observed_input = nullptr, double tau = band_tau,
+		const std::vector<double> *evidence_input = nullptr,
+		bool openings_already_classified = false)
 {
 	Structure result;
 	result.rows = rows;
@@ -509,36 +514,42 @@ inline Structure analyse_cells(std::vector<std::array<std::uint8_t, 3>> rgb,
 	classes = std::get<0>(sky);
 	result.sky_rows = std::get<1>(sky);
 	result.sky_cells = std::get<2>(sky);
-	classes = doors_and_shopfronts(classes, rows, cols);
+	if (!openings_already_classified)
+		classes = doors_and_shopfronts(classes, rows, cols);
 	for (std::size_t i = 0; i < rows * cols; ++i)
 		observed[i] = observed[i] && classes[i] != 0;
 	std::vector<std::optional<std::array<double, 3>>> row_lab(rows);
 	std::vector<double> row_weight(rows, 0.0);
-	// A normalized RGB row median is sufficient for the C++ cell path; texture
-	// callers that need full OkLab segmentation can still provide precomputed
-	// rows through segment().
+	std::vector<double> channel;
+	channel.reserve(cols);
 	for (std::size_t row = 0; row < rows; ++row) {
-		std::array<double, 3> sum{};
-		std::size_t count = 0;
+		std::vector<imgops::Lab> picked;
+		picked.reserve(cols);
 		for (std::size_t col = 0; col < cols; ++col) {
 			const auto i = row * cols + col;
 			if (observed[i] && (classes[i] == 255 || classes[i] == 64)) {
-				for (unsigned channel = 0; channel < 3; ++channel)
-					sum[channel] += rgb[i][channel] / 255.0;
-				++count;
+				picked.push_back(imgops::srgb_to_oklab(rgb[i]));
 			}
 		}
-		if (count) {
-			for (double &value : sum)
-				value /= count;
-			row_lab[row] = sum;
-			row_weight[row] = static_cast<double>(count) / cols;
+		if (!picked.empty()) {
+			imgops::Lab med{};
+			for (std::size_t k = 0; k < med.size(); ++k) {
+				channel.clear();
+				for (const auto &lab : picked)
+					channel.push_back(lab[k]);
+				med[k] = imgops::median(channel);
+			}
+			row_lab[row] = med;
+			row_weight[row] = static_cast<double>(picked.size()) / cols;
 		}
 	}
 	result.bands = segment(row_lab, row_weight, tau);
 	result.lattice = find_lattice(classes, observed, rows, cols);
+	const std::optional<std::vector<double>> evidence =
+			evidence_input ? std::optional<std::vector<double>>(*evidence_input)
+						   : std::nullopt;
 	const auto completed =
-			complete_windows(classes, observed, result.lattice, std::nullopt, rows, cols);
+			complete_windows(classes, observed, result.lattice, evidence, rows, cols);
 	result.classes = std::get<0>(completed);
 	result.added = std::get<1>(completed);
 	result.removed = std::get<2>(completed);
@@ -548,10 +559,32 @@ inline Structure analyse_cells(std::vector<std::array<std::uint8_t, 3>> rgb,
 	return result;
 }
 
-// Remove sky-colored cells from the over-tall top of a facade texture.  The
-// Rust implementation uses OkLab; this compact RGB form preserves its two
-// important invariants (blue-dominant bright cells and eave-shadow repair)
-// without making the bands header depend on the image-processing module.
+// Texture entry point corresponding to Rust's bands::analyse(CellSource::Texture).
+// Opening detection owns door/shop classification and supplies per-cell soft
+// opening evidence to lattice completion; the cell-only path remains unchanged.
+inline Structure analyse_texture(const openings::Texture &texture, std::size_t rows,
+		std::size_t cols, std::pair<int, int> origin_px = {0, 0},
+		const std::vector<bool> *observed_input = nullptr, double tau = band_tau)
+{
+	auto detected = openings::classify_texture(texture, cols, rows, origin_px);
+	if (!detected.consistent()) {
+		Structure result;
+		result.rows = rows;
+		result.cols = cols;
+		return result;
+	}
+	std::vector<bool> observed(rows * cols, true);
+	for (std::size_t i = 0; i < observed.size(); ++i)
+		observed[i] = (!observed_input || i >= observed_input->size() ||
+							  (*observed_input)[i]) &&
+					  detected.classes[i] != openings::cls_nodata;
+	auto result = analyse_cells(detected.colours, detected.classes, rows, cols, &observed,
+			tau, &detected.evidence, true);
+	result.openings = std::move(detected);
+	return result;
+}
+
+// Remove overhanging sky using the same OkLab row medians and cell mask as Rust.
 inline std::tuple<std::vector<std::uint8_t>, std::size_t, std::size_t> drop_sky(
 		const std::vector<std::array<std::uint8_t, 3>> &rgb,
 		const std::vector<std::uint8_t> &classes, std::size_t rows, std::size_t cols)
@@ -561,55 +594,65 @@ inline std::tuple<std::vector<std::uint8_t>, std::size_t, std::size_t> drop_sky(
 	if (rows < 4 || cols == 0 || rgb.size() < rows * cols || out.size() < rows * cols)
 		return {std::move(out), 0, 0};
 	const std::size_t lower = rows / 2;
-	std::array<double, 3> body{};
-	std::size_t body_count = 0;
+	std::vector<imgops::Lab> lab;
+	lab.reserve(rows * cols);
+	for (const auto &color : rgb)
+		lab.push_back(imgops::srgb_to_oklab(color));
+	std::vector<imgops::Lab> picked;
 	for (std::size_t i = lower * cols; i < rows * cols; ++i)
-		if (classes[i] == wall || classes[i] == unknown) {
-			for (unsigned channel = 0; channel < 3; ++channel)
-				body[channel] += rgb[i][channel] / 255.0;
-			++body_count;
-		}
-	if (!body_count)
+		if (classes[i] == wall || classes[i] == unknown)
+			picked.push_back(lab[i]);
+	if (picked.empty())
 		return {std::move(out), 0, 0};
-	for (double &channel : body)
-		channel /= body_count;
-	auto sky_like = [&](std::size_t i) {
-		const auto &p = rgb[i];
-		const double red = p[0] / 255.0, green = p[1] / 255.0, blue = p[2] / 255.0;
-		const double brightness = (red + green + blue) / 3.0;
-		return blue > red + .10 && blue > green + .06 && brightness > .58 &&
-			   blue > body[2] + .06;
+	auto median_lab = [](const std::vector<imgops::Lab> &values) {
+		imgops::Lab result{};
+		std::vector<double> channel;
+		channel.reserve(values.size());
+		for (std::size_t k = 0; k < result.size(); ++k) {
+			channel.clear();
+			for (const auto &value : values)
+				channel.push_back(value[k]);
+			result[k] = imgops::median(channel);
+		}
+		return result;
 	};
+	const auto body = median_lab(picked);
 	std::size_t dropped_rows = 0, dropped_cells = 0;
 	for (std::size_t row = 0; row + 3 < rows; ++row) {
-		bool has_wall = false, blue_row = true;
+		picked.clear();
 		for (std::size_t c = 0; c < cols; ++c) {
 			const auto i = row * cols + c;
-			has_wall = has_wall || classes[i] == wall || classes[i] == unknown;
-			blue_row = blue_row && sky_like(i);
+			if (classes[i] == wall || classes[i] == unknown)
+				picked.push_back(lab[i]);
 		}
-		if (!has_wall) {
-			if (dropped_rows == row)
+		if (picked.empty()) {
+			const bool all_nodata =
+					std::all_of(out.begin() + row * cols, out.begin() + (row + 1) * cols,
+							[=](std::uint8_t value) { return value == nodata; });
+			if (all_nodata && dropped_rows == row)
 				++dropped_rows;
 			else
 				break;
-		} else if (blue_row && dropped_rows == row) {
+		} else {
+			const auto med = median_lab(picked);
+			const bool bluer =
+					(med[2] < -.06 && med[2] < body[2] - .03) || med[2] < body[2] - .06;
+			if (!bluer || med[0] <= body[0] - .08 || dropped_rows != row)
+				break;
 			for (std::size_t c = 0; c < cols; ++c) {
-				if (classes[row * cols + c] != nodata)
-					++dropped_cells;
 				out[row * cols + c] = nodata;
 			}
 			++dropped_rows;
-		} else {
-			break;
 		}
 	}
+	dropped_cells = static_cast<std::size_t>(
+			std::count_if(classes.begin(), classes.begin() + dropped_rows * cols,
+					[=](std::uint8_t value) { return value != nodata; }));
 	for (std::size_t row = 0; row < rows; ++row)
 		for (std::size_t c = 0; c < cols; ++c) {
 			const auto i = row * cols + c;
-			const auto &p = rgb[i];
-			const bool strong = p[2] > p[0] + 18 && p[2] > p[1] + 10 && p[0] > 178 &&
-								classes[i] != nodata;
+			const bool strong = lab[i][2] < -.07 && lab[i][0] > .70 &&
+								lab[i][2] < body[2] - .06 && classes[i] != nodata;
 			const bool zone = row < std::max<std::size_t>(1, rows / 3) ||
 							  (row < lower && (c < 2 || c + 2 >= cols));
 			if (strong && zone) {
@@ -618,8 +661,8 @@ inline std::tuple<std::vector<std::uint8_t>, std::size_t, std::size_t> drop_sky(
 			}
 		}
 	// A nearly all-window top row over a non-window row is an eave shadow.
-	for (std::size_t row = dropped_rows;
-			row + 1 < rows && row < std::max<std::size_t>(1, rows / 3); ++row) {
+	const auto shadow_limit = std::min(rows - 1, std::max<std::size_t>(1, rows / 3));
+	for (std::size_t row = dropped_rows; row < shadow_limit; ++row) {
 		std::size_t observed = 0, top_windows = 0, below = 0, below_windows = 0;
 		for (std::size_t c = 0; c < cols; ++c) {
 			const auto top = out[row * cols + c], next = out[(row + 1) * cols + c];
@@ -628,11 +671,17 @@ inline std::tuple<std::vector<std::uint8_t>, std::size_t, std::size_t> drop_sky(
 			below += next != nodata;
 			below_windows += next == window;
 		}
-		if (observed && below && static_cast<double>(top_windows) / observed > .8 &&
-				static_cast<double>(below_windows) / below < .3)
+		if (!observed)
+			continue;
+		if (observed && static_cast<double>(top_windows) / observed >= .9 &&
+				static_cast<double>(below_windows) / std::max<std::size_t>(below, 1) <
+						.6) {
 			for (std::size_t c = 0; c < cols; ++c)
 				if (out[row * cols + c] == window)
 					out[row * cols + c] = wall;
+		} else {
+			break;
+		}
 	}
 	return {std::move(out), dropped_rows, dropped_cells};
 }

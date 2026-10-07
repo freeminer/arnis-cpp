@@ -443,14 +443,6 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 									  min_x - 4, max_x + 4),
 				x);
 	};
-	auto is_steep_land = [&editor](int x, int z) {
-		if (!editor.ground)
-			return false;
-		const auto point = editor.ground_point(x, z);
-		const auto cover = editor.ground->cover_class(point);
-		return cover != 0 && cover != land_cover::LC_WATER &&
-			   editor.ground->slope(point) > 4;
-	};
 	auto climbs_to_water = [&](int x, int z) {
 		constexpr int max_climb = 48;
 		constexpr int reach = 3;
@@ -525,7 +517,8 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 								? still_surface
 								: std::nullopt;
 				int water_y = column_surface.value_or(editor.get_water_level(x, z));
-				if (!column_surface && is_steep_land(x, z) && !climbs_to_water(x, z))
+				if (!column_surface && editor.is_steep_land(x, z) &&
+						!climbs_to_water(x, z))
 					continue;
 				if (!column_surface && ground_y > water_y) {
 					// A DEM step fully inside the water polygon remains water; a

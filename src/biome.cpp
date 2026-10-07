@@ -33,9 +33,14 @@ std::optional<std::string> ecoregion_biome(
 	case EcoBiome::TropicalConifer:
 	case EcoBiome::TemperateBroadleaf:
 	case EcoBiome::TemperateGrassland:
+		if (lc == LC_TREE_COVER)
+			return "minecraft:forest";
+		break;
 	case EcoBiome::Mediterranean:
 		if (lc == LC_TREE_COVER)
 			return "minecraft:forest";
+		if (lc == LC_SHRUBLAND && dry_warm)
+			return "minecraft:savanna";
 		break;
 	case EcoBiome::MontaneGrassland:
 		if (lc == LC_TREE_COVER)
@@ -101,10 +106,6 @@ std::string biome_for_class(std::uint8_t lc, Climate c, double lat, std::uint8_t
 {
 	const double a = std::abs(lat);
 	if (lc == land_cover::LC_WATER) {
-		// Rust's temperate baseline keeps water as river/ocean; the
-		// latitude-based warm/lukewarm/cold variants are for other climates.
-		if (c == Climate::Temperate)
-			return wd >= 8 ? "minecraft:ocean" : "minecraft:river";
 		bool cold = c == Climate::IceCap || c == Climate::Tundra || c == Climate::Boreal;
 		if (wd < 8)
 			return cold ? "minecraft:frozen_river" : "minecraft:river";

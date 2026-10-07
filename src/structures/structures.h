@@ -132,6 +132,8 @@ void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max
 namespace car
 {
 void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base);
+void maybe_place_car_on_deck(WorldEditor &editor, int cx, int cz, int base_y,
+		uint8_t rot_base, int max_height);
 }
 
 namespace helicopter

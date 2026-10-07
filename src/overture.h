@@ -91,16 +91,22 @@ std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource
 std::vector<OvertureBuilding> decode_overture_building_tile(
 		const std::vector<std::uint8_t> &, std::uint32_t tile_x, std::uint32_t tile_y,
 		std::uint8_t zoom, std::size_t maximum);
+// Checked form distinguishes malformed MVT payloads from valid tiles with no
+// supported building features.
+std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
+		const std::vector<std::uint8_t> &, std::uint32_t tile_x, std::uint32_t tile_y,
+		std::uint8_t zoom, std::size_t maximum);
 // Adapts a PMTiles archive to the normal source seam.  `read_range` is owned by
 // the embedding application, which can add HTTP, release caching, or offline
 // archive access without putting transport policy in the map generator.
 BuildingSource pmtiles_building_source(pmtiles::Header,
 		std::vector<std::uint8_t> root_directory, pmtiles::RangeReader read_range,
-		std::uint8_t zoom = 14);
+		std::uint8_t zoom = 14, bool debug = false);
 // HTTP-backed PMTiles source.  The URL must point at one buildings.pmtiles
 // archive; requests are byte ranges, never a whole planet-scale archive.
 BuildingSource http_pmtiles_building_source(std::string archive_url,
-		std::uint8_t zoom = 14, std::filesystem::path cache_directory = {});
+		std::uint8_t zoom = 14, std::filesystem::path cache_directory = {},
+		bool debug = false);
 
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
 		double max_lat, double max_lng, double scale, bool debug);

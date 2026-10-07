@@ -300,12 +300,13 @@ Tree Tree::get_tree(TreeType kind)
 	}
 	case TreeType::Mangrove: {
 		Tree t;
-		t.log_block = JUNGLE_LOG;
-		t.log_height = 9;
-		t.leaves_block = JUNGLE_LEAVES;
+		t.log_block = MANGROVE_LOG;
+		t.log_height = 8;
+		t.leaves_block = MANGROVE_LEAVES;
 		t.leaves_fill = std::span<const std::pair<Coord, Coord>>(MANGROVE_LEAVES_FILL);
-		t.round_ranges[0] = {10, 9, 8, 7};
-		t.round_ranges[1] = {9, 8};
+		t.round_ranges[0] = {10, 9, 8, 7, 6, 5};
+		t.round_ranges[1] = {9, 8, 7, 6};
+		t.round_ranges[2] = {8, 7};
 		t.branch_chance = .55f;
 		return t;
 	}
@@ -716,7 +717,7 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 						  : std::uint8_t{0};
 	const bool wet_ground =
 			cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES;
-	if (use_region_pack && editor.scale() >= 0.35) {
+	if (use_region_pack && editor.scale() >= MICRO_TREE_MAX_SCALE) {
 		const auto handled = editor.place_regional_tree(pos.x,
 				editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, cover,
 				habitat_for_tree_type(tree_type), from_tags, wet_ground, allow_on_paved,
@@ -746,7 +747,7 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	const int base_y = editor.get_absolute_y(pos.x, pos.y, pos.z);
 	// Fixed-size tree models dominate country-scale terrain. Keep the same
 	// species palette but scale a nominal 25 m tree into a compact shrub.
-	if (editor.scale() < 0.35) {
+	if (editor.scale() < MICRO_TREE_MAX_SCALE) {
 		const int height = std::clamp(
 				static_cast<int>(
 						std::lround(mapped_height_m.value_or(25.0) * editor.scale())),

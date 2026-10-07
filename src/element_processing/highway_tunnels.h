@@ -24,7 +24,7 @@ struct PortalFace
 
 struct HighwayTunnelCell
 {
-	int x, z, road_y, half_width, terrain_y;
+	int x, z, road_y, half_width, carve_top;
 	bool covered, light;
 	std::vector<Block> palette;
 	std::vector<PortalFace> faces;

@@ -9,6 +9,8 @@ LuantiNode to_luanti_node(
 	const auto id = block.id();
 	if (block == BLUE_ICE)
 		return {"mcl_core:blue_ice", 0};
+	if (block == FLOWERING_AZALEA_LEAVES)
+		return {"mcl_trees:leaves_azalea_flowering", 0};
 	auto facedir = [&]() -> std::uint8_t {
 		if (!facing)
 			return static_cast<std::uint8_t>(top ? 20 : 0);
@@ -26,6 +28,18 @@ LuantiNode to_luanti_node(
 	auto door = [&](const char *bottom, const char *upper) {
 		return LuantiNode{top ? upper : bottom, facedir()};
 	};
+	if (block == WHITE_BED)
+		return {top ? "mcl_beds:bed_white_top" : "mcl_beds:bed_white_bottom", facedir()};
+	if (block == LECTERN)
+		return {"mcl_lectern:lectern", facedir()};
+	if (block == CAKE)
+		return {"mcl_cake:cake", 0};
+	if (block == MELON)
+		return {"mcl_farming:melon", 0};
+	if (block == LOOM)
+		return {"mcl_loom:loom", 0};
+	if (block == SMITHING_TABLE)
+		return {"mcl_smithing_table:table", 0};
 	switch (id) {
 	case 0:
 		return {"mcl_trees:tree_mangrove", 0};

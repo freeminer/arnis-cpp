@@ -17,6 +17,11 @@
 namespace arnis
 {
 
+// Shared scale threshold for compact procedural trees versus full-size or
+// region-pack trees. Rust exposes this from element_processing::tree and uses
+// it in both tree placement and ground vegetation selection.
+inline constexpr double MICRO_TREE_MAX_SCALE = 0.35;
+
 struct Coord
 {
 	int x;

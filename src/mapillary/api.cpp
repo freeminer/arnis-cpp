@@ -2,6 +2,7 @@
 #include "sfm.h"
 
 #include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <nlohmann/json.hpp>
 namespace arnis::mapillary
@@ -181,14 +182,29 @@ std::optional<PanoMeta> parse_pano_meta(const std::vector<std::uint8_t> &bytes)
 		return {};
 	}
 }
+
+std::optional<std::vector<std::uint8_t>> Client::fetch_bytes(
+		const std::string &url, std::size_t max_bytes) const
+{
+	if (fetch_)
+		return fetch_(url, max_bytes);
+	if (!graph_fetch_)
+		return std::nullopt;
+	auto reply = graph_fetch_(url, max_bytes);
+	if (!reply || reply->status < 200 || reply->status >= 300 ||
+			reply->body.size() > max_bytes)
+		return std::nullopt;
+	return std::move(reply->body);
+}
+
 std::optional<cache::ImageRecord> Client::image(
 		const std::string &id, const std::string &url) const
 {
 	if (auto hit = cache_.load_metadata(id))
 		return hit;
-	if (!fetch_ || !cache::Layout::safe_key(id))
+	if ((!fetch_ && !graph_fetch_) || !cache::Layout::safe_key(id))
 		return {};
-	auto bytes = fetch_(url, 1024 * 1024);
+	auto bytes = fetch_bytes(url, 1024 * 1024);
 	if (!bytes)
 		return {};
 	auto record = parse_image_record(*bytes);
@@ -211,7 +227,7 @@ std::optional<std::filesystem::path> Client::download_image(
 		return {};
 	if (cache::is_cached(*path))
 		return path;
-	if (!fetch_)
+	if (!fetch_ && !graph_fetch_)
 		return {};
 	const auto &url = size == cache::ImageSize::W1024	? record.thumb_1024_url
 					  : size == cache::ImageSize::W2048 ? record.thumb_2048_url
@@ -219,7 +235,7 @@ std::optional<std::filesystem::path> Client::download_image(
 	if (url.empty())
 		return {};
 	constexpr std::size_t max_image_bytes = 96 * 1024 * 1024;
-	auto bytes = fetch_(url, max_image_bytes);
+	auto bytes = fetch_bytes(url, max_image_bytes);
 	if (!bytes || bytes->empty() || bytes->size() > max_image_bytes ||
 			!cache_.save_image(record.id, size, *bytes))
 		return {};
@@ -247,10 +263,10 @@ std::optional<std::filesystem::path> Client::download_cluster(
 			return {};
 		if (cache::is_cached(*cluster_path))
 			return cluster_path;
-		if (!fetch_)
+		if (!fetch_ && !graph_fetch_)
 			return {};
 		constexpr std::size_t max_cluster_bytes = 96 * 1024 * 1024;
-		auto bytes = fetch_(url, max_cluster_bytes);
+		auto bytes = fetch_bytes(url, max_cluster_bytes);
 		if (!bytes || bytes->empty() || bytes->size() > max_cluster_bytes ||
 				!cache_.save_cluster(cluster_id, *bytes))
 			return {};
@@ -303,9 +319,9 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 {
 	std::vector<cache::ImageRecord> result;
 	auto cells = search_cells(bounds, maximum);
-	if (!fetch_ || !cells)
+	if ((!fetch_ && !graph_fetch_) || !cells)
 		return result;
-	for (const auto &cell : *cells) {
+	auto query_cell = [&](auto &&self, const SearchCell &cell, unsigned depth) -> void {
 		std::string bbox = std::to_string(cell.min_longitude) + "," +
 						   std::to_string(cell.min_latitude) + "," +
 						   std::to_string(cell.max_longitude) + "," +
@@ -314,15 +330,53 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 				endpoint + "?access_token=" + token +
 				"&is_pano=true&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +
 				bbox;
-		auto reply = fetch_(url, 16 * 1024 * 1024);
-		if (!reply)
-			continue;
-		auto records = parse_search_response(*reply);
+		constexpr unsigned max_subdivision_depth = 5;
+		constexpr std::size_t max_search_bytes = 16 * 1024 * 1024;
+		std::vector<std::uint8_t> body;
+		if (graph_fetch_) {
+			auto reply = graph_fetch_(url, max_search_bytes);
+			if (!reply)
+				return;
+			bool auth_failure = reply->status == 401;
+			if (reply->status == 500) {
+				std::string response_text(reply->body.begin(), reply->body.end());
+				std::transform(response_text.begin(), response_text.end(),
+						response_text.begin(), [](unsigned char c) {
+							return static_cast<char>(std::tolower(c));
+						});
+				auth_failure =
+						response_text.find("oauthexception") != std::string::npos ||
+						response_text.find("access token") != std::string::npos;
+			}
+			if (reply->status == 500 && !auth_failure && depth < max_subdivision_depth) {
+				const double mid_lon = (cell.min_longitude + cell.max_longitude) * 0.5;
+				const double mid_lat = (cell.min_latitude + cell.max_latitude) * 0.5;
+				const SearchCell quadrants[] = {
+						{cell.min_longitude, cell.min_latitude, mid_lon, mid_lat},
+						{mid_lon, cell.min_latitude, cell.max_longitude, mid_lat},
+						{cell.min_longitude, mid_lat, mid_lon, cell.max_latitude},
+						{mid_lon, mid_lat, cell.max_longitude, cell.max_latitude}};
+				for (const auto &quadrant : quadrants)
+					self(self, quadrant, depth + 1);
+				return;
+			}
+			if (reply->status < 200 || reply->status >= 300)
+				return;
+			body = std::move(reply->body);
+		} else {
+			auto reply = fetch_(url, max_search_bytes);
+			if (!reply)
+				return;
+			body = std::move(*reply);
+		}
+		auto records = parse_search_response(body);
 		for (const auto &record : records)
 			cache_.save_metadata(record);
 		result.insert(result.end(), std::make_move_iterator(records.begin()),
 				std::make_move_iterator(records.end()));
-	}
+	};
+	for (const auto &cell : *cells)
+		query_cell(query_cell, cell, 0);
 	std::sort(result.begin(), result.end(),
 			[](const auto &a, const auto &b) { return a.id < b.id; });
 	result.erase(std::unique(result.begin(), result.end(),
