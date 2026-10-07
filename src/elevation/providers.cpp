@@ -1,4 +1,5 @@
 #include "providers.h"
+#include "../net.h"
 #include "../../../http.h"
 #include "stb_image.h"
 #include <iomanip>
@@ -10,6 +11,7 @@
 #include <limits>
 #include <atomic>
 #include <chrono>
+#include <functional>
 #include <thread>
 #include <unordered_map>
 #include <numbers>
@@ -381,7 +383,7 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 			const auto path =
 					root / ("z" + std::to_string(zoom) + "_x" + std::to_string(key.x) +
 								   "_y" + std::to_string(key.y) + ".png");
-			for (unsigned attempt = 0; attempt <= 3; ++attempt) {
+			for (unsigned attempt = 0; attempt < 3; ++attempt) {
 				tile_ec.clear();
 				if (std::filesystem::is_regular_file(path, tile_ec)) {
 					if (auto raster = read_rgb_raster(path)) {
@@ -399,7 +401,7 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 					std::filesystem::remove(path, tile_ec);
 					tile_ec.clear();
 				}
-				if (attempt < 3)
+				if (attempt < 2)
 					std::this_thread::sleep_for(
 							std::chrono::milliseconds(500u << attempt));
 			}
@@ -699,12 +701,17 @@ bool download_tile(const std::string &url, const std::filesystem::path &file,
 		std::uint64_t minimum_bytes)
 {
 	std::filesystem::create_directories(file.parent_path());
+	static std::atomic_uint64_t temp_counter{0};
 	auto tmp = file;
-	tmp += ".tmp";
+	tmp += ".tmp-" +
+		   std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
+		   "-" + std::to_string(temp_counter.fetch_add(1, std::memory_order_relaxed));
 	std::error_code ec;
-	std::filesystem::remove(tmp, ec);
-	if (!http_to_file(url, tmp.string()))
+	[[maybe_unused]] auto permit = arnis::net::request_permit();
+	if (!http_to_file(url, tmp.string())) {
+		std::filesystem::remove(tmp, ec);
 		return false;
+	}
 	auto n = std::filesystem::file_size(tmp, ec);
 	if (ec || n < minimum_bytes) {
 		std::filesystem::remove(tmp);
@@ -713,7 +720,7 @@ bool download_tile(const std::string &url, const std::filesystem::path &file,
 	std::filesystem::rename(tmp, file, ec);
 	if (ec) {
 		std::filesystem::remove(tmp);
-		return false;
+		return std::filesystem::is_regular_file(file, ec);
 	}
 	return true;
 }
