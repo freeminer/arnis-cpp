@@ -564,6 +564,13 @@ impl Block {
             472 => "podzol",
             473 => "light_gray_concrete_powder",
             474..=479 => "snow",
+            480 => "flowering_azalea_leaves",
+            481 => "white_bed",
+            482 => "lectern",
+            483 => "cake",
+            484 => "melon",
+            485 => "loom",
+            486 => "smithing_table",
             _ => return None,
         })
         // Block ids are u16 handles; keep the name and property tables in sync
@@ -795,7 +802,9 @@ impl Block {
                 map.insert("persistent".to_string(), Value::String("true".to_string()));
                 map
             })),
-            231 => Some(Value::Compound({
+            // Cherry, mangrove, azalea and flowering azalea leaves; persistent so a
+            // trunkless bush does not decay.
+            231 | 233 | 234 | 480 => Some(Value::Compound({
                 let mut map: HashMap<String, Value> = HashMap::new();
                 map.insert("persistent".to_string(), Value::String("true".to_string()));
                 map
@@ -1562,6 +1571,14 @@ pub const CACTUS: Block = Block::new(470);
 pub const SNOWY_GRASS_BLOCK: Block = Block::new(471);
 pub const SNOWY_PODZOL: Block = Block::new(472);
 pub const LIGHT_GRAY_CONCRETE_POWDER: Block = Block::new(473);
+pub const FLOWERING_AZALEA_LEAVES: Block = Block::new(480);
+/// Placed with explicit facing and part properties, like every bed.
+pub const WHITE_BED: Block = Block::new(481);
+pub const LECTERN: Block = Block::new(482);
+pub const CAKE: Block = Block::new(483);
+pub const MELON: Block = Block::new(484);
+pub const LOOM: Block = Block::new(485);
+pub const SMITHING_TABLE: Block = Block::new(486);
 /// Snow layers by depth in eighths of a block, one to seven.
 pub const SNOW_LAYERS: [Block; 7] = [
     SNOW_LAYER,

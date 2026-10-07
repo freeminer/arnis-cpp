@@ -2,6 +2,7 @@ use crate::args::Args;
 use crate::coordinate_system::cartesian::XZBBox;
 use crate::coordinate_system::geographic::LLBBox;
 use crate::element_processing::building_facade::BuildingContext;
+use crate::element_processing::subprocessor::interior::InteriorUseIndex;
 use crate::element_processing::*;
 use crate::floodfill_cache::{CoordinateBitmap, FloodFillCache};
 use crate::ground::Ground;
@@ -278,6 +279,7 @@ fn process_element(
     element: &ProcessedElement,
     args: &Args,
     highway_connectivity: &highways::HighwayConnectivityMap,
+    road_markings: &road_markings::RoadMarkingIndex,
     flood_fill_cache: &FloodFillCache,
     building_footprints: &CoordinateBitmap,
     building_passages: &CoordinateBitmap,
@@ -297,6 +299,7 @@ fn process_element(
     part_groups: &PartGroups,
     group_members: &FnvHashMap<u64, Vec<u64>>,
     still_surfaces: &water_areas::StillWaterSurfaces,
+    interior_uses: &InteriorUseIndex,
 ) {
     let signage = editor.signage_enabled();
     match element {
@@ -324,6 +327,7 @@ fn process_element(
                     road_mask,
                     building_footprints,
                     group_members,
+                    interior_uses,
                 };
                 let anchor =
                     buildings::generate_buildings(editor, way, args, None, None, &ctx, group_seed);
@@ -347,6 +351,7 @@ fn process_element(
                     tunnel_portals,
                     tunnel_footprint,
                     tunnel_cells,
+                    road_markings,
                 );
                 if signage {
                     signage::generate_highway_way_signage(editor, way, building_footprints);
@@ -475,6 +480,7 @@ fn process_element(
                     tunnel_portals,
                     tunnel_footprint,
                     tunnel_cells,
+                    road_markings,
                 );
             } else if node.tags.get("aeroway").map(String::as_str) == Some("helipad") {
                 highways::generate_helipad_node(editor, node, args, building_footprints);
@@ -503,6 +509,7 @@ fn process_element(
                     road_mask,
                     building_footprints,
                     group_members,
+                    interior_uses,
                 };
                 buildings::generate_building_from_relation(editor, rel, args, &ctx, xzbbox);
             } else if rel.tags.contains_key("water")
@@ -678,7 +685,7 @@ pub fn generate_world_with_options(
     editor.set_map_decals(world_format == WorldFormat::JavaAnvil);
     editor.set_projection_info(&args.projection.to_string(), args.scale);
     if let Some(run) = one_world {
-        editor.set_merge_into_existing(true);
+        editor.set_merge_into_existing(crate::world_utils::WorldLayout::of(&run.world_dir));
         editor.set_climate_anchor(run.origin_lat, run.origin_lon);
         // metadata.json describes the whole world, not this area alone.
         if let Ok(Some(manifest)) = crate::one_world::Manifest::load(&run.world_dir) {
@@ -781,7 +788,8 @@ pub fn generate_world_with_options(
     let wants_map_item = args.map_item && world_format == WorldFormat::JavaAnvil && !extending;
     let place_branding = world_format == WorldFormat::JavaAnvil && !extending;
     let first_decal_id = if one_world.is_some() {
-        let next = crate::map_item::next_map_id(&output_path.join("data"));
+        let layout = crate::world_utils::WorldLayout::of(&output_path);
+        let next = crate::map_item::next_map_id(&layout.maps_dir(&output_path));
         next + if wants_map_item {
             2
         } else if place_branding {
@@ -890,6 +898,14 @@ pub fn generate_world_with_options(
 
     // Build highway connectivity map once before processing
     let highway_connectivity = highways::build_highway_connectivity_map(&elements);
+    let road_markings = road_markings::RoadMarkingIndex::build(
+        &elements,
+        args.scale,
+        crate::decals::region::SignRegion::detect(
+            (llbbox.min().lat() + llbbox.max().lat()) / 2.0,
+            (llbbox.min().lng() + llbbox.max().lng()) / 2.0,
+        ),
+    );
 
     // Collect underground railway centerline points for post-ground-fill air carving (phase 2).
     let mut rail_tunnel_points: Vec<(i32, i32)> = Vec::new();
@@ -910,6 +926,13 @@ pub fn generate_world_with_options(
     // Collect building footprints to prevent trees from spawning inside buildings
     // Uses a memory-efficient bitmap (~1 bit per coordinate) instead of a HashSet (~24 bytes per coordinate)
     let building_footprints = flood_fill_cache.collect_building_footprints(&elements, &xzbbox);
+
+    // Tenants and surrounding areas per building, for interiors furnished by use.
+    let interior_uses = if args.interior {
+        InteriorUseIndex::build(&elements, &clip_bbox)
+    } else {
+        InteriorUseIndex::default()
+    };
 
     // Collect coordinates covered by tunnel=building_passage highways so that
     // building generation can cut ground-level openings through walls and floors.
@@ -1213,6 +1236,7 @@ pub fn generate_world_with_options(
                     element,
                     args,
                     &highway_connectivity,
+                    &road_markings,
                     &flood_fill_cache,
                     &building_footprints,
                     &building_passages,
@@ -1235,6 +1259,7 @@ pub fn generate_world_with_options(
                     &part_groups,
                     &group_members,
                     &still_surfaces,
+                    &interior_uses,
                 );
             }
 
@@ -1589,6 +1614,7 @@ pub fn generate_world_with_options(
                 &element,
                 args,
                 &highway_connectivity,
+                &road_markings,
                 &flood_fill_cache,
                 &building_footprints,
                 &building_passages,
@@ -1608,6 +1634,7 @@ pub fn generate_world_with_options(
                 &part_groups,
                 &group_members,
                 &still_surfaces,
+                &interior_uses,
             );
 
             // Release flood fill cache entries for memory optimization.
@@ -1623,6 +1650,7 @@ pub fn generate_world_with_options(
 
     // Keep road_mask alive for the LC_WATER carve below.
     drop(highway_connectivity);
+    drop(road_markings);
     drop(flood_fill_cache);
 
     // True when ground (and the ore/water post-passes) run on the merged editor:
