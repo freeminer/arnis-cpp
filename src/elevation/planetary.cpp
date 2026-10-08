@@ -66,6 +66,20 @@ std::string tile_name(
 	return filename;
 }
 
+std::int16_t decode_sample(const std::uint8_t *bytes, bool big_endian)
+{
+	const std::uint16_t bits =
+			big_endian ? static_cast<std::uint16_t>(
+								 (std::uint16_t(bytes[0]) << 8) | bytes[1])
+					   : static_cast<std::uint16_t>(
+								 (std::uint16_t(bytes[1]) << 8) | bytes[0]);
+	const std::int32_t signed_value =
+			bits <= static_cast<std::uint16_t>(std::numeric_limits<std::int16_t>::max())
+					? bits
+					: static_cast<std::int32_t>(bits) - 0x10000;
+	return static_cast<std::int16_t>(signed_value);
+}
+
 struct Window
 {
 	std::size_t line0, sample0, lines, samples, step, ppd;
@@ -85,12 +99,17 @@ struct Window
 		const auto sample1 = std::size_t(std::ceil(east * ppd));
 		const auto raw_lines = std::max<std::size_t>(1, line1 - line0);
 		const auto raw_samples = std::max<std::size_t>(1, sample1 - sample0);
+		// Rust deliberately floors the grid-resolution ratio: if a source window
+		// is less than two source pixels per output cell, keep every source pixel.
+		// Only the hard memory budget rounds upward, otherwise large windows can
+		// exceed MAX_SOURCE_DIM after striding.
 		const auto by_grid =
-				std::max(double(raw_lines) / std::max<std::size_t>(1, height),
-						double(raw_samples) / std::max<std::size_t>(1, width));
-		const auto by_budget = double(std::max(raw_lines, raw_samples)) / MAX_SOURCE_DIM;
+				std::floor(std::max(double(raw_lines) / std::max<std::size_t>(1, height),
+						double(raw_samples) / std::max<std::size_t>(1, width)));
+		const auto by_budget =
+				std::ceil(double(std::max(raw_lines, raw_samples)) / MAX_SOURCE_DIM);
 		const auto step = std::max<std::size_t>(
-				1, std::size_t(std::ceil(std::max(by_grid, by_budget))));
+				1, static_cast<std::size_t>(std::max(by_grid, by_budget)));
 		return {line0, sample0, (raw_lines + step - 1) / step,
 				(raw_samples + step - 1) / step, step, spec.ppd};
 	}
@@ -99,28 +118,40 @@ struct Window
 std::filesystem::path cache_path(
 		const std::filesystem::path &directory, CelestialBody body, const Window &window)
 {
-	return directory /
-		   (std::string(celestial_body_name(body)) + "_p" + std::to_string(window.ppd) +
-				   "_" + std::to_string(window.line0) + "_" +
+	const auto provider = body == CelestialBody::Moon ? "lola" : "mola";
+	return directory / provider /
+		   ("p" + std::to_string(window.ppd) + "_" + std::to_string(window.line0) + "_" +
 				   std::to_string(window.sample0) + "_" + std::to_string(window.lines) +
 				   "x" + std::to_string(window.samples) + "_s" +
-				   std::to_string(window.step) + ".f64");
+				   std::to_string(window.step) + ".bin");
 }
 
-std::optional<std::vector<double>> load_window(
+std::optional<std::vector<float>> load_window(
 		const std::filesystem::path &path, std::size_t count)
 {
 	std::ifstream input(path, std::ios::binary);
 	if (!input)
 		return std::nullopt;
-	std::vector<double> values(count);
-	input.read(reinterpret_cast<char *>(values.data()), values.size() * sizeof(double));
-	return input && input.peek() == std::char_traits<char>::eof()
-				   ? std::optional<std::vector<double>>(std::move(values))
-				   : std::nullopt;
+	if (count > std::numeric_limits<std::size_t>::max() / 4)
+		return std::nullopt;
+	std::vector<std::uint8_t> bytes(count * 4);
+	input.read(reinterpret_cast<char *>(bytes.data()),
+			static_cast<std::streamsize>(bytes.size()));
+	if (!input || input.peek() != std::char_traits<char>::eof())
+		return std::nullopt;
+	std::vector<float> values(count);
+	for (std::size_t i = 0; i < count; ++i) {
+		const auto offset = i * 4;
+		const std::uint32_t bits = std::uint32_t(bytes[offset]) |
+								   (std::uint32_t(bytes[offset + 1]) << 8) |
+								   (std::uint32_t(bytes[offset + 2]) << 16) |
+								   (std::uint32_t(bytes[offset + 3]) << 24);
+		std::memcpy(&values[i], &bits, sizeof(bits));
+	}
+	return values;
 }
 
-void save_window(const std::filesystem::path &path, const std::vector<double> &values)
+void save_window(const std::filesystem::path &path, const std::vector<float> &values)
 {
 	std::error_code error;
 	std::filesystem::create_directories(path.parent_path(), error);
@@ -130,8 +161,17 @@ void save_window(const std::filesystem::path &path, const std::vector<double> &v
 	std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
 	if (!output)
 		return;
-	output.write(reinterpret_cast<const char *>(values.data()),
-			values.size() * sizeof(double));
+	for (const float value : values) {
+		std::uint32_t bits = 0;
+		std::memcpy(&bits, &value, sizeof(bits));
+		const std::uint8_t bytes[] = {static_cast<std::uint8_t>(bits),
+				static_cast<std::uint8_t>(bits >> 8),
+				static_cast<std::uint8_t>(bits >> 16),
+				static_cast<std::uint8_t>(bits >> 24)};
+		output.write(reinterpret_cast<const char *>(bytes), sizeof(bytes));
+		if (!output)
+			break;
+	}
 	output.close();
 	if (output)
 		std::filesystem::rename(temporary, path, error);
@@ -139,17 +179,18 @@ void save_window(const std::filesystem::path &path, const std::vector<double> &v
 		std::filesystem::remove(temporary, error);
 }
 
-double interpolate(double a, double b, double c, double d, double x, double y)
+float interpolate(float a, float b, float c, float d, double x, double y)
 {
-	const double values[] = {a, b, c, d};
+	const float values[] = {a, b, c, d};
 	const double weights[] = {(1.0 - x) * (1.0 - y), x * (1.0 - y), (1.0 - x) * y, x * y};
 	double sum = 0.0, weight = 0.0;
 	for (unsigned i = 0; i < 4; ++i)
 		if (std::isfinite(values[i])) {
-			sum += values[i] * weights[i];
+			sum += static_cast<double>(values[i]) * weights[i];
 			weight += weights[i];
 		}
-	return weight > 0.0 ? sum / weight : std::numeric_limits<double>::quiet_NaN();
+	return weight > 0.0 ? static_cast<float>(sum / weight)
+						: std::numeric_limits<float>::quiet_NaN();
 }
 
 } // namespace
@@ -189,19 +230,18 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 	// Only a completely decoded cache window is a hit. Checking path existence
 	// separately would accept a truncated/corrupt file and silently turn the
 	// whole requested area into NaNs instead of following Rust's refetch path.
-	auto cached_window = cached.empty() ? std::optional<std::vector<double>>{}
+	auto cached_window = cached.empty() ? std::optional<std::vector<float>>{}
 										: load_window(cached, sample_count);
 	const bool fetched = cached_window.has_value();
-	std::vector<double> source =
+	std::vector<float> source =
 			fetched ? std::move(*cached_window)
-					: std::vector<double>(
-							  sample_count, std::numeric_limits<double>::quiet_NaN());
+					: std::vector<float>(
+							  sample_count, std::numeric_limits<float>::quiet_NaN());
 	std::size_t successful_rows = fetched ? window.lines : 0;
 	if (!fetched) {
-		const auto fetch_row =
-				[&](std::size_t row) -> std::optional<std::vector<double>> {
-			std::vector<double> values(
-					window.samples, std::numeric_limits<double>::quiet_NaN());
+		const auto fetch_row = [&](std::size_t row) -> std::optional<std::vector<float>> {
+			std::vector<float> values(
+					window.samples, std::numeric_limits<float>::quiet_NaN());
 			const auto line = window.line0 + row * window.step;
 			const auto latitude = 90.0 - double(line) / spec->ppd;
 			const auto lat_band = std::clamp(
@@ -241,21 +281,15 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 					return std::nullopt;
 				for (std::size_t i = 0; i < take; ++i) {
 					const auto at = i * window.step * 2;
-					const auto raw =
-							spec->big_endian
-									? std::int16_t((std::uint16_t((*bytes)[at]) << 8) |
-												   (*bytes)[at + 1])
-									: std::int16_t(
-											  (std::uint16_t((*bytes)[at + 1]) << 8) |
-											  (*bytes)[at]);
+					const auto raw = decode_sample(bytes->data() + at, spec->big_endian);
 					if (raw != std::numeric_limits<std::int16_t>::min())
-						values[col + i] = raw * spec->dn_to_meters;
+						values[col + i] = static_cast<float>(raw * spec->dn_to_meters);
 				}
 				col += take;
 			}
 			return values;
 		};
-		std::vector<std::optional<std::vector<double>>> rows(window.lines);
+		std::vector<std::optional<std::vector<float>>> rows(window.lines);
 		std::atomic_size_t next_row{0};
 		const auto worker = [&]() {
 			for (;;) {
@@ -315,9 +349,12 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 				return source[std::min(yy, window.lines - 1) * window.samples +
 							  std::min(xx, window.samples - 1)];
 			};
-			result.heights[z][x] = interpolate(at(y, sx), at(y, sx + 1), at(y + 1, sx),
-										   at(y + 1, sx + 1), fx - sx, fy - y) *
-								   celestial_height_gain(body);
+			result.heights[z][x] =
+					double(interpolate(static_cast<float>(at(y, sx)),
+							static_cast<float>(at(y, sx + 1)),
+							static_cast<float>(at(y + 1, sx)),
+							static_cast<float>(at(y + 1, sx + 1)), fx - sx, fy - y)) *
+					celestial_terrain_gain(body);
 		}
 	}
 	return result;

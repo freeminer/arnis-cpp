@@ -5,8 +5,10 @@
 
 #include <algorithm>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <nlohmann/json.hpp>
+#include <thread>
 namespace arnis::mapillary
 {
 Client::Client(cache::Layout cache) : cache_(std::move(cache))
@@ -368,6 +370,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 				"&is_pano=true&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +
 				bbox;
 		constexpr unsigned max_subdivision_depth = 5;
+		constexpr unsigned leaf_retry_count = 2;
 		constexpr std::size_t max_search_bytes = 16 * 1024 * 1024;
 		std::vector<std::uint8_t> body;
 		if (graph_fetch_) {
@@ -398,6 +401,45 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						{mid_lon, mid_lat, cell.max_longitude, cell.max_latitude}};
 				for (const auto &quadrant : quadrants)
 					self(self, quadrant, depth + 1);
+				return;
+			}
+			// Rust retries a non-explicit Graph 500 at the smallest cell before
+			// treating it as a coverage hole. Without this, a transient Graph API
+			// failure at maximum subdivision depth permanently drops that cell.
+			if (reply->status == 500 && !auth_failure && depth >= max_subdivision_depth) {
+				bool recovered = false;
+				for (unsigned retry = 1; retry <= leaf_retry_count; ++retry) {
+					std::this_thread::sleep_for(std::chrono::milliseconds(750 * retry));
+					reply = graph_fetch_(url, max_search_bytes);
+					if (!reply)
+						continue;
+					bool retry_auth_failure = reply->status == 401;
+					if (reply->status == 500) {
+						std::string response_text(reply->body.begin(), reply->body.end());
+						std::transform(response_text.begin(), response_text.end(),
+								response_text.begin(), [](unsigned char c) {
+									return static_cast<char>(std::tolower(c));
+								});
+						retry_auth_failure =
+								response_text.find("oauthexception") !=
+										std::string::npos ||
+								response_text.find("access token") != std::string::npos;
+					}
+					if (reply->status >= 200 && reply->status < 300) {
+						recovered = true;
+						break;
+					}
+					if (retry_auth_failure || reply->status != 500)
+						break;
+				}
+				if (!recovered) {
+					if (failed_cells)
+						++*failed_cells;
+					return;
+				}
+			} else if (reply->status == 500 && auth_failure) {
+				if (failed_cells)
+					++*failed_cells;
 				return;
 			}
 			if (reply->status < 200 || reply->status >= 300) {

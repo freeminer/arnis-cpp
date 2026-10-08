@@ -137,7 +137,7 @@ unsigned air_neighbors(const world_editor::WorldEditor &editor, int x, int y, in
 }
 
 void place_blob(world_editor::WorldEditor &editor, int cx, int cy, int cz, const Ore &ore,
-		XoroRandom &random, const CaveRect &region)
+		XoroRandom &random)
 {
 	const double angle = random.next_float() * PI;
 	const double half_length = ore.size / 8.0;
@@ -164,8 +164,9 @@ void place_blob(world_editor::WorldEditor &editor, int cx, int cy, int cz, const
 					const int bx = static_cast<int>(std::round(px)) + dx;
 					const int by = py + dy;
 					const int bz = static_cast<int>(std::round(pz)) + dz;
-					if (!region.contains(bx, bz) ||
-							!editor.block_exists_absolute(bx, by, bz))
+					// Match Rust: the extra chunk used to seed edge blobs is allowed to
+					// complete those blobs across the requested region boundary.
+					if (!editor.block_exists_absolute(bx, by, bz))
 						continue;
 					const auto exposed = air_neighbors(editor, bx, by, bz);
 					if (exposed >= 3)
@@ -222,7 +223,7 @@ void place_ores_region(world_editor::WorldEditor &editor, const CaveRect &region
 											  shift;
 					if (y > ground_y - 2 || !editor.block_exists_absolute(x, y, z))
 						continue;
-					place_blob(editor, x, y, z, ore, random, region);
+					place_blob(editor, x, y, z, ore, random);
 				}
 			}
 		}

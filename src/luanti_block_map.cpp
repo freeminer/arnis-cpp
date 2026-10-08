@@ -11,6 +11,8 @@ LuantiNode to_luanti_node(
 		return {"mcl_core:blue_ice", 0};
 	if (block == FLOWERING_AZALEA_LEAVES)
 		return {"mcl_trees:leaves_azalea_flowering", 0};
+	if (block == LIGHT_GRAY_CONCRETE_POWDER)
+		return {"mcl_colorblocks:concrete_powder_silver", 0};
 	auto facedir = [&]() -> std::uint8_t {
 		if (!facing)
 			return static_cast<std::uint8_t>(top ? 20 : 0);

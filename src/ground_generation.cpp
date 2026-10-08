@@ -518,6 +518,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const bool schematic_trees = editor.has_schematic_tree_pack();
 	const auto geographic_bounds = editor.geographic_bounds();
 	const double center_latitude = (geographic_bounds[0] + geographic_bounds[1]) * .5;
+	const bool geographic_bounds_valid =
+			std::isfinite(geographic_bounds[0]) && std::isfinite(geographic_bounds[1]) &&
+			std::isfinite(geographic_bounds[2]) && std::isfinite(geographic_bounds[3]) &&
+			geographic_bounds[1] > geographic_bounds[0] &&
+			geographic_bounds[3] > geographic_bounds[2];
+	// Rust uses the requested bbox midpoint for the celestial palette. Keep the
+	// explicit latitude only for embedding callers that do not retain a bbox.
+	const double celestial_center_latitude =
+			geographic_bounds_valid ? center_latitude : args.celestial_latitude_degrees;
 	const terrain_surface::SnowLine snow_line(editor.ground
 													  ? editor.ground->snow_threshold()
 													  : std::numeric_limits<int>::max(),
@@ -725,11 +734,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						// that surface while the selected under-block still closes the terrain.
 						if (process_surface) {
 							const auto planetary_palette =
-									planetary
-											? celestial_surface_palette(args.body, slope,
-													  args.celestial_latitude_degrees,
-													  ground_y, x, z)
-											: std::pair<Block, Block>{};
+									planetary ? celestial_surface_palette(args.body,
+														slope, celestial_center_latitude,
+														ground_y, x, z)
+											  : std::pair<Block, Block>{};
 							const std::pair<Block, Block> palette =
 									planetary	  ? planetary_palette
 									: talus_block ? *talus_block

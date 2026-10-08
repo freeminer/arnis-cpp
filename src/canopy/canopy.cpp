@@ -8,7 +8,10 @@
 #include <zlib.h>
 #include <fstream>
 #include <chrono>
+#include <memory>
+#include <mutex>
 #include <limits>
+#include <unordered_map>
 #include "../../../http.h"
 #include "../world_utils.h"
 
@@ -23,6 +26,65 @@ constexpr double SLOT_P_MAX = 0.85;
 constexpr std::size_t ROW_BLOCK = 128;
 constexpr std::uint64_t FETCH_BATCH_BYTES = 16ULL << 20;
 constexpr auto ROW_CACHE_MAX_AGE = std::chrono::hours(24 * 30);
+constexpr auto TILE_FAILURE_RETRY = std::chrono::minutes(5);
+constexpr auto FAILURE_WARNING_RETRY = std::chrono::minutes(5);
+
+struct TileFetchState
+{
+	std::mutex mutex;
+	std::chrono::steady_clock::time_point unavailable_until{};
+};
+
+std::shared_ptr<TileFetchState> tile_fetch_state(
+		const std::filesystem::path &base, int xt, int yt)
+{
+	static std::mutex states_mutex;
+	static std::unordered_map<std::string, std::shared_ptr<TileFetchState>> states;
+	const auto key = cache_dir(base).string() + "/" + quadkey_of(xt, yt);
+	std::lock_guard lock(states_mutex);
+	if (const auto it = states.find(key); it != states.end())
+		return it->second;
+	auto created = std::make_shared<TileFetchState>();
+	states.emplace(key, created);
+	if (states.size() > 512) {
+		const auto now = std::chrono::steady_clock::now();
+		for (auto it = states.begin(); it != states.end();) {
+			const auto &candidate = it->second;
+			// An unshared state cannot be modified by an active tile request.
+			if (candidate.use_count() == 1 && candidate->unavailable_until <= now)
+				it = states.erase(it);
+			else
+				++it;
+		}
+	}
+	return created;
+}
+
+bool should_log_canopy_failure()
+{
+	// Chunk generation asks for overlapping regions. A large area may touch
+	// many unavailable source tiles, so per-tile throttling still permits a
+	// warning storm on every new chunk. Keep retry state per tile, but rate-limit
+	// canopy failure diagnostics for the process.
+	static std::mutex warning_mutex;
+	static std::chrono::steady_clock::time_point last_warning{};
+	std::lock_guard lock(warning_mutex);
+	const auto now = std::chrono::steady_clock::now();
+	if (last_warning != std::chrono::steady_clock::time_point{} &&
+			now - last_warning < FAILURE_WARNING_RETRY)
+		return false;
+	last_warning = now;
+	return true;
+}
+
+void print_canopy_fetch_message_once()
+{
+	static std::once_flag once;
+	std::call_once(once, [] {
+		std::cout
+				<< "Fetching canopy height data (Meta/WRI 1m global canopy height)...\n";
+	});
+}
 }
 
 CanopyData::CanopyData(std::vector<std::uint8_t> grid, std::size_t w, std::size_t h) :
@@ -485,7 +547,7 @@ std::optional<StripIndex> cached_or_remote_strip_index(const std::filesystem::pa
 	return index;
 }
 
-bool fill_from_remote_tile(const std::filesystem::path &base,
+bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 		const RangeFetcher &fetch_range, int xt, int yt, double min_lat, double min_lon,
 		double max_lat, double max_lon, std::size_t width, std::size_t height,
 		std::vector<std::uint8_t> &grid)
@@ -679,6 +741,31 @@ bool fill_from_remote_tile(const std::filesystem::path &base,
 		bi += count;
 	}
 	return true;
+}
+
+bool fill_from_remote_tile(const std::filesystem::path &base,
+		const RangeFetcher &fetch_range, int xt, int yt, double min_lat, double min_lon,
+		double max_lat, double max_lon, std::size_t width, std::size_t height,
+		std::vector<std::uint8_t> &grid)
+{
+	const auto window =
+			tile_window(xt, yt, min_lat, min_lon, max_lat, max_lon, width, height);
+	if (window.columns.empty() || window.rows.empty())
+		return false;
+
+	// Concurrent mapgen calls often ask for the same source tile. Serialize only
+	// requests for that tile; a successful first caller populates the strip/row
+	// caches, while a failed one suppresses repeated HTTP retries briefly.
+	const auto state = tile_fetch_state(base, xt, yt);
+	std::lock_guard lock(state->mutex);
+	const auto now = std::chrono::steady_clock::now();
+	if (state->unavailable_until > now)
+		return false;
+	const bool loaded = fill_from_remote_tile_unlocked(base, fetch_range, xt, yt, min_lat,
+			min_lon, max_lat, max_lon, width, height, grid);
+	state->unavailable_until =
+			loaded ? std::chrono::steady_clock::time_point{} : now + TILE_FAILURE_RETRY;
+	return loaded;
 }
 } // namespace
 
@@ -922,24 +1009,28 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 	if (!fetch_range || grid_width == 0 || grid_height == 0 || !std::isfinite(min_lat) ||
 			!std::isfinite(min_lon) || !std::isfinite(max_lat) || !std::isfinite(max_lon))
 		return std::nullopt;
-	std::cout << "Fetching canopy height data (Meta/WRI 1m global canopy height)...\n";
+	print_canopy_fetch_message_once();
 	prune_row_cache(base);
 	std::vector<std::uint8_t> grid(grid_width * grid_height, CANOPY_NODATA);
 	std::size_t loaded_tiles = 0;
 	std::vector<std::string> failures;
+	bool log_failure = false;
 	for (const auto &[xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon)) {
 		if (fill_from_remote_tile(base, fetch_range, xt, yt, min_lat, min_lon, max_lat,
 					max_lon, grid_width, grid_height, grid))
 			++loaded_tiles;
-		else
+		else {
 			failures.push_back(quadkey_of(xt, yt) + ": canopy tile unavailable");
+			log_failure = should_log_canopy_failure() || log_failure;
+		}
 	}
 	CanopyData data(std::move(grid), grid_width, grid_height);
 	const auto [covered, canopy, mean, maximum] = data.stats();
 	if (covered == 0) {
 		const auto why = failures.empty() ? std::string("no tiles") : failures.front();
-		std::clog << "Warning: Canopy height data unavailable (" << why.substr(0, 200)
-				  << "). Falling back to land cover for trees.\n";
+		if (log_failure)
+			std::clog << "Warning: Canopy height data unavailable (" << why.substr(0, 200)
+					  << "). Falling back to land cover for trees.\n";
 		return std::nullopt;
 	}
 	const auto cout_flags = std::cout.flags();
@@ -952,7 +1043,7 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 			  << static_cast<unsigned>(maximum) << "m\n";
 	std::cout.flags(cout_flags);
 	std::cout.precision(cout_precision);
-	if (!failures.empty())
+	if (!failures.empty() && log_failure)
 		std::clog
 				<< "Warning: " << failures.size()
 				<< " canopy tile(s) unavailable; those areas fall back to land cover.\n";

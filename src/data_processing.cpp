@@ -88,11 +88,18 @@ namespace
 std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		const std::filesystem::path &root, const std::string &realm, double latitude,
 		double longitude, double scale, int ground_level, arnis::trees::TreeSize max_size,
-		double blocks_per_meter, bool wait_for_load = false)
+		double blocks_per_meter, const std::vector<std::uint16_t> &ecoregion_ids,
+		bool exclude_palms, bool wait_for_load = false)
 {
 	// Tree pack loading eagerly opens every referenced schematic. Keep it out
 	// of the synchronous generation path so terrain and structures can proceed.
 	using Selector = std::shared_ptr<arnis::trees::RegionSelector>;
+	// Rust loads the pack at every scale, but only attaches area-specific mixes
+	// when schematic trees can actually be placed. Tiny-scale worlds use the
+	// compact procedural tree path, so decoding cross-pack communities there is
+	// wasted work and must not alter the selected pack.
+	const auto effective_ecoregion_ids =
+			scale >= MICRO_TREE_MAX_SCALE ? ecoregion_ids : std::vector<std::uint16_t>{};
 	struct CacheState
 	{
 		std::mutex mutex;
@@ -109,9 +116,16 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 	const auto key = root.string() + "|" + realm + "|" +
 					 std::to_string(std::bit_cast<std::uint64_t>(latitude)) + "|" +
 					 std::to_string(std::bit_cast<std::uint64_t>(longitude)) + "|" +
-					 std::to_string(scale) + "|" + std::to_string(ground_level) + "|" +
+					 std::to_string(std::bit_cast<std::uint64_t>(scale)) + "|" +
+					 std::to_string(ground_level) + "|" +
 					 std::to_string(static_cast<int>(max_size)) + "|" +
-					 std::to_string(blocks_per_meter);
+					 std::to_string(std::bit_cast<std::uint64_t>(blocks_per_meter)) +
+					 "|" + (exclude_palms ? "exclude-palms" : "include-palms") + [&] {
+						 std::string suffix;
+						 for (const auto id : effective_ecoregion_ids)
+							 suffix += "|" + std::to_string(id);
+						 return suffix;
+					 }();
 	{
 		std::unique_lock lock(state->mutex);
 		if (const auto it = state->selectors.find(key); it != state->selectors.end())
@@ -124,13 +138,14 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		}
 	}
 	std::thread([root, realm, latitude, longitude, scale, ground_level, max_size,
-						blocks_per_meter, key] {
+						blocks_per_meter, effective_ecoregion_ids, exclude_palms, key] {
 		Selector result;
 		try {
 			auto loaded = arnis::trees::RegionSelector::load_for_location(latitude,
 					longitude, root, scale, ground_level,
 					arnis::trees::SizeFilter::up_to(max_size), blocks_per_meter,
-					realm.empty() ? std::nullopt : std::optional<std::string>(realm));
+					realm.empty() ? std::nullopt : std::optional<std::string>(realm),
+					effective_ecoregion_ids, exclude_palms);
 			if (loaded)
 				result = std::make_shared<arnis::trees::RegionSelector>(
 						std::move(*loaded));
@@ -1256,13 +1271,32 @@ bool generate_world(WorldEditor &editor,
 	std::shared_ptr<trees::RegionSelector> shared_selector;
 	const auto tree_pack_root = assets::path("tree-packs");
 	std::optional<std::string> dominant_tree_realm;
-	if (editor.ground && editor.ground->ecoregion_map())
-		dominant_tree_realm = editor.ground->ecoregion_map()->dominant_tree_pack();
+	std::vector<std::uint16_t> area_ecoregion_ids;
+	bool ecoregion_map_has_gaps = true;
+	if (editor.ground && editor.ground->ecoregion_map()) {
+		const auto &ecoregions = editor.ground->ecoregion_map();
+		dominant_tree_realm = ecoregions->dominant_tree_pack();
+		ecoregion_map_has_gaps = ecoregions->has_gaps();
+		for (const auto &[id, count] : ecoregions->by_area()) {
+			(void)count;
+			if (ecoregion::tree_mix(id))
+				area_ecoregion_ids.push_back(id);
+		}
+	}
+	const double abs_centre_lat = std::abs(centre_lat);
+	const bool unmapped_palms = ecoregion_map_has_gaps && abs_centre_lat <= 35.0;
+	const bool any_area_ecoregion_allows_palms = std::any_of(
+			area_ecoregion_ids.begin(), area_ecoregion_ids.end(), [&](std::uint16_t id) {
+				const auto eco = ecoregion::lookup(id);
+				return eco && ecoregion::palms_belong(*eco, abs_centre_lat);
+			});
+	const bool exclude_palms = !unmapped_palms && !any_area_ecoregion_allows_palms;
 	if (!args.legacy_trees) {
 		const auto selector = cached_region_selector(tree_pack_root,
 				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
 				base_level, args.max_tree_size,
-				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0);
+				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0,
+				area_ecoregion_ids, exclude_palms);
 		if (selector)
 			shared_selector = selector;
 		if (shared_selector) {
@@ -1506,7 +1540,8 @@ bool generate_world(WorldEditor &editor,
 		shared_selector = cached_region_selector(tree_pack_root,
 				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
 				base_level, args.max_tree_size,
-				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0, true);
+				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0,
+				area_ecoregion_ids, exclude_palms, true);
 		if (shared_selector)
 			editor.set_tree_slot_spacing(shared_selector->base_spacing());
 		if (shared_selector)

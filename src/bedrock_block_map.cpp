@@ -206,6 +206,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 			return *mapped;
 	if (block == GRAY_CONCRETE_POWDER)
 		return state("concretePowder", {{"color", std::string("gray")}});
+	if (block == LIGHT_GRAY_CONCRETE_POWDER)
+		return state("concretePowder", {{"color", std::string("silver")}});
 	if (block == BROWN_CONCRETE_POWDER)
 		return state("concretePowder", {{"color", std::string("brown")}});
 	const auto wool = [&](Block value, const char *color) -> std::optional<BedrockBlock> {

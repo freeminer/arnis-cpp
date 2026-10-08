@@ -24,7 +24,11 @@ std::uint64_t hash3(int x, int y, int z, std::uint64_t seed)
 double noise(int x, int y, int z)
 {
 	constexpr int p = 24;
-	auto floor = [](int v) { return v >= 0 ? v / p : -(((-v) + p - 1) / p); };
+	auto floor = [](int v) {
+		const int quotient = v / p;
+		const int remainder = v % p;
+		return remainder < 0 ? quotient - 1 : quotient;
+	};
 	int x0 = floor(x), y0 = floor(y), z0 = floor(z);
 	double fx = double(x - x0 * p) / p, fy = double(y - y0 * p) / p,
 		   fz = double(z - z0 * p) / p;

@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <cstring>
 #include <optional>
 #include <stdexcept>
@@ -132,6 +133,25 @@ float component_value(const unsigned char *p, int type, bool normalized)
 		return 1;
 	}
 }
+bool index_value(const unsigned char *p, int type, std::uint32_t &out)
+{
+	switch (type) {
+	case TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE:
+		out = *p;
+		return true;
+	case TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT: {
+		std::uint16_t value;
+		std::memcpy(&value, p, sizeof(value));
+		out = value;
+		return true;
+	}
+	case TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT:
+		std::memcpy(&out, p, sizeof(out));
+		return true;
+	default:
+		return false;
+	}
+}
 std::optional<std::array<float, 3>> color_at(
 		const tinygltf::Model &m, int accessor, std::size_t index)
 {
@@ -221,9 +241,12 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 						indices.clear();
 						break;
 					}
-					float q = component_value(
-							ib.data.data() + off, ia.componentType, false);
-					indices.push_back(std::uint32_t(q));
+					std::uint32_t index;
+					if (!index_value(ib.data.data() + off, ia.componentType, index)) {
+						indices.clear();
+						break;
+					}
+					indices.push_back(index);
 				}
 				if (indices.empty() && ia.count)
 					continue;

@@ -321,7 +321,7 @@ struct RegionSelector::Data
 
 std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		double scale, int ground_level, const SizeFilter &sizes, bool exclude_palms,
-		double blocks_per_meter)
+		double blocks_per_meter, const std::vector<std::uint16_t> &ecoregion_ids)
 {
 	auto data = std::make_shared<Data>();
 	data->scale = scale;
@@ -428,15 +428,15 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		load_pack(source.vanilla_path("region.json"), data->vanilla, "vanilla-plus");
 	else
 		data->vanilla.own_count = data->vanilla.communities.size();
-	// Resolve every ecoregion mix, including communities referenced from other
-	// realm packs, as Rust's attach_ecoregions does. Cache manifests and resolved
+	// Resolve the area's ecoregion mixes, including communities referenced from
+	// other realm packs, as Rust's attach_ecoregions does. Cache manifests and resolved
 	// mix keys so each referenced community is decoded only once. Match Rust's
 	// realm_pack.own: derived communities must never become sources for later
 	// mixes, or repeated exclusions multiply their copies.
 	const auto community_count = data->realm.communities.size();
 	std::unordered_map<std::string, std::optional<std::size_t>> resolved_mixes;
 	std::unordered_map<std::string, std::optional<nlohmann::json>> mix_manifests;
-	for (std::uint16_t id = 0; id < 900; ++id) {
+	for (const auto id : ecoregion_ids) {
 		const auto mix = ecoregion::tree_mix(id);
 		if (!mix)
 			continue;
@@ -736,17 +736,19 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
 		double longitude, const std::filesystem::path &root, double scale,
 		int ground_level, const SizeFilter &sizes, double blocks_per_meter,
-		const std::optional<std::string> &preferred_realm)
+		const std::optional<std::string> &preferred_realm,
+		const std::vector<std::uint16_t> &ecoregion_ids, bool exclude_palms)
 {
 	// Rust always reads the compiled tree-pack bundle.  Preserve the C++
 	// override when supplied, but resolve the bundled asset root for the common
 	// empty-root call path as well.
 	TreePackSource source = TreePackSource::embedded(
 			preferred_realm.value_or(realm_for_latlon(latitude, longitude)), root);
-	// Keep palms in the index: Rust gates them per ecoregion, and a
-	// latitude-only load filter would discard Mediterranean palms before that
-	// context is available.
-	auto result = load(source, scale, ground_level, sizes, false, blocks_per_meter);
+	// Rust drops palm schematics only when the area's ecoregion data is complete
+	// and none of its mapped tree communities can use palms. Otherwise retain
+	// them so per-cell ecoregion and latitude rules can decide at placement time.
+	auto result = load(source, scale, ground_level, sizes, exclude_palms,
+			blocks_per_meter, ecoregion_ids);
 	if (result) {
 		result->data_->latitude = latitude;
 		result->data_->latitude_known = true;

@@ -21,6 +21,7 @@ namespace arnis::highways
 {
 int highway_block_range(const std::string &highway_type,
 		const std::unordered_map<std::string, std::string> &tags, double scale);
+int lane_marking_count(const std::string &highway_type, const tags_t &tags);
 std::vector<Block> surface_palette(const std::string &highway_type, const tags_t &tags);
 }
 
@@ -174,30 +175,6 @@ bool is_road_class(const std::string &highway)
 			"secondary_link", "tertiary", "tertiary_link", "unclassified", "residential",
 			"living_street", "road", "busway", "service", "track"};
 	return classes.contains(highway);
-}
-
-bool has_lane_paint(const std::string &highway, const tags_t &tags)
-{
-	const auto paint = tags.get("lane_markings");
-	if (paint == "no")
-		return false;
-	const auto parsed_lanes = strict_parse::i32(tags.get("lanes"));
-	int lanes = 1;
-	if (parsed_lanes) {
-		lanes = std::clamp(*parsed_lanes, 1, 16);
-	} else {
-		const auto junction = tags.get("junction");
-		if (junction == "roundabout" || junction == "circular")
-			lanes = 1;
-		else if (highway == "motorway" || highway == "primary" || highway == "trunk" ||
-				 highway == "secondary" || highway == "tertiary")
-			lanes = 2;
-		else
-			lanes = 1;
-	}
-	const bool minor = highway == "residential" || highway == "living_street" ||
-					   highway == "service" || highway == "track";
-	return !(minor && lanes < 3 && paint != "yes") && lanes >= 2;
 }
 
 bool signalled_crossing(const tags_t &tags)
@@ -468,7 +445,8 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 			surface = *cycleway;
 		const auto [rank, link] = road_class(highway);
 		roads.push_back({&way, rank, link, is_roundabout(way.tags),
-				oneway_sign(highway, way.tags), has_lane_paint(highway, way.tags), range,
+				oneway_sign(highway, way.tags),
+				arnis::highways::lane_marking_count(highway, way.tags) >= 2, range,
 				std::move(surface), node_path_index(way)});
 		for (std::size_t ni = 0; ni < way.nodes.size(); ++ni) {
 			if (!clipping::is_invented_node_id(way.nodes[ni].id))

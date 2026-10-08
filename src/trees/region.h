@@ -90,12 +90,16 @@ public:
 	RegionSelector() = default;
 	static std::optional<RegionSelector> load(const TreePackSource &, double scale,
 			int ground_level, const SizeFilter &sizes = SizeFilter{},
-			bool exclude_palms = false, double blocks_per_meter = 0.0);
+			bool exclude_palms = false, double blocks_per_meter = 0.0,
+			// Mixes are attached only for tree-pack ecoregions in the current area.
+			const std::vector<std::uint16_t> &ecoregion_ids = {});
 	static std::optional<RegionSelector> load_for_location(double latitude,
 			double longitude, const std::filesystem::path &root, double scale,
 			int ground_level, const SizeFilter &sizes = SizeFilter{},
 			double blocks_per_meter = 0.0,
-			const std::optional<std::string> &preferred_realm = std::nullopt);
+			const std::optional<std::string> &preferred_realm = std::nullopt,
+			const std::vector<std::uint16_t> &ecoregion_ids = {},
+			bool exclude_palms = false);
 	bool empty() const;
 	std::size_t entry_count() const;
 	int base_spacing() const;

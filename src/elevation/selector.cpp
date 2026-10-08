@@ -1,6 +1,25 @@
 #include "selector.h"
+#include <cmath>
+#include <iostream>
+
 namespace arnis::elevation
 {
+namespace
+{
+double non_finite_ratio(const std::vector<std::vector<double>> &heights)
+{
+	std::size_t total = 0;
+	std::size_t missing = 0;
+	for (const auto &row : heights)
+		for (const double value : row) {
+			++total;
+			if (!std::isfinite(value))
+				++missing;
+		}
+	return total ? static_cast<double>(missing) / total : 1.0;
+}
+} // namespace
+
 std::optional<double> Selector::sample(double lat, double lon)
 {
 	auto t = cached_.tile_for(lat, lon);
@@ -33,13 +52,19 @@ ElevationData Selector::raw_grid(
 	if (cached_.mode() != providers::SourceMode::Planetary) {
 		if (auto heights = providers::fetch_mapterhorn_terrain_grid(
 					cached_.root(), {a, b, c, d}, w, h)) {
-			ElevationData out;
-			out.width = w;
-			out.height = h;
-			out.world_width = w;
-			out.world_height = h;
-			out.heights = std::move(*heights);
-			return out;
+			const double missing_ratio = non_finite_ratio(*heights);
+			if (cached_.mode() != providers::SourceMode::Auto || missing_ratio <= 0.5) {
+				ElevationData out;
+				out.width = w;
+				out.height = h;
+				out.world_width = w;
+				out.world_height = h;
+				out.heights = std::move(*heights);
+				return out;
+			}
+			std::cerr << "Warning: Elevation provider 'mapterhorn' returned "
+					  << std::round(missing_ratio * 100.0)
+					  << "% empty data. Falling back to 'aws'.\n";
 		}
 		if (cached_.mode() == providers::SourceMode::Auto) {
 			ElevationData out;

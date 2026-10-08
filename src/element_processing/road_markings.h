@@ -27,17 +27,10 @@ struct TransverseMark
 
 	bool covers(std::uint32_t path_index) const
 	{
-		const auto distance = path_index > t ? path_index - t : t - path_index;
-		switch (kind) {
-		case Kind::Stop:
-		case Kind::GiveWay:
-			return distance == 0;
-		case Kind::Zebra:
-			return distance <= 1;
-		case Kind::CrossingLines:
-			return distance == 2;
-		}
-		return false;
+		// Rust stores every transverse row as its own mark; width is not inferred
+		// from the kind. Zebra bars and paired edge lines therefore cover only
+		// the path indices explicitly emitted by RoadMarkingIndex::build.
+		return path_index == t;
 	}
 };
 

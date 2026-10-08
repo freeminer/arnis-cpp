@@ -173,7 +173,7 @@ std::pair<Block, Block> celestial_surface_palette(CelestialBody body, int slope,
 			case 8:
 				return {ANDESITE, STONE};
 			default:
-				return {GRAY_CONCRETE_POWDER, STONE};
+				return {LIGHT_GRAY_CONCRETE_POWDER, STONE};
 			}
 		}
 		if (patch < .24) {
@@ -208,7 +208,7 @@ std::pair<Block, Block> celestial_surface_palette(CelestialBody body, int slope,
 		case 11:
 		case 12:
 		case 13:
-			return {GRAY_CONCRETE_POWDER, STONE};
+			return {LIGHT_GRAY_CONCRETE_POWDER, STONE};
 		case 14:
 		case 15:
 		case 16:
