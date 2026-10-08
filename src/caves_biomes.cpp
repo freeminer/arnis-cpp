@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <cctype>
+#include <iostream>
 #include <limits>
 
 namespace arnis::caves
@@ -10,35 +11,47 @@ namespace arnis::caves
 BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 {
 	BiomeAmounts out;
+	if (error)
+		error->clear();
 	auto fail = [&](std::string s) {
 		if (error)
 			*error = std::move(s);
+	};
+	auto trim = [](std::string_view value) {
+		const auto first = value.find_first_not_of(" \t\r\n\f\v");
+		if (first == std::string_view::npos)
+			return std::string_view{};
+		const auto last = value.find_last_not_of(" \t\r\n\f\v");
+		return value.substr(first, last - first + 1);
 	};
 	size_t begin = 0;
 	while (begin < spec.size()) {
 		size_t end = spec.find(',', begin);
 		if (end == std::string_view::npos)
 			end = spec.size();
-		auto part = spec.substr(begin, end - begin);
+		auto part = trim(spec.substr(begin, end - begin));
+		if (part.empty()) {
+			begin = end + 1;
+			continue;
+		}
 		const auto eq = part.find('=');
 		if (eq == std::string_view::npos) {
-			fail("expected name=percent");
+			fail("'" + std::string(part) + "': expected name=percent");
 			return {};
 		}
-		auto trim = [](std::string_view v) {
-			const auto first = v.find_first_not_of(" \t\r\n");
-			if (first == std::string_view::npos)
-				return std::string_view{};
-			const auto last = v.find_last_not_of(" \t\r\n");
-			return v.substr(first, last - first + 1);
-		};
 		std::string name(trim(part.substr(0, eq)));
 		std::string value(trim(part.substr(eq + 1)));
 		try {
 			size_t used = 0;
 			const double pct = std::stod(value, &used);
-			if (used != value.size() || !std::isfinite(pct)) {
-				fail("percent must be finite");
+			if (used != value.size()) {
+				fail("'" + std::string(part) + "': percent is not a number");
+				return {};
+			}
+			if (!std::isfinite(pct)) {
+				fail("'" + std::string(part) +
+						"': percent must be a finite number (0..=200), got '" + value +
+						"'");
 				return {};
 			}
 			const double v = std::clamp(pct, 0.0, 200.0) / 100.0;
@@ -65,7 +78,7 @@ BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 				return {};
 			}
 		} catch (...) {
-			fail("percent is not a number");
+			fail("'" + std::string(part) + "': percent is not a number");
 			return {};
 		}
 		begin = end + 1;
@@ -77,5 +90,14 @@ double BiomeAmounts::effective_threshold(double base, double amount)
 	if (amount <= 0.0 || !std::isfinite(amount))
 		return std::numeric_limits<double>::quiet_NaN();
 	return std::max(0.02, base - 0.10 * std::log2(amount));
+}
+
+BiomeAmounts biome_amounts_for_generation(std::string_view spec)
+{
+	std::string error;
+	const auto amounts = BiomeAmounts::parse(spec, &error);
+	if (!error.empty())
+		std::clog << "Warning: --cave-biomes ignored (" << error << "); using defaults\n";
+	return amounts;
 }
 }

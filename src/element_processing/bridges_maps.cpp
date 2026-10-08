@@ -15,6 +15,11 @@
 #include "../strict_parse.h"
 #include "bridge_modules.h"
 
+namespace arnis::railways
+{
+bool is_at_grade_track(const ProcessedWay &way);
+}
+
 namespace arnis::bridges
 {
 
@@ -91,14 +96,7 @@ std::optional<std::pair<int, int>> grade_obstacle(const ProcessedWay &way, doubl
 	}
 
 	const auto railway = way.tags.get("railway");
-	const bool rail_track = railway == "rail" || railway == "light_rail" ||
-							railway == "subway" || railway == "tram" ||
-							railway == "narrow_gauge" || railway == "monorail" ||
-							railway == "funicular" || railway == "miniature" ||
-							railway == "preserved" || railway == "disused";
-	const bool subway = railway == "subway" || way.tags.get("subway") == "yes";
-	if (rail_track && !is_bridge_way(way) && way.tags.get("tunnel") != "yes" &&
-			!(subway && way.tags.get("tunnel") != "no")) {
+	if (railways::is_at_grade_track(way)) {
 		const int headroom = railway == "tram"		  ? ROAD_HEADROOM
 							 : railway == "miniature" ? PATH_HEADROOM
 													  : RAIL_HEADROOM;
@@ -1602,27 +1600,57 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 				}
 		}
 	}
-	// Mark roads/tracks running at grade below a raised deck, including a
-	// one-cell shoulder around their rasterized centreline.
+	// Mark at-grade roads/tracks below a raised deck, including the whole road
+	// footprint and a one-cell shoulder. Match Rust's coarse spatial prefilter
+	// and grade-obstacle eligibility: tunnels, elevated ways, pedestrian
+	// features, and approach ramps are not support blockers.
+	std::unordered_set<std::pair<int, int>, XZPairHash> deck_buckets;
+	for (const auto &entry : result.deck_y_)
+		deck_buckets.emplace(div_euclid(entry.first.first, OBSTACLE_GRID_CELL),
+				div_euclid(entry.first.second, OBSTACLE_GRID_CELL));
+	for (const auto &entry : result.rail_deck_y_)
+		deck_buckets.emplace(div_euclid(entry.first.first, OBSTACLE_GRID_CELL),
+				div_euclid(entry.first.second, OBSTACLE_GRID_CELL));
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		if (is_bridge_way(way) ||
-				(!way.tags.contains("highway") && !way.tags.contains("railway")))
+		if (structures.lookup_ramp(way.id))
 			continue;
+		const auto obstacle = grade_obstacle(way, scale);
+		if (!obstacle)
+			continue;
+		const int reach = obstacle->first + 1;
 		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const auto &a = way.nodes[i - 1];
+			const auto &b = way.nodes[i];
+			const int x0 = std::min(a.x, b.x) - reach;
+			const int x1 = std::max(a.x, b.x) + reach;
+			const int z0 = std::min(a.z, b.z) - reach;
+			const int z1 = std::max(a.z, b.z) + reach;
+			bool near_deck = false;
+			for (int bx = div_euclid(x0, OBSTACLE_GRID_CELL);
+					bx <= div_euclid(x1, OBSTACLE_GRID_CELL) && !near_deck; ++bx)
+				for (int bz = div_euclid(z0, OBSTACLE_GRID_CELL);
+						bz <= div_euclid(z1, OBSTACLE_GRID_CELL); ++bz)
+					if (deck_buckets.contains({bx, bz})) {
+						near_deck = true;
+						break;
+					}
+			if (!near_deck)
+				continue;
 			const auto points = bresenham_line(way.nodes[i - 1].x, 0, way.nodes[i - 1].z,
 					way.nodes[i].x, 0, way.nodes[i].z);
-			for (const auto &p : points)
-				for (int dx = -1; dx <= 1; ++dx)
-					for (int dz = -1; dz <= 1; ++dz) {
+			for (const auto &p : points) {
+				for (int dx = -reach; dx <= reach; ++dx)
+					for (int dz = -reach; dz <= reach; ++dz) {
 						const std::pair<int, int> cell{
 								std::get<0>(p) + dx, std::get<2>(p) + dz};
 						if (result.deck_y_.contains(cell) ||
 								result.rail_deck_y_.contains(cell))
 							result.grade_crossings_.insert(cell);
 					}
+			}
 		}
 	}
 	return result;

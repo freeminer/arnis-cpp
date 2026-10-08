@@ -41,6 +41,7 @@ constexpr std::uint16_t SHOAL_DT_UNITS = 9;
 constexpr std::uint8_t DT_MAX = std::numeric_limits<std::uint8_t>::max();
 constexpr int MAX_WATER_DEPTH = 6;
 constexpr std::size_t MAX_WATER_FIELD_CELLS = 1'000'000'000ULL;
+constexpr std::size_t FRONTIER_KEEP = 1U << 16;
 
 std::uint8_t nibble_get(const std::vector<std::uint8_t> &buf, std::size_t i)
 {
@@ -183,14 +184,15 @@ int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y, int b
 	const double warp_z = value_noise_01(x + 17, z + 811, 50);
 	const int wx = x + static_cast<int>((warp_x - 0.5) * 30.0);
 	const int wz = z + static_cast<int>((warp_z - 0.5) * 30.0);
-	const double h_f = 0.40 * value_noise_01(wx + 113, wz + 257, 44) +
-					   0.30 * value_noise_01(wx + 31, wz + 71, 18) +
-					   0.30 * value_noise_01(wx + 7, wz + 11, 10);
-	if (h_f < 0.28)
+	const float n_large = static_cast<float>(value_noise_01(wx + 113, wz + 257, 44));
+	const float n_med = static_cast<float>(value_noise_01(wx + 31, wz + 71, 18));
+	const float n_sharp = static_cast<float>(value_noise_01(wx + 7, wz + 11, 10));
+	const float h_f = 0.40f * n_large + 0.30f * n_med + 0.30f * n_sharp;
+	if (h_f < 0.28f)
 		return 0;
-	const double t = (h_f - 0.28) / 0.72;
+	const float t = (h_f - 0.28f) / 0.72f;
 	const int bump = std::clamp(
-			static_cast<int>(std::floor(std::pow(t, 0.45) * (amp + 0.99))), 1, amp);
+			static_cast<int>(std::floor(std::pow(t, 0.45f) * (amp + 0.99f))), 1, amp);
 	for (int dy = 1; dy <= bump; ++dy) {
 		const int y = bed_y + dy;
 		if (y >= water_y)
@@ -233,7 +235,10 @@ void clear_tree_from(WorldEditor &editor, int x, int y, int z)
 		stack.pop_back();
 		if (!is_tree_part(editor.block_name_absolute(cx, cy, cz)))
 			continue;
-		editor.set_block_absolute(AIR, cx, cy, cz);
+		// Rust passes Some(&[]) here: an explicit empty replacement set means
+		// clear this generated tree block regardless of the first-write guard.
+		editor.set_block_absolute(AIR, cx, cy, cz, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
 		++cleared;
 		for (const auto &[dx, dy, dz] :
 				std::array<std::tuple<int, int, int>, 6>{{{1, 0, 0}, {-1, 0, 0},
@@ -255,7 +260,8 @@ void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 	if (is_trunk(above_name))
 		clear_tree_from(editor, x, water_y + 1, z);
 	else if (has_suffix(above_name, "_leaves"))
-		editor.set_block_absolute(AIR, x, water_y + 1, z);
+		editor.set_block_absolute(AIR, x, water_y + 1, z, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
 }
 
 void place_underwater_vegetation(
@@ -486,6 +492,13 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 				});
 			}
 			cur.swap(next);
+		}
+		for (auto *frontier : {&cur, &next}) {
+			if (frontier->capacity() > FRONTIER_KEEP) {
+				std::vector<std::uint32_t> compact;
+				compact.reserve(FRONTIER_KEEP);
+				frontier->swap(compact);
+			}
 		}
 	}
 

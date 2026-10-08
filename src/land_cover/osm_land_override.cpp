@@ -4,11 +4,13 @@
 #include "../bresenham.h"
 #include "../clipping.h"
 #include "../element_processing/bridges.h"
+#include "../element_processing/way_segments.h"
 #include "../element_processing/waterways.h"
 
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstdint>
 #include <deque>
 #include <iterator>
 #include <limits>
@@ -102,7 +104,8 @@ bool closed(const std::vector<ProcessedNode> &nodes)
 	if (nodes.size() < 3)
 		return false;
 	const auto &a = nodes.front(), &b = nodes.back();
-	return a.id == b.id || (std::abs(a.x - b.x) <= 1 && std::abs(a.z - b.z) <= 1);
+	return a.id == b.id || (std::abs(static_cast<std::int64_t>(a.x) - b.x) <= 1 &&
+								   std::abs(static_cast<std::int64_t>(a.z) - b.z) <= 1);
 }
 
 struct GridMap
@@ -113,55 +116,6 @@ struct GridMap
 	int x(int value) const { return int(std::lround((value - min_x) * sx)); }
 	int z(int value) const { return int(std::lround((value - min_z) * sz)); }
 };
-
-bool matching_endpoint(const ProcessedNode &a, const ProcessedNode &b)
-{
-	return a.id == b.id || (std::abs(a.x - b.x) <= 1 && std::abs(a.z - b.z) <= 1);
-}
-
-void merge_segments(std::vector<std::vector<ProcessedNode>> &rings)
-{
-	std::vector<bool> removed(rings.size());
-	std::vector<std::vector<ProcessedNode>> merged;
-	for (std::size_t i = 0; i < rings.size(); ++i) {
-		for (std::size_t j = 0; j < rings.size(); ++j) {
-			if (i == j || removed[i] || removed[j] || rings[i].empty() ||
-					rings[j].empty())
-				continue;
-			auto &x = rings[i];
-			auto &y = rings[j];
-			if (matching_endpoint(x.front(), x.back()) ||
-					matching_endpoint(y.front(), y.back()))
-				continue;
-			std::vector<ProcessedNode> joined;
-			if (matching_endpoint(x.front(), y.front())) {
-				joined.assign(x.rbegin(), x.rend());
-				joined.insert(joined.end(), std::next(y.begin()), y.end());
-			} else if (matching_endpoint(x.back(), y.back())) {
-				joined = x;
-				joined.insert(joined.end(), std::next(y.rbegin()), y.rend());
-			} else if (matching_endpoint(x.front(), y.back())) {
-				joined = y;
-				joined.insert(joined.end(), std::next(x.begin()), x.end());
-			} else if (matching_endpoint(x.back(), y.front())) {
-				joined = x;
-				joined.insert(joined.end(), std::next(y.begin()), y.end());
-			}
-			if (!joined.empty()) {
-				removed[i] = removed[j] = true;
-				merged.push_back(std::move(joined));
-			}
-		}
-	}
-	for (std::size_t i = rings.size(); i-- > 0;)
-		if (removed[i])
-			rings.erase(rings.begin() + i);
-	const auto merged_count = merged.size();
-	rings.insert(rings.end(), std::make_move_iterator(merged.begin()),
-			std::make_move_iterator(merged.end()));
-	if (merged_count)
-		merge_segments(rings);
-}
 
 std::vector<std::vector<ProcessedNode>> relation_rings(
 		const ProcessedRelation &relation, const XZBBox &bbox)
@@ -175,8 +129,8 @@ std::vector<std::vector<ProcessedNode>> relation_rings(
 		else if (member.role == ProcessedMemberRole::Inner)
 			inner.push_back(member.way.nodes);
 	}
-	merge_segments(outer);
-	merge_segments(inner);
+	merge_way_segments(outer);
+	merge_way_segments(inner);
 	std::vector<std::vector<ProcessedNode>> result;
 	const auto append_closed_clipped = [&](const auto &rings) {
 		for (const auto &ring : rings) {
@@ -388,7 +342,13 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 	for (std::size_t i = 0; i < count; ++i)
 		if (data.grid[i / data.width][i % data.width] != LC_WATER)
 			set_bit(land_seed, i);
-	const int band = std::clamp(int(std::lround(15.0 * data.cells_per_meter)), 1, 64);
+	// Match Rust's band_cells: invalid resolutions use the minimum band, while
+	// very large finite resolutions saturate before integer conversion.
+	const double raw_band = 15.0 * data.cells_per_meter;
+	const int band =
+			!std::isfinite(data.cells_per_meter) || data.cells_per_meter <= 0.0 ? 1
+			: raw_band >= 64.0													? 64
+							   : std::max(1, static_cast<int>(std::lround(raw_band)));
 	const auto rim = dilate(land_seed, data.grid, data.width, data.height, band, true);
 	const auto past_outline =
 			has_water_area

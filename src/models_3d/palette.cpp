@@ -98,6 +98,16 @@ float tag_match_distance(const RGBTuple &a, const RGBTuple &b)
 	const float da = lhs[1] - rhs[1], db = lhs[2] - rhs[2];
 	return dl * dl + da * da + db * db;
 }
+
+bool reads_as_warm_stone(RGBTuple color)
+{
+	const auto lab = oklab_components(color);
+	const float l = lab[0], a = lab[1], b = lab[2];
+	const float chroma = std::sqrt(a * a + b * b);
+	const bool yellow_enough = a <= 0.0f || b > 1.73f * a;
+	return b > .030f && a > -.05f && yellow_enough && b < .13f && l > .55f &&
+		   chroma < .11f;
+}
 }
 Block closest_block(RGBTuple color)
 {
@@ -172,6 +182,42 @@ std::vector<Block> closest_blocks_for_usage(
 	for (std::size_t i = 0; i < limit && values[i].first <= cutoff; ++i)
 		out.push_back(values[i].second);
 	return out;
+}
+
+Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng)
+{
+	const auto palette = current_palette();
+	const bool warm_stone_color = reads_as_warm_stone(color);
+	std::vector<std::pair<float, Block>> candidates;
+	if (warm_stone_color) {
+		const std::array warm_stone = {
+				SANDSTONE, SMOOTH_SANDSTONE, END_STONE_BRICKS, WHITE_TERRACOTTA};
+		for (const auto &entry : palette)
+			if (std::find(warm_stone.begin(), warm_stone.end(), entry.block) !=
+					warm_stone.end())
+				candidates.emplace_back(
+						tag_match_distance(color, entry.color), entry.block);
+	} else {
+		for (const auto &entry : palette)
+			if ((entry.usage & USE_WALL) != 0)
+				candidates.emplace_back(
+						tag_match_distance(color, entry.color), entry.block);
+	}
+	std::stable_sort(candidates.begin(), candidates.end(),
+			[](const auto &a, const auto &b) { return a.first < b.first; });
+	if (candidates.size() > 3)
+		candidates.resize(3);
+	if (!warm_stone_color && !candidates.empty()) {
+		const float cutoff = std::max(candidates.front().first, 1e-6f) * 1.5f;
+		candidates.erase(std::remove_if(candidates.begin(), candidates.end(),
+								 [cutoff](const auto &candidate) {
+									 return candidate.first > cutoff;
+								 }),
+				candidates.end());
+	}
+	if (candidates.empty())
+		return STONE_BRICKS;
+	return candidates[rng.uniform(static_cast<std::uint32_t>(candidates.size()))].second;
 }
 
 std::vector<Block> all_blocks_for_usage(std::uint8_t usage)

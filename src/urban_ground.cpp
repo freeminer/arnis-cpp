@@ -50,8 +50,9 @@ int adaptive_expansion(
 		maxz = std::max(maxz, cell.second);
 	}
 	const double average = double(total) / dense.size();
-	const double occupancy =
-			double(dense.size()) / double((maxx - minx + 1) * (maxz - minz + 1));
+	const double span_x = static_cast<double>(maxx) - minx + 1.0;
+	const double span_z = static_cast<double>(maxz) - minz + 1.0;
+	const double occupancy = double(dense.size()) / (span_x * span_z);
 	const double density_factor = average < 3.0 ? 1.5 : 1.0;
 	const double occupancy_factor =
 			occupancy < 0.4 ? 1.5 : (occupancy < 0.6 ? 1.25 : 1.0);

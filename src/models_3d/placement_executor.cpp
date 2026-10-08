@@ -9,9 +9,12 @@
 #include "../colors.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cctype>
 #include <cmath>
 #include <optional>
+#include <thread>
+#include <unordered_map>
 
 namespace arnis::models_3d
 {
@@ -210,6 +213,8 @@ Block named_palette_block(const std::string &name)
 		return COBBLED_DEEPSLATE;
 	if (n == "DEEPSLATE")
 		return DEEPSLATE;
+	if (n == "DIRT")
+		return DIRT;
 	if (n == "POLISHED_DEEPSLATE")
 		return POLISHED_DEEPSLATE;
 	if (n == "OAK_PLANKS")
@@ -232,6 +237,8 @@ Block named_palette_block(const std::string &name)
 		return BROWN_TERRACOTTA;
 	if (n == "RED_TERRACOTTA")
 		return RED_TERRACOTTA;
+	if (n == "RED_WOOL")
+		return RED_WOOL;
 	if (n == "BLUE_TERRACOTTA")
 		return BLUE_TERRACOTTA;
 	if (n == "CYAN_TERRACOTTA")
@@ -248,12 +255,18 @@ Block named_palette_block(const std::string &name)
 		return YELLOW_CONCRETE;
 	if (n == "ORANGE_TERRACOTTA")
 		return ORANGE_TERRACOTTA;
+	if (n == "ORANGE_WOOL")
+		return ORANGE_WOOL;
 	if (n == "GOLD_BLOCK")
 		return GOLD_BLOCK;
 	if (n == "IRON_BLOCK")
 		return IRON_BLOCK;
 	if (n == "SNOW_BLOCK")
 		return SNOW_BLOCK;
+	if (n == "SMOOTH_QUARTZ")
+		return SMOOTH_QUARTZ;
+	if (n == "SMOOTH_SANDSTONE")
+		return SMOOTH_SANDSTONE;
 	// Keep palette-layer names aligned with Rust's block_by_const_name table.
 	if (n == "BLACK_TERRACOTTA")
 		return BLACK_TERRACOTTA;
@@ -508,23 +521,84 @@ ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 		double blocks_per_meter)
 {
 	ModelPlacementStats stats;
-	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0)
+	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0 ||
+			prescan.placements.empty())
 		return stats;
+
+	// Rust fetches metadata and model bytes once per distinct 3DMR ID, then
+	// reuses that pair for every OSM placement. Apart from avoiding repeated
+	// cache reads and GLB parsing, this keeps duplicate tags from multiplying
+	// memory use during a single generation pass.
+	std::vector<std::uint64_t> model_ids;
+	model_ids.reserve(prescan.placements.size());
+	for (const auto &placement : prescan.placements)
+		model_ids.push_back(placement.model_id);
+	std::sort(model_ids.begin(), model_ids.end());
+	model_ids.erase(std::unique(model_ids.begin(), model_ids.end()), model_ids.end());
+	std::unordered_map<std::uint64_t, three_dmr::ModelInfo> infos;
+	std::unordered_map<std::uint64_t, ModelAsset> assets;
+	infos.reserve(model_ids.size());
+	assets.reserve(model_ids.size());
+	struct FetchedModel
+	{
+		three_dmr::ModelInfo info;
+		ModelAsset asset;
+	};
+	std::vector<std::optional<FetchedModel>> fetched(model_ids.size());
+	std::atomic_size_t next{0};
+	const auto available_workers = std::max(1u, std::thread::hardware_concurrency());
+	const auto rayon_like_workers = std::max<std::size_t>(
+			1, static_cast<std::size_t>(static_cast<double>(available_workers) * .9));
+	const auto worker_count = std::min(model_ids.size(), rayon_like_workers);
+	std::vector<std::thread> workers;
+	workers.reserve(worker_count);
+	for (std::size_t worker = 0; worker < worker_count; ++worker) {
+		workers.emplace_back([&] {
+			for (;;) {
+				const auto index = next.fetch_add(1, std::memory_order_relaxed);
+				if (index >= model_ids.size())
+					return;
+				try {
+					const auto id = model_ids[index];
+					auto info = provider.info(id);
+					if (!info)
+						continue;
+					auto asset = provider.fetch(std::to_string(id));
+					if (asset)
+						fetched[index].emplace(
+								FetchedModel{std::move(*info), std::move(*asset)});
+				} catch (...) {
+					// Match Rust's per-ID fetch failure behavior: skip this model while
+					// allowing other independent provider requests to complete.
+				}
+			}
+		});
+	}
+	for (auto &worker : workers)
+		worker.join();
+	for (std::size_t i = 0; i < fetched.size(); ++i) {
+		if (!fetched[i])
+			continue;
+		infos.emplace(model_ids[i], std::move(fetched[i]->info));
+		assets.emplace(model_ids[i], std::move(fetched[i]->asset));
+	}
+
 	for (const auto &placement : prescan.placements) {
 		++stats.attempted;
-		auto asset = provider.fetch(std::to_string(placement.model_id));
-		auto info = provider.info(placement.model_id);
-		if (!asset || !info)
+		const auto asset = assets.find(placement.model_id);
+		const auto info = infos.find(placement.model_id);
+		if (asset == assets.end() || info == infos.end())
 			continue;
 		const int ground =
 				ground_for(editor, placement.footprint.min_x, placement.footprint.min_z,
 						placement.footprint.max_x, placement.footprint.max_z);
-		WorldTransform transform(info->rotation, info->scale, info->translation,
+		WorldTransform transform(info->second.rotation, info->second.scale,
+				info->second.translation,
 				{float(blocks_per_meter), float(blocks_per_meter),
 						float(blocks_per_meter)},
 				placement.world_yaw_degrees, float(placement.anchor_x), float(ground),
 				float(placement.anchor_z));
-		place_grounded(editor, *asset, transform, ground, 0, stats);
+		place_grounded(editor, asset->second, transform, ground, 0, stats);
 	}
 	return stats;
 }

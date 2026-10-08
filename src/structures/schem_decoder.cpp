@@ -1,5 +1,6 @@
 #include "schem_decoder.h"
 #include "../assets_root.h"
+#include "../tile.h"
 #include "../../../arnis_adapter.h"
 
 #include <cstring>
@@ -8,16 +9,36 @@
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <limits>
 #include <map>
+#include <tuple>
 #include <zlib.h>
 
 namespace arnis::structures
 {
 StructureSchematic structure_schematic(const SchemDocument &document)
 {
-	StructureSchematic out{document.width, document.length, document.voxels};
+	StructureSchematic out;
+	out.width = document.width;
+	out.length = document.length;
+	int min_y = std::numeric_limits<int>::max();
+	for (const auto &voxel : document.voxels)
+		if (resolve_schem_block(voxel.block) != block_definitions::AIR) {
+			min_y = std::min(min_y, voxel.y);
+			out.voxels.push_back(voxel);
+		}
+	if (min_y != std::numeric_limits<int>::max())
+		for (auto &voxel : out.voxels)
+			voxel.y -= min_y;
 	out.entities = document.entities;
+	int tallest = std::numeric_limits<int>::min();
+	for (const auto &v : out.voxels)
+		if (v.y > tallest) {
+			tallest = v.y;
+			out.anchor_x = v.x;
+			out.anchor_z = v.z;
+		}
 	for (const auto &v : out.voxels)
 		out.max_extent = std::max(out.max_extent,
 				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
@@ -44,15 +65,135 @@ bool place_structure_yaw(world_editor::WorldEditor &editor,
 		const StructureSchematic &structure, int base_x, int base_y, int base_z,
 		double yaw_degrees, double pitch_degrees)
 {
-	return place_schem_document_yaw(editor, document_from_structure(structure), base_x,
-			base_y, base_z, yaw_degrees, pitch_degrees);
+	const auto columns =
+			ColumnSchematic::from_document(document_from_structure(structure));
+	return place_structure_yaw(
+			editor, columns, base_x, base_y, base_z, yaw_degrees, pitch_degrees);
+}
+
+bool place_structure_yaw(world_editor::WorldEditor &editor,
+		const ColumnSchematic &schematic, int base_x, int base_y, int base_z,
+		double yaw_degrees, double pitch_degrees)
+{
+	if (schematic.width <= 0 || schematic.length <= 0 || schematic.voxels.empty())
+		return false;
+	const double quarters = yaw_degrees / 90.0;
+	const auto nearest_quarter = std::llround(quarters);
+	const unsigned rotation = static_cast<unsigned>((nearest_quarter % 4 + 4) % 4);
+	double sine, cosine;
+	if (std::abs(quarters - double(nearest_quarter)) < 1e-9) {
+		switch (rotation) {
+		case 0:
+			sine = 0;
+			cosine = 1;
+			break;
+		case 1:
+			sine = 1;
+			cosine = 0;
+			break;
+		case 2:
+			sine = 0;
+			cosine = -1;
+			break;
+		default:
+			sine = -1;
+			cosine = 0;
+			break;
+		}
+	} else {
+		sine = std::sin(yaw_degrees * M_PI / 180.0);
+		cosine = std::cos(yaw_degrees * M_PI / 180.0);
+	}
+	std::vector<BlockWithProperties> palette = schematic.palette;
+	if (rotation)
+		for (auto &state : palette)
+			state.properties = rotate_schem_properties(state.properties, rotation);
+	const auto pitch_lift = [&](int z) {
+		if (pitch_degrees == 0.0)
+			return 0;
+		return static_cast<int>(std::lround((double(schematic.length - 1) * .5 - z) *
+											std::tan(pitch_degrees * M_PI / 180.0)));
+	};
+	int lift_floor = std::numeric_limits<int>::max();
+	for (const auto &voxel : schematic.voxels)
+		lift_floor =
+				std::min(lift_floor, static_cast<int>(voxel.y) + pitch_lift(voxel.z));
+	const double cx = double(schematic.width) * .5;
+	const double cz = double(schematic.length) * .5;
+	int min_x = std::numeric_limits<int>::max(), max_x = std::numeric_limits<int>::min();
+	int min_z = std::numeric_limits<int>::max(), max_z = std::numeric_limits<int>::min();
+	for (const auto &[mx, mz] : {std::pair{0.0, 0.0}, {double(schematic.width), 0.0},
+				 {0.0, double(schematic.length)},
+				 {double(schematic.width), double(schematic.length)}}) {
+		const double dx = mx - cx, dz = mz - cz;
+		const double wx = base_x + dx * cosine - dz * sine;
+		const double wz = base_z + dx * sine + dz * cosine;
+		min_x = std::min(min_x, static_cast<int>(std::floor(wx)));
+		max_x = std::max(max_x, static_cast<int>(std::ceil(wx)));
+		min_z = std::min(min_z, static_cast<int>(std::floor(wz)));
+		max_z = std::max(max_z, static_cast<int>(std::ceil(wz)));
+	}
+	bool placed = false;
+	for (int wz = min_z; wz <= max_z; ++wz)
+		for (int wx = min_x; wx <= max_x; ++wx) {
+			const double dx = wx - base_x, dz = wz - base_z;
+			const int mx = static_cast<int>(std::floor(cx + dx * cosine + dz * sine));
+			const int mz = static_cast<int>(std::floor(cz - dx * sine + dz * cosine));
+			const auto [column, count] = schematic.column(mx, mz);
+			if (!column)
+				continue;
+			const int lift = pitch_lift(mz) - lift_floor;
+			for (std::size_t i = 0; i < count; ++i) {
+				const auto &voxel = column[i];
+				editor.set_block_with_properties_absolute(palette[voxel.palette_slot], wx,
+						base_y + static_cast<int>(voxel.y) + lift, wz, nullptr, nullptr);
+				placed = true;
+			}
+		}
+	return placed;
 }
 bool place_structure(world_editor::WorldEditor &editor,
 		const StructureSchematic &structure, int base_x, int base_y, int base_z,
-		unsigned rotation)
+		unsigned rotation, const Block *ground)
 {
-	return place_structure_yaw(editor, structure, base_x, base_y, base_z,
-			90.0 * static_cast<double>(rotation & 3));
+	if (structure.max_extent > TILE_EDITOR_HALO) {
+		std::cerr << "structure extent " << structure.max_extent << " exceeds tile halo "
+				  << TILE_EDITOR_HALO << "; skipping to avoid seam clipping\n";
+		return false;
+	}
+	const unsigned k = rotation & 3u;
+	const auto rotate_cell = [&](int x, int z) {
+		switch (k) {
+		case 1:
+			return std::pair{structure.length - 1 - z, x};
+		case 2:
+			return std::pair{structure.width - 1 - x, structure.length - 1 - z};
+		case 3:
+			return std::pair{z, structure.width - 1 - x};
+		default:
+			return std::pair{x, z};
+		}
+	};
+	const auto [anchor_x, anchor_z] = rotate_cell(structure.anchor_x, structure.anchor_z);
+	const std::vector<Block> replace_all;
+	bool placed = false;
+	for (const auto &voxel : structure.voxels) {
+		const auto [rx, rz] = rotate_cell(voxel.x, voxel.z);
+		const int wx = base_x + rx - anchor_x;
+		const int wz = base_z + rz - anchor_z;
+		auto properties =
+				k ? rotate_schem_properties(voxel.properties, k) : voxel.properties;
+		BlockWithProperties block{
+				resolve_schem_block(voxel.block), std::move(properties)};
+		if (block.block == block_definitions::AIR)
+			continue;
+		editor.set_block_with_properties_absolute(
+				std::move(block), wx, base_y + voxel.y, wz, nullptr, &replace_all);
+		if (ground)
+			editor.set_block_absolute(*ground, wx, base_y - 1, wz, nullptr, &replace_all);
+		placed = true;
+	}
+	return placed;
 }
 StructureSchematic StructureSchematic::centered() const
 {
@@ -660,6 +801,88 @@ SchemDocument load_palettized(const std::vector<std::uint8_t> &gzip_bytes)
 StructureSchematic load_structure(const std::vector<std::uint8_t> &gzip_bytes)
 {
 	return structure_schematic(decode_sponge_schem(gzip_bytes));
+}
+
+ColumnSchematic ColumnSchematic::from_document(const SchemDocument &document)
+{
+	if (document.width <= 0 || document.length <= 0 ||
+			document.width > std::numeric_limits<std::int16_t>::max() ||
+			document.length > std::numeric_limits<std::int16_t>::max())
+		throw std::runtime_error("schem dimensions exceed column coordinate range");
+	ColumnSchematic out;
+	out.width = document.width;
+	out.length = document.length;
+	const auto area = static_cast<std::uint64_t>(out.width) * out.length;
+	if (area > std::numeric_limits<std::size_t>::max())
+		throw std::runtime_error("schem column index exceeds addressable range");
+	out.columns.resize(static_cast<std::size_t>(area));
+
+	using StateKey = std::pair<std::string, std::map<std::string, std::string>>;
+	std::map<StateKey, std::uint8_t> slots;
+	int min_y = std::numeric_limits<int>::max();
+	for (const auto &voxel : document.voxels)
+		if (voxel.x >= 0 && voxel.z >= 0 && voxel.x < out.width && voxel.z < out.length &&
+				voxel.y >= 0 && voxel.y <= std::numeric_limits<std::int16_t>::max() &&
+				resolve_schem_block(voxel.block) != block_definitions::AIR)
+			min_y = std::min(min_y, voxel.y);
+	if (min_y == std::numeric_limits<int>::max())
+		throw std::runtime_error("schem has no mapped blocks");
+	out.voxels.reserve(document.voxels.size());
+	for (const auto &voxel : document.voxels) {
+		if (voxel.x < 0 || voxel.z < 0 || voxel.x >= out.width || voxel.z >= out.length ||
+				voxel.y < 0 || voxel.y > std::numeric_limits<std::int16_t>::max())
+			continue;
+		const Block block = resolve_schem_block(voxel.block);
+		if (block == block_definitions::AIR)
+			continue;
+		std::map<std::string, std::string> properties(
+				voxel.properties.begin(), voxel.properties.end());
+		StateKey key{voxel.block, std::move(properties)};
+		auto slot = slots.find(key);
+		if (slot == slots.end()) {
+			if (out.palette.size() >= 256)
+				throw std::runtime_error(
+						"schem has more than 256 rendered palette entries");
+			const auto palette_slot = static_cast<std::uint8_t>(out.palette.size());
+			const std::unordered_map<std::string, std::string> palette_properties(
+					key.second.begin(), key.second.end());
+			out.palette.emplace_back(block, palette_properties);
+			slot = slots.emplace(std::move(key), palette_slot).first;
+		}
+		out.voxels.push_back({static_cast<std::int16_t>(voxel.x),
+				static_cast<std::int16_t>(voxel.y - min_y),
+				static_cast<std::int16_t>(voxel.z), slot->second});
+	}
+	std::sort(out.voxels.begin(), out.voxels.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.x, a.z, a.y) < std::tie(b.x, b.z, b.y);
+	});
+	for (std::size_t i = 0; i < out.voxels.size();) {
+		const auto &first = out.voxels[i];
+		std::size_t end = i + 1;
+		while (end < out.voxels.size() && out.voxels[end].x == first.x &&
+				out.voxels[end].z == first.z)
+			++end;
+		const auto index = static_cast<std::size_t>(first.z) * out.width + first.x;
+		out.columns[index] = {
+				static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(end - i)};
+		i = end;
+	}
+	return out;
+}
+
+std::pair<const ColumnVoxel *, std::size_t> ColumnSchematic::column(int x, int z) const
+{
+	if (x < 0 || z < 0 || x >= width || z >= length || columns.empty())
+		return {nullptr, 0};
+	const auto [offset, count] = columns[static_cast<std::size_t>(z) * width + x];
+	if (!count)
+		return {nullptr, 0};
+	return {voxels.data() + offset, count};
+}
+
+ColumnSchematic load_column_schematic(const std::vector<std::uint8_t> &gzip_bytes)
+{
+	return ColumnSchematic::from_document(decode_sponge_schem(gzip_bytes));
 }
 
 Block resolve_schem_block(const std::string &name)

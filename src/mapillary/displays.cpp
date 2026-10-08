@@ -1,6 +1,7 @@
 #include "displays.h"
 #include "../../../arnis_world_editor.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
 #include <nlohmann/json.hpp>
 namespace arnis::mapillary::displays
@@ -98,6 +99,33 @@ std::vector<Piece> pieces(const std::vector<std::pair<int, int>> &cells,
 
 namespace
 {
+std::int64_t name_seed(const std::string &name)
+{
+	std::uint64_t hash = 0x0102'0304'0506'0708ULL;
+	for (const unsigned char byte : name) {
+		hash ^= byte;
+		hash *= 0x0000'0100'0000'01b3ULL;
+	}
+	return std::bit_cast<std::int64_t>(hash);
+}
+
+nlohmann::json display_nbt(const std::string &name, const Quad &quad)
+{
+	const std::string model = "arnis:" + name;
+	return {{"item", {{"id", "minecraft:stone"}, {"count", 1},
+							 {"components", {{"minecraft:item_model", model}}}}},
+			{"item_display", "fixed"},
+			{"transformation",
+					{{"left_rotation",
+							 {quad.rot[0], quad.rot[1], quad.rot[2], quad.rot[3]}},
+							{"right_rotation", {0.0f, 0.0f, 0.0f, 1.0f}},
+							{"translation", {0.0f, 0.0f, 0.0f}},
+							{"scale", {static_cast<float>(quad.w),
+											  static_cast<float>(quad.h), 1.0f}}}},
+			{"billboard", "fixed"}, {"view_range", 16.0f}, {"width", 0.0f},
+			{"height", 0.0f}};
+}
+
 std::uint32_t tex_side(double blocks, std::uint32_t px)
 {
 	return std::max<std::uint32_t>(
@@ -223,10 +251,19 @@ bool Registry::collect_to_editor(arnis::world_editor::WorldEditor &editor,
 {
 	return collect(name, cells, normal, step, base_y, total_height, rgb, rgb_width,
 			rgb_height, pixels_per_block, [&](const Quad &quad, const Panel &panel) {
-				return editor.place_facade_panel(static_cast<int>(std::llround(quad.cx)),
-						static_cast<int>(std::llround(quad.cy)),
-						static_cast<int>(std::llround(quad.cz)), facing_index(normal),
-						panel.pixels, panel.pixel_width, panel.pixel_height);
+				const auto x = static_cast<int>(std::llround(quad.cx));
+				const auto y = static_cast<int>(std::llround(quad.cy));
+				const auto z = static_cast<int>(std::llround(quad.cz));
+				const auto facing = facing_index(normal);
+				if (editor.has_entity_sink() &&
+						editor.add_item_display(quad.cx, quad.cy, quad.cz,
+								name_seed(name), display_nbt(name, quad))) {
+					editor.record_facade_panel(x, y, z, facing, panel.pixels,
+							panel.pixel_width, panel.pixel_height);
+					return true;
+				}
+				return editor.place_facade_panel(x, y, z, facing, panel.pixels,
+						panel.pixel_width, panel.pixel_height);
 			});
 }
 }

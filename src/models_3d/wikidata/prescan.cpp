@@ -269,8 +269,6 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		direction(tag(e, "direction"), yaw);
 		std::optional<double> h =
 				entry->height_m ? entry->height_m : meters(tag(e, "height"));
-		if (h && *h > 600.0)
-			continue;
 		std::optional<double> extent;
 		if (!entry->height_m) {
 			// Match Rust's synthetic footprint for point landmarks.  Using the
@@ -278,8 +276,6 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			// suppresses otherwise valid statue/tower models.
 			extent = std::max(fp.max_x - fp.min_x, fp.max_z - fp.min_z) / scale;
 		}
-		if (extent && (*extent > 225.0 || *extent < 2.0))
-			continue;
 		r.placements.push_back({e.id(), std::string(e.kind()), raw, qid, ax, az, fp,
 				yaw + rotation, h, extent, palette_for(e), entry->palette_layers});
 		r.suppressed.push_back(key);

@@ -6,11 +6,16 @@
 #include <unordered_set>
 #include <algorithm>
 #include <filesystem>
+#include <memory>
 #include <string>
 #include <vector>
 
 namespace arnis
 {
+namespace mapillary
+{
+class FacadeJob;
+}
 // Note: Types are defined in arnis_adapter.h, no forward declarations needed
 
 // Hash for pair<string, uint64_t> used in StillWaterSurfaces
@@ -67,6 +72,9 @@ struct GenerationOptions
 	std::string projection_name;
 	double projection_scale = 1.0;
 	double min_lat = 0.0, max_lat = 0.0, min_lon = 0.0, max_lon = 0.0;
+	// Shared asynchronous facade precompute, started by the host before world
+	// preparation and joined by the building pass when its export is needed.
+	std::shared_ptr<mapillary::FacadeJob> facades;
 };
 inline bool is_java(WorldFormat f)
 {
@@ -137,7 +145,7 @@ inline void apply_generation_options(WorldEditor &editor, const GenerationOption
 
 // Rust pipeline policy: region streaming is worthwhile only when enough tiles
 // exist to amortize flush-worker setup and memory bookkeeping.
-bool should_stream_to_disk(std::size_t tile_count);
+bool should_stream_to_disk(std::size_t tile_count, bool fillground = false);
 bool should_use_parallel_tiles(std::size_t tile_count, bool java_format);
 struct GenerationFeatureFlags
 {
@@ -150,7 +158,8 @@ struct GenerationTilePolicy
 	bool parallel = false;
 	bool stream_to_disk = false;
 };
-GenerationTilePolicy generation_tile_policy(std::size_t tile_count, bool java_format);
+GenerationTilePolicy generation_tile_policy(
+		std::size_t tile_count, bool java_format, bool fillground = false);
 struct GenerationProgress
 {
 	double processing = 19.5, world_start = 20.0, world_end = 70.0, ground_start = 70.0,
@@ -206,11 +215,11 @@ struct GenerationRuntime
 	GenerationProgress progress;
 	bool initialized = false, completed = false, failed = false;
 	std::string error;
-	void initialize(std::size_t tile_count)
+	void initialize(std::size_t tile_count, bool fillground = false)
 	{
 		features = generation_features(is_java(options.format), is_luanti(options.format),
 				options.map_item, options.map_preview);
-		tiles = generation_tile_policy(tile_count, is_java(options.format));
+		tiles = generation_tile_policy(tile_count, is_java(options.format), fillground);
 		progress = GenerationProgress{};
 		initialized = true;
 		completed = false;
@@ -270,7 +279,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 		const Args &args, FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
 		bool elements_prepared = false,
-		const PreparedBuildingData *prepared_buildings = nullptr);
+		const PreparedBuildingData *prepared_buildings = nullptr,
+		mapillary::FacadeJob *facade_job = nullptr);
 // Options-aware entry point matching Rust's generate_world_with_options for
 // library callers that already own the backend editor instance.
 bool generate_world_with_options(WorldEditor &editor,

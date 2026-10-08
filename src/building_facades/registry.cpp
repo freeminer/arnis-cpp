@@ -242,22 +242,25 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 	return placed;
 }
 
-void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode> &nodes,
-		std::uint64_t way_id, std::uint64_t group_seed,
-		buildings::BuildingCategory category, const building_facade::FacadePlan &plan,
-		int base_y, int building_height, double scale)
+building_facade::PointSet collect(world_editor::WorldEditor &editor,
+		const std::vector<ProcessedNode> &nodes, std::uint64_t way_id,
+		std::uint64_t group_seed, buildings::BuildingCategory category,
+		const building_facade::FacadePlan &plan, int base_y, int building_height,
+		double scale)
 {
 	if (nodes.size() < 3 || building_height < MIN_WALL_BLOCKS)
-		return;
+		return {};
 	if (!editor.map_decals_enabled())
-		return;
+		return {};
 	std::optional<FacadeSet> set;
 	std::optional<std::array<int, 4>> extent;
+	bool first = false;
 	{
 		auto &s = state();
 		std::lock_guard lock(s.mutex);
-		if (!s.enabled || !s.set || !s.claimed.insert(way_id).second)
-			return;
+		if (!s.enabled || !s.set)
+			return {};
+		first = s.claimed.insert(way_id).second;
 		set = s.set;
 		extent = s.extent;
 	}
@@ -270,11 +273,11 @@ void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode>
 			static_cast<double>(building_height) / std::max(0.001, scale), way_id,
 			anchor_x, anchor_z);
 	if (!choice)
-		return;
+		return {};
 	std::vector<PendingRun> collected_runs;
 	for (std::size_t i = 0; i < plan.segments.size() && i + 1 < nodes.size(); ++i) {
 		const auto &segment = plan.segments[i];
-		if (!segment || segment->facade_class == building_facade::FacadeClass::Open)
+		if (!segment)
 			continue;
 		auto cells = line(nodes[i].x, nodes[i].z, nodes[i + 1].x, nodes[i + 1].z);
 		if (cells.empty())
@@ -296,11 +299,13 @@ void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode>
 			if (first == cells.size())
 				break;
 			std::size_t open_end = first + 1;
-			const bool party = plan.is_party(cells[first].first, cells[first].second);
+			const bool party = plan.is_party(cells[first].first, cells[first].second,
+					segment->normal.first, segment->normal.second);
 			while (open_end < cells.size() && inside(cells[open_end]) &&
 					!mapillary::facades::photo_column(
 							cells[open_end].first, cells[open_end].second, way_id) &&
-					plan.is_party(cells[open_end].first, cells[open_end].second) == party)
+					plan.is_party(cells[open_end].first, cells[open_end].second,
+							segment->normal.first, segment->normal.second) == party)
 				++open_end;
 			if (open_end - first < MIN_RUN_CELLS) {
 				first = open_end;
@@ -322,7 +327,14 @@ void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode>
 		}
 	}
 	if (collected_runs.empty())
-		return;
+		return {};
+	building_facade::PointSet shell;
+	for (const auto &run : collected_runs)
+		shell.insert(run.cells.begin(), run.cells.end());
+	// Every tile that walks this building needs the same flat-shell mask, while
+	// only the first visit records image work for finalization.
+	if (!first)
+		return shell;
 	const auto group_id = osm_parser::seed_without_hint(group_seed);
 	const double wall_height_m =
 			static_cast<double>(building_height) / std::max(0.001, scale);
@@ -344,5 +356,6 @@ void collect(world_editor::WorldEditor &editor, const std::vector<ProcessedNode>
 			}
 		}
 	}
+	return shell;
 }
 } // namespace arnis::building_facades

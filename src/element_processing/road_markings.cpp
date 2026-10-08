@@ -408,8 +408,9 @@ std::int64_t WayMarks::dash_phase(std::uint32_t t) const
 bool CarriagewayClip::contains(int x, int z) const
 {
 	return std::any_of(centreline.begin(), centreline.end(), [&](const auto &cell) {
-		return std::abs(x - cell.first) <= half_width &&
-			   std::abs(z - cell.second) <= half_width;
+		const auto dx = static_cast<std::int64_t>(x) - cell.first;
+		const auto dz = static_cast<std::int64_t>(z) - cell.second;
+		return std::abs(dx) <= half_width && std::abs(dz) <= half_width;
 	});
 }
 
@@ -606,10 +607,17 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 
 	// Node-mapped pedestrian crossings are rendered as transverse paint on every
 	// carriageway way sharing the node, including both halves of a split way.
-	for (const auto &element : elements) {
-		if (!element.is_node())
-			continue;
-		const auto &node = element.as_node();
+	// Match Rust's source of truth: crossing tags are read from each processed
+	// road's embedded nodes, which remain available even when the parser does not
+	// emit standalone ProcessedNode elements for them.
+	std::vector<std::pair<std::uint64_t, const ProcessedNode *>> road_nodes;
+	std::unordered_set<std::uint64_t> seen_road_nodes;
+	for (const auto &road : roads)
+		for (const auto &node : road.way->nodes)
+			if (seen_road_nodes.insert(node.id).second)
+				road_nodes.emplace_back(node.id, &node);
+	for (const auto &[node_id, node_ptr] : road_nodes) {
+		const auto &node = *node_ptr;
 		const auto highway = node.tags.get("highway");
 		if (highway != "crossing" &&
 				!(highway == "traffic_signals" && !node.tags.get("crossing").empty()))
@@ -650,7 +658,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				continue;
 		}
 		const std::uint32_t reach = paint->kind == CrossingPaint::Kind::Zebra ? 2 : 3;
-		crossing_reach[node.id] = std::max(crossing_reach[node.id], reach);
+		crossing_reach[node_id] = std::max(crossing_reach[node_id], reach);
 		for (const auto &[ri, ni] : refs->second) {
 			for (const int dir : {1, -1}) {
 				const auto cells = arm_cells(roads, node_uses, ri, ni, dir, reach + 1);
@@ -680,7 +688,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				}
 			}
 			if (signalled_crossing(node.tags))
-				signal_crossings.emplace_back(ri, ni, node.id);
+				signal_crossings.emplace_back(ri, ni, node_id);
 		}
 	}
 

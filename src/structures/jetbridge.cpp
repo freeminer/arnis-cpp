@@ -14,7 +14,7 @@ constexpr double CAB_X = 11.0, CAB_Z = 14.0;
 constexpr double MINIMUM_LENGTH = 12.0;
 constexpr int FOOTPRINT_PROBE = 4;
 
-std::optional<SchemDocument> load_asset()
+std::optional<ColumnSchematic> load_asset()
 {
 	const auto path = assets::path("structures/jetbridge.schem");
 	std::ifstream stream(path, std::ios::binary);
@@ -23,10 +23,16 @@ std::optional<SchemDocument> load_asset()
 	std::vector<std::uint8_t> bytes(
 			(std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
 	try {
-		return decode_sponge_schem(bytes);
+		return load_column_schematic(bytes);
 	} catch (...) {
 		return std::nullopt;
 	}
+}
+
+const ColumnSchematic *jetbridge_asset()
+{
+	static const std::optional<ColumnSchematic> schematic = load_asset();
+	return schematic ? &*schematic : nullptr;
 }
 
 std::pair<const ProcessedNode *, const ProcessedNode *> terminal_end(
@@ -65,7 +71,7 @@ void generate_jet_bridge(WorldEditor &editor, const ProcessedWay &way,
 {
 	if (!editor.place_schematics() || !claims(way))
 		return;
-	const auto document = load_asset();
+	const auto *document = jetbridge_asset();
 	if (!document)
 		return;
 	const auto [terminal, apron] =
@@ -82,7 +88,7 @@ void generate_jet_bridge(WorldEditor &editor, const ProcessedWay &way,
 	const int base_z = int(std::lround(double(terminal->z) + ux * s + uz * c));
 	if (editor.is_lc_water(base_x, base_z))
 		return;
-	place_schem_document_yaw(editor, *document, base_x,
+	place_structure_yaw(editor, *document, base_x,
 			editor.get_absolute_y(base_x, 1, base_z), base_z, yaw * 180.0 / M_PI);
 }
 }

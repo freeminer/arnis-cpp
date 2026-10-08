@@ -482,7 +482,7 @@ std::pair<int, int> patch_shape(PatchFeature feature)
 
 void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 		const Args &args, int min_x, int max_x, int min_z, int max_z,
-		double absolute_latitude, int alpine_from_y, bool cactus_country, ChaCha8Rng &rng,
+		double absolute_latitude, int alpine_from_y, ChaCha8Rng &rng,
 		WeightedFeature selected, Habitat origin_habitat, int origin_x, int origin_z)
 {
 	auto [tries, spread] = patch_shape(selected.feature);
@@ -561,9 +561,6 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 			continue;
 		const auto current_habitat = point_habitat(x, z);
 		const auto cover = point_cover(x, z);
-		const auto eco = point_eco(x, z);
-		const bool point_cactus_country =
-				eco ? ecoregion::realm_is_americas(eco->realm) : cactus_country;
 		const bool in_feature_habitat =
 				selected.feature == PatchFeature::LilyPads
 						? cover == land_cover::LC_WETLAND ||
@@ -573,8 +570,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 						? current_habitat.has_value() || cover == land_cover::LC_BARE
 						: current_habitat &&
 								  same_ground(*current_habitat, origin_habitat);
-		if (!in_feature_habitat ||
-				(selected.feature == PatchFeature::Cactus && !point_cactus_country))
+		if (!in_feature_habitat)
 			continue;
 		const int y = ground.elevation_enabled ? editor.get_ground_level(x, z)
 											   : args.ground_level;
@@ -725,8 +721,8 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 				if (selected->feature == PatchFeature::Cactus && !cactus_country)
 					continue;
 				grow_patch(editor, *editor.ground, bbox, args, min_x, max_x, min_z, max_z,
-						absolute_latitude, alpine_from_y, cactus_country, rng, *selected,
-						*habitat_origin, origin_x, origin_z);
+						absolute_latitude, alpine_from_y, rng, *selected, *habitat_origin,
+						origin_x, origin_z);
 			}
 		}
 	}

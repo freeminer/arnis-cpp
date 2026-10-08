@@ -51,7 +51,7 @@ struct Site
 		const int y = editor.get_absolute_y(x, 0, z);
 		return editor.check_for_block_absolute(
 					   x, y, z, std::optional<std::vector<Block>>(SITE_GROUND)) &&
-			   !editor.block_exists_absolute(x, y + 1, z);
+			   !editor.block_exists_absolute(x, editor.get_absolute_y(x, 1, z), z);
 	}
 
 	std::optional<int> level_pad(const std::vector<std::pair<int, int>> &area) const

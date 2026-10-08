@@ -64,7 +64,7 @@ int stratum_layer(int x, int z, double warp, int y, std::size_t &cursor)
 	}
 	while (cursor < starts.size() && starts[cursor] <= w)
 		++cursor;
-	const auto i = std::min(cursor, starts.size() - 1);
+	const auto i = cursor;
 	const double start = starts[i - 1];
 	const double end =
 			i < starts.size() ? starts[i] : std::numeric_limits<double>::infinity();
@@ -309,7 +309,7 @@ double SnowLine::depth(int x, int z, int y) const
 		return -std::numeric_limits<double>::infinity();
 	if (threshold_y == std::numeric_limits<int>::min())
 		return 2.5;
-	return std::min((double(y - threshold_y) / band_blocks) +
+	return std::min(((double(y) - double(threshold_y)) / band_blocks) +
 							(noise(x, z, 32, SNOW_LINE) - .5) * .6,
 			2.5);
 }

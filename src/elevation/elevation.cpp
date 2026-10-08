@@ -92,7 +92,7 @@ static std::vector<double> blur_line(
 			sum += value * w;
 			weight += w;
 		}
-		out[i] = weight > 0.0 ? sum / weight : values[i];
+		out[i] = weight > 0.0 ? sum / weight : std::numeric_limits<double>::quiet_NaN();
 	}
 	return out;
 }

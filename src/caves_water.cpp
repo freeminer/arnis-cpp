@@ -3,6 +3,7 @@
 #include "block_definitions.h"
 #include "caves_biomes.h"
 #include "caves_density.h"
+#include "caves_shape_query.h"
 #include "caves_rng.h"
 #include "caves_theme.h"
 #include "world_editor/floor_state.h"
@@ -40,94 +41,6 @@ bool host(const world_editor::WorldEditor &e, int x, int y, int z)
 {
 	return e.check_for_block_absolute(x, y, z, HOSTS);
 }
-
-class CaveShapeQuery
-{
-public:
-	CaveShapeQuery(const world_editor::WorldEditor &editor, const CaveRect &world,
-			std::int64_t seed, int floor_y, const CaveEllipsoids &ellipsoids) :
-			editor_(editor), world_(world), floor_y_(floor_y),
-			gen_(seed, floor_y, world_editor::world_max_y()), ellipsoids_(ellipsoids)
-	{
-		const auto bounds = editor_.writable_y_bounds();
-		write_min_y_ = bounds.first;
-		write_max_y_ = bounds.second;
-		density_cache_.reserve(4096);
-		for (std::size_t i = 0; i < ellipsoids_.size(); ++i) {
-			const auto &e = ellipsoids_[i];
-			const int x0 = CaveRect::floor_div(
-					static_cast<int>(std::floor(e.x - e.horizontal_radius)), 16);
-			const int x1 = CaveRect::floor_div(
-					static_cast<int>(std::floor(e.x + e.horizontal_radius)), 16);
-			const int z0 = CaveRect::floor_div(
-					static_cast<int>(std::floor(e.z - e.horizontal_radius)), 16);
-			const int z1 = CaveRect::floor_div(
-					static_cast<int>(std::floor(e.z + e.horizontal_radius)), 16);
-			for (int cx = x0; cx <= x1; ++cx)
-				for (int cz = z0; cz <= z1; ++cz)
-					carvers_by_chunk_[{cx, cz}].push_back(i);
-		}
-	}
-
-	bool is_cave(int x, int y, int z) const
-	{
-		if (!world_.contains(x, z) || y <= floor_y_ ||
-				y > editor_.get_ground_level(x, z) - 6 || y < write_min_y_ ||
-				y > write_max_y_)
-			return false;
-		if (const auto it = carvers_by_chunk_.find(
-					{CaveRect::floor_div(x, 16), CaveRect::floor_div(z, 16)});
-				it != carvers_by_chunk_.end())
-			for (const auto i : it->second)
-				if (ellipsoids_[i].contains(x, y, z))
-					return true;
-		return noise_carves(x, y, z);
-	}
-
-private:
-	double density_at(int x, int y, int z) const
-	{
-		const auto key = pack_cave_pos(x, y, z);
-		if (const auto it = density_cache_.find(key); it != density_cache_.end())
-			return it->second;
-		return density_cache_.emplace(key, gen_.combined_density(x, y, z)).first->second;
-	}
-
-	bool noise_carves(int x, int y, int z) const
-	{
-		const int wx0 = CaveRect::floor_div(x, 4) * 4;
-		const int wy0 = CaveRect::floor_div(y, 8) * 8;
-		const int wz0 = CaveRect::floor_div(z, 4) * 4;
-		const int wx1 = wx0 + 4, wy1 = wy0 + 8, wz1 = wz0 + 4;
-		const double n000 = density_at(wx0, wy0, wz0);
-		const double n100 = density_at(wx1, wy0, wz0);
-		const double n001 = density_at(wx0, wy0, wz1);
-		const double n101 = density_at(wx1, wy0, wz1);
-		const double n010 = density_at(wx0, wy1, wz0);
-		const double n110 = density_at(wx1, wy1, wz0);
-		const double n011 = density_at(wx0, wy1, wz1);
-		const double n111 = density_at(wx1, wy1, wz1);
-		const double fy = double(y - wy0) / 8.0;
-		const double xz00 = lerp(fy, n000, n010);
-		const double xz10 = lerp(fy, n100, n110);
-		const double xz01 = lerp(fy, n001, n011);
-		const double xz11 = lerp(fy, n101, n111);
-		const double fx = double(x - wx0) / 4.0;
-		const double z0 = lerp(fx, xz00, xz10);
-		const double z1 = lerp(fx, xz01, xz11);
-		return lerp(double(z - wz0) / 4.0, z0, z1) <= 0.0 ||
-			   gen_.noodle_density(x, y, z) <= 0.0;
-	}
-
-	const world_editor::WorldEditor &editor_;
-	CaveRect world_;
-	int floor_y_;
-	CaveGen gen_;
-	const CaveEllipsoids &ellipsoids_;
-	int write_min_y_ = 0, write_max_y_ = -1;
-	std::map<std::pair<int, int>, std::vector<std::size_t>> carvers_by_chunk_;
-	mutable std::unordered_map<std::int64_t, double> density_cache_;
-};
 
 bool planned_solid(const world_editor::WorldEditor &editor, const CaveRect &world,
 		int floor_y, const std::unordered_set<std::int64_t> &carved,
@@ -169,6 +82,11 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 		const int cz = static_cast<int>(std::lround(z));
 		if (!world.contains(cx, cz))
 			break;
+		// Rust samples the river step's roof once at its center and clips the
+		// whole cross-section to that plane. Re-sampling each neighboring column
+		// lets the channel climb or pinch on a slope, diverging from the planned
+		// cross-section and making the stream irregular across tile boundaries.
+		const int ptop = editor.get_ground_level(cx, cz) - 6;
 		const bool contact_here = is_cave(cx, cy, cz);
 		const bool contact_below = is_cave(cx, cy - 1, cz) || is_cave(cx, cy - 2, cz);
 		if (contact_here && !(descended || contact_below))
@@ -184,7 +102,7 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 					continue;
 				for (int dy = 0; dy <= 1; ++dy) {
 					const int py = cy - dy;
-					if (py > editor.get_ground_level(px, pz) - 6 || is_cave(px, py, pz))
+					if (py > ptop || is_cave(px, py, pz))
 						continue;
 					carved.insert(pack_cave_pos(px, py, pz));
 					auto [it, inserted] = by_column.emplace(std::pair{px, pz}, py);
@@ -314,23 +232,21 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 }
 }
 
-void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y, const Args &args,
-		const CaveEllipsoids &ellipsoids, std::unordered_set<std::int64_t> *basin_fluid,
+void generate_water_features(world_editor::WorldEditor &editor,
+		const CaveRect &world_bounds, const CaveRect &region, std::int64_t seed,
+		int floor_y, const Args &args, const CaveShapeQuery &cave_shape,
+		std::unordered_set<std::int64_t> *basin_fluid,
 		std::unordered_set<std::int64_t> *water_cells_out,
-		std::unordered_set<std::int64_t> *cave_air_out)
+		std::unordered_set<std::int64_t> *cave_air_out, WaterPlan *plan_out)
 {
-	BiomeAmounts amounts = BiomeAmounts::defaults();
-	if (args.cave_biomes)
-		amounts = BiomeAmounts::parse(*args.cave_biomes);
+	const auto amounts = args.cave_biomes ? BiomeAmounts::parse(*args.cave_biomes)
+										  : BiomeAmounts::defaults();
 	const ThemeSelector decor(seed, amounts, floor_y);
 	std::unordered_set<std::int64_t> water_cells;
 	std::unordered_set<std::int64_t> carved_cells;
-	const CaveRect origins = region.grow(64);
+	const CaveRect origins = region.grow(CAVE_FEATURE_REACH).clip(world_bounds);
 	const int cx0 = chunk_floor(origins.min_x), cx1 = chunk_floor(origins.max_x);
 	const int cz0 = chunk_floor(origins.min_z), cz1 = chunk_floor(origins.max_z);
-	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	const CaveShapeQuery cave_shape(editor, region, seed, floor_y, ellipsoids);
 	auto dry_cave = [&](int x, int y, int z) { return cave_shape.is_cave(x, y, z); };
 
 	for (int cx = cx0; cx <= cx1; ++cx)
@@ -341,7 +257,7 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 			if (pool_rng.next_int(30) == 0) {
 				const int gx = cx * 16 + pool_rng.next_int(16);
 				const int gz = cz * 16 + pool_rng.next_int(16);
-				if (region.contains(gx, gz)) {
+				if (world_bounds.contains(gx, gz)) {
 					const int top = editor.get_ground_level(gx, gz) - 6;
 					const int lo = floor_y + 16;
 					const int hi = std::min(top - 10, floor_y + 94);
@@ -387,12 +303,12 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 						for (int dx = -ri_h; dx <= ri_h; ++dx)
 							for (int dz = -ri_h; dz <= ri_h; ++dz) {
 								const int px = gx + dx, pz = gz + dz;
-								if (!region.contains(px, pz))
+								if (!world_bounds.contains(px, pz))
 									continue;
 								const int ptop = editor.get_ground_level(px, pz) - 6;
 								for (int dy = -ri_v; dy <= ri_v; ++dy) {
 									const int py = gy + dy;
-									if (py > ptop || py < write_min_y || py > write_max_y)
+									if (py > ptop)
 										continue;
 									const bool inside = std::any_of(lobes.begin(),
 											lobes.end(), [&](const Lobe &l) {
@@ -432,8 +348,9 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 										return std::get<1>(a) < std::get<1>(b);
 									});
 							for (const auto &[x, y, z] : fill)
-								if (planned_solid(editor, region, floor_y, carved_cells,
-											water_cells, dry_cave, x, y - 1, z))
+								if (planned_solid(editor, world_bounds, floor_y,
+											carved_cells, water_cells, dry_cave, x, y - 1,
+											z))
 									water_cells.insert(pack_cave_pos(x, y, z));
 						}
 					}
@@ -447,7 +364,7 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 				continue;
 			const int ox = cx * 16 + river_rng.next_int(16);
 			const int oz = cz * 16 + river_rng.next_int(16);
-			if (!region.contains(ox, oz))
+			if (!world_bounds.contains(ox, oz))
 				continue;
 			const int lo = floor_y + 44;
 			const int hi = std::min(editor.get_ground_level(ox, oz) - 14, floor_y + 102);
@@ -458,7 +375,7 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 				continue;
 			const double yaw = double(river_rng.next_float()) * 2.0 * M_PI;
 			const int steps = 26 + river_rng.next_int(27);
-			walk_river(editor, region, floor_y, carved_cells, water_cells, dry_cave,
+			walk_river(editor, world_bounds, floor_y, carved_cells, water_cells, dry_cave,
 					river_rng.next_long(), ox, oy, oz, yaw, steps, 2);
 		}
 
@@ -466,35 +383,51 @@ void generate_water_features(world_editor::WorldEditor &editor, const CaveRect &
 	std::vector<std::int64_t> unsupported;
 	for (const auto p : water_cells) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		if (!planned_solid(editor, region, floor_y, carved_cells, water_cells, dry_cave,
-					x, y - 1, z))
+		if (!planned_solid(editor, world_bounds, floor_y, carved_cells, water_cells,
+					dry_cave, x, y - 1, z))
 			unsupported.push_back(p);
 	}
 	for (const auto p : unsupported)
 		water_cells.erase(p);
 
+	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	std::vector<std::int64_t> ordered_carved(carved_cells.begin(), carved_cells.end());
 	std::sort(ordered_carved.begin(), ordered_carved.end());
 	for (const auto p : ordered_carved) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		if (host(editor, x, y, z))
+		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
+				host(editor, x, y, z))
 			editor.set_block_absolute(AIR, x, y, z, HOSTS, std::nullopt);
 	}
 	std::vector<std::int64_t> ordered_water(water_cells.begin(), water_cells.end());
 	std::sort(ordered_water.begin(), ordered_water.end());
 	for (const auto p : ordered_water) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		if (editor.check_for_block_absolute(x, y, z, std::vector<Block>{AIR}))
+		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
+				editor.check_for_block_absolute(x, y, z, std::vector<Block>{AIR}))
 			editor.set_block_absolute(
 					WATER, x, y, z, std::vector<Block>{AIR}, std::nullopt);
 	}
-	if (water_cells_out)
-		water_cells_out->insert(water_cells.begin(), water_cells.end());
+	for (const auto p : water_cells) {
+		const auto [x, y, z] = unpack_cave_pos(p);
+		if (region.contains(x, z)) {
+			if (water_cells_out)
+				water_cells_out->insert(p);
+			if (basin_fluid)
+				basin_fluid->insert(p);
+		}
+	}
 	if (cave_air_out)
-		cave_air_out->insert(carved_cells.begin(), carved_cells.end());
-	if (basin_fluid)
-		basin_fluid->insert(water_cells.begin(), water_cells.end());
+		for (const auto p : carved_cells) {
+			const auto [x, y, z] = unpack_cave_pos(p);
+			if (region.contains(x, z))
+				cave_air_out->insert(p);
+		}
 	generate_deep_lava_sea(editor, region, floor_y, water_cells, basin_fluid);
+	if (plan_out) {
+		plan_out->carved = std::move(carved_cells);
+		plan_out->water = std::move(water_cells);
+	}
 }
 
 void seal_floating_fluid_region(
@@ -527,13 +460,12 @@ void seal_floating_fluid_region(
 	}
 }
 
-bool WaterPlan::solid(const CaveRect &world, int floor, int x, int y, int z,
-		const std::function<bool(int, int, int)> &is_cave) const
+bool WaterPlan::solid(const CaveShapeQuery &shape, int x, int y, int z) const
 {
 	const auto p = pack_cave_pos(x, y, z);
 	if (water.contains(p))
 		return true;
-	return world.contains(x, z) && y >= floor && !is_cave(x, y, z) && !carved.contains(p);
+	return shape.solid(x, y, z) && !carved.contains(p);
 }
 void WaterPlan::apply(world_editor::WorldEditor &editor, const CaveRect &region,
 		const std::vector<Block> &cave_host) const
@@ -549,8 +481,7 @@ void WaterPlan::apply(world_editor::WorldEditor &editor, const CaveRect &region,
 		if (region.contains(x, z)) {
 			editor.set_block_absolute(WATER, x, y, z,
 					std::optional<std::vector<Block>>({AIR}), std::nullopt);
-			// Freeminer's backend updates fluid propagation from the placed source;
-			// it has no explicit schedule_fluid_tick API.
+			editor.schedule_fluid_tick(WATER, x, y, z);
 		}
 	}
 }

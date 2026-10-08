@@ -15,6 +15,7 @@
 #include "bridges.h"
 #include "../floodfill.h"
 #include "../ground_generation.h"
+#include "../biome.h"
 #include "../land_cover/land_cover.h"
 #include "../deterministic_rng.h"
 #include "../trees/mapped.h"
@@ -62,15 +63,34 @@ bool wetland_wet_zone(int x, int z)
 	return ground_generation::value_noise_01(x + 11, z + 7, 28) > 0.55;
 }
 
+Block beach_block(const tags_t &tags)
+{
+	const auto surface = tags.find("surface");
+	if (surface == tags.end())
+		return SAND;
+	const auto &value = surface->second;
+	if (value == "gravel" || value == "fine_gravel" || value == "pebblestone" ||
+			value == "pebbles" || value == "shingle" || value == "stones")
+		return GRAVEL;
+	if (value == "rock" || value == "stone" || value == "bare_rock")
+		return STONE;
+	if (value == "mud")
+		return MUD;
+	return SAND;
+}
+
 bool wetland_puddle_noise(int x, int z)
 {
 	return ground_generation::value_noise_01(x + 31, z + 17, 6) > 0.78;
 }
 
-// Rust's seam-safe test helper: keep the two gates independently reusable
-// for diagnostics and regression checks of wetland puddle placement.
-bool wetland_puddle_at(int x, int z)
+bool wetland_puddle_cell(const tags_t &tags, int x, int z)
 {
+	const auto wetland = tags.find("wetland");
+	if (wetland != tags.end() &&
+			(wetland->second == "wet_meadow" || wetland->second == "fen" ||
+					wetland->second == "tidalflat"))
+		return false;
 	return wetland_wet_zone(x, z) && wetland_puddle_noise(x, z);
 }
 
@@ -155,24 +175,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			row_nodes.emplace_back(node.x, node.z);
 		for (const auto &[x, z] :
 				trees::mapped::tree_row_positions(row_nodes, args.scale)) {
-			trees::MappedRequest request;
-			request.habitat = habitat_for_mapped_tree(mapped_row.kind);
-			if (!mapped_row.genus.empty())
-				request.genus = mapped_row.genus;
-			request.conifer = mapped_row.conifer;
-			if (mapped_row.height_m > 0.0)
-				request.want_size = trees::size_for_height(static_cast<int>(
-						std::lround(mapped_row.height_m * editor.scale())));
-			if (editor.ground)
-				request.eco = editor.ground->ecoregion_at(editor.ground_point(x, z));
-			request.beach = request.eco.has_value() && near_beach(editor, x, z);
-			if (editor.place_mapped_regional_tree(x, 1, z, 0, request).has_value())
-				continue;
-			Tree::create_of_type(editor, {x, 1, z}, mapped_row.kind, &building_footprints,
-					&bridge_surface, true,
-					mapped_row.height_m > 0.0 ? std::optional<double>(mapped_row.height_m)
-											  : std::nullopt,
-					true, false, false);
+			Tree::create_mapped(
+					editor, {x, 1, z}, mapped_row, &building_footprints, &bridge_surface);
 		}
 		return;
 	}
@@ -182,24 +186,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		const int z = element.as_node().z;
 		const auto mapped =
 				trees::mapped::from_tags(tags, static_cast<std::uint64_t>(element.id()));
-		trees::MappedRequest request;
-		request.habitat = habitat_for_mapped_tree(mapped.kind);
-		if (!mapped.genus.empty())
-			request.genus = mapped.genus;
-		request.conifer = mapped.conifer;
-		if (mapped.height_m > 0.0)
-			request.want_size = trees::size_for_height(
-					static_cast<int>(std::lround(mapped.height_m * editor.scale())));
-		if (editor.ground)
-			request.eco = editor.ground->ecoregion_at(editor.ground_point(x, z));
-		request.beach = request.eco.has_value() && near_beach(editor, x, z);
-		if (editor.place_mapped_regional_tree(x, 1, z, 0, request).has_value())
-			return;
-		Tree::create_of_type(editor, {x, 1, z}, mapped.kind, &building_footprints,
-				&bridge_surface, true,
-				mapped.height_m > 0.0 ? std::optional<double>(mapped.height_m)
-									  : std::nullopt,
-				true, false, false);
+		Tree::create_mapped(
+				editor, {x, 1, z}, mapped, &building_footprints, &bridge_surface);
 		return;
 	}
 
@@ -399,13 +387,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	} else if (natural_type == "sand" || natural_type == "dune") {
 		block_type = SAND;
 	} else if (natural_type == "beach" || natural_type == "shoal") {
-		auto it_surface = tags.find("natural");
-		std::string surface =
-				(it_surface == tags.end()) ? std::string() : it_surface->second;
-		if (surface == "gravel")
-			block_type = GRAVEL;
-		else
-			block_type = SAND;
+		block_type = beach_block(tags);
 	} else if (natural_type == "water" || natural_type == "reef" ||
 			   natural_type == "bay") {
 		block_type = WATER;
@@ -522,6 +504,9 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			trees_ok_to_generate.push_back(TreeType::Bush);
 			trees_ok_to_generate.push_back(TreeType::AzaleaBush);
 		}
+		const bool leaf_type_tagged = it_leaf_type != tags.end() &&
+									  (it_leaf_type->second == "broadleaved" ||
+											  it_leaf_type->second == "needleleaved");
 
 		std::optional<std::vector<Block>> protected_fill_blocks(std::vector<Block>{
 				BLACK_CONCRETE,
@@ -536,6 +521,12 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		});
 
 		std::vector<std::pair<int, int>> wetland_puddles;
+		const auto climate = editor.climate();
+		const bool arid =
+				natural_type == "sand" && (climate == biome::Climate::HotDesert ||
+												  climate == biome::Climate::HotSteppe ||
+												  climate == biome::Climate::ColdDesert ||
+												  climate == biome::Climate::ColdSteppe);
 		std::optional<Block> shrubbery_species;
 		for (const auto &p : filled_area) {
 			int x = p.first;
@@ -589,6 +580,13 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						std::optional<std::vector<Block>>{std::vector<Block>{WATER}})) {
 				continue;
 			}
+			if (!editor.owns(x, z)) {
+				const bool puddle_cell =
+						natural_type == "wetland" && wetland_puddle_cell(tags, x, z);
+				if (puddle_cell && try_place_wetland_puddle(editor, x, z))
+					wetland_puddles.emplace_back(x, z);
+				continue;
+			}
 
 			if (natural_type == "grassland") {
 				if (!editor.check_for_block(x, 0, z,
@@ -623,7 +621,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					continue;
 				}
 				int random_choice = static_cast<int>(rng.uniform(500));
-				if (random_choice == 0) {
+				if (random_choice == 0 && editor.land_cover_backs_trees(x, z)) {
 					Tree::create(
 							editor, {x, 1, z}, &building_footprints, &bridge_surface);
 				} else if (random_choice == 1) {
@@ -656,7 +654,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						TreeType tree_type = trees_ok_to_generate[rng.uniform(
 								static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
 						Tree::create_of_type(editor, {x, 1, z}, tree_type,
-								&building_footprints, &bridge_surface);
+								&building_footprints, &bridge_surface, false,
+								std::nullopt, leaf_type_tagged);
 					} else {
 						Tree::create(
 								editor, {x, 1, z}, &building_footprints, &bridge_surface);
@@ -668,9 +667,10 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				}
 			} else if (natural_type == "sand") {
-				if (editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{SAND}}) &&
+				if (arid &&
+						editor.check_for_block(x, 0, z,
+								std::optional<std::vector<Block>>{
+										std::vector<Block>{SAND}}) &&
 						rng.uniform(100) == 1) {
 					editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
 				}
@@ -699,7 +699,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					continue;
 				}
 				const bool wet = wetland_wet_zone(x, z);
-				if (wetland_puddle_at(x, z)) {
+				if (wetland_puddle_cell(tags, x, z)) {
 					if (try_place_wetland_puddle(editor, x, z))
 						wetland_puddles.emplace_back(x, z);
 					continue;

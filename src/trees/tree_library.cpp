@@ -44,7 +44,12 @@ TreeSize smaller_enabled(TreeSize requested, const SizeFilter &f)
 }
 TreeSize tree_size_from_string(const std::string &s)
 {
-	std::string n = s;
+	auto first = std::find_if_not(
+			s.begin(), s.end(), [](unsigned char c) { return std::isspace(c); });
+	auto last = std::find_if_not(s.rbegin(), s.rend(), [](unsigned char c) {
+		return std::isspace(c);
+	}).base();
+	std::string n(first, std::max(first, last));
 	for (char &c : n)
 		c = char(std::tolower((unsigned char)c));
 	return n == "small"	   ? TreeSize::Small

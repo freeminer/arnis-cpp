@@ -25,7 +25,20 @@ struct TransverseMark
 	bool broken{false};
 	std::int8_t side{0};
 
-	bool covers(std::uint32_t path_index) const { return path_index == t; }
+	bool covers(std::uint32_t path_index) const
+	{
+		const auto distance = path_index > t ? path_index - t : t - path_index;
+		switch (kind) {
+		case Kind::Stop:
+		case Kind::GiveWay:
+			return distance == 0;
+		case Kind::Zebra:
+			return distance <= 1;
+		case Kind::CrossingLines:
+			return distance == 2;
+		}
+		return false;
+	}
 };
 
 struct WayMarks

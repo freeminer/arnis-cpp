@@ -12,6 +12,7 @@ namespace arnis::block_palette
 inline constexpr std::uint8_t USE_MODEL = 1;
 inline constexpr std::uint8_t USE_WALL = 2;
 inline constexpr std::uint8_t USE_ROOF = 4;
+inline constexpr std::uint8_t USE_FACADE = 8;
 
 Block closest_block(RGBTuple color);
 Block facade_block_for_color(RGBTuple color);

@@ -34,7 +34,7 @@ bool is_palm(const std::string &s)
 	for (const auto *p : genera)
 		if (genus == p)
 			return true;
-	return genus == "palm" || genus == "palms";
+	return false;
 }
 bool subtropical_latitude(double lat)
 {
@@ -224,18 +224,7 @@ std::vector<std::pair<const char *, unsigned>> vanilla_sprinkle(ecoregion::EcoBi
 }
 double smooth_noise(int x, int z, int scale)
 {
-	const int s = std::max(1, scale);
-	auto div = [s](int v) { return v >= 0 ? v / s : -(((-v) + s - 1) / s); };
-	const int x0 = div(x) * s, z0 = div(z) * s;
-	const double tx = double(x - x0) / s, tz = double(z - z0) / s;
-	auto smooth = [](double v) { return v * v * (3 - 2 * v); };
-	auto sample = [](int a, int b) {
-		return double(land_cover::coord_hash(a, b) % 1000) / 1000.;
-	};
-	const double a = sample(x0, z0) * (1 - smooth(tx)) + sample(x0 + s, z0) * smooth(tx);
-	const double b =
-			sample(x0, z0 + s) * (1 - smooth(tx)) + sample(x0 + s, z0 + s) * smooth(tx);
-	return a * (1 - smooth(tz)) + b * smooth(tz);
+	return ground_generation::value_noise_01(x, z, scale);
 }
 }
 
@@ -253,6 +242,13 @@ struct RegionSelector::Data
 		unsigned weight = 1;
 		Niche niche = Niche::Any;
 	};
+	struct WeightedCommunity
+	{
+		std::size_t community = 0;
+		unsigned weight = 1;
+	};
+	using Pool = std::vector<WeightedCommunity>;
+	using Pools = std::array<std::array<Pool, 3>, 3>;
 	struct Entry
 	{
 		Schematic schem;
@@ -285,6 +281,10 @@ struct RegionSelector::Data
 	std::unordered_map<std::uint16_t, std::vector<EcoChoice>> eco_choices;
 	std::unordered_map<std::uint16_t, std::vector<std::size_t>> eco_communities;
 	std::unordered_map<std::uint16_t, std::size_t> eco_beach_community;
+	// Index 0 excludes palms, index 1 permits them. Latitude may be attached
+	// after pack loading, so both Rust-equivalent pool sets are prepared once.
+	std::unordered_map<std::uint16_t, std::array<Pools, 2>> eco_pools;
+	std::unordered_map<std::uint16_t, std::array<Pools, 2>> vanilla_pools;
 	double scale = 1.;
 	double blocks_per_meter = 0.;
 	int ground_level = 0;
@@ -633,6 +633,104 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			data->realm.communities.push_back(std::move(grove));
 		}
 	}
+	// Resolve Rust's plain/montane/wet and untagged/conifer/broadleaf weighted
+	// pools once per ecoregion. Slot selection then performs only one weighted
+	// roll, rather than allocating and filtering communities for every tree.
+	auto build_pools = [](const std::vector<Data::EcoChoice> &choices,
+							   const Data::Pack &pack, bool palms) {
+		using Pool = Data::Pool;
+		auto keep = [&](const Pool &pool, auto predicate) {
+			Pool out;
+			for (const auto &item : pool)
+				if (item.community < pack.communities.size() &&
+						predicate(pack.communities[item.community]))
+					out.push_back(item);
+			return out;
+		};
+		auto or_pool = [](Pool first, Pool second) {
+			return first.empty() ? std::move(second) : std::move(first);
+		};
+		Pool all, any, montane, wet;
+		for (const auto &choice : choices) {
+			const Data::WeightedCommunity item{choice.community, choice.weight};
+			all.push_back(item);
+			if (choice.niche == Data::Niche::Any)
+				any.push_back(item);
+			else if (choice.niche == Data::Niche::Montane)
+				montane.push_back(item);
+			else if (choice.niche == Data::Niche::Wet)
+				wet.push_back(item);
+		}
+		Pool plain = or_pool(std::move(any), all);
+		Pool montane_pool = or_pool(std::move(montane),
+				or_pool(keep(plain,
+								[](const auto &c) {
+									return c.habitat == Habitat::Conifer;
+								}),
+						plain));
+		Pool wet_pool = or_pool(std::move(wet),
+				or_pool(keep(plain,
+								[](const auto &c) { return c.habitat == Habitat::Wet; }),
+						plain));
+		const Pool all_conifers = or_pool(
+				keep(all, [](const auto &c) { return c.habitat == Habitat::Conifer; }),
+				keep(all, [](const auto &c) {
+					return std::any_of(c.species_conifer.begin(), c.species_conifer.end(),
+							[](bool conifer) { return conifer; });
+				}));
+		Data::Pools result;
+		const std::array<Pool, 3> places{
+				std::move(plain), std::move(montane_pool), std::move(wet_pool)};
+		for (std::size_t place = 0; place < places.size(); ++place) {
+			Pool pool = places[place];
+			if (!palms) {
+				auto non_palm = keep(pool, [](const auto &c) {
+					return !std::all_of(c.species_palm.begin(), c.species_palm.end(),
+							[](bool palm) { return palm; });
+				});
+				pool = or_pool(std::move(non_palm), std::move(pool));
+			}
+			result[place][0] = pool;
+			const auto conifers = or_pool(
+					keep(pool,
+							[](const auto &c) { return c.habitat == Habitat::Conifer; }),
+					or_pool(keep(pool,
+									[](const auto &c) {
+										return std::any_of(c.species_conifer.begin(),
+												c.species_conifer.end(),
+												[](bool value) { return value; });
+									}),
+							all_conifers));
+			result[place][1] = conifers;
+			auto broadleaf = [](const auto &c) {
+				return std::any_of(c.species_conifer.begin(), c.species_conifer.end(),
+						[](bool value) { return !value; });
+			};
+			result[place][2] = or_pool(keep(pool,
+											   [&](const auto &c) {
+												   return c.habitat != Habitat::Conifer &&
+														  broadleaf(c);
+											   }),
+					or_pool(keep(pool, broadleaf), pool));
+		}
+		return result;
+	};
+	for (const auto &[id, choices] : data->eco_choices) {
+		const auto eco = ecoregion::lookup(id);
+		if (!eco)
+			continue;
+		std::vector<Data::EcoChoice> sprinkle;
+		for (const auto &[name, weight] : vanilla_sprinkle(eco->biome))
+			for (std::size_t i = 0; i < data->vanilla.communities.size(); ++i)
+				if (data->vanilla.communities[i].name == name) {
+					sprinkle.push_back({i, weight, Data::Niche::Any});
+					break;
+				}
+		data->eco_pools[id][0] = build_pools(choices, data->realm, false);
+		data->eco_pools[id][1] = build_pools(choices, data->realm, true);
+		data->vanilla_pools[id][0] = build_pools(sprinkle, data->vanilla, false);
+		data->vanilla_pools[id][1] = build_pools(sprinkle, data->vanilla, true);
+	}
 	return RegionSelector{std::move(data)};
 }
 std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
@@ -694,8 +792,6 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					450.) &&
 			smooth_noise(sx, sz, 64) < .6;
 	const Habitat tagged_hint = hint;
-	if (request.wet_ground)
-		hint = Habitat::Wet;
 	const auto eco_mix = request.eco ? data_->eco_choices.find(request.eco->id)
 									 : data_->eco_choices.end();
 	const bool has_eco_mix =
@@ -704,8 +800,10 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 			has_eco_mix && request.eco && data_->latitude_known
 					? ecoregion::palms_belong(*request.eco, data_->latitude)
 					: data_->palms_default;
-	if (montane && (hint == Habitat::Lowland || hint == Habitat::Wet))
-		hint = Habitat::Conifer;
+	const Habitat effective_hint =
+			montane && (tagged_hint == Habitat::Lowland || tagged_hint == Habitat::Wet)
+					? Habitat::Conifer
+					: tagged_hint;
 	const auto blend = land_cover::coord_hash(sx + 7, sz + 13) % 100;
 	const bool want_wet = request.wet_ground ||
 						  (request.tagged && tagged_hint == Habitat::Wet) ||
@@ -716,78 +814,66 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 			request.conifer ? !*request.conifer
 							: request.tagged && tagged_hint == Habitat::Lowland;
 	const Data::Pack *pack = &data_->realm;
-	const std::vector<std::size_t> *candidates = &pack->by_habitat[habitat_index(hint)];
-	if (candidates->empty())
-		candidates = &pack->by_habitat[habitat_index(Habitat::Lowland)];
-	std::size_t ci = candidates->empty()
-							 ? std::min(pack->fallback, pack->communities.size() - 1)
-							 : (*candidates)[std::min<std::size_t>(candidates->size() - 1,
-									   std::size_t(smooth_noise(sx, sz, 160) *
-												   candidates->size()))];
+	auto choose_community = [&](const Data::Pack &source) {
+		const auto &preferred = source.by_habitat[habitat_index(effective_hint)];
+		const auto &original = source.by_habitat[habitat_index(tagged_hint)];
+		const auto *candidates = !preferred.empty()	 ? &preferred
+								 : !original.empty() ? &original
+													 : nullptr;
+		if (!candidates)
+			return std::min(source.fallback, source.communities.size() - 1);
+		const auto selected =
+				static_cast<std::size_t>(smooth_noise(sx, sz, 160) * candidates->size());
+		return (*candidates)[std::min(candidates->size() - 1, selected)];
+	};
+	std::size_t ci = choose_community(*pack);
 	if (!mapped_selection && blend >= 97 && pack->own_count > 0)
 		ci = land_cover::coord_hash(sx + 5, sz + 9) % pack->own_count;
 
-	// Rust selects a prepared ecoregion mix before falling back to the generic
-	// habitat community. Resolve its niche and leaf-type pools here so tagged
-	// forests and wet/montane sites do not randomly receive unrelated groves.
-	auto choose_vanilla = [&, sx = sx, sz = sz]() -> std::optional<std::size_t> {
+	// Pools are prepared when the region library loads, matching Rust's O(1)
+	// pool resolution and avoiding per-slot temporary allocations.
+	auto choose_cached = [&](const Data::Pools &pools,
+								 std::uint32_t salt) -> std::optional<std::size_t> {
+		const std::size_t place = montane ? 1 : want_wet ? 2 : 0;
+		const std::size_t tag = want_conifer ? 1 : want_broadleaf ? 2 : 0;
+		const auto &pool = pools[place][tag];
+		unsigned total = 0;
+		for (const auto &choice : pool)
+			total += choice.weight;
+		if (!total)
+			return std::nullopt;
+		const auto h = land_cover::coord_hash(sx ^ static_cast<int>(salt), sz ^ 0x5a17);
+		const double roll = h % 5 == 0 ? double((h >> 8) % 10000) / 10000.
+									   : ground_generation::patch_noise(sx, sz, 48, salt);
+		unsigned selected = std::min(total - 1, static_cast<unsigned>(roll * total));
+		for (const auto &choice : pool) {
+			if (selected < choice.weight)
+				return choice.community;
+			selected -= choice.weight;
+		}
+		return pool.back().community;
+	};
+	auto choose_vanilla = [&]() -> std::optional<std::size_t> {
 		if (!request.eco || data_->vanilla.empty())
 			return std::nullopt;
-		const auto sprinkle = vanilla_sprinkle(request.eco->biome);
-		auto build_vanilla_pool = [&](bool strict) {
-			std::vector<std::pair<std::size_t, unsigned>> pool;
-			for (const auto &[name, weight] : sprinkle)
-				for (std::size_t i = 0; i < data_->vanilla.communities.size(); ++i) {
-					const auto &candidate = data_->vanilla.communities[i];
-					if (candidate.name != name)
-						continue;
-					const bool has_conifer =
-							candidate.habitat == Habitat::Conifer ||
-							std::any_of(candidate.species_conifer.begin(),
-									candidate.species_conifer.end(),
-									[](bool conifer) { return conifer; });
-					const bool has_wet = candidate.habitat == Habitat::Wet;
-					const bool has_type = std::any_of(candidate.species_conifer.begin(),
-							candidate.species_conifer.end(), [&](bool conifer) {
-								return (want_conifer && conifer) ||
-									   (want_broadleaf && !conifer);
-							});
-					const bool place_matches = !strict || (montane			 ? has_conifer
-																  : want_wet ? has_wet
-																			 : true);
-					const bool type_matches =
-							!strict || (!want_conifer && !want_broadleaf) || has_type;
-					if (place_matches && type_matches)
-						pool.emplace_back(i, weight);
-					break;
-				}
-			return pool;
-		};
-		auto pool = build_vanilla_pool(true);
-		if (pool.empty())
-			pool = build_vanilla_pool(false);
-		if (pool.empty())
-			return std::nullopt;
-		unsigned total = 0;
-		for (const auto &[index, weight] : pool)
-			total += weight;
-		auto h = land_cover::coord_hash(sx ^ 0x3c0b22f, sz ^ 0x5a17);
-		const double roll =
-				h % 5 == 0 ? double((h >> 8) % 10000) / 10000.
-						   : ground_generation::patch_noise(sx, sz, 48, 0x3c0b22f);
-		unsigned selected = std::min(total - 1, static_cast<unsigned>(roll * total));
-		for (const auto &[index, weight] : pool) {
-			if (selected < weight)
-				return index;
-			selected -= weight;
-		}
-		return pool.back().first;
+		const auto pools = data_->vanilla_pools.find(request.eco->id);
+		if (pools != data_->vanilla_pools.end())
+			if (const auto selected = choose_cached(
+						pools->second[palms_allowed ? 1 : 0], 0x3c0b22f))
+				return selected;
+		const auto &conifers = data_->vanilla.by_habitat[habitat_index(Habitat::Conifer)];
+		return conifers.empty()
+					   ? std::optional<std::size_t>(data_->vanilla.fallback)
+					   : std::optional<std::size_t>(conifers[std::min<std::size_t>(
+								 conifers.size() - 1,
+								 static_cast<std::size_t>(
+										 smooth_noise(sx, sz, 160) * conifers.size()))]);
 	};
 
 	bool selected_from_mix = false;
 	if (request.eco) {
-		const auto mix = data_->eco_choices.find(request.eco->id);
-		if (mix != data_->eco_choices.end() && !mix->second.empty()) {
+		const auto mix = data_->eco_pools.find(request.eco->id);
+		if (mix != data_->eco_pools.end()) {
 			const auto beach = data_->eco_beach_community.find(request.eco->id);
 			const bool choose_beach_palms =
 					request.beach && palms_allowed && !want_wet && !want_conifer &&
@@ -803,106 +889,10 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					ci = *vanilla;
 				}
 			} else {
-				std::vector<const Data::EcoChoice *> niche_pool, plain_pool,
-						fallback_pool;
-				for (const auto &choice : mix->second) {
-					fallback_pool.push_back(&choice);
-					if (choice.niche == Data::Niche::Any)
-						plain_pool.push_back(&choice);
-					if ((montane && choice.niche == Data::Niche::Montane) ||
-							(!montane && want_wet && choice.niche == Data::Niche::Wet) ||
-							(!want_wet && !montane && choice.niche == Data::Niche::Any))
-						niche_pool.push_back(&choice);
-				}
-				auto &pool = niche_pool.empty() ? plain_pool : niche_pool;
-				if (pool.empty())
-					pool = fallback_pool;
-				if (niche_pool.empty() && (want_wet || montane)) {
-					std::vector<const Data::EcoChoice *> habitat_pool;
-					for (const auto *choice : pool) {
-						const auto &candidate =
-								data_->realm.communities[choice->community];
-						const bool conifer =
-								candidate.habitat == Habitat::Conifer ||
-								std::any_of(candidate.species_conifer.begin(),
-										candidate.species_conifer.end(),
-										[](bool value) { return value; });
-						if ((montane && conifer) ||
-								(!montane && want_wet &&
-										candidate.habitat == Habitat::Wet))
-							habitat_pool.push_back(choice);
-					}
-					if (!habitat_pool.empty())
-						pool = std::move(habitat_pool);
-				}
-				if (!palms_allowed) {
-					std::vector<const Data::EcoChoice *> non_palm_pool;
-					for (const auto *choice : pool) {
-						const auto &candidate =
-								data_->realm.communities[choice->community];
-						if (std::any_of(candidate.species_palm.begin(),
-									candidate.species_palm.end(),
-									[](bool palm) { return !palm; }))
-							non_palm_pool.push_back(choice);
-					}
-					if (!non_palm_pool.empty())
-						pool = std::move(non_palm_pool);
-				}
-				if (want_conifer || want_broadleaf) {
-					std::vector<const Data::EcoChoice *> typed_pool;
-					for (const auto *choice : pool) {
-						const auto &candidate =
-								data_->realm.communities[choice->community];
-						if (std::any_of(candidate.species_conifer.begin(),
-									candidate.species_conifer.end(), [&](bool conifer) {
-										return (want_conifer && conifer) ||
-											   (want_broadleaf && !conifer);
-									}))
-							typed_pool.push_back(choice);
-					}
-					if (!typed_pool.empty()) {
-						pool = std::move(typed_pool);
-					} else if (want_conifer) {
-						// Rust's conifer pool falls back to conifer communities anywhere
-						// in the ecoregion when the selected niche has none.
-						std::vector<const Data::EcoChoice *> global_conifers;
-						for (const auto &choice : mix->second) {
-							const auto &candidate =
-									data_->realm.communities[choice.community];
-							const bool has_conifer =
-									candidate.habitat == Habitat::Conifer ||
-									std::any_of(candidate.species_conifer.begin(),
-											candidate.species_conifer.end(),
-											[](bool value) { return value; });
-							if (has_conifer &&
-									(palms_allowed ||
-											std::any_of(candidate.species_palm.begin(),
-													candidate.species_palm.end(),
-													[](bool palm) { return !palm; })))
-								global_conifers.push_back(&choice);
-						}
-						if (!global_conifers.empty())
-							pool = std::move(global_conifers);
-					}
-				}
-				unsigned total = 0;
-				for (const auto *choice : pool)
-					total += choice->weight;
-				if (total) {
-					auto h = land_cover::coord_hash(sx ^ 0x3c0a11e, sz ^ 0x5a17);
-					const double roll = h % 5 == 0 ? double((h >> 8) % 10000) / 10000.
-												   : ground_generation::patch_noise(
-															 sx, sz, 48, 0x3c0a11e);
-					unsigned selected =
-							std::min(total - 1, static_cast<unsigned>(roll * total));
-					for (const auto *choice : pool) {
-						if (selected < choice->weight) {
-							ci = choice->community;
-							selected_from_mix = true;
-							break;
-						}
-						selected -= choice->weight;
-					}
+				if (const auto selected = choose_cached(
+							mix->second[palms_allowed ? 1 : 0], 0x3c0a11e)) {
+					ci = *selected;
+					selected_from_mix = true;
 				}
 				if (!mapped_selection && !selected_from_mix && !data_->vanilla.empty())
 					if (const auto vanilla = choose_vanilla()) {
@@ -915,15 +905,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	if (!mapped_selection && !selected_from_mix && pack == &data_->realm && blend >= 67 &&
 			blend < 97 && !data_->vanilla.empty()) {
 		pack = &data_->vanilla;
-		ci = std::min(pack->fallback, pack->communities.size() - 1);
-		const std::vector<std::size_t> *vanilla_candidates =
-				&pack->by_habitat[habitat_index(hint)];
-		if (vanilla_candidates->empty())
-			vanilla_candidates = &pack->by_habitat[habitat_index(Habitat::Lowland)];
-		if (!vanilla_candidates->empty())
-			ci = (*vanilla_candidates)[std::min<std::size_t>(
-					vanilla_candidates->size() - 1,
-					std::size_t(smooth_noise(sx, sz, 160) * vanilla_candidates->size()))];
+		ci = choose_community(*pack);
 	}
 	const auto &community = pack->communities[ci];
 	if (!request.density_decided) {
@@ -1031,8 +1013,6 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		};
 		if (typed_species.empty())
 			scan_type(data_->realm);
-		if (typed_species.empty())
-			scan_type(data_->vanilla);
 	}
 	SpeciesPool species_candidates = genus_selected			  ? std::move(mapped_species)
 									 : !typed_species.empty() ? std::move(typed_species)

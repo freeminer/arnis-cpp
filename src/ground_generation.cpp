@@ -183,16 +183,17 @@ int local_slope(WorldEditor &editor, int x, int z, const ChunkGroundCache *groun
 	const auto level_at = [&](int sx, int sz) {
 		return ground_level_at(editor, ground_cache, true, fallback_y, sx, sz);
 	};
-	const int center = level_at(x, z);
-	int max_delta = 0;
-	for (int dx = -1; dx <= 1; ++dx) {
-		for (int dz = -1; dz <= 1; ++dz) {
-			if (dx == 0 && dz == 0)
-				continue;
-			max_delta = std::max(max_delta, std::abs(level_at(x + dx, z + dz) - center));
-		}
-	}
-	return max_delta;
+	// Match Ground::slope's cardinal four-block stencil even when the host
+	// editor has no Arnis Ground object. The previous eight-neighbour,
+	// one-block estimate classified a visibly different set of columns as
+	// steep, changing the terrain palette in this fallback path.
+	constexpr int step = 4;
+	const std::array<int, 4> samples{{level_at(x + step, z), level_at(x - step, z),
+			level_at(x, z - step), level_at(x, z + step)}};
+	const auto [min_it, max_it] = std::minmax_element(samples.begin(), samples.end());
+	const auto rise = static_cast<std::int64_t>(*max_it) - *min_it;
+	return rise >= std::numeric_limits<int>::max() ? std::numeric_limits<int>::max()
+												   : static_cast<int>(rise);
 }
 
 bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
@@ -270,15 +271,15 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 	return {GRASS_BLOCK, DIRT};
 }
 
-std::pair<bool, bool> canopy_verdict(
-		WorldEditor &editor, int x, int z, int origin_x, int origin_z)
+std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int origin_x,
+		int origin_z, int spacing, bool schematic_trees)
 {
 	if (!editor.ground || !editor.ground->has_canopy() ||
 			!editor.ground->has_land_cover())
 		return {false, false};
-	const int spacing = std::max(1, editor.get_tree_slot_spacing());
 	const auto floor_div = [spacing](int v) {
-		return v >= 0 ? v / spacing : -(((-v) + spacing - 1) / spacing);
+		const int quotient = v / spacing;
+		return quotient - (v % spacing < 0 ? 1 : 0);
 	};
 	const int cell_x = floor_div(x) * spacing;
 	const int cell_z = floor_div(z) * spacing;
@@ -289,8 +290,7 @@ std::pair<bool, bool> canopy_verdict(
 	const auto [slot_x, slot_z] = trees::trunk_slot_s(x, z, spacing);
 	if (x != slot_x || z != slot_z)
 		return {true, false};
-	const double p =
-			canopy::slot_probability(*fraction, spacing, editor.place_schematics());
+	const double p = canopy::slot_probability(*fraction, spacing, schematic_trees);
 	const double roll =
 			double(land_cover::coord_hash(x ^ 0x434d, z ^ 0x484d) % 10000) / 10000.0;
 	return {true, roll < p};
@@ -298,8 +298,9 @@ std::pair<bool, bool> canopy_verdict(
 
 void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
+		const CoordinateBitmap *tunnel_footprint,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
-		double forest_fern_share)
+		double forest_fern_share, int tree_spacing, bool schematic_trees)
 {
 	const bool sealed = editor.surface_is_sealed(x, z);
 	if (editor.check_for_block_absolute(x, ground_y + 1, z))
@@ -323,9 +324,10 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	auto rng = coord_rng(x, z, 0);
 	const auto climate =
 			editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
-	const auto [canopy_covered, canopy_tree] =
-			canopy_verdict(editor, x, z, origin_x, origin_z);
+	const auto [canopy_covered, canopy_tree] = canopy_verdict(
+			editor, x, z, origin_x, origin_z, tree_spacing, schematic_trees);
 	if (canopy_tree && slope <= 4 && ground_allows_trees &&
+			!(tunnel_footprint && tunnel_footprint->contains(x, z)) &&
 			!editor.check_for_block_absolute(x, ground_y + 1, z) &&
 			!(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z)))
 		Tree::create_from_canopy(
@@ -345,7 +347,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		if (!editor.block_exists_absolute(x, y, z))
 			editor.set_block_if_absent_absolute(block, x, y, z);
 	};
-	if (cover == land_cover::LC_TREE_COVER && slope <= 4 && ground_allows_trees) {
+	if (cover == land_cover::LC_TREE_COVER && slope <= 4 && ground_allows_trees &&
+			!(tunnel_footprint && tunnel_footprint->contains(x, z))) {
 		// The canopy map adds a separately selected tree; it suppresses only the
 		// land-cover tree roll in measured cells, never the forest-floor plants.
 		const auto tree_rate = scale < MICRO_TREE_MAX_SCALE ? 4u : 30u;
@@ -431,7 +434,7 @@ void clear_road_vegetation(WorldEditor &editor, int x, int y, int z)
 			YELLOW_CONCRETE, DIRT_PATH, WATER};
 	const auto &loose_plants = ground_decoration::loose_plant_blocks();
 	static const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
-			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG};
+			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG};
 	const auto &stacked = ground_decoration::stacked_plant_parts();
 	const bool surface = editor.check_for_block_absolute(x, y, z, stray_surface);
 	const bool under_wood = editor.check_for_block_absolute(x, y + 2, z, wood);
@@ -502,9 +505,17 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const int max_z = std::min(iter_max_z, xzbbox.max_z());
 	if (min_x > max_x || min_z > max_z)
 		return;
+	// Rust's water_blend accessor materializes its cached shoreline field on
+	// demand. C++ normally warms it during data_processing, but this generator
+	// is also a public standalone entry point, so ensure direct callers see the
+	// same smoothed ESA/OSM water classification.
+	if (editor.ground)
+		editor.ground->warm_water_blend();
 	if (show_progress)
 		std::cout << "[6/7] Generating ground...\n";
 	const bool terrain_enabled = generation_mode_terrain(args.mode);
+	const int tree_spacing = std::max(1, editor.get_tree_slot_spacing());
+	const bool schematic_trees = editor.has_schematic_tree_pack();
 	const auto geographic_bounds = editor.geographic_bounds();
 	const double center_latitude = (geographic_bounds[0] + geographic_bounds[1]) * .5;
 	const terrain_surface::SnowLine snow_line(editor.ground
@@ -544,6 +555,41 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						terrain_enabled, args.ground_level, gx, gz);
 			};
 			int column_fill_y_min = world_editor::terrain_floor_y() + 1;
+			if (args.fillground) {
+				const bool chunk_fully_in_bbox = chunk_min_x == (chunk_x << 4) &&
+												 chunk_max_x == (chunk_x << 4) + 15 &&
+												 chunk_min_z == (chunk_z << 4) &&
+												 chunk_max_z == (chunk_z << 4) + 15;
+				const bool rotated_in =
+						chunk_fully_in_bbox &&
+						(!editor.ground || (editor.ground->is_in_rotated_bounds(
+													chunk_min_x, chunk_min_z) &&
+												   editor.ground->is_in_rotated_bounds(
+														   chunk_max_x, chunk_min_z) &&
+												   editor.ground->is_in_rotated_bounds(
+														   chunk_min_x, chunk_max_z) &&
+												   editor.ground->is_in_rotated_bounds(
+														   chunk_max_x, chunk_max_z)));
+				if (rotated_in) {
+					int min_ground_y = args.ground_level;
+					if (ground_cache)
+						min_ground_y = *std::min_element(
+								ground_cache->grid.begin(), ground_cache->grid.end());
+					const int bottom_section = chunk_of(world_editor::terrain_floor_y());
+					// section_top = section_y*16 + 15 <= min_ground_y - 3.
+					const int top_section = chunk_of(min_ground_y - 18);
+					const int section_min = std::numeric_limits<std::int8_t>::min();
+					const int section_max = std::numeric_limits<std::int8_t>::max();
+					if (bottom_section >= section_min && bottom_section <= section_max &&
+							top_section >= section_min && top_section <= section_max &&
+							top_section >= bottom_section) {
+						const bool all_clean = editor.bulk_fill_chunk_sections_below(
+								chunk_x, chunk_z, bottom_section, top_section, STONE);
+						if (all_clean)
+							column_fill_y_min = (top_section + 1) * 16;
+					}
+				}
+			}
 			for (int x = chunk_min_x; x <= chunk_max_x; ++x) {
 				for (int z = chunk_min_z; z <= chunk_max_z; ++z) {
 					// Rotation expands the output AABB. Rust masks columns whose inverse
@@ -553,8 +599,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						water_columns.forget(x, z);
 						continue;
 					}
-					const bool in_tunnel =
-							tunnel_footprint && tunnel_footprint->contains(x, z);
 					// Rust's geo-only mode deliberately bypasses elevation and uses the
 					// configured flat level.  Keep all downstream surface/water decisions
 					// on that same height rather than merely disabling the provider fetch.
@@ -649,178 +693,203 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					const bool process_surface = steep_override || !has_existing_stone;
 					std::optional<Block> column_under;
 
-					// Rust uses a smoothed ESA water mask, but never retracts a hard water
-					// cell.  Keep OSM water too, and avoid flooding cliff faces.
-					if (process_surface && !planetary && !in_tunnel && !steep_override &&
-							(grid_water || existing_water || osm_gap ||
-									water_blend > .5)) {
-						const int water_y = editor.get_water_level(x, z);
-						if (ground_y <= water_y &&
-								!is_protected_surface(editor, x, water_y, z)) {
-							editor.set_block_if_absent_absolute(WATER, x, water_y, z);
-							if (water_y - 1 > world_editor::min_y())
-								editor.set_block_if_absent_absolute(
-										SAND, x, water_y - 1, z);
-							if (water_y - 2 > world_editor::min_y())
-								editor.set_block_if_absent_absolute(
-										SANDSTONE, x, water_y - 2, z);
-							// Match Rust: only skip normal ground generation when this
-							// column was actually converted to water.  A classified cell
-							// above its water surface must remain terrain, otherwise the
-							// later water/depth pass leaves false flooded areas.
-							water_columns.forget(x, z);
-							continue;
+					// Follow Rust's smoothed ESA water mask while preserving every hard
+					// water cell. Interior water remains at terrain height when snapping
+					// its surface down to the local water level would leave it submerged.
+					const bool esa_water =
+							grid_water || existing_water || osm_gap || water_blend > .5;
+					bool place_esa_water = false;
+					int water_y = 0;
+					if (process_surface && !planetary && esa_water && !steep_override) {
+						water_y = editor.get_water_level(x, z);
+						if (ground_y <= water_y) {
+							place_esa_water = true;
+						} else if (grid_water && editor.ground &&
+								   editor.ground->is_interior_water(relative)) {
+							water_y = ground_y;
+							place_esa_water = true;
 						}
 					}
-					// On a steep DEM edge a snapped water level may sit below the
-					// current column.  Rust keeps an interior water cell in that case;
-					// otherwise the ground pass paints a grass/rock line through the
-					// middle of a lake and the later depth pass cannot restore it.
-					if (process_surface && !planetary && !in_tunnel && steep_override &&
-							grid_water && editor.ground->is_interior_water(relative)) {
-						const int water_y = ground_y;
-						if (!is_protected_surface(editor, x, water_y, z)) {
-							editor.set_block_if_absent_absolute(WATER, x, water_y, z);
-							water_columns.forget(x, z);
-							continue;
-						}
-					}
+					if (place_esa_water) {
+						editor.set_block_if_absent_absolute(WATER, x, water_y, z);
+						if (water_y - 1 > world_editor::min_y())
+							editor.set_block_if_absent_absolute(SAND, x, water_y - 1, z);
+						if (water_y - 2 > world_editor::min_y())
+							editor.set_block_if_absent_absolute(
+									SANDSTONE, x, water_y - 2, z);
+						water_columns.forget(x, z);
+					} else {
 
-					// Rust computes the natural under-material even when an authored
-					// surface already occupies the cell; its absent-only setter protects
-					// that surface while the selected under-block still closes the terrain.
-					if (process_surface && !in_tunnel) {
-						const auto planetary_palette =
-								planetary ? celestial_surface_palette(args.body, slope,
-													args.celestial_latitude_degrees,
-													ground_y, x, z)
-										  : std::pair<Block, Block>{};
-						const std::pair<Block, Block> palette =
-								planetary	  ? planetary_palette
-								: talus_block ? *talus_block
-								: slope > 4	  ? terrain_surface::steep_palette(
-														x, z, ground_y, slope, cover_here)
-								: glacier
-										? std::pair{PACKED_ICE, PACKED_ICE}
-										: natural_surface_palette(editor, x, z, ground_y,
-												  slope, cover_here, has_cover);
-						Block surface = palette.first;
-						std::optional<Block> climate_under = palette.second;
-						// Rust shoreline parity: blend the immediate ring around ESA or
-						// already-rendered OSM water to sand on gentle terrain. This keeps
-						// water boundaries from exposing abrupt grass/clay edges.
-						if (!planetary && surface != WATER && slope <= 3) {
-							bool near_esa_water = false;
-							if (has_cover) {
-								for (int dz = -1; dz <= 1 && !near_esa_water; ++dz)
-									for (int dx = -1; dx <= 1; ++dx)
-										if ((dx || dz) &&
-												editor.ground->cover_class(
-														editor.ground_point(
-																x + dx, z + dz)) ==
-														land_cover::LC_WATER) {
-											near_esa_water = true;
-											break;
-										}
-							}
-							bool near_placed_water = false;
-							for (const auto &[dx, dz] :
-									std::array<std::pair<int, int>, 4>{
-											{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
-								if (editor.check_for_block_type_absolute(
-											x + dx, ground_y, z + dz, WATER)) {
-									near_placed_water = true;
-									break;
+						// Rust computes the natural under-material even when an authored
+						// surface already occupies the cell; its absent-only setter protects
+						// that surface while the selected under-block still closes the terrain.
+						if (process_surface) {
+							const auto planetary_palette =
+									planetary
+											? celestial_surface_palette(args.body, slope,
+													  args.celestial_latitude_degrees,
+													  ground_y, x, z)
+											: std::pair<Block, Block>{};
+							const std::pair<Block, Block> palette =
+									planetary	  ? planetary_palette
+									: talus_block ? *talus_block
+									: slope > 4	  ? terrain_surface::steep_palette(x, z,
+															ground_y, slope, cover_here)
+									: glacier	  ? std::pair{PACKED_ICE, PACKED_ICE}
+												  : natural_surface_palette(editor, x, z,
+															ground_y, slope, cover_here,
+															has_cover);
+							Block surface = palette.first;
+							std::optional<Block> climate_under = palette.second;
+							// Rust shoreline parity: blend the immediate ring around ESA or
+							// already-rendered OSM water to sand on gentle terrain. This keeps
+							// water boundaries from exposing abrupt grass/clay edges.
+							if (!planetary && surface != WATER && slope <= 3) {
+								bool near_esa_water = false;
+								if (has_cover) {
+									for (int dz = -1; dz <= 1 && !near_esa_water; ++dz)
+										for (int dx = -1; dx <= 1; ++dx)
+											if ((dx || dz) &&
+													editor.ground->cover_class(
+															editor.ground_point(
+																	x + dx, z + dz)) ==
+															land_cover::LC_WATER) {
+												near_esa_water = true;
+												break;
+											}
 								}
-							if (near_esa_water || near_placed_water) {
-								surface = SAND;
+								bool near_placed_water = false;
+								for (const auto &[dx, dz] :
+										std::array<std::pair<int, int>, 4>{
+												{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
+									if (editor.check_for_block_type_absolute(
+												x + dx, ground_y, z + dz, WATER)) {
+										near_placed_water = true;
+										break;
+									}
+								if (near_esa_water || near_placed_water) {
+									surface = SAND;
+									climate_under = SANDSTONE;
+								}
+							}
+							if (surface == SAND && !climate_under)
 								climate_under = SANDSTONE;
+							else if (!climate_under &&
+									 (surface == STONE || surface == ANDESITE ||
+											 surface == COBBLESTONE || surface == TUFF))
+								climate_under = STONE;
+							else if (!climate_under)
+								climate_under = DIRT;
+							column_under = climate_under;
+							// Select snow before the protected/absent-only surface write, so
+							// mapped roads and structures are not overwritten by a later cap.
+							if ((snow == terrain_surface::Snow::Block ||
+										(snow != terrain_surface::Snow::None &&
+												terrain_surface::is_ice(surface))) &&
+									water_blend <= .5 && surface != WATER)
+								surface = SNOW_BLOCK;
+							natural_snow_surface = surface;
+							if (steep_override) {
+								// Match Rust's steep-face blacklist: roads, structures, bedrock,
+								// and water remain authored even when terrain rock is forced.
+								editor.set_block_absolute(surface, x, ground_y, z,
+										std::nullopt,
+										std::optional<std::vector<Block>>(
+												std::vector<Block>{WATER, BEDROCK,
+														GRAY_CONCRETE_POWDER,
+														CYAN_TERRACOTTA, GRAY_CONCRETE,
+														LIGHT_GRAY_CONCRETE,
+														WHITE_CONCRETE, YELLOW_CONCRETE,
+														DIRT_PATH, STONE_BRICKS, BRICK,
+														OAK_PLANKS, BLACK_CONCRETE}));
+							} else if (talus_block && surface == talus_block->first) {
+								editor.set_block_absolute(surface, x, ground_y, z,
+										std::optional<std::vector<Block>>(
+												terrain_surface::talus_buries()),
+										std::nullopt);
+							} else {
+								editor.set_block_if_absent_absolute(
+										surface, x, ground_y, z);
+							}
+							const bool surface_is_water =
+									editor.check_for_block_type_absolute(
+											x, ground_y, z, WATER);
+							auto set_under_if_absent = [&](Block block) {
+								if (!editor.check_for_block_absolute(x, ground_y - 1, z))
+									editor.set_block_absolute(block, x, ground_y - 1, z,
+											std::nullopt, std::nullopt);
+							};
+
+							// Rust leaves authored/placed water untouched: under-materials must
+							// not be written below a water surface and expose through shallow
+							// rivers or lakes.
+							if (!surface_is_water && climate_under) {
+								set_under_if_absent(*climate_under);
+							} else if (surface_is_water) {
+								// Match Rust's OSM-water seabed: stop at the bottom of the
+								// contiguous water column, then cap it with a stable sand /
+								// gravel / clay choice and sandstone underneath. ESA water has
+								// its own depth-aware bed in water_depth::carve_lc_water_pass.
+								int water_bottom = ground_y;
+								while (water_bottom - 1 > world_editor::min_y() &&
+										editor.check_for_block_type_absolute(
+												x, water_bottom - 1, z, WATER))
+									--water_bottom;
+								const int floor_y = water_bottom - 1;
+								if (floor_y > world_editor::min_y()) {
+									const auto hash = land_cover::coord_hash(x, z);
+									const Block floor = hash % 5 == 0	? GRAVEL
+														: hash % 5 == 1 ? CLAY
+																		: SAND;
+									editor.set_block_if_absent_absolute(
+											floor, x, floor_y, z);
+									if (floor_y - 1 > world_editor::min_y())
+										editor.set_block_if_absent_absolute(
+												SANDSTONE, x, floor_y - 1, z);
+								}
 							}
 						}
-						if (surface == SAND && !climate_under)
-							climate_under = SANDSTONE;
-						else if (!climate_under &&
-								 (surface == STONE || surface == ANDESITE ||
-										 surface == COBBLESTONE || surface == TUFF))
-							climate_under = STONE;
-						else if (!climate_under)
-							climate_under = DIRT;
-						column_under = climate_under;
-						// Select snow before the protected/absent-only surface write, so
-						// mapped roads and structures are not overwritten by a later cap.
-						if ((snow == terrain_surface::Snow::Block ||
-									(snow != terrain_surface::Snow::None &&
-											terrain_surface::is_ice(surface))) &&
-								water_blend <= .5 && surface != WATER)
-							surface = SNOW_BLOCK;
-						natural_snow_surface = surface;
-						if (steep_override) {
-							// Match Rust's steep-face blacklist: roads, structures, bedrock,
-							// and water remain authored even when terrain rock is forced.
-							editor.set_block_absolute(surface, x, ground_y, z,
-									std::nullopt,
-									std::optional<std::vector<Block>>(std::vector<Block>{
-											WATER, BEDROCK, GRAY_CONCRETE_POWDER,
-											CYAN_TERRACOTTA, GRAY_CONCRETE,
-											LIGHT_GRAY_CONCRETE, WHITE_CONCRETE,
-											YELLOW_CONCRETE, DIRT_PATH, STONE_BRICKS,
-											BRICK, OAK_PLANKS, BLACK_CONCRETE}));
-						} else if (talus_block && surface == talus_block->first) {
-							editor.set_block_absolute(surface, x, ground_y, z,
-									std::optional<std::vector<Block>>(
-											terrain_surface::talus_buries()),
-									std::nullopt);
-						} else {
-							editor.set_block_if_absent_absolute(surface, x, ground_y, z);
-						}
-						const bool surface_is_water =
-								editor.check_for_block_type_absolute(
-										x, ground_y, z, WATER);
-						auto set_under_if_absent = [&](Block block) {
-							if (!editor.check_for_block_absolute(x, ground_y - 1, z))
-								editor.set_block_absolute(block, x, ground_y - 1, z,
-										std::nullopt, std::nullopt);
-						};
 
-						// Rust leaves authored/placed water untouched: under-materials must
-						// not be written below a water surface and expose through shallow
-						// rivers or lakes.
-						if (!surface_is_water && climate_under) {
-							set_under_if_absent(*climate_under);
-						} else if (surface_is_water) {
-							// Match Rust's OSM-water seabed: stop at the bottom of the
-							// contiguous water column, then cap it with a stable sand /
-							// gravel / clay choice and sandstone underneath. ESA water has
-							// its own depth-aware bed in water_depth::carve_lc_water_pass.
-							int water_bottom = ground_y;
-							while (water_bottom - 1 > world_editor::min_y() &&
-									editor.check_for_block_type_absolute(
-											x, water_bottom - 1, z, WATER))
-								--water_bottom;
-							const int floor_y = water_bottom - 1;
-							if (floor_y > world_editor::min_y()) {
-								const auto hash = land_cover::coord_hash(x, z);
-								const Block floor = hash % 5 == 0	? GRAVEL
-													: hash % 5 == 1 ? CLAY
-																	: SAND;
-								editor.set_block_if_absent_absolute(floor, x, floor_y, z);
-								if (floor_y - 1 > world_editor::min_y())
-									editor.set_block_if_absent_absolute(
-											SANDSTONE, x, floor_y - 1, z);
+						if (!planetary && has_cover)
+							maybe_place_vegetation(editor, x, ground_y, z,
+									building_footprints, xzbbox.min_x(), xzbbox.min_z(),
+									tunnel_footprint, bridge_surface, args.scale, slope,
+									forest_fern_share, tree_spacing, schematic_trees);
+
+						// Snow is a separate cap, so climate/land-cover material selection is
+						// preserved below it just as in the Rust ground pass.
+						// Match Rust's softened climatic snow edge.  A small deterministic
+						// jitter avoids an artificial contour line at exactly the threshold;
+						// MAX_INT disables snow for low/flat worlds.
+						if (!planetary && editor.ground && water_blend <= .5 &&
+								!editor.check_for_block_type_absolute(
+										x, ground_y, z, WATER)) {
+							const auto surface_block =
+									editor.get_block_absolute(x, ground_y, z)
+											.value_or(AIR);
+							if (snow != terrain_surface::Snow::None) {
+								const bool natural_top =
+										natural_snow_surface == surface_block ||
+										surface_block == PACKED_ICE;
+								const unsigned eighths =
+										natural_top
+												? terrain_surface::snow_eighths(snow,
+														  terrain_enabled
+																  ? editor.ground->level_exact(
+																			relative) -
+																			ground_y + .5
+																  : 0.0)
+												: 1;
+								terrain_surface::place_snow_layer(
+										editor, x, ground_y, z, eighths);
 							}
 						}
 					}
-
-					if (!planetary && !in_tunnel && has_cover)
-						maybe_place_vegetation(editor, x, ground_y, z,
-								building_footprints, xzbbox.min_x(), xzbbox.min_z(),
-								bridge_surface, args.scale, slope, forest_fern_share);
 
 					// Rust's universal depth pass closes visible gaps below all terrain
 					// columns, including ones whose surface was supplied by OSM.
-					if (terrain_enabled && !in_tunnel &&
-							!editor.check_for_block_type_absolute(
-									x, ground_y, z, WATER)) {
+					if (terrain_enabled && !editor.check_for_block_type_absolute(
+												   x, ground_y, z, WATER)) {
 						int lowest = ground_y;
 						for (int dx = -1; dx <= 1; ++dx)
 							for (int dz = -1; dz <= 1; ++dz)
@@ -831,8 +900,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								world_editor::terrain_floor_y() + 1, ground_y - depth);
 						const int fill_max = ground_y - 1;
 						const Block under = column_under.value_or(STONE);
-						if (terrain_enabled && !planetary && steep_override &&
-								under == STONE)
+						if (terrain_enabled && !planetary && slope > 4 && under == STONE)
 							terrain_surface::fill_strata(
 									editor, x, z, fill_min, fill_max, slope > 6);
 						else
@@ -840,36 +908,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									under, x, z, fill_min, fill_max, true);
 					}
 
-					// Snow is a separate cap, so climate/land-cover material selection is
-					// preserved below it just as in the Rust ground pass.
-					// Match Rust's softened climatic snow edge.  A small deterministic
-					// jitter avoids an artificial contour line at exactly the threshold;
-					// MAX_INT disables snow for low/flat worlds.
-					if (!planetary && !in_tunnel && editor.ground && water_blend <= .5 &&
-							!editor.check_for_block_type_absolute(
-									x, ground_y, z, WATER)) {
-						const auto surface_block =
-								editor.get_block_absolute(x, ground_y, z).value_or(AIR);
-						if (snow != terrain_surface::Snow::None) {
-							const bool natural_top =
-									natural_snow_surface == surface_block ||
-									surface_block == PACKED_ICE;
-							const unsigned eighths =
-									natural_top
-											? terrain_surface::snow_eighths(snow,
-													  terrain_enabled
-															  ? editor.ground->level_exact(
-																		relative) -
-																		ground_y + .5
-															  : 0.0)
-											: 1;
-							terrain_surface::place_snow_layer(
-									editor, x, ground_y, z, eighths);
-						}
-					}
-
-					if (!planetary && !in_tunnel)
-						clear_road_vegetation(editor, x, ground_y, z);
+					// Rust performs this post-pass for every body and column: an
+					// authored road or water surface can receive vegetation from an
+					// overlapping element regardless of the active terrain provider.
+					clear_road_vegetation(editor, x, ground_y, z);
 
 					if (args.fillground)
 						editor.fill_column_absolute(
@@ -887,6 +929,12 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			}
 		}
 	}
+
+	// Rust places deterministic, chunk-origin plant patches only after every
+	// ground column in this region has its final surface. Keep the caller's
+	// region bounds here so streamed tile generation uses the same patch origins
+	// while clipping writes to the tile currently being generated.
+	ground_decoration::decorate_region(editor, args, xzbbox, min_x, max_x, min_z, max_z);
 }
 
 void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,

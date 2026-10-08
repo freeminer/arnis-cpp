@@ -17,21 +17,30 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cctype>
 #include <curl/curl.h>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
+#include <condition_variable>
+#include <exception>
+#include <functional>
 #include <iostream>
 #include <iterator>
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <nlohmann/json.hpp>
 #include <optional>
+#include <queue>
 #include <regex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <type_traits>
 #include <unordered_map>
 #include <unordered_set>
+#include <utility>
 
 namespace arnis::overture
 {
@@ -43,6 +52,127 @@ elevation::CacheClearStats clear_overture_cache()
 
 namespace
 {
+constexpr std::uint8_t OVERTURE_TILE_ZOOM = 14;
+constexpr std::uint64_t OVERTURE_MAX_TILES = 4096;
+
+// Keep blocking tile fetches on a small, dedicated process-wide pool. Creating
+// and joining a new set of workers for every 64-tile batch needlessly churns
+// threads on large areas, and using the generation pool would let slow HTTP
+// requests starve world-generation work.
+class TileFetchPool
+{
+	struct Group
+	{
+		explicit Group(std::size_t count) : remaining(count) {}
+		std::atomic_size_t remaining;
+		std::mutex mutex;
+		std::condition_variable finished;
+		std::exception_ptr failure;
+	};
+
+	std::vector<std::thread> workers_;
+	std::queue<std::function<void()>> tasks_;
+	std::mutex mutex_;
+	std::condition_variable ready_;
+	bool stopping_{false};
+
+	void enqueue(std::function<void()> task)
+	{
+		{
+			std::lock_guard lock(mutex_);
+			tasks_.push(std::move(task));
+		}
+		ready_.notify_one();
+	}
+
+public:
+	TileFetchPool()
+	{
+		const auto hardware = std::thread::hardware_concurrency();
+		const auto count = std::clamp<std::size_t>(hardware == 0 ? 2 : hardware, 2, 8);
+		workers_.reserve(count);
+		for (std::size_t i = 0; i < count; ++i) {
+			workers_.emplace_back([this] {
+				for (;;) {
+					std::function<void()> task;
+					{
+						std::unique_lock lock(mutex_);
+						ready_.wait(
+								lock, [this] { return stopping_ || !tasks_.empty(); });
+						if (stopping_ && tasks_.empty())
+							return;
+						task = std::move(tasks_.front());
+						tasks_.pop();
+					}
+					task();
+				}
+			});
+		}
+	}
+
+	~TileFetchPool()
+	{
+		{
+			std::lock_guard lock(mutex_);
+			stopping_ = true;
+		}
+		ready_.notify_all();
+		for (auto &worker : workers_)
+			if (worker.joinable())
+				worker.join();
+	}
+
+	template <typename Function>
+	void parallel_for(std::size_t count, Function &&function)
+	{
+		if (count == 0)
+			return;
+		auto group = std::make_shared<Group>(count);
+		auto work = std::make_shared<std::decay_t<Function>>(
+				std::forward<Function>(function));
+		for (std::size_t i = 0; i < count; ++i) {
+			enqueue([group, work, i] {
+				try {
+					(*work)(i);
+				} catch (...) {
+					std::lock_guard lock(group->mutex);
+					if (!group->failure)
+						group->failure = std::current_exception();
+				}
+				if (group->remaining.fetch_sub(1, std::memory_order_acq_rel) == 1)
+					group->finished.notify_one();
+			});
+		}
+		{
+			std::unique_lock lock(group->mutex);
+			group->finished.wait(lock, [&] {
+				return group->remaining.load(std::memory_order_acquire) == 0;
+			});
+			if (group->failure)
+				std::rethrow_exception(group->failure);
+		}
+	}
+};
+
+TileFetchPool &tile_fetch_pool()
+{
+	static TileFetchPool pool;
+	return pool;
+}
+
+bool overture_tiles_cover(const geographic::LLBBox &bbox)
+{
+	const auto [min_x, min_y] = pmtiles::lonlat_to_tile(
+			bbox.min().lng(), bbox.max().lat(), OVERTURE_TILE_ZOOM);
+	const auto [max_x, max_y] = pmtiles::lonlat_to_tile(
+			bbox.max().lng(), bbox.min().lat(), OVERTURE_TILE_ZOOM);
+	if (max_x < min_x || max_y < min_y)
+		return false;
+	const auto width = std::uint64_t(max_x) - min_x + 1;
+	const auto height = std::uint64_t(max_y) - min_y + 1;
+	return width <= OVERTURE_MAX_TILES && height <= OVERTURE_MAX_TILES &&
+		   width * height <= OVERTURE_MAX_TILES;
+}
 
 size_t release_listing_write(void *data, size_t size, size_t count, void *opaque)
 {
@@ -326,56 +456,84 @@ std::optional<double> attribute_number(
 		return static_cast<double>(*value);
 	if (const auto value = std::get_if<std::uint64_t>(&*attribute))
 		return static_cast<double>(*value);
-	if (const auto value = std::get_if<std::string>(&*attribute)) {
-		try {
-			const auto parsed = std::stod(*value);
-			return std::isfinite(parsed) ? std::optional<double>(parsed) : std::nullopt;
-		} catch (...) {
-		}
-	}
 	return {};
 }
 
 bool source_is_osm(const std::optional<std::string> &geometry_source,
 		const std::optional<std::string> &sources)
 {
-	return (geometry_source &&
-				   geometry_source->find("OpenStreetMap") != std::string::npos) ||
+	constexpr std::string_view expected = "openstreetmap";
+	const bool primary_source_is_osm =
+			geometry_source && geometry_source->size() == expected.size() &&
+			std::equal(geometry_source->begin(), geometry_source->end(), expected.begin(),
+					[](unsigned char a, char b) { return std::tolower(a) == b; });
+	return primary_source_is_osm ||
 		   (sources && sources->find("OpenStreetMap") != std::string::npos);
 }
 
 std::optional<OvertureOsmRef> parse_osm_reference(const std::string &sources)
 {
-	std::size_t cursor = 0;
-	while ((cursor = sources.find("\"record_id\"", cursor)) != std::string::npos) {
-		const auto object_begin = sources.rfind('{', cursor);
-		const auto object_end = sources.find('}', cursor);
-		if (object_begin == std::string::npos || object_end == std::string::npos)
-			return {};
-		const auto object = sources.substr(object_begin, object_end - object_begin + 1);
-		if (object.find("OpenStreetMap") == std::string::npos) {
-			cursor = object_end + 1;
-			continue;
-		}
-		const auto colon = sources.find(':', cursor + 11);
-		const auto quote = colon == std::string::npos ? colon : sources.find('"', colon);
-		const auto end_quote =
-				quote == std::string::npos ? quote : sources.find('"', quote + 1);
-		if (end_quote == std::string::npos)
-			return {};
-		const auto value = sources.substr(quote + 1, end_quote - quote - 1);
-		if (value.size() < 2 || (value[0] != 'w' && value[0] != 'W' && value[0] != 'r' &&
-										value[0] != 'R'))
-			return {};
-		const auto at = value.find('@');
+	const auto parse_record_id =
+			[](const std::string &record_id) -> std::optional<OvertureOsmRef> {
+		const auto first = record_id.find_first_not_of(" \t\n\r\f\v");
+		if (first == std::string::npos)
+			return std::nullopt;
+		const auto last = record_id.find_last_not_of(" \t\n\r\f\v");
+		const auto value = record_id.substr(first, last - first + 1);
+		if (value.size() < 2)
+			return std::nullopt;
+		const char kind = static_cast<char>(
+				std::tolower(static_cast<unsigned char>(value.front())));
+		if (kind != 'w' && kind != 'r')
+			return std::nullopt;
+		const auto at = value.find('@', 1);
+		const auto digits = value.substr(1, at == std::string::npos ? at : at - 1);
+		if (digits.empty() || !std::all_of(digits.begin(), digits.end(),
+									  [](unsigned char c) { return std::isdigit(c); }))
+			return std::nullopt;
 		try {
-			const auto id = std::stoull(value.substr(1, at - 1));
-			return OvertureOsmRef{id, value[0] == 'r' || value[0] == 'R'};
+			return OvertureOsmRef{std::stoull(digits), kind == 'r'};
 		} catch (...) {
-			return {};
+			return std::nullopt;
 		}
-	}
-	return {};
+	};
+
+	const auto document = nlohmann::json::parse(sources, nullptr, false);
+	if (document.is_discarded())
+		return std::nullopt;
+	const auto is_osm_dataset = [](const std::string &dataset) {
+		constexpr std::string_view expected = "openstreetmap";
+		return dataset.size() == expected.size() &&
+			   std::equal(dataset.begin(), dataset.end(), expected.begin(),
+					   [](unsigned char a, char b) { return std::tolower(a) == b; });
+	};
+
+	std::function<std::optional<OvertureOsmRef>(const nlohmann::json &)> find_reference;
+	find_reference = [&](const nlohmann::json &value) -> std::optional<OvertureOsmRef> {
+		if (value.is_array()) {
+			for (const auto &entry : value)
+				if (auto reference = find_reference(entry))
+					return reference;
+		} else if (value.is_object()) {
+			const auto dataset = value.find("dataset");
+			const auto record_id = value.find("record_id");
+			if (dataset != value.end() && dataset->is_string() &&
+					is_osm_dataset(dataset->get_ref<const std::string &>()) &&
+					record_id != value.end() && record_id->is_string()) {
+				if (auto reference = parse_record_id(
+							record_id->get_ref<const std::string &>()))
+					return reference;
+			}
+			for (auto it = value.begin(); it != value.end(); ++it) {
+				if (it.key() == "dataset" || it.key() == "record_id")
+					continue;
+				if (auto reference = find_reference(it.value()))
+					return reference;
+			}
+		}
+		return std::nullopt;
+	};
+	return find_reference(document);
 }
 
 double ring_area2(const std::vector<std::pair<double, double>> &ring)
@@ -420,6 +578,34 @@ std::optional<std::string> string_at(
 		if (chunk->IsNull(row))
 			return std::nullopt;
 		auto scalar = chunk->GetScalar(row);
+		if (!scalar.ok())
+			return std::nullopt;
+		if ((*scalar)->type->id() == arrow::Type::STRING)
+			return std::string(
+					std::static_pointer_cast<arrow::StringScalar>(*scalar)->view());
+		if ((*scalar)->type->id() == arrow::Type::LARGE_STRING)
+			return std::string(
+					std::static_pointer_cast<arrow::LargeStringScalar>(*scalar)->view());
+		return std::nullopt;
+	}
+	return std::nullopt;
+}
+
+// Rust formats the nested `sources` field for its dataset fallback check; keep
+// that conversion separate so ordinary string fields retain strict typing.
+std::optional<std::string> display_at(
+		const std::shared_ptr<arrow::ChunkedArray> &column, std::int64_t row)
+{
+	if (!column || row < 0 || row >= column->length())
+		return std::nullopt;
+	for (const auto &chunk : column->chunks()) {
+		if (row >= chunk->length()) {
+			row -= chunk->length();
+			continue;
+		}
+		if (chunk->IsNull(row))
+			return std::nullopt;
+		auto scalar = chunk->GetScalar(row);
 		return scalar.ok() ? std::optional<std::string>((*scalar)->ToString())
 						   : std::nullopt;
 	}
@@ -429,24 +615,48 @@ std::optional<std::string> string_at(
 std::optional<double> number_at(
 		const std::shared_ptr<arrow::ChunkedArray> &column, std::int64_t row)
 {
-	auto text = string_at(column, row);
-	if (!text)
+	if (!column || row < 0 || row >= column->length())
 		return std::nullopt;
-	try {
-		return std::stod(*text);
-	} catch (...) {
+	for (const auto &chunk : column->chunks()) {
+		if (row >= chunk->length()) {
+			row -= chunk->length();
+			continue;
+		}
+		if (chunk->IsNull(row))
+			return std::nullopt;
+		auto scalar = chunk->GetScalar(row);
+		if (!scalar.ok())
+			return std::nullopt;
+		// Rust's Parquet reader accepts only Field::Float / Field::Double for
+		// height-like attributes; strings and integral columns are not coerced.
+		if ((*scalar)->type->id() == arrow::Type::DOUBLE)
+			return std::static_pointer_cast<arrow::DoubleScalar>(*scalar)->value;
+		if ((*scalar)->type->id() == arrow::Type::FLOAT)
+			return static_cast<double>(
+					std::static_pointer_cast<arrow::FloatScalar>(*scalar)->value);
 		return std::nullopt;
 	}
+	return std::nullopt;
 }
 
 std::optional<int> integer_at(
 		const std::shared_ptr<arrow::ChunkedArray> &column, std::int64_t row)
 {
-	auto number = number_at(column, row);
-	if (!number || *number < std::numeric_limits<int>::min() ||
-			*number > std::numeric_limits<int>::max())
+	if (!column || row < 0 || row >= column->length())
 		return std::nullopt;
-	return static_cast<int>(*number);
+	for (const auto &chunk : column->chunks()) {
+		if (row >= chunk->length()) {
+			row -= chunk->length();
+			continue;
+		}
+		if (chunk->IsNull(row))
+			return std::nullopt;
+		auto scalar = chunk->GetScalar(row);
+		if (!scalar.ok() || (*scalar)->type->id() != arrow::Type::INT32)
+			return std::nullopt;
+		return std::static_pointer_cast<arrow::Int32Scalar>(*scalar)->value;
+	}
+	return std::nullopt;
 }
 
 std::optional<std::vector<std::uint8_t>> binary_at(
@@ -540,12 +750,31 @@ std::size_t enrich_osm_buildings_from_overture(
 		if (building.num_floors && *building.num_floors >= 2 &&
 				*building.num_floors < 200)
 			(*tags)["building:levels"] = std::to_string(*building.num_floors);
-		if (building.height && *building.height >= 2.5 && *building.height <= 500.0)
-			(*tags)["height"] = std::to_string(*building.height);
+		if (building.height && *building.height >= 2.5 && *building.height <= 500.0) {
+			std::ostringstream formatted_height;
+			formatted_height << std::fixed << std::setprecision(1) << *building.height;
+			(*tags)["height"] = formatted_height.str();
+		}
 		(*tags)["arnis:height_source"] = "overture_maps";
 		++enriched;
 	}
 	return enriched;
+}
+
+std::size_t OvertureData::apply_hints(std::vector<ProcessedElement> &osm_elements) const
+{
+	return enrich_osm_buildings_from_overture(hints, osm_elements);
+}
+
+std::pair<std::size_t, std::size_t> OvertureData::merge_into(
+		std::vector<ProcessedElement> &osm_elements) const
+{
+	const auto enriched = apply_hints(osm_elements);
+	auto unique = deduplicate_against_osm(elements, osm_elements);
+	const auto added = unique.size();
+	osm_elements.insert(osm_elements.end(), std::make_move_iterator(unique.begin()),
+			std::make_move_iterator(unique.end()));
+	return {enriched, added};
 }
 std::string overture_class_to_osm_building(const std::optional<std::string> &subtype,
 		const std::optional<std::string> &clazz)
@@ -563,7 +792,7 @@ std::vector<OvertureBuilding> decode_overture_building_tile(
 
 std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
 		const std::vector<std::uint8_t> &tile, std::uint32_t tile_x, std::uint32_t tile_y,
-		std::uint8_t zoom, std::size_t maximum)
+		std::uint8_t zoom, std::size_t maximum, bool include_osm_sourced)
 {
 	std::vector<OvertureBuilding> buildings;
 	if (maximum == 0)
@@ -605,6 +834,10 @@ std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
 			const auto sources = attribute_string(layer, feature, "sources");
 			building.is_osm_sourced = source_is_osm(
 					attribute_string(layer, feature, "@geometry_source"), sources);
+			// Rust excludes OSM-sourced duplicate footprints before applying the
+			// building budget, so they cannot crowd out Overture-only geometry.
+			if (building.is_osm_sourced && !include_osm_sourced)
+				continue;
 			if (sources)
 				building.osm_ref = parse_osm_reference(*sources);
 			building.height = attribute_number(layer, feature, "height");
@@ -632,23 +865,24 @@ std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
 	return buildings;
 }
 
-BuildingSource pmtiles_building_source(pmtiles::Header header,
+BuildingTransportSource pmtiles_building_transport_source(pmtiles::Header header,
 		std::vector<std::uint8_t> root_directory, pmtiles::RangeReader read_range,
-		std::uint8_t zoom, bool debug)
+		std::uint8_t zoom, bool debug, bool include_osm_sourced)
 {
 	return [header, root_directory = std::move(root_directory),
-				   read_range = std::move(read_range), zoom,
-				   debug](const geographic::LLBBox &bbox, std::size_t maximum) {
+				   read_range = std::move(read_range), zoom, debug,
+				   include_osm_sourced](const geographic::LLBBox &bbox,
+				   std::size_t maximum) -> std::optional<std::vector<OvertureBuilding>> {
 		std::vector<OvertureBuilding> buildings;
 		std::unordered_map<std::string, std::size_t> by_id;
 		if (maximum == 0 || !read_range || zoom < header.min_zoom ||
 				zoom > header.max_zoom)
-			return buildings;
+			return std::nullopt;
 		const auto [min_x, min_y] =
 				pmtiles::lonlat_to_tile(bbox.min().lng(), bbox.max().lat(), zoom);
 		const auto [max_x, max_y] =
 				pmtiles::lonlat_to_tile(bbox.max().lng(), bbox.min().lat(), zoom);
-		constexpr std::uint64_t max_tiles = 4096;
+		constexpr std::uint64_t max_tiles = OVERTURE_MAX_TILES;
 		const auto width = std::uint64_t(max_x) - min_x + 1;
 		const auto height = std::uint64_t(max_y) - min_y + 1;
 		if (width > max_tiles || height > max_tiles || width * height > max_tiles)
@@ -663,7 +897,7 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 			std::uint32_t x, y;
 			pmtiles::TileLocation location;
 		};
-	std::vector<std::pair<std::uint32_t, std::uint32_t>> tiles;
+		std::vector<std::pair<std::uint32_t, std::uint32_t>> tiles;
 		tiles.reserve(static_cast<std::size_t>(width * height));
 		for (std::uint32_t x = min_x; x <= max_x; ++x)
 			for (std::uint32_t y = min_y; y <= max_y; ++y)
@@ -684,54 +918,51 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 				located.push_back({x, y, result.location});
 			}
 		}
+		// Rust aborts the tile attempt when any directory lookup fails. Missing
+		// tiles are valid empty coverage, but a failed range read is not.
+		if (locate_failures > 0)
+			return std::nullopt;
 		if (debug)
 			std::cerr << "Overture tiles: " << tiles.size() << " cover the bbox, "
 					  << located.size() << " hold data, " << missing_tiles
 					  << " are empty.\n";
-		const unsigned hardware_threads = std::thread::hardware_concurrency();
-		const std::size_t workers = std::clamp<std::size_t>(
-				hardware_threads == 0 ? 2 : hardware_threads, 2, 8);
 		constexpr std::size_t tile_batch_size = 64;
 		std::size_t lost_tiles = locate_failures;
+		std::size_t attempted_tiles = 0;
 		for (std::size_t batch_start = 0; batch_start < located.size();
 				batch_start += tile_batch_size) {
 			const auto batch_count =
 					std::min(tile_batch_size, located.size() - batch_start);
+			attempted_tiles += batch_count;
 			std::vector<TileResult> results(batch_count);
-			std::atomic_size_t next{0};
-			auto read_batch_tile = [&]() {
-				for (;;) {
-					const auto index = next.fetch_add(1, std::memory_order_relaxed);
-					if (index >= batch_count)
-						return;
-					const auto &located_tile = located[batch_start + index];
-					auto &result = results[index];
-					auto tile = pmtiles::read_tile_payload_checked(
-							header, located_tile.location, read_range);
-					result.status = tile.status;
-					if (tile.status == pmtiles::TileReadStatus::Found &&
-							!tile.bytes.empty()) {
-						auto decoded = try_decode_overture_building_tile(
-								tile.bytes, located_tile.x, located_tile.y, zoom, maximum);
-						if (decoded)
-							result.buildings = std::move(*decoded);
-						else
-							result.status = pmtiles::TileReadStatus::Error;
-					}
+			tile_fetch_pool().parallel_for(batch_count, [&](std::size_t index) {
+				const auto &located_tile = located[batch_start + index];
+				auto &result = results[index];
+				auto tile = pmtiles::read_tile_payload_checked(
+						header, located_tile.location, read_range);
+				result.status = tile.status;
+				if (tile.status == pmtiles::TileReadStatus::Found &&
+						!tile.bytes.empty()) {
+					// The Rust reader applies the bbox test before its global building
+					// budget. A per-tile decode cap here would let buffered polygons
+					// outside the requested area hide later in-bounds buildings, so
+					// keep each bounded batch complete and cap only after bbox filtering
+					// and cross-tile deduplication below.
+					auto decoded = try_decode_overture_building_tile(tile.bytes,
+							located_tile.x, located_tile.y, zoom,
+							std::numeric_limits<std::size_t>::max(), include_osm_sourced);
+					if (decoded)
+						result.buildings = std::move(*decoded);
+					else
+						result.status = pmtiles::TileReadStatus::Error;
 				}
-			};
-			std::vector<std::thread> pool;
-			pool.reserve(std::min(workers, batch_count));
-			for (std::size_t i = 0; i < std::min(workers, batch_count); ++i)
-				pool.emplace_back(read_batch_tile);
-			for (auto &worker : pool)
-				worker.join();
+			});
 
 			// Merge in tile order, independent of worker completion order. Keep
 			// the largest buffered footprint for each GERS id; tile-edge copies
 			// are clipped, while the full copy preserves more geometry.
 			for (auto &result : results) {
-				if (result.status == pmtiles::TileReadStatus::Error) {
+				if (result.status != pmtiles::TileReadStatus::Found) {
 					++lost_tiles;
 					continue;
 				}
@@ -753,6 +984,10 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 			if (buildings.size() >= maximum)
 				break;
 		}
+		// Returning empty success here would prevent Auto from trying the
+		// GeoParquet fallback, even though every tile containing data failed.
+		if (attempted_tiles > 0 && lost_tiles == attempted_tiles)
+			return std::nullopt;
 		if (debug && lost_tiles > 0)
 			std::cerr << "Warning: Overture tile data incomplete: " << lost_tiles
 					  << " tile read(s) failed.\n";
@@ -766,8 +1001,21 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 	};
 }
 
-BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_t zoom,
-		std::filesystem::path cache_directory, bool debug)
+BuildingSource pmtiles_building_source(pmtiles::Header header,
+		std::vector<std::uint8_t> root_directory, pmtiles::RangeReader read_range,
+		std::uint8_t zoom, bool debug, bool include_osm_sourced)
+{
+	auto transport = pmtiles_building_transport_source(header, std::move(root_directory),
+			std::move(read_range), zoom, debug, include_osm_sourced);
+	return [transport = std::move(transport)](
+				   const geographic::LLBBox &bbox, std::size_t maximum) {
+		return transport(bbox, maximum).value_or(std::vector<OvertureBuilding>{});
+	};
+}
+
+BuildingTransportSource http_pmtiles_building_transport_source(std::string archive_url,
+		std::uint8_t zoom, std::filesystem::path cache_directory, bool debug,
+		bool include_osm_sourced)
 {
 	struct State
 	{
@@ -776,8 +1024,9 @@ BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_
 	};
 	auto state = std::make_shared<State>();
 	return [url = std::move(archive_url), state, zoom,
-				   cache_directory = std::move(cache_directory),
-				   debug](const geographic::LLBBox &bbox, std::size_t maximum) {
+				   cache_directory = std::move(cache_directory), debug,
+				   include_osm_sourced](const geographic::LLBBox &bbox,
+				   std::size_t maximum) -> std::optional<std::vector<OvertureBuilding>> {
 		const pmtiles::RangeReader range = [&url, &cache_directory](std::uint64_t offset,
 												   std::uint64_t length)
 				-> std::optional<std::vector<std::uint8_t>> {
@@ -814,13 +1063,25 @@ BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_
 			if (!state->archive)
 				state->archive = pmtiles::open_archive(range);
 			if (!state->archive)
-				return std::vector<OvertureBuilding>{};
+				return std::nullopt;
 			archive = *state->archive;
 		}
 		if (archive.root_directory.empty())
-			return std::vector<OvertureBuilding>{};
-		return pmtiles_building_source(archive.header, std::move(archive.root_directory),
-				range, zoom, debug)(bbox, maximum);
+			return std::nullopt;
+		return pmtiles_building_transport_source(archive.header,
+				std::move(archive.root_directory), range, zoom, debug,
+				include_osm_sourced)(bbox, maximum);
+	};
+}
+
+BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_t zoom,
+		std::filesystem::path cache_directory, bool debug, bool include_osm_sourced)
+{
+	auto transport = http_pmtiles_building_transport_source(std::move(archive_url), zoom,
+			std::move(cache_directory), debug, include_osm_sourced);
+	return [transport = std::move(transport)](
+				   const geographic::LLBBox &bbox, std::size_t maximum) {
+		return transport(bbox, maximum).value_or(std::vector<OvertureBuilding>{});
 	};
 }
 
@@ -888,7 +1149,7 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 		}
 		if (!overlaps)
 			continue;
-		auto source_text = string_at(sources, row);
+		auto source_text = display_at(sources, row);
 		buildings.push_back({*value_id, std::move(*ring),
 				source_text && source_text->find("OpenStreetMap") != std::string::npos,
 				source_text ? parse_osm_reference(*source_text) : std::nullopt,
@@ -1020,29 +1281,154 @@ std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource
 		const geographic::LLBBox &bbox, double scale, bool include_osm_sourced,
 		std::size_t maximum)
 {
+	return fetch_overture_data_from(source, bbox, scale, include_osm_sourced, maximum)
+			.elements;
+}
+
+OvertureData fetch_overture_data_from(const BuildingSource &source,
+		const geographic::LLBBox &bbox, double scale, bool include_osm_sourced,
+		std::size_t maximum)
+{
+	OvertureData out;
 	if (!source || scale <= 0)
-		return {};
+		return out;
 	if (maximum == 0)
 		maximum = overture_building_budget(bbox);
-	// Ask the external decoder for no more rows than the conversion cap.  Keep
-	// a final cap in convert_overture_buildings in case a source ignores it.
+	maximum = std::min(maximum, MAX_OVERTURE_BUILDINGS);
+	// Hints have an independent Rust-equivalent cap. Fetch enough raw rows for
+	// both budgets, then apply the footprint budget only after OSM duplicates
+	// have been split into the hint stream.
+	const auto raw_limit = std::min(MAX_OVERTURE_BUILDINGS + MAX_OVERTURE_OSM_HINTS,
+			maximum + MAX_OVERTURE_OSM_HINTS);
 	try {
-		auto buildings = source(bbox, std::min(maximum, MAX_OVERTURE_BUILDINGS));
-		return convert_overture_buildings(buildings, bbox, scale, include_osm_sourced,
-				std::min(maximum, MAX_OVERTURE_BUILDINGS));
+		auto buildings = source(bbox, raw_limit);
+		std::unordered_map<std::uint64_t, std::size_t> hint_indices;
+		for (const auto &building : buildings) {
+			if (building.id == "f8c0757e-c059-49e4-9757-7e278751926f")
+				continue;
+			if (building.is_osm_sourced) {
+				const bool usable_height = building.height && *building.height >= 2.5 &&
+										   *building.height <= 500.0;
+				const bool usable_floors = building.num_floors &&
+										   *building.num_floors >= 2 &&
+										   *building.num_floors < 200;
+				if (building.osm_ref && (usable_height || usable_floors)) {
+					const auto key =
+							building.osm_ref->id ^
+							(building.osm_ref->relation ? (std::uint64_t{1} << 63) : 0);
+					const auto found = hint_indices.find(key);
+					if (found != hint_indices.end()) {
+						auto &prior = out.hints[found->second];
+						if (!prior.height && usable_height)
+							prior.height = building.height;
+						if (!prior.num_floors && usable_floors)
+							prior.num_floors = building.num_floors;
+					} else if (out.hints.size() < MAX_OVERTURE_OSM_HINTS) {
+						hint_indices.emplace(key, out.hints.size());
+						OvertureBuilding hint;
+						hint.is_osm_sourced = true;
+						hint.osm_ref = building.osm_ref;
+						if (usable_height)
+							hint.height = building.height;
+						if (usable_floors)
+							hint.num_floors = building.num_floors;
+						out.hints.push_back(std::move(hint));
+					}
+				}
+				if (!include_osm_sourced)
+					continue;
+			}
+			if (out.elements.size() >= maximum)
+				continue;
+			if (auto way = overture_building_to_way(building, bbox, scale))
+				out.elements.push_back(ProcessedElement::FromWay(*way));
+		}
 	} catch (...) {
 		// Rust treats STAC/Parquet failures as optional-data failures and
 		// continues with OSM.  Keep that property for host callbacks as well.
 		return {};
 	}
+	return out;
+}
+
+OvertureData fetch_overture_data_from_transports(
+		const BuildingTransportSource &tile_source,
+		const BuildingTransportSource &parquet_source, const geographic::LLBBox &bbox,
+		double scale, OvertureSource source, bool include_osm_sourced,
+		std::size_t maximum)
+{
+	const auto collect =
+			[&](const BuildingTransportSource &transport) -> std::optional<OvertureData> {
+		if (!transport)
+			return std::nullopt;
+		bool failed = false;
+		const BuildingSource adapter = [&](const geographic::LLBBox &area,
+											   std::size_t limit) {
+			try {
+				if (auto rows = transport(area, limit))
+					return std::move(*rows);
+			} catch (...) {
+				failed = true;
+				throw;
+			}
+			failed = true;
+			return std::vector<OvertureBuilding>{};
+		};
+		auto result = fetch_overture_data_from(
+				adapter, bbox, scale, include_osm_sourced, maximum);
+		if (failed)
+			return std::nullopt;
+		return result;
+	};
+
+	if (source == OvertureSource::Parquet)
+		return collect(parquet_source).value_or(OvertureData{});
+	const bool tile_area = overture_tiles_cover(bbox);
+	if (source == OvertureSource::Tiles)
+		return tile_area ? collect(tile_source).value_or(OvertureData{}) : OvertureData{};
+	if (tile_area)
+		if (auto tiled = collect(tile_source))
+			return std::move(*tiled);
+	return collect(parquet_source).value_or(OvertureData{});
 }
 
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
 		double max_lat, double max_lng, double scale, bool debug)
 {
+	return fetch_overture_data(
+			min_lat, min_lng, max_lat, max_lng, scale, debug, OvertureSource::Auto)
+			.elements;
+}
+
+OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
+		double max_lng, double scale, bool debug, OvertureSource source)
+{
 	const geographic::LLBBox bbox(min_lat, min_lng, max_lat, max_lng);
 	if (scale <= 0.0 || min_lat > max_lat || min_lng > max_lng)
 		return {};
+	const bool tiles_cover = overture_tiles_cover(bbox);
+	if (source == OvertureSource::Tiles && !tiles_cover) {
+		if (debug)
+			std::cerr << "Overture Maps: tile source is limited to " << OVERTURE_MAX_TILES
+					  << " z14 tiles; use auto or parquet for this area.\n";
+		return {};
+	}
+	if (source == OvertureSource::Parquet ||
+			(source == OvertureSource::Auto && !tiles_cover)) {
+#if defined(USE_ARROW) && USE_ARROW
+		if (debug && source == OvertureSource::Auto)
+			std::cerr << "Overture Maps: area exceeds the vector-tile threshold; "
+					  << "using GeoParquet.\n";
+		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
+												"overture-buildings.parquet")),
+				bbox, scale);
+#else
+		if (debug)
+			std::cerr
+					<< "Overture Maps: GeoParquet requested but Arrow support is disabled.\n";
+		return {};
+#endif
+	}
 	// Kept as a conservative fallback just as in Rust. An application with a
 	// newer release can use http_pmtiles_building_source() directly; this API
 	// remains useful for existing callers that only supplied a bounding box.
@@ -1087,24 +1473,54 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 						candidates.end())
 			candidates.push_back(release);
 	}
+	const auto maximum = std::min(overture_building_budget(bbox), MAX_OVERTURE_BUILDINGS);
+	const auto raw_limit = std::min(MAX_OVERTURE_BUILDINGS + MAX_OVERTURE_OSM_HINTS,
+			maximum + MAX_OVERTURE_OSM_HINTS);
+	std::vector<std::string> tile_errors;
 	for (const auto &release : candidates) {
 		const std::string archive =
 				"https://overturemaps-extras-us-west-2.s3.us-west-2.amazonaws.com/tiles/" +
 				release + "/buildings.pmtiles";
 		if (debug)
-			std::cerr << "Overture Maps: trying release " << release << " for "
-					  << overture_building_budget(bbox) << " buildings.\n";
-		auto result = fetch_overture_buildings_from(
-				http_pmtiles_building_source(archive, 14,
-						cache::cache_root() / release / "tiles" / "buildings", debug),
-				bbox, scale);
-		if (!result.empty()) {
-			if (!release_env) {
-				cache::set_last_good_release(cache::cache_root(), release);
-				cache::prune_releases_older_than(cache::cache_root(), release);
-			}
-			return result;
+			std::cerr << "Overture Maps: trying release " << release << " for " << maximum
+					  << " buildings.\n";
+		auto transport = http_pmtiles_building_transport_source(archive,
+				OVERTURE_TILE_ZOOM, cache::cache_root() / release / "tiles" / "buildings",
+				debug, true);
+		auto rows = transport(bbox, raw_limit);
+		if (!rows) {
+			tile_errors.push_back(release + ": tile archive read failed");
+			if (debug)
+				std::cerr << "Overture tiles unavailable for release " << release
+						  << "; trying the next source.\n";
+			continue;
 		}
+		// A successfully read empty collection is still a valid release. Only
+		// transport errors advance to another release or GeoParquet fallback.
+		const BuildingSource rows_source =
+				[rows = std::move(*rows)](const geographic::LLBBox &,
+						std::size_t) mutable { return std::move(rows); };
+		auto result = fetch_overture_data_from(rows_source, bbox, scale, false, maximum);
+		if (!release_env) {
+			cache::set_last_good_release(cache::cache_root(), release);
+			cache::prune_releases_older_than(cache::cache_root(), release);
+		}
+		return result;
+	}
+	if (source == OvertureSource::Auto) {
+#if defined(USE_ARROW) && USE_ARROW
+		if (debug)
+			std::cerr << "Overture Maps: vector tiles unavailable ("
+					  << (tile_errors.empty() ? "no usable release" : tile_errors.front())
+					  << "); falling back to the GeoParquet source.\n";
+		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
+												"overture-buildings.parquet")),
+				bbox, scale);
+#else
+		if (debug)
+			std::cerr << "Overture Maps: vector tiles unavailable and Arrow/Parquet "
+					  << "fallback is disabled.\n";
+#endif
 	}
 	return {};
 }
@@ -1112,25 +1528,8 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
 		double max_lat, double max_lng, double scale, bool debug, OvertureSource source)
 {
-	const geographic::LLBBox bbox(min_lat, min_lng, max_lat, max_lng);
-	if (source == OvertureSource::Parquet) {
-#if defined(USE_ARROW) && USE_ARROW
-		// The embedding application supplies the cached partition path; the
-		// default path keeps this overload deterministic for library callers.
-		return fetch_overture_buildings_from(
-				parquet_building_source(
-						std::filesystem::path("overture-buildings.parquet")),
-				bbox, scale);
-#else
-		if (debug)
-			std::cerr
-					<< "Overture Maps: GeoParquet requested but Arrow support is disabled.\n";
-		return {};
-#endif
-	}
-	// Tiles and Auto both use the range-backed PMTiles provider here. Auto's
-	// higher-level caller can retry with Parquet when it has a partition path.
-	return fetch_overture_buildings(min_lat, min_lng, max_lat, max_lng, scale, debug);
+	return fetch_overture_data(min_lat, min_lng, max_lat, max_lng, scale, debug, source)
+			.elements;
 }
 
 std::vector<ProcessedElement> deduplicate_against_osm(

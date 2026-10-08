@@ -12,4 +12,7 @@ struct BiomeAmounts
 	static BiomeAmounts parse(std::string_view spec, std::string *error = nullptr);
 	static double effective_threshold(double base, double amount);
 };
+// Rust caves::biome_amounts fallback used by generation when validation was
+// bypassed by an embedding caller.
+BiomeAmounts biome_amounts_for_generation(std::string_view spec);
 }

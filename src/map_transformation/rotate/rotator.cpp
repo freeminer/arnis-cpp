@@ -110,7 +110,7 @@ void rotate_world_with_ground(double angle_degrees,
 	const bool had_elevation = ground.elevation_enabled;
 	const bool had_land_cover = ground.has_land_cover();
 	const bool had_canopy = ground.has_canopy();
-	const auto original_ecoregions = ground.ecoregion_map;
+	const auto *original_ecoregions = ground.ecoregion_map();
 	const double rad = -angle_degrees * M_PI / 180.0;
 	const double cx = (bbox.min_x() + bbox.max_x()) / 2.0;
 	const double cz = (bbox.min_z() + bbox.max_z()) / 2.0;
@@ -146,8 +146,13 @@ void rotate_world_with_ground(double angle_degrees,
 	// columns are expressed in the enlarged output bbox, while Ground accessors
 	// continue to receive coordinates relative to the original bbox.
 	std::vector<std::vector<double>> heights;
-	if (had_elevation)
+	std::vector<std::vector<std::uint8_t>> has_data;
+	if (had_elevation) {
 		heights.assign(grid_height, std::vector<double>(grid_width));
+		has_data.assign(grid_height, std::vector<std::uint8_t>(grid_width, 0));
+	}
+	const int original_width = original_bbox.max_x() - original_bbox.min_x() + 1;
+	const int original_height = original_bbox.max_z() - original_bbox.min_z() + 1;
 	std::vector<std::vector<std::uint8_t>> cover, water;
 	if (had_land_cover) {
 		cover.assign(grid_height, std::vector<std::uint8_t>(grid_width));
@@ -171,8 +176,12 @@ void rotate_world_with_ground(double angle_degrees,
 			const XZPoint source{
 					static_cast<int>(std::llround(ox)) - original_bbox.min_x(),
 					static_cast<int>(std::llround(oz)) - original_bbox.min_z()};
-			if (had_elevation)
+			if (had_elevation) {
 				heights[zi][xi] = ground.level(source);
+				has_data[zi][xi] = source.x >= 0 && source.z >= 0 &&
+								   (source.x < original_width) &&
+								   (source.z < original_height);
+			}
 			if (had_land_cover) {
 				cover[zi][xi] = ground.cover_class(source);
 				water[zi][xi] = ground.water_distance(source);
@@ -190,6 +199,8 @@ void rotate_world_with_ground(double angle_degrees,
 			auto previous = heights;
 			for (std::size_t z = 1; z + 1 < grid_height; ++z)
 				for (std::size_t x = 1; x + 1 < grid_width; ++x) {
+					if (!has_data[z][x])
+						continue;
 					if (had_land_cover &&
 							(cover[z][x] == land_cover::LC_WATER ||
 									cover[z - 1][x] == land_cover::LC_WATER ||

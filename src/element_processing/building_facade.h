@@ -22,8 +22,10 @@ using PointSet = std::unordered_set<std::pair<int, int>, PointHash>;
 
 struct ColumnFacade
 {
+	int wall_u{0};
 	bool party{false};
 	bool street{true};
+	bool corner{false};
 };
 
 struct BuildingContext
@@ -72,6 +74,8 @@ struct FacadeAnchor
 class FacadePlan
 {
 	PointSet party_columns_;
+	std::unordered_map<std::pair<int, int>, PointSet, PointHash>
+			directional_party_columns_;
 	PointSet street_columns_;
 
 public:
@@ -83,10 +87,11 @@ public:
 
 	static FacadePlan empty();
 	bool is_party(int x, int z) const;
+	bool is_party(int x, int z, int normal_x, int normal_z) const;
 	bool is_street(int x, int z) const;
 	bool is_door(int x, int z) const;
 	void mark_door_column(int x, int z);
-	void add_party_column(int x, int z);
+	void add_party_column(int x, int z, int normal_x, int normal_z);
 	void add_street_column(int x, int z);
 };
 

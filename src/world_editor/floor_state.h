@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstdint>
+#include <limits>
 #include <stdexcept>
 #include <utility>
 
@@ -31,7 +32,11 @@ inline thread_local FloorState FLOOR_STATE;
 
 inline void set_world_bounds(int minimum, int maximum)
 {
-	if (minimum % 16 != 0 || maximum % 16 != 15 || minimum >= maximum)
+	const auto rem_euclid_16 = [](int value) {
+		const int remainder = value % 16;
+		return remainder < 0 ? remainder + 16 : remainder;
+	};
+	if (rem_euclid_16(minimum) != 0 || rem_euclid_16(maximum) != 15 || minimum >= maximum)
 		throw std::invalid_argument("world bounds must cover complete 16-block sections");
 	FLOOR_STATE.world_min_y = minimum;
 	FLOOR_STATE.world_max_y = maximum;
@@ -60,8 +65,14 @@ inline std::int8_t min_section_y()
 
 inline void set_terrain_floor_y(int ground_level)
 {
-	const int floor = std::max(min_y(), ground_level - TERRAIN_FLOOR_DEPTH);
-	const int aligned = floor >= 0 ? floor / 16 * 16 : -((-floor + 15) / 16) * 16;
+	const int floor_candidate =
+			ground_level < std::numeric_limits<int>::min() + TERRAIN_FLOOR_DEPTH
+					? std::numeric_limits<int>::min()
+					: ground_level - TERRAIN_FLOOR_DEPTH;
+	const int floor = std::max(min_y(), floor_candidate);
+	int aligned = floor / 16 * 16;
+	if (floor % 16 < 0)
+		aligned -= 16;
 	FLOOR_STATE.terrain_floor_y = std::max(min_y(), aligned);
 }
 

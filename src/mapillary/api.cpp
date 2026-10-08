@@ -1,5 +1,7 @@
 #include "api.h"
 #include "sfm.h"
+#include "../net.h"
+#include "httpfetch.h"
 
 #include <algorithm>
 #include <cctype>
@@ -7,6 +9,26 @@
 #include <nlohmann/json.hpp>
 namespace arnis::mapillary
 {
+Client::Client(cache::Layout cache) : cache_(std::move(cache))
+{
+	graph_fetch_ = [](const std::string &url,
+						   std::size_t max_bytes) -> std::optional<HttpReply> {
+		auto permit = arnis::net::request_permit();
+		HTTPFetchRequest request;
+		request.url = url;
+		request.timeout = 30000L;
+		request.connect_timeout = 10000L;
+		request.useragent = "Arnis/Cpp (+https://github.com/louis-e/arnis)";
+		request.quiet = true;
+		HTTPFetchResult response;
+		httpfetch_sync(request, response);
+		if (!response.succeeded || response.data.size() > max_bytes)
+			return std::nullopt;
+		return HttpReply{static_cast<int>(response.response_code),
+				std::vector<std::uint8_t>(response.data.begin(), response.data.end())};
+	};
+}
+
 std::optional<std::vector<SearchCell>> search_cells(
 		const SearchCell &bounds, std::size_t maximum)
 {
@@ -39,13 +61,17 @@ std::optional<std::vector<SearchCell>> search_cells(
 }
 
 std::vector<cache::ImageRecord> parse_search_response(
-		const std::vector<std::uint8_t> &bytes)
+		const std::vector<std::uint8_t> &bytes, bool *valid)
 {
+	if (valid)
+		*valid = false;
 	std::vector<cache::ImageRecord> result;
 	try {
 		auto response = nlohmann::json::parse(bytes.begin(), bytes.end());
 		if (!response.contains("data") || !response["data"].is_array())
 			return result;
+		if (valid)
+			*valid = true;
 		for (const auto &entry : response["data"]) {
 			auto encoded = entry.dump();
 			std::vector<std::uint8_t> one(encoded.begin(), encoded.end());
@@ -315,12 +341,23 @@ std::optional<nlohmann::json> Client::cluster_document(
 	}
 }
 std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
-		const std::string &endpoint, const std::string &token, std::size_t maximum) const
+		const std::string &endpoint, const std::string &token, std::size_t maximum,
+		std::size_t *failed_cells) const
 {
 	std::vector<cache::ImageRecord> result;
+	if (failed_cells)
+		*failed_cells = 0;
 	auto cells = search_cells(bounds, maximum);
-	if ((!fetch_ && !graph_fetch_) || !cells)
+	if (!cells) {
+		if (failed_cells)
+			*failed_cells = maximum + 1;
 		return result;
+	}
+	if (!fetch_ && !graph_fetch_) {
+		if (failed_cells)
+			*failed_cells = cells->size();
+		return result;
+	}
 	auto query_cell = [&](auto &&self, const SearchCell &cell, unsigned depth) -> void {
 		std::string bbox = std::to_string(cell.min_longitude) + "," +
 						   std::to_string(cell.min_latitude) + "," +
@@ -335,8 +372,11 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 		std::vector<std::uint8_t> body;
 		if (graph_fetch_) {
 			auto reply = graph_fetch_(url, max_search_bytes);
-			if (!reply)
+			if (!reply) {
+				if (failed_cells)
+					++*failed_cells;
 				return;
+			}
 			bool auth_failure = reply->status == 401;
 			if (reply->status == 500) {
 				std::string response_text(reply->body.begin(), reply->body.end());
@@ -360,16 +400,25 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 					self(self, quadrant, depth + 1);
 				return;
 			}
-			if (reply->status < 200 || reply->status >= 300)
+			if (reply->status < 200 || reply->status >= 300) {
+				if (failed_cells)
+					++*failed_cells;
 				return;
+			}
 			body = std::move(reply->body);
 		} else {
 			auto reply = fetch_(url, max_search_bytes);
-			if (!reply)
+			if (!reply) {
+				if (failed_cells)
+					++*failed_cells;
 				return;
+			}
 			body = std::move(*reply);
 		}
-		auto records = parse_search_response(body);
+		bool valid_response = false;
+		auto records = parse_search_response(body, &valid_response);
+		if (!valid_response && failed_cells)
+			++*failed_cells;
 		for (const auto &record : records)
 			cache_.save_metadata(record);
 		result.insert(result.end(), std::make_move_iterator(records.begin()),

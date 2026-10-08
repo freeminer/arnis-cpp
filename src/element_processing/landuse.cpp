@@ -81,9 +81,11 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 
 	Block block_type = GRASS_BLOCK;
 	if (landuse_tag == "greenfield" || landuse_tag == "meadow" ||
-			landuse_tag == "grass" || landuse_tag == "flowerbed" ||
-			landuse_tag == "orchard" || landuse_tag == "forest") {
+			landuse_tag == "grass" || landuse_tag == "orchard" ||
+			landuse_tag == "forest") {
 		block_type = GRASS_BLOCK;
+	} else if (landuse_tag == "flowerbed") {
+		block_type = DIRT;
 	} else if (landuse_tag == "farmland") {
 		block_type = FARMLAND;
 	} else if (landuse_tag == "cemetery") {

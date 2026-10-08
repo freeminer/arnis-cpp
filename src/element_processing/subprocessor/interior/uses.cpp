@@ -470,8 +470,12 @@ InteriorPlan plan_interior(const PlanInputs &input)
 	};
 	std::stable_sort(
 			tenants.begin(), tenants.end(), [](const Tenant *a, const Tenant *b) {
-				return a->use.prefers_upper_floor() && !a->level &&
-					   !(b->use.prefers_upper_floor() && !b->level);
+				// Match Rust's ascending sort_by_key: tenants that do not prefer
+				// an upper floor are assigned first, so upper-floor uses can see
+				// whether a street tenant already occupies the ground floor.
+				const bool a_prefers_upper = a->use.prefers_upper_floor() && !a->level;
+				const bool b_prefers_upper = b->use.prefers_upper_floor() && !b->level;
+				return !a_prefers_upper && b_prefers_upper;
 			});
 	for (const Tenant *tenant : tenants) {
 		auto floor = floor_of(tenant->level);

@@ -57,6 +57,14 @@ struct PairHash
 
 using RailBridgeInternalEndpoints = vector<pair<int, int>>;
 
+const std::unordered_set<std::string> &rail_track_types()
+{
+	static const std::unordered_set<std::string> types{"rail", "light_rail", "subway",
+			"tram", "narrow_gauge", "monorail", "funicular", "miniature", "preserved",
+			"disused"};
+	return types;
+}
+
 bool contains_endpoint(
 		const RailBridgeInternalEndpoints &endpoints, const pair<int, int> &xz)
 {
@@ -240,21 +248,44 @@ bool is_rail_bridge(const ProcessedWay &way)
 	return it != way.tags.end() && it->second != "no";
 }
 
+bool wants_rail_tunnel(const ProcessedWay &way)
+{
+	const auto tunnel = way.tags.get("tunnel");
+	if (tunnel == "yes")
+		return true;
+	const bool is_subway =
+			way.tags.get("railway") == "subway" || way.tags.get("subway") == "yes";
+	return is_subway && tunnel != "no" && !is_rail_bridge(way);
+}
+
+bool renders_as_rail_tunnel(const ProcessedWay &way)
+{
+	const auto railway = way.tags.get("railway");
+	return way.nodes.size() >= 2 && rail_track_types().contains(railway) &&
+		   way.tags.get("area") != "yes" && wants_rail_tunnel(way);
+}
+
+bool is_at_grade_track(const ProcessedWay &way)
+{
+	const auto railway = way.tags.get("railway");
+	return way.nodes.size() >= 2 && rail_track_types().contains(railway) &&
+		   way.tags.get("area") != "yes" && !is_rail_bridge(way) &&
+		   !wants_rail_tunnel(way);
+}
+
 bool renders_as_rail_bridge(const ProcessedWay &way)
 {
 	auto it = way.tags.find("railway");
 	if (it == way.tags.end() || way.nodes.size() < 2 || !is_rail_bridge(way))
 		return false;
 	const string &railway_type = it->second;
-	if (railway_type == "subway" || way.tags.get("subway") == "yes")
-		return false;
 	const vector<string> skip_types = {
 			"proposed", "abandoned", "construction", "razed", "turntable"};
 	for (const auto &skip : skip_types) {
 		if (railway_type == skip)
 			return false;
 	}
-	return way.tags.get("tunnel") != "yes";
+	return !wants_rail_tunnel(way);
 }
 
 RailBridgeInternalEndpoints collect_rail_bridge_internal_endpoints(
@@ -484,14 +515,7 @@ void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 	for (const auto &element : elements)
 		if (element.is_way()) {
 			const auto &way = element.as_way();
-			const auto railway = way.tags.get("railway");
-			static const std::unordered_set<std::string> tracks{"rail", "light_rail",
-					"subway", "tram", "narrow_gauge", "monorail", "funicular",
-					"miniature", "preserved", "disused"};
-			if (way.nodes.size() >= 2 && tracks.contains(railway) &&
-					way.tags.get("area") != "yes" &&
-					(railway == "subway" || way.tags.get("subway") == "yes" ||
-							way.tags.get("tunnel") == "yes")) {
+			if (renders_as_rail_tunnel(way)) {
 				has_tunnel = true;
 				break;
 			}
@@ -500,19 +524,11 @@ void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		return;
 	if (footprint.is_empty())
 		footprint = CoordinateBitmap(xzbbox);
-	static const std::unordered_set<std::string> tracks{"rail", "light_rail", "subway",
-			"tram", "narrow_gauge", "monorail", "funicular", "miniature", "preserved",
-			"disused"};
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		auto it = way.tags.find("railway");
-		if (it == way.tags.end() || !tracks.contains(it->second) ||
-				way.nodes.size() < 2 || way.tags.get("area") == "yes")
-			continue;
-		if (!(it->second == "subway" || way.tags.get("subway") == "yes" ||
-					way.tags.get("tunnel") == "yes"))
+		if (!renders_as_rail_tunnel(way))
 			continue;
 		for (const auto &[x, z] : build_connected_centerline(way))
 			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
@@ -880,23 +896,33 @@ void carve_subway_interior(
 					editor.get_ground_level(x, z) - SUBWAY_DEPTH - INTERIOR_HEIGHT - 1,
 					z);
 	}
+	std::unordered_set<std::uint64_t> carved_points;
+	carved_points.reserve(floors.size());
 	for (std::size_t idx = 0; idx < floors.size(); ++idx) {
 		const auto &p = floors[idx];
 		const pos_t bx = p.X, bz = p.Z, floor_y = p.Y;
 		const pos_t ceil_y = floor_y + INTERIOR_HEIGHT + 1;
+		const auto key =
+				(std::uint64_t(static_cast<std::uint32_t>(bx)) << 32) | std::uint32_t(bz);
+		const bool first = carved_points.insert(key).second;
+		const bool lantern = idx % LIGHT_INTERVAL == 0;
+		if (!first && !lantern)
+			continue;
 		if (floor_y <= world_editor::min_y())
 			continue;
-		for (int dx = -AIR_RADIUS; dx <= AIR_RADIUS; ++dx) {
-			for (int dz = -AIR_RADIUS; dz <= AIR_RADIUS; ++dz) {
-				for (int y = floor_y + 1; y < ceil_y; ++y) {
-					if (dx == 0 && dz == 0 && y == floor_y + 1)
-						continue;
-					editor.set_block_absolute(AIR, bx + dx, y, bz + dz, carve_whitelist,
-							std::optional<std::vector<Block>>());
+		if (first) {
+			for (int dx = -AIR_RADIUS; dx <= AIR_RADIUS; ++dx) {
+				for (int dz = -AIR_RADIUS; dz <= AIR_RADIUS; ++dz) {
+					for (int y = floor_y + 1; y < ceil_y; ++y) {
+						if (dx == 0 && dz == 0 && y == floor_y + 1)
+							continue;
+						editor.set_block_absolute(AIR, bx + dx, y, bz + dz,
+								carve_whitelist, std::optional<std::vector<Block>>());
+					}
 				}
 			}
 		}
-		if (idx % LIGHT_INTERVAL == 0)
+		if (lantern)
 			editor.set_block_absolute(SEA_LANTERN, bx, ceil_y - 1, bz, nullopt, nullopt);
 	}
 }
@@ -915,19 +941,11 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		return;
 
 	const string &railway_type = it->second;
-	static const std::unordered_set<std::string> track_types{"rail", "light_rail",
-			"subway", "tram", "narrow_gauge", "monorail", "funicular", "miniature",
-			"preserved", "disused"};
-	if (ADVTRAINS_AVAILABLE && track_types.contains(railway_type) &&
+	if (ADVTRAINS_AVAILABLE && rail_track_types().contains(railway_type) &&
 			element.tags.get("area") != "yes")
 		advtrains::mark_generated(element);
-	const bool tunnel_requested = railway_type == "subway" ||
-								  element.tags.get("subway") == "yes" ||
-								  element.tags.get("tunnel") == "yes";
-	if (tunnel_requested) {
-		// Area/platform/station geometries must never become track tunnels.
-		if (element.nodes.size() >= 2 && track_types.contains(railway_type) &&
-				element.tags.get("area") != "yes")
+	if (wants_rail_tunnel(element)) {
+		if (renders_as_rail_tunnel(element))
 			generate_subway_shell(editor, element, subway_points);
 		return;
 	}

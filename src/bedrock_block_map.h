@@ -35,8 +35,8 @@ struct BedrockBlockHash
 	}
 };
 BedrockBlock to_bedrock_block(const Block &block);
-// Property-aware conversion used by schematic/world writers.  In particular,
-// Java snow layers carry their depth in `layers`, while the Bedrock state is
-// zero-based and capped at seven.
+// Property-aware Java-to-Bedrock conversion used by schematic/world writers.
+// It translates orientation, half/shape, growth, and stateful natural-block
+// properties rather than silently dropping the Java state map.
 BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &block);
 }

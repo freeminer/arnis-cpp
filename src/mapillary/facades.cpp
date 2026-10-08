@@ -25,6 +25,8 @@ namespace arnis::mapillary::facades
 {
 namespace
 {
+constexpr double MIN_VALID_FRACTION = 0.25;
+
 std::optional<std::uint64_t> u64(const nlohmann::json &value)
 {
 	if (value.is_number_unsigned())
@@ -360,11 +362,12 @@ void project_export(const std::vector<arnis::ProcessedElement> &elements,
 		}
 	std::unordered_map<std::uint64_t, std::vector<arnis::ProcessedWay>> relation_rings;
 	for (const auto &[relation_id, relation] : relations) {
-		const bool has_export = std::any_of(store->buildings.begin(),
-				store->buildings.end(), [&,relation_id=relation_id](const ExportBuilding &building) {
-					return building.owner.kind == OwnerKind::Relation &&
-						   building.owner.id == relation_id;
-				});
+		const bool has_export =
+				std::any_of(store->buildings.begin(), store->buildings.end(),
+						[&, relation_id = relation_id](const ExportBuilding &building) {
+							return building.owner.kind == OwnerKind::Relation &&
+								   building.owner.id == relation_id;
+						});
 		if (!has_export)
 			continue;
 		auto rings = buildings::facade_outer_rings(*relation, bbox);
@@ -644,7 +647,8 @@ std::size_t collect_displays(arnis::world_editor::WorldEditor &editor,
 					if (valid[i])
 						valid_rgb.push_back(rgb[i]);
 				}
-			if (valid_rgb.empty() || valid_rgb.size() < count / 4)
+			if (valid_rgb.empty() ||
+					static_cast<double>(valid_rgb.size()) < MIN_VALID_FRACTION * count)
 				continue;
 			auto median = [](std::vector<std::array<std::uint8_t, 3>> values) {
 				std::array<std::uint8_t, 3> result{};

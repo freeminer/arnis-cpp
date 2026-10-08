@@ -106,7 +106,7 @@ inline Lattice column_lattice(const std::vector<double> &share)
 																 period + 1))));
 				if (better)
 					result = {period, width, phase, rounded_score, mean, 0, false,
-							std::move(on), {}};
+							std::move(on), {}, {}, std::nullopt, 0, {}, {}};
 			}
 	double explained = 0;
 	for (std::size_t i = 0; i < share.size(); ++i)
@@ -273,7 +273,7 @@ complete_windows(const std::vector<std::uint8_t> &classes,
 			}
 	std::vector<bool> floor_rows(rows, false);
 	for (std::size_t r = 0; r < rows; ++r)
-		floor_rows[r] = r < lattice.rows_on.size() && lattice.rows_on[r] &&
+		floor_rows[r] = r < lattice.floor_rows.size() && lattice.floor_rows[r] &&
 						r < lattice.q.size() && lattice.q[r] < shop_share;
 	std::vector<std::pair<std::size_t, std::size_t>> groups;
 	for (std::size_t r = 0; r < rows;) {

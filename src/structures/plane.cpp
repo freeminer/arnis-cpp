@@ -8,10 +8,46 @@
 #include <iterator>
 
 #include <algorithm>
+#include <array>
 #include <cmath>
+#include <mutex>
+#include <optional>
 
 namespace arnis::structures::plane
 {
+namespace
+{
+const SchemDocument *plane_asset(bool gear_down, unsigned livery)
+{
+	if (livery < 1 || livery > 6)
+		return nullptr;
+	static std::array<std::optional<SchemDocument>, 6> down;
+	static std::array<std::optional<SchemDocument>, 6> up;
+	static std::once_flag down_once;
+	static std::once_flag up_once;
+	auto &fleet = gear_down ? down : up;
+	auto &once = gear_down ? down_once : up_once;
+	std::call_once(once, [&] {
+		for (unsigned i = 1; i <= fleet.size(); ++i) {
+			const auto path = assets::path(std::string("structures/planes/plane_gear_") +
+										   (gear_down ? "down_" : "up_") +
+										   std::to_string(i) + ".schem");
+			std::ifstream stream(path, std::ios::binary);
+			if (!stream)
+				continue;
+			std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(stream)),
+					std::istreambuf_iterator<char>());
+			try {
+				fleet[i - 1] = decode_sponge_schem(bytes);
+			} catch (...) {
+				fleet[i - 1].reset();
+			}
+		}
+	});
+	return fleet[livery - 1] ? &*fleet[livery - 1] : nullptr;
+}
+} // namespace
+
 static int region_floor(int coordinate)
 {
 	return coordinate >= 0 ? coordinate / 512 : -1 - ((-coordinate - 1) / 512);
@@ -365,27 +401,16 @@ bool place_plane_placement(WorldEditor &editor, const Placement &placement)
 	const bool gear_down = placement.kind == PlaneKind::Parked;
 	auto rng = element_rng(placement.representative_id * 31 + 7);
 	const unsigned livery = rng.uniform(6) + 1;
-	const auto filename = std::string("structures/planes/plane_gear_") +
-						  (gear_down ? "down_" : "up_") + std::to_string(livery) +
-						  ".schem";
-	const auto path = assets::path(filename);
-	std::ifstream stream(path, std::ios::binary);
-	if (!stream)
+	const auto *document = plane_asset(gear_down, livery);
+	if (!document)
 		return false;
-	std::vector<std::uint8_t> bytes(
-			(std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
-	try {
-		const auto document = decode_sponge_schem(bytes);
-		int ground_y = editor.get_ground_level(placement.anchor_x, placement.anchor_z);
-		for (int x = placement.footprint.min_x; x <= placement.footprint.max_x; ++x)
-			for (int z = placement.footprint.min_z; z <= placement.footprint.max_z; ++z)
-				ground_y = std::min(ground_y, editor.get_ground_level(x, z));
-		return place_schem_document_yaw(editor, document, placement.anchor_x,
-				ground_y + placement.elevation_blocks, placement.anchor_z,
-				placement.yaw_degrees, placement.pitch_degrees);
-	} catch (...) {
-		return false;
-	}
+	int ground_y = editor.get_ground_level(placement.anchor_x, placement.anchor_z);
+	for (int x = placement.footprint.min_x; x <= placement.footprint.max_x; ++x)
+		for (int z = placement.footprint.min_z; z <= placement.footprint.max_z; ++z)
+			ground_y = std::min(ground_y, editor.get_ground_level(x, z));
+	return place_schem_document_yaw(editor, *document, placement.anchor_x,
+			ground_y + placement.elevation_blocks, placement.anchor_z,
+			placement.yaw_degrees, placement.pitch_degrees);
 }
 
 std::size_t place_plane_placements(

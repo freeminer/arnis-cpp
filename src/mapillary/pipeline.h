@@ -22,6 +22,7 @@
 #include <unordered_map>
 #include <map>
 #include <set>
+#include <memory>
 
 namespace arnis::mapillary
 {
@@ -41,6 +42,7 @@ struct PipelineConfig
 	// cache-only run.  Keeping them in the C++ contract avoids silently losing
 	// settings when a library host switches from acquisition to facades.
 	std::filesystem::path facade_cache = cache::Layout{}.facade_dir(params.digest(), 1);
+	std::filesystem::path exports_dir() const { return facade_cache / "exports"; }
 	std::size_t threads = 0;
 	std::shared_ptr<std::atomic_bool> cancel;
 	std::optional<std::string> cache_only;
@@ -66,6 +68,8 @@ struct PipelineStats
 	std::array<std::size_t, 4> tiers{};
 	std::size_t cache_hits = 0;
 	std::size_t cache_misses = 0;
+	std::size_t exported_buildings = 0;
+	std::size_t exported_walls = 0;
 	double fetch_seconds = 0.0;
 	double geometry_seconds = 0.0;
 	double align_seconds = 0.0;
@@ -76,6 +80,10 @@ struct PipelineStats
 
 struct PipelineResult
 {
+	Frame frame;
+	std::vector<Building> buildings;
+	std::vector<Wall> walls;
+	std::vector<WallProduct> products;
 	std::vector<cache::ImageRecord> images;
 	std::vector<PanoMeta> metas;
 	struct Credit
@@ -153,6 +161,9 @@ struct AlignedWall
 	std::optional<std::string> best_pano;
 	std::vector<ViewCandidate> selected, candidates;
 	plane::EndSource corner_a{plane::EndSource::Osm}, corner_b{plane::EndSource::Osm};
+	std::string unreachable_reason;
+	std::size_t n_los_clean{};
+	bool reachable{};
 	bool single_view{};
 };
 struct AlignmentStage
@@ -170,6 +181,8 @@ struct AlignmentRun
 	RegistrationStage registration;
 	CandidateStage candidates;
 	AlignmentStage alignment;
+	std::map<std::string, std::filesystem::path> image_paths;
+	std::map<std::string, std::filesystem::path> original_paths;
 	std::size_t images_requested{}, images_decoded{};
 	bool cancelled{};
 };
@@ -179,14 +192,43 @@ struct AlignmentPipelineResult
 	PipelineResult acquisition;
 	std::optional<Geometry> geometry;
 	std::optional<AlignmentRun> alignment;
+	bool cache_only_complete{};
+	bool cache_reused{};
 	std::string error;
 	bool succeeded() const
 	{
-		return geometry.has_value() && alignment.has_value() && error.empty();
+		return geometry.has_value() &&
+			   (alignment.has_value() || cache_only_complete || cache_reused) &&
+			   error.empty();
 	}
 };
 
-PipelineResult acquire_images(const Client &, const PipelineConfig &);
+struct TextureStage
+{
+	std::vector<WallProduct> products;
+	std::size_t cache_hits{}, cache_misses{}, cache_entries{};
+};
+
+// Shared asynchronous lifetime for facade precomputation. A host can start it
+// while preparing terrain/OSM, then attach it to GenerationOptions; world
+// generation joins once, immediately before facade data is consumed.
+class FacadeJob
+{
+	struct State;
+	std::shared_ptr<State> state_;
+	explicit FacadeJob(std::shared_ptr<State> state) : state_(std::move(state)) {}
+
+public:
+	FacadeJob() = default;
+	~FacadeJob();
+	static FacadeJob start(Client client, PipelineConfig config);
+	bool is_running() const;
+	void cancel() const;
+	std::optional<std::filesystem::path> join() const;
+};
+
+PipelineResult acquire_images(const Client &, const PipelineConfig &,
+		const nlohmann::json *preloaded_osm = nullptr);
 std::optional<Geometry> stage_geometry(const PipelineConfig &, const PipelineResult &,
 		const Client &, std::string *error = nullptr);
 RegistrationStage stage_registration(const PipelineConfig &, const Geometry &);
@@ -203,6 +245,14 @@ AlignmentStage stage_align_visibility(const PipelineConfig &, const Geometry &,
 		const ImageLoader &load_image);
 std::optional<projection::Image> decode_cached_image(
 		const std::filesystem::path &, std::string *error = nullptr);
+WallProduct make_no_view_product(const Wall &, const AlignedWall &);
+WallProduct make_uncached_product(const Wall &);
+TextureStage stage_texture(
+		const PipelineConfig &, const Geometry &, const AlignmentRun &);
 AlignmentRun run_alignment(const Client &, const PipelineConfig &, const Geometry &);
 AlignmentPipelineResult run_alignment_pipeline(const Client &, const PipelineConfig &);
+// Write a Rust-compatible facade export directory. The caller owns directory
+// naming/retention; this function claims a fresh directory and never mixes runs.
+bool write_export(const PipelineResult &, const std::filesystem::path &,
+		std::string *error = nullptr);
 } // namespace arnis::mapillary

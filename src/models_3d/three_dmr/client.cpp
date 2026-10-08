@@ -2,12 +2,25 @@
 #include "../../cache_root.h"
 #include "../model_asset.h"
 #include "../../../../http.h"
+#include <array>
 #include <fstream>
 #include <thread>
 #include <cmath>
+#include <mutex>
 #include <nlohmann/json.hpp>
 namespace arnis::models_3d::three_dmr
 {
+namespace
+{
+std::mutex &request_mutex(const std::string &url)
+{
+	// A fixed stripe table coalesces identical requests across independent
+	// emerge-thread Client instances without retaining one mutex per model ID.
+	static std::array<std::mutex, 127> mutexes;
+	return mutexes[std::hash<std::string>{}(url) % mutexes.size()];
+}
+} // namespace
+
 std::filesystem::path cache_root(const std::filesystem::path &base)
 {
 	if (!base.empty())
@@ -284,15 +297,21 @@ std::optional<ModelInfo> Client::fetch_info(std::uint64_t id) const
 		return std::nullopt;
 	if (auto cached = load_valid_info_cache(config_, id))
 		return cached;
+	const auto url = info_url(config_, id);
+	const std::lock_guard<std::mutex> request_lock(request_mutex(url));
+	// A different mapgen worker may have filled the shared cache while this
+	// caller waited for the URL's in-flight request to finish.
+	if (auto cached = load_valid_info_cache(config_, id))
+		return cached;
 	std::optional<std::vector<std::uint8_t>> bytes;
 	if (fetch_bytes_) {
-		bytes = fetch_bytes_(info_url(config_, id), 1024 * 1024);
+		bytes = fetch_bytes_(url, 1024 * 1024);
 	} else {
 		const auto temp =
 				info_cache_path(config_, id).string() + "." +
 				std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
 				".download";
-		if (http_to_file(info_url(config_, id), temp))
+		if (http_to_file(url, temp))
 			bytes = read_capped(temp, 1024 * 1024);
 		std::error_code ec;
 		std::filesystem::remove(temp, ec);
@@ -315,15 +334,19 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_glb(std::uint64_t id) con
 		return std::nullopt;
 	if (auto cached = load_valid_glb_cache(config_, id))
 		return cached;
+	const auto url = model_url(config_, id);
+	const std::lock_guard<std::mutex> request_lock(request_mutex(url));
+	if (auto cached = load_valid_glb_cache(config_, id))
+		return cached;
 	std::optional<std::vector<std::uint8_t>> bytes;
 	if (fetch_bytes_) {
-		bytes = fetch_bytes_(model_url(config_, id), MAX_GLB_BYTES);
+		bytes = fetch_bytes_(url, MAX_GLB_BYTES);
 	} else {
 		const auto temp =
 				model_cache_path(config_, id).string() + "." +
 				std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
 				".download";
-		if (http_to_file(model_url(config_, id), temp))
+		if (http_to_file(url, temp))
 			bytes = read_capped(temp, MAX_GLB_BYTES);
 		std::error_code ec;
 		std::filesystem::remove(temp, ec);

@@ -17,6 +17,11 @@
 namespace arnis
 {
 
+namespace trees::mapped
+{
+struct MappedTree;
+}
+
 // Shared scale threshold for compact procedural trees versus full-size or
 // region-pack trees. Rust exposes this from element_processing::tree and uses
 // it in both tree placement and ground vegetation selection.
@@ -156,6 +161,10 @@ struct Tree
 	// procedural fallback does no second density thinning, so it shares the
 	// geometry path while retaining this explicit integration entry point.
 	static void create_from_canopy(WorldEditor &editor, const Coord &pos,
+			const BuildingFootprintBitmap *building_footprints = nullptr,
+			const bridges::BridgeSurfaceMap *bridge_surface = nullptr);
+	static void create_mapped(WorldEditor &editor, const Coord &pos,
+			const trees::mapped::MappedTree &mapped,
 			const BuildingFootprintBitmap *building_footprints = nullptr,
 			const bridges::BridgeSurfaceMap *bridge_surface = nullptr);
 

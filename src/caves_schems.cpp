@@ -80,17 +80,18 @@ std::unordered_map<std::string, std::shared_ptr<const CavePack>> pack_cache;
 
 std::string base_block_name(std::string name)
 {
-	if (const auto colon = name.find(':'); colon != std::string::npos)
-		name.erase(0, colon + 1);
 	if (const auto states = name.find('['); states != std::string::npos)
 		name.resize(states);
+	constexpr std::string_view minecraft_namespace = "minecraft:";
+	if (name.starts_with(minecraft_namespace))
+		name.erase(0, minecraft_namespace.size());
 	return name;
 }
 
 std::optional<Block> map_cave_block(const structures::SchemVoxel &voxel)
 {
 	const auto n = base_block_name(voxel.block);
-	if (n == "air" || n == "cave_air" || n == "void_air")
+	if (n == "air")
 		return AIR;
 	if (n == "ice")
 		return ICE;
@@ -309,7 +310,8 @@ bool is_air(const world_editor::WorldEditor &editor, int x, int y, int z)
 
 bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &schem,
 		Orientation orientation, int sink, int ax, int ay, int az, unsigned rotation,
-		int floor_y, const CaveRect &region, const std::vector<Block> &rock,
+		int floor_y, const CaveRect &region,
+		const std::unordered_set<std::int64_t> &cave_air, const std::vector<Block> &rock,
 		std::unordered_set<std::int64_t> *basin_fluid)
 {
 	const int fw = (rotation & 1) ? schem.length : schem.width;
@@ -353,7 +355,8 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 		if (wy < ay)
 			continue;
 		++tested;
-		if (is_air(editor, ax + rx - cx, wy, az + rz - cz))
+		const int wx = ax + rx - cx, wz = az + rz - cz;
+		if (cave_air.contains(pack_cave_pos(wx, wy, wz)) || is_air(editor, wx, wy, wz))
 			++visible;
 	}
 	if (!embedded && (!tested || visible * 2 < tested))
@@ -368,9 +371,7 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 			const auto [rx, rz] =
 					trees::rotate_xz(v.x, v.z, schem.width, schem.length, rotation);
 			const int wx = ax + rx - cx, wz = az + rz - cz;
-			if (wx < region.min_x || wx > region.max_x || wz < region.min_z ||
-					wz > region.max_z ||
-					!editor.block_exists_absolute(wx, base_y - 1, wz))
+			if (!editor.block_exists_absolute(wx, base_y - 1, wz))
 				return false;
 		}
 	}
@@ -387,7 +388,7 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 			continue;
 		if (wy <= floor_y)
 			continue;
-		if (wy > editor.get_ground_level(wx, wz) - 8)
+		if (wy > editor.get_ground_level(wx, wz) - 6)
 			continue;
 		if (entry.air) {
 			if (orientation == Orientation::Embed)
@@ -403,11 +404,15 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 				std::optional<std::vector<Block>>{allowed}, std::nullopt);
 		if (editor.check_for_block_absolute(
 					wx, wy, wz, std::vector<Block>{entry.block})) {
-			placed_solids.emplace_back(wx, wy, wz, entry.block);
-			if (entry.fluid && basin_fluid)
-				basin_fluid->insert(pack_cave_pos(wx, wy, wz));
-			if (embedded && v.y == schem.height - 1 && !entry.fluid)
-				top_row.emplace_back(wx, wy, wz, entry.block);
+			if (entry.fluid) {
+				editor.schedule_fluid_tick(entry.block, wx, wy, wz);
+				if (basin_fluid)
+					basin_fluid->insert(pack_cave_pos(wx, wy, wz));
+			} else {
+				placed_solids.emplace_back(wx, wy, wz, entry.block);
+				if (orientation == Orientation::EmbedFloor && v.y == schem.height - 1)
+					top_row.emplace_back(wx, wy, wz, entry.block);
+			}
 		}
 	}
 	// Remove isolated pieces left behind when the cave roof clipped their support.
@@ -438,17 +443,16 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 } // namespace
 
 void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y, const Args &args,
-		std::unordered_set<std::int64_t> *basin_fluid)
+		const std::unordered_set<std::int64_t> &cave_air, std::int64_t seed, int floor_y,
+		const Args &args, std::unordered_set<std::int64_t> *basin_fluid)
 {
 	const auto pack = get_pack(editor.get_cave_asset_root());
 	if (!pack || pack->families.empty())
 		return;
 	const std::vector<Block> rock{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,
 			DIORITE, ANDESITE, DIRT, GRAVEL};
-	auto biome_amounts = BiomeAmounts::defaults();
-	if (args.cave_biomes)
-		biome_amounts = BiomeAmounts::parse(*args.cave_biomes);
+	const auto biome_amounts = args.cave_biomes ? BiomeAmounts::parse(*args.cave_biomes)
+												: BiomeAmounts::defaults();
 	ThemeSelector themes(seed, biome_amounts, floor_y);
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	const int min_chunk_x =
@@ -477,23 +481,23 @@ void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &
 						z > region.max_z)
 					continue;
 				const int surface = editor.get_ground_level(x, z);
-				const int roof = std::min(surface - 8, write_max_y);
+				const int roof = std::min(surface - 6, write_max_y);
 				const int bottom = std::max(floor_y + 6, write_min_y);
 				std::vector<int> floors, ceilings;
 				for (int y = bottom; y <= roof; ++y) {
-					if (!is_air(editor, x, y, z))
+					if (!cave_air.contains(pack_cave_pos(x, y, z)))
 						continue;
-					if (!is_air(editor, x, y - 1, z) &&
+					if (!cave_air.contains(pack_cave_pos(x, y - 1, z)) &&
 							editor.check_for_block_absolute(x, y - 1, z, rock))
 						floors.push_back(y);
-					if (y < roof && !is_air(editor, x, y + 1, z) &&
+					if (y < roof && !cave_air.contains(pack_cave_pos(x, y + 1, z)) &&
 							editor.check_for_block_absolute(x, y + 1, z, rock))
 						ceilings.push_back(y);
 				}
 				auto open = [&](int y) {
 					for (int dx = -1; dx <= 1; ++dx)
 						for (int dz = -1; dz <= 1; ++dz)
-							if (!is_air(editor, x + dx, y, z + dz))
+							if (!cave_air.contains(pack_cave_pos(x + dx, y, z + dz)))
 								return false;
 					return true;
 				};
@@ -559,7 +563,8 @@ void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &
 					break;
 				}
 				if (place_formation(editor, schem, family->orientation, family->sink, x,
-							anchor_y, z, rotation, floor_y, region, rock, basin_fluid))
+							anchor_y, z, rotation, floor_y, region, cave_air, rock,
+							basin_fluid))
 					++placed;
 			}
 		}

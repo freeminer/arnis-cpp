@@ -207,18 +207,19 @@ size_t append_bytes(void *ptr, size_t size, size_t count, void *userdata)
 }
 std::string cache_key(const std::string &value);
 std::optional<std::vector<std::uint8_t>> http_range(const std::string &url,
-		std::uint64_t offset, std::uint64_t length, std::string *error)
+		const std::filesystem::path &archive_cache, std::uint64_t offset,
+		std::uint64_t length, std::string *error)
 {
 	if (!length || length > 256 * 1024 * 1024) {
 		if (error)
 			*error = "invalid archive range";
 		return std::nullopt;
 	}
-	const auto root = cache_root();
-	const auto cached = root.empty() ? std::filesystem::path{}
-									 : root / cache_key(url) /
-											   (std::to_string(offset) + "-" +
-													   std::to_string(length) + ".bin");
+	const auto cached = archive_cache.empty()
+								? std::filesystem::path{}
+								: archive_cache / cache_key(url) /
+										  (std::to_string(offset) + "-" +
+												  std::to_string(length) + ".bin");
 	if (!cached.empty()) {
 		std::error_code ec;
 		if (std::filesystem::exists(cached, ec)) {
@@ -661,6 +662,9 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	std::string local_error;
 	std::vector<std::uint8_t> manifest_bytes;
 	const auto cache = cache_root();
+	const auto archive_cache =
+			cache.empty() ? std::filesystem::path{} : cache / cache_key(root);
+	bool fetched_manifest = false;
 	const auto cache_manifest =
 			cache.empty() ? std::filesystem::path{}
 						  : cache / ("manifest-" + cache_key(root) + ".json");
@@ -672,6 +676,13 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			std::ifstream in(cache_manifest, std::ios::binary);
 			manifest_bytes.assign(std::istreambuf_iterator<char>(in), {});
 		}
+	}
+	if (!manifest_bytes.empty()) {
+		const auto cached_json = nlohmann::json::parse(manifest_bytes, nullptr, false);
+		if (cached_json.is_discarded() || !cached_json.is_object() ||
+				cached_json.value("zoom", 0) != ZOOM ||
+				!cached_json.contains("archives") || !cached_json["archives"].is_array())
+			manifest_bytes.clear();
 	}
 	if (manifest_bytes.empty()) {
 		CURL *curl = curl_easy_init();
@@ -697,6 +708,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 				*error = "tile archive index unreachable";
 			return std::nullopt;
 		}
+		fetched_manifest = true;
 		if (!cache_manifest.empty()) {
 			std::error_code ec;
 			std::filesystem::create_directories(cache_manifest.parent_path(), ec);
@@ -709,6 +721,41 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		if (error)
 			*error = "bad archive index";
 		return std::nullopt;
+	}
+	// Keep each source's range cache separate, then discard archive ranges no
+	// longer named by its refreshed manifest (rebakes publish new archive files).
+	// Restrict cleanup to the exact source-scoped cache directory and hash-named
+	// archive subdirectories; manifest files and unknown cache entries are left
+	// untouched.
+	if (fetched_manifest && !archive_cache.empty()) {
+		std::unordered_set<std::string> keep;
+		for (const auto &entry : json["archives"]) {
+			const auto file = entry.value("file", std::string{});
+			if (!file.empty() && file.size() <= 96 &&
+					file.find("..") == std::string::npos &&
+					file.find_first_not_of(
+							"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") ==
+							std::string::npos)
+				keep.insert(cache_key(root + "/" + file));
+		}
+		std::error_code ec;
+		std::vector<std::filesystem::path> stale;
+		for (std::filesystem::directory_iterator it(archive_cache, ec), end;
+				!ec && it != end; it.increment(ec)) {
+			std::error_code type_error;
+			if (!it->is_directory(type_error))
+				continue;
+			const auto name = it->path().filename().string();
+			const bool hash_name =
+					name.size() == 16 &&
+					name.find_first_not_of("0123456789abcdef") == std::string::npos;
+			if (hash_name && !keep.contains(name))
+				stale.push_back(it->path());
+		}
+		for (const auto &path : stale) {
+			std::error_code remove_error;
+			std::filesystem::remove_all(path, remove_error);
+		}
 	}
 	const auto a =
 			overture::pmtiles::lonlat_to_tile(bbox.min().lng(), bbox.max().lat(), ZOOM);
@@ -782,9 +829,9 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		if (!covers)
 			continue;
 		const auto archive_url = root + "/" + file;
-		auto range = [archive_url](std::uint64_t off, std::uint64_t len) {
+		auto range = [archive_url, archive_cache](std::uint64_t off, std::uint64_t len) {
 			std::string ignored_error;
-			return http_range(archive_url, off, len, &ignored_error);
+			return http_range(archive_url, archive_cache, off, len, &ignored_error);
 		};
 		auto archive = overture::pmtiles::open_archive(range);
 		if (!archive)

@@ -88,25 +88,22 @@ const std::vector<Ore> &ore_table()
 		rare(TUFF, TUFF, 160, 8, D::Uniform, -64, 0, 0.0);
 		fixed(GRAVEL, GRAVEL, 33, 6, D::Uniform, -64, 0, 0.0);
 
-		// Luanti's freeminer palette currently exposes one ore node per ore, so
-		// the deep variant resolves to the same backend block while host-based
-		// selection remains ready for backends with separate deepslate ores.
-		fixed(COAL_ORE, COAL_ORE, 17, 30, D::Uniform, 136, 256, 0.0);
-		fixed(COAL_ORE, COAL_ORE, 17, 20, D::Trapezoid, 0, 192, 0.5);
-		fixed(IRON_ORE, IRON_ORE, 9, 90, D::Trapezoid, 80, 256, 0.0);
-		fixed(IRON_ORE, IRON_ORE, 9, 10, D::Trapezoid, -24, 56, 0.0);
-		fixed(IRON_ORE, IRON_ORE, 4, 10, D::Uniform, -64, 72, 0.0);
-		fixed(COPPER_ORE, COPPER_ORE, 10, 16, D::Trapezoid, -16, 112, 0.0);
-		fixed(COPPER_ORE, COPPER_ORE, 20, 16, D::Trapezoid, -16, 112, 0.0);
-		fixed(GOLD_ORE, GOLD_ORE, 9, 4, D::Trapezoid, -64, 32, 0.5);
-		fixed(REDSTONE_ORE, REDSTONE_ORE, 8, 4, D::Uniform, -64, 15, 0.0);
-		fixed(REDSTONE_ORE, REDSTONE_ORE, 8, 8, D::Trapezoid, -96, -32, 0.0);
-		fixed(LAPIS_ORE, LAPIS_ORE, 7, 2, D::Trapezoid, -32, 32, 0.0);
-		fixed(LAPIS_ORE, LAPIS_ORE, 7, 4, D::Uniform, -64, 64, 1.0);
-		fixed(DIAMOND_ORE, DIAMOND_ORE, 4, 7, D::Trapezoid, -64, 16, 0.5);
-		fixed(DIAMOND_ORE, DIAMOND_ORE, 8, 2, D::Uniform, -64, -4, 0.5);
-		rare(DIAMOND_ORE, DIAMOND_ORE, 12, 9, D::Trapezoid, -64, 16, 0.7);
-		fixed(DIAMOND_ORE, DIAMOND_ORE, 8, 4, D::Trapezoid, -64, 16, 1.0);
+		fixed(COAL_ORE, DEEPSLATE_COAL_ORE, 17, 30, D::Uniform, 136, 256, 0.0);
+		fixed(COAL_ORE, DEEPSLATE_COAL_ORE, 17, 20, D::Trapezoid, 0, 192, 0.5);
+		fixed(IRON_ORE, DEEPSLATE_IRON_ORE, 9, 90, D::Trapezoid, 80, 256, 0.0);
+		fixed(IRON_ORE, DEEPSLATE_IRON_ORE, 9, 10, D::Trapezoid, -24, 56, 0.0);
+		fixed(IRON_ORE, DEEPSLATE_IRON_ORE, 4, 10, D::Uniform, -64, 72, 0.0);
+		fixed(COPPER_ORE, DEEPSLATE_COPPER_ORE, 10, 16, D::Trapezoid, -16, 112, 0.0);
+		fixed(COPPER_ORE, DEEPSLATE_COPPER_ORE, 20, 16, D::Trapezoid, -16, 112, 0.0);
+		fixed(GOLD_ORE, DEEPSLATE_GOLD_ORE, 9, 4, D::Trapezoid, -64, 32, 0.5);
+		fixed(REDSTONE_ORE, DEEPSLATE_REDSTONE_ORE, 8, 4, D::Uniform, -64, 15, 0.0);
+		fixed(REDSTONE_ORE, DEEPSLATE_REDSTONE_ORE, 8, 8, D::Trapezoid, -96, -32, 0.0);
+		fixed(LAPIS_ORE, DEEPSLATE_LAPIS_ORE, 7, 2, D::Trapezoid, -32, 32, 0.0);
+		fixed(LAPIS_ORE, DEEPSLATE_LAPIS_ORE, 7, 4, D::Uniform, -64, 64, 1.0);
+		fixed(DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, 4, 7, D::Trapezoid, -64, 16, 0.5);
+		fixed(DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, 8, 2, D::Uniform, -64, -4, 0.5);
+		rare(DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, 12, 9, D::Trapezoid, -64, 16, 0.7);
+		fixed(DIAMOND_ORE, DEEPSLATE_DIAMOND_ORE, 8, 4, D::Trapezoid, -64, 16, 1.0);
 		return result;
 	}();
 	return ores;

@@ -14,6 +14,8 @@
 namespace arnis::elevation
 {
 
+// The provider may invoke this reader concurrently for independent raster
+// rows, up to the same bounded worker count used by the Rust provider.
 using PlanetaryRangeReader = std::function<std::optional<std::vector<std::uint8_t>>(
 		const std::string &url, std::uint64_t offset, std::uint64_t length)>;
 

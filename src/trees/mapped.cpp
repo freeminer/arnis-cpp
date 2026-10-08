@@ -138,7 +138,8 @@ std::vector<std::pair<int, int>> tree_row_positions(
 	if (nodes.size() == 1)
 		return nodes;
 	auto dist = [](auto a, auto b) {
-		return std::hypot(double(b.first - a.first), double(b.second - a.second));
+		return std::hypot(
+				double(b.first) - double(a.first), double(b.second) - double(a.second));
 	};
 	double total = 0;
 	for (size_t i = 1; i < nodes.size(); ++i)
@@ -162,10 +163,11 @@ std::vector<std::pair<int, int>> tree_row_positions(
 		double len = dist(nodes[seg], nodes[seg + 1]),
 			   t = len ? std::clamp((target - start) / len, 0.0, 1.0) : 0;
 		auto p = std::make_pair(
-				int(std::lround(nodes[seg].first +
-								(nodes[seg + 1].first - nodes[seg].first) * t)),
-				int(std::lround(nodes[seg].second +
-								(nodes[seg + 1].second - nodes[seg].second) * t)));
+				int(std::lround(double(nodes[seg].first) +
+								(double(nodes[seg + 1].first) - nodes[seg].first) * t)),
+				int(std::lround(
+						double(nodes[seg].second) +
+						(double(nodes[seg + 1].second) - nodes[seg].second) * t)));
 		if (out.empty() || out.back() != p)
 			out.push_back(p);
 	}

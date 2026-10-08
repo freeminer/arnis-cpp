@@ -3,6 +3,8 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iomanip>
+#include <iostream>
 #include <zlib.h>
 #include <fstream>
 #include <chrono>
@@ -920,17 +922,41 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 	if (!fetch_range || grid_width == 0 || grid_height == 0 || !std::isfinite(min_lat) ||
 			!std::isfinite(min_lon) || !std::isfinite(max_lat) || !std::isfinite(max_lon))
 		return std::nullopt;
+	std::cout << "Fetching canopy height data (Meta/WRI 1m global canopy height)...\n";
 	prune_row_cache(base);
 	std::vector<std::uint8_t> grid(grid_width * grid_height, CANOPY_NODATA);
-	for (const auto &[xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon))
-		fill_from_remote_tile(base, fetch_range, xt, yt, min_lat, min_lon, max_lat,
-				max_lon, grid_width, grid_height, grid);
+	std::size_t loaded_tiles = 0;
+	std::vector<std::string> failures;
+	for (const auto &[xt, yt] : tiles_for_bbox(min_lat, min_lon, max_lat, max_lon)) {
+		if (fill_from_remote_tile(base, fetch_range, xt, yt, min_lat, min_lon, max_lat,
+					max_lon, grid_width, grid_height, grid))
+			++loaded_tiles;
+		else
+			failures.push_back(quadkey_of(xt, yt) + ": canopy tile unavailable");
+	}
 	CanopyData data(std::move(grid), grid_width, grid_height);
 	const auto [covered, canopy, mean, maximum] = data.stats();
-	(void)canopy;
-	(void)mean;
-	(void)maximum;
-	return covered ? std::optional<CanopyData>(std::move(data)) : std::nullopt;
+	if (covered == 0) {
+		const auto why = failures.empty() ? std::string("no tiles") : failures.front();
+		std::clog << "Warning: Canopy height data unavailable (" << why.substr(0, 200)
+				  << "). Falling back to land cover for trees.\n";
+		return std::nullopt;
+	}
+	const auto cout_flags = std::cout.flags();
+	const auto cout_precision = std::cout.precision();
+	std::cout << "Canopy height data loaded: " << loaded_tiles << " tile"
+			  << (loaded_tiles == 1 ? "" : "s") << ", canopy over "
+			  << static_cast<unsigned>(CANOPY_MIN_M) << "m on " << std::fixed
+			  << std::setprecision(1) << (100.0 * static_cast<double>(canopy) / covered)
+			  << "% of the area, mean " << mean << "m, tallest "
+			  << static_cast<unsigned>(maximum) << "m\n";
+	std::cout.flags(cout_flags);
+	std::cout.precision(cout_precision);
+	if (!failures.empty())
+		std::clog
+				<< "Warning: " << failures.size()
+				<< " canopy tile(s) unavailable; those areas fall back to land cover.\n";
+	return std::optional<CanopyData>(std::move(data));
 }
 std::size_t clear_canopy_cache(const std::filesystem::path &base)
 {

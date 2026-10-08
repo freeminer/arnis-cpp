@@ -11,10 +11,11 @@ namespace arnis::overture::mvt
 {
 inline constexpr std::uint32_t GEOM_POLYGON = 3;
 using Value = std::variant<std::string, double, std::int64_t, std::uint64_t, bool>;
+using Area = __int128_t;
 struct Ring
 {
 	std::vector<std::pair<int, int>> points;
-	std::int64_t area2 = 0;
+	Area area2 = 0;
 	bool exterior() const { return area2 > 0; }
 };
 struct Feature

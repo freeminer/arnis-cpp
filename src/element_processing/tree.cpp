@@ -1,4 +1,5 @@
 #include "tree.h"
+#include "../trees/mapped.h"
 #include "../deterministic_rng.h"
 #include "../land_cover/land_cover.h"
 #include "../trees/region.h"
@@ -510,6 +511,53 @@ void Tree::create_from_canopy(WorldEditor &editor, const Coord &pos,
 {
 	create_of_type(editor, pos, selected_tree_type(pos.x, pos.z), building_footprints,
 			bridge_surface, false, std::nullopt, false, true, true);
+}
+
+void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
+		const trees::mapped::MappedTree &mapped,
+		const BuildingFootprintBitmap *building_footprints,
+		const bridges::BridgeSurfaceMap *bridge_surface)
+{
+	// Keep the mapped-tree selector request in one place, matching Rust's
+	// create_mapped path. Explicit OSM placement is allowed on paving, but the
+	// region selector still rejects water, footprints and bridge decks.
+	if (building_footprints && building_footprints->contains(pos.x, pos.z))
+		return;
+	if (!editor.owns(pos.x, pos.z) ||
+			(bridge_surface && bridge_surface->contains(pos.x, pos.z)) ||
+			editor.check_for_block(
+					pos.x, 0, pos.z, std::optional<std::vector<Block>>({WATER})))
+		return;
+
+	trees::MappedRequest request;
+	request.habitat = habitat_for_tree_type(mapped.kind);
+	if (!mapped.genus.empty())
+		request.genus = mapped.genus;
+	request.conifer = mapped.conifer;
+	if (mapped.height_m > 0.0)
+		request.want_size = trees::size_for_height(
+				static_cast<int>(std::lround(mapped.height_m * editor.scale())));
+	if (editor.ground)
+		request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
+	if (request.eco) {
+		const int radius =
+				std::clamp(static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
+		for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
+					 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
+			if (editor.ground->cover_class(editor.ground_point(pos.x + dx, pos.z + dz)) ==
+					land_cover::LC_BEACH) {
+				request.beach = true;
+				break;
+			}
+	}
+	if (editor.place_mapped_regional_tree(pos.x,
+					  editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request)
+					.has_value())
+		return;
+
+	create_of_type(editor, pos, mapped.kind, building_footprints, bridge_surface, true,
+			mapped.height_m > 0.0 ? std::optional<double>(mapped.height_m) : std::nullopt,
+			false, false, true);
 }
 
 std::vector<Block> Tree::get_building_wall_blocks()

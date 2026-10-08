@@ -26,6 +26,11 @@ std::uint64_t key(int x, int z)
 	return (std::uint64_t(static_cast<std::uint32_t>(x)) << 32) |
 		   static_cast<std::uint32_t>(z);
 }
+int rem_euclid(int value, int divisor)
+{
+	const int remainder = value % divisor;
+	return remainder < 0 ? remainder + divisor : remainder;
+}
 
 struct Frame
 {
@@ -111,8 +116,8 @@ struct Plan
 		auto outside = [&](int dx, int dz) { return !has(area, x + dx, z + dz); };
 		const bool xs = outside(0, -1) || outside(0, 1);
 		const bool zs = outside(-1, 0) || outside(1, 0);
-		return (xs && (zs || (x - frame.min_x) % FACADE_COLUMN_SPACING == 0)) ||
-			   (zs && (z - frame.min_z) % FACADE_COLUMN_SPACING == 0);
+		return (xs && (zs || rem_euclid(x - frame.min_x, FACADE_COLUMN_SPACING) == 0)) ||
+			   (zs && rem_euclid(z - frame.min_z, FACADE_COLUMN_SPACING) == 0);
 	}
 };
 
@@ -242,6 +247,7 @@ void generate(WorldEditor &e, const std::vector<std::pair<int, int>> &floor_area
 						: seed % 20 < 17 ? Facade::Green
 										 : Facade::Brick;
 	const Block band = facade == Facade::Brick ? BRICK : LIGHT_GRAY_CONCRETE;
+	const Block column = facade == Facade::Brick ? BRICK : LIGHT_GRAY_CONCRETE;
 	for (auto [x, z] : floor_area) {
 		const int ground = e.get_ground_level(x, z);
 		const Block fill = p.has(p.edge, x, z) ? LIGHT_GRAY_CONCRETE : STONE;
@@ -256,7 +262,9 @@ void generate(WorldEditor &e, const std::vector<std::pair<int, int>> &floor_area
 			if (p.in_core(x, z))
 				continue;
 			const auto ri = p.ramp_step(x, z);
-			if (k && ri && *ri > 1 && *ri < RAMP_RUN)
+			// Rust leaves the ramp entry block clear as well as the intermediate
+			// slope cells; retain headroom over the complete rising section.
+			if (k && ri && *ri >= 1 && *ri < RAMP_RUN)
 				continue;
 			const Block b = p.has(p.edge, x, z)					  ? LIGHT_GRAY_CONCRETE
 							: p.open_deck(x, z) && p.stripe(x, z) ? WHITE_CONCRETE
@@ -296,7 +304,9 @@ void generate(WorldEditor &e, const std::vector<std::pair<int, int>> &floor_area
 						for (int dy = 2; dy < LEVEL; ++dy)
 							connected_blocks::place_connected(e, IRON_BARS, x, y + dy, z);
 					if (facade == Facade::Green) {
-						const auto h = land_cover::coord_hash(x ^ int(seed), z ^ y);
+						const auto seed_i32 = static_cast<std::int32_t>(
+								static_cast<std::uint32_t>(seed));
+						const auto h = land_cover::coord_hash(x ^ seed_i32, z ^ y);
 						const Block leaf = h % 3 == 0 ? AZALEA_LEAVES : OAK_LEAVES;
 						if (h % 100 < 60) {
 							e.set_block_absolute(leaf, x, y + 2, z);
@@ -307,7 +317,7 @@ void generate(WorldEditor &e, const std::vector<std::pair<int, int>> &floor_area
 				}
 			} else if (p.open_deck(x, z) && p.column(x, z))
 				for (int dy = 1; dy < LEVEL; ++dy)
-					e.set_block_absolute(LIGHT_GRAY_CONCRETE, x, y + dy, z);
+					e.set_block_absolute(column, x, y + dy, z);
 			else if (p.open_deck(x, z) && p.light(x, z))
 				e.set_block_with_properties_absolute(
 						lantern, x, y + LEVEL - 1, z, std::nullopt, std::nullopt);

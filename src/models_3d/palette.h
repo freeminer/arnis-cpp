@@ -10,6 +10,7 @@ inline constexpr std::uint8_t USE_MODEL = 1, USE_WALL = 2, USE_ROOF = 4, USE_FAC
 Block closest_block(RGBTuple color);
 Block facade_block_for_color(RGBTuple color);
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k);
+Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng);
 std::vector<Block> closest_blocks_for_usage(
 		RGBTuple color, std::size_t k, std::uint8_t usage);
 std::vector<Block> all_blocks_for_usage(std::uint8_t usage);

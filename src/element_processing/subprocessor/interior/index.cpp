@@ -120,8 +120,8 @@ bool point_in_ring(int x, int z, const std::vector<std::pair<int, int>> &ring)
 	for (std::size_t i = 0; i < ring.size(); ++i) {
 		const auto [xi, zi] = ring[i];
 		const auto [xj, zj] = ring[j];
-		if ((zi > z) != (zj > z) && x < (static_cast<double>(xj - xi) * (z - zi) /
-												(static_cast<double>(zj - zi))) +
+		if ((zi > z) != (zj > z) && x < ((static_cast<double>(xj) - xi) * (z - zi) /
+												(static_cast<double>(zj) - zi)) +
 													xi)
 			inside = !inside;
 		j = i;

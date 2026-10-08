@@ -73,11 +73,16 @@ std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
 {
 	if (way.tags.get("cycleway") == "crossing" || way.tags.contains("crossing"))
 		return std::nullopt;
-	const auto colour = way.tags.get("surface:colour").empty()
-								? way.tags.get("colour")
-								: way.tags.get("surface:colour");
-	if (!colour.empty()) {
-		std::string value = colour;
+	const auto surface_colour = way.tags.find("surface:colour");
+	const auto colour = way.tags.find("colour");
+	const auto selected_colour =
+			surface_colour != way.tags.end() ? surface_colour : colour;
+	if (selected_colour != way.tags.end()) {
+		std::string value = selected_colour->second;
+		const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+		value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+		value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
+				value.end());
 		std::transform(value.begin(), value.end(), value.begin(),
 				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		bool red = value.find("red") != std::string::npos || value == "maroon" ||

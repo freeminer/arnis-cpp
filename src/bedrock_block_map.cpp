@@ -1,7 +1,9 @@
 #include "bedrock_block_map.h"
 #include "../../arnis_block.h"
+#include <algorithm>
 #include <initializer_list>
 #include <optional>
+#include <string_view>
 #include <tuple>
 namespace arnis
 {
@@ -203,7 +205,9 @@ BedrockBlock to_bedrock_block(const Block &block)
 		if (auto mapped = concrete(value, color))
 			return *mapped;
 	if (block == GRAY_CONCRETE_POWDER)
-		return state("concrete_powder", {{"color", std::string("gray")}});
+		return state("concretePowder", {{"color", std::string("gray")}});
+	if (block == BROWN_CONCRETE_POWDER)
+		return state("concretePowder", {{"color", std::string("brown")}});
 	const auto wool = [&](Block value, const char *color) -> std::optional<BedrockBlock> {
 		return block == value ? std::optional<BedrockBlock>(
 										state("wool", {{"color", std::string(color)}}))
@@ -397,12 +401,74 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("pointed_dripstone");
 	if (block == GLOW_LICHEN)
 		return simple("glow_lichen");
+	if (block == SCULK_VEIN)
+		return simple("sculk_vein");
+	if (block == CAVE_VINES || block == CAVE_VINES_UNLIT || block == CAVE_VINES_PLANT ||
+			block == CAVE_VINES_PLANT_LIT)
+		return state("cave_vines", {{"growing_plant_age", 25}});
+	if (block == RED_MUSHROOM_BLOCK || block == BROWN_MUSHROOM_BLOCK)
+		return state(block == RED_MUSHROOM_BLOCK ? "red_mushroom_block"
+												 : "brown_mushroom_block",
+				{{"huge_mushroom_bits", 14}});
+	if (block == RED_MUSHROOM)
+		return simple("red_mushroom");
+	if (block == BROWN_MUSHROOM)
+		return simple("brown_mushroom");
+	if (block == MUSHROOM_STEM)
+		return state("mushroom_stem", {{"huge_mushroom_bits", 15}});
+	const auto coral_color = [](const char *species) -> const char * {
+		return std::string_view(species) == "tube"	   ? "blue"
+			   : std::string_view(species) == "brain"  ? "pink"
+			   : std::string_view(species) == "bubble" ? "purple"
+			   : std::string_view(species) == "fire"   ? "red"
+													   : "yellow";
+	};
+	for (const auto &[value, species,
+				 dead] : std::initializer_list<std::tuple<Block, const char *, bool>>{
+				 {TUBE_CORAL_BLOCK, "tube", false}, {BRAIN_CORAL_BLOCK, "brain", false},
+				 {BUBBLE_CORAL_BLOCK, "bubble", false}, {FIRE_CORAL_BLOCK, "fire", false},
+				 {HORN_CORAL_BLOCK, "horn", false}, {DEAD_TUBE_CORAL_BLOCK, "tube", true},
+				 {DEAD_BRAIN_CORAL_BLOCK, "brain", true},
+				 {DEAD_BUBBLE_CORAL_BLOCK, "bubble", true},
+				 {DEAD_FIRE_CORAL_BLOCK, "fire", true},
+				 {DEAD_HORN_CORAL_BLOCK, "horn", true}})
+		if (block == value)
+			return state(
+					"coral_block", {{"coral_color", std::string(coral_color(species))},
+										   {"dead_bit", dead}});
+	for (const auto &[value, species] :
+			std::initializer_list<std::pair<Block, const char *>>{{TUBE_CORAL, "tube"},
+					{BRAIN_CORAL, "brain"}, {BUBBLE_CORAL, "bubble"},
+					{FIRE_CORAL, "fire"}, {HORN_CORAL, "horn"}})
+		if (block == value)
+			return state("coral", {{"coral_color", std::string(coral_color(species))},
+										  {"dead_bit", false}});
+	for (const auto &[value, species] :
+			std::initializer_list<std::pair<Block, const char *>>{
+					{TUBE_CORAL_FAN, "tube"}, {BRAIN_CORAL_FAN, "brain"},
+					{BUBBLE_CORAL_FAN, "bubble"}, {FIRE_CORAL_FAN, "fire"},
+					{HORN_CORAL_FAN, "horn"}})
+		if (block == value)
+			return state("coral_fan", {{"coral_color", std::string(coral_color(species))},
+											  {"coral_fan_direction", 0}});
 	if (block == BIG_DRIPLEAF)
 		return simple("big_dripleaf");
 	if (block == BIG_DRIPLEAF_STEM)
 		return simple("big_dripleaf_stem");
 	if (block == SMALL_DRIPLEAF_LOWER || block == SMALL_DRIPLEAF_UPPER)
 		return simple("small_dripleaf");
+	if (block == MYCELIUM)
+		return simple("mycelium");
+	if (block == MOSS_CARPET)
+		return simple("moss_carpet");
+	if (block == SWEET_BERRY_BUSH)
+		return state("sweet_berry_bush", {{"growth", 3}});
+	if (block == PUMPKIN)
+		return state("pumpkin", {{"direction", 0}});
+	if (block == LILY_PAD)
+		return simple("waterlily");
+	if (block == CACTUS)
+		return state("cactus", {{"age", 0}});
 	if (block == SNOW_BLOCK)
 		return simple("snow");
 	if (block == SPONGE)
@@ -478,6 +544,10 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("quartz_block");
 	if (block == OAK_FENCE)
 		return state("fence", {{"wood_type", std::string("oak")}});
+	if (block == SPRUCE_FENCE || block == DARK_OAK_FENCE)
+		return state("fence",
+				{{"wood_type",
+						std::string(block == SPRUCE_FENCE ? "spruce" : "dark_oak")}});
 	if (block == OAK_PRESSURE_PLATE)
 		return state("wooden_pressure_plate", {{"redstone_signal", 0}});
 	if (block == RED_BED_NORTH_HEAD || block == RED_BED_NORTH_FOOT ||
@@ -514,6 +584,47 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == WHITE_BED)
 		return state("bed",
 				{{"direction", 2}, {"head_piece_bit", false}, {"occupied_bit", false}});
+	if (block == REDSTONE_LAMP)
+		return simple("redstone_lamp");
+	if (block == EMPTY_FLOWER_POT)
+		return state("flower_pot", {{"update_bit", false}});
+	if (block == TERRACOTTA)
+		return simple("hardened_clay");
+	if (block == MANGROVE_LOG)
+		return state("mangrove_log", {{"pillar_axis", std::string("y")}});
+	if (block == MANGROVE_LEAVES)
+		return state(
+				"mangrove_leaves", {{"persistent_bit", true}, {"update_bit", false}});
+	for (const auto &[value,
+				 name] : std::initializer_list<std::pair<Block, const char *>>{
+				 {LANTERN, "lantern"}, {SOUL_LANTERN, "soul_lantern"}, {SMOKER, "smoker"},
+				 {COMPOSTER, "composter"}, {HOPPER, "hopper"},
+				 {BLAST_FURNACE, "blast_furnace"}, {DISPENSER, "dispenser"},
+				 {GRINDSTONE, "grindstone"},
+				 {POLISHED_BLACKSTONE_SLAB, "polished_blackstone_slab"},
+				 {CHISELED_QUARTZ_BLOCK, "chiseled_quartz_block"},
+				 {SNOWY_GRASS_BLOCK, "snowy_grass_block"}, {SNOWY_PODZOL, "snowy_podzol"},
+				 {WARPED_STAIRS, "warped_stairs"}, {WARPED_TRAPDOOR, "warped_trapdoor"},
+				 {WARPED_SLAB, "warped_slab"},
+				 {STRIPPED_WARPED_STEM, "stripped_warped_stem"},
+				 {STRIPPED_WARPED_HYPHAE, "stripped_warped_hyphae"},
+				 {OBSIDIAN, "obsidian"}, {DEEPSLATE_COAL_ORE, "deepslate_coal_ore"},
+				 {DEEPSLATE_IRON_ORE, "deepslate_iron_ore"},
+				 {DEEPSLATE_COPPER_ORE, "deepslate_copper_ore"},
+				 {DEEPSLATE_GOLD_ORE, "deepslate_gold_ore"},
+				 {DEEPSLATE_REDSTONE_ORE, "deepslate_redstone_ore"},
+				 {DEEPSLATE_LAPIS_ORE, "deepslate_lapis_ore"},
+				 {DEEPSLATE_DIAMOND_ORE, "deepslate_diamond_ore"}, {CALCITE, "calcite"},
+				 {BASALT, "basalt"}, {SMOOTH_BASALT, "smooth_basalt"},
+				 {SPORE_BLOSSOM, "spore_blossom"}, {AZALEA, "azalea"},
+				 {FLOWERING_AZALEA, "flowering_azalea"}, {AZALEA_LEAVES, "azalea_leaves"},
+				 {SHROOMLIGHT, "shroomlight"}, {SCULK, "sculk"},
+				 {SCULK_CATALYST, "sculk_catalyst"}, {SCULK_SENSOR, "sculk_sensor"},
+				 {SCULK_SHRIEKER, "sculk_shrieker"}, {GREEN_CARPET, "green_carpet"},
+				 {LIGHT_BLUE_CARPET, "light_blue_carpet"},
+				 {LIGHT_GRAY_CARPET, "light_gray_carpet"}})
+		if (block == value)
+			return simple(name);
 	if (block == LECTERN)
 		return state("lectern",
 				{{"direction", 2}, {"minecraft:cardinal_direction", std::string("north")},
@@ -544,6 +655,10 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == OAK_SLAB || block == OAK_SLAB_TOP)
 		return state("wooden_slab", {{"wood_type", std::string("oak")},
 											{"top_slot_bit", block == OAK_SLAB_TOP}});
+	if (block == SPRUCE_SLAB || block == DARK_OAK_SLAB)
+		return state("wooden_slab",
+				{{"wood_type", std::string(block == SPRUCE_SLAB ? "spruce" : "dark_oak")},
+						{"top_slot_bit", false}});
 	if (block == SMOOTH_STONE_SLAB)
 		return state(
 				"stone_block_slab", {{"stone_slab_type", std::string("smooth_stone")},
@@ -647,20 +762,246 @@ BedrockBlock to_bedrock_block(const Block &block)
 
 BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 {
-	using namespace block_definitions;
-	if (value.block == SNOW_LAYER) {
-		int layers = 1;
-		if (const auto it = value.properties.find("layers");
-				it != value.properties.end()) {
-			try {
-				layers = std::stoi(it->second);
-			} catch (...) {
-				layers = 1;
-			}
+	auto out = to_bedrock_block(value.block);
+	const auto prop = [&](const char *key) -> const std::string * {
+		const auto it = value.properties.find(key);
+		return it == value.properties.end() ? nullptr : &it->second;
+	};
+	const auto string_prop = [&](const char *key, const char *fallback) {
+		const auto *v = prop(key);
+		return v ? std::string_view(*v) : std::string_view(fallback);
+	};
+	const auto is_true = [&](const char *key) {
+		return string_prop(key, "false") == "true";
+	};
+	const auto int_prop = [&](const char *key, int fallback) {
+		const auto *v = prop(key);
+		if (!v)
+			return fallback;
+		try {
+			return std::stoi(*v);
+		} catch (...) {
+			return fallback;
 		}
-		layers = std::clamp(layers, 1, 8);
+	};
+	const auto set = [&](const char *key, BedrockStateValue state_value) {
+		out.states.insert_or_assign(key, std::move(state_value));
+	};
+	const auto has_suffix = [](std::string_view s, std::string_view suffix) {
+		return s.size() >= suffix.size() && s.substr(s.size() - suffix.size()) == suffix;
+	};
+	const auto bedrock_name = [&]() -> std::string_view {
+		constexpr std::string_view prefix = "minecraft:";
+		return out.name.compare(0, prefix.size(), prefix) == 0
+					   ? std::string_view(out.name).substr(prefix.size())
+					   : std::string_view(out.name);
+	};
+	const auto facing_weirdo = [&]() {
+		const auto facing = string_prop("facing", "east");
+		return facing == "east" ? 0 : facing == "west" ? 1 : facing == "south" ? 2 : 3;
+	};
+	const auto facing_cardinal = [&]() {
+		const auto facing =
+				string_prop("facing", "south"); // Bedrock: south, west, north, east.
+		return facing == "south" ? 0 : facing == "west" ? 1 : facing == "north" ? 2 : 3;
+	};
+	const auto facing_direction = [&]() {
+		const auto facing = string_prop(
+				"facing", "up"); // Bedrock: down, up, north, south, west, east.
+		return facing == "down"	   ? 0
+			   : facing == "north" ? 2
+			   : facing == "south" ? 3
+			   : facing == "west"  ? 4
+			   : facing == "east"  ? 5
+								   : 1;
+	};
+	const auto name = bedrock_name();
+
+	if (value.block == block_definitions::CAVE_VINES ||
+			value.block == block_definitions::CAVE_VINES_UNLIT ||
+			value.block == block_definitions::CAVE_VINES_PLANT ||
+			value.block == block_definitions::CAVE_VINES_PLANT_LIT) {
+		const bool head = value.block == block_definitions::CAVE_VINES ||
+						  value.block == block_definitions::CAVE_VINES_UNLIT;
+		const auto vine_name = is_true("berries")
+									   ? (head ? "cave_vines_head_with_berries"
+											   : "cave_vines_body_with_berries")
+									   : "cave_vines";
+		return state(vine_name, {{"growing_plant_age", 25}});
+	}
+	if (value.block == block_definitions::SNOW_LAYER || name == "snow_layer") {
+		const auto layers = std::clamp(int_prop("layers", 1), 1, 8);
 		return state("snow_layer", {{"height", layers - 1}, {"covered_bit", false}});
 	}
-	return to_bedrock_block(value.block);
+	if (has_suffix(name, "_stairs")) {
+		if (name == "stone_stairs")
+			out.name = "minecraft:normal_stone_stairs";
+		else if (name == "cobblestone_stairs")
+			out.name = "minecraft:stone_stairs";
+		set("weirdo_direction", facing_weirdo());
+		set("upside_down_bit", string_prop("half", "bottom") == "top");
+		return out;
+	}
+	if (name == "barrel") {
+		set("facing_direction", facing_direction());
+		set("open_bit", is_true("open"));
+		return out;
+	}
+	if (name == "amethyst_cluster" || name == "small_amethyst_bud" ||
+			name == "medium_amethyst_bud" || name == "large_amethyst_bud") {
+		set("facing_direction", facing_direction());
+		return out;
+	}
+	if (name == "daylight_detector" && is_true("inverted"))
+		return state("daylight_detector_inverted", {{"redstone_signal", 11}});
+	if (name == "redstone_lamp" && is_true("lit"))
+		return simple("lit_redstone_lamp");
+	if (has_suffix(name, "_slab") || name.rfind("stone_block_slab", 0) == 0 ||
+			name == "wooden_slab") {
+		const auto type = string_prop("type", "bottom");
+		set("top_slot_bit", type == "top");
+		if (type == "double") {
+			if (name.rfind("stone_block_slab", 0) == 0 || name == "wooden_slab")
+				out.name = "minecraft:double_" + std::string(name);
+			else if (has_suffix(name, "_slab"))
+				out.name = "minecraft:" + std::string(name.substr(0, name.size() - 5)) +
+						   "_double_slab";
+		}
+		return out;
+	}
+	if (name == "chain" || has_suffix(name, "_log") || has_suffix(name, "_wood") ||
+			name == "basalt") {
+		const auto axis = string_prop("axis", "y");
+		set("pillar_axis", std::string(axis));
+		return out;
+	}
+	if (name == "wooden_door" || has_suffix(name, "_door")) {
+		const auto facing =
+				string_prop("facing", "south"); // Door direction is rotated clockwise.
+		const int direction = facing == "east"	  ? 0
+							  : facing == "south" ? 1
+							  : facing == "west"  ? 2
+												  : 3;
+		set("upper_block_bit", string_prop("half", "lower") == "upper");
+		set("direction", direction);
+		set("door_hinge_bit", string_prop("hinge", "left") == "right");
+		set("open_bit", is_true("open"));
+		return out;
+	}
+	if (name == "trapdoor" || has_suffix(name, "_trapdoor")) {
+		set("direction", facing_weirdo());
+		set("open_bit", is_true("open"));
+		set("upside_down_bit", string_prop("half", "bottom") == "top");
+		return out;
+	}
+	if (name == "bed") {
+		set("direction", facing_cardinal());
+		set("head_piece_bit", string_prop("part", "foot") == "head");
+		set("occupied_bit", is_true("occupied"));
+		return out;
+	}
+	if (name == "rail") {
+		const auto shape = string_prop("shape", "north_south");
+		const int direction = shape == "east_west"		   ? 1
+							  : shape == "ascending_east"  ? 2
+							  : shape == "ascending_west"  ? 3
+							  : shape == "ascending_north" ? 4
+							  : shape == "ascending_south" ? 5
+							  : shape == "south_east"	   ? 6
+							  : shape == "south_west"	   ? 7
+							  : shape == "north_west"	   ? 8
+							  : shape == "north_east"	   ? 9
+														   : 0;
+		set("rail_direction", direction);
+		return out;
+	}
+	if (name == "wall_banner") {
+		const auto facing = string_prop("facing", "north");
+		set("facing_direction", facing == "south"  ? 3
+								: facing == "west" ? 4
+								: facing == "east" ? 5
+												   : 2);
+		return out;
+	}
+	if (name == "redstone_torch" && prop("facing")) {
+		const auto facing = string_prop("facing", "north");
+		const auto mounted = facing == "north"	 ? "south"
+							 : facing == "south" ? "north"
+							 : facing == "east"	 ? "west"
+												 : "east";
+		set("torch_facing_direction", std::string(mounted));
+		return out;
+	}
+	if (name == "wheat" || name == "carrots" || name == "potatoes") {
+		set("growth", std::clamp(int_prop("age", 0), 0, 7));
+		return out;
+	}
+	if (name == "double_plant") {
+		set("upper_block_bit", string_prop("half", "lower") == "upper");
+		return out;
+	}
+	if (name == "seagrass" && prop("half")) {
+		set("sea_grass_type",
+				std::string(string_prop("half", "lower") == "upper" ? "double_top"
+																	: "double_bot"));
+		return out;
+	}
+	if (name == "standing_sign" || name == "sign") {
+		set("ground_sign_direction", ((int_prop("rotation", 0) % 16) + 16) % 16);
+		return out;
+	}
+	if (name == "sea_pickle") {
+		set("cluster_count", std::clamp(int_prop("pickles", 1) - 1, 0, 3));
+		set("dead_bit", false);
+		return out;
+	}
+	if (name == "chiseled_bookshelf") {
+		set("direction", facing_cardinal());
+		set("books_stored", 0);
+		return out;
+	}
+	if (name == "cobblestone_wall") {
+		for (const auto *side : {"east", "north", "south", "west"}) {
+			const auto connection = string_prop(side, "none");
+			set((std::string("wall_connection_type_") + side).c_str(),
+					std::string(connection == "low"	   ? "short"
+								: connection == "tall" ? "tall"
+													   : "none"));
+		}
+		set("wall_post_bit", string_prop("up", "true") != "false");
+		return out;
+	}
+	if (name == "pointed_dripstone") {
+		const auto thickness = string_prop("thickness", "tip");
+		set("dripstone_thickness",
+				std::string(thickness == "tip_merge" ? "merge" : thickness));
+		set("hanging", string_prop("vertical_direction", "up") == "down");
+		return out;
+	}
+	if (name == "glow_lichen" || name == "sculk_vein") {
+		int bits = 0;
+		constexpr const char *faces[] = {"down", "up", "south", "west", "north", "east"};
+		for (int i = 0; i < 6; ++i)
+			if (is_true(faces[i]))
+				bits |= 1 << i;
+		set("multi_face_direction_bits", bits ? bits : 1);
+		return out;
+	}
+	if (name == "big_dripleaf" || name == "big_dripleaf_stem") {
+		const bool is_head = name == "big_dripleaf";
+		out.name = "minecraft:big_dripleaf";
+		set("big_dripleaf_head", is_head);
+		set("big_dripleaf_tilt", std::string("none"));
+		set("direction", 0);
+		return out;
+	}
+	if (name == "small_dripleaf") {
+		out.name = "minecraft:small_dripleaf_block";
+		set("upper_block_bit", value.block == block_definitions::SMALL_DRIPLEAF_UPPER ||
+									   string_prop("half", "lower") == "upper");
+		set("direction", 0);
+		return out;
+	}
+	return out;
 }
 }

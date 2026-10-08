@@ -32,6 +32,8 @@ namespace arnis
 namespace water_areas
 {
 
+constexpr int MAX_STILL_FILL_DROP = 20;
+
 using BgPoint = boost::geometry::model::d2::point_xy<double>;
 using BgLinestring = boost::geometry::model::linestring<BgPoint>;
 using BgPolygon = boost::geometry::model::polygon<BgPoint>;
@@ -329,9 +331,52 @@ static std::vector<std::pair<int, int>> subtract_spans(
 
 static bool spans_contain(const std::vector<std::pair<int, int>> &spans, int x)
 {
-	return std::any_of(spans.begin(), spans.end(),
-			[x](const auto &span) { return x >= span.first && x <= span.second; });
+	const auto it = std::lower_bound(spans.begin(), spans.end(), x,
+			[](const auto &span, int value) { return span.second < value; });
+	return it != spans.end() && x >= it->first;
 }
+
+struct SpanRows
+{
+	std::vector<std::vector<std::pair<int, int>>> rows;
+	int z0{};
+
+	SpanRows(const std::vector<std::vector<ScanlineEdge>> &outer_groups,
+			const std::vector<ScanlineEdge> &inner_edges, int first_z, int last_z,
+			int min_x, int max_x) : z0(first_z)
+	{
+		if (last_z < first_z)
+			return;
+		rows.reserve(static_cast<std::size_t>(std::int64_t(last_z) - first_z + 1));
+		for (int z = first_z;; ++z) {
+			std::vector<std::pair<int, int>> outer_spans;
+			for (const auto &edges : outer_groups)
+				outer_spans = union_spans(
+						outer_spans, compute_scanline_spans(edges, static_cast<double>(z),
+											 min_x, max_x));
+			if (!outer_spans.empty() && !inner_edges.empty()) {
+				auto inner_spans = compute_scanline_spans(
+						inner_edges, static_cast<double>(z), min_x, max_x);
+				if (!inner_spans.empty())
+					outer_spans = subtract_spans(outer_spans, inner_spans);
+			}
+			rows.push_back(std::move(outer_spans));
+			if (z == last_z)
+				break;
+		}
+	}
+
+	const std::vector<std::pair<int, int>> &get(int z) const
+	{
+		static const std::vector<std::pair<int, int>> empty;
+		const auto index = std::int64_t(z) - z0;
+		if (index < 0 || static_cast<std::uint64_t>(index) >= rows.size())
+			return empty;
+		return rows[static_cast<std::size_t>(index)];
+	}
+
+	bool contains(int x, int z) const { return spans_contain(get(z), x); }
+};
 
 static constexpr double STILL_SURFACE_MAX_BELOW_SHARE = .01;
 
@@ -365,7 +410,9 @@ static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
 		const int remainder = ((coordinate % stride) + stride) % stride;
 		return coordinate + (stride - remainder) % stride;
 	};
-	for (int z = lattice_start(min_z); z <= max_z; z += stride) {
+	// Rust anchors the vertical sampling lattice at this polygon's minimum Z;
+	// only X is aligned to the world grid when each row is sampled.
+	for (int z = min_z; z <= max_z; z += stride) {
 		std::vector<std::pair<int, int>> outer_spans;
 		for (const auto &edges : outer_edge_groups)
 			outer_spans = union_spans(outer_spans,
@@ -429,20 +476,10 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 	for (const auto &outer : outers)
 		outer_edge_groups.push_back(collect_ring_edges(outer));
 	auto inner_edges = collect_all_ring_edges(inners);
-	auto filled_at = [&](int x, int z) {
-		std::vector<std::pair<int, int>> outer_spans;
-		for (const auto &edges : outer_edge_groups)
-			outer_spans = union_spans(
-					outer_spans, compute_scanline_spans(edges, static_cast<double>(z),
-										 min_x - 4, max_x + 4));
-		if (outer_spans.empty() || !spans_contain(outer_spans, x))
-			return false;
-		if (inner_edges.empty())
-			return true;
-		return !spans_contain(compute_scanline_spans(inner_edges, static_cast<double>(z),
-									  min_x - 4, max_x + 4),
-				x);
-	};
+	constexpr int interior_margin = 4;
+	const SpanRows spans(outer_edge_groups, inner_edges, min_z - interior_margin,
+			max_z + interior_margin, min_x - interior_margin, max_x + interior_margin);
+	auto filled_at = [&](int x, int z) { return spans.contains(x, z); };
 	auto climbs_to_water = [&](int x, int z) {
 		constexpr int max_climb = 48;
 		constexpr int reach = 3;
@@ -482,25 +519,11 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 	};
 
 	for (int z = min_z; z <= max_z; ++z) {
-		std::vector<std::pair<int, int>> outer_spans;
-		for (const auto &edges : outer_edge_groups) {
-			auto spans =
-					compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x);
-			if (!spans.empty())
-				outer_spans = union_spans(outer_spans, spans);
-		}
-		if (outer_spans.empty())
-			continue;
-
-		std::vector<std::pair<int, int>> fill_spans = outer_spans;
-		if (!inner_edges.empty()) {
-			auto inner_spans = compute_scanline_spans(
-					inner_edges, static_cast<double>(z), min_x, max_x);
-			if (!inner_spans.empty())
-				fill_spans = subtract_spans(outer_spans, inner_spans);
-		}
-
-		for (const auto &[start, end] : fill_spans) {
+		for (const auto &[span_start, span_end] : spans.get(z)) {
+			const int start = std::max(span_start, min_x);
+			const int end = std::min(span_end, max_x);
+			if (start > end)
+				continue;
 			for (int x = start; x <= end; ++x) {
 				const bool on_road = road_mask.contains(x, z);
 				if (on_road && !bridge_surface.contains(x, z))
@@ -516,7 +539,17 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 														land_cover::LC_WATER)
 								? still_surface
 								: std::nullopt;
-				int water_y = column_surface.value_or(editor.get_water_level(x, z));
+				int water_y;
+				if (column_surface) {
+					// Match Rust's still-water guard: do not bridge exposed banks or
+					// suspend a lake surface more than 20 blocks above its terrain.
+					if (ground_y > *column_surface ||
+							*column_surface - ground_y > MAX_STILL_FILL_DROP)
+						continue;
+					water_y = *column_surface;
+				} else {
+					water_y = editor.get_water_level(x, z);
+				}
 				if (!column_surface && editor.is_steep_land(x, z) &&
 						!climbs_to_water(x, z))
 					continue;
@@ -835,6 +868,10 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
 			clipped_inners.push_back(std::move(*clipped));
 	inners = std::move(clipped_inners);
+	// Clipping can leave adjacent fragments of a hole as separate segments.
+	// Rust reassembles those fragments before deciding whether the inner rings
+	// are valid, matching the outer-ring handling above.
+	merge_loopy_loops(inners);
 	if (!verify_closed_rings(inners)) {
 		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
 				  << std::endl;
@@ -920,6 +957,7 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 				continue;
 			merge_loopy_loops(inners);
 			clip_rings(inners);
+			merge_loopy_loops(inners);
 			if (!verify_closed_rings(inners))
 				continue;
 			kind = "relation";

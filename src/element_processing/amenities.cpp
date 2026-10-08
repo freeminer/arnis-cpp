@@ -320,169 +320,106 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 	}
 
 	if (amenity_type == "parking") {
-		std::optional<crate::coordinate_system::cartesian::XZPoint> previous_node =
-				std::nullopt;
-		std::tuple<int, int, int> corner_addup = std::make_tuple(0, 0, 0);
-		std::vector<std::pair<int, int>> current_amenity;
-
-		const crate::block_definitions::Block block_type =
-				crate::block_definitions::GRAY_CONCRETE;
+		using B = crate::block_definitions::Block;
+		std::vector<B> block_types{crate::block_definitions::GRAY_CONCRETE_POWDER,
+				crate::block_definitions::CYAN_TERRACOTTA};
+		if (const auto surface = tags.find("surface"); surface != tags.end())
+			if (const auto *mapped = surfaces::get_blocks_for_surface(surface->second);
+					mapped && !mapped->empty())
+				block_types = *mapped;
+		const std::optional<std::vector<B>> outline_replacements =
+				std::vector<B>{crate::block_definitions::BLACK_CONCRETE,
+						crate::block_definitions::GRAY_CONCRETE_POWDER,
+						crate::block_definitions::CYAN_TERRACOTTA};
+		const std::optional<std::vector<B>> fill_replacements =
+				std::vector<B>{crate::block_definitions::BLACK_CONCRETE,
+						crate::block_definitions::GRAY_CONCRETE_POWDER,
+						crate::block_definitions::CYAN_TERRACOTTA,
+						crate::block_definitions::GRAY_CONCRETE};
+		constexpr int space_width = 4;
+		constexpr int space_length = 8;
+		constexpr int lane_width = 5;
+		std::optional<crate::coordinate_system::cartesian::XZPoint> previous_node;
 
 		for (const crate::osm_parser::ProcessedNode &node : element.nodes()) {
 			crate::coordinate_system::cartesian::XZPoint pt = node.xz();
-			if (previous_node.has_value()) {
-				std::vector<std::tuple<int, int, int>> bresenham_points =
-						crate::bresenham::bresenham_line(
-								previous_node->x, 0, previous_node->z, pt.x, 0, pt.z);
-				for (const auto &t : bresenham_points) {
-					int bx = std::get<0>(t);
-					int bz = std::get<2>(t);
-					// Use replacement whitelist for better block placement
-					editor.set_block(block_type, bx, 0, bz,
-							std::optional<std::vector<crate::block_definitions::Block>>(
-									std::vector<crate::block_definitions::Block>{
-											crate::block_definitions::BLACK_CONCRETE}),
-							std::nullopt);
-
-					current_amenity.emplace_back(node.x, node.z);
-					std::get<0>(corner_addup) += node.x;
-					std::get<1>(corner_addup) += node.z;
-					std::get<2>(corner_addup) += 1;
+			if (previous_node)
+				for (const auto &[bx, by, bz] : crate::bresenham::bresenham_line(
+							 previous_node->x, 0, previous_node->z, pt.x, 0, pt.z)) {
+					(void)by;
+					editor.set_block(surfaces::semirandom_surface(bx, bz, block_types),
+							bx, 0, bz, outline_replacements, std::nullopt);
 				}
-			}
 			previous_node.emplace(pt);
 		}
 
-		if (std::get<2>(corner_addup) > 0) {
-			std::vector<std::pair<int, int>> flood_area =
-					*flood_fill_cache.get_or_compute_element(element, args.timeout);
+		const auto flood_area =
+				flood_fill_cache.get_or_compute_element(element, args.timeout);
+		for (const auto &[x, z] : *flood_area) {
+			if (editor.nested_area_owns(x, z))
+				continue;
+			editor.set_block(surfaces::semirandom_surface(x, z, block_types), x, 0, z,
+					fill_replacements, std::nullopt);
+			const int zone_x = x / space_width;
+			const int zone_z = z / (space_length + lane_width);
+			const int local_x = x % space_width;
+			const int local_z = z % (space_length + lane_width);
+			if ((local_z < space_length && (local_x == 0 || local_z == 0)) ||
+					local_z == space_length)
+				editor.set_block(crate::block_definitions::WHITE_CONCRETE, x, 0, z,
+						fill_replacements, std::nullopt);
 
-			for (const auto &p : flood_area) {
-				int x = p.first;
-				int z = p.second;
-				editor.set_block(block_type, x, 0, z,
-						std::optional<std::vector<crate::block_definitions::Block>>(
-								std::vector<crate::block_definitions::Block>{
-										crate::block_definitions::BLACK_CONCRETE,
-										crate::block_definitions::GRAY_CONCRETE}),
-						std::nullopt);
-
-				if (amenity_type == "parking") {
-					// Create defined parking spaces with realistic layout
-					int space_width = 4;  // Width of each parking space
-					int space_length = 8; // Fits the bundled cars.
-					int lane_width = 5;	  // Width of driving lanes
-
-					// Calculate which "zone" this coordinate falls into
-					int zone_x = x / space_width;
-					int zone_z = z / (space_length + lane_width);
-					int local_x = x % space_width;
-					if (local_x < 0)
-						local_x += space_width;
-					int local_z = z % (space_length + lane_width);
-					if (local_z < 0)
-						local_z += (space_length + lane_width);
-
-					// Create parking space boundaries (only within parking areas, not in driving lanes)
-					if (local_z < space_length) {
-						// We're in a parking space area, not in the driving lane
-						if (local_x == 0) {
-							// Vertical parking space lines (only on the left edge)
-							editor.set_block(
-									crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0,
-									z,
-									std::optional<
-											std::vector<crate::block_definitions::Block>>(
-											std::vector<crate::block_definitions::Block>{
-													crate::block_definitions::
-															BLACK_CONCRETE,
-													crate::block_definitions::
-															GRAY_CONCRETE}),
-									std::nullopt);
-						} else if (local_z == 0) {
-							// Horizontal parking space lines (only on the top edge)
-							editor.set_block(
-									crate::block_definitions::LIGHT_GRAY_CONCRETE, x, 0,
-									z,
-									std::optional<
-											std::vector<crate::block_definitions::Block>>(
-											std::vector<crate::block_definitions::Block>{
-													crate::block_definitions::
-															BLACK_CONCRETE,
-													crate::block_definitions::
-															GRAY_CONCRETE}),
-									std::nullopt);
-						}
-					} else if (local_z == space_length) {
-						// Bottom edge of parking spaces (border with driving lane)
-						editor.set_block(crate::block_definitions::LIGHT_GRAY_CONCRETE, x,
-								0, z,
-								std::optional<
-										std::vector<crate::block_definitions::Block>>(
-										std::vector<crate::block_definitions::Block>{
-												crate::block_definitions::BLACK_CONCRETE,
-												crate::block_definitions::GRAY_CONCRETE}),
-								std::nullopt);
-					} else if (local_z > space_length &&
-							   local_z < space_length + lane_width) {
-						// Driving lane - use darker concrete
-						editor.set_block(crate::block_definitions::BLACK_CONCRETE, x, 0,
-								z,
-								std::optional<
-										std::vector<crate::block_definitions::Block>>(
-										std::vector<crate::block_definitions::Block>{
-												crate::block_definitions::GRAY_CONCRETE}),
-								std::nullopt);
-					}
-
-					// Add light posts at parking space outline corners
-					if (local_x == 0 && local_z == 0 && zone_x % 3 == 0 &&
-							zone_z % 2 == 0) {
-						// Light posts at regular intervals on parking space corners
-						editor.set_block(crate::block_definitions::COBBLESTONE_WALL, x, 1,
-								z, std::nullopt, std::nullopt);
-						for (int dy = 2; dy <= 4; ++dy)
-							editor.set_block(crate::block_definitions::OAK_FENCE, x, dy,
-									z, std::nullopt, std::nullopt);
-						editor.set_block(crate::block_definitions::GLOWSTONE, x, 5, z,
-								std::nullopt, std::nullopt);
-					}
-				}
+			if (local_x == 0 && local_z == 0 && zone_x % 3 == 0 && zone_z % 2 == 0) {
+				editor.set_block(crate::block_definitions::SMOOTH_STONE, x, 1, z,
+						std::nullopt, std::nullopt);
+				editor.set_block(crate::block_definitions::ANDESITE_WALL, x, 2, z,
+						std::nullopt, std::nullopt);
+				for (int dy = 3; dy <= 5; ++dy)
+					editor.set_block(crate::block_definitions::IRON_BARS, x, dy, z,
+							std::nullopt, std::nullopt);
+				editor.set_block(crate::block_definitions::SEA_LANTERN, x, 6, z,
+						std::nullopt, std::nullopt);
+				editor.set_block(crate::block_definitions::SMOOTH_STONE_SLAB, x, 7, z,
+						std::nullopt, std::nullopt);
 			}
+		}
 
-			// Place cars only in spaces whose complete footprint lies in the lot.
-			std::vector<std::pair<int, int>> lot = flood_area;
-			std::sort(lot.begin(), lot.end());
-			if (!lot.empty()) {
-				int min_x = lot.front().first, max_x = lot.front().first;
-				int min_z = lot.front().second, max_z = lot.front().second;
-				for (const auto &[x, z] : lot) {
-					min_x = std::min(min_x, x);
-					max_x = std::max(max_x, x);
-					min_z = std::min(min_z, z);
-					max_z = std::max(max_z, z);
-				}
-				constexpr int width = 4, length = 8, period_z = 13;
-				for (int zx = min_x / width; zx <= max_x / width; ++zx) {
-					for (int zz = min_z / period_z; zz <= max_z / period_z; ++zz) {
-						const int x0 = zx * width, z0 = zz * period_z;
-						bool inside = true;
-						for (int dx = 0; inside && dx <= width; ++dx)
-							for (int dz = 0; dz <= length; ++dz)
-								if (!std::binary_search(lot.begin(), lot.end(),
-											std::pair{x0 + dx, z0 + dz})) {
-									inside = false;
-									break;
-								}
-						if (inside)
-							structures::car::maybe_place_car(editor, x0 + 2, z0 + 4, 0);
-					}
+		// Cars are only placed when the entire bay footprint is within the lot.
+		std::vector<std::pair<int, int>> lot;
+		lot.reserve(flood_area->size());
+		for (const auto &[x, z] : *flood_area)
+			if (!editor.nested_area_owns(x, z))
+				lot.emplace_back(x, z);
+		std::sort(lot.begin(), lot.end());
+		if (!flood_area->empty()) {
+			int min_x = flood_area->front().first, max_x = flood_area->front().first;
+			int min_z = flood_area->front().second, max_z = flood_area->front().second;
+			for (const auto &[x, z] : *flood_area) {
+				min_x = std::min(min_x, x);
+				max_x = std::max(max_x, x);
+				min_z = std::min(min_z, z);
+				max_z = std::max(max_z, z);
+			}
+			constexpr int period_z = space_length + lane_width;
+			for (int zx = min_x / space_width; zx <= max_x / space_width; ++zx) {
+				for (int zz = min_z / period_z; zz <= max_z / period_z; ++zz) {
+					const int x0 = zx * space_width, z0 = zz * period_z;
+					bool inside = true;
+					for (int dx = 0; inside && dx <= space_width; ++dx)
+						for (int dz = 0; dz <= space_length; ++dz)
+							if (!std::binary_search(lot.begin(), lot.end(),
+										std::pair{x0 + dx, z0 + dz})) {
+								inside = false;
+								break;
+							}
+					if (inside)
+						structures::car::maybe_place_car(editor, x0 + 2, z0 + 4, 0);
 				}
 			}
 		}
+
 		return;
 	}
-
 	return;
 }
 

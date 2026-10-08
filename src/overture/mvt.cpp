@@ -1,5 +1,7 @@
 #include "mvt.h"
 
+#include <algorithm>
+#include <bit>
 #include <cstring>
 #include <limits>
 
@@ -45,8 +47,10 @@ struct Reader
 			return true;
 		}
 		if (wire == 2) {
-			std::vector<std::uint8_t> ignored;
-			return bytes(ignored);
+			if (!varint(n) || n > data.size() - pos)
+				return false;
+			pos += std::size_t(n);
+			return true;
 		}
 		if (wire == 5) {
 			if (data.size() - pos < 4)
@@ -59,12 +63,14 @@ struct Reader
 };
 std::int64_t zigzag64(std::uint64_t value)
 {
-	return static_cast<std::int64_t>(
-			(value >> 1) ^ -static_cast<std::int64_t>(value & 1));
+	const auto decoded = (value >> 1) ^ (std::uint64_t{0} - (value & 1));
+	return std::bit_cast<std::int64_t>(decoded);
 }
 std::int32_t zigzag(std::uint64_t value)
 {
-	return static_cast<std::int32_t>(zigzag64(value));
+	const auto decoded = static_cast<std::uint32_t>(value);
+	return std::bit_cast<std::int32_t>(
+			(decoded >> 1) ^ (std::uint32_t{0} - (decoded & 1)));
 }
 std::uint32_t little_u32(const std::uint8_t *data)
 {
@@ -91,16 +97,16 @@ bool packed(const std::vector<std::uint8_t> &bytes, std::vector<std::uint32_t> &
 }
 void decode_geometry(const std::vector<std::uint32_t> &commands, Feature &feature)
 {
-	int x = 0, y = 0;
+	std::int32_t x = 0, y = 0;
 	std::size_t i = 0;
 	Ring ring;
 	auto finish = [&] {
 		if (ring.points.size() >= 3) {
-			std::int64_t area = 0;
+			Area area = 0;
 			for (std::size_t p = 0; p < ring.points.size(); ++p) {
-				auto a = ring.points[p], b = ring.points[(p + 1) % ring.points.size()];
-				area += std::int64_t(a.first) * b.second -
-						std::int64_t(b.first) * a.second;
+				const auto a = ring.points[p];
+				const auto b = ring.points[(p + 1) % ring.points.size()];
+				area += Area(a.first) * b.second - Area(b.first) * a.second;
 			}
 			ring.area2 = area;
 			feature.rings.push_back(std::move(ring));
@@ -110,26 +116,29 @@ void decode_geometry(const std::vector<std::uint32_t> &commands, Feature &featur
 	while (i < commands.size()) {
 		const auto command = commands[i++];
 		const auto id = command & 7, count = command >> 3;
-		if (!count)
-			return;
-		if (id == 1 || id == 2)
+		if (id == 1 || id == 2) {
 			for (std::uint32_t n = 0; n < count && i + 1 < commands.size(); ++n) {
-				x += zigzag(commands[i++]);
-				y += zigzag(commands[i++]);
+				const auto dx = static_cast<std::uint32_t>(x) +
+								static_cast<std::uint32_t>(zigzag(commands[i++]));
+				const auto dy = static_cast<std::uint32_t>(y) +
+								static_cast<std::uint32_t>(zigzag(commands[i++]));
+				x = std::bit_cast<std::int32_t>(dx);
+				y = std::bit_cast<std::int32_t>(dy);
 				if (id == 1)
 					finish();
 				ring.points.emplace_back(x, y);
 			}
-		else if (id == 7)
+		} else if (id == 7)
 			finish();
 		else
-			return;
+			break;
 	}
 	finish();
 }
 bool decode_value(const std::vector<std::uint8_t> &bytes, Value &value)
 {
 	Reader r{bytes};
+	value = false;
 	while (r.pos < bytes.size()) {
 		std::uint64_t key;
 		if (!r.varint(key))
@@ -140,7 +149,7 @@ bool decode_value(const std::vector<std::uint8_t> &bytes, Value &value)
 			if (!r.bytes(s))
 				return false;
 			value = std::string(s.begin(), s.end());
-			return true;
+			continue;
 		}
 		if (field == 2 && wire == 5) {
 			if (r.pos + 4 > bytes.size())
@@ -150,7 +159,7 @@ bool decode_value(const std::vector<std::uint8_t> &bytes, Value &value)
 			std::memcpy(&decoded, &bits, sizeof(decoded));
 			r.pos += sizeof(decoded);
 			value = double(decoded);
-			return true;
+			continue;
 		}
 		if (field == 3 && wire == 1) {
 			if (r.pos + 8 > bytes.size())
@@ -160,28 +169,31 @@ bool decode_value(const std::vector<std::uint8_t> &bytes, Value &value)
 			std::memcpy(&decoded, &bits, sizeof(decoded));
 			r.pos += sizeof(decoded);
 			value = decoded;
-			return true;
+			continue;
 		}
 		if ((field == 4 || field == 5 || field == 6) && wire == 0) {
 			std::uint64_t v;
 			if (!r.varint(v))
 				return false;
-			value = field == 4	 ? Value(std::int64_t(v))
-					: field == 6 ? Value(zigzag64(v))
-								 : Value(v);
-			return true;
+			if (field == 4)
+				value = std::bit_cast<std::int64_t>(v);
+			else if (field == 6)
+				value = zigzag64(v);
+			else
+				value = v;
+			continue;
 		}
 		if (field == 7 && wire == 0) {
 			std::uint64_t v;
 			if (!r.varint(v))
 				return false;
 			value = bool(v);
-			return true;
+			continue;
 		}
 		if (!r.skip(wire))
 			return false;
 	}
-	return false;
+	return true;
 }
 bool decode_feature(const std::vector<std::uint8_t> &bytes, Feature &out)
 {
@@ -192,19 +204,37 @@ bool decode_feature(const std::vector<std::uint8_t> &bytes, Feature &out)
 		if (!r.varint(key))
 			return false;
 		auto field = key >> 3, wire = key & 7;
-		if (field == 2 && wire == 2) {
+		if (field == 2) {
 			std::vector<std::uint8_t> b;
-			if (!r.bytes(b) || !packed(b, out.tags))
+			if (wire == 2) {
+				if (!r.bytes(b) || !packed(b, out.tags))
+					return false;
+			} else if (wire == 0) {
+				std::uint64_t value;
+				if (!r.varint(value) || value > UINT32_MAX)
+					return false;
+				out.tags.push_back(static_cast<std::uint32_t>(value));
+			} else {
 				return false;
+			}
 		} else if (field == 3 && wire == 0) {
 			std::uint64_t v;
-			if (!r.varint(v))
+			if (!r.varint(v) || v > UINT32_MAX)
 				return false;
-			out.geom_type = v;
-		} else if (field == 4 && wire == 2) {
+			out.geom_type = static_cast<std::uint32_t>(v);
+		} else if (field == 4) {
 			std::vector<std::uint8_t> b;
-			if (!r.bytes(b) || !packed(b, geometry))
+			if (wire == 2) {
+				if (!r.bytes(b) || !packed(b, geometry))
+					return false;
+			} else if (wire == 0) {
+				std::uint64_t value;
+				if (!r.varint(value) || value > UINT32_MAX)
+					return false;
+				geometry.push_back(static_cast<std::uint32_t>(value));
+			} else {
 				return false;
+			}
 		} else if (!r.skip(wire))
 			return false;
 	}
@@ -227,13 +257,13 @@ bool decode_layer(const std::vector<std::uint8_t> &bytes, Layer &out)
 				out.name.assign(b.begin(), b.end());
 			else if (field == 2) {
 				Feature f;
-				if (!decode_feature(b, f))
-					return false;
-				out.features.push_back(std::move(f));
+				if (decode_feature(b, f))
+					out.features.push_back(std::move(f));
 			} else if (field == 4) {
 				Value v;
-				if (decode_value(b, v))
-					out.values.push_back(std::move(v));
+				if (!decode_value(b, v))
+					return false;
+				out.values.push_back(std::move(v));
 			}
 		} else if (field == 3 && wire == 2) {
 			if (!r.bytes(b))
@@ -243,11 +273,13 @@ bool decode_layer(const std::vector<std::uint8_t> &bytes, Layer &out)
 			std::uint64_t v;
 			if (!r.varint(v))
 				return false;
-			out.extent = std::uint32_t(std::min<std::uint64_t>(v, UINT32_MAX));
+			out.extent = v <= UINT32_MAX ? std::max<std::uint32_t>(
+												   1, static_cast<std::uint32_t>(v))
+										 : 4096;
 		} else if (!r.skip(wire))
 			return false;
 	}
-	return !out.name.empty();
+	return true;
 }
 }
 std::optional<Value> Layer::attribute(

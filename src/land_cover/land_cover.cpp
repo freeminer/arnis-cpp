@@ -7,18 +7,21 @@
 #include <filesystem>
 #include "../../arnis_adapter.h"
 #include "../element_processing/bridges.h"
+#include "../element_processing/way_segments.h"
 #include "../element_processing/waterways.h"
 #include "../bresenham.h"
 #include "../clipping.h"
 #include <queue>
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
 #include <deque>
 #include <array>
 #include <limits>
 #include <iomanip>
 #include <sstream>
+#include <system_error>
 #include <utility>
 #include <unordered_map>
 
@@ -32,38 +35,37 @@ namespace arnis::land_cover
 {
 namespace
 {
-void merge_ring_segments(std::vector<std::vector<ProcessedNode>> &rings)
+constexpr int BRIDGE_STAMP_MARGIN_CELLS = 8;
+
+int scaled_block_range(int raw, double scale)
 {
-	bool changed = true;
-	while (changed) {
-		changed = false;
-		for (std::size_t i = 0; i < rings.size() && !changed; ++i) {
-			if (rings[i].empty())
-				continue;
-			for (std::size_t j = i + 1; j < rings.size(); ++j) {
-				if (rings[j].empty())
-					continue;
-				auto same = [](const ProcessedNode &a, const ProcessedNode &b) {
-					return a.id == b.id || (a.x == b.x && a.z == b.z);
-				};
-				auto &a = rings[i];
-				auto &b = rings[j];
-				if (same(a.back(), b.front()))
-					a.insert(a.end(), std::next(b.begin()), b.end());
-				else if (same(a.back(), b.back()))
-					a.insert(a.end(), std::next(b.rbegin()), b.rend());
-				else if (same(a.front(), b.back()))
-					a.insert(a.begin(), b.begin(), std::prev(b.end()));
-				else if (same(a.front(), b.front()))
-					a.insert(a.begin(), std::next(b.rbegin()), b.rend());
-				else
-					continue;
-				rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(j));
-				changed = true;
-				break;
-			}
+	return scale < 1.0 ? std::max(1, static_cast<int>(std::floor(raw * scale))) : raw;
+}
+
+int bridge_block_range_world(const ProcessedWay &way, double scale)
+{
+	const auto highway = way.tags.get("highway");
+	if (!highway.empty())
+		return highways::highway_block_range(highway, way.tags, scale);
+	if (way.tags.find("railway") != way.tags.end()) {
+		int tracks = 1;
+		const auto tracks_tag = way.tags.get("tracks");
+		if (!tracks_tag.empty()) {
+			int parsed_tracks = 0;
+			const auto *begin = tracks_tag.data();
+			const auto *end = begin + tracks_tag.size();
+			const auto parsed = std::from_chars(begin, end, parsed_tracks);
+			if (parsed.ec == std::errc{} && parsed.ptr == end)
+				tracks = std::max(1, parsed_tracks);
 		}
+		return scaled_block_range(1 + tracks - 1, scale);
 	}
+	return scaled_block_range(1, scale);
+}
+
+int world_to_grid(int relative, double scale)
+{
+	return static_cast<int>(std::lround(std::max(relative, 0) * scale));
 }
 
 double cells_per_meter(const GeographicBounds &bbox, std::size_t grid_width)
@@ -302,6 +304,10 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 			std::any_of(heights.begin(), heights.begin() + data.height,
 					[&](const auto &row) { return row.size() < data.width; }))
 		return;
+	if (std::none_of(elements.begin(), elements.end(), [](const auto &element) {
+			return element.is_way() && bridges::is_bridge_way(element.as_way());
+		}))
+		return;
 	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
 	// real water/vegetation out of the mask is what lets bridge footprints be
 	// reclassified from their surrounding land-cover rather than overwritten.
@@ -314,27 +320,15 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 				e.as_way().nodes.size() < 2)
 			continue;
 		const auto &way = e.as_way();
-		auto nodes = way.nodes;
-		int half_width = 1;
-		const auto highway = way.tags.get("highway");
-		if (!highway.empty())
-			half_width = highways::highway_block_range(highway, way.tags, scale);
-		else if (way.tags.find("railway") != way.tags.end()) {
-			try {
-				half_width += std::max(0, std::stoi(way.tags.get("tracks")) - 1);
-			} catch (...) {
-			}
-		} else
-			half_width = std::max(
-					1, scale < 1.0 ? int(std::floor(half_width * scale)) : half_width);
-		half_width += 8;
-		const int range_x = std::max(1, int(std::ceil(half_width * sx)));
-		const int range_z = std::max(1, int(std::ceil(half_width * sz)));
-		for (std::size_t i = 1; i < nodes.size(); ++i) {
-			int x0 = std::lround((nodes[i - 1].x - bbox.min_x()) * sx),
-				z0 = std::lround((nodes[i - 1].z - bbox.min_z()) * sz);
-			int x1 = std::lround((nodes[i].x - bbox.min_x()) * sx),
-				z1 = std::lround((nodes[i].z - bbox.min_z()) * sz);
+		const int block_range_world =
+				bridge_block_range_world(way, scale) + BRIDGE_STAMP_MARGIN_CELLS;
+		const int range_x = std::max(1, int(std::ceil(block_range_world * sx)));
+		const int range_z = std::max(1, int(std::ceil(block_range_world * sz)));
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const int x0 = world_to_grid(way.nodes[i - 1].x - bbox.min_x(), sx);
+			const int z0 = world_to_grid(way.nodes[i - 1].z - bbox.min_z(), sz);
+			const int x1 = world_to_grid(way.nodes[i].x - bbox.min_x(), sx);
+			const int z1 = world_to_grid(way.nodes[i].z - bbox.min_z(), sz);
 			for (auto [x, y, z] : bresenham::bresenham_line(x0, 0, z0, x1, 0, z1))
 				for (int dz = -range_z; dz <= range_z; ++dz)
 					for (int dx = -range_x; dx <= range_x; ++dx) {
@@ -630,8 +624,8 @@ void apply_osm_water_override(LandCoverData &data,
 				else if (m.role == ProcessedMemberRole::Inner)
 					inner_nodes.push_back(m.way.nodes);
 			}
-			merge_ring_segments(outer_nodes);
-			merge_ring_segments(inner_nodes);
+			merge_way_segments(outer_nodes);
+			merge_way_segments(inner_nodes);
 			std::vector<std::vector<std::pair<int, int>>> outer, inner;
 			for (const auto &ring : outer_nodes)
 				if (closed_ring(ring))

@@ -3,6 +3,7 @@
 #include "../../../http.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <cstring>
@@ -16,6 +17,7 @@ namespace arnis::elevation
 namespace
 {
 constexpr std::size_t MAX_SOURCE_DIM = 3072;
+constexpr std::size_t MAX_CONCURRENT_DOWNLOADS = 24;
 
 struct DemSpec
 {
@@ -184,20 +186,22 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 	const auto cached = cache_directory.empty()
 								? std::filesystem::path{}
 								: cache_path(cache_directory, body, window);
+	// Only a completely decoded cache window is a hit. Checking path existence
+	// separately would accept a truncated/corrupt file and silently turn the
+	// whole requested area into NaNs instead of following Rust's refetch path.
+	auto cached_window = cached.empty() ? std::optional<std::vector<double>>{}
+										: load_window(cached, sample_count);
+	const bool fetched = cached_window.has_value();
 	std::vector<double> source =
-			cached.empty()
-					? std::vector<double>{}
-					: load_window(cached, sample_count).value_or(std::vector<double>{});
-	if (source.empty())
-		source.assign(sample_count, std::numeric_limits<double>::quiet_NaN());
-	const bool fetched = source.size() == sample_count &&
-						 (!cached.empty() && std::filesystem::exists(cached));
+			fetched ? std::move(*cached_window)
+					: std::vector<double>(
+							  sample_count, std::numeric_limits<double>::quiet_NaN());
 	std::size_t successful_rows = fetched ? window.lines : 0;
 	if (!fetched) {
-		for (std::size_t row = 0; row < window.lines; ++row) {
+		const auto fetch_row =
+				[&](std::size_t row) -> std::optional<std::vector<double>> {
 			std::vector<double> values(
 					window.samples, std::numeric_limits<double>::quiet_NaN());
-			bool complete = true;
 			const auto line = window.line0 + row * window.step;
 			const auto latitude = 90.0 - double(line) / spec->ppd;
 			const auto lat_band = std::clamp(
@@ -233,31 +237,52 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 					if (bytes && bytes->size() != length)
 						bytes.reset();
 				}
-				if (!bytes) {
-					complete = false;
-				} else {
-					for (std::size_t i = 0; i < take; ++i) {
-						const auto at = i * window.step * 2;
-						const auto raw =
-								spec->big_endian
-										? std::int16_t(
-												  (std::uint16_t((*bytes)[at]) << 8) |
-												  (*bytes)[at + 1])
-										: std::int16_t(
-												  (std::uint16_t((*bytes)[at + 1]) << 8) |
-												  (*bytes)[at]);
-						if (raw != std::numeric_limits<std::int16_t>::min())
-							values[col + i] = raw * spec->dn_to_meters;
-					}
+				if (!bytes)
+					return std::nullopt;
+				for (std::size_t i = 0; i < take; ++i) {
+					const auto at = i * window.step * 2;
+					const auto raw =
+							spec->big_endian
+									? std::int16_t((std::uint16_t((*bytes)[at]) << 8) |
+												   (*bytes)[at + 1])
+									: std::int16_t(
+											  (std::uint16_t((*bytes)[at + 1]) << 8) |
+											  (*bytes)[at]);
+					if (raw != std::numeric_limits<std::int16_t>::min())
+						values[col + i] = raw * spec->dn_to_meters;
 				}
 				col += take;
 			}
-			if (complete) {
-				std::copy(values.begin(), values.end(),
-						source.begin() +
-								static_cast<std::ptrdiff_t>(row * window.samples));
-				++successful_rows;
+			return values;
+		};
+		std::vector<std::optional<std::vector<double>>> rows(window.lines);
+		std::atomic_size_t next_row{0};
+		const auto worker = [&]() {
+			for (;;) {
+				const auto row = next_row.fetch_add(1, std::memory_order_relaxed);
+				if (row >= window.lines)
+					return;
+				try {
+					rows[row] = fetch_row(row);
+				} catch (...) {
+					// A failed request row is left as NaN, matching Rust's row-level
+					// error handling so the common elevation postprocess can fill it.
+				}
 			}
+		};
+		const auto worker_count = std::min(MAX_CONCURRENT_DOWNLOADS, window.lines);
+		std::vector<std::thread> workers;
+		workers.reserve(worker_count);
+		for (std::size_t i = 0; i < worker_count; ++i)
+			workers.emplace_back(worker);
+		for (auto &thread : workers)
+			thread.join();
+		for (std::size_t row = 0; row < window.lines; ++row) {
+			if (!rows[row])
+				continue;
+			std::copy(rows[row]->begin(), rows[row]->end(),
+					source.begin() + static_cast<std::ptrdiff_t>(row * window.samples));
+			++successful_rows;
 		}
 	}
 	if (successful_rows == 0)

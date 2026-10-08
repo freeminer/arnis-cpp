@@ -8,6 +8,10 @@
 namespace arnis::caves
 {
 
+// Keep the dry-cave predicate's feature halo aligned with caves/shape.rs.
+constexpr int CAVE_FEATURE_REACH = 64;
+constexpr int CAVE_SHAPE_MARGIN = 2 * CAVE_FEATURE_REACH + 16;
+
 struct CaveRect
 {
 	int min_x = 0, max_x = -1, min_z = 0, max_z = -1;

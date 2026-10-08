@@ -325,7 +325,8 @@ Block get_slab_block_for_material(const Block &material)
 
 Block get_wall_piece_for_material(const Block &material)
 {
-	if (material == BRICK || material == BROWN_TERRACOTTA || material == MUD_BRICKS ||
+	if (material == BRICK || material == BROWN_TERRACOTTA ||
+			material == BROWN_CONCRETE_POWDER || material == MUD_BRICKS ||
 			material == WHITE_TERRACOTTA)
 		return BRICK_WALL;
 	if (material == ANDESITE || material == GRAY_CONCRETE ||

@@ -40,6 +40,7 @@ class Client
 			const std::string &url, std::size_t max_bytes) const;
 
 public:
+	explicit Client(cache::Layout cache = cache::Layout{});
 	Client(cache::Layout cache, JsonFetcher fetch) :
 			cache_(std::move(cache)), fetch_(std::move(fetch))
 	{
@@ -53,12 +54,17 @@ public:
 	std::optional<PanoMeta> metadata(const cache::ImageRecord &) const;
 	std::optional<std::filesystem::path> download_image(
 			const cache::ImageRecord &, cache::ImageSize) const;
+	std::optional<cache::ImageRecord> cached_metadata(const std::string &id) const
+	{
+		return cache_.load_metadata(id);
+	}
 	std::optional<std::filesystem::path> download_cluster(
 			const cache::ImageRecord &) const;
 	std::optional<nlohmann::json> cluster_document(
 			const cache::ImageRecord &, std::string *error = nullptr) const;
 	std::vector<cache::ImageRecord> search(const SearchCell &,
 			const std::string &endpoint, const std::string &token,
-			std::size_t maximum = mapillary_max_cells) const;
+			std::size_t maximum = mapillary_max_cells,
+			std::size_t *failed_cells = nullptr) const;
 };
 }

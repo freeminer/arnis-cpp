@@ -1,15 +1,20 @@
 #include "floodfill_cache.h"
 #include "floodfill.h"
 #include "clipping.h"
+#include "element_processing/way_segments.h"
+#include "strict_parse.h"
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <thread>
 #include <future>
 #include <numeric>
 #include <cmath>
-#include <iterator>
 #include <stdexcept>
 #include <cstdlib>
 #include <unordered_set>
+#include <iterator>
+#include <string_view>
 
 namespace arnis
 {
@@ -34,21 +39,29 @@ FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
 namespace
 {
 
-std::size_t configured_workers = 0;
+std::atomic_size_t configured_workers{0};
+
+std::size_t thread_count_for_fraction(double cpu_fraction)
+{
+	if (const char *override_value = std::getenv("RAYON_NUM_THREADS")) {
+		const std::string_view value(override_value);
+		std::size_t requested = 0;
+		const auto [end, error] =
+				std::from_chars(value.data(), value.data() + value.size(), requested);
+		if (error == std::errc{} && end == value.data() + value.size() && requested > 0)
+			return requested;
+	}
+	cpu_fraction = std::clamp(cpu_fraction, 0.1, 1.0);
+	const auto available = std::max(1u, std::thread::hardware_concurrency());
+	return std::max<std::size_t>(
+			1, static_cast<std::size_t>(static_cast<double>(available) * cpu_fraction));
+}
 
 FloodFillResult empty_flood_fill_result()
 {
 	static const auto empty =
 			std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>();
 	return empty;
-}
-
-bool same_ring_point(const ProcessedNode &a, const ProcessedNode &b)
-{
-	// Match Rust's merge_way_segments(): clipped/synthetic nodes can differ by
-	// one projected block even when they represent the same relation endpoint.
-	return a.id == b.id || (std::abs(static_cast<int64_t>(a.x) - b.x) <= 1 &&
-								   std::abs(static_cast<int64_t>(a.z) - b.z) <= 1);
 }
 
 bool relation_fills_members(const ProcessedRelation &relation)
@@ -73,75 +86,24 @@ bool relation_fills_members(const ProcessedRelation &relation)
 template <typename Tags>
 bool is_underground_building(const Tags &tags)
 {
+	if (const auto location = tags.find("location"); location != tags.end()) {
+		if (location->second == "underground" || location->second == "subway")
+			return true;
+		if (location->second == "surface" || location->second == "overground" ||
+				location->second == "roof")
+			return false;
+	}
 	auto negative_tag = [&tags](const char *key) {
 		auto it = tags.find(key);
 		if (it == tags.end())
 			return false;
-		try {
-			return std::stoi(it->second) < 0;
-		} catch (...) {
-			return false;
-		}
+		const auto level = strict_parse::i32(it->second);
+		return level && *level < 0;
 	};
 	if (negative_tag("layer") || negative_tag("level"))
 		return true;
-	auto location = tags.find("location");
-	if (location != tags.end() &&
-			(location->second == "underground" || location->second == "subway"))
-		return true;
 	return tags.contains("building:levels:underground") &&
 		   !tags.contains("building:levels");
-}
-
-void merge_relation_segments(std::vector<std::vector<ProcessedNode>> &rings)
-{
-	// Port of element_processing::merge_way_segments, including its merge
-	// orientation and recursion order, so all relation consumers see the same
-	// reconstructed rings as Rust.
-	std::vector<bool> removed(rings.size(), false);
-	std::vector<std::vector<ProcessedNode>> merged;
-	for (std::size_t i = 0; i < rings.size(); ++i) {
-		for (std::size_t j = 0; j < rings.size(); ++j) {
-			if (i == j || removed[i] || removed[j] || rings[i].empty() ||
-					rings[j].empty())
-				continue;
-			const auto &a = rings[i];
-			const auto &b = rings[j];
-			if (same_ring_point(a.front(), a.back()) ||
-					same_ring_point(b.front(), b.back()))
-				continue;
-			if (same_ring_point(a.front(), b.front())) {
-				removed[i] = removed[j] = true;
-				auto joined = a;
-				std::reverse(joined.begin(), joined.end());
-				joined.insert(joined.end(), std::next(b.begin()), b.end());
-				merged.push_back(std::move(joined));
-			} else if (same_ring_point(a.back(), b.back())) {
-				removed[i] = removed[j] = true;
-				auto joined = a;
-				joined.insert(joined.end(), std::next(b.rbegin()), b.rend());
-				merged.push_back(std::move(joined));
-			} else if (same_ring_point(a.front(), b.back())) {
-				removed[i] = removed[j] = true;
-				auto joined = b;
-				joined.insert(joined.end(), std::next(a.begin()), a.end());
-				merged.push_back(std::move(joined));
-			} else if (same_ring_point(a.back(), b.front())) {
-				removed[i] = removed[j] = true;
-				auto joined = a;
-				joined.insert(joined.end(), std::next(b.begin()), b.end());
-				merged.push_back(std::move(joined));
-			}
-		}
-	}
-	for (std::size_t i = removed.size(); i > 0; --i)
-		if (removed[i - 1])
-			rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(i - 1));
-	const auto merged_count = merged.size();
-	for (auto &ring : merged)
-		rings.push_back(std::move(ring));
-	if (merged_count > 0)
-		merge_relation_segments(rings);
 }
 
 template <typename Apply>
@@ -153,7 +115,7 @@ void for_relation_ring_cells(const ProcessedRelation &relation, ProcessedMemberR
 		if (member.role == role)
 			rings.push_back(member.way.nodes);
 	}
-	merge_relation_segments(rings);
+	merge_way_segments(rings);
 
 	for (auto &ring : rings) {
 		ring = clipping::clip_way_to_bbox(ring, xzbbox);
@@ -307,6 +269,13 @@ bool CoordinateBitmap::is_unset_in_bounds(int32_t x, int32_t z) const
 bool WorldEditor::surface_is_sealed(int x, int z) const
 {
 	return sealed_surface && sealed_surface->contains(x, z);
+}
+
+bool WorldEditor::nested_area_owns(int x, int z) const
+{
+	// The merged mask clears paving where a smaller planted area takes
+	// precedence. Those cleared cells belong to the nested area, not this fill.
+	return sealed_surface && !sealed_surface->contains(x, z);
 }
 
 std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
@@ -610,9 +579,18 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 	// in-flight jobs bounded so a large extract cannot create one native thread
 	// per OSM way.
 	FloodFillCache cache;
-	const std::size_t workers =
-			configured_workers ? configured_workers
-							   : std::max(1u, std::thread::hardware_concurrency());
+	std::size_t workers = configured_workers.load(std::memory_order_relaxed);
+	if (workers == 0) {
+		// Rust configures Rayon once at startup with a 90% CPU cap. The C++ API
+		// can also be used without that executable startup path, so establish the
+		// same default on the first precompute. Concurrent callers race only to
+		// publish the same value; an explicit prior configuration remains intact.
+		const auto fallback = thread_count_for_fraction(.9);
+		std::size_t expected = 0;
+		configured_workers.compare_exchange_strong(
+				expected, fallback, std::memory_order_relaxed);
+		workers = configured_workers.load(std::memory_order_relaxed);
+	}
 	for (std::size_t base = 0; base < ways_needing_fill.size(); base += workers) {
 		const std::size_t end = std::min(base + workers, ways_needing_fill.size());
 		std::vector<std::future<
@@ -744,7 +722,8 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 			if ((it_building != way.tags.end() || it_building_part != way.tags.end()) &&
 					!is_underground_building(way.tags)) {
 				std::lock_guard<std::mutex> lock(way_cache_mutex);
-				if (auto cached = way_cache.find(way.id); cached != way_cache.end()) {
+				if (auto cached = way_cache.find(way.id);
+						cached != way_cache.end() && cached->second) {
 					for (const auto &coord : *cached->second) {
 						footprints.set(coord.first, coord.second);
 					}
@@ -771,7 +750,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 
 			if (it_building != way.tags.end() || it_building_part != way.tags.end()) {
 				auto it = way_cache.find(way.id);
-				if (it != way_cache.end()) {
+				if (it != way_cache.end() && it->second) {
 					auto centroid = compute_centroid(*it->second);
 					if (centroid.has_value()) {
 						centroids.push_back(centroid.value());
@@ -795,7 +774,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 				for (const auto &member : rel.members) {
 					if (member.role == ProcessedMemberRole::Outer) {
 						auto it = way_cache.find(member.way.id);
-						if (it != way_cache.end()) {
+						if (it != way_cache.end() && it->second) {
 							all_coords.insert(all_coords.end(), it->second->begin(),
 									it->second->end());
 						}
@@ -840,12 +819,8 @@ void FloodFillCache::clear()
 
 void configure_thread_pool(double cpu_fraction)
 {
-	if (std::getenv("RAYON_NUM_THREADS"))
-		return;
-	cpu_fraction = std::clamp(cpu_fraction, 0.1, 1.0);
-	const auto available = std::max(1u, std::thread::hardware_concurrency());
-	configured_workers =
-			std::max<std::size_t>(1, static_cast<std::size_t>(available * cpu_fraction));
+	configured_workers.store(
+			thread_count_for_fraction(cpu_fraction), std::memory_order_relaxed);
 }
 
 } // namespace arnis

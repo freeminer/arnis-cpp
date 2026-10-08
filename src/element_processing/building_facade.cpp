@@ -97,6 +97,12 @@ bool FacadePlan::is_party(int x, int z) const
 {
 	return !party_columns_.empty() && party_columns_.contains({x, z});
 }
+bool FacadePlan::is_party(int x, int z, int normal_x, int normal_z) const
+{
+	const auto it = directional_party_columns_.find({x, z});
+	return it != directional_party_columns_.end() &&
+		   it->second.contains({normal_x, normal_z});
+}
 bool FacadePlan::is_street(int x, int z) const
 {
 	return street_columns_.contains({x, z});
@@ -109,9 +115,10 @@ void FacadePlan::mark_door_column(int x, int z)
 {
 	door_columns.insert({x, z});
 }
-void FacadePlan::add_party_column(int x, int z)
+void FacadePlan::add_party_column(int x, int z, int normal_x, int normal_z)
 {
 	party_columns_.insert({x, z});
+	directional_party_columns_[{x, z}].insert({normal_x, normal_z});
 }
 void FacadePlan::add_street_column(int x, int z)
 {
@@ -151,7 +158,7 @@ FacadePlan compute_facade_plan(const ProcessedWay &element,
 						 !own_cells.contains(candidate);
 			}
 			if (party) {
-				plan.add_party_column(x, z);
+				plan.add_party_column(x, z, normal.first, normal.second);
 				++party_count;
 			}
 		}

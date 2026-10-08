@@ -156,12 +156,15 @@ std::uint64_t existing_chunks(
 	const int cx0 = div16(min_x), cz0 = div16(min_z), cx1 = div16(max_x),
 			  cz1 = div16(max_z);
 	auto div32 = [](int v) { return v >= 0 ? v / 32 : -((-v + 31) / 32); };
+	const auto dimension_overworld = world / "dimensions" / "minecraft" / "overworld";
+	const auto region_dir = std::filesystem::is_directory(dimension_overworld)
+									? dimension_overworld / "region"
+									: world / "region";
 	std::uint64_t count = 0;
 	for (int rz = div32(cz0); rz <= div32(cz1); ++rz)
 		for (int rx = div32(cx0); rx <= div32(cx1); ++rx) {
-			std::ifstream f(world / "region" /
-									("r." + std::to_string(rx) + "." +
-											std::to_string(rz) + ".mca"),
+			std::ifstream f(region_dir / ("r." + std::to_string(rx) + "." +
+												 std::to_string(rz) + ".mca"),
 					std::ios::binary);
 			std::array<unsigned char, 4096> h{};
 			if (!f || !f.read(reinterpret_cast<char *>(h.data()), h.size()))
