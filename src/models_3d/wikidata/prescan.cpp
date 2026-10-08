@@ -5,8 +5,11 @@
 #include "../../block_definitions.h"
 #include "../../tile.h"
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <cmath>
+#include <thread>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 namespace arnis::models_3d::wikidata
@@ -326,14 +329,66 @@ void retain_fetchable(
 {
 	if (!fetchable)
 		return;
+	// Rust fetches each distinct source URL once, even when multiple QIDs
+	// reference the same Commons asset. Keep that URL-level de-duplication in
+	// the C++ prescan too; the provider callback accepts QIDs, so retain one
+	// representative QID for each URL and share its availability result.
+	std::unordered_map<std::string, std::string> representative_qid_by_url;
+	for (const auto &placement : r.placements) {
+		const auto *entry = lookup_wikidata(placement.qid);
+		if (entry && !entry->url.empty())
+			representative_qid_by_url.try_emplace(entry->url, placement.qid);
+	}
+	std::unordered_map<std::string, bool> fetchable_by_url;
+	fetchable_by_url.reserve(representative_qid_by_url.size());
+	std::vector<std::pair<std::string, std::string>> unique_urls;
+	unique_urls.reserve(representative_qid_by_url.size());
+	for (const auto &[url, qid] : representative_qid_by_url)
+		unique_urls.emplace_back(url, qid);
+	std::vector<std::uint8_t> available(unique_urls.size(), 0);
+	if (unique_urls.size() == 1) {
+		available[0] = fetchable(unique_urls[0].second) ? 1 : 0;
+	} else if (!unique_urls.empty()) {
+		// Rust uses Rayon over the distinct URL list. Keep network/model parsing
+		// concurrent, but write each result to a fixed slot and rebuild the map
+		// only after joining so placement and suppression order remain stable.
+		std::atomic<std::size_t> next{0};
+		const auto worker_count = std::min<std::size_t>(
+				unique_urls.size(), std::max(1u, std::thread::hardware_concurrency()));
+		std::vector<std::thread> workers;
+		workers.reserve(worker_count);
+		for (std::size_t worker = 0; worker < worker_count; ++worker)
+			workers.emplace_back([&] {
+				for (;;) {
+					const auto i = next.fetch_add(1, std::memory_order_relaxed);
+					if (i >= unique_urls.size())
+						break;
+					try {
+						available[i] = fetchable(unique_urls[i].second) ? 1 : 0;
+					} catch (...) {
+						available[i] = 0;
+					}
+				}
+			});
+		for (auto &worker : workers)
+			worker.join();
+	}
+	for (std::size_t i = 0; i < unique_urls.size(); ++i)
+		fetchable_by_url.emplace(unique_urls[i].first, available[i] != 0);
+
 	std::unordered_set<std::uint64_t> kept;
-	r.placements.erase(std::remove_if(r.placements.begin(), r.placements.end(),
-							   [&](const Placement &p) {
-								   if (!fetchable(p.qid))
-									   return true;
-								   kept.insert(p.osm_id);
-								   return false;
-							   }),
+	r.placements.erase(
+			std::remove_if(r.placements.begin(), r.placements.end(),
+					[&](const Placement &p) {
+						const auto *entry = lookup_wikidata(p.qid);
+						if (!entry)
+							return true;
+						const auto fetched = fetchable_by_url.find(entry->url);
+						if (fetched == fetchable_by_url.end() || !fetched->second)
+							return true;
+						kept.insert(p.osm_id);
+						return false;
+					}),
 			r.placements.end());
 	r.suppression_claims.erase(
 			std::remove_if(r.suppression_claims.begin(), r.suppression_claims.end(),

@@ -2,6 +2,7 @@
 
 #include "../assets_root.h"
 #include "../deterministic_rng.h"
+#include "../models_3d/pipeline.h"
 #include "schem_decoder.h"
 
 #include <fstream>
@@ -45,6 +46,25 @@ const SchemDocument *plane_asset(bool gear_down, unsigned livery)
 		}
 	});
 	return fleet[livery - 1] ? &*fleet[livery - 1] : nullptr;
+}
+
+const std::vector<const SchemDocument *> &available_plane_assets(bool gear_down)
+{
+	static const auto down = [] {
+		std::vector<const SchemDocument *> assets;
+		for (unsigned i = 1; i <= 6; ++i)
+			if (const auto *asset = plane_asset(true, i))
+				assets.push_back(asset);
+		return assets;
+	}();
+	static const auto up = [] {
+		std::vector<const SchemDocument *> assets;
+		for (unsigned i = 1; i <= 6; ++i)
+			if (const auto *asset = plane_asset(false, i))
+				assets.push_back(asset);
+		return assets;
+	}();
+	return gear_down ? down : up;
 }
 } // namespace
 
@@ -399,17 +419,17 @@ bool place_plane_placement(WorldEditor &editor, const Placement &placement)
 	if (!editor.place_schematics())
 		return false;
 	const bool gear_down = placement.kind == PlaneKind::Parked;
-	auto rng = element_rng(placement.representative_id * 31 + 7);
-	const unsigned livery = rng.uniform(6) + 1;
-	const auto *document = plane_asset(gear_down, livery);
-	if (!document)
+	const auto &fleet = available_plane_assets(gear_down);
+	if (fleet.empty())
 		return false;
-	int ground_y = editor.get_ground_level(placement.anchor_x, placement.anchor_z);
-	for (int x = placement.footprint.min_x; x <= placement.footprint.max_x; ++x)
-		for (int z = placement.footprint.min_z; z <= placement.footprint.max_z; ++z)
-			ground_y = std::min(ground_y, editor.get_ground_level(x, z));
+	auto rng = element_rng(placement.representative_id * 31 + 7);
+	const auto livery = static_cast<std::size_t>(rng()) % fleet.size();
+	const auto *document = fleet[livery];
+	const int ground_y = models_3d::lowest_ground_in_bbox(editor,
+			placement.footprint.min_x, placement.footprint.min_z,
+			placement.footprint.max_x, placement.footprint.max_z);
 	return place_schem_document_yaw(editor, *document, placement.anchor_x,
-			ground_y + placement.elevation_blocks, placement.anchor_z,
+			ground_y + 1 + placement.elevation_blocks, placement.anchor_z,
 			placement.yaw_degrees, placement.pitch_degrees);
 }
 

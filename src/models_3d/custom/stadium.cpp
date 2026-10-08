@@ -179,9 +179,23 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double scal
 	for (auto &e : elements)
 		if (tag(e, "leisure") == "stadium")
 			add(e, true);
-	for (auto &e : elements)
-		if (tag(e, "building") == "stadium")
-			add(e, false);
+	for (auto &e : elements) {
+		if (tag(e, "building") != "stadium")
+			continue;
+		auto key = std::make_pair(std::string(e.kind()), e.id());
+		if (has(already, key) || has(r.suppressed, key))
+			continue;
+		const auto [cx, cz] = anchor(e);
+		// Rust's leisure stadium owns nested building=stadium outlines as well
+		// as pitches/tracks. Claim these before testing the inner footprint so a
+		// single mapped stadium never places overlapping GLB models.
+		if (std::any_of(r.placements.begin(), r.placements.end(),
+					[&](const auto &p) { return p.footprint.contains(cx, cz); })) {
+			r.suppressed.push_back(std::move(key));
+			continue;
+		}
+		add(e, false);
+	}
 	for (auto &e : elements) {
 		auto key = std::make_pair(std::string(e.kind()), e.id());
 		if (has(already, key) || has(r.suppressed, key))
