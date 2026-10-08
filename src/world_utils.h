@@ -3,9 +3,27 @@
 #include <cstdint>
 #include <string>
 #include <vector>
+#include <optional>
 #include "coordinate_system/geographic/llbbox.h"
 namespace arnis::world_utils
 {
+inline constexpr std::int32_t DIMENSION_FOLDERS_DATA_VERSION = 4772;
+
+struct WorldLayout
+{
+	enum class Kind
+	{
+		Legacy,
+		Dimensions
+	};
+
+	Kind kind{Kind::Legacy};
+	static WorldLayout of(const std::filesystem::path &world);
+	std::filesystem::path overworld_dir(const std::filesystem::path &world) const;
+	std::filesystem::path maps_dir(const std::filesystem::path &world) const;
+};
+
+std::optional<std::int32_t> level_data_version(const std::filesystem::path &world);
 bool replace_file_atomically(
 		const std::filesystem::path &, const std::vector<std::uint8_t> &);
 std::filesystem::path get_bedrock_output_directory();

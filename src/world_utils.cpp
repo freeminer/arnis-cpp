@@ -6,9 +6,211 @@
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
+#include <iterator>
+#include <limits>
 #include <system_error>
+#include <array>
+#include <zlib.h>
 namespace arnis::world_utils
 {
+namespace
+{
+class NbtReader
+{
+	const std::vector<std::uint8_t> &bytes_;
+	std::size_t pos_{0};
+
+	bool read_u8(std::uint8_t &value)
+	{
+		if (pos_ >= bytes_.size())
+			return false;
+		value = bytes_[pos_++];
+		return true;
+	}
+	bool read_u16(std::uint16_t &value)
+	{
+		if (bytes_.size() - pos_ < 2)
+			return false;
+		value = (std::uint16_t(bytes_[pos_]) << 8) | bytes_[pos_ + 1];
+		pos_ += 2;
+		return true;
+	}
+	bool read_i32(std::int32_t &value)
+	{
+		if (bytes_.size() - pos_ < 4)
+			return false;
+		const auto raw = (std::uint32_t(bytes_[pos_]) << 24) |
+						 (std::uint32_t(bytes_[pos_ + 1]) << 16) |
+						 (std::uint32_t(bytes_[pos_ + 2]) << 8) | bytes_[pos_ + 3];
+		pos_ += 4;
+		value = static_cast<std::int32_t>(raw);
+		return true;
+	}
+	bool skip(std::size_t count)
+	{
+		if (count > bytes_.size() - pos_)
+			return false;
+		pos_ += count;
+		return true;
+	}
+	bool read_name(std::string &name)
+	{
+		std::uint16_t size = 0;
+		if (!read_u16(size) || size > bytes_.size() - pos_)
+			return false;
+		name.assign(reinterpret_cast<const char *>(bytes_.data() + pos_), size);
+		pos_ += size;
+		return true;
+	}
+	bool skip_payload(std::uint8_t type, unsigned depth)
+	{
+		if (depth > 64)
+			return false;
+		std::int32_t length = 0;
+		std::uint8_t element_type = 0;
+		std::uint16_t string_length = 0;
+		switch (type) {
+		case 1:
+			return skip(1);
+		case 2:
+			return skip(2);
+		case 3:
+		case 5:
+			return skip(4);
+		case 4:
+		case 6:
+			return skip(8);
+		case 7:
+			return read_i32(length) && length >= 0 && skip(std::size_t(length));
+		case 8:
+			return read_u16(string_length) && skip(string_length);
+		case 9:
+			if (!read_u8(element_type) || !read_i32(length) || length < 0 ||
+					(element_type == 0 && length != 0))
+				return false;
+			for (std::int32_t i = 0; i < length; ++i)
+				if (!skip_payload(element_type, depth + 1))
+					return false;
+			return true;
+		case 10:
+			for (;;) {
+				std::uint8_t child_type = 0;
+				if (!read_u8(child_type))
+					return false;
+				if (child_type == 0)
+					return true;
+				std::string child_name;
+				if (!read_name(child_name) || !skip_payload(child_type, depth + 1))
+					return false;
+			}
+		case 11:
+			return read_i32(length) && length >= 0 &&
+				   std::size_t(length) <= std::numeric_limits<std::size_t>::max() / 4 &&
+				   skip(std::size_t(length) * 4);
+		case 12:
+			return read_i32(length) && length >= 0 &&
+				   std::size_t(length) <= std::numeric_limits<std::size_t>::max() / 8 &&
+				   skip(std::size_t(length) * 8);
+		default:
+			return false;
+		}
+	}
+	std::optional<std::int32_t> read_data_compound(unsigned depth)
+	{
+		if (depth > 64)
+			return std::nullopt;
+		std::optional<std::int32_t> version;
+		for (;;) {
+			std::uint8_t type = 0;
+			if (!read_u8(type))
+				return std::nullopt;
+			if (type == 0)
+				return version;
+			std::string name;
+			if (!read_name(name))
+				return std::nullopt;
+			if (name == "DataVersion" && type == 3) {
+				std::int32_t value = 0;
+				if (!read_i32(value))
+					return std::nullopt;
+				version = value;
+			} else if (name == "Data" && type == 10) {
+				if (const auto found = read_data_compound(depth + 1))
+					version = found;
+			} else if (!skip_payload(type, depth + 1)) {
+				return std::nullopt;
+			}
+		}
+	}
+
+public:
+	explicit NbtReader(const std::vector<std::uint8_t> &bytes) : bytes_(bytes) {}
+	std::optional<std::int32_t> data_version()
+	{
+		std::uint8_t root_type = 0;
+		std::string root_name;
+		if (!read_u8(root_type) || root_type != 10 || !read_name(root_name))
+			return std::nullopt;
+		return read_data_compound(0);
+	}
+};
+
+std::optional<std::vector<std::uint8_t>> decompress_level_dat(
+		const std::filesystem::path &path)
+{
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+		return std::nullopt;
+	std::vector<std::uint8_t> compressed((std::istreambuf_iterator<char>(input)), {});
+	if (compressed.empty() || compressed.size() > std::numeric_limits<uInt>::max())
+		return std::nullopt;
+	z_stream stream{};
+	if (inflateInit2(&stream, 16 + MAX_WBITS) != Z_OK)
+		return std::nullopt;
+	stream.next_in = compressed.data();
+	stream.avail_in = static_cast<uInt>(compressed.size());
+	std::vector<std::uint8_t> output;
+	std::array<std::uint8_t, 32768> chunk{};
+	int status = Z_OK;
+	while (status == Z_OK && output.size() <= 64 * 1024 * 1024) {
+		stream.next_out = chunk.data();
+		stream.avail_out = static_cast<uInt>(chunk.size());
+		status = inflate(&stream, Z_NO_FLUSH);
+		const auto produced = chunk.size() - stream.avail_out;
+		output.insert(output.end(), chunk.begin(), chunk.begin() + produced);
+	}
+	inflateEnd(&stream);
+	if (status != Z_STREAM_END || output.size() > 64 * 1024 * 1024)
+		return std::nullopt;
+	return output;
+}
+} // namespace
+
+std::optional<std::int32_t> level_data_version(const std::filesystem::path &world)
+{
+	const auto bytes = decompress_level_dat(world / "level.dat");
+	return bytes ? NbtReader(*bytes).data_version() : std::nullopt;
+}
+
+WorldLayout WorldLayout::of(const std::filesystem::path &world)
+{
+	const auto version = level_data_version(world);
+	return {version && *version >= DIMENSION_FOLDERS_DATA_VERSION ? Kind::Dimensions
+																  : Kind::Legacy};
+}
+
+std::filesystem::path WorldLayout::overworld_dir(const std::filesystem::path &world) const
+{
+	return kind == Kind::Dimensions ? world / "dimensions" / "minecraft" / "overworld"
+									: world;
+}
+
+std::filesystem::path WorldLayout::maps_dir(const std::filesystem::path &world) const
+{
+	return kind == Kind::Dimensions ? world / "data" / "minecraft" / "maps"
+									: world / "data";
+}
+
 static std::filesystem::path home()
 {
 	if (const char *h = std::getenv("HOME"))

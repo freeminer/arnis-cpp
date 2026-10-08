@@ -156,10 +156,8 @@ std::uint64_t existing_chunks(
 	const int cx0 = div16(min_x), cz0 = div16(min_z), cx1 = div16(max_x),
 			  cz1 = div16(max_z);
 	auto div32 = [](int v) { return v >= 0 ? v / 32 : -((-v + 31) / 32); };
-	const auto dimension_overworld = world / "dimensions" / "minecraft" / "overworld";
-	const auto region_dir = std::filesystem::is_directory(dimension_overworld)
-									? dimension_overworld / "region"
-									: world / "region";
+	const auto region_dir =
+			world_utils::WorldLayout::of(world).overworld_dir(world) / "region";
 	std::uint64_t count = 0;
 	for (int rz = div32(cz0); rz <= div32(cz1); ++rz)
 		for (int rx = div32(cx0); rx <= div32(cx1); ++rx) {
