@@ -1081,6 +1081,300 @@ Block resolve_schem_block(const std::string &name)
 		return COBBLESTONE_WALL;
 	if (n == "gray_concrete_powder")
 		return GRAY_CONCRETE_POWDER;
+	// Keep Rust's schematic palette coverage when the Freeminer block set does
+	// not expose a dedicated slab, wall, button, or furniture node. These
+	// material-preserving substitutes retain the voxel instead of treating it
+	// as air; properties are still parsed and applied by the normal state path.
+	if (n == "cut_sandstone_slab" || n == "sandstone_slab")
+		return CUT_SANDSTONE;
+	if (n == "sandstone_wall")
+		return SANDSTONE;
+	if (n == "diorite_wall" || n == "diorite_stairs")
+		return DIORITE;
+	if (n == "smooth_quartz_slab" || n == "smooth_quartz_stairs")
+		return SMOOTH_QUARTZ;
+	if (n == "blackstone_stairs" || n == "polished_blackstone_stairs" ||
+			n == "blackstone_wall" || n == "polished_blackstone_wall" ||
+			n == "polished_blackstone_brick_wall")
+		return POLISHED_BLACKSTONE_BRICKS;
+	if (n == "iron_trapdoor")
+		return IRON_BARS;
+	if (n == "jungle_trapdoor" || n == "jungle_fence" || n == "jungle_fence_gate" ||
+			n == "jungle_stairs" || n == "jungle_slab" || n == "bamboo_stairs" ||
+			n == "bamboo_slab")
+		return JUNGLE_PLANKS;
+	if (n == "birch_fence" || n == "birch_fence_gate" || n == "birch_door" ||
+			n == "birch_button")
+		return BIRCH_LOG;
+	if (n == "dark_oak_fence_gate" || n == "dark_oak_button")
+		return DARK_OAK_PLANKS;
+	if (n == "oak_button" || n == "stone_button" || n == "acacia_button" ||
+			n == "bamboo_button" || n == "mangrove_button" || n == "warped_button")
+		return OAK_PLANKS;
+	if (n == "birch_pressure_plate" || n == "stone_pressure_plate" ||
+			n == "dark_oak_pressure_plate")
+		return OAK_SLAB;
+	if (n == "lodestone")
+		return IRON_BLOCK;
+	if (n == "redstone_torch" || n == "redstone_wall_torch")
+		return REDSTONE_LAMP;
+	if (n == "mossy_stone_brick_wall" || n == "mossy_cobblestone_wall")
+		return MOSSY_COBBLESTONE;
+	if (n == "end_stone_brick_wall" || n == "end_stone_brick_slab")
+		return END_STONE_BRICKS;
+	if (n == "polished_deepslate_wall" || n == "polished_deepslate_slab" ||
+			n == "deepslate_brick_slab")
+		return POLISHED_DEEPSLATE;
+	if (n == "polished_andesite_slab")
+		return POLISHED_ANDESITE;
+	if (n == "chiseled_polished_blackstone")
+		return POLISHED_BLACKSTONE_BRICKS;
+	if (n == "chiseled_deepslate" || n == "reinforced_deepslate")
+		return DEEPSLATE_BRICKS;
+	if (n == "cobblestone_slab")
+		return COBBLESTONE;
+	if (n == "nether_brick_fence" || n == "nether_brick_wall" || n == "nether_wart_block")
+		return NETHER_BRICK;
+	if (n == "oak_fence_gate" || n == "spruce_button")
+		return OAK_PLANKS;
+	if (n == "spruce_fence_gate" || n == "warped_fence_gate")
+		return SPRUCE_PLANKS;
+	if (n == "powered_rail")
+		return RAIL;
+	if (n == "andesite_slab")
+		return ANDESITE;
+	if (n == "cobbled_deepslate_slab" || n == "cobbled_deepslate_stairs")
+		return COBBLED_DEEPSLATE;
+	if (n == "dark_oak_trapdoor")
+		return DARK_OAK_PLANKS;
+	if (n == "gray_stained_glass_pane" || n == "light_gray_stained_glass_pane" ||
+			n == "black_stained_glass_pane")
+		return GRAY_STAINED_GLASS;
+	if (n == "gray_wall_banner")
+		return BLACK_WALL_BANNER;
+	if (n == "polished_blackstone_button" || n == "polished_blackstone_pressure_plate")
+		return POLISHED_BLACKSTONE_SLAB;
+	if (n == "red_nether_brick_slab" || n == "mangrove_slab" || n == "nether_brick_slab")
+		return RED_NETHER_BRICK;
+	if (n == "smooth_red_sandstone_slab")
+		return SMOOTH_RED_SANDSTONE;
+	if (n == "acacia_trapdoor")
+		return ACACIA_PLANKS;
+	if (n == "cyan_carpet")
+		return CYAN_WOOL;
+	if (n == "stone_stairs")
+		return STONE_BRICK_STAIRS;
+	if (n == "mossy_cobblestone_slab" || n == "mossy_stone_brick_slab")
+		return MOSSY_COBBLESTONE;
+	if (n == "blue_stained_glass_pane")
+		return BLUE_STAINED_GLASS;
+	if (n == "tripwire_hook")
+		return IRON_BARS;
+	if (n == "spruce_wall_sign")
+		return SIGN;
+	if (n == "granite_stairs" || n == "acacia_stairs")
+		return GRANITE;
+	if (n == "deepslate_tiles" || n == "deepslate_tile_slab" ||
+			n == "deepslate_tile_wall" || n == "deepslate_brick_wall")
+		return DEEPSLATE_BRICKS;
+	if (n == "polished_diorite_slab")
+		return POLISHED_DIORITE;
+	if (n == "quartz_pillar")
+		return PURPUR_PILLAR;
+	// Mirror the Rust palette entries that already have corresponding C++ block
+	// definitions. The explicit substitutions above cover the remaining nodes
+	// whose exact material variant is unavailable in this host.
+	if (n == "tuff_wall" || n == "polished_tuff_wall" || n == "granite_wall")
+		return ANDESITE_WALL;
+	if (n == "barrel")
+		return BARREL;
+	if (n == "blackstone")
+		return BLACKSTONE;
+	if (n == "black_concrete_powder")
+		return BLACK_CONCRETE;
+	if (n == "black_wall_banner")
+		return BLACK_WALL_BANNER;
+	if (n == "black_wool")
+		return BLACK_WOOL;
+	if (n == "blast_furnace" || n == "observer")
+		return BLAST_FURNACE;
+	if (n == "mud_brick_wall")
+		return BRICK_WALL;
+	if (n == "chest")
+		return CHEST;
+	if (n == "chiseled_quartz_block")
+		return CHISELED_QUARTZ_BLOCK;
+	if (n == "chiseled_stone_bricks")
+		return CHISELED_STONE_BRICKS;
+	if (n == "clay")
+		return CLAY;
+	if (n == "coarse_dirt")
+		return COARSE_DIRT;
+	if (n == "cobbled_deepslate")
+		return COBBLED_DEEPSLATE;
+	if (n == "composter")
+		return COMPOSTER;
+	if (n == "cracked_stone_bricks")
+		return CRACKED_STONE_BRICKS;
+	if (n == "crafting_table")
+		return CRAFTING_TABLE;
+	if (n == "cyan_concrete")
+		return CYAN_CONCRETE;
+	if (n == "cyan_terracotta")
+		return CYAN_TERRACOTTA;
+	if (n == "cyan_wool")
+		return CYAN_WOOL;
+	if (n == "dark_oak_fence")
+		return DARK_OAK_FENCE;
+	if (n == "dark_oak_slab")
+		return DARK_OAK_SLAB;
+	if (n == "dark_oak_stairs")
+		return DARK_OAK_STAIRS;
+	if (n == "dispenser")
+		return DISPENSER;
+	if (n == "flower_pot")
+		return EMPTY_FLOWER_POT;
+	if (n == "end_rod" || n == "light_gray_candle" || n == "gray_candle")
+		return END_ROD;
+	if (n == "end_stone_bricks")
+		return END_STONE_BRICKS;
+	if (n == "potted_oxeye_daisy" || n == "potted_azalea_bush" ||
+			n == "potted_flowering_azalea_bush")
+		return FLOWER_POT;
+	if (n == "potted_allium" || n == "potted_cornflower")
+		return FLOWER_POT;
+	if (n == "furnace")
+		return FURNACE;
+	if (n == "glass_pane" || n == "white_stained_glass_pane")
+		return GLASS_PANE;
+	if (n == "grass" || n == "short_grass" || n == "tall_grass")
+		return GRASS;
+	if (n == "gravel")
+		return GRAVEL;
+	if (n == "gray_wool")
+		return GRAY_WOOL;
+	if (n == "green_carpet")
+		return GREEN_CARPET;
+	if (n == "grindstone")
+		return GRINDSTONE;
+	if (n == "hopper")
+		return HOPPER;
+	if (n == "ladder")
+		return LADDER;
+	if (n == "lantern")
+		return LANTERN;
+	if (n == "lever")
+		return LEVER;
+	if (n == "lightning_rod")
+		return LIGHTNING_ROD;
+	if (n == "light_blue_carpet" || n == "blue_carpet")
+		return LIGHT_BLUE_CARPET;
+	if (n == "light_gray_carpet" || n == "gray_carpet")
+		return LIGHT_GRAY_CARPET;
+	if (n == "light_gray_wool")
+		return LIGHT_GRAY_CONCRETE;
+	if (n == "mossy_cobblestone")
+		return MOSSY_COBBLESTONE;
+	if (n == "mossy_cobblestone_stairs")
+		return MOSSY_COBBLESTONE_STAIRS;
+	if (n == "mossy_stone_bricks")
+		return MOSSY_STONE_BRICKS;
+	if (n == "mossy_stone_brick_stairs")
+		return MOSSY_STONE_BRICK_STAIRS;
+	if (n == "netherite_block")
+		return NETHERITE_BLOCK;
+	if (n == "nether_brick_stairs")
+		return NETHER_BRICK_STAIRS;
+	if (n == "oak_door")
+		return OAK_DOOR;
+	if (n == "oak_pressure_plate")
+		return OAK_PRESSURE_PLATE;
+	if (n == "oak_slab")
+		return OAK_SLAB;
+	if (n == "oak_trapdoor")
+		return OAK_TRAPDOOR;
+	if (n == "orange_concrete")
+		return ORANGE_CONCRETE;
+	if (n == "podzol")
+		return PODZOL;
+	if (n == "polished_tuff")
+		return POLISHED_ANDESITE;
+	if (n == "polished_andesite_stairs")
+		return POLISHED_ANDESITE_STAIRS;
+	if (n == "polished_basalt")
+		return POLISHED_BASALT;
+	if (n == "bedrock")
+		return POLISHED_BLACKSTONE;
+	if (n == "polished_blackstone_bricks")
+		return POLISHED_BLACKSTONE_BRICKS;
+	if (n == "polished_blackstone_slab")
+		return POLISHED_BLACKSTONE_SLAB;
+	if (n == "polished_deepslate")
+		return POLISHED_DEEPSLATE;
+	if (n == "polished_deepslate_stairs")
+		return POLISHED_DEEPSLATE_STAIRS;
+	if (n == "polished_diorite")
+		return POLISHED_DIORITE;
+	if (n == "polished_diorite_stairs")
+		return POLISHED_DIORITE_STAIRS;
+	if (n == "prismarine")
+		return PRISMARINE;
+	if (n == "quartz_bricks")
+		return QUARTZ_BRICKS;
+	if (n == "quartz_slab")
+		return QUARTZ_SLAB_TOP;
+	if (n == "quartz_stairs")
+		return QUARTZ_STAIRS;
+	if (n == "pink_concrete")
+		return RED_CONCRETE;
+	if (n == "poppy" || n == "red_tulip")
+		return RED_FLOWER;
+	if (n == "red_nether_brick_stairs")
+		return RED_NETHER_BRICK_STAIRS;
+	if (n == "scaffolding")
+		return SCAFFOLDING;
+	if (n == "beacon")
+		return SEA_LANTERN;
+	if (n == "sea_pickle")
+		return SEA_PICKLE;
+	if (n == "smoker")
+		return SMOKER;
+	if (n == "smooth_quartz")
+		return SMOOTH_QUARTZ;
+	if (n == "smooth_red_sandstone")
+		return SMOOTH_RED_SANDSTONE;
+	if (n == "cut_sandstone")
+		return SMOOTH_SANDSTONE;
+	if (n == "sandstone_stairs")
+		return SMOOTH_SANDSTONE_STAIRS;
+	if (n == "snow_block")
+		return SNOW_BLOCK;
+	if (n == "snow")
+		return SNOW_LAYER;
+	if (n == "soul_lantern")
+		return SOUL_LANTERN;
+	if (n == "spruce_fence")
+		return SPRUCE_FENCE;
+	if (n == "spruce_slab")
+		return SPRUCE_SLAB;
+	if (n == "spruce_stairs")
+		return SPRUCE_STAIRS;
+	if (n == "spruce_trapdoor")
+		return SPRUCE_TRAPDOOR;
+	if (n == "stone_brick_wall")
+		return STONE_BRICK_WALL;
+	if (n == "tuff")
+		return TUFF;
+	if (n == "warped_slab")
+		return WARPED_SLAB;
+	if (n == "warped_stairs")
+		return WARPED_STAIRS;
+	if (n == "warped_trapdoor")
+		return WARPED_TRAPDOOR;
+	if (n == "dandelion")
+		return YELLOW_FLOWER;
+	if (n == "yellow_terracotta")
+		return YELLOW_TERRACOTTA;
 	// Rust's map_structure_block returns None for unmodelled palette entries;
 	// do not invent stone geometry for unsupported blocks.
 	return AIR;
