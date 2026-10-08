@@ -251,7 +251,7 @@ struct RegionSelector::Data
 	using Pools = std::array<std::array<Pool, 3>, 3>;
 	struct Entry
 	{
-		Schematic schem;
+		std::shared_ptr<const Schematic> schem;
 		TreeSize size;
 		std::uint8_t width;
 	};
@@ -329,6 +329,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	data->ground_level = ground_level;
 	data->palms_default = !exclude_palms;
 	data->sizes = sizes;
+	std::unordered_map<std::string, std::size_t> asset_entries;
 	auto build_community = [&](const nlohmann::json &json,
 								   const std::filesystem::path &manifest,
 								   const std::string &pack_name,
@@ -358,12 +359,23 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 					for (const auto &relative : sp[field]) {
 						auto path = manifest.parent_path() / relative.get<std::string>();
 						try {
-							auto schem = load_schem(path);
-							if (has_leaves(schem)) {
-								const auto size = schematic_size(schem);
+							const auto asset_key = std::filesystem::absolute(path)
+														   .lexically_normal()
+														   .string() +
+												   "|" + std::to_string(width);
+							if (const auto it = asset_entries.find(asset_key);
+									it != asset_entries.end()) {
+								variants.push_back(it->second);
+								continue;
+							}
+							auto schem = load_schem_shared(path);
+							if (has_leaves(*schem)) {
+								const auto size = schematic_size(*schem);
 								data->entries.push_back(
 										{std::move(schem), size, std::uint8_t(width)});
 								variants.push_back(data->entries.size() - 1);
+								asset_entries.emplace(
+										asset_key, data->entries.size() - 1);
 							}
 						} catch (...) {
 						}
@@ -771,7 +783,7 @@ int RegionSelector::base_spacing() const
 }
 const Schematic *RegionSelector::schematic(std::size_t index) const
 {
-	return data_ && index < data_->entries.size() ? &data_->entries[index].schem
+	return data_ && index < data_->entries.size() ? data_->entries[index].schem.get()
 												  : nullptr;
 }
 

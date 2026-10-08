@@ -8,6 +8,8 @@
 #include <limits>
 #include <map>
 #include <bit>
+#include <mutex>
+#include <unordered_map>
 namespace arnis::trees
 {
 namespace
@@ -63,6 +65,29 @@ Schematic load_schem(const std::filesystem::path &file)
 	std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), {});
 	return tree_only(structures::decode_sponge_schem(data));
 }
+std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &file)
+{
+	struct Assets
+	{
+		std::mutex mutex;
+		std::unordered_map<std::string, std::weak_ptr<const Schematic>> entries;
+	};
+	// Detached selector loaders can outlive shutdown of other static objects.
+	static auto *assets = new Assets;
+	const auto key = std::filesystem::absolute(file).lexically_normal().string();
+	// Serialize decoding to avoid duplicate loads and transient allocation spikes.
+	std::lock_guard lock(assets->mutex);
+	if (const auto it = assets->entries.find(key); it != assets->entries.end())
+		if (auto shared = it->second.lock())
+			return shared;
+	if (assets->entries.size() >= 1024)
+		std::erase_if(assets->entries,
+				[](const auto &entry) { return entry.second.expired(); });
+	auto shared = std::make_shared<const Schematic>(load_schem(file));
+	if (!shared->voxels.empty())
+		assets->entries.insert_or_assign(key, shared);
+	return shared;
+}
 int min_log_y(const Schematic &s)
 {
 	int out = s.height;
@@ -74,13 +99,19 @@ int min_log_y(const Schematic &s)
 }
 Schematic tree_only(const Schematic &in)
 {
-	Schematic out = in;
-	out.voxels.clear();
-	out.entities.clear();
+	// Copy the placement metadata, not every voxel/state/entity before filtering.
+	Schematic out;
+	out.width = in.width;
+	out.height = in.height;
+	out.length = in.length;
+	out.offset_x = in.offset_x;
+	out.offset_y = in.offset_y;
+	out.offset_z = in.offset_z;
 	for (const auto &v : in.voxels) {
 		if (auto name = tree_block_name(v.block))
 			out.voxels.push_back({v.x, v.y, v.z, std::move(*name), {}});
 	}
+	out.voxels.shrink_to_fit();
 	// Sponge schematics frequently carry an air pad below the root. Rust removes
 	// it at load time so every tree has a stable y=0 floor independent of the
 	// editor/exporter that produced the asset.

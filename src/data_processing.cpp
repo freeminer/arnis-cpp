@@ -102,10 +102,37 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 			scale >= MICRO_TREE_MAX_SCALE ? ecoregion_ids : std::vector<std::uint16_t>{};
 	struct CacheState
 	{
+		struct Job
+		{
+			Selector selector;
+			bool complete{};
+			std::uint64_t used{};
+		};
 		std::mutex mutex;
 		std::condition_variable ready;
-		std::unordered_map<std::string, Selector> selectors;
-		std::unordered_set<std::string> loading;
+		std::unordered_map<std::string, std::shared_ptr<Job>> selectors;
+		std::uint64_t clock{};
+		unsigned active_loaders{};
+		void trim()
+		{
+			// Keep four completed location-specific selectors. Active callers and
+			// waiters retain their own references, so eviction cannot invalidate them.
+			for (;;) {
+				std::size_t completed = 0;
+				auto oldest = selectors.end();
+				for (auto it = selectors.begin(); it != selectors.end(); ++it) {
+					if (!it->second->complete)
+						continue;
+					++completed;
+					if (oldest == selectors.end() ||
+							it->second->used < oldest->second->used)
+						oldest = it;
+				}
+				if (completed <= 4)
+					return;
+				selectors.erase(oldest);
+			}
+		}
 	};
 	// The initializer is detached so process shutdown must not destroy its cache
 	// while the tree pack is still being read.
@@ -126,19 +153,30 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 							 suffix += "|" + std::to_string(id);
 						 return suffix;
 					 }();
+	std::shared_ptr<CacheState::Job> job;
 	{
 		std::unique_lock lock(state->mutex);
-		if (const auto it = state->selectors.find(key); it != state->selectors.end())
-			return it->second;
-		if (!state->loading.insert(key).second) {
+		if (const auto it = state->selectors.find(key); it != state->selectors.end()) {
+			job = it->second;
+			job->used = ++state->clock;
+			if (job->complete)
+				return job->selector;
 			if (!wait_for_load)
 				return {};
-			state->ready.wait(lock, [&] { return state->selectors.contains(key); });
-			return state->selectors.at(key);
+			state->ready.wait(lock, [&] { return job->complete; });
+			return job->selector;
 		}
+		job = std::make_shared<CacheState::Job>();
+		job->used = ++state->clock;
+		state->selectors.emplace(key, job);
 	}
-	std::thread([root, realm, latitude, longitude, scale, ground_level, max_size,
-						blocks_per_meter, effective_ecoregion_ids, exclude_palms, key] {
+	auto load = [root, realm, latitude, longitude, scale, ground_level, max_size,
+						blocks_per_meter, effective_ecoregion_ids, exclude_palms, job] {
+		{
+			std::unique_lock lock(state->mutex);
+			state->ready.wait(lock, [&] { return state->active_loaders < 2; });
+			++state->active_loaders;
+		}
 		Selector result;
 		try {
 			auto loaded = arnis::trees::RegionSelector::load_for_location(latitude,
@@ -154,15 +192,24 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		}
 		{
 			std::lock_guard lock(state->mutex);
-			state->loading.erase(key);
-			state->selectors.emplace(key, std::move(result));
+			job->selector = std::move(result);
+			job->complete = true;
+			job->used = ++state->clock;
+			--state->active_loaders;
+			state->trim();
 		}
 		state->ready.notify_all();
-	}).detach();
+	};
+	try {
+		std::thread(load).detach();
+	} catch (...) {
+		// Thread resource exhaustion must not leave a pending job/waiter stranded.
+		load();
+	}
 	if (wait_for_load) {
 		std::unique_lock lock(state->mutex);
-		state->ready.wait(lock, [&] { return state->selectors.contains(key); });
-		return state->selectors.at(key);
+		state->ready.wait(lock, [&] { return job->complete; });
+		return job->selector;
 	}
 	return {};
 }

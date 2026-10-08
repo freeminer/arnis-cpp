@@ -11,6 +11,7 @@
 #include <memory>
 #include <mutex>
 #include <limits>
+#include <list>
 #include <unordered_map>
 #include "../../../http.h"
 #include "../world_utils.h"
@@ -28,6 +29,60 @@ constexpr std::uint64_t FETCH_BATCH_BYTES = 16ULL << 20;
 constexpr auto ROW_CACHE_MAX_AGE = std::chrono::hours(24 * 30);
 constexpr auto TILE_FAILURE_RETRY = std::chrono::minutes(5);
 constexpr auto FAILURE_WARNING_RETRY = std::chrono::minutes(5);
+
+// Immutable decoded rows shared across chunk workers. Disk strips remain the
+// authoritative backing store; LRU eviction bounds retained payload to 64 MiB.
+struct DecodedRows
+{
+	using Row = std::shared_ptr<const std::vector<std::uint8_t>>;
+	struct Entry {
+		Row row;
+		std::list<std::string>::iterator position;
+	};
+	std::mutex mutex;
+	std::list<std::string> lru;
+	std::unordered_map<std::string, Entry> entries;
+	std::size_t bytes{};
+	Row get(const std::string &key)
+	{
+		std::lock_guard lock(mutex);
+		const auto it = entries.find(key);
+		if (it == entries.end())
+			return {};
+		lru.splice(lru.begin(), lru, it->second.position);
+		return it->second.row;
+	}
+	Row put(const std::string &key, std::vector<std::uint8_t> values)
+	{
+		auto row = std::make_shared<const std::vector<std::uint8_t>>(std::move(values));
+		std::lock_guard lock(mutex);
+		if (const auto it = entries.find(key); it != entries.end())
+			return it->second.row;
+		while (bytes + row->size() > (64ULL << 20) && !lru.empty()) {
+			const auto it = entries.find(lru.back());
+			bytes -= it->second.row->size();
+			entries.erase(it);
+			lru.pop_back();
+		}
+		lru.push_front(key);
+		entries.emplace(key, Entry{row, lru.begin()});
+		bytes += row->size();
+		return row;
+	}
+	void clear()
+	{
+		std::lock_guard lock(mutex);
+		entries.clear();
+		lru.clear();
+		bytes = 0;
+	}
+};
+
+DecodedRows &decoded_rows()
+{
+	static DecodedRows cache;
+	return cache;
+}
 
 struct TileFetchState
 {
@@ -556,6 +611,21 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 			tile_window(xt, yt, min_lat, min_lon, max_lat, max_lon, width, height);
 	if (win.columns.empty() || win.rows.empty())
 		return false;
+	const auto row_prefix = std::filesystem::absolute(cache_dir(base))
+								   .lexically_normal().string() + "/" + quadkey_of(xt, yt) + "/";
+	// A complete hit avoids index reads, compressed row reads and decompression.
+	bool complete = true;
+	for (std::size_t i = 0; i < win.rows.size(); ++i) {
+		const auto row = decoded_rows().get(row_prefix + std::to_string(win.rows[i]));
+		if (!row) {
+			complete = false;
+			break;
+		}
+		for (std::size_t x = 0; x < win.columns.size(); ++x)
+			grid[(win.grid_z0 + i) * width + win.grid_x0 + x] = (*row)[win.columns[x]];
+	}
+	if (complete)
+		return true;
 	const auto index = cached_or_remote_strip_index(base, xt, yt, fetch_range);
 	if (!index)
 		return false;
@@ -685,6 +755,12 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 			output.reserve((end - first) * win.columns.size());
 			for (std::size_t n = first; n < end; ++n) {
 				const auto row = unique_rows[n];
+				const auto row_key = row_prefix + std::to_string(row);
+				if (const auto cached = decoded_rows().get(row_key)) {
+					for (const auto column : win.columns)
+						output.push_back((*cached)[column]);
+					continue;
+				}
 				if (index->counts[row] == 0 || index->counts[row] > 64 * 1024 * 1024 ||
 						index->offsets[row] < lo)
 					return std::nullopt;
@@ -695,9 +771,14 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 				std::vector<std::uint8_t> compressed(
 						bytes.begin() + offset, bytes.begin() + offset + length);
 				std::vector<std::uint8_t> scratch, values;
-				if (!inflate_sampled_row(compressed, win.columns, scratch, values))
+				if (!inflate_sampled_row(compressed, {TILE_PX - 1}, scratch, values))
 					return std::nullopt;
-				output.insert(output.end(), values.begin(), values.end());
+				// TIFF horizontal predictor must be reversed for the entire shared row.
+				for (std::size_t x = 1; x < scratch.size(); ++x)
+					scratch[x] = std::uint8_t(scratch[x] + scratch[x - 1]);
+				const auto decoded = decoded_rows().put(row_key, std::move(scratch));
+				for (const auto column : win.columns)
+					output.push_back((*decoded)[column]);
 			}
 			return output;
 		};
@@ -1051,6 +1132,7 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 }
 std::size_t clear_canopy_cache(const std::filesystem::path &base)
 {
+	decoded_rows().clear();
 	const auto dir = cache_dir(base);
 	return clear_cache_tree(dir);
 }

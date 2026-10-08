@@ -1,6 +1,7 @@
 #pragma once
 #include <filesystem>
 #include <vector>
+#include <memory>
 #include "../structures/schem_decoder.h"
 #include "tree_library.h"
 #include "../floodfill_cache.h"
@@ -18,6 +19,8 @@ Schematic tree_only(const Schematic &schem);
 // regional tree selector; keep this predicate available to pack loaders.
 bool has_leaves(const Schematic &schem);
 Schematic load_schem(const std::filesystem::path &file);
+// Weak asset cache: selectors share immutable voxels; no cache owns them forever.
+std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &file);
 TreeSize schematic_size(const Schematic &schem);
 // One deterministic trunk position per lattice cell; shared by regional and
 // canopy-driven placement so streamed tiles cannot disagree at their seam.
