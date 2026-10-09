@@ -8,10 +8,76 @@
 #include <cctype>
 #include <chrono>
 #include <cmath>
+#include <array>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <thread>
+#include <zlib.h>
 namespace arnis::mapillary
 {
+namespace
+{
+constexpr std::size_t max_inflated_cluster_bytes = 256U * 1024U * 1024U;
+
+std::string encode_query_value(const std::string &value)
+{
+	static constexpr char hex[] = "0123456789ABCDEF";
+	std::string encoded;
+	encoded.reserve(value.size());
+	for (const unsigned char byte : value) {
+		if ((byte >= 'A' && byte <= 'Z') || (byte >= 'a' && byte <= 'z') ||
+				(byte >= '0' && byte <= '9') || byte == '-' || byte == '.' ||
+				byte == '_' || byte == '~') {
+			encoded.push_back(static_cast<char>(byte));
+		} else {
+			encoded.push_back('%');
+			encoded.push_back(hex[byte >> 4]);
+			encoded.push_back(hex[byte & 0x0f]);
+		}
+	}
+	return encoded;
+}
+
+std::optional<std::vector<std::uint8_t>> normalize_cluster(
+		const std::vector<std::uint8_t> &bytes)
+{
+	if (bytes.empty() || bytes.size() > std::numeric_limits<uInt>::max())
+		return {};
+	z_stream stream{};
+	if (inflateInit(&stream) == Z_OK) {
+		stream.next_in =
+				const_cast<Bytef *>(reinterpret_cast<const Bytef *>(bytes.data()));
+		stream.avail_in = static_cast<uInt>(bytes.size());
+		std::array<std::uint8_t, 64 * 1024> chunk{};
+		std::size_t inflated = 0;
+		int status = Z_OK;
+		while (status == Z_OK && inflated <= max_inflated_cluster_bytes) {
+			stream.next_out = chunk.data();
+			stream.avail_out = static_cast<uInt>(chunk.size());
+			status = inflate(&stream, Z_NO_FLUSH);
+			inflated += chunk.size() - stream.avail_out;
+		}
+		inflateEnd(&stream);
+		if (inflated > max_inflated_cluster_bytes)
+			return {};
+		if (status == Z_STREAM_END)
+			return bytes;
+	}
+	try {
+		(void)nlohmann::json::parse(bytes.begin(), bytes.end());
+	} catch (...) {
+		return {};
+	}
+	uLongf compressed_size = compressBound(static_cast<uLong>(bytes.size()));
+	std::vector<std::uint8_t> compressed(compressed_size);
+	if (compress2(compressed.data(), &compressed_size, bytes.data(),
+				static_cast<uLong>(bytes.size()), Z_DEFAULT_COMPRESSION) != Z_OK)
+		return {};
+	compressed.resize(compressed_size);
+	return compressed;
+}
+} // namespace
+
 Client::Client(cache::Layout cache) : cache_(std::move(cache))
 {
 	concurrent_fetch_ = true;
@@ -234,7 +300,7 @@ std::optional<HttpReply> Client::fetch_reply(
 	}
 	if (fetch_) {
 		auto body = fetch_(url, max_bytes);
-		if (body)
+		if (body && body->size() <= max_bytes)
 			return HttpReply{200, std::move(*body)};
 	}
 	return std::nullopt;
@@ -253,7 +319,7 @@ std::optional<cache::ImageRecord> Client::refresh_metadata(const std::string &id
 	while (!endpoint.empty() && endpoint.back() == '/')
 		endpoint.pop_back();
 	const auto url =
-			endpoint + "/" + id + "?access_token=" + token +
+			endpoint + "/" + id + "?access_token=" + encode_query_value(token) +
 			"&fields=thumb_original_url,thumb_2048_url,thumb_1024_url,sfm_cluster";
 	constexpr std::size_t max_metadata_bytes = 1024 * 1024;
 	auto reply = fetch_reply(url, max_metadata_bytes);
@@ -405,9 +471,12 @@ std::optional<std::filesystem::path> Client::download_cluster(
 			if (url.empty())
 				return {};
 			auto reply = fetch_reply(url, max_cluster_bytes);
-			if (reply && reply->status >= 200 && reply->status < 300 &&
-					!reply->body.empty() && cache_.save_cluster(cluster_id, reply->body))
-				return cluster_path;
+			if (reply && reply->status >= 200 && reply->status < 300) {
+				auto normalized = normalize_cluster(reply->body);
+				if (normalized && cache_.save_cluster(cluster_id, *normalized))
+					return cluster_path;
+				return {};
+			}
 			if (!requeried && reply && (reply->status == 403 || reply->status == 404)) {
 				auto refreshed = refresh_metadata(record.id);
 				if (refreshed) {
@@ -495,7 +564,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						   std::to_string(cell.max_longitude) + "," +
 						   std::to_string(cell.max_latitude);
 		std::string url =
-				endpoint + "?access_token=" + token +
+				endpoint + "?access_token=" + encode_query_value(token) +
 				"&is_pano=true&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +
 				bbox;
 		constexpr unsigned max_subdivision_depth = 5;

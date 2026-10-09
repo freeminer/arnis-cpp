@@ -4,16 +4,73 @@
 #include "../world_editor/floor_state.h"
 #include <algorithm>
 #include <array>
+#include <atomic>
+#include <charconv>
 #include <cmath>
+#include <cstdlib>
 #include <cstdint>
 #include <deque>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <thread>
 #include <tuple>
 #include <unordered_set>
+#include <string_view>
 namespace arnis::elevation
 {
+namespace
+{
+std::size_t elevation_worker_count()
+{
+	if (const char *value = std::getenv("RAYON_NUM_THREADS")) {
+		const std::string_view text(value);
+		std::size_t requested = 0;
+		const auto [end, error] =
+				std::from_chars(text.data(), text.data() + text.size(), requested);
+		if (error == std::errc{} && end == text.data() + text.size() && requested > 0)
+			return requested;
+	}
+	const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+	return std::max<std::size_t>(1, static_cast<std::size_t>(hardware * 0.9));
+}
+
+template <typename Function>
+void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
+{
+	if (begin >= end)
+		return;
+	const auto workers_count =
+			std::min<std::size_t>(end - begin, elevation_worker_count());
+	if (workers_count == 1) {
+		for (auto row = begin; row < end; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{begin};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= end)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> threads;
+	threads.reserve(workers_count - 1);
+	for (std::size_t i = 1; i < workers_count; ++i) {
+		try {
+			threads.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	}
+	worker();
+	for (auto &thread : threads)
+		thread.join();
+}
+} // namespace
+
 void repair_terrain_anomalies(std::vector<std::vector<double>> &h, double meters_per_cell)
 {
 	if (h.size() < 5 || h[0].size() < 5)
@@ -22,17 +79,20 @@ void repair_terrain_anomalies(std::vector<std::vector<double>> &h, double meters
 	const double abs_threshold = std::max(6.0, 0.25 * meters_per_cell);
 	const int passes = meters_per_cell > 4.0 ? 2 : 10;
 	std::vector<std::vector<double>> snapshot = h;
-	std::vector<double> neighbors;
-	std::vector<double> abs_devs;
-	neighbors.reserve(24);
-	abs_devs.reserve(24);
 	std::size_t total_repaired = 0;
 	int passes_ran = 0;
 	for (int pass = 0; pass < passes; ++pass) {
 		if (pass > 0)
-			snapshot = h;
-		std::size_t changed = 0;
-		for (std::size_t y = 2; y < H - 2; ++y)
+			parallel_rows(0, H, [&](std::size_t y) {
+				std::copy(h[y].begin(), h[y].end(), snapshot[y].begin());
+			});
+		std::atomic_size_t changed{0};
+		parallel_rows(2, H - 2, [&](std::size_t y) {
+			thread_local std::vector<double> neighbors;
+			thread_local std::vector<double> abs_devs;
+			neighbors.reserve(24);
+			abs_devs.reserve(24);
+			std::size_t row_changed = 0;
 			for (std::size_t x = 2; x < W - 2; ++x) {
 				const double c = snapshot[y][x];
 				if (!std::isfinite(c))
@@ -73,12 +133,16 @@ void repair_terrain_anomalies(std::vector<std::vector<double>> &h, double meters
 				if (std::abs(c - median) > abs_threshold &&
 						std::abs(c - median) > 3.0 * std::max(1.0, mad)) {
 					h[y][x] = median;
-					++changed;
+					++row_changed;
 				}
 			}
-		if (changed == 0)
+			if (row_changed)
+				changed.fetch_add(row_changed, std::memory_order_relaxed);
+		});
+		const auto repaired = changed.load(std::memory_order_relaxed);
+		if (repaired == 0)
 			break;
-		total_repaired += changed;
+		total_repaired += repaired;
 		passes_ran = pass + 1;
 	}
 	if (total_repaired > 0)
