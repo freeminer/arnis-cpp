@@ -4,6 +4,7 @@
 #include "httpfetch.h"
 
 #include <algorithm>
+#include <atomic>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -13,6 +14,7 @@ namespace arnis::mapillary
 {
 Client::Client(cache::Layout cache) : cache_(std::move(cache))
 {
+	concurrent_fetch_ = true;
 	graph_fetch_ = [](const std::string &url,
 						   std::size_t max_bytes) -> std::optional<HttpReply> {
 		auto permit = arnis::net::request_permit();
@@ -24,7 +26,7 @@ Client::Client(cache::Layout cache) : cache_(std::move(cache))
 		request.quiet = true;
 		HTTPFetchResult response;
 		httpfetch_sync(request, response);
-		if (!response.succeeded || response.data.size() > max_bytes)
+		if (response.response_code <= 0 || response.data.size() > max_bytes)
 			return std::nullopt;
 		return HttpReply{static_cast<int>(response.response_code),
 				std::vector<std::uint8_t>(response.data.begin(), response.data.end())};
@@ -216,13 +218,72 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_bytes(
 {
 	if (fetch_)
 		return fetch_(url, max_bytes);
-	if (!graph_fetch_)
-		return std::nullopt;
-	auto reply = graph_fetch_(url, max_bytes);
+	auto reply = fetch_reply(url, max_bytes);
 	if (!reply || reply->status < 200 || reply->status >= 300 ||
 			reply->body.size() > max_bytes)
 		return std::nullopt;
 	return std::move(reply->body);
+}
+
+std::optional<HttpReply> Client::fetch_reply(
+		const std::string &url, std::size_t max_bytes) const
+{
+	if (graph_fetch_) {
+		auto reply = graph_fetch_(url, max_bytes);
+		return !reply || reply->body.size() > max_bytes ? std::nullopt : reply;
+	}
+	if (fetch_) {
+		auto body = fetch_(url, max_bytes);
+		if (body)
+			return HttpReply{200, std::move(*body)};
+	}
+	return std::nullopt;
+}
+
+std::optional<cache::ImageRecord> Client::refresh_metadata(const std::string &id) const
+{
+	std::string endpoint, token;
+	{
+		std::lock_guard<std::mutex> lock(credentials_->mutex);
+		endpoint = credentials_->endpoint;
+		token = credentials_->token;
+	}
+	if (endpoint.empty() || token.empty() || !cache::Layout::safe_key(id))
+		return {};
+	while (!endpoint.empty() && endpoint.back() == '/')
+		endpoint.pop_back();
+	const auto url =
+			endpoint + "/" + id + "?access_token=" + token +
+			"&fields=thumb_original_url,thumb_2048_url,thumb_1024_url,sfm_cluster";
+	constexpr std::size_t max_metadata_bytes = 1024 * 1024;
+	auto reply = fetch_reply(url, max_metadata_bytes);
+	if (!reply || reply->status < 200 || reply->status >= 300)
+		return {};
+	try {
+		auto fresh = nlohmann::json::parse(reply->body.begin(), reply->body.end());
+		if (!fresh.is_object() ||
+				(fresh.contains("id") && fresh.value("id", std::string{}) != id))
+			return {};
+		if (auto cached = cache_.load_metadata(id); cached && !cached->raw_json.empty()) {
+			auto merged = nlohmann::json::parse(cached->raw_json);
+			if (!merged.is_object())
+				merged = nlohmann::json::object();
+			for (auto it = fresh.begin(); it != fresh.end(); ++it)
+				merged[it.key()] = it.value();
+			fresh = std::move(merged);
+		}
+		if (!fresh.contains("id"))
+			fresh["id"] = id;
+		const auto encoded = fresh.dump();
+		const std::vector<std::uint8_t> bytes(encoded.begin(), encoded.end());
+		auto record = parse_image_record(bytes);
+		if (!record || record->id != id)
+			return {};
+		cache_.save_metadata(*record);
+		return record;
+	} catch (...) {
+		return {};
+	}
 }
 
 std::optional<cache::ImageRecord> Client::image(
@@ -257,17 +318,43 @@ std::optional<std::filesystem::path> Client::download_image(
 		return path;
 	if (!fetch_ && !graph_fetch_)
 		return {};
-	const auto &url = size == cache::ImageSize::W1024	? record.thumb_1024_url
-					  : size == cache::ImageSize::W2048 ? record.thumb_2048_url
-														: record.thumb_original_url;
-	if (url.empty())
-		return {};
+	auto current = cache_.load_metadata(record.id).value_or(record);
+	auto url_for = [size](const cache::ImageRecord &image) -> const std::string & {
+		return size == cache::ImageSize::W1024	 ? image.thumb_1024_url
+			   : size == cache::ImageSize::W2048 ? image.thumb_2048_url
+												 : image.thumb_original_url;
+	};
+	bool requeried = false;
+	if (url_for(current).empty()) {
+		auto refreshed = refresh_metadata(record.id);
+		if (!refreshed)
+			return {};
+		current = std::move(*refreshed);
+		requeried = true;
+	}
 	constexpr std::size_t max_image_bytes = 96 * 1024 * 1024;
-	auto bytes = fetch_bytes(url, max_image_bytes);
-	if (!bytes || bytes->empty() || bytes->size() > max_image_bytes ||
-			!cache_.save_image(record.id, size, *bytes))
+	for (;;) {
+		const auto &url = url_for(current);
+		if (url.empty())
+			return {};
+		auto reply = fetch_reply(url, max_image_bytes);
+		if (reply && reply->status >= 200 && reply->status < 300) {
+			auto &bytes = reply->body;
+			if (bytes.size() <= 4 || bytes[0] != 0xff || bytes[1] != 0xd8 ||
+					bytes[2] != 0xff || !cache_.save_image(record.id, size, bytes))
+				return {};
+			return path;
+		}
+		if (!requeried && reply && (reply->status == 403 || reply->status == 404)) {
+			auto refreshed = refresh_metadata(record.id);
+			if (refreshed) {
+				current = std::move(*refreshed);
+				requeried = true;
+				continue;
+			}
+		}
 		return {};
-	return path;
+	}
 }
 std::optional<std::filesystem::path> Client::download_cluster(
 		const cache::ImageRecord &record) const
@@ -278,13 +365,32 @@ std::optional<std::filesystem::path> Client::download_cluster(
 		const auto metadata = nlohmann::json::parse(record.raw_json);
 		if (!metadata.contains("sfm_cluster") || !metadata["sfm_cluster"].is_object())
 			return {};
-		const auto &cluster = metadata["sfm_cluster"];
-		const auto url = cluster.value("url", std::string{});
+		auto current = cache_.load_metadata(record.id).value_or(record);
+		auto cluster_info = [](const cache::ImageRecord &image) {
+			nlohmann::json result = nlohmann::json::object();
+			try {
+				const auto parsed = nlohmann::json::parse(image.raw_json);
+				if (parsed.contains("sfm_cluster") && parsed["sfm_cluster"].is_object())
+					result = parsed["sfm_cluster"];
+			} catch (...) {
+			}
+			return result;
+		};
+		auto cluster = cluster_info(current);
+		bool requeried = false;
+		if (cluster.value("url", std::string{}).empty()) {
+			auto refreshed = refresh_metadata(record.id);
+			if (!refreshed)
+				return {};
+			current = std::move(*refreshed);
+			cluster = cluster_info(current);
+			requeried = true;
+		}
 		const auto id_value = cluster.value("id", nlohmann::json{});
 		const auto cluster_id = id_value.is_string() ? id_value.get<std::string>()
 								: id_value.is_number_integer() ? id_value.dump()
 															   : std::string{};
-		if (url.empty())
+		if (cluster.value("url", std::string{}).empty())
 			return {};
 		const auto cluster_path = cache_.cluster_path(cluster_id);
 		if (!cluster_path)
@@ -294,11 +400,25 @@ std::optional<std::filesystem::path> Client::download_cluster(
 		if (!fetch_ && !graph_fetch_)
 			return {};
 		constexpr std::size_t max_cluster_bytes = 96 * 1024 * 1024;
-		auto bytes = fetch_bytes(url, max_cluster_bytes);
-		if (!bytes || bytes->empty() || bytes->size() > max_cluster_bytes ||
-				!cache_.save_cluster(cluster_id, *bytes))
+		for (;;) {
+			const auto url = cluster.value("url", std::string{});
+			if (url.empty())
+				return {};
+			auto reply = fetch_reply(url, max_cluster_bytes);
+			if (reply && reply->status >= 200 && reply->status < 300 &&
+					!reply->body.empty() && cache_.save_cluster(cluster_id, reply->body))
+				return cluster_path;
+			if (!requeried && reply && (reply->status == 403 || reply->status == 404)) {
+				auto refreshed = refresh_metadata(record.id);
+				if (refreshed) {
+					current = std::move(*refreshed);
+					cluster = cluster_info(current);
+					requeried = true;
+					continue;
+				}
+			}
 			return {};
-		return cluster_path;
+		}
 	} catch (...) {
 		return {};
 	}
@@ -347,6 +467,11 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 		std::size_t *failed_cells) const
 {
 	std::vector<cache::ImageRecord> result;
+	{
+		std::lock_guard<std::mutex> lock(credentials_->mutex);
+		credentials_->endpoint = endpoint;
+		credentials_->token = token;
+	}
 	if (failed_cells)
 		*failed_cells = 0;
 	auto cells = search_cells(bounds, maximum);
@@ -360,7 +485,11 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			*failed_cells = cells->size();
 		return result;
 	}
-	auto query_cell = [&](auto &&self, const SearchCell &cell, unsigned depth) -> void {
+	std::vector<std::vector<cache::ImageRecord>> cell_results(cells->size());
+	std::vector<std::size_t> cell_failures(cells->size(), 0);
+	auto query_cell = [&](auto &&self, const SearchCell &cell, unsigned depth,
+							  std::vector<cache::ImageRecord> &records,
+							  std::size_t &failures) -> void {
 		std::string bbox = std::to_string(cell.min_longitude) + "," +
 						   std::to_string(cell.min_latitude) + "," +
 						   std::to_string(cell.max_longitude) + "," +
@@ -376,8 +505,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 		if (graph_fetch_) {
 			auto reply = graph_fetch_(url, max_search_bytes);
 			if (!reply) {
-				if (failed_cells)
-					++*failed_cells;
+				++failures;
 				return;
 			}
 			bool auth_failure = reply->status == 401;
@@ -400,7 +528,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						{cell.min_longitude, mid_lat, mid_lon, cell.max_latitude},
 						{mid_lon, mid_lat, cell.max_longitude, cell.max_latitude}};
 				for (const auto &quadrant : quadrants)
-					self(self, quadrant, depth + 1);
+					self(self, quadrant, depth + 1, records, failures);
 				return;
 			}
 			// Rust retries a non-explicit Graph 500 at the smallest cell before
@@ -433,46 +561,74 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						break;
 				}
 				if (!recovered) {
-					if (failed_cells)
-						++*failed_cells;
+					++failures;
 					return;
 				}
 			} else if (reply->status == 500 && auth_failure) {
-				if (failed_cells)
-					++*failed_cells;
+				++failures;
 				return;
 			}
 			if (reply->status < 200 || reply->status >= 300) {
-				if (failed_cells)
-					++*failed_cells;
+				++failures;
 				return;
 			}
 			body = std::move(reply->body);
 		} else {
 			auto reply = fetch_(url, max_search_bytes);
 			if (!reply) {
-				if (failed_cells)
-					++*failed_cells;
+				++failures;
 				return;
 			}
 			body = std::move(*reply);
 		}
 		bool valid_response = false;
-		auto records = parse_search_response(body, &valid_response);
-		if (!valid_response && failed_cells)
-			++*failed_cells;
-		for (const auto &record : records)
-			cache_.save_metadata(record);
-		result.insert(result.end(), std::make_move_iterator(records.begin()),
-				std::make_move_iterator(records.end()));
+		auto cell_records = parse_search_response(body, &valid_response);
+		if (!valid_response)
+			++failures;
+		records.insert(records.end(), std::make_move_iterator(cell_records.begin()),
+				std::make_move_iterator(cell_records.end()));
 	};
-	for (const auto &cell : *cells)
-		query_cell(query_cell, cell, 0);
+	const auto hardware = std::thread::hardware_concurrency();
+	const std::size_t worker_limit =
+			concurrent_fetch_
+					? std::clamp<std::size_t>(hardware == 0 ? 2 : hardware, 1, 12)
+					: 1;
+	const std::size_t worker_count = std::min(cells->size(), worker_limit);
+	std::atomic_size_t next_cell{0};
+	std::vector<std::thread> workers;
+	workers.reserve(worker_count);
+	for (std::size_t worker = 0; worker < worker_count; ++worker) {
+		workers.emplace_back([&] {
+			for (;;) {
+				const auto index = next_cell.fetch_add(1, std::memory_order_relaxed);
+				if (index >= cells->size())
+					return;
+				try {
+					query_cell(query_cell, (*cells)[index], 0, cell_results[index],
+							cell_failures[index]);
+				} catch (...) {
+					++cell_failures[index];
+				}
+			}
+		});
+	}
+	for (auto &worker : workers)
+		worker.join();
+	for (std::size_t index = 0; index < cells->size(); ++index) {
+		if (failed_cells)
+			*failed_cells += cell_failures[index];
+		result.insert(result.end(), std::make_move_iterator(cell_results[index].begin()),
+				std::make_move_iterator(cell_results[index].end()));
+	}
 	std::sort(result.begin(), result.end(),
 			[](const auto &a, const auto &b) { return a.id < b.id; });
 	result.erase(std::unique(result.begin(), result.end(),
 						 [](const auto &a, const auto &b) { return a.id == b.id; }),
 			result.end());
+	// Match Rust: deduplicate across all cells first, then write one cache record
+	// per image. This also avoids races when buffered search cells overlap.
+	for (const auto &record : result)
+		cache_.save_metadata(record);
 	return result;
 }
 }

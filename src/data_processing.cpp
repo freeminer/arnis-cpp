@@ -1650,10 +1650,15 @@ bool generate_world(WorldEditor &editor,
 						int y, int z, std::uint8_t cover,
 						const trees::MappedRequest &request) -> std::optional<bool> {
 					(void)cover;
-					const int elevation = editor.terrain_level(x, z).value_or(
-							editor.get_absolute_y(x, y, z));
+					// Tree::create_mapped passes an absolute placement height, while
+					// schematic placement expects an offset from local ground.
+					const int ground_y = editor.get_ground_level(x, z);
+					const int y_offset = y - ground_y;
+					// Rust falls back to the requested absolute base when sampled
+					// terrain elevation is unavailable.
+					const int elevation = editor.terrain_level(x, z).value_or(y);
 					return trees::place_selected_mapped_region_tree(editor,
-							*shared_selector, x, z, elevation, y, request,
+							*shared_selector, x, z, elevation, y_offset, request,
 							&building_footprints, &bridge_surface);
 				});
 	}

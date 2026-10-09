@@ -5,6 +5,8 @@
 #include <functional>
 #include <map>
 #include <filesystem>
+#include <memory>
+#include <mutex>
 namespace arnis::mapillary
 {
 using JsonFetcher = std::function<std::optional<std::vector<std::uint8_t>>(
@@ -33,11 +35,24 @@ std::optional<cache::ImageRecord> parse_image_record(const std::vector<std::uint
 std::optional<PanoMeta> parse_pano_meta(const std::vector<std::uint8_t> &);
 class Client
 {
+	struct Credentials
+	{
+		std::mutex mutex;
+		std::string endpoint, token;
+	};
 	cache::Layout cache_;
 	JsonFetcher fetch_;
 	GraphFetcher graph_fetch_;
+	std::shared_ptr<Credentials> credentials_ = std::make_shared<Credentials>();
+	// The built-in HTTP transport is safe to use from the bounded search pool.
+	// Injected callbacks stay serialized unless they gain an explicit thread-safe
+	// contract, which keeps the API's testing/embedding seam predictable.
+	bool concurrent_fetch_ = false;
 	std::optional<std::vector<std::uint8_t>> fetch_bytes(
 			const std::string &url, std::size_t max_bytes) const;
+	std::optional<HttpReply> fetch_reply(
+			const std::string &url, std::size_t max_bytes) const;
+	std::optional<cache::ImageRecord> refresh_metadata(const std::string &id) const;
 
 public:
 	explicit Client(cache::Layout cache = cache::Layout{});

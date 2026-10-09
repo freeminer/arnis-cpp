@@ -166,9 +166,16 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 	};
 	if (!editor.owns(x, z) || blocked(x, z))
 		return false;
-	const auto selected =
-			selector.pick_mapped(x, z, request.habitat, elevation_y, request);
-	if (!selected || blocked(selected->x, selected->z))
+	auto selected = selector.pick_mapped(x, z, request.habitat, elevation_y, request);
+	if (!selected)
+		return false;
+	// Match Rust's tile ownership rule: a mapped tree is never dropped just
+	// because its deterministic schematic slot crosses an ownership seam.
+	if (!editor.owns(selected->x, selected->z)) {
+		selected->x = x;
+		selected->z = z;
+	}
+	if (blocked(selected->x, selected->z))
 		return false;
 	return place_selected_schematic(
 			editor, selector, y_offset, *selected, building_footprints);
