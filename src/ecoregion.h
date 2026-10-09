@@ -87,7 +87,8 @@ public:
 	{
 		return {align_x_, align_z_};
 	}
-	std::vector<std::pair<std::uint16_t, std::size_t>> by_area() const;
+	std::vector<std::pair<std::uint16_t, std::size_t>> by_area(
+			bool *has_gaps = nullptr) const;
 	bool has_gaps() const;
 	std::optional<std::string> dominant_tree_pack() const;
 };

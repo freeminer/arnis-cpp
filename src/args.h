@@ -242,6 +242,9 @@ struct Args
 		interior = false;
 		legacy_trees = false;
 		aws_only_elevation = false;
+		// Cave carving and its themed decorations are Earth-only; do not carry
+		// an explicit library setting onto Moon or Mars generation.
+		caves = false;
 		building_facades = false;
 		mapillary_facades = false;
 		disable_height_limit = false;
@@ -276,8 +279,8 @@ struct Args
 		return mapillary_facades_on() && !mapillary_facades_dir.has_value();
 	}
 
-	// Enable interior generation (optional)
-	bool interior{true};
+	// Rust's CLI leaves interior generation off unless explicitly requested.
+	bool interior{false};
 	// Retained for parity with Rust argument validation; exporters may consume
 	// these options when they support facade panels.
 	bool building_facades{false};
@@ -385,6 +388,10 @@ struct Args
 				return false;
 		}
 		if (cave_asset_pack && !caves)
+			return false;
+		if (cave_asset_pack &&
+				!std::filesystem::is_regular_file(
+						std::filesystem::path(*cave_asset_pack) / "cave_pack.json"))
 			return false;
 		if (!mapillary_facade_debug_walls.empty() && !mapillary_facade_debug_dir)
 			return false;

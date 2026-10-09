@@ -333,33 +333,49 @@ std::optional<std::uint16_t> EcoMap::id_at(double latitude, double longitude) co
 		return {};
 	return grid_->value(*tile, grid_->index_in_tile(cell));
 }
-std::vector<std::pair<std::uint16_t, std::size_t>> EcoMap::by_area() const
+std::vector<std::pair<std::uint16_t, std::size_t>> EcoMap::by_area(bool *has_gaps) const
 {
 	std::map<std::uint16_t, std::size_t> counts;
+	bool gaps = false;
 	if (is_local()) {
 		for (const auto id : ids_)
 			++counts[id];
+		gaps = std::any_of(counts.begin(), counts.end(),
+				[](const auto &entry) { return !lookup(entry.first).has_value(); });
 		std::vector<std::pair<std::uint16_t, std::size_t>> out(
 				counts.begin(), counts.end());
 		std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
 			return a.second != b.second ? a.second > b.second : a.first < b.first;
 		});
+		if (has_gaps)
+			*has_gaps = gaps;
 		return out;
 	}
-	if (!grid_)
+	if (!grid_) {
+		if (has_gaps)
+			*has_gaps = true;
 		return {};
+	}
 	for (std::size_t tile = 0; tile < grid_->tile_count(); ++tile) {
 		auto decoded = grid_->decode(tile);
-		if (!decoded)
+		if (!decoded) {
+			gaps = true;
 			continue;
+		}
 		for (std::size_t i = 0; i < grid_->cells_per_tile(); ++i) {
-			++counts[grid_->value(*decoded, i)];
+			const auto id = grid_->value(*decoded, i);
+			++counts[id];
 		}
 	}
+	gaps = gaps || std::any_of(counts.begin(), counts.end(), [](const auto &entry) {
+		return !lookup(entry.first).has_value();
+	});
 	std::vector<std::pair<std::uint16_t, std::size_t>> out(counts.begin(), counts.end());
 	std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
 		return a.second != b.second ? a.second > b.second : a.first < b.first;
 	});
+	if (has_gaps)
+		*has_gaps = gaps;
 	return out;
 }
 bool EcoMap::has_gaps() const

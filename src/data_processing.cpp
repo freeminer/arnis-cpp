@@ -1324,12 +1324,29 @@ bool generate_world(WorldEditor &editor,
 	bool ecoregion_map_has_gaps = true;
 	if (editor.ground && editor.ground->ecoregion_map()) {
 		const auto &ecoregions = editor.ground->ecoregion_map();
-		dominant_tree_realm = ecoregions->dominant_tree_pack();
-		ecoregion_map_has_gaps = ecoregions->has_gaps();
-		for (const auto &[id, count] : ecoregions->by_area()) {
-			(void)count;
-			if (ecoregion::tree_mix(id))
-				area_ecoregion_ids.push_back(id);
+		if (ecoregions->is_local()) {
+			// Area-local maps are small and vary with the current bbox, so their
+			// summary must be computed from this map.
+			dominant_tree_realm = ecoregions->dominant_tree_pack();
+			ecoregion_map_has_gaps = ecoregions->has_gaps();
+			for (const auto &[id, count] : ecoregions->by_area()) {
+				(void)count;
+				if (ecoregion::tree_mix(id))
+					area_ecoregion_ids.push_back(id);
+			}
+		} else {
+			// The Freeminer chunk adapter may supply the immutable global raster.
+			// Its summary is computed once by generation_map(); rescanning and
+			// decompressing every source tile here stalls all EmergeThreads before
+			// they reach object or terrain placement.
+			const auto &summary = ecoregion::generation_map();
+			dominant_tree_realm = summary.dominant_tree_realm;
+			ecoregion_map_has_gaps = summary.has_gaps;
+			for (const auto &[id, count] : summary.by_area) {
+				(void)count;
+				if (ecoregion::tree_mix(id))
+					area_ecoregion_ids.push_back(id);
+			}
 		}
 	}
 	const double abs_centre_lat = std::abs(centre_lat);
