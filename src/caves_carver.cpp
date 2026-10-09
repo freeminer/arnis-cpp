@@ -41,14 +41,15 @@ bool decor_chance(int x, int y, int z, std::uint64_t seed, std::uint64_t per_tho
 }
 
 void grow_dripstone(world_editor::WorldEditor &editor, int x, int y, int z,
-		std::uint64_t seed, bool up)
+		const std::unordered_set<std::int64_t> &air, std::uint64_t seed, bool up)
 {
 	const int length = 1 + static_cast<int>(decor_hash(x, y, z, seed ^ 0xD21AULL) % 5);
 	const int step = up ? 1 : -1;
 	const char *direction = up ? "up" : "down";
 	for (int i = 0; i < length; ++i) {
 		const int yy = y + step * i;
-		if (editor.block_exists_absolute(x, yy, z))
+		if (!air.contains(pack_cave_pos(x, yy, z)) &&
+				editor.block_exists_absolute(x, yy, z))
 			break;
 		const char *thickness = length == 1		  ? "tip"
 								: i == 0		  ? "base"
@@ -754,9 +755,9 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				editor.set_block_absolute(
 						DRIPSTONE_BLOCK, x, y + 1, z, rock_options, std::nullopt);
 			if (ceiling_rock && decor_chance(x, y, z, decoration_seed ^ 0xD21A, 170))
-				grow_dripstone(editor, x, y, z, decoration_seed, false);
+				grow_dripstone(editor, x, y, z, air_cells, decoration_seed, false);
 			else if (floor_rock && decor_chance(x, y, z, decoration_seed ^ 0xD21B, 130))
-				grow_dripstone(editor, x, y, z, decoration_seed, true);
+				grow_dripstone(editor, x, y, z, air_cells, decoration_seed, true);
 		} else if (theme == CaveTheme::Amethyst) {
 			if (floor_rock) {
 				if (editor.check_for_block_absolute(x, y - 2, z, rock_options) &&

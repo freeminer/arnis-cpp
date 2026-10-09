@@ -154,13 +154,19 @@ struct DecalEntry
 
 class DecalRegistry
 {
+public:
+	static constexpr int FIRST_ID = 2;
+
+private:
 	std::map<DecalKey, DecalEntry> entries_;
 	std::vector<DecalKey> ordered_;
 	int next_id_{FIRST_ID};
+	int first_id_{FIRST_ID};
 
 public:
-	static constexpr int FIRST_ID = 2;
 	static DecalRegistry from_keys(const std::set<DecalKey> &keys);
+	static DecalRegistry from_keys_starting_at(
+			const std::set<DecalKey> &keys, int first_id);
 	std::optional<DecalEntry> get(const DecalKey &key) const;
 	bool contains(const DecalKey &key) const;
 	std::size_t size() const;
@@ -168,6 +174,7 @@ public:
 	int max_id() const;
 	int tile_count() const;
 	const std::vector<DecalKey> &ordered() const;
-	std::optional<std::tuple<DecalKey, std::uint32_t, std::uint32_t>> tile(int map_id) const;
+	std::optional<std::tuple<DecalKey, std::uint32_t, std::uint32_t>> tile(
+			int map_id) const;
 };
 }

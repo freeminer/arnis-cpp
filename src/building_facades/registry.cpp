@@ -152,6 +152,17 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		const Choice choice = group == groups.end() ? run.choice : group->second.choice;
 		if (run.cells.size() < MIN_RUN_CELLS || choice.entry >= set->entries().size())
 			continue;
+		// Match mapillary::displays::wall_is_visible: a facade hidden entirely
+		// below the terrain surface has no visible wall to carry a panel. Check
+		// the wall's highest row against each column's effective ground height;
+		// one exposed column is enough to keep the candidate.
+		const int top = run.base_y + run.height;
+		const bool wall_visible =
+				std::any_of(run.cells.begin(), run.cells.end(), [&](const auto &cell) {
+					return top > editor.get_absolute_y(cell.first, 0, cell.second) + 1;
+				});
+		if (!wall_visible)
+			continue;
 		auto image = images.find(choice.entry);
 		if (image == images.end()) {
 			auto loaded = load_image(directory, set->entries()[choice.entry], ppm);
@@ -245,8 +256,10 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 building_facade::PointSet collect(world_editor::WorldEditor &editor,
 		const std::vector<ProcessedNode> &nodes, std::uint64_t way_id,
 		std::uint64_t group_seed, buildings::BuildingCategory category,
-		const building_facade::FacadePlan &plan, int base_y, int building_height,
-		double scale)
+		const building_facade::FacadePlan &plan,
+		const CoordinateBitmap *building_footprints,
+		const building_facade::PointSet &own_fill, bool ground_level, int base_y,
+		int building_height, double scale)
 {
 	if (nodes.size() < 3 || building_height < MIN_WALL_BLOCKS)
 		return {};
@@ -299,13 +312,24 @@ building_facade::PointSet collect(world_editor::WorldEditor &editor,
 			if (first == cells.size())
 				break;
 			std::size_t open_end = first + 1;
-			const bool party = plan.is_party(cells[first].first, cells[first].second,
-					segment->normal.first, segment->normal.second);
+			const auto is_party = [&](const auto &cell) {
+				if (!ground_level || !building_footprints)
+					return false;
+				for (int distance = 1; distance <= 2; ++distance) {
+					const std::pair neighbor{
+							cell.first + segment->normal.first * distance,
+							cell.second + segment->normal.second * distance};
+					if (building_footprints->contains(neighbor.first, neighbor.second) &&
+							!own_fill.contains(neighbor))
+						return true;
+				}
+				return false;
+			};
+			const bool party = is_party(cells[first]);
 			while (open_end < cells.size() && inside(cells[open_end]) &&
 					!mapillary::facades::photo_column(
 							cells[open_end].first, cells[open_end].second, way_id) &&
-					plan.is_party(cells[open_end].first, cells[open_end].second,
-							segment->normal.first, segment->normal.second) == party)
+					is_party(cells[open_end]) == party)
 				++open_end;
 			if (open_end - first < MIN_RUN_CELLS) {
 				first = open_end;

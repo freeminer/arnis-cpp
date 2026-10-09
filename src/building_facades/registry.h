@@ -30,6 +30,7 @@ std::size_t finalize(world_editor::WorldEditor &);
 building_facade::PointSet collect(world_editor::WorldEditor &,
 		const std::vector<ProcessedNode> &, std::uint64_t way_id,
 		std::uint64_t group_seed, buildings::BuildingCategory,
-		const building_facade::FacadePlan &, int base_y, int building_height,
-		double scale);
+		const building_facade::FacadePlan &, const CoordinateBitmap *building_footprints,
+		const building_facade::PointSet &own_fill, bool ground_level, int base_y,
+		int building_height, double scale);
 }

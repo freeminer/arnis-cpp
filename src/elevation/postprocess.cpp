@@ -10,9 +10,11 @@
 #include <cstdlib>
 #include <cstdint>
 #include <deque>
+#include <iomanip>
 #include <iostream>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <thread>
 #include <tuple>
 #include <unordered_set>
@@ -1375,6 +1377,10 @@ std::size_t reclassify_non_surface_water_cells(CoverGrid &cover, const MaskGrid 
 								.value_or(land_cover::LC_BARE));
 	for (const auto &[x, y, value] : replacements)
 		cover[y][x] = value;
+	if (!replacements.empty())
+		std::clog << "Land cover repair: reclassified " << replacements.size()
+				  << " LC_WATER cells not on the water surface (embankments / piers / "
+					 "shoreline walls)\n";
 	return replacements.size();
 }
 
@@ -1410,25 +1416,39 @@ void pull_coastal_land_toward_water(
 			}
 		}
 	}
+	std::size_t affected = 0;
+	std::size_t skipped_cliff = 0;
 	for (std::size_t y = 0; y < h; ++y)
 		for (std::size_t x = 0; x < w; ++x) {
 			const auto d = distance[y][x];
 			const double water = water_level[y][x], original = heights[y][x];
 			if (!d || d > max_distance || !std::isfinite(water) ||
-					!std::isfinite(original) || original - water > 15.0)
+					!std::isfinite(original))
 				continue;
+			if (original - water > 15.0) {
+				++skipped_cliff;
+				continue;
+			}
 			const double weight = static_cast<double>(max_distance - d) / max_distance;
 			heights[y][x] = original * (1.0 - weight) + water * weight;
+			++affected;
 		}
+	if (affected || skipped_cliff)
+		std::clog << "Land cover repair: pulled " << affected
+				  << " coastal land cells toward water (within " << max_distance
+				  << " cells); kept " << skipped_cliff
+				  << " cells above 15 m as real cliffs\n";
 }
 
 std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 		std::uint8_t target, double sigma, const std::function<void(double)> &report)
 {
 	const std::size_t h = cover.size();
-	if (h == 0 || cover.front().empty())
+	if (h == 0)
 		return {};
 	const std::size_t w = cover.front().size();
+	if (w == 0)
+		return std::vector<std::vector<float>>(h);
 	const int radius = static_cast<int>(std::ceil(sigma * 3.0));
 	std::vector<double> kernel(static_cast<std::size_t>(radius * 2 + 1));
 	double kernel_sum = 0.0;
@@ -1444,82 +1464,92 @@ std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 	// Preserve f64 accumulation while avoiding the full f64 input mask and
 	// full f64 feathered result that dominated the old city's peak allocation.
 	std::vector<std::vector<double>> horizontal(h, std::vector<double>(w));
-	for (std::size_t y = 0; y < h; ++y) {
-		std::vector<std::size_t> hits(w + 1, 0);
-		for (std::size_t x = 0; x < w; ++x)
-			hits[x + 1] = hits[x] + (cover[y][x] == target);
-		for (std::size_t x = 0; x < w; ++x) {
-			const auto left = x > static_cast<std::size_t>(radius)
-									  ? x - static_cast<std::size_t>(radius)
-									  : 0;
-			const auto right = std::min(w, x + static_cast<std::size_t>(radius) + 1);
-			const auto window = right - left;
-			const auto matching = hits[right] - hits[left];
-			if (matching == 0) {
-				horizontal[y][x] = 0.0;
-				continue;
-			}
-			if (matching == window) {
-				horizontal[y][x] = 1.0;
-				continue;
-			}
-			double sum = 0.0, weight_sum = 0.0;
-			for (int k = -radius; k <= radius; ++k) {
-				const auto nx = static_cast<std::int64_t>(x) + k;
-				if (nx < 0 || nx >= static_cast<std::int64_t>(w))
+	constexpr std::size_t BLUR_CHUNKS = 10;
+	const auto row_chunk = (h + BLUR_CHUNKS - 1) / BLUR_CHUNKS;
+	for (std::size_t y0 = 0; y0 < h; y0 += row_chunk) {
+		const auto y1 = std::min(h, y0 + row_chunk);
+		parallel_rows(y0, y1, [&](std::size_t y) {
+			std::vector<std::size_t> hits(w + 1, 0);
+			for (std::size_t x = 0; x < w; ++x)
+				hits[x + 1] = hits[x] + (cover[y][x] == target);
+			for (std::size_t x = 0; x < w; ++x) {
+				const auto left = x > static_cast<std::size_t>(radius)
+										  ? x - static_cast<std::size_t>(radius)
+										  : 0;
+				const auto right = std::min(w, x + static_cast<std::size_t>(radius) + 1);
+				const auto window = right - left;
+				const auto matching = hits[right] - hits[left];
+				if (matching == 0) {
+					horizontal[y][x] = 0.0;
 					continue;
-				const double weight = kernel[static_cast<std::size_t>(k + radius)];
-				sum += (cover[y][static_cast<std::size_t>(nx)] == target ? 1.0 : 0.0) *
-					   weight;
-				weight_sum += weight;
+				}
+				if (matching == window) {
+					horizontal[y][x] = 1.0;
+					continue;
+				}
+				double sum = 0.0, weight_sum = 0.0;
+				for (int k = -radius; k <= radius; ++k) {
+					const auto nx = static_cast<std::int64_t>(x) + k;
+					if (nx < 0 || nx >= static_cast<std::int64_t>(w))
+						continue;
+					const double weight = kernel[static_cast<std::size_t>(k + radius)];
+					sum += (cover[y][static_cast<std::size_t>(nx)] == target ? 1.0
+																			 : 0.0) *
+						   weight;
+					weight_sum += weight;
+				}
+				horizontal[y][x] = weight_sum > 0.0
+										   ? sum / weight_sum
+										   : std::numeric_limits<double>::quiet_NaN();
 			}
-			horizontal[y][x] = weight_sum > 0.0
-									   ? sum / weight_sum
-									   : std::numeric_limits<double>::quiet_NaN();
-		}
+		});
 		if (report)
-			report(0.5 * static_cast<double>(y + 1) / h);
+			report(0.5 * static_cast<double>(y1) / h);
 	}
 
 	std::vector<std::vector<float>> output(h, std::vector<float>(w));
-	for (std::size_t x = 0; x < w; ++x) {
-		std::vector<std::size_t> ones(h + 1, 0), zeros(h + 1, 0);
-		for (std::size_t y = 0; y < h; ++y) {
-			const double value = horizontal[y][x];
-			ones[y + 1] = ones[y] + (value == 1.0);
-			zeros[y + 1] = zeros[y] + (value == 0.0);
-		}
-		for (std::size_t y = 0; y < h; ++y) {
-			const auto top = y > static_cast<std::size_t>(radius)
-									 ? y - static_cast<std::size_t>(radius)
-									 : 0;
-			const auto bottom = std::min(h, y + static_cast<std::size_t>(radius) + 1);
-			const auto window = bottom - top;
-			if (ones[bottom] - ones[top] == window) {
-				output[y][x] = 1.0f;
-				continue;
+	const auto col_chunk = (w + BLUR_CHUNKS - 1) / BLUR_CHUNKS;
+	for (std::size_t x0 = 0; x0 < w; x0 += col_chunk) {
+		const auto x1 = std::min(w, x0 + col_chunk);
+		parallel_rows(x0, x1, [&](std::size_t x) {
+			std::vector<std::size_t> ones(h + 1, 0), zeros(h + 1, 0);
+			for (std::size_t y = 0; y < h; ++y) {
+				const double value = horizontal[y][x];
+				ones[y + 1] = ones[y] + (value == 1.0);
+				zeros[y + 1] = zeros[y] + (value == 0.0);
 			}
-			if (zeros[bottom] - zeros[top] == window) {
-				output[y][x] = 0.0f;
-				continue;
-			}
-			double sum = 0.0, weight_sum = 0.0;
-			for (int k = -radius; k <= radius; ++k) {
-				const auto ny = static_cast<std::int64_t>(y) + k;
-				if (ny < 0 || ny >= static_cast<std::int64_t>(h))
+			for (std::size_t y = 0; y < h; ++y) {
+				const auto top = y > static_cast<std::size_t>(radius)
+										 ? y - static_cast<std::size_t>(radius)
+										 : 0;
+				const auto bottom = std::min(h, y + static_cast<std::size_t>(radius) + 1);
+				const auto window = bottom - top;
+				if (ones[bottom] - ones[top] == window) {
+					output[y][x] = 1.0f;
 					continue;
-				const double value = horizontal[static_cast<std::size_t>(ny)][x];
-				if (!std::isfinite(value))
+				}
+				if (zeros[bottom] - zeros[top] == window) {
+					output[y][x] = 0.0f;
 					continue;
-				const double weight = kernel[static_cast<std::size_t>(k + radius)];
-				sum += value * weight;
-				weight_sum += weight;
+				}
+				double sum = 0.0, weight_sum = 0.0;
+				for (int k = -radius; k <= radius; ++k) {
+					const auto ny = static_cast<std::int64_t>(y) + k;
+					if (ny < 0 || ny >= static_cast<std::int64_t>(h))
+						continue;
+					const double value = horizontal[static_cast<std::size_t>(ny)][x];
+					if (!std::isfinite(value))
+						continue;
+					const double weight = kernel[static_cast<std::size_t>(k + radius)];
+					sum += value * weight;
+					weight_sum += weight;
+				}
+				output[y][x] = weight_sum > 0.0 ? static_cast<float>(sum / weight_sum)
+												: std::numeric_limits<float>::quiet_NaN();
 			}
-			output[y][x] = weight_sum > 0.0 ? static_cast<float>(sum / weight_sum)
-											: std::numeric_limits<float>::quiet_NaN();
-		}
+		});
 		if (report)
-			report(0.5 + 0.5 * static_cast<double>(x + 1) / w);
+			report(0.5 + 0.5 * static_cast<double>(x1) / w);
 	}
 	return output;
 }
@@ -1562,10 +1592,16 @@ void apply_land_cover_repair(HeightGrid &heights, land_cover::LandCoverData &dat
 		double built_up_sigma_cells, std::uint32_t coastal_pull_distance_cells,
 		double meters_per_cell, const std::function<void(double)> &report)
 {
-	if (heights.empty() || heights.front().empty() ||
-			data.width != heights.front().size() || data.height != heights.size() ||
-			data.grid.size() != data.height)
+	if (heights.empty() || heights.front().empty())
 		return;
+	if (data.width != heights.front().size() || data.height != heights.size() ||
+			data.grid.size() != data.height) {
+		std::clog << "Warning: land cover grid (" << data.width << 'x' << data.height
+				  << ") does not match elevation grid ("
+				  << (heights.empty() ? 0 : heights.front().size()) << 'x'
+				  << heights.size() << "); skipping land-cover-aware repair\n";
+		return;
+	}
 	const auto dropped = drop_water_on_steep_terrain(heights, data.grid, meters_per_cell);
 	auto surface = level_water_surfaces(heights, data.grid, meters_per_cell);
 	const auto reclassified = reclassify_non_surface_water_cells(data.grid, surface);
@@ -1633,10 +1669,24 @@ std::pair<ElevationAffine, FitRange> derive_affine(
 						static_cast<long long>(ground_level)));
 	}
 	const double available_y_range = static_cast<double>(ceiling - ground_level);
-	const double scaled_range =
-			ideal_scaled_range <= available_y_range
-					? ideal_scaled_range
-					: height_range * (available_y_range / height_range);
+	double scaled_range;
+	if (ideal_scaled_range <= available_y_range) {
+		scaled_range = ideal_scaled_range;
+		std::ostringstream message;
+		message << "Realistic elevation: " << std::fixed << std::setprecision(1)
+				<< height_range << "m range fits in " << std::setprecision(0)
+				<< available_y_range << " available blocks\n";
+		std::clog << message.str();
+	} else {
+		const double compression_factor = available_y_range / height_range;
+		scaled_range = height_range * compression_factor;
+		std::ostringstream message;
+		message << "Elevation compressed: " << std::fixed << std::setprecision(1)
+				<< height_range << "m range -> " << std::setprecision(0) << scaled_range
+				<< " blocks (" << std::setprecision(2) << height_range / scaled_range
+				<< ":1 ratio, 1 block = " << scaled_range / height_range << "m)\n";
+		std::clog << message.str();
+	}
 	const double blocks_per_meter =
 			height_range > 0.0 ? scaled_range / height_range : 0.0;
 	return {{lo, blocks_per_meter, ground_level, std::nullopt},
@@ -1703,14 +1753,30 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 		const double free = (ceiling - affine.ground_level) - fit->scaled_range;
 		const double margin =
 				std::max(0.0, std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)));
-		if (margin > 0.0 && affine.blocks_per_meter > 0.0)
+		if (margin > 0.0 && affine.blocks_per_meter > 0.0) {
 			affine.min_height_m -= margin / affine.blocks_per_meter;
+			std::clog << "One World: keeping " << static_cast<int>(margin)
+					  << " blocks below the lowest terrain for neighbouring areas\n";
+		}
 		fit.reset();
 		break;
 	}
-	case AffinePolicy::Kind::Fixed:
+	case AffinePolicy::Kind::Fixed: {
 		affine = policy.fixed;
+		std::ostringstream message;
+		message << "One World: using the world's elevation mapping (1 block = "
+				<< std::fixed << std::setprecision(2)
+				<< (affine.blocks_per_meter > 0.0
+								   ? 1.0 / affine.blocks_per_meter
+								   : std::numeric_limits<double>::infinity())
+				<< " m, " << std::setprecision(0) << affine.min_height_m << " m at Y "
+				<< affine.ground_level;
+		if (affine.soft_top)
+			message << ", compressed above " << affine.soft_top->knee_m << " m";
+		message << ")\n";
+		std::clog << message.str();
 		break;
+	}
 	}
 	const double base = affine.ground_level;
 	const double upper = ceiling;
@@ -1739,10 +1805,19 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 					const double mapped = affine.y_for_metres(value);
 					clamped += (mapped < base && value > LOWEST_LAND_M) || mapped > upper;
 				}
-		if (total && clamped * 200 > total)
-			std::clog
-					<< "Warning: " << (100.0 * clamped / total)
-					<< "% of this area lies outside the world's height band and is flattened there.\n";
+		if (total && clamped * 200 > total) {
+			const double percentage = 100.0 * clamped / total;
+			std::ostringstream message;
+			message << "Warning: " << std::fixed << std::setprecision(1) << percentage
+					<< "% of this area lies outside the world's height band (Y "
+					<< affine.ground_level << " to " << static_cast<int>(upper)
+					<< ") and is flattened there."
+					<< (disable_height_limit
+									   ? ""
+									   : " The band was fixed by the first area; a new One World has room for all of Earth.")
+					<< '\n';
+			std::clog << message.str();
+		}
 	}
 	double top = base;
 	if (fit)

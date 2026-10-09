@@ -532,7 +532,7 @@ std::optional<decals::DecalKey> furniture_pictogram(const tags_t &tags)
 }
 std::shared_ptr<const decals::DecalRegistry> build_registry(
 		const std::vector<ProcessedElement> &elements, SignageLevel level,
-		decals::SignRegion region, double scale)
+		decals::SignRegion region, double scale, int first_map_id)
 {
 	if (level == SignageLevel::None)
 		return {};
@@ -642,16 +642,18 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 	}
 	return keys.empty() ? std::shared_ptr<const decals::DecalRegistry>{}
 						: std::make_shared<const decals::DecalRegistry>(
-								  decals::DecalRegistry::from_keys(keys));
+								  decals::DecalRegistry::from_keys_starting_at(
+										  keys, first_map_id));
 }
 
 std::shared_ptr<const SignageContext> build_context(
 		const std::vector<ProcessedElement> &elements, SignageLevel level,
-		decals::SignRegion region, double scale, const RoadMaskBitmap &carriageway)
+		decals::SignRegion region, double scale, const RoadMaskBitmap &carriageway,
+		int first_map_id)
 {
 	if (level == SignageLevel::None)
 		return {};
-	auto registry = build_registry(elements, level, region, scale);
+	auto registry = build_registry(elements, level, region, scale, first_map_id);
 	if (!registry)
 		return {};
 	auto context = std::make_shared<SignageContext>();

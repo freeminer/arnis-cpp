@@ -5,10 +5,69 @@
 #include <iomanip>
 #include <cmath>
 #include <chrono>
+#include <limits>
+#include <thread>
+#include <iostream>
+#include <fstream>
 namespace arnis::elevation
 {
 namespace
 {
+void add_saturating(std::uint64_t &total, std::uint64_t value)
+{
+	if (std::numeric_limits<std::uint64_t>::max() - total < value)
+		total = std::numeric_limits<std::uint64_t>::max();
+	else
+		total += value;
+}
+
+std::uint64_t directory_size_bytes(const std::filesystem::path &dir)
+{
+	std::error_code ec;
+	std::filesystem::directory_iterator it(dir, ec), end;
+	if (ec)
+		return 0;
+	std::uint64_t total = 0;
+	for (; it != end; it.increment(ec)) {
+		if (ec) {
+			ec.clear();
+			continue;
+		}
+		const auto path = it->path();
+		const auto type = it->symlink_status(ec);
+		if (ec) {
+			ec.clear();
+			continue;
+		}
+		if (std::filesystem::is_symlink(type)) {
+			// Count the stored target text, not the bytes in its target file.
+			// On POSIX this is the symlink's on-disk length and never follows it.
+			const auto target = std::filesystem::read_symlink(path, ec);
+			if (!ec) {
+				const auto chars = target.native().size();
+				const auto bytes =
+						chars > std::numeric_limits<std::uint64_t>::max() /
+												sizeof(std::filesystem::path::value_type)
+								? std::numeric_limits<std::uint64_t>::max()
+								: static_cast<std::uint64_t>(chars) *
+										  sizeof(std::filesystem::path::value_type);
+				add_saturating(total, bytes);
+			} else {
+				ec.clear();
+			}
+		} else if (std::filesystem::is_directory(type)) {
+			add_saturating(total, directory_size_bytes(path));
+		} else if (std::filesystem::is_regular_file(type)) {
+			const auto bytes = std::filesystem::file_size(path, ec);
+			if (!ec)
+				add_saturating(total, bytes);
+			else
+				ec.clear();
+		}
+	}
+	return total;
+}
+
 void clear_recursive(const std::filesystem::path &dir, CacheClearStats &stats)
 {
 	std::error_code ec;
@@ -125,6 +184,31 @@ CacheClearStats clear_cache_dir(const std::filesystem::path &dir)
 	clear_recursive(dir, stats);
 	return stats;
 }
+std::uint64_t dir_size_bytes(const std::filesystem::path &dir)
+{
+	std::error_code ec;
+	const auto type = std::filesystem::symlink_status(dir, ec);
+	if (ec || !std::filesystem::is_directory(type))
+		return 0;
+	return directory_size_bytes(dir);
+}
+std::string format_size(std::uint64_t bytes)
+{
+	constexpr double KB = 1024.0;
+	constexpr double MB = KB * 1024.0;
+	constexpr double GB = MB * 1024.0;
+	const double value = static_cast<double>(bytes);
+	std::ostringstream out;
+	if (value >= GB)
+		out << std::fixed << std::setprecision(1) << value / GB << " GB";
+	else if (value >= MB)
+		out << std::fixed << std::setprecision(0) << value / MB << " MB";
+	else if (value >= KB)
+		out << std::fixed << std::setprecision(0) << value / KB << " KB";
+	else
+		out << bytes << " B";
+	return out.str();
+}
 CacheClearStats cleanup_old_cached_files(
 		const std::filesystem::path &dir, std::chrono::hours age)
 {
@@ -143,6 +227,52 @@ CacheClearStats cleanup_old_cached_files(
 	cleanup_recursive(
 			dir, std::filesystem::file_time_type::clock::now(), duration, stats);
 	return stats;
+}
+void spawn_throttled_cleanup(const std::filesystem::path &base_cache_dir)
+{
+	std::error_code ec;
+	const auto root_type = std::filesystem::symlink_status(base_cache_dir, ec);
+	if (ec || !std::filesystem::is_directory(root_type) ||
+			std::filesystem::is_symlink(root_type))
+		return;
+
+	constexpr auto cleanup_interval = std::chrono::hours(24);
+	const auto stamp = base_cache_dir / ".last-cleanup";
+	const auto stamp_type = std::filesystem::symlink_status(stamp, ec);
+	if (!ec && std::filesystem::is_symlink(stamp_type)) {
+		std::filesystem::remove(stamp, ec);
+		ec.clear();
+	} else if (!ec && std::filesystem::is_regular_file(stamp_type)) {
+		const auto modified = std::filesystem::last_write_time(stamp, ec);
+		if (!ec) {
+			const auto now = std::filesystem::file_time_type::clock::now();
+			// A future timestamp (clock rollback) is treated as stale and replaced.
+			if (now >= modified && now - modified < cleanup_interval)
+				return;
+		}
+		ec.clear();
+	} else {
+		ec.clear();
+	}
+
+	// A failed stamp write means cleanup would be retried on every mapchunk.
+	// Skip this sweep instead; a later generation can retry once writable.
+	{
+		std::ofstream marker(stamp, std::ios::binary | std::ios::trunc);
+		if (!marker)
+			return;
+	}
+
+	std::thread([base_cache_dir]() {
+		const auto stats = cleanup_old_cached_files(base_cache_dir, TILE_CACHE_MAX_AGE);
+		if (stats.files_deleted > 0)
+			std::cout << "Cleaned up " << stats.files_deleted
+					  << " old cached elevation files (older than "
+					  << TILE_CACHE_MAX_AGE.count() / 24 << " days)\n";
+		if (stats.errors > 1)
+			std::cerr << "Warning: Failed to delete " << stats.errors
+					  << " old cached files\n";
+	}).detach();
 }
 std::optional<ElevationData> GridCache::load(const std::string &k) const
 {

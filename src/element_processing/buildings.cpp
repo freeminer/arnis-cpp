@@ -1762,30 +1762,32 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 	if (terrace) {
 		for (const auto &[x, z] : area)
 			if (!interior(x, z))
-				editor.set_block_absolute(
-						STONE_BRICKS, x, roof_y + 1, z, std::vector<Block>{AIR});
+				force_rooftop_block(STONE_BRICKS, x, roof_y + 1, z);
 		std::vector<std::pair<int, int>> terrace_interior;
 		for (const auto &[x, z] : area)
 			if (interior(x, z))
 				terrace_interior.emplace_back(x, z);
 		for (const auto &[x, z] : terrace_interior) {
-			const auto roll =
-					(std::uint64_t(std::uint32_t(x)) * 0x9E3779B97F4A7C15ULL ^
-							std::uint64_t(std::uint32_t(z)) * 0x517CC1B727220A95ULL ^
-							seed) %
-					100;
-			if (roll < 3) {
+			auto rng = coord_rng(x, z, element.id);
+			const auto roll = rng.uniform(100);
+			if (roll >= 15)
+				continue;
+			if (roll <= 2) {
 				force_rooftop_block(IRON_BLOCK, x, roof_y + 1, z);
 				force_rooftop_block(SMOOTH_STONE_SLAB, x, roof_y + 2, z);
-			} else if (roll < 6) {
+			} else if (roll <= 5) {
 				force_rooftop_block(CAULDRON, x, roof_y + 1, z);
-				force_rooftop_block(SPRUCE_LEAVES, x, roof_y + 2, z);
-			} else if (roll < 9) {
+				const auto leaf_roll = rng.uniform(3);
+				const Block leaf = leaf_roll == 0	? OAK_LEAVES
+								   : leaf_roll == 1 ? BIRCH_LEAVES
+													: SPRUCE_LEAVES;
+				force_rooftop_block(leaf, x, roof_y + 2, z);
+			} else if (roll <= 8) {
 				force_rooftop_block(OAK_FENCE, x, roof_y + 1, z);
 				force_rooftop_block(OAK_SLAB, x, roof_y + 2, z);
-			} else if (roll < 11)
+			} else if (roll <= 10)
 				force_rooftop_block(OAK_STAIRS, x, roof_y + 1, z);
-			else if (roll < 13)
+			else if (roll <= 12)
 				force_rooftop_block(LIGHTNING_ROD, x, roof_y + 1, z);
 			else if (roll == 13)
 				force_rooftop_block(CAULDRON, x, roof_y + 1, z);
@@ -1795,10 +1797,11 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		if (!terrace_interior.empty()) {
 			const auto best = std::min_element(terrace_interior.begin(),
 					terrace_interior.end(), [&](const auto &a, const auto &b) {
-						return std::abs(a.first - center_x) +
-									   std::abs(a.second - center_z) <
-							   std::abs(b.first - center_x) +
-									   std::abs(b.second - center_z);
+						const auto a_dx = std::int64_t(a.first) - center_x;
+						const auto a_dz = std::int64_t(a.second) - center_z;
+						const auto b_dx = std::int64_t(b.first) - center_x;
+						const auto b_dz = std::int64_t(b.second) - center_z;
+						return a_dx * a_dx + a_dz * a_dz < b_dx * b_dx + b_dz * b_dz;
 					});
 			for (int dy = 0; dy < 6; ++dy)
 				force_rooftop_block(
@@ -2785,7 +2788,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	// it is a no-op unless --building-facades was enabled and a backend sink is
 	// installed.
 	const auto preset_shell = building_facades::collect(*editor, element.nodes,
-			element.id, visual_seed, category, facade_plan,
+			element.id, visual_seed, category, facade_plan, building_footprints,
+			current_footprint, min_level_offset == 0,
 			start_y_offset + abs_terrain_offset + 1, building_height, scale_factor);
 	// Rust's glass-curtain presets use the facade itself as the window field;
 	// ordinary procedural window slots would punch a mismatched rhythm into
@@ -4000,7 +4004,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			element.tags.contains("building:part") && !sibling_cells.empty() &&
 			std::all_of(cached_floor_area.begin(), cached_floor_area.end(),
 					[&](const auto &cell) { return sibling_cells.contains(cell); });
-	if (args.roof && !podium_tower && !has_crown)
+	const bool modeled_part_roof = element.tags.contains("building:part") &&
+								   (element.tags.contains("roof:colour") ||
+										   element.tags.contains("roof:material"));
+	if (args.roof && !podium_tower && !has_crown && !modeled_part_roof)
 		generate_rooftop_systems(*editor, element, cached_floor_area, category, condition,
 				generated_roof_type, start_y_offset, building_height, abs_terrain_offset,
 				floor_cycle, wall_block, detail, clean_visual_seed, covered_by_sibling);

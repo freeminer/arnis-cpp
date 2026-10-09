@@ -3,15 +3,71 @@
 #include "../coordinate_system/transformation.h"
 
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <string_view>
+#include <thread>
 #include <vector>
 
 namespace arnis::elevation
 {
+namespace
+{
+std::size_t elevation_worker_count()
+{
+	if (const char *value = std::getenv("RAYON_NUM_THREADS")) {
+		const std::string_view text(value);
+		std::size_t requested = 0;
+		const auto [end, error] =
+				std::from_chars(text.data(), text.data() + text.size(), requested);
+		if (error == std::errc{} && end == text.data() + text.size() && requested > 0)
+			return requested;
+	}
+	const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+	return std::max<std::size_t>(1, static_cast<std::size_t>(hardware * 0.9));
+}
+
+template <typename Function>
+void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
+{
+	if (begin >= end)
+		return;
+	const auto workers_count =
+			std::min<std::size_t>(end - begin, elevation_worker_count());
+	if (workers_count == 1) {
+		for (auto row = begin; row < end; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{begin};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= end)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> threads;
+	threads.reserve(workers_count - 1);
+	for (std::size_t i = 1; i < workers_count; ++i) {
+		try {
+			threads.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	}
+	worker();
+	for (auto &thread : threads)
+		thread.join();
+}
+} // namespace
 
 std::tuple<std::size_t, std::size_t, std::size_t, std::size_t> compute_grid_dims(
 		const geographic::LLBBox &bbox, double scale)
@@ -100,19 +156,24 @@ static std::vector<double> blur_line(
 std::vector<std::vector<double>> gaussian_blur_grid(
 		const std::vector<std::vector<double>> &grid, double sigma)
 {
-	if (grid.empty() || grid.front().empty())
+	if (grid.empty())
 		return {};
 	const std::size_t height = grid.size();
 	const std::size_t width = grid.front().size();
+	if (width == 0)
+		return std::vector<std::vector<double>>(height);
 	const auto kernel = gaussian_kernel(sigma);
 	const int radius = static_cast<int>(kernel.size() / 2);
 
 	std::vector<std::vector<double>> tmp(height, std::vector<double>(width, 0.0));
-	for (std::size_t z = 0; z < height; ++z)
-		tmp[z] = blur_line(grid[z], kernel, radius);
+	parallel_rows(0, height,
+			[&](std::size_t z) { tmp[z] = blur_line(grid[z], kernel, radius); });
 
 	constexpr std::size_t COLUMN_GROUP = 8;
-	for (std::size_t x0 = 0; x0 < width; x0 += COLUMN_GROUP) {
+	const std::size_t group_count = (width + COLUMN_GROUP - 1) / COLUMN_GROUP;
+	std::vector<std::vector<double>> output(height, std::vector<double>(width));
+	parallel_rows(0, group_count, [&](std::size_t group) {
+		const auto x0 = group * COLUMN_GROUP;
 		const auto group_width = std::min(COLUMN_GROUP, width - x0);
 		std::vector<std::vector<double>> columns(
 				group_width, std::vector<double>(height));
@@ -122,10 +183,10 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 		for (std::size_t c = 0; c < group_width; ++c) {
 			const auto blurred = blur_line(columns[c], kernel, radius);
 			for (std::size_t z = 0; z < height; ++z)
-				tmp[z][x0 + c] = blurred[z];
+				output[z][x0 + c] = blurred[z];
 		}
-	}
-	return tmp;
+	});
+	return output;
 }
 
 std::vector<std::vector<double>> gaussian_blur_grid_masked(
@@ -141,15 +202,18 @@ std::vector<std::vector<double>> gaussian_blur_grid_masked(
 	const auto kernel = gaussian_kernel(sigma);
 	const int radius = static_cast<int>(kernel.size() / 2);
 	std::vector<std::vector<double>> after_h(height, std::vector<double>(width));
-	for (std::size_t y = 0; y < height; ++y) {
+	parallel_rows(0, height, [&](std::size_t y) {
 		std::vector<double> row(grid[y].begin(), grid[y].begin() + width);
 		for (std::size_t x = 0; x < width; ++x)
 			if (masked[y][x])
 				row[x] = std::numeric_limits<double>::quiet_NaN();
 		after_h[y] = blur_line(row, kernel, radius);
-	}
+	});
 	constexpr std::size_t COLUMN_GROUP = 8;
-	for (std::size_t x0 = 0; x0 < width; x0 += COLUMN_GROUP) {
+	const std::size_t group_count = (width + COLUMN_GROUP - 1) / COLUMN_GROUP;
+	std::vector<std::vector<double>> output(height, std::vector<double>(width));
+	parallel_rows(0, group_count, [&](std::size_t group) {
+		const auto x0 = group * COLUMN_GROUP;
 		const auto group_width = std::min(COLUMN_GROUP, width - x0);
 		std::vector<std::vector<double>> columns(
 				group_width, std::vector<double>(height));
@@ -159,25 +223,37 @@ std::vector<std::vector<double>> gaussian_blur_grid_masked(
 		for (std::size_t c = 0; c < group_width; ++c) {
 			const auto blurred = blur_line(columns[c], kernel, radius);
 			for (std::size_t y = 0; y < height; ++y)
-				after_h[y][x0 + c] = blurred[y];
+				output[y][x0 + c] = blurred[y];
 		}
-	}
-	return after_h;
+	});
+	return output;
 }
 
 void fill_nan_values(std::vector<std::vector<double>> &heights)
 {
 	if (heights.empty() || heights.front().empty())
 		return;
+	const std::size_t height = heights.size();
+	const std::size_t width = heights.front().size();
+	const bool has_nan = std::any_of(heights.begin(), heights.end(), [](const auto &row) {
+		return std::any_of(
+				row.begin(), row.end(), [](double value) { return std::isnan(value); });
+	});
+	if (!has_nan)
+		return;
 
 	// Match Rust: every pass reads an immutable snapshot, avoiding scan-order
 	// bias when a large no-data area is filled from its perimeter.
-	bool changed = true;
-	while (changed) {
-		const auto snapshot = heights;
-		changed = false;
-		for (std::size_t z = 0; z < heights.size(); ++z) {
-			for (std::size_t x = 0; x < heights[z].size(); ++x) {
+	std::vector<std::vector<double>> snapshot = heights;
+	for (;;) {
+		parallel_rows(0, height, [&](std::size_t z) {
+			std::copy(heights[z].begin(), heights[z].end(), snapshot[z].begin());
+		});
+		std::atomic_bool changed{false};
+		parallel_rows(0, height, [&](std::size_t z) {
+			bool row_changed = false;
+			const auto row_width = std::min(width, heights[z].size());
+			for (std::size_t x = 0; x < row_width; ++x) {
 				if (!std::isnan(heights[z][x]))
 					continue;
 				double sum = 0.0;
@@ -187,6 +263,7 @@ void fill_nan_values(std::vector<std::vector<double>> &heights)
 						const int nx = static_cast<int>(x) + dx;
 						const int nz = static_cast<int>(z) + dz;
 						if (nx < 0 || nz < 0 || nz >= static_cast<int>(snapshot.size()) ||
+								nx >= static_cast<int>(width) ||
 								nx >= static_cast<int>(
 											  snapshot[static_cast<std::size_t>(nz)]
 													  .size()))
@@ -200,10 +277,14 @@ void fill_nan_values(std::vector<std::vector<double>> &heights)
 					}
 				if (count > 0) {
 					heights[z][x] = sum / count;
-					changed = true;
+					row_changed = true;
 				}
 			}
-		}
+			if (row_changed)
+				changed.store(true, std::memory_order_relaxed);
+		});
+		if (!changed.load(std::memory_order_relaxed))
+			break;
 	}
 }
 
@@ -215,17 +296,27 @@ void filter_elevation_outliers(std::vector<std::vector<double>> &heights)
 	// IQR filter incorrectly removes genuine isolated peaks and islands.
 	constexpr double MIN_REASONABLE_M = -500.0;
 	constexpr double MAX_REASONABLE_M = 9000.0;
-	std::size_t filtered = 0;
-	for (auto &row : heights)
-		for (double &value : row)
+	const std::size_t height = heights.size();
+	const std::size_t width = heights.front().size();
+	std::atomic_size_t filtered{0};
+	parallel_rows(0, height, [&](std::size_t y) {
+		std::size_t row_filtered = 0;
+		for (std::size_t x = 0; x < std::min(width, heights[y].size()); ++x) {
+			double &value = heights[y][x];
 			if (!std::isnan(value) &&
 					(value < MIN_REASONABLE_M || value > MAX_REASONABLE_M)) {
 				value = std::numeric_limits<double>::quiet_NaN();
-				++filtered;
+				++row_filtered;
 			}
-	if (filtered > 0) {
-		std::clog << "Filtered " << filtered << " impossible elevations (outside "
-				  << MIN_REASONABLE_M << "m.." << MAX_REASONABLE_M << "m)\n";
+		}
+		if (row_filtered)
+			filtered.fetch_add(row_filtered, std::memory_order_relaxed);
+	});
+	const auto outliers_filtered = filtered.load(std::memory_order_relaxed);
+	if (outliers_filtered > 0) {
+		std::clog << "Filtered " << outliers_filtered
+				  << " impossible elevations (outside " << MIN_REASONABLE_M << "m.."
+				  << MAX_REASONABLE_M << "m)\n";
 		fill_nan_values(heights);
 	}
 }

@@ -968,7 +968,13 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	// complete realm and vanilla packs.  The initial community above is only a
 	// locality hint; do not replace a mapped genus with an unrelated species
 	// merely because that one grove lacks it.
-	if (request.genus && mapped_selection && mapped_species.empty()) {
+	if (request.genus && mapped_selection) {
+		// Rust resolves a mapped genus against every community in the active
+		// ecoregion mix before falling back to the whole realm and vanilla packs.
+		// The locality-selected community above is only a hint for procedural
+		// trees; using it here could replace a mapped species with a different
+		// member of the same grove.
+		mapped_species.clear();
 		auto scan_community = [&](std::size_t ci) {
 			if (ci >= data_->realm.communities.size())
 				return;

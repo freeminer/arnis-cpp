@@ -513,7 +513,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		editor.ground->warm_water_blend();
 	if (show_progress)
 		std::cout << "[6/7] Generating ground...\n";
-	const bool terrain_enabled = generation_mode_terrain(args.mode);
+	const bool terrain_enabled = editor.ground ? editor.ground->elevation_enabled
+											   : generation_mode_terrain(args.mode);
 	const int tree_spacing = std::max(1, editor.get_tree_slot_spacing());
 	const bool schematic_trees = editor.has_schematic_tree_pack();
 	const auto geographic_bounds = editor.geographic_bounds();
@@ -754,7 +755,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							// water boundaries from exposing abrupt grass/clay edges.
 							if (!planetary && surface != WATER && slope <= 3) {
 								bool near_esa_water = false;
-								if (has_cover) {
+								if (has_cover && !esa_water) {
 									for (int dz = -1; dz <= 1 && !near_esa_water; ++dz)
 										for (int dx = -1; dx <= 1; ++dx)
 											if ((dx || dz) &&

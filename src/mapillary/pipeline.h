@@ -98,6 +98,7 @@ struct PipelineResult
 	std::vector<ClusterRef> clusters;
 	std::optional<nlohmann::json> osm;
 	std::optional<std::string> osm_error;
+	std::optional<std::string> search_error;
 	std::size_t cells = 0;
 	std::size_t failed_cells = 0;
 	bool cancelled = false;

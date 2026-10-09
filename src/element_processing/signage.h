@@ -50,10 +50,12 @@ std::optional<decals::DecalKey> information_key(const ProcessedNode &node);
 std::optional<decals::DecalKey> furniture_pictogram(const tags_t &tags);
 std::shared_ptr<const decals::DecalRegistry> build_registry(
 		const std::vector<ProcessedElement> &elements, SignageLevel level,
-		decals::SignRegion region, double scale);
+		decals::SignRegion region, double scale,
+		int first_map_id = decals::DecalRegistry::FIRST_ID);
 std::shared_ptr<const SignageContext> build_context(
 		const std::vector<ProcessedElement> &elements, SignageLevel level,
-		decals::SignRegion region, double scale, const RoadMaskBitmap &carriageway);
+		decals::SignRegion region, double scale, const RoadMaskBitmap &carriageway,
+		int first_map_id = decals::DecalRegistry::FIRST_ID);
 IntersectionIndex build_intersection_index(
 		const std::vector<ProcessedElement> &elements, double scale);
 void place_node_signage(world_editor::WorldEditor &editor, const ProcessedNode &node,
@@ -78,21 +80,21 @@ void generate_node_facade_signage(world_editor::WorldEditor &editor,
 		const RoadMaskBitmap &road_mask);
 void generate_power_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,
 		const RoadMaskBitmap &road_mask);
-void generate_highway_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,
-		const BuildingFootprintBitmap &footprints);
+void generate_highway_way_signage(world_editor::WorldEditor &editor,
+		const ProcessedWay &way, const BuildingFootprintBitmap &footprints);
 void generate_parking_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,
 		const RoadMaskBitmap &road_mask);
 
 // Billboard and advertising support
-bool generate_billboard(WorldEditor &editor, const ProcessedNode &node,
-		const RoadMaskBitmap &road_mask);
+bool generate_billboard(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask);
 bool generate_column(WorldEditor &editor, const ProcessedNode &node);
 bool generate_poster_box_posters(WorldEditor &editor, const ProcessedNode &node);
-bool generate_information_board(WorldEditor &editor, const ProcessedNode &node,
-		const RoadMaskBitmap &road_mask);
+bool generate_information_board(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask);
 std::optional<decals::DecalKey> plaque_key(const tags_t &tags);
 bool generate_plaque(WorldEditor &editor, const ProcessedNode &node);
-void place_bus_stop_signs(WorldEditor &editor, const tags_t &tags,
-		int x, int sign_y, int z);
+void place_bus_stop_signs(
+		WorldEditor &editor, const tags_t &tags, int x, int sign_y, int z);
 
 }

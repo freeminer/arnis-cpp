@@ -22,6 +22,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <thread>
+#include <tuple>
 
 #include "../../arnis_adapter.h"
 #include "assets_root.h"
@@ -68,6 +69,7 @@
 //#include "models_3d/wikidata/osm_models.h"
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
+#include "elevation/elevation.h"
 #include "trees/mapped.h"
 #include "models_3d/pipeline.h"
 #include "models_3d/placement_executor.h"
@@ -1469,15 +1471,15 @@ bool generate_world(WorldEditor &editor,
 	building_facades::set_world_extent(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	if (editor.ground && !editor.ground->has_land_cover()) {
-		// Rust obtains ESA WorldCover before applying OSM water/land overrides.
-		// Keep its grid bounded for the library host: Ground interpolates the
-		// grid over the complete world, while a denser grid only multiplies COG
-		// range sampling and retained memory. OSM remains the offline fallback.
+		// Match Ground::new_enabled: land-cover samples use the same world/grid
+		// dimensions as elevation, before applying OSM water/land overrides.
 		const auto geographic = editor.geographic_bounds();
 		const auto world_width = static_cast<std::size_t>(max_x - min_x + 1);
 		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
-		const auto grid_width = std::clamp<std::size_t>(world_width / 4 + 1, 64, 1024);
-		const auto grid_height = std::clamp<std::size_t>(world_height / 4 + 1, 64, 1024);
+		const auto grid_dims =
+				elevation::compute_grid_dims_for_world(world_width, world_height);
+		const auto grid_width = std::get<2>(grid_dims);
+		const auto grid_height = std::get<3>(grid_dims);
 		auto land_cover = land_cover::fetch_land_cover_data(
 				{geographic[0], geographic[2], geographic[1], geographic[3]}, grid_width,
 				grid_height);
@@ -1497,8 +1499,10 @@ bool generate_world(WorldEditor &editor,
 		const auto geographic = editor.geographic_bounds();
 		const auto world_width = static_cast<std::size_t>(max_x - min_x + 1);
 		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
-		const auto grid_width = std::clamp<std::size_t>(world_width / 4 + 1, 64, 1024);
-		const auto grid_height = std::clamp<std::size_t>(world_height / 4 + 1, 64, 1024);
+		const auto grid_dims =
+				elevation::compute_grid_dims_for_world(world_width, world_height);
+		const auto grid_width = std::get<2>(grid_dims);
+		const auto grid_height = std::get<3>(grid_dims);
 		if (auto canopy = canopy::fetch_canopy_data(cache::provider_cache_root("canopy"),
 					geographic[0], geographic[2], geographic[1], geographic[3],
 					grid_width, grid_height))
@@ -1539,7 +1543,7 @@ bool generate_world(WorldEditor &editor,
 					highways::collect_carriageway_coords(elements, xzbbox, args.scale);
 			context = signage::build_context(elements, args.signage,
 					decals::detect_region(centre_lat, centre_lon), args.scale,
-					signage_carriageway);
+					signage_carriageway, editor.first_decal_map_id);
 		}
 		editor.set_signage_context(context);
 		editor.set_decal_registry(context ? context->registry : nullptr);

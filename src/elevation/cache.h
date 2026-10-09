@@ -23,8 +23,13 @@ struct CacheClearStats
 std::filesystem::path provider_cache_dir(
 		const std::filesystem::path &base, const std::string &provider_name);
 CacheClearStats clear_cache_dir(const std::filesystem::path &dir);
+std::uint64_t dir_size_bytes(const std::filesystem::path &dir);
+std::string format_size(std::uint64_t bytes);
 CacheClearStats cleanup_old_cached_files(const std::filesystem::path &dir,
 		std::chrono::hours max_age = TILE_CACHE_MAX_AGE);
+// Start a best-effort age-based cleanup at most once per day. The walk runs
+// detached so generation does not wait for a large, cold cache tree.
+void spawn_throttled_cleanup(const std::filesystem::path &base_cache_dir);
 class GridCache
 {
 	std::filesystem::path root_;

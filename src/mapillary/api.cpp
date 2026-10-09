@@ -10,6 +10,7 @@
 #include <cmath>
 #include <array>
 #include <limits>
+#include <numeric>
 #include <nlohmann/json.hpp>
 #include <thread>
 #include <zlib.h>
@@ -100,21 +101,36 @@ Client::Client(cache::Layout cache) : cache_(std::move(cache))
 }
 
 std::optional<std::vector<SearchCell>> search_cells(
-		const SearchCell &bounds, std::size_t maximum)
+		const SearchCell &bounds, std::size_t maximum, std::string *error)
 {
+	if (error)
+		error->clear();
 	if (!std::isfinite(bounds.min_longitude) || !std::isfinite(bounds.min_latitude) ||
 			!std::isfinite(bounds.max_longitude) || !std::isfinite(bounds.max_latitude) ||
 			bounds.max_longitude < bounds.min_longitude ||
-			bounds.max_latitude < bounds.min_latitude)
+			bounds.max_latitude < bounds.min_latitude) {
+		if (error)
+			*error = "invalid Mapillary search bounds";
 		return {};
+	}
 	std::size_t lat_steps = std::max<std::size_t>(
 			1, std::ceil((bounds.max_latitude - bounds.min_latitude) /
 						 mapillary_max_cell_deg));
 	std::size_t lon_steps = std::max<std::size_t>(
 			1, std::ceil((bounds.max_longitude - bounds.min_longitude) /
 						 mapillary_max_cell_deg));
-	if (lat_steps > maximum || lon_steps > maximum / lat_steps)
+	if (lat_steps > maximum || lon_steps > maximum / lat_steps) {
+		if (error) {
+			const auto required =
+					lat_steps > std::numeric_limits<std::size_t>::max() / lon_steps
+							? std::numeric_limits<std::size_t>::max()
+							: lat_steps * lon_steps;
+			*error = "this area needs " + std::to_string(required) +
+					 " imagery search cells and the limit is " + std::to_string(maximum) +
+					 ". Search a smaller area.";
+		}
 		return {};
+	}
 	double lat_span = (bounds.max_latitude - bounds.min_latitude) / lat_steps;
 	double lon_span = (bounds.max_longitude - bounds.min_longitude) / lon_steps;
 	std::vector<SearchCell> result;
@@ -533,9 +549,11 @@ std::optional<nlohmann::json> Client::cluster_document(
 }
 std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 		const std::string &endpoint, const std::string &token, std::size_t maximum,
-		std::size_t *failed_cells) const
+		std::size_t *failed_cells, std::string *error) const
 {
 	std::vector<cache::ImageRecord> result;
+	if (error)
+		error->clear();
 	{
 		std::lock_guard<std::mutex> lock(credentials_->mutex);
 		credentials_->endpoint = endpoint;
@@ -543,22 +561,30 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 	}
 	if (failed_cells)
 		*failed_cells = 0;
-	auto cells = search_cells(bounds, maximum);
+	auto cells = search_cells(bounds, maximum, error);
 	if (!cells) {
 		if (failed_cells)
 			*failed_cells = maximum + 1;
+		if (error && error->empty())
+			*error = "Mapillary search bounds could not be tiled";
 		return result;
 	}
 	if (!fetch_ && !graph_fetch_) {
 		if (failed_cells)
 			*failed_cells = cells->size();
+		if (error)
+			*error = "Mapillary search has no configured HTTP fetcher";
 		return result;
 	}
 	std::vector<std::vector<cache::ImageRecord>> cell_results(cells->size());
 	std::vector<std::size_t> cell_failures(cells->size(), 0);
+	std::vector<std::uint8_t> cell_answered(cells->size(), 0);
+	std::vector<std::size_t> cell_refused(cells->size(), 0);
+	std::vector<std::string> cell_errors(cells->size());
 	auto query_cell = [&](auto &&self, const SearchCell &cell, unsigned depth,
 							  std::vector<cache::ImageRecord> &records,
-							  std::size_t &failures) -> void {
+							  std::size_t &failures, std::uint8_t &answered,
+							  std::size_t &refused, std::string &failure_reason) -> void {
 		std::string bbox = std::to_string(cell.min_longitude) + "," +
 						   std::to_string(cell.min_latitude) + "," +
 						   std::to_string(cell.max_longitude) + "," +
@@ -575,18 +601,50 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			auto reply = graph_fetch_(url, max_search_bytes);
 			if (!reply) {
 				++failures;
+				if (failure_reason.empty())
+					failure_reason = "Mapillary search request could not be delivered";
 				return;
 			}
+			auto describe_failure = [](const HttpReply &failed) {
+				std::string body(failed.body.begin(), failed.body.end());
+				std::string message;
+				std::string kind;
+				try {
+					const auto parsed = nlohmann::json::parse(body);
+					if (parsed.is_object() && parsed.contains("error") &&
+							parsed["error"].is_object()) {
+						const auto &api_error = parsed["error"];
+						message = api_error.value("message", std::string{});
+						kind = api_error.value("type", std::string{});
+					}
+				} catch (...) {
+				}
+				if (message.empty()) {
+					message = body.substr(0, 200);
+					if (message.find_first_not_of(" \t\r\n") == std::string::npos)
+						message.clear();
+				}
+				std::string result = "Mapillary API " + std::to_string(failed.status);
+				if (!message.empty())
+					result += ": " + message;
+				const auto lower = [&] {
+					std::string value = message;
+					std::transform(value.begin(), value.end(), value.begin(),
+							[](unsigned char c) {
+								return static_cast<char>(std::tolower(c));
+							});
+					return value;
+				}();
+				if (failed.status == 401 || kind == "OAuthException" ||
+						lower.find("access token") != std::string::npos)
+					result += " Check the Mapillary token.";
+				return result;
+			};
 			bool auth_failure = reply->status == 401;
-			if (reply->status == 500) {
-				std::string response_text(reply->body.begin(), reply->body.end());
-				std::transform(response_text.begin(), response_text.end(),
-						response_text.begin(), [](unsigned char c) {
-							return static_cast<char>(std::tolower(c));
-						});
+			if (!auth_failure) {
+				const auto detail = describe_failure(*reply);
 				auth_failure =
-						response_text.find("oauthexception") != std::string::npos ||
-						response_text.find("access token") != std::string::npos;
+						detail.find("Check the Mapillary token.") != std::string::npos;
 			}
 			if (reply->status == 500 && !auth_failure && depth < max_subdivision_depth) {
 				const double mid_lon = (cell.min_longitude + cell.max_longitude) * 0.5;
@@ -597,7 +655,8 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						{cell.min_longitude, mid_lat, mid_lon, cell.max_latitude},
 						{mid_lon, mid_lat, cell.max_longitude, cell.max_latitude}};
 				for (const auto &quadrant : quadrants)
-					self(self, quadrant, depth + 1, records, failures);
+					self(self, quadrant, depth + 1, records, failures, answered, refused,
+							failure_reason);
 				return;
 			}
 			// Rust retries a non-explicit Graph 500 at the smallest cell before
@@ -605,6 +664,8 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			// failure at maximum subdivision depth permanently drops that cell.
 			if (reply->status == 500 && !auth_failure && depth >= max_subdivision_depth) {
 				bool recovered = false;
+				if (failure_reason.empty())
+					failure_reason = describe_failure(*reply);
 				for (unsigned retry = 1; retry <= leaf_retry_count; ++retry) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(750 * retry));
 					reply = graph_fetch_(url, max_search_bytes);
@@ -626,19 +687,28 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						recovered = true;
 						break;
 					}
+					if (failure_reason.empty())
+						failure_reason = describe_failure(*reply);
 					if (retry_auth_failure || reply->status != 500)
 						break;
 				}
 				if (!recovered) {
 					++failures;
+					++refused;
+					if (reply && failure_reason.empty())
+						failure_reason = describe_failure(*reply);
 					return;
 				}
 			} else if (reply->status == 500 && auth_failure) {
 				++failures;
+				if (failure_reason.empty())
+					failure_reason = describe_failure(*reply);
 				return;
 			}
 			if (reply->status < 200 || reply->status >= 300) {
 				++failures;
+				if (failure_reason.empty())
+					failure_reason = describe_failure(*reply);
 				return;
 			}
 			body = std::move(reply->body);
@@ -646,14 +716,21 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			auto reply = fetch_(url, max_search_bytes);
 			if (!reply) {
 				++failures;
+				if (failure_reason.empty())
+					failure_reason = "Mapillary search request could not be delivered";
 				return;
 			}
 			body = std::move(*reply);
 		}
 		bool valid_response = false;
 		auto cell_records = parse_search_response(body, &valid_response);
-		if (!valid_response)
+		if (!valid_response) {
 			++failures;
+			if (failure_reason.empty())
+				failure_reason = "Mapillary response was not the expected JSON";
+		} else {
+			answered = 1;
+		}
 		records.insert(records.end(), std::make_move_iterator(cell_records.begin()),
 				std::make_move_iterator(cell_records.end()));
 	};
@@ -674,9 +751,12 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 					return;
 				try {
 					query_cell(query_cell, (*cells)[index], 0, cell_results[index],
-							cell_failures[index]);
+							cell_failures[index], cell_answered[index],
+							cell_refused[index], cell_errors[index]);
 				} catch (...) {
 					++cell_failures[index];
+					if (cell_errors[index].empty())
+						cell_errors[index] = "Mapillary search failed unexpectedly";
 				}
 			}
 		});
@@ -688,6 +768,22 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			*failed_cells += cell_failures[index];
 		result.insert(result.end(), std::make_move_iterator(cell_results[index].begin()),
 				std::make_move_iterator(cell_results[index].end()));
+	}
+	if (error && result.empty() &&
+			std::any_of(cell_refused.begin(), cell_refused.end(),
+					[](std::size_t refused) { return refused != 0; })) {
+		const auto refused =
+				std::accumulate(cell_refused.begin(), cell_refused.end(), std::size_t{0});
+		*error = "Mapillary refused every one of " + std::to_string(refused) +
+				 " search cells for this area. A token the API does not accept is the "
+				 "usual cause; a service outage is another.";
+	} else if (error && result.empty() &&
+			   std::none_of(cell_answered.begin(), cell_answered.end(),
+					   [](std::uint8_t answered) { return answered != 0; })) {
+		const auto failed = std::find_if(cell_errors.begin(), cell_errors.end(),
+				[](const std::string &message) { return !message.empty(); });
+		if (failed != cell_errors.end())
+			*error = *failed;
 	}
 	std::sort(result.begin(), result.end(),
 			[](const auto &a, const auto &b) { return a.id < b.id; });

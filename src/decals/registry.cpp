@@ -31,7 +31,14 @@ int DecalEntry::tile_id(std::uint32_t col, std::uint32_t row) const
 }
 DecalRegistry DecalRegistry::from_keys(const std::set<DecalKey> &keys)
 {
+	return from_keys_starting_at(keys, FIRST_ID);
+}
+DecalRegistry DecalRegistry::from_keys_starting_at(
+		const std::set<DecalKey> &keys, int first_id)
+{
 	DecalRegistry registry;
+	registry.first_id_ = first_id;
+	registry.next_id_ = first_id;
 	for (const auto &key : keys) {
 		const auto [cols, rows] = key.dims();
 		registry.entries_.emplace(key, DecalEntry{registry.next_id_, cols, rows});
@@ -63,14 +70,14 @@ int DecalRegistry::max_id() const
 }
 int DecalRegistry::tile_count() const
 {
-	return next_id_ - FIRST_ID;
+	return next_id_ - first_id_;
 }
 const std::vector<DecalKey> &DecalRegistry::ordered() const
 {
 	return ordered_;
 }
-std::optional<std::tuple<DecalKey, std::uint32_t, std::uint32_t>>
-DecalRegistry::tile(int map_id) const
+std::optional<std::tuple<DecalKey, std::uint32_t, std::uint32_t>> DecalRegistry::tile(
+		int map_id) const
 {
 	for (const auto &[key, entry] : entries_) {
 		const int offset = map_id - entry.base_id;

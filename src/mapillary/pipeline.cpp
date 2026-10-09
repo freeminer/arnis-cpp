@@ -1727,8 +1727,12 @@ PipelineResult acquire_images(const Client &client, const PipelineConfig &config
 		return result;
 	}
 	const auto search_bounds = pad_pano_bounds(config.bounds, config.pano_margin_m);
-	const auto cells = search_cells(search_bounds, config.maximum_cells);
+	std::string search_error;
+	const auto cells = search_cells(search_bounds, config.maximum_cells, &search_error);
 	if (!cells) {
+		result.search_error = search_error.empty()
+									  ? "Mapillary search bounds could not be tiled"
+									  : std::move(search_error);
 		result.stats.total_seconds =
 				std::chrono::duration<double>(std::chrono::steady_clock::now() - started)
 						.count();
@@ -1743,7 +1747,9 @@ PipelineResult acquire_images(const Client &client, const PipelineConfig &config
 		return result;
 	}
 	result.images = client.search(search_bounds, config.endpoint, config.access_token,
-			config.maximum_cells, &result.failed_cells);
+			config.maximum_cells, &result.failed_cells, &search_error);
+	if (!search_error.empty())
+		result.search_error = std::move(search_error);
 	std::sort(result.images.begin(), result.images.end(),
 			[](const auto &a, const auto &b) { return a.id < b.id; });
 	result.images.erase(
@@ -1935,6 +1941,11 @@ AlignmentPipelineResult run_alignment_pipeline(
 	output.acquisition =
 			acquire_images(client, config, preloaded_osm ? &*preloaded_osm : nullptr);
 	output.acquisition.stats.fetch_seconds += osm_seconds;
+	if (output.acquisition.search_error) {
+		output.error = *output.acquisition.search_error;
+		finish();
+		return output;
+	}
 	if (output.acquisition.cancelled || config.cancelled()) {
 		output.error = "cancelled";
 		finish();

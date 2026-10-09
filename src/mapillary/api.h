@@ -28,8 +28,8 @@ struct SearchCell
 	double min_longitude{}, min_latitude{}, max_longitude{}, max_latitude{};
 };
 // Graph API bbox searches are deliberately tiled below its 0.01-degree limit.
-std::optional<std::vector<SearchCell>> search_cells(
-		const SearchCell &bounds, std::size_t maximum = mapillary_max_cells);
+std::optional<std::vector<SearchCell>> search_cells(const SearchCell &bounds,
+		std::size_t maximum = mapillary_max_cells, std::string *error = nullptr);
 std::vector<cache::ImageRecord> parse_search_response(const std::vector<std::uint8_t> &);
 std::optional<cache::ImageRecord> parse_image_record(const std::vector<std::uint8_t> &);
 std::optional<PanoMeta> parse_pano_meta(const std::vector<std::uint8_t> &);
@@ -80,6 +80,6 @@ public:
 	std::vector<cache::ImageRecord> search(const SearchCell &,
 			const std::string &endpoint, const std::string &token,
 			std::size_t maximum = mapillary_max_cells,
-			std::size_t *failed_cells = nullptr) const;
+			std::size_t *failed_cells = nullptr, std::string *error = nullptr) const;
 };
 }
