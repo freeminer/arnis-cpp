@@ -4,6 +4,7 @@
 #include <utility>
 #include <array>
 #include <functional>
+#include <optional>
 namespace arnis::models_3d::three_dmr
 {
 inline constexpr std::size_t MAX_GLB_BYTES = 64 * 1024 * 1024;
@@ -22,8 +23,9 @@ using FetchBytes = std::function<std::optional<std::vector<std::uint8_t>>(
 struct ModelInfo
 {
 	std::uint64_t id = 0;
-	std::string title, author, license;
-	double lat = 0, lon = 0, rotation = 0, scale = 1;
+	std::optional<std::string> title, author, license;
+	std::optional<double> lat, lon;
+	double rotation = 0, scale = 1;
 	std::array<double, 3> translation{0, 0, 0};
 };
 std::filesystem::path cache_root(const std::filesystem::path &base = {});

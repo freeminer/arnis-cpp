@@ -317,97 +317,140 @@ struct WeightedFeature
 	std::uint32_t weight;
 };
 
-std::vector<WeightedFeature> features(Habitat h)
+const std::vector<WeightedFeature> &features(Habitat h)
 {
 	using F = PatchFeature;
 	using H = Habitat;
+	// Match Rust's static feature slices: origins in the same habitat reuse a
+	// process-lifetime table instead of allocating a vector for every origin.
+	static const std::vector<WeightedFeature> meadow{{F::Flowers, 90},
+			{F::TallGrass, 100}, {F::TallFlowers, 6}, {F::Pumpkins, 1},
+			{F::SugarCane, 70}};
+	static const std::vector<WeightedFeature> alpine{
+			{F::Flowers, 160}, {F::TallGrass, 50}};
+	static const std::vector<WeightedFeature> forest{{F::Flowers, 50},
+			{F::TallFlowers, 35}, {F::Ferns, 80}, {F::Mushrooms, 60}, {F::SugarCane, 50},
+			{F::Pumpkins, 1}};
+	static const std::vector<WeightedFeature> taiga{{F::Ferns, 200},
+			{F::SweetBerries, 60}, {F::Mushrooms, 80}, {F::Flowers, 20}, {F::Moss, 40}};
+	static const std::vector<WeightedFeature> jungle{
+			{F::Ferns, 180}, {F::Flowers, 30}, {F::SugarCane, 100}, {F::TallGrass, 60}};
+	static const std::vector<WeightedFeature> shrub{{F::Flowers, 50}, {F::TallGrass, 70}};
+	static const std::vector<WeightedFeature> steppe{{F::TallGrass, 140},
+			{F::DeadBushes, 80}, {F::Flowers, 20}, {F::SugarCane, 60}, {F::Cactus, 30}};
+	static const std::vector<WeightedFeature> desert{
+			{F::DeadBushes, 160}, {F::Cactus, 80}, {F::SugarCane, 100}};
+	static const std::vector<WeightedFeature> tundra{
+			{F::Flowers, 30}, {F::Moss, 60}, {F::SweetBerries, 20}};
+	static const std::vector<WeightedFeature> wetland{{F::LilyPads, 180},
+			{F::Flowers, 60}, {F::SugarCane, 100}, {F::TallGrass, 60},
+			{F::Mushrooms, 20}};
+	static const std::vector<WeightedFeature> prairie{{F::TallGrass, 180},
+			{F::Flowers, 70}, {F::TallFlowers, 25}, {F::SugarCane, 40}};
+	static const std::vector<WeightedFeature> maquis{{F::Flowers, 60}, {F::TallGrass, 60},
+			{F::DeadBushes, 40}, {F::SweetBerries, 30}, {F::SugarCane, 30}};
+	static const std::vector<WeightedFeature> savanna{{F::TallGrass, 220},
+			{F::DeadBushes, 30}, {F::Flowers, 20}, {F::SugarCane, 40}};
 	switch (h) {
 	case H::Meadow:
-		return {{F::Flowers, 90}, {F::TallGrass, 100}, {F::TallFlowers, 6},
-				{F::Pumpkins, 1}, {F::SugarCane, 70}};
+		return meadow;
 	case H::Alpine:
-		return {{F::Flowers, 160}, {F::TallGrass, 50}};
+		return alpine;
 	case H::Forest:
-		return {{F::Flowers, 50}, {F::TallFlowers, 35}, {F::Ferns, 80},
-				{F::Mushrooms, 60}, {F::SugarCane, 50}, {F::Pumpkins, 1}};
+		return forest;
 	case H::Taiga:
-		return {{F::Ferns, 200}, {F::SweetBerries, 60}, {F::Mushrooms, 80},
-				{F::Flowers, 20}, {F::Moss, 40}};
+		return taiga;
 	case H::Jungle:
-		return {{F::Ferns, 180}, {F::Flowers, 30}, {F::SugarCane, 100},
-				{F::TallGrass, 60}};
+		return jungle;
 	case H::Shrub:
-		return {{F::Flowers, 50}, {F::TallGrass, 70}};
+		return shrub;
 	case H::Steppe:
-		return {{F::TallGrass, 140}, {F::DeadBushes, 80}, {F::Flowers, 20},
-				{F::SugarCane, 60}, {F::Cactus, 30}};
+		return steppe;
 	case H::Desert:
-		return {{F::DeadBushes, 160}, {F::Cactus, 80}, {F::SugarCane, 100}};
+		return desert;
 	case H::Tundra:
-		return {{F::Flowers, 30}, {F::Moss, 60}, {F::SweetBerries, 20}};
+		return tundra;
 	case H::Wetland:
-		return {{F::LilyPads, 180}, {F::Flowers, 60}, {F::SugarCane, 100},
-				{F::TallGrass, 60}, {F::Mushrooms, 20}};
+		return wetland;
 	case H::Prairie:
-		return {{F::TallGrass, 180}, {F::Flowers, 70}, {F::TallFlowers, 25},
-				{F::SugarCane, 40}};
+		return prairie;
 	case H::Maquis:
-		return {{F::Flowers, 60}, {F::TallGrass, 60}, {F::DeadBushes, 40},
-				{F::SweetBerries, 30}, {F::SugarCane, 30}};
+		return maquis;
 	case H::Savanna:
-		return {{F::TallGrass, 220}, {F::DeadBushes, 30}, {F::Flowers, 20},
-				{F::SugarCane, 40}};
+		return savanna;
 	}
-	return {};
+	return meadow;
 }
 
-FlowerPalette flower_palette(Habitat h)
+const FlowerPalette &flower_palette(Habitat h)
 {
 	using H = Habitat;
+	static const FlowerPalette meadow{{YELLOW_FLOWER, 30}, {RED_FLOWER, 25},
+			{OXEYE_DAISY, 20}, {CORNFLOWER, 12}, {WHITE_FLOWER, 12}, {ALLIUM, 4},
+			{RED_TULIP, 3}, {ORANGE_TULIP, 2}, {WHITE_TULIP, 2}, {PINK_TULIP, 2}};
+	static const FlowerPalette forest{{RED_FLOWER, 30}, {YELLOW_FLOWER, 25},
+			{LILY_OF_THE_VALLEY, 25}, {ALLIUM, 5}, {OXEYE_DAISY, 5}};
+	static const FlowerPalette taiga{{YELLOW_FLOWER, 40}, {LILY_OF_THE_VALLEY, 25},
+			{RED_FLOWER, 20}, {WHITE_FLOWER, 15}};
+	static const FlowerPalette jungle{
+			{RED_FLOWER, 45}, {BLUE_FLOWER, 30}, {YELLOW_FLOWER, 25}};
+	static const FlowerPalette shrub{
+			{YELLOW_FLOWER, 30}, {RED_FLOWER, 30}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+	static const FlowerPalette maquis{
+			{RED_FLOWER, 35}, {YELLOW_FLOWER, 25}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+	static const FlowerPalette steppe{
+			{YELLOW_FLOWER, 40}, {ALLIUM, 30}, {RED_FLOWER, 30}};
+	static const FlowerPalette tundra{
+			{WHITE_FLOWER, 40}, {YELLOW_FLOWER, 30}, {OXEYE_DAISY, 30}};
+	static const FlowerPalette wetland{
+			{BLUE_FLOWER, 70}, {OXEYE_DAISY, 15}, {YELLOW_FLOWER, 15}};
+	static const FlowerPalette prairie{{YELLOW_FLOWER, 35}, {OXEYE_DAISY, 20},
+			{ALLIUM, 15}, {CORNFLOWER, 15}, {RED_FLOWER, 10}, {ORANGE_TULIP, 5}};
+	static const FlowerPalette alpine{{WHITE_FLOWER, 30}, {CORNFLOWER, 20}, {ALLIUM, 20},
+			{OXEYE_DAISY, 15}, {YELLOW_FLOWER, 15}};
+	static const FlowerPalette savanna{
+			{YELLOW_FLOWER, 30}, {RED_FLOWER, 30}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+	static const FlowerPalette desert{
+			{YELLOW_FLOWER, 40}, {ALLIUM, 30}, {RED_FLOWER, 30}};
 	switch (h) {
 	case H::Meadow:
-		return {{YELLOW_FLOWER, 30}, {RED_FLOWER, 25}, {OXEYE_DAISY, 20},
-				{CORNFLOWER, 12}, {WHITE_FLOWER, 12}, {ALLIUM, 4}, {RED_TULIP, 3},
-				{ORANGE_TULIP, 2}, {WHITE_TULIP, 2}, {PINK_TULIP, 2}};
+		return meadow;
 	case H::Forest:
-		return {{RED_FLOWER, 30}, {YELLOW_FLOWER, 25}, {LILY_OF_THE_VALLEY, 25},
-				{ALLIUM, 5}, {OXEYE_DAISY, 5}};
+		return forest;
 	case H::Taiga:
-		return {{YELLOW_FLOWER, 40}, {LILY_OF_THE_VALLEY, 25}, {RED_FLOWER, 20},
-				{WHITE_FLOWER, 15}};
+		return taiga;
 	case H::Jungle:
-		return {{RED_FLOWER, 45}, {BLUE_FLOWER, 30}, {YELLOW_FLOWER, 25}};
+		return jungle;
 	case H::Shrub:
-		return {{YELLOW_FLOWER, 30}, {RED_FLOWER, 30}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+		return shrub;
 	case H::Maquis:
-		return {{RED_FLOWER, 35}, {YELLOW_FLOWER, 25}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+		return maquis;
 	case H::Steppe:
-		return {{YELLOW_FLOWER, 40}, {ALLIUM, 30}, {RED_FLOWER, 30}};
+		return steppe;
 	case H::Tundra:
-		return {{WHITE_FLOWER, 40}, {YELLOW_FLOWER, 30}, {OXEYE_DAISY, 30}};
+		return tundra;
 	case H::Wetland:
-		return {{BLUE_FLOWER, 70}, {OXEYE_DAISY, 15}, {YELLOW_FLOWER, 15}};
+		return wetland;
 	case H::Prairie:
-		return {{YELLOW_FLOWER, 35}, {OXEYE_DAISY, 20}, {ALLIUM, 15}, {CORNFLOWER, 15},
-				{RED_FLOWER, 10}, {ORANGE_TULIP, 5}};
+		return prairie;
 	case H::Alpine:
-		return {{WHITE_FLOWER, 30}, {CORNFLOWER, 20}, {ALLIUM, 20}, {OXEYE_DAISY, 15},
-				{YELLOW_FLOWER, 15}};
+		return alpine;
 	case H::Savanna:
-		return {{YELLOW_FLOWER, 30}, {RED_FLOWER, 30}, {ALLIUM, 20}, {WHITE_FLOWER, 20}};
+		return savanna;
 	case H::Desert:
-		return {{YELLOW_FLOWER, 40}, {ALLIUM, 30}, {RED_FLOWER, 30}};
+		return desert;
 	}
-	return {{YELLOW_FLOWER, 1}};
+	return meadow;
 }
 
-TallFlowerPalette tall_flower_palette(Habitat h)
+const TallFlowerPalette &tall_flower_palette(Habitat h)
 {
+	static const TallFlowerPalette forest{{{LILAC_LOWER, LILAC_UPPER}, 35},
+			{{ROSE_BUSH_LOWER, ROSE_BUSH_UPPER}, 35}, {{PEONY_LOWER, PEONY_UPPER}, 30}};
+	static const TallFlowerPalette other{{{SUNFLOWER_LOWER, SUNFLOWER_UPPER}, 1}};
 	if (h == Habitat::Forest)
-		return {{{LILAC_LOWER, LILAC_UPPER}, 35},
-				{{ROSE_BUSH_LOWER, ROSE_BUSH_UPPER}, 35},
-				{{PEONY_LOWER, PEONY_UPPER}, 30}};
-	return {{{SUNFLOWER_LOWER, SUNFLOWER_UPPER}, 1}};
+		return forest;
+	return other;
 }
 
 template <typename T>
@@ -490,8 +533,8 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 				selected.feature == PatchFeature::TallFlowers) &&
 			rng.uniform(100) >= 12)
 		tries = tries * 2 / 5;
-	const auto flowers = flower_palette(origin_habitat);
-	const auto tall_flowers = tall_flower_palette(origin_habitat);
+	const auto &flowers = flower_palette(origin_habitat);
+	const auto &tall_flowers = tall_flower_palette(origin_habitat);
 	Block main_flower = GRASS;
 	Block other_flower = GRASS;
 	if (selected.feature == PatchFeature::Flowers) {

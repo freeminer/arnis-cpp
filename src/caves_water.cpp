@@ -404,9 +404,14 @@ void generate_water_features(world_editor::WorldEditor &editor,
 	for (const auto p : ordered_water) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
-				editor.check_for_block_absolute(x, y, z, std::vector<Block>{AIR}))
+				editor.check_for_block_absolute(x, y, z, std::vector<Block>{AIR})) {
 			editor.set_block_absolute(
 					WATER, x, y, z, std::vector<Block>{AIR}, std::nullopt);
+			// Rust's water-plan apply schedules source updates explicitly; this
+			// active region-generation path writes the plan inline, so it must do
+			// the same here for rivers and pools to flow into breached caves.
+			editor.schedule_fluid_tick(WATER, x, y, z);
+		}
 	}
 	for (const auto p : water_cells) {
 		const auto [x, y, z] = unpack_cave_pos(p);

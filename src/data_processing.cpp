@@ -25,6 +25,7 @@
 #include <tuple>
 
 #include "../../arnis_adapter.h"
+#include "../../arnis_ground.h"
 #include "assets_root.h"
 #include "bresenham.h"
 #include "cache_root.h"
@@ -186,9 +187,15 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 					arnis::trees::SizeFilter::up_to(max_size), blocks_per_meter,
 					realm.empty() ? std::nullopt : std::optional<std::string>(realm),
 					effective_ecoregion_ids, exclude_palms);
-			if (loaded)
+			if (loaded) {
+				// Rust's TreePackSource::load reports the selected realm, community
+				// counts and enabled size tiers when the pack is first loaded. The
+				// cached C++ selector reports once at cache population, not on every
+				// mapgen worker that reuses it.
+				loaded->report();
 				result = std::make_shared<arnis::trees::RegionSelector>(
 						std::move(*loaded));
+			}
 		} catch (...) {
 			// A missing or malformed regional pack disables this optional source.
 		}
@@ -1179,8 +1186,11 @@ bool generate_world(WorldEditor &editor,
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
-	if (!args.valid())
+	if (const auto validation_error = args.validation_error()) {
+		editor.report_generation_error("options rejected: " + *validation_error);
+		std::cerr << "Arnis generation options rejected: " << *validation_error << '\n';
 		return false;
+	}
 	// Rust uses the same 3D toggle for bundled schematic props and model
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.
@@ -1249,12 +1259,12 @@ bool generate_world(WorldEditor &editor,
 							  args.mapillary_facades_dir))
 		facade_job->cancel();
 	editor.reserve_ground_level_cache();
-	world_editor::set_world_bounds(
-			args.disable_height_limit && !args.bedrock ? -2032 : -64,
-			args.disable_height_limit && !args.bedrock ? 2031 : 319);
+	world_editor::set_world_bounds(extended_min_y_for(args), world_top_y_for(args));
 	if (editor.ground) {
 		editor.ground->set_celestial_body(args.body);
-		editor.ground->set_extended_ceiling(args.disable_height_limit && !args.bedrock);
+		editor.ground->set_extended_ceiling(
+				args.disable_height_limit &&
+				extended_max_y_for(args) > world_editor::DEFAULT_MAX_Y);
 	}
 	const int base_level = editor.ground ? editor.ground->base_level(args.ground_level)
 										 : args.ground_level;
@@ -1390,6 +1400,22 @@ bool generate_world(WorldEditor &editor,
 		return value;
 	};
 	for (const auto &landmark : landmarks::catalogue()) {
+		// Rust anchors every catalogue entry from its canonical lat/lon, whether
+		// or not the corresponding OSM feature survived clipping or was returned
+		// by Overpass.  The Freeminer adapter already owns the authoritative
+		// projection used to turn those same coordinates into ProcessedNodes.
+		// Prefer it here so suppression and placement use the identical world
+		// frame instead of a centroid that moves when a way is clipped.
+		if (editor.mg) {
+			const auto position =
+					editor.mg->ll_to_pos({landmark.latitude, landmark.longitude});
+			landmark_anchors.push_back({landmark.qid, static_cast<int>(position.X),
+					static_cast<int>(position.Y)});
+			continue;
+		}
+		// Standalone library callers without a mapgen projection retain the
+		// geometry-based fallback; embedded Freeminer generation takes the
+		// canonical geographic-anchor path above.
 		for (const auto &element : elements) {
 			auto wikidata = element.tags().find("wikidata");
 			const auto key = std::pair<std::string, std::uint64_t>{
@@ -1424,7 +1450,13 @@ bool generate_world(WorldEditor &editor,
 			break;
 		}
 	}
-	auto landmark_plan = landmarks::prescan(elements, landmark_anchors, args.scale);
+	// Rust disables both landmark suppression and placement when model objects
+	// are off; otherwise a no-3D run could still discard the OSM feature that a
+	// bundled schematic would have replaced.
+	auto landmark_plan =
+			args.use_3d && !args.skip_objects()
+					? landmarks::prescan(elements, landmark_anchors, args.scale)
+					: landmarks::PrescanResult{};
 	const auto model_pipeline =
 			args.use_3d
 					? std::optional<models_3d::Models3dPipeline>(
@@ -1742,7 +1774,7 @@ bool generate_world(WorldEditor &editor,
 	// sibling part's shared building/facade context. Tile ownership can schedule
 	// one source element on multiple tiles, so compute expiry in task order and
 	// keep each fill alive until its last tile has consumed it.
-	const auto element_tiles = create_tiles(xzbbox, DEFAULT_TILE_SIZE);
+	auto element_tiles = create_tiles(xzbbox, DEFAULT_TILE_SIZE);
 	const bool tiled_element_dispatch =
 			should_use_parallel_tiles(element_tiles.size(), java_format);
 	std::vector<std::vector<std::size_t>> element_assignments;
@@ -1750,6 +1782,36 @@ bool generate_world(WorldEditor &editor,
 	if (tiled_element_dispatch) {
 		element_assignments =
 				assign_elements_to_tiles(render_elements, element_tiles, args.scale);
+		// Rust schedules dense tiles first for LPT unless memory pressure enables
+		// streaming, where row-major region bands keep the eviction frontier
+		// monotonic. The C++ Freeminer backend still processes overlays serially,
+		// but preserving the same stable tile/merge order avoids different winners
+		// for overlapping halo writes and keeps per-tile pass order aligned.
+		const bool streaming_order =
+				java_format &&
+				should_stream_to_disk(element_tiles.size(), args.fillground);
+		std::vector<std::size_t> tile_order(element_tiles.size());
+		std::iota(tile_order.begin(), tile_order.end(), 0);
+		std::stable_sort(
+				tile_order.begin(), tile_order.end(), [&](std::size_t a, std::size_t b) {
+					if (streaming_order) {
+						const auto row_a = element_tiles[a].min_z >> 9;
+						const auto row_b = element_tiles[b].min_z >> 9;
+						if (row_a != row_b)
+							return row_a < row_b;
+					}
+					return element_assignments[a].size() > element_assignments[b].size();
+				});
+		std::vector<TileBounds> ordered_tiles;
+		std::vector<std::vector<std::size_t>> ordered_assignments;
+		ordered_tiles.reserve(element_tiles.size());
+		ordered_assignments.reserve(element_assignments.size());
+		for (const auto index : tile_order) {
+			ordered_tiles.push_back(std::move(element_tiles[index]));
+			ordered_assignments.push_back(std::move(element_assignments[index]));
+		}
+		element_tiles = std::move(ordered_tiles);
+		element_assignments = std::move(ordered_assignments);
 		std::size_t task_count = 0;
 		for (const auto &assigned : element_assignments)
 			task_count += assigned.size();
@@ -1788,7 +1850,11 @@ bool generate_world(WorldEditor &editor,
 		const int min_z = std::max(tile.min_z, xzbbox.min_z());
 		const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
 		editor.set_strict_bounds(min_x, min_z, max_x, max_z);
-		return editor.begin_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		const bool began =
+				editor.begin_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		if (!began)
+			editor.report_generation_error("failed to begin tile overlay");
+		return began;
 	};
 	auto finish_ground_tile = [&](std::size_t tile_index) {
 		const auto &tile = element_tiles[tile_index];
@@ -1796,9 +1862,13 @@ bool generate_world(WorldEditor &editor,
 		const int max_x = std::min(tile.max_x - 1, xzbbox.max_x());
 		const int min_z = std::max(tile.min_z, xzbbox.min_z());
 		const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
-		if (min_x > max_x || min_z > max_z)
-			return editor.merge_tile(
+		if (min_x > max_x || min_z > max_z) {
+			const bool merged = editor.merge_tile(
 					tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+			if (!merged)
+				editor.report_generation_error("failed to merge empty tile overlay");
+			return merged;
+		}
 		editor.set_strict_bounds(min_x, min_z, max_x, max_z);
 		// These POI/address plates need their host building, and must precede
 		// ground decoration just like other tile-owned element writes.
@@ -1843,7 +1913,11 @@ bool generate_world(WorldEditor &editor,
 		}
 		water_depth::carve_lc_water_region(editor, big_water_field, road_mask,
 				tunnel_footprint, min_x, max_x, min_z, max_z, &bridge_surface);
-		return editor.merge_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		const bool merged =
+				editor.merge_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		if (!merged)
+			editor.report_generation_error("failed to merge tile overlay");
+		return merged;
 	};
 	std::size_t active_tile = std::numeric_limits<std::size_t>::max();
 	std::size_t next_ground_tile = 0;
@@ -2276,8 +2350,11 @@ bool generate_world(WorldEditor &editor,
 	// their respective WorldEditor backends.
 	editor.request_flush();
 	editor.request_save();
-	if (!editor.finalize_persistence())
+	if (!editor.finalize_persistence()) {
+		editor.report_generation_error("backend persistence finalization failed");
+		std::cerr << "Arnis generation failed while finalizing backend persistence\n";
 		return false;
+	}
 
 	return true;
 }
@@ -2288,7 +2365,7 @@ bool generate_world_with_options(WorldEditor &editor,
 		BuildingFootprintBitmap const &building_footprints,
 		const GenerationOptions &options, bool elements_prepared)
 {
-	if (!valid_generation_options(options))
+	if (!valid_generation_options(options, args))
 		return false;
 	apply_generation_options(editor, options);
 	args.ground_level = options.ground_level;

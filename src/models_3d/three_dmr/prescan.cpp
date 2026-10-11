@@ -114,8 +114,10 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		direction(tag(e, "direction"), yaw);
 		r.placements.push_back({e.id(), model, ax, az, fp, yaw + rotation});
 		r.suppressed.push_back(key);
-		if (pts.size() > 1)
-			footprints.push_back(raw);
+		// Rust uses the raw OSM bbox for suppression even when it is a point
+		// or a degenerate way. `fp` above may be expanded for model ground
+		// lookup, but that synthetic footprint is not used for suppression.
+		footprints.push_back(raw);
 	}
 	for (const auto &e : elements) {
 		auto key = std::make_pair(std::string(e.kind()), e.id());

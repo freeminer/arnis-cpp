@@ -1,6 +1,8 @@
 #pragma once
 
 #include <chrono>
+#include <algorithm>
+#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <cstdlib>
@@ -139,7 +141,15 @@ inline FacadeDetail facade_detail_from_string(const std::string &value)
 }
 inline FacadeMode facade_mode_from_string(const std::string &value)
 {
-	return value == "blocks" ? FacadeMode::Blocks : FacadeMode::Photos;
+	auto normalized = value;
+	const auto first = normalized.find_first_not_of(" \t\n\r\f\v");
+	if (first == std::string::npos)
+		return FacadeMode::Photos;
+	const auto last = normalized.find_last_not_of(" \t\n\r\f\v");
+	normalized = normalized.substr(first, last - first + 1);
+	std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return normalized == "blocks" ? FacadeMode::Blocks : FacadeMode::Photos;
 }
 inline OvertureSource overture_source_from_string(const std::string &value)
 {
@@ -268,10 +278,17 @@ struct Args
 	}
 	std::optional<std::string> mapillary_api_token() const
 	{
-		if (mapillary_token && !mapillary_token->empty())
-			return mapillary_token;
-		if (const char *env = std::getenv("MAPILLARY_TOKEN"); env && *env)
-			return std::string(env);
+		const auto nonblank = [](const std::string &value) -> std::optional<std::string> {
+			const auto first = value.find_first_not_of(" \t\n\r\f\v");
+			if (first == std::string::npos)
+				return std::nullopt;
+			const auto last = value.find_last_not_of(" \t\n\r\f\v");
+			return value.substr(first, last - first + 1);
+		};
+		if (mapillary_token)
+			return nonblank(*mapillary_token);
+		if (const char *env = std::getenv("MAPILLARY_TOKEN"); env)
+			return nonblank(env);
 		return std::nullopt;
 	}
 	bool mapillary_pipeline_on() const
@@ -342,7 +359,7 @@ struct Args
 	// Rust's validate_args equivalent for library callers.  Keep validation
 	// side-effect free so CLI adapters can turn the boolean into their own
 	// diagnostic/error type.
-	bool valid() const
+	std::optional<std::string> validation_error() const
 	{
 		// Planetary scales intentionally sit below the Earth object scale
 		// minimum; Rust validates scale only for geographic Earth worlds.
@@ -350,57 +367,74 @@ struct Args
 				height_multiplier < MIN_HEIGHT_MULTIPLIER ||
 				height_multiplier > MAX_HEIGHT_MULTIPLIER ||
 				!std::isfinite(height_multiplier) || timeout_ref().count() < 0)
-			return false;
+			return "invalid scale, height multiplier, or timeout";
 		if (bedrock && luanti)
-			return false;
+			return "Bedrock and Luanti output cannot both be enabled";
+		if (spawn_lat.has_value() != spawn_lng.has_value())
+			return "Both --spawn-lat and --spawn-lng must be provided together.";
+		if (spawn_lat && spawn_lng &&
+				(!std::isfinite(*spawn_lat) || !std::isfinite(*spawn_lng) ||
+						*spawn_lat < -90.0 || *spawn_lat > 90.0 || *spawn_lng < -180.0 ||
+						*spawn_lng > 180.0))
+			return "Invalid spawn coordinates: latitude/longitude out of range";
+		if (!std::isfinite(rotation) || rotation < -90.0 || rotation > 90.0)
+			return "Rotation angle must be between -90 and 90 degrees.";
+		const int floor = (disable_height_limit && !bedrock && !luanti ? -2032 : -64) + 2;
+		const int top = !disable_height_limit || luanti ? 319 : bedrock ? 511 : 2031;
+		const int ceiling = top - 15;
+		if (ground_level < floor || ground_level > ceiling)
+			return "--ground-level must be between " + std::to_string(floor) + " and " +
+				   std::to_string(ceiling) + " for this world format (got " +
+				   std::to_string(ground_level) + ").";
 		if (legacy_terrain && mode == GenerationMode::GeoOnly)
-			return false;
+			return "legacy terrain cannot be combined with geo-only mode";
 		if (map_preview && luanti)
-			return false;
+			return "map preview is not supported for Luanti output";
 		if (one_world_run &&
 				(bedrock || luanti || !is_earth(body) ||
 						std::abs(rotation) > std::numeric_limits<double>::epsilon() ||
 						mapillary_probe))
-			return false;
+			return "One World mode conflicts with the selected format, body, rotation, or Mapillary probe";
 		// Web Mercator is supported for the shared One World coordinate frame;
 		// for standalone generation the Rust CLI warns because scale varies with latitude.
 		if (projection == projection::ProjectionKind::WebMercator && !one_world_run)
-			return false;
+			return "Web Mercator projection requires One World mode";
 		if ((mapillary_facades == std::optional<bool>(true) || mapillary_probe) &&
 				!mapillary_api_token().has_value())
-			return false;
+			return "Mapillary facade/probe mode requires an API token";
 		if (mapillary_debug_dir && !mapillary_probe)
-			return false;
+			return "Mapillary debug output requires probe mode";
 		if (facade_px != 4 && facade_px != 8 && facade_px != 16 && facade_px != 32)
-			return false;
+			return "facade pixel size must be 4, 8, 16, or 32";
 		if (mapillary_facade_debug_walls.size() > 4096)
-			return false;
+			return "Mapillary facade debug wall list exceeds 4096 characters";
 		if (mapillary_facades_wanted() && (bedrock || luanti) &&
 				facade_mode_places_displays(mapillary_facade_mode))
-			return false;
+			return "Mapillary photo facades are incompatible with Bedrock/Luanti output";
 		if (building_facades && (bedrock || luanti))
-			return false;
+			return "building facades are incompatible with Bedrock/Luanti output";
 		if (cave_biomes && !caves)
-			return false;
+			return "cave biome weights require cave generation";
 		if (cave_biomes) {
 			std::string error;
 			if (caves::BiomeAmounts::parse(*cave_biomes, &error), !error.empty())
-				return false;
+				return "invalid cave biome weights: " + error;
 		}
 		if (cave_asset_pack && !caves)
-			return false;
+			return "cave asset pack requires cave generation";
 		if (cave_asset_pack &&
 				!std::filesystem::is_regular_file(
 						std::filesystem::path(*cave_asset_pack) / "cave_pack.json"))
-			return false;
+			return "cave asset pack is missing cave_pack.json";
 		if (!mapillary_facade_debug_walls.empty() && !mapillary_facade_debug_dir)
-			return false;
+			return "Mapillary facade debug walls require a debug output directory";
 		if (mapillary_facade_debug_dir && !mapillary_pipeline_on())
-			return false;
+			return "Mapillary facade debug output requires the Mapillary pipeline";
 		if (mapillary_facades_dir &&
 				!std::filesystem::is_directory(*mapillary_facades_dir))
-			return false;
-		return true;
+			return "Mapillary facade export directory does not exist";
+		return std::nullopt;
 	}
+	bool valid() const { return !validation_error().has_value(); }
 };
 }

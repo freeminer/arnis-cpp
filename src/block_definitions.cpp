@@ -633,9 +633,8 @@ Block get_castle_wall_block(ChaCha8Rng &rng)
 
 BlockWithProperties snow_layer_with_depth(unsigned layers)
 {
-	BlockWithProperties result{SNOW_LAYER};
-	result.properties.emplace("layers", std::to_string(std::clamp(layers, 1u, 7u)));
-	return result;
+	return BlockWithProperties{
+			SNOW_LAYER, {{"layers", std::to_string(std::clamp(layers, 1u, 7u))}}};
 }
 
 }

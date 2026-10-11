@@ -20,6 +20,14 @@ struct Bounds
 		return x >= min_x && x <= max_x && z >= min_z && z <= max_z;
 	}
 };
+struct ResolvedPaletteLayers
+{
+	std::vector<float> y_max_frac;
+	std::vector<std::vector<Block>> blocks;
+	bool empty() const { return blocks.empty(); }
+};
+std::optional<ResolvedPaletteLayers> resolve_palette_layers(
+		const std::optional<std::vector<WikidataEntry::PaletteLayer>> &source);
 struct Placement
 {
 	std::uint64_t osm_id = 0;
@@ -34,7 +42,8 @@ struct Placement
 	std::optional<double> height_m, xz_extent_m;
 	// Rust's contextual fallback palette. Used only by untextured/STL voxels.
 	std::vector<Block> palette;
-	std::vector<WikidataEntry::PaletteLayer> palette_layers;
+	// Rust resolves the source index's optional palette layers during prescan.
+	std::optional<ResolvedPaletteLayers> palette_layers;
 };
 struct SuppressionClaim
 {
@@ -51,7 +60,8 @@ struct PrescanResult
 };
 PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rotation,
 		double scale,
-		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed =
+				{});
 std::vector<std::pair<int, int>> deferred_regions(const PrescanResult &, double scale);
 // Rust suppresses OSM geometry only after a model fetch succeeds.  Hosts that
 // fetch during discovery can apply this filter before merging suppression IDs.

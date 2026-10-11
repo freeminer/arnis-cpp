@@ -765,9 +765,10 @@ BedrockBlock to_bedrock_block(const Block &block)
 BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 {
 	auto out = to_bedrock_block(value.block);
+	const auto &properties = value.property_values();
 	const auto prop = [&](const char *key) -> const std::string * {
-		const auto it = value.properties.find(key);
-		return it == value.properties.end() ? nullptr : &it->second;
+		const auto it = properties.find(key);
+		return it == properties.end() ? nullptr : &it->second;
 	};
 	const auto string_prop = [&](const char *key, const char *fallback) {
 		const auto *v = prop(key);

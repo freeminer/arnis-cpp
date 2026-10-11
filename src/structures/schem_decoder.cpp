@@ -17,6 +17,23 @@
 
 namespace arnis::structures
 {
+namespace
+{
+std::shared_ptr<const SchemProperties> properties_for_rotation(const SchemVoxel &voxel,
+		unsigned rotation,
+		std::unordered_map<const SchemProperties *,
+				std::shared_ptr<const SchemProperties>> &cache)
+{
+	if (!rotation || !voxel.properties || voxel.properties->empty())
+		return voxel.properties;
+	auto [it, inserted] = cache.try_emplace(voxel.properties.get());
+	if (inserted)
+		it->second = BlockWithProperties::intern_properties(
+				rotate_schem_properties(*voxel.properties, rotation & 3u));
+	return it->second;
+}
+} // namespace
+
 StructureSchematic structure_schematic(const SchemDocument &document)
 {
 	StructureSchematic out;
@@ -24,7 +41,7 @@ StructureSchematic structure_schematic(const SchemDocument &document)
 	out.length = document.length;
 	int min_y = std::numeric_limits<int>::max();
 	for (const auto &voxel : document.voxels)
-		if (resolve_schem_block(voxel.block) != block_definitions::AIR) {
+		if (voxel.resolved_block != block_definitions::AIR) {
 			min_y = std::min(min_y, voxel.y);
 			out.voxels.push_back(voxel);
 		}
@@ -107,7 +124,8 @@ bool place_structure_yaw(world_editor::WorldEditor &editor,
 	std::vector<BlockWithProperties> palette = schematic.palette;
 	if (rotation)
 		for (auto &state : palette)
-			state.properties = rotate_schem_properties(state.properties, rotation);
+			state = BlockWithProperties{state.block,
+					rotate_schem_properties(state.property_values(), rotation)};
 	const auto pitch_lift = [&](int z) {
 		if (pitch_degrees == 0.0)
 			return 0;
@@ -176,15 +194,15 @@ bool place_structure(world_editor::WorldEditor &editor,
 	};
 	const auto [anchor_x, anchor_z] = rotate_cell(structure.anchor_x, structure.anchor_z);
 	const std::vector<Block> replace_all;
+	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
+			rotated_properties;
 	bool placed = false;
 	for (const auto &voxel : structure.voxels) {
 		const auto [rx, rz] = rotate_cell(voxel.x, voxel.z);
 		const int wx = base_x + rx - anchor_x;
 		const int wz = base_z + rz - anchor_z;
-		auto properties =
-				k ? rotate_schem_properties(voxel.properties, k) : voxel.properties;
-		BlockWithProperties block{
-				resolve_schem_block(voxel.block), std::move(properties)};
+		BlockWithProperties block{voxel.resolved_block,
+				properties_for_rotation(voxel, k, rotated_properties)};
 		if (block.block == block_definitions::AIR)
 			continue;
 		editor.set_block_with_properties_absolute(
@@ -747,48 +765,61 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 	const std::size_t cells = static_cast<std::size_t>(volume);
 	if (data.size() != cells)
 		throw std::runtime_error("schem BlockData size mismatch");
+	std::unordered_map<std::string, std::shared_ptr<const SchemProperties>>
+			state_properties;
+	std::unordered_map<std::string, Block> resolved_blocks;
 	for (std::size_t i = 0; i < cells; i++) {
 		auto it = palette.find(data[i]);
 		if (it == palette.end())
 			continue;
 		const int x = i % doc.width, z = (i / doc.width) % doc.length,
 				  y = i / (doc.width * doc.length);
-		std::unordered_map<std::string, std::string> properties;
-		const auto open = it->second.find('['), close = it->second.rfind(']');
-		if (open != std::string::npos && close != std::string::npos && close > open + 1) {
-			std::size_t start = open + 1;
-			while (start < close) {
-				std::size_t end = start;
-				int depth = 0;
-				bool quoted = false;
-				for (; end < close; ++end) {
-					const char ch = it->second[end];
-					if (ch == '"' && (end == start || it->second[end - 1] != '\\'))
-						quoted = !quoted;
-					if (!quoted && (ch == '[' || ch == '{'))
-						++depth;
-					else if (!quoted && (ch == ']' || ch == '}') && depth)
-						--depth;
-					else if (!quoted && ch == ',' && depth == 0)
-						break;
+		std::shared_ptr<const SchemProperties> properties;
+		auto state = state_properties.find(it->second);
+		if (state == state_properties.end()) {
+			SchemProperties parsed;
+			const auto open = it->second.find('['), close = it->second.rfind(']');
+			if (open != std::string::npos && close != std::string::npos &&
+					close > open + 1) {
+				std::size_t start = open + 1;
+				while (start < close) {
+					std::size_t end = start;
+					int depth = 0;
+					bool quoted = false;
+					for (; end < close; ++end) {
+						const char ch = it->second[end];
+						if (ch == '"' && (end == start || it->second[end - 1] != '\\'))
+							quoted = !quoted;
+						if (!quoted && (ch == '[' || ch == '{'))
+							++depth;
+						else if (!quoted && (ch == ']' || ch == '}') && depth)
+							--depth;
+						else if (!quoted && ch == ',' && depth == 0)
+							break;
+					}
+					const auto equals = it->second.find('=', start);
+					if (equals != std::string::npos && equals < end) {
+						auto key = it->second.substr(start, equals - start);
+						auto value = it->second.substr(equals + 1, end - equals - 1);
+						const auto trim = [](std::string &s) {
+							const auto a = s.find_first_not_of(" \t");
+							const auto b = s.find_last_not_of(" \t");
+							s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
+						};
+						trim(key);
+						trim(value);
+						parsed.emplace(std::move(key), std::move(value));
+					}
+					start = end < close ? end + 1 : close;
 				}
-				const auto equals = it->second.find('=', start);
-				if (equals != std::string::npos && equals < end) {
-					auto key = it->second.substr(start, equals - start);
-					auto value = it->second.substr(equals + 1, end - equals - 1);
-					const auto trim = [](std::string &s) {
-						const auto a = s.find_first_not_of(" \t");
-						const auto b = s.find_last_not_of(" \t");
-						s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
-					};
-					trim(key);
-					trim(value);
-					properties.emplace(std::move(key), std::move(value));
-				}
-				start = end < close ? end + 1 : close;
 			}
+			properties = BlockWithProperties::intern_properties(std::move(parsed));
+			state = state_properties.emplace(it->second, std::move(properties)).first;
 		}
-		doc.voxels.push_back({x, y, z, it->second, std::move(properties)});
+		auto [mapped, inserted] = resolved_blocks.try_emplace(it->second);
+		if (inserted)
+			mapped->second = resolve_schem_block(it->second);
+		doc.voxels.push_back({x, y, z, it->second, mapped->second, state->second});
 	}
 	return doc;
 }
@@ -823,7 +854,7 @@ ColumnSchematic ColumnSchematic::from_document(const SchemDocument &document)
 	for (const auto &voxel : document.voxels)
 		if (voxel.x >= 0 && voxel.z >= 0 && voxel.x < out.width && voxel.z < out.length &&
 				voxel.y >= 0 && voxel.y <= std::numeric_limits<std::int16_t>::max() &&
-				resolve_schem_block(voxel.block) != block_definitions::AIR)
+				voxel.resolved_block != block_definitions::AIR)
 			min_y = std::min(min_y, voxel.y);
 	if (min_y == std::numeric_limits<int>::max())
 		throw std::runtime_error("schem has no mapped blocks");
@@ -832,11 +863,12 @@ ColumnSchematic ColumnSchematic::from_document(const SchemDocument &document)
 		if (voxel.x < 0 || voxel.z < 0 || voxel.x >= out.width || voxel.z >= out.length ||
 				voxel.y < 0 || voxel.y > std::numeric_limits<std::int16_t>::max())
 			continue;
-		const Block block = resolve_schem_block(voxel.block);
+		const Block block = voxel.resolved_block;
 		if (block == block_definitions::AIR)
 			continue;
+		const auto &voxel_properties = voxel.state_properties();
 		std::map<std::string, std::string> properties(
-				voxel.properties.begin(), voxel.properties.end());
+				voxel_properties.begin(), voxel_properties.end());
 		StateKey key{voxel.block, std::move(properties)};
 		auto slot = slots.find(key);
 		if (slot == slots.end()) {
@@ -1586,6 +1618,8 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 	for (const auto &voxel : document.voxels)
 		lift_floor = std::min(lift_floor, voxel.y + pitch_lift(voxel.z));
 	std::map<std::pair<int, int>, std::vector<const SchemVoxel *>> columns;
+	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
+			rotated_properties;
 	for (const auto &voxel : document.voxels)
 		columns[{voxel.x, voxel.z}].push_back(&voxel);
 	int min_x = std::numeric_limits<int>::max(), max_x = std::numeric_limits<int>::min();
@@ -1614,10 +1648,9 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 			for (const auto *voxel : column->second) {
 				// State has no arbitrary-angle representation. Snap it to the
 				// nearest cardinal while preserving the hull's true free yaw.
-				BlockWithProperties block{resolve_schem_block(voxel->block),
-						state_rotation ? rotate_schem_properties(
-												 voxel->properties, state_rotation)
-									   : voxel->properties};
+				BlockWithProperties block{voxel->resolved_block,
+						properties_for_rotation(
+								*voxel, state_rotation, rotated_properties)};
 				if (block.block == block_definitions::AIR)
 					continue;
 				editor.set_block_with_properties_absolute(std::move(block), wx,
@@ -1642,7 +1675,7 @@ bool place_schem_file(world_editor::WorldEditor &editor,
 		return false;
 	}
 	for (const auto &v : doc.voxels) {
-		BlockWithProperties block{resolve_schem_block(v.block), v.properties};
+		BlockWithProperties block{v.resolved_block, v.properties};
 		if (block.block == block_definitions::AIR)
 			continue;
 		editor.set_block_with_properties_absolute(std::move(block),
@@ -1670,9 +1703,11 @@ bool place_schem_file_rotated(world_editor::WorldEditor &editor,
 	} catch (...) {
 		return false;
 	}
+	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
+			rotated_properties;
 	for (const auto &v : doc.voxels) {
-		BlockWithProperties b{resolve_schem_block(v.block),
-				rotate_schem_properties(v.properties, rotation & 3)};
+		BlockWithProperties b{v.resolved_block,
+				properties_for_rotation(v, rotation, rotated_properties)};
 		if (b.block == block_definitions::AIR)
 			continue;
 		int x = v.x + doc.offset_x, z = v.z + doc.offset_z;
@@ -1751,9 +1786,11 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 			doc.offset_z -= int(sz / static_cast<long long>(n));
 		}
 	}
+	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
+			rotated_properties;
 	for (const auto &v : doc.voxels) {
-		BlockWithProperties b{resolve_schem_block(v.block),
-				rotate_schem_properties(v.properties, rotation & 3)};
+		BlockWithProperties b{v.resolved_block,
+				properties_for_rotation(v, rotation, rotated_properties)};
 		if (b.block == block_definitions::AIR)
 			continue;
 		int x = v.x + doc.offset_x, z = v.z + doc.offset_z;

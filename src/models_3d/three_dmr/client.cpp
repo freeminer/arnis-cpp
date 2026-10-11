@@ -1,5 +1,6 @@
 #include "client.h"
 #include "../../cache_root.h"
+#include "../../net.h"
 #include "../model_asset.h"
 #include "../../../../http.h"
 #include <array>
@@ -115,10 +116,18 @@ std::optional<ModelInfo> parse_model_info(const std::vector<std::uint8_t> &b)
 			return std::nullopt;
 		ModelInfo m;
 		m.id = j["id"].get<std::uint64_t>();
-		if (const auto it = j.find("title"); it != j.end() && it->is_string())
-			m.title = it->get<std::string>();
-		if (const auto it = j.find("author"); it != j.end() && it->is_string())
-			m.author = it->get<std::string>();
+		const auto optional_string = [&](const char *key,
+											 std::optional<std::string> &out) {
+			const auto it = j.find(key);
+			if (it == j.end() || it->is_null())
+				return true;
+			if (!it->is_string())
+				return false;
+			out = it->get<std::string>();
+			return true;
+		};
+		if (!optional_string("title", m.title) || !optional_string("author", m.author))
+			return std::nullopt;
 		// Rust accepts either numeric or string license codes.
 		if (const auto it = j.find("license"); it != j.end() && !it->is_null()) {
 			if (it->is_string())
@@ -128,19 +137,38 @@ std::optional<ModelInfo> parse_model_info(const std::vector<std::uint8_t> &b)
 				// value, not only numeric license codes.
 				m.license = it->dump();
 		}
-		auto number = [&](const char *key, double fallback) {
+		const auto optional_number = [&](const char *key, std::optional<double> &out) {
 			const auto it = j.find(key);
-			return it != j.end() && it->is_number() ? it->get<double>() : fallback;
+			if (it == j.end() || it->is_null())
+				return true;
+			if (!it->is_number())
+				return false;
+			out = it->get<double>();
+			return true;
 		};
-		m.lat = number("lat", 0.0);
-		m.lon = number("lon", 0.0);
-		m.rotation = number("rotation", 0.0);
-		m.scale = number("scale", 1.0);
-		if (const auto it = j.find("translation");
-				it != j.end() && it->is_array() && it->size() == 3 &&
-				(*it)[0].is_number() && (*it)[1].is_number() && (*it)[2].is_number())
+		if (!optional_number("lat", m.lat) || !optional_number("lon", m.lon))
+			return std::nullopt;
+		const auto defaulted_number = [&](const char *key, double fallback, double &out) {
+			const auto it = j.find(key);
+			if (it == j.end()) {
+				out = fallback;
+				return true;
+			}
+			if (!it->is_number())
+				return false;
+			out = it->get<double>();
+			return true;
+		};
+		if (!defaulted_number("rotation", 0.0, m.rotation) ||
+				!defaulted_number("scale", 1.0, m.scale))
+			return std::nullopt;
+		if (const auto it = j.find("translation"); it != j.end()) {
+			if (!it->is_array() || it->size() != 3 || !(*it)[0].is_number() ||
+					!(*it)[1].is_number() || !(*it)[2].is_number())
+				return std::nullopt;
 			for (std::size_t i = 0; i < 3; ++i)
 				m.translation[i] = (*it)[i].get<double>();
+		}
 		return normalize_model_info(std::move(m));
 	} catch (...) {
 		return std::nullopt;
@@ -150,13 +178,17 @@ std::vector<std::uint8_t> encode_model_info(const ModelInfo &m)
 {
 	const auto v = normalize_model_info(m);
 	nlohmann::json j{{"id", v.id}, {"rotation", v.rotation}, {"scale", v.scale},
-			{"translation", v.translation}, {"lat", v.lat}, {"lon", v.lon}};
-	if (!v.title.empty())
-		j["title"] = v.title;
-	if (!v.author.empty())
-		j["author"] = v.author;
-	if (!v.license.empty())
-		j["license"] = v.license;
+			{"translation", v.translation}};
+	if (v.lat)
+		j["lat"] = *v.lat;
+	if (v.lon)
+		j["lon"] = *v.lon;
+	if (v.title)
+		j["title"] = *v.title;
+	if (v.author)
+		j["author"] = *v.author;
+	if (v.license)
+		j["license"] = *v.license;
 	const std::string s = j.dump();
 	return {s.begin(), s.end()};
 }
@@ -304,17 +336,20 @@ std::optional<ModelInfo> Client::fetch_info(std::uint64_t id) const
 	if (auto cached = load_valid_info_cache(config_, id))
 		return cached;
 	std::optional<std::vector<std::uint8_t>> bytes;
-	if (fetch_bytes_) {
-		bytes = fetch_bytes_(url, 1024 * 1024);
-	} else {
-		const auto temp =
-				info_cache_path(config_, id).string() + "." +
-				std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
-				".download";
-		if (http_to_file(url, temp))
-			bytes = read_capped(temp, 1024 * 1024);
-		std::error_code ec;
-		std::filesystem::remove(temp, ec);
+	{
+		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		if (fetch_bytes_) {
+			bytes = fetch_bytes_(url, 1024 * 1024);
+		} else {
+			const auto temp = info_cache_path(config_, id).string() + "." +
+							  std::to_string(std::hash<std::thread::id>{}(
+									  std::this_thread::get_id())) +
+							  ".download";
+			if (http_to_file(url, temp))
+				bytes = read_capped(temp, 1024 * 1024);
+			std::error_code ec;
+			std::filesystem::remove(temp, ec);
+		}
 	}
 	if (!bytes || bytes->empty())
 		return std::nullopt;
@@ -339,17 +374,20 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_glb(std::uint64_t id) con
 	if (auto cached = load_valid_glb_cache(config_, id))
 		return cached;
 	std::optional<std::vector<std::uint8_t>> bytes;
-	if (fetch_bytes_) {
-		bytes = fetch_bytes_(url, MAX_GLB_BYTES);
-	} else {
-		const auto temp =
-				model_cache_path(config_, id).string() + "." +
-				std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
-				".download";
-		if (http_to_file(url, temp))
-			bytes = read_capped(temp, MAX_GLB_BYTES);
-		std::error_code ec;
-		std::filesystem::remove(temp, ec);
+	{
+		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		if (fetch_bytes_) {
+			bytes = fetch_bytes_(url, MAX_GLB_BYTES);
+		} else {
+			const auto temp = model_cache_path(config_, id).string() + "." +
+							  std::to_string(std::hash<std::thread::id>{}(
+									  std::this_thread::get_id())) +
+							  ".download";
+			if (http_to_file(url, temp))
+				bytes = read_capped(temp, MAX_GLB_BYTES);
+			std::error_code ec;
+			std::filesystem::remove(temp, ec);
+		}
 	}
 	if (!bytes || bytes->size() > MAX_GLB_BYTES || !valid_glb_bytes(*bytes))
 		return std::nullopt;

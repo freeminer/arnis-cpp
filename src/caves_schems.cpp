@@ -136,10 +136,10 @@ std::optional<Block> map_cave_block(const structures::SchemVoxel &voxel)
 	if (n == "big_dripleaf_stem")
 		return BIG_DRIPLEAF_STEM;
 	if (n == "small_dripleaf") {
-		const auto half = voxel.properties.find("half");
-		return half != voxel.properties.end() && half->second == "upper"
-					   ? SMALL_DRIPLEAF_UPPER
-					   : SMALL_DRIPLEAF_LOWER;
+		const auto &properties = voxel.state_properties();
+		const auto half = properties.find("half");
+		return half != properties.end() && half->second == "upper" ? SMALL_DRIPLEAF_UPPER
+																   : SMALL_DRIPLEAF_LOWER;
 	}
 	return std::nullopt;
 }
@@ -174,7 +174,7 @@ std::optional<CaveSchematic> decode_cave_schematic(const std::filesystem::path &
 		if (!air)
 			min_solid_y = std::min(min_solid_y, voxel.y);
 		out.voxels.push_back(voxel);
-		auto properties = voxel.properties;
+		auto properties = voxel.state_properties();
 		for (auto it = properties.begin(); it != properties.end();) {
 			if ((it->first == "waterlogged" && it->second == "false") ||
 					it->first == "level" || it->first == "distance" ||
@@ -189,7 +189,7 @@ std::optional<CaveSchematic> decode_cave_schematic(const std::filesystem::path &
 	if (out.voxels.empty() || out.solid_count == 0)
 		return std::nullopt;
 	// The Rust pack loader normalizes padded assets so their lowest solid sits at y=0.
-	if (min_solid_y > 0) {
+	if (min_solid_y != 0) {
 		for (auto &voxel : out.voxels)
 			voxel.y -= min_solid_y;
 		for (std::size_t i = out.voxels.size(); i-- > 0;)
@@ -253,20 +253,56 @@ std::optional<CavePack> load_pack(const std::filesystem::path &root)
 		return std::nullopt;
 	CavePack pack;
 	for (const auto &source : manifest["families"]) {
-		if (!source.is_object() || !source.contains("files") ||
+		if (!source.is_object() || !source.contains("name") ||
+				!source["name"].is_string() || !source.contains("orientation") ||
+				!source["orientation"].is_string() || !source.contains("biomes") ||
+				!source["biomes"].is_array() || !source.contains("weight") ||
+				!source["weight"].is_number_integer() || !source.contains("files") ||
 				!source["files"].is_array())
-			continue;
-		Family family;
-		family.orientation = parse_orientation(source.value("orientation", "any"));
-		family.weight = std::max<std::uint32_t>(1, source.value("weight", 1u));
-		family.sink = std::max(0, source.value("sink", 0));
-		if (source.contains("biomes") && source["biomes"].is_array())
-			for (const auto &tag : source["biomes"])
-				if (tag.is_string())
-					family.biomes.push_back(tag.get<std::string>());
-		for (const auto &entry : source["files"]) {
+			return std::nullopt;
+		std::uint64_t weight = 0;
+		try {
+			weight = source["weight"].get<std::uint64_t>();
+		} catch (...) {
+			return std::nullopt;
+		}
+		if (weight > std::numeric_limits<std::uint32_t>::max())
+			return std::nullopt;
+		for (const auto &tag : source["biomes"])
+			if (!tag.is_string())
+				return std::nullopt;
+		for (const auto &entry : source["files"])
 			if (!entry.is_string())
-				continue;
+				return std::nullopt;
+		std::int32_t sink = 0;
+		if (source.contains("sink")) {
+			if (!source["sink"].is_number_integer())
+				return std::nullopt;
+			try {
+				if (source["sink"].is_number_unsigned()) {
+					const auto value = source["sink"].get<std::uint64_t>();
+					if (value > static_cast<std::uint64_t>(
+										std::numeric_limits<std::int32_t>::max()))
+						return std::nullopt;
+					sink = static_cast<std::int32_t>(value);
+				} else {
+					const auto value = source["sink"].get<std::int64_t>();
+					if (value < std::numeric_limits<std::int32_t>::min() ||
+							value > std::numeric_limits<std::int32_t>::max())
+						return std::nullopt;
+					sink = static_cast<std::int32_t>(value);
+				}
+			} catch (...) {
+				return std::nullopt;
+			}
+		}
+		Family family;
+		family.orientation = parse_orientation(source["orientation"].get<std::string>());
+		family.weight = std::max<std::uint32_t>(1, static_cast<std::uint32_t>(weight));
+		family.sink = std::max(0, sink);
+		for (const auto &tag : source["biomes"])
+			family.biomes.push_back(tag.get<std::string>());
+		for (const auto &entry : source["files"]) {
 			const auto relative = std::filesystem::path(entry.get<std::string>());
 			if (relative.is_absolute())
 				continue;
@@ -276,6 +312,11 @@ std::optional<CavePack> load_pack(const std::filesystem::path &root)
 			const auto rel = normalized.lexically_relative(root.lexically_normal());
 			if (rel.empty() || *rel.begin() == "..")
 				continue;
+			// Rust treats an unreadable/missing manifest file as a pack-load
+			// failure; malformed schematic contents alone are skipped below.
+			std::ifstream probe(normalized, std::ios::binary);
+			if (!probe)
+				return std::nullopt;
 			auto schem = decode_cave_schematic(normalized);
 			if (schem && schem->solid_count >=
 								 (family.orientation == Orientation::Cover ? 3u : 1u))

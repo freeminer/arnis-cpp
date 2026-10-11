@@ -18,10 +18,28 @@ namespace
 std::optional<std::string> tree_block_name(std::string name)
 {
 	name = name.substr(0, name.find('['));
-	if (name.starts_with("minecraft:"))
+	while (name.starts_with("minecraft:"))
 		name.erase(0, 10);
-	if (name.starts_with("stripped_"))
-		name.erase(0, 9);
+	// Keep this allowlist in lockstep with Rust's map_block(). In particular,
+	// stripped states are supported only for known log/wood blocks; stripping
+	// the prefix generically would accidentally admit blocks such as
+	// stripped_cherry_leaves or stripped_mangrove_roots.
+	if (name.starts_with("stripped_")) {
+		const auto base = name.substr(9);
+		if (base == "pale_oak_log" || base == "pale_oak_wood")
+			return "minecraft:birch_log";
+		for (const auto *species : {"oak", "birch", "spruce", "dark_oak", "jungle",
+					 "acacia", "cherry", "mangrove"}) {
+			const std::string prefix(species);
+			if (base == prefix + "_log" || base == prefix + "_wood")
+				return "minecraft:" + prefix + "_log";
+		}
+		if (base == "bamboo_block")
+			return "minecraft:jungle_log";
+		if (base == "warped_stem" || base == "warped_hyphae")
+			return "minecraft:spruce_log";
+		return std::nullopt;
+	}
 	if (name == "vine" || name == "moss_block" || name == "moss_carpet")
 		return "minecraft:oak_leaves";
 	if (name == "flowering_azalea_leaves" || name == "azalea_leaves")

@@ -178,7 +178,7 @@ BlockWithProperties rotated_block(const BlockWithProperties &block, uint8_t k)
 	if (k == 0)
 		return block;
 	return BlockWithProperties{
-			block.block, structures::rotate_schem_properties(block.properties, k)};
+			block.block, structures::rotate_schem_properties(block.property_values(), k)};
 }
 
 void sweep_module(world_editor::WorldEditor *editor,

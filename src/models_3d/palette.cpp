@@ -30,22 +30,24 @@ std::uint8_t usage_for(Block block)
 struct E
 {
 	RGBTuple color;
+	std::array<float, 3> lab;
 	Block block;
 	std::uint8_t usage;
 	E(RGBTuple color_, Block block_) :
-			color(color_), block(block_), usage(usage_for(block_))
+			color(color_), lab(oklab_components(color_)), block(block_),
+			usage(usage_for(block_))
 	{
 	}
 	E(RGBTuple color_, Block block_, std::uint8_t usage_) :
-			color(color_), block(block_), usage(usage_)
+			color(color_), lab(oklab_components(color_)), block(block_), usage(usage_)
 	{
 	}
 };
 // Kept in the same order as palette.rs.  Order is significant for stable
 // ties, so independently generated tiles choose the same material.
-auto current_palette()
+const auto &current_palette()
 {
-	return std::to_array<E>({{{207, 213, 214}, WHITE_CONCRETE, 7},
+	static const auto palette = std::to_array<E>({{{207, 213, 214}, WHITE_CONCRETE, 7},
 			{{210, 178, 161}, WHITE_TERRACOTTA}, {{234, 236, 237}, WHITE_WOOL},
 			{{236, 230, 223}, QUARTZ_BLOCK}, {{235, 229, 222}, QUARTZ_BRICKS},
 			{{249, 254, 254}, SNOW_BLOCK}, {{220, 220, 220}, IRON_BLOCK},
@@ -89,13 +91,19 @@ auto current_palette()
 			{{113, 109, 138}, LIGHT_BLUE_TERRACOTTA}, {{100, 32, 156}, PURPLE_CONCRETE},
 			{{169, 48, 159}, MAGENTA_CONCRETE}, {{21, 119, 136}, CYAN_CONCRETE},
 			{{87, 91, 91}, CYAN_TERRACOTTA}});
+	return palette;
 }
 
-float tag_match_distance(const RGBTuple &a, const RGBTuple &b)
+float oklab_distance(const std::array<float, 3> &a, const std::array<float, 3> &b)
 {
-	const auto lhs = oklab_components(a), rhs = oklab_components(b);
-	const float dl = .5f * (lhs[0] - rhs[0]);
-	const float da = lhs[1] - rhs[1], db = lhs[2] - rhs[2];
+	const float dl = a[0] - b[0], da = a[1] - b[1], db = a[2] - b[2];
+	return dl * dl + da * da + db * db;
+}
+
+float tag_match_distance(const std::array<float, 3> &a, const E &b)
+{
+	const float dl = .5f * (a[0] - b.lab[0]);
+	const float da = a[1] - b.lab[1], db = a[2] - b.lab[2];
 	return dl * dl + da * da + db * db;
 }
 
@@ -111,9 +119,10 @@ bool reads_as_warm_stone(RGBTuple color)
 }
 Block closest_block(RGBTuple color)
 {
-	const auto palette = current_palette();
+	const auto &palette = current_palette();
+	const auto target = oklab_components(color);
 	return std::min_element(palette.begin(), palette.end(), [&](const E &a, const E &b) {
-		return oklab_distance(color, a.color) < oklab_distance(color, b.color);
+		return oklab_distance(target, a.lab) < oklab_distance(target, b.lab);
 	})->block;
 }
 
@@ -130,7 +139,7 @@ Block facade_block_for_color(RGBTuple color)
 					block == NETHERITE_BLOCK || block == MOSS_BLOCK ||
 					block == MOSSY_COBBLESTONE || block == DIRT || block == COARSE_DIRT;
 			if (!excluded)
-				eligible.emplace_back(oklab_components(entry.color), block);
+				eligible.emplace_back(entry.lab, block);
 		}
 		return eligible;
 	}();
@@ -151,26 +160,30 @@ Block facade_block_for_color(RGBTuple color)
 }
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k)
 {
-	const auto palette = current_palette();
-	std::vector<E> values(palette.begin(), palette.end());
-	std::stable_sort(values.begin(), values.end(), [&](const E &a, const E &b) {
-		return oklab_distance(color, a.color) < oklab_distance(color, b.color);
-	});
+	const auto &palette = current_palette();
+	const auto target = oklab_components(color);
+	std::vector<std::pair<float, Block>> values;
+	values.reserve(palette.size());
+	for (const auto &entry : palette)
+		values.emplace_back(oklab_distance(target, entry.lab), entry.block);
+	std::stable_sort(values.begin(), values.end(),
+			[](const auto &a, const auto &b) { return a.first < b.first; });
 	std::vector<Block> out;
 	out.reserve(std::min(std::max<std::size_t>(1, k), values.size()));
 	for (std::size_t i = 0; i < std::min(std::max<std::size_t>(1, k), values.size()); ++i)
-		out.push_back(values[i].block);
+		out.push_back(values[i].second);
 	return out;
 }
 
 std::vector<Block> closest_blocks_for_usage(
 		RGBTuple color, std::size_t k, std::uint8_t usage)
 {
-	const auto palette = current_palette();
+	const auto &palette = current_palette();
+	const auto target = oklab_components(color);
 	std::vector<std::pair<float, Block>> values;
 	for (const auto &entry : palette)
 		if ((entry.usage & usage) != 0)
-			values.emplace_back(tag_match_distance(color, entry.color), entry.block);
+			values.emplace_back(tag_match_distance(target, entry), entry.block);
 	std::stable_sort(values.begin(), values.end(),
 			[](const auto &a, const auto &b) { return a.first < b.first; });
 	if (values.empty())
@@ -186,7 +199,8 @@ std::vector<Block> closest_blocks_for_usage(
 
 Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng)
 {
-	const auto palette = current_palette();
+	const auto &palette = current_palette();
+	const auto target = oklab_components(color);
 	const bool warm_stone_color = reads_as_warm_stone(color);
 	std::vector<std::pair<float, Block>> candidates;
 	if (warm_stone_color) {
@@ -195,13 +209,11 @@ Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng)
 		for (const auto &entry : palette)
 			if (std::find(warm_stone.begin(), warm_stone.end(), entry.block) !=
 					warm_stone.end())
-				candidates.emplace_back(
-						tag_match_distance(color, entry.color), entry.block);
+				candidates.emplace_back(tag_match_distance(target, entry), entry.block);
 	} else {
 		for (const auto &entry : palette)
 			if ((entry.usage & USE_WALL) != 0)
-				candidates.emplace_back(
-						tag_match_distance(color, entry.color), entry.block);
+				candidates.emplace_back(tag_match_distance(target, entry), entry.block);
 	}
 	std::stable_sort(candidates.begin(), candidates.end(),
 			[](const auto &a, const auto &b) { return a.first < b.first; });
@@ -222,7 +234,7 @@ Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng)
 
 std::vector<Block> all_blocks_for_usage(std::uint8_t usage)
 {
-	const auto palette = current_palette();
+	const auto &palette = current_palette();
 	std::vector<Block> out;
 	for (const auto &entry : palette)
 		if ((entry.usage & usage) != 0)

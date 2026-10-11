@@ -8,7 +8,8 @@ namespace arnis::models_3d
 {
 struct WikidataEntry
 {
-	std::string label, url, license, license_url, artist;
+	std::string label, url, license;
+	std::optional<std::string> license_url, artist;
 	std::optional<double> height_m;
 	// Rust index palette_layers: optional Y-banded palette override used by
 	// coloured/voxelized models before falling back to OSM surface colours.
@@ -18,7 +19,7 @@ struct WikidataEntry
 		std::vector<std::string> blocks;
 		std::optional<std::string> hex;
 	};
-	std::vector<PaletteLayer> palette_layers;
+	std::optional<std::vector<PaletteLayer>> palette_layers;
 };
 const WikidataEntry *lookup_wikidata(const std::string &qid);
 std::vector<WikidataEntry> wikidata_attributions();

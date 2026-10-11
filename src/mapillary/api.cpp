@@ -84,7 +84,6 @@ Client::Client(cache::Layout cache) : cache_(std::move(cache))
 	concurrent_fetch_ = true;
 	graph_fetch_ = [](const std::string &url,
 						   std::size_t max_bytes) -> std::optional<HttpReply> {
-		auto permit = arnis::net::request_permit();
 		HTTPFetchRequest request;
 		request.url = url;
 		request.timeout = 30000L;
@@ -298,8 +297,6 @@ std::optional<PanoMeta> parse_pano_meta(const std::vector<std::uint8_t> &bytes)
 std::optional<std::vector<std::uint8_t>> Client::fetch_bytes(
 		const std::string &url, std::size_t max_bytes) const
 {
-	if (fetch_)
-		return fetch_(url, max_bytes);
 	auto reply = fetch_reply(url, max_bytes);
 	if (!reply || reply->status < 200 || reply->status >= 300 ||
 			reply->body.size() > max_bytes)
@@ -310,6 +307,10 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_bytes(
 std::optional<HttpReply> Client::fetch_reply(
 		const std::string &url, std::size_t max_bytes) const
 {
+	// Rust's request permit covers every transport, not just the built-in HTTP
+	// client. Keep injected library/test transports under the same process-wide
+	// request cap and avoid nested permits in the default fetcher.
+	[[maybe_unused]] auto permit = arnis::net::request_permit();
 	if (graph_fetch_) {
 		auto reply = graph_fetch_(url, max_bytes);
 		return !reply || reply->body.size() > max_bytes ? std::nullopt : reply;

@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <unordered_map>
+#include "../../../arnis_block.h"
 namespace arnis::world_editor
 {
 struct WorldEditor;
@@ -16,11 +17,22 @@ struct WorldEditor;
 namespace arnis::structures
 {
 
+using SchemProperties = std::unordered_map<std::string, std::string>;
+
 struct SchemVoxel
 {
 	int x, y, z;
 	std::string block;
-	std::unordered_map<std::string, std::string> properties;
+	Block resolved_block;
+	// Palette states are immutable and shared by all voxels using the same
+	// Sponge block state, instead of allocating a string map for every voxel.
+	std::shared_ptr<const SchemProperties> properties;
+
+	const SchemProperties &state_properties() const
+	{
+		static const SchemProperties empty;
+		return properties ? *properties : empty;
+	}
 };
 struct SchemEntity
 {

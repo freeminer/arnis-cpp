@@ -119,9 +119,18 @@ inline std::filesystem::path generation_output_path(const GenerationOptions &o)
 	std::string base = o.level_name.empty() ? "Arnis World" : o.level_name;
 	return std::filesystem::path(base + "." + format_extension(o.format));
 }
-inline bool valid_generation_options(const GenerationOptions &o)
+inline bool valid_generation_options(const GenerationOptions &o, const Args &base_args)
 {
-	if (o.ground_level < -64 || o.ground_level > 319 || !valid_scale(o.projection_scale))
+	if (!valid_scale(o.projection_scale))
+		return false;
+	// Ground-level bounds depend on the adapted format and extended-height args;
+	// validate the same effective configuration the generation pass will receive.
+	Args adapted = base_args;
+	adapted.ground_level = o.ground_level;
+	adapted.scale = o.projection_scale;
+	adapted.bedrock = is_bedrock(o.format);
+	adapted.luanti = is_luanti(o.format);
+	if (!adapted.valid())
 		return false;
 #if !defined(USE_ARROW) || !USE_ARROW
 	if (o.overture_source == OvertureSource::Parquet)

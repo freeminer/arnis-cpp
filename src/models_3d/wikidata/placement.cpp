@@ -5,7 +5,8 @@
 #include <cmath>
 namespace arnis::models_3d::wikidata
 {
-namespace {
+namespace
+{
 constexpr float MAX_XZ_EXTENT_M = 225.0f;
 constexpr float MAX_Y_EXTENT_M = 600.0f;
 constexpr float MIN_EXTENT_M = 2.0f;
@@ -46,7 +47,8 @@ bool place_wikidata_model_height(ModelProvider &p, world_editor::WorldEditor &e,
 		return false;
 	auto a = p.fetch(k);
 	const float scale = a ? scale_for_height(*a, h) : 0.0f;
-	return a && scale > 0.0f && place_model_asset(e, *a, x, y, z, scale, normalize_yaw(yaw));
+	return a && scale > 0.0f &&
+		   place_model_asset(e, *a, x, y, z, scale, normalize_yaw(yaw));
 }
 bool place_wikidata_model_with_info(ModelProvider &p, world_editor::WorldEditor &e,
 		const std::string &k, const three_dmr::ModelInfo &i, float x, float y, float z,
@@ -73,9 +75,9 @@ PlacementAttribution place_wikidata_attributed(ModelProvider &p,
 	r.qid = q;
 	if (const auto *a = lookup_wikidata(q)) {
 		r.label = a->label;
-		r.artist = a->artist;
+		r.artist = a->artist.value_or("");
 		r.license = a->license;
-		r.license_url = a->license_url;
+		r.license_url = a->license_url.value_or("");
 	}
 	r.placed = place_wikidata_model(p, e, q, x, y, z, scale, yaw);
 	return r;

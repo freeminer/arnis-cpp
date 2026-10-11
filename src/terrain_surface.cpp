@@ -373,13 +373,14 @@ void place_snow_layer(WorldEditor &e, int x, int y, int z, unsigned eighths)
 	const auto top = e.get_block_absolute(x, y, z);
 	if (!top)
 		return;
-	if (e.block_exists_absolute(x, y + 1, z))
-		return;
 	if (eighths != 0) {
+		if (e.block_exists_absolute(x, y + 1, z))
+			return;
 		const auto layer = snow_layer_with_depth(std::min(eighths, 7u));
-		e.set_block_with_properties_absolute(
-				layer, x, y + 1, z, std::nullopt, std::nullopt);
-	} else if (!is_ice(*top)) {
+		if (!e.try_set_block_with_properties_absolute(
+					layer, x, y + 1, z, std::nullopt, std::nullopt))
+			return;
+	} else if (!is_ice(*top) || e.block_exists_absolute(x, y + 1, z)) {
 		return;
 	}
 	const std::optional<std::vector<Block>> replacements{{*top}};

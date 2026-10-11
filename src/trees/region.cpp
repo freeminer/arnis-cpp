@@ -8,6 +8,7 @@
 #include <cctype>
 #include <cmath>
 #include <fstream>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <utility>
 #include <array>
@@ -277,6 +278,9 @@ struct RegionSelector::Data
 		bool empty() const { return communities.empty(); }
 	};
 	std::vector<Entry> entries;
+	std::string realm_name;
+	std::size_t total_realm = 0;
+	std::size_t total_vanilla = 0;
 	Pack realm, vanilla;
 	std::unordered_map<std::uint16_t, std::vector<EcoChoice>> eco_choices;
 	std::unordered_map<std::uint16_t, std::vector<std::size_t>> eco_communities;
@@ -329,6 +333,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	data->ground_level = ground_level;
 	data->palms_default = !exclude_palms;
 	data->sizes = sizes;
+	data->realm_name = source.realm();
 	std::unordered_map<std::string, std::size_t> asset_entries;
 	auto build_community = [&](const nlohmann::json &json,
 								   const std::filesystem::path &manifest,
@@ -432,6 +437,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	load_pack(source.realm_path("region.json"), data->realm, source.realm());
 	if (data->realm.empty())
 		return std::nullopt;
+	data->total_realm = data->entries.size();
 	// The directory name is `vanilla-plus`, while its manifest identifies the
 	// realm as `vnplus`.  Rust checks the manifest value; accept both spellings
 	// so callers constructing a source directly do not load the vanilla pack
@@ -440,6 +446,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		load_pack(source.vanilla_path("region.json"), data->vanilla, "vanilla-plus");
 	else
 		data->vanilla.own_count = data->vanilla.communities.size();
+	data->total_vanilla = data->entries.size() - data->total_realm;
 	// Resolve the area's ecoregion mixes, including communities referenced from
 	// other realm packs, as Rust's attach_ecoregions does. Cache manifests and resolved
 	// mix keys so each referenced community is decoded only once. Match Rust's
@@ -777,6 +784,34 @@ std::size_t RegionSelector::entry_count() const
 {
 	return data_ ? data_->entries.size() : 0;
 }
+
+void RegionSelector::report() const
+{
+	if (!data_)
+		return;
+	std::array<std::size_t, 5> counts{};
+	for (const auto &entry : data_->entries)
+		++counts[static_cast<std::size_t>(entry.size)];
+	const auto on = [](bool value) { return value ? "on" : "off"; };
+	std::cout << "Region tree pack loaded: realm " << data_->realm_name << " - "
+			  << data_->total_realm << " regional trees (" << data_->realm.own_count
+			  << " communities) + " << data_->total_vanilla << " vanilla sprinkle trees ("
+			  << data_->vanilla.communities.size() << " communities)\n";
+	const auto borrowed = data_->realm.communities.size() - data_->realm.own_count;
+	if (!data_->eco_choices.empty())
+		std::cout << "  ecoregions: " << data_->eco_choices.size() << " mapped, "
+				  << borrowed << " extra communities ("
+				  << data_->entries.size() - data_->total_realm - data_->total_vanilla
+				  << " trees)\n";
+	std::cout << "  size tiers [schems]: small " << counts[0] << " ["
+			  << on(data_->sizes.allows(TreeSize::Small)) << "], medium " << counts[1]
+			  << " [" << on(data_->sizes.allows(TreeSize::Medium)) << "], big "
+			  << counts[2] << " [" << on(data_->sizes.allows(TreeSize::Big)) << "], tall "
+			  << counts[3] << " [" << on(data_->sizes.allows(TreeSize::Tall))
+			  << "], giant " << counts[4] << " ["
+			  << on(data_->sizes.allows(TreeSize::Giant)) << "]\n";
+}
+
 int RegionSelector::base_spacing() const
 {
 	return !data_ ? 5 : data_->scale < .3 ? 7 : data_->scale < .7 ? 6 : 5;
@@ -901,6 +936,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				if (const auto vanilla = choose_vanilla()) {
 					pack = &data_->vanilla;
 					ci = *vanilla;
+					selected_from_mix = true;
 				}
 			} else {
 				if (const auto selected = choose_cached(
@@ -912,8 +948,19 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					if (const auto vanilla = choose_vanilla()) {
 						pack = &data_->vanilla;
 						ci = *vanilla;
+						selected_from_mix = true;
 					}
 			}
+		}
+	}
+	// Rust gives an ecoregion-mix result precedence over the rare pack-owned
+	// community roll. That roll is only the no-mix fallback, and is a clearing
+	// when the realm pack has no manifest-owned communities.
+	if (!mapped_selection && !selected_from_mix && blend >= 97) {
+		if (pack == &data_->realm) {
+			if (!pack->own_count)
+				return std::nullopt;
+			ci = land_cover::coord_hash(sx + 5, sz + 9) % pack->own_count;
 		}
 	}
 	if (!mapped_selection && !selected_from_mix && pack == &data_->realm && blend >= 67 &&

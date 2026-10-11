@@ -103,6 +103,7 @@ public:
 	bool empty() const;
 	std::size_t entry_count() const;
 	int base_spacing() const;
+	void report() const;
 	std::optional<SlotSelection> pick_slot(
 			int x, int z, Habitat, int elevation_y, SlotRequest request = {}) const;
 	std::optional<SlotSelection> pick_mapped(

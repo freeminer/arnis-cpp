@@ -1,4 +1,5 @@
 #include "planetary.h"
+#include "../net.h"
 
 #include "../../../http.h"
 
@@ -206,6 +207,7 @@ PlanetaryRangeReader http_planetary_range_reader()
 {
 	return [](const std::string &url, std::uint64_t offset,
 				   std::uint64_t length) -> std::optional<std::vector<std::uint8_t>> {
+		[[maybe_unused]] auto permit = arnis::net::request_permit();
 		const auto response = http_get_range(url, offset, length);
 		if (response.size() != length)
 			return std::nullopt;

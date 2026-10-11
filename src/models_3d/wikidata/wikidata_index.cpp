@@ -34,18 +34,40 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 				e.label = v.value("label", "");
 				e.url = v.value("url", "");
 				e.license = v.value("license", "");
-				e.license_url = v.value("license_url", "");
-				e.artist = v.value("artist", "");
+				const auto optional_string =
+						[&](const char *key) -> std::optional<std::string> {
+					const auto field = v.find(key);
+					if (field == v.end() || field->is_null())
+						return std::nullopt;
+					if (field->is_string())
+						return field->get<std::string>();
+					return std::nullopt;
+				};
+				e.license_url = optional_string("license_url");
+				e.artist = optional_string("artist");
 				if (v.contains("height_m"))
-					e.height_m = v["height_m"].get<double>();
-				for (const auto &layer :
-						v.value("palette_layers", nlohmann::json::array())) {
-					WikidataEntry::PaletteLayer p;
-					p.y_max_frac = layer.value("y_max_frac", 1.0f);
-					p.blocks = layer.value("blocks", std::vector<std::string>{});
-					if (layer.contains("hex") && layer["hex"].is_string())
-						p.hex = layer["hex"].get<std::string>();
-					e.palette_layers.push_back(std::move(p));
+					if (v["height_m"].is_number())
+						e.height_m = v["height_m"].get<double>();
+				if (v.contains("palette_layers") && !v["palette_layers"].is_null()) {
+					if (v["palette_layers"].is_array()) {
+						std::vector<WikidataEntry::PaletteLayer> layers;
+						for (const auto &layer : v["palette_layers"]) {
+							if (!layer.is_object() || !layer.contains("y_max_frac") ||
+									!layer["y_max_frac"].is_number())
+								continue;
+							WikidataEntry::PaletteLayer p;
+							p.y_max_frac = layer["y_max_frac"].get<float>();
+							if (layer.contains("blocks") && layer["blocks"].is_array())
+								p.blocks =
+										layer["blocks"].get<std::vector<std::string>>();
+							if (layer.contains("hex") && layer["hex"].is_string())
+								p.hex = layer["hex"].get<std::string>();
+							layers.push_back(std::move(p));
+						}
+						e.palette_layers = std::move(layers);
+					} else {
+						e.palette_layers = std::vector<WikidataEntry::PaletteLayer>{};
+					}
 				}
 				m[id] = std::move(e);
 			}
@@ -106,7 +128,7 @@ std::vector<std::string> search_wikidata(const std::string &text)
 			[](unsigned char c) { return char(std::tolower(c)); });
 	std::vector<std::string> out;
 	for (const auto &[id, e] : index_data()) {
-		std::string l = e.label, a = e.artist;
+		std::string l = e.label, a = e.artist.value_or("");
 		std::transform(l.begin(), l.end(), l.begin(),
 				[](unsigned char c) { return char(std::tolower(c)); });
 		std::transform(a.begin(), a.end(), a.begin(),
@@ -212,7 +234,7 @@ std::optional<ModelFormat> wikidata_model_format(const std::string &q)
 std::vector<WikidataEntry::PaletteLayer> wikidata_palette_layers(const std::string &q)
 {
 	if (auto *entry = lookup_wikidata(q))
-		return entry->palette_layers;
+		return entry->palette_layers.value_or(std::vector<WikidataEntry::PaletteLayer>{});
 	return {};
 }
 }

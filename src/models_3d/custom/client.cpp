@@ -1,5 +1,6 @@
 #include "client.h"
 #include "../../cache_root.h"
+#include "../../net.h"
 #include "archetypes.h"
 #include "../model_asset.h"
 #include "../../world_utils.h"
@@ -77,29 +78,35 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 		return std::nullopt;
 	const std::string url = base == "plane" ? PLANE_MODEL_URL : STADIUM_MODEL_URL;
 	std::optional<std::vector<std::uint8_t>> bytes;
-	if (fetcher_) {
-		bytes = fetcher_(url, max_glb_bytes);
-	} else {
-		const auto download = (root / (base + "." +
-											  std::to_string(std::hash<std::thread::id>{}(
-													  std::this_thread::get_id())) +
-											  ".download"))
-									  .string();
-		if (http_to_file(url, download)) {
-			std::ifstream input(download, std::ios::binary);
-			input.seekg(0, std::ios::end);
-			const auto size = input.tellg();
-			if (size >= 0 && static_cast<std::uint64_t>(size) <= max_glb_bytes) {
-				input.seekg(0);
-				std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
-				input.read(reinterpret_cast<char *>(data.data()),
-						std::streamsize(data.size()));
-				if (input)
-					bytes = std::move(data);
+	{
+		// Match Rust's process-wide network cap for both the host transport seam
+		// and the built-in downloader.
+		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		if (fetcher_) {
+			bytes = fetcher_(url, max_glb_bytes);
+		} else {
+			const auto download =
+					(root / (base + "." +
+									std::to_string(std::hash<std::thread::id>{}(
+											std::this_thread::get_id())) +
+									".download"))
+							.string();
+			if (http_to_file(url, download)) {
+				std::ifstream input(download, std::ios::binary);
+				input.seekg(0, std::ios::end);
+				const auto size = input.tellg();
+				if (size >= 0 && static_cast<std::uint64_t>(size) <= max_glb_bytes) {
+					input.seekg(0);
+					std::vector<std::uint8_t> data(static_cast<std::size_t>(size));
+					input.read(reinterpret_cast<char *>(data.data()),
+							std::streamsize(data.size()));
+					if (input)
+						bytes = std::move(data);
+				}
 			}
+			std::error_code remove_error;
+			std::filesystem::remove(download, remove_error);
 		}
-		std::error_code remove_error;
-		std::filesystem::remove(download, remove_error);
 	}
 	if (!bytes || bytes->empty() || bytes->size() > max_glb_bytes)
 		return std::nullopt;

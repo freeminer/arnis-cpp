@@ -76,8 +76,12 @@ Models3dPipeline Models3dPipeline::prescan_fetchable_models(
 	wikidata::retain_fetchable(out.wikidata_, wikidata_fetchable);
 	append_unique(out.suppressed_, out.wikidata_.suppressed);
 	out.stadium_ = custom::stadium::prescan(elements, scale, out.suppressed_);
-	custom::stadium::retain_fetchable(
-			out.stadium_, !stadium_fetchable || stadium_fetchable());
+	// Rust returns before fetching the shared stadium GLB when no eligible
+	// stadium placement exists. Do not call the provider callback on an empty
+	// pre-scan: it may perform network I/O even though there is nothing to place.
+	if (!out.stadium_.placements.empty())
+		custom::stadium::retain_fetchable(
+				out.stadium_, !stadium_fetchable || stadium_fetchable());
 	append_unique(out.suppressed_, out.stadium_.suppressed);
 	out.plane_ = custom::plane::prescan(elements, scale);
 	return out;

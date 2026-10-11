@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <optional>
@@ -333,47 +334,15 @@ Block named_palette_block(const std::string &name)
 	return Block{};
 }
 
-std::vector<std::pair<float, std::vector<Block>>> resolve_layers(
-		const std::vector<WikidataEntry::PaletteLayer> &layers)
-{
-	std::vector<std::pair<float, std::vector<Block>>> out;
-	for (const auto &layer : layers) {
-		if (!std::isfinite(layer.y_max_frac))
-			continue;
-		std::vector<Block> pool;
-		if (layer.hex) {
-			const auto hex = layer.hex->starts_with('#') ? *layer.hex : "#" + *layer.hex;
-			if (auto rgb = color_text_to_rgb_tuple(hex))
-				pool = closest_blocks(*rgb, 5);
-		} else
-			for (const auto &name : layer.blocks) {
-				const auto b = named_palette_block(name);
-				if (b != Block{})
-					pool.push_back(b);
-			}
-		std::sort(pool.begin(), pool.end(),
-				[](const Block &a, const Block &b) { return a.id() < b.id(); });
-		pool.erase(
-				std::unique(pool.begin(), pool.end(),
-						[](const Block &a, const Block &b) { return a.id() == b.id(); }),
-				pool.end());
-		if (!pool.empty())
-			out.emplace_back(std::clamp(layer.y_max_frac, 0.0f, 1.0f), std::move(pool));
-	}
-	std::sort(out.begin(), out.end(),
-			[](const auto &a, const auto &b) { return a.first < b.first; });
-	return out;
-}
-
 bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel> voxels,
 		int ground_y, int elevation, ModelPlacementStats &stats,
 		const std::vector<Block> *fallback_palette = nullptr,
-		const std::vector<std::pair<float, std::vector<Block>>> *layers = nullptr,
+		const std::optional<wikidata::ResolvedPaletteLayers> *layers = nullptr,
 		std::uint64_t palette_seed = 0)
 {
 	if (voxels.empty())
 		return false;
-	if (layers && !layers->empty()) {
+	if (layers && *layers && !(*layers)->empty()) {
 		int min_y = voxels.front().position[1], max_y = min_y;
 		for (const auto &v : voxels) {
 			min_y = std::min(min_y, v.position[1]);
@@ -384,9 +353,15 @@ bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel>
 			if (voxel.block == block_definitions::STONE_BRICKS) {
 				const float frac =
 						std::clamp(float(voxel.position[1] - min_y) / span, 0.0f, 1.0f);
-				auto it = std::find_if(layers->begin(), layers->end(),
-						[frac](const auto &l) { return frac <= l.first; });
-				const auto &pool = (it == layers->end() ? layers->back() : *it).second;
+				auto it = std::find_if((*layers)->y_max_frac.begin(),
+						(*layers)->y_max_frac.end(),
+						[frac](float y_max) { return frac <= y_max; });
+				const auto layer_index =
+						it == (*layers)->y_max_frac.end()
+								? (*layers)->blocks.size() - 1
+								: static_cast<std::size_t>(
+										  it - (*layers)->y_max_frac.begin());
+				const auto &pool = (*layers)->blocks[layer_index];
 				const auto h = palette_hash(palette_seed, voxel.position);
 				voxel.block = pool[h % pool.size()];
 			}
@@ -412,7 +387,7 @@ bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel>
 bool place_grounded(world_editor::WorldEditor &editor, const ModelAsset &asset,
 		const WorldTransform &transform, int ground_y, int elevation,
 		ModelPlacementStats &stats, const std::vector<Block> *fallback_palette = nullptr,
-		const std::vector<std::pair<float, std::vector<Block>>> *layers = nullptr,
+		const std::optional<wikidata::ResolvedPaletteLayers> *layers = nullptr,
 		std::uint64_t palette_seed = 0)
 {
 	return place_grounded_voxels(editor, voxelize_asset(asset, transform), ground_y,
@@ -424,6 +399,56 @@ int ground_for(
 {
 	return lowest_ground_in_bbox(editor, min_x, min_z, max_x, max_z);
 }
+}
+
+std::optional<wikidata::ResolvedPaletteLayers> wikidata::resolve_palette_layers(
+		const std::optional<std::vector<WikidataEntry::PaletteLayer>> &source)
+{
+	if (!source)
+		return std::nullopt;
+	std::vector<std::pair<float, std::vector<Block>>> entries;
+	for (const auto &layer : *source) {
+		if (!std::isfinite(layer.y_max_frac))
+			continue;
+		std::vector<Block> pool;
+		if (layer.hex) {
+			const auto first_hex = layer.hex->find_first_not_of('#');
+			const auto hex = first_hex == std::string::npos
+									 ? std::string("#")
+									 : "#" + layer.hex->substr(first_hex);
+			if (auto rgb = color_text_to_rgb_tuple(hex))
+				pool = closest_blocks(*rgb, 5);
+		} else {
+			for (const auto &name : layer.blocks) {
+				const auto block = named_palette_block(name);
+				if (block != Block{})
+					pool.push_back(block);
+			}
+		}
+		if (pool.empty())
+			continue;
+		entries.emplace_back(layer.y_max_frac, std::move(pool));
+	}
+	if (entries.empty())
+		return std::nullopt;
+	const auto total_order_key = [](float value) {
+		constexpr std::uint32_t sign = std::uint32_t{1} << 31;
+		const auto bits = std::bit_cast<std::uint32_t>(value);
+		return bits & sign ? ~bits : bits ^ sign;
+	};
+	std::stable_sort(entries.begin(), entries.end(), [&](const auto &a, const auto &b) {
+		return total_order_key(a.first) < total_order_key(b.first);
+	});
+	wikidata::ResolvedPaletteLayers resolved;
+	resolved.y_max_frac.reserve(entries.size());
+	resolved.blocks.reserve(entries.size());
+	for (auto &[limit, pool] : entries) {
+		resolved.y_max_frac.push_back(limit);
+		resolved.blocks.push_back(std::move(pool));
+	}
+	return resolved.empty()
+				   ? std::nullopt
+				   : std::optional<wikidata::ResolvedPaletteLayers>(std::move(resolved));
 }
 
 ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
@@ -461,7 +486,6 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 				continue;
 			WorldTransform transform(0, 1, {0, 0, 0}, {1, 1, 1}, placement.yaw_degrees,
 					float(placement.anchor_x), float(ground), float(placement.anchor_z));
-			const auto layers = resolve_layers(placement.palette_layers);
 			std::uint64_t qid_seed = 0xcbf29ce484222325ULL;
 			for (unsigned char c : placement.qid) {
 				qid_seed ^= c;
@@ -469,8 +493,8 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 			}
 			place_grounded_voxels(editor,
 					voxelize_fitted_stl(*asset, placement, blocks_per_meter, transform),
-					ground, 0, stats, &placement.palette,
-					layers.empty() ? nullptr : &layers, qid_seed);
+					ground, 0, stats, &placement.palette, &placement.palette_layers,
+					qid_seed);
 			continue;
 		}
 		float scale = 1.0f;
@@ -504,14 +528,13 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 				float(placement.anchor_x) - offset[0],
 				float(ground) - asset->min[1] * scale,
 				float(placement.anchor_z) - offset[2]);
-		const auto layers = resolve_layers(placement.palette_layers);
 		std::uint64_t qid_seed = 0xcbf29ce484222325ULL;
 		for (unsigned char c : placement.qid) {
 			qid_seed ^= c;
 			qid_seed *= 0x100000001b3ULL;
 		}
 		place_grounded(editor, *asset, transform, ground, 0, stats, &placement.palette,
-				layers.empty() ? nullptr : &layers, qid_seed);
+				&placement.palette_layers, qid_seed);
 	}
 	return stats;
 }
