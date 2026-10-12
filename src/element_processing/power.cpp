@@ -1,5 +1,6 @@
 #include "power.h"
 #include "../bresenham.h"
+#include "../strict_parse.h"
 #include "../structures/structures.h"
 #include <algorithm>
 #include <cmath>
@@ -50,27 +51,11 @@ void generate_power(WorldEditor &editor, const ProcessedElement &element,
 		const FloodFillCache &flood_fill_cache,
 		const std::optional<std::chrono::milliseconds> &timeout)
 {
-	// Skip if 'layer' or 'level' is negative in the tags
-	auto it_layer = element.tags().find("layer");
-	if (it_layer != element.tags().end()) {
-		try {
-			if (std::stoi(it_layer->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
-	}
-
-	auto it_level = element.tags().find("level");
-	if (it_level != element.tags().end()) {
-		try {
-			if (std::stoi(it_level->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
+	// Match Rust parse::<i32>().unwrap_or(0): malformed tags default to zero.
+	for (const char *key : {"layer", "level"}) {
+		if (const auto it = element.tags().find(key);
+				it != element.tags().end() && strict_parse::i32_or_zero(it->second) < 0)
+			return;
 	}
 
 	// Skip underground power infrastructure
@@ -153,27 +138,11 @@ void generate_power(WorldEditor &editor, const ProcessedElement &element)
 
 void generate_power_nodes(WorldEditor &editor, const ProcessedNode &node)
 {
-	// Skip if 'layer' or 'level' is negative in the tags
-	auto it_layer = node.tags.find("layer");
-	if (it_layer != node.tags.end()) {
-		try {
-			if (std::stoi(it_layer->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
-	}
-
-	auto it_level = node.tags.find("level");
-	if (it_level != node.tags.end()) {
-		try {
-			if (std::stoi(it_level->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
+	// Match Rust parse::<i32>().unwrap_or(0): malformed tags default to zero.
+	for (const char *key : {"layer", "level"}) {
+		if (const auto it = node.tags.find(key);
+				it != node.tags.end() && strict_parse::i32_or_zero(it->second) < 0)
+			return;
 	}
 
 	// Skip underground power infrastructure

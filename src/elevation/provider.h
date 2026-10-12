@@ -66,7 +66,8 @@ ElevationData build_grid(const std::vector<Tile> &, double min_lat, double min_l
 		double max_lat, double max_lon, std::size_t width, std::size_t height);
 ElevationData build_processed_grid(const std::vector<Tile> &, double min_lat,
 		double min_lon, double max_lat, double max_lon, std::size_t width,
-		std::size_t height, const LandCoverRepairConfig &repair = {});
+		std::size_t height, const LandCoverRepairConfig &repair = {},
+		providers::SourceMode mode = providers::SourceMode::Auto);
 void normalize_grid(ElevationData &, double sea_level, double scale, double min_height,
 		double max_height);
 ElevationData resample_grid(const ElevationData &, std::size_t width, std::size_t height);

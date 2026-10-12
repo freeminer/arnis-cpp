@@ -1,6 +1,7 @@
 #include "advertising.h"
 #include "signage.h"
 #include "../deterministic_rng.h"
+#include "../strict_parse.h"
 #include <algorithm>
 
 namespace arnis
@@ -8,30 +9,14 @@ namespace arnis
 namespace advertising
 {
 
-void generate_advertising(WorldEditor &editor, const ProcessedNode &node,
-		const RoadMaskBitmap &road_mask)
+void generate_advertising(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask)
 {
-	// Skip if 'layer' or 'level' is negative in the tags
-	auto it_layer = node.tags.find("layer");
-	if (it_layer != node.tags.end()) {
-		try {
-			if (std::stoi(it_layer->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
-	}
-
-	auto it_level = node.tags.find("level");
-	if (it_level != node.tags.end()) {
-		try {
-			if (std::stoi(it_level->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
+	// Match Rust parse::<i32>().unwrap_or(0): malformed tags default to zero.
+	for (const char *key : {"layer", "level"}) {
+		if (const auto it = node.tags.find(key);
+				it != node.tags.end() && strict_parse::i32_or_zero(it->second) < 0)
+			return;
 	}
 
 	auto it_advertising = node.tags.find("advertising");

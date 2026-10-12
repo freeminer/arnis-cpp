@@ -1,5 +1,6 @@
 #include "emergency.h"
 #include "signage.h"
+#include "../strict_parse.h"
 #include <algorithm>
 
 namespace arnis
@@ -9,27 +10,11 @@ namespace emergency
 
 void generate_emergency(WorldEditor &editor, const ProcessedNode &node)
 {
-	// Skip if 'layer' or 'level' is negative in the tags
-	auto it_layer = node.tags.find("layer");
-	if (it_layer != node.tags.end()) {
-		try {
-			if (std::stoi(it_layer->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
-	}
-
-	auto it_level = node.tags.find("level");
-	if (it_level != node.tags.end()) {
-		try {
-			if (std::stoi(it_level->second) < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
+	// Match Rust parse::<i32>().unwrap_or(0): malformed tags default to zero.
+	for (const char *key : {"layer", "level"}) {
+		if (const auto it = node.tags.find(key);
+				it != node.tags.end() && strict_parse::i32_or_zero(it->second) < 0)
+			return;
 	}
 
 	auto it_emergency = node.tags.find("emergency");
@@ -62,8 +47,8 @@ void generate_fire_hydrant(WorldEditor &editor, const ProcessedNode &node)
 	if (const auto key = signage::furniture_pictogram(node.tags);
 			key && editor.signage_context && editor.signage_context->has(*key)) {
 		const int y = editor.get_ground_level(x, z) + 1;
-		for (const std::int8_t facing : {std::int8_t(2), std::int8_t(3),
-				 std::int8_t(4), std::int8_t(5)})
+		for (const std::int8_t facing :
+				{std::int8_t(2), std::int8_t(3), std::int8_t(4), std::int8_t(5)})
 			editor.place_decal(x, y, z, facing, *key);
 	}
 }

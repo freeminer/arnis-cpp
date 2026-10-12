@@ -1314,6 +1314,9 @@ bool generate_world(WorldEditor &editor,
 			trees::mapped::MappedTrunks::collect(elements, args.scale));
 	const auto geo = editor.geographic_bounds();
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
+	auto [min_x, min_z] = editor.get_min_coords();
+	auto [max_x, max_z] = editor.get_max_coords();
+	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
 	if (editor.ground)
 		editor.ground->set_snow_line_for_latitude(centre_lat);
 	// Rust loads the global ecoregion raster for Earth runs and keeps it on
@@ -1345,17 +1348,38 @@ bool generate_world(WorldEditor &editor,
 					area_ecoregion_ids.push_back(id);
 			}
 		} else {
-			// The Freeminer chunk adapter may supply the immutable global raster.
-			// Its summary is computed once by generation_map(); rescanning and
-			// decompressing every source tile here stalls all EmergeThreads before
-			// they reach object or terrain placement.
-			const auto &summary = ecoregion::generation_map();
-			dominant_tree_realm = summary.dominant_tree_realm;
-			ecoregion_map_has_gaps = summary.has_gaps;
-			for (const auto &[id, count] : summary.by_area) {
-				(void)count;
-				if (ecoregion::tree_mix(id))
-					area_ecoregion_ids.push_back(id);
+			// Freeminer may attach the immutable world raster instead of Rust's
+			// area-local map. Build the same coarse summary over this generation
+			// bbox; using a global summary makes every chunk load every realm's
+			// communities and picks the first realm in the entire raster.
+			const auto &source = ecoregion::generation_map().map;
+			const auto width = std::int64_t(xzbbox.max_x()) - xzbbox.min_x() + 1;
+			const auto height = std::int64_t(xzbbox.max_z()) - xzbbox.min_z() + 1;
+			if (source && editor.mg && width > 0 && height > 0 &&
+					width <= std::numeric_limits<std::int32_t>::max() &&
+					height <= std::numeric_limits<std::int32_t>::max()) {
+				const auto min_x = xzbbox.min_x();
+				const auto min_z = xzbbox.min_z();
+				auto area_map = ecoregion::EcoMap::build(static_cast<std::size_t>(width),
+						static_cast<std::size_t>(height), {min_x, min_z},
+						[&editor, min_x, min_z](double x, double z) {
+							const auto ll = editor.mg->pos_to_ll(
+									static_cast<int>(std::floor(min_x + x)),
+									static_cast<int>(std::floor(min_z + z)));
+							return std::pair{ll.lat, ll.lon};
+						});
+				if (area_map) {
+					ecoregion_map_has_gaps = area_map->has_gaps();
+					for (const auto &[id, count] : area_map->by_area()) {
+						(void)count;
+						if (!ecoregion::tree_mix(id))
+							continue;
+						if (!dominant_tree_realm)
+							if (const auto mix = ecoregion::tree_mix(id))
+								dominant_tree_realm = std::string(mix->first);
+						area_ecoregion_ids.push_back(id);
+					}
+				}
 			}
 		}
 	}
@@ -1453,10 +1477,14 @@ bool generate_world(WorldEditor &editor,
 	// Rust disables both landmark suppression and placement when model objects
 	// are off; otherwise a no-3D run could still discard the OSM feature that a
 	// bundled schematic would have replaced.
-	auto landmark_plan =
-			args.use_3d && !args.skip_objects()
-					? landmarks::prescan(elements, landmark_anchors, args.scale)
-					: landmarks::PrescanResult{};
+	const auto [landmark_min_x, landmark_min_z] = editor.get_min_coords();
+	const auto [landmark_max_x, landmark_max_z] = editor.get_max_coords();
+	auto landmark_plan = args.use_3d && !args.skip_objects()
+								 ? landmarks::prescan(elements, landmark_anchors,
+										   {landmark_min_x, landmark_min_z,
+												   landmark_max_x, landmark_max_z},
+										   args.scale, args.rotation)
+								 : landmarks::PrescanResult{};
 	const auto model_pipeline =
 			args.use_3d
 					? std::optional<models_3d::Models3dPipeline>(
@@ -1484,9 +1512,6 @@ bool generate_world(WorldEditor &editor,
 			args.use_3d
 					? structures::plane::prescan_placements(render_elements, args.scale)
 					: std::vector<structures::plane::Placement>{};
-	auto [min_x, min_z] = editor.get_min_coords();
-	auto [max_x, max_z] = editor.get_max_coords();
-	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
 	const int interior_pad = args.one_world_run ? one_world::CLIP_PAD_BLOCKS : 0;
 	const ::XZBBox interior_clip_bbox(
 			static_cast<int>(std::max<std::int64_t>(
@@ -1516,7 +1541,13 @@ bool generate_world(WorldEditor &editor,
 	mapillary::facades::set_displays_enabled(
 			java_format && args.mapillary_facades != std::optional<bool>(false) &&
 			args.mapillary_facade_mode == FacadeMode::Photos);
-	mapillary::facades::project_export(elements, xzbbox, args.scale);
+	const auto facade_attribution_dir =
+			args.mapillary_facades != std::optional<bool>(false) &&
+							args.mapillary_facades_dir
+					? std::optional<std::filesystem::path>(*args.mapillary_facades_dir)
+					: std::nullopt;
+	mapillary::facades::project_export(
+			elements, xzbbox, args.scale, facade_attribution_dir);
 	building_facades::set_world_extent(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	if (editor.ground && !editor.ground->has_land_cover()) {
@@ -1980,16 +2011,17 @@ bool generate_world(WorldEditor &editor,
 			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
 			continue;
 		}
+		if (!landmark_plan.suppressed.empty() &&
+				std::find(landmark_plan.suppressed.begin(),
+						landmark_plan.suppressed.end(),
+						std::pair<std::string, std::uint64_t>{std::string(element.kind()),
+								element.id()}) != landmark_plan.suppressed.end()) {
+			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
+			continue;
+		}
 
 		if (element.is_way()) {
 			auto const &way = element.as_way();
-			if (std::find(landmark_plan.suppressed.begin(),
-						landmark_plan.suppressed.end(),
-						std::pair<std::string, std::uint64_t>{"way", way.id}) !=
-					landmark_plan.suppressed.end()) {
-				release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-				continue;
-			}
 			if (editor.ground && !way.nodes.empty()) {
 				args.ground_level = editor.ground->level(way.nodes.begin()->xz());
 			}
@@ -2338,7 +2370,7 @@ bool generate_world(WorldEditor &editor,
 	// Rust places plane models after the other 3D providers and immediately
 	// before landmarks; preserve that ordering for overlap and suppression.
 	structures::plane::place_plane_placements(editor, plane_candidates);
-	landmarks::place_all(editor, landmark_plan, args.scale);
+	landmarks::place_all(editor, landmark_plan, args.scale, args.rotation);
 	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 
 	railways::advtrains::finish_network(editor);

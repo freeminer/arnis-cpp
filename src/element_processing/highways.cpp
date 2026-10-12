@@ -21,6 +21,7 @@
 #include "surfaces.h"
 #include "road_markings.h"
 #include "highway_tunnels.h"
+#include "highways.h"
 #include "signage.h"
 #include "../floodfill.h"
 #include "../structures/helicopter.h"
@@ -162,6 +163,14 @@ struct LaneLine
 	bool centre;
 };
 
+int highway_default_lanes(const std::string &highway)
+{
+	return highway == "motorway" || highway == "primary" || highway == "trunk" ||
+						   highway == "secondary" || highway == "tertiary"
+				   ? 2
+				   : 1;
+}
+
 int lane_marking_count(const std::string &highway, const crate::tags_t &tags)
 {
 	const auto marked = tags.get("lane_markings");
@@ -175,11 +184,8 @@ int lane_marking_count(const std::string &highway, const crate::tags_t &tags)
 		const auto junction = tags.get("junction");
 		if (junction == "roundabout" || junction == "circular")
 			lanes = 1;
-		else if (highway == "motorway" || highway == "primary" || highway == "trunk" ||
-				 highway == "secondary" || highway == "tertiary")
-			lanes = 2;
 		else
-			lanes = 1;
+			lanes = highway_default_lanes(highway);
 	}
 	const bool minor = highway == "residential" || highway == "living_street" ||
 					   highway == "service" || highway == "track";
@@ -1787,25 +1793,38 @@ void generate_aeroway(crate::world_editor::WorldEditor &editor,
 {
 	const bool runway = way.tags.get("aeroway") == "runway";
 	const bool taxiway = way.tags.get("aeroway") == "taxiway";
-	double half_width_m = 12.0;
-	if (auto it = way.tags.find("width"); it != way.tags.end()) {
-		std::string_view width = it->second;
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.front())))
-			width.remove_prefix(1);
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-			width.remove_suffix(1);
-		while (!width.empty() && width.back() == 'm')
-			width.remove_suffix(1);
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-			width.remove_suffix(1);
-		if (const auto metres = crate::strict_parse::f64(width);
-				metres && std::isfinite(*metres) && *metres > 0.0)
-			half_width_m = std::clamp(*metres * 0.5, 6.0, 40.0);
+	const bool stand_line = way.tags.get("aeroway") == "parking_position";
+	double half_width_m = stand_line ? 2.5 : 12.0;
+	if (!stand_line) {
+		auto it = way.tags.find("width");
+		if (it != way.tags.end()) {
+			std::string_view width = it->second;
+			while (!width.empty() &&
+					std::isspace(static_cast<unsigned char>(width.front())))
+				width.remove_prefix(1);
+			while (!width.empty() &&
+					std::isspace(static_cast<unsigned char>(width.back())))
+				width.remove_suffix(1);
+			while (!width.empty() && width.back() == 'm')
+				width.remove_suffix(1);
+			while (!width.empty() &&
+					std::isspace(static_cast<unsigned char>(width.back())))
+				width.remove_suffix(1);
+			if (const auto metres = crate::strict_parse::f64(width);
+					metres && std::isfinite(*metres) && *metres > 0.0)
+				half_width_m = std::clamp(*metres * 0.5, 6.0, 40.0);
+		}
 	}
 	const int half_width =
 			std::max(1, static_cast<int>(std::round(half_width_m * args.scale)));
 	const auto base = runway ? crate::block_definitions::GRAY_CONCRETE
 							 : crate::block_definitions::LIGHT_GRAY_CONCRETE;
+	const std::vector<crate::block_definitions::Block> runway_overwrites = {
+			crate::block_definitions::LIGHT_GRAY_CONCRETE,
+			crate::block_definitions::YELLOW_CONCRETE};
+	std::optional<std::vector<crate::block_definitions::Block>> base_over;
+	if (runway)
+		base_over = runway_overwrites;
 	struct AerowayPoint
 	{
 		int x, z;
@@ -1833,11 +1852,11 @@ void generate_aeroway(crate::world_editor::WorldEditor &editor,
 		for (int dx = -half_width; dx <= half_width; ++dx)
 			for (int dz = -half_width; dz <= half_width; ++dz)
 				editor.set_block(
-						base, point.x + dx, 0, point.z + dz, std::nullopt, std::nullopt);
+						base, point.x + dx, 0, point.z + dz, base_over, std::nullopt);
 	const std::vector<crate::block_definitions::Block> over_base = {base};
 	for (const auto &point : points) {
 		const int x = point.x, z = point.z;
-		if (taxiway)
+		if (taxiway || stand_line)
 			editor.set_block(crate::block_definitions::YELLOW_CONCRETE, x, 0, z,
 					over_base, std::nullopt);
 		const float dash_on = std::max(1.0f, 10.0f * static_cast<float>(args.scale));

@@ -84,19 +84,7 @@ std::vector<Voxel> voxelize_points(const std::vector<std::array<float, 3>> &poin
 std::pair<std::array<float, 3>, std::array<float, 3>> glb_model_bbox(
 		const std::vector<std::uint8_t> &bytes)
 {
-	std::array<float, 3> lo{INFINITY, INFINITY, INFINITY},
-			hi{-INFINITY, -INFINITY, -INFINITY};
-	for (const auto &triangle : glb_colored_triangles(bytes))
-		for (const auto &p : triangle.vertices)
-			for (int j = 0; j < 3; ++j)
-				if (std::isfinite(p[j])) {
-					lo[j] = std::min(lo[j], p[j]);
-					hi[j] = std::max(hi[j], p[j]);
-				}
-	if (!std::all_of(lo.begin(), lo.end(), [](float v) { return std::isfinite(v); }) ||
-			!std::all_of(hi.begin(), hi.end(), [](float v) { return std::isfinite(v); }))
-		throw std::runtime_error("GLB has no positions");
-	return {lo, hi};
+	return glb_vertex_bounds(bytes);
 }
 WorldTransform::WorldTransform(double yaw, double scale, std::array<double, 3> t,
 		std::array<float, 3> w, double wy, float x, float y, float z) :

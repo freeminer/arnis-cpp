@@ -204,7 +204,9 @@ std::optional<CrossingPaint> crossing_paint(
 	if (signalled_crossing(tags))
 		return signal_lines ? CrossingPaint{CrossingPaint::Kind::Lines, true}
 							: CrossingPaint{CrossingPaint::Kind::Zebra, false};
-	if (!crossing.empty())
+	// Rust distinguishes an absent tag from a present-but-empty tag. Empty
+	// `crossing=*` still means a mapped crossing and receives the default paint.
+	if (tags.contains("crossing"))
 		return CrossingPaint{CrossingPaint::Kind::Zebra, false};
 	return untagged;
 }
@@ -598,7 +600,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		const auto &node = *node_ptr;
 		const auto highway = node.tags.get("highway");
 		if (highway != "crossing" &&
-				!(highway == "traffic_signals" && !node.tags.get("crossing").empty()))
+				!(highway == "traffic_signals" && node.tags.contains("crossing")))
 			continue;
 		const auto paint =
 				crossing_paint(node.tags, std::nullopt, result.signal_crossing_lines);

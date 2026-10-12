@@ -1,6 +1,7 @@
 #include <string>
 #include <map>
 #include <optional>
+#include <string_view>
 #include <tuple>
 #include <algorithm>
 #include <cmath>
@@ -10,6 +11,7 @@
 #include <vector>
 
 #include "../bresenham.h"
+#include "../strict_parse.h"
 #include "../structures/structures.h"
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -18,18 +20,12 @@ namespace arnis
 namespace man_made
 {
 
-
 std::optional<int> parse_int(const std::optional<std::string> &s)
 {
 	if (!s.has_value())
 		return std::nullopt;
-	try {
-		return std::optional<int>(std::stoi(s.value()));
-	} catch (...) {
-		return std::nullopt;
-	}
+	return strict_parse::i32(*s);
 }
-
 
 void generate_pier(WorldEditor &editor, const ProcessedElement &element)
 {
@@ -89,9 +85,9 @@ void generate_antenna(WorldEditor &editor, const ProcessedElement &element)
 	int z = node.z;
 
 	int height = 20;
-	std::optional<int> htag = parse_int(element.tag("height"));
-	if (htag.has_value()) {
-		height = std::min(htag.value(), 40);
+	const auto height_tag = element.tag("height");
+	if (height_tag.has_value()) {
+		height = std::min(parse_int(height_tag).value_or(20), 40);
 	} else {
 		std::optional<std::string> tower_type = element.tag("tower:type");
 		if (tower_type.has_value()) {
@@ -104,11 +100,11 @@ void generate_antenna(WorldEditor &editor, const ProcessedElement &element)
 		}
 	}
 
-	editor.set_block(IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(),
-			std::nullopt);
+	editor.set_block(
+			IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(), std::nullopt);
 	for (int y = 4; y < height; ++y) {
-		editor.set_block(IRON_BARS, x, y, z, std::optional<std::vector<Block>>(),
-				std::nullopt);
+		editor.set_block(
+				IRON_BARS, x, y, z, std::optional<std::vector<Block>>(), std::nullopt);
 	}
 
 	for (int y = 7; y < height; y += 7) {
@@ -182,24 +178,23 @@ void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 	editor.fill_blocks(OAK_LOG, x + 2, 1, z, x + 2, 4, z,
 			std::optional<std::vector<Block>>(), std::nullopt);
 
-	editor.set_block(OAK_SLAB, x - 1, 5, z, std::optional<std::vector<Block>>(),
-			std::nullopt);
-	editor.set_block(OAK_FENCE, x, 4, z, std::optional<std::vector<Block>>(),
-			std::nullopt);
+	editor.set_block(
+			OAK_SLAB, x - 1, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
+	editor.set_block(
+			OAK_FENCE, x, 4, z, std::optional<std::vector<Block>>(), std::nullopt);
 	editor.set_block(
 			OAK_SLAB, x, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
-	editor.set_block(OAK_SLAB, x + 1, 5, z, std::optional<std::vector<Block>>(),
-			std::nullopt);
+	editor.set_block(
+			OAK_SLAB, x + 1, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
 
-	editor.set_block(IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(),
-			std::nullopt);
+	editor.set_block(
+			IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(), std::nullopt);
 }
 
 void generate_manhole(WorldEditor &editor, const ProcessedElement &element)
 {
 	if (const auto node = element.first_node())
-		editor.set_block(EARTH_GRATING, node->x, 0, node->z,
-				std::nullopt, std::nullopt);
+		editor.set_block(EARTH_GRATING, node->x, 0, node->z, std::nullopt, std::nullopt);
 }
 
 struct PairHash
@@ -325,17 +320,25 @@ int read_height(const ProcessedElement &element, int default_height, double scal
 	auto tag = element.tag("height");
 	if (!tag.has_value())
 		return std::max(default_height, 3);
-	std::string value = tag.value();
-	value.erase(std::remove_if(value.begin(), value.end(),
-						[](unsigned char c) { return std::isspace(c); }),
-			value.end());
-	if (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
-		value.pop_back();
-	try {
-		return std::max(static_cast<int>(std::round(std::stod(value) * scale_factor)), 3);
-	} catch (...) {
+	std::string_view value = *tag;
+	while (!value.empty() && value.back() == 'm')
+		value.remove_suffix(1);
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+		value.remove_prefix(1);
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+		value.remove_suffix(1);
+	const auto parsed = strict_parse::f64(value);
+	if (!parsed)
 		return std::max(default_height, 3);
-	}
+	const double scaled = *parsed * scale_factor;
+	int height = 0; // Rust's float-to-i32 cast maps NaN to zero.
+	if (scaled >= std::numeric_limits<int>::max())
+		height = std::numeric_limits<int>::max();
+	else if (scaled <= std::numeric_limits<int>::min())
+		height = std::numeric_limits<int>::min();
+	else if (std::isfinite(scaled))
+		height = static_cast<int>(std::round(scaled));
+	return std::max(height, 3);
 }
 
 bool is_tank_value(const std::optional<std::string> &value)
@@ -501,14 +504,9 @@ bool is_tank_structure(const ProcessedWay &way)
 void generate_man_made(
 		WorldEditor &editor, const ProcessedElement &element, const Args &args)
 {
-	if (element.tag("layer").has_value()) {
-		std::optional<int> layer = parse_int(element.tag("layer"));
-		if (layer.has_value() && layer.value() < 0)
-			return;
-	}
-	if (element.tag("level").has_value()) {
-		std::optional<int> level = parse_int(element.tag("level"));
-		if (level.has_value() && level.value() < 0)
+	for (const char *key : {"layer", "level"}) {
+		if (const auto value = element.tag(key);
+				value && strict_parse::i32_or_zero(*value) < 0)
 			return;
 	}
 

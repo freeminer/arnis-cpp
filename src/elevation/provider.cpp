@@ -2,6 +2,7 @@
 #include "providers.h"
 #include "elevation.h"
 #include "postprocess.h"
+#include "../coordinate_system/transformation.h"
 #include <cmath>
 #include <utility>
 #include <fstream>
@@ -193,18 +194,34 @@ ElevationData build_grid(const std::vector<Tile> &tiles, double a, double b, dou
 }
 ElevationData build_processed_grid(const std::vector<Tile> &tiles, double a, double b,
 		double c, double d, std::size_t w, std::size_t h,
-		const LandCoverRepairConfig &repair)
+		const LandCoverRepairConfig &repair, providers::SourceMode mode)
 {
 	auto out = build_grid(tiles, a, b, c, d, w, h);
-	// Rust order is significant: filters must see missing provider samples as
-	// NaN, otherwise a missing tile becomes a synthetic sea-level plateau.
-	filter_elevation_outliers(out.heights);
+	double bbox_width_m = repair.bbox_width_m;
+	double bbox_height_m = repair.bbox_height_m;
+	if ((!std::isfinite(bbox_width_m) || bbox_width_m <= 0.0 ||
+				!std::isfinite(bbox_height_m) || bbox_height_m <= 0.0) &&
+			std::isfinite(a) && std::isfinite(b) && std::isfinite(c) &&
+			std::isfinite(d)) {
+		const auto [height_m, width_m] = coordinate_system::geo_distance(
+				geographic::LLPoint(a, b), geographic::LLPoint(c, d));
+		if (!std::isfinite(bbox_width_m) || bbox_width_m <= 0.0)
+			bbox_width_m = width_m;
+		if (!std::isfinite(bbox_height_m) || bbox_height_m <= 0.0)
+			bbox_height_m = height_m;
+	}
 	const double meters_per_cell =
-			(w && h) ? (repair.bbox_width_m / static_cast<double>(w) +
-							   repair.bbox_height_m / static_cast<double>(h)) *
+			(w && h) ? (bbox_width_m / static_cast<double>(w) +
+							   bbox_height_m / static_cast<double>(h)) *
 							   0.5
 					 : 0.0;
-	repair_terrain_anomalies(out.heights, meters_per_cell);
+	// Rust applies these Earth-calibrated filters only when the source mode can
+	// fall back to Earth DEMs; MAD repair otherwise erases real planetary relief.
+	if (providers::allows_earth_fallback(mode)) {
+		// Filters must see missing samples as NaN, before gap fill creates values.
+		filter_elevation_outliers(out.heights);
+		repair_terrain_anomalies(out.heights, meters_per_cell);
+	}
 	fill_nan_values(out.heights);
 	if (repair && w && h) {
 		const double sigma_cells =

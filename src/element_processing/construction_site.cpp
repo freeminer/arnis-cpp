@@ -261,10 +261,10 @@ void prop(WorldEditor &editor, const Site &site, int x, int z, Rolls &r)
 		}
 	} else if (type == Prop::Cabin || type == Prop::Container) {
 		const bool cabin = type == Prop::Cabin;
-		const Block wall =
-				cabin ? (r.next(4) == 0 ? LIGHT_GRAY_CONCRETE : WHITE_CONCRETE)
-					  : std::array<Block, 6>{BLUE_CONCRETE, ORANGE_CONCRETE, RED_CONCRETE,
-								GREEN_CONCRETE, CYAN_CONCRETE, GRAY_CONCRETE}[r.next(6)];
+		const Block wall = cabin ? (r.next(4) == 0 ? LIGHT_GRAY_CONCRETE : WHITE_CONCRETE)
+								 : std::array<Block, 7>{BLUE_CONCRETE, ORANGE_CONCRETE,
+										   RED_CONCRETE, GREEN_CONCRETE, GREEN_CONCRETE,
+										   CYAN_CONCRETE, GRAY_CONCRETE}[r.next(6)];
 		const int door = r.next(2) == 0 ? 0 : along - 1;
 		for (auto [cx, cz, u, v] : cells) {
 			const bool end = u == 0 || u == along - 1;

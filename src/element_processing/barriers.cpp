@@ -1,5 +1,6 @@
 #include "block_definitions.h"
 #include "bresenham.h"
+#include "connected_blocks.h"
 #include "world_editor.h"
 
 #include <string>
@@ -8,6 +9,7 @@
 #include <tuple>
 #include <cmath>
 #include <optional>
+#include <utility>
 
 #include "../../../arnis_adapter.h"
 #include "bridges.h"
@@ -18,6 +20,57 @@ namespace barriers
 {
 
 const int BRIDGE_BARRIER_NEARBY_RADIUS = 2;
+
+namespace
+{
+std::vector<std::optional<int>> barrier_bases(world_editor::WorldEditor &editor,
+		const bridges::BridgeSurfaceMap &surface,
+		const std::vector<std::pair<int, int>> &cells)
+{
+	const auto ground = [&editor](const std::pair<int, int> &cell) {
+		return editor.get_absolute_y(cell.first, 0, cell.second);
+	};
+	const auto deck = [&surface](const std::pair<int, int> &cell) {
+		return surface.nearby_deck_y(
+				cell.first, cell.second, BRIDGE_BARRIER_NEARBY_RADIUS);
+	};
+	std::vector<std::optional<int>> bases;
+	bases.reserve(cells.size());
+	for (const auto &cell : cells)
+		bases.emplace_back(ground(cell));
+
+	std::size_t i = 0;
+	while (i < cells.size()) {
+		if (!deck(cells[i])) {
+			++i;
+			continue;
+		}
+		const auto start = i;
+		while (i < cells.size() && deck(cells[i]))
+			++i;
+		const auto at_grade = [&](std::size_t inside, std::size_t outside) {
+			const auto deck_y = deck(cells[inside]);
+			return deck_y && *deck_y - ground(cells[outside]) <= 2;
+		};
+		const bool on_bridge = (start == 0 && i == cells.size()) ||
+							   (start > 0 && at_grade(start, start - 1)) ||
+							   (i < cells.size() && at_grade(i - 1, i));
+		if (!on_bridge)
+			continue;
+		for (std::size_t n = start; n < i; ++n) {
+			const auto [x, z] = cells[n];
+			bases[n] = surface.supported_top(editor, x, z, BRIDGE_BARRIER_NEARBY_RADIUS);
+			if (!bases[n]) {
+				const int y = ground(cells[n]);
+				const auto deck_y = deck(cells[n]);
+				if (deck_y && *deck_y - y <= 1)
+					bases[n] = y;
+			}
+		}
+	}
+	return bases;
+}
+} // namespace
 
 void generate_barriers(world_editor::WorldEditor &editor,
 		osm_parser::ProcessedElement const &element,
@@ -125,49 +178,44 @@ void generate_barriers(world_editor::WorldEditor &editor,
 			wall_height = minimum_height;
 		}
 	}
-
+	const bool joined = connected_blocks::is_connectable(editor, barrier_material);
+	const bool capped = wall_height > 1 &&
+						barrier_material != block_definitions::OAK_LEAVES &&
+						barrier_material != block_definitions::OAK_FENCE;
+	const bool hedge = barrier_material == block_definitions::OAK_LEAVES;
+	std::vector<std::pair<int, int>> cells;
 	for (std::size_t i = 1; i < way.nodes.size(); ++i) {
-		const osm_parser::ProcessedNode &prev = way.nodes[i - 1];
-		int x1 = prev.x;
-		int z1 = prev.z;
-
-		const osm_parser::ProcessedNode &cur = way.nodes[i];
-		int x2 = cur.x;
-		int z2 = cur.z;
-
-		std::vector<std::tuple<int, int, int>> bresenham_points =
-				bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
-		for (const auto &pt : bresenham_points) {
-			int bx = std::get<0>(pt);
-			int bz = std::get<2>(pt);
-
-			if (auto deck_y = bridge_surface.supported_top(
-						editor, bx, bz, BRIDGE_BARRIER_NEARBY_RADIUS)) {
-				for (int y = 1; y <= wall_height; ++y) {
-					editor.set_block_absolute(barrier_material, bx, *deck_y + y, bz,
-							std::optional<std::vector<block_definitions::Block>>(),
-							std::optional<std::vector<block_definitions::Block>>());
-				}
-				if (wall_height > 1) {
-					editor.set_block_absolute(block_definitions::STONE_BRICK_SLAB, bx,
-							*deck_y + wall_height + 1, bz,
-							std::optional<std::vector<block_definitions::Block>>(),
-							std::optional<std::vector<block_definitions::Block>>());
-				}
-			} else {
-				for (int y = 1; y <= wall_height; ++y) {
-					editor.set_block(barrier_material, bx, y, bz,
-							std::optional<std::vector<block_definitions::Block>>(),
-							std::nullopt);
-				}
-				if (wall_height > 1) {
-					editor.set_block(block_definitions::STONE_BRICK_SLAB, bx,
-							wall_height + 1, bz,
-							std::optional<std::vector<block_definitions::Block>>(),
-							std::nullopt);
-				}
-			}
+		const auto &a = way.nodes[i - 1];
+		const auto &b = way.nodes[i];
+		for (const auto &point : bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
+			const std::pair<int, int> cell{std::get<0>(point), std::get<2>(point)};
+			if (cells.empty() || cells.back() != cell)
+				cells.push_back(cell);
 		}
+	}
+	if (joined)
+		cells = connected_blocks::four_connected_line(cells);
+	const auto bases = barrier_bases(editor, bridge_surface, cells);
+	for (std::size_t i = 0; i < cells.size(); ++i) {
+		if (!bases[i])
+			continue;
+		const auto [x, z] = cells[i];
+		const int base = *bases[i];
+		if (hedge && !editor.surface_is_sealed(x, z) &&
+				base == editor.get_absolute_y(x, 0, z))
+			editor.set_block_absolute(block_definitions::GRASS_BLOCK, x, base, z,
+					std::nullopt, std::nullopt);
+		for (int y = 1; y <= wall_height; ++y) {
+			if (joined)
+				connected_blocks::place_connected(
+						editor, barrier_material, x, base + y, z);
+			else
+				editor.set_block_absolute(
+						barrier_material, x, base + y, z, std::nullopt, std::nullopt);
+		}
+		if (capped)
+			editor.set_block_absolute(block_definitions::STONE_BRICK_SLAB, x,
+					base + wall_height + 1, z, std::nullopt, std::nullopt);
 	}
 }
 
@@ -183,8 +231,11 @@ void place_barrier_node_block(world_editor::WorldEditor &editor,
 		const bridges::BridgeSurfaceMap &bridge_surface, block_definitions::Block block,
 		int dy)
 {
-	if (auto deck_y = bridge_surface.supported_top(
-				editor, node.x, node.z, BRIDGE_BARRIER_NEARBY_RADIUS)) {
+	const auto deck_y = bridge_surface.contains(node.x, node.z)
+								? bridge_surface.supported_top(editor, node.x, node.z,
+										  BRIDGE_BARRIER_NEARBY_RADIUS)
+								: std::nullopt;
+	if (deck_y) {
 		editor.set_block_absolute(block, node.x, *deck_y + dy, node.z,
 				std::optional<std::vector<block_definitions::Block>>(),
 				std::optional<std::vector<block_definitions::Block>>());
@@ -205,7 +256,7 @@ void generate_barrier_nodes(world_editor::WorldEditor &editor,
 	const std::string &val = it->second;
 	if (val == "bollard") {
 		place_barrier_node_block(
-				editor, node, bridge_surface, block_definitions::STREETS_BOLLARD, 1);
+				editor, node, bridge_surface, block_definitions::COBBLESTONE_WALL, 1);
 	} else if (val == "stile" || val == "gate" || val == "swing_gate" ||
 			   val == "lift_gate") {
 		/* Future implementation for gates:

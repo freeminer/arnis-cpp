@@ -88,8 +88,6 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				for (const std::tuple<int, int, int> &t : bresenham_points) {
 					int bx = std::get<0>(t);
 					int bz = std::get<2>(t);
-					if (!editor.pos_ok(bx, bz) || bridge_surface.contains(bx, bz))
-						continue;
 					editor.set_block(block_type, bx, 0, bz,
 							std::optional<std::vector<Block>>({GRASS_BLOCK, STONE_BRICKS,
 									SMOOTH_STONE, LIGHT_GRAY_CONCRETE, COBBLESTONE,
@@ -118,92 +116,46 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 			for (const std::pair<int, int> &p : filled_area) {
 				int x = p.first;
 				int z = p.second;
-				if (bridge_surface.contains(x, z))
-					continue;
 				// Cached polygons cover the entire source tile, not just this chunk.
-				// Reject unwritable cells before querying elevation or land-cover water.
-				if (!editor.pos_ok(x, z)) {
-					// These features consume a draw even when their writes are rejected.
-					// Preserve the element's random stream for subsequent owned cells.
-					if (leisure_type == "playground" ||
-							leisure_type == "recreation_ground")
-						(void)rng.uniform(5000);
+				// Let the editor reject out-of-bounds writes, but avoid terrain reads
+				// for cells this editor cannot own.
+				if (!editor.pos_ok(x, z))
 					continue;
-				}
+				if (leisure_type == "schoolyard" && editor.nested_area_owns(x, z))
+					continue;
 				editor.set_block(block_type, x, 0, z,
 						std::optional<std::vector<Block>>({GRASS_BLOCK}), std::nullopt);
 
 				// Add decorative elements for parks and gardens
 				if ((leisure_type == "park" || leisure_type == "garden" ||
 							leisure_type == "nature_reserve") &&
-						!editor.surface_is_sealed(x, z) && !editor.is_lc_water(x, z) &&
+						editor.owns(x, z) &&
 						editor.check_for_block(x, 0, z,
-								std::optional<std::vector<Block>>({GRASS_BLOCK}))) {
+								std::optional<std::vector<Block>>({GRASS_BLOCK})) &&
+						!editor.surface_is_sealed(x, z) && !editor.is_lc_water(x, z)) {
 
 					int random_choice = static_cast<int>(rng.uniform(1000));
 
-					if (random_choice >= 0 && random_choice < 30) {
-						ground_decoration::place_scattered_flower(
-								editor, x, z, ground_decoration::FlowerSetting::Garden);
-					} else if (random_choice >= 30 && random_choice < 90) {
+					if (random_choice < 30) {
+						if (random_choice < 22) {
+							ground_decoration::place_scattered_flower(editor, x, z,
+									leisure_type == "nature_reserve"
+											? ground_decoration::FlowerSetting::Meadow
+											: ground_decoration::FlowerSetting::Garden);
+						} else {
+							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
+						}
+					} else if (random_choice < 90) {
 						// Grass
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
-					} else if (random_choice >= 90 && random_choice < 105) {
+					} else if (random_choice < 105) {
 						bush::place(editor, x, z, bush::Kind::Garden);
-					} else if (random_choice >= 105 && random_choice < 120) {
-						// Match Rust's land-cover guard: a park meadow may only
-						// receive a tree where the source cover supports woody growth,
-						// with the one-in-1000 specimen exception retained.
-						if (random_choice == 105 || editor.land_cover_backs_trees(x, z))
+					} else if (random_choice < 120) {
+						if (editor.land_cover_backs_trees(x, z))
 							Tree::create(editor, {x, 1, z}, &building_footprints,
 									&bridge_surface);
 						else
 							editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
-					}
-				}
-
-				// Add playground or recreation ground features
-				if (leisure_type == "playground" || leisure_type == "recreation_ground") {
-					int rc = static_cast<int>(rng.uniform(5000));
-
-					if (rc >= 0 && rc < 10) {
-						// Swing set
-						for (int y = 1; y <= 3; ++y) {
-							editor.set_block(
-									OAK_FENCE, x - 1, y, z, std::nullopt, std::nullopt);
-							editor.set_block(
-									OAK_FENCE, x + 1, y, z, std::nullopt, std::nullopt);
-						}
-						editor.set_block(
-								OAK_PLANKS, x - 1, 4, z, std::nullopt, std::nullopt);
-						editor.set_block(OAK_SLAB, x, 4, z, std::nullopt, std::nullopt);
-						editor.set_block(
-								OAK_PLANKS, x + 1, 4, z, std::nullopt, std::nullopt);
-						editor.set_block(
-								STONE_BLOCK_SLAB, x, 2, z, std::nullopt, std::nullopt);
-					} else if (rc >= 10 && rc < 20) {
-						// Slide
-						editor.set_block(OAK_SLAB, x, 1, z, std::nullopt, std::nullopt);
-						editor.set_block(
-								OAK_SLAB, x + 1, 2, z, std::nullopt, std::nullopt);
-						editor.set_block(
-								OAK_SLAB, x + 2, 3, z, std::nullopt, std::nullopt);
-
-						editor.set_block(
-								OAK_PLANKS, x + 2, 2, z, std::nullopt, std::nullopt);
-						editor.set_block(
-								OAK_PLANKS, x + 2, 1, z, std::nullopt, std::nullopt);
-
-						editor.set_block(
-								LADDER, x + 2, 2, z - 1, std::nullopt, std::nullopt);
-						editor.set_block(
-								LADDER, x + 2, 1, z - 1, std::nullopt, std::nullopt);
-					} else if (rc >= 20 && rc < 30) {
-						// Sandpit
-						editor.fill_blocks(SAND, x - 3, 0, z - 3, x + 3, 0, z + 3,
-								std::optional<std::vector<Block>>(
-										{GREEN_STAINED_HARDENED_CLAY}),
-								std::nullopt);
 					}
 				}
 			}
@@ -212,8 +164,7 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				structures::playground::scatter_playgrounds(editor, filled_area);
 			}
 			if (leisure_type == "pitch") {
-				const std::vector<Block> vegetation{GRASS, FERN, RED_FLOWER,
-						YELLOW_FLOWER, BLUE_FLOWER, WHITE_FLOWER, OAK_LEAVES};
+				const auto &vegetation = ground_decoration::loose_plant_blocks();
 				for (const auto &[x, z] : filled_area)
 					editor.set_block(AIR, x, 1, z, vegetation, std::nullopt);
 				sport_pitches::draw_pitch_markings(

@@ -131,7 +131,6 @@ void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks
 							   : streak_noise < .22 ? TUFF
 													: Block{};
 	const bool has_streak = streaks && streak_noise < .22;
-	int start = lo;
 	std::size_t cursor = 0;
 	int layer = stratum_layer(x, z, s.warp, lo, cursor);
 	Block kind = bed_kind(x, z, layer);
@@ -162,16 +161,7 @@ void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks
 		const double tone = tone_a + (tone_b - tone_a) * double(y - tone_y) / TONE_STEP;
 		return face_ramp()[ramp_step(kind, tone, hi + 1 - y)];
 	};
-	Block old = block_at(lo);
-	for (int y = lo + 1; y <= hi; ++y) {
-		const Block b = block_at(y);
-		if (b != old) {
-			editor.fill_column_absolute(old, x, z, start, y - 1, true);
-			start = y;
-			old = b;
-		}
-	}
-	editor.fill_column_absolute(old, x, z, start, hi, true);
+	editor.fill_column_with_absolute(x, z, lo, hi, block_at, true);
 }
 
 std::optional<TalusField> TalusField::build(

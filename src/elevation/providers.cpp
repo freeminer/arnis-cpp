@@ -17,6 +17,20 @@
 #include <numbers>
 namespace arnis::elevation::providers
 {
+std::pair<double, double> bbox_dimensions_m(const GeoBBox &bbox)
+{
+	constexpr double earth_radius_m = 6'378'137.0;
+	constexpr double degrees_to_radians = std::numbers::pi / 180.0;
+	const double mid_lat = (bbox.min_lat + bbox.max_lat) * 0.5;
+	const double mid_lat_cos =
+			std::max(1.0e-6, std::abs(std::cos(mid_lat * degrees_to_radians)));
+	const double width_m = (bbox.max_lon - bbox.min_lon) * degrees_to_radians *
+						   earth_radius_m * mid_lat_cos;
+	const double height_m =
+			(bbox.max_lat - bbox.min_lat) * degrees_to_radians * earth_radius_m;
+	return {std::abs(width_m), std::abs(height_m)};
+}
+
 static unsigned g_retries = 2;
 static bool g_aws = true, g_mapterhorn = true, g_usgs = true;
 static ProviderStats g_stats;
@@ -299,7 +313,7 @@ std::uint8_t choose_aws_terrain_zoom(const GeoBBox &bbox)
 					   ? std::numeric_limits<std::size_t>::max()
 					   : rows * cols;
 	};
-	while (zoom > 10 && tile_count(zoom) > 2048)
+	while (zoom > 10 && tile_count(zoom) > MAX_TILES_PER_FETCH)
 		--zoom;
 	return static_cast<std::uint8_t>(zoom);
 }
@@ -482,14 +496,9 @@ std::string mapterhorn_tile_url(const XyzTileKey &key)
 unsigned choose_mapterhorn_zoom(const GeoBBox &bbox, std::size_t width,
 		std::size_t height, unsigned min_zoom, unsigned max_zoom, std::size_t budget)
 {
-	constexpr double earth_radius_m = MERCATOR_RADIUS_M;
-	const double mid_lat = (bbox.min_lat + bbox.max_lat) * .5;
-	const double lat = mid_lat * 3.14159265358979323846 / 180.;
-	const double metres_x =
-			std::abs((bbox.max_lon - bbox.min_lon) * 3.14159265358979323846 / 180. *
-					 earth_radius_m * std::max(.000001, std::abs(std::cos(lat))));
-	const double metres_y = std::abs((bbox.max_lat - bbox.min_lat) *
-									 3.14159265358979323846 / 180. * earth_radius_m);
+	const auto [metres_x, metres_y] = bbox_dimensions_m(bbox);
+	const double mid_lat = (bbox.min_lat + bbox.max_lat) * 0.5;
+	const double lat = mid_lat * std::numbers::pi / 180.0;
 	const double cell = std::max(
 			.05, std::min(metres_x / double(std::max<std::size_t>(1, width - 1)),
 						 metres_y / double(std::max<std::size_t>(1, height - 1))));

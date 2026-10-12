@@ -63,14 +63,15 @@ enum class Snow
 };
 // Convert partial snow cover to its Java snow-layer depth (one through seven
 // eighths), following the terrain's unrounded height within the top block.
-inline unsigned snow_eighths(Snow snow, double terrain_rise = 0.0)
+inline unsigned snow_eighths(
+		Snow snow, const std::optional<double> &terrain_rise = std::nullopt)
 {
 	if (snow == Snow::None)
 		return 0;
-	const unsigned smooth =
-			terrain_rise >= 0.0 && terrain_rise < 1.0
-					? static_cast<unsigned>(std::min(std::round(terrain_rise * 8.0), 7.0))
-					: 0;
+	const unsigned smooth = terrain_rise && *terrain_rise >= 0.0 && *terrain_rise < 1.0
+									? static_cast<unsigned>(std::min(
+											  std::round(*terrain_rise * 8.0), 7.0))
+									: 0;
 	if (snow == Snow::Block)
 		return smooth;
 	const unsigned max_layers =

@@ -78,8 +78,9 @@ std::optional<Export> load_export(
 		const std::filesystem::path &, std::string *error = nullptr);
 void install_export(Export);
 void set_displays_enabled(bool enabled);
-void project_export(
-		const std::vector<arnis::ProcessedElement> &, const XZBBox &, double scale);
+void project_export(const std::vector<arnis::ProcessedElement> &, const XZBBox &,
+		double scale,
+		const std::optional<std::filesystem::path> &attribution_dir = std::nullopt);
 void clear();
 bool has_building(std::uint64_t way_id);
 std::optional<imgops::Rgb> building_color(std::uint64_t way_id);

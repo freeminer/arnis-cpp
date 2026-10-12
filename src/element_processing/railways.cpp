@@ -20,6 +20,7 @@ using std::vector;
 #include "../bresenham.h"
 #include "../floodfill_cache.h"
 #include "../world_editor/floor_state.h"
+#include "../strict_parse.h"
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
 #include "bridges.h"
@@ -1017,13 +1018,9 @@ void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &element)
 
 	// Skip negative layer
 	if (auto it_layer = element.tags.find("layer"); it_layer != element.tags.end()) {
-		try {
-			int layer_value = std::stoi(it_layer->second);
-			if (layer_value < 0)
-				return;
-		} catch (...) {
-			// parse error -> ignore layer
-		}
+		if (const auto layer_value = strict_parse::i32(it_layer->second);
+				layer_value && *layer_value < 0)
+			return;
 	}
 
 	const int elevation_height = 4; // 4 blocks in the air

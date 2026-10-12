@@ -1,7 +1,9 @@
 #include "facades.h"
 #include "../bresenham.h"
+#include "../clipping.h"
 #include "../block_palette.h"
 #include "../element_processing/buildings.h"
+#include "credits.h"
 #include "displays.h"
 #include "../../arnis_adapter.h"
 #include "../../arnis_world_editor.h"
@@ -105,6 +107,54 @@ std::optional<std::filesystem::path> safe_image_path(
 		if (std::filesystem::is_regular_file(candidate))
 			return candidate;
 	return std::nullopt;
+}
+
+std::map<std::string, credits::ImageCredit> manifest_credits(
+		const std::filesystem::path &directory)
+{
+	std::map<std::string, credits::ImageCredit> result;
+	std::ifstream input(directory / "manifest.json");
+	if (!input)
+		return result;
+	try {
+		nlohmann::json manifest;
+		input >> manifest;
+		const auto entries = manifest.value("credits", nlohmann::json::array());
+		if (!entries.is_array())
+			return result;
+		for (const auto &entry : entries) {
+			if (!entry.is_object() || !entry.contains("id") || !entry["id"].is_string())
+				continue;
+			const auto id = entry["id"].get<std::string>();
+			if (id.empty())
+				continue;
+			auto field = [&](const char *name) {
+				const auto it = entry.find(name);
+				return it != entry.end() && it->is_string() ? it->get<std::string>()
+															: std::string{};
+			};
+			auto title = field("title");
+			if (title.empty())
+				title = id;
+			result.insert_or_assign(
+					id, credits::ImageCredit{id, std::move(title), field("creator"), {}});
+		}
+	} catch (const std::exception &) {
+		// A broken optional manifest must not invalidate a usable facade export.
+	}
+	return result;
+}
+
+void record_folder_credits(
+		const std::filesystem::path &directory, const std::vector<std::string> &image_ids)
+{
+	if (image_ids.empty())
+		return;
+	const auto named = manifest_credits(directory);
+	for (const auto &id : image_ids) {
+		const auto it = named.find(id);
+		credits::record(it == named.end() ? credits::ImageCredit::by_id(id) : it->second);
+	}
 }
 
 bool load_wall_pixels(const std::filesystem::path &path, ExportWall &wall)
@@ -339,7 +389,8 @@ void clear()
 }
 
 void project_export(const std::vector<arnis::ProcessedElement> &elements,
-		const XZBBox &bbox, double scale)
+		const XZBBox &bbox, double scale,
+		const std::optional<std::filesystem::path> &attribution_dir)
 {
 	std::unique_lock lock(store_mutex);
 	projected_cells.clear();
@@ -390,75 +441,143 @@ void project_export(const std::vector<arnis::ProcessedElement> &elements,
 			twice_area += static_cast<double>(a.x) * b.z - static_cast<double>(b.x) * a.z;
 		}
 		const bool clockwise = twice_area > 0.0;
-		for (const auto &edge : wall.edges) {
-			for (std::size_t segment = 1; segment < way.nodes.size(); ++segment) {
-				const auto &a = way.nodes[segment - 1];
-				const auto &b = way.nodes[segment];
+		struct Placement
+		{
+			std::size_t segment = 0;
+			bool forward = false;
+			std::optional<std::pair<double, double>> span;
+		};
+		const auto segment_count = way.nodes.size() - 1;
+		std::vector<std::optional<Placement>> placements(wall.edges.size());
+		std::vector<bool> taken(segment_count, false);
+		// First place complete OSM edges. Keeping these ahead of clipped stubs
+		// prevents a boundary fragment from claiming a segment that has a full
+		// matching pair of source nodes.
+		for (std::size_t edge_index = 0; edge_index < wall.edges.size(); ++edge_index) {
+			const auto &edge = wall.edges[edge_index];
+			for (std::size_t segment = 0; segment < segment_count; ++segment) {
+				const auto &a = way.nodes[segment];
+				const auto &b = way.nodes[segment + 1];
 				const bool forward = a.id == edge.node_a && b.id == edge.node_b;
 				const bool backward = a.id == edge.node_b && b.id == edge.node_a;
 				if (!forward && !backward)
 					continue;
-				projected_buildings.insert(way.id);
-				const double dx = static_cast<double>(b.x - a.x);
-				const double dz = static_cast<double>(b.z - a.z);
-				const double length = std::max(1e-9, std::hypot(dx, dz));
-				const double tx = dx / length, tz = dz / length;
-				const double nx = clockwise ? tz : -tz;
-				const double nz = clockwise ? -tx : tx;
-				const std::int8_t snx =
-						std::abs(nx) >= std::abs(nz)
-								? static_cast<std::int8_t>((nx > 0.0) - (nx < 0.0))
-								: 0;
-				const std::int8_t snz =
-						std::abs(nx) >= std::abs(nz)
-								? 0
-								: static_cast<std::int8_t>((nz > 0.0) - (nz < 0.0));
-				std::optional<std::pair<double, double>> span = edge.span_m;
+				auto span = edge.span_m;
 				if (span && !forward)
 					std::swap(span->first, span->second);
-				const auto points = bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
-				const auto count = points.size();
-				std::vector<bool> covered(count, false);
-				for (std::size_t i = 0; i < count; ++i) {
-					const int x = std::get<0>(points[i]);
-					const int z = std::get<2>(points[i]);
-					if (x < bbox.min_x() || x > bbox.max_x() || z < bbox.min_z() ||
-							z > bbox.max_z())
-						continue;
-					const double fraction =
-							count > 1 ? static_cast<double>(i) / (count - 1) : 0.0;
-					int column;
-					if (span) {
-						const double c = span->first +
-										 fraction * (span->second - span->first) -
-										 wall.col0_m;
-						if (c < 0.0 || c >= wall.columns)
-							continue;
-						column = static_cast<int>(std::floor(c));
-					} else {
-						const int span_columns = std::max(0, edge.col1 - edge.col0);
-						const double along = forward ? fraction : 1.0 - fraction;
-						column = std::clamp(edge.col0 + static_cast<int>(std::lround(
-																along * span_columns)),
-								0, static_cast<int>(wall.columns) - 1);
-					}
-					projected_cells[{x, z}] = {building_index, wall_index,
-							static_cast<std::uint32_t>(column), way.id, snx, snz,
-							b.x - a.x, b.z - a.z};
-					covered[i] = true;
-				}
-				for (std::size_t i = 0; i < count; ++i) {
-					if (!covered[i])
-						continue;
-					for (std::size_t nearr = i > 0 ? i - 1 : i;
-							nearr <= std::min(count - 1, i + 1); ++nearr) {
-						projected_photo_cells.insert_or_assign(
-								CellKey{std::get<0>(points[nearr]),
-										std::get<2>(points[nearr])},
-								way.id);
-					}
-				}
+				placements[edge_index] = Placement{segment, forward, span};
+				taken[segment] = true;
 				break;
+			}
+		}
+		// A clipped building ring has one real OSM endpoint and one synthetic
+		// boundary endpoint. Preserve the surviving metres of that wall instead
+		// of dropping the entire facade edge because its other node was clipped.
+		for (std::size_t edge_index = 0; edge_index < wall.edges.size(); ++edge_index) {
+			if (placements[edge_index] || !wall.edges[edge_index].span_m)
+				continue;
+			const auto &edge = wall.edges[edge_index];
+			const auto [s0, s1] = *edge.span_m;
+			std::optional<Placement> candidate;
+			std::set<std::pair<std::pair<int, int>, std::pair<int, int>>> seen;
+			for (std::size_t segment = 0; segment < segment_count; ++segment) {
+				if (taken[segment])
+					continue;
+				const auto &a = way.nodes[segment];
+				const auto &b = way.nodes[segment + 1];
+				const bool a_on_edge = a.id == edge.node_a || a.id == edge.node_b;
+				const bool b_on_edge = b.id == edge.node_a || b.id == edge.node_b;
+				if (a_on_edge == b_on_edge)
+					continue;
+				const auto &real = a_on_edge ? a : b;
+				const auto &invented = a_on_edge ? b : a;
+				if (!clipping::is_invented_node_id(invented.id))
+					continue;
+				const double dx = static_cast<double>(b.x) - a.x;
+				const double dz = static_cast<double>(b.z) - a.z;
+				const double stub_m = std::hypot(dx, dz) / std::max(scale, 1e-9);
+				const auto [from, to] = real.id == edge.node_a
+												? std::pair{s0, s0 + stub_m}
+												: std::pair{s1, s1 - stub_m};
+				const std::pair<double, double> span =
+						a_on_edge ? std::pair{from, to} : std::pair{to, from};
+				auto ends = std::pair{std::pair{a.x, a.z}, std::pair{b.x, b.z}};
+				if (ends.second < ends.first)
+					std::swap(ends.first, ends.second);
+				if (!seen.insert(ends).second)
+					continue;
+				candidate = Placement{segment, span.second >= span.first, span};
+			}
+			if (seen.size() == 1 && candidate) {
+				taken[candidate->segment] = true;
+				placements[edge_index] = std::move(candidate);
+			}
+		}
+		for (std::size_t edge_index = 0; edge_index < wall.edges.size(); ++edge_index) {
+			if (!placements[edge_index])
+				continue;
+			const auto &edge = wall.edges[edge_index];
+			const auto &placement = *placements[edge_index];
+			const auto &a = way.nodes[placement.segment];
+			const auto &b = way.nodes[placement.segment + 1];
+			projected_buildings.insert(way.id);
+			const double dx = static_cast<double>(b.x) - a.x;
+			const double dz = static_cast<double>(b.z) - a.z;
+			const double length = std::max(1e-9, std::hypot(dx, dz));
+			const double tx = dx / length, tz = dz / length;
+			const double nx = clockwise ? tz : -tz;
+			const double nz = clockwise ? -tx : tx;
+			const std::int8_t snx =
+					std::abs(nx) >= std::abs(nz)
+							? static_cast<std::int8_t>((nx > 0.0) - (nx < 0.0))
+							: 0;
+			const std::int8_t snz =
+					std::abs(nx) >= std::abs(nz)
+							? 0
+							: static_cast<std::int8_t>((nz > 0.0) - (nz < 0.0));
+			const auto points = bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
+			const auto count = points.size();
+			if (count == 0)
+				continue;
+			std::vector<bool> covered(count, false);
+			for (std::size_t i = 0; i < count; ++i) {
+				const int x = std::get<0>(points[i]);
+				const int z = std::get<2>(points[i]);
+				if (x < bbox.min_x() || x > bbox.max_x() || z < bbox.min_z() ||
+						z > bbox.max_z())
+					continue;
+				const double fraction =
+						count > 1 ? static_cast<double>(i) / (count - 1) : 0.0;
+				int column;
+				if (placement.span) {
+					const double c =
+							placement.span->first +
+							fraction * (placement.span->second - placement.span->first) -
+							wall.col0_m;
+					if (c < 0.0 || c >= wall.columns)
+						continue;
+					column = static_cast<int>(std::floor(c));
+				} else {
+					const int span_columns = std::max(0, edge.col1 - edge.col0);
+					const double along = placement.forward ? fraction : 1.0 - fraction;
+					column = std::clamp(edge.col0 + static_cast<int>(std::lround(
+															along * span_columns)),
+							0, static_cast<int>(wall.columns) - 1);
+				}
+				projected_cells[{x, z}] = {building_index, wall_index,
+						static_cast<std::uint32_t>(column), way.id, snx, snz,
+						placement.forward ? b.x - a.x : a.x - b.x,
+						placement.forward ? b.z - a.z : a.z - b.z};
+				covered[i] = true;
+			}
+			for (std::size_t i = 0; i < count; ++i) {
+				if (!covered[i])
+					continue;
+				for (std::size_t near = i > 0 ? i - 1 : i;
+						near <= std::min(count - 1, i + 1); ++near)
+					projected_photo_cells.insert_or_assign(
+							CellKey{std::get<0>(points[near]), std::get<2>(points[near])},
+							way.id);
 			}
 		}
 	};
@@ -469,7 +588,6 @@ void project_export(const std::vector<arnis::ProcessedElement> &elements,
 				++wall_index) {
 			const auto &wall = building.walls[wall_index];
 			if (building.owner.kind == OwnerKind::Way) {
-				projected_buildings.insert(building.owner.id);
 				const auto way_it = ways.find(building.owner.id);
 				if (way_it != ways.end())
 					project_wall(building_index, wall_index, wall, *way_it->second);
@@ -483,6 +601,11 @@ void project_export(const std::vector<arnis::ProcessedElement> &elements,
 				project_wall(building_index, wall_index, wall, ring);
 		}
 	}
+	// Explicit review exports do not pass through the Mapillary fetch pipeline,
+	// but their pixels still require the same CC BY-SA attribution. Credit only
+	// images used by walls that actually projected into this generation.
+	if (attribution_dir && !projected_cells.empty())
+		record_folder_credits(*attribution_dir, store->image_ids);
 }
 
 bool has_building(std::uint64_t way_id)

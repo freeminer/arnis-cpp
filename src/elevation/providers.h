@@ -3,16 +3,25 @@
 #include <filesystem>
 #include <cstdint>
 #include <optional>
+#include <utility>
 #include <vector>
 #include "../celestial.h"
 #include <array>
 namespace arnis::elevation::providers
 {
+// Shared XYZ tile request budget used by both Rust tile providers.  Keep zoom
+// selection bounded before materializing tile lists so large extents cannot
+// trigger unbounded downloads or allocations.
+inline constexpr std::size_t MAX_TILES_PER_FETCH = 2048;
+
 enum class Source;
 struct GeoBBox
 {
 	double min_lat = 0, min_lon = 0, max_lat = 0, max_lon = 0;
 };
+// Approximate physical dimensions of a geographic bbox at its midpoint
+// latitude; used to choose a tile zoom that matches the requested grid.
+std::pair<double, double> bbox_dimensions_m(const GeoBBox &);
 bool bboxes_overlap(const GeoBBox &, const GeoBBox &);
 bool usgs_3dep_covers(const GeoBBox &);
 enum class SourceMode
@@ -95,7 +104,7 @@ std::string mapterhorn_tile_url(const XyzTileKey &);
 // and latitude-aware ground-resolution calculation for any image client.
 unsigned choose_mapterhorn_zoom(const GeoBBox &, std::size_t grid_width,
 		std::size_t grid_height, unsigned min_zoom = 6, unsigned max_zoom = 17,
-		std::size_t tile_budget = 2048);
+		std::size_t tile_budget = MAX_TILES_PER_FETCH);
 // Fetch/sample the Rust-compatible AWS Terrarium XYZ provider. Missing tiles
 // remain NaN for the shared elevation post-processing pipeline to fill.
 std::vector<std::vector<double>> fetch_aws_terrain_grid(

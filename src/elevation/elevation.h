@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <tuple>
 #include <vector>
 
@@ -39,7 +40,8 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 		const std::vector<std::vector<double>> &grid, double sigma);
 std::vector<std::vector<double>> gaussian_blur_grid_masked(
 		const std::vector<std::vector<double>> &grid,
-		const std::vector<std::vector<std::uint8_t>> &masked, double sigma);
+		const std::vector<std::vector<std::uint8_t>> &masked, double sigma,
+		const std::function<void(double)> &report = {});
 
 void fill_nan_values(std::vector<std::vector<double>> &heights);
 void filter_elevation_outliers(std::vector<std::vector<double>> &heights);

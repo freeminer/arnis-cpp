@@ -2,10 +2,15 @@
 #include "assets_root.h"
 #include "../../arnis_adapter.h"
 #include "structures/schem_decoder.h"
+#include "world_editor/floor_state.h"
 
 #include <algorithm>
 #include <cmath>
 #include <fstream>
+#include <limits>
+#include <map>
+#include <numeric>
+#include <tuple>
 
 namespace arnis::landmarks
 {
@@ -22,6 +27,15 @@ std::string tag(const ProcessedElement &element, const char *name)
 {
 	auto it = element.tags().find(name);
 	return it == element.tags().end() ? std::string{} : it->second;
+}
+
+std::string trim(std::string value)
+{
+	const auto first = value.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return {};
+	const auto last = value.find_last_not_of(" \t\r\n");
+	return value.substr(first, last - first + 1);
 }
 
 std::vector<std::pair<int, int>> points(const ProcessedElement &element)
@@ -65,18 +79,13 @@ std::vector<std::pair<int, int>> regions_around(int x, int z, int radius)
 	return out;
 }
 
-std::pair<double, double> rotate(double x, double z, unsigned quarter)
+std::pair<double, double> rotate(double x, double z, double degrees)
 {
-	switch (quarter & 3) {
-	case 1:
-		return {-z, x};
-	case 2:
-		return {-x, -z};
-	case 3:
-		return {z, -x};
-	default:
-		return {x, z};
-	}
+	constexpr double pi = 3.14159265358979323846;
+	const double radians = degrees * pi / 180.0;
+	const double cosine = std::cos(radians);
+	const double sine = std::sin(radians);
+	return {x * cosine - z * sine, x * sine + z * cosine};
 }
 
 std::filesystem::path asset_path(const Landmark &landmark)
@@ -84,8 +93,8 @@ std::filesystem::path asset_path(const Landmark &landmark)
 	return assets::path(landmark.schematic_path);
 }
 
-int median_base_y(
-		WorldEditor &editor, const Placement &placement, double scale, unsigned rotation)
+int median_base_y(WorldEditor &editor, const Placement &placement, double scale,
+		double rotation_degrees)
 {
 	std::vector<int> levels;
 	levels.reserve(289);
@@ -97,13 +106,167 @@ int median_base_y(
 			const double mz = landmark.anchor_z +
 							  landmark.suppress_half_z * (2.0 * iz / 16.0 - 1.0);
 			auto [dx, dz] = rotate((mx - landmark.anchor_x) * scale,
-					(mz - landmark.anchor_z) * scale, rotation);
+					(mz - landmark.anchor_z) * scale, rotation_degrees);
 			levels.push_back(
 					editor.get_ground_level(int(std::lround(placement.world_x + dx)),
 							int(std::lround(placement.world_z + dz))));
 		}
 	std::nth_element(levels.begin(), levels.begin() + levels.size() / 2, levels.end());
-	return levels[levels.size() / 2] + 1 + landmark.ground_offset;
+	return std::max(levels[levels.size() / 2] + 1 + landmark.ground_offset,
+			world_editor::min_y() + 2);
+}
+
+struct ModelVoxel
+{
+	std::int16_t x, y, z;
+	std::uint8_t palette_slot;
+};
+
+struct LandmarkModel
+{
+	std::vector<BlockWithProperties> palette;
+	std::vector<ModelVoxel> voxels;
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> columns;
+	std::vector<std::uint8_t> excavated;
+	int min_x = 0, max_x = -1, min_z = 0, max_z = -1, max_y = 0;
+
+	std::size_t slot(int x, int z) const
+	{
+		return static_cast<std::size_t>(x - min_x) +
+			   static_cast<std::size_t>(z - min_z) * (max_x - min_x + 1);
+	}
+	std::pair<const ModelVoxel *, std::size_t> column(int x, int z) const
+	{
+		if (x < min_x || x > max_x || z < min_z || z > max_z)
+			return {nullptr, 0};
+		const auto [start, count] = columns[slot(x, z)];
+		if (!count)
+			return {nullptr, 0};
+		return {voxels.data() + start, static_cast<std::size_t>(count)};
+	}
+};
+
+LandmarkModel make_model(
+		const structures::SchemDocument &document, const Landmark &landmark)
+{
+	LandmarkModel model;
+	using PaletteKey = std::pair<content_t, const structures::SchemProperties *>;
+	std::map<PaletteKey, std::uint8_t> slots;
+	for (const auto &voxel : document.voxels) {
+		const Block block = voxel.resolved_block == AIR
+									? structures::resolve_schem_block(voxel.block)
+									: voxel.resolved_block;
+		if (block == AIR)
+			continue;
+		const PaletteKey key{block.id(), voxel.properties.get()};
+		auto [it, inserted] =
+				slots.try_emplace(key, static_cast<std::uint8_t>(model.palette.size()));
+		if (inserted)
+			model.palette.emplace_back(block, voxel.properties);
+		model.voxels.push_back(
+				{static_cast<std::int16_t>(voxel.x), static_cast<std::int16_t>(voxel.y),
+						static_cast<std::int16_t>(voxel.z), it->second});
+	}
+	if (model.voxels.empty())
+		return model;
+	std::sort(model.voxels.begin(), model.voxels.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.x, a.z, a.y) < std::tie(b.x, b.z, b.y);
+	});
+	model.min_x = model.max_x = model.voxels.front().x;
+	model.min_z = model.max_z = model.voxels.front().z;
+	for (const auto &voxel : model.voxels) {
+		model.min_x = std::min(model.min_x, int(voxel.x));
+		model.max_x = std::max(model.max_x, int(voxel.x));
+		model.min_z = std::min(model.min_z, int(voxel.z));
+		model.max_z = std::max(model.max_z, int(voxel.z));
+		model.max_y = std::max(model.max_y, int(voxel.y));
+	}
+	const auto width = static_cast<std::size_t>(model.max_x - model.min_x + 1);
+	const auto length = static_cast<std::size_t>(model.max_z - model.min_z + 1);
+	const auto cell_count = width * length;
+	model.columns.assign(cell_count, {0, 0});
+	std::vector<std::uint8_t> marker(cell_count, 0);
+	std::vector<Block> marker_blocks;
+	for (const auto &name : landmark.interior_markers)
+		marker_blocks.push_back(structures::resolve_schem_block(name));
+	for (std::size_t start = 0; start < model.voxels.size();) {
+		const auto x = model.voxels[start].x;
+		const auto z = model.voxels[start].z;
+		std::size_t end = start + 1;
+		while (end < model.voxels.size() && model.voxels[end].x == x &&
+				model.voxels[end].z == z)
+			++end;
+		const auto index = model.slot(x, z);
+		model.columns[index] = {static_cast<std::uint32_t>(start),
+				static_cast<std::uint32_t>(end - start)};
+		for (std::size_t i = start; i < end; ++i)
+			if (std::find(marker_blocks.begin(), marker_blocks.end(),
+						model.palette[model.voxels[i].palette_slot].block) !=
+					marker_blocks.end())
+				marker[index] = 1;
+		start = end;
+	}
+
+	// Flood the non-marker cells from the model boundary; enclosed space is the
+	// landmark interior. This mirrors Rust's marker-ring excavation semantics.
+	if (marker_blocks.empty()) {
+		model.excavated.assign(cell_count, 1);
+	} else {
+		std::vector<std::uint8_t> outside(cell_count, 0);
+		std::vector<std::size_t> stack;
+		stack.reserve(cell_count);
+		auto push = [&](std::size_t index) {
+			if (!marker[index] && !outside[index]) {
+				outside[index] = 1;
+				stack.push_back(index);
+			}
+		};
+		for (std::size_t x = 0; x < width; ++x) {
+			push(x);
+			push((length - 1) * width + x);
+		}
+		for (std::size_t z = 0; z < length; ++z) {
+			push(z * width);
+			push(z * width + width - 1);
+		}
+		while (!stack.empty()) {
+			const auto index = stack.back();
+			stack.pop_back();
+			const auto x = index % width, z = index / width;
+			if (x > 0)
+				push(index - 1);
+			if (x + 1 < width)
+				push(index + 1);
+			if (z > 0)
+				push(index - width);
+			if (z + 1 < length)
+				push(index + width);
+		}
+		model.excavated.resize(cell_count);
+		for (std::size_t i = 0; i < cell_count; ++i)
+			model.excavated[i] = !outside[i];
+		const auto radius =
+				static_cast<std::size_t>(std::max(0, landmark.ground_overlap));
+		if (radius) {
+			std::vector<std::uint8_t> eroded(cell_count, 0), second(cell_count, 0);
+			for (std::size_t z = 0; z < length; ++z)
+				for (std::size_t x = radius; x + radius < width; ++x) {
+					bool inside = true;
+					for (std::size_t k = x - radius; k <= x + radius && inside; ++k)
+						inside = model.excavated[z * width + k] != 0;
+					eroded[z * width + x] = inside;
+				}
+			for (std::size_t z = radius; z + radius < length; ++z)
+				for (std::size_t x = 0; x < width; ++x) {
+					bool inside = true;
+					for (std::size_t k = z - radius; k <= z + radius && inside; ++k)
+						inside = eroded[k * width + x] != 0;
+					second[z * width + x] = inside;
+				}
+			model.excavated.swap(second);
+		}
+	}
+	return model;
 }
 } // namespace
 
@@ -129,12 +292,16 @@ const std::vector<Landmark> &catalogue()
 }
 
 PrescanResult prescan(const std::vector<ProcessedElement> &elements,
-		const std::vector<WorldAnchor> &anchors, double scale,
-		const std::vector<Key> &already_suppressed)
+		const std::vector<WorldAnchor> &anchors, const WorldBounds &world_bounds,
+		double scale, double rotation_degrees, const std::vector<Key> &already_suppressed)
 {
 	PrescanResult result;
-	if (scale <= 0.0)
+	if (scale <= 0.0 || !std::isfinite(scale) || !std::isfinite(rotation_degrees))
 		return result;
+	constexpr double pi = 3.14159265358979323846;
+	const double rotation = rotation_degrees * pi / 180.0;
+	const double sin_rotation = std::sin(rotation);
+	const double cos_rotation = std::cos(rotation);
 	for (const auto &landmark : catalogue()) {
 		auto anchor = std::find_if(
 				anchors.begin(), anchors.end(), [&](const WorldAnchor &value) {
@@ -142,9 +309,14 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 				});
 		if (anchor == anchors.end())
 			continue;
+		const int radius = static_cast<int>(std::ceil(landmark.reach_m * scale));
+		if (anchor->x + radius < world_bounds.min_x ||
+				anchor->x - radius > world_bounds.max_x ||
+				anchor->z + radius < world_bounds.min_z ||
+				anchor->z - radius > world_bounds.max_z)
+			continue;
 		const Placement placement{&landmark, anchor->x, anchor->z};
 		result.placements.push_back(placement);
-		const int radius = static_cast<int>(std::ceil(landmark.reach_m * scale));
 		auto regions = regions_around(anchor->x, anchor->z, radius);
 		result.deferred_regions.insert(
 				result.deferred_regions.end(), regions.begin(), regions.end());
@@ -152,7 +324,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 			const Key key{std::string(element.kind()), element.id()};
 			if (contains(already_suppressed, key) || contains(result.suppressed, key))
 				continue;
-			const bool is_landmark = tag(element, "wikidata") == landmark.qid ||
+			const bool is_landmark = trim(tag(element, "wikidata")) == landmark.qid ||
 									 contains(landmark.osm_ids, key);
 			if (is_landmark) {
 				result.suppressed.push_back(key);
@@ -172,8 +344,14 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 					(sum_x / static_cast<double>(geometry.size()) - anchor->x) / scale;
 			const double dz =
 					(sum_z / static_cast<double>(geometry.size()) - anchor->z) / scale;
-			if (std::abs(dx) <= landmark.suppress_half_x &&
-					std::abs(dz) <= landmark.suppress_half_z)
+			// Rust maps world-space feature centres back into the schematic's
+			// coordinate frame before testing its replacement rectangle. This
+			// inverse rotation is essential for rotated Arnis maps; an axis-aligned
+			// world-space test can otherwise miss the building the model covers.
+			const double model_dx = dx * cos_rotation + dz * sin_rotation;
+			const double model_dz = -dx * sin_rotation + dz * cos_rotation;
+			if (std::abs(model_dx) <= landmark.suppress_half_x &&
+					std::abs(model_dz) <= landmark.suppress_half_z)
 				result.suppressed.push_back(key);
 		}
 	}
@@ -188,54 +366,144 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 	return result;
 }
 
-bool place(
-		WorldEditor &editor, const Placement &placement, double scale, unsigned rotation)
+bool place(WorldEditor &editor, const Placement &placement, double scale,
+		double rotation_degrees)
 {
-	if (!placement.landmark || scale <= 0.0)
+	if (!placement.landmark || scale <= 0.0 || !std::isfinite(scale) ||
+			!std::isfinite(rotation_degrees) || !editor.place_schematics())
 		return false;
-	std::ifstream input(asset_path(*placement.landmark), std::ios::binary);
-	if (!input)
-		return false;
-	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-	structures::SchemDocument document;
+	std::shared_ptr<const structures::SchemDocument> document;
 	try {
-		document = structures::decode_sponge_schem(bytes);
+		document = structures::load_schem_cached(asset_path(*placement.landmark));
 	} catch (...) {
 		return false;
 	}
-	const int base = median_base_y(editor, placement, scale, rotation);
+	if (!document)
+		return false;
+	const auto model = make_model(*document, *placement.landmark);
+	if (model.voxels.empty() || model.columns.empty())
+		return false;
+	const int base = median_base_y(editor, placement, scale, rotation_degrees);
 	const auto [min_x, min_z] = editor.get_min_coords();
 	const auto [max_x, max_z] = editor.get_max_coords();
-	std::size_t placed = 0;
-	for (const auto &voxel : document.voxels) {
-		const Block block = structures::resolve_schem_block(voxel.block);
-		if (block == AIR)
-			continue;
-		auto [dx, dz] = rotate((voxel.x - placement.landmark->anchor_x) * scale,
-				(voxel.z - placement.landmark->anchor_z) * scale, rotation);
-		const int x = int(std::lround(placement.world_x + dx));
-		const int z = int(std::lround(placement.world_z + dz));
-		if (x < min_x || x > max_x || z < min_z || z > max_z)
-			continue;
-		const int y0 =
-				base + int(std::lround((voxel.y - placement.landmark->ground_y) * scale));
-		const int y1 = std::max(y0 + 1,
-				base + int(std::lround(
-							   (voxel.y + 1 - placement.landmark->ground_y) * scale)));
-		for (int y = y0; y < y1; ++y) {
-			editor.set_block_absolute(block, x, y, z);
-			++placed;
-		}
+	auto to_world = [&](double mx, double mz) {
+		return rotate((mx - placement.landmark->anchor_x) * scale,
+				(mz - placement.landmark->anchor_z) * scale, rotation_degrees);
+	};
+	auto to_model = [&](double wx, double wz) {
+		const double dx = (wx - placement.world_x) / scale;
+		const double dz = (wz - placement.world_z) / scale;
+		constexpr double pi = 3.14159265358979323846;
+		const double radians = rotation_degrees * pi / 180.0;
+		const double cosine = std::cos(radians), sine = std::sin(radians);
+		return std::make_pair(placement.landmark->anchor_x + dx * cosine + dz * sine,
+				placement.landmark->anchor_z - dx * sine + dz * cosine);
+	};
+	int world_min_x = std::numeric_limits<int>::max();
+	int world_max_x = std::numeric_limits<int>::min();
+	int world_min_z = std::numeric_limits<int>::max();
+	int world_max_z = std::numeric_limits<int>::min();
+	for (const auto &[mx, mz] :
+			{std::pair{model.min_x, model.min_z}, std::pair{model.max_x + 1, model.min_z},
+					std::pair{model.min_x, model.max_z + 1},
+					std::pair{model.max_x + 1, model.max_z + 1}}) {
+		auto [dx, dz] = to_world(mx, mz);
+		world_min_x = std::min(
+				world_min_x, static_cast<int>(std::floor(placement.world_x + dx)));
+		world_max_x = std::max(
+				world_max_x, static_cast<int>(std::ceil(placement.world_x + dx)));
+		world_min_z = std::min(
+				world_min_z, static_cast<int>(std::floor(placement.world_z + dz)));
+		world_max_z = std::max(
+				world_max_z, static_cast<int>(std::ceil(placement.world_z + dz)));
 	}
+	world_min_x = std::max(world_min_x, min_x);
+	world_max_x = std::min(world_max_x, max_x);
+	world_min_z = std::max(world_min_z, min_z);
+	world_max_z = std::min(world_max_z, max_z);
+	const auto [writable_min_y, world_ceiling] = editor.writable_y_bounds();
+	const int world_floor = std::max(writable_min_y, world_editor::min_y() + 1);
+	const int clear_top =
+			base + static_cast<int>(std::lround(
+						   (model.max_y - placement.landmark->ground_y + 1) * scale));
+	const int foundation_floor = std::max(world_floor, base - 64);
+	const unsigned property_rotation =
+			static_cast<unsigned>((std::llround(rotation_degrees / 90.0) % 4 + 4) % 4);
+	std::vector<BlockWithProperties> rotated_palette;
+	rotated_palette.reserve(model.palette.size());
+	for (const auto &block : model.palette) {
+		auto properties = block.properties;
+		if (property_rotation && properties)
+			properties = BlockWithProperties::intern_properties(
+					structures::rotate_schem_properties(*properties, property_rotation));
+		rotated_palette.emplace_back(block.block, std::move(properties));
+	}
+	const std::optional<std::vector<Block>> empty_replacements{std::vector<Block>{}};
+	std::size_t placed = 0;
+	for (int wz = world_min_z; wz <= world_max_z; ++wz)
+		for (int wx = world_min_x; wx <= world_max_x; ++wx) {
+			auto [mx, mz] = to_model(wx + 0.5, wz + 0.5);
+			const int model_x = static_cast<int>(std::floor(mx));
+			const int model_z = static_cast<int>(std::floor(mz));
+			auto [column, count] = model.column(model_x, model_z);
+			if (!column || !count)
+				continue;
+			const int column_low = column[0].y;
+			const int column_bottom =
+					base + static_cast<int>(std::lround(
+								   (column_low - placement.landmark->ground_y) * scale));
+			const int column_top = std::max(column_bottom + 1,
+					base + static_cast<int>(
+								   std::lround((column[count - 1].y + 1 -
+													   placement.landmark->ground_y) *
+											   scale)));
+			const auto index = model.slot(model_x, model_z);
+			const int terrain = editor.get_ground_level(wx, wz);
+			const int clear_from = model.excavated[index]
+										   ? std::min(column_bottom, terrain + 1)
+								   : column_top > terrain ? terrain + 1
+														  : clear_top;
+			for (int y = std::max(clear_from, world_floor);
+					y < clear_top && y <= world_ceiling; ++y)
+				if (editor.get_block_absolute(wx, y, wz))
+					editor.set_block_absolute(
+							AIR, wx, y, wz, std::nullopt, empty_replacements);
+
+			if (column_low <= placement.landmark->ground_y + 2) {
+				for (int y = column_bottom - 1;
+						y >= foundation_floor && y >= world_floor &&
+						!editor.get_block_absolute(wx, y, wz);
+						--y)
+					editor.set_block_absolute(
+							STONE, wx, y, wz, std::nullopt, empty_replacements);
+			}
+			for (std::size_t i = 0; i < count; ++i) {
+				const auto &voxel = column[i];
+				const int y0 =
+						base + static_cast<int>(std::lround(
+									   (voxel.y - placement.landmark->ground_y) * scale));
+				const int y1 = std::max(y0 + 1,
+						base + static_cast<int>(std::lround(
+									   (voxel.y + 1 - placement.landmark->ground_y) *
+									   scale)));
+				const auto &block = rotated_palette[voxel.palette_slot];
+				for (int y = std::max(y0, world_floor); y < y1 && y <= world_ceiling;
+						++y) {
+					editor.set_block_with_properties_absolute(
+							block, wx, y, wz, std::nullopt, empty_replacements);
+					++placed;
+				}
+			}
+		}
 	return placed > 0;
 }
 
 std::size_t place_all(WorldEditor &editor, const PrescanResult &prescan, double scale,
-		unsigned rotation)
+		double rotation_degrees)
 {
 	std::size_t placed = 0;
 	for (const auto &placement : prescan.placements)
-		placed += place(editor, placement, scale, rotation) ? 1 : 0;
+		placed += place(editor, placement, scale, rotation_degrees) ? 1 : 0;
 	return placed;
 }
 } // namespace arnis::landmarks

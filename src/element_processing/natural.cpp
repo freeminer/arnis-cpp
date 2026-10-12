@@ -553,7 +553,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			// Generate custom layer instead of dirt, must be stone on the lowest level
 			if (natural_type == "beach" || natural_type == "sand" ||
 					natural_type == "dune" || natural_type == "shoal") {
-				editor.set_block(SAND, x, 0, z, std::nullopt, std::nullopt);
+				// Preserve the natural=beach/shoal surface=* mapping during fill.
+				editor.set_block(block_type, x, 0, z, std::nullopt, std::nullopt);
 			} else if (natural_type == "glacier") {
 				editor.set_block(PACKED_ICE, x, 0, z, std::nullopt, std::nullopt);
 				editor.set_block(STONE, x, -1, z, std::nullopt, std::nullopt);
@@ -793,7 +794,9 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 									if (cluster_block == GRASS_BLOCK) {
 										int vegetation_chance =
 												static_cast<int>(rng.uniform(100));
-										if (vegetation_chance == 0) {
+										if (vegetation_chance == 0 &&
+												editor.land_cover_backs_trees(
+														cluster_x, cluster_z)) {
 											// 1% chance for rare trees
 											Tree::create(editor,
 													{cluster_x, 1, cluster_z},
@@ -927,7 +930,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					continue;
 				}
 				int hill_chance = static_cast<int>(rng.uniform(1000));
-				if (hill_chance == 0) {
+				if (hill_chance == 0 && editor.land_cover_backs_trees(x, z)) {
 					// 0.1% chance for rare trees
 					Tree::create(
 							editor, {x, 1, z}, &building_footprints, &bridge_surface);
@@ -975,7 +978,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 							 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 					const int nx = px + dx, nz = pz + dz;
-					if (!area.contains(cell_key(nx, nz)) ||
+					if (!area.contains(cell_key(nx, nz)) || !editor.owns(nx, nz) ||
 							coord_hash(nx + 89, nz + 97) % 100 >= 20 ||
 							!editor.check_for_block(nx, 0, nz,
 									std::vector<Block>{GRASS_BLOCK, MUD, DIRT,

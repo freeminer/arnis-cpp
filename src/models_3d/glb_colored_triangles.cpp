@@ -66,7 +66,9 @@ std::optional<std::array<float, 3>> image_average(const tinygltf::Model &m, int 
 	if (source < 0 || std::size_t(source) >= m.images.size())
 		return std::nullopt;
 	const auto &img = m.images[source];
-	if (img.bits != 8 || img.component < 3 || img.image.empty())
+	// Rust's glTF image helper accepts only RGB8/RGBA8. Reject other channel
+	// layouts instead of interpreting their first three bytes as RGB.
+	if (img.bits != 8 || (img.component != 3 && img.component != 4) || img.image.empty())
 		return std::nullopt;
 	std::uint64_t r = 0, g = 0, b = 0, count = 0;
 	for (std::size_t p = 0; p + std::size_t(img.component) <= img.image.size();
@@ -82,6 +84,11 @@ std::optional<std::array<float, 3>> image_average(const tinygltf::Model &m, int 
 		return std::nullopt;
 	return std::array<float, 3>{
 			float(r) / count / 255.f, float(g) / count / 255.f, float(b) / count / 255.f};
+}
+bool is_default_white(const std::array<float, 3> &color)
+{
+	return std::abs(color[0] - 1.0f) < 1e-3f && std::abs(color[1] - 1.0f) < 1e-3f &&
+		   std::abs(color[2] - 1.0f) < 1e-3f;
 }
 std::size_t component_size(int type)
 {
@@ -256,7 +263,7 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 					indices[i] = std::uint32_t(i);
 			}
 			std::array<float, 3> material{1, 1, 1};
-			bool uncolored = true;
+			bool material_has_texture = false;
 			if (prim.material >= 0 &&
 					std::size_t(prim.material) < model.materials.size()) {
 				const auto &pbr = model.materials[prim.material].pbrMetallicRoughness;
@@ -265,13 +272,10 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 				if (auto tex = image_average(model, pbr.baseColorTexture.index)) {
 					for (int k = 0; k < 3; ++k)
 						material[k] *= (*tex)[k];
-					uncolored = false;
+					material_has_texture = true;
 				}
-				if (std::abs(material[0] - 1) > .001f ||
-						std::abs(material[1] - 1) > .001f ||
-						std::abs(material[2] - 1) > .001f)
-					uncolored = false;
 			}
+			const bool uncolored = !material_has_texture && is_default_white(material);
 			auto ci = prim.attributes.find("COLOR_0");
 			for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
 				ColoredTriangle t;
@@ -317,5 +321,77 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 			stack.push_back({child, world});
 	}
 	return out;
+}
+
+std::pair<std::array<float, 3>, std::array<float, 3>> glb_vertex_bounds(
+		const std::vector<std::uint8_t> &bytes)
+{
+	tinygltf::TinyGLTF loader;
+	tinygltf::Model model;
+	std::string err, warn;
+	if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes.data(), bytes.size()))
+		throw std::runtime_error("GLB parse: " + err);
+	std::array<float, 3> minimum{INFINITY, INFINITY, INFINITY};
+	std::array<float, 3> maximum{-INFINITY, -INFINITY, -INFINITY};
+	bool any = false;
+	std::vector<int> roots;
+	if (model.defaultScene >= 0 && std::size_t(model.defaultScene) < model.scenes.size())
+		roots = model.scenes[model.defaultScene].nodes;
+	else
+		for (const auto &scene : model.scenes)
+			roots.insert(roots.end(), scene.nodes.begin(), scene.nodes.end());
+	std::vector<std::pair<int, Matrix>> stack;
+	for (int node : roots)
+		stack.push_back({node, identity});
+	while (!stack.empty()) {
+		auto [node_id, parent] = stack.back();
+		stack.pop_back();
+		if (node_id < 0 || std::size_t(node_id) >= model.nodes.size())
+			continue;
+		const auto &node = model.nodes[node_id];
+		const auto world = multiply(parent, local_matrix(node));
+		if (node.mesh >= 0 && std::size_t(node.mesh) < model.meshes.size())
+			for (const auto &primitive : model.meshes[node.mesh].primitives) {
+				if (primitive.mode != TINYGLTF_MODE_TRIANGLES)
+					continue;
+				const auto position = primitive.attributes.find("POSITION");
+				if (position == primitive.attributes.end() || position->second < 0 ||
+						std::size_t(position->second) >= model.accessors.size())
+					continue;
+				const auto &accessor = model.accessors[position->second];
+				if (accessor.type != TINYGLTF_TYPE_VEC3 ||
+						accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT ||
+						accessor.bufferView < 0 ||
+						std::size_t(accessor.bufferView) >= model.bufferViews.size())
+					continue;
+				const auto &view = model.bufferViews[accessor.bufferView];
+				if (view.buffer < 0 || std::size_t(view.buffer) >= model.buffers.size())
+					continue;
+				const auto &buffer = model.buffers[view.buffer];
+				const int stride = accessor.ByteStride(view);
+				if (stride < int(3 * sizeof(float)))
+					continue;
+				const std::size_t offset = view.byteOffset + accessor.byteOffset;
+				for (std::size_t i = 0; i < accessor.count; ++i) {
+					const std::size_t at = offset + i * std::size_t(stride);
+					if (at + 3 * sizeof(float) > buffer.data.size())
+						break;
+					std::array<float, 3> point;
+					std::memcpy(point.data(), buffer.data.data() + at, 3 * sizeof(float));
+					point = transform_point(world, point);
+					for (std::size_t axis = 0; axis < 3; ++axis)
+						if (std::isfinite(point[axis])) {
+							minimum[axis] = std::min(minimum[axis], point[axis]);
+							maximum[axis] = std::max(maximum[axis], point[axis]);
+							any = true;
+						}
+				}
+			}
+		for (int child : node.children)
+			stack.push_back({child, world});
+	}
+	if (!any)
+		throw std::runtime_error("GLB has no finite vertices");
+	return {minimum, maximum};
 }
 }

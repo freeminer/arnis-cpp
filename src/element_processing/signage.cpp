@@ -282,19 +282,15 @@ std::pair<int, int> right_dir(std::int8_t facing)
 std::optional<std::pair<int, int>> get_nearest_road_block(
 		int x, int z, int radius, const RoadMaskBitmap &road_mask)
 {
-	// Search in expanding squares from the given position
-	for (int r = 1; r <= radius; ++r) {
-		for (int dz = -r; dz <= r; ++dz) {
-			for (int dx = -r; dx <= r; ++dx) {
-				if (std::abs(dx) != r && std::abs(dz) != r)
-					continue; // skip inner square
-				int nx = x + dx;
-				int nz = z + dz;
-				if (road_mask.contains(nx, nz)) {
-					return {{nx, nz}};
-				}
-			}
-		}
+	// Match Rust's shared search: probe the four cardinal cells, then diagonals,
+	// at even distances. Stable candidate order keeps sign placement deterministic.
+	for (int dist = 2; dist <= radius; dist += 2) {
+		const std::array<std::pair<int, int>, 8> candidates{{{x, z - dist}, {x, z + dist},
+				{x - dist, z}, {x + dist, z}, {x - dist, z - dist}, {x + dist, z + dist},
+				{x - dist, z + dist}, {x + dist, z - dist}}};
+		for (const auto &[nx, nz] : candidates)
+			if (road_mask.contains(nx, nz))
+				return {{nx, nz}};
 	}
 	return std::nullopt;
 }
@@ -987,20 +983,23 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 		int sx = node.x, sz = node.z;
 		if (ctx.carriageway.contains(sx, sz)) {
 			bool found = false;
-			for (int radius = 1; radius <= 10 && !found; ++radius)
-				for (int dx = -radius; dx <= radius && !found; ++dx)
-					for (int dz = -radius; dz <= radius; ++dz) {
-						if (std::max(std::abs(dx), std::abs(dz)) != radius)
-							continue;
-						const int tx = node.x + dx, tz = node.z + dz;
-						if (!ctx.carriageway.contains(tx, tz) && editor.owns(tx, tz) &&
-								!editor.is_lc_water(tx, tz)) {
-							sx = tx;
-							sz = tz;
-							found = true;
-							break;
-						}
+			for (int dist = 2; dist <= 10 && !found; dist += 2) {
+				const std::array<std::pair<int, int>, 8> candidates{
+						{{node.x, node.z - dist}, {node.x, node.z + dist},
+								{node.x - dist, node.z}, {node.x + dist, node.z},
+								{node.x - dist, node.z - dist},
+								{node.x + dist, node.z + dist},
+								{node.x - dist, node.z + dist},
+								{node.x + dist, node.z - dist}}};
+				for (const auto &[tx, tz] : candidates)
+					if (!ctx.carriageway.contains(tx, tz) && editor.owns(tx, tz) &&
+							!editor.is_lc_water(tx, tz)) {
+						sx = tx;
+						sz = tz;
+						found = true;
+						break;
 					}
+			}
 			if (!found)
 				return;
 		}

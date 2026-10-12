@@ -5,6 +5,7 @@
 #include "../ground_generation.h"
 #include "mapped.h"
 #include <algorithm>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <fstream>
@@ -479,12 +480,16 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 				const auto colon = body.find(':');
 				if (star != std::string_view::npos && colon != std::string_view::npos &&
 						colon < star) {
-					unsigned weight = 0;
-					try {
-						weight = static_cast<unsigned>(
-								std::stoul(std::string(body.substr(star + 1))));
-					} catch (...) {
-					}
+					auto weight_text = body.substr(star + 1);
+					if (weight_text.starts_with('+'))
+						weight_text.remove_prefix(1);
+					std::uint32_t weight = 0;
+					const auto [weight_end, weight_error] =
+							std::from_chars(weight_text.data(),
+									weight_text.data() + weight_text.size(), weight);
+					if (weight_error != std::errc{} ||
+							weight_end != weight_text.data() + weight_text.size())
+						weight = 0;
 					if (weight) {
 						const auto pack_name = body.substr(0, colon);
 						const auto stop = body.find('!', colon + 1);
@@ -758,11 +763,25 @@ std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
 		const std::optional<std::string> &preferred_realm,
 		const std::vector<std::uint16_t> &ecoregion_ids, bool exclude_palms)
 {
-	// Rust always reads the compiled tree-pack bundle.  Preserve the C++
-	// override when supplied, but resolve the bundled asset root for the common
-	// empty-root call path as well.
-	TreePackSource source = TreePackSource::embedded(
-			preferred_realm.value_or(realm_for_latlon(latitude, longitude)), root);
+	// Rust chooses the pack belonging to the largest mapped ecoregion before
+	// falling back to the bbox-centre latitude/longitude.  `ecoregion_ids` is
+	// supplied in EcoMap::by_area order, so its first usable tree mix carries
+	// the same dominant-pack hint even for callers that do not pre-resolve it.
+	std::string realm;
+	if (preferred_realm) {
+		realm = *preferred_realm;
+	} else {
+		for (const auto id : ecoregion_ids)
+			if (const auto mix = ecoregion::tree_mix(id)) {
+				realm = std::string(mix->first);
+				break;
+			}
+		if (realm.empty())
+			realm = realm_for_latlon(latitude, longitude);
+	}
+	// Preserve the C++ asset-root override while resolving bundled assets for
+	// the common empty-root call path.
+	TreePackSource source = TreePackSource::embedded(realm, root);
 	// Rust drops palm schematics only when the area's ecoregion data is complete
 	// and none of its mapped tree communities can use palms. Otherwise retain
 	// them so per-cell ecoregion and latitude rules can decide at placement time.

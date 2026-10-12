@@ -26,6 +26,10 @@ std::pair<std::array<float, 3>, std::array<float, 3>> glb_model_bbox(
 		const std::vector<std::uint8_t> &bytes);
 std::vector<std::array<std::array<float, 3>, 3>> glb_triangles(
 		const std::vector<std::uint8_t> &bytes);
+// Bounding box of every POSITION vertex in active-scene triangle primitives,
+// including unreferenced vertices, matching Rust's glb_model_bbox contract.
+std::pair<std::array<float, 3>, std::array<float, 3>> glb_vertex_bounds(
+		const std::vector<std::uint8_t> &bytes);
 std::vector<ColoredTriangle> glb_colored_triangles(
 		const std::vector<std::uint8_t> &bytes);
 Block block_for_model_color(std::array<float, 3> color);

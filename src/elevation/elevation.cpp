@@ -153,6 +153,39 @@ static std::vector<double> blur_line(
 	return out;
 }
 
+static void blur_vertical_in_place(std::vector<std::vector<double>> &grid,
+		const std::vector<double> &kernel, int radius, std::size_t width,
+		const std::function<void(double)> &report = {}, double report_begin = 0.0,
+		double report_end = 1.0)
+{
+	constexpr std::size_t COLUMN_GROUP = 8;
+	const std::size_t group_count = (width + COLUMN_GROUP - 1) / COLUMN_GROUP;
+	constexpr std::size_t BLUR_CHUNKS = 10;
+	const auto chunk_size = (group_count + BLUR_CHUNKS - 1) / BLUR_CHUNKS;
+	for (std::size_t begin = 0; begin < group_count; begin += chunk_size) {
+		const auto end = std::min(group_count, begin + chunk_size);
+		parallel_rows(begin, end, [&](std::size_t group) {
+			const auto x0 = group * COLUMN_GROUP;
+			const auto group_width = std::min(COLUMN_GROUP, width - x0);
+			// Each output column depends only on itself; gather a group before storing so
+			// the vertical pass can reuse its horizontal buffer instead of copying a grid.
+			std::vector<std::vector<double>> columns(
+					group_width, std::vector<double>(grid.size()));
+			for (std::size_t y = 0; y < grid.size(); ++y)
+				for (std::size_t c = 0; c < group_width; ++c)
+					columns[c][y] = grid[y][x0 + c];
+			for (std::size_t c = 0; c < group_width; ++c) {
+				const auto blurred = blur_line(columns[c], kernel, radius);
+				for (std::size_t y = 0; y < grid.size(); ++y)
+					grid[y][x0 + c] = blurred[y];
+			}
+		});
+		if (report)
+			report(report_begin +
+					(report_end - report_begin) * static_cast<double>(end) / group_count);
+	}
+}
+
 std::vector<std::vector<double>> gaussian_blur_grid(
 		const std::vector<std::vector<double>> &grid, double sigma)
 {
@@ -169,29 +202,14 @@ std::vector<std::vector<double>> gaussian_blur_grid(
 	parallel_rows(0, height,
 			[&](std::size_t z) { tmp[z] = blur_line(grid[z], kernel, radius); });
 
-	constexpr std::size_t COLUMN_GROUP = 8;
-	const std::size_t group_count = (width + COLUMN_GROUP - 1) / COLUMN_GROUP;
-	std::vector<std::vector<double>> output(height, std::vector<double>(width));
-	parallel_rows(0, group_count, [&](std::size_t group) {
-		const auto x0 = group * COLUMN_GROUP;
-		const auto group_width = std::min(COLUMN_GROUP, width - x0);
-		std::vector<std::vector<double>> columns(
-				group_width, std::vector<double>(height));
-		for (std::size_t z = 0; z < height; ++z)
-			for (std::size_t c = 0; c < group_width; ++c)
-				columns[c][z] = tmp[z][x0 + c];
-		for (std::size_t c = 0; c < group_width; ++c) {
-			const auto blurred = blur_line(columns[c], kernel, radius);
-			for (std::size_t z = 0; z < height; ++z)
-				output[z][x0 + c] = blurred[z];
-		}
-	});
-	return output;
+	blur_vertical_in_place(tmp, kernel, radius, width);
+	return tmp;
 }
 
 std::vector<std::vector<double>> gaussian_blur_grid_masked(
 		const std::vector<std::vector<double>> &grid,
-		const std::vector<std::vector<std::uint8_t>> &masked, double sigma)
+		const std::vector<std::vector<std::uint8_t>> &masked, double sigma,
+		const std::function<void(double)> &report)
 {
 	const std::size_t height = std::min(grid.size(), masked.size());
 	if (height == 0)
@@ -202,31 +220,22 @@ std::vector<std::vector<double>> gaussian_blur_grid_masked(
 	const auto kernel = gaussian_kernel(sigma);
 	const int radius = static_cast<int>(kernel.size() / 2);
 	std::vector<std::vector<double>> after_h(height, std::vector<double>(width));
-	parallel_rows(0, height, [&](std::size_t y) {
-		std::vector<double> row(grid[y].begin(), grid[y].begin() + width);
-		for (std::size_t x = 0; x < width; ++x)
-			if (masked[y][x])
-				row[x] = std::numeric_limits<double>::quiet_NaN();
-		after_h[y] = blur_line(row, kernel, radius);
-	});
-	constexpr std::size_t COLUMN_GROUP = 8;
-	const std::size_t group_count = (width + COLUMN_GROUP - 1) / COLUMN_GROUP;
-	std::vector<std::vector<double>> output(height, std::vector<double>(width));
-	parallel_rows(0, group_count, [&](std::size_t group) {
-		const auto x0 = group * COLUMN_GROUP;
-		const auto group_width = std::min(COLUMN_GROUP, width - x0);
-		std::vector<std::vector<double>> columns(
-				group_width, std::vector<double>(height));
-		for (std::size_t y = 0; y < height; ++y)
-			for (std::size_t c = 0; c < group_width; ++c)
-				columns[c][y] = after_h[y][x0 + c];
-		for (std::size_t c = 0; c < group_width; ++c) {
-			const auto blurred = blur_line(columns[c], kernel, radius);
-			for (std::size_t y = 0; y < height; ++y)
-				output[y][x0 + c] = blurred[y];
-		}
-	});
-	return output;
+	constexpr std::size_t BLUR_CHUNKS = 10;
+	const auto row_chunk = (height + BLUR_CHUNKS - 1) / BLUR_CHUNKS;
+	for (std::size_t y0 = 0; y0 < height; y0 += row_chunk) {
+		const auto y1 = std::min(height, y0 + row_chunk);
+		parallel_rows(y0, y1, [&](std::size_t y) {
+			std::vector<double> row(width);
+			for (std::size_t x = 0; x < width; ++x)
+				row[x] = masked[y][x] ? std::numeric_limits<double>::quiet_NaN()
+									  : grid[y][x];
+			after_h[y] = blur_line(row, kernel, radius);
+		});
+		if (report)
+			report(0.5 * static_cast<double>(y1) / height);
+	}
+	blur_vertical_in_place(after_h, kernel, radius, width, report, 0.5, 1.0);
+	return after_h;
 }
 
 void fill_nan_values(std::vector<std::vector<double>> &heights)

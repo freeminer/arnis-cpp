@@ -1,6 +1,7 @@
 #include <string>
 #include <optional>
 #include <stdexcept>
+#include "../strict_parse.h"
 
 #include "../../../arnis_adapter.h"
 namespace arnis
@@ -16,23 +17,16 @@ void generate_doors(crate::world_editor::WorldEditor &editor,
 			element.tags.find("entrance") != element.tags.end()) {
 		auto it = element.tags.find("level");
 		if (it != element.tags.end()) {
-			try {
-				int level = std::stoi(it->second);
-				if (level != 0) {
-					return;
-				}
-			} catch (const std::invalid_argument &) {
-				// ignore parse error
-			} catch (const std::out_of_range &) {
-				// ignore parse error
-			}
+			const auto level = strict_parse::i32(it->second);
+			if (level && *level != 0)
+				return;
 		}
 
 		int x = element.x;
 		int z = element.z;
 
-		editor.set_block(crate::block_definitions::GRAY_CONCRETE, x, 0, z,
-				std::nullopt, std::nullopt);
+		editor.set_block(crate::block_definitions::GRAY_CONCRETE, x, 0, z, std::nullopt,
+				std::nullopt);
 		editor.set_block(crate::block_definitions::DARK_OAK_DOOR_LOWER, x, 1, z,
 				std::nullopt, std::nullopt);
 		editor.set_block(crate::block_definitions::DARK_OAK_DOOR_UPPER, x, 2, z,

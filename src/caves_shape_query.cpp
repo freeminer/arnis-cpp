@@ -56,8 +56,11 @@ bool CaveShapeQuery::is_cave(int x, int y, int z) const
 
 bool CaveShapeQuery::solid(int x, int y, int z) const
 {
+	// The roof gate limits where the cave predicate may carve, not the terrain
+	// envelope that supports planned water/features. Rust CaveShape::surf keeps
+	// the sealed cap above `top()` solid, so use the actual surface here too.
 	return world_.contains(x, z) && y >= floor_y_ &&
-		   y <= editor_.get_ground_level(x, z) - 6 && !is_cave(x, y, z);
+		   y <= editor_.get_ground_level(x, z) && !is_cave(x, y, z);
 }
 
 double CaveShapeQuery::density_at(int x, int y, int z) const

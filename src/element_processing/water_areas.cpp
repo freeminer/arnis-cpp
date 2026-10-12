@@ -26,6 +26,7 @@
 #include "../bresenham.h"
 #include "args.h"
 #include "../data_processing.h"
+#include "../strict_parse.h"
 namespace arnis
 {
 
@@ -458,10 +459,19 @@ static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, in
 {
 	if (!editor.ground)
 		return std::nullopt;
+	// Rust samples the raw Ground elevation on coordinates relative to the
+	// generation bbox. Do not route this through get_ground_level(): its road
+	// surface overrides are for placement, not for resolving a water body's
+	// source elevation.
+	const auto [origin_x, origin_z] = editor.get_min_coords();
+	const auto *ground = editor.ground;
 	return resolve_still_surface(
 			editor.ground, min_x, min_z, max_x, max_z, outers, inners,
-			[&editor](int x, int z) { return editor.ground_point(x, z); },
-			[&editor](int x, int z) { return editor.get_ground_level(x, z); });
+			[origin_x, origin_z](
+					int x, int z) { return XZPoint{x - origin_x, z - origin_z}; },
+			[ground, origin_x, origin_z](int x, int z) {
+				return ground->level({x - origin_x, z - origin_z});
+			});
 }
 
 static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
@@ -791,14 +801,9 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 	// Don't handle water below layer 0
 	auto it_layer = element.tags.find("layer");
 	if (it_layer != element.tags.end()) {
-		try {
-			int layer = std::stoi(it_layer->second);
-			if (layer < 0) {
-				return;
-			}
-		} catch (...) {
-			// ignore parse errors
-		}
+		const auto layer = strict_parse::i32(it_layer->second);
+		if (layer && *layer < 0)
+			return;
 	}
 
 	std::vector<std::vector<ProcessedNode>> outers;
@@ -889,8 +894,11 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
 		return result;
 
-	const int origin_x = ground->mg ? ground->mg->node_min.X : xzbbox.min_x();
-	const int origin_z = ground->mg ? ground->mg->node_min.Z : xzbbox.min_z();
+	// Keep raster coordinates anchored to the exact generation bbox, as in
+	// water_areas::still_surface_level. The active Freeminer chunk bbox normally
+	// starts at mg->node_min, but callers may provide a clipped/tiled bbox.
+	const int origin_x = xzbbox.min_x();
+	const int origin_z = xzbbox.min_z();
 	auto point_at = [=](int x, int z) { return XZPoint{x - origin_x, z - origin_z}; };
 	auto level_at = [=](int x, int z) {
 		return ground->level({x - origin_x, z - origin_z});
@@ -917,14 +925,9 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 					(natural != "water" && natural != "bay"))
 				continue;
 			const auto layer = relation.tags.get("layer");
-			if (!layer.empty()) {
-				try {
-					if (std::stoi(layer) < 0)
-						continue;
-				} catch (...) {
-					// A malformed layer tag does not make the water relation underground.
-				}
-			}
+			if (const auto parsed_layer = strict_parse::i32(layer);
+					parsed_layer && *parsed_layer < 0)
+				continue;
 			for (const auto &member : relation.members) {
 				if (member.role == ProcessedMemberRole::Outer)
 					outers.push_back(member.way.nodes);

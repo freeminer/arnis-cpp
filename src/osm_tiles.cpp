@@ -271,7 +271,8 @@ std::optional<std::vector<std::uint8_t>> zstd_decode(
 		const std::vector<std::uint8_t> &input, std::string *error)
 {
 	const auto size = ZSTD_getFrameContentSize(input.data(), input.size());
-	if (size == ZSTD_CONTENTSIZE_ERROR || size > 256 * 1024 * 1024) {
+	if (size == ZSTD_CONTENTSIZE_ERROR ||
+			(size != ZSTD_CONTENTSIZE_UNKNOWN && size > 256 * 1024 * 1024)) {
 		if (error)
 			*error = "tile has invalid zstd frame";
 		return std::nullopt;
@@ -364,6 +365,48 @@ struct Reader
 		return true;
 	}
 };
+
+bool valid_utf8(const std::uint8_t *data, std::size_t size)
+{
+	for (std::size_t i = 0; i < size;) {
+		const auto first = data[i++];
+		if (first <= 0x7f)
+			continue;
+		if (first >= 0xc2 && first <= 0xdf) {
+			if (i >= size || (data[i++] & 0xc0) != 0x80)
+				return false;
+			continue;
+		}
+		if (first >= 0xe0 && first <= 0xef) {
+			if (i + 1 >= size)
+				return false;
+			const auto second = data[i++];
+			const auto third = data[i++];
+			if ((third & 0xc0) != 0x80 ||
+					(first == 0xe0			? second < 0xa0 || second > 0xbf
+							: first == 0xed ? second < 0x80 || second > 0x9f
+											: (second & 0xc0) != 0x80))
+				return false;
+			continue;
+		}
+		if (first >= 0xf0 && first <= 0xf4) {
+			if (i + 2 >= size)
+				return false;
+			const auto second = data[i++];
+			const auto third = data[i++];
+			const auto fourth = data[i++];
+			if ((third & 0xc0) != 0x80 || (fourth & 0xc0) != 0x80 ||
+					(first == 0xf0			? second < 0x90 || second > 0xbf
+							: first == 0xf4 ? second < 0x80 || second > 0x8f
+											: (second & 0xc0) != 0x80))
+				return false;
+			continue;
+		}
+		return false;
+	}
+	return true;
+}
+
 bool fail(std::string *e, const char *message)
 {
 	if (e)
@@ -469,6 +512,8 @@ bool decode(const std::vector<std::uint8_t> &b, DecodedTile &out, std::string *e
 		std::uint64_t len;
 		if (!r.uvar(len) || len > b.size() - std::min(r.p, b.size()) || len > (1u << 28))
 			return fail(error, "truncated string");
+		if (!valid_utf8(b.data() + r.p, static_cast<std::size_t>(len)))
+			return fail(error, "tile string is not valid UTF-8");
 		strings.emplace_back(
 				reinterpret_cast<const char *>(b.data() + r.p), static_cast<size_t>(len));
 		r.p += static_cast<size_t>(len);

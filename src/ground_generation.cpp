@@ -274,8 +274,7 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int origin_x,
 		int origin_z, int spacing, bool schematic_trees)
 {
-	if (!editor.ground || !editor.ground->has_canopy() ||
-			!editor.ground->has_land_cover())
+	if (!editor.ground || !editor.ground->has_canopy())
 		return {false, false};
 	const auto floor_div = [spacing](int v) {
 		const int quotient = v / spacing;
@@ -859,7 +858,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							}
 						}
 
-						if (!planetary && has_cover)
+						if (process_surface && !place_esa_water && !planetary &&
+								has_cover)
 							maybe_place_vegetation(editor, x, ground_y, z,
 									building_footprints, xzbbox.min_x(), xzbbox.min_z(),
 									tunnel_footprint, bridge_surface, args.scale, slope,
@@ -870,7 +870,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						// Match Rust's softened climatic snow edge.  A small deterministic
 						// jitter avoids an artificial contour line at exactly the threshold;
 						// MAX_INT disables snow for low/flat worlds.
-						if (!planetary && editor.ground && water_blend <= .5 &&
+						if (process_surface && !place_esa_water && !planetary &&
+								editor.ground && water_blend <= .5 &&
 								!editor.check_for_block_type_absolute(
 										x, ground_y, z, WATER)) {
 							const auto surface_block =
@@ -884,10 +885,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										natural_top
 												? terrain_surface::snow_eighths(snow,
 														  terrain_enabled
-																  ? editor.ground->level_exact(
-																			relative) -
-																			ground_y + .5
-																  : 0.0)
+																  ? std::optional<double>(
+																			editor.ground->level_exact(
+																					relative) -
+																			ground_y + .5)
+																  : std::nullopt)
 												: 1;
 								terrain_surface::place_snow_layer(
 										editor, x, ground_y, z, eighths);
@@ -897,6 +899,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 
 					// Rust's universal depth pass closes visible gaps below all terrain
 					// columns, including ones whose surface was supplied by OSM.
+					// Rust's depth-fill pass only runs when the per-chunk terrain
+					// cache exists. Flat/geo-only columns keep their authored depth.
+					// Close gaps beneath authored surfaces that skipped material
+					// selection with stone, matching Rust's fallback underfill.
 					if (terrain_enabled && !editor.check_for_block_type_absolute(
 												   x, ground_y, z, WATER)) {
 						int lowest = ground_y;

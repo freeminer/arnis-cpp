@@ -455,7 +455,8 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 	std::filesystem::create_directories(root, ec);
 	if (ec)
 		return std::nullopt;
-	const unsigned zoom = choose_mapterhorn_zoom(bbox, width, height, 0, MAX_ZOOM, 2048);
+	const unsigned zoom =
+			choose_mapterhorn_zoom(bbox, width, height, 0, MAX_ZOOM, MAX_TILES_PER_FETCH);
 	const unsigned floor = std::min<unsigned>(MIN_ZOOM, zoom);
 	FetchState state;
 	std::vector<XyzTileKey> level_keys = covering_xyz_tiles(bbox, zoom);

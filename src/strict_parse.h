@@ -29,6 +29,14 @@ inline std::optional<int> i32(std::string_view text)
 	return value;
 }
 
+// Rust call sites commonly use parse::<i32>().unwrap_or(0) for optional OSM
+// layer/level tags. Keep that fallback explicit while rejecting numeric
+// prefixes that std::stoi would otherwise accept.
+inline int i32_or_zero(std::string_view text)
+{
+	return i32(text).value_or(0);
+}
+
 inline std::optional<double> f64(std::string_view text)
 {
 	if (text.empty())

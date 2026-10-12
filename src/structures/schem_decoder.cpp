@@ -12,6 +12,7 @@
 #include <iostream>
 #include <limits>
 #include <map>
+#include <mutex>
 #include <tuple>
 #include <zlib.h>
 
@@ -382,29 +383,14 @@ std::vector<std::uint8_t> ungzip(const std::vector<std::uint8_t> &in)
 	}
 }
 
-void decode_block_data(Reader &r, std::vector<std::int32_t> &data)
+void decode_block_data(
+		Reader &r, std::vector<std::pair<std::size_t, std::size_t>> &ranges)
 {
 	const auto byte_count = r.u32();
 	if (byte_count > r.b.size() - r.p)
 		throw std::runtime_error("truncated schem BlockData");
-	const std::size_t end = r.p + byte_count;
-	while (r.p < end) {
-		std::uint32_t value = 0;
-		unsigned shift = 0;
-		for (;;) {
-			if (r.p >= end)
-				throw std::runtime_error("truncated schem BlockData varint");
-			const std::uint8_t byte = r.u8();
-			if (shift >= 32 && (byte & 0x7f))
-				throw std::runtime_error("schem BlockData varint overflow");
-			if (shift < 32)
-				value |= std::uint32_t(byte & 0x7f) << shift;
-			if (!(byte & 0x80))
-				break;
-			shift += 7;
-		}
-		data.push_back(static_cast<std::int32_t>(value));
-	}
+	ranges.emplace_back(r.p, byte_count);
+	r.p += byte_count;
 }
 
 void decode_palette(Reader &r, std::unordered_map<int, std::string> &palette)
@@ -648,7 +634,8 @@ void place_native_entity(
 // every field in a `Schematic` compound.  Accept both arrangements, sharing
 // the same strict byte-stream decoder as the v2 top-level form.
 void decode_schematic_fields(Reader &r, SchemDocument &doc,
-		std::unordered_map<int, std::string> &palette, std::vector<std::int32_t> &data)
+		std::unordered_map<int, std::string> &palette,
+		std::vector<std::pair<std::size_t, std::size_t>> &data_ranges)
 {
 	for (;;) {
 		const auto type = r.u8();
@@ -656,7 +643,7 @@ void decode_schematic_fields(Reader &r, SchemDocument &doc,
 			return;
 		const auto name = r.str();
 		if ((name == "Width" || name == "Height" || name == "Length") && type == 2) {
-			const int value = r.u16();
+			const int value = static_cast<std::int16_t>(r.u16());
 			if (name == "Width")
 				doc.width = value;
 			else if (name == "Height")
@@ -677,11 +664,11 @@ void decode_schematic_fields(Reader &r, SchemDocument &doc,
 		} else if (name == "Palette" && type == 10) {
 			decode_palette(r, palette);
 		} else if ((name == "BlockData" || name == "Data") && type == 7) {
-			decode_block_data(r, data);
+			decode_block_data(r, data_ranges);
 		} else if ((name == "BlockEntities" || name == "TileEntities") && type == 9) {
 			decode_block_entities(r, doc);
 		} else if ((name == "Schematic" || name == "Blocks") && type == 10) {
-			decode_schematic_fields(r, doc, palette, data);
+			decode_schematic_fields(r, doc, palette, data_ranges);
 		} else {
 			skip_payload(r, type);
 		}
@@ -694,7 +681,10 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 	Reader r{ungzip(gzip_data)};
 	SchemDocument doc;
 	std::unordered_map<int, std::string> palette;
-	std::vector<std::int32_t> data;
+	// Retain ranges into the decompressed NBT buffer and decode palette indices
+	// directly from it below. A full int32_t expansion can add several GiB for
+	// large schematics, while Rust's varint_indices iterator stays compact.
+	std::vector<std::pair<std::size_t, std::size_t>> data_ranges;
 	if (r.u8() != 10)
 		throw std::runtime_error("schem root is not compound");
 	r.str();
@@ -706,11 +696,11 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 			break;
 		auto name = r.str();
 		if ((name == "Schematic" || name == "Blocks") && type == 10) {
-			decode_schematic_fields(r, doc, palette, data);
+			decode_schematic_fields(r, doc, palette, data_ranges);
 			continue;
 		}
-		if (name == "Width" || name == "Height" || name == "Length") {
-			auto v = r.u16();
+		if ((name == "Width" || name == "Height" || name == "Length") && type == 2) {
+			const auto v = static_cast<std::int16_t>(r.u16());
 			if (name == "Width")
 				doc.width = v;
 			else if (name == "Height")
@@ -745,14 +735,14 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 				palette[id] = n;
 			}
 		} else if (name == "BlockData" && type == 7) {
-			decode_block_data(r, data);
+			decode_block_data(r, data_ranges);
 		} else if ((name == "BlockEntities" || name == "TileEntities") && type == 9) {
 			decode_block_entities(r, doc);
 		} else
 			skip_payload(r, type);
 	}
-	if (!doc.width || !doc.height || !doc.length)
-		throw std::runtime_error("schem dimensions missing");
+	if (doc.width <= 0 || doc.height <= 0 || doc.length <= 0)
+		throw std::runtime_error("schem dimensions missing or non-positive");
 	// Rust rejects volumes beyond the signed 32-bit index range before
 	// allocating or iterating BlockData.  Besides matching that contract, the
 	// checked multiplication prevents hostile dimensions from wrapping size_t.
@@ -763,65 +753,118 @@ SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data)
 	if (volume > max_cells)
 		throw std::runtime_error("schem volume exceeds the supported range");
 	const std::size_t cells = static_cast<std::size_t>(volume);
-	if (data.size() != cells)
-		throw std::runtime_error("schem BlockData size mismatch");
 	std::unordered_map<std::string, std::shared_ptr<const SchemProperties>>
 			state_properties;
 	std::unordered_map<std::string, Block> resolved_blocks;
-	for (std::size_t i = 0; i < cells; i++) {
-		auto it = palette.find(data[i]);
-		if (it == palette.end())
-			continue;
-		const int x = i % doc.width, z = (i / doc.width) % doc.length,
-				  y = i / (doc.width * doc.length);
-		std::shared_ptr<const SchemProperties> properties;
-		auto state = state_properties.find(it->second);
-		if (state == state_properties.end()) {
-			SchemProperties parsed;
-			const auto open = it->second.find('['), close = it->second.rfind(']');
-			if (open != std::string::npos && close != std::string::npos &&
-					close > open + 1) {
-				std::size_t start = open + 1;
-				while (start < close) {
-					std::size_t end = start;
-					int depth = 0;
-					bool quoted = false;
-					for (; end < close; ++end) {
-						const char ch = it->second[end];
-						if (ch == '"' && (end == start || it->second[end - 1] != '\\'))
-							quoted = !quoted;
-						if (!quoted && (ch == '[' || ch == '{'))
-							++depth;
-						else if (!quoted && (ch == ']' || ch == '}') && depth)
-							--depth;
-						else if (!quoted && ch == ',' && depth == 0)
-							break;
-					}
-					const auto equals = it->second.find('=', start);
-					if (equals != std::string::npos && equals < end) {
-						auto key = it->second.substr(start, equals - start);
-						auto value = it->second.substr(equals + 1, end - equals - 1);
-						const auto trim = [](std::string &s) {
-							const auto a = s.find_first_not_of(" \t");
-							const auto b = s.find_last_not_of(" \t");
-							s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
-						};
-						trim(key);
-						trim(value);
-						parsed.emplace(std::move(key), std::move(value));
-					}
-					start = end < close ? end + 1 : close;
-				}
+	std::size_t decoded_cells = 0;
+	for (const auto &[range_start, range_size] : data_ranges) {
+		const std::size_t range_end = range_start + range_size;
+		std::size_t data_offset = range_start;
+		while (data_offset < range_end) {
+			std::uint32_t value = 0;
+			unsigned shift = 0;
+			for (;;) {
+				if (data_offset >= range_end)
+					throw std::runtime_error("truncated schem BlockData varint");
+				const std::uint8_t byte = r.b[data_offset++];
+				if (shift >= 32 && (byte & 0x7f))
+					throw std::runtime_error("schem BlockData varint overflow");
+				if (shift < 32)
+					value |= std::uint32_t(byte & 0x7f) << shift;
+				if (!(byte & 0x80))
+					break;
+				shift += 7;
 			}
-			properties = BlockWithProperties::intern_properties(std::move(parsed));
-			state = state_properties.emplace(it->second, std::move(properties)).first;
+			if (decoded_cells >= cells)
+				throw std::runtime_error(
+						"schem BlockData has more entries than its volume");
+			auto it = palette.find(static_cast<std::int32_t>(value));
+			if (it == palette.end()) {
+				++decoded_cells;
+				continue;
+			}
+			const auto i = decoded_cells++;
+			const int x = i % doc.width, z = (i / doc.width) % doc.length,
+					  y = i / (doc.width * doc.length);
+			std::shared_ptr<const SchemProperties> properties;
+			auto state = state_properties.find(it->second);
+			if (state == state_properties.end()) {
+				SchemProperties parsed;
+				const auto open = it->second.find('['), close = it->second.rfind(']');
+				if (open != std::string::npos && close != std::string::npos &&
+						close > open + 1) {
+					std::size_t start = open + 1;
+					while (start < close) {
+						std::size_t end = start;
+						int depth = 0;
+						bool quoted = false;
+						for (; end < close; ++end) {
+							const char ch = it->second[end];
+							if (ch == '"' &&
+									(end == start || it->second[end - 1] != '\\'))
+								quoted = !quoted;
+							if (!quoted && (ch == '[' || ch == '{'))
+								++depth;
+							else if (!quoted && (ch == ']' || ch == '}') && depth)
+								--depth;
+							else if (!quoted && ch == ',' && depth == 0)
+								break;
+						}
+						const auto equals = it->second.find('=', start);
+						if (equals != std::string::npos && equals < end) {
+							auto key = it->second.substr(start, equals - start);
+							auto value = it->second.substr(equals + 1, end - equals - 1);
+							const auto trim = [](std::string &s) {
+								const auto a = s.find_first_not_of(" \t");
+								const auto b = s.find_last_not_of(" \t");
+								s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
+							};
+							trim(key);
+							trim(value);
+							parsed.emplace(std::move(key), std::move(value));
+						}
+						start = end < close ? end + 1 : close;
+					}
+				}
+				properties = BlockWithProperties::intern_properties(std::move(parsed));
+				state = state_properties.emplace(it->second, std::move(properties)).first;
+			}
+			auto [mapped, inserted] = resolved_blocks.try_emplace(it->second);
+			if (inserted)
+				mapped->second = resolve_schem_block(it->second);
+			doc.voxels.push_back({x, y, z, it->second, mapped->second, state->second});
 		}
-		auto [mapped, inserted] = resolved_blocks.try_emplace(it->second);
-		if (inserted)
-			mapped->second = resolve_schem_block(it->second);
-		doc.voxels.push_back({x, y, z, it->second, mapped->second, state->second});
 	}
+	if (decoded_cells != cells)
+		throw std::runtime_error("schem BlockData has fewer entries than its volume");
 	return doc;
+}
+
+std::shared_ptr<const SchemDocument> load_schem_cached(const std::filesystem::path &file)
+{
+	static std::mutex cache_mutex;
+	static std::unordered_map<std::string, std::shared_ptr<const SchemDocument>> cache;
+
+	std::error_code path_error;
+	auto normalized = std::filesystem::absolute(file, path_error);
+	if (path_error)
+		normalized = file;
+	normalized = normalized.lexically_normal();
+	const auto key = normalized.string();
+
+	// Serialize misses as well as cache access: concurrent mapgen workers must
+	// not independently read and decode the same large landmark schematic.
+	std::lock_guard lock(cache_mutex);
+	if (const auto found = cache.find(key); found != cache.end())
+		return found->second;
+
+	std::ifstream input(normalized, std::ios::binary);
+	if (!input)
+		throw std::runtime_error("unable to open schematic: " + key);
+	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+	auto document = std::make_shared<const SchemDocument>(decode_sponge_schem(bytes));
+	cache.emplace(key, document);
+	return document;
 }
 
 SchemDocument load_palettized(const std::vector<std::uint8_t> &gzip_bytes)
@@ -1038,7 +1081,7 @@ Block resolve_schem_block(const std::string &name)
 		return RED_CONCRETE;
 	if (n == "green_wool")
 		return GREEN_WOOL;
-	if (n == "green_terracotta")
+	if (n == "green_terracotta" || n == "green_stained_hardened_clay")
 		return GREEN_STAINED_HARDENED_CLAY;
 	if (n == "red_terracotta")
 		return RED_TERRACOTTA;

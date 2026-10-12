@@ -5,22 +5,40 @@
 #include <cmath>
 namespace arnis::models_3d
 {
+static std::uint32_t read_le_u32(const std::uint8_t *p)
+{
+	return static_cast<std::uint32_t>(p[0]) | (static_cast<std::uint32_t>(p[1]) << 8) |
+		   (static_cast<std::uint32_t>(p[2]) << 16) |
+		   (static_cast<std::uint32_t>(p[3]) << 24);
+}
+
+static bool looks_like_binary_with_solid_header(const std::vector<std::uint8_t> &bytes)
+{
+	if (bytes.size() < 84)
+		return false;
+	const std::uint64_t count = read_le_u32(bytes.data() + 80);
+	const std::uint64_t expected = 84 + 50 * count;
+	return expected == bytes.size() ||
+		   (expected <= bytes.size() && expected + 4 >= bytes.size());
+}
+
 static float f(const std::uint8_t *p)
 {
+	const std::uint32_t bits = read_le_u32(p);
 	float v;
-	std::memcpy(&v, p, 4);
+	std::memcpy(&v, &bits, sizeof(v));
 	return v;
 }
 std::vector<Triangle> parse_binary_stl(const std::vector<std::uint8_t> &b)
 {
 	if (b.size() < 84)
 		throw std::runtime_error("STL too short");
-	std::uint32_t n = b[80] | b[81] << 8 | b[82] << 16 | b[83] << 24;
+	const std::uint32_t n = read_le_u32(b.data() + 80);
 	const std::uint64_t expected = 84ull + 50ull * n;
 	// Binary STL can legitimately have a header beginning with "solid"; only
 	// reject it when its declared binary layout does not fit the payload.
 	const bool solid = b.size() >= 5 && std::memcmp(b.data(), "solid", 5) == 0;
-	if (solid && expected != b.size() && expected + 4 < b.size())
+	if (solid && !looks_like_binary_with_solid_header(b))
 		throw std::runtime_error("ASCII STL not supported");
 	if (b.size() < expected)
 		throw std::runtime_error("STL truncated");
@@ -45,13 +63,15 @@ std::pair<std::array<float, 3>, std::array<float, 3>> stl_bbox(
 			hi{-INFINITY, -INFINITY, -INFINITY};
 	bool any = false;
 	for (auto &t : ts)
-		for (auto &v : t)
-			if (std::isfinite(v[0]) && std::isfinite(v[1]) && std::isfinite(v[2]))
-				for (int i = 0; i < 3; ++i) {
-					lo[i] = std::min(lo[i], v[i]);
-					hi[i] = std::max(hi[i], v[i]);
-					any = true;
-				}
+		for (auto &v : t) {
+			if (!std::isfinite(v[0]) || !std::isfinite(v[1]) || !std::isfinite(v[2]))
+				continue;
+			for (int i = 0; i < 3; ++i) {
+				lo[i] = std::min(lo[i], v[i]);
+				hi[i] = std::max(hi[i], v[i]);
+			}
+			any = true;
+		}
 	if (!any)
 		throw std::runtime_error("STL has no finite vertices");
 	return {lo, hi};

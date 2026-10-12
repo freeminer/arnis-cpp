@@ -3,6 +3,7 @@
 #include "../block_definitions.h"
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace arnis::connected_blocks
 {
@@ -14,7 +15,7 @@ enum class Family
 	Wall,
 	Fence
 };
-Family family(const Block &b)
+Family family(const Block &b, const WorldEditor *editor = nullptr)
 {
 	if (b == IRON_BARS || b == COBBLESTONE_WALL || b == ANDESITE_WALL ||
 			b == STONE_BRICK_WALL || b == BRICK_WALL)
@@ -22,6 +23,15 @@ Family family(const Block &b)
 	if (b == OAK_FENCE || b == EARTH_FENCE_CHAINLINK || b == EARTH_FENCE_BARBED ||
 			b == EARTH_FENCE_PICKET || b == EARTH_FENCE_WROUGHT)
 		return Family::Fence;
+	if (editor) {
+		if (const auto name = editor->block_name(b)) {
+			const std::string_view view(*name);
+			if (view.ends_with("_wall"))
+				return Family::Wall;
+			if (view.ends_with("_fence"))
+				return Family::Fence;
+		}
+	}
 	return Family::None;
 }
 bool flag(bool v)
@@ -30,13 +40,13 @@ bool flag(bool v)
 }
 void refresh(WorldEditor &e, const Block &b, int x, int y, int z)
 {
-	const auto own = family(b);
+	const auto own = family(b, &e);
 	const int dx[] = {0, 0, 1, -1};
 	const int dz[] = {-1, 1, 0, 0};
 	bool side[4]{};
 	for (int i = 0; i < 4; ++i) {
 		auto n = e.get_block_absolute(x + dx[i], y, z + dz[i]);
-		side[i] = n && family(*n) == own;
+		side[i] = n && family(*n, &e) == own;
 	}
 	BlockWithProperties joined =
 			own == Family::Fence || b == IRON_BARS
@@ -50,17 +60,21 @@ bool is_connectable(const Block &b)
 {
 	return family(b) != Family::None;
 }
+bool is_connectable(const WorldEditor &editor, const Block &b)
+{
+	return family(b, &editor) != Family::None;
+}
 void place_connected(WorldEditor &e, const Block &b, int x, int y, int z)
 {
 	e.set_block_absolute(b, x, y, z);
-	if (!e.get_block_absolute(x, y, z) || !is_connectable(b))
+	if (!e.get_block_absolute(x, y, z) || family(b, &e) == Family::None)
 		return;
 	refresh(e, b, x, y, z);
 	const int dx[] = {0, 0, 1, -1};
 	const int dz[] = {-1, 1, 0, 0};
 	for (int i = 0; i < 4; ++i) {
 		auto n = e.get_block_absolute(x + dx[i], y, z + dz[i]);
-		if (n && family(*n) == family(b))
+		if (n && family(*n, &e) == family(b, &e))
 			refresh(e, *n, x + dx[i], y, z + dz[i]);
 	}
 }

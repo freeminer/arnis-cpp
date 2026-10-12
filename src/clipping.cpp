@@ -182,8 +182,20 @@ std::vector<ProcessedNode> clip_way_to_bbox(
 std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 		const std::vector<ProcessedNode> &ring, const XZBBox &box)
 {
-	if (ring.size() < 3 || !closed(ring))
+	// Match Rust's water-ring closure tolerance. OSM rings can end at adjacent
+	// projected cells after coordinate quantization even when their node IDs
+	// differ; rejecting those here drops otherwise valid water polygons.
+	const bool water_ring_closed =
+			ring.size() >= 3 &&
+			(ring.front().id == ring.back().id ||
+					(std::abs(ring.front().x - ring.back().x) <= 1 &&
+							std::abs(ring.front().z - ring.back().z) <= 1));
+	if (!water_ring_closed)
 		return std::nullopt;
+	if (std::all_of(ring.begin(), ring.end(), [&](const auto &node) {
+			return inside_box({double(node.x), double(node.z)}, box);
+		}))
+		return ring;
 	std::vector<P> input;
 	input.reserve(ring.size());
 	for (const auto &node : ring)

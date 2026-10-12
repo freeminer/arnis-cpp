@@ -11,6 +11,7 @@
 #include "ground_generation.h"
 #include "../../arnis_adapter.h"
 
+#include <algorithm>
 #include <iterator>
 #include <array>
 #include <cmath>
@@ -724,9 +725,21 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 	const int chunk_min_z = (min_z - max_spread) >> 4;
 	const int chunk_max_z = (max_z + max_spread) >> 4;
 	const auto geographic_bounds = editor.geographic_bounds();
+	const bool has_geographic_bounds =
+			std::all_of(geographic_bounds.begin(), geographic_bounds.end(),
+					[](double v) { return std::isfinite(v); }) &&
+			geographic_bounds[1] > geographic_bounds[0] &&
+			geographic_bounds[3] > geographic_bounds[2];
+	// Rust falls back to the 45N, 0E reference center when Args has no bbox.
+	// An unset C++ editor bbox is all zeroes; don't treat that as a measured
+	// equatorial area, which would switch tree-cover patches to jungle.
 	const double absolute_latitude =
-			std::abs((geographic_bounds[0] + geographic_bounds[1]) * .5);
-	const double center_longitude = (geographic_bounds[2] + geographic_bounds[3]) * .5;
+			has_geographic_bounds
+					? std::abs((geographic_bounds[0] + geographic_bounds[1]) * .5)
+					: 45.0;
+	const double center_longitude =
+			has_geographic_bounds ? (geographic_bounds[2] + geographic_bounds[3]) * .5
+								  : 0.0;
 	const int snow_y = editor.ground->snow_threshold();
 	const int alpine_from_y =
 			snow_y == std::numeric_limits<int>::max() ||

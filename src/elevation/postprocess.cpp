@@ -1572,7 +1572,11 @@ void smooth_built_up_gaussian(HeightGrid &heights, const CoverGrid &cover,
 			});
 	// Synthesize masked NaNs while reading each row, as Rust does; avoiding a
 	// full-sized copy of the elevation grid lowers the peak during city smoothing.
-	auto blurred = gaussian_blur_grid_masked(heights, surface, sigma);
+	auto blurred =
+			gaussian_blur_grid_masked(heights, surface, sigma, [&](double fraction) {
+				if (report)
+					report(0.5 + 0.5 * fraction);
+			});
 	for (std::size_t y = 0; y < h; ++y)
 		for (std::size_t x = 0; x < w; ++x) {
 			if (surface[y][x])

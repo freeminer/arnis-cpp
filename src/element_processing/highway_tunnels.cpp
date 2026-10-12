@@ -8,6 +8,7 @@
 #include <utility>
 
 #include "../bresenham.h"
+#include "../strict_parse.h"
 #include "../world_editor/floor_state.h"
 #include "bridges.h"
 #include "surfaces.h"
@@ -58,12 +59,9 @@ int highway_half_width(const ProcessedWay &way, double scale)
 
 int layer_extra(const ProcessedWay &way)
 {
-	int layer = 0;
-	if (auto it = way.tags.find("layer"); it != way.tags.end())
-		try {
-			layer = std::stoi(it->second);
-		} catch (...) {
-		}
+	const int layer = way.tags.find("layer") != way.tags.end()
+							  ? strict_parse::i32(way.tags.at("layer")).value_or(0)
+							  : 0;
 	return std::clamp(-(static_cast<int64_t>(layer) + 1), int64_t{0}, int64_t{8}) *
 		   LAYER_DROP;
 }

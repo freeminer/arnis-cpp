@@ -505,7 +505,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == LEVER)
 		return state("lever", {{"facing_direction", 2}, {"open_bit", false}});
 	if (block == CAULDRON)
-		return simple("cauldron");
+		return state("cauldron",
+				{{"cauldron_liquid", std::string("water")}, {"fill_level", 0}});
 	if (block == BEDROCK)
 		return simple("bedrock");
 	if (block == BLACKSTONE)
@@ -741,7 +742,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == MAGMA_BLOCK)
 		return simple("magma");
 	if (block == WATER_CAULDRON)
-		return simple("cauldron");
+		return state("cauldron",
+				{{"cauldron_liquid", std::string("water")}, {"fill_level", 6}});
 	if (block == SIGN)
 		return state("standing_sign", {{"ground_sign_direction", 0}});
 	if (block == STEEL_SIGN || block == TEXT_SIGN_SMALL || block == TEXT_SIGN_MEDIUM ||

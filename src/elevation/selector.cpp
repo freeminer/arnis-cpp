@@ -1,5 +1,6 @@
 #include "selector.h"
 #include <cmath>
+#include <exception>
 #include <iostream>
 
 namespace arnis::elevation
@@ -50,8 +51,17 @@ ElevationData Selector::raw_grid(
 		return out;
 	}
 	if (cached_.mode() != providers::SourceMode::Planetary) {
-		if (auto heights = providers::fetch_mapterhorn_terrain_grid(
-					cached_.root(), {a, b, c, d}, w, h)) {
+		std::optional<std::vector<std::vector<double>>> heights;
+		std::string fetch_error;
+		try {
+			heights = providers::fetch_mapterhorn_terrain_grid(
+					cached_.root(), {a, b, c, d}, w, h);
+		} catch (const std::exception &error) {
+			fetch_error = error.what();
+		} catch (...) {
+			fetch_error = "unknown error";
+		}
+		if (heights) {
 			const double missing_ratio = non_finite_ratio(*heights);
 			if (cached_.mode() != providers::SourceMode::Auto || missing_ratio <= 0.5) {
 				ElevationData out;
@@ -67,6 +77,12 @@ ElevationData Selector::raw_grid(
 					  << "% empty data. Falling back to 'aws'.\n";
 		}
 		if (cached_.mode() == providers::SourceMode::Auto) {
+			if (!fetch_error.empty())
+				std::cerr << "Warning: Elevation provider 'mapterhorn' failed: "
+						  << fetch_error << ". Falling back to 'aws'.\n";
+			else if (!heights)
+				std::cerr << "Warning: Elevation provider 'mapterhorn' failed. "
+						  << "Falling back to 'aws'.\n";
 			ElevationData out;
 			out.width = w;
 			out.height = h;
@@ -84,7 +100,7 @@ ElevationData Selector::grid(double a, double b, double c, double d, std::size_t
 		std::size_t h, const LandCoverRepairConfig &repair)
 {
 	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root(), cached_.mode());
-	return build_processed_grid(tiles, a, b, c, d, w, h, repair);
+	return build_processed_grid(tiles, a, b, c, d, w, h, repair, cached_.mode());
 }
 ElevationData Selector::normalized_grid(double a, double b, double c, double d,
 		std::size_t w, std::size_t h, double sea, double scale, double lo, double hi,
