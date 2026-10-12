@@ -18,6 +18,10 @@ Schematic tree_only(const Schematic &schem);
 // Rust's schematic contract rejects log-only assets (snags/cacti) from the
 // regional tree selector; keep this predicate available to pack loaders.
 bool has_leaves(const Schematic &schem);
+// Rust load_schem counterpart for callers that already hold compressed
+// Sponge schematic bytes (for example, asset providers that do not expose
+// filesystem paths).
+Schematic load_schem(const std::vector<std::uint8_t> &gzip_bytes);
 Schematic load_schem(const std::filesystem::path &file);
 // Weak asset cache: selectors share immutable voxels; no cache owns them forever.
 std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &file);

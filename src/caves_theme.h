@@ -27,7 +27,7 @@ enum class CaveTheme
 inline NormalNoise cave_theme_noise(std::int64_t seed, std::string_view name)
 {
 	auto factory = XoroRandom::from_seed(seed ^ 0x0DEC0DECL).fork_positional();
-	auto random = XoroRandom::from_hash_of(factory.first, factory.second, name);
+	auto random = factory.from_hash_of(name);
 	return NormalNoise::create(random, -7, {1.0});
 }
 

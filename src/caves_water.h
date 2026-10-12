@@ -25,6 +25,13 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		std::unordered_set<std::int64_t> *cave_air_out = nullptr,
 		WaterPlan *plan_out = nullptr);
 
+// Rust cave pipeline's contained lava-sea pass. It operates only on tracked
+// carved cave air, after water features have been applied and before schematics.
+void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &region,
+		int floor_y, const std::unordered_set<std::int64_t> &cave_air,
+		const std::unordered_set<std::int64_t> &water_cells,
+		std::unordered_set<std::int64_t> *basin_fluid = nullptr);
+
 // Rust caves::seal_floating_fluid_region counterpart. Run after all cave,
 // surface-water, and tunnel carving passes so fluid columns cannot hang over air.
 void seal_floating_fluid_region(

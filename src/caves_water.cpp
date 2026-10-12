@@ -135,30 +135,13 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 	}
 }
 
-void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &region,
-		int floor_y, const std::unordered_set<std::int64_t> &water_cells,
+void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
+		const CaveRect &region, int floor_y,
+		const std::unordered_set<std::int64_t> &cave_air,
+		const std::unordered_set<std::int64_t> &water_cells,
 		std::unordered_set<std::int64_t> *basin_fluid)
 {
-	const int lava_level = floor_y + 10;
-	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	const int min_y = std::max(floor_y + 2, write_min_y);
-	const int max_y = std::min(lava_level, write_max_y);
-	if (min_y > max_y)
-		return;
-	std::unordered_set<std::int64_t> cave_air;
-	std::size_t columns = static_cast<std::size_t>(region.max_x - region.min_x + 1) *
-						  static_cast<std::size_t>(region.max_z - region.min_z + 1);
-	cave_air.reserve(std::min<std::size_t>(columns * 4, 1'000'000));
-	for (int x = region.min_x; x <= region.max_x; ++x)
-		for (int z = region.min_z; z <= region.max_z; ++z) {
-			const int top =
-					std::min({editor.get_ground_level(x, z) - 8, max_y, write_max_y});
-			for (int y = min_y; y <= top; ++y)
-				if (!editor.block_exists_absolute(x, y, z))
-					cave_air.insert(pack_cave_pos(x, y, z));
-		}
-	if (cave_air.empty())
-		return;
+	const int lava_level = floor_y + 10; // Rust vy(-54), with vanilla floor at -64.
 	constexpr std::array<std::array<int, 3>, 6> neighbours = {
 			{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}};
 	auto is_open = [&](int x, int y, int z) {
@@ -168,10 +151,9 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 		return !editor.block_exists_absolute(x, y, z) && !cave_air.contains(p);
 	};
 	std::vector<std::int64_t> candidates;
-	candidates.reserve(cave_air.size());
 	for (const auto p : cave_air) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		if (y >= lava_level)
+		if (!region.contains(x, z) || y >= lava_level)
 			continue;
 		const bool exposed = std::any_of(neighbours.begin(), neighbours.end(),
 				[&, x = x, y = y, z = z](const auto &offset) {
@@ -230,6 +212,15 @@ void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &r
 		}
 	}
 }
+}
+
+void generate_deep_lava_sea(world_editor::WorldEditor &editor, const CaveRect &region,
+		int floor_y, const std::unordered_set<std::int64_t> &cave_air,
+		const std::unordered_set<std::int64_t> &water_cells,
+		std::unordered_set<std::int64_t> *basin_fluid)
+{
+	generate_deep_lava_sea_impl(
+			editor, region, floor_y, cave_air, water_cells, basin_fluid);
 }
 
 void generate_water_features(world_editor::WorldEditor &editor,
@@ -428,7 +419,6 @@ void generate_water_features(world_editor::WorldEditor &editor,
 			if (region.contains(x, z))
 				cave_air_out->insert(p);
 		}
-	generate_deep_lava_sea(editor, region, floor_y, water_cells, basin_fluid);
 	if (plan_out) {
 		plan_out->carved = std::move(carved_cells);
 		plan_out->water = std::move(water_cells);

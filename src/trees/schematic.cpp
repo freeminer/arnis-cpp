@@ -81,7 +81,11 @@ Schematic load_schem(const std::filesystem::path &file)
 	if (!in)
 		return {};
 	std::vector<std::uint8_t> data((std::istreambuf_iterator<char>(in)), {});
-	return tree_only(structures::decode_sponge_schem(data));
+	return load_schem(data);
+}
+Schematic load_schem(const std::vector<std::uint8_t> &gzip_bytes)
+{
+	return tree_only(structures::decode_sponge_schem(gzip_bytes));
 }
 std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &file)
 {

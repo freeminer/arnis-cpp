@@ -1931,6 +1931,9 @@ bool generate_world(WorldEditor &editor,
 			caves::generate_water_features(editor, cave_world, cave_region, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, cave_shape, &cave_basin_fluid,
 					&cave_water_cells, &cave_air, &cave_water_plan);
+			caves::generate_deep_lava_sea(editor, cave_region,
+					world_editor::terrain_floor_y(), cave_air, cave_water_cells,
+					&cave_basin_fluid);
 			caves::stamp_schematics_region(editor, cave_region, cave_air, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, &cave_basin_fluid);
 			caves::place_ores_region(
@@ -2329,6 +2332,9 @@ bool generate_world(WorldEditor &editor,
 			caves::generate_water_features(editor, cave_world, cave_world, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, cave_shape, &cave_basin_fluid,
 					&cave_water_cells, &cave_air, &cave_water_plan);
+			caves::generate_deep_lava_sea(editor, cave_world,
+					world_editor::terrain_floor_y(), cave_air, cave_water_cells,
+					&cave_basin_fluid);
 			caves::stamp_schematics_region(editor, cave_world, cave_air, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, &cave_basin_fluid);
 			caves::place_ores_region(editor,

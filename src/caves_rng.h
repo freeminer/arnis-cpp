@@ -9,6 +9,18 @@ struct Seed128
 {
 	std::int64_t lo, hi;
 };
+class XoroRandom;
+
+class PositionalFactory
+{
+	std::int64_t lo_, hi_;
+	explicit PositionalFactory(std::int64_t lo, std::int64_t hi) : lo_(lo), hi_(hi) {}
+	friend class XoroRandom;
+
+public:
+	XoroRandom from_hash_of(std::string_view name) const;
+};
+
 class XoroRandom
 {
 	std::int64_t lo_, hi_;
@@ -24,6 +36,6 @@ public:
 	double next_double();
 	float next_float();
 	std::int32_t next_int(std::int32_t bound);
-	std::pair<std::int64_t, std::int64_t> fork_positional();
+	PositionalFactory fork_positional();
 };
 }

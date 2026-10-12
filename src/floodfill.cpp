@@ -99,7 +99,7 @@ static Polygon create_polygon(const std::vector<std::pair<int, int>> &coords)
 }
 
 /// Optimized flood fill for larger polygons with multi-seed detection for complex shapes like U-shapes
-[[maybe_unused]] static std::vector<std::pair<int, int>> optimized_flood_fill_area(
+static std::vector<std::pair<int, int>> optimized_flood_fill_area(
 		const std::vector<std::pair<int, int>> &polygon_coords,
 		const std::chrono::milliseconds *timeout, int32_t min_x, int32_t max_x,
 		int32_t min_z, int32_t max_z)
@@ -145,11 +145,7 @@ static Polygon create_polygon(const std::vector<std::pair<int, int>> &coords)
 			queue.emplace(x, z);
 			visited.insert(x, z);
 
-			std::size_t processed_since_timeout_check = 0;
 			while (!queue.empty()) {
-				if (timeout && (++processed_since_timeout_check & 1023U) == 0 &&
-						timeout_exceeded(start_time, *timeout))
-					return filled_area;
 				auto [curr_x, curr_z] = queue.front();
 				queue.pop();
 
@@ -180,7 +176,7 @@ static Polygon create_polygon(const std::vector<std::pair<int, int>> &coords)
 }
 
 /// Original flood fill algorithm with enhanced multi-seed detection for complex shapes
-[[maybe_unused]] static std::vector<std::pair<int, int>> original_flood_fill_area(
+static std::vector<std::pair<int, int>> original_flood_fill_area(
 		const std::vector<std::pair<int, int>> &polygon_coords,
 		const std::chrono::milliseconds *timeout, int32_t min_x, int32_t max_x,
 		int32_t min_z, int32_t max_z)
@@ -225,11 +221,7 @@ static Polygon create_polygon(const std::vector<std::pair<int, int>> &coords)
 			queue.emplace(x, z);
 			visited.insert(x, z);
 
-			std::size_t processed_since_timeout_check = 0;
 			while (!queue.empty()) {
-				if (timeout && (++processed_since_timeout_check & 1023U) == 0 &&
-						timeout_exceeded(start_time, *timeout))
-					return filled_area;
 				auto [curr_x, curr_z] = queue.front();
 				queue.pop();
 
@@ -262,10 +254,8 @@ static Polygon create_polygon(const std::vector<std::pair<int, int>> &coords)
 // caller's outline pass, like geo::Contains.
 static std::vector<std::pair<int, int>> scanline_fill_area(
 		const std::vector<std::pair<int, int>> &polygon_coords, int32_t min_x,
-		int32_t max_x, int32_t min_z, int32_t max_z,
-		const std::chrono::milliseconds *timeout)
+		int32_t max_x, int32_t min_z, int32_t max_z)
 {
-	const auto start_time = std::chrono::steady_clock::now();
 	const std::int64_t rows = static_cast<std::int64_t>(max_z) - min_z + 1;
 	const std::int64_t edges = static_cast<std::int64_t>(polygon_coords.size()) - 1;
 	if (rows <= 0 || edges <= 0 || rows > MAX_SCANLINE_EDGE_TESTS / edges)
@@ -277,43 +267,32 @@ static std::vector<std::pair<int, int>> scanline_fill_area(
 	};
 	std::vector<Span> spans;
 	std::vector<double> crossings;
-	std::vector<std::pair<std::int64_t, std::int64_t>> horizontal_boundaries;
 	std::int64_t cells = 0;
 	for (std::int64_t zi = min_z; zi <= max_z; ++zi) {
-		if (timeout && ((zi - min_z) & 63) == 0 &&
-				timeout_exceeded(start_time, *timeout))
-			break;
 		const auto z = static_cast<int32_t>(zi);
 		const double zf = static_cast<double>(z);
 		crossings.clear();
-		horizontal_boundaries.clear();
 		for (std::size_t i = 1; i < polygon_coords.size(); ++i) {
 			const auto [ix0, iz0] = polygon_coords[i - 1];
 			const auto [ix1, iz1] = polygon_coords[i];
-			if (iz0 == z && iz1 == z) {
-				horizontal_boundaries.emplace_back(
-						std::min<std::int64_t>(ix0, ix1),
-						std::max<std::int64_t>(ix0, ix1));
-			}
 			const double x0 = static_cast<double>(ix0), z0 = static_cast<double>(iz0);
 			const double x1 = static_cast<double>(ix1), z1 = static_cast<double>(iz1);
 			// Half-open in z: a vertex on the row contributes once, not twice.
 			if ((z0 <= zf) == (z1 <= zf))
 				continue;
-			crossings.push_back(x0 + (zf - z0) * (x1 - x0) / (z1 - z0));
+			const double t = (zf - z0) / (z1 - z0);
+			crossings.push_back(x0 + t * (x1 - x0));
 		}
 		if (crossings.size() < 2)
 			continue;
 		std::sort(crossings.begin(), crossings.end());
-		std::sort(horizontal_boundaries.begin(), horizontal_boundaries.end());
 		auto append_span = [&](std::int64_t first, std::int64_t last) {
 			if (last < first)
 				return true;
 			cells += last - first + 1;
 			if (cells > MAX_FLOOD_FILL_AREA)
 				return false;
-			spans.push_back(
-					{z, static_cast<int32_t>(first), static_cast<int32_t>(last)});
+			spans.push_back({z, static_cast<int32_t>(first), static_cast<int32_t>(last)});
 			return true;
 		};
 		for (std::size_t i = 1; i < crossings.size(); i += 2) {
@@ -325,35 +304,15 @@ static std::vector<std::pair<int, int>> scanline_fill_area(
 			if (raw_last < min_x || raw_first > max_x || last_clamped < first_clamped)
 				continue;
 
-			// A scanline crossing test cannot see a horizontal edge lying exactly
-			// on this integer row. Subtract those boundary intervals explicitly so
-			// the result retains strict point-in-polygon/Contains semantics.
-			std::int64_t cursor = first_clamped;
-			for (const auto &[boundary_first, boundary_last] : horizontal_boundaries) {
-				if (boundary_last < cursor)
-					continue;
-				if (boundary_first > last_clamped)
-					break;
-				if (!append_span(cursor,
-							std::min(last_clamped, boundary_first - 1)))
-					return {};
-				cursor = std::max(cursor, boundary_last + 1);
-				if (cursor > last_clamped)
-					break;
-			}
-			if (!append_span(cursor, last_clamped))
+			if (!append_span(first_clamped, last_clamped))
 				return {};
 		}
 	}
 
 	std::vector<std::pair<int, int>> filled;
 	filled.reserve(static_cast<std::size_t>(cells));
-	std::size_t emitted_since_timeout_check = 0;
 	for (const auto &[z, first, last] : spans) {
 		for (std::int64_t xi = first; xi <= last; ++xi) {
-			if (timeout && (++emitted_since_timeout_check & 4095U) == 0 &&
-					timeout_exceeded(start_time, *timeout))
-				return filled;
 			filled.emplace_back(static_cast<int>(xi), z);
 		}
 	}
@@ -366,7 +325,7 @@ std::vector<std::pair<int, int>> flood_fill_area(
 		const std::vector<std::pair<int, int>> &polygon_coords,
 		const std::chrono::milliseconds *timeout)
 {
-	if (polygon_coords.size() < 4) {
+	if (polygon_coords.size() < 3) {
 		return {}; // Not a valid polygon
 	}
 	// Do not invent a closing edge for an open OSM way. Besides being more
@@ -389,11 +348,20 @@ std::vector<std::pair<int, int>> flood_fill_area(
 	int32_t min_z = minmax_z.first->second;
 	int32_t max_z = minmax_z.second->second;
 
-	// Scanline filling tests each edge once per row instead of running a full
-	// point-in-polygon test for every candidate cell. This avoids the O(area ×
-	// edges) hotspot seen in live EmergeThread traces for medium-sized polygons.
-	return scanline_fill_area(
-			polygon_coords, min_x, max_x, min_z, max_z, timeout);
+	const std::int64_t width = static_cast<std::int64_t>(max_x) - min_x + 1;
+	const std::int64_t height = static_cast<std::int64_t>(max_z) - min_z + 1;
+	// Match Rust's strategy: keep bitmap flood fills for bounded rings, and use
+	// scanline rasterization only when the visited bitmap would exceed its cap.
+	if (width <= 0 || height <= 0 || width > MAX_FLOOD_FILL_AREA / height) {
+		return scanline_fill_area(polygon_coords, min_x, max_x, min_z, max_z);
+	}
+	const std::int64_t area = width * height;
+	if (area > MAX_FLOOD_FILL_AREA)
+		return scanline_fill_area(polygon_coords, min_x, max_x, min_z, max_z);
+	if (area < 50'000)
+		return optimized_flood_fill_area(
+				polygon_coords, timeout, min_x, max_x, min_z, max_z);
+	return original_flood_fill_area(polygon_coords, timeout, min_x, max_x, min_z, max_z);
 }
 
 }

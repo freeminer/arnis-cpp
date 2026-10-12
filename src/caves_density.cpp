@@ -137,7 +137,7 @@ CaveGen::CaveGen(std::int64_t seed, int floor_y, int world_max_y) :
 	noises_.reserve(NOISES.size());
 	for (const auto &spec : NOISES) {
 		const std::string name = std::string("minecraft:") + spec.id;
-		XoroRandom random = XoroRandom::from_hash_of(factory.first, factory.second, name);
+		XoroRandom random = factory.from_hash_of(name);
 		noises_.push_back(
 				NormalNoise::create(random, spec.first_octave, spec.amplitudes));
 	}

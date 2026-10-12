@@ -3433,6 +3433,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					stair, sx, sy, sz, std::vector<Block>{AIR}, std::nullopt);
 		}
 	};
+	const auto put_threshold = [&](int x, int z, int nx, int nz) {
+		const Block threshold =
+				base_course_block != wall_block ? base_course_block : STONE_BRICKS;
+		editor->set_block_absolute(
+				threshold, x + nx, start_y_offset + abs_terrain_offset, z + nz);
+		put_doorstep(x, z, nx, nz);
+	};
 	const bool mapped_entrance = std::any_of(
 			element.nodes.begin(), element.nodes.end(), [](const ProcessedNode &node) {
 				return node.tags.contains("entrance") || node.tags.contains("door");
@@ -3448,9 +3455,19 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			if ((!node.tags.get("entrance").empty() &&
 						node.tags.get("entrance") != "no") ||
 					(!node.tags.get("door").empty() && node.tags.get("door") != "no")) {
-				if (const auto level = parse_i32_tag(node.tags, "level");
-						level && *level != 0)
-					continue;
+				if (const auto level_it = node.tags.find("level");
+						level_it != node.tags.end()) {
+					std::string_view level_text = level_it->second;
+					while (!level_text.empty() &&
+							std::isspace(static_cast<unsigned char>(level_text.front())))
+						level_text.remove_prefix(1);
+					while (!level_text.empty() &&
+							std::isspace(static_cast<unsigned char>(level_text.back())))
+						level_text.remove_suffix(1);
+					if (const auto level = strict_parse::f64(level_text);
+							level && *level != 0.0)
+						continue;
+				}
 				if (!rendered_entrances.emplace(node.x, node.z).second)
 					continue;
 				// An outline node belongs to the segment before and/or after it.
@@ -3489,10 +3506,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							entrance_façade->len >= 8 &&
 							(entrance_façade->tangent.first == 0 ||
 									entrance_façade->tangent.second == 0);
-					const auto hinge = double_door ? "left" : "right";
+					bool second_leaf = false;
 					put_entrance_door(door_block, node.x, node.z,
 							entrance_façade->normal.first, entrance_façade->normal.second,
-							hinge);
+							"left");
 					if (double_door &&
 							!passage_at(effective_passages, node.x + tangent.first,
 									node.z + tangent.second) &&
@@ -3503,32 +3520,19 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								entrance_façade->normal.second, "right");
 						facade_plan.mark_door_column(
 								node.x + tangent.first, node.z + tangent.second);
+						second_leaf = true;
 					}
 					interior_entries.push_back(
 							{{node.x + inward.first, node.z + inward.second}, inward});
 					if (!signage_anchor)
 						signage_anchor = building_facade::FacadeAnchor{node.x, node.z,
 								entrance_façade->normal, 0, 0, std::pair{node.x, node.z}};
-					const int step_x = node.x + entrance_façade->normal.first;
-					const int step_z = node.z + entrance_façade->normal.second;
-					// Rust only emits a threshold when the exterior run actually
-					// reaches terrain; suppress floating steps on sloped entrances.
-					if (editor->get_ground_level(step_x, step_z) <= start_y_offset) {
-						const Block threshold = base_course_block != wall_block
-														? base_course_block
-														: STONE_BRICKS;
-						editor->set_block_absolute(threshold, step_x,
-								start_y_offset + abs_terrain_offset, step_z,
-								std::vector<Block>{AIR});
-					}
-					put_doorstep(node.x, node.z, entrance_façade->normal.first,
+					put_threshold(node.x, node.z, entrance_façade->normal.first,
 							entrance_façade->normal.second);
-					// Rust hangs a small lantern over mapped entrances. Keep it on
-					// the facade's outward side so it does not occupy the doorway.
-					if (editor->get_ground_level(step_x, step_z) <= start_y_offset)
-						editor->set_block_absolute(SEA_LANTERN, step_x,
-								start_y_offset + abs_terrain_offset + 3, step_z,
-								std::vector<Block>{AIR});
+					if (second_leaf)
+						put_threshold(node.x + tangent.first, node.z + tangent.second,
+								entrance_façade->normal.first,
+								entrance_façade->normal.second);
 				} else {
 					// Still provide the interior with a usable entry when no road-based
 					// facade plan exists: infer the inward neighbour from the actual
@@ -3558,14 +3562,33 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			}
 		}
 		if (!mapped_entrance) {
-			std::optional<std::size_t> entrance_segment = facade_plan.front_segment;
-			if (!entrance_segment)
+			const bool corner_entrance =
+					facade_plan.corner && (category == BuildingCategory::Commercial ||
+												  category == BuildingCategory::Hotel ||
+												  category == BuildingCategory::Office);
+			std::optional<std::size_t> entrance_segment;
+			if (corner_entrance) {
+				const auto &corner = *facade_plan.corner;
+				const auto length = [&](std::size_t i) {
+					return i < facade_plan.segments.size() && facade_plan.segments[i]
+								   ? facade_plan.segments[i]->len
+								   : 0;
+				};
+				entrance_segment = length(corner.seg_a) >= length(corner.seg_b)
+										   ? corner.seg_a
+										   : corner.seg_b;
+			} else if (facade_plan.front_segment) {
+				entrance_segment = facade_plan.front_segment;
+			} else {
 				for (std::size_t i = 0; i < facade_plan.segments.size(); ++i)
 					if (facade_plan.segments[i] &&
+							facade_plan.segments[i]->facade_class !=
+									building_facade::FacadeClass::Party &&
 							(!entrance_segment ||
 									facade_plan.segments[i]->len >
 											facade_plan.segments[*entrance_segment]->len))
 						entrance_segment = i;
+			}
 			if (entrance_segment && *entrance_segment + 1 < element.nodes.size() &&
 					facade_plan.segments[*entrance_segment]) {
 				const auto &a = element.nodes[*entrance_segment];
@@ -3575,9 +3598,23 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				if (points.size() >= 5) {
 					auto position_rng =
 							element_rng_salted(clean_visual_seed, 0xD00E57E900000011ULL);
-					const int jitter = int(position_rng.uniform(3)) - 1;
-					const std::size_t center = std::clamp<std::size_t>(
-							points.size() / 2 + jitter, 2, points.size() - 3);
+					std::size_t target = points.size() / 2;
+					if (corner_entrance) {
+						const int from_corner = 2 + int(position_rng.uniform(2));
+						const bool corner_at_end =
+								facade_plan.corner->seg_a == *entrance_segment;
+						target = corner_at_end
+										 ? points.size() - 1 -
+												   static_cast<std::size_t>(from_corner)
+										 : static_cast<std::size_t>(from_corner);
+					} else {
+						const int jitter = int(position_rng.uniform(3)) - 1;
+						target = static_cast<std::size_t>(std::clamp<std::ptrdiff_t>(
+								static_cast<std::ptrdiff_t>(points.size() / 2) + jitter,
+								2, static_cast<std::ptrdiff_t>(points.size()) - 3));
+					}
+					const std::size_t center =
+							std::clamp<std::size_t>(target, 2, points.size() - 3);
 					std::optional<std::pair<int, int>> door;
 					for (const int offset : {0, 1, -1, 2, -2}) {
 						const auto index = std::clamp<int>(
@@ -3585,7 +3622,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const int dx = std::get<0>(points[index]),
 								  dz = std::get<2>(points[index]);
 						if (!passage_at(effective_passages, dx, dz) &&
-								!facade_plan.is_party(dx, dz)) {
+								!facade_plan.is_party(dx, dz) &&
+								!is_flat_column(dx, dz)) {
 							door = {dx, dz};
 							break;
 						}
@@ -3625,14 +3663,26 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							facade_plan.mark_door_column(
 									door->first + segment.tangent.first,
 									door->second + segment.tangent.second);
+							put_threshold(door->first + segment.tangent.first,
+									door->second + segment.tangent.second,
+									segment.normal.first, segment.normal.second);
 						}
-						const bool formal = category == BuildingCategory::Commercial ||
-											category == BuildingCategory::Office ||
-											category == BuildingCategory::Hotel;
-						if ((formal || storefront) &&
+						const bool canopy =
+								(double_door ||
+										category == BuildingCategory::Commercial ||
+										category == BuildingCategory::Hotel) &&
 								element_rng_salted(
 										clean_visual_seed, 0xD00E57E900000013ULL)
-										.random_bool(.6))
+										.random_bool(.6);
+						const bool lantern =
+								!canopy &&
+								(category == BuildingCategory::House ||
+										category == BuildingCategory::Residential ||
+										category == BuildingCategory::Historic) &&
+								element_rng_salted(
+										clean_visual_seed, 0xD00E57E900000013ULL)
+										.random_bool(.35);
+						const auto set_trapdoor = [&](int x, int y, int z) {
 							editor->set_block_with_properties_absolute(
 									BlockWithProperties{trapdoor_block,
 											{{"half", "top"}, {"open", "false"},
@@ -3641,19 +3691,28 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																	segment.normal.first,
 																	segment.normal
 																			.second)}}},
-									door->first + segment.normal.first,
-									start_y_offset + abs_terrain_offset + 3,
-									door->second + segment.normal.second,
-									std::vector<Block>{AIR}, std::nullopt);
-						const int lantern_x = door->first + segment.normal.first;
-						const int lantern_z = door->second + segment.normal.second;
-						put_doorstep(door->first, door->second, segment.normal.first,
+									x, y, z, std::vector<Block>{AIR}, std::nullopt);
+						};
+						if (canopy) {
+							for (int t = -1; t <= (double_door ? 2 : 1); ++t)
+								set_trapdoor(door->first + segment.normal.first +
+													 segment.tangent.first * t,
+										start_y_offset + abs_terrain_offset + 3,
+										door->second + segment.normal.second +
+												segment.tangent.second * t);
+						} else if (lantern) {
+							const int lantern_x = door->first + segment.normal.first;
+							const int lantern_z = door->second + segment.normal.second;
+							set_trapdoor(lantern_x,
+									start_y_offset + abs_terrain_offset + 4, lantern_z);
+							const BlockWithProperties hanging_lantern{
+									LANTERN, {{"hanging", "true"}}};
+							editor->set_block_with_properties_absolute(hanging_lantern,
+									lantern_x, start_y_offset + abs_terrain_offset + 3,
+									lantern_z, std::vector<Block>{AIR}, std::nullopt);
+						}
+						put_threshold(door->first, door->second, segment.normal.first,
 								segment.normal.second);
-						if (editor->get_ground_level(lantern_x, lantern_z) <=
-								start_y_offset)
-							editor->set_block_absolute(SEA_LANTERN, lantern_x,
-									start_y_offset + abs_terrain_offset + 3, lantern_z,
-									std::vector<Block>{AIR});
 					}
 				}
 			}
@@ -3763,7 +3822,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				condition != BuildingCondition::Construction &&
 				condition != BuildingCondition::Ruined &&
 				category != BuildingCategory::Garage &&
-				category != BuildingCategory::Shed && !facade_plan.segments.empty()) {
+				category != BuildingCategory::Shed &&
+				category != BuildingCategory::Greenhouse &&
+				!facade_plan.segments.empty()) {
 			const auto &units = interior_plan->floors.front();
 			const auto unit_of = [&](int x, int z) {
 				std::size_t nearest = 0;
@@ -3858,17 +3919,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						x + segment.normal.first, z + segment.normal.second);
 				put_entrance_door(door_block, x, z, segment.normal.first,
 						segment.normal.second, "left");
-				const int step_x = x + segment.normal.first;
-				const int step_z = z + segment.normal.second;
-				if (editor->get_ground_level(step_x, step_z) <= start_y_offset) {
-					const Block threshold = base_course_block != wall_block
-													? base_course_block
-													: STONE_BRICKS;
-					editor->set_block_absolute(threshold, step_x,
-							start_y_offset + abs_terrain_offset, step_z,
-							std::vector<Block>{AIR});
-				}
-				put_doorstep(x, z, segment.normal.first, segment.normal.second);
+				put_threshold(x, z, segment.normal.first, segment.normal.second);
 				interior_entries.push_back(
 						{{x - segment.normal.first, z - segment.normal.second},
 								{-segment.normal.first, -segment.normal.second}});

@@ -102,8 +102,8 @@ PerlinNoise PerlinNoise::create(
 		if (amplitudes[i] == 0.0)
 			continue;
 		const int octave = first_octave + static_cast<int>(i);
-		XoroRandom octave_random = XoroRandom::from_hash_of(
-				factory.first, factory.second, "octave_" + std::to_string(octave));
+		XoroRandom octave_random =
+				factory.from_hash_of("octave_" + std::to_string(octave));
 		out.levels_[i].emplace(octave_random);
 	}
 	out.lowest_frequency_input_factor_ = std::pow(2.0, first_octave);

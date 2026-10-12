@@ -31,6 +31,19 @@ namespace arnis::ground_generation
 namespace
 {
 
+constexpr int CHUNK_SIZE = 16;
+
+int chunk_index(int coordinate)
+{
+	const int quotient = coordinate / CHUNK_SIZE;
+	return coordinate % CHUNK_SIZE < 0 ? quotient - 1 : quotient;
+}
+
+int chunk_origin(int chunk)
+{
+	return chunk * CHUNK_SIZE;
+}
+
 class WaterColumnMemo
 {
 	int base_x_{};
@@ -47,7 +60,7 @@ class WaterColumnMemo
 
 public:
 	WaterColumnMemo(int chunk_x, int chunk_z) :
-			base_x_((chunk_x << 4) - 1), base_z_((chunk_z << 4) - 1)
+			base_x_(chunk_origin(chunk_x) - 1), base_z_(chunk_origin(chunk_z) - 1)
 	{
 	}
 
@@ -80,8 +93,8 @@ struct ChunkGroundCache
 			int min_x, int max_x, int min_z, int max_z)
 	{
 		ChunkGroundCache cache;
-		cache.base_x = chunk_x << 4;
-		cache.base_z = chunk_z << 4;
+		cache.base_x = chunk_origin(chunk_x);
+		cache.base_z = chunk_origin(chunk_z);
 		cache.min_x = min_x;
 		cache.max_x = max_x;
 		cache.min_z = min_z;
@@ -532,17 +545,16 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 													  : std::numeric_limits<int>::max(),
 			editor.ground ? editor.ground->blocks_per_meter() : 0.0, center_latitude,
 			args.rotation);
-	const auto chunk_of = [](int v) { return v >= 0 ? v / 16 : -(((-v) + 15) / 16); };
-	for (int chunk_x = chunk_of(min_x); chunk_x <= chunk_of(max_x); ++chunk_x) {
+	for (int chunk_x = chunk_index(min_x); chunk_x <= chunk_index(max_x); ++chunk_x) {
 		const int chunk_min_x = std::max(min_x, chunk_x * 16);
 		const int chunk_max_x = std::min(max_x, chunk_x * 16 + 15);
-		for (int chunk_z = chunk_of(min_z); chunk_z <= chunk_of(max_z); ++chunk_z) {
+		for (int chunk_z = chunk_index(min_z); chunk_z <= chunk_index(max_z); ++chunk_z) {
 			const int chunk_min_z = std::max(min_z, chunk_z * 16);
 			const int chunk_max_z = std::min(max_z, chunk_z * 16 + 15);
 			double forest_fern_share = .12;
 			if (editor.ground) {
-				const int sample_x = (chunk_x << 4) + 8;
-				const int sample_z = (chunk_z << 4) + 8;
+				const int sample_x = chunk_origin(chunk_x) + 8;
+				const int sample_z = chunk_origin(chunk_z) + 8;
 				const auto eco = editor.ground->ecoregion_at(
 						editor.ground_point(sample_x, sample_z));
 				const auto habitat = ground_decoration::habitat(land_cover::LC_TREE_COVER,
@@ -565,10 +577,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			};
 			int column_fill_y_min = world_editor::terrain_floor_y() + 1;
 			if (args.fillground) {
-				const bool chunk_fully_in_bbox = chunk_min_x == (chunk_x << 4) &&
-												 chunk_max_x == (chunk_x << 4) + 15 &&
-												 chunk_min_z == (chunk_z << 4) &&
-												 chunk_max_z == (chunk_z << 4) + 15;
+				const bool chunk_fully_in_bbox =
+						chunk_min_x == chunk_origin(chunk_x) &&
+						chunk_max_x == chunk_origin(chunk_x) + 15 &&
+						chunk_min_z == chunk_origin(chunk_z) &&
+						chunk_max_z == chunk_origin(chunk_z) + 15;
 				const bool rotated_in =
 						chunk_fully_in_bbox &&
 						(!editor.ground || (editor.ground->is_in_rotated_bounds(
@@ -584,9 +597,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					if (ground_cache)
 						min_ground_y = *std::min_element(
 								ground_cache->grid.begin(), ground_cache->grid.end());
-					const int bottom_section = chunk_of(world_editor::terrain_floor_y());
+					const int bottom_section =
+							chunk_index(world_editor::terrain_floor_y());
 					// section_top = section_y*16 + 15 <= min_ground_y - 3.
-					const int top_section = chunk_of(min_ground_y - 18);
+					const int top_section = chunk_index(min_ground_y - 18);
 					const int section_min = std::numeric_limits<std::int8_t>::min();
 					const int section_max = std::numeric_limits<std::int8_t>::max();
 					if (bottom_section >= section_min && bottom_section <= section_max &&

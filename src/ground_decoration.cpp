@@ -720,10 +720,10 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 			min_x > max_x || min_z > max_z)
 		return;
 	constexpr int max_spread = 7;
-	const int chunk_min_x = (min_x - max_spread) >> 4;
-	const int chunk_max_x = (max_x + max_spread) >> 4;
-	const int chunk_min_z = (min_z - max_spread) >> 4;
-	const int chunk_max_z = (max_z + max_spread) >> 4;
+	const int chunk_min_x = div_euclid(min_x - max_spread, 16);
+	const int chunk_max_x = div_euclid(max_x + max_spread, 16);
+	const int chunk_min_z = div_euclid(min_z - max_spread, 16);
+	const int chunk_max_z = div_euclid(max_z + max_spread, 16);
 	const auto geographic_bounds = editor.geographic_bounds();
 	const bool has_geographic_bounds =
 			std::all_of(geographic_bounds.begin(), geographic_bounds.end(),
@@ -752,8 +752,10 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 			for (std::uint64_t origin = 0; origin < 4; ++origin) {
 				ChaCha8Rng rng = coord_rng(
 						chunk_x, chunk_z, 0x9A7C4E11D00D0001ULL ^ (origin << 48));
-				const int origin_x = (chunk_x << 4) + int(rng.uniform(16));
-				const int origin_z = (chunk_z << 4) + int(rng.uniform(16));
+				// Rust's signed shift keeps the two's-complement chunk coordinate;
+				// left-shifting a negative signed integer is undefined in C++.
+				const int origin_x = chunk_x * 16 + int(rng.uniform(16));
+				const int origin_z = chunk_z * 16 + int(rng.uniform(16));
 				const auto origin_coord =
 						XZPoint{origin_x - bbox.min_x(), origin_z - bbox.min_z()};
 				const auto origin_eco = editor.ground->ecoregion_at(origin_coord);

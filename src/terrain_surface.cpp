@@ -175,16 +175,15 @@ std::optional<TalusField> TalusField::build(
 	double hi = std::numeric_limits<double>::lowest();
 	for (int i = 0; i < 5; ++i)
 		for (int j = 0; j < 5; ++j) {
-			const double h =
-					at((chunk_x << 4) - 16 + i * 12, (chunk_z << 4) - 16 + j * 12);
+			const double h = at(chunk_x * 16 - 16 + i * 12, chunk_z * 16 - 16 + j * 12);
 			lo = std::min(lo, h);
 			hi = std::max(hi, h);
 		}
 	if ((hi - lo) * correction < 6.0)
 		return std::nullopt;
 	TalusField field;
-	field.x0 = (chunk_x << 4) - 20;
-	field.z0 = (chunk_z << 4) - 20;
+	field.x0 = chunk_x * 16 - 20;
+	field.z0 = chunk_z * 16 - 20;
 	field.correction = correction;
 	field.highest = std::numeric_limits<double>::lowest();
 	for (std::size_t k = 0; k < field.heights.size(); ++k) {

@@ -163,8 +163,14 @@ std::int32_t XoroRandom::next_int(std::int32_t bound)
 	}
 	return std::int32_t(p >> 32);
 }
-std::pair<std::int64_t, std::int64_t> XoroRandom::fork_positional()
+PositionalFactory XoroRandom::fork_positional()
 {
-	return {next_long(), next_long()};
+	const auto lo = next_long();
+	const auto hi = next_long();
+	return PositionalFactory(lo, hi);
+}
+XoroRandom PositionalFactory::from_hash_of(std::string_view name) const
+{
+	return XoroRandom::from_hash_of(lo_, hi_, name);
 }
 }
