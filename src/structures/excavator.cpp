@@ -23,8 +23,9 @@ void scatter_excavators(
 					return dx > -24 && dx < 24 && dz > -24 && dz < 24;
 				}))
 			continue;
-		place_named_schem(
-				editor, "excavator", x, editor.get_absolute_y(x, 1, z), z, (h >> 5) & 3);
+		if (!place_named_schem(editor, "excavator", x, editor.get_absolute_y(x, 1, z), z,
+					(h >> 5) & 3))
+			continue;
 		placed.emplace_back(x, z);
 	}
 }

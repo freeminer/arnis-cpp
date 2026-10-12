@@ -39,11 +39,10 @@ int floor_div(int n, int d)
 
 struct Site
 {
-	WorldEditor &editor;
 	const BuildingFootprintBitmap &footprints;
 	std::unordered_set<std::uint64_t> cells;
 
-	bool open(int x, int z) const
+	bool open(const WorldEditor &editor, int x, int z) const
 	{
 		if (!cells.contains(key(x, z)) || footprints.contains(x, z) ||
 				editor.surface_is_sealed(x, z) || editor.is_lc_water(x, z))
@@ -54,11 +53,12 @@ struct Site
 			   !editor.block_exists_absolute(x, editor.get_absolute_y(x, 1, z), z);
 	}
 
-	std::optional<int> level_pad(const std::vector<std::pair<int, int>> &area) const
+	std::optional<int> level_pad(
+			WorldEditor &editor, const std::vector<std::pair<int, int>> &area) const
 	{
 		int lo = INT32_MAX, hi = INT32_MIN;
 		for (auto [x, z] : area) {
-			if (!open(x, z))
+			if (!open(editor, x, z))
 				return std::nullopt;
 			const int y = editor.get_absolute_y(x, 1, z);
 			lo = std::min(lo, y);
@@ -204,7 +204,7 @@ void prop(WorldEditor &editor, const Site &site, int x, int z, Rolls &r)
 						static_cast<int>(std::floor(
 								radius - std::sqrt(double(dx * dx + dz * dz)) + .7)),
 						0, radius);
-				if (!h || !site.open(cx + dx, cz + dz))
+				if (!h || !site.open(editor, cx + dx, cz + dz))
 					continue;
 				for (int y = 1; y <= h; ++y) {
 					Block b = material == 0	  ? SAND
@@ -217,7 +217,7 @@ void prop(WorldEditor &editor, const Site &site, int x, int z, Rolls &r)
 			}
 		return;
 	}
-	auto base = site.level_pad(coords);
+	auto base = site.level_pad(editor, coords);
 	if (!base)
 		return;
 	if (type == Prop::Stockpile) {
@@ -261,10 +261,10 @@ void prop(WorldEditor &editor, const Site &site, int x, int z, Rolls &r)
 		}
 	} else if (type == Prop::Cabin || type == Prop::Container) {
 		const bool cabin = type == Prop::Cabin;
-		const Block wall = cabin ? (r.next(4) == 0 ? LIGHT_GRAY_CONCRETE : WHITE_CONCRETE)
-								 : std::array<Block, 7>{BLUE_CONCRETE, ORANGE_CONCRETE,
-										   RED_CONCRETE, GREEN_CONCRETE, GREEN_CONCRETE,
-										   CYAN_CONCRETE, GRAY_CONCRETE}[r.next(6)];
+		const Block wall =
+				cabin ? (r.next(4) == 0 ? LIGHT_GRAY_CONCRETE : WHITE_CONCRETE)
+					  : std::array<Block, 6>{BLUE_CONCRETE, ORANGE_CONCRETE, RED_CONCRETE,
+								GREEN_CONCRETE, CYAN_CONCRETE, GRAY_CONCRETE}[r.next(6)];
 		const int door = r.next(2) == 0 ? 0 : along - 1;
 		for (auto [cx, cz, u, v] : cells) {
 			const bool end = u == 0 || u == along - 1;
@@ -324,7 +324,7 @@ void furnish(WorldEditor &editor, const ProcessedWay &way,
 {
 	if (area.empty())
 		return;
-	Site site{editor, footprints, {}};
+	Site site{footprints, {}};
 	site.cells.reserve(area.size());
 	int min_x = INT32_MAX, min_z = INT32_MAX, max_x = INT32_MIN, max_z = INT32_MIN;
 	for (auto [x, z] : area) {

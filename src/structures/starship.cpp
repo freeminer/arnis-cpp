@@ -13,7 +13,9 @@ void place_starship(WorldEditor &e, const ProcessedWay &w)
 		sz += n.z;
 	}
 	int x = sx / w.nodes.size(), z = sz / w.nodes.size();
-	auto p = assets::path("structures/starship.schem");
+	const auto root = e.get_schematic_asset_root().empty() ? assets::path("structures")
+														   : e.get_schematic_asset_root();
+	const auto p = root / "starship.schem";
 	// Rust anchors the embedded model at the launch-mount centreline with an
 	// explicit upright rotation; use the rotated path so property-bearing
 	// schematic blocks follow the same placement contract.

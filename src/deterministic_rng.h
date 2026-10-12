@@ -2,6 +2,7 @@
 
 #include <array>
 #include <bit>
+#include <cmath>
 #include <cstdint>
 #include <limits>
 
@@ -85,6 +86,24 @@ public:
 				std::uint64_t((*this)()) | (std::uint64_t((*this)()) << 32);
 		const std::uint64_t mantissa = raw >> 11;
 		return static_cast<long double>(mantissa) / 9007199254740992.0L < probability;
+	}
+	float random_f32()
+	{
+		// rand 0.9's StandardUniform<f32> uses the top 24 bits of one
+		// next_u32() draw. Converting the full word to float first rounds
+		// several values differently (and can produce 1.0f).
+		return static_cast<float>((*this)() >> 8) * (1.0f / 16777216.0f);
+	}
+	double uniform_real(double lower, double upper)
+	{
+		// Match rand 0.9's StandardUniform f64 path: consume a u64, keep its top
+		// 53 bits, then scale into the half-open range. Clamp the rounded upper
+		// endpoint back into the range, as UniformFloat does.
+		const std::uint64_t raw =
+				std::uint64_t((*this)()) | (std::uint64_t((*this)()) << 32);
+		const double unit = static_cast<double>(raw >> 11) / 9007199254740992.0;
+		const double value = lower + (upper - lower) * unit;
+		return value < upper ? value : std::nextafter(upper, lower);
 	}
 	std::uint32_t uniform(std::uint32_t upper_exclusive)
 	{

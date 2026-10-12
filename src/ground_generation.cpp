@@ -170,7 +170,10 @@ double value_noise_01_impl(int x, int z, int scale)
 {
 	const int s = std::max(1, scale);
 	const auto floor_to = [s](int v) {
-		return (v >= 0 ? v / s : -(((-v) + s - 1) / s)) * s;
+		int quotient = v / s;
+		if (v % s < 0)
+			--quotient;
+		return quotient * s;
 	};
 	const int x0 = floor_to(x), z0 = floor_to(z), x1 = x0 + s, z1 = z0 + s;
 	const double tx = double(x - x0) / s, tz = double(z - z0) / s;
@@ -287,7 +290,8 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int origin_x,
 		int origin_z, int spacing, bool schematic_trees)
 {
-	if (!editor.ground || !editor.ground->has_canopy())
+	if (!editor.ground || !editor.ground->has_canopy() ||
+			!editor.ground->has_land_cover())
 		return {false, false};
 	const auto floor_div = [spacing](int v) {
 		const int quotient = v / spacing;
@@ -336,6 +340,9 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	auto rng = coord_rng(x, z, 0);
 	const auto climate =
 			editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
+	// Rust only lets the canopy raster make tree decisions when land cover is
+	// present too; without it, vegetation falls back entirely to the procedural
+	// biome/terrain path.
 	const auto [canopy_covered, canopy_tree] = canopy_verdict(
 			editor, x, z, origin_x, origin_z, tree_spacing, schematic_trees);
 	if (canopy_tree && slope <= 4 && ground_allows_trees &&

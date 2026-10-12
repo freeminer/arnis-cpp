@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <array>
 #include <cstdint>
+#include <limits>
 #include <string>
 #include <utility>
 #include <vector>
@@ -467,7 +468,9 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 				else if (resource == "clay" || resource == "kaolinite")
 					ore_block = CLAY;
 				int abs_y = editor.get_absolute_y(x, 0, z);
-				const int resource_range = std::max(1, 100 + abs_y);
+				const int resource_range = abs_y > std::numeric_limits<int>::max() - 100
+												   ? std::numeric_limits<int>::max()
+												   : std::max(1, 100 + abs_y);
 				int random_choice = static_cast<int>(rng.uniform(resource_range));
 				if (random_choice < 5) {
 					editor.set_block(ore_block, x, 0, z,

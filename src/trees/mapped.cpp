@@ -14,6 +14,12 @@ namespace
 {
 constexpr double ROW_SPACING_M = 8.0;
 constexpr double CROWN_RADIUS_M = 5.0;
+int div_euclid(int value, int divisor)
+{
+	const int quotient = value / divisor;
+	const int remainder = value % divisor;
+	return remainder < 0 ? quotient - 1 : quotient;
+}
 std::optional<std::vector<TreeType>> genus_pool(const std::string &g)
 {
 	if (g == "Betula")
@@ -43,7 +49,8 @@ std::optional<std::vector<TreeType>> genus_pool(const std::string &g)
 		return std::vector<TreeType>{TreeType::Spruce};
 	return std::nullopt;
 }
-std::string genus(const std::unordered_map<std::string, std::string> &tags)
+std::optional<std::string> parse_genus(
+		const std::unordered_map<std::string, std::string> &tags)
 {
 	for (const char *key : {"genus", "species", "taxon"}) {
 		auto it = tags.find(key);
@@ -73,7 +80,7 @@ std::string genus(const std::unordered_map<std::string, std::string> &tags)
 		if (it->second == "Q25243")
 			return "Picea";
 	}
-	return {};
+	return std::nullopt;
 }
 }
 bool is_conifer_genus(const std::string &g)
@@ -88,26 +95,28 @@ bool is_conifer_genus(const std::string &g)
 	return std::find_if(std::begin(names), std::end(names),
 				   [&](const char *n) { return g == n; }) != std::end(names);
 }
-MappedTree from_tags(
+MappedTree MappedTree::from_tags(
 		const std::unordered_map<std::string, std::string> &tags, std::uint64_t id)
 {
 	MappedTree out;
-	out.genus = genus(tags);
+	out.genus = parse_genus(tags);
 	const auto leaf = tags.find("leaf_type");
 	if (leaf != tags.end() && leaf->second == "needleleaved")
 		out.conifer = true;
 	else if (leaf != tags.end() && leaf->second == "broadleaved")
 		out.conifer = false;
-	else if (!out.genus.empty())
-		out.conifer = is_conifer_genus(out.genus);
+	else if (out.genus)
+		out.conifer = is_conifer_genus(*out.genus);
 	std::vector<TreeType> pool;
-	if (const auto known = genus_pool(out.genus)) {
+	const auto known =
+			out.genus ? genus_pool(*out.genus) : std::optional<std::vector<TreeType>>{};
+	if (known) {
 		pool = *known;
 	} else if (leaf != tags.end() && leaf->second == "broadleaved") {
 		pool = {TreeType::Oak, TreeType::Birch, TreeType::TallOak};
 	} else if (leaf != tags.end() && leaf->second == "needleleaved") {
 		pool = {TreeType::Spruce, TreeType::Pine};
-	} else if (!out.genus.empty()) {
+	} else if (out.genus) {
 		pool = {TreeType::Oak, TreeType::TallOak};
 	} else if (leaf != tags.end()) {
 		pool = {TreeType::Oak, TreeType::Spruce, TreeType::Birch, TreeType::TallOak,
@@ -181,8 +190,7 @@ MappedTrunks MappedTrunks::collect(
 	result.radius_ = std::max(1, int(std::lround(CROWN_RADIUS_M * scale)));
 	const auto add = [&](int x, int z) {
 		const int r = result.radius_;
-		result.trunks_.push_back(
-				{int(std::floor(double(x) / r)), int(std::floor(double(z) / r)), x, z});
+		result.trunks_.push_back({div_euclid(x, r), div_euclid(z, r), x, z});
 	};
 	for (const auto &element : elements) {
 		if (element.is_node()) {
@@ -211,8 +219,8 @@ bool MappedTrunks::under_crown(int x, int z) const
 	if (trunks_.empty())
 		return false;
 	const int r = radius_;
-	const int cx = int(std::floor(double(x) / r));
-	const int cz = int(std::floor(double(z) / r));
+	const int cx = div_euclid(x, r);
+	const int cz = div_euclid(z, r);
 	for (int gx = cx - 1; gx <= cx + 1; ++gx) {
 		const auto begin = std::lower_bound(trunks_.begin(), trunks_.end(),
 				MappedTrunks::Trunk{gx, cz - 1, std::numeric_limits<int>::min(),

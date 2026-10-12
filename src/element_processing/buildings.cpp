@@ -1547,9 +1547,13 @@ std::pair<int, bool> calculate_building_height(const ProcessedWay &element,
 		double effective = *tagged;
 		const bool is_part = element.tags.contains("building:part");
 		bool elevated = false;
-		if (const auto min_height = parse_meter_tag(element.tags, "min_height")) {
-			elevated = *min_height > 0;
-			effective = std::max(1.0, effective - *min_height);
+		if (element.tags.contains("min_height")) {
+			// Rust treats a present but malformed min_height as 0.0; its
+			// presence still takes precedence over building:min_level.
+			const double min_height =
+					parse_meter_tag(element.tags, "min_height").value_or(0.0);
+			elevated = min_height > 0;
+			effective = std::max(1.0, effective - min_height);
 		} else if (min_level > 0) {
 			elevated = true;
 			effective = std::max(
@@ -1560,7 +1564,10 @@ std::pair<int, bool> calculate_building_height(const ProcessedWay &element,
 				effective = std::max(
 						(is_part ? 1.0 : 3.0), effective - std::max(0.0, *roof_height));
 		height = std::max((elevated || is_part) ? 1 : 3, int(effective * scale));
-		tall = *tagged > 28;
+		// Rust only promotes tall buildings here; a prior building:levels value
+		// above seven remains tall even when a shorter explicit height is given.
+		if (*tagged > 28)
+			tall = true;
 	}
 	if (!explicit_height && relation_levels) {
 		height = std::max(
@@ -1627,9 +1634,9 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (args.terrain) {
 		std::optional<int> max_ground_level;
 		for (const auto &node : element.nodes) {
-			const int level = editor.get_ground_level(node.x, node.z);
-			max_ground_level =
-					max_ground_level ? std::max(*max_ground_level, level) : level;
+			if (const auto level = editor.terrain_level(node.x, node.z))
+				max_ground_level =
+						max_ground_level ? std::max(*max_ground_level, *level) : *level;
 		}
 		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
 	}
@@ -1702,7 +1709,8 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 
 inline int32_t multiply_scale(int32_t value, double scale_factor);
 void generate_bridge(WorldEditor &editor, const ProcessedWay &element,
-		const std::optional<std::chrono::duration<double>> &floodfill_timeout);
+		const FloodFillCache &flood_fill_cache,
+		const std::optional<std::chrono::milliseconds> &floodfill_timeout);
 
 void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		const std::vector<std::pair<int, int>> &area, BuildingCategory category,
@@ -1784,22 +1792,6 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 	}
 	if (covered_by_sibling)
 		return;
-
-	const bool parapet = building_height > floor_cycle + 2 &&
-						 (category == BuildingCategory::Commercial ||
-								 category == BuildingCategory::Office ||
-								 category == BuildingCategory::Hotel ||
-								 category == BuildingCategory::School ||
-								 category == BuildingCategory::Hospital ||
-								 category == BuildingCategory::TallBuilding ||
-								 category == BuildingCategory::GlassySkyscraper ||
-								 category == BuildingCategory::GlassCornerSkyscraper ||
-								 category == BuildingCategory::ModernSkyscraper);
-	if (parapet)
-		for (const auto &[x, z] : area)
-			if (!interior(x, z))
-				editor.set_block_absolute(
-						wall_block, x, roof_y + 1, z, std::vector<Block>{AIR});
 
 	const bool terrace = element.tags.contains("building:part") && building_height >= 28;
 	if (terrace) {
@@ -2032,31 +2024,110 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 // Rust adds a deterministic cap/edge treatment to plain flat roofs.
 void generate_flat_roof_edge_variation(WorldEditor &editor, const ProcessedWay &element,
 		int start_y, int building_height, int abs_offset, Block wall_block,
-		Block accent_block, std::uint64_t seed)
+		Block accent_block)
 {
-	if (element.nodes.size() < 2 || element.tags.contains("building:part") ||
-			element.tags.contains("roof:shape"))
+	if (element.nodes.empty())
 		return;
-	auto rng = element_rng_salted(seed, 0xF1A7E001ULL);
+	auto rng = element_rng(element.id);
 	if (!rng.random_bool(.55))
 		return;
 	const unsigned variation = rng.uniform(3);
 	const int y = start_y + building_height + abs_offset + 2;
-	std::unordered_set<std::pair<int, int>, PairHash> placed;
-	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
-		const auto &a = element.nodes[i];
-		const auto &b = element.nodes[(i + 1) % element.nodes.size()];
-		for (const auto &[x, unused_y, z] :
-				bresenham_line(a.x, start_y, a.z, b.x, start_y, b.z)) {
-			if (!placed.insert({x, z}).second)
-				continue;
-			const Block cap = variation == 0   ? wall_block
-							  : variation == 1 ? STONE_BRICK_SLAB
-											   : accent_block;
-			editor.set_block_absolute(cap, x, y, z, std::nullopt,
-					std::optional<std::vector<Block>>(std::vector<Block>{}));
+	std::optional<std::pair<int, int>> previous_node;
+	for (const auto &node : element.nodes) {
+		if (previous_node) {
+			const auto [x1, z1] = *previous_node;
+			const auto [x2, z2] = std::pair{node.x, node.z};
+			for (const auto &[x, unused_y, z] :
+					bresenham_line(x1, start_y, z1, x2, start_y, z2)) {
+				const Block cap = variation == 0 ? wall_block
+								  : variation == 1
+										  ? get_slab_block_for_material(wall_block)
+										  : accent_block;
+				editor.set_block_absolute(cap, x, y, z, std::vector<Block>{AIR});
+			}
 		}
+		previous_node = std::pair{node.x, node.z};
 	}
+}
+
+bool short_flat_parapet_excluded(BuildingCategory category)
+{
+	return category == BuildingCategory::House || category == BuildingCategory::Farm ||
+		   category == BuildingCategory::Garage || category == BuildingCategory::Shed ||
+		   category == BuildingCategory::Greenhouse ||
+		   category == BuildingCategory::Religious;
+}
+
+bool short_flat_parapet_for(std::uint64_t element_id, RoofType roof_type,
+		int building_height, BuildingCategory category, BuildingCondition condition)
+{
+	if (roof_type != RoofType::Flat || building_height > 8 ||
+			short_flat_parapet_excluded(category) ||
+			condition != BuildingCondition::Normal)
+		return false;
+	return element_rng(element_id ^ 0x534FF1544AAEE0F0ULL).random_bool(.75);
+}
+
+bool category_has_parapet_preset(BuildingCategory category)
+{
+	switch (category) {
+	case BuildingCategory::Commercial:
+	case BuildingCategory::Office:
+	case BuildingCategory::Hotel:
+	case BuildingCategory::School:
+	case BuildingCategory::Hospital:
+	case BuildingCategory::TallBuilding:
+	case BuildingCategory::GlassySkyscraper:
+	case BuildingCategory::GlassCornerSkyscraper:
+	case BuildingCategory::GridSkyscraper:
+	case BuildingCategory::ContemporarySkyscraper:
+	case BuildingCategory::ModernSkyscraper:
+	case BuildingCategory::MasonrySkyscraper:
+		return true;
+	default:
+		return false;
+	}
+}
+
+void generate_parapet(WorldEditor &editor, const ProcessedWay &element, int start_y,
+		int building_height, int abs_offset, Block wall_block, Block accent_block,
+		BuildingCategory category)
+{
+	if (element.nodes.empty())
+		return;
+	const int parapet_y = start_y + building_height + abs_offset + 2;
+	const Block wall_piece = get_wall_piece_for_material(wall_block);
+	std::unordered_set<std::pair<int, int>, PairHash> placed;
+	auto place_ring = [&](auto &&place) {
+		for (std::size_t i = 1; i < element.nodes.size(); ++i) {
+			const auto &a = element.nodes[i - 1];
+			const auto &b = element.nodes[i];
+			for (const auto &[x, unused_y, z] :
+					bresenham_line(a.x, start_y, a.z, b.x, start_y, b.z))
+				if (placed.insert({x, z}).second)
+					place(x, z);
+		}
+	};
+	place_ring([&](int x, int z) {
+		const Block block = building_height >= 16 ? wall_block : wall_piece;
+		editor.set_block_absolute(block, x, parapet_y, z, std::vector<Block>{AIR});
+	});
+	if (category != BuildingCategory::ModernSkyscraper)
+		return;
+	const BlockWithProperties cap{
+			get_slab_block_for_material(accent_block), {{"type", "top"}}};
+	placed.clear();
+	place_ring([&](int x, int z) {
+		editor.set_block_with_properties_absolute(
+				cap, x, parapet_y + 1, z, std::vector<Block>{AIR}, std::nullopt);
+	});
+	std::unordered_set<std::pair<int, int>, PairHash> corners;
+	for (const auto &node : element.nodes)
+		corners.insert({node.x, node.z});
+	for (const auto &[x, z] : corners)
+		editor.set_block_absolute(
+				accent_block, x, parapet_y + 1, z, std::nullopt, std::vector<Block>{});
 }
 
 // Rust extends pitched roofs one and two cells beyond exposed eaves.
@@ -2212,6 +2283,71 @@ void generate_corner_downpipes(WorldEditor &editor, const ProcessedWay &element,
 			editor.set_block_absolute(pipe, ox, h + abs_offset, oz,
 					std::optional<std::vector<Block>>{{AIR}});
 	}
+}
+
+bool is_glass_surface_block(Block block)
+{
+	return block == GLASS || block == WHITE_STAINED_GLASS ||
+		   block == GRAY_STAINED_GLASS || block == LIGHT_GRAY_STAINED_GLASS ||
+		   block == BLACK_STAINED_GLASS || block == BROWN_STAINED_GLASS ||
+		   block == CYAN_STAINED_GLASS || block == BLUE_STAINED_GLASS ||
+		   block == LIGHT_BLUE_STAINED_GLASS;
+}
+
+void generate_chimney(WorldEditor &editor,
+		const std::vector<std::pair<int, int>> &floor_area, int min_x, int max_x,
+		int min_z, int max_z, int roof_base, int abs_offset, std::uint64_t element_id)
+{
+	if (floor_area.empty())
+		return;
+	const std::unordered_set<std::pair<int, int>, PairHash> footprint(
+			floor_area.begin(), floor_area.end());
+	auto near_eave = [&](int x, int z) {
+		for (const auto &[dx, dz] :
+				{std::pair{-1, 0}, std::pair{1, 0}, std::pair{0, -1}, std::pair{0, 1}})
+			if (!footprint.contains({x + dx, z + dz}))
+				return false;
+		for (const auto &[dx, dz] :
+				{std::pair{-2, 0}, std::pair{2, 0}, std::pair{0, -2}, std::pair{0, 2}})
+			if (!footprint.contains({x + dx, z + dz}))
+				return true;
+		return false;
+	};
+	auto rng = element_rng(element_id);
+	const int center_x = (min_x + max_x) / 2;
+	const int center_z = (min_z + max_z) / 2;
+	const unsigned quadrant = rng.uniform(4);
+	std::vector<std::pair<int, int>> candidates;
+	for (const auto &[x, z] : floor_area) {
+		const bool in_quadrant = quadrant == 0	 ? x < center_x && z < center_z
+								 : quadrant == 1 ? x >= center_x && z < center_z
+								 : quadrant == 2 ? x < center_x && z >= center_z
+												 : x >= center_x && z >= center_z;
+		if (in_quadrant && near_eave(x, z))
+			candidates.emplace_back(x, z);
+	}
+	if (candidates.empty())
+		for (const auto &[x, z] : floor_area)
+			if (near_eave(x, z))
+				candidates.emplace_back(x, z);
+	std::erase_if(candidates, [&](const auto &p) {
+		for (int y = roof_base + 1; y <= roof_base + 3; ++y)
+			if (const auto block =
+							editor.get_block_absolute(p.first, y + abs_offset, p.second);
+					block && is_glass_surface_block(*block))
+				return true;
+		return false;
+	});
+	if (candidates.empty())
+		return;
+	const auto [x, z] =
+			candidates[rng.uniform(static_cast<std::uint32_t>(candidates.size()))];
+	const std::vector<Block> replace_any;
+	for (int y = roof_base + 1; y < roof_base + 5; ++y)
+		editor.set_block_absolute(BRICK, x, y + abs_offset, z, std::nullopt, replace_any);
+	const Block cap = rng.random_bool(.4) ? EMPTY_FLOWER_POT : STONE_BRICK_SLAB;
+	editor.set_block_absolute(
+			cap, x, roof_base + 5 + abs_offset, z, std::nullopt, replace_any);
 }
 
 // Hospital wall marker corresponding to Rust's green-cross banner pass.
@@ -2398,7 +2534,7 @@ std::optional<PodiumTowerPlan> plan_podium_tower(const ProcessedWay &element,
 			!generate_roof || condition != BuildingCondition::Normal ||
 			element.tags.contains("building:part"))
 		return std::nullopt;
-	auto rng = element_rng_salted(group_seed, 0x90D10A7000000001ULL);
+	auto rng = element_rng(group_seed ^ 0x90D10A7000000001ULL);
 	if (!rng.random_bool(.4))
 		return std::nullopt;
 	const int inset = footprint_size < 1200 ? 3 : 4 + int(rng.uniform(2));
@@ -2422,6 +2558,7 @@ std::optional<int> generate_inset_tiers(WorldEditor &editor,
 {
 	int current_base = base_y;
 	bool placed = false;
+	const std::vector<Block> replace_any;
 	for (const auto &tier : tiers) {
 		std::vector<std::pair<int, int>> tier_cells;
 		for (const auto &cell : roof_area) {
@@ -2446,15 +2583,16 @@ std::optional<int> generate_inset_tiers(WorldEditor &editor,
 					const bool window = has_windows && row >= 2 &&
 										row < floor_cycle - 1 && ((x + z) % 3 != 0);
 					editor.set_block_absolute(window ? window_block : wall_block, x,
-							y + abs_terrain_offset, z);
+							y + abs_terrain_offset, z, std::nullopt, replace_any);
 				} else if (tier.with_ceilings && row == 0) {
 					editor.set_block_absolute(
 							(x % 3 == 0 && z % 3 == 0) ? GLOWSTONE : floor_block, x,
-							y + abs_terrain_offset, z);
+							y + abs_terrain_offset, z, std::nullopt, replace_any);
 				}
 			}
-			editor.set_block_absolute(
-					floor_block, x, current_base + tier.height + abs_terrain_offset, z);
+			editor.set_block_absolute(floor_block, x,
+					current_base + tier.height + abs_terrain_offset, z, std::nullopt,
+					replace_any);
 		}
 		current_base += tier.height;
 	}
@@ -2465,11 +2603,11 @@ bool generate_setback_crown(WorldEditor &editor,
 		const std::vector<std::pair<int, int>> &roof_area, BuildingCategory category,
 		BuildingCondition condition, bool is_tall_building, int start_y,
 		int building_height, int abs_terrain_offset, int floor_cycle, Block wall_block,
-		Block window_block, Block floor_block, bool has_windows, std::uint64_t seed)
+		Block window_block, Block floor_block, bool has_windows, std::uint64_t element_id)
 {
 	if (!is_tall_building || condition != BuildingCondition::Normal ||
 			roof_area.size() < 200 ||
-			!element_rng_salted(seed, 0x5E7BAC4C00000001ULL).random_bool(.45))
+			!element_rng(element_id ^ 0x5E7BAC4C00000001ULL).random_bool(.45))
 		return false;
 	const auto distances = roof_edge_distances(roof_area);
 	const int tier_count = category == BuildingCategory::MasonrySkyscraper ? 3 : 2;
@@ -2481,17 +2619,21 @@ bool generate_setback_crown(WorldEditor &editor,
 			wall_block, window_block, floor_block, has_windows);
 	if (!top)
 		return false;
-	const auto deepest = std::max_element(
-			roof_area.begin(), roof_area.end(), [&](const auto &a, const auto &b) {
-				return distances.at(a) < distances.at(b);
-			});
-	if (deepest != roof_area.end() && distances.at(*deepest) >= 6) {
+	std::optional<std::pair<int, int>> deepest;
+	int deepest_distance = -1;
+	for (const auto &cell : roof_area)
+		if (const int distance = distances.at(cell); distance >= deepest_distance) {
+			deepest = cell;
+			deepest_distance = distance;
+		}
+	if (deepest && deepest_distance >= 6) {
 		const int mast_y = *top + abs_terrain_offset + 1;
+		const std::vector<Block> replace_any;
 		for (int h = 0; h < 3; ++h)
-			editor.set_block_absolute(
-					IRON_BARS, deepest->first, mast_y + h, deepest->second);
-		editor.set_block_absolute(
-				LIGHTNING_ROD, deepest->first, mast_y + 3, deepest->second);
+			editor.set_block_absolute(IRON_BARS, deepest->first, mast_y + h,
+					deepest->second, std::nullopt, replace_any);
+		editor.set_block_absolute(LIGHTNING_ROD, deepest->first, mast_y + 3,
+				deepest->second, std::nullopt, replace_any);
 	}
 	return true;
 }
@@ -2528,38 +2670,27 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const auto visual_seed = style_seed.value_or(osm_parser::seed_with_hint(
 			element.id, osm_parser::building_style_hint(element.tags)));
 	const auto clean_visual_seed = osm_parser::variant_seed(visual_seed);
+	const auto group_seed = style_seed.value_or(element.id);
 	if (should_skip_underground_tags(element.tags)) {
 		return std::nullopt;
 	}
 
-	if (element.tags.get("tomb") == "pyramid") {
-		historic::generate_pyramid(*editor, element, args, flood_fill_cache);
+	static const std::unordered_set<std::uint64_t> skip_way_ids = {
+			5013364, 204068874, 32920861, 1352374225, 1486731987};
+	if (skip_way_ids.contains(element.id))
 		return std::nullopt;
-	}
-
-	// min_level
-	int min_level = 0;
-	{
-		auto it = element.tags.find("building:min_level");
-		if (it != element.tags.end()) {
-			try {
-				min_level = std::stoi(it->second);
-			} catch (...) {
-				min_level = 0;
-			}
-		}
-	}
-
-	static const std::unordered_set<uint64_t> skip_way_ids = {
-			5013364, 204068874, 32920861};
-	if (skip_way_ids.find(element.id) != skip_way_ids.end())
-		return std::nullopt;
-
 	if (arnis::man_made::is_tank_structure(element)) {
 		arnis::man_made::generate_tank_structure(
 				*editor, ProcessedElement(element), args);
 		return std::nullopt;
 	}
+	if (element.tags.get("tomb") == "pyramid") {
+		historic::generate_pyramid(*editor, element, args, flood_fill_cache);
+		return std::nullopt;
+	}
+
+	const int min_level =
+			strict_parse::i32(element.tags.get("building:min_level")).value_or(0);
 
 	int abs_terrain_offset = (!args.terrain) ? args.ground_level : 0;
 	double scale_factor = args.scale;
@@ -2623,13 +2754,78 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	std::size_t cached_footprint_size = cached_floor_area.size();
 	if (cached_footprint_size == 0)
 		return std::nullopt;
-	// Rust routes roof-only building parts before the ordinary wall/floor
-	// pipeline; otherwise an element with only building:part=roof becomes a box.
+	int start_y_offset = 0;
+	if (args.terrain) {
+		std::optional<int> max_ground_level;
+		for (const auto &node : element.nodes) {
+			if (const auto level = editor->terrain_level(node.x, node.z))
+				max_ground_level =
+						max_ground_level ? std::max(*max_ground_level, *level) : *level;
+		}
+		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
+	} else {
+		start_y_offset = min_level_offset;
+	}
+
+	// Match Rust's early special-structure dispatch order so these elements do
+	// not pass through generic facade, wall, and roof decoration.
+	if (element.tags.get("amenity") == "shelter") {
+		for (const auto &node : element.nodes) {
+			for (int y = 1; y <= multiply_scale(4, scale_factor); ++y)
+				editor->set_block(OAK_FENCE, node.x, y, node.z);
+			editor->set_block(STONE_BRICK_SLAB, node.x, 5, node.z);
+		}
+		for (const auto &[x, z] : cached_floor_area)
+			editor->set_block(STONE_BRICK_SLAB, x, 5, z);
+		return std::nullopt;
+	}
 	if (element.tags.get("building:part") == "roof") {
 		generate_roof_only_structure(
 				*editor, element, cached_floor_area, args, visual_seed);
 		return std::nullopt;
 	}
+	const auto building_tag = element.tags.get("building");
+	if (building_tag == "shed" && element.tags.contains("bicycle_parking")) {
+		for (const auto &[x, z] : cached_floor_area)
+			editor->set_block(OAK_PLANKS, x, 0, z);
+		for (const auto &node : element.nodes) {
+			for (int y = 1; y <= 4; ++y)
+				editor->set_block(OAK_FENCE, node.x, y, node.z);
+			editor->set_block(STONE_BLOCK_SLAB, node.x, 5, node.z);
+		}
+		for (const auto &[x, z] : cached_floor_area)
+			editor->set_block(STONE_BLOCK_SLAB, x, 5, z);
+		return std::nullopt;
+	}
+	auto generate_dedicated_parking = [&]() {
+		const int parking_floor_cycle =
+				floor_cycle_for(early_building_type, element.tags);
+		const auto [parking_height, ignored_tall] = calculate_building_height(element,
+				early_building_type, min_level, scale_factor, relation_levels,
+				parking_floor_cycle, cached_footprint_size, visual_seed);
+		(void)ignored_tall;
+		parking_garage::generate(*editor, cached_floor_area, parking_height,
+				start_y_offset + abs_terrain_offset, visual_seed);
+	};
+	if (building_tag == "parking") {
+		generate_dedicated_parking();
+		return std::nullopt;
+	}
+	if (building_tag == "roof") {
+		generate_roof_only_structure(
+				*editor, element, cached_floor_area, args, visual_seed);
+		return std::nullopt;
+	}
+	if (building_tag == "bridge" && !element.tags.contains("min_height") &&
+			!element.tags.contains("building:min_level")) {
+		generate_bridge(*editor, element, flood_fill_cache, args.timeout);
+		return std::nullopt;
+	}
+	if (!building_tag.empty() && element.tags.get("parking") == "multi-storey") {
+		generate_dedicated_parking();
+		return std::nullopt;
+	}
+
 	building_facade::PointSet current_footprint(
 			cached_floor_area.begin(), cached_floor_area.end());
 	building_facade::FacadePlan facade_plan = building_facade::FacadePlan::empty();
@@ -2655,37 +2851,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				building_passages, *road_mask, *building_footprints, groups};
 		facade_plan = building_facade::compute_facade_plan(
 				element, context, args.scale, own_cells);
-	}
-
-	int start_y_offset = 0;
-	if (args.terrain) {
-		std::optional<int> max_ground_level;
-		for (const auto &node : element.nodes) {
-			const int level = editor->get_ground_level(node.x, node.z);
-			max_ground_level =
-					max_ground_level ? std::max(*max_ground_level, level) : level;
-		}
-
-		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
-	} else {
-		start_y_offset = min_level_offset;
-	}
-	// Rust routes multi-storey parking before construction/ruin height
-	// reductions and the generic tall-building floor-cycle adjustment. Keep the
-	// dedicated garage's deck count based on the same tagged/inferred height.
-	const bool dedicated_parking = element.tags.contains("building") &&
-								   (element.tags.get("building") == "parking" ||
-										   element.tags.get("parking") == "multi-storey");
-	if (dedicated_parking) {
-		const int parking_floor_cycle =
-				floor_cycle_for(early_building_type, element.tags);
-		const auto [parking_height, ignored_tall] = calculate_building_height(element,
-				early_building_type, min_level, scale_factor, relation_levels,
-				parking_floor_cycle, cached_footprint_size, visual_seed);
-		(void)ignored_tall;
-		parking_garage::generate(*editor, cached_floor_area, parking_height,
-				start_y_offset + abs_terrain_offset, visual_seed);
-		return std::nullopt;
 	}
 
 	int min_x = std::numeric_limits<int>::max();
@@ -2830,12 +2995,15 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				building_type, min_level, scale_factor, relation_levels, floor_cycle,
 				cached_footprint_size, clean_visual_seed);
 	}
+	const int style_building_height = building_height;
+	// Rust classifies from the tagged/inferred full height, then applies
+	// construction/ruin reductions to the realized shell.
+	const BuildingCategory category = building_category(element, is_tall_building,
+			style_building_height, scale_factor, clean_visual_seed);
 	if (condition == BuildingCondition::Construction)
 		building_height = std::max(3, building_height / 2);
 	else if (condition == BuildingCondition::Ruined)
 		building_height = std::max(3, int(building_height * .6));
-	const BuildingCategory category = building_category(
-			element, is_tall_building, building_height, scale_factor, clean_visual_seed);
 	// Rust records preset facade candidates after category/height selection.  The
 	// backend-native registry performs the equivalent crop and submission here;
 	// it is a no-op unless --building-facades was enabled and a backend sink is
@@ -2865,8 +3033,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							 cached_footprint_size > THIN_RING_MAX_CELLS;
 	const ArchEra era = building_arch_era(element.tags);
 	const DetailTier detail =
-			compute_detail_tier(element, category, cached_footprint_size, building_height,
-					facade_plan.front_segment.has_value());
+			compute_detail_tier(element, category, cached_footprint_size,
+					style_building_height, facade_plan.front_segment.has_value());
 	const WallDepthStyle wall_depth_style = wall_depth_style_for(
 			category, era, detail, cached_footprint_size, clean_visual_seed);
 	const bool wall_depth_span_ok = max_x - min_x >= 4 && max_z - min_z >= 4;
@@ -2918,9 +3086,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					(!part_has_explicit_top &&
 							(category == BuildingCategory::House ||
 									category == BuildingCategory::Residential)));
-	const auto podium_tower = plan_podium_tower(element, is_tall_building,
-			building_height, floor_cycle, condition, !sloped_roof, args.roof,
-			cached_floor_area, clean_visual_seed);
+	const auto podium_tower =
+			plan_podium_tower(element, is_tall_building, building_height, floor_cycle,
+					condition, !sloped_roof, args.roof, cached_floor_area, group_seed);
 	if (podium_tower)
 		building_height = podium_tower->podium_height;
 	const bool top_treatment =
@@ -2985,34 +3153,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	Block accent_block = accent_blocks_arr[rng.uniform(static_cast<std::uint32_t>(
 			sizeof(accent_blocks_arr) / sizeof(accent_blocks_arr[0])))];
 
-	bool has_multiple_floors = building_height > floor_cycle + 2;
+	bool has_multiple_floors = style_building_height > floor_cycle + 2;
 	const double accent_chance = detail == DetailTier::Minimal	  ? .05
 								 : detail == DetailTier::Standard ? .2
 																  : .4;
 	bool use_accent_lines = has_multiple_floors && rng.random_bool(accent_chance);
 	bool use_vertical_accent =
 			has_multiple_floors && !use_accent_lines && rng.random_bool(0.1);
-
-	{
-		auto it = element.tags.find("amenity");
-		if (it != element.tags.end() && it->second == "shelter") {
-			Block roof_block = STONE_BRICK_SLAB;
-			const std::vector<std::pair<int, int>> &roof_area = cached_floor_area;
-			for (const auto &node : element.nodes) {
-				int x = node.x;
-				int z = node.z;
-				for (int shelter_y = 1; shelter_y <= multiply_scale(4, scale_factor);
-						++shelter_y) {
-					editor->set_block(OAK_FENCE, x, shelter_y, z);
-				}
-				editor->set_block(roof_block, x, 5, z);
-			}
-			for (const auto &p : roof_area) {
-				editor->set_block(roof_block, p.first, 5, p.second);
-			}
-			return std::nullopt;
-		}
-	}
 
 	{
 		auto it = element.tags.find("building");
@@ -3022,31 +3169,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				building_height = std::max(3, static_cast<int>(2.0 * scale_factor));
 			} else if (btype == "shed") {
 				building_height = std::max(3, static_cast<int>(2.0 * scale_factor));
-				if (element.tags.find("bicycle_parking") != element.tags.end()) {
-					Block ground_block = OAK_PLANKS;
-					Block roof_block = STONE_BLOCK_SLAB;
-					const std::vector<std::pair<int, int>> &floor_area =
-							cached_floor_area;
-					for (const auto &p : floor_area) {
-						editor->set_block(ground_block, p.first, 0, p.second);
-					}
-					for (const auto &node : element.nodes) {
-						int x = node.x;
-						int z = node.z;
-						for (int dy = 1; dy <= 4; ++dy) {
-							editor->set_block(OAK_FENCE, x, dy, z);
-						}
-						editor->set_block(roof_block, x, 5, z);
-					}
-					for (const auto &p : floor_area) {
-						editor->set_block(roof_block, p.first, 5, p.second);
-					}
-					return std::nullopt;
-				}
-			} else if (btype == "roof") {
-				generate_roof_only_structure(
-						*editor, element, cached_floor_area, args, visual_seed);
-				return std::nullopt;
 			} else if (btype == "apartments") {
 				if (building_height ==
 						std::max(3, static_cast<int>(6.0 * scale_factor))) {
@@ -3057,9 +3179,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						std::max(3, static_cast<int>(6.0 * scale_factor))) {
 					building_height = std::max(3, static_cast<int>(23.0 * scale_factor));
 				}
-			} else if (btype == "bridge") {
-				generate_bridge(*editor, element, args.timeout_ref());
-				return std::nullopt;
 			}
 		}
 	}
@@ -3109,8 +3228,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 										!foreign_building_at(bx + 2 * outward.first,
 												bz + 2 * outward.second)));
 
-				if (args.terrain && min_level == 0 && !is_passage) {
-					const int local_ground_level = editor->get_ground_level(bx, bz);
+				if (args.terrain && min_level_offset == 0 && !is_passage) {
+					const int local_ground_level =
+							editor->terrain_level(bx, bz).value_or(args.ground_level);
 					for (int y = local_ground_level; y <= start_y_offset; ++y) {
 						editor->set_block_absolute(
 								wall_block, bx, y + abs_terrain_offset, bz);
@@ -3121,7 +3241,22 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						std::min(BUILDING_PASSAGE_HEIGHT, building_height);
 				const int wall_start = is_passage ? start_y_offset + passage_height + 1
 												  : start_y_offset + 1;
-				for (int h = wall_start; h <= start_y_offset + building_height; ++h) {
+				int column_top = start_y_offset + building_height;
+				if (condition == BuildingCondition::Construction) {
+					// Rust derives an independent, repeatable half-built height for each
+					// wall column from its world coordinate and the source element ID.
+					auto column_rng =
+							coord_rng(bx, bz, static_cast<std::uint64_t>(element.id));
+					const double factor = .30 + column_rng.uniform_real(0.0, 1.0) * .55;
+					const int local =
+							start_y_offset +
+							static_cast<int>(std::lround(
+									static_cast<double>(building_height) * factor));
+					column_top = std::max(start_y_offset + 1, local);
+					column_top =
+							std::min(start_y_offset + building_height - 1, column_top);
+				}
+				for (int h = wall_start; h <= column_top; ++h) {
 					const bool above_floor = h > start_y_offset + 1;
 					const int floor_row =
 							((h - start_y_offset - grammar_anchor) % floor_cycle +
@@ -3351,6 +3486,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		previous_node = std::make_pair(x, z);
 	}
 
+	// Rust builds the roof over both the filled footprint and the wall ring so
+	// roof blocks reach the outside face of the generated walls. Keep the area
+	// sorted to make every roof feature's iteration order deterministic.
+	std::vector<std::pair<int, int>> roof_area = cached_floor_area;
+	roof_area.insert(roof_area.end(), current_building.begin(), current_building.end());
+	std::sort(roof_area.begin(), roof_area.end());
+	roof_area.erase(std::unique(roof_area.begin(), roof_area.end()), roof_area.end());
+
 	std::optional<building_facade::FacadeAnchor> signage_anchor;
 	std::vector<interior_uses::Entry> interior_entries;
 	// Rust keeps the selected door species and orientation as block-state
@@ -3444,6 +3587,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			element.nodes.begin(), element.nodes.end(), [](const ProcessedNode &node) {
 				return node.tags.contains("entrance") || node.tags.contains("door");
 			});
+	// Match BuildingStyle::resolve/configuration in Rust: preset utility doors
+	// are suppressed for mapped entrances and thin-ring footprints, and an
+	// abandoned building clears both special-door flags.
+	const bool thin_ring_footprint = cached_footprint_size <= THIN_RING_MAX_CELLS;
+	const bool allow_preset_utility_door = !mapped_entrance && !thin_ring_footprint &&
+										   condition != BuildingCondition::Construction &&
+										   condition != BuildingCondition::Ruined &&
+										   condition != BuildingCondition::Abandoned;
 	if (min_level_offset == 0 && condition != BuildingCondition::Construction &&
 			condition != BuildingCondition::Ruined &&
 			category != BuildingCategory::Greenhouse &&
@@ -3608,10 +3759,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 												   static_cast<std::size_t>(from_corner)
 										 : static_cast<std::size_t>(from_corner);
 					} else {
-						const int jitter = int(position_rng.uniform(3)) - 1;
-						target = static_cast<std::size_t>(std::clamp<std::ptrdiff_t>(
-								static_cast<std::ptrdiff_t>(points.size() / 2) + jitter,
-								2, static_cast<std::ptrdiff_t>(points.size()) - 3));
+						const double jitter = position_rng.uniform_real(-.15, .15);
+						target = static_cast<std::size_t>(
+								static_cast<double>(points.size()) * (.5 + jitter));
 					}
 					const std::size_t center =
 							std::clamp<std::size_t>(target, 2, points.size() - 3);
@@ -3622,8 +3772,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const int dx = std::get<0>(points[index]),
 								  dz = std::get<2>(points[index]);
 						if (!passage_at(effective_passages, dx, dz) &&
-								!facade_plan.is_party(dx, dz) &&
-								!is_flat_column(dx, dz)) {
+								!facade_plan.is_party(dx, dz)) {
 							door = {dx, dz};
 							break;
 						}
@@ -3721,8 +3870,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	// Rust gives small utility buildings a dedicated entrance instead of the
 	// normal façade-door planner (which deliberately excludes these categories).
-	if (min_level_offset == 0 && condition != BuildingCondition::Construction &&
-			condition != BuildingCondition::Ruined && !mapped_entrance &&
+	if (min_level_offset == 0 && allow_preset_utility_door &&
 			(category == BuildingCategory::Garage || category == BuildingCategory::Shed ||
 					category == BuildingCategory::Greenhouse)) {
 		const int door_y = start_y_offset + abs_terrain_offset + 1;
@@ -3736,7 +3884,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				const int x2 = dx > dz ? x1 + 1 : x1;
 				const int z2 = dx > dz ? z1 : z1 + 1;
 				if (passage_at(effective_passages, x1, z1) ||
-						passage_at(effective_passages, x2, z2))
+						passage_at(effective_passages, x2, z2) ||
+						mapillary::facades::photo_column(x1, z1, element.id) ||
+						mapillary::facades::photo_column(x2, z2, element.id))
 					continue;
 				for (const auto &[x, z] : {std::pair{x1, z1}, std::pair{x2, z2}}) {
 					editor->set_block_absolute(SPRUCE_DOOR_LOWER, x, door_y, z);
@@ -3806,8 +3956,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		std::optional<interior_uses::InteriorPlan> interior_plan;
 		if (interior_allowed) {
 			const interior_uses::PlanInputs plan_inputs{element.tags, building_type,
-					floor_levels.size(), min_level,
-					min_level_offset > 0 || element.tags.contains("building:part"),
+					floor_levels.size(), min_level, min_level_offset > 0,
 					floor_area.size(), {(min_x + max_x) / 2, (min_z + max_z) / 2},
 					interior_tenants, interior_area};
 			interior_plan = interior_uses::plan_interior(plan_inputs);
@@ -3817,13 +3966,15 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		// entrance when the existing mapped/synthetic doors leave it unserved.
 		// Keep the entrance selection tied to the same planned unit anchors and
 		// facade-segment ranking so multi-shop buildings remain navigable.
+		const bool preset_utility_door =
+				allow_preset_utility_door &&
+				(category == BuildingCategory::Garage ||
+						category == BuildingCategory::Shed ||
+						category == BuildingCategory::Greenhouse);
 		if (min_level_offset == 0 && interior_plan && !interior_plan->floors.empty() &&
 				interior_plan->floors.front().size() >= 2 &&
 				condition != BuildingCondition::Construction &&
-				condition != BuildingCondition::Ruined &&
-				category != BuildingCategory::Garage &&
-				category != BuildingCategory::Shed &&
-				category != BuildingCategory::Greenhouse &&
+				condition != BuildingCondition::Ruined && !preset_utility_door &&
 				!facade_plan.segments.empty()) {
 			const auto &units = interior_plan->floors.front();
 			const auto unit_of = [&](int x, int z) {
@@ -3884,7 +4035,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const int x = std::get<0>(points[p]);
 						const int z = std::get<2>(points[p]);
 						if (passage_at(effective_passages, x, z) ||
-								facade_plan.is_party(x, z) || is_flat_column(x, z) ||
+								facade_plan.is_party(x, z) ||
 								unit_of(x - segment.normal.first,
 										z - segment.normal.second) != unit)
 							continue;
@@ -4023,8 +4174,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					roof_block_from_tags(element, roof_rng).value_or(floor_block);
 
 			generate_roof(*editor, element, start_y_offset, building_height,
-					roof_floor_block, wall_block, accent_block, roof_type,
-					cached_floor_area, abs_terrain_offset);
+					roof_floor_block, wall_block, accent_block, roof_type, roof_area,
+					abs_terrain_offset);
 		} else if (!part_has_explicit_top) {
 			std::string btype = "yes";
 			auto it = element.tags.find("building");
@@ -4087,7 +4238,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					generated_sloped_roof = true;
 					generate_roof(*editor, element, start_y_offset, building_height,
 							floor_block, wall_block, accent_block, automatic_roof,
-							cached_floor_area, abs_terrain_offset);
+							roof_area, abs_terrain_offset);
 				}
 			} else if ((btype == "industrial" || btype == "warehouse" ||
 							   btype == "hangar") &&
@@ -4099,7 +4250,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					generated_sloped_roof = true;
 					generate_roof(*editor, element, start_y_offset, building_height,
 							floor_block, wall_block, accent_block, RoofType::Skillion,
-							cached_floor_area, abs_terrain_offset);
+							roof_area, abs_terrain_offset);
 				}
 			}
 		}
@@ -4175,7 +4326,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						continue;
 				}
 				int descent = 0;
-				if (min_level == 0) {
+				if (min_level_offset == 0) {
 					std::optional<int> ground;
 					for (const auto &p : {std::pair{bx, bz}, std::pair{lx, lz}})
 						if (const auto y = editor->terrain_level(p.first, p.second))
@@ -4303,15 +4454,29 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	// or leave an open top when the automatic roof roll chose flat.
 	const bool skip_top = condition == BuildingCondition::Construction ||
 						  condition == BuildingCondition::Ruined;
+	const bool covered_by_sibling =
+			element.tags.contains("building:part") && !sibling_cells.empty() &&
+			std::all_of(cached_floor_area.begin(), cached_floor_area.end(),
+					[&](const auto &cell) { return sibling_cells.contains(cell); });
+	const bool modeled_part_roof = element.tags.contains("building:part") &&
+								   (element.tags.contains("roof:colour") ||
+										   element.tags.contains("roof:material"));
+	const bool has_parapet = category_has_parapet_preset(category) ||
+							 short_flat_parapet_for(element.id, generated_roof_type,
+									 building_height, category, condition);
 	if (!generated_sloped_roof && !skip_top) {
 		for (const auto &[x, z] : cached_floor_area)
 			editor->set_block_absolute(floor_block, x,
 					start_y_offset + building_height + abs_terrain_offset + 1, z);
 	}
-	if (!generated_sloped_roof && args.roof && !podium_tower)
+	if (args.roof && !podium_tower && !skip_top &&
+			generated_roof_type == RoofType::Flat && has_parapet && !covered_by_sibling)
+		generate_parapet(*editor, element, start_y_offset, building_height,
+				abs_terrain_offset, wall_block, accent_block, category);
+	if (!generated_sloped_roof && args.roof && !podium_tower && !has_parapet &&
+			!modeled_part_roof && !covered_by_sibling)
 		generate_flat_roof_edge_variation(*editor, element, start_y_offset,
-				building_height, abs_terrain_offset, wall_block, accent_block,
-				clean_visual_seed);
+				building_height, abs_terrain_offset, wall_block, accent_block);
 	if (!element.tags.contains("building:part"))
 		generate_facade_cornice(*editor, element, facade_plan, condition, accent_block,
 				start_y_offset, building_height, abs_terrain_offset, floor_cycle,
@@ -4320,73 +4485,57 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		auto overhang_rng = element_rng_salted(clean_visual_seed, 0xEA7E0001ULL);
 		const Block overhang_block =
 				roof_block_from_tags(element, overhang_rng).value_or(floor_block);
-		place_eave_overhang(*editor, cached_floor_area, start_y_offset + building_height,
+		place_eave_overhang(*editor, roof_area, start_y_offset + building_height,
 				abs_terrain_offset, overhang_block);
 	}
-	// Rust places a small deterministic chimney on pitched residential/farm
-	// roofs. Keep it inside the actual footprint and out of the wall ring.
-	if (generated_sloped_roof &&
-			(category == BuildingCategory::House ||
-					category == BuildingCategory::Residential ||
-					category == BuildingCategory::Farm ||
-					category == BuildingCategory::Historic) &&
-			cached_floor_area.size() >= 25 &&
-			element_rng_salted(clean_visual_seed, 0xC41A0E700000001ULL)
-					.random_bool(.55)) {
-		std::vector<std::pair<int, int>> chimney_spots;
-		const std::unordered_set<std::pair<int, int>, PairHash> footprint(
-				cached_floor_area.begin(), cached_floor_area.end());
-		for (const auto &[x, z] : cached_floor_area) {
-			bool inside = true;
-			for (const auto &[dx, dz] : {std::pair{-1, 0}, std::pair{1, 0},
-						 std::pair{0, -1}, std::pair{0, 1}})
-				inside = inside && footprint.contains({x + dx, z + dz});
-			if (inside)
-				chimney_spots.emplace_back(x, z);
-		}
-		if (!chimney_spots.empty()) {
-			auto chimney_rng =
-					element_rng_salted(clean_visual_seed, 0xC41A0E700000002ULL);
-			const auto [cx, cz] = chimney_spots[chimney_rng.uniform(
-					static_cast<std::uint32_t>(chimney_spots.size()))];
-			const int chimney_base =
-					start_y_offset + building_height + abs_terrain_offset + 2;
-			for (int y = 0; y < 4; ++y)
-				editor->set_block_absolute(
-						BRICK, cx, chimney_base + y, cz, std::vector<Block>{AIR});
-			editor->set_block_absolute(
-					chimney_rng.random_bool(.4) ? FLOWER_POT : STONE_BRICK_SLAB, cx,
-					chimney_base + 4, cz, std::vector<Block>{AIR});
-		}
-	}
+	const bool chimney_roof = generated_roof_type == RoofType::Gabled ||
+							  generated_roof_type == RoofType::Hipped ||
+							  generated_roof_type == RoofType::Mansard ||
+							  generated_roof_type == RoofType::Gambrel ||
+							  generated_roof_type == RoofType::HalfHipped;
+	const bool residential_chimney_type =
+			building_type == "house" || building_type == "residential" ||
+			building_type == "detached" || building_type == "semidetached_house" ||
+			building_type == "terrace" || building_type == "farm" ||
+			building_type == "cabin" || building_type == "bungalow" ||
+			building_type == "villa" || building_type == "yes";
+	const bool preset_chimney = category == BuildingCategory::House;
+	const bool inferred_chimney =
+			(category == BuildingCategory::Residential ||
+					category == BuildingCategory::Default) &&
+			residential_chimney_type && chimney_roof && cached_footprint_size >= 30 &&
+			cached_footprint_size <= 400 &&
+			element_rng_salted(clean_visual_seed, 0xC41A0E700000003ULL).random_bool(.40);
+	if (generated_sloped_roof && chimney_roof && (preset_chimney || inferred_chimney))
+		generate_chimney(*editor, roof_area, min_x, max_x, min_z, max_z,
+				start_y_offset + building_height + 1, abs_terrain_offset, element.id);
 	if (podium_tower) {
-		const auto distances = roof_edge_distances(cached_floor_area);
+		const auto distances = roof_edge_distances(roof_area);
 		const std::vector<InsetTier> tower{{podium_tower->inset,
 				podium_tower->full_height - podium_tower->podium_height, true}};
-		generate_inset_tiers(*editor, cached_floor_area, distances,
+		generate_inset_tiers(*editor, roof_area, distances,
 				start_y_offset + building_height + 1, abs_terrain_offset, tower,
 				floor_cycle, wall_block, window_block, floor_block, has_windows);
 	}
-	const bool has_crown =
-			args.roof && !podium_tower && !generated_sloped_roof &&
-			!element.tags.contains("building:part") &&
-			generate_setback_crown(*editor, cached_floor_area, category, condition,
-					is_tall_building, start_y_offset, building_height, abs_terrain_offset,
-					floor_cycle, wall_block, window_block, floor_block, has_windows,
-					clean_visual_seed);
-	const bool covered_by_sibling =
-			element.tags.contains("building:part") && !sibling_cells.empty() &&
-			std::all_of(cached_floor_area.begin(), cached_floor_area.end(),
-					[&](const auto &cell) { return sibling_cells.contains(cell); });
-	const bool modeled_part_roof = element.tags.contains("building:part") &&
-								   (element.tags.contains("roof:colour") ||
-										   element.tags.contains("roof:material"));
-	if (args.roof && !podium_tower && !has_crown && !modeled_part_roof)
-		generate_rooftop_systems(*editor, element, cached_floor_area, category, condition,
+	const bool has_crown = args.roof && !podium_tower && !generated_sloped_roof &&
+						   !element.tags.contains("building:part") &&
+						   generate_setback_crown(*editor, roof_area, category, condition,
+								   is_tall_building, start_y_offset, building_height,
+								   abs_terrain_offset, floor_cycle, wall_block,
+								   window_block, floor_block, has_windows, element.id);
+	const bool residential_antenna_roof =
+			generated_sloped_roof && category == BuildingCategory::House &&
+			condition == BuildingCondition::Normal &&
+			(generated_roof_type == RoofType::Gabled ||
+					generated_roof_type == RoofType::Hipped ||
+					generated_roof_type == RoofType::Pyramidal);
+	if (args.roof && !podium_tower && !has_crown &&
+			(!modeled_part_roof || residential_antenna_roof))
+		generate_rooftop_systems(*editor, element, roof_area, category, condition,
 				generated_roof_type, start_y_offset, building_height, abs_terrain_offset,
 				floor_cycle, wall_block, detail, clean_visual_seed, covered_by_sibling);
 	if (category == BuildingCategory::Hospital && !generated_sloped_roof)
-		generate_hospital_helipad(*editor, element, cached_floor_area, start_y_offset,
+		generate_hospital_helipad(*editor, element, roof_area, start_y_offset,
 				building_height, abs_terrain_offset);
 	mapillary::facades::collect_displays(*editor, element.id, start_y_offset,
 			abs_terrain_offset, building_height, args.facade_px);
@@ -5526,7 +5675,8 @@ std::vector<ProcessedWay> facade_outer_rings(
 }
 
 void generate_bridge(WorldEditor &editor, const ProcessedWay &element,
-		const std::optional<std::chrono::duration<double>> &floodfill_timeout)
+		const FloodFillCache &flood_fill_cache,
+		const std::optional<std::chrono::milliseconds> &floodfill_timeout)
 {
 	// Need at least 2 nodes for a bridge
 	if (element.nodes.size() < 2) {
@@ -5550,22 +5700,19 @@ void generate_bridge(WorldEditor &editor, const ProcessedWay &element,
 
 	Block floor_block = STONE;
 	Block railing_block = STONE_BRICKS;
+	const int bridge_y_offset = [&]() {
+		if (const auto level = strict_parse::i32(element.tags.get("level")))
+			return (*level * 3) + 1;
+		if (const auto layer = strict_parse::i32(element.tags.get("layer"));
+				layer && *layer > 0)
+			return (*layer * 4) + 2;
+		return 1;
+	}();
 
 	std::optional<std::pair<int, int>> previous_node = std::nullopt;
 	for (const auto &node : element.nodes) {
 		int x = node.x;
 		int z = node.z;
-
-		int bridge_y_offset = 1;
-		auto it = element.tags.find(std::string("level"));
-		if (it != element.tags.end()) {
-			try {
-				int level = std::stoi(it->second);
-				bridge_y_offset = (level * 3) + 1;
-			} catch (const std::exception &) {
-				bridge_y_offset = 1;
-			}
-		}
 
 		if (previous_node.has_value()) {
 			auto prev = previous_node.value();
@@ -5587,29 +5734,12 @@ void generate_bridge(WorldEditor &editor, const ProcessedWay &element,
 		previous_node = std::make_pair(x, z);
 	}
 
-	std::vector<std::pair<int, int>> polygon_coords;
-	polygon_coords.reserve(element.nodes.size());
-	for (const auto &n : element.nodes)
-		polygon_coords.emplace_back(n.x, n.z);
-
-	std::vector<std::pair<int, int>> bridge_area =
-			flood_fill_area(polygon_coords, floodfill_timeout);
-
-	int bridge_y_offset = 1;
-	auto it2 = element.tags.find(std::string("level"));
-	if (it2 != element.tags.end()) {
-		try {
-			int level = std::stoi(it2->second);
-			bridge_y_offset = (level * 3) + 1;
-		} catch (const std::exception &) {
-			bridge_y_offset = 1;
-		}
-	}
+	const auto bridge_area = flood_fill_cache.get_or_compute(element, floodfill_timeout);
 
 	// Use the same level bridge deck height for filled areas
 	int floor_y = bridge_deck_ground_y + bridge_y_offset;
 
-	for (const auto &p : bridge_area) {
+	for (const auto &p : *bridge_area) {
 		int x = p.first;
 		int z = p.second;
 		editor.set_block(floor_block, x, floor_y, z, std::nullopt, std::nullopt);

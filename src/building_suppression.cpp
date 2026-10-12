@@ -38,6 +38,17 @@ bool tag_is(const tags_t &tags, const char *key, const char *value)
 	return it != tags.end() && it->second == value;
 }
 
+bool is_building_part(const tags_t &tags)
+{
+	const auto it = tags.find("building:part");
+	if (it == tags.end())
+		return false;
+	return !std::equal(it->second.begin(), it->second.end(), "no", "no" + 2,
+			[](unsigned char a, unsigned char b) {
+				return std::tolower(a) == std::tolower(b);
+			});
+}
+
 std::string normalized_role(std::string role)
 {
 	const auto first = role.find_first_not_of(" \t\r\n");
@@ -329,8 +340,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		if (relation_ways.contains(id) || way->nodes.size() < 4 ||
 				way->nodes.front().id != way->nodes.back().id)
 			continue;
-		const bool part = way->tags.contains("building:part") &&
-						  !tag_is(way->tags, "building:part", "no");
+		const bool part = is_building_part(way->tags);
 		if (!part && !way->tags.contains("building"))
 			continue;
 		if (part) {
@@ -409,8 +419,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		const auto type = relation.tags.get("type");
 		if (type != "multipolygon" && type != "building")
 			continue;
-		const bool part = relation.tags.contains("building:part") &&
-						  !tag_is(relation.tags, "building:part", "no");
+		const bool part = is_building_part(relation.tags);
 		if ((!part && !relation.tags.contains("building")) ||
 				(part && !covers_ground(relation.tags)))
 			continue;

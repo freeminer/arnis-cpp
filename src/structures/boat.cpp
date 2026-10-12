@@ -8,26 +8,17 @@ namespace arnis::structures
 {
 namespace
 {
-const StructureSchematic *boat_schematic()
+const StructureSchematic *boat_schematic(const WorldEditor &editor)
 {
-	static std::once_flag once;
-	static std::optional<StructureSchematic> schematic;
-	std::call_once(once, [] {
-		const auto path = assets::path("structures/boat.schem");
-		std::ifstream input(path, std::ios::binary);
-		if (!input)
-			return;
-		try {
-			std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-			// Rust places the boat with the schematic's native anchor; do not
-			// recenter it here, since that shifts the hull relative to the water
-			// cell chosen by the global lattice.
-			schematic = load_structure(bytes);
-		} catch (...) {
-			schematic.reset();
-		}
-	});
-	return schematic ? &*schematic : nullptr;
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	try {
+		// Rust places the boat with its native anchor; retain the same origin.
+		return load_structure_cached(root / "boat.schem").get();
+	} catch (...) {
+		return nullptr;
+	}
 }
 }
 
@@ -37,7 +28,7 @@ void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max
 	// disabled, even if terrain/land-cover data is available.
 	if (!editor.ground || !editor.place_schematics())
 		return;
-	const auto *schematic = boat_schematic();
+	const auto *schematic = boat_schematic(editor);
 	if (!schematic)
 		return;
 	int count = 0;

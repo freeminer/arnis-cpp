@@ -6,7 +6,9 @@
 #include <vector>
 #include <filesystem>
 #include <memory>
+#include <functional>
 #include <unordered_map>
+#include <optional>
 #include "../../../arnis_block.h"
 namespace arnis::world_editor
 {
@@ -78,6 +80,14 @@ struct ColumnSchematic
 	static ColumnSchematic from_document(const SchemDocument &document);
 	std::pair<const ColumnVoxel *, std::size_t> column(int x, int z) const;
 };
+
+// Decode and derive reusable placement forms once per normalized asset path.
+std::shared_ptr<const StructureSchematic> load_structure_cached(
+		const std::filesystem::path &file);
+std::shared_ptr<const StructureSchematic> load_centered_structure_cached(
+		const std::filesystem::path &file);
+std::shared_ptr<const ColumnSchematic> load_column_schematic_cached(
+		const std::filesystem::path &file);
 enum class SchemAnchor
 {
 	Offset,
@@ -85,7 +95,29 @@ enum class SchemAnchor
 	BaseCentroid
 };
 
-SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data);
+// General structure schematics use signed Short dimensions; cave packs follow
+// the cave loader's unsigned-Short convention while still accepting Int tags.
+enum class SchemDimensionMode
+{
+	Signed,
+	CavePack
+};
+
+// Optional projection for consumers that need only a subset of schematic
+// blocks. Unmapped palette entries and block entities are skipped while
+// decoding, avoiding a full general-purpose document allocation.
+struct SchemDecodeOptions
+{
+	SchemDimensionMode dimension_mode = SchemDimensionMode::Signed;
+	bool include_entities = true;
+	std::function<std::optional<Block>(const std::string &)> block_mapper;
+	std::function<void(int, int, int, Block)> voxel_sink;
+};
+
+SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data,
+		SchemDimensionMode dimension_mode = SchemDimensionMode::Signed);
+SchemDocument decode_sponge_schem(
+		const std::vector<std::uint8_t> &gzip_data, const SchemDecodeOptions &options);
 // Decode a file-backed schematic once per normalized path. This preserves the
 // Rust OnceLock behavior while allowing callers to supply an external asset root.
 std::shared_ptr<const SchemDocument> load_schem_cached(const std::filesystem::path &file);

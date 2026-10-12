@@ -152,6 +152,7 @@ LandmarkModel make_model(
 	LandmarkModel model;
 	using PaletteKey = std::pair<content_t, const structures::SchemProperties *>;
 	std::map<PaletteKey, std::uint8_t> slots;
+	int min_y = std::numeric_limits<int>::max();
 	for (const auto &voxel : document.voxels) {
 		const Block block = voxel.resolved_block == AIR
 									? structures::resolve_schem_block(voxel.block)
@@ -166,9 +167,15 @@ LandmarkModel make_model(
 		model.voxels.push_back(
 				{static_cast<std::int16_t>(voxel.x), static_cast<std::int16_t>(voxel.y),
 						static_cast<std::int16_t>(voxel.z), it->second});
+		min_y = std::min(min_y, voxel.y);
 	}
 	if (model.voxels.empty())
 		return model;
+	// Rust's load_palettized() removes empty lower layers before constructing
+	// landmark columns. Keep the landmark ground_y metadata relative to the
+	// lowest rendered block rather than to the schematic's raw NBT origin.
+	for (auto &voxel : model.voxels)
+		voxel.y = static_cast<std::int16_t>(static_cast<int>(voxel.y) - min_y);
 	std::sort(model.voxels.begin(), model.voxels.end(), [](const auto &a, const auto &b) {
 		return std::tie(a.x, a.z, a.y) < std::tie(b.x, b.z, b.y);
 	});

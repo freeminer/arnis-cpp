@@ -14,25 +14,16 @@ constexpr double CAB_X = 11.0, CAB_Z = 14.0;
 constexpr double MINIMUM_LENGTH = 12.0;
 constexpr int FOOTPRINT_PROBE = 4;
 
-std::optional<ColumnSchematic> load_asset()
+const ColumnSchematic *jetbridge_asset(const WorldEditor &editor)
 {
-	const auto path = assets::path("structures/jetbridge.schem");
-	std::ifstream stream(path, std::ios::binary);
-	if (!stream)
-		return std::nullopt;
-	std::vector<std::uint8_t> bytes(
-			(std::istreambuf_iterator<char>(stream)), std::istreambuf_iterator<char>());
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
 	try {
-		return load_column_schematic(bytes);
+		return load_column_schematic_cached(root / "jetbridge.schem").get();
 	} catch (...) {
-		return std::nullopt;
+		return nullptr;
 	}
-}
-
-const ColumnSchematic *jetbridge_asset()
-{
-	static const std::optional<ColumnSchematic> schematic = load_asset();
-	return schematic ? &*schematic : nullptr;
 }
 
 std::pair<const ProcessedNode *, const ProcessedNode *> terminal_end(
@@ -71,7 +62,7 @@ void generate_jet_bridge(WorldEditor &editor, const ProcessedWay &way,
 {
 	if (!editor.place_schematics() || !claims(way))
 		return;
-	const auto *document = jetbridge_asset();
+	const auto *document = jetbridge_asset(editor);
 	if (!document)
 		return;
 	const auto [terminal, apron] =

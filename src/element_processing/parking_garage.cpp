@@ -317,7 +317,7 @@ void generate(WorldEditor &e, const std::vector<std::pair<int, int>> &floor_area
 				}
 			} else if (p.open_deck(x, z) && p.column(x, z))
 				for (int dy = 1; dy < LEVEL; ++dy)
-					e.set_block_absolute(column, x, y + dy, z);
+					e.set_block_absolute(LIGHT_GRAY_CONCRETE, x, y + dy, z);
 			else if (p.open_deck(x, z) && p.light(x, z))
 				e.set_block_with_properties_absolute(
 						lantern, x, y + LEVEL - 1, z, std::nullopt, std::nullopt);

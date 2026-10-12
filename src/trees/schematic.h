@@ -7,14 +7,29 @@
 #include "../floodfill_cache.h"
 namespace arnis::trees
 {
-using Schematic = structures::SchemDocument;
+// Rust trees::Schematic counterpart. Keep only data used by tree selection and
+// stamping; the general Sponge document's entities and placement offset are
+// intentionally discarded after decoding.
+struct Schematic
+{
+	struct Voxel
+	{
+		int x = 0, y = 0, z = 0;
+		Block block;
+	};
+
+	int width = 0, height = 0, length = 0;
+	std::vector<Voxel> voxels;
+	int min_log_vy = 0;
+};
+
 std::optional<Block> map_block(const std::string &name);
 int min_log_y(const Schematic &schem);
 bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &schem,
 		int anchor_x, int anchor_z, int base_y, unsigned rot,
 		const std::vector<Block> &blacklist, const BuildingFootprintBitmap *footprints,
 		int y_offset);
-Schematic tree_only(const Schematic &schem);
+Schematic tree_only(const structures::SchemDocument &schem);
 // Rust's schematic contract rejects log-only assets (snags/cacti) from the
 // regional tree selector; keep this predicate available to pack loaders.
 bool has_leaves(const Schematic &schem);

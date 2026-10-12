@@ -73,6 +73,13 @@ public:
 	void retain_fetchable_wikidata(const std::function<bool(const std::string &)> &);
 	std::vector<std::pair<int, int>> deferred_regions(double scale) const;
 	ModelDiscovery discovery(double scale) const;
+	// Execute the selected providers in the same deterministic order as the
+	// Rust Models3dPipeline::place path. C++-only plane archetypes are included
+	// with the custom provider stage; the separate OSM plane structures remain
+	// owned by their structures module.
+	ModelPlacementStats place(three_dmr::Client &three_dmr_provider,
+			ModelProvider &wikidata_provider, ModelProvider &custom_provider,
+			world_editor::WorldEditor &, double blocks_per_meter) const;
 };
 // Shared terrain anchoring and streamed-region retention helpers from
 // models_3d/mod.rs.  These are useful to custom hosts independently of any
@@ -85,18 +92,21 @@ std::vector<std::pair<int, int>> region_keys_around(
 // remains intentionally separate so this works in library and streamed modes.
 ModelDiscovery discover_models(const std::vector<ProcessedElement> &, double scale,
 		double world_rotation = 0.0,
-		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed =
+				{});
 // Same discovery result, but performs model availability selection before any
 // Wikidata geometry is suppressed.  `fetchable` should use the host's model
 // cache/provider and may return false without treating it as a fatal error.
 ModelDiscovery discover_models_fetchable_wikidata(const std::vector<ProcessedElement> &,
 		double scale, const std::function<bool(const std::string &)> &fetchable,
 		double world_rotation = 0.0,
-		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed =
+				{});
 ModelDiscovery discover_models_fetchable(const std::vector<ProcessedElement> &,
 		double scale, const std::function<bool(const std::string &)> &wikidata_fetchable,
 		const std::function<bool()> &stadium_fetchable, double world_rotation = 0.0,
-		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed = {});
+		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed =
+				{});
 // Execute the two Arnis-hosted archetype providers selected by a pipeline
 // prescan.  `provider` may be custom::Client (including its host fetch
 // callback) or any ModelProvider; unavailable assets simply yield zero placed

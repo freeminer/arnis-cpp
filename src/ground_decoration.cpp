@@ -663,7 +663,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 		case PatchFeature::DeadBushes:
 			plant_on(x, y, z, dry_soil, DEAD_BUSH);
 			break;
-		case PatchFeature::Cactus:
+		case PatchFeature::Cactus: {
 			if (editor.check_for_block_absolute(x, y, z, std::vector<Block>{SAND}) &&
 					open(x, y, z)) {
 				const int height = pick % 4 == 0 ? 1 : pick % 4 == 3 ? 3 : 2;
@@ -678,7 +678,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 							std::optional<std::vector<Block>>({GRASS}), std::nullopt);
 				}
 			}
-			break;
+		} break;
 		case PatchFeature::LilyPads:
 			if ((point_cover(x, z) == land_cover::LC_WETLAND ||
 						point_cover(x, z) == land_cover::LC_MANGROVES ||

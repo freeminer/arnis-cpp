@@ -1268,19 +1268,53 @@ std::optional<ProcessedWay> overture_building_to_way(
 		min_lng = std::min(min_lng, lng);
 		max_lng = std::max(max_lng, lng);
 		const auto point = transformer.transform_point(geographic::LLPoint(lat, lng));
-		way.nodes.push_back({base + i, tags_t{}, point.x, point.z});
+		ProcessedNode node{base + i, tags_t{}, point.x, point.z};
+		node.latitude = lat;
+		node.longitude = lng;
+		way.nodes.push_back(std::move(node));
 	}
 	if (way.nodes.size() < 3 || max_lng < bbox.min().lng() ||
 			min_lng > bbox.max().lng() || max_lat < bbox.min().lat() ||
 			min_lat > bbox.max().lat())
 		return std::nullopt;
 	if (way.nodes.front().x != way.nodes.back().x ||
-			way.nodes.front().z != way.nodes.back().z)
-		way.nodes.push_back({base + building.exterior_ring.size(), {},
-				way.nodes.front().x, way.nodes.front().z});
+			way.nodes.front().z != way.nodes.back().z) {
+		auto closing_node = way.nodes.front();
+		closing_node.id = base + building.exterior_ring.size();
+		way.nodes.push_back(std::move(closing_node));
+	}
 	XZBBox clipbox(
 			rectangle.min().x, rectangle.min().z, rectangle.max().x, rectangle.max().z);
-	way.nodes = clipping::clip_way_to_bbox(way.nodes, clipbox);
+	const auto source_nodes = way.nodes;
+	way.nodes = clipping::clip_way_to_bbox(source_nodes, clipbox);
+	// The generic clipper emits projected nodes. Restore their geographic
+	// coordinates by interpolating along the source ring so host mapgens can
+	// reproject Overture geometry into their own world coordinate frame.
+	for (auto &node : way.nodes) {
+		double nearest_distance = std::numeric_limits<double>::infinity();
+		for (std::size_t i = 1; i < source_nodes.size(); ++i) {
+			const auto &a = source_nodes[i - 1];
+			const auto &b = source_nodes[i];
+			const double dx = static_cast<double>(b.x) - a.x;
+			const double dz = static_cast<double>(b.z) - a.z;
+			const double length_squared = dx * dx + dz * dz;
+			const double t =
+					length_squared > 0.0
+							? std::clamp(((node.x - a.x) * dx + (node.z - a.z) * dz) /
+												 length_squared,
+									  0.0, 1.0)
+							: 0.0;
+			const double nearest_x = a.x + t * dx;
+			const double nearest_z = a.z + t * dz;
+			const double distance = (node.x - nearest_x) * (node.x - nearest_x) +
+									(node.z - nearest_z) * (node.z - nearest_z);
+			if (distance < nearest_distance) {
+				nearest_distance = distance;
+				node.latitude = a.latitude + t * (b.latitude - a.latitude);
+				node.longitude = a.longitude + t * (b.longitude - a.longitude);
+			}
+		}
+	}
 	if (way.nodes.size() < 4)
 		return std::nullopt;
 	way.tags["building"] =

@@ -1,9 +1,6 @@
 #include "helicopter.h"
 #include "../assets_root.h"
 #include "schem_decoder.h"
-#include <fstream>
-#include <iterator>
-#include <mutex>
 namespace arnis::structures
 {
 void maybe_place_helicopter(WorldEditor &e, int x, int z)
@@ -13,23 +10,14 @@ void maybe_place_helicopter(WorldEditor &e, int x, int z)
 	auto h = land_cover::coord_hash(x, z);
 	if (h % 100 >= 60 || e.is_lc_water(x, z))
 		return;
-	static std::once_flag once;
-	static std::optional<StructureSchematic> schematic;
-	std::call_once(once, [] {
-		const auto p = assets::path("structures/helicopter.schem");
-		std::ifstream in(p, std::ios::binary);
-		if (!in)
-			return;
-		try {
-			std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), {});
-			// Rust caches the centered schematic in OnceLock.
-			schematic = load_structure(bytes).centered();
-		} catch (...) {
-			schematic.reset();
-		}
-	});
-	if (!schematic)
+	const auto root = e.get_schematic_asset_root().empty() ? assets::path("structures")
+														   : e.get_schematic_asset_root();
+	std::shared_ptr<const StructureSchematic> schematic;
+	try {
+		schematic = load_centered_structure_cached(root / "helicopter.schem");
+	} catch (...) {
 		return;
+	}
 	place_structure(e, *schematic, x, e.get_absolute_y(x, 1, z), z, (h >> 8) & 3);
 }
 }

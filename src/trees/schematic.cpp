@@ -3,6 +3,7 @@
 #include "../ground_decoration.h"
 #include "../land_cover/land_cover.h"
 #include "../block_definitions.h"
+#include <array>
 #include <fstream>
 #include <algorithm>
 #include <limits>
@@ -14,6 +15,42 @@ namespace arnis::trees
 {
 namespace
 {
+bool is_log_block(Block block)
+{
+	using namespace block_definitions;
+	static const std::array<Block, 8> logs = {OAK_LOG, BIRCH_LOG, SPRUCE_LOG,
+			DARK_OAK_LOG, JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG};
+	return std::find(logs.begin(), logs.end(), block) != logs.end();
+}
+
+bool is_leaf_block(Block block)
+{
+	using namespace block_definitions;
+	static const std::array<Block, 9> leaves = {OAK_LEAVES, BIRCH_LEAVES, SPRUCE_LEAVES,
+			DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES, MANGROVE_LEAVES,
+			AZALEA_LEAVES};
+	return std::find(leaves.begin(), leaves.end(), block) != leaves.end();
+}
+
+void finalize_tree_schematic(Schematic &schematic)
+{
+	schematic.voxels.shrink_to_fit();
+	if (!schematic.voxels.empty()) {
+		int min_y = schematic.voxels.front().y;
+		for (const auto &voxel : schematic.voxels)
+			min_y = std::min(min_y, voxel.y);
+		if (min_y != 0)
+			for (auto &voxel : schematic.voxels)
+				voxel.y -= min_y;
+	}
+	schematic.min_log_vy = schematic.height;
+	for (const auto &voxel : schematic.voxels)
+		if (is_log_block(voxel.block))
+			schematic.min_log_vy = std::min(schematic.min_log_vy, voxel.y);
+	if (schematic.min_log_vy == schematic.height)
+		schematic.min_log_vy = 0;
+}
+
 // Tree assets deliberately collapse decorative states to the Rust tree palette.
 std::optional<std::string> tree_block_name(std::string name)
 {
@@ -85,7 +122,19 @@ Schematic load_schem(const std::filesystem::path &file)
 }
 Schematic load_schem(const std::vector<std::uint8_t> &gzip_bytes)
 {
-	return tree_only(structures::decode_sponge_schem(gzip_bytes));
+	Schematic schematic;
+	structures::SchemDecodeOptions options;
+	options.include_entities = false;
+	options.block_mapper = map_block;
+	options.voxel_sink = [&schematic](int x, int y, int z, Block block) {
+		schematic.voxels.push_back({x, y, z, block});
+	};
+	const auto document = structures::decode_sponge_schem(gzip_bytes, options);
+	schematic.width = document.width;
+	schematic.height = document.height;
+	schematic.length = document.length;
+	finalize_tree_schematic(schematic);
+	return schematic;
 }
 std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &file)
 {
@@ -112,51 +161,33 @@ std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &
 }
 int min_log_y(const Schematic &s)
 {
-	int out = s.height;
-	for (const auto &v : s.voxels)
-		if (v.block.find("_log") != std::string::npos ||
-				v.block.find("_wood") != std::string::npos)
-			out = std::min(out, v.y);
-	return out == s.height ? 0 : out;
+	return s.min_log_vy;
 }
-Schematic tree_only(const Schematic &in)
+Schematic tree_only(const structures::SchemDocument &in)
 {
-	// Copy the placement metadata, not every voxel/state/entity before filtering.
+	// Retain only the data Rust's tree schematic needs; general schematic
+	// offsets and block entities are irrelevant after tree decoding.
 	Schematic out;
 	out.width = in.width;
 	out.height = in.height;
 	out.length = in.length;
-	out.offset_x = in.offset_x;
-	out.offset_y = in.offset_y;
-	out.offset_z = in.offset_z;
 	for (const auto &v : in.voxels) {
-		if (auto name = tree_block_name(v.block))
-			out.voxels.push_back({v.x, v.y, v.z, std::move(*name), {}});
+		if (v.block.empty()) {
+			if (v.resolved_block != Block{})
+				out.voxels.push_back({v.x, v.y, v.z, v.resolved_block});
+		} else if (const auto block = map_block(v.block))
+			out.voxels.push_back({v.x, v.y, v.z, *block});
 	}
-	out.voxels.shrink_to_fit();
 	// Sponge schematics frequently carry an air pad below the root. Rust removes
 	// it at load time so every tree has a stable y=0 floor independent of the
 	// editor/exporter that produced the asset.
-	if (!out.voxels.empty()) {
-		int min_y = out.voxels.front().y;
-		for (const auto &v : out.voxels)
-			min_y = std::min(min_y, v.y);
-		if (min_y) {
-			for (auto &v : out.voxels)
-				v.y -= min_y;
-			// Rust retains the original asset height for size classification.
-		}
-	}
+	finalize_tree_schematic(out);
 	return out;
 }
 bool has_leaves(const Schematic &s)
 {
-	for (const auto &v : s.voxels) {
-		const auto canonical = tree_block_name(v.block);
-		if (canonical && canonical->find("_leaves") != std::string::npos)
-			return true;
-	}
-	return false;
+	return std::any_of(s.voxels.begin(), s.voxels.end(),
+			[&](const auto &v) { return is_leaf_block(v.block); });
 }
 TreeSize schematic_size(const Schematic &s)
 {
@@ -209,7 +240,7 @@ bool place_schematic(world_editor::WorldEditor &editor, const Schematic &s, int 
 	const int center_z = (final_l - 1) / 2;
 	for (const auto &v : s.voxels) {
 		const auto [px, pz] = rotate_xz(v.x, v.z, s.width, s.length, rot);
-		Block b = structures::resolve_schem_block(v.block);
+		const Block b = v.block;
 		if (b != Block{}) {
 			editor.set_block_absolute(b, x + px - center_x, y + v.y, z + pz - center_z);
 			placed = true;
@@ -232,12 +263,7 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		const auto [rx, rz] = rotate_xz(v.x, v.z, s.width, s.length, rot);
 		return std::pair{anchor_x + rx - cx, anchor_z + rz - cz};
 	};
-	const auto is_log = [](const std::string &name) {
-		const auto base = name.substr(0, name.find('['));
-		return base.ends_with("_log") || base.ends_with("_wood") ||
-			   base.ends_with("_roots") || base.ends_with("_stem") ||
-			   base.ends_with("_hyphae") || base.ends_with("bamboo_block");
-	};
+	const auto is_log = is_log_block;
 	// Snapshot before stamping: tree voxels must never count as their own roof.
 	std::map<std::pair<int, int>, int> roof_tops;
 	if (footprints)
@@ -249,10 +275,6 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 														wx, wz, base_y, base_y + s.height)
 												  .value_or(base_y + s.height);
 			}
-	int min_log_vy = s.height;
-	for (const auto &v : s.voxels)
-		if (is_log(v.block))
-			min_log_vy = std::min(min_log_vy, v.y);
 	struct Root
 	{
 		int top;
@@ -274,11 +296,9 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 			continue;
 		if (log && (editor.check_for_block(
 							wx, 0, wz, std::optional<std::vector<Block>>({WATER})) ||
-						   (v.y <= min_log_vy + 2 && editor.is_lc_water(wx, wz))))
+						   (v.y <= s.min_log_vy + 2 && editor.is_lc_water(wx, wz))))
 			continue;
-		const Block block = structures::resolve_schem_block(v.block);
-		if (block == Block{})
-			continue;
+		const Block block = v.block;
 		placed |=
 				editor.try_set_block_absolute(block, wx, wy, wz, std::nullopt, blacklist);
 		if (log) {

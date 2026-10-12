@@ -167,8 +167,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	// mapped row before the generic natural-area decoration pass.
 	if (natural_type == "tree_row" && element.is_way()) {
 		const auto &nodes = element.as_way().nodes;
-		const auto mapped_row =
-				trees::mapped::from_tags(tags, static_cast<std::uint64_t>(element.id()));
+		const auto mapped_row = trees::mapped::MappedTree::from_tags(
+				tags, static_cast<std::uint64_t>(element.id()));
 		std::vector<std::pair<int, int>> row_nodes;
 		row_nodes.reserve(nodes.size());
 		for (const auto &node : nodes)
@@ -184,8 +184,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	if (natural_type == "tree" && element.is_node()) {
 		const int x = element.as_node().x;
 		const int z = element.as_node().z;
-		const auto mapped =
-				trees::mapped::from_tags(tags, static_cast<std::uint64_t>(element.id()));
+		const auto mapped = trees::mapped::MappedTree::from_tags(
+				tags, static_cast<std::uint64_t>(element.id()));
 		Tree::create_mapped(
 				editor, {x, 1, z}, mapped, &building_footprints, &bridge_surface);
 		return;
@@ -344,17 +344,17 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			if (tags.contains("genus") || tags.contains("species") ||
 					tags.contains("taxon") || tags.contains("genus:wikidata")) {
 				mapped_kind = true;
-				const auto mapped = trees::mapped::from_tags(
+				const auto mapped = trees::mapped::MappedTree::from_tags(
 						tags, static_cast<std::uint64_t>(element.id()));
 				trees::MappedRequest mapped_request;
-				if (!mapped.genus.empty())
-					mapped_request.genus = mapped.genus;
+				if (mapped.genus)
+					mapped_request.genus = *mapped.genus;
 				mapped_request.conifer = mapped.conifer;
-				if (mapped.height_m > 0.0)
-					mapped_height_m = mapped.height_m;
-				if (mapped.height_m > 0.0)
+				if (mapped.height_m)
+					mapped_height_m = *mapped.height_m;
+				if (mapped.height_m)
 					mapped_request.want_size = trees::size_for_height(static_cast<int>(
-							std::lround(mapped.height_m * editor.scale())));
+							std::lround(*mapped.height_m * editor.scale())));
 				if (editor.ground)
 					mapped_request.eco =
 							editor.ground->ecoregion_at(editor.ground_point(x, z));
@@ -362,9 +362,10 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 								.has_value())
 					return;
 				tree_type = mapped.kind;
-				if (mapped.height_m > 0.0 && mapped.height_m < 4.0)
+				if (mapped.height_m && *mapped.height_m < 4.0)
 					tree_type = TreeType::Bush;
-				else if (mapped.height_m > 24.0 && tree_type == TreeType::Oak)
+				else if (mapped.height_m && *mapped.height_m > 24.0 &&
+						 tree_type == TreeType::Oak)
 					tree_type = TreeType::TallOak;
 			}
 
@@ -648,8 +649,12 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				}
 				const double density = ground_generation::value_noise_01(x, z, 32);
 				const int tree_threshold = std::max(5, int(60.0 - density * 45.0));
-				int random_choice = static_cast<int>(rng.uniform(30));
-				if (rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0) {
+				// Preserve Rust's per-cell RNG draw order: the tree decision is drawn
+				// before the understory choice, even when a tree ultimately wins.
+				const bool spawn_tree =
+						rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0;
+				const int random_choice = static_cast<int>(rng.uniform(30));
+				if (spawn_tree) {
 					// Select a random tree type from the approved list
 					if (!trees_ok_to_generate.empty()) {
 						TreeType tree_type = trees_ok_to_generate[rng.uniform(
@@ -785,8 +790,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 								float place_prob =
 										1.0f -
 										(distance / static_cast<float>(cluster_size));
-								if (static_cast<float>(rng()) / 4294967296.0f <
-										place_prob) {
+								if (rng.random_f32() < place_prob) {
 									editor.set_block(cluster_block, cluster_x, 0,
 											cluster_z, std::nullopt, std::nullopt);
 
@@ -873,12 +877,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 							bush::shrubbery_species(editor, anchor.first, anchor.second);
 				}
 				for (int y = 1; y <= 2; ++y) {
-					BlockWithProperties leaf{
-							bush::shrubbery_leaf(*shrubbery_species, x, y, z),
-							{{"persistent", "true"}}};
-					editor.set_block_with_properties_absolute(leaf, x,
-							editor.get_absolute_y(x, y, z), z, std::nullopt,
-							std::nullopt);
+					editor.set_block(bush::shrubbery_leaf(*shrubbery_species, x, y, z), x,
+							y, z, std::nullopt, std::nullopt);
 				}
 			} else if (natural_type == "tundra") {
 				// Treeless habitat with low vegetation, mosses, lichens

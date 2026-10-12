@@ -83,7 +83,7 @@ inline int terrain_floor_y()
 
 inline void set_terrain_top_y(int y)
 {
-	FLOOR_STATE.terrain_top_y = std::clamp(y, min_y(), world_max_y());
+	FLOOR_STATE.terrain_top_y = y;
 }
 
 inline int terrain_top_y()

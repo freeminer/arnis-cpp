@@ -1,6 +1,8 @@
 #pragma once
 
 #include "../element_processing/tree.h"
+#include <cstdint>
+#include <optional>
 #include <string>
 #include <tuple>
 #include <unordered_map>
@@ -12,13 +14,14 @@ namespace arnis::trees::mapped
 struct MappedTree
 {
 	TreeType kind{TreeType::Oak};
-	std::string genus;
+	std::optional<std::string> genus;
 	std::optional<bool> conifer;
-	double height_m{0};
+	std::optional<double> height_m;
+
+	static MappedTree from_tags(
+			const std::unordered_map<std::string, std::string> &tags, std::uint64_t id);
 };
 bool is_conifer_genus(const std::string &genus);
-MappedTree from_tags(
-		const std::unordered_map<std::string, std::string> &tags, std::uint64_t id);
 bool is_tree_row(const std::unordered_map<std::string, std::string> &tags);
 std::vector<std::pair<int, int>> tree_row_positions(
 		const std::vector<std::pair<int, int>> &nodes, double scale);

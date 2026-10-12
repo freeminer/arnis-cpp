@@ -270,6 +270,10 @@ std::optional<std::vector<std::uint8_t>> http_range(const std::string &url,
 std::optional<std::vector<std::uint8_t>> zstd_decode(
 		const std::vector<std::uint8_t> &input, std::string *error)
 {
+	// Rust's unpack() treats an empty payload as an empty decoded value; keep
+	// that contract instead of passing an empty buffer to Zstd's frame parser.
+	if (input.empty())
+		return std::vector<std::uint8_t>{};
 	const auto size = ZSTD_getFrameContentSize(input.data(), input.size());
 	if (size == ZSTD_CONTENTSIZE_ERROR ||
 			(size != ZSTD_CONTENTSIZE_UNKNOWN && size > 256 * 1024 * 1024)) {

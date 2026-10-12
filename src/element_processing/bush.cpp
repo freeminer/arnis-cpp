@@ -194,9 +194,7 @@ Block species_at(const WorldEditor &editor, int x, int z, Kind kind)
 
 void set_leaf(WorldEditor &editor, Block leaf, int x, int y, int z)
 {
-	BlockWithProperties persistent{leaf, {{"persistent", "true"}}};
-	editor.set_block_with_properties_absolute(
-			persistent, x, editor.get_absolute_y(x, y, z), z, std::nullopt, std::nullopt);
+	editor.set_block(leaf, x, y, z, std::nullopt, std::nullopt);
 }
 
 bool can_spread(const WorldEditor &editor, int x, int z)

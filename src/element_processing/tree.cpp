@@ -531,12 +531,14 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 
 	trees::MappedRequest request;
 	request.habitat = habitat_for_tree_type(mapped.kind);
-	if (!mapped.genus.empty())
-		request.genus = mapped.genus;
+	if (mapped.genus)
+		request.genus = *mapped.genus;
 	request.conifer = mapped.conifer;
-	if (mapped.height_m > 0.0)
+	if (mapped.height_m)
 		request.want_size = trees::size_for_height(
-				static_cast<int>(std::lround(mapped.height_m * editor.scale())));
+				static_cast<int>(std::lround(*mapped.height_m * editor.scale())));
+	else
+		request.want_size = editor.canopy_size_hint(pos.x, pos.z);
 	if (editor.ground)
 		request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
 	if (request.eco) {
@@ -550,14 +552,14 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 				break;
 			}
 	}
-	if (editor.place_mapped_regional_tree(pos.x,
-					  editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request)
+	if (editor.scale() >= MICRO_TREE_MAX_SCALE &&
+			editor.place_mapped_regional_tree(pos.x,
+						  editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request)
 					.has_value())
 		return;
 
 	create_of_type(editor, pos, mapped.kind, building_footprints, bridge_surface, true,
-			mapped.height_m > 0.0 ? std::optional<double>(mapped.height_m) : std::nullopt,
-			false, false, true);
+			mapped.height_m, false, false, true);
 }
 
 std::vector<Block> Tree::get_building_wall_blocks()

@@ -2,6 +2,7 @@
 #include "../../arnis_adapter.h"
 #include "floodfill_cache.h"
 #include "args.h"
+#include <array>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -283,6 +284,11 @@ std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
 
 // Sorts broad ground-cover polygons once before a parsed extract is shared.
 void prepare_elements_for_generation(std::vector<ProcessedElement> &elements);
+
+// Start Rust's asynchronous Mapillary facade pipeline for geographic bounds
+// supplied by an embedding host. Bounds are min-lat, max-lat, min-lon, max-lon.
+std::shared_ptr<mapillary::FacadeJob> start_mapillary_facade_job(
+		const Args &, const std::array<double, 4> &geographic_bounds);
 
 bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &elements,
 		const Args &args, FloodFillCache &flood_fill_cache,

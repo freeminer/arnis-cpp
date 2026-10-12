@@ -152,7 +152,8 @@ std::optional<CaveSchematic> decode_cave_schematic(const std::filesystem::path &
 	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(in)), {});
 	structures::SchemDocument document;
 	try {
-		document = structures::decode_sponge_schem(bytes);
+		document = structures::decode_sponge_schem(
+				bytes, structures::SchemDimensionMode::CavePack);
 	} catch (...) {
 		return std::nullopt;
 	}

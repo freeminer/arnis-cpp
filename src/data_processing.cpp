@@ -957,6 +957,55 @@ void prepare_elements_for_generation(std::vector<ProcessedElement> &elements)
 	sort_ground_fill_areas(elements);
 }
 
+std::shared_ptr<mapillary::FacadeJob> start_mapillary_facade_job(
+		const Args &args, const std::array<double, 4> &geo)
+{
+	const bool geographic_bounds_valid =
+			std::all_of(geo.begin(), geo.end(),
+					[](double value) { return std::isfinite(value); }) &&
+			geo[1] > geo[0] && geo[3] > geo[2];
+	if (!geographic_bounds_valid || !args.mapillary_pipeline_on() ||
+			args.skip_objects() || args.mapillary_probe)
+		return {};
+
+	const mapillary::BBox bbox{geo[0], geo[2], geo[1], geo[3]};
+	mapillary::PipelineConfig config;
+	config.bounds = {bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat};
+	config.access_token = *args.mapillary_api_token();
+	constexpr double pi = 3.14159265358979323846;
+	constexpr double earth_radius_m = 6371000.0;
+	const double mid_lat = 0.5 * (bbox.min_lat + bbox.max_lat);
+	const double height_m = (bbox.max_lat - bbox.min_lat) * pi / 180.0 * earth_radius_m;
+	const double width_m = (bbox.max_lon - bbox.min_lon) * pi / 180.0 * earth_radius_m *
+						   std::cos(mid_lat * pi / 180.0);
+	if (std::abs(width_m * height_m) > 100000.0)
+		config.cache_only = "area is too large for a cold Mapillary facade run";
+	auto overpass_fetcher =
+			[](const retrieve_data::OverpassEndpoint &endpoint,
+					const std::string &query) -> std::optional<std::string> {
+		auto permit = net::request_permit();
+		HTTPFetchRequest request;
+		request.url = endpoint.url;
+		request.method = HTTP_POST;
+		request.fields.emplace("data", query);
+		request.timeout = static_cast<long>(endpoint.timeout_seconds) * 1000L;
+		request.connect_timeout = 10000L;
+		request.useragent = retrieve_data::OSM_USER_AGENT;
+		request.quiet = true;
+		HTTPFetchResult response;
+		httpfetch_sync(request, response);
+		if (!response.succeeded || response.response_code < 200 ||
+				response.response_code >= 300 || response.data.size() > 64 * 1024 * 1024)
+			return std::nullopt;
+		return std::move(response.data);
+	};
+	config.osm_fetch =
+			mapillary::osm_fetch_config(bbox, args, std::move(overpass_fetcher));
+	mapillary::Client client;
+	return std::make_shared<mapillary::FacadeJob>(
+			mapillary::FacadeJob::start(std::move(client), std::move(config)));
+}
+
 // Forward declarations for all element processing functions
 namespace buildings
 {
@@ -1362,11 +1411,13 @@ bool generate_world(WorldEditor &editor,
 				const auto min_z = xzbbox.min_z();
 				auto area_map = ecoregion::EcoMap::build(static_cast<std::size_t>(width),
 						static_cast<std::size_t>(height), {min_x, min_z},
-						[&editor, min_x, min_z](double x, double z) {
+						[&editor, min_x, min_z](
+								double x, double z) -> std::pair<double, double> {
 							const auto ll = editor.mg->pos_to_ll(
 									static_cast<int>(std::floor(min_x + x)),
 									static_cast<int>(std::floor(min_z + z)));
-							return std::pair{ll.lat, ll.lon};
+							return {static_cast<double>(ll.lat),
+									static_cast<double>(ll.lon)};
 						});
 				if (area_map) {
 					ecoregion_map_has_gaps = area_map->has_gaps();
@@ -1394,7 +1445,7 @@ bool generate_world(WorldEditor &editor,
 	if (!args.legacy_trees) {
 		const auto selector = cached_region_selector(tree_pack_root,
 				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
-				base_level, args.max_tree_size,
+				area_floor, args.max_tree_size,
 				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0,
 				area_ecoregion_ids, exclude_palms);
 		if (selector)
@@ -1595,8 +1646,13 @@ bool generate_world(WorldEditor &editor,
 		// than a rounded land-cover-sized sample that is discarded afterwards.
 		editor.ground->apply_osm_water_override(elements, xzbbox);
 		editor.ground->apply_osm_land_override(elements, xzbbox, args.scale);
+		if (args.debug)
+			editor.ground->save_land_cover_debug_image("landcover_debug_post_osm_water");
 		editor.ground->apply_bridge_land_cover_repair(elements, xzbbox, args.scale);
 		editor.ground->mark_beaches();
+		if (args.debug)
+			editor.ground->save_land_cover_debug_image(
+					"landcover_debug_post_bridge_repair");
 		// Each override deliberately invalidates the interpolated shoreline
 		// field. Rebuild it only after the complete Rust-equivalent override
 		// sequence so the ground pass sees OSM-correct water and smooth coasts.
@@ -1670,7 +1726,7 @@ bool generate_world(WorldEditor &editor,
 	if (!shared_selector && !args.legacy_trees) {
 		shared_selector = cached_region_selector(tree_pack_root,
 				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
-				base_level, args.max_tree_size,
+				area_floor, args.max_tree_size,
 				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0,
 				area_ecoregion_ids, exclude_palms, true);
 		if (shared_selector)
@@ -1808,6 +1864,12 @@ bool generate_world(WorldEditor &editor,
 	auto element_tiles = create_tiles(xzbbox, DEFAULT_TILE_SIZE);
 	const bool tiled_element_dispatch =
 			should_use_parallel_tiles(element_tiles.size(), java_format);
+	// Rust's ARNIS_NO_BAND override forces LPT ordering even when the memory
+	// estimate would otherwise select row-major bands for streaming.
+	const bool force_lpt_tile_order = std::getenv("ARNIS_NO_BAND") != nullptr;
+	const bool streaming_order =
+			java_format && !force_lpt_tile_order &&
+			should_stream_to_disk(element_tiles.size(), args.fillground);
 	std::vector<std::vector<std::size_t>> element_assignments;
 	std::vector<std::pair<std::size_t, std::size_t>> element_tasks;
 	if (tiled_element_dispatch) {
@@ -1818,9 +1880,6 @@ bool generate_world(WorldEditor &editor,
 		// monotonic. The C++ Freeminer backend still processes overlays serially,
 		// but preserving the same stable tile/merge order avoids different winners
 		// for overlapping halo writes and keeps per-tile pass order aligned.
-		const bool streaming_order =
-				java_format &&
-				should_stream_to_disk(element_tiles.size(), args.fillground);
 		std::vector<std::size_t> tile_order(element_tiles.size());
 		std::iota(tile_order.begin(), tile_order.end(), 0);
 		std::stable_sort(
@@ -1947,6 +2006,20 @@ bool generate_world(WorldEditor &editor,
 		}
 		water_depth::carve_lc_water_region(editor, big_water_field, road_mask,
 				tunnel_footprint, min_x, max_x, min_z, max_z, &bridge_surface);
+		// Rust's eviction path cannot run these passes after regions have been
+		// released. Match it by reopening tunnel interiors after the tile's ground,
+		// ore and water writes, then sealing any newly exposed cave fluids before
+		// this tile is merged. The editor's strict bounds keep the global tunnel
+		// indexes from writing outside the tile being finalized.
+		if (regional_ground_passes && streaming_order) {
+			if (!subway_points.empty())
+				railways::carve_subway_interior(editor, subway_points);
+			if (!highway_tunnel_cells.empty())
+				highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
+			if (args.caves)
+				caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
+						world_editor::terrain_floor_y());
+		}
 		const bool merged =
 				editor.merge_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
 		if (!merged)
@@ -2357,21 +2430,17 @@ bool generate_world(WorldEditor &editor,
 	editor.release_sealed_surface();
 	// Tunnel interiors must be reopened after underground fill, but before
 	// models: a late carve can cut holes into an already placed landmark.
-	if (!subway_points.empty())
+	if (!(regional_ground_passes && streaming_order) && !subway_points.empty())
 		railways::carve_subway_interior(editor, subway_points);
-	if (!highway_tunnel_cells.empty())
+	if (!(regional_ground_passes && streaming_order) && !highway_tunnel_cells.empty())
 		highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
-	if (args.caves)
+	if (args.caves && !(regional_ground_passes && streaming_order))
 		caves::seal_floating_fluid_region(editor,
 				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 				world_editor::terrain_floor_y());
 	if (model_pipeline) {
-		models_3d::place_three_dmr_prescan(
-				three_dmr_provider, editor, model_pipeline->three_dmr(), args.scale);
-		models_3d::place_wikidata_prescan(
-				wikidata_provider, editor, model_pipeline->wikidata(), args.scale);
-		models_3d::place_custom_models(
-				*model_pipeline, custom_model_provider, editor, args.scale);
+		model_pipeline->place(three_dmr_provider, wikidata_provider,
+				custom_model_provider, editor, args.scale);
 	}
 	// Rust places plane models after the other 3D providers and immediately
 	// before landmarks; preserve that ordering for overlap and suppression.
@@ -2419,50 +2488,8 @@ bool generate_world_with_options(WorldEditor &editor,
 	args.use_3d = options.use_3d;
 	auto facade_job = options.facades;
 	const auto geo = editor.geographic_bounds();
-	const bool geographic_bounds_valid = std::isfinite(geo[0]) && std::isfinite(geo[1]) &&
-										 std::isfinite(geo[2]) && std::isfinite(geo[3]) &&
-										 geo[1] > geo[0] && geo[3] > geo[2];
-	if (!facade_job && geographic_bounds_valid && args.mapillary_pipeline_on() &&
-			!args.skip_objects() && !args.mapillary_probe) {
-		const mapillary::BBox bbox{geo[0], geo[2], geo[1], geo[3]};
-		mapillary::PipelineConfig config;
-		config.bounds = {bbox.min_lon, bbox.min_lat, bbox.max_lon, bbox.max_lat};
-		config.access_token = *args.mapillary_api_token();
-		constexpr double pi = 3.14159265358979323846;
-		constexpr double earth_radius_m = 6371000.0;
-		const double mid_lat = 0.5 * (bbox.min_lat + bbox.max_lat);
-		const double height_m =
-				(bbox.max_lat - bbox.min_lat) * pi / 180.0 * earth_radius_m;
-		const double width_m = (bbox.max_lon - bbox.min_lon) * pi / 180.0 *
-							   earth_radius_m * std::cos(mid_lat * pi / 180.0);
-		if (std::abs(width_m * height_m) > 100000.0)
-			config.cache_only = "area is too large for a cold Mapillary facade run";
-		auto overpass_fetcher =
-				[](const retrieve_data::OverpassEndpoint &endpoint,
-						const std::string &query) -> std::optional<std::string> {
-			auto permit = net::request_permit();
-			HTTPFetchRequest request;
-			request.url = endpoint.url;
-			request.method = HTTP_POST;
-			request.fields.emplace("data", query);
-			request.timeout = static_cast<long>(endpoint.timeout_seconds) * 1000L;
-			request.connect_timeout = 10000L;
-			request.useragent = retrieve_data::OSM_USER_AGENT;
-			request.quiet = true;
-			HTTPFetchResult response;
-			httpfetch_sync(request, response);
-			if (!response.succeeded || response.response_code < 200 ||
-					response.response_code >= 300 ||
-					response.data.size() > 64 * 1024 * 1024)
-				return std::nullopt;
-			return std::move(response.data);
-		};
-		config.osm_fetch =
-				mapillary::osm_fetch_config(bbox, args, std::move(overpass_fetcher));
-		mapillary::Client client;
-		facade_job = std::make_shared<mapillary::FacadeJob>(
-				mapillary::FacadeJob::start(std::move(client), std::move(config)));
-	}
+	if (!facade_job)
+		facade_job = start_mapillary_facade_job(args, geo);
 	return generate_world(editor, elements, args, flood_fill_cache, building_footprints,
 			elements_prepared,
 			options.prepared_buildings ? &*options.prepared_buildings : nullptr,

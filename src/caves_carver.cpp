@@ -40,6 +40,15 @@ bool decor_chance(int x, int y, int z, std::uint64_t seed, std::uint64_t per_tho
 	return decor_hash(x, y, z, seed) % 1000 < per_thousand;
 }
 
+// Keep feature clearance identical to Rust's decoration::is_air: an explicitly
+// carved cell remains available to a feature even if the editor's live view has
+// since been changed by another planned cave pass.
+bool is_cave_air(const world_editor::WorldEditor &editor,
+		const std::unordered_set<std::int64_t> &air, int x, int y, int z)
+{
+	return air.contains(pack_cave_pos(x, y, z)) || !editor.block_exists_absolute(x, y, z);
+}
+
 void grow_dripstone(world_editor::WorldEditor &editor, int x, int y, int z,
 		const std::unordered_set<std::int64_t> &air, std::uint64_t seed, bool up)
 {
@@ -48,8 +57,7 @@ void grow_dripstone(world_editor::WorldEditor &editor, int x, int y, int z,
 	const char *direction = up ? "up" : "down";
 	for (int i = 0; i < length; ++i) {
 		const int yy = y + step * i;
-		if (!air.contains(pack_cave_pos(x, yy, z)) &&
-				editor.block_exists_absolute(x, yy, z))
+		if (!is_cave_air(editor, air, x, yy, z))
 			break;
 		const char *thickness = length == 1		  ? "tip"
 								: i == 0		  ? "base"
@@ -71,8 +79,7 @@ void hang_cave_vines(world_editor::WorldEditor &editor,
 	const int length = 1 + static_cast<int>(decor_hash(x, y, z, seed ^ 0x617EULL) % 8);
 	for (int i = 0; i < length; ++i) {
 		const int yy = y - i;
-		if (!air.contains(pack_cave_pos(x, yy, z)) &&
-				editor.block_exists_absolute(x, yy, z))
+		if (!is_cave_air(editor, air, x, yy, z))
 			break;
 		const bool berries = decor_hash(x, yy, z, seed ^ 0xBEEFULL) % 5 == 0;
 		const auto props =
@@ -106,8 +113,7 @@ void build_giant_mushroom(world_editor::WorldEditor &editor, const CaveRect &reg
 	const int stem_height =
 			3 + static_cast<int>(decor_hash(x, y, z, seed ^ 0x9145ULL) % 4);
 	for (int i = 0; i <= stem_height; ++i)
-		if (!air.contains(pack_cave_pos(x, y + i, z)) &&
-				editor.block_exists_absolute(x, y + i, z))
+		if (!is_cave_air(editor, air, x, y + i, z))
 			return;
 	const bool red = decor_hash(x, y, z, seed ^ 0x9146ULL) % 2 == 0;
 	const auto air_variants = std::vector<Block>{AIR};
@@ -717,17 +723,14 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 											std::vector<Block>{AIR}),
 									std::nullopt);
 						else if (vegetation < 85) {
-							if (editor.check_for_block_type_absolute(x, y + 1, z, AIR)) {
-								editor.set_block_with_properties_absolute(
-										BlockWithProperties{
-												TALL_GRASS_BOTTOM, {{"half", "lower"}}},
-										x, y, z, std::vector<Block>{AIR}, std::nullopt);
-								editor.set_block_with_properties_absolute(
-										BlockWithProperties{
-												TALL_GRASS_TOP, {{"half", "upper"}}},
-										x, y + 1, z, std::vector<Block>{AIR},
-										std::nullopt);
-							}
+							editor.set_block_with_properties_absolute(
+									BlockWithProperties{
+											TALL_GRASS_BOTTOM, {{"half", "lower"}}},
+									x, y, z, std::vector<Block>{AIR}, std::nullopt);
+							editor.set_block_with_properties_absolute(
+									BlockWithProperties{
+											TALL_GRASS_TOP, {{"half", "upper"}}},
+									x, y + 1, z, std::vector<Block>{AIR}, std::nullopt);
 						} else if (vegetation < 92)
 							editor.set_block_absolute(AZALEA, x, y, z,
 									std::vector<Block>{AIR}, std::nullopt);
@@ -819,7 +822,7 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				if (decor_hash(x, y, z, decoration_seed ^ 0xBA5D) % 170 == 0) {
 					const BlockWithProperties pillar{BASALT, {{"axis", "y"}}};
 					for (int i = 0; i < 14; ++i) {
-						if (editor.block_exists_absolute(x, y + i, z))
+						if (!is_cave_air(editor, air_cells, x, y + i, z))
 							break;
 						editor.set_block_with_properties_absolute(pillar, x, y + i, z,
 								std::vector<Block>{AIR}, std::nullopt);

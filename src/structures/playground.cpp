@@ -27,16 +27,11 @@ void scatter_playgrounds(
 		const int y = editor.get_absolute_y(x, 1, z);
 		const unsigned rotation = (h >> 7) & 3;
 		const int selected = static_cast<int>((h >> 5) % 3) + 1;
-		bool placed_schematic = place_named_schem(editor,
-				"playground" + std::to_string(selected), x, y, z, rotation, &SAND);
-		// Rust skips a failed variant and keeps trying the remaining parsed
-		// playgrounds, so one bad asset does not remove the whole feature.
-		for (int fallback = 1; !placed_schematic && fallback <= 3; ++fallback)
-			if (fallback != selected)
-				placed_schematic =
-						place_named_schem(editor, "playground" + std::to_string(fallback),
-								x, y, z, rotation, &SAND);
-		if (!placed_schematic)
+		// Rust selects the deterministic variant and skips this candidate if
+		// that asset failed to parse; silently substituting another variant changes
+		// both the generated scene and the stable placement sequence.
+		if (!place_named_schem(editor, "playground" + std::to_string(selected), x, y, z,
+					rotation, &SAND))
 			continue;
 		placed.emplace_back(x, z);
 	}

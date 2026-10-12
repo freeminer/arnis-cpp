@@ -198,6 +198,22 @@ ModelPlacementStats place_custom_models(const Models3dPipeline &pipeline,
 	out.voxels = planes.voxels + stadiums.voxels;
 	return out;
 }
+
+ModelPlacementStats Models3dPipeline::place(three_dmr::Client &three_dmr_provider,
+		ModelProvider &wikidata_provider, ModelProvider &custom_provider,
+		world_editor::WorldEditor &editor, double blocks_per_meter) const
+{
+	ModelPlacementStats stats;
+	// Keep provider precedence stable: explicit 3DMR models claim and render
+	// before Wikidata, followed by the custom archetypes.
+	stats.add(place_three_dmr_prescan(
+			three_dmr_provider, editor, three_dmr_, blocks_per_meter));
+	stats.add(place_wikidata_prescan(
+			wikidata_provider, editor, wikidata_, blocks_per_meter));
+	stats.add(place_custom_models(*this, custom_provider, editor, blocks_per_meter));
+	return stats;
+}
+
 std::array<float, 3> rotated_center_offset(const ModelAsset &a, float s, float yaw)
 {
 	const float cx = (a.min[0] + a.max[0]) * 0.5f * s,

@@ -891,7 +891,8 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 		const Ground *ground, const XZBBox &xzbbox)
 {
 	StillWaterSurfaces result;
-	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
+	if (!ground || !ground->has_land_cover() ||
+			(!ground->elevation_enabled && !ground->mg))
 		return result;
 
 	// Keep raster coordinates anchored to the exact generation bbox, as in
@@ -901,7 +902,11 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 	const int origin_z = xzbbox.min_z();
 	auto point_at = [=](int x, int z) { return XZPoint{x - origin_x, z - origin_z}; };
 	auto level_at = [=](int x, int z) {
-		return ground->level({x - origin_x, z - origin_z});
+		// Elevation rasters are indexed from the generation bbox. Freeminer's
+		// terrain fallback instead queries MapgenEarth in absolute world coords.
+		return ground->level(ground->mg && !ground->elevation_enabled
+									 ? XZPoint{x, z}
+									 : XZPoint{x - origin_x, z - origin_z});
 	};
 
 	for (const auto &element : elements) {

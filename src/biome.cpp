@@ -241,8 +241,7 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 			std::optional<std::string> selected;
 			const auto bpm = ground->blocks_per_meter();
 			if (ground->elevation_enabled &&
-					ground->snow_threshold() != std::numeric_limits<int>::max() &&
-					bpm > 0.0)
+					ground->snow_threshold() != std::numeric_limits<int>::max())
 				selected = mountain_biome(lc, climate, water_distance,
 						ground->snow_threshold() == std::numeric_limits<int>::min()
 								? std::numeric_limits<double>::infinity()

@@ -309,10 +309,13 @@ std::vector<ArmCell> arm_cells(const std::vector<Road> &roads,
 			const auto &a = roads[ri].way->nodes[k - 1];
 			const auto &b = roads[ri].way->nodes[k];
 			const auto points = bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
-			for (std::size_t p = points.size(); p-- > 1 && cells.size() < limit;)
-				cells.push_back({std::get<0>(points[p - 1]), std::get<2>(points[p - 1]),
-						ri, roads[ri].node_t[k] - static_cast<std::uint32_t>(p - 1),
-						dir});
+			for (std::size_t distance = 1;
+					distance < points.size() && cells.size() < limit; ++distance) {
+				const auto point_index = points.size() - 1 - distance;
+				cells.push_back({std::get<0>(points[point_index]),
+						std::get<2>(points[point_index]), ri,
+						roads[ri].node_t[k] - static_cast<std::uint32_t>(distance), dir});
+			}
 			--k;
 		}
 	}

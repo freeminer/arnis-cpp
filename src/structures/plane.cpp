@@ -5,66 +5,41 @@
 #include "../models_3d/pipeline.h"
 #include "schem_decoder.h"
 
-#include <fstream>
-#include <iterator>
-
 #include <algorithm>
 #include <array>
 #include <cmath>
-#include <mutex>
 #include <optional>
 
 namespace arnis::structures::plane
 {
 namespace
 {
-const SchemDocument *plane_asset(bool gear_down, unsigned livery)
+std::shared_ptr<const SchemDocument> plane_asset(
+		const WorldEditor &editor, bool gear_down, unsigned livery)
 {
 	if (livery < 1 || livery > 6)
-		return nullptr;
-	static std::array<std::optional<SchemDocument>, 6> down;
-	static std::array<std::optional<SchemDocument>, 6> up;
-	static std::once_flag down_once;
-	static std::once_flag up_once;
-	auto &fleet = gear_down ? down : up;
-	auto &once = gear_down ? down_once : up_once;
-	std::call_once(once, [&] {
-		for (unsigned i = 1; i <= fleet.size(); ++i) {
-			const auto path = assets::path(std::string("structures/planes/plane_gear_") +
-										   (gear_down ? "down_" : "up_") +
-										   std::to_string(i) + ".schem");
-			std::ifstream stream(path, std::ios::binary);
-			if (!stream)
-				continue;
-			std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(stream)),
-					std::istreambuf_iterator<char>());
-			try {
-				fleet[i - 1] = decode_sponge_schem(bytes);
-			} catch (...) {
-				fleet[i - 1].reset();
-			}
-		}
-	});
-	return fleet[livery - 1] ? &*fleet[livery - 1] : nullptr;
+		return {};
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	const auto path = root / "planes" /
+					  (std::string("plane_gear_") + (gear_down ? "down_" : "up_") +
+							  std::to_string(livery) + ".schem");
+	try {
+		return load_schem_cached(path);
+	} catch (...) {
+		return {};
+	}
 }
 
-const std::vector<const SchemDocument *> &available_plane_assets(bool gear_down)
+std::vector<std::shared_ptr<const SchemDocument>> available_plane_assets(
+		const WorldEditor &editor, bool gear_down)
 {
-	static const auto down = [] {
-		std::vector<const SchemDocument *> assets;
-		for (unsigned i = 1; i <= 6; ++i)
-			if (const auto *asset = plane_asset(true, i))
-				assets.push_back(asset);
-		return assets;
-	}();
-	static const auto up = [] {
-		std::vector<const SchemDocument *> assets;
-		for (unsigned i = 1; i <= 6; ++i)
-			if (const auto *asset = plane_asset(false, i))
-				assets.push_back(asset);
-		return assets;
-	}();
-	return gear_down ? down : up;
+	std::vector<std::shared_ptr<const SchemDocument>> assets;
+	for (unsigned i = 1; i <= 6; ++i)
+		if (auto asset = plane_asset(editor, gear_down, i))
+			assets.push_back(std::move(asset));
+	return assets;
 }
 } // namespace
 
@@ -419,12 +394,12 @@ bool place_plane_placement(WorldEditor &editor, const Placement &placement)
 	if (!editor.place_schematics())
 		return false;
 	const bool gear_down = placement.kind == PlaneKind::Parked;
-	const auto &fleet = available_plane_assets(gear_down);
+	const auto fleet = available_plane_assets(editor, gear_down);
 	if (fleet.empty())
 		return false;
 	auto rng = element_rng(placement.representative_id * 31 + 7);
 	const auto livery = static_cast<std::size_t>(rng()) % fleet.size();
-	const auto *document = fleet[livery];
+	const auto &document = fleet[livery];
 	const int ground_y = models_3d::lowest_ground_in_bbox(editor,
 			placement.footprint.min_x, placement.footprint.min_z,
 			placement.footprint.max_x, placement.footprint.max_z);
