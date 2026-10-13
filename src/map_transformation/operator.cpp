@@ -1,28 +1,10 @@
 #include "operator.h"
 #include "rotate/rotator.h"
-#include "translate/startend_translator.h"
-#include "translate/vector_translator.h"
+#include "translate/translator_factory.h"
 #include <stdexcept>
 
 namespace arnis::map_transformation
 {
-namespace
-{
-int integer_field(const nlohmann::json &object, const char *key)
-{
-	if (!object.contains(key) || !object.at(key).is_number_integer())
-		throw std::runtime_error(std::string("Expected integer field '") + key + "'");
-	return object.at(key).get<int>();
-}
-cartesian::XZPoint point_field(const nlohmann::json &object, const char *key)
-{
-	if (!object.contains(key) || !object.at(key).is_object())
-		throw std::runtime_error(std::string("Expected object field '") + key + "'");
-	const auto &point = object.at(key);
-	return {integer_field(point, "x"), integer_field(point, "z")};
-}
-}
-
 std::unique_ptr<Operator> operator_from_json(const nlohmann::json &entry)
 {
 	if (!entry.is_object() || !entry.contains("operation") ||
@@ -41,26 +23,7 @@ std::unique_ptr<Operator> operator_from_json(const nlohmann::json &entry)
 	}
 	if (operation != "translate")
 		throw std::runtime_error("Unrecognized operation type '" + operation + "'");
-	if (!config.contains("type") || !config.at("type").is_string() ||
-			!config.contains("config") || !config.at("config").is_object())
-		throw std::runtime_error(
-				"Translator config requires string 'type' and object 'config'");
-	const auto type = config.at("type").get<std::string>();
-	const auto &translate = config.at("config");
-	if (type == "vector") {
-		const auto vector =
-				translate.contains("vector") ? translate.at("vector") : translate;
-		auto out = std::make_unique<VectorTranslator>();
-		out->vector = {integer_field(vector, "dx"), integer_field(vector, "dz")};
-		return out;
-	}
-	if (type == "startend") {
-		auto out = std::make_unique<StartEndTranslator>();
-		out->start = point_field(translate, "start");
-		out->end = point_field(translate, "end");
-		return out;
-	}
-	throw std::runtime_error("Unrecognized translator type '" + type + "'");
+	return translator_from_json(config);
 }
 
 std::vector<std::unique_ptr<Operator>> operator_vec_from_json(const nlohmann::json &list)

@@ -17,6 +17,11 @@
 namespace arnis
 {
 
+namespace trees
+{
+enum class Habitat;
+}
+
 namespace trees::mapped
 {
 struct MappedTree;
@@ -120,6 +125,11 @@ enum class TreeType
 	FloweringOak = 12,
 	Mangrove = 13
 };
+
+namespace trees
+{
+Habitat habitat_for_tree_type(TreeType type);
+}
 
 struct Tree
 {

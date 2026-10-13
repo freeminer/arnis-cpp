@@ -16,13 +16,6 @@ void translate_by_vector(
 				n.x += v.dx;
 				n.z += v.dz;
 			}
-		} else if (e.is_relation()) {
-			auto &relation = std::get<ProcessedRelation>(e);
-			for (auto &member : relation.members)
-				for (auto &n : member.way.nodes) {
-					n.x += v.dx;
-					n.z += v.dz;
-				}
 		}
 	}
 }

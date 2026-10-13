@@ -55,7 +55,8 @@ std::string overpass_query(const geographic::LLBBox &bbox)
 		<< "nwr[\"natural\"][\"natural\"!=\"coastline\"][\"natural\"!=\"bay\"][\"natural\"!=\"strait\"];nwr[\"leisure\"];"
 		<< "nwr[\"water\"][\"water\"!=\"bay\"][\"water\"!=\"ocean\"][\"water\"!=\"sea\"][\"tidal\"!=\"yes\"];nwr[\"waterway\"][\"waterway\"!=\"tidal_channel\"];"
 		<< "nwr[\"amenity\"];nwr[\"tourism\"];nwr[\"bridge\"];nwr[\"railway\"];nwr[\"roller_coaster\"];nwr[\"barrier\"];nwr[\"entrance\"];nwr[\"door\"];"
-		<< "nwr[\"power\"];nwr[\"historic\"];nwr[\"emergency\"];nwr[\"advertising\"];nwr[\"man_made\"];nwr[\"aeroway\"];nwr[\"3dmr\"];way[\"place\"][\"place\"!~\"^(ocean|sea|bay|strait|sound|fjord)$\"];way;\n)->.relsinbbox;\n"
+		<< "nwr[\"power\"];nwr[\"historic\"];nwr[\"emergency\"];nwr[\"advertising\"];nwr[\"man_made\"];nwr[\"aeroway\"];nwr[\"3dmr\"];"
+		<< "nwr[\"shop\"];nwr[\"office\"];way[\"place\"][\"place\"!~\"^(ocean|sea|bay|strait|sound|fjord)$\"];way;\n)->.relsinbbox;\n"
 		<< "(way(r.relsinbbox);)->.waysinbbox;(node(w.waysinbbox);node(w.relsinbbox);)->.nodesinbbox;.relsinbbox out body;.waysinbbox out body;.nodesinbbox out skel qt;";
 	return out.str();
 }
@@ -95,55 +96,87 @@ const char *fallback_reason(const std::string &error)
 }
 
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &bbox,
-		const OverpassFetcher &fetcher, std::uint64_t seed, bool probe)
+		const OverpassFetcher &fetcher, std::uint64_t seed, bool probe,
+		std::string *error)
 {
 	const auto query = overpass_query(bbox);
 	std::size_t answered = 0;
 	std::size_t truncated = 0;
+	std::string last_error;
 	for (const auto &endpoint : overpass_request_plan(seed, probe)) {
 		auto response = fetcher(endpoint, query);
-		if (!response || response->empty())
+		if (!response) {
+			last_error = "Overpass request failed at " + url_host(endpoint.url);
 			continue;
+		}
+		if (response->empty()) {
+			last_error =
+					"Overpass returned an empty response from " + url_host(endpoint.url);
+			continue;
+		}
+		++answered;
 		try {
 			std::istringstream input(*response);
 			auto document = osm_parser::parse_overpass_json(input);
-			++answered;
 			if (document.remark && remark_means_truncated(*document.remark)) {
 				++truncated;
+				last_error = "Overpass response was truncated at " +
+							 url_host(endpoint.url) + ": " + *document.remark;
 				if (truncated >= 2)
 					break;
 				continue;
 			}
 			return FetchResult{std::move(document), endpoint.url};
-		} catch (const std::exception &) {
+		} catch (const std::exception &e) {
+			last_error = "Invalid Overpass response from " + url_host(endpoint.url) +
+						 ": " + e.what();
 		}
 	}
-	(void)answered;
+	if (error) {
+		if (truncated > 0 && truncated == answered)
+			*error =
+					"All answering Overpass servers returned partial data. " + last_error;
+		else if (truncated > 0)
+			*error =
+					std::to_string(truncated) + " of " + std::to_string(answered) +
+					" answering Overpass server(s) returned partial data; others failed. " +
+					last_error;
+		else if (!last_error.empty())
+			*error = std::move(last_error);
+		else
+			*error = "All Overpass servers failed without a response";
+	}
 	return std::nullopt;
 }
 
 std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, bool use_tile_archive,
-		const std::string &tiles_url, std::uint64_t seed, bool probe)
+		const std::string &tiles_url, std::uint64_t seed, bool probe, std::string *error)
 {
+	std::string archive_error;
 	if (use_tile_archive && !tiles_url.empty()) {
-		std::string archive_error;
 		if (auto document =
 						osm_tiles::fetch_data_from_tiles(bbox, tiles_url, &archive_error))
 			return FetchResult{std::move(*document), tiles_url};
-		// Archive misses intentionally fall through to the configured Overpass
-		// transport; keep the detailed reason available for debugger callers.
-		(void)archive_error;
 	}
-	return fetch_overpass(bbox, fetcher, seed, probe);
+	std::string overpass_error;
+	auto result = fetch_overpass(bbox, fetcher, seed, probe, &overpass_error);
+	if (!result && error) {
+		if (!archive_error.empty())
+			*error = "Tile archive unavailable (" + archive_error +
+					 "); Overpass fallback failed (" + overpass_error + ")";
+		else
+			*error = std::move(overpass_error);
+	}
+	return result;
 }
 
 std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, const arnis::Args &args, std::uint64_t seed,
-		bool probe)
+		bool probe, std::string *error)
 {
 	return fetch_osm_data(
-			bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url, seed, probe);
+			bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url, seed, probe, error);
 }
 
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body)

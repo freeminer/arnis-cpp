@@ -3,6 +3,7 @@
 #include <array>
 #include <limits>
 #include <cstdint>
+#include <memory>
 namespace arnis::map_palette
 {
 namespace
@@ -87,14 +88,17 @@ std::uint8_t nearest_map_color(std::uint8_t r, std::uint8_t g, std::uint8_t b)
 {
 	// Direct-mapped per-thread memo: atlas and map renders repeatedly quantize
 	// the same colors, while this fixed table remains bounded across worlds.
-	thread_local std::array<std::uint32_t, MEMO_SLOTS> memo{};
+	// Keep the per-thread memo off TLS storage, matching Rust's lazily allocated
+	// Box<[u32; MEMO_SLOTS]>. Generation workers that never render a map then
+	// pay neither the 64 KiB TLS footprint nor its initialization cost.
+	thread_local auto memo = std::make_unique<std::array<std::uint32_t, MEMO_SLOTS>>();
 	const std::uint32_t rgb = (std::uint32_t(r) << 16) | (std::uint32_t(g) << 8) | b;
 	const auto slot = static_cast<std::size_t>((rgb * 0x9E3779B1u) >> (32 - MEMO_BITS));
-	const std::uint32_t entry = memo[slot];
+	const std::uint32_t entry = (*memo)[slot];
 	if (entry && (entry >> 8) == rgb)
 		return static_cast<std::uint8_t>(entry);
 	const auto id = nearest_map_color_uncached(r, g, b);
-	memo[slot] = (rgb << 8) | id;
+	(*memo)[slot] = (rgb << 8) | id;
 	return id;
 }
 }

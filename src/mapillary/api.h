@@ -52,10 +52,15 @@ class Client
 			const std::string &url, std::size_t max_bytes) const;
 	std::optional<HttpReply> fetch_reply(
 			const std::string &url, std::size_t max_bytes) const;
+	std::optional<HttpReply> fetch_retrying(
+			const std::string &url, std::size_t max_bytes) const;
 	std::optional<cache::ImageRecord> refresh_metadata(const std::string &id) const;
 
 public:
 	explicit Client(cache::Layout cache = cache::Layout{});
+	// True only for the built-in transport. Injected callbacks remain serial,
+	// matching search()'s thread-safety contract for library/test hosts.
+	bool supports_concurrent_fetch() const noexcept { return concurrent_fetch_; }
 	Client(cache::Layout cache, JsonFetcher fetch) :
 			cache_(std::move(cache)), fetch_(std::move(fetch))
 	{
@@ -69,6 +74,7 @@ public:
 	std::optional<PanoMeta> metadata(const cache::ImageRecord &) const;
 	std::optional<std::filesystem::path> download_image(
 			const cache::ImageRecord &, cache::ImageSize) const;
+	void discard_cluster_cache(const std::string &id) const;
 	std::optional<cache::ImageRecord> cached_metadata(const std::string &id) const
 	{
 		return cache_.load_metadata(id);

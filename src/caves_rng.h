@@ -9,6 +9,13 @@ struct Seed128
 {
 	std::int64_t lo, hi;
 };
+
+// Match caves/{carver,water,schems}.rs chunk_rng: coordinate multiplications
+// wrap as signed i64 in Rust. Do the arithmetic as u64 to avoid C++ signed
+// overflow while preserving the exact two's-complement bit pattern.
+std::int64_t chunk_seed(
+		std::int64_t seed, std::int32_t cx, std::int32_t cz, std::int64_t salt);
+
 class XoroRandom;
 
 class PositionalFactory

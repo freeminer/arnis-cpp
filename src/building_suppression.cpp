@@ -156,12 +156,28 @@ struct RelationFootprint
 	double center_lon;
 };
 
-std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relation)
+std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relation,
+		const std::unordered_map<std::uint64_t, const ProcessedWay *> &source_ways)
 {
 	std::vector<std::vector<const ProcessedWay *>> open;
-	for (const auto &member : relation.members)
-		if (member.role == ProcessedMemberRole::Outer && member.way.nodes.size() >= 2)
-			open.push_back({&member.way});
+	if (!relation.source_members.empty()) {
+		// Rust evaluates suppression from the original OSM records, before relation
+		// members are clipped for rendering. The parser also normalizes roleless
+		// building members to Outer, but this pass intentionally accepts only
+		// explicit outer/outline roles.
+		for (const auto &member : relation.source_members) {
+			const auto role = normalized_role(member.role);
+			if (member.type != "way" || (role != "outer" && role != "outline"))
+				continue;
+			const auto way = source_ways.find(member.id);
+			if (way != source_ways.end() && way->second->nodes.size() >= 2)
+				open.push_back({way->second});
+		}
+	} else {
+		for (const auto &member : relation.members)
+			if (member.role == ProcessedMemberRole::Outer && member.way.nodes.size() >= 2)
+				open.push_back({&member.way});
+	}
 	std::vector<std::vector<GeoPoint>> result;
 	while (!open.empty()) {
 		auto segments = std::move(open.back());
@@ -423,7 +439,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		if ((!part && !relation.tags.contains("building")) ||
 				(part && !covers_ground(relation.tags)))
 			continue;
-		auto rings = relation_rings(relation);
+		auto rings = relation_rings(relation, ways);
 		double area = 0, lat_sum = 0, lon_sum = 0;
 		std::size_t count = 0;
 		for (const auto &ring : rings) {

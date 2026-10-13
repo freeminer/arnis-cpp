@@ -11,7 +11,6 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
-#include <deque>
 #include <iterator>
 #include <limits>
 #include <tuple>
@@ -219,29 +218,48 @@ std::vector<std::uint64_t> dilate(const std::vector<std::uint64_t> &seeds,
 {
 	const std::size_t count = width * height;
 	std::vector<std::uint64_t> seen = seeds, out((count + 63) / 64);
-	std::deque<std::pair<std::size_t, int>> queue;
-	for (std::size_t i = 0; i < count; ++i)
-		if (bit(seeds, i))
-			queue.emplace_back(i, 0);
+	std::vector<std::uint32_t> frontier;
+	frontier.reserve(std::min(count, width * 2 + height * 2));
 	constexpr std::array<std::pair<int, int>, 4> neighbours{
 			{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
-	while (!queue.empty()) {
-		const auto [index, depth] = queue.front();
-		queue.pop_front();
-		if (depth >= distance)
+	const auto is_passable = [&](std::size_t index) {
+		return (grid[index / width][index % width] == LC_WATER) == through_water;
+	};
+	for (std::size_t index = 0; index < count; ++index) {
+		if (!bit(seeds, index))
 			continue;
 		const int x = index % width, z = index / width;
+		bool touches_passable = false;
 		for (const auto &[dx, dz] : neighbours) {
 			const int nx = x + dx, nz = z + dz;
-			if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height))
-				continue;
-			const auto next = std::size_t(nz) * width + nx;
-			if (bit(seen, next) || (grid[nz][nx] == LC_WATER) != through_water)
-				continue;
-			set_bit(seen, next);
-			set_bit(out, next);
-			queue.emplace_back(next, depth + 1);
+			if (nx >= 0 && nz >= 0 && nx < int(width) && nz < int(height) &&
+					is_passable(std::size_t(nz) * width + nx)) {
+				touches_passable = true;
+				break;
+			}
 		}
+		if (touches_passable)
+			frontier.push_back(static_cast<std::uint32_t>(index));
+	}
+	std::vector<std::uint32_t> next_frontier;
+	for (int step = 0; step < std::max(0, distance) && !frontier.empty(); ++step) {
+		next_frontier.clear();
+		for (const auto index32 : frontier) {
+			const auto index = static_cast<std::size_t>(index32);
+			const int x = index % width, z = index / width;
+			for (const auto &[dx, dz] : neighbours) {
+				const int nx = x + dx, nz = z + dz;
+				if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height))
+					continue;
+				const auto neighbor = std::size_t(nz) * width + nx;
+				if (bit(seen, neighbor) || !is_passable(neighbor))
+					continue;
+				set_bit(seen, neighbor);
+				set_bit(out, neighbor);
+				next_frontier.push_back(static_cast<std::uint32_t>(neighbor));
+			}
+		}
+		frontier.swap(next_frontier);
 	}
 	return out;
 }
@@ -367,7 +385,7 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 		data.grid[z][x] = cls;
 	if (!changes.empty()) {
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
-		data.water_blend_grid.clear();
+		data.invalidate_water_blend_grid();
 	}
 }
 }

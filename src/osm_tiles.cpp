@@ -9,7 +9,9 @@
 #include <chrono>
 #include <curl/curl.h>
 #include <fstream>
+#include <future>
 #include <iomanip>
+#include <iostream>
 #include <limits>
 #include <map>
 #include <nlohmann/json.hpp>
@@ -29,6 +31,8 @@ constexpr std::int64_t MAX_LON_E7 = 1'800'000'000;
 constexpr std::uint64_t SPILL_LAT = (std::uint64_t{1} << 31) - 1;
 constexpr std::uint64_t RELATION_TILE_BASE = ((std::uint64_t{1} << 40) - 1) / 3;
 constexpr std::uint64_t MAX_RECORD_BYTES = 16 * 1024 * 1024;
+constexpr std::size_t MAX_TILE_BYTES = 256 * 1024 * 1024;
+constexpr std::size_t TILE_FETCH_BATCH = 8;
 
 bool building_tags(const tags_t &tags)
 {
@@ -72,19 +76,19 @@ TileExtent extent_union(const TileExtent &a, const TileExtent &b)
 }
 
 TileExtent relation_extent(const DecodedRelation &relation,
-		const std::unordered_map<std::uint64_t, DecodedWay> &ways)
+		const std::unordered_map<std::uint64_t, const DecodedWay *> &ways)
 {
 	TileExtent extent;
 	for (const auto &member : relation.members) {
 		const auto it = ways.find(member.ref);
 		if (it != ways.end())
-			extent = extent_union(extent, way_extent(it->second));
+			extent = extent_union(extent, way_extent(*it->second));
 	}
 	return extent;
 }
 
 std::vector<DecodedTile> select_for_bbox(
-		const std::vector<DecodedTile> &input, const geographic::LLBBox &bbox)
+		const DecodedTile &input, const geographic::LLBBox &bbox)
 {
 	// Match Rust's extent exactly: outward rounding plus the small margin keeps
 	// ways whose projected vertices land on the edge row/column available to the
@@ -104,29 +108,29 @@ std::vector<DecodedTile> select_for_bbox(
 			static_cast<std::int32_t>(lower_e7(bbox.min().lng(), MAX_LON_E7)),
 			static_cast<std::int32_t>(upper_e7(bbox.max().lat(), MAX_LAT_E7)),
 			static_cast<std::int32_t>(upper_e7(bbox.max().lng(), MAX_LON_E7)), true};
-	std::unordered_map<std::uint64_t, DecodedWay> ways;
-	std::unordered_map<std::uint64_t, DecodedRelation> relations;
-	for (const auto &tile : input) {
-		for (const auto &way : tile.ways)
-			ways.emplace(way.id, way);
-		for (const auto &relation : tile.relations)
-			relations.emplace(relation.id, relation);
-	}
+	std::unordered_map<std::uint64_t, const DecodedWay *> ways;
+	std::unordered_map<std::uint64_t, const DecodedRelation *> relations;
+	ways.reserve(input.ways.size());
+	relations.reserve(input.relations.size());
+	for (const auto &way : input.ways)
+		ways.emplace(way.id, &way);
+	for (const auto &relation : input.relations)
+		relations.emplace(relation.id, &relation);
 	std::unordered_set<std::uint64_t> keep_ways, keep_relations;
 	TileExtent building_extent = area;
 	for (const auto &[id, way] : ways)
-		if (intersects(way_extent(way), area)) {
+		if (intersects(way_extent(*way), area)) {
 			keep_ways.insert(id);
-			if (building_tags(way.tags))
-				building_extent = extent_union(building_extent, way_extent(way));
+			if (building_tags(way->tags))
+				building_extent = extent_union(building_extent, way_extent(*way));
 		}
 	for (const auto &[id, relation] : relations) {
-		const auto extent = relation_extent(relation, ways);
+		const auto extent = relation_extent(*relation, ways);
 		if (intersects(extent, area)) {
 			keep_relations.insert(id);
-			for (const auto &member : relation.members)
+			for (const auto &member : relation->members)
 				keep_ways.insert(member.ref);
-			if (building_tags(relation.tags) && extent.valid)
+			if (building_tags(relation->tags) && extent.valid)
 				building_extent = extent_union(building_extent, extent);
 		}
 	}
@@ -134,14 +138,14 @@ std::vector<DecodedTile> select_for_bbox(
 	// members) before selecting adjacent building parts.
 	for (const auto id : keep_ways)
 		if (const auto it = ways.find(id);
-				it != ways.end() && building_tags(it->second.tags))
-			building_extent = extent_union(building_extent, way_extent(it->second));
+				it != ways.end() && building_tags(it->second->tags))
+			building_extent = extent_union(building_extent, way_extent(*it->second));
 	// Keep building parts intersecting the bbox or the footprint of a selected
 	// building. This is Rust's union of the requested area and selected outline
 	// extents; unrelated building relations are deliberately not pulled in.
 	for (const auto &[id, way] : ways)
-		if (!keep_ways.contains(id) && building_tags(way.tags)) {
-			const auto extent = way_extent(way);
+		if (!keep_ways.contains(id) && building_tags(way->tags)) {
+			const auto extent = way_extent(*way);
 			if (intersects(extent, building_extent))
 				keep_ways.insert(id);
 		}
@@ -149,38 +153,35 @@ std::vector<DecodedTile> select_for_bbox(
 	// initial selected extent. Rust includes those relations when any member
 	// overlaps the accumulated requested/selected-building extent.
 	for (const auto &[id, relation] : relations)
-		if (!keep_relations.contains(id) && building_tags(relation.tags) &&
-				intersects(relation_extent(relation, ways), building_extent)) {
+		if (!keep_relations.contains(id) && building_tags(relation->tags) &&
+				intersects(relation_extent(*relation, ways), building_extent)) {
 			keep_relations.insert(id);
-			for (const auto &member : relation.members)
+			for (const auto &member : relation->members)
 				keep_ways.insert(member.ref);
 		}
 	std::vector<DecodedTile> selected;
-	for (const auto &tile : input) {
-		DecodedTile out;
-		for (const auto &way : tile.ways)
-			if (keep_ways.contains(way.id)) {
-				out.ways.push_back(way);
-			}
-		for (const auto &relation : tile.relations)
-			if (keep_relations.contains(relation.id))
-				out.relations.push_back(relation);
-		std::set<std::pair<std::int32_t, std::int32_t>> vertices;
-		for (const auto &way : out.ways)
-			for (const auto &point : way.points)
-				vertices.insert(point);
-		for (const auto &node : tile.nodes) {
-			const bool in_area = node.lat >= area.min_lat && node.lat <= area.max_lat &&
-								 node.lon >= area.min_lon && node.lon <= area.max_lon;
-			if (in_area || vertices.contains({node.lat, node.lon}))
-				out.nodes.push_back(node);
-		}
-		// Rust's assembler keeps in-bbox standalone nodes as well as ways and
-		// relations. Dropping a node-only tile here loses mapped POIs and other
-		// point features when no selected way shares their archive tile.
-		if (!out.nodes.empty() || !out.ways.empty() || !out.relations.empty())
-			selected.push_back(std::move(out));
+	DecodedTile out;
+	for (const auto &way : input.ways)
+		if (keep_ways.contains(way.id))
+			out.ways.push_back(way);
+	for (const auto &relation : input.relations)
+		if (keep_relations.contains(relation.id))
+			out.relations.push_back(relation);
+	std::set<std::pair<std::int32_t, std::int32_t>> vertices;
+	for (const auto &way : out.ways)
+		for (const auto &point : way.points)
+			vertices.insert(point);
+	for (const auto &node : input.nodes) {
+		const bool in_area = node.lat >= area.min_lat && node.lat <= area.max_lat &&
+							 node.lon >= area.min_lon && node.lon <= area.max_lon;
+		if (in_area || vertices.contains({node.lat, node.lon}))
+			out.nodes.push_back(node);
 	}
+	// Rust's assembler keeps in-bbox standalone nodes as well as ways and
+	// relations. Dropping a node-only tile here loses mapped POIs and other
+	// point features when no selected way shares their archive tile.
+	if (!out.nodes.empty() || !out.ways.empty() || !out.relations.empty())
+		selected.push_back(std::move(out));
 	return selected;
 }
 }
@@ -276,7 +277,7 @@ std::optional<std::vector<std::uint8_t>> zstd_decode(
 		return std::vector<std::uint8_t>{};
 	const auto size = ZSTD_getFrameContentSize(input.data(), input.size());
 	if (size == ZSTD_CONTENTSIZE_ERROR ||
-			(size != ZSTD_CONTENTSIZE_UNKNOWN && size > 256 * 1024 * 1024)) {
+			(size != ZSTD_CONTENTSIZE_UNKNOWN && size > MAX_TILE_BYTES)) {
 		if (error)
 			*error = "tile has invalid zstd frame";
 		return std::nullopt;
@@ -300,9 +301,13 @@ std::optional<std::vector<std::uint8_t>> zstd_decode(
 	std::array<std::uint8_t, 64 * 1024> buffer{};
 	std::size_t remaining = 1;
 	while (in.pos < in.size || remaining != 0) {
-		ZSTD_outBuffer out{buffer.data(), buffer.size(), 0};
+		// Match Rust's `take(cap + 1)`: give Zstd only the remaining allowance
+		// plus one byte, so an unknown-size frame cannot expand a full extra
+		// scratch-buffer chunk before the cap is noticed.
+		const auto allowance = MAX_TILE_BYTES + 1 - output.size();
+		ZSTD_outBuffer out{buffer.data(), std::min(buffer.size(), allowance), 0};
 		remaining = ZSTD_decompressStream(stream, &out, &in);
-		if (ZSTD_isError(remaining) || output.size() > 256 * 1024 * 1024 - out.pos) {
+		if (ZSTD_isError(remaining) || output.size() > MAX_TILE_BYTES - out.pos) {
 			ZSTD_freeDStream(stream);
 			if (error)
 				*error = "tile zstd decompression failed";
@@ -708,7 +713,6 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	}
 	const auto root =
 			base_url.back() == '/' ? base_url.substr(0, base_url.size() - 1) : base_url;
-	std::string local_error;
 	std::vector<std::uint8_t> manifest_bytes;
 	const auto cache = cache_root();
 	const auto archive_cache =
@@ -833,7 +837,23 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	std::unordered_set<std::uint32_t> wanted_cells;
 	for (const auto &[x, y] : wanted)
 		wanted_cells.insert((y >> shift) * side + (x >> shift));
-	std::vector<DecodedTile> decoded;
+	// Rust absorbs each decoded tile into ID-keyed maps immediately. Holding all
+	// tile vectors until selection keeps every buffered duplicate alive; collect
+	// first-seen records here instead, which bounds retained OSM geometry to the
+	// unique objects needed by selection and relation completion.
+	DecodedTile decoded;
+	std::unordered_set<std::uint64_t> seen_nodes, seen_ways, seen_relations;
+	auto absorb = [&](DecodedTile &&tile) {
+		for (auto &node : tile.nodes)
+			if (seen_nodes.insert(node.id).second)
+				decoded.nodes.push_back(std::move(node));
+		for (auto &way : tile.ways)
+			if (seen_ways.insert(way.id).second)
+				decoded.ways.push_back(std::move(way));
+		for (auto &relation : tile.relations)
+			if (seen_relations.insert(relation.id).second)
+				decoded.relations.push_back(std::move(relation));
+	};
 	struct OpenArchive
 	{
 		overture::pmtiles::Archive archive;
@@ -883,29 +903,77 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			return http_range(archive_url, archive_cache, off, len, &ignored_error);
 		};
 		auto archive = overture::pmtiles::open_archive(range);
-		if (!archive)
-			continue;
+		if (!archive) {
+			if (error)
+				*error = "could not open tile archive " + file;
+			return std::nullopt;
+		}
 		OpenArchive archive_state{*archive, range, {}, false};
-		for (const auto &[x, y] : wanted) {
-			auto raw = overture::pmtiles::read_tile(
-					archive->header, archive->root_directory, ZOOM, x, y, range);
-			if (!raw || raw->empty())
-				continue;
-			auto plain = zstd_decode(*raw, &local_error);
-			if (!plain)
-				continue;
+		struct TileResult
+		{
 			DecodedTile tile;
-			if (decode(*plain, tile, &local_error)) {
-				archive_state.aot2 |=
-						std::equal(plain->begin(), plain->begin() + 4, "AOT2");
-				for (const auto &relation : tile.relations)
+			bool valid = false;
+			bool aot2 = false;
+			std::string error;
+		};
+		for (std::size_t begin = 0; begin < wanted.size(); begin += TILE_FETCH_BATCH) {
+			const auto end = std::min(wanted.size(), begin + TILE_FETCH_BATCH);
+			std::vector<std::future<TileResult>> pending;
+			pending.reserve(end - begin);
+			for (std::size_t i = begin; i < end; ++i) {
+				const auto [x, y] = wanted[i];
+				pending.push_back(std::async(std::launch::async, [&, x, y] {
+					TileResult result;
+					const auto read = overture::pmtiles::read_tile_checked(
+							archive->header, archive->root_directory, ZOOM, x, y, range);
+					if (read.status == overture::pmtiles::TileReadStatus::Missing)
+						return result;
+					if (read.status != overture::pmtiles::TileReadStatus::Found) {
+						result.error = "could not read tile " + std::to_string(ZOOM) +
+									   "/" + std::to_string(x) + "/" + std::to_string(y) +
+									   " from " + file;
+						return result;
+					}
+					if (read.bytes.empty())
+						return result;
+					std::string tile_error;
+					auto plain = zstd_decode(read.bytes, &tile_error);
+					if (!plain) {
+						result.error = "tile " + std::to_string(ZOOM) + "/" +
+									   std::to_string(x) + "/" + std::to_string(y) +
+									   " is not readable: " + tile_error;
+						return result;
+					}
+					result.aot2 = plain->size() >= 4 &&
+								  std::equal(plain->begin(), plain->begin() + 4, "AOT2");
+					result.valid = decode(*plain, result.tile, &tile_error);
+					if (!result.valid)
+						result.error = "tile " + std::to_string(ZOOM) + "/" +
+									   std::to_string(x) + "/" + std::to_string(y) +
+									   " is invalid: " + tile_error;
+					return result;
+				}));
+			}
+			// std::async results are consumed in source order, preserving Rust's
+			// indexed parallel-iterator ordering and deterministic first-seen IDs.
+			for (auto &future : pending) {
+				auto result = future.get();
+				if (!result.error.empty()) {
+					if (error)
+						*error = std::move(result.error);
+					return std::nullopt;
+				}
+				if (!result.valid)
+					continue;
+				archive_state.aot2 |= result.aot2;
+				for (const auto &relation : result.tile.relations)
 					archive_state.relation_ids.insert(relation.id);
-				decoded.push_back(std::move(tile));
+				absorb(std::move(result.tile));
 			}
 		}
 		opened.push_back(std::move(archive_state));
 	}
-	if (decoded.empty()) {
+	if (decoded.nodes.empty() && decoded.ways.empty() && decoded.relations.empty()) {
 		if (error)
 			*error = "the tile archive has no data for this area";
 		return std::nullopt;
@@ -913,14 +981,14 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	// AOT2 tiles contain only relation members which touch that tile. If a
 	// selected relation has missing ways, retrieve its whole-record entry from
 	// each AOT2 archive that supplied one of its fragments before assembling.
-	std::unordered_map<std::uint64_t, DecodedWay> available_ways;
-	std::unordered_map<std::uint64_t, DecodedRelation> available_relations;
-	for (const auto &tile : decoded) {
-		for (const auto &way : tile.ways)
-			available_ways.emplace(way.id, way);
-		for (const auto &relation : tile.relations)
-			available_relations.emplace(relation.id, relation);
-	}
+	std::unordered_map<std::uint64_t, const DecodedWay *> available_ways;
+	std::unordered_map<std::uint64_t, const DecodedRelation *> available_relations;
+	available_ways.reserve(decoded.ways.size());
+	available_relations.reserve(decoded.relations.size());
+	for (const auto &way : decoded.ways)
+		available_ways.emplace(way.id, &way);
+	for (const auto &relation : decoded.relations)
+		available_relations.emplace(relation.id, &relation);
 	const auto lower = [](double v, std::int64_t limit) {
 		return static_cast<std::int32_t>(std::clamp(
 				static_cast<std::int64_t>(std::floor(v * COORD_SCALE)) - EDGE_MARGIN_E7,
@@ -937,47 +1005,110 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	std::unordered_set<std::uint64_t> partial_relations;
 	for (const auto &[id, relation] : available_relations) {
 		bool missing_way = false;
-		for (const auto &member : relation.members)
+		for (const auto &member : relation->members)
 			missing_way |= !available_ways.contains(member.ref);
-		if (missing_way && intersects(relation_extent(relation, available_ways), area))
+		if (missing_way && intersects(relation_extent(*relation, available_ways), area))
 			partial_relations.insert(id);
 	}
+	std::size_t skipped_relations = 0;
+	std::size_t completed_relations = 0;
+	std::string first_skipped_relation;
+	auto note_skipped_relation = [&](std::string message) {
+		++skipped_relations;
+		if (first_skipped_relation.empty())
+			first_skipped_relation = std::move(message);
+	};
 	for (auto &archive : opened) {
 		if (!archive.aot2)
 			continue;
 		overture::pmtiles::LeafDirectoryCache leaves;
+		std::vector<std::pair<std::uint64_t, overture::pmtiles::TileLocation>> locations;
 		for (const auto id : partial_relations) {
 			if (!archive.relation_ids.contains(id))
 				continue;
 			const auto location = overture::pmtiles::locate_id_checked(
 					archive.archive.header, archive.archive.root_directory,
 					RELATION_TILE_BASE + id, archive.read_range, &leaves);
+			if (location.status == overture::pmtiles::TileReadStatus::Error) {
+				note_skipped_relation("could not locate relation " + std::to_string(id));
+				continue;
+			}
 			if (location.status != overture::pmtiles::TileReadStatus::Found ||
 					location.location.length > MAX_RECORD_BYTES)
 				continue;
-			const auto record = overture::pmtiles::read_tile_payload_checked(
-					archive.archive.header, location.location, archive.read_range);
-			if (record.status != overture::pmtiles::TileReadStatus::Found ||
-					record.bytes.empty())
-				continue;
-			const auto plain = zstd_decode(record.bytes, &local_error);
-			if (!plain)
-				continue;
-			DecodedTile whole_relation;
-			if (decode(*plain, whole_relation, &local_error)) {
+			locations.emplace_back(id, location.location);
+		}
+		for (std::size_t begin = 0; begin < locations.size(); begin += TILE_FETCH_BATCH) {
+			const auto end = std::min(locations.size(), begin + TILE_FETCH_BATCH);
+			struct RelationResult
+			{
+				std::optional<DecodedTile> tile;
+				std::string error;
+			};
+			std::vector<std::future<RelationResult>> pending;
+			pending.reserve(end - begin);
+			for (std::size_t i = begin; i < end; ++i) {
+				const auto relation_id = locations[i].first;
+				const auto tile_location = locations[i].second;
+				pending.push_back(std::async(std::launch::async, [&, relation_id,
+																		 tile_location] {
+					RelationResult result;
+					const auto record = overture::pmtiles::read_tile_payload_checked(
+							archive.archive.header, tile_location, archive.read_range);
+					if (record.status != overture::pmtiles::TileReadStatus::Found) {
+						result.error =
+								"could not read relation " + std::to_string(relation_id);
+						return result;
+					}
+					if (record.bytes.empty())
+						return result;
+					std::string record_error;
+					const auto plain = zstd_decode(record.bytes, &record_error);
+					if (!plain) {
+						result.error = "relation " + std::to_string(relation_id) +
+									   " is not readable: " + record_error;
+						return result;
+					}
+					DecodedTile whole_relation;
+					if (!decode(*plain, whole_relation, &record_error)) {
+						result.error = "relation " + std::to_string(relation_id) +
+									   " is invalid: " + record_error;
+						return result;
+					}
+					result.tile = std::move(whole_relation);
+					return result;
+				}));
+			}
+			for (auto &future : pending) {
+				auto result = future.get();
+				if (!result.error.empty()) {
+					note_skipped_relation(std::move(result.error));
+					continue;
+				}
+				if (!result.tile)
+					continue;
+				++completed_relations;
 				std::unordered_set<std::uint64_t> completed_ids;
-				for (const auto &relation : whole_relation.relations)
+				for (const auto &relation : result.tile->relations)
 					completed_ids.insert(relation.id);
 				// Replace the tile's clipped member list with the authoritative record;
 				// retaining the first fragment would still leave multipolygons open.
-				for (auto &tile : decoded)
-					std::erase_if(tile.relations, [&](const DecodedRelation &relation) {
-						return completed_ids.contains(relation.id);
-					});
-				decoded.push_back(std::move(whole_relation));
+				std::erase_if(decoded.relations, [&](const DecodedRelation &relation) {
+					if (!completed_ids.contains(relation.id))
+						return false;
+					seen_relations.erase(relation.id);
+					return true;
+				});
+				absorb(std::move(*result.tile));
 			}
 		}
 	}
+	if (completed_relations > 0)
+		std::cout << "Completed " << completed_relations
+				  << " relations that reach past the bbox's tiles\n";
+	if (skipped_relations > 0)
+		std::cerr << "Warning: " << skipped_relations << " relations left partial ("
+				  << first_skipped_relation << ")\n";
 	const auto selected = select_for_bbox(decoded, bbox);
 	if (selected.empty()) {
 		if (error)

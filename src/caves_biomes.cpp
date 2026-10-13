@@ -1,4 +1,5 @@
 #include "caves_biomes.h"
+#include "strict_parse.h"
 #include <algorithm>
 #include <cmath>
 #include <cstdlib>
@@ -41,44 +42,38 @@ BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 		}
 		std::string name(trim(part.substr(0, eq)));
 		std::string value(trim(part.substr(eq + 1)));
-		try {
-			size_t used = 0;
-			const double pct = std::stod(value, &used);
-			if (used != value.size()) {
-				fail("'" + std::string(part) + "': percent is not a number");
-				return {};
-			}
-			if (!std::isfinite(pct)) {
-				fail("'" + std::string(part) +
-						"': percent must be a finite number (0..=200), got '" + value +
-						"'");
-				return {};
-			}
-			const double v = std::clamp(pct, 0.0, 200.0) / 100.0;
-			std::transform(name.begin(), name.end(), name.begin(),
-					[](unsigned char c) { return char(std::tolower(c)); });
-			if (name == "lush")
-				out.lush = v;
-			else if (name == "dripstone" || name == "drip")
-				out.dripstone = v;
-			else if (name == "deepdark" || name == "deep_dark" || name == "sculk")
-				out.deepdark = v;
-			else if (name == "mushroom" || name == "shroom")
-				out.mushroom = v;
-			else if (name == "ice")
-				out.ice = v;
-			else if (name == "amethyst" || name == "crystal")
-				out.amethyst = v;
-			else if (name == "volcanic" || name == "volcano")
-				out.volcanic = v;
-			else if (name == "coral")
-				out.coral = v;
-			else {
-				fail("unknown cave biome '" + name + "'");
-				return {};
-			}
-		} catch (...) {
+		const auto parsed = strict_parse::f64(value);
+		if (!parsed) {
 			fail("'" + std::string(part) + "': percent is not a number");
+			return {};
+		}
+		const double pct = *parsed;
+		if (!std::isfinite(pct)) {
+			fail("'" + std::string(part) +
+					"': percent must be a finite number (0..=200), got '" + value + "'");
+			return {};
+		}
+		const double v = std::clamp(pct, 0.0, 200.0) / 100.0;
+		std::transform(name.begin(), name.end(), name.begin(),
+				[](unsigned char c) { return char(std::tolower(c)); });
+		if (name == "lush")
+			out.lush = v;
+		else if (name == "dripstone" || name == "drip")
+			out.dripstone = v;
+		else if (name == "deepdark" || name == "deep_dark" || name == "sculk")
+			out.deepdark = v;
+		else if (name == "mushroom" || name == "shroom")
+			out.mushroom = v;
+		else if (name == "ice")
+			out.ice = v;
+		else if (name == "amethyst" || name == "crystal")
+			out.amethyst = v;
+		else if (name == "volcanic" || name == "volcano")
+			out.volcanic = v;
+		else if (name == "coral")
+			out.coral = v;
+		else {
+			fail("unknown cave biome '" + name + "'");
 			return {};
 		}
 		begin = end + 1;

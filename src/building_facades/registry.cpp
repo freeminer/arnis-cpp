@@ -24,6 +24,9 @@ constexpr std::size_t MIN_RUN_CELLS = 2;
 constexpr std::size_t MAX_PARTY_STRETCHES = 16;
 constexpr int MIN_WALL_BLOCKS = 2;
 constexpr int PARTY_ROOF_STEP = 2;
+// Rust's bundled preset photographs are authored at 32 pixels per metre.
+// Decode no finer than that; `facade_px` itself is pixels per block.
+constexpr double SET_PX_PER_M = 32.0;
 
 struct PendingRun
 {
@@ -52,7 +55,7 @@ struct State
 	std::mutex mutex;
 	bool enabled = false;
 	double scale = 1.0;
-	std::uint32_t ppm = 16;
+	double ppm = 16.0;
 	std::filesystem::path directory;
 	std::optional<FacadeSet> set;
 	std::unordered_set<std::uint64_t> claimed;
@@ -92,7 +95,7 @@ std::vector<std::pair<int, int>> line(int x0, int z0, int x1, int z1)
 }
 
 void reset(bool want, const std::optional<std::filesystem::path> &directory,
-		std::uint32_t pixels_per_metre, double scale)
+		std::uint32_t pixels_per_block, double scale)
 {
 	auto &s = state();
 	std::lock_guard lock(s.mutex);
@@ -103,7 +106,9 @@ void reset(bool want, const std::optional<std::filesystem::path> &directory,
 	s.extent.reset();
 	s.set.reset();
 	s.scale = std::max(0.001, scale);
-	s.ppm = pixels_per_metre ? pixels_per_metre : 16;
+	const auto px_per_block = pixels_per_block ? pixels_per_block : 16u;
+	s.ppm = std::min(
+			SET_PX_PER_M, static_cast<double>(px_per_block) * std::max(0.0, s.scale));
 	if (!want || !directory)
 		return;
 	s.directory = *directory;
@@ -131,7 +136,7 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 	std::filesystem::path directory;
 	std::optional<FacadeSet> set;
 	std::unordered_map<std::uint64_t, GroupPick> groups;
-	std::uint32_t ppm = 16;
+	double ppm = 16.0;
 	double scale = 1.0;
 	{
 		auto &s = state();

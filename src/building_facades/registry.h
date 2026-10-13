@@ -20,7 +20,7 @@ struct WorldEditor;
 namespace arnis::building_facades
 {
 void reset(bool enabled, const std::optional<std::filesystem::path> &directory,
-		std::uint32_t pixels_per_metre, double scale);
+		std::uint32_t pixels_per_block, double scale);
 void set_world_extent(int min_x, int min_z, int max_x, int max_z);
 bool enabled();
 std::size_t finalize(world_editor::WorldEditor &);

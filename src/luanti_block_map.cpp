@@ -1,16 +1,164 @@
 #include "luanti_block_map.h"
 #include "../../arnis_block.h"
+#include <array>
 #include <string>
+#include <string_view>
 namespace arnis
 {
-LuantiNode to_luanti_node(
-		const Block &block, LuantiGame, const char *facing, bool open, bool top)
+LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
+		const char *facing, bool open, bool top)
 {
+	const bool white_bed = block.block == WHITE_BED;
+	const bool red_bed =
+			block.block == RED_BED_NORTH_HEAD || block.block == RED_BED_NORTH_FOOT ||
+			block.block == RED_BED_EAST_HEAD || block.block == RED_BED_EAST_FOOT ||
+			block.block == RED_BED_SOUTH_HEAD || block.block == RED_BED_SOUTH_FOOT ||
+			block.block == RED_BED_WEST_HEAD || block.block == RED_BED_WEST_FOOT;
+	if (white_bed || red_bed) {
+		std::string bed_facing = facing ? facing : "north";
+		std::string bed_part = top ? "head" : "foot";
+		if (block.block == RED_BED_EAST_HEAD || block.block == RED_BED_EAST_FOOT)
+			bed_facing = "east";
+		else if (block.block == RED_BED_SOUTH_HEAD || block.block == RED_BED_SOUTH_FOOT)
+			bed_facing = "south";
+		else if (block.block == RED_BED_WEST_HEAD || block.block == RED_BED_WEST_FOOT)
+			bed_facing = "west";
+		if (block.block == RED_BED_NORTH_HEAD || block.block == RED_BED_EAST_HEAD ||
+				block.block == RED_BED_SOUTH_HEAD || block.block == RED_BED_WEST_HEAD)
+			bed_part = "head";
+		if (const auto it = block.property_values().find("facing");
+				it != block.property_values().end())
+			bed_facing = it->second;
+		if (const auto it = block.property_values().find("part");
+				it != block.property_values().end())
+			bed_part = it->second;
+		const std::uint8_t direction = bed_facing == "east"	   ? 1
+									   : bed_facing == "south" ? 2
+									   : bed_facing == "west"  ? 3
+															   : 0;
+		const char *name = white_bed ? (bed_part == "head" ? "mcl_beds:bed_white_top"
+														   : "mcl_beds:bed_white_bottom")
+									 : (bed_part == "head" ? "mcl_beds:bed_red_top"
+														   : "mcl_beds:bed_red_bottom");
+		return {name, direction};
+	}
+	auto property = [&](std::string_view key) -> std::string_view {
+		const auto it = block.property_values().find(std::string(key));
+		return it == block.property_values().end() ? std::string_view{} : it->second;
+	};
+	auto wallmounted = [](std::string_view direction) -> std::uint8_t {
+		if (direction == "down")
+			return 0;
+		if (direction == "up")
+			return 1;
+		if (direction == "west")
+			return 2;
+		if (direction == "east")
+			return 3;
+		if (direction == "south")
+			return 4;
+		if (direction == "north")
+			return 5;
+		return 1;
+	};
+	const auto id = block.block.id();
+	if (id >= 393 && id <= 396) {
+		static constexpr const char *names[] = {"mcl_amethyst:amethyst_cluster",
+				"mcl_amethyst:small_amethyst_bud", "mcl_amethyst:medium_amethyst_bud",
+				"mcl_amethyst:large_amethyst_bud"};
+		const auto facing_value = property("facing");
+		return {names[id - 393], wallmounted(facing_value.empty() ? "up" : facing_value)};
+	}
+	if (id == 400) {
+		const bool hanging = property("vertical_direction") == "down";
+		const auto thickness = property("thickness");
+		const char *name = nullptr;
+		if (hanging) {
+			if (thickness == "tip_merge")
+				name = "mcl_dripstone:dripstone_top_tip_merge";
+			else if (thickness == "frustum")
+				name = "mcl_dripstone:dripstone_top_frustum";
+			else if (thickness == "middle")
+				name = "mcl_dripstone:dripstone_top_middle";
+			else if (thickness == "base")
+				name = "mcl_dripstone:dripstone_top_base";
+			else
+				name = "mcl_dripstone:dripstone_top_tip";
+		} else {
+			if (thickness == "tip_merge")
+				name = "mcl_dripstone:dripstone_bottom_tip_merge";
+			else if (thickness == "frustum")
+				name = "mcl_dripstone:dripstone_bottom_frustum";
+			else if (thickness == "middle")
+				name = "mcl_dripstone:dripstone_bottom_middle";
+			else if (thickness == "base")
+				name = "mcl_dripstone:dripstone_bottom_base";
+			else
+				name = "mcl_dripstone:dripstone_bottom_tip";
+		}
+		return {name, 0};
+	}
+	if (id == 402) {
+		static constexpr std::pair<std::string_view, std::uint8_t> faces[] = {{"down", 1},
+				{"up", 0}, {"east", 2}, {"west", 3}, {"north", 4}, {"south", 5}};
+		for (const auto &[face, param2] : faces)
+			if (property(face) == "true")
+				return {"mcl_sculk:vein", param2};
+		return {"mcl_sculk:vein", 1};
+	}
+	if (id == 406) {
+		static const std::array<std::string, 64> names = [] {
+			std::array<std::string, 64> result;
+			constexpr char letters[] = {'n', 'w', 's', 'e', 'u', 'd'};
+			for (std::size_t bits = 0; bits < result.size(); ++bits) {
+				result[bits] = "mcl_core:glow_lichen_";
+				for (std::size_t face = 0; face < 6; ++face)
+					if (bits & (std::size_t{1} << face))
+						result[bits].push_back(letters[face]);
+			}
+			return result;
+		}();
+		std::size_t bits = 0;
+		constexpr const char *faces[] = {"north", "west", "south", "east", "up", "down"};
+		for (std::size_t face = 0; face < 6; ++face)
+			if (property(faces[face]) == "true")
+				bits |= std::size_t{1} << face;
+		if (bits == 0)
+			bits = std::size_t{1} << 5;
+		return {names[bits].c_str(), 0};
+	}
+	if (id == 408 || id == 409)
+		return {property("berries") == "true" ? "mcl_lush_caves:cave_vines_lit"
+											  : "mcl_lush_caves:cave_vines",
+				0};
+	const auto state_facing = property("facing");
+	const auto state_half = property("half");
+	const char *effective_facing = state_facing.empty() ? facing : state_facing.data();
+	const bool effective_top = state_half.empty()
+									   ? (top || id == 107 || id == 365 || id == 366)
+									   : (state_half == "top" || state_half == "upper");
+	const auto state_open = property("open");
+	const bool effective_open = state_open.empty() ? open : state_open == "true";
+	return to_luanti_node(
+			block.block, game, effective_facing, effective_open, effective_top);
+}
+
+LuantiNode to_luanti_node(
+		const Block &block, LuantiGame game, const char *facing, bool open, bool top)
+{
+	const bool red_bed = block == RED_BED_NORTH_HEAD || block == RED_BED_NORTH_FOOT ||
+						 block == RED_BED_EAST_HEAD || block == RED_BED_EAST_FOOT ||
+						 block == RED_BED_SOUTH_HEAD || block == RED_BED_SOUTH_FOOT ||
+						 block == RED_BED_WEST_HEAD || block == RED_BED_WEST_FOOT;
+	if (block == WHITE_BED || red_bed)
+		return to_luanti_node(BlockWithProperties{block}, game, facing, open, top);
+
 	const auto id = block.id();
+	if ((id >= 393 && id <= 396) || id == 400 || id == 402 || id == 406 || id == 408 ||
+			id == 409)
+		return to_luanti_node(BlockWithProperties{block}, game, facing, open, top);
 	if (block == BLUE_ICE)
 		return {"mcl_core:blue_ice", 0};
-	if (block == FLOWERING_AZALEA_LEAVES)
-		return {"mcl_trees:leaves_azalea_flowering", 0};
 	if (block == LIGHT_GRAY_CONCRETE_POWDER)
 		return {"mcl_colorblocks:concrete_powder_silver", 0};
 	auto facedir = [&]() -> std::uint8_t {
@@ -28,12 +176,18 @@ LuantiNode to_luanti_node(
 		return LuantiNode{open ? opened : closed, facedir()};
 	};
 	auto door = [&](const char *bottom, const char *upper) {
-		return LuantiNode{top ? upper : bottom, facedir()};
+		std::uint8_t direction = 0;
+		if (facing) {
+			const std::string value(facing);
+			direction = value == "east"	   ? 1
+						: value == "south" ? 2
+						: value == "west"  ? 3
+										   : 0;
+		}
+		return LuantiNode{top ? upper : bottom, direction};
 	};
-	if (block == WHITE_BED)
-		return {top ? "mcl_beds:bed_white_top" : "mcl_beds:bed_white_bottom", facedir()};
 	if (block == LECTERN)
-		return {"mcl_lectern:lectern", facedir()};
+		return {"mcl_lectern:lectern", 0};
 	if (block == CAKE)
 		return {"mcl_cake:cake", 0};
 	if (block == MELON)
@@ -125,6 +279,20 @@ LuantiNode to_luanti_node(
 		return {"mcl_colorblocks:concrete_yellow", 0};
 	case 40:
 		return {"mcl_core:snow", 0};
+	case 474:
+		return {"mcl_core:snow_2", 0};
+	case 475:
+		return {"mcl_core:snow_3", 0};
+	case 476:
+		return {"mcl_core:snow_4", 0};
+	case 477:
+		return {"mcl_core:snow_5", 0};
+	case 478:
+		return {"mcl_core:snow_6", 0};
+	case 479:
+		return {"mcl_core:snow_7", 0};
+	case 480:
+		return {"mcl_trees:leaves_azalea", 0};
 	case 41:
 		return {"mcl_colorblocks:hardened_clay_light_blue", 0};
 	case 42:
@@ -243,6 +411,10 @@ LuantiNode to_luanti_node(
 		return {"mcl_colorblocks:concrete_red", 0};
 	case 101:
 		return trapdoor("mcl_doors:iron_trapdoor", "mcl_doors:iron_trapdoor_open");
+	case 102:
+		return stair("mcl_stairs:stair_copper_oxidized_cut");
+	case 103:
+		return {"mcl_copper:block_oxidized", 0};
 	case 104:
 		return {"mcl_colorblocks:hardened_clay_yellow", 0};
 	case 105:
@@ -291,6 +463,8 @@ LuantiNode to_luanti_node(
 		return {"mcl_core:clay", 0};
 	case 132:
 		return {"mcl_core:grass_path", 0};
+	case 133:
+		return stair("mcl_stairs:stair_copper_exposed_cut");
 	case 134:
 		return {"mcl_core:packed_ice", 0};
 	case 135:
@@ -334,9 +508,9 @@ LuantiNode to_luanti_node(
 	case 154:
 		return {"mcl_lanterns:lantern_floor", 0};
 	case 155:
-		return {"mcl_chests:chest", facedir()};
+		return {"mcl_chests:chest", 0};
 	case 156:
-		return {"mcl_buttons:button_stone_off", facedir()};
+		return {"mcl_buttons:button_stone_off", 0};
 	case 157:
 		return {"mcl_anvils:anvil", 0};
 	case 158:
@@ -353,7 +527,7 @@ LuantiNode to_luanti_node(
 	case 168:
 	case 294:
 	case 295:
-		return {"mcl_beds:bed_red_bottom", facedir()};
+		return {"mcl_beds:bed_red_bottom", 0};
 	case 163:
 		return {"mcl_core:glass_black", 0};
 	case 164:
@@ -535,15 +709,15 @@ LuantiNode to_luanti_node(
 	case 255:
 		return {"mcl_banners:hanging_banner", 0};
 	case 256:
-		return {"mcl_lever:lever_off", facedir()};
+		return {"mcl_lever:lever_off", 0};
 	case 257:
-		return {"mcl_grindstone:grindstone", facedir()};
+		return {"mcl_grindstone:grindstone", 0};
 	case 258:
 		return {"mcl_minecarts:rail", 0};
 	case 259:
 		return {"mcl_wool:red", 0};
 	case 260:
-		return {"mcl_core:ladder", facedir()};
+		return {"mcl_core:ladder", 0};
 	case 261:
 		return {"mcl_wool:yellow", 0};
 	case 265:
@@ -565,7 +739,7 @@ LuantiNode to_luanti_node(
 	case 273:
 		return {"mcl_stairs:slab_deepslate_polished", 0};
 	case 274:
-		return {"mcl_signs:wall_sign_oak", facedir()};
+		return {"mcl_signs:wall_sign_oak", 0};
 	case 275:
 	case 277:
 	case 278:
@@ -581,9 +755,9 @@ LuantiNode to_luanti_node(
 	case 281:
 		return {"mcl_pressureplates:pressure_plate_stone_off", 0};
 	case 282:
-		return {"mcl_blast_furnace:blast_furnace", facedir()};
+		return {"mcl_blast_furnace:blast_furnace", 0};
 	case 283:
-		return {"mcl_dispensers:dispenser", facedir()};
+		return {"mcl_dispensers:dispenser", 0};
 	case 284:
 		return {"mcl_hoppers:hopper", 0};
 	case 286:
@@ -609,7 +783,7 @@ LuantiNode to_luanti_node(
 	case 298:
 		return {"mcl_deepslate:deepslate_chiseled", 0};
 	case 300:
-		return {"mcl_buttons:button_birch_off", facedir()};
+		return {"mcl_buttons:button_birch_off", 0};
 	case 301:
 		return {"mcl_core:cobweb", 0};
 	case 302:
@@ -624,7 +798,7 @@ LuantiNode to_luanti_node(
 	case 326:
 		return {"mcl_books:bookshelf", 0};
 	case 306:
-		return {"mcl_buttons:button_oak_off", facedir()};
+		return {"mcl_buttons:button_oak_off", 0};
 	case 307:
 		return {"mcl_minecarts:golden_rail", 0};
 	case 308:
@@ -648,13 +822,13 @@ LuantiNode to_luanti_node(
 	case 321:
 		return {"mcl_blackstone:basalt_polished", 0};
 	case 322:
-		return {"mcl_buttons:button_polished_blackstone_off", facedir()};
+		return {"mcl_buttons:button_polished_blackstone_off", 0};
 	case 323:
 		return {"mcl_pressureplates:pressure_plate_polished_blackstone_off", 0};
 	case 324:
 		return {"mcl_stairs:slab_red_nether_brick", 0};
 	case 325:
-		return {"mcl_buttons:button_spruce_off", facedir()};
+		return {"mcl_buttons:button_spruce_off", 0};
 	case 327:
 		return trapdoor("mcl_doors:trapdoor_acacia", "mcl_doors:trapdoor_acacia_open");
 	case 328:
@@ -662,7 +836,7 @@ LuantiNode to_luanti_node(
 	case 329:
 		return {"mcl_wool:cyan_carpet", 0};
 	case 330:
-		return {"mcl_buttons:button_dark_oak_off", facedir()};
+		return {"mcl_buttons:button_dark_oak_off", 0};
 	case 331:
 		return {"mcl_stairs:slab_end_bricks", 0};
 	case 332:
@@ -674,7 +848,7 @@ LuantiNode to_luanti_node(
 	case 335:
 		return {"mcl_walls:netherbrick", 0};
 	case 336:
-		return {"mcl_smoker:smoker", facedir()};
+		return {"mcl_smoker:smoker", 0};
 	case 337:
 		return {"mcl_core:redsandstonesmooth2", 0};
 	case 338:
@@ -692,9 +866,9 @@ LuantiNode to_luanti_node(
 	case 344:
 		return {"mcl_ocean:prismarine", 0};
 	case 345:
-		return {"mcl_end:end_rod", facedir()};
+		return {"mcl_end:end_rod", 0};
 	case 347:
-		return {"mcl_signs:wall_sign_spruce", facedir()};
+		return {"mcl_signs:wall_sign_spruce", 0};
 	case 348:
 		return stair("mcl_stairs:stair_granite");
 	case 349:
@@ -716,7 +890,7 @@ LuantiNode to_luanti_node(
 	case 357:
 		return {"mcl_nether:quartz_pillar", 0};
 	case 358:
-		return {"mcl_redstone_torch:redstone_torch_on_wall", facedir()};
+		return {"mcl_redstone_torch:redstone_torch_on_wall", 0};
 	case 359:
 		return {"mcl_core:goldblock", 0};
 	case 360:
@@ -767,6 +941,118 @@ LuantiNode to_luanti_node(
 		return {"mcl_stairs:slab_blackstone", 0};
 	case 384:
 		return door("mcl_doors:iron_door_b_1", "mcl_doors:iron_door_t_1");
+	case 385:
+		return {"mcl_core:lava_source", 0};
+	case 386:
+		return {"mcl_core:obsidian", 0};
+	case 387:
+		return {"mcl_core:ice", 0};
+	case 389:
+		return {"mcl_powder_snow:powder_snow", 0};
+	case 390:
+		return {"mcl_amethyst:calcite", 0};
+	case 391:
+		return {"mcl_amethyst:amethyst_block", 0};
+	case 392:
+		return {"mcl_amethyst:budding_amethyst_block", 0};
+	case 397:
+		return {"mcl_blackstone:basalt", 0};
+	case 398:
+		return {"mcl_blackstone:basalt_smooth", 0};
+	case 399:
+		return {"mcl_dripstone:dripstone_block", 0};
+	case 401:
+		return {"mcl_sculk:sculk", 0};
+	case 403:
+		return {"mcl_sculk:catalyst", 0};
+	case 404:
+		return {"mcl_sculk:sensor", 0};
+	case 405:
+		return {"mcl_sculk:shrieker", 0};
+	case 407:
+		return {"mcl_lush_caves:moss_carpet", 0};
+	case 410:
+		return {"mcl_lush_caves:spore_blossom", 0};
+	case 411:
+		return {"mcl_lush_caves:azalea", 0};
+	case 412:
+		return {"mcl_lush_caves:azalea_flowering", 0};
+	case 413:
+		return {"mcl_lush_caves:dripleaf_big", 0};
+	case 414:
+		return {"mcl_lush_caves:dripleaf_big_stem", 0};
+	case 415:
+		return {"mcl_lush_caves:dripleaf_small_stem", 0};
+	case 416:
+		return {"mcl_lush_caves:dripleaf_small", 0};
+	case 417:
+		return {"mcl_core:mycelium", 0};
+	case 418:
+		return {"mcl_mushrooms:mushroom_red", 0};
+	case 419:
+		return {"mcl_mushrooms:mushroom_brown", 0};
+	case 420:
+		return {"mcl_mushrooms:red_mushroom_block_cap_111111", 0};
+	case 421:
+		return {"mcl_mushrooms:brown_mushroom_block_cap_111111", 0};
+	case 422:
+		return {"mcl_mushrooms:brown_mushroom_block_stem_full", 0};
+	case 423:
+		return {"mcl_crimson:shroomlight", 0};
+	case 424:
+		return {"mcl_ocean:tube_coral_block", 0};
+	case 425:
+		return {"mcl_ocean:brain_coral_block", 0};
+	case 426:
+		return {"mcl_ocean:bubble_coral_block", 0};
+	case 427:
+		return {"mcl_ocean:fire_coral_block", 0};
+	case 428:
+		return {"mcl_ocean:horn_coral_block", 0};
+	case 429:
+		return {"mcl_ocean:dead_tube_coral_block", 0};
+	case 430:
+		return {"mcl_ocean:dead_brain_coral_block", 0};
+	case 431:
+		return {"mcl_ocean:dead_bubble_coral_block", 0};
+	case 432:
+		return {"mcl_ocean:dead_fire_coral_block", 0};
+	case 433:
+		return {"mcl_ocean:dead_horn_coral_block", 0};
+	case 434:
+		return {"mcl_ocean:tube_coral", 0};
+	case 435:
+		return {"mcl_ocean:brain_coral", 0};
+	case 436:
+		return {"mcl_ocean:bubble_coral", 0};
+	case 437:
+		return {"mcl_ocean:fire_coral", 0};
+	case 438:
+		return {"mcl_ocean:horn_coral", 0};
+	case 439:
+		return {"mcl_ocean:tube_coral_fan", 0};
+	case 440:
+		return {"mcl_ocean:brain_coral_fan", 0};
+	case 441:
+		return {"mcl_ocean:bubble_coral_fan", 0};
+	case 442:
+		return {"mcl_ocean:fire_coral_fan", 0};
+	case 443:
+		return {"mcl_ocean:horn_coral_fan", 0};
+	case 444:
+		return {"mcl_deepslate:deepslate_with_coal", 0};
+	case 445:
+		return {"mcl_deepslate:deepslate_with_iron", 0};
+	case 446:
+		return {"mcl_deepslate:deepslate_with_copper", 0};
+	case 447:
+		return {"mcl_deepslate:deepslate_with_gold", 0};
+	case 448:
+		return {"mcl_deepslate:deepslate_with_redstone", 0};
+	case 449:
+		return {"mcl_deepslate:deepslate_with_lapis", 0};
+	case 450:
+		return {"mcl_deepslate:deepslate_with_diamond", 0};
 	case 451:
 		return {"mcl_flowers:cornflower", 0};
 	case 452:
@@ -805,6 +1091,12 @@ LuantiNode to_luanti_node(
 		return {"mcl_farming:pumpkin", 0};
 	case 469:
 		return {"mcl_flowers:waterlily", 0};
+	case 470:
+		return {"mcl_core:cactus", 0};
+	case 471:
+		return {"mcl_core:dirt_with_grass_snow", 0};
+	case 472:
+		return {"mcl_core:podzol", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

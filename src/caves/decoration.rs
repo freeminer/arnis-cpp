@@ -287,9 +287,14 @@ pub(super) fn decorate(
     let seed = d.seed;
 
     // iterate cave-air cells; classify floor / ceiling / wall by solid neighbors.
-    let cells: Vec<(i32, i32, i32)> = air
-        .iter()
-        .map(|&p| super::unpack(p))
+    // Hash-table iteration differs between Rust's FNV set and the C++ backend's
+    // unordered_set. These writes may overlap (vines, tall vegetation, pools),
+    // so sort the shared packed keys to keep both generators' write order equal.
+    let mut ordered_air: Vec<i64> = air.iter().copied().collect();
+    ordered_air.sort_unstable();
+    let cells: Vec<(i32, i32, i32)> = ordered_air
+        .into_iter()
+        .map(super::unpack)
         .filter(|&(x, _, z)| region.contains(x, z))
         .collect();
 
@@ -610,7 +615,11 @@ pub(super) fn decorate(
     // CORAL REEFS in water pools: a pool whose floor lands in a coral blotch becomes a flooded
     // reef — dead-coral/sand bed, live coral blocks + fans (default-waterlogged), sea pickles,
     // seagrass. Writes into WATER cells only (whitelist), so dry caves are never touched.
-    for &p in water_cells {
+    // Match the canonical packed-key order used by the C++ backend; coral beds
+    // and growth can overlap vertically in a water column.
+    let mut ordered_water: Vec<i64> = water_cells.iter().copied().collect();
+    ordered_water.sort_unstable();
+    for p in ordered_water {
         let (x, y, z) = super::unpack(p);
         if !region.contains(x, z) {
             continue;

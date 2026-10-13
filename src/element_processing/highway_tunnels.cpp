@@ -216,12 +216,9 @@ bool renders_as_highway_tunnel(const ProcessedWay &way)
 		return false;
 	if (way.tags.get("indoor") == "yes" || way.tags.get("area") == "yes")
 		return false;
-	if (auto it = way.tags.find("level"); it != way.tags.end())
-		try {
-			if (std::stoi(it->second) < 0)
-				return false;
-		} catch (...) {
-		}
+	if (const auto it = way.tags.find("level");
+			it != way.tags.end() && strict_parse::i32(it->second).value_or(0) < 0)
+		return false;
 	const auto type = way.tags.get("highway");
 	return type != "street_lamp" && type != "crossing" && type != "bus_stop" &&
 		   type != "proposed" && type != "construction" && type != "razed";
@@ -448,7 +445,8 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 		const double t = static_cast<double>(i) / last;
 		const int grade =
 				std::lround(terrain.front() + (terrain.back() - terrain.front()) * t);
-		const int desired = std::min(grade, cover[i] - COVER_DROP) - extra;
+		const int cover_drop = COVER_DROP + extra;
+		const int desired = std::min(grade, cover[i] - cover_drop);
 		const int rs = start_internal ? INT_MIN
 									  : terrain.front() - start_drop -
 												static_cast<int>(i) / RAMP_RUN;

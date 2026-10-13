@@ -29,27 +29,6 @@ std::string trim(std::string value)
 	const auto last = value.find_last_not_of(" \t\r\n");
 	return value.substr(first, last - first + 1);
 }
-std::string normalized_name(std::string value)
-{
-	value = trim(std::move(value));
-	std::transform(value.begin(), value.end(), value.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-	for (char &c : value)
-		if (c == '_' || c == '-')
-			c = ' ';
-	return value;
-}
-std::string qid_for_name(const std::string &name)
-{
-	const auto wanted = normalized_name(name);
-	if (wanted.empty())
-		return {};
-	for (const auto &qid : wikidata_ids())
-		if (const auto *entry = lookup_wikidata(qid);
-				entry && normalized_name(entry->label) == wanted)
-			return qid;
-	return {};
-}
 bool has(const std::vector<std::pair<std::string, std::uint64_t>> &v,
 		const std::pair<std::string, std::uint64_t> &k)
 {
@@ -235,7 +214,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 	struct FootprintOwner
 	{
 		Bounds bounds;
-		std::uint64_t osm_id;
+		std::pair<std::string, std::uint64_t> key;
 	};
 	std::vector<FootprintOwner> footprints;
 	for (const auto &e : elements) {
@@ -243,8 +222,6 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		if (has(already, key))
 			continue;
 		auto qid = trim(tag(e, "wikidata"));
-		if (qid.empty())
-			qid = qid_for_name(tag(e, "name"));
 		auto *entry = lookup_wikidata(qid);
 		if (!entry)
 			continue;
@@ -283,9 +260,9 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 				yaw + rotation, h, extent, palette_for(e),
 				resolve_palette_layers(entry->palette_layers)});
 		r.suppressed.push_back(key);
-		r.suppression_claims.push_back({key, e.id()});
+		r.suppression_claims.push_back({key, key});
 		if (raw)
-			footprints.push_back({fp, e.id()});
+			footprints.push_back({fp, key});
 	}
 	for (const auto &e : elements) {
 		auto key = std::make_pair(std::string(e.kind()), e.id());
@@ -305,7 +282,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		for (const auto &owner : footprints)
 			if (owner.bounds.contains(x, z)) {
 				r.suppressed.push_back(key);
-				r.suppression_claims.push_back({key, owner.osm_id});
+				r.suppression_claims.push_back({key, owner.key});
 				break;
 			}
 	}
@@ -377,7 +354,8 @@ void retain_fetchable(
 	for (std::size_t i = 0; i < unique_urls.size(); ++i)
 		fetchable_by_url.emplace(unique_urls[i].first, available[i] != 0);
 
-	std::unordered_set<std::uint64_t> kept;
+	std::vector<std::pair<std::string, std::uint64_t>> kept;
+	kept.reserve(r.placements.size());
 	r.placements.erase(
 			std::remove_if(r.placements.begin(), r.placements.end(),
 					[&](const Placement &p) {
@@ -387,14 +365,15 @@ void retain_fetchable(
 						const auto fetched = fetchable_by_url.find(entry->url);
 						if (fetched == fetchable_by_url.end() || !fetched->second)
 							return true;
-						kept.insert(p.osm_id);
+						kept.emplace_back(p.osm_kind, p.osm_id);
 						return false;
 					}),
 			r.placements.end());
 	r.suppression_claims.erase(
 			std::remove_if(r.suppression_claims.begin(), r.suppression_claims.end(),
 					[&](const SuppressionClaim &claim) {
-						return !kept.contains(claim.owner_osm_id);
+						return std::find(kept.begin(), kept.end(), claim.owner_key) ==
+							   kept.end();
 					}),
 			r.suppression_claims.end());
 	r.suppressed.clear();

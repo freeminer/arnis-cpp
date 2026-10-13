@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <limits>
 #include <string_view>
+#include <unordered_set>
 #include <utility>
 
 #include "../../../arnis_adapter.h"
@@ -22,6 +23,8 @@
 #include "road_markings.h"
 #include "highway_tunnels.h"
 #include "highways.h"
+#include "connected_blocks.h"
+#include "road_mask_search.h"
 #include "signage.h"
 #include "../floodfill.h"
 #include "../structures/helicopter.h"
@@ -307,7 +310,8 @@ bool fast_road(const std::string &highway, const crate::tags_t &tags)
 
 int node_feature_base_y(const crate::world_editor::WorldEditor &editor,
 		const crate::bridges::BridgeSurfaceMap &bridge_surface,
-		const std::unordered_map<std::string, std::string> &tags, int x, int z)
+		const std::unordered_map<std::string, std::string> &tags, int x, int z,
+		int bridge_radius = 0)
 {
 	int layer = 0;
 	if (tags.find("indoor") == tags.end() || tags.at("indoor") != "yes") {
@@ -315,8 +319,8 @@ int node_feature_base_y(const crate::world_editor::WorldEditor &editor,
 			layer = std::max(0, crate::strict_parse::i32(it->second).value_or(0));
 		}
 	}
-	return bridge_surface.nearby_deck_y(x, z, 0).value_or(
-			editor.get_ground_level(x, z) + layer * 6);
+	return bridge_surface.nearby_deck_y(x, z, bridge_radius)
+			.value_or(editor.get_ground_level(x, z) + layer * 6);
 }
 
 void place_way_lamps(crate::world_editor::WorldEditor &editor,
@@ -646,15 +650,21 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		const crate::road_markings::RoadMarkingIndex &markings,
 		const crate::CoordinateBitmap *tunnel_footprint)
 {
+	using crate::block_definitions::BLACK_WOOL;
 	using crate::block_definitions::Block;
 	using crate::block_definitions::COBBLESTONE_WALL;
 	using crate::block_definitions::GLOWSTONE;
 	using crate::block_definitions::GREEN_WOOL;
+	using crate::block_definitions::IRON_BARS;
+	using crate::block_definitions::LIGHT_GRAY_WALL_BANNER;
 	using crate::block_definitions::OAK_FENCE;
 	using crate::block_definitions::RED_WOOL;
 	using crate::block_definitions::WHITE_WOOL;
 	using crate::block_definitions::YELLOW_WOOL;
 	(void)COBBLESTONE_WALL;
+	(void)IRON_BARS;
+	(void)BLACK_WOOL;
+	(void)LIGHT_GRAY_WALL_BANNER;
 	(void)OAK_FENCE;
 	(void)GLOWSTONE;
 	(void)GREEN_WOOL;
@@ -711,53 +721,66 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			if (element.is_node()) {
 				int x = element.as_node().x;
 				int z = element.as_node().z;
-				const int base =
+				const int head_base =
 						node_feature_base_y(editor, bridge_surface, element.tags(), x, z);
-				auto signal_rng = coord_rng(x, z, 0x54524146464943ULL);
-				auto light = crate::block_definitions::STREETS_TRAFFIC_LIGHTS
-						[signal_rng.uniform(
-								crate::block_definitions::STREETS_TRAFFIC_LIGHTS.size())];
-				if (light.id() != CONTENT_AIR) {
-					// Streets traffic-light nodeboxes are deliberately outside their
-					// node and attach to a pole in the neighbouring cell.  Keep the
-					// support at the OSM point, extend it to head height, and place the
-					// head one cell in front of it so the mounting bracket meets it.
-					std::uint8_t facing =
-							static_cast<std::uint8_t>(signal_rng.uniform(4));
-					constexpr std::array<std::pair<int, int>, 4> head_offsets{
-							{{0, -1}, {-1, 0}, {0, 1}, {1, 0}}};
-					auto [head_dx, head_dz] = head_offsets[facing];
-					if (!editor.owns(x + head_dx, z + head_dz)) {
-						facing = static_cast<std::uint8_t>((facing + 2) % 4);
-						std::tie(head_dx, head_dz) = head_offsets[facing];
-					}
-					for (int dy = 1; dy <= 4; ++dy) {
-						auto pole = crate::block_definitions::STREETS_POLE;
-						pole.setParam2(facing);
-						editor.set_block_absolute(pole, x, base + dy, z,
-								std::optional<std::vector<Block>>(),
-								std::optional<std::vector<Block>>());
-					}
-					light.setParam2(facing);
-					editor.set_block_absolute(light, x + head_dx, base + 4, z + head_dz,
+				auto set_block = [&](const Block &block, int bx, int by, int bz) {
+					editor.set_block_absolute(block, bx, by, bz,
 							std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
+				};
+				const auto anchor =
+						road_mask.contains(x, z)
+								? crate::element_processing::get_nearest_non_road_block(
+										  x, z, 4, road_mask)
+								: std::nullopt;
+				if (anchor) {
+					const auto [ax, az] = *anchor;
+					const int pole_base = node_feature_base_y(
+							editor, bridge_surface, element.tags(), ax, az, 1);
+					set_block(COBBLESTONE_WALL, ax, pole_base + 1, az);
+					const int arm_y = head_base + 6;
+					for (int y = pole_base + 2; y < arm_y; ++y)
+						set_block(IRON_BARS, ax, y, az);
+
+					std::vector<std::pair<int, int>> arm;
+					for (const auto &[lx, unused_y, lz] :
+							crate::bresenham::bresenham_line(x, 0, z, ax, 0, az)) {
+						(void)unused_y;
+						arm.emplace_back(lx, lz);
+					}
+					const std::unordered_set<std::pair<int, int>, PairHash> arm_cells(
+							arm.begin(), arm.end());
+					for (const auto &[lx, lz] : arm) {
+						auto joins = [&](int dx, int dz) {
+							return arm_cells.contains({lx + dx, lz + dz});
+						};
+						const auto bars = crate::connected_blocks::connected_fence(
+								IRON_BARS, joins(0, -1), joins(0, 1), joins(1, 0),
+								joins(-1, 0));
+						editor.set_block_with_properties_absolute(
+								bars, lx, arm_y, lz, std::nullopt, std::nullopt);
+					}
 				} else {
-					for (int dy = 1; dy <= 3; ++dy) {
-						editor.set_block_absolute(crate::block_definitions::STREETS_POLE,
-								x, base + dy, z, std::optional<std::vector<Block>>(),
-								std::optional<std::vector<Block>>());
-					}
-					editor.set_block_absolute(GREEN_WOOL, x, base + 4, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block_absolute(YELLOW_WOOL, x, base + 5, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
-					editor.set_block_absolute(RED_WOOL, x, base + 6, z,
-							std::optional<std::vector<Block>>(),
-							std::optional<std::vector<Block>>());
+					set_block(COBBLESTONE_WALL, x, head_base + 1, z);
+					set_block(IRON_BARS, x, head_base + 2, z);
+					set_block(IRON_BARS, x, head_base + 3, z);
 				}
+
+				set_block(BLACK_WOOL, x, head_base + 4, z);
+				set_block(BLACK_WOOL, x, head_base + 5, z);
+				const std::vector<std::pair<std::string, std::string>> banner_patterns{
+						{"red", "minecraft:triangle_top"},
+						{"lime", "minecraft:triangle_bottom"},
+						{"yellow", "minecraft:circle"},
+						{"black", "minecraft:curly_border"},
+						{"black", "minecraft:border"}};
+				const int banner_y = head_base + 5;
+				const std::array<std::tuple<int, int, const char *>, 4> banner_offsets{
+						{{0, -1, "north"}, {0, 1, "south"}, {-1, 0, "west"},
+								{1, 0, "east"}}};
+				for (const auto &[dx, dz, facing] : banner_offsets)
+					editor.place_wall_banner(LIGHT_GRAY_WALL_BANNER, x + dx, banner_y,
+							z + dz, facing, "light_gray", banner_patterns);
 			}
 		}
 		return;
@@ -888,7 +911,12 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	// current Rust implementation (lanes=* and width=* both affect it).
 	block_range = highway_block_range(highway_type, way.tags, scale_factor);
 	add_stripe = lane_marking_count(highway_type, way.tags) >= 2;
-	const auto painted_lanes = lane_lines(highway_type, way.tags, block_range, markings);
+	// Rust does not paint lane markings on a tunnel way; preserve pavement width
+	// and the tunnel's own interior treatment, but omit all surface stripe blocks.
+	const bool tunnel_way = renders_as_highway_tunnel(way);
+	const auto painted_lanes =
+			tunnel_way ? std::vector<LaneLine>{}
+					   : lane_lines(highway_type, way.tags, block_range, markings);
 	std::optional<std::pair<float, float>> centre_span;
 	for (const auto &line : painted_lanes) {
 		if (!line.centre)
@@ -1878,7 +1906,6 @@ void generate_aeroway(crate::world_editor::WorldEditor &editor,
 
 namespace
 {
-constexpr double HELIPAD_NODE_RADIUS_M = 8.0;
 constexpr double HELIPAD_RING_FRACTION = 0.85;
 
 void paint_helipad(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells,

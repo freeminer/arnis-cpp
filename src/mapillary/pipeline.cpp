@@ -54,6 +54,8 @@ constexpr double SKY_B = -0.05;
 constexpr double COLOUR_MAD_SCALE = 50.0;
 constexpr double HIRES_MAX_DIST_M = 30.0;
 constexpr std::size_t DEFAULT_IMAGE_DOWNLOAD_THREADS = 12;
+constexpr std::size_t CLUSTER_BATCH_GIVE_UP_FAILURES = 2 * DEFAULT_IMAGE_DOWNLOAD_THREADS;
+constexpr auto CLUSTER_BATCH_DEADLINE = std::chrono::seconds(300);
 constexpr const char *BLOCK_NOTE =
 		"Blocks are 1 m x 1 m at Arnis scale 1 (worlds with scale != 1 must "
 		"resample). Columns run from node_a (col 0, s = s_l) towards node_b; if the "
@@ -498,40 +500,151 @@ std::optional<Geometry> stage_geometry(const PipelineConfig &config,
 		geometry.metas.emplace(meta.id, meta);
 	}
 
-	// Cluster downloads are deduplicated by acquisition; resolve refs to their
-	// cached metadata record and load each point cloud once for all its panos.
+	// Resolve cluster references to image metadata and deduplicate by cluster ID.
 	std::unordered_map<std::string, const cache::ImageRecord *> records;
 	for (const auto &image : fetched.images)
 		if (records.emplace(image.id, &image).second)
 			geometry.image_records.emplace(image.id, image);
+	struct ClusterWork
+	{
+		std::string id;
+		const cache::ImageRecord *record;
+	};
+	std::vector<ClusterWork> cluster_work;
+	std::unordered_set<std::string> seen_clusters;
 	for (const auto &reference : fetched.clusters) {
-		if (config.cancelled()) {
-			if (error)
-				*error = "cancelled";
-			return std::nullopt;
-		}
 		const auto record = records.find(reference.pano_id);
-		if (record == records.end())
+		if (record == records.end() || !seen_clusters.insert(reference.id).second)
 			continue;
-		std::string cluster_error;
-		auto document = client.cluster_document(*record->second, &cluster_error);
-		if (!document) {
-			continue; // Match Rust's non-fatal per-cluster download/parse failure.
+		cluster_work.push_back({reference.id, record->second});
+	}
+	// Rust downloads independent SfM clusters concurrently, then parses their
+	// large JSON documents in parallel. Keep injected transports serial, but use
+	// the same bounded worker count for the production HTTP client.
+	std::vector<std::optional<Json>> cluster_documents(cluster_work.size());
+	std::vector<std::string> cluster_errors(cluster_work.size());
+	std::vector<unsigned char> cluster_received(cluster_work.size(), 0);
+	const std::size_t requested_threads =
+			config.threads == 0 ? DEFAULT_IMAGE_DOWNLOAD_THREADS : config.threads;
+	const std::size_t cluster_threads =
+			cluster_work.empty() ? 0
+			: client.supports_concurrent_fetch()
+					? std::max<std::size_t>(
+							  1, std::min(cluster_work.size(), requested_threads))
+					: 1;
+	std::atomic_size_t next_cluster{0};
+	const auto cluster_batch_started = std::chrono::steady_clock::now();
+	std::atomic_size_t cluster_failures_since_delivery{0};
+	std::atomic<std::uint64_t> cluster_last_delivery_ms{0};
+	auto cluster_batch_stopped = [&] {
+		if (cluster_failures_since_delivery.load(std::memory_order_relaxed) >=
+				CLUSTER_BATCH_GIVE_UP_FAILURES)
+			return true;
+		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - cluster_batch_started)
+									 .count();
+		return elapsed - static_cast<std::int64_t>(cluster_last_delivery_ms.load(
+								 std::memory_order_relaxed)) >
+			   CLUSTER_BATCH_DEADLINE.count() * 1000;
+	};
+	std::vector<std::thread> cluster_workers;
+	cluster_workers.reserve(cluster_threads);
+	for (std::size_t worker = 0; worker < cluster_threads; ++worker) {
+		cluster_workers.emplace_back([&] {
+			for (;;) {
+				if (config.cancelled() || cluster_batch_stopped())
+					return;
+				const auto index = next_cluster.fetch_add(1, std::memory_order_relaxed);
+				if (index >= cluster_work.size())
+					return;
+				try {
+					cluster_documents[index] = client.cluster_document(
+							*cluster_work[index].record, &cluster_errors[index]);
+				} catch (const std::exception &exception) {
+					cluster_errors[index] = exception.what();
+				} catch (...) {
+					cluster_errors[index] = "unknown download failure";
+				}
+				if (cluster_documents[index]) {
+					cluster_received[index] = 1;
+					const auto elapsed =
+							std::chrono::duration_cast<std::chrono::milliseconds>(
+									std::chrono::steady_clock::now() -
+									cluster_batch_started)
+									.count();
+					cluster_last_delivery_ms.store(static_cast<std::uint64_t>(elapsed),
+							std::memory_order_relaxed);
+					cluster_failures_since_delivery.store(0, std::memory_order_relaxed);
+				} else {
+					cluster_failures_since_delivery.fetch_add(
+							1, std::memory_order_relaxed);
+				}
+			}
+		});
+	}
+	for (auto &worker : cluster_workers)
+		worker.join();
+	if (config.cancelled()) {
+		if (error)
+			*error = "cancelled";
+		return std::nullopt;
+	}
+	// Cluster documents can be hundreds of megabytes of JSON per metro. Match
+	// Rust's parallel parse/load stage, and release each JSON tree immediately
+	// after its compact SfM representation has been built.
+	std::vector<std::optional<sfm::Cluster>> parsed_clusters(cluster_work.size());
+	std::vector<std::string> parse_errors(cluster_work.size());
+	next_cluster.store(0, std::memory_order_relaxed);
+	cluster_workers.clear();
+	for (std::size_t worker = 0; worker < cluster_threads; ++worker) {
+		cluster_workers.emplace_back([&] {
+			for (;;) {
+				const auto index = next_cluster.fetch_add(1, std::memory_order_relaxed);
+				if (index >= cluster_work.size())
+					return;
+				if (!cluster_documents[index])
+					continue;
+				try {
+					parsed_clusters[index] = sfm::load_cluster(*cluster_documents[index],
+							cluster_work[index].id, geometry.frame, &parse_errors[index]);
+				} catch (const std::exception &exception) {
+					parse_errors[index] = exception.what();
+				} catch (...) {
+					parse_errors[index] = "unknown parse failure";
+				}
+				cluster_documents[index].reset();
+			}
+		});
+	}
+	for (auto &worker : cluster_workers)
+		worker.join();
+	for (std::size_t i = 0; i < cluster_work.size(); ++i) {
+		if (!parsed_clusters[i]) {
+			if (!cluster_errors[i].empty()) {
+				std::cerr << "Note: Mapillary cluster " << cluster_work[i].id
+						  << " not available (" << cluster_errors[i] << ")\n";
+				client.discard_cluster_cache(cluster_work[i].id);
+			} else if (cluster_received[i]) {
+				std::cerr << "Note: Mapillary cluster " << cluster_work[i].id
+						  << " did not parse";
+				if (!parse_errors[i].empty())
+					std::cerr << " (" << parse_errors[i] << ")";
+				std::cerr << "; discarding the invalid cache entry\n";
+				client.discard_cluster_cache(cluster_work[i].id);
+			}
+			continue; // Rust treats individual cluster failures as non-fatal.
 		}
-		auto cluster = sfm::load_cluster(
-				*document, reference.id, geometry.frame, &cluster_error);
-		if (!cluster)
-			continue;
+		auto &cluster = parsed_clusters[i];
 		std::vector<const PanoMeta *> cluster_metas;
 		for (const auto &meta : metas)
-			if (meta.cluster_id && *meta.cluster_id == reference.id)
+			if (meta.cluster_id && *meta.cluster_id == cluster_work[i].id)
 				cluster_metas.push_back(&meta);
 		const auto shot_map = sfm::map_shots(*cluster, cluster_metas, config.params);
 		(void)sfm::metric_check(
 				*cluster, cluster_metas, shot_map, geometry.frame, config.params);
 		sfm::apply_shot_poses(geometry.cameras, *cluster, shot_map, meta_refs,
 				by_sequence, config.params);
-		geometry.clusters.emplace(reference.id, std::move(*cluster));
+		geometry.clusters.emplace(cluster_work[i].id, std::move(*cluster));
 	}
 	sfm::camera_heights(geometry.cameras, meta_refs, geometry.clusters, config.params);
 	const auto lo = geometry.frame.to_enu(bbox.min_lon, bbox.min_lat);
@@ -1596,6 +1709,23 @@ AlignmentRun run_alignment(
 	auto parallel_for = [&](std::size_t count, const auto &work) {
 		if (count == 0)
 			return;
+		// Rust's fetch::BatchGuard stops an image batch when the provider is
+		// clearly unavailable, while still allowing partial success and warm
+		// cache hits. Keep the same safeguards here: the facade stage blocks
+		// world generation until all of its requested imagery has been tried.
+		const auto batch_started = std::chrono::steady_clock::now();
+		std::atomic_size_t failures_since_delivery{0};
+		std::atomic<std::uint64_t> last_delivery_ms{0};
+		auto batch_stopped = [&] {
+			if (failures_since_delivery.load(std::memory_order_relaxed) >= 24)
+				return true;
+			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+					std::chrono::steady_clock::now() - batch_started)
+										 .count();
+			return elapsed - static_cast<std::int64_t>(
+									 last_delivery_ms.load(std::memory_order_relaxed)) >
+				   300000;
+		};
 		const std::size_t requested =
 				config.threads == 0 ? DEFAULT_IMAGE_DOWNLOAD_THREADS : config.threads;
 		const std::size_t worker_count =
@@ -1606,10 +1736,22 @@ AlignmentRun run_alignment(
 		for (std::size_t worker = 0; worker < worker_count; ++worker) {
 			workers.emplace_back([&] {
 				for (;;) {
-					const auto index = next.fetch_add(1, std::memory_order_relaxed);
-					if (index >= count || config.cancelled())
+					if (config.cancelled() || batch_stopped())
 						return;
-					work(index);
+					const auto index = next.fetch_add(1, std::memory_order_relaxed);
+					if (index >= count)
+						return;
+					if (work(index)) {
+						const auto elapsed =
+								std::chrono::duration_cast<std::chrono::milliseconds>(
+										std::chrono::steady_clock::now() - batch_started)
+										.count();
+						last_delivery_ms.store(static_cast<std::uint64_t>(elapsed),
+								std::memory_order_relaxed);
+						failures_since_delivery.store(0, std::memory_order_relaxed);
+					} else {
+						failures_since_delivery.fetch_add(1, std::memory_order_relaxed);
+					}
 				}
 			});
 		}
@@ -1622,6 +1764,7 @@ AlignmentRun run_alignment(
 		if (record != geometry.image_records.end())
 			downloaded_images[index] =
 					client.download_image(record->second, cache::ImageSize::W2048);
+		return downloaded_images[index].has_value();
 	});
 	if (config.cancelled()) {
 		result.cancelled = true;
@@ -1679,6 +1822,7 @@ AlignmentRun run_alignment(
 		if (record != geometry.image_records.end())
 			downloaded_originals[index] =
 					client.download_image(record->second, cache::ImageSize::Original);
+		return downloaded_originals[index].has_value();
 	});
 	if (config.cancelled()) {
 		result.cancelled = true;

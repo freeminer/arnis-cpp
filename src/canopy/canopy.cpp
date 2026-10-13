@@ -214,8 +214,10 @@ std::tuple<std::size_t, std::size_t, double, std::uint8_t> CanopyData::stats() c
 double slot_probability(double fraction, int spacing, bool schematic_pack)
 {
 	const auto per_tree = schematic_pack ? COLUMNS_PER_TREE : COLUMNS_PER_TREE_LEGACY;
-	return std::clamp(fraction * std::max(0, spacing) * std::max(0, spacing) / per_tree,
-			0.0, SLOT_P_MAX);
+	// Rust computes spacing * spacing, so a negative spacing still contributes
+	// its squared area. Convert before multiplying to avoid signed overflow here.
+	const double area = static_cast<double>(spacing) * spacing;
+	return std::clamp(fraction * area / per_tree, 0.0, SLOT_P_MAX);
 }
 
 std::pair<int, int> tile_xy(double lat, double lon)
@@ -612,7 +614,7 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 	if (win.columns.empty() || win.rows.empty())
 		return false;
 	const auto row_prefix = std::filesystem::absolute(cache_dir(base))
-								   .lexically_normal().string() + "/" + quadkey_of(xt, yt) + "/";
+							   .lexically_normal().string() + "/" + quadkey_of(xt, yt) + "/";
 	// A complete hit avoids index reads, compressed row reads and decompression.
 	bool complete = true;
 	for (std::size_t i = 0; i < win.rows.size(); ++i) {

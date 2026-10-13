@@ -64,8 +64,9 @@ std::size_t type_size(std::uint16_t type)
 	return 0;
 }
 std::vector<std::uint8_t> value_bytes(const std::string &url,
-		const std::vector<std::uint8_t> &source, std::size_t entry, std::uint16_t type,
-		std::uint64_t count, bool big, bool be, const CogRangeFetcher &fetch)
+		const std::vector<std::uint8_t> &source, const std::vector<std::uint8_t> &header,
+		std::size_t entry, std::uint16_t type, std::uint64_t count, bool big, bool be,
+		const CogRangeFetcher &fetch)
 {
 	const auto n = type_size(type) * count;
 	const auto inline_size = big ? 8U : 4U;
@@ -75,6 +76,9 @@ std::vector<std::uint8_t> value_bytes(const std::string &url,
 	const auto offset = big ? u64(source, field, be) : u32(source, field, be);
 	if (n == 0 || n > 64U * 1024U * 1024U)
 		return {};
+	if (offset <= header.size() && n <= header.size() - static_cast<std::size_t>(offset))
+		return {header.begin() + static_cast<std::size_t>(offset),
+				header.begin() + static_cast<std::size_t>(offset) + n};
 	return fetch(url, offset, n);
 }
 std::uint64_t scalar(
@@ -136,7 +140,7 @@ bool read_cog_info(const std::string &url, const std::vector<std::uint8_t> &head
 		const auto e = start + count_size + std::size_t(i) * entry_size;
 		const auto tag = u16(v, e, be), type = u16(v, e + 2, be);
 		const auto values = big ? u64(v, e + 4, be) : u32(v, e + 4, be);
-		auto data = value_bytes(url, v, e, type, values, big, be, fetch);
+		auto data = value_bytes(url, v, header, e, type, values, big, be, fetch);
 		if (data.empty())
 			continue;
 		auto first = scalar(data, type, be, 0);

@@ -95,9 +95,6 @@ void generate_advertising_flag(WorldEditor &editor, const ProcessedNode &node)
 
 void generate_poster_box(WorldEditor &editor, const ProcessedNode &node)
 {
-	if (signage::generate_poster_box_posters(editor, node)) {
-		return;
-	}
 	int x = node.x;
 	int z = node.z;
 
@@ -114,6 +111,9 @@ void generate_poster_box(WorldEditor &editor, const ProcessedNode &node)
 	// Y=4: Two polished stone brick slabs
 	editor.set_block(STONE_BRICK_SLAB, x, 4, z, std::nullopt, std::nullopt);
 	editor.set_block(STONE_BRICK_SLAB, x + 1, 4, z, std::nullopt, std::nullopt);
+
+	// Rust always builds the box, then overlays poster decals when available.
+	signage::generate_poster_box_posters(editor, node);
 }
 
 }

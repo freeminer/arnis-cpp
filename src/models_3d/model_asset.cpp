@@ -22,8 +22,10 @@ ModelAsset load_model_asset_auto(const std::filesystem::path &p)
 		a.max = b.second;
 	} else {
 		auto b = stl_bbox(parse_binary_stl(a.bytes));
-		a.min = b.first;
-		a.max = b.second;
+		if (!b)
+			throw std::runtime_error("STL has no finite vertices");
+		a.min = b->first;
+		a.max = b->second;
 	}
 	return a;
 }
@@ -53,8 +55,10 @@ ModelAsset load_model_asset(const std::filesystem::path &p, ModelFormat f)
 		a.max = b.second;
 	} else {
 		auto b = stl_bbox(parse_binary_stl(a.bytes));
-		a.min = b.first;
-		a.max = b.second;
+		if (!b)
+			throw std::runtime_error("STL has no finite vertices");
+		a.min = b->first;
+		a.max = b->second;
 	}
 	return a;
 }

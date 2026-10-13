@@ -626,6 +626,9 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			for (const auto &choice : it->second)
 				if (known.insert(choice.community).second)
 					communities.push_back(choice.community);
+			// Rust sorts and deduplicates the community IDs before palm-grove
+			// construction; keep species order and seeded selection identical.
+			std::sort(communities.begin(), communities.end());
 		}
 	}
 	// Rust prepares one palm-only community per ecoregion mix. Beach selection

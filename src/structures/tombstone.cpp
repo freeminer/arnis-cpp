@@ -6,6 +6,11 @@
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
+#include <memory>
+#include <mutex>
+#include <string>
+#include <unordered_map>
+#include <vector>
 namespace arnis::structures
 {
 namespace tombstone
@@ -19,6 +24,44 @@ std::filesystem::path asset(const WorldEditor &editor, const std::string &name)
 							  ? assets::path("structures")
 							  : editor.get_schematic_asset_root();
 	return root / (name + ".schem");
+}
+const std::vector<std::shared_ptr<const StructureSchematic>> &variants(
+		const WorldEditor &editor, int first, int last)
+{
+	static std::mutex cache_mutex;
+	static std::unordered_map<std::string,
+			std::vector<std::shared_ptr<const StructureSchematic>>>
+			cache;
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	const auto key = root.lexically_normal().string() + ":" + std::to_string(first) +
+					 ":" + std::to_string(last);
+	std::lock_guard lock(cache_mutex);
+	const auto [it, inserted] = cache.try_emplace(key);
+	if (inserted) {
+		auto &result = it->second;
+		for (int index = first; index <= last; ++index) {
+			const auto loaded = try_load_structure_cached(
+					root / ("tombstone" + std::to_string(index) + ".schem"));
+			if (loaded) {
+				// Rust centers every successfully parsed tombstone before choosing from
+				// the compacted valid-asset pool.
+				result.push_back(
+						std::make_shared<const StructureSchematic>(loaded->centered()));
+			} else {
+				// A broken individual asset is omitted; it must not disable the other
+				// variants or change deterministic selection among valid assets.
+			}
+		}
+	}
+	return it->second;
+}
+const StructureSchematic *pick_variant(
+		const std::vector<std::shared_ptr<const StructureSchematic>> &models,
+		std::uint64_t h)
+{
+	return models.empty() ? nullptr : models[(h >> 8) % models.size()].get();
 }
 bool near_large_crypt(int x, int z)
 {
@@ -40,9 +83,10 @@ void maybe_place(WorldEditor &e, int x, int z, const RoadMaskBitmap &road_mask)
 		return;
 	const auto h = land_cover::coord_hash(x, z);
 	if (x % LARGE_GRID == 0 && z % LARGE_GRID == 0 && h % 100 < 5) {
-		place_schem_file_anchored(e,
-				asset(e, "tombstone" + std::to_string(10 + (h >> 8) % 2)), x,
-				e.get_absolute_y(x, 0, z), z, (h >> 16) & 3, SchemAnchor::Centered);
+		const auto &models = variants(e, 10, 11);
+		if (const auto *schematic = pick_variant(models, h))
+			place_structure(
+					e, *schematic, x, e.get_absolute_y(x, 0, z), z, (h >> 16) & 3);
 		return;
 	}
 	if (!near_large_crypt(x, z)) {
@@ -50,11 +94,12 @@ void maybe_place(WorldEditor &e, int x, int z, const RoadMaskBitmap &road_mask)
 		const int hashed_x = static_cast<int>(static_cast<std::uint32_t>(x) + 0x5f5fU);
 		const int hashed_z = static_cast<int>(static_cast<std::uint32_t>(z) + 0x3c3cU);
 		const auto small_hash = land_cover::coord_hash(hashed_x, hashed_z);
-		if (small_hash % 100 < 28)
-			place_schem_file_anchored(e,
-					asset(e, "tombstone" + std::to_string(1 + (small_hash >> 8) % 9)), x,
-					e.get_absolute_y(x, 0, z), z, (small_hash >> 16) & 3,
-					SchemAnchor::Centered);
+		if (small_hash % 100 < 28) {
+			const auto &models = variants(e, 1, 9);
+			if (const auto *schematic = pick_variant(models, small_hash))
+				place_structure(e, *schematic, x, e.get_absolute_y(x, 0, z), z,
+						(small_hash >> 16) & 3);
+		}
 	}
 }
 }

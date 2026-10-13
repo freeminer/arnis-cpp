@@ -14,12 +14,23 @@
 #include <map>
 #include <mutex>
 #include <tuple>
+#include <unordered_set>
 #include <zlib.h>
 
 namespace arnis::structures
 {
 namespace
 {
+std::string trim_state_component(std::string value)
+{
+	constexpr const char *whitespace = " \t\r\n\f\v";
+	const auto begin = value.find_first_not_of(whitespace);
+	if (begin == std::string::npos)
+		return {};
+	const auto end = value.find_last_not_of(whitespace);
+	return value.substr(begin, end - begin + 1);
+}
+
 std::string schematic_cache_key(const std::filesystem::path &file)
 {
 	std::error_code path_error;
@@ -150,6 +161,7 @@ bool place_structure_yaw(world_editor::WorldEditor &editor,
 	const double cz = double(schematic.length) * .5;
 	int min_x = std::numeric_limits<int>::max(), max_x = std::numeric_limits<int>::min();
 	int min_z = std::numeric_limits<int>::max(), max_z = std::numeric_limits<int>::min();
+	const std::vector<Block> replace_all;
 	for (const auto &[mx, mz] : {std::pair{0.0, 0.0}, {double(schematic.width), 0.0},
 				 {0.0, double(schematic.length)},
 				 {double(schematic.width), double(schematic.length)}}) {
@@ -174,7 +186,8 @@ bool place_structure_yaw(world_editor::WorldEditor &editor,
 			for (std::size_t i = 0; i < count; ++i) {
 				const auto &voxel = column[i];
 				editor.set_block_with_properties_absolute(palette[voxel.palette_slot], wx,
-						base_y + static_cast<int>(voxel.y) + lift, wz, nullptr, nullptr);
+						base_y + static_cast<int>(voxel.y) + lift, wz, nullptr,
+						&replace_all);
 				placed = true;
 			}
 		}
@@ -593,14 +606,23 @@ std::string entity_item_id(const std::vector<std::uint8_t> &bytes)
 void place_native_entity(
 		world_editor::WorldEditor &editor, int x, int y, int z, const SchemEntity &entity)
 {
+	// Preserve the complete source payload for backends that understand native
+	// schematic NBT. The built-in interpretations below are compatibility
+	// fallbacks for hosts without that capability.
+	if (editor.schem_entity_sink) {
+		editor.retain_schematic_entity(x, y, z, entity.nbt);
+		return;
+	}
 	const auto items = entity_items(entity.nbt);
 	const auto id = entity_string(entity.nbt, "id");
 	if (id.find("chest") != std::string::npos) {
 		editor.set_chest_with_items_absolute(x, y, z, items);
+		editor.retain_schematic_entity(x, y, z, entity.nbt);
 		return;
 	}
 	if (id.find("barrel") != std::string::npos) {
 		editor.set_barrel_with_items_absolute(x, y, z, items);
+		editor.retain_schematic_entity(x, y, z, entity.nbt);
 		return;
 	}
 	if (id.find("sign") != std::string::npos ||
@@ -614,12 +636,15 @@ void place_native_entity(
 				text += value;
 			}
 		}
-		if (editor.place_sign_node(block_definitions::SIGN, x, y, z, 0, text))
+		if (editor.place_sign_node(block_definitions::SIGN, x, y, z, 0, text)) {
+			editor.retain_schematic_entity(x, y, z, entity.nbt);
 			return;
+		}
 	}
 	if (id.find("item_frame") != std::string::npos) {
 		if (editor.item_frame_sink) {
 			editor.item_frame_sink(x, y, z, entity_item_id(entity.nbt));
+			editor.retain_schematic_entity(x, y, z, entity.nbt);
 			return;
 		}
 	}
@@ -628,15 +653,16 @@ void place_native_entity(
 			editor.banner_sink(x, y, z, entity_string(entity.nbt, "Facing"),
 					entity_string(entity.nbt, "Base"),
 					entity_banner_patterns(entity.nbt));
+			editor.retain_schematic_entity(x, y, z, entity.nbt);
 			return;
 		}
 	}
 	if (id.find("bed") != std::string::npos) {
 		editor.set_bed_block_entity_absolute(x, y, z);
+		editor.retain_schematic_entity(x, y, z, entity.nbt);
 		return;
 	}
-	if (editor.schem_entity_sink)
-		editor.schem_entity_sink(x, y, z, entity.nbt);
+	editor.retain_schematic_entity(x, y, z, entity.nbt);
 }
 
 // Sponge v3 nests its palette/data beneath `Blocks`, and some writers wrap
@@ -870,16 +896,11 @@ SchemDocument decode_sponge_schem(
 						}
 						const auto equals = it->second.find('=', start);
 						if (equals != std::string::npos && equals < end) {
-							auto key = it->second.substr(start, equals - start);
-							auto value = it->second.substr(equals + 1, end - equals - 1);
-							const auto trim = [](std::string &s) {
-								const auto a = s.find_first_not_of(" \t");
-								const auto b = s.find_last_not_of(" \t");
-								s = a == std::string::npos ? "" : s.substr(a, b - a + 1);
-							};
-							trim(key);
-							trim(value);
-							parsed.emplace(std::move(key), std::move(value));
+							auto key = trim_state_component(
+									it->second.substr(start, equals - start));
+							auto value = trim_state_component(
+									it->second.substr(equals + 1, end - equals - 1));
+							parsed.insert_or_assign(std::move(key), std::move(value));
 						}
 						start = end < close ? end + 1 : close;
 					}
@@ -936,6 +957,27 @@ std::shared_ptr<const StructureSchematic> load_structure_cached(
 			std::make_shared<const StructureSchematic>(structure_schematic(*document));
 	std::lock_guard lock(cache_mutex);
 	return cache.emplace(key, std::move(structure)).first->second;
+}
+
+std::shared_ptr<const StructureSchematic> try_load_structure_cached(
+		const std::filesystem::path &file)
+{
+	static std::mutex cache_mutex;
+	static std::unordered_map<std::string, std::shared_ptr<const StructureSchematic>>
+			cache;
+	const auto key = schematic_cache_key(file);
+	std::lock_guard lock(cache_mutex);
+	if (const auto found = cache.find(key); found != cache.end())
+		return found->second;
+	std::shared_ptr<const StructureSchematic> result;
+	try {
+		result = load_structure_cached(file);
+	} catch (...) {
+		// A null entry is intentional: failed Rust OnceLock<Option<_>> parses
+		// remain failed for the lifetime of the process too.
+	}
+	cache.emplace(key, result);
+	return result;
 }
 
 std::shared_ptr<const StructureSchematic> load_centered_structure_cached(
@@ -1071,11 +1113,38 @@ Block resolve_schem_block(const std::string &name)
 {
 	using namespace block_definitions;
 	const auto colon = name.find(':');
+	if (colon != std::string::npos && name.substr(0, colon) != "minecraft")
+		return AIR;
 	std::string n = colon == std::string::npos ? name : name.substr(colon + 1);
 	// Palette entries may carry Java block-state properties, e.g.
 	// `oak_log[axis=y]`; the block identity is the part before '['.
 	if (const auto state = n.find('['); state != std::string::npos)
 		n.resize(state);
+	// Keep the default schematic palette aligned with Rust's
+	// `map_structure_block`: blocks outside that explicit palette are dropped
+	// instead of being silently substituted with a vaguely similar material.
+	// (The optional custom block_mapper path remains available for tree packs.)
+	static const std::unordered_set<std::string> rust_unmapped_aliases{"acacia_leaves",
+			"acacia_wood", "azalea_leaves", "bamboo_block", "birch_leaves", "birch_log",
+			"birch_wood", "cherry_leaves", "cherry_log", "cherry_wood",
+			"chiseled_bookshelf", "chiseled_bookshelf_east", "chiseled_bookshelf_north",
+			"chiseled_bookshelf_south", "chiseled_bookshelf_west", "dark_oak_leaves",
+			"dark_oak_wood", "deepslate_bricks", "flowering_azalea_leaves", "grass_block",
+			"green_stained_hardened_clay", "jungle_fence_gate", "jungle_leaves",
+			"jungle_log", "jungle_wood", "mangrove_leaves", "mangrove_log",
+			"mangrove_propagule", "mangrove_roots", "mangrove_wood", "moss_block",
+			"moss_carpet", "muddy_mangrove_roots", "oak_planks", "oak_stairs", "oak_wood",
+			"pale_oak_leaves", "pale_oak_log", "pale_oak_wood", "rail", "redstone_lamp",
+			"spruce_leaves", "spruce_wood", "stripped_acacia_log", "stripped_acacia_wood",
+			"stripped_bamboo_block", "stripped_birch_log", "stripped_birch_wood",
+			"stripped_cherry_log", "stripped_cherry_wood", "stripped_dark_oak_log",
+			"stripped_dark_oak_wood", "stripped_jungle_log", "stripped_jungle_wood",
+			"stripped_mangrove_log", "stripped_mangrove_wood", "stripped_oak_log",
+			"stripped_oak_wood", "stripped_pale_oak_log", "stripped_pale_oak_wood",
+			"stripped_spruce_log", "stripped_spruce_wood", "vine", "warped_hyphae",
+			"warped_stem"};
+	if (rust_unmapped_aliases.contains(n))
+		return AIR;
 	if (n == "air" || n == "cave_air")
 		return AIR;
 	if (n == "stone")
@@ -1105,7 +1174,7 @@ Block resolve_schem_block(const std::string &name)
 	if (n == "iron_bars")
 		return IRON_BARS;
 	if (n == "chain" || n == "iron_chain")
-		return CHAIN;
+		return CHAIN_X;
 	if (n == "chiseled_bookshelf" || n == "chiseled_bookshelf_north" ||
 			n == "chiseled_bookshelf_east" || n == "chiseled_bookshelf_south" ||
 			n == "chiseled_bookshelf_west")
@@ -1124,9 +1193,12 @@ Block resolve_schem_block(const std::string &name)
 			n == "stripped_pale_oak_log" || n == "stripped_pale_oak_wood")
 		return BIRCH_LOG;
 	if (n == "spruce_log" || n == "spruce_wood" || n == "stripped_spruce_log" ||
-			n == "stripped_spruce_wood" || n == "warped_stem" || n == "warped_hyphae" ||
-			n == "stripped_warped_stem" || n == "stripped_warped_hyphae")
+			n == "stripped_spruce_wood" || n == "warped_stem" || n == "warped_hyphae")
 		return SPRUCE_LOG;
+	if (n == "stripped_warped_stem")
+		return STRIPPED_WARPED_STEM;
+	if (n == "stripped_warped_hyphae")
+		return STRIPPED_WARPED_HYPHAE;
 	if (n == "dark_oak_log" || n == "dark_oak_wood" || n == "stripped_dark_oak_log" ||
 			n == "stripped_dark_oak_wood")
 		return DARK_OAK_LOG;
@@ -1243,11 +1315,15 @@ Block resolve_schem_block(const std::string &name)
 	if (n == "iron_door")
 		return IRON_DOOR;
 	if (n == "cut_red_sandstone")
-		return RED_TERRACOTTA;
+		return SMOOTH_RED_SANDSTONE;
 	if (n == "black_stained_glass")
 		return BLACK_STAINED_GLASS;
-	if (n == "white_stained_glass" || n == "tinted_glass" || n == "brown_stained_glass")
-		return n == "white_stained_glass" ? WHITE_STAINED_GLASS : GLASS;
+	if (n == "white_stained_glass")
+		return WHITE_STAINED_GLASS;
+	if (n == "tinted_glass")
+		return TINTED_GLASS;
+	if (n == "brown_stained_glass")
+		return BROWN_STAINED_GLASS;
 	if (n == "cracked_polished_blackstone_bricks")
 		return POLISHED_BLACKSTONE_BRICKS;
 	if (n == "stone_brick_slab")
@@ -1293,7 +1369,7 @@ Block resolve_schem_block(const std::string &name)
 	if (n == "cut_sandstone_slab")
 		return CUT_SANDSTONE_SLAB;
 	if (n == "sandstone_slab")
-		return CUT_SANDSTONE;
+		return CUT_SANDSTONE_SLAB;
 	if (n == "sandstone_wall")
 		return SANDSTONE_WALL;
 	if (n == "diorite_wall")
@@ -1404,7 +1480,7 @@ Block resolve_schem_block(const std::string &name)
 	if (n == "spruce_fence_gate")
 		return SPRUCE_FENCE_GATE;
 	if (n == "warped_fence_gate")
-		return SPRUCE_PLANKS;
+		return SPRUCE_FENCE_GATE;
 	if (n == "powered_rail")
 		return POWERED_RAIL;
 	if (n == "andesite_slab")
@@ -1414,7 +1490,7 @@ Block resolve_schem_block(const std::string &name)
 	if (n == "cobbled_deepslate_stairs")
 		return COBBLED_DEEPSLATE_STAIRS;
 	if (n == "dark_oak_trapdoor")
-		return DARK_OAK_PLANKS;
+		return DARK_OAK_TRAPDOOR;
 	if (n == "gray_stained_glass_pane")
 		return GRAY_STAINED_GLASS_PANE;
 	if (n == "light_gray_stained_glass_pane" || n == "black_stained_glass_pane")
@@ -1428,7 +1504,7 @@ Block resolve_schem_block(const std::string &name)
 	if (n == "red_nether_brick_slab")
 		return RED_NETHER_BRICK_SLAB;
 	if (n == "mangrove_slab" || n == "nether_brick_slab")
-		return RED_NETHER_BRICK;
+		return RED_NETHER_BRICK_SLAB;
 	if (n == "smooth_red_sandstone_slab")
 		return SMOOTH_RED_SANDSTONE_SLAB;
 	if (n == "acacia_trapdoor")
@@ -1662,7 +1738,10 @@ std::string rotate_direction(const std::string &direction, unsigned rotation)
 	for (unsigned i = 0; i < 4; ++i)
 		if (direction == order[i])
 			return order[(i + rotation) & 3];
-	return direction;
+	// Match Rust's rotate_dir: vertical facings are invariant, and an
+	// unrecognized direction falls back to north rather than leaking an
+	// unsupported value into the backend block state.
+	return direction == "up" || direction == "down" ? direction : "north";
 }
 std::string rotate_rail_shape(const std::string &shape, unsigned rotation)
 {
@@ -1716,8 +1795,9 @@ BlockWithProperties resolve_schem_block_with_properties(const std::string &name)
 				end = close;
 			const auto equals = name.find('=', start);
 			if (equals != std::string::npos && equals < end)
-				properties.emplace(name.substr(start, equals - start),
-						name.substr(equals + 1, end - equals - 1));
+				properties.insert_or_assign(
+						trim_state_component(name.substr(start, equals - start)),
+						trim_state_component(name.substr(equals + 1, end - equals - 1)));
 			if (end == close)
 				break;
 		}
@@ -1774,6 +1854,7 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 		columns[{voxel.x, voxel.z}].push_back(&voxel);
 	int min_x = std::numeric_limits<int>::max(), max_x = std::numeric_limits<int>::min();
 	int min_z = std::numeric_limits<int>::max(), max_z = std::numeric_limits<int>::min();
+	const std::vector<Block> replace_all;
 	for (const auto &[mx, mz] : {std::pair{0.0, 0.0}, {double(document.width), 0.0},
 				 {0.0, double(document.length)},
 				 {double(document.width), double(document.length)}}) {
@@ -1804,7 +1885,7 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 				if (block.block == block_definitions::AIR)
 					continue;
 				editor.set_block_with_properties_absolute(std::move(block), wx,
-						base_y + voxel->y + lift, wz, nullptr, nullptr);
+						base_y + voxel->y + lift, wz, nullptr, &replace_all);
 				placed = true;
 			}
 		}
@@ -1821,18 +1902,18 @@ bool place_schem_file(world_editor::WorldEditor &editor,
 		return false;
 	}
 	const auto &doc = *cached;
+	const std::vector<Block> replace_all;
 	for (const auto &v : doc.voxels) {
 		BlockWithProperties block{v.resolved_block, v.properties};
 		if (block.block == block_definitions::AIR)
 			continue;
 		editor.set_block_with_properties_absolute(std::move(block),
 				ox + doc.offset_x + v.x, oy + doc.offset_y + v.y, oz + doc.offset_z + v.z,
-				nullptr, nullptr);
+				nullptr, &replace_all);
 	}
-	if (editor.schem_entity_sink)
-		for (const auto &e : doc.entities)
-			place_native_entity(editor, ox + doc.offset_x + e.x, oy + doc.offset_y + e.y,
-					oz + doc.offset_z + e.z, e);
+	for (const auto &e : doc.entities)
+		place_native_entity(editor, ox + doc.offset_x + e.x, oy + doc.offset_y + e.y,
+				oz + doc.offset_z + e.z, e);
 	return true;
 }
 
@@ -1847,6 +1928,7 @@ bool place_schem_file_rotated(world_editor::WorldEditor &editor,
 		return false;
 	}
 	const auto &doc = *cached;
+	const std::vector<Block> replace_all;
 	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
 			rotated_properties;
 	for (const auto &v : doc.voxels) {
@@ -1871,31 +1953,30 @@ bool place_schem_file_rotated(world_editor::WorldEditor &editor,
 		}
 		const int wx = ox + x, wy = oy + doc.offset_y + v.y, wz = oz + z;
 		editor.set_block_with_properties_absolute(
-				std::move(b), wx, wy, wz, nullptr, nullptr);
+				std::move(b), wx, wy, wz, nullptr, &replace_all);
 		// Rust's place_structure optionally force-fills the terrain immediately
 		// below each schematic column (used by bundled playgrounds).
 		if (ground)
-			editor.set_block_absolute(*ground, wx, wy - 1, wz, nullptr, nullptr);
+			editor.set_block_absolute(*ground, wx, wy - 1, wz, nullptr, &replace_all);
 	}
-	if (editor.schem_entity_sink)
-		for (const auto &e : doc.entities) {
-			int x = e.x + doc.offset_x, z = e.z + doc.offset_z;
-			switch (rotation & 3) {
-			case 1:
-				std::swap(x, z);
-				x = -x;
-				break;
-			case 2:
-				x = -x;
-				z = -z;
-				break;
-			case 3:
-				std::swap(x, z);
-				z = -z;
-				break;
-			}
-			place_native_entity(editor, ox + x, oy + doc.offset_y + e.y, oz + z, e);
+	for (const auto &e : doc.entities) {
+		int x = e.x + doc.offset_x, z = e.z + doc.offset_z;
+		switch (rotation & 3) {
+		case 1:
+			std::swap(x, z);
+			x = -x;
+			break;
+		case 2:
+			x = -x;
+			z = -z;
+			break;
+		case 3:
+			std::swap(x, z);
+			z = -z;
+			break;
 		}
+		place_native_entity(editor, ox + x, oy + doc.offset_y + e.y, oz + z, e);
+	}
 	return true;
 }
 
@@ -1928,6 +2009,7 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 			doc.offset_z -= int(sz / static_cast<long long>(n));
 		}
 	}
+	const std::vector<Block> replace_all;
 	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
 			rotated_properties;
 	for (const auto &v : doc.voxels) {
@@ -1950,28 +2032,27 @@ bool place_schem_file_anchored(world_editor::WorldEditor &editor,
 			z = -z;
 			break;
 		}
-		editor.set_block_with_properties_absolute(
-				std::move(b), ox + x, oy + doc.offset_y + v.y, oz + z, nullptr, nullptr);
+		editor.set_block_with_properties_absolute(std::move(b), ox + x,
+				oy + doc.offset_y + v.y, oz + z, nullptr, &replace_all);
 	}
-	if (editor.schem_entity_sink)
-		for (const auto &e : doc.entities) {
-			int x = e.x + doc.offset_x, z = e.z + doc.offset_z;
-			switch (rotation & 3) {
-			case 1:
-				std::swap(x, z);
-				x = -x;
-				break;
-			case 2:
-				x = -x;
-				z = -z;
-				break;
-			case 3:
-				std::swap(x, z);
-				z = -z;
-				break;
-			}
-			place_native_entity(editor, ox + x, oy + doc.offset_y + e.y, oz + z, e);
+	for (const auto &e : doc.entities) {
+		int x = e.x + doc.offset_x, z = e.z + doc.offset_z;
+		switch (rotation & 3) {
+		case 1:
+			std::swap(x, z);
+			x = -x;
+			break;
+		case 2:
+			x = -x;
+			z = -z;
+			break;
+		case 3:
+			std::swap(x, z);
+			z = -z;
+			break;
 		}
+		place_native_entity(editor, ox + x, oy + doc.offset_y + e.y, oz + z, e);
+	}
 	return true;
 }
 

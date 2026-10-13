@@ -55,6 +55,13 @@ namespace
 constexpr std::uint8_t OVERTURE_TILE_ZOOM = 14;
 constexpr std::uint64_t OVERTURE_MAX_TILES = 4096;
 
+// Keep the known transient ML false positives out of both transports before
+// they can consume an in-bbox footprint budget slot.
+bool is_skipped_footprint(std::string_view id)
+{
+	return id == "f8c0757e-c059-49e4-9757-7e278751926f";
+}
+
 // Keep blocking tile fetches on a small, dedicated process-wide pool. Creating
 // and joining a new set of workers for every 64-tile batch needlessly churns
 // threads on large areas, and using the generation pool would let slow HTTP
@@ -710,33 +717,34 @@ std::optional<OvertureOsmRef> parse_overture_osm_reference(const std::string &so
 	return parse_osm_reference(sources);
 }
 
-std::size_t enrich_osm_buildings_from_overture(
-		const std::vector<OvertureBuilding> &buildings,
-		std::vector<ProcessedElement> &elements)
+void OvertureHints::insert(OvertureOsmRef key, OsmAttributeHint hint)
 {
-	std::unordered_map<std::uint64_t, const OvertureBuilding *> ways;
-	std::unordered_map<std::uint64_t, const OvertureBuilding *> relations;
-	for (const auto &building : buildings) {
-		if (!building.is_osm_sourced || !building.osm_ref ||
-				(!building.height && !building.num_floors))
-			continue;
-		const auto usable_height =
-				building.height && *building.height >= 2.5 && *building.height <= 500.0;
-		const auto usable_floors = building.num_floors && *building.num_floors >= 2 &&
-								   *building.num_floors < 200;
-		if (!usable_height && !usable_floors)
-			continue;
-		auto &hints = building.osm_ref->relation ? relations : ways;
-		if (hints.size() < MAX_OVERTURE_OSM_HINTS || hints.contains(building.osm_ref->id))
-			hints.try_emplace(building.osm_ref->id, &building);
+	if (hint.height_m && (!std::isfinite(*hint.height_m) || *hint.height_m < 2.5 ||
+								 *hint.height_m > 500.0))
+		hint.height_m.reset();
+	if (hint.num_floors && (*hint.num_floors < 2 || *hint.num_floors >= 200))
+		hint.num_floors.reset();
+	if (!hint.height_m && !hint.num_floors)
+		return;
+	const auto found = hints_.find(key);
+	if (found != hints_.end()) {
+		if (!found->second.height_m)
+			found->second.height_m = hint.height_m;
+		if (!found->second.num_floors)
+			found->second.num_floors = hint.num_floors;
+	} else if (hints_.size() < MAX_OVERTURE_OSM_HINTS) {
+		hints_.emplace(key, hint);
 	}
+}
+
+std::size_t OvertureHints::apply(std::vector<ProcessedElement> &elements) const
+{
 	std::size_t enriched = 0;
 	for (auto &element : elements) {
-		const auto &hints = element.is_relation() ? relations : ways;
 		if (element.is_node())
 			continue;
-		const auto hint = hints.find(element.id());
-		if (hint == hints.end())
+		const auto hint = hints_.find({element.id(), element.is_relation()});
+		if (hint == hints_.end())
 			continue;
 		tags_t *tags = nullptr;
 		if (element.is_way())
@@ -746,13 +754,12 @@ std::size_t enrich_osm_buildings_from_overture(
 		if (!(tags->contains("building") || tags->contains("building:part")) ||
 				tags->contains("height") || tags->contains("building:levels"))
 			continue;
-		const auto &building = *hint->second;
-		if (building.num_floors && *building.num_floors >= 2 &&
-				*building.num_floors < 200)
-			(*tags)["building:levels"] = std::to_string(*building.num_floors);
-		if (building.height && *building.height >= 2.5 && *building.height <= 500.0) {
+		if (hint->second.num_floors)
+			(*tags)["building:levels"] = std::to_string(*hint->second.num_floors);
+		if (hint->second.height_m) {
 			std::ostringstream formatted_height;
-			formatted_height << std::fixed << std::setprecision(1) << *building.height;
+			formatted_height << std::fixed << std::setprecision(1)
+							 << *hint->second.height_m;
 			(*tags)["height"] = formatted_height.str();
 		}
 		(*tags)["arnis:height_source"] = "overture_maps";
@@ -761,9 +768,21 @@ std::size_t enrich_osm_buildings_from_overture(
 	return enriched;
 }
 
+std::size_t enrich_osm_buildings_from_overture(
+		const std::vector<OvertureBuilding> &buildings,
+		std::vector<ProcessedElement> &elements)
+{
+	OvertureHints hints;
+	for (const auto &building : buildings)
+		if (building.is_osm_sourced && building.osm_ref)
+			hints.insert(*building.osm_ref,
+					OsmAttributeHint{building.height, building.num_floors});
+	return hints.apply(elements);
+}
+
 std::size_t OvertureData::apply_hints(std::vector<ProcessedElement> &osm_elements) const
 {
-	return enrich_osm_buildings_from_overture(hints, osm_elements);
+	return hints.apply(osm_elements);
 }
 
 std::pair<std::size_t, std::size_t> OvertureData::merge_into(
@@ -814,12 +833,12 @@ std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
 			// Keep the tile transport's pre-budget filtering identical to the
 			// Rust PMTiles path: known transient ML false positives must not
 			// consume a slot that could be used by a real footprint.
-			if (*id == "f8c0757e-c059-49e4-9757-7e278751926f")
+			if (is_skipped_footprint(*id))
 				continue;
 			const mvt::Ring *ring = nullptr;
 			for (const auto &candidate : feature.rings)
 				if (candidate.exterior() && candidate.points.size() >= 3 &&
-						(!ring || candidate.area2 > ring->area2))
+						(!ring || candidate.area2 >= ring->area2))
 					ring = &candidate;
 			if (!ring)
 				continue;
@@ -869,11 +888,12 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 		pmtiles::Header header, std::vector<std::uint8_t> root_directory,
 		pmtiles::RangeReader read_range, std::uint8_t zoom, bool debug,
 		bool include_osm_sourced, std::size_t footprint_budget,
-		std::size_t osm_hint_budget)
+		std::size_t osm_hint_budget, bool report_gaps)
 {
 	return [header, root_directory = std::move(root_directory),
 				   read_range = std::move(read_range), zoom, debug, include_osm_sourced,
-				   footprint_budget, osm_hint_budget](const geographic::LLBBox &bbox,
+				   footprint_budget, osm_hint_budget,
+				   report_gaps](const geographic::LLBBox &bbox,
 				   std::size_t maximum) -> std::optional<std::vector<OvertureBuilding>> {
 		std::vector<OvertureBuilding> buildings;
 		std::unordered_map<std::string, std::size_t> by_id;
@@ -933,6 +953,7 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 		constexpr std::size_t tile_batch_size = 64;
 		std::size_t lost_tiles = locate_failures;
 		std::size_t attempted_tiles = 0;
+		bool capped = false;
 		for (std::size_t batch_start = 0; batch_start < located.size();
 				batch_start += tile_batch_size) {
 			const auto batch_count =
@@ -971,6 +992,8 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 					continue;
 				}
 				for (auto &building : result.buildings) {
+					if (is_skipped_footprint(building.id))
+						continue;
 					if (!ring_overlaps_bbox(building.exterior_ring, bbox))
 						continue;
 					if (footprint_budget > 0 && building.is_osm_sourced) {
@@ -1001,7 +1024,16 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 						if (hint_by_osm_ref.size() >= osm_hint_budget)
 							continue;
 						hint_by_osm_ref.emplace(hint_key, buildings.size());
-						buildings.push_back(std::move(building));
+						// Rust stores OSM enrichments as compact OsmAttributeHint values;
+						// do not retain the decoded polygon ring in this temporary row.
+						OvertureBuilding hint;
+						hint.is_osm_sourced = true;
+						hint.osm_ref = building.osm_ref;
+						if (usable_height)
+							hint.height = building.height;
+						if (usable_floors)
+							hint.num_floors = building.num_floors;
+						buildings.push_back(std::move(hint));
 						continue;
 					}
 					const auto previous = by_id.find(building.id);
@@ -1018,16 +1050,22 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 			// Check the cap between bounded rounds, after every tile in this
 			// round had a chance to replace a clipped duplicate with its full ring.
 			if (footprint_budget > 0 ? footprint_count >= footprint_budget
-									 : buildings.size() >= maximum)
+									 : buildings.size() >= maximum) {
+				capped = true;
 				break;
+			}
 		}
 		// Returning empty success here would prevent Auto from trying the
 		// GeoParquet fallback, even though every tile containing data failed.
 		if (attempted_tiles > 0 && lost_tiles == attempted_tiles)
 			return std::nullopt;
-		if (debug && lost_tiles > 0)
+		if (report_gaps && lost_tiles > 0)
 			std::cerr << "Warning: Overture tile data incomplete: " << lost_tiles
 					  << " tile read(s) failed.\n";
+		if (report_gaps && capped)
+			std::cerr
+					<< "Warning: Overture Maps reached the building limit (" << maximum
+					<< "); later footprints may be missing. Use a smaller area for full coverage.\n";
 		std::sort(buildings.begin(), buildings.end(),
 				[](const OvertureBuilding &a, const OvertureBuilding &b) {
 					return a.id < b.id;
@@ -1061,7 +1099,7 @@ BuildingTransportSource pmtiles_building_transport_source(pmtiles::Header header
 		std::uint8_t zoom, bool debug, bool include_osm_sourced)
 {
 	return pmtiles_building_transport_source_impl(header, std::move(root_directory),
-			std::move(read_range), zoom, debug, include_osm_sourced, 0, 0);
+			std::move(read_range), zoom, debug, include_osm_sourced, 0, 0, false);
 }
 
 BuildingSource pmtiles_building_source(pmtiles::Header header,
@@ -1079,7 +1117,7 @@ BuildingSource pmtiles_building_source(pmtiles::Header header,
 static BuildingTransportSource http_pmtiles_building_transport_source_impl(
 		std::string archive_url, std::uint8_t zoom, std::filesystem::path cache_directory,
 		bool debug, bool include_osm_sourced, std::size_t footprint_budget,
-		std::size_t osm_hint_budget)
+		std::size_t osm_hint_budget, bool report_gaps)
 {
 	struct State
 	{
@@ -1089,8 +1127,8 @@ static BuildingTransportSource http_pmtiles_building_transport_source_impl(
 	auto state = std::make_shared<State>();
 	return [url = std::move(archive_url), state, zoom,
 				   cache_directory = std::move(cache_directory), debug,
-				   include_osm_sourced, footprint_budget,
-				   osm_hint_budget](const geographic::LLBBox &bbox,
+				   include_osm_sourced, footprint_budget, osm_hint_budget,
+				   report_gaps](const geographic::LLBBox &bbox,
 				   std::size_t maximum) -> std::optional<std::vector<OvertureBuilding>> {
 		const pmtiles::RangeReader range = [&url, &cache_directory](std::uint64_t offset,
 												   std::uint64_t length)
@@ -1135,7 +1173,8 @@ static BuildingTransportSource http_pmtiles_building_transport_source_impl(
 			return std::nullopt;
 		return pmtiles_building_transport_source_impl(archive.header,
 				std::move(archive.root_directory), range, zoom, debug,
-				include_osm_sourced, footprint_budget, osm_hint_budget)(bbox, maximum);
+				include_osm_sourced, footprint_budget, osm_hint_budget,
+				report_gaps)(bbox, maximum);
 	};
 }
 
@@ -1144,7 +1183,7 @@ BuildingTransportSource http_pmtiles_building_transport_source(std::string archi
 		bool include_osm_sourced)
 {
 	return http_pmtiles_building_transport_source_impl(std::move(archive_url), zoom,
-			std::move(cache_directory), debug, include_osm_sourced, 0, 0);
+			std::move(cache_directory), debug, include_osm_sourced, 0, 0, false);
 }
 
 BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_t zoom,
@@ -1207,7 +1246,7 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 		if (!value_id || !value_geometry)
 			continue;
 		// Filter before the source budget cap, matching Rust's Parquet path.
-		if (*value_id == "f8c0757e-c059-49e4-9757-7e278751926f")
+		if (is_skipped_footprint(*value_id))
 			continue;
 		auto ring = parse_overture_wkb_polygon(*value_geometry);
 		if (!ring || ring->size() < 3)
@@ -1374,7 +1413,7 @@ std::vector<ProcessedElement> convert_overture_buildings(
 		// Known transient ML false positive (temporary stage/tent at
 		// Königsplatz, Munich).  Rust filters this stable GERS id before
 		// converting it into a generated building.
-		if (building.id == "f8c0757e-c059-49e4-9757-7e278751926f")
+		if (is_skipped_footprint(building.id))
 			continue;
 		if (!include_osm_sourced && building.is_osm_sourced)
 			continue;
@@ -1409,42 +1448,16 @@ OvertureData fetch_overture_data_from(const BuildingSource &source,
 			maximum + MAX_OVERTURE_OSM_HINTS);
 	try {
 		auto buildings = source(bbox, raw_limit);
-		std::unordered_map<std::uint64_t, std::size_t> hint_indices;
 		for (const auto &building : buildings) {
-			if (building.id == "f8c0757e-c059-49e4-9757-7e278751926f")
-				continue;
 			if (building.is_osm_sourced) {
-				const bool usable_height = building.height && *building.height >= 2.5 &&
-										   *building.height <= 500.0;
-				const bool usable_floors = building.num_floors &&
-										   *building.num_floors >= 2 &&
-										   *building.num_floors < 200;
-				if (building.osm_ref && (usable_height || usable_floors)) {
-					const auto key =
-							building.osm_ref->id ^
-							(building.osm_ref->relation ? (std::uint64_t{1} << 63) : 0);
-					const auto found = hint_indices.find(key);
-					if (found != hint_indices.end()) {
-						auto &prior = out.hints[found->second];
-						if (!prior.height && usable_height)
-							prior.height = building.height;
-						if (!prior.num_floors && usable_floors)
-							prior.num_floors = building.num_floors;
-					} else if (out.hints.size() < MAX_OVERTURE_OSM_HINTS) {
-						hint_indices.emplace(key, out.hints.size());
-						OvertureBuilding hint;
-						hint.is_osm_sourced = true;
-						hint.osm_ref = building.osm_ref;
-						if (usable_height)
-							hint.height = building.height;
-						if (usable_floors)
-							hint.num_floors = building.num_floors;
-						out.hints.push_back(std::move(hint));
-					}
-				}
+				if (building.osm_ref)
+					out.hints.insert(*building.osm_ref,
+							OsmAttributeHint{building.height, building.num_floors});
 				if (!include_osm_sourced)
 					continue;
 			}
+			if (is_skipped_footprint(building.id))
+				continue;
 			if (out.elements.size() >= maximum)
 				continue;
 			if (auto way = overture_building_to_way(building, bbox, scale))
@@ -1593,7 +1606,7 @@ OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 					  << " buildings.\n";
 		auto transport = http_pmtiles_building_transport_source_impl(archive,
 				OVERTURE_TILE_ZOOM, cache::cache_root() / release / "tiles" / "buildings",
-				debug, true, maximum, MAX_OVERTURE_OSM_HINTS);
+				debug, true, maximum, MAX_OVERTURE_OSM_HINTS, true);
 		auto rows = transport(bbox, raw_limit);
 		if (!rows) {
 			tile_errors.push_back(release + ": tile archive read failed");
@@ -1616,17 +1629,15 @@ OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 	}
 	if (source == OvertureSource::Auto) {
 #if defined(USE_ARROW) && USE_ARROW
-		if (debug)
-			std::cerr << "Overture Maps: vector tiles unavailable ("
-					  << (tile_errors.empty() ? "no usable release" : tile_errors.front())
-					  << "); falling back to the GeoParquet source.\n";
+		std::cerr << "Warning: Overture vector tiles unavailable ("
+				  << (tile_errors.empty() ? "no usable release" : tile_errors.front())
+				  << "); falling back to the GeoParquet source.\n";
 		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
 												"overture-buildings.parquet")),
 				bbox, scale);
 #else
-		if (debug)
-			std::cerr << "Overture Maps: vector tiles unavailable and Arrow/Parquet "
-					  << "fallback is disabled.\n";
+		std::cerr << "Warning: Overture vector tiles unavailable and Arrow/Parquet "
+				  << "fallback is disabled.\n";
 #endif
 	}
 	return {};

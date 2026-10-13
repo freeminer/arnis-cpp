@@ -14,9 +14,12 @@ namespace arnis
 // independent of the tree generation traversal order.
 static std::uint64_t leaf_hash(int x, int y, int z)
 {
-	return std::uint64_t(std::int64_t(x) * 73856093LL) ^
-		   std::uint64_t(std::int64_t(y) * 19349663LL) ^
-		   std::uint64_t(std::int64_t(z) * 83492791LL);
+	// Rust casts each signed coordinate to u64 and uses wrapping_mul. Keep the
+	// multiplication unsigned here so large/negative world coordinates have the
+	// same modulo-2^64 hash without signed-overflow undefined behaviour.
+	return static_cast<std::uint64_t>(static_cast<std::int64_t>(x)) * 73856093ULL ^
+		   static_cast<std::uint64_t>(static_cast<std::int64_t>(y)) * 19349663ULL ^
+		   static_cast<std::uint64_t>(static_cast<std::int64_t>(z)) * 83492791ULL;
 }
 
 static bool leaf_gap_at(std::uint64_t hash)
@@ -440,9 +443,9 @@ Tree Tree::get_tree_variant(TreeType kind, std::uint32_t variant_idx)
 	return t;
 }
 
-namespace
+namespace trees
 {
-trees::Habitat habitat_for_tree_type(TreeType type)
+Habitat habitat_for_tree_type(TreeType type)
 {
 	switch (type) {
 	case TreeType::Spruce:
@@ -457,7 +460,10 @@ trees::Habitat habitat_for_tree_type(TreeType type)
 		return trees::Habitat::Lowland;
 	}
 }
+} // namespace trees
 
+namespace
+{
 TreeType selected_tree_type(int x, int z)
 {
 	auto rng = coord_rng(x, z, 0);
@@ -530,7 +536,7 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 		return;
 
 	trees::MappedRequest request;
-	request.habitat = habitat_for_tree_type(mapped.kind);
+	request.habitat = trees::habitat_for_tree_type(mapped.kind);
 	if (mapped.genus)
 		request.genus = *mapped.genus;
 	request.conifer = mapped.conifer;
@@ -770,8 +776,8 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	if (use_region_pack && editor.scale() >= MICRO_TREE_MAX_SCALE) {
 		const auto handled = editor.place_regional_tree(pos.x,
 				editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, cover,
-				habitat_for_tree_type(tree_type), from_tags, wet_ground, allow_on_paved,
-				density_decided);
+				trees::habitat_for_tree_type(tree_type), from_tags, wet_ground,
+				allow_on_paved, density_decided);
 		// A present false result is still handled: Rust's active pack may choose
 		// a clearing, which must not fall through to a procedural tree.
 		if (handled.has_value())

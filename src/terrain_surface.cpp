@@ -147,17 +147,17 @@ void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks
 			tone_a = tone_b;
 			tone_b = sample_tone(tone_y + TONE_STEP);
 		}
+		if (has_streak) {
+			const auto streak_x = std::bit_cast<std::int32_t>(
+					static_cast<std::uint32_t>(x) * 31u ^ static_cast<std::uint32_t>(z));
+			if (value_noise_salted(streak_x, y, 10, STREAK_RUN) < .7)
+				return streak_block;
+		}
 		const int current_layer = stratum_layer(x, z, s.warp, y, cursor);
 		if (current_layer != layer) {
 			layer = current_layer;
 			kind = bed_kind(x, z, layer);
 		}
-		const auto streak_x = std::bit_cast<std::int32_t>(
-				static_cast<std::uint32_t>(x) * 31u ^ static_cast<std::uint32_t>(z));
-		const bool streak_run =
-				has_streak && value_noise_salted(streak_x, y, 10, STREAK_RUN) < .7;
-		if (streak_run)
-			return streak_block;
 		const double tone = tone_a + (tone_b - tone_a) * double(y - tone_y) / TONE_STEP;
 		return face_ramp()[ramp_step(kind, tone, hi + 1 - y)];
 	};
@@ -170,7 +170,7 @@ std::optional<TalusField> TalusField::build(
 	const auto at = [&](int x, int z) {
 		return ground.level_exact({x - origin_x, z - origin_z});
 	};
-	const double correction = ground.elevation_slope_correction;
+	const double correction = ground.slope_correction();
 	double lo = std::numeric_limits<double>::max();
 	double hi = std::numeric_limits<double>::lowest();
 	for (int i = 0; i < 5; ++i)
@@ -321,8 +321,8 @@ bool is_plausible_ice(double d, biome::Climate c)
 Snow snow_cover(double d, double slope, const std::function<double()> &convexity,
 		double shade, int x, int z)
 {
-	if (d < -1.5)
-		return Snow::None;
+	if (d < SNOW_MIN_DEPTH)
+		return Snow::none();
 	const std::array<std::pair<double, double>, 5> slope_terms{
 			{{2.0, .1}, {4.0, 0.0}, {6.0, -.7}, {8.0, -1.5}, {10.0, -2.8}}};
 	double st = slope_terms.back().second;
@@ -347,11 +347,11 @@ Snow snow_cover(double d, double slope, const std::function<double()> &convexity
 								 : d + st + .25 * std::clamp(convexity(), -2.0, 2.0) +
 										   shade_term + drift;
 	if (score >= full_cover)
-		return Snow::Block;
+		return Snow::block();
 	if (score < 0.0)
-		return Snow::None;
+		return Snow::none();
 	const unsigned layers = 1 + static_cast<unsigned>(score / full_cover * 7.0);
-	return static_cast<Snow>(std::clamp(layers, 1u, 7u));
+	return Snow::layer(static_cast<std::uint8_t>(std::clamp(layers, 1u, 7u)));
 }
 double glacier_depth(double d)
 {

@@ -25,7 +25,6 @@ using std::vector;
 #include "bridge_styles.h"
 #include "bridges.h"
 #include "advtrains.h"
-#include "connected_blocks.h"
 #undef stoi
 namespace arnis
 {
@@ -581,7 +580,7 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 		const int ground = editor.get_ground_level(mx, mz);
 		editor.set_block_absolute(GRAY_CONCRETE, mx, ground, mz, nullopt, nullopt);
 		for (int y = ground + 1; y <= wire_y; ++y)
-			connected_blocks::place_connected(editor, COBBLESTONE_WALL, mx, y, mz);
+			editor.set_block_absolute(COBBLESTONE_WALL, mx, y, mz, nullopt, nullopt);
 		for (int d = 1; d < CATENARY_MAST_OFFSET; ++d)
 			editor.set_block_absolute(sx ? CHAIN_X : CHAIN_Z, cx + sx * d, wire_y,
 					cz + sz * d, nullopt, nullopt);
@@ -593,6 +592,60 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 {
 	const auto *plan = advtrains::get_plan(element);
+	// Keep the Rust at-grade placement order and endpoint orientation when the
+	// optional Advtrains network is unavailable. Rust renders each OSM segment
+	// separately, skips its duplicated first point after the first segment, and
+	// carries sleeper spacing across the joins. A merged centerline changes the
+	// previous/next pair at shared OSM nodes, which can turn a straight join into
+	// a curve (or vice versa).
+	if (!ADVTRAINS_AVAILABLE) {
+		std::size_t tds = 0;
+		for (std::size_t i = 1; i < element.nodes.size(); ++i) {
+			const auto &prev_node = element.nodes[i - 1];
+			const auto &cur_node = element.nodes[i];
+			const auto points = bresenham_line(
+					prev_node.x, 0, prev_node.z, cur_node.x, 0, cur_node.z);
+			const auto smoothed = smooth_diagonal_rails(points);
+			const std::size_t skip_first = i > 1 ? 1 : 0;
+			for (std::size_t j = skip_first; j < smoothed.size(); ++j) {
+				const auto [bx, unused_y, bz] = smoothed[j];
+				(void)unused_y;
+				const int current_ground = editor.get_ground_level(bx, bz);
+				const int prev_ground =
+						j > 0 ? editor.get_ground_level(std::get<0>(smoothed[j - 1]),
+										std::get<2>(smoothed[j - 1]))
+							  : current_ground;
+				const int next_ground =
+						j + 1 < smoothed.size()
+								? editor.get_ground_level(std::get<0>(smoothed[j + 1]),
+										  std::get<2>(smoothed[j + 1]))
+								: current_ground;
+				if (prev_ground < current_ground)
+					for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
+						editor.set_block_absolute(
+								GRAVEL, bx, fill_y, bz, nullopt, nullopt);
+				editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
+
+				const optional<pair<int, int>> prev =
+						j > 0 ? optional<pair<int, int>>{pair<int, int>{
+										std::get<0>(smoothed[j - 1]),
+										std::get<2>(smoothed[j - 1])}}
+							  : nullopt;
+				const optional<pair<int, int>> next =
+						j + 1 < smoothed.size() ? optional<pair<int, int>>{pair<int, int>{
+														  std::get<0>(smoothed[j + 1]),
+														  std::get<2>(smoothed[j + 1])}}
+												: nullopt;
+				const Block rail_block = determine_rail_with_slope(
+						{bx, bz}, prev, next, prev_ground, current_ground, next_ground);
+				editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
+				if ((tds % 4) == 0)
+					editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
+				++tds;
+			}
+		}
+		return;
+	}
 	const auto centerline = build_connected_centerline(element);
 	if (centerline.empty())
 		return;
@@ -825,6 +878,76 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 		vector<pair<int, int>> &subway_points)
 {
 	const auto *plan = advtrains::get_plan(element);
+	// Rust builds subway shells one OSM segment at a time. Keep that same
+	// previous/next context at shared nodes in the non-Advtrains path; the
+	// connected Advtrains centerline below intentionally uses its network path.
+	if (!ADVTRAINS_AVAILABLE) {
+		for (std::size_t i = 1; i < element.nodes.size(); ++i) {
+			const auto &prev_node = element.nodes[i - 1];
+			const auto &cur_node = element.nodes[i];
+			const auto points = bresenham_line(
+					prev_node.x, 0, prev_node.z, cur_node.x, 0, cur_node.z);
+			const auto smoothed_segment = smooth_diagonal_rails(points);
+			for (std::size_t j = 0; j < smoothed_segment.size(); ++j) {
+				const auto [bx, unused_y, bz] = smoothed_segment[j];
+				(void)unused_y;
+				if (subway_points.empty() ||
+						subway_points.back() != pair<int, int>{bx, bz})
+					subway_points.emplace_back(bx, bz);
+
+				const int ground_y = editor.get_ground_level(bx, bz);
+				const pos_t ceil_y = ground_y - SUBWAY_DEPTH;
+				const pos_t floor_y = ceil_y - INTERIOR_HEIGHT - 1;
+				if (floor_y <= world_editor::min_y())
+					continue;
+
+				const int prev_ground =
+						j > 0 ? editor.get_ground_level(
+										std::get<0>(smoothed_segment[j - 1]),
+										std::get<2>(smoothed_segment[j - 1]))
+							  : ground_y;
+				const int next_ground =
+						j + 1 < smoothed_segment.size()
+								? editor.get_ground_level(
+										  std::get<0>(smoothed_segment[j + 1]),
+										  std::get<2>(smoothed_segment[j + 1]))
+								: ground_y;
+				for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
+					for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz)
+						for (int y = floor_y; y <= ceil_y; ++y) {
+							const bool wall_or_ceiling = std::abs(dx) == WALL_RADIUS ||
+														 std::abs(dz) == WALL_RADIUS ||
+														 y == ceil_y;
+							const Block block =
+									y == floor_y ? POLISHED_DEEPSLATE
+									: wall_or_ceiling
+											? subway_shell_block(bx + dx, y, bz + dz)
+											: STONE_BRICKS;
+							editor.set_block_absolute(
+									block, bx + dx, y, bz + dz, nullopt, nullopt);
+						}
+
+				const optional<pair<int, int>> prev =
+						j > 0 ? optional<pair<int, int>>{pair<int, int>{
+										std::get<0>(smoothed_segment[j - 1]),
+										std::get<2>(smoothed_segment[j - 1])}}
+							  : nullopt;
+				const optional<pair<int, int>> next =
+						j + 1 < smoothed_segment.size()
+								? optional<pair<int, int>>{pair<int, int>{
+										  std::get<0>(smoothed_segment[j + 1]),
+										  std::get<2>(smoothed_segment[j + 1])}}
+								: nullopt;
+				const Block rail_block = determine_rail_with_slope(
+						{bx, bz}, prev, next, prev_ground, ground_y, next_ground);
+				editor.set_block_absolute(rail_block, bx, floor_y + 1, bz,
+						std::optional<std::vector<Block>>(
+								{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
+						std::nullopt);
+			}
+		}
+		return;
+	}
 	const auto smoothed = build_connected_centerline(element);
 	for (size_t j = 0; j < smoothed.size(); ++j) {
 		int bx = smoothed[j].first;

@@ -8,6 +8,18 @@
 
 namespace arnis::caves
 {
+std::int64_t chunk_seed(
+		std::int64_t seed, std::int32_t cx, std::int32_t cz, std::int64_t salt)
+{
+	const auto bits = std::bit_cast<std::uint64_t>(seed) ^
+					  (static_cast<std::uint64_t>(static_cast<std::int64_t>(cx)) *
+							  341873128712ULL) ^
+					  (static_cast<std::uint64_t>(static_cast<std::int64_t>(cz)) *
+							  132897987541ULL) ^
+					  std::bit_cast<std::uint64_t>(salt);
+	return std::bit_cast<std::int64_t>(bits);
+}
+
 namespace
 {
 constexpr std::int64_t GOLDEN = -7046029254386353131LL;
@@ -133,10 +145,10 @@ std::int64_t XoroRandom::next_long()
 	const auto l = static_cast<std::uint64_t>(lo_);
 	auto l1 = static_cast<std::uint64_t>(hi_);
 	const auto sum = l + l1;
-	const auto out = static_cast<std::int64_t>(std::rotl(sum, 17) + l);
+	const auto out = std::bit_cast<std::int64_t>(std::rotl(sum, 17) + l);
 	l1 ^= l;
-	lo_ = static_cast<std::int64_t>(std::rotl(l, 49) ^ l1 ^ (l1 << 21));
-	hi_ = static_cast<std::int64_t>(std::rotl(l1, 28));
+	lo_ = std::bit_cast<std::int64_t>(std::rotl(l, 49) ^ l1 ^ (l1 << 21));
+	hi_ = std::bit_cast<std::int64_t>(std::rotl(l1, 28));
 	return out;
 }
 double XoroRandom::next_double()

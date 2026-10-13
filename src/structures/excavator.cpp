@@ -23,9 +23,12 @@ void scatter_excavators(
 					return dx > -24 && dx < 24 && dz > -24 && dz < 24;
 				}))
 			continue;
-		if (!place_named_schem(editor, "excavator", x, editor.get_absolute_y(x, 1, z), z,
-					(h >> 5) & 3))
-			continue;
+		// Rust's place_structure has no success result; once a candidate passes
+		// the water and spacing checks, it consumes a scatter slot even if the
+		// editor clips every voxel at a tile boundary. Keep later deterministic
+		// candidate selection independent of the stamp result.
+		place_named_schem(
+				editor, "excavator", x, editor.get_absolute_y(x, 1, z), z, (h >> 5) & 3);
 		placed.emplace_back(x, z);
 	}
 }

@@ -1,4 +1,5 @@
 #include "caves_carver.h"
+#include "caves_deepslate.h"
 #include "caves_density.h"
 #include "caves_theme.h"
 #include "caves_water.h"
@@ -7,6 +8,7 @@
 #include "block_definitions.h"
 #include "world_editor/floor_state.h"
 #include "../../arnis_world_editor.h"
+#include <algorithm>
 #include <array>
 #include <cmath>
 #include <optional>
@@ -292,9 +294,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 											0x0CA50CA5LL, .075f, -56, 180},
 						 {0xE547E547LL, .025f, -56, 47}}) {
 				const auto [salt, probability, y_min, y_max] = cfg;
-				XoroRandom r =
-						XoroRandom::from_seed(seed ^ std::int64_t(cx) * 341873128712LL ^
-											  std::int64_t(cz) * 132897987541LL ^ salt);
+				XoroRandom r = XoroRandom::from_seed(chunk_seed(seed, cx, cz, salt));
 				if (r.next_float() > probability)
 					continue;
 				const int a = r.next_int(15) + 1;
@@ -331,9 +331,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 			}
 
 			// Vanilla's canyon carver uses a separate origin salt and walk shape.
-			XoroRandom r = XoroRandom::from_seed(
-					seed ^ std::int64_t(cx) * 341873128712LL ^
-					std::int64_t(cz) * 132897987541LL ^ 0x4A1E4A1ELL);
+			XoroRandom r = XoroRandom::from_seed(chunk_seed(seed, cx, cz, 0x4A1E4A1ELL));
 			if (r.next_float() <= .008f) {
 				double x = cx * 16 + r.next_int(16);
 				double y = -54 + r.next_int(64) + shift;
@@ -390,8 +388,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 
 void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int floor_y,
 		const CaveRect &world_bounds, std::uint64_t seed,
-		const CaveShapeQuery &cave_shape, const WaterPlan &water_plan,
-		const std::unordered_set<std::int64_t> *cave_air)
+		const CaveShapeQuery &cave_shape, const WaterPlan &water_plan)
 {
 	constexpr double inner_radius = 4.2;
 	constexpr double amethyst_radius = 5.0;
@@ -404,20 +401,19 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 		const auto p = pack_cave_pos(x, y, z);
 		if (const auto it = overlay.find(p); it != overlay.end())
 			return !it->second;
-		return (cave_air && cave_air->contains(p)) || water_plan.carved.contains(p) ||
-			   water_plan.water.contains(p) || cave_shape.is_cave(x, y, z);
+		// Match Rust place_geodes: pre-existing shell openings are the canonical
+		// cave shape or cells explicitly carved by a planned water feature. Do not
+		// treat every final cave-air cell or planned water voxel as an opening;
+		// those are separate from the Rust shell-preservation predicate.
+		return water_plan.carved.contains(p) || cave_shape.is_cave(x, y, z);
 	};
 	auto standing = [&](int x, int y, int z) {
 		const auto p = pack_cave_pos(x, y, z);
 		if (const auto it = overlay.find(p); it != overlay.end())
 			return it->second;
-		if (water_plan.water.contains(p))
-			return true;
-		if (cave_air && cave_air->contains(p))
-			return false;
 		return water_plan.solid(cave_shape, x, y, z);
 	};
-	const auto expanded = region.grow(radius + 1);
+	const auto expanded = region.grow(radius + 1).clip(world_bounds);
 	const auto [cx0, cx1, cz0, cz1] = expanded.chunks();
 	const std::vector<Block> bedrock{BEDROCK};
 	// Decide every center before writing any geode. Rust tests a candidate
@@ -439,7 +435,29 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 				continue;
 			centers.emplace_back(gx, gy, gz);
 		}
-	std::vector<std::tuple<int, int, int, int, int, int>> clusters;
+	auto place_cluster = [&](int gx, int gy, int gz, int bx, int by, int bz) {
+		if (decor_hash(bx, by, bz, seed ^ 0xC1A5ULL) % 100 >= 70)
+			return;
+		const int dx = gx - bx, dy = gy - by, dz = gz - bz;
+		const char *face;
+		int x = bx, y = by, z = bz;
+		if (std::abs(dx) >= std::abs(dy) && std::abs(dx) >= std::abs(dz)) {
+			face = dx > 0 ? "east" : "west";
+			x += dx > 0 ? 1 : -1;
+		} else if (std::abs(dy) >= std::abs(dz)) {
+			face = dy > 0 ? "up" : "down";
+			y += dy > 0 ? 1 : -1;
+		} else {
+			face = dz > 0 ? "south" : "north";
+			z += dz > 0 ? 1 : -1;
+		}
+		if (!region.contains(x, z) || y < write_min_y || y > write_max_y)
+			return;
+		BlockWithProperties cluster{
+				AMETHYST_CLUSTER, {{"facing", face}, {"waterlogged", "false"}}};
+		editor.set_block_with_properties_absolute(
+				cluster, x, y, z, std::vector<Block>{AIR}, std::nullopt);
+	};
 	for (const auto &[gx, gy, gz] : centers) {
 
 		std::set<std::tuple<int, int, int>> hollow;
@@ -513,32 +531,9 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 						keep ? block : AIR, x, y, z, std::nullopt, bedrock);
 		}
 		for (const auto &[bx, by, bz] : buddings) {
-			if (reverted.contains(pack_cave_pos(bx, by, bz)) ||
-					decor_hash(bx, by, bz, seed ^ 0xC1A5ULL) % 100 >= 70)
-				continue;
-			clusters.emplace_back(gx, gy, gz, bx, by, bz);
+			if (!reverted.contains(pack_cave_pos(bx, by, bz)))
+				place_cluster(gx, gy, gz, bx, by, bz);
 		}
-	}
-	for (const auto &[gx, gy, gz, bx, by, bz] : clusters) {
-		const int dx = gx - bx, dy = gy - by, dz = gz - bz;
-		const char *face;
-		int x = bx, y = by, z = bz;
-		if (std::abs(dx) >= std::abs(dy) && std::abs(dx) >= std::abs(dz)) {
-			face = dx > 0 ? "east" : "west";
-			x += dx > 0 ? 1 : -1;
-		} else if (std::abs(dy) >= std::abs(dz)) {
-			face = dy > 0 ? "up" : "down";
-			y += dy > 0 ? 1 : -1;
-		} else {
-			face = dz > 0 ? "south" : "north";
-			z += dz > 0 ? 1 : -1;
-		}
-		if (!region.contains(x, z) || y < write_min_y || y > write_max_y)
-			continue;
-		BlockWithProperties cluster{
-				AMETHYST_CLUSTER, {{"facing", face}, {"waterlogged", "false"}}};
-		editor.set_block_with_properties_absolute(
-				cluster, x, y, z, std::vector<Block>{AIR}, std::nullopt);
 	}
 }
 
@@ -618,6 +613,9 @@ void carve_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		const CaveRect &world_bounds, std::int64_t seed, int floor_y,
 		CaveEllipsoids *ellipsoids, std::unordered_set<std::int64_t> *cave_air)
 {
+	// Rust's carve_region establishes the deepslate host transition itself,
+	// before computing or carving cave cells.
+	apply_deepslate(editor, region.min_x, region.max_x, region.min_z, region.max_z);
 	CaveGen density(seed, floor_y, world_editor::world_max_y());
 	std::unordered_set<std::int64_t> carved;
 	carve_density_region(density, editor, region.min_x, region.max_x, region.min_z,
@@ -657,7 +655,9 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	const auto &air_cells = cave_air ? *cave_air : empty_air;
 	// Match Rust: decorate only the explicitly tracked cave-air cells. Fluid
 	// cells are consulted separately and unrelated voids are not candidates.
-	for (const auto p : air_cells) {
+	std::vector<std::int64_t> ordered_air(air_cells.begin(), air_cells.end());
+	std::sort(ordered_air.begin(), ordered_air.end());
+	for (const auto p : ordered_air) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (!region.contains(x, z))
 			continue;
@@ -947,7 +947,9 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				TUBE_CORAL, BRAIN_CORAL, FIRE_CORAL, HORN_CORAL, BUBBLE_CORAL};
 		const Block dead_beds[] = {DEAD_TUBE_CORAL_BLOCK, DEAD_BRAIN_CORAL_BLOCK,
 				DEAD_FIRE_CORAL_BLOCK, DEAD_HORN_CORAL_BLOCK, DEAD_BUBBLE_CORAL_BLOCK};
-		for (const auto packed : *water_cells) {
+		std::vector<std::int64_t> ordered_water(water_cells->begin(), water_cells->end());
+		std::sort(ordered_water.begin(), ordered_water.end());
+		for (const auto packed : ordered_water) {
 			const auto [x, y, z] = unpack_cave_pos(packed);
 			if (!region.contains(x, z) || !themes.coral_zone(x, z) ||
 					!editor.check_for_block_absolute(x, y - 1, z, rock_options))
@@ -983,6 +985,6 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	// Geodes are a chunk/region-level feature pass in Rust, independent of the
 	// cave-air and water-cell counts. Keep it outside both per-cell passes.
 	place_geodes(editor, region, floor_y, world_bounds, decoration_seed, cave_shape,
-			water_plan, cave_air);
+			water_plan);
 }
 } // namespace arnis::caves

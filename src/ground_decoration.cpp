@@ -50,14 +50,19 @@ const std::vector<Block> &plant_lower_halves()
 	return blocks;
 }
 
+const std::vector<Block> &wood()
+{
+	static const std::vector<Block> blocks{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
+			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG};
+	return blocks;
+}
+
 bool open_above(WorldEditor &e, int x, int y, int z)
 {
 	const bool first_open = !e.block_exists_absolute(x, y + 1, z) ||
 							e.check_for_block_absolute(x, y + 1, z,
 									std::optional<std::vector<Block>>{{GRASS}});
-	const std::vector<Block> wood{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
-			JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG};
-	return first_open && !e.check_for_block_absolute(x, y + 2, z, wood);
+	return first_open && !e.check_for_block_absolute(x, y + 2, z, wood());
 }
 
 bool is_undergrowth_impl(const Block &block)
@@ -75,7 +80,7 @@ void clear_undergrowth_under_trunk_impl(WorldEditor &editor, int x, int y, int z
 	if (!below || !is_undergrowth_impl(*below))
 		return;
 	const auto &loose = loose_plants();
-	const auto &lower = plant_lower_halves();
+	const auto &lower = plant_lower_half_blocks();
 	editor.set_block_absolute(AIR, x, y - 1, z, &loose, nullptr);
 	editor.set_block_absolute(AIR, x, y - 2, z, &lower, nullptr);
 }
@@ -168,6 +173,16 @@ bool is_undergrowth(const Block &block)
 const std::vector<Block> &loose_plant_blocks()
 {
 	return loose_plants();
+}
+
+const std::vector<Block> &wood_blocks()
+{
+	return wood();
+}
+
+const std::vector<Block> &plant_lower_half_blocks()
+{
+	return plant_lower_halves();
 }
 
 const std::vector<Block> &stacked_plant_parts()
@@ -558,31 +573,35 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 		return habitat(point_cover(x, z), ground.climate(), absolute_latitude,
 				terrain_y >= alpine_from_y, point_eco(x, z));
 	};
-	const std::vector<Block> soil{GRASS_BLOCK, PODZOL, DIRT, COARSE_DIRT, MOSS_BLOCK};
-	const std::vector<Block> shade_soil{
+	// Rust keeps these as static slices.  Keep the equivalent C++ palettes
+	// process-lifetime as well: grow_patch runs once per patch origin, so local
+	// vectors here multiplied allocator churn across large generated regions.
+	static const std::vector<Block> soil{
+			GRASS_BLOCK, PODZOL, DIRT, COARSE_DIRT, MOSS_BLOCK};
+	static const std::vector<Block> shade_soil{
 			GRASS_BLOCK, PODZOL, DIRT, COARSE_DIRT, MOSS_BLOCK, MYCELIUM};
-	const std::vector<Block> cane_soil{GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, SAND, MUD};
-	const std::vector<Block> dry_soil{SAND, COARSE_DIRT, DIRT, TERRACOTTA, RED_TERRACOTTA,
-			ORANGE_TERRACOTTA, YELLOW_TERRACOTTA};
+	static const std::vector<Block> cane_soil{
+			GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, SAND, MUD};
+	static const std::vector<Block> dry_soil{SAND, COARSE_DIRT, DIRT, TERRACOTTA,
+			RED_TERRACOTTA, ORANGE_TERRACOTTA, YELLOW_TERRACOTTA};
+	static const std::vector<Block> grass_block{GRASS_BLOCK};
+	static const std::vector<Block> grass{GRASS};
+	static const std::optional<std::vector<Block>> replace_grass{grass};
+	static const std::vector<Block> sand{SAND};
 	const auto open = [&](int x, int y, int z) {
 		return (!editor.block_exists_absolute(x, y + 1, z) ||
-					   editor.check_for_block_absolute(
-							   x, y + 1, z, std::vector<Block>{GRASS})) &&
-			   !editor.check_for_block_absolute(x, y + 2, z,
-					   std::vector<Block>{OAK_LOG, SPRUCE_LOG, BIRCH_LOG, DARK_OAK_LOG,
-							   JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG});
+					   editor.check_for_block_absolute(x, y + 1, z, grass)) &&
+			   !editor.check_for_block_absolute(x, y + 2, z, wood());
 	};
 	const auto plant_on = [&](int x, int y, int z, const std::vector<Block> &blocks,
 								  const Block &plant) {
 		if (editor.check_for_block_absolute(x, y, z, blocks) && open(x, y, z))
-			editor.set_block_absolute(plant, x, y + 1, z,
-					std::optional<std::vector<Block>>({GRASS}), std::nullopt);
+			editor.set_block_absolute(plant, x, y + 1, z, replace_grass, std::nullopt);
 	};
 	const auto tall_on = [&](int x, int y, int z, Block lower, Block upper) {
 		if (editor.check_for_block_absolute(x, y, z, soil) && open(x, y, z) &&
 				!editor.block_exists_absolute(x, y + 2, z)) {
-			editor.set_block_absolute(lower, x, y + 1, z,
-					std::optional<std::vector<Block>>({GRASS}), std::nullopt);
+			editor.set_block_absolute(lower, x, y + 1, z, replace_grass, std::nullopt);
 			editor.set_block_absolute(upper, x, y + 2, z, std::nullopt, std::nullopt);
 		}
 	};
@@ -649,13 +668,13 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 				for (int dy = 1; dy <= height; ++dy) {
 					if (dy > 1 && editor.block_exists_absolute(x, y + dy, z))
 						break;
-					editor.set_block_absolute(SUGAR_CANE, x, y + dy, z,
-							std::optional<std::vector<Block>>({GRASS}), std::nullopt);
+					editor.set_block_absolute(
+							SUGAR_CANE, x, y + dy, z, replace_grass, std::nullopt);
 				}
 			}
 			break;
 		case PatchFeature::Pumpkins:
-			plant_on(x, y, z, std::vector<Block>{GRASS_BLOCK}, PUMPKIN);
+			plant_on(x, y, z, grass_block, PUMPKIN);
 			break;
 		case PatchFeature::SweetBerries:
 			plant_on(x, y, z, soil, SWEET_BERRY_BUSH);
@@ -664,8 +683,7 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 			plant_on(x, y, z, dry_soil, DEAD_BUSH);
 			break;
 		case PatchFeature::Cactus: {
-			if (editor.check_for_block_absolute(x, y, z, std::vector<Block>{SAND}) &&
-					open(x, y, z)) {
+			if (editor.check_for_block_absolute(x, y, z, sand) && open(x, y, z)) {
 				const int height = pick % 4 == 0 ? 1 : pick % 4 == 3 ? 3 : 2;
 				for (int dy = 1; dy <= height; ++dy) {
 					if ((dy > 1 && editor.block_exists_absolute(x, y + dy, z)) ||
@@ -674,8 +692,8 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 							editor.block_exists_absolute(x, y + dy, z + 1) ||
 							editor.block_exists_absolute(x, y + dy, z - 1))
 						break;
-					editor.set_block_absolute(CACTUS, x, y + dy, z,
-							std::optional<std::vector<Block>>({GRASS}), std::nullopt);
+					editor.set_block_absolute(
+							CACTUS, x, y + dy, z, replace_grass, std::nullopt);
 				}
 			}
 		} break;
@@ -745,8 +763,9 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 			snow_y == std::numeric_limits<int>::max() ||
 							snow_y == std::numeric_limits<int>::min()
 					? snow_y
-					: snow_y - static_cast<int>(std::lround(
-									   1000.0 * editor.ground->blocks_per_meter()));
+					: snow_y - static_cast<int>(
+									   std::lround(ALPINE_BAND_METRES *
+												   editor.ground->blocks_per_meter()));
 	for (int chunk_x = chunk_min_x; chunk_x <= chunk_max_x; ++chunk_x) {
 		for (int chunk_z = chunk_min_z; chunk_z <= chunk_max_z; ++chunk_z) {
 			for (std::uint64_t origin = 0; origin < 4; ++origin) {
@@ -772,6 +791,8 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 						static_cast<std::uint32_t>(rng.uniform(1000)));
 				if (!selected)
 					continue;
+				// Rust uses ecoregion realm when available, with the bbox longitude
+				// window as its fallback for areas without ecoregion coverage.
 				const bool cactus_country =
 						origin_eco
 								? ecoregion::realm_is_americas(origin_eco->realm)

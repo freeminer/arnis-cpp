@@ -1,5 +1,4 @@
 #include "planetary.h"
-#include "../net.h"
 
 #include "../../../http.h"
 
@@ -207,7 +206,9 @@ PlanetaryRangeReader http_planetary_range_reader()
 {
 	return [](const std::string &url, std::uint64_t offset,
 				   std::uint64_t length) -> std::optional<std::vector<std::uint8_t>> {
-		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		// http_get_range owns the shared request permit. Acquiring one here too
+		// would let every planetary worker hold a permit while waiting for a
+		// second one inside the transport, deadlocking once the limit is reached.
 		const auto response = http_get_range(url, offset, length);
 		if (response.size() != length)
 			return std::nullopt;
@@ -333,7 +334,7 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 	auto east = east_longitude(bbox.max().lng());
 	if (east < west)
 		east += 360.0;
-	for (std::size_t z = 0; z < height; ++z) {
+	const auto resample_row = [&](std::size_t z) {
 		const auto lat = bbox.max().lat() +
 						 (bbox.min().lat() - bbox.max().lat()) *
 								 (double(z) / std::max<std::size_t>(1, height - 1));
@@ -358,6 +359,27 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 							static_cast<float>(at(y + 1, sx + 1)), fx - sx, fy - y)) *
 					celestial_terrain_gain(body);
 		}
+	};
+	const auto resample_workers = std::min(MAX_CONCURRENT_DOWNLOADS, height);
+	if (resample_workers <= 1) {
+		for (std::size_t z = 0; z < height; ++z)
+			resample_row(z);
+	} else {
+		std::atomic_size_t next_row{0};
+		std::vector<std::thread> workers;
+		workers.reserve(resample_workers);
+		for (std::size_t i = 0; i < resample_workers; ++i) {
+			workers.emplace_back([&]() {
+				for (;;) {
+					const auto z = next_row.fetch_add(1, std::memory_order_relaxed);
+					if (z >= height)
+						return;
+					resample_row(z);
+				}
+			});
+		}
+		for (auto &thread : workers)
+			thread.join();
 	}
 	return result;
 }

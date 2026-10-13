@@ -19,6 +19,13 @@ namespace arnis::mapillary
 namespace
 {
 constexpr std::size_t max_inflated_cluster_bytes = 256U * 1024U * 1024U;
+// Rust gives the Graph API a short request timeout, but allows a single CDN
+// image/cluster transfer up to DOWNLOAD_DEADLINE (240 s). The old shared 30 s
+// timeout rejected slow-but-progressing media long before Rust would.
+constexpr long graph_timeout_ms = 30000L;
+constexpr long media_timeout_ms = 240000L;
+constexpr long graph_connect_timeout_ms = 10000L;
+constexpr long media_connect_timeout_ms = 20000L;
 
 std::string encode_query_value(const std::string &value)
 {
@@ -86,8 +93,10 @@ Client::Client(cache::Layout cache) : cache_(std::move(cache))
 						   std::size_t max_bytes) -> std::optional<HttpReply> {
 		HTTPFetchRequest request;
 		request.url = url;
-		request.timeout = 30000L;
-		request.connect_timeout = 10000L;
+		const bool graph_api = url.find("graph.mapillary.com") != std::string::npos;
+		request.timeout = graph_api ? graph_timeout_ms : media_timeout_ms;
+		request.connect_timeout =
+				graph_api ? graph_connect_timeout_ms : media_connect_timeout_ms;
 		request.useragent = "Arnis/Cpp (+https://github.com/louis-e/arnis)";
 		request.quiet = true;
 		HTTPFetchResult response;
@@ -323,6 +332,37 @@ std::optional<HttpReply> Client::fetch_reply(
 	return std::nullopt;
 }
 
+std::optional<HttpReply> Client::fetch_retrying(
+		const std::string &url, std::size_t max_bytes) const
+{
+	// Match fetch.rs: retry answered transient failures up to five attempts,
+	// but a transport that fails twice in succession is considered unavailable.
+	constexpr unsigned attempts = 5;
+	unsigned undelivered = 0;
+	for (unsigned attempt = 0; attempt < attempts; ++attempt) {
+		auto reply = fetch_reply(url, max_bytes);
+		if (!reply) {
+			if (++undelivered >= 2)
+				return {};
+		} else {
+			undelivered = 0;
+			if ((reply->status >= 200 && reply->status < 300) || reply->status == 401 ||
+					reply->status == 403 || reply->status == 404)
+				return reply;
+		}
+		if (attempt + 1 == attempts)
+			return reply;
+
+		// The Rust client uses a five-second linear backoff for ordinary
+		// transient statuses and exponential backoff for rate limiting.
+		const auto seconds = reply && reply->status == 429
+									 ? std::min(120U, 5U << std::min(attempt, 4U))
+									 : 5U * (attempt + 1);
+		std::this_thread::sleep_for(std::chrono::seconds(seconds));
+	}
+	return {};
+}
+
 std::optional<cache::ImageRecord> Client::refresh_metadata(const std::string &id) const
 {
 	std::string endpoint, token;
@@ -339,7 +379,7 @@ std::optional<cache::ImageRecord> Client::refresh_metadata(const std::string &id
 			endpoint + "/" + id + "?access_token=" + encode_query_value(token) +
 			"&fields=thumb_original_url,thumb_2048_url,thumb_1024_url,sfm_cluster";
 	constexpr std::size_t max_metadata_bytes = 1024 * 1024;
-	auto reply = fetch_reply(url, max_metadata_bytes);
+	auto reply = fetch_retrying(url, max_metadata_bytes);
 	if (!reply || reply->status < 200 || reply->status >= 300)
 		return {};
 	try {
@@ -420,7 +460,7 @@ std::optional<std::filesystem::path> Client::download_image(
 		const auto &url = url_for(current);
 		if (url.empty())
 			return {};
-		auto reply = fetch_reply(url, max_image_bytes);
+		auto reply = fetch_retrying(url, max_image_bytes);
 		if (reply && reply->status >= 200 && reply->status < 300) {
 			auto &bytes = reply->body;
 			if (bytes.size() <= 4 || bytes[0] != 0xff || bytes[1] != 0xd8 ||
@@ -439,6 +479,16 @@ std::optional<std::filesystem::path> Client::download_image(
 		return {};
 	}
 }
+
+void Client::discard_cluster_cache(const std::string &id) const
+{
+	const auto path = cache_.cluster_path(id);
+	if (!path)
+		return;
+	std::error_code ignored;
+	std::filesystem::remove(*path, ignored);
+}
+
 std::optional<std::filesystem::path> Client::download_cluster(
 		const cache::ImageRecord &record) const
 {
@@ -487,7 +537,7 @@ std::optional<std::filesystem::path> Client::download_cluster(
 			const auto url = cluster.value("url", std::string{});
 			if (url.empty())
 				return {};
-			auto reply = fetch_reply(url, max_cluster_bytes);
+			auto reply = fetch_retrying(url, max_cluster_bytes);
 			if (reply && reply->status >= 200 && reply->status < 300) {
 				auto normalized = normalize_cluster(reply->body);
 				if (normalized && cache_.save_cluster(cluster_id, *normalized))
@@ -596,10 +646,39 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 				bbox;
 		constexpr unsigned max_subdivision_depth = 5;
 		constexpr unsigned leaf_retry_count = 2;
+		constexpr unsigned request_attempts = 5;
+		constexpr auto request_backoff = std::chrono::seconds(5);
 		constexpr std::size_t max_search_bytes = 16 * 1024 * 1024;
 		std::vector<std::uint8_t> body;
-		if (graph_fetch_) {
-			auto reply = graph_fetch_(url, max_search_bytes);
+		if (graph_fetch_ || fetch_) {
+			// Match Rust's Http::attempt: search requests, like image and cluster
+			// downloads, must pass through the process-wide permit so concurrent
+			// Arnis jobs cannot exceed the shared network request limit.
+			// Retry one undelivered request (a second indicates a dead host), and
+			// transient HTTP failures with bounded backoff. 401/403/404 and Graph
+			// 500 are handled below because they respectively indicate bad
+			// credentials, an expired URL, or a request to subdivide the cell.
+			unsigned undelivered = 0;
+			std::optional<HttpReply> reply;
+			for (unsigned attempt = 0; attempt < request_attempts; ++attempt) {
+				reply = fetch_reply(url, max_search_bytes);
+				if (!reply) {
+					if (++undelivered >= 2)
+						break;
+				} else if (reply->status >= 200 && reply->status < 300) {
+					break;
+				} else if (reply->status == 401 || reply->status == 403 ||
+						   reply->status == 404 || reply->status == 500) {
+					break;
+				}
+				if (attempt + 1 < request_attempts) {
+					const auto wait =
+							reply && reply->status == 429
+									? std::chrono::seconds(std::min(120U, 5U << attempt))
+									: request_backoff * (attempt + 1);
+					std::this_thread::sleep_for(wait);
+				}
+			}
 			if (!reply) {
 				++failures;
 				if (failure_reason.empty())
@@ -669,7 +748,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 					failure_reason = describe_failure(*reply);
 				for (unsigned retry = 1; retry <= leaf_retry_count; ++retry) {
 					std::this_thread::sleep_for(std::chrono::milliseconds(750 * retry));
-					reply = graph_fetch_(url, max_search_bytes);
+					reply = fetch_reply(url, max_search_bytes);
 					if (!reply)
 						continue;
 					bool retry_auth_failure = reply->status == 401;
@@ -714,14 +793,10 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			}
 			body = std::move(reply->body);
 		} else {
-			auto reply = fetch_(url, max_search_bytes);
-			if (!reply) {
-				++failures;
-				if (failure_reason.empty())
-					failure_reason = "Mapillary search request could not be delivered";
-				return;
-			}
-			body = std::move(*reply);
+			++failures;
+			if (failure_reason.empty())
+				failure_reason = "Mapillary search has no configured HTTP fetcher";
+			return;
 		}
 		bool valid_response = false;
 		auto cell_records = parse_search_response(body, &valid_response);

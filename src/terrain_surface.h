@@ -49,34 +49,41 @@ std::pair<Block, Block> steep_palette(
 		int x, int z, int ground_y, int slope, uint8_t cover);
 std::pair<Block, Block> bare_rock_palette(int x, int z);
 
-enum class Snow
+struct Snow
 {
-	None,
-	Layer,
-	Layer2,
-	Layer3,
-	Layer4,
-	Layer5,
-	Layer6,
-	Layer7,
-	Block
+	enum class Kind
+	{
+		None,
+		Layer,
+		Block
+	};
+
+	Kind kind = Kind::None;
+	std::uint8_t max_layers = 0;
+
+	static constexpr Snow none() { return {}; }
+	static constexpr Snow layer(std::uint8_t max_layers)
+	{
+		return {Kind::Layer, max_layers};
+	}
+	static constexpr Snow block() { return {Kind::Block, 0}; }
+	constexpr bool is_none() const { return kind == Kind::None; }
+	constexpr bool is_block() const { return kind == Kind::Block; }
 };
 // Convert partial snow cover to its Java snow-layer depth (one through seven
 // eighths), following the terrain's unrounded height within the top block.
 inline unsigned snow_eighths(
 		Snow snow, const std::optional<double> &terrain_rise = std::nullopt)
 {
-	if (snow == Snow::None)
+	if (snow.kind == Snow::Kind::None)
 		return 0;
 	const unsigned smooth = terrain_rise && *terrain_rise >= 0.0 && *terrain_rise < 1.0
 									? static_cast<unsigned>(std::min(
 											  std::round(*terrain_rise * 8.0), 7.0))
 									: 0;
-	if (snow == Snow::Block)
+	if (snow.kind == Snow::Kind::Block)
 		return smooth;
-	const unsigned max_layers =
-			static_cast<unsigned>(snow) - static_cast<unsigned>(Snow::Layer) + 1;
-	return std::clamp(smooth, 1u, std::max(max_layers, 1u));
+	return std::clamp(smooth, 1u, std::max<unsigned>(snow.max_layers, 1u));
 }
 struct SnowLine
 {
@@ -90,6 +97,7 @@ struct SnowLine
 	double shade(double gradient_x, double gradient_z, double slope) const;
 };
 bool is_plausible_ice(double depth, biome::Climate climate);
+inline constexpr double SNOW_MIN_DEPTH = -1.5;
 Snow snow_cover(double depth, double slope, const std::function<double()> &convexity,
 		double shade, int x, int z);
 double glacier_depth(double depth);

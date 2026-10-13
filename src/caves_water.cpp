@@ -242,9 +242,8 @@ void generate_water_features(world_editor::WorldEditor &editor,
 
 	for (int cx = cx0; cx <= cx1; ++cx)
 		for (int cz = cz0; cz <= cz1; ++cz) {
-			XoroRandom pool_rng = XoroRandom::from_seed(
-					seed ^ (std::int64_t(cx) * 341873128712LL) ^
-					(std::int64_t(cz) * 132897987541LL) ^ 0xA044A044LL);
+			XoroRandom pool_rng =
+					XoroRandom::from_seed(chunk_seed(seed, cx, cz, 0xA044A044LL));
 			if (pool_rng.next_int(30) == 0) {
 				const int gx = cx * 16 + pool_rng.next_int(16);
 				const int gz = cz * 16 + pool_rng.next_int(16);
@@ -348,9 +347,8 @@ void generate_water_features(world_editor::WorldEditor &editor,
 				}
 			}
 
-			XoroRandom river_rng = XoroRandom::from_seed(
-					seed ^ (std::int64_t(cx) * 341873128712LL) ^
-					(std::int64_t(cz) * 132897987541LL) ^ 0xA045A045LL);
+			XoroRandom river_rng =
+					XoroRandom::from_seed(chunk_seed(seed, cx, cz, 0xA045A045LL));
 			if (river_rng.next_int(18) != 0)
 				continue;
 			const int ox = cx * 16 + river_rng.next_int(16);
@@ -465,13 +463,17 @@ bool WaterPlan::solid(const CaveShapeQuery &shape, int x, int y, int z) const
 void WaterPlan::apply(world_editor::WorldEditor &editor, const CaveRect &region,
 		const std::vector<Block> &cave_host) const
 {
-	for (const auto &p : carved) {
+	std::vector<std::int64_t> ordered_carved(carved.begin(), carved.end());
+	std::sort(ordered_carved.begin(), ordered_carved.end());
+	for (const auto p : ordered_carved) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z))
 			editor.set_block_absolute(AIR, x, y, z,
 					std::optional<std::vector<Block>>(cave_host), std::nullopt);
 	}
-	for (const auto &p : water) {
+	std::vector<std::int64_t> ordered_water(water.begin(), water.end());
+	std::sort(ordered_water.begin(), ordered_water.end());
+	for (const auto p : ordered_water) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z)) {
 			editor.set_block_absolute(WATER, x, y, z,

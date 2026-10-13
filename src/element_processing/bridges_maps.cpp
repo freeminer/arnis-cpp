@@ -37,6 +37,8 @@ constexpr int RAIL_HEADROOM = 8;
 constexpr int RIVER_HEADROOM = 4;
 constexpr int STREAM_HEADROOM = 2;
 constexpr int STACKED_DECK_HEADROOM = 6;
+constexpr int LOWER_DECK_GAP = STACKED_DECK_HEADROOM - 1;
+constexpr int DECK_STRUCTURE_DEPTH = 2;
 constexpr int OBSTACLE_GRID_CELL = 64;
 
 struct XZPairHash
@@ -1658,15 +1660,8 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 
 std::optional<int> BridgeSurfaceMap::deck_y_at(int x, int z) const
 {
-	auto it = deck_y_.find({x, z});
-	auto rail = rail_deck_y_.find({x, z});
-	if (it == deck_y_.end() && rail == rail_deck_y_.end())
-		return std::nullopt;
-	if (it == deck_y_.end())
-		return rail->second;
-	if (rail == rail_deck_y_.end())
-		return it->second;
-	return std::max(it->second, rail->second);
+	const auto it = deck_y_.find({x, z});
+	return it == deck_y_.end() ? std::nullopt : std::optional<int>(it->second);
 }
 
 std::optional<int> BridgeSurfaceMap::nearby_deck_y(int x, int z, int radius) const
@@ -1701,8 +1696,9 @@ bool BridgeSurfaceMap::support_blocked(int x, int z, int deck_y) const
 		return true;
 	const auto lower = deck_low_y_.find({x, z});
 	const auto rail = rail_deck_y_.find({x, z});
-	return (lower != deck_low_y_.end() && lower->second <= deck_y - 6) ||
-		   (rail != rail_deck_y_.end() && rail->second <= deck_y - 6);
+	const auto is_lower = [deck_y](int y) { return y <= deck_y - LOWER_DECK_GAP; };
+	return (lower != deck_low_y_.end() && is_lower(lower->second)) ||
+		   (rail != rail_deck_y_.end() && is_lower(rail->second));
 }
 
 std::optional<int> BridgeSurfaceMap::supported_top(
@@ -1717,32 +1713,16 @@ std::optional<int> BridgeSurfaceMap::supported_top(
 				low = std::min(low, it->second);
 				high = std::max(high, deck_y_.at({x + dx, z + dz}));
 			}
-			if (const auto rail = rail_deck_y_.find({x + dx, z + dz});
-					rail != rail_deck_y_.end()) {
-				low = std::min(low, rail->second);
-				high = std::max(high, rail->second);
-			}
 		}
 	if (low > high)
 		return std::nullopt;
-	return editor.highest_block_between(x, z, low - 2, high);
+	return editor.highest_block_between(x, z, low - DECK_STRUCTURE_DEPTH, high);
 }
 
 bool BridgeSurfaceMap::deck_clears(int x, int z, int water_y) const
 {
-	// Road and rail deck footprints use their respective Rust structure depths.
 	const auto deck = deck_low_y_.find({x, z});
-	const auto rail = rail_deck_y_.find({x, z});
-	const int low =
-			deck == deck_low_y_.end() ? std::numeric_limits<int>::max() : deck->second;
-	const int rail_low =
-			rail == rail_deck_y_.end() ? std::numeric_limits<int>::max() : rail->second;
-	if (low == std::numeric_limits<int>::max() &&
-			rail_low == std::numeric_limits<int>::max())
-		return false;
-	return std::min(low == std::numeric_limits<int>::max() ? low : low - 2,
-				   rail_low == std::numeric_limits<int>::max() ? rail_low
-															   : rail_low - 2) > water_y;
+	return deck != deck_low_y_.end() && deck->second - DECK_STRUCTURE_DEPTH > water_y;
 }
 
 bool BridgeSurfaceMap::over_grade_way(int x, int z) const

@@ -6,6 +6,9 @@
 #include <tuple>
 #include <filesystem>
 #include <functional>
+#include <memory>
+#include <mutex>
+#include <optional>
 namespace arnis
 {
 class ProcessedElement;
@@ -88,7 +91,13 @@ struct LandCoverData
 {
 	std::vector<std::vector<uint8_t>> grid;
 	std::vector<std::vector<uint8_t>> water_distance;
-	std::vector<std::vector<float>> water_blend_grid;
+	struct WaterBlendCache
+	{
+		std::mutex mutex;
+		std::optional<std::vector<std::vector<float>>> grid;
+	};
+	mutable std::shared_ptr<WaterBlendCache> water_blend_cache =
+			std::make_shared<WaterBlendCache>();
 	std::size_t width{0};
 	std::size_t height{0};
 	double cells_per_meter{1.0};
@@ -97,6 +106,8 @@ struct LandCoverData
 	GeographicBounds source_bounds{};
 	std::vector<EsaRasterTile> source_tiles;
 
+	const std::vector<std::vector<float>> &water_blend_grid() const;
+	void invalidate_water_blend_grid();
 	void refresh_water_blend_grid();
 	void remap_rows_to_mercator(double lat_top, double lat_bottom);
 	void crop(std::size_t x0, std::size_t z0, std::size_t width, std::size_t height);

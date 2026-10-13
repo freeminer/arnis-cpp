@@ -17,7 +17,8 @@ class CaveShapeQuery
 {
 public:
 	CaveShapeQuery(const world_editor::WorldEditor &editor, const CaveRect &world,
-			std::int64_t seed, int floor_y, const CaveEllipsoids &ellipsoids);
+			const CaveRect &region, std::int64_t seed, int floor_y,
+			const CaveEllipsoids &ellipsoids);
 	bool is_cave(int x, int y, int z) const;
 	bool solid(int x, int y, int z) const;
 
@@ -26,7 +27,7 @@ private:
 	bool noise_carves(int x, int y, int z) const;
 
 	const world_editor::WorldEditor &editor_;
-	CaveRect world_;
+	CaveRect ext_;
 	int floor_y_;
 	CaveGen gen_;
 	const CaveEllipsoids &ellipsoids_;

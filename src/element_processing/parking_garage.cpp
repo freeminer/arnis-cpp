@@ -279,11 +279,13 @@ void generate(WorldEditor &e, const std::vector<std::pair<int, int>> &floor_area
 				for (int r = 0; r < RAMP_WIDTH; ++r) {
 					auto [x, z] = p.frame.xz(p.ramp->a0 + i, p.ramp->c0 + r);
 					if (i % 2 == 0)
-						e.set_block_absolute(
-								SMOOTH_STONE, x, base_y + k * LEVEL + i / 2, z);
+						e.set_block_absolute(SMOOTH_STONE, x, base_y + k * LEVEL + i / 2,
+								z, std::nullopt,
+								std::optional<std::vector<Block>>(std::vector<Block>{}));
 					else
 						e.set_block_absolute(SMOOTH_STONE_SLAB, x,
-								base_y + k * LEVEL + (i + 1) / 2, z);
+								base_y + k * LEVEL + (i + 1) / 2, z, std::nullopt,
+								std::optional<std::vector<Block>>(std::vector<Block>{}));
 				}
 	for (int k = 0; k < decks; ++k) {
 		const int y = base_y + k * LEVEL;

@@ -11,8 +11,6 @@
 #include "../element_processing/waterways.h"
 #include "../bresenham.h"
 #include "../clipping.h"
-#include <queue>
-
 #include <algorithm>
 #include <charconv>
 #include <cmath>
@@ -173,6 +171,12 @@ void fill_land_cover_gaps(
 {
 	width = std::min(width, grid.empty() ? std::size_t{0} : grid.front().size());
 	height = std::min(height, grid.size());
+	bool has_gap = false;
+	for (std::size_t z = 0; z < height && !has_gap; ++z)
+		has_gap = std::find(grid[z].begin(), grid[z].begin() + width, 0) !=
+				  grid[z].begin() + width;
+	if (!has_gap)
+		return;
 	for (int pass = 0; pass < 10; ++pass) {
 		const auto snapshot = grid;
 		bool changed = false;
@@ -212,7 +216,10 @@ void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 			kernel[std::size_t(z + radius) * side + std::size_t(x + radius)] =
 					std::exp(-(x * x + z * z) / (2.0 * sigma * sigma));
 	const auto snapshot = grid;
-	for (std::size_t z = 0; z < height; ++z)
+	for (std::size_t z = 0; z < height; ++z) {
+		std::array<double, 256> votes{};
+		std::array<std::uint8_t, 16> seen{};
+		std::size_t seen_len = 0;
 		for (std::size_t x = 0; x < width; ++x) {
 			const auto center = snapshot[z][x];
 			if (center == 0)
@@ -230,24 +237,37 @@ void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 			}
 			if (!boundary)
 				continue;
-			std::array<double, 256> votes{};
+
+			for (std::size_t i = 0; i < seen_len; ++i)
+				votes[seen[i]] = 0.0;
+			seen_len = 0;
 			for (int dz = -radius; dz <= radius; ++dz)
 				for (int dx = -radius; dx <= radius; ++dx) {
 					const int nx = int(x) + dx, nz = int(z) + dz;
 					if (nx >= 0 && nz >= 0 && nx < int(width) && nz < int(height)) {
 						const auto cls = snapshot[std::size_t(nz)][std::size_t(nx)];
-						if (cls)
-							votes[cls] += kernel[std::size_t(dz + radius) * side +
-												 std::size_t(dx + radius)];
+						if (!cls)
+							continue;
+						const double previous = votes[cls];
+						votes[cls] = previous + kernel[std::size_t(dz + radius) * side +
+														std::size_t(dx + radius)];
+						if (previous == 0.0 && seen_len < seen.size())
+							seen[seen_len++] = cls;
 					}
 				}
-			uint8_t best = 0;
-			for (unsigned cls = 1; cls < votes.size(); ++cls)
-				if (votes[cls] > votes[best])
-					best = static_cast<uint8_t>(cls);
-			if (best)
+			std::uint8_t best = 0;
+			double best_vote = 0.0;
+			for (std::size_t i = 0; i < seen_len; ++i) {
+				const auto cls = seen[i];
+				if (votes[cls] > best_vote) {
+					best = cls;
+					best_vote = votes[cls];
+				}
+			}
+			if (best_vote > 0.0)
 				grid[z][x] = best;
 		}
+	}
 }
 
 LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t width,
@@ -290,7 +310,6 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 	if (smooth_boundaries)
 		smooth_land_cover_boundaries(out.grid, width, height, out.cells_per_meter);
 	out.water_distance = compute_water_distance(out.grid, width, height);
-	out.refresh_water_blend_grid();
 	return out;
 }
 
@@ -439,7 +458,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 		}
 	if (water_changed) {
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
-		data.water_blend_grid.clear();
+		data.invalidate_water_blend_grid();
 	}
 }
 
@@ -657,7 +676,7 @@ void apply_osm_water_override(LandCoverData &data,
 	}
 	if (changed) {
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
-		data.water_blend_grid.clear();
+		data.invalidate_water_blend_grid();
 		// OSM water may extend ESA water slightly, but should not float on a raised
 		// bank. Sink only newly reachable cells that are within Rust's 1.5-block
 		// elevation guard; the ESA water seeds remain at their sampled heights.
@@ -987,7 +1006,23 @@ std::vector<std::vector<uint8_t>> compute_water_distance(
 
 void LandCoverData::refresh_water_blend_grid()
 {
-	water_blend_grid = compute_water_blend_smooth(grid, width, height, cells_per_meter);
+	(void)water_blend_grid();
+}
+
+const std::vector<std::vector<float>> &LandCoverData::water_blend_grid() const
+{
+	if (!water_blend_cache)
+		water_blend_cache = std::make_shared<WaterBlendCache>();
+	const auto cache = water_blend_cache;
+	std::lock_guard lock(cache->mutex);
+	if (!cache->grid)
+		cache->grid = compute_water_blend_smooth(grid, width, height, cells_per_meter);
+	return *cache->grid;
+}
+
+void LandCoverData::invalidate_water_blend_grid()
+{
+	water_blend_cache = std::make_shared<WaterBlendCache>();
 }
 
 void LandCoverData::remap_rows_to_mercator(double lat_top, double lat_bottom)
@@ -1001,7 +1036,7 @@ void LandCoverData::remap_rows_to_mercator(double lat_top, double lat_bottom)
 	};
 	grid_ops::remap_rows_in_place(grid, source, nearest);
 	grid_ops::remap_rows_in_place(water_distance, source, nearest);
-	refresh_water_blend_grid();
+	invalidate_water_blend_grid();
 }
 
 void LandCoverData::crop(
@@ -1011,54 +1046,52 @@ void LandCoverData::crop(
 	grid_ops::crop_rows(water_distance, x0, z0, new_width, new_height);
 	width = new_width;
 	height = new_height;
-	refresh_water_blend_grid();
+	invalidate_water_blend_grid();
 }
 
 void mark_beaches(LandCoverData &data)
 {
 	if (data.width == 0 || data.height == 0)
 		return;
-	const auto reach = std::clamp<int>(
-			static_cast<int>(std::lround(50.0 * data.cells_per_meter)), 1, 255);
-	std::vector<std::uint8_t> distance(data.width * data.height, 255);
-	std::queue<std::pair<int, int>> frontier;
+	const double raw_reach = std::round(50.0 * data.cells_per_meter);
+	const int reach = std::isnan(raw_reach)
+							  ? 0
+							  : static_cast<int>(std::clamp(raw_reach, 1.0, 255.0));
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> frontier;
 	for (std::size_t z = 0; z < data.height; ++z)
 		for (std::size_t x = 0; x < data.width; ++x) {
-			if (data.grid[z][x] != LC_WATER)
+			if (data.grid[z][x] != LC_BARE)
 				continue;
-			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
-						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-				const int nx = static_cast<int>(x) + dx, nz = static_cast<int>(z) + dz;
-				if (nx < 0 || nz < 0 || nx >= static_cast<int>(data.width) ||
-						nz >= static_cast<int>(data.height) ||
-						data.grid[nz][nx] != LC_BARE)
-					continue;
-				const auto i = static_cast<std::size_t>(nz) * data.width + nx;
-				if (distance[i] == 255) {
-					distance[i] = 1;
-					frontier.emplace(nx, nz);
-				}
-			}
+			const bool touches_water =
+					(x > 0 && data.grid[z][x - 1] == LC_WATER) ||
+					(x + 1 < data.width && data.grid[z][x + 1] == LC_WATER) ||
+					(z > 0 && data.grid[z - 1][x] == LC_WATER) ||
+					(z + 1 < data.height && data.grid[z + 1][x] == LC_WATER);
+			if (touches_water)
+				frontier.emplace_back(
+						static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(z));
 		}
-	while (!frontier.empty()) {
-		const auto [x, z] = frontier.front();
-		frontier.pop();
-		const auto i = static_cast<std::size_t>(z) * data.width + x;
+	for (const auto &[x, z] : frontier)
 		data.grid[z][x] = LC_BEACH;
-		if (distance[i] >= reach)
-			continue;
-		for (const auto &[dx, dz] :
-				std::array<std::pair<int, int>, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-			const int nx = x + dx, nz = z + dz;
-			if (nx < 0 || nz < 0 || nx >= static_cast<int>(data.width) ||
-					nz >= static_cast<int>(data.height) || data.grid[nz][nx] != LC_BARE)
-				continue;
-			const auto ni = static_cast<std::size_t>(nz) * data.width + nx;
-			if (distance[ni] == 255) {
-				distance[ni] = static_cast<std::uint8_t>(distance[i] + 1);
-				frontier.emplace(nx, nz);
+
+	std::vector<std::pair<std::uint32_t, std::uint32_t>> next;
+	for (int step = 1; step < reach && !frontier.empty(); ++step) {
+		next.clear();
+		for (const auto &[x32, z32] : frontier) {
+			const auto x = static_cast<std::size_t>(x32);
+			const auto z = static_cast<std::size_t>(z32);
+			const std::array<std::pair<std::size_t, std::size_t>, 4> candidates{
+					{{x > 0 ? x - 1 : data.width, z}, {x + 1, z},
+							{x, z > 0 ? z - 1 : data.height}, {x, z + 1}}};
+			for (const auto &[nx, nz] : candidates) {
+				if (nx >= data.width || nz >= data.height || data.grid[nz][nx] != LC_BARE)
+					continue;
+				data.grid[nz][nx] = LC_BEACH;
+				next.emplace_back(
+						static_cast<std::uint32_t>(nx), static_cast<std::uint32_t>(nz));
 			}
 		}
+		frontier.swap(next);
 	}
 }
 

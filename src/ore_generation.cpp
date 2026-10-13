@@ -88,14 +88,16 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 					n = static_cast<int>(
 							r.uniform(static_cast<std::uint32_t>(max_veins + 1)));
 				for (int i = 0; i < n; ++i) {
-					Ore o{rule.block, rule.deep_block,
-							static_cast<int>(
-									rule.vein_min +
-									r.uniform(rule.vein_max - rule.vein_min + 1))};
-					blob(e, cx * 16 + r.uniform(16),
-							lo + r.uniform(static_cast<std::uint32_t>(
-										 std::max(0, hi - lo + 1))),
-							cz * 16 + r.uniform(16), o, r);
+					// Match Rust's per-vein random draw order: starting X, Z, Y,
+					// followed by vein size. Changing this shifts every later vein.
+					const int x = cx * 16 + r.uniform(16);
+					const int z = cz * 16 + r.uniform(16);
+					const int y = lo + r.uniform(static_cast<std::uint32_t>(
+											   std::max(0, hi - lo + 1)));
+					const int size = static_cast<int>(
+							rule.vein_min + r.uniform(rule.vein_max - rule.vein_min + 1));
+					Ore o{rule.block, rule.deep_block, size};
+					blob(e, x, y, z, o, r);
 				}
 			}
 		}

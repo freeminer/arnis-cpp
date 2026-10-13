@@ -197,7 +197,9 @@ std::optional<CrossingPaint> crossing_paint(
 		return CrossingPaint{CrossingPaint::Kind::Lines, false};
 	if (markings == "dashes" || markings == "dashes:paired" || markings == "dots")
 		return CrossingPaint{CrossingPaint::Kind::Lines, true};
-	if (!markings.empty())
+	// Rust matches `Some(_)` here, so even a present-but-empty tag selects
+	// zebra paint; distinguish that from an absent key.
+	if (tags.contains("crossing:markings"))
 		return CrossingPaint{CrossingPaint::Kind::Zebra, false};
 	if (tags.get("crossing_ref") == "zebra" || crossing == "zebra")
 		return CrossingPaint{CrossingPaint::Kind::Zebra, false};
@@ -443,7 +445,6 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				crossing_ways.push_back(&way);
 			continue;
 		}
-		const auto ri = roads.size();
 		const auto range = arnis::highways::highway_block_range(highway, way.tags, scale);
 		auto surface = arnis::highways::surface_palette(highway, way.tags);
 		if (const auto cycleway = surfaces::cycleway_palette(way))
@@ -453,9 +454,33 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				oneway_sign(highway, way.tags),
 				arnis::highways::lane_marking_count(highway, way.tags) >= 2, range,
 				std::move(surface), node_path_index(way)});
+	}
+	// Rust indexes only node IDs referenced at least twice across road and
+	// crossing ways. For closed ways, count the closing node once, then retain
+	// both path positions below when the ID is shared.
+	std::unordered_map<std::uint64_t, std::uint32_t> node_use_counts;
+	auto count_way_nodes = [&](const ProcessedWay &way) {
+		const bool closed =
+				way.nodes.size() > 2 && way.nodes.front().id == way.nodes.back().id;
+		const std::size_t begin = closed ? 1 : 0;
+		for (std::size_t ni = begin; ni < way.nodes.size(); ++ni) {
+			const auto id = way.nodes[ni].id;
+			if (!clipping::is_invented_node_id(id))
+				++node_use_counts[id];
+		}
+	};
+	for (const auto &road : roads)
+		count_way_nodes(*road.way);
+	for (const auto *crossing : crossing_ways)
+		count_way_nodes(*crossing);
+	for (std::size_t ri = 0; ri < roads.size(); ++ri) {
+		const auto &way = *roads[ri].way;
 		for (std::size_t ni = 0; ni < way.nodes.size(); ++ni) {
-			if (!clipping::is_invented_node_id(way.nodes[ni].id))
-				node_uses[way.nodes[ni].id].emplace_back(ri, ni);
+			const auto id = way.nodes[ni].id;
+			const auto uses = node_use_counts.find(id);
+			if (!clipping::is_invented_node_id(id) && uses != node_use_counts.end() &&
+					uses->second >= 2)
+				node_uses[id].emplace_back(ri, ni);
 		}
 	}
 	auto add_gap = [&](const std::vector<ArmCell> &cells, std::size_t end) {
@@ -610,15 +635,30 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		if (!paint || crossing_reach.contains(node.id))
 			continue;
 		const auto refs = node_uses.find(node.id);
-		if (refs == node_uses.end())
-			continue;
-		if (road_arms_at(roads, refs->second).size() > 2)
+		std::vector<std::pair<std::size_t, std::size_t>> standalone_refs;
+		const std::vector<std::pair<std::size_t, std::size_t>> *node_refs = nullptr;
+		if (refs != node_uses.end()) {
+			node_refs = &refs->second;
+		} else {
+			// Rust still paints node-mapped crossings on a road node that is not
+			// shared with another way; it just has no shared-node index entry.
+			bool found = false;
+			for (std::size_t ri = 0; ri < roads.size() && !found; ++ri)
+				for (std::size_t ni = 0; ni < roads[ri].way->nodes.size(); ++ni)
+					if (roads[ri].way->nodes[ni].id == node_id) {
+						standalone_refs.emplace_back(ri, ni);
+						found = true;
+						break;
+					}
+			node_refs = &standalone_refs;
+		}
+		if (road_arms_at(roads, *node_refs).size() > 2)
 			continue;
 		const std::size_t near_crossing =
 				static_cast<std::size_t>(std::max(2.0, 8.0 * scale));
 		if (is_signal(node)) {
 			bool beside_crossing = false;
-			for (const auto &[ri, ni] : refs->second) {
+			for (const auto &[ri, ni] : *node_refs) {
 				for (const int dir : {1, -1}) {
 					const auto cells =
 							arm_cells(roads, node_uses, ri, ni, dir, near_crossing + 1);
@@ -642,7 +682,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		}
 		const std::uint32_t reach = paint->kind == CrossingPaint::Kind::Zebra ? 2 : 3;
 		crossing_reach[node_id] = std::max(crossing_reach[node_id], reach);
-		for (const auto &[ri, ni] : refs->second) {
+		for (const auto &[ri, ni] : *node_refs) {
 			for (const int dir : {1, -1}) {
 				const auto cells = arm_cells(roads, node_uses, ri, ni, dir, reach + 1);
 				add_gap(cells, cells.size());

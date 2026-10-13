@@ -5,7 +5,13 @@
 #include "../osm_parser.h"
 #include "building_facade.h"
 #include "world_editor.h"
+#include <cstddef>
+#include <map>
 #include <memory>
+#include <mutex>
+#include <set>
+#include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 namespace arnis::signage
@@ -31,7 +37,16 @@ struct SignageContext
 	IntersectionIndex intersections;
 	double scale{1.0};
 	RoadMaskBitmap carriageway;
+	void note(const char *kind, int x, int y, int z) const;
+	std::string summary(bool verbose) const;
 
+private:
+	mutable std::mutex report_mutex;
+	mutable std::map<std::string,
+			std::pair<std::size_t, std::set<std::tuple<int, int, int>>>>
+			report;
+
+public:
 	bool has(const decals::DecalKey &key) const
 	{
 		return registry && registry->contains(key);

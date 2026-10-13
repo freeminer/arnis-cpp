@@ -81,9 +81,10 @@ public:
 inline bool timeout_exceeded(const std::chrono::steady_clock::time_point &start_time,
 		const std::chrono::milliseconds &timeout_duration)
 {
-	const auto elapsed = std::chrono::steady_clock::now() - start_time;
-	return std::chrono::duration_cast<std::chrono::milliseconds>(elapsed) >
-		   timeout_duration;
+	// Compare the full elapsed duration. Rust compares Instant::elapsed() directly
+	// with Duration, so truncating to whole milliseconds here can let a fill run
+	// almost one extra millisecond past its configured limit.
+	return std::chrono::steady_clock::now() - start_time > timeout_duration;
 }
 
 // Converts polygon coordinates to Boost Polygon

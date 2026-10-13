@@ -1,8 +1,11 @@
 #include "structures.h"
+#include "../assets_root.h"
 #include "../land_cover/land_cover.h"
 #include "../block_definitions.h"
 #include "schem_decoder.h"
 #include <algorithm>
+#include <memory>
+#include <string>
 
 namespace arnis::structures::playground
 {
@@ -27,12 +30,18 @@ void scatter_playgrounds(
 		const int y = editor.get_absolute_y(x, 1, z);
 		const unsigned rotation = (h >> 7) & 3;
 		const int selected = static_cast<int>((h >> 5) % 3) + 1;
-		// Rust selects the deterministic variant and skips this candidate if
-		// that asset failed to parse; silently substituting another variant changes
-		// both the generated scene and the stable placement sequence.
-		if (!place_named_schem(editor, "playground" + std::to_string(selected), x, y, z,
-					rotation, &SAND))
+		const auto root = editor.get_schematic_asset_root().empty()
+								  ? assets::path("structures")
+								  : editor.get_schematic_asset_root();
+		auto schematic = try_load_structure_cached(
+				root / ("playground" + std::to_string(selected) + ".schem"));
+		if (!schematic) {
+			// Rust skips the candidate when its selected embedded asset fails to parse.
 			continue;
+		}
+		// Rust's placement API has no success result, so a valid candidate consumes
+		// a spacing slot even if every voxel is clipped by the active tile bounds.
+		place_structure(editor, *schematic, x, y, z, rotation, &SAND);
 		placed.emplace_back(x, z);
 	}
 }

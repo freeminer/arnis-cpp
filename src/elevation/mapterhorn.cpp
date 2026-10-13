@@ -35,6 +35,40 @@ constexpr std::size_t PROBE_MIN_LEVEL_TILES = 64;
 constexpr std::size_t PROBE_TILE_COUNT = 16;
 constexpr std::size_t OUTAGE_FAILURE_THRESHOLD = 128;
 
+template <typename Function>
+void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
+{
+	if (begin >= end)
+		return;
+	const auto worker_count = std::min<std::size_t>(8, end - begin);
+	if (worker_count == 1) {
+		for (auto row = begin; row < end; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{begin};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= end)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> workers;
+	workers.reserve(worker_count - 1);
+	for (std::size_t i = 1; i < worker_count; ++i) {
+		try {
+			workers.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	}
+	worker();
+	for (auto &thread : workers)
+		thread.join();
+}
+
 struct NetworkResponse
 {
 	long status = 0;
@@ -487,10 +521,11 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 				i < level_keys.size() && probe_keys.size() < PROBE_TILE_COUNT;
 				i += stride)
 			probe_keys.push_back(level_keys[i]);
+		const auto failed_before = state.failed;
 		std::vector<XyzTileKey> probe_absent;
 		if (!fetch_level(root, probe_keys, state, probe_absent))
 			return std::nullopt;
-		if (!state.available.empty() || state.failed)
+		if (!state.available.empty() || state.failed > failed_before)
 			break;
 		level_keys = covering_xyz_tiles(bbox, --level);
 	}
@@ -525,8 +560,10 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 		const auto sanity = fetch_tile(root, known_land);
 		if (sanity.status != FetchStatus::Hit)
 			return std::nullopt;
-		state.available.insert(pack_key(known_land));
 		state.saw_network_success |= sanity.network_success;
+		// This tile is only an outage canary, not coverage for the requested bbox.
+		// Rust keeps it out of the sample set so an all-missing bbox remains NaN
+		// and the provider chain can fall back to AWS.
 	}
 	if (state.saw_network_success)
 		for (const auto &key : state.pending_markers) {
@@ -540,7 +577,7 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 		const auto chunk_end = std::min(height, chunk_start + 1024);
 		std::unordered_map<std::uint64_t, RgbRaster> tiles;
 		load_chunk_tiles(root, bbox, zoom, chunk_start, chunk_end, height, state, tiles);
-		for (std::size_t gy = chunk_start; gy < chunk_end; ++gy) {
+		parallel_rows(chunk_start, chunk_end, [&](std::size_t gy) {
 			const double lat = row_lat(bbox, gy, height);
 			const double norm_y = norm_y_for_lat(lat);
 			for (std::size_t gx = 0; gx < width; ++gx) {
@@ -555,7 +592,7 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 					grid[gy][gx] = 0.0;
 				}
 			}
-		}
+		});
 	}
 	return grid;
 #endif

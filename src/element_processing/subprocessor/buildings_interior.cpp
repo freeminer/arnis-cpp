@@ -462,7 +462,10 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 		}
 		for (int v = 1; v <= 3; ++v) {
 			const auto [x, z] = world(u + side, v);
-			kept.insert(zone_key(x, z));
+			const auto key = zone_key(x, z);
+			if (zone.contains(key) && !structural.contains(key) &&
+					!editor.get_block_absolute(x, base_y, z))
+				kept.insert(key);
 		}
 		break;
 	}
@@ -497,12 +500,12 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 			if (h % 4 == 0) {
 				put(cell.first, cell.second, 1, WATER_CAULDRON);
 			} else {
-				put_top_slab(cell.first, cell.second, 1, wood.slab);
+				put_top_slab(cell.first, cell.second, 1, SMOOTH_QUARTZ_SLAB);
 				mount(cell.first, cell.second, 2, inward, LIGHT_GRAY_STAINED_GLASS);
 			}
-			const BlockWithProperties seat{
-					wood.stairs, {{"facing", ladder_facing(inward)}, {"half", "bottom"},
-										 {"shape", "straight"}}};
+			const BlockWithProperties seat{QUARTZ_STAIRS,
+					{{"facing", ladder_facing({-inward.first, -inward.second})},
+							{"half", "bottom"}, {"shape", "straight"}}};
 			editor.set_block_with_properties_absolute(
 					seat, sx, base_y, sz, std::nullopt, std::nullopt);
 		}
@@ -536,12 +539,12 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 					const auto [sx, sz] = world(u + du, v);
 					if (free(sx, sz))
 						seats.emplace_back(std::pair{sx, sz},
-								std::pair{du * tangent.first, du * tangent.second});
+								std::pair{-du * tangent.first, -du * tangent.second});
 				}
 				const auto [end_x, end_z] = world(u, v + 1);
 				if (free(end_x, end_z))
 					seats.emplace_back(std::pair{end_x, end_z},
-							std::pair{normal.first, normal.second});
+							std::pair{-normal.first, -normal.second});
 				if (seats.empty() || !put_top_slab(x, z, 1, wood.slab))
 					break;
 				for (const auto &[cell, look] : seats) {
@@ -613,7 +616,7 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 		if (depth == depth_at.end() || depth->second < 3)
 			continue;
 		const auto [u, v] = local(x, z);
-		if ((u - entry_u + 8 * width) % 4 != 2 || v % 6 == 0)
+		if (floor_mod(u - entry_u, 4) != 2 || v % 6 == 0)
 			continue;
 		const auto h = interior_mix(x, z, seed ^ 0x5A0EULL);
 		if (unit.use.goods == Goods::Books) {
@@ -997,8 +1000,8 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto [x, z] = world(u, service_v - 1);
 			if (u % 2 == 0) {
 				const BlockWithProperties seat{
-						wood.stairs, {{"facing", ladder_facing({-n.first, -n.second})},
-											 {"half", "bottom"}, {"shape", "straight"}}};
+						wood.stairs, {{"facing", ladder_facing(n)}, {"half", "bottom"},
+											 {"shape", "straight"}}};
 				put_with(x, z, 1, seat);
 			}
 		}
@@ -1022,12 +1025,12 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto [sx, sz] = world(tu + du, tv);
 			if (free(sx, sz))
 				seats.emplace_back(
-						std::pair{sx, sz}, std::pair{du * t.first, du * t.second});
+						std::pair{sx, sz}, std::pair{-du * t.first, -du * t.second});
 		}
 		if (end_seat) {
 			const auto [sx, sz] = world(tu, tv + 1);
 			if (free(sx, sz))
-				seats.emplace_back(std::pair{sx, sz}, std::pair{n.first, n.second});
+				seats.emplace_back(std::pair{sx, sz}, std::pair{-n.first, -n.second});
 		}
 		if (seats.empty())
 			return false;
@@ -1282,8 +1285,8 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 					put(x, z, 1, QUARTZ_BLOCK);
 				} else {
 					const BlockWithProperties stair{QUARTZ_STAIRS,
-							{{"facing", ladder_facing(n)}, {"half", "bottom"},
-									{"shape", "straight"}}};
+							{{"facing", ladder_facing({-n.first, -n.second})},
+									{"half", "bottom"}, {"shape", "straight"}}};
 					put_with(x, z, 1, stair);
 				}
 			}
@@ -1343,8 +1346,8 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 					   u < width - 1) {
 				put_with(x, z, 1,
 						BlockWithProperties{wood.stairs,
-								{{"facing", ladder_facing({-n.first, -n.second})},
-										{"half", "bottom"}, {"shape", "straight"}}});
+								{{"facing", ladder_facing(n)}, {"half", "bottom"},
+										{"shape", "straight"}}});
 			} else if (faith == interior_uses::Faith::Other && v >= 2 && v % 2 == 0) {
 				put(x, z, 1, RED_CARPET);
 			}
@@ -1510,14 +1513,14 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 				const auto [x1, z1] = world(width - 1, v);
 				if (put(x1, z1, 1, wood.planks)) {
 					const BlockWithProperties stair{wood.stairs,
-							{{"facing", ladder_facing(t)}, {"half", "bottom"},
-									{"shape", "straight"}}};
+							{{"facing", ladder_facing({-t.first, -t.second})},
+									{"half", "bottom"}, {"shape", "straight"}}};
 					put_with(x1, z1, 2, stair);
 				}
 				const auto [x2, z2] = world(width - 2, v);
 				const BlockWithProperties seat{
-						wood.stairs, {{"facing", ladder_facing(t)}, {"half", "bottom"},
-											 {"shape", "straight"}}};
+						wood.stairs, {{"facing", ladder_facing({-t.first, -t.second})},
+											 {"half", "bottom"}, {"shape", "straight"}}};
 				put_with(x2, z2, 1, seat);
 			}
 		}
@@ -1545,8 +1548,8 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto [x, z] = world(0, v);
 			if (depth_at(x, z) >= 1) {
 				const BlockWithProperties bench{
-						wood.stairs, {{"facing", ladder_facing({-t.first, -t.second})},
-											 {"half", "bottom"}, {"shape", "straight"}}};
+						wood.stairs, {{"facing", ladder_facing(t)}, {"half", "bottom"},
+											 {"shape", "straight"}}};
 				put_with(x, z, 1, bench);
 			}
 		}
@@ -1621,8 +1624,8 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 				continue;
 			put_with(x, z, 1,
 					BlockWithProperties{RED_NETHER_BRICK_STAIRS,
-							{{"facing", ladder_facing({-n.first, -n.second})},
-									{"half", "bottom"}, {"shape", "straight"}}});
+							{{"facing", ladder_facing(n)}, {"half", "bottom"},
+									{"shape", "straight"}}});
 		}
 	}
 }
@@ -1676,34 +1679,6 @@ void split_civic_corridor(WorldEditor &editor,
 	const int c0 = along_x ? min_z : min_x;
 	const int c1 = along_x ? max_z : max_x;
 	const int span = c1 - c0 + 1;
-	std::pair<int, int> hall;
-	std::vector<std::pair<int, int>> sides;
-	if (span >= 2 * (room_depth + 1) + 2) {
-		const int h0 = c0 + (span - 2) / 2;
-		hall = {h0, h0 + 1};
-		sides = {{h0 - 1, 1}, {h0 + 2, -1}};
-	} else if (span >= room_depth + 3) {
-		hall = {c0, c0 + 1};
-		sides = {{c0 + 2, -1}};
-	} else {
-		return;
-	}
-	const int length = a1 - a0 + 1;
-	const std::size_t count =
-			static_cast<std::size_t>(std::max((length + 1) / (room_len + 1), 1));
-	std::vector<int> starts;
-	starts.reserve(count + 1);
-	for (std::size_t k = 0; k <= count; ++k)
-		starts.push_back(
-				a0 +
-				static_cast<int>((k * static_cast<std::size_t>(length + 1)) / count));
-	auto side_of = [&](int c) -> std::optional<std::size_t> {
-		if (c >= hall.first && c <= hall.second)
-			return std::nullopt;
-		if (sides.size() == 1 || c < hall.first)
-			return 0;
-		return 1;
-	};
 	std::optional<interior_uses::Entry> entry;
 	for (const auto &candidate : entries)
 		if (zone.contains(key(candidate.cell.first, candidate.cell.second))) {
@@ -1723,6 +1698,119 @@ void split_civic_corridor(WorldEditor &editor,
 				break;
 		}
 	}
+	std::pair<int, int> hall;
+	std::vector<std::pair<int, int>> sides;
+	if (span >= 2 * (room_depth + 1) + 2) {
+		const int h0 = c0 + (span - 2) / 2;
+		hall = {h0, h0 + 1};
+		sides = {{h0 - 1, 1}, {h0 + 2, -1}};
+	} else if (span >= room_depth + 3) {
+		hall = {c0, c0 + 1};
+		sides = {{c0 + 2, -1}};
+	} else {
+		if (kind != interior_uses::UseKind::Clinic)
+			return;
+		const std::pair<int, int> frame_n =
+				entry ? entry->inward : (along_x ? std::pair{1, 0} : std::pair{0, 1});
+		const std::pair<int, int> frame_t{-frame_n.second, frame_n.first};
+		const int frame_ox = frame_n.first + frame_t.first > 0 ? min_x : max_x;
+		const int frame_oz = frame_n.second + frame_t.second > 0 ? min_z : max_z;
+		const int frame_width =
+				frame_t.first != 0 ? max_x - min_x + 1 : max_z - min_z + 1;
+		const int frame_depth =
+				frame_n.first != 0 ? max_x - min_x + 1 : max_z - min_z + 1;
+		auto frame_local_v = [&](int x, int z) {
+			return (x - frame_ox) * frame_n.first + (z - frame_oz) * frame_n.second;
+		};
+		const int wall_v = frame_depth - 5;
+		std::vector<std::pair<int, int>> wall;
+		std::size_t back_count = 0;
+		for (const auto &[x, z] : cells) {
+			const int v = frame_local_v(x, z);
+			if (v > wall_v)
+				++back_count;
+			else if (v == wall_v)
+				wall.emplace_back(x, z);
+		}
+		if (back_count < 6 || wall.empty())
+			return;
+		const int middle = frame_width / 2;
+		std::sort(wall.begin(), wall.end(), [](const auto &a, const auto &b) {
+			return std::pair{a.second, a.first} < std::pair{b.second, b.first};
+		});
+		std::stable_sort(wall.begin(), wall.end(), [&](const auto &a, const auto &b) {
+			const auto local_u = [&](const auto &p) {
+				return (p.first - frame_ox) * frame_t.first +
+					   (p.second - frame_oz) * frame_t.second;
+			};
+			return std::abs(local_u(a) - middle) < std::abs(local_u(b) - middle);
+		});
+		std::optional<std::pair<int, int>> door;
+		for (const auto &[x, z] : wall) {
+			const int front_x = x - frame_n.first, front_z = z - frame_n.second;
+			const int back_x = x + frame_n.first, back_z = z + frame_n.second;
+			const auto walkable = [&](int cx, int cz) {
+				const auto cell = key(cx, cz);
+				const auto claim = claimed_top.find(cell);
+				return zone.contains(cell) && !structural.contains(cell) &&
+					   (!editor.get_block_absolute(cx, base_y, cz) ||
+							   kept.contains(cell)) &&
+					   (kept.contains(cell) ||
+							   (claim == claimed_top.end() ||
+									   claim->second <= floor_metres + 1.0)) &&
+					   (!passages.contains(cx, cz) || floor_y >= passage_top);
+			};
+			if (walkable(front_x, front_z) && walkable(back_x, back_z)) {
+				door = std::pair{x, z};
+				break;
+			}
+		}
+		if (!door)
+			return;
+		const int top_y = base_y + (ceiling_y - floor_y) - 1;
+		for (const auto &[x, z] : wall) {
+			const auto cell = key(x, z);
+			planned.insert(cell);
+			structural.insert(cell);
+			if (kept.contains(cell) || editor.get_block_absolute(x, base_y, z))
+				continue;
+			if (std::pair{x, z} == *door) {
+				const char *facing = ladder_facing(frame_n);
+				const BlockWithProperties lower{DARK_OAK_DOOR_LOWER,
+						{{"half", "lower"}, {"facing", facing}, {"hinge", "left"}}};
+				const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
+						{{"half", "upper"}, {"facing", facing}, {"hinge", "left"}}};
+				editor.set_block_with_properties_absolute(
+						lower, x, base_y, z, std::nullopt, std::nullopt);
+				if (top_y > base_y)
+					editor.set_block_with_properties_absolute(
+							upper, x, base_y + 1, z, std::nullopt, std::nullopt);
+				door_positions.emplace_back(x, z);
+				continue;
+			}
+			wall_positions.emplace_back(x, z);
+			for (int y = base_y; y <= top_y; ++y)
+				editor.set_block_absolute(
+						wall_block, x, y, z, std::nullopt, std::nullopt);
+		}
+		return;
+	}
+	const int length = a1 - a0 + 1;
+	const std::size_t count =
+			static_cast<std::size_t>(std::max((length + 1) / (room_len + 1), 1));
+	std::vector<int> starts;
+	starts.reserve(count + 1);
+	for (std::size_t k = 0; k <= count; ++k)
+		starts.push_back(
+				a0 +
+				static_cast<int>((k * static_cast<std::size_t>(length + 1)) / count));
+	auto side_of = [&](int c) -> std::optional<std::size_t> {
+		if (c >= hall.first && c <= hall.second)
+			return std::nullopt;
+		if (sides.size() == 1 || c < hall.first)
+			return 0;
+		return 1;
+	};
 	std::optional<std::pair<std::size_t, std::size_t>> lobby;
 	if (entry) {
 		const int a = along_x ? entry->cell.first : entry->cell.second;
@@ -1880,10 +1968,14 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 	}
 	const auto existing_doors = door_positions;
 	const auto kind = unit.use.kind;
+	const bool clinic_layout = kind == interior_uses::UseKind::Clinic ||
+							   (kind == interior_uses::UseKind::Hospital &&
+									   floor_index == 0 && floor_count > 1);
+	const auto layout_kind = clinic_layout ? interior_uses::UseKind::Clinic : kind;
 	if (kind != interior_uses::UseKind::Hotel || floor_index != 0 || floor_count <= 1)
 		split_civic_corridor(editor, cells, entries, existing_doors, structural, planned,
 				kept, wall_positions, door_positions, claimed_top, passages, floor_metres,
-				passage_top, floor_y, base_y, ceiling_y, wall_block, kind);
+				passage_top, floor_y, base_y, ceiling_y, wall_block, layout_kind);
 	std::optional<interior_uses::Entry> entry;
 	for (const auto &candidate : entries)
 		if (zone.contains(key(candidate.cell.first, candidate.cell.second))) {
@@ -1891,7 +1983,9 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			break;
 		}
 	if (!entry) {
-		for (const auto &[dx, dz] : door_positions) {
+		const auto &fallback_entry_doors =
+				clinic_layout ? existing_doors : door_positions;
+		for (const auto &[dx, dz] : fallback_entry_doors) {
 			for (const auto d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(key(x, z))) {
@@ -2049,6 +2143,13 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 								{"slot_4_occupied", fill[4] ? "true" : "false"},
 								{"slot_5_occupied", fill[5] ? "true" : "false"}}});
 	};
+	auto plant = [&](int u, int v) {
+		const auto [x, z] = world(u, v);
+		const auto h = interior_mix(x, z, seed);
+		const std::array<Block, 4> plants = {
+				AZALEA, FLOWERING_AZALEA, POTTED_RED_TULIP, POTTED_BLUE_ORCHID};
+		return put(x, z, 1, plants[h % plants.size()]);
+	};
 	std::unordered_map<std::uint64_t, int> depth_at;
 	std::deque<std::pair<int, int>> queue;
 	for (const auto &[x, z] : cells) {
@@ -2094,6 +2195,30 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 	};
 	const int headroom = ceiling_y - floor_y;
 	const int mid = width / 2;
+	std::unordered_set<std::uint64_t> school_hall_cells;
+	if (kind == interior_uses::UseKind::School) {
+		const bool along_x = max_x - min_x >= max_z - min_z;
+		const int c0 = along_x ? min_z : min_x;
+		const int c1 = along_x ? max_z : max_x;
+		const int span = c1 - c0 + 1;
+		// Match Canvas::split_corridor: a two-cell central hall when there is
+		// room for classrooms on both sides, otherwise a hall along one edge.
+		if (span >= 9) {
+			const int h0 = span >= 16 ? c0 + (span - 2) / 2 : c0;
+			const auto bench_facing = along_x ? std::pair{0, 1} : std::pair{1, 0};
+			for (const auto &[x, z] : cells) {
+				const int across = along_x ? z : x;
+				if (across != h0 && across != h0 + 1)
+					continue;
+				school_hall_cells.insert(key(x, z));
+				if (across == h0 && interior_mix(x, z, seed) % 5 == 0)
+					seat(x, z, bench_facing);
+			}
+		}
+	}
+	auto in_school_hall = [&](int x, int z) {
+		return school_hall_cells.contains(key(x, z));
+	};
 	if (kind == interior_uses::UseKind::Bank) {
 		const int row = std::clamp(depth / 3, 4, 6);
 		std::vector<int> tellers;
@@ -2108,13 +2233,13 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		}
 		for (const int u : tellers) {
 			const auto [x, z] = world(u, row + 1);
-			seat(x, z, n);
+			seat(x, z, {-n.first, -n.second});
 		}
 		for (const auto &[cell, inward] : walls()) {
 			const auto [x, z] = cell;
 			const int v = local(x, z).second;
 			if (v >= 1 && v < row - 1 && inward != n) {
-				seat(x, z, {-inward.first, -inward.second});
+				seat(x, z, inward);
 			} else if (v > row + 2) {
 				if (interior_mix(x, z, seed) % 3 == 0) {
 					std::vector<std::tuple<std::string, int, int>> items;
@@ -2183,37 +2308,189 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		return;
 	}
 	if (kind == interior_uses::UseKind::School) {
+		if (!school_hall_cells.empty()) {
+			const bool along_x = max_x - min_x >= max_z - min_z;
+			const int a0 = along_x ? min_x : min_z;
+			const int a1 = along_x ? max_x : max_z;
+			const int c0 = along_x ? min_z : min_x;
+			const int c1 = along_x ? max_z : max_x;
+			const int span = c1 - c0 + 1;
+			const int hall_c0 = span >= 16 ? c0 + (span - 2) / 2 : c0;
+			const int hall_c1 = hall_c0 + 1;
+			const std::size_t side_count = span >= 16 ? 2 : 1;
+			const int length = a1 - a0 + 1;
+			const std::size_t room_count =
+					static_cast<std::size_t>(std::max((length + 1) / 9, 1));
+			std::vector<int> starts;
+			starts.reserve(room_count + 1);
+			for (std::size_t k = 0; k <= room_count; ++k)
+				starts.push_back(
+						a0 + static_cast<int>((k * static_cast<std::size_t>(length + 1)) /
+											  room_count));
+			std::optional<std::pair<std::size_t, std::size_t>> lobby;
+			if (entry) {
+				const int a = along_x ? entry->cell.first : entry->cell.second;
+				const int c = along_x ? entry->cell.second : entry->cell.first;
+				std::optional<std::size_t> side;
+				if (c < hall_c0)
+					side = 0;
+				else if (c > hall_c1)
+					side = side_count == 1 ? 0 : 1;
+				if (side)
+					for (std::size_t k = 0; k < room_count; ++k)
+						if (a >= starts[k] && a < starts[k + 1]) {
+							lobby = std::pair{*side, k};
+							break;
+						}
+			}
+
+			for (std::size_t side = 0; side < side_count; ++side) {
+				for (std::size_t k = 0; k < room_count; ++k) {
+					if (lobby == std::pair{side, k})
+						continue;
+					std::vector<std::pair<int, int>> room;
+					std::unordered_set<std::uint64_t> room_set;
+					for (const auto &[x, z] : cells) {
+						const int a = along_x ? x : z;
+						const int c = along_x ? z : x;
+						const bool on_side =
+								side_count == 1 ? c > hall_c1
+												: (side == 0 ? c < hall_c0 : c > hall_c1);
+						if (!on_side || a < starts[k] || a >= starts[k + 1] ||
+								structural.contains(key(x, z)) ||
+								editor.get_block_absolute(x, base_y, z))
+							continue;
+						room.emplace_back(x, z);
+						room_set.insert(key(x, z));
+					}
+					if (room.size() < 6)
+						continue;
+					int rmin_x = room.front().first, rmax_x = rmin_x;
+					int rmin_z = room.front().second, rmax_z = rmin_z;
+					for (const auto &[x, z] : room) {
+						rmin_x = std::min(rmin_x, x);
+						rmax_x = std::max(rmax_x, x);
+						rmin_z = std::min(rmin_z, z);
+						rmax_z = std::max(rmax_z, z);
+					}
+					std::optional<interior_uses::Entry> room_entry;
+					for (const auto &[dx, dz] : door_positions) {
+						for (const auto d : INTERIOR_DIRS) {
+							const int x = dx + d.first, z = dz + d.second;
+							if (room_set.contains(key(x, z))) {
+								room_entry = interior_uses::Entry{{x, z}, d};
+								break;
+							}
+						}
+						if (room_entry)
+							break;
+					}
+					std::pair<int, int> room_n =
+							along_x ? std::pair{1, 0} : std::pair{0, 1};
+					if (room_entry)
+						room_n = {-room_entry->inward.second, room_entry->inward.first};
+					const std::pair<int, int> room_t{-room_n.second, room_n.first};
+					const int ox = room_n.first + room_t.first > 0 ? rmin_x : rmax_x;
+					const int oz = room_n.second + room_t.second > 0 ? rmin_z : rmax_z;
+					const int room_width =
+							room_t.first != 0 ? rmax_x - rmin_x + 1 : rmax_z - rmin_z + 1;
+					const int room_depth =
+							room_n.first != 0 ? rmax_x - rmin_x + 1 : rmax_z - rmin_z + 1;
+					auto room_world = [&](int u, int v) {
+						return std::pair{ox + room_t.first * u + room_n.first * v,
+								oz + room_t.second * u + room_n.second * v};
+					};
+					auto room_local = [&](int x, int z) {
+						const int dx = x - ox, dz = z - oz;
+						return std::pair{dx * room_t.first + dz * room_t.second,
+								dx * room_n.first + dz * room_n.second};
+					};
+					const int room_mid = room_width / 2;
+					for (int u = 1; u < room_width - 1; ++u) {
+						const auto [x, z] = room_world(u, 0);
+						mount(x, z, 2, room_n, GREEN_CONCRETE);
+						if (headroom >= 4)
+							mount(x, z, 3, room_n, GREEN_CONCRETE);
+					}
+					const auto [teacher_x, teacher_z] = room_world(room_mid, 2);
+					top_slab(teacher_x, teacher_z, 1, wood.slab);
+					const auto [chair_x, chair_z] = room_world(room_mid, 1);
+					seat(chair_x, chair_z, room_n);
+					const auto [lectern_x, lectern_z] = room_world(room_mid + 2, 2);
+					put_with(lectern_x, lectern_z, 1,
+							BlockWithProperties{
+									LECTERN, {{"facing", ladder_facing(room_n)}}});
+					for (int v = 4; v + 1 < room_depth - 1; v += 2)
+						for (int u = 1; u < room_width - 1; ++u) {
+							if (u % 3 == 0)
+								continue;
+							const auto [x, z] = room_world(u, v);
+							const auto [cx, cz] = room_world(u, v + 1);
+							if (!room_set.contains(key(x, z)) ||
+									!room_set.contains(key(cx, cz)) || !free(x, z) ||
+									!free(cx, cz))
+								continue;
+							top_slab(x, z, 1, wood.slab);
+							seat(cx, cz, {-room_n.first, -room_n.second});
+						}
+					for (const auto &[x, z] : room) {
+						if (room_local(x, z).second != room_depth - 1 ||
+								!room_set.contains(key(x, z)))
+							continue;
+						if (interior_mix(x, z, seed) % 2 == 0)
+							shelf(x, z, 1, {-room_n.first, -room_n.second}, seed);
+					}
+					const auto [plant_x, plant_z] =
+							room_world(room_width - 1, room_depth - 1);
+					const std::array<Block, 4> plants = {AZALEA, FLOWERING_AZALEA,
+							POTTED_RED_TULIP, POTTED_BLUE_ORCHID};
+					put(plant_x, plant_z, 1,
+							plants[interior_mix(plant_x, plant_z, seed) % plants.size()]);
+				}
+			}
+			return;
+		}
 		for (int u = 1; u < width - 1; ++u) {
 			const auto [x, z] = world(u, 0);
+			if (in_school_hall(x, z))
+				continue;
 			mount(x, z, 2, {n.first, n.second}, GREEN_CONCRETE);
 			if (headroom >= 4)
 				mount(x, z, 3, {n.first, n.second}, GREEN_CONCRETE);
 		}
 		const auto [dx, dz] = world(mid, 2);
-		top_slab(dx, dz, 1, wood.slab);
+		if (!in_school_hall(dx, dz))
+			top_slab(dx, dz, 1, wood.slab);
 		const auto [sx, sz] = world(mid, 1);
-		seat(sx, sz, {-n.first, -n.second});
+		if (!in_school_hall(sx, sz))
+			seat(sx, sz, n);
 		const auto [lx, lz] = world(mid + 2, 2);
-		put_with(lx, lz, 1,
-				BlockWithProperties{
-						LECTERN, {{"facing", ladder_facing({-n.first, -n.second})}}});
+		if (!in_school_hall(lx, lz))
+			put_with(lx, lz, 1,
+					BlockWithProperties{LECTERN, {{"facing", ladder_facing(n)}}});
 		for (int v = 4; v + 1 < depth - 1; v += 2) {
 			for (int u = 1; u < width - 1; ++u) {
 				if (u % 3 == 0)
 					continue;
 				const auto [x, z] = world(u, v);
 				const auto [cx, cz] = world(u, v + 1);
+				if (in_school_hall(x, z) || in_school_hall(cx, cz))
+					continue;
 				if (free(x, z) && free(cx, cz)) {
 					top_slab(x, z, 1, wood.slab);
-					seat(cx, cz, {n.first, n.second});
+					seat(cx, cz, {-n.first, -n.second});
 				}
 			}
 		}
 		for (const auto &[cell, inward] : walls()) {
 			const auto [x, z] = cell;
-			if (local(x, z).second == depth - 1 && interior_mix(x, z, seed) % 2 == 0)
+			if (!in_school_hall(x, z) && local(x, z).second == depth - 1 &&
+					interior_mix(x, z, seed) % 2 == 0)
 				shelf(x, z, 1, inward, seed);
 		}
+		const auto [px, pz] = world(width - 1, depth - 1);
+		if (!in_school_hall(px, pz))
+			plant(width - 1, depth - 1);
 		return;
 	}
 	if (kind == interior_uses::UseKind::Library) {
@@ -2237,8 +2514,19 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto [u, v] = local(x, z);
 			if (v < stacks_from) {
 				if (v >= 3 && floor_mod(u - entry_u, 4) == 2 && v % 3 == 0) {
-					if (top_slab(x, z, 1, wood.slab))
+					std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>>
+							seats;
+					for (const int du : {-1, 1}) {
+						const auto [sx, sz] = world(u + du, v);
+						if (free(sx, sz))
+							seats.emplace_back(std::pair{sx, sz},
+									std::pair{-du * t.first, -du * t.second});
+					}
+					if (!seats.empty() && top_slab(x, z, 1, wood.slab)) {
+						for (const auto &[cell, facing] : seats)
+							seat(cell.first, cell.second, facing);
 						put(x, z, 2, LANTERN);
+					}
 				}
 			} else if ((v - stacks_from) % 3 == 0 && std::abs(u - entry_u) > 1 &&
 					   u % 7 != 0) {
@@ -2247,6 +2535,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					put(x, z, 2, BOOKSHELF);
 			}
 		}
+		plant(0, 1);
 		return;
 	}
 	if (kind == interior_uses::UseKind::Kindergarten) {
@@ -2260,8 +2549,8 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				const auto [sx, sz] = world(u + du, v + dv);
 				if (free(sx, sz))
 					seats.emplace_back(
-							std::pair{sx, sz}, std::pair{du * t.first + dv * n.first,
-													   du * t.second + dv * n.second});
+							std::pair{sx, sz}, std::pair{-du * t.first - dv * n.first,
+													   -du * t.second - dv * n.second});
 			}
 			if (seats.empty())
 				continue;
@@ -2340,511 +2629,38 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				const auto [x, z] = cell;
 				if (hall.contains(key(x, z)) && inward == bench_side &&
 						interior_mix(x, z, seed) % 5 == 0)
-					seat(x, z, {-inward.first, -inward.second});
+					seat(x, z, inward);
 			}
 		}
-		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
-			if (hall.contains(key(x, z)))
-				continue;
-			const auto [u, v] = local(x, z);
-			const bool side_wall =
-					inward != n && inward != std::pair{-n.first, -n.second};
-			if (!side_wall || v < 2)
-				continue;
-			if (v % 3 == 2)
-				bed(x + inward.first, z + inward.second, {-inward.first, -inward.second});
-			else if (v % 3 == 0) {
-				put(x, z, 1, BARREL);
-				put(x, z, 2, EMPTY_FLOWER_POT);
-			}
-			(void)u;
-		}
-		const auto [bx, bz] = world(0, 1);
-		put(bx, bz, 1, WATER_CAULDRON);
-		return;
-	}
-	if (kind == interior_uses::UseKind::Clinic ||
-			kind == interior_uses::UseKind::Hospital) {
-		for (int v = 1; v <= 2; ++v) {
-			const auto [x, z] = world(entry_u + 2, v);
-			put(x, z, 1, QUARTZ_BLOCK);
-		}
-		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
-			const auto [u, v] = local(x, z);
-			if (v >= 1 && std::abs(u - entry_u) > 3 && interior_mix(x, z, seed) % 3 != 0)
-				seat(x, z, {-inward.first, -inward.second});
-		}
-		bool bed_placed = false;
-		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
-			const int bx = x + inward.first, bz = z + inward.second;
-			if (!bed_placed)
-				bed_placed = bed(bx, bz, {-inward.first, -inward.second});
-		}
-		const auto [bx, bz] = world(0, 1);
-		put(bx, bz, 1, WATER_CAULDRON);
-		return;
-	}
-	if (kind == interior_uses::UseKind::Museum) {
-		const std::array<Block, 8> exhibits = {AMETHYST_CLUSTER, GOLD_BLOCK, LANTERN,
-				BREWING_STAND, ANVIL, POTTED_BLUE_ORCHID, END_ROD, CHISELED_STONE_BRICKS};
-		for (const auto &[x, z] : cells) {
-			const auto [u, v] = local(x, z);
-			const auto d = depth_at.find(key(x, z));
-			if (d == depth_at.end() || d->second < 3 || floor_mod(u - entry_u, 4) != 2 ||
-					v % 4 != 3)
-				continue;
-			const auto h = interior_mix(x, z, seed);
-			const Block plinth = h % 2 == 0 ? CHISELED_QUARTZ_BLOCK : POLISHED_ANDESITE;
-			if (put(x, z, 1, plinth))
-				put(x, z, 2, exhibits[(h >> 8) % exhibits.size()]);
-		}
-		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
-			const auto h = interior_mix(x, z, seed ^ 0x3EULL);
-			if (local(x, z).second >= 2 && h % 3 == 0 && put(x, z, 1, SMOOTH_QUARTZ))
-				put(x, z, 2, exhibits[(h >> 8) % exhibits.size()]);
-			(void)inward;
-		}
-		for (int v = 1; v <= 2; ++v) {
-			const auto [x, z] = world(entry_u + 2, v);
-			put(x, z, 1, wood.planks);
-		}
-		return;
-	}
-	if (kind == interior_uses::UseKind::Station) {
-		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
-			const int v = local(x, z).second;
-			if (inward == std::pair{-t.first, -t.second} && v >= 2 && v <= 6) {
-				put(x, z, 1, POLISHED_ANDESITE);
-				if (headroom >= 3)
-					put(x, z, 2, IRON_BARS);
-			}
-		}
-		const int board_y = std::min(headroom, 4);
-		for (int du = -2; du <= 2; ++du) {
-			const auto [x, z] = world(width / 2 + du, depth - 1);
-			mount(x, z, board_y, {-n.first, -n.second}, BLACK_CONCRETE);
-		}
-		for (const auto &[x, z] : cells) {
-			const auto [u, v] = local(x, z);
-			const auto d = depth_at.find(key(x, z));
-			if (d == depth_at.end() || d->second < 3 || floor_mod(u - entry_u, 5) < 1 ||
-					floor_mod(u - entry_u, 5) > 3 || v < 4)
-				continue;
-			if (v % 5 == 1)
-				seat(x, z, n);
-			else if (v % 5 == 2)
-				seat(x, z, {-n.first, -n.second});
-		}
-		const auto [kx, kz] = world(width - 2, 1);
-		if (put(kx, kz, 1, wood.planks))
-			put(kx, kz, 2, CAKE);
-		return;
-	}
-	if (kind == interior_uses::UseKind::Office) {
-		int office_wall_v = depth;
-		if (depth >= 14 && cells.size() >= 160) {
-			const int wall_v = depth - 6;
-			std::vector<std::pair<int, int>> back_cells;
-			std::vector<std::pair<int, int>> wall_cells;
-			for (const auto &[x, z] : cells) {
-				const int v = local(x, z).second;
-				if (v > wall_v)
-					back_cells.emplace_back(x, z);
-				else if (v == wall_v)
-					wall_cells.emplace_back(x, z);
-			}
-			std::sort(wall_cells.begin(), wall_cells.end(),
-					[&](const auto &a, const auto &b) {
-						return std::abs(local(a.first, a.second).first - width / 2) <
-							   std::abs(local(b.first, b.second).first - width / 2);
-					});
-			std::optional<std::pair<int, int>> meeting_door;
-			auto walkable = [&](int x, int z) {
-				const auto cell = key(x, z);
-				const auto top = claimed_top.find(cell);
-				return zone.contains(cell) && !structural.contains(cell) &&
-					   (top == claimed_top.end() || top->second <= floor_metres + 1.0) &&
-					   (!passages.contains(x, z) || floor_y >= passage_top) &&
-					   !editor.get_block_absolute(x, base_y, z);
-			};
-			if (back_cells.size() >= 6 && !wall_cells.empty()) {
-				for (const auto &[x, z] : wall_cells) {
-					const auto [front_x, front_z] = std::pair{x - n.first, z - n.second};
-					const auto [back_x, back_z] = std::pair{x + n.first, z + n.second};
-					if (walkable(front_x, front_z) && walkable(back_x, back_z)) {
-						meeting_door = std::pair{x, z};
-						break;
-					}
-				}
-			}
-			if (meeting_door) {
-				office_wall_v = wall_v;
-				const int top_y = base_y + (ceiling_y - floor_y) - 1;
-				for (const auto &[x, z] : wall_cells) {
-					const auto cell_key = key(x, z);
-					structural.insert(cell_key);
-					planned.insert(cell_key);
-					if (std::pair{x, z} == *meeting_door) {
-						const char *facing = ladder_facing(n);
-						const BlockWithProperties lower{DARK_OAK_DOOR_LOWER,
-								{{"half", "lower"}, {"facing", facing},
-										{"hinge", "left"}}};
-						const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
-								{{"half", "upper"}, {"facing", facing},
-										{"hinge", "left"}}};
-						editor.set_block_with_properties_absolute(
-								lower, x, base_y, z, std::nullopt, std::nullopt);
-						if (top_y > base_y)
-							editor.set_block_with_properties_absolute(
-									upper, x, base_y + 1, z, std::nullopt, std::nullopt);
-						door_positions.emplace_back(x, z);
-						continue;
-					}
-					wall_positions.emplace_back(x, z);
-					for (int y = base_y; y <= top_y; ++y)
-						editor.set_block_absolute(
-								wall_block, x, y, z, std::nullopt, std::nullopt);
-				}
-
-				// Rust's long_frame aligns the meeting table to the back room's
-				// longer dimension and turns it around when the door is at the far end.
-				int back_min_x = back_cells.front().first, back_max_x = back_min_x;
-				int back_min_z = back_cells.front().second, back_max_z = back_min_z;
-				for (const auto &[x, z] : back_cells) {
-					back_min_x = std::min(back_min_x, x);
-					back_max_x = std::max(back_max_x, x);
-					back_min_z = std::min(back_min_z, z);
-					back_max_z = std::max(back_max_z, z);
-				}
-				const std::pair<int, int> positive =
-						back_max_x - back_min_x >= back_max_z - back_min_z
-								? std::pair{1, 0}
-								: std::pair{0, 1};
-				auto frame_for = [&](std::pair<int, int> room_n) {
-					const std::pair<int, int> room_t{-room_n.second, room_n.first};
-					const int room_ox =
-							room_n.first + room_t.first > 0 ? back_min_x : back_max_x;
-					const int room_oz =
-							room_n.second + room_t.second > 0 ? back_min_z : back_max_z;
-					const int room_width = room_t.first != 0
-												   ? back_max_x - back_min_x + 1
-												   : back_max_z - back_min_z + 1;
-					const int room_depth = room_n.first != 0
-												   ? back_max_x - back_min_x + 1
-												   : back_max_z - back_min_z + 1;
-					return std::tuple{
-							room_ox, room_oz, room_n, room_t, room_width, room_depth};
-				};
-				auto positive_frame = frame_for(positive);
-				const int p_ox = std::get<0>(positive_frame);
-				const int p_oz = std::get<1>(positive_frame);
-				const auto p_n = std::get<2>(positive_frame);
-				const int p_depth = std::get<5>(positive_frame);
-				const int door_v = (meeting_door->first + n.first - p_ox) * p_n.first +
-								   (meeting_door->second + n.second - p_oz) * p_n.second;
-				const auto room_n = door_v > p_depth / 2
-											? std::pair{-positive.first, -positive.second}
-											: positive;
-				const auto [room_ox, room_oz, room_frame_n, room_t, room_width,
-						room_depth] = frame_for(room_n);
-				auto room_world = [&](int u, int v) {
-					return std::pair{room_ox + room_t.first * u + room_frame_n.first * v,
-							room_oz + room_t.second * u + room_frame_n.second * v};
-				};
-				const int table_u = room_width / 2;
-				for (int v = 2; v < room_depth - 2; ++v) {
-					const auto table = room_world(table_u, v);
-					if (!free(table.first, table.second))
-						continue;
-					const auto left = room_world(table_u - 1, v);
-					const auto right = room_world(table_u + 1, v);
-					const bool left_free = free(left.first, left.second);
-					const bool right_free = free(right.first, right.second);
-					if (!left_free && !right_free)
-						continue;
-					top_slab(table.first, table.second, 1, wood.slab);
-					if (left_free)
-						seat(left.first, left.second, {-room_t.first, -room_t.second});
-					if (right_free)
-						seat(right.first, right.second, room_t);
-				}
-				const auto plant_cell = room_world(table_u, room_depth - 1);
-				put(plant_cell.first, plant_cell.second, 1,
-						seed % 2 ? FLOWERING_AZALEA : AZALEA);
-			}
-		}
-		if (floor_index == 0 && cells.size() >= 60) {
-			for (const int side : {1, -1}) {
-				const int u = entry_u + 2 * side;
-				std::array<std::pair<int, int>, 3> desk;
-				bool fits = true;
-				for (int v = 1; v <= 3; ++v) {
-					desk[v - 1] = world(u, v);
-					fits &= free(desk[v - 1].first, desk[v - 1].second);
-				}
-				if (!fits)
-					continue;
-				for (std::size_t i = 0; i < desk.size(); ++i) {
-					put(desk[i].first, desk[i].second, 1, wood.planks);
-					if (i == 1)
-						put(desk[i].first, desk[i].second, 2, EMPTY_FLOWER_POT);
-				}
-				for (int v = 1; v <= 3; ++v) {
-					const auto [x, z] = world(u + side, v);
-					kept.insert(key(x, z));
-				}
-				break;
-			}
-		}
-		for (const auto &[x, z] : cells) {
-			const auto d = depth_at.find(key(x, z));
-			const auto [u, v] = local(x, z);
-			if (v > office_wall_v || d == depth_at.end() || d->second < 2 || v < 3 ||
-					(v % 4 != 1 && v % 4 != 2))
-				continue;
-			switch (floor_mod(u - entry_u, 6)) {
-			case 2:
-			case 3:
-				top_slab(x, z, 1, wood.slab);
-				put(x, z, 2, GLASS_PANE);
-				break;
-			case 1:
-				seat(x, z, {-t.first, -t.second});
-				break;
-			case 4:
-				seat(x, z, {t.first, t.second});
-				break;
-			default:
-				break;
-			}
-		}
-		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
-			if (local(x, z).second > office_wall_v)
-				continue;
-			const auto h = interior_mix(x, z, seed);
-			if (local(x, z).second <= 3 && h % 7 == 0) {
-				if (put(x, z, 1, WHITE_CONCRETE) && headroom >= 3)
-					put(x, z, 2, LIGHT_BLUE_STAINED_GLASS);
-				continue;
-			}
-			switch (h % 8) {
-			case 0:
-				shelf(x, z, 1, inward, h);
-				break;
-			case 1:
-				put(x, z, 1, BARREL);
-				break;
-			case 2:
-				put(x, z, 1, h & 0x100 ? AZALEA : FLOWERING_AZALEA);
-				break;
-			default:
-				break;
-			}
-		}
-	}
-	if (kind == interior_uses::UseKind::Hotel) {
-		if (floor_index == 0 && floor_count > 1) {
-			std::vector<std::pair<int, int>> lobby_cells = cells;
-			std::unordered_set<std::uint64_t> lobby_zone = zone;
-			std::unordered_map<std::uint64_t, int> lobby_depth;
-			if (depth >= 16 && cells.size() >= 200) {
-				const int wall_v = depth / 2;
-				const int top_y = base_y + (ceiling_y - floor_y) - 1;
-				std::optional<std::pair<int, int>> door_cell;
-				std::vector<std::pair<int, int>> back_cells, wall_cells;
-				for (const auto &[x, z] : cells) {
-					const int v = local(x, z).second;
-					if (v > wall_v)
-						back_cells.emplace_back(x, z);
-					else if (v == wall_v)
-						wall_cells.emplace_back(x, z);
-				}
-				std::stable_sort(wall_cells.begin(), wall_cells.end(),
-						[&](const auto &a, const auto &b) {
-							return std::abs(local(a.first, a.second).first - width / 2) <
-								   std::abs(local(b.first, b.second).first - width / 2);
-						});
-				auto walkable = [&](int x, int z) {
-					const auto cell = key(x, z);
-					const auto claim = claimed_top.find(cell);
-					return zone.contains(cell) && !structural.contains(cell) &&
-						   (claim == claimed_top.end() ||
-								   claim->second <= floor_metres + 1.0) &&
-						   (!passages.contains(x, z) || floor_y >= passage_top) &&
-						   (kept.contains(cell) ||
-								   !editor.get_block_absolute(x, base_y, z));
-				};
-				if (back_cells.size() >= 6) {
-					for (const auto &[x, z] : wall_cells) {
-						if (walkable(x - n.first, z - n.second) &&
-								walkable(x + n.first, z + n.second)) {
-							door_cell = std::pair{x, z};
-							break;
-						}
-					}
-				}
-				if (door_cell) {
-					std::vector<std::pair<int, int>> restaurant_cells;
-					for (const auto &[x, z] : cells) {
-						const auto [u, v] = local(x, z);
-						if (v > wall_v) {
-							restaurant_cells.emplace_back(x, z);
-							lobby_zone.erase(key(x, z));
-						} else if (v >= wall_v) {
-							lobby_zone.erase(key(x, z));
-						}
-						if (v == wall_v && std::pair{x, z} != *door_cell) {
-							const auto cell_key = key(x, z);
-							structural.insert(cell_key);
-							planned.insert(cell_key);
-							wall_positions.emplace_back(x, z);
-							for (int y = base_y; y <= top_y; ++y)
-								editor.set_block_absolute(
-										wall_block, x, y, z, std::nullopt, std::nullopt);
-						}
-						(void)u;
-					}
-					const auto [dx, dz] = *door_cell;
-					const auto door_key = key(dx, dz);
-					structural.insert(door_key);
-					planned.insert(door_key);
-					door_positions.push_back(*door_cell);
-					const char *door_facing = ladder_facing(n);
-					const BlockWithProperties lower{DARK_OAK_DOOR_LOWER,
-							{{"half", "lower"}, {"facing", door_facing},
-									{"hinge", "left"}}};
-					const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
-							{{"half", "upper"}, {"facing", door_facing},
-									{"hinge", "left"}}};
-					editor.set_block_with_properties_absolute(
-							lower, dx, base_y, dz, std::nullopt, std::nullopt);
-					if (top_y > base_y)
-						editor.set_block_with_properties_absolute(
-								upper, dx, base_y + 1, dz, std::nullopt, std::nullopt);
-					const auto restaurant_entry_cell =
-							std::pair{dx + n.first, dz + n.second};
-					const auto lobby_entry_cell = std::pair{dx - n.first, dz - n.second};
-					kept.insert(key(
-							restaurant_entry_cell.first, restaurant_entry_cell.second));
-					kept.insert(key(lobby_entry_cell.first, lobby_entry_cell.second));
-					lobby_cells.erase(
-							std::remove_if(lobby_cells.begin(), lobby_cells.end(),
-									[&](const auto &cell) {
-										return !lobby_zone.contains(
-												key(cell.first, cell.second));
-									}),
-							lobby_cells.end());
-					interior_uses::Unit restaurant = unit;
-					restaurant.use.kind = interior_uses::UseKind::Food;
-					restaurant.use.eatery = interior_uses::Eatery::Restaurant;
-					const std::vector<interior_uses::Entry> restaurant_entries = {
-							{restaurant_entry_cell, n}};
-					furnish_eatery(editor, restaurant, restaurant_cells,
-							restaurant_entries, door_positions, structural, kept,
-							claimed_top, passages, floor_metres, passage_top, floor_y,
-							base_y, ceiling_y, seed, wood_seed, loot_salt);
-				}
-			}
-			std::deque<std::pair<int, int>> lobby_queue;
-			for (const auto &[x, z] : lobby_cells) {
-				if (structural.contains(key(x, z)) ||
-						editor.get_block_absolute(x, base_y, z))
-					continue;
-				if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-							[&](const auto &d) {
-								return !lobby_zone.contains(
-											   key(x + d.first, z + d.second)) ||
-									   structural.contains(
-											   key(x + d.first, z + d.second));
-							})) {
-					lobby_depth.emplace(key(x, z), 1);
-					lobby_queue.emplace_back(x, z);
-				}
-			}
-			while (!lobby_queue.empty()) {
-				const auto [x, z] = lobby_queue.front();
-				lobby_queue.pop_front();
-				const int next = lobby_depth.at(key(x, z)) + 1;
-				for (const auto d : INTERIOR_DIRS) {
-					const int nx = x + d.first, nz = z + d.second;
-					if (!lobby_zone.contains(key(nx, nz)) ||
-							structural.contains(key(nx, nz)) ||
-							editor.get_block_absolute(nx, base_y, nz))
-						continue;
-					if (lobby_depth.emplace(key(nx, nz), next).second)
-						lobby_queue.emplace_back(nx, nz);
-				}
-			}
-			for (int v = 2; v <= 4; ++v) {
-				const auto [x, z] = world(entry_u + 3, v);
-				put(x, z, 1, wood.planks);
-			}
-			for (const auto &[x, z] : lobby_cells) {
-				const auto [u, v] = local(x, z);
-				const auto d = lobby_depth.find(key(x, z));
-				if (d != lobby_depth.end() && d->second >= 3 &&
-						floor_mod(u - entry_u, 6) == 3 && v % 5 == 3 && v > 3 &&
-						top_slab(x, z, 1, wood.slab)) {
-					for (const int du : {-1, 1}) {
-						const auto [sx, sz] = world(u + du, v);
-						seat(sx, sz, {du * t.first, du * t.second});
-					}
-				}
-			}
+		if (hall_span.first < 0) {
 			for (const auto &[cell, inward] : walls()) {
 				const auto [x, z] = cell;
-				if (!lobby_zone.contains(key(x, z)))
+				const int v = local(x, z).second;
+				const bool side_wall =
+						inward != n && inward != std::pair{-n.first, -n.second};
+				if (!side_wall || v < 2)
 					continue;
-				if (interior_mix(x, z, seed) % 7 == 0)
-					put(x, z, 1,
-							interior_mix(x, z, 3) % 2 == 0 ? AZALEA : FLOWERING_AZALEA);
-				(void)inward;
+				if (v % 3 == 2)
+					bed(x + inward.first, z + inward.second,
+							{-inward.first, -inward.second});
+				else if (v % 3 == 0) {
+					put(x, z, 1, BARREL);
+					put(x, z, 2, EMPTY_FLOWER_POT);
+				}
 			}
-			for (const auto &[x, z] : lobby_cells)
-				if (free(x, z) && lobby_depth.contains(key(x, z)) &&
-						lobby_depth.at(key(x, z)) >= 2)
-					put(x, z, 1, RED_CARPET);
+			const auto [bx, bz] = world(0, 1);
+			put(bx, bz, 1, WATER_CAULDRON);
 			return;
 		}
-		const bool along_x = max_x - min_x >= max_z - min_z;
-		const int c0 = along_x ? min_z : min_x;
-		const int c1 = along_x ? max_z : max_x;
-		const int span = c1 - c0 + 1;
-		std::pair<int, int> hall_span{-1, -1};
-		if (span >= 14) {
-			const int h0 = c0 + (span - 2) / 2;
-			hall_span = {h0, h0 + 1};
-		} else if (span >= 8) {
-			hall_span = {c0, c0 + 1};
-		}
-		std::unordered_set<std::uint64_t> hall;
-		for (const auto &[x, z] : cells) {
-			const int c = along_x ? z : x;
-			if (hall_span.first >= 0 && c >= hall_span.first && c <= hall_span.second)
-				hall.insert(key(x, z));
-		}
-		for (const auto &[x, z] : cells)
-			if (hall.contains(key(x, z)) && free(x, z))
-				put(x, z, 1, RED_CARPET);
-
-		// Corridor partitions make the guest rooms separate free-cell
-		// components. Furnish each room independently, as Rust's hotel_room does.
 		std::unordered_set<std::uint64_t> visited;
 		for (const auto &[start_x, start_z] : cells) {
-			const auto start_key = key(start_x, start_z);
-			if (hall.contains(start_key) || structural.contains(start_key) ||
-					visited.contains(start_key) ||
-					editor.get_block_absolute(start_x, base_y, start_z))
+			const auto start = key(start_x, start_z);
+			if (hall.contains(start) || structural.contains(start) ||
+					visited.contains(start))
 				continue;
 			std::vector<std::pair<int, int>> room;
 			std::deque<std::pair<int, int>> pending{{start_x, start_z}};
-			visited.insert(start_key);
+			visited.insert(start);
 			while (!pending.empty()) {
 				const auto [x, z] = pending.front();
 				pending.pop_front();
@@ -2854,103 +2670,1032 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					const auto neighbor = key(nx, nz);
 					if (zone.contains(neighbor) && !hall.contains(neighbor) &&
 							!structural.contains(neighbor) &&
-							!visited.contains(neighbor) &&
-							!editor.get_block_absolute(nx, base_y, nz)) {
+							!visited.contains(neighbor)) {
 						visited.insert(neighbor);
 						pending.emplace_back(nx, nz);
 					}
 				}
 			}
-			// Canvas::split_corridor returns only rooms with at least six cells;
-			// smaller isolated fragments remain unfurnished in the Rust plan.
 			if (room.size() < 6)
 				continue;
+			std::unordered_set<std::uint64_t> room_set;
 			int rx0 = room.front().first, rx1 = rx0;
 			int rz0 = room.front().second, rz1 = rz0;
-			std::unordered_set<std::uint64_t> room_cells;
 			for (const auto &[x, z] : room) {
+				room_set.insert(key(x, z));
 				rx0 = std::min(rx0, x);
 				rx1 = std::max(rx1, x);
 				rz0 = std::min(rz0, z);
 				rz1 = std::max(rz1, z);
-				room_cells.insert(key(x, z));
 			}
 			std::pair<int, int> room_n = n;
-			int nearest_door = std::numeric_limits<int>::max();
 			for (const auto &[dx, dz] : door_positions) {
-				for (const auto d : INTERIOR_DIRS) {
-					if (!room_cells.contains(key(dx + d.first, dz + d.second)))
-						continue;
-					const int distance = std::abs(dx - start_x) + std::abs(dz - start_z);
-					if (distance < nearest_door) {
-						nearest_door = distance;
+				bool found = false;
+				for (const auto d : INTERIOR_DIRS)
+					if (room_set.contains(key(dx + d.first, dz + d.second)) &&
+							hall.contains(key(dx - d.first, dz - d.second))) {
 						room_n = d;
+						found = true;
+						break;
 					}
-				}
+				if (found)
+					break;
 			}
 			const std::pair<int, int> room_t{-room_n.second, room_n.first};
-			const int ox = room_n.first + room_t.first > 0 ? rx0 : rx1;
-			const int oz = room_n.second + room_t.second > 0 ? rz0 : rz1;
-			const int room_width = room_t.first != 0 ? rx1 - rx0 + 1 : rz1 - rz0 + 1;
-			const int room_depth = room_n.first != 0 ? rx1 - rx0 + 1 : rz1 - rz0 + 1;
+			const int room_ox = room_n.first + room_t.first > 0 ? rx0 : rx1;
+			const int room_oz = room_n.second + room_t.second > 0 ? rz0 : rz1;
 			auto room_world = [&](int u, int v) {
-				return std::pair{ox + room_t.first * u + room_n.first * v,
-						oz + room_t.second * u + room_n.second * v};
+				return std::pair{room_ox + room_t.first * u + room_n.first * v,
+						room_oz + room_t.second * u + room_n.second * v};
 			};
 			auto room_local = [&](int x, int z) {
-				const int dx = x - ox, dz = z - oz;
+				const int dx = x - room_ox, dz = z - room_oz;
 				return std::pair{dx * room_t.first + dz * room_t.second,
 						dx * room_n.first + dz * room_n.second};
 			};
-			const int room_mid = room_width / 2, back = room_depth - 1;
-			bool slept = false;
-			for (const int du : {0, -1, 1, -2, 2}) {
-				const auto [fx, fz] = room_world(room_mid + du, back - 1);
-				if (!bed(fx, fz, room_n))
-					continue;
-				slept = true;
-				for (const int side : {-1, 1}) {
-					const auto [tx, tz] = room_world(room_mid + du + side, back);
-					if (put(tx, tz, 1, wood.planks))
-						put(tx, tz, 2, LANTERN);
-				}
-				break;
-			}
-			std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>> room_walls;
 			for (const auto &[x, z] : room) {
 				if (!free(x, z))
 					continue;
-				for (const auto d : INTERIOR_DIRS)
-					if (!room_cells.contains(key(x + d.first, z + d.second))) {
-						room_walls.emplace_back(
-								std::pair{x, z}, std::pair{-d.first, -d.second});
-						break;
-					}
-			}
-			bool desk_placed = false;
-			for (const auto &[cell, inward] : room_walls) {
-				const auto [x, z] = cell;
 				const int v = room_local(x, z).second;
-				if (v == 0)
-					continue;
-				if (!desk_placed && v >= 1 && v < back - 1 &&
-						inward != std::pair{-room_n.first, -room_n.second}) {
-					if (top_slab(x, z, 1, wood.slab)) {
-						seat(x + inward.first, z + inward.second, inward);
-						desk_placed = true;
+				for (const auto d : INTERIOR_DIRS) {
+					const auto neighbor = key(x + d.first, z + d.second);
+					if (room_set.contains(neighbor) && !structural.contains(neighbor) &&
+							(!editor.get_block_absolute(
+									 x + d.first, base_y, z + d.second) ||
+									kept.contains(neighbor)))
+						continue;
+					const std::pair<int, int> inward{-d.first, -d.second};
+					const bool side_wall =
+							inward != room_n &&
+							inward != std::pair{-room_n.first, -room_n.second};
+					if (side_wall && v >= 2) {
+						if (v % 3 == 2) {
+							const int bx = x + inward.first, bz = z + inward.second;
+							const int hx = bx - inward.first, hz = bz - inward.second;
+							if (room_set.contains(key(bx, bz)) &&
+									room_set.contains(key(hx, hz)))
+								bed(bx, bz, {-inward.first, -inward.second});
+						} else if (v % 3 == 0) {
+							put(x, z, 1, BARREL);
+							put(x, z, 2, EMPTY_FLOWER_POT);
+						}
 					}
-				} else if (v == 1) {
-					shelf(x, z, 1, inward, interior_mix(x, z, seed));
+					break;
 				}
 			}
-			if (slept)
-				for (const auto &[x, z] : room)
-					if (free(x, z))
-						put(x, z, 1, LIGHT_GRAY_CARPET);
+			const auto [bx, bz] = room_world(0, 1);
+			if (room_set.contains(key(bx, bz)))
+				put(bx, bz, 1, WATER_CAULDRON);
 		}
 		return;
 	}
-}
+	if (kind == interior_uses::UseKind::Clinic ||
+			kind == interior_uses::UseKind::Hospital) {
+		if (clinic_layout) {
+			const bool along_x = max_x - min_x >= max_z - min_z;
+			const int a0 = along_x ? min_x : min_z;
+			const int a1 = along_x ? max_x : max_z;
+			const int c0 = along_x ? min_z : min_x;
+			const int c1 = along_x ? max_z : max_x;
+			const int span = c1 - c0 + 1;
+			if (span >= 7) {
+				const int hall_c0 = span >= 12 ? c0 + (span - 2) / 2 : c0;
+				const int hall_c1 = hall_c0 + 1;
+				const std::size_t side_count = span >= 12 ? 2 : 1;
+				const int length = a1 - a0 + 1;
+				const std::size_t room_count =
+						static_cast<std::size_t>(std::max((length + 1) / 6, 1));
+				std::vector<int> starts;
+				starts.reserve(room_count + 1);
+				for (std::size_t k = 0; k <= room_count; ++k)
+					starts.push_back(a0 + static_cast<int>((k * static_cast<std::size_t>(
+																		length + 1)) /
+														   room_count));
+				std::optional<std::pair<std::size_t, std::size_t>> lobby;
+				if (entry) {
+					const int a = along_x ? entry->cell.first : entry->cell.second;
+					const int c = along_x ? entry->cell.second : entry->cell.first;
+					std::optional<std::size_t> side;
+					if (c < hall_c0)
+						side = 0;
+					else if (c > hall_c1)
+						side = side_count == 1 ? 0 : 1;
+					if (side)
+						for (std::size_t k = 0; k < room_count; ++k)
+							if (a >= starts[k] && a < starts[k + 1]) {
+								lobby = std::pair{*side, k};
+								break;
+							}
+				}
+
+				std::unordered_set<std::uint64_t> hall;
+				for (const auto &[x, z] : cells) {
+					const int a = along_x ? x : z;
+					const int c = along_x ? z : x;
+					if (c >= hall_c0 && c <= hall_c1) {
+						hall.insert(key(x, z));
+						continue;
+					}
+					if (!lobby || a < starts[lobby->second] ||
+							a >= starts[lobby->second + 1])
+						continue;
+					const bool lobby_side =
+							side_count == 1
+									? c > hall_c1
+									: (lobby->first == 0 ? c < hall_c0 : c > hall_c1);
+					if (lobby_side)
+						hall.insert(key(x, z));
+				}
+
+				int hx0 = std::numeric_limits<int>::max();
+				int hx1 = std::numeric_limits<int>::min();
+				int hz0 = std::numeric_limits<int>::max();
+				int hz1 = std::numeric_limits<int>::min();
+				for (const auto &[x, z] : cells)
+					if (hall.contains(key(x, z))) {
+						hx0 = std::min(hx0, x);
+						hx1 = std::max(hx1, x);
+						hz0 = std::min(hz0, z);
+						hz1 = std::max(hz1, z);
+					}
+				if (hx0 > hx1 || hz0 > hz1)
+					return;
+				const std::pair<int, int> hall_n =
+						entry ? entry->inward
+							  : (hx1 - hx0 >= hz1 - hz0 ? std::pair{1, 0}
+														: std::pair{0, 1});
+				const std::pair<int, int> hall_t{-hall_n.second, hall_n.first};
+				const int hall_ox = hall_n.first + hall_t.first > 0 ? hx0 : hx1;
+				const int hall_oz = hall_n.second + hall_t.second > 0 ? hz0 : hz1;
+				const int hall_width = hall_t.first != 0 ? hx1 - hx0 + 1 : hz1 - hz0 + 1;
+				auto hall_world = [&](int u, int v) {
+					return std::pair{hall_ox + hall_t.first * u + hall_n.first * v,
+							hall_oz + hall_t.second * u + hall_n.second * v};
+				};
+				auto hall_local = [&](int x, int z) {
+					const int dx = x - hall_ox, dz = z - hall_oz;
+					return std::pair{dx * hall_t.first + dz * hall_t.second,
+							dx * hall_n.first + dz * hall_n.second};
+				};
+				const int hall_entry_u =
+						entry ? hall_local(entry->cell.first, entry->cell.second).first
+							  : hall_width / 2;
+				for (int v = 1; v <= 2; ++v) {
+					const auto [x, z] = hall_world(hall_entry_u + 2, v);
+					if (hall.contains(key(x, z)))
+						put(x, z, 1, QUARTZ_BLOCK);
+				}
+				for (const auto &[x, z] : cells) {
+					if (!hall.contains(key(x, z)) || !free(x, z))
+						continue;
+					const auto [u, v] = hall_local(x, z);
+					if (v < 1 || std::abs(u - hall_entry_u) <= 3 ||
+							interior_mix(x, z, seed) % 3 == 0)
+						continue;
+					for (const auto d : INTERIOR_DIRS)
+						if (!hall.contains(key(x + d.first, z + d.second)) ||
+								structural.contains(key(x + d.first, z + d.second))) {
+							seat(x, z, {-d.first, -d.second});
+							break;
+						}
+				}
+				const auto [plant_x, plant_z] = hall_world(0, 1);
+				if (hall.contains(key(plant_x, plant_z))) {
+					const auto h = interior_mix(plant_x, plant_z, seed);
+					const std::array<Block, 4> plants = {AZALEA, FLOWERING_AZALEA,
+							POTTED_RED_TULIP, POTTED_BLUE_ORCHID};
+					put(plant_x, plant_z, 1, plants[h % plants.size()]);
+				}
+
+				// Mirror Canvas::split_corridor: each corridor-side interval is its
+				// own exam room, except the entry interval, which becomes reception.
+				for (std::size_t side = 0; side < side_count; ++side) {
+					const int wall_c =
+							span >= 12 ? (side == 0 ? hall_c0 - 1 : hall_c1 + 1) : c0 + 2;
+					const int toward_hall_c = span >= 12 ? (side == 0 ? 1 : -1) : -1;
+					const std::pair<int, int> room_n =
+							along_x ? std::pair{0, -toward_hall_c}
+									: std::pair{-toward_hall_c, 0};
+					for (std::size_t k = 0; k < room_count; ++k) {
+						if (lobby == std::pair{side, k})
+							continue;
+						const int side_lo = starts[k];
+						const int side_hi =
+								k + 1 < room_count ? starts[k + 1] - 1 : starts[k + 1];
+						std::vector<std::pair<int, int>> room;
+						for (const auto &[x, z] : cells) {
+							const int a = along_x ? x : z;
+							const int c = along_x ? z : x;
+							const bool on_side =
+									span >= 12 ? (side == 0 ? c < hall_c0 : c > hall_c1)
+											   : c > hall_c1;
+							if (!on_side || c == wall_c || a < side_lo || a >= side_hi)
+								continue;
+							room.emplace_back(x, z);
+						}
+						if (room.size() < 6)
+							continue;
+						int rx0 = room.front().first, rx1 = rx0;
+						int rz0 = room.front().second, rz1 = rz0;
+						for (const auto &[x, z] : room) {
+							rx0 = std::min(rx0, x);
+							rx1 = std::max(rx1, x);
+							rz0 = std::min(rz0, z);
+							rz1 = std::max(rz1, z);
+						}
+						const std::pair<int, int> room_t{-room_n.second, room_n.first};
+						const int room_ox = room_n.first + room_t.first > 0 ? rx0 : rx1;
+						const int room_oz = room_n.second + room_t.second > 0 ? rz0 : rz1;
+						auto room_local = [&](int x, int z) {
+							const int dx = x - room_ox, dz = z - room_oz;
+							return std::pair{dx * room_t.first + dz * room_t.second,
+									dx * room_n.first + dz * room_n.second};
+						};
+						std::unordered_set<std::uint64_t> room_set;
+						for (const auto &[x, z] : room)
+							room_set.insert(key(x, z));
+						std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>>
+								room_walls;
+						for (const auto &[x, z] : room) {
+							if (!free(x, z))
+								continue;
+							for (const auto d : INTERIOR_DIRS)
+								if (!room_set.contains(key(x + d.first, z + d.second)) ||
+										structural.contains(
+												key(x + d.first, z + d.second)) ||
+										editor.get_block_absolute(
+												x + d.first, base_y, z + d.second)) {
+									room_walls.emplace_back(std::pair{x, z},
+											std::pair{-d.first, -d.second});
+									break;
+								}
+						}
+						std::stable_sort(room_walls.begin(), room_walls.end(),
+								[&](const auto &a, const auto &b) {
+									return room_local(a.first.first, a.first.second)
+												   .second >
+										   room_local(b.first.first, b.first.second)
+												   .second;
+								});
+						for (const auto &[cell, inward] : room_walls) {
+							if (bed(cell.first + inward.first,
+										cell.second + inward.second,
+										{-inward.first, -inward.second}))
+								break;
+						}
+						int fixture = 0;
+						for (auto it = room_walls.rbegin();
+								it != room_walls.rend() && fixture < 3; ++it) {
+							const auto &[cell, inward] = *it;
+							bool placed = false;
+							if (fixture == 0)
+								placed = put(cell.first, cell.second, 1, WATER_CAULDRON);
+							else if (fixture == 1) {
+								placed = top_slab(
+										cell.first, cell.second, 1, SMOOTH_QUARTZ_SLAB);
+								if (placed)
+									seat(cell.first + inward.first,
+											cell.second + inward.second,
+											{-inward.first, -inward.second});
+							} else
+								placed = put(cell.first, cell.second, 1, BARREL);
+							if (placed)
+								++fixture;
+						}
+					}
+				}
+				return;
+			}
+			// Rust's non-corridor clinic path keeps reception at the front and
+			// partitions off a five-cell-deep exam room at the back.
+			const int wall_v = depth - 5;
+			if (wall_v > 0 && std::any_of(door_positions.begin(), door_positions.end(),
+									  [&](const auto &door) {
+										  return structural.contains(
+														 key(door.first, door.second)) &&
+												 local(door.first, door.second).second ==
+														 wall_v;
+									  })) {
+				std::vector<std::pair<int, int>> room;
+				std::unordered_set<std::uint64_t> room_set;
+				int rx0 = std::numeric_limits<int>::max();
+				int rx1 = std::numeric_limits<int>::min();
+				int rz0 = std::numeric_limits<int>::max();
+				int rz1 = std::numeric_limits<int>::min();
+				for (const auto &[x, z] : cells) {
+					if (local(x, z).second <= wall_v)
+						continue;
+					room.emplace_back(x, z);
+					room_set.insert(key(x, z));
+					rx0 = std::min(rx0, x);
+					rx1 = std::max(rx1, x);
+					rz0 = std::min(rz0, z);
+					rz1 = std::max(rz1, z);
+				}
+				if (room.size() >= 6) {
+					for (int v = 1; v <= 2; ++v) {
+						const auto [x, z] = world(entry_u + 2, v);
+						if (local(x, z).second < wall_v)
+							put(x, z, 1, QUARTZ_BLOCK);
+					}
+					for (const auto &[cell, inward] : walls()) {
+						const auto [x, z] = cell;
+						if (local(x, z).second < wall_v &&
+								std::abs(local(x, z).first - entry_u) > 3 &&
+								interior_mix(x, z, seed) % 3 != 0)
+							seat(x, z, inward);
+					}
+					const std::pair<int, int> room_t{-n.second, n.first};
+					const int room_ox = n.first + room_t.first > 0 ? rx0 : rx1;
+					const int room_oz = n.second + room_t.second > 0 ? rz0 : rz1;
+					auto room_local = [&](int x, int z) {
+						const int dx = x - room_ox, dz = z - room_oz;
+						return std::pair{dx * room_t.first + dz * room_t.second,
+								dx * n.first + dz * n.second};
+					};
+					std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>>
+							room_walls;
+					for (const auto &[x, z] : room) {
+						if (!free(x, z))
+							continue;
+						for (const auto d : INTERIOR_DIRS)
+							if (!room_set.contains(key(x + d.first, z + d.second)) ||
+									structural.contains(key(x + d.first, z + d.second)) ||
+									editor.get_block_absolute(
+											x + d.first, base_y, z + d.second)) {
+								room_walls.emplace_back(
+										std::pair{x, z}, std::pair{-d.first, -d.second});
+								break;
+							}
+					}
+					std::stable_sort(room_walls.begin(), room_walls.end(),
+							[&](const auto &a, const auto &b) {
+								return room_local(a.first.first, a.first.second).second >
+									   room_local(b.first.first, b.first.second).second;
+							});
+					for (const auto &[cell, inward] : room_walls)
+						if (bed(cell.first + inward.first, cell.second + inward.second,
+									{-inward.first, -inward.second}))
+							break;
+					int fixture = 0;
+					for (auto it = room_walls.rbegin();
+							it != room_walls.rend() && fixture < 3; ++it) {
+						const auto &[cell, inward] = *it;
+						bool placed = false;
+						if (fixture == 0)
+							placed = put(cell.first, cell.second, 1, WATER_CAULDRON);
+						else if (fixture == 1) {
+							placed = top_slab(
+									cell.first, cell.second, 1, SMOOTH_QUARTZ_SLAB);
+							if (placed)
+								seat(cell.first + inward.first,
+										cell.second + inward.second,
+										{-inward.first, -inward.second});
+						} else
+							placed = put(cell.first, cell.second, 1, BARREL);
+						if (placed)
+							++fixture;
+					}
+					const auto [plant_x, plant_z] = world(0, 1);
+					if (local(plant_x, plant_z).second < wall_v)
+						plant(0, 1);
+					return;
+				}
+			}
+			for (int v = 1; v <= 2; ++v) {
+				const auto [x, z] = world(entry_u + 2, v);
+				put(x, z, 1, QUARTZ_BLOCK);
+			}
+			for (const auto &[cell, inward] : walls()) {
+				const auto [x, z] = cell;
+				const auto [u, v] = local(x, z);
+				if (v >= 1 && std::abs(u - entry_u) > 3 &&
+						interior_mix(x, z, seed) % 3 != 0)
+					seat(x, z, inward);
+			}
+			if (!clinic_layout) {
+				bool bed_placed = false;
+				for (const auto &[cell, inward] : walls()) {
+					const auto [x, z] = cell;
+					const int bx = x + inward.first, bz = z + inward.second;
+					if (!bed_placed)
+						bed_placed = bed(bx, bz, {-inward.first, -inward.second});
+				}
+			}
+			plant(0, 1);
+			return;
+		}
+		if (kind == interior_uses::UseKind::Museum) {
+			const std::array<Block, 8> exhibits = {AMETHYST_CLUSTER, GOLD_BLOCK, LANTERN,
+					BREWING_STAND, ANVIL, POTTED_BLUE_ORCHID, END_ROD,
+					CHISELED_STONE_BRICKS};
+			for (const auto &[x, z] : cells) {
+				const auto [u, v] = local(x, z);
+				const auto d = depth_at.find(key(x, z));
+				if (d == depth_at.end() || d->second < 3 ||
+						floor_mod(u - entry_u, 4) != 2 || v % 4 != 3)
+					continue;
+				const auto h = interior_mix(x, z, seed);
+				const Block plinth =
+						h % 2 == 0 ? CHISELED_QUARTZ_BLOCK : POLISHED_ANDESITE;
+				if (put(x, z, 1, plinth))
+					put(x, z, 2, exhibits[(h >> 8) % exhibits.size()]);
+			}
+			for (const auto &[cell, inward] : walls()) {
+				const auto [x, z] = cell;
+				const auto h = interior_mix(x, z, seed ^ 0x3EULL);
+				if (local(x, z).second >= 2 && h % 3 == 0 && put(x, z, 1, SMOOTH_QUARTZ))
+					put(x, z, 2, exhibits[(h >> 8) % exhibits.size()]);
+				(void)inward;
+			}
+			for (int v = 1; v <= 2; ++v) {
+				const auto [x, z] = world(entry_u + 2, v);
+				put(x, z, 1, wood.planks);
+			}
+			return;
+		}
+		if (kind == interior_uses::UseKind::Station) {
+			for (const auto &[cell, inward] : walls()) {
+				const auto [x, z] = cell;
+				const int v = local(x, z).second;
+				if (inward == std::pair{-t.first, -t.second} && v >= 2 && v <= 6) {
+					put(x, z, 1, POLISHED_ANDESITE);
+					if (headroom >= 3)
+						put(x, z, 2, IRON_BARS);
+				}
+			}
+			const int board_y = std::min(headroom, 4);
+			for (int du = -2; du <= 2; ++du) {
+				const auto [x, z] = world(width / 2 + du, depth - 1);
+				mount(x, z, board_y, {-n.first, -n.second}, BLACK_CONCRETE);
+			}
+			for (const auto &[x, z] : cells) {
+				const auto [u, v] = local(x, z);
+				const auto d = depth_at.find(key(x, z));
+				if (d == depth_at.end() || d->second < 3 ||
+						floor_mod(u - entry_u, 5) < 1 || floor_mod(u - entry_u, 5) > 3 ||
+						v < 4)
+					continue;
+				if (v % 5 == 1)
+					seat(x, z, {-n.first, -n.second});
+				else if (v % 5 == 2)
+					seat(x, z, n);
+			}
+			const auto [kx, kz] = world(width - 2, 1);
+			if (put(kx, kz, 1, wood.planks))
+				put(kx, kz, 2, CAKE);
+			plant(0, 1);
+			return;
+		}
+		if (kind == interior_uses::UseKind::Office) {
+			int office_wall_v = depth;
+			if (depth >= 14 && cells.size() >= 160) {
+				const int wall_v = depth - 6;
+				std::vector<std::pair<int, int>> back_cells;
+				std::vector<std::pair<int, int>> wall_cells;
+				for (const auto &[x, z] : cells) {
+					const int v = local(x, z).second;
+					if (v > wall_v)
+						back_cells.emplace_back(x, z);
+					else if (v == wall_v)
+						wall_cells.emplace_back(x, z);
+				}
+				std::sort(wall_cells.begin(), wall_cells.end(),
+						[&](const auto &a, const auto &b) {
+							return std::abs(local(a.first, a.second).first - width / 2) <
+								   std::abs(local(b.first, b.second).first - width / 2);
+						});
+				std::optional<std::pair<int, int>> meeting_door;
+				auto walkable = [&](int x, int z) {
+					const auto cell = key(x, z);
+					const auto top = claimed_top.find(cell);
+					return zone.contains(cell) && !structural.contains(cell) &&
+						   (top == claimed_top.end() ||
+								   top->second <= floor_metres + 1.0) &&
+						   (!passages.contains(x, z) || floor_y >= passage_top) &&
+						   !editor.get_block_absolute(x, base_y, z);
+				};
+				if (back_cells.size() >= 6 && !wall_cells.empty()) {
+					for (const auto &[x, z] : wall_cells) {
+						const auto [front_x, front_z] =
+								std::pair{x - n.first, z - n.second};
+						const auto [back_x, back_z] =
+								std::pair{x + n.first, z + n.second};
+						if (walkable(front_x, front_z) && walkable(back_x, back_z)) {
+							meeting_door = std::pair{x, z};
+							break;
+						}
+					}
+				}
+				if (meeting_door) {
+					office_wall_v = wall_v;
+					const int top_y = base_y + (ceiling_y - floor_y) - 1;
+					for (const auto &[x, z] : wall_cells) {
+						const auto cell_key = key(x, z);
+						structural.insert(cell_key);
+						planned.insert(cell_key);
+						if (std::pair{x, z} == *meeting_door) {
+							const char *facing = ladder_facing(n);
+							const BlockWithProperties lower{DARK_OAK_DOOR_LOWER,
+									{{"half", "lower"}, {"facing", facing},
+											{"hinge", "left"}}};
+							const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
+									{{"half", "upper"}, {"facing", facing},
+											{"hinge", "left"}}};
+							editor.set_block_with_properties_absolute(
+									lower, x, base_y, z, std::nullopt, std::nullopt);
+							if (top_y > base_y)
+								editor.set_block_with_properties_absolute(upper, x,
+										base_y + 1, z, std::nullopt, std::nullopt);
+							door_positions.emplace_back(x, z);
+							continue;
+						}
+						wall_positions.emplace_back(x, z);
+						for (int y = base_y; y <= top_y; ++y)
+							editor.set_block_absolute(
+									wall_block, x, y, z, std::nullopt, std::nullopt);
+					}
+
+					// Rust's long_frame aligns the meeting table to the back room's
+					// longer dimension and turns it around when the door is at the far end.
+					int back_min_x = back_cells.front().first, back_max_x = back_min_x;
+					int back_min_z = back_cells.front().second, back_max_z = back_min_z;
+					for (const auto &[x, z] : back_cells) {
+						back_min_x = std::min(back_min_x, x);
+						back_max_x = std::max(back_max_x, x);
+						back_min_z = std::min(back_min_z, z);
+						back_max_z = std::max(back_max_z, z);
+					}
+					const std::pair<int, int> positive =
+							back_max_x - back_min_x >= back_max_z - back_min_z
+									? std::pair{1, 0}
+									: std::pair{0, 1};
+					auto frame_for = [&](std::pair<int, int> room_n) {
+						const std::pair<int, int> room_t{-room_n.second, room_n.first};
+						const int room_ox =
+								room_n.first + room_t.first > 0 ? back_min_x : back_max_x;
+						const int room_oz = room_n.second + room_t.second > 0
+													? back_min_z
+													: back_max_z;
+						const int room_width = room_t.first != 0
+													   ? back_max_x - back_min_x + 1
+													   : back_max_z - back_min_z + 1;
+						const int room_depth = room_n.first != 0
+													   ? back_max_x - back_min_x + 1
+													   : back_max_z - back_min_z + 1;
+						return std::tuple{
+								room_ox, room_oz, room_n, room_t, room_width, room_depth};
+					};
+					auto positive_frame = frame_for(positive);
+					const int p_ox = std::get<0>(positive_frame);
+					const int p_oz = std::get<1>(positive_frame);
+					const auto p_n = std::get<2>(positive_frame);
+					const int p_depth = std::get<5>(positive_frame);
+					const int door_v =
+							(meeting_door->first + n.first - p_ox) * p_n.first +
+							(meeting_door->second + n.second - p_oz) * p_n.second;
+					const auto room_n = door_v > p_depth / 2 ? std::pair{-positive.first,
+																	   -positive.second}
+															 : positive;
+					const auto [room_ox, room_oz, room_frame_n, room_t, room_width,
+							room_depth] = frame_for(room_n);
+					auto room_world = [&](int u, int v) {
+						return std::pair{
+								room_ox + room_t.first * u + room_frame_n.first * v,
+								room_oz + room_t.second * u + room_frame_n.second * v};
+					};
+					const int table_u = room_width / 2;
+					for (int v = 2; v < room_depth - 2; ++v) {
+						const auto table = room_world(table_u, v);
+						if (!free(table.first, table.second))
+							continue;
+						const auto left = room_world(table_u - 1, v);
+						const auto right = room_world(table_u + 1, v);
+						const bool left_free = free(left.first, left.second);
+						const bool right_free = free(right.first, right.second);
+						if (!left_free && !right_free)
+							continue;
+						top_slab(table.first, table.second, 1, wood.slab);
+						if (left_free)
+							seat(left.first, left.second, room_t);
+						if (right_free)
+							seat(right.first, right.second,
+									{-room_t.first, -room_t.second});
+					}
+					const auto plant_cell = room_world(table_u, room_depth - 1);
+					put(plant_cell.first, plant_cell.second, 1,
+							seed % 2 ? FLOWERING_AZALEA : AZALEA);
+				}
+			}
+			if (floor_index == 0 && cells.size() >= 60) {
+				for (const int side : {1, -1}) {
+					const int u = entry_u + 2 * side;
+					std::array<std::pair<int, int>, 3> desk;
+					bool fits = true;
+					for (int v = 1; v <= 3; ++v) {
+						desk[v - 1] = world(u, v);
+						fits &= free(desk[v - 1].first, desk[v - 1].second);
+					}
+					if (!fits)
+						continue;
+					for (std::size_t i = 0; i < desk.size(); ++i) {
+						put(desk[i].first, desk[i].second, 1, wood.planks);
+						if (i == 1)
+							put(desk[i].first, desk[i].second, 2, EMPTY_FLOWER_POT);
+					}
+					for (int v = 1; v <= 3; ++v) {
+						const auto [x, z] = world(u + side, v);
+						kept.insert(key(x, z));
+					}
+					break;
+				}
+			}
+			for (const auto &[x, z] : cells) {
+				const auto d = depth_at.find(key(x, z));
+				const auto [u, v] = local(x, z);
+				if (v > office_wall_v || d == depth_at.end() || d->second < 2 || v < 3 ||
+						(v % 4 != 1 && v % 4 != 2))
+					continue;
+				switch (floor_mod(u - entry_u, 6)) {
+				case 2:
+				case 3:
+					top_slab(x, z, 1, wood.slab);
+					put(x, z, 2, GLASS_PANE);
+					break;
+				case 1:
+					seat(x, z, t);
+					break;
+				case 4:
+					seat(x, z, {-t.first, -t.second});
+					break;
+				default:
+					break;
+				}
+			}
+			for (const auto &[cell, inward] : walls()) {
+				const auto [x, z] = cell;
+				if (local(x, z).second > office_wall_v)
+					continue;
+				const auto h = interior_mix(x, z, seed);
+				if (local(x, z).second <= 3 && h % 7 == 0) {
+					if (put(x, z, 1, WHITE_CONCRETE) && headroom >= 3)
+						put(x, z, 2, LIGHT_BLUE_STAINED_GLASS);
+					continue;
+				}
+				switch (h % 8) {
+				case 0:
+					shelf(x, z, 1, inward, h);
+					break;
+				case 1:
+					put(x, z, 1, BARREL);
+					break;
+				case 2:
+					put(x, z, 1, h & 0x100 ? AZALEA : FLOWERING_AZALEA);
+					break;
+				default:
+					break;
+				}
+			}
+		}
+		if (kind == interior_uses::UseKind::Hotel) {
+			if (floor_index == 0 && floor_count > 1) {
+				std::vector<std::pair<int, int>> lobby_cells = cells;
+				std::unordered_set<std::uint64_t> lobby_zone = zone;
+				std::unordered_map<std::uint64_t, int> lobby_depth;
+				if (depth >= 16 && cells.size() >= 200) {
+					const int wall_v = depth / 2;
+					const int top_y = base_y + (ceiling_y - floor_y) - 1;
+					std::optional<std::pair<int, int>> door_cell;
+					std::vector<std::pair<int, int>> back_cells, wall_cells;
+					for (const auto &[x, z] : cells) {
+						const int v = local(x, z).second;
+						if (v > wall_v)
+							back_cells.emplace_back(x, z);
+						else if (v == wall_v)
+							wall_cells.emplace_back(x, z);
+					}
+					std::sort(wall_cells.begin(), wall_cells.end(),
+							[](const auto &a, const auto &b) {
+								return std::pair{a.second, a.first} <
+									   std::pair{b.second, b.first};
+							});
+					std::stable_sort(wall_cells.begin(), wall_cells.end(),
+							[&](const auto &a, const auto &b) {
+								return std::abs(local(a.first, a.second).first -
+												width / 2) <
+									   std::abs(local(b.first, b.second).first -
+												width / 2);
+							});
+					auto walkable = [&](int x, int z) {
+						const auto cell = key(x, z);
+						const auto claim = claimed_top.find(cell);
+						return zone.contains(cell) && !structural.contains(cell) &&
+							   (claim == claimed_top.end() ||
+									   claim->second <= floor_metres + 1.0) &&
+							   (!passages.contains(x, z) || floor_y >= passage_top) &&
+							   (kept.contains(cell) ||
+									   !editor.get_block_absolute(x, base_y, z));
+					};
+					if (back_cells.size() >= 6) {
+						for (const auto &[x, z] : wall_cells) {
+							if (walkable(x - n.first, z - n.second) &&
+									walkable(x + n.first, z + n.second)) {
+								door_cell = std::pair{x, z};
+								break;
+							}
+						}
+					}
+					if (door_cell) {
+						std::vector<std::pair<int, int>> restaurant_cells;
+						for (const auto &[x, z] : cells) {
+							const auto [u, v] = local(x, z);
+							if (v > wall_v) {
+								restaurant_cells.emplace_back(x, z);
+								lobby_zone.erase(key(x, z));
+							} else if (v >= wall_v) {
+								lobby_zone.erase(key(x, z));
+							}
+							if (v == wall_v && std::pair{x, z} != *door_cell) {
+								const auto cell_key = key(x, z);
+								structural.insert(cell_key);
+								planned.insert(cell_key);
+								if (kept.contains(cell_key) ||
+										editor.get_block_absolute(x, base_y, z))
+									continue;
+								wall_positions.emplace_back(x, z);
+								for (int y = base_y; y <= top_y; ++y)
+									editor.set_block_absolute(wall_block, x, y, z,
+											std::nullopt, std::nullopt);
+							}
+							(void)u;
+						}
+						const auto [dx, dz] = *door_cell;
+						const auto door_key = key(dx, dz);
+						structural.insert(door_key);
+						planned.insert(door_key);
+						door_positions.push_back(*door_cell);
+						if (!kept.contains(door_key) &&
+								!editor.get_block_absolute(dx, base_y, dz)) {
+							const char *door_facing = ladder_facing(n);
+							const BlockWithProperties lower{DARK_OAK_DOOR_LOWER,
+									{{"half", "lower"}, {"facing", door_facing},
+											{"hinge", "left"}}};
+							const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
+									{{"half", "upper"}, {"facing", door_facing},
+											{"hinge", "left"}}};
+							editor.set_block_with_properties_absolute(
+									lower, dx, base_y, dz, std::nullopt, std::nullopt);
+							if (top_y > base_y)
+								editor.set_block_with_properties_absolute(upper, dx,
+										base_y + 1, dz, std::nullopt, std::nullopt);
+						}
+						const auto restaurant_entry_cell =
+								std::pair{dx + n.first, dz + n.second};
+						const auto lobby_entry_cell =
+								std::pair{dx - n.first, dz - n.second};
+						kept.insert(key(restaurant_entry_cell.first,
+								restaurant_entry_cell.second));
+						kept.insert(key(lobby_entry_cell.first, lobby_entry_cell.second));
+						lobby_cells.erase(
+								std::remove_if(lobby_cells.begin(), lobby_cells.end(),
+										[&](const auto &cell) {
+											return !lobby_zone.contains(
+													key(cell.first, cell.second));
+										}),
+								lobby_cells.end());
+						interior_uses::Unit restaurant = unit;
+						restaurant.use.kind = interior_uses::UseKind::Food;
+						restaurant.use.eatery = interior_uses::Eatery::Restaurant;
+						const std::vector<interior_uses::Entry> restaurant_entries = {
+								{restaurant_entry_cell, n}};
+						furnish_eatery(editor, restaurant, restaurant_cells,
+								restaurant_entries, door_positions, structural, kept,
+								claimed_top, passages, floor_metres, passage_top, floor_y,
+								base_y, ceiling_y, seed, wood_seed, loot_salt);
+					}
+				}
+				std::deque<std::pair<int, int>> lobby_queue;
+				for (const auto &[x, z] : lobby_cells) {
+					if (structural.contains(key(x, z)) ||
+							editor.get_block_absolute(x, base_y, z))
+						continue;
+					if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
+								[&](const auto &d) {
+									return !lobby_zone.contains(
+												   key(x + d.first, z + d.second)) ||
+										   structural.contains(
+												   key(x + d.first, z + d.second));
+								})) {
+						lobby_depth.emplace(key(x, z), 1);
+						lobby_queue.emplace_back(x, z);
+					}
+				}
+				while (!lobby_queue.empty()) {
+					const auto [x, z] = lobby_queue.front();
+					lobby_queue.pop_front();
+					const int next = lobby_depth.at(key(x, z)) + 1;
+					for (const auto d : INTERIOR_DIRS) {
+						const int nx = x + d.first, nz = z + d.second;
+						if (!lobby_zone.contains(key(nx, nz)) ||
+								structural.contains(key(nx, nz)) ||
+								editor.get_block_absolute(nx, base_y, nz))
+							continue;
+						if (lobby_depth.emplace(key(nx, nz), next).second)
+							lobby_queue.emplace_back(nx, nz);
+					}
+				}
+				for (int v = 2; v <= 4; ++v) {
+					const auto [x, z] = world(entry_u + 3, v);
+					if (lobby_zone.contains(key(x, z)))
+						put(x, z, 1, wood.planks);
+				}
+				for (const auto &[x, z] : lobby_cells) {
+					const auto [u, v] = local(x, z);
+					const auto d = lobby_depth.find(key(x, z));
+					if (d != lobby_depth.end() && d->second >= 3 &&
+							floor_mod(u - entry_u, 6) == 3 && v % 5 == 3 && v > 3 &&
+							top_slab(x, z, 1, wood.slab)) {
+						for (const int du : {-1, 1}) {
+							const auto [sx, sz] = world(u + du, v);
+							if (lobby_zone.contains(key(sx, sz)))
+								seat(sx, sz, {-du * t.first, -du * t.second});
+						}
+					}
+				}
+				for (const auto &[cell, inward] : walls()) {
+					const auto [x, z] = cell;
+					if (!lobby_zone.contains(key(x, z)))
+						continue;
+					if (interior_mix(x, z, seed) % 7 == 0)
+						put(x, z, 1,
+								interior_mix(x, z, 3) % 2 == 0 ? AZALEA
+															   : FLOWERING_AZALEA);
+					(void)inward;
+				}
+				for (const auto &[x, z] : lobby_cells)
+					if (free(x, z) && lobby_depth.contains(key(x, z)) &&
+							lobby_depth.at(key(x, z)) >= 2)
+						put(x, z, 1, RED_CARPET);
+				return;
+			}
+			const bool along_x = max_x - min_x >= max_z - min_z;
+			const int c0 = along_x ? min_z : min_x;
+			const int c1 = along_x ? max_z : max_x;
+			const int span = c1 - c0 + 1;
+			std::pair<int, int> hall_span{-1, -1};
+			if (span >= 14) {
+				const int h0 = c0 + (span - 2) / 2;
+				hall_span = {h0, h0 + 1};
+			} else if (span >= 8) {
+				hall_span = {c0, c0 + 1};
+			}
+			std::unordered_set<std::uint64_t> hall;
+			for (const auto &[x, z] : cells) {
+				const int c = along_x ? z : x;
+				if (hall_span.first >= 0 && c >= hall_span.first && c <= hall_span.second)
+					hall.insert(key(x, z));
+			}
+			for (const auto &[x, z] : cells)
+				if (hall.contains(key(x, z)) && free(x, z))
+					put(x, z, 1, RED_CARPET);
+
+			// Corridor partitions make the guest rooms separate free-cell
+			// components. Furnish each room independently, as Rust's hotel_room does.
+			std::unordered_set<std::uint64_t> visited;
+			for (const auto &[start_x, start_z] : cells) {
+				const auto start_key = key(start_x, start_z);
+				if (hall.contains(start_key))
+					continue;
+				std::vector<std::pair<int, int>> room;
+				if (hall_span.first < 0) {
+					if (!visited.empty())
+						continue;
+					room = cells;
+					for (const auto &[x, z] : room)
+						visited.insert(key(x, z));
+				} else {
+					if (structural.contains(start_key) || visited.contains(start_key))
+						continue;
+					std::deque<std::pair<int, int>> pending{{start_x, start_z}};
+					visited.insert(start_key);
+					while (!pending.empty()) {
+						const auto [x, z] = pending.front();
+						pending.pop_front();
+						room.emplace_back(x, z);
+						for (const auto d : INTERIOR_DIRS) {
+							const int nx = x + d.first, nz = z + d.second;
+							const auto neighbor = key(nx, nz);
+							if (zone.contains(neighbor) && !hall.contains(neighbor) &&
+									!structural.contains(neighbor) &&
+									!visited.contains(neighbor)) {
+								visited.insert(neighbor);
+								pending.emplace_back(nx, nz);
+							}
+						}
+					}
+				}
+				// Canvas::split_corridor returns only rooms with at least six cells;
+				// smaller isolated fragments remain unfurnished in the Rust plan.
+				if (room.size() < 6)
+					continue;
+				int rx0 = room.front().first, rx1 = rx0;
+				int rz0 = room.front().second, rz1 = rz0;
+				std::unordered_set<std::uint64_t> room_cells;
+				for (const auto &[x, z] : room) {
+					rx0 = std::min(rx0, x);
+					rx1 = std::max(rx1, x);
+					rz0 = std::min(rz0, z);
+					rz1 = std::max(rz1, z);
+					room_cells.insert(key(x, z));
+				}
+				std::pair<int, int> room_n = n;
+				if (hall_span.first >= 0)
+					for (const auto &[dx, dz] : door_positions) {
+						bool found = false;
+						for (const auto d : INTERIOR_DIRS)
+							if (room_cells.contains(key(dx + d.first, dz + d.second)) &&
+									hall.contains(key(dx - d.first, dz - d.second))) {
+								room_n = d;
+								found = true;
+								break;
+							}
+						if (found)
+							break;
+					}
+				const std::pair<int, int> room_t{-room_n.second, room_n.first};
+				const int ox = room_n.first + room_t.first > 0 ? rx0 : rx1;
+				const int oz = room_n.second + room_t.second > 0 ? rz0 : rz1;
+				const int room_width = room_t.first != 0 ? rx1 - rx0 + 1 : rz1 - rz0 + 1;
+				const int room_depth = room_n.first != 0 ? rx1 - rx0 + 1 : rz1 - rz0 + 1;
+				auto room_world = [&](int u, int v) {
+					return std::pair{ox + room_t.first * u + room_n.first * v,
+							oz + room_t.second * u + room_n.second * v};
+				};
+				auto room_local = [&](int x, int z) {
+					const int dx = x - ox, dz = z - oz;
+					return std::pair{dx * room_t.first + dz * room_t.second,
+							dx * room_n.first + dz * room_n.second};
+				};
+				const int room_mid = room_width / 2, back = room_depth - 1;
+				bool slept = false;
+				for (const int du : {0, -1, 1, -2, 2}) {
+					const auto [fx, fz] = room_world(room_mid + du, back - 1);
+					if (!room_cells.contains(key(fx, fz)) ||
+							!room_cells.contains(
+									key(fx + room_n.first, fz + room_n.second)))
+						continue;
+					if (!bed(fx, fz, room_n))
+						continue;
+					slept = true;
+					for (const int side : {-1, 1}) {
+						const auto [tx, tz] = room_world(room_mid + du + side, back);
+						if (room_cells.contains(key(tx, tz)) &&
+								put(tx, tz, 1, wood.planks))
+							put(tx, tz, 2, LANTERN);
+					}
+					break;
+				}
+				std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>>
+						room_walls;
+				for (const auto &[x, z] : room) {
+					if (!free(x, z))
+						continue;
+					for (const auto d : INTERIOR_DIRS)
+						if (!room_cells.contains(key(x + d.first, z + d.second)) ||
+								structural.contains(key(x + d.first, z + d.second)) ||
+								editor.get_block_absolute(
+										x + d.first, base_y, z + d.second)) {
+							room_walls.emplace_back(
+									std::pair{x, z}, std::pair{-d.first, -d.second});
+							break;
+						}
+				}
+				bool desk_placed = false;
+				for (const auto &[cell, inward] : room_walls) {
+					const auto [x, z] = cell;
+					const int v = room_local(x, z).second;
+					if (v == 0)
+						continue;
+					if (!desk_placed && v >= 1 && v < back - 1 &&
+							inward != std::pair{-room_n.first, -room_n.second}) {
+						const int sx = x + inward.first, sz = z + inward.second;
+						if (top_slab(x, z, 1, wood.slab)) {
+							if (room_cells.contains(key(sx, sz)))
+								seat(sx, sz, {-inward.first, -inward.second});
+							desk_placed = true;
+						}
+					} else if (v == 1) {
+						shelf(x, z, 1, inward, interior_mix(x, z, seed));
+					}
+				}
+				if (slept)
+					for (const auto &[x, z] : room)
+						if (free(x, z))
+							put(x, z, 1, LIGHT_GRAY_CARPET);
+			}
+			return;
+		}
+	}
 }
 
 // INTERIOR1_LAYER1
@@ -3430,6 +4175,8 @@ inline std::optional<Block> get_interior_block(char c, bool is_layer2, Block wal
 		return {}; // Default case for unknown characters
 	}
 }
+
+} // namespace
 
 /// Generates interior layouts inside buildings at each floor level
 void generate_building_interior(WorldEditor &editor, const InteriorRequest &request)
@@ -4697,92 +5444,99 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				}
 			}
 
-			// Port Canvas::light_up: keep light coverage within the same planned
-			// zone, account for existing lights, and hang lanterns in tall rooms.
-			std::unordered_set<std::uint64_t> wall_cells;
-			for (const auto &p : wall_positions)
-				wall_cells.insert(interior_cell_key(p.first, p.second));
-			std::unordered_set<std::uint64_t> door_cells;
-			for (const auto &p : door_positions)
-				door_cells.insert(interior_cell_key(p.first, p.second));
-			std::vector<std::pair<int, int>> open_cells;
-			for (const auto &[x, z] : floor_area) {
-				const auto key = interior_cell_key(x, z);
-				if (!initially_walkable_cells.contains(key) || wall_cells.contains(key) ||
-						door_cells.contains(key))
-					continue;
-				if (building_passages.contains(x, z) &&
-						floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														   building_height))
-					continue;
-				open_cells.emplace_back(x, z);
-			}
-			const int top = current_floor_ceiling + abs_terrain_offset;
-			const int absolute_floor = floor_y + abs_terrain_offset;
-			const bool slab_above = floor_index + 1 < floor_levels.size();
-			const int sunk = slab_above ? top + 1 : absolute_floor;
-			auto is_light_block = [](const Block &block) {
-				return block == GLOWSTONE || block == SEA_LANTERN ||
-					   block == SHROOMLIGHT || block == LANTERN ||
-					   block == SOUL_LANTERN || block == END_ROD;
-			};
-			std::unordered_set<std::uint64_t> lit;
-			for (const auto &[x, z] : open_cells) {
-				for (const int y : {top, sunk}) {
-					const auto block = editor.get_block_absolute(x, y, z);
-					if (block && is_light_block(*block)) {
-						lit.insert(interior_cell_key(x, z));
-						break;
-					}
+			// Rust only calls Canvas::light_up for occupied (non-abandoned)
+			// interiors. Abandoned layouts keep their intentionally dark pattern.
+			if (!is_abandoned_building) {
+				// Port Canvas::light_up: keep light coverage within the same planned
+				// zone, account for existing lights, and hang lanterns in tall rooms.
+				std::unordered_set<std::uint64_t> wall_cells;
+				for (const auto &p : wall_positions)
+					wall_cells.insert(interior_cell_key(p.first, p.second));
+				std::unordered_set<std::uint64_t> door_cells;
+				for (const auto &p : door_positions)
+					door_cells.insert(interior_cell_key(p.first, p.second));
+				std::vector<std::pair<int, int>> open_cells;
+				for (const auto &[x, z] : floor_area) {
+					const auto key = interior_cell_key(x, z);
+					if (!initially_walkable_cells.contains(key) ||
+							wall_cells.contains(key) || door_cells.contains(key))
+						continue;
+					if (building_passages.contains(x, z) &&
+							floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
+															   building_height))
+						continue;
+					open_cells.emplace_back(x, z);
 				}
-			}
-			const int headroom = top - absolute_floor;
-			if (headroom >= 6) {
-				const BlockWithProperties chain{CHAIN_X, {{"axis", "y"}}};
-				const BlockWithProperties lantern{LANTERN, {{"hanging", "true"}}};
+				const int top = current_floor_ceiling + abs_terrain_offset;
+				const int absolute_floor = floor_y + abs_terrain_offset;
+				const bool slab_above = floor_index + 1 < floor_levels.size();
+				const int sunk = slab_above ? top + 1 : absolute_floor;
+				auto is_light_block = [](const Block &block) {
+					return block == GLOWSTONE || block == SEA_LANTERN ||
+						   block == SHROOMLIGHT || block == LANTERN ||
+						   block == SOUL_LANTERN || block == END_ROD;
+				};
+				std::unordered_set<std::uint64_t> lit;
 				for (const auto &[x, z] : open_cells) {
-					if (floor_mod(x, 5) != 2 || floor_mod(z, 5) != 2)
-						continue;
-					if (editor.get_block_absolute(x, absolute_floor + 1, z))
-						continue;
-					for (int dy = 5; dy <= headroom; ++dy)
-						editor.set_block_with_properties_absolute(chain, x,
-								absolute_floor + dy, z, std::nullopt, std::nullopt);
-					editor.set_block_with_properties_absolute(lantern, x,
-							absolute_floor + 4, z, std::nullopt, std::nullopt);
-					lit.insert(interior_cell_key(x, z));
-				}
-			}
-			for (const auto &[x, z] : open_cells) {
-				if (floor_mod(x + 2 * z, 5) != 0)
-					continue;
-				const auto key = interior_cell_key(x, z);
-				const auto zone_it = zone_of.find(key);
-				const auto zone =
-						zone_it == zone_of.end() ? std::uint16_t{1} : zone_it->second;
-				bool near_light = false;
-				for (int dx = -2; dx <= 2 && !near_light; ++dx)
-					for (int dz = -2; dz <= 2; ++dz) {
-						const auto nearby = interior_cell_key(x + dx, z + dz);
-						const auto nearby_zone = zone_of.find(nearby);
-						const auto same_zone = nearby_zone == zone_of.end()
-													   ? std::uint16_t{1}
-													   : nearby_zone->second;
-						if (same_zone == zone && lit.contains(nearby)) {
-							near_light = true;
+					for (const int y : {top, sunk}) {
+						const auto block = editor.get_block_absolute(x, y, z);
+						if (block && is_light_block(*block)) {
+							lit.insert(interior_cell_key(x, z));
 							break;
 						}
 					}
-				if (near_light)
-					continue;
-				if (headroom >= 3)
-					editor.set_block_absolute(
-							GLOWSTONE, x, top, z, std::nullopt, std::nullopt);
-				else
-					editor.set_block_absolute(GLOWSTONE, x, sunk, z,
-							std::optional<std::vector<Block>>(
-									std::vector<Block>{floor_block}),
-							std::nullopt);
+				}
+				const int headroom = top - absolute_floor;
+				if (headroom >= 6) {
+					const BlockWithProperties chain{CHAIN_X, {{"axis", "y"}}};
+					const BlockWithProperties lantern{LANTERN, {{"hanging", "true"}}};
+					for (const auto &[x, z] : open_cells) {
+						if (floor_mod(x, 5) != 2 || floor_mod(z, 5) != 2)
+							continue;
+						// Canvas marks a cell Used when furnishing places its
+						// standing-height block. Higher-only furnishings leave it
+						// walkable, so they must not suppress this chandelier.
+						if (editor.get_block_absolute(x, absolute_floor + 1, z))
+							continue;
+						for (int dy = 5; dy <= headroom; ++dy)
+							editor.set_block_with_properties_absolute(chain, x,
+									absolute_floor + dy, z, std::nullopt, std::nullopt);
+						editor.set_block_with_properties_absolute(lantern, x,
+								absolute_floor + 4, z, std::nullopt, std::nullopt);
+						lit.insert(interior_cell_key(x, z));
+					}
+				}
+				for (const auto &[x, z] : open_cells) {
+					if (floor_mod(x + 2 * z, 5) != 0)
+						continue;
+					const auto key = interior_cell_key(x, z);
+					const auto zone_it = zone_of.find(key);
+					const auto zone =
+							zone_it == zone_of.end() ? std::uint16_t{1} : zone_it->second;
+					bool near_light = false;
+					for (int dx = -2; dx <= 2 && !near_light; ++dx)
+						for (int dz = -2; dz <= 2; ++dz) {
+							const auto nearby = interior_cell_key(x + dx, z + dz);
+							const auto nearby_zone = zone_of.find(nearby);
+							const auto same_zone = nearby_zone == zone_of.end()
+														   ? std::uint16_t{1}
+														   : nearby_zone->second;
+							if (same_zone == zone && lit.contains(nearby)) {
+								near_light = true;
+								break;
+							}
+						}
+					if (near_light)
+						continue;
+					if (headroom >= 3)
+						editor.set_block_absolute(
+								GLOWSTONE, x, top, z, std::nullopt, std::nullopt);
+					else
+						editor.set_block_absolute(GLOWSTONE, x, sunk, z,
+								std::optional<std::vector<Block>>(
+										std::vector<Block>{floor_block}),
+								std::nullopt);
+				}
 			}
 			if (shaft_open && shaft && floor_index + 1 < floor_levels.size()) {
 				const auto [cell, inward] = *shaft;

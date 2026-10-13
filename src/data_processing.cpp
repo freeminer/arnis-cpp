@@ -22,7 +22,9 @@
 #include <mutex>
 #include <unordered_map>
 #include <thread>
+#include <future>
 #include <tuple>
+#include <stdexcept>
 
 #include "../../arnis_adapter.h"
 #include "../../arnis_ground.h"
@@ -71,6 +73,8 @@
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
 #include "elevation/elevation.h"
+#include "one_world.h"
+#include "projection/web_mercator.h"
 #include "trees/mapped.h"
 #include "models_3d/pipeline.h"
 #include "models_3d/placement_executor.h"
@@ -88,6 +92,80 @@ namespace arnis
 
 namespace
 {
+struct GroundFetchPlan
+{
+	std::array<double, 4>
+			bounds{}; // min latitude, max latitude, min longitude, max longitude
+	std::size_t world_width{0}, world_height{0};
+	std::size_t grid_width{0}, grid_height{0};
+	std::size_t pad{0};
+	bool remap_mercator{false};
+};
+
+GroundFetchPlan make_ground_fetch_plan(
+		const Args &args, const std::array<double, 4> &geographic, const XZBBox &xzbbox)
+{
+	GroundFetchPlan plan;
+	plan.bounds = geographic;
+	plan.world_width = static_cast<std::size_t>(
+			std::max<std::int64_t>(1, std::int64_t(xzbbox.max_x()) - xzbbox.min_x() + 1));
+	plan.world_height = static_cast<std::size_t>(
+			std::max<std::int64_t>(1, std::int64_t(xzbbox.max_z()) - xzbbox.min_z() + 1));
+	const auto original_grid =
+			elevation::compute_grid_dims_for_world(plan.world_width, plan.world_height);
+	plan.grid_width = std::get<2>(original_grid);
+	plan.grid_height = std::get<3>(original_grid);
+
+	// Rust's GroundFrame pads One World's source grids before fetching so the
+	// smoothing kernels have data beyond the generated edge, then crops back to
+	// the exact world rectangle. If the padded grid would be capped, it drops
+	// the padding rather than resampling a non-exact crop.
+	if (!args.one_world_run)
+		return plan;
+	const auto pad_blocks = one_world::ground_pad_blocks(args.scale);
+	if (pad_blocks <= 0)
+		return plan;
+	const auto pad = static_cast<std::size_t>(pad_blocks);
+	if (plan.world_width > std::numeric_limits<std::size_t>::max() - 2 * pad ||
+			plan.world_height > std::numeric_limits<std::size_t>::max() - 2 * pad)
+		return plan;
+	const auto padded_width = plan.world_width + 2 * pad;
+	const auto padded_height = plan.world_height + 2 * pad;
+	const auto padded_grid =
+			elevation::compute_grid_dims_for_world(padded_width, padded_height);
+	const auto padded_grid_width = std::get<2>(padded_grid);
+	const auto padded_grid_height = std::get<3>(padded_grid);
+	if (padded_grid_width != padded_width || padded_grid_height != padded_height)
+		return plan;
+
+	const auto &run = *args.one_world_run;
+	const projection::WebMercatorProjection projected(
+			run.origin_lat, run.origin_lon, args.scale);
+	const double x0 = static_cast<double>(projection::snap_edge(
+							  projected.x_for_lon(geographic[2]), false)) -
+					  static_cast<double>(pad) + 0.5;
+	const double z0 = static_cast<double>(projection::snap_edge(
+							  projected.z_for_lat(geographic[1]), false)) -
+					  static_cast<double>(pad) + 0.5;
+	const double x1 = x0 + static_cast<double>(padded_width - 1);
+	const double z1 = z0 + static_cast<double>(padded_height - 1);
+	try {
+		const ::arnis::geographic::LLBBox padded_bounds(projected.lat_for_z(z1),
+				projected.lon_for_x(x0), projected.lat_for_z(z0),
+				projected.lon_for_x(x1));
+		plan.bounds = {padded_bounds.min().lat(), padded_bounds.max().lat(),
+				padded_bounds.min().lng(), padded_bounds.max().lng()};
+		plan.grid_width = padded_grid_width;
+		plan.grid_height = padded_grid_height;
+		plan.pad = pad;
+		plan.remap_mercator = true;
+	} catch (const std::invalid_argument &) {
+		// Match GroundFrame::fetch_plan: invalid padded bounds fall back to the
+		// original request and its unpadded dimensions.
+	}
+	return plan;
+}
+
 std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		const std::filesystem::path &root, const std::string &realm, double latitude,
 		double longitude, double scale, int ground_level, arnis::trees::TreeSize max_size,
@@ -562,6 +640,71 @@ std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
 		}
 	}
 	return result;
+}
+
+struct TileFillReaders
+{
+	std::vector<std::vector<std::uint64_t>> tile_ids;
+	std::unordered_map<std::uint64_t, std::size_t> remaining_readers;
+};
+
+TileFillReaders compute_tile_fill_readers(
+		const std::vector<std::vector<std::size_t>> &tile_assignments,
+		const std::vector<ProcessedElement> &elements,
+		const std::unordered_map<std::uint64_t, std::uint64_t> &part_groups,
+		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
+				&group_members,
+		const FloodFillCache &cache)
+{
+	TileFillReaders result;
+	result.tile_ids.reserve(tile_assignments.size());
+	for (const auto &assigned : tile_assignments) {
+		std::vector<std::uint64_t> ids;
+		auto add_with_siblings = [&](std::uint64_t id) {
+			ids.push_back(id);
+			const auto group = part_groups.find(id);
+			const auto seed = group == part_groups.end() ? id : group->second;
+			for (const auto key : {osm_parser::seed_without_hint(seed),
+						 osm_parser::seed_without_hint(id)})
+				if (const auto members = group_members.find(key);
+						members != group_members.end())
+					ids.insert(ids.end(), members->second.begin(), members->second.end());
+		};
+		for (const auto element_index : assigned) {
+			const auto &element = elements[element_index];
+			if (element.is_way()) {
+				add_with_siblings(element.as_way().id);
+			} else if (element.is_relation()) {
+				add_with_siblings(element.as_relation().id);
+				for (const auto &member : element.as_relation().members)
+					add_with_siblings(member.way.id);
+			}
+		}
+		ids.erase(std::remove_if(ids.begin(), ids.end(),
+						  [&](std::uint64_t id) { return !cache.contains(id); }),
+				ids.end());
+		std::sort(ids.begin(), ids.end());
+		ids.erase(std::unique(ids.begin(), ids.end()), ids.end());
+		for (const auto id : ids)
+			++result.remaining_readers[id];
+		result.tile_ids.push_back(std::move(ids));
+	}
+	return result;
+}
+
+void release_tile_fills(const std::vector<std::uint64_t> &ids,
+		std::unordered_map<std::uint64_t, std::size_t> &remaining_readers,
+		FloodFillCache &cache)
+{
+	for (const auto id : ids) {
+		const auto found = remaining_readers.find(id);
+		if (found == remaining_readers.end() || found->second == 0)
+			continue;
+		if (--found->second == 0) {
+			cache.release(id);
+			remaining_readers.erase(found);
+		}
+	}
 }
 
 namespace
@@ -1257,7 +1400,7 @@ bool generate_world(WorldEditor &editor,
 				std::filesystem::path(__FILE__).parent_path().parent_path() /
 						"cave-pack"};
 		for (const auto &candidate : cave_pack_candidates)
-			if (std::filesystem::is_directory(candidate)) {
+			if (std::filesystem::is_regular_file(candidate / "cave_pack.json")) {
 				editor.set_cave_asset_root(candidate);
 				break;
 			}
@@ -1266,9 +1409,9 @@ bool generate_world(WorldEditor &editor,
 	// are Java-only; the editor still receives the requested map-item policy,
 	// while the format-specific exporter decides whether to emit it.
 	const bool java_format = !args.bedrock && !args.luanti;
-	// Voxy/Lod output also requires baked light data in the Rust pipeline,
-	// even when the user did not explicitly request Java lighting.
-	editor.set_bake_lighting(args.bake_lighting || args.voxy_lod);
+	// Rust only enables Voxy-driven baked lighting for Java Anvil worlds.
+	// Keep the same format gate for direct C++ callers as well.
+	editor.set_bake_lighting(args.bake_lighting || (args.voxy_lod && java_format));
 	editor.set_start_with_map(args.map_item);
 	editor.set_map_decals(java_format);
 	editor.clear_facade_panels();
@@ -1277,6 +1420,17 @@ bool generate_world(WorldEditor &editor,
 			args.building_facades_dir
 					? std::optional<std::filesystem::path>(*args.building_facades_dir)
 					: std::nullopt;
+	if (!facade_directory && args.building_facades) {
+		// Rust's resolver accepts a replacement facade pack from the environment
+		// before searching the packaged assets. Keep an invalid override from
+		// masking the usable packaged set, matching manifest::resolve().
+		if (const char *override_dir = std::getenv("ARNIS_BUILDING_FACADES_DIR");
+				override_dir && *override_dir) {
+			const std::filesystem::path candidate(override_dir);
+			if (std::filesystem::is_regular_file(candidate / "manifest.json"))
+				facade_directory = candidate;
+		}
+	}
 	if (!facade_directory && args.building_facades) {
 		// Match Rust's executable/repository asset search instead of depending
 		// on the caller's current working directory.
@@ -1549,7 +1703,7 @@ bool generate_world(WorldEditor &editor,
 												  .fetch("stadium.glb")
 												  .has_value();
 									  },
-									  0.0, landmark_plan.suppressed))
+									  args.rotation, landmark_plan.suppressed))
 					: std::nullopt;
 	// Match Rust's specificity ordering: smaller ground-cover polygons render
 	// first, then larger areas fill the remaining uncovered cells.
@@ -1601,24 +1755,31 @@ bool generate_world(WorldEditor &editor,
 			elements, xzbbox, args.scale, facade_attribution_dir);
 	building_facades::set_world_extent(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
-	if (editor.ground && !editor.ground->has_land_cover()) {
+	const auto ground_geographic = editor.geographic_bounds();
+	const auto ground_fetch_plan =
+			make_ground_fetch_plan(args, ground_geographic, xzbbox);
+	if (editor.ground && args.body == CelestialBody::Earth &&
+			!editor.ground->has_land_cover()) {
 		// Match Ground::new_enabled: land-cover samples use the same world/grid
-		// dimensions as elevation, before applying OSM water/land overrides.
-		const auto geographic = editor.geographic_bounds();
-		const auto world_width = static_cast<std::size_t>(max_x - min_x + 1);
-		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
-		const auto grid_dims =
-				elevation::compute_grid_dims_for_world(world_width, world_height);
-		const auto grid_width = std::get<2>(grid_dims);
-		const auto grid_height = std::get<3>(grid_dims);
+		// dimensions as elevation. One World additionally fetches a padded,
+		// Mercator-row-remapped source grid and crops to the generated rectangle.
 		auto land_cover = land_cover::fetch_land_cover_data(
-				{geographic[0], geographic[2], geographic[1], geographic[3]}, grid_width,
-				grid_height);
-		if (land_cover.width == 0 || land_cover.height == 0)
+				{ground_fetch_plan.bounds[0], ground_fetch_plan.bounds[2],
+						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[3]},
+				ground_fetch_plan.grid_width, ground_fetch_plan.grid_height);
+		if (land_cover.width == 0 || land_cover.height == 0) {
 			land_cover = build_osm_water_land_cover(elements, xzbbox);
+		} else {
+			if (ground_fetch_plan.remap_mercator)
+				land_cover.remap_rows_to_mercator(
+						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[0]);
+			if (ground_fetch_plan.pad > 0)
+				land_cover.crop(ground_fetch_plan.pad, ground_fetch_plan.pad,
+						ground_fetch_plan.world_width, ground_fetch_plan.world_height);
+		}
 		if (land_cover.width > 0 && land_cover.height > 0) {
-			editor.ground->set_land_cover_data(
-					std::move(land_cover), world_width, world_height);
+			editor.ground->set_land_cover_data(std::move(land_cover),
+					ground_fetch_plan.world_width, ground_fetch_plan.world_height);
 		}
 	}
 	// Rust fetches canopy alongside land cover and only enables it for Earth.
@@ -1627,19 +1788,22 @@ bool generate_world(WorldEditor &editor,
 	// by tree placement and the natural-surface pass.
 	if (editor.ground && args.canopy_height && args.body == CelestialBody::Earth &&
 			!editor.ground->has_canopy()) {
-		const auto geographic = editor.geographic_bounds();
-		const auto world_width = static_cast<std::size_t>(max_x - min_x + 1);
-		const auto world_height = static_cast<std::size_t>(max_z - min_z + 1);
-		const auto grid_dims =
-				elevation::compute_grid_dims_for_world(world_width, world_height);
-		const auto grid_width = std::get<2>(grid_dims);
-		const auto grid_height = std::get<3>(grid_dims);
 		if (auto canopy = canopy::fetch_canopy_data(cache::provider_cache_root("canopy"),
-					geographic[0], geographic[2], geographic[1], geographic[3],
-					grid_width, grid_height))
-			editor.ground->set_canopy_data(std::move(*canopy), world_width, world_height);
+					ground_fetch_plan.bounds[0], ground_fetch_plan.bounds[2],
+					ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[3],
+					ground_fetch_plan.grid_width, ground_fetch_plan.grid_height)) {
+			if (ground_fetch_plan.remap_mercator)
+				canopy->remap_rows_to_mercator(
+						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[0]);
+			if (ground_fetch_plan.pad > 0)
+				canopy->crop(ground_fetch_plan.pad, ground_fetch_plan.pad,
+						ground_fetch_plan.world_width, ground_fetch_plan.world_height);
+			editor.ground->set_canopy_data(std::move(*canopy),
+					ground_fetch_plan.world_width, ground_fetch_plan.world_height);
+		}
 	}
-	if (editor.ground && editor.ground->has_land_cover()) {
+	if (editor.ground && args.body == CelestialBody::Earth &&
+			editor.ground->has_land_cover()) {
 		auto &land_cover = *editor.ground->land_cover;
 		// These are elevation-mutating passes in Rust. Run them through Ground so
 		// water snapping and bridge repair update the authoritative DEM, rather
@@ -1653,10 +1817,8 @@ bool generate_world(WorldEditor &editor,
 		if (args.debug)
 			editor.ground->save_land_cover_debug_image(
 					"landcover_debug_post_bridge_repair");
-		// Each override deliberately invalidates the interpolated shoreline
-		// field. Rebuild it only after the complete Rust-equivalent override
-		// sequence so the ground pass sees OSM-correct water and smooth coasts.
-		land_cover.refresh_water_blend_grid();
+		// The shoreline field stays invalidated until Rust's first water-blend
+		// access in ground generation, after all land-cover mutations are done.
 	}
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
 			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
@@ -1685,13 +1847,17 @@ bool generate_world(WorldEditor &editor,
 		editor.set_decal_registry(context ? context->registry : nullptr);
 	}
 	if (editor.decal_registry && !editor.decal_frame_sink) {
-		editor.set_decal_frame_sink([&editor](const WorldEditor::DecalFrame &frame) {
-			const auto texture = decal_texture(*editor.decal_registry, frame.map_id);
-			if (!texture)
-				return false;
-			Block node = block_definitions::DECAL_FRAME;
-			editor.set_block_absolute(
-					node, frame.x, frame.y, frame.z, std::nullopt, std::nullopt);
+		editor.set_decal_frame_sink(
+				[](WorldEditor &target, const WorldEditor::DecalFrame &frame) {
+					if (!target.decal_registry)
+						return false;
+					const auto texture =
+							decal_texture(*target.decal_registry, frame.map_id);
+					if (!texture)
+						return false;
+					Block node = block_definitions::DECAL_FRAME;
+					target.set_block_absolute(
+							node, frame.x, frame.y, frame.z, std::nullopt, std::nullopt);
 #if defined(__clang__)
 #pragma clang diagnostic push
 #pragma clang diagnostic ignored "-Wc++11-narrowing"
@@ -1699,15 +1865,17 @@ bool generate_world(WorldEditor &editor,
 #pragma GCC diagnostic push
 #pragma GCC diagnostic ignored "-Wnarrowing"
 #endif
-			return editor.mg &&
-				   editor.mg->queueGeneratedDecal({frame.x, frame.y, frame.z}, *texture,
-						   frame.map_id, frame.facing, frame.rotation, frame.glow);
+					return target.mg &&
+						   target.mg->queueGeneratedDecal(target.active_tile_overlay,
+								   {frame.x, frame.y, frame.z}, *texture, frame.map_id,
+								   frame.facing, frame.rotation, frame.glow);
 #if defined(__clang__)
 #pragma clang diagnostic pop
 #elif defined(__GNUC__)
 #pragma GCC diagnostic pop
 #endif
-		});
+				},
+				true);
 	}
 	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
 	// Pre-scan still water surfaces for consistent water levels across tiles
@@ -1739,8 +1907,8 @@ bool generate_world(WorldEditor &editor,
 	// that mode so both mapped and land-cover trees take the same micro path.
 	if (shared_selector && args.scale >= MICRO_TREE_MAX_SCALE) {
 		editor.set_regional_tree_placer(
-				[&editor, shared_selector, &building_footprints, &bridge_surface](int x,
-						int y, int z, std::uint8_t cover,
+				[shared_selector, &building_footprints, &bridge_surface](
+						WorldEditor &tile_editor, int x, int y, int z, std::uint8_t cover,
 						std::optional<trees::Habitat> habitat_hint, bool tagged,
 						bool wet_ground, bool allow_on_paved,
 						bool density_decided) -> std::optional<bool> {
@@ -1750,57 +1918,63 @@ bool generate_world(WorldEditor &editor,
 					const auto [slot_x, slot_z] =
 							trees::trunk_slot_s(x, z, shared_selector->base_spacing());
 					const auto slot_cover =
-							editor.ground ? editor.ground->cover_class(
-													editor.ground_point(slot_x, slot_z))
-										  : cover;
+							tile_editor.ground
+									? tile_editor.ground->cover_class(
+											  tile_editor.ground_point(slot_x, slot_z))
+									: cover;
 					request.wet_ground =
-							editor.ground ? slot_cover == land_cover::LC_WETLAND ||
-													slot_cover == land_cover::LC_MANGROVES
-										  : wet_ground;
-					request.eco = editor.ground
-										  ? editor.ground->ecoregion_at(
-													editor.ground_point(slot_x, slot_z))
-										  : std::nullopt;
-					request.want_size = editor.canopy_size_hint(slot_x, slot_z);
+							tile_editor.ground
+									? slot_cover == land_cover::LC_WETLAND ||
+											  slot_cover == land_cover::LC_MANGROVES
+									: wet_ground;
+					request.eco =
+							tile_editor.ground
+									? tile_editor.ground->ecoregion_at(
+											  tile_editor.ground_point(slot_x, slot_z))
+									: std::nullopt;
+					request.want_size = tile_editor.canopy_size_hint(slot_x, slot_z);
 					if (request.eco) {
 						const int beach_radius = std::clamp(
-								static_cast<int>(std::lround(12.0 * editor.scale())), 2,
-								12);
+								static_cast<int>(std::lround(12.0 * tile_editor.scale())),
+								2, 12);
 						for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
 									 {{0, 0}, {beach_radius, 0}, {-beach_radius, 0},
 											 {0, beach_radius}, {0, -beach_radius}}})
-							if (editor.ground &&
-									editor.ground->cover_class(editor.ground_point(
-											slot_x + dx, slot_z + dz)) ==
+							if (tile_editor.ground &&
+									tile_editor.ground->cover_class(
+											tile_editor.ground_point(
+													slot_x + dx, slot_z + dz)) ==
 											land_cover::LC_BEACH) {
 								request.beach = true;
 								break;
 							}
 					}
 					if (!habitat_hint)
-						return trees::place_selected_region_tree_for_cover(editor,
+						return trees::place_selected_region_tree_for_cover(tile_editor,
 								*shared_selector, x, z, slot_cover, y, request,
 								&building_footprints, &bridge_surface, allow_on_paved);
-					return trees::place_selected_region_tree(editor, *shared_selector, x,
-							z, *habitat_hint, y, request, &building_footprints,
-							&bridge_surface, allow_on_paved);
-				});
+					return trees::place_selected_region_tree(tile_editor,
+							*shared_selector, x, z, *habitat_hint, y, request,
+							&building_footprints, &bridge_surface, allow_on_paved);
+				},
+				true);
 		editor.set_mapped_regional_tree_placer(
-				[&editor, shared_selector, &building_footprints, &bridge_surface](int x,
-						int y, int z, std::uint8_t cover,
+				[shared_selector, &building_footprints, &bridge_surface](
+						WorldEditor &tile_editor, int x, int y, int z, std::uint8_t cover,
 						const trees::MappedRequest &request) -> std::optional<bool> {
 					(void)cover;
 					// Tree::create_mapped passes an absolute placement height, while
 					// schematic placement expects an offset from local ground.
-					const int ground_y = editor.get_ground_level(x, z);
+					const int ground_y = tile_editor.get_ground_level(x, z);
 					const int y_offset = y - ground_y;
 					// Rust falls back to the requested absolute base when sampled
 					// terrain elevation is unavailable.
-					const int elevation = editor.terrain_level(x, z).value_or(y);
-					return trees::place_selected_mapped_region_tree(editor,
+					const int elevation = tile_editor.terrain_level(x, z).value_or(y);
+					return trees::place_selected_mapped_region_tree(tile_editor,
 							*shared_selector, x, z, elevation, y_offset, request,
 							&building_footprints, &bridge_surface);
-				});
+				},
+				true);
 	}
 	struct RegionalTreeScope
 	{
@@ -1813,8 +1987,13 @@ bool generate_world(WorldEditor &editor,
 	} regional_tree_scope{editor};
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
-	std::vector<std::pair<int, int>> subway_points;
-	std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
+	struct ElementDispatchState
+	{
+		std::optional<highways::HighwayConnectivity> highway_connectivity;
+		std::vector<std::pair<int, int>> subway_points;
+		std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
+	};
+	ElementDispatchState dispatch_state;
 	auto tunnel_internal_endpoints =
 			highways::collect_tunnel_internal_endpoints(elements, xzbbox);
 	auto tunnel_portals = highways::collect_tunnel_portals(
@@ -1917,47 +2096,102 @@ bool generate_world(WorldEditor &editor,
 			element_tasks.emplace_back(
 					element_index, std::numeric_limits<std::size_t>::max());
 	}
-	auto last_fill_use = compute_last_fill_use(
-			render_elements, element_tasks, building_part_groups, building_group_members);
-	const auto expiring_fills = fills_expiring_at(last_fill_use);
+	std::optional<TileFillReaders> tile_fill_reader_state;
+	FillExpirations expiring_fills;
+	if (tiled_element_dispatch) {
+		// Rust counts one reader per tile, including relation members and every
+		// building-part sibling that can be reached from that tile. Keep this
+		// accounting even while the Freeminer host executes tiles serially: it is
+		// the correct lifetime boundary for the bounded tile-worker path and frees
+		// a fill as soon as its last assigned tile has consumed it.
+		tile_fill_reader_state =
+				compute_tile_fill_readers(element_assignments, render_elements,
+						building_part_groups, building_group_members, flood_fill_cache);
+	} else {
+		auto last_fill_use = compute_last_fill_use(render_elements, element_tasks,
+				building_part_groups, building_group_members);
+		expiring_fills = fills_expiring_at(last_fill_use);
+	}
+	auto release_task_fills = [&](std::size_t task_index) {
+		if (!tile_fill_reader_state)
+			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
+	};
+	auto release_tile_fills_for = [&](std::size_t tile_index) {
+		if (tile_fill_reader_state &&
+				tile_index < tile_fill_reader_state->tile_ids.size())
+			release_tile_fills(tile_fill_reader_state->tile_ids[tile_index],
+					tile_fill_reader_state->remaining_readers, flood_fill_cache);
+	};
 
 	// All roads share the same immutable connectivity for this pass.
-	std::optional<highways::HighwayConnectivity> highway_connectivity;
 	const auto geo_bounds = editor.geographic_bounds();
 	const auto marking_index =
 			road_markings::RoadMarkingIndex::build(elements, args.scale,
 					decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 							(geo_bounds[2] + geo_bounds[3]) * .5));
-	// Rust finalizes each Java tile immediately after its elements. Keep the
-	// same order on the shared C++ editor: strict bounds provide tile ownership,
-	// while all generation inputs (ground, masks and relation fills) remain shared.
+	// Rust builds Java tiles against independent editors, then merges results in
+	// stable order in bounded batches. Only use worker editors when the host
+	// supplies overlay-backed writes and backend callbacks are tile-safe.
 	const bool regional_ground_passes =
 			tiled_element_dispatch && java_format && element_tiles.size() >= 3;
-	auto begin_generation_tile = [&](std::size_t tile_index) {
+	const bool parallel_tile_workers =
+			regional_ground_passes && bool(editor.begin_tile_sink) &&
+			bool(editor.merge_tile_sink) && editor.tile_worker_callbacks_safe();
+	const auto tile_batch_size =
+			std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+	std::size_t deferred_tiles_in_batch = 0;
+	if (regional_ground_passes)
+		editor.set_defer_tile_merges(true);
+	auto begin_generation_tile = [&](WorldEditor &tile_editor, std::size_t tile_index) {
 		const auto &tile = element_tiles[tile_index];
 		const int min_x = std::max(tile.min_x, xzbbox.min_x());
 		const int max_x = std::min(tile.max_x - 1, xzbbox.max_x());
 		const int min_z = std::max(tile.min_z, xzbbox.min_z());
 		const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
-		editor.set_strict_bounds(min_x, min_z, max_x, max_z);
-		const bool began =
-				editor.begin_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		tile_editor.set_strict_bounds(min_x, min_z, max_x, max_z);
+		const bool began = tile_editor.begin_tile(
+				tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
 		if (!began)
-			editor.report_generation_error("failed to begin tile overlay");
+			tile_editor.report_generation_error("failed to begin tile overlay");
 		return began;
 	};
-	auto finish_ground_tile = [&](std::size_t tile_index) {
+	auto merge_finished_tile = [&](WorldEditor &tile_editor, const TileBounds &tile) {
+		const bool merged = tile_editor.merge_tile(
+				tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		if (!merged) {
+			editor.report_generation_error("failed to finish tile overlay");
+			return false;
+		}
+		if (&tile_editor != &editor &&
+				!editor.merge_tile_worker(std::move(tile_editor), tile.min_x, tile.min_z,
+						tile.max_x - 1, tile.max_z - 1)) {
+			editor.report_generation_error("failed to collect tile worker result");
+			return false;
+		}
+		if (++deferred_tiles_in_batch >= tile_batch_size) {
+			deferred_tiles_in_batch = 0;
+			if (!editor.flush_deferred_tile_merges()) {
+				editor.report_generation_error("failed to merge tile overlay batch");
+				return false;
+			}
+		}
+		return true;
+	};
+	auto finish_ground_tile = [&](WorldEditor &tile_editor,
+									  ElementDispatchState &tile_state,
+									  std::size_t tile_index,
+									  bool return_worker_result = false) {
+		WorldEditor &editor = tile_editor;
 		const auto &tile = element_tiles[tile_index];
 		const int min_x = std::max(tile.min_x, xzbbox.min_x());
 		const int max_x = std::min(tile.max_x - 1, xzbbox.max_x());
 		const int min_z = std::max(tile.min_z, xzbbox.min_z());
 		const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
 		if (min_x > max_x || min_z > max_z) {
-			const bool merged = editor.merge_tile(
-					tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
-			if (!merged)
-				editor.report_generation_error("failed to merge empty tile overlay");
-			return merged;
+			if (return_worker_result)
+				return tile_editor.merge_tile(
+						tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+			return merge_finished_tile(tile_editor, tile);
 		}
 		editor.set_strict_bounds(min_x, min_z, max_x, max_z);
 		// These POI/address plates need their host building, and must precede
@@ -1977,13 +2211,12 @@ bool generate_world(WorldEditor &editor,
 			const caves::CaveRect cave_world{
 					xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
 			const caves::CaveRect cave_region{min_x, max_x, min_z, max_z};
-			caves::apply_deepslate(editor, min_x, max_x, min_z, max_z);
 			caves::CaveEllipsoids tile_ellipsoids;
 			std::unordered_set<std::int64_t> cave_air;
 			caves::carve_region(editor, cave_region, cave_world, CAVE_SEED,
 					world_editor::terrain_floor_y(), &tile_ellipsoids, &cave_air);
-			const caves::CaveShapeQuery cave_shape(editor, cave_world, CAVE_SEED,
-					world_editor::terrain_floor_y(), tile_ellipsoids);
+			const caves::CaveShapeQuery cave_shape(editor, cave_world, cave_region,
+					CAVE_SEED, world_editor::terrain_floor_y(), tile_ellipsoids);
 			std::unordered_set<std::int64_t> cave_basin_fluid;
 			std::unordered_set<std::int64_t> cave_water_cells;
 			caves::WaterPlan cave_water_plan;
@@ -2012,108 +2245,76 @@ bool generate_world(WorldEditor &editor,
 		// this tile is merged. The editor's strict bounds keep the global tunnel
 		// indexes from writing outside the tile being finalized.
 		if (regional_ground_passes && streaming_order) {
-			if (!subway_points.empty())
-				railways::carve_subway_interior(editor, subway_points);
-			if (!highway_tunnel_cells.empty())
-				highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
+			if (!tile_state.subway_points.empty())
+				railways::carve_subway_interior(editor, tile_state.subway_points);
+			if (!tile_state.highway_tunnel_cells.empty())
+				highways::carve_highway_tunnel_interior(
+						editor, tile_state.highway_tunnel_cells);
 			if (args.caves)
 				caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
 						world_editor::terrain_floor_y());
 		}
-		const bool merged =
-				editor.merge_tile(tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
-		if (!merged)
-			editor.report_generation_error("failed to merge tile overlay");
-		return merged;
+		if (return_worker_result)
+			return tile_editor.merge_tile(
+					tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
+		return merge_finished_tile(tile_editor, tile);
 	};
 	std::size_t active_tile = std::numeric_limits<std::size_t>::max();
 	std::size_t next_ground_tile = 0;
-	for (std::size_t task_index = 0; task_index < element_tasks.size(); ++task_index) {
-		const auto [element_index, tile_index] = element_tasks[task_index];
-		if (tile_index != active_tile) {
-			if (regional_ground_passes &&
-					active_tile != std::numeric_limits<std::size_t>::max()) {
-				if (!finish_ground_tile(active_tile)) {
-					std::cerr << "Failed to merge generated Arnis tile\n";
-					editor.finish_tile_pass();
-					return false;
-				}
-				next_ground_tile = active_tile + 1;
-			}
-			while (regional_ground_passes && next_ground_tile < tile_index) {
-				if (!begin_generation_tile(next_ground_tile) ||
-						!finish_ground_tile(next_ground_tile)) {
-					std::cerr << "Failed to generate or merge empty Arnis tile\n";
-					editor.finish_tile_pass();
-					return false;
-				}
-				++next_ground_tile;
-			}
-			active_tile = tile_index;
-			if (tiled_element_dispatch) {
-				const auto &tile = element_tiles[tile_index];
-				editor.set_strict_bounds(std::max(tile.min_x, xzbbox.min_x()),
-						std::max(tile.min_z, xzbbox.min_z()),
-						std::min(tile.max_x - 1, xzbbox.max_x()),
-						std::min(tile.max_z - 1, xzbbox.max_z()));
-				if (regional_ground_passes && !begin_generation_tile(tile_index)) {
-					std::cerr << "Failed to begin Arnis tile generation\n";
-					editor.finish_tile_pass();
-					return false;
-				}
-			} else {
-				editor.clear_strict_bounds();
-			}
-		}
-		auto const &element = render_elements[element_index];
-		// Keep per-element terrain adjustment, but start from the normalized
-		// options used by the Rust generation pipeline rather than the raw caller
-		// arguments (which may not yet include mode/body defaults).
-		auto args = effective_args;
+	std::optional<WorldEditor> active_tile_worker;
+	ElementDispatchState active_tile_dispatch_state;
+	auto collect_tile_dispatch_state = [&](const ElementDispatchState &state) {
+		dispatch_state.subway_points.insert(dispatch_state.subway_points.end(),
+				state.subway_points.begin(), state.subway_points.end());
+		dispatch_state.highway_tunnel_cells.insert(
+				dispatch_state.highway_tunnel_cells.end(),
+				state.highway_tunnel_cells.begin(), state.highway_tunnel_cells.end());
+		if (!dispatch_state.highway_connectivity && state.highway_connectivity)
+			dispatch_state.highway_connectivity = state.highway_connectivity;
+	};
+	auto process_assigned_element = [&](WorldEditor &target, ElementDispatchState &state,
+											std::size_t task_index,
+											std::size_t element_index) {
+		WorldEditor &editor = target;
+		const auto &element = render_elements[element_index];
+		// Rust passes the same normalized generation options to every element;
+		// terrain-aware handlers query their own coordinates rather than mutating
+		// the shared flat-ground fallback from an element's first node.
+		const Args &args = effective_args;
 		if (element.is_relation() && suppressed_relations.count(element.id())) {
-			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-			continue;
+			release_task_fills(task_index);
+			return;
 		}
 		if (building_data.outline_suppression.count(
 					{std::string(element.kind()), element.id()})) {
-			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-			continue;
+			release_task_fills(task_index);
+			return;
 		}
 		if (model_pipeline &&
 				std::find(model_pipeline->suppressed().begin(),
 						model_pipeline->suppressed().end(),
 						std::pair<std::string, std::uint64_t>{std::string(element.kind()),
 								element.id()}) != model_pipeline->suppressed().end()) {
-			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-			continue;
+			release_task_fills(task_index);
+			return;
 		}
 		if (!landmark_plan.suppressed.empty() &&
 				std::find(landmark_plan.suppressed.begin(),
 						landmark_plan.suppressed.end(),
 						std::pair<std::string, std::uint64_t>{std::string(element.kind()),
 								element.id()}) != landmark_plan.suppressed.end()) {
-			release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-			continue;
+			release_task_fills(task_index);
+			return;
 		}
 
 		if (element.is_way()) {
 			auto const &way = element.as_way();
-			if (editor.ground && !way.nodes.empty()) {
-				args.ground_level = editor.ground->level(way.nodes.begin()->xz());
-			}
-
-			// Solar farms are commonly mapped as barrier=fence plus
-			// power=generator.  The barrier handler would otherwise shadow the
-			// generator, unlike the Rust dispatcher.
 			if (way.tags.contains("barrier") && !way.tags.contains("building") &&
-					way.tags.get("power") == std::optional<std::string>("generator")) {
+					way.tags.get("power") == std::optional<std::string>("generator"))
 				power::generate_power(editor, element, building_footprints,
 						flood_fill_cache, args.timeout);
-			}
 
 			if (way.tags.contains("building") || way.tags.contains("building:part")) {
-				// Skip building outlines that are suppressed by building relations with parts.
-				// The individual building:part ways will render instead.
 				if (suppressed_building_outlines.find(way.id) ==
 						suppressed_building_outlines.end()) {
 					auto group = building_part_groups.find(way.id);
@@ -2129,7 +2330,6 @@ bool generate_world(WorldEditor &editor,
 						signage::generate_building_signage(editor, way, anchor);
 				}
 			} else if (structures::jetbridge::claims(way)) {
-				// Must precede highway: many jet bridges also have corridor/highway tags.
 				structures::jetbridge::generate_jet_bridge(
 						editor, way, building_footprints);
 			} else if (way.tags.contains("highway")) {
@@ -2137,13 +2337,13 @@ bool generate_world(WorldEditor &editor,
 						highways::renders_as_highway_tunnel(way) &&
 						highways::generate_highway_tunnel_shell(editor, way, args,
 								tunnel_internal_endpoints, tunnel_portals,
-								highway_tunnel_cells);
+								state.highway_tunnel_cells);
 				if (!tunnel_rendered) {
-					if (!highway_connectivity)
-						highway_connectivity =
+					if (!state.highway_connectivity)
+						state.highway_connectivity =
 								highways::build_highway_connectivity_map(elements);
 					highways::generate_highways_internal(editor, element, args,
-							*highway_connectivity, args.timeout, road_mask,
+							*state.highway_connectivity, args.timeout, road_mask,
 							bridge_structures, bridge_surface, tunnel_portals,
 							marking_index,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
@@ -2162,9 +2362,8 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.contains("amenity")) {
 				amenities::generate_amenities(
 						editor, element, args, flood_fill_cache, road_mask);
-				if (editor.signage_enabled() && way.tags.get("amenity") == "parking") {
+				if (editor.signage_enabled() && way.tags.get("amenity") == "parking")
 					signage::generate_parking_signage(editor, way, road_mask);
-				}
 			} else if (way.tags.contains("leisure")) {
 				leisure::generate_leisure(editor, way, args, flood_fill_cache,
 						building_footprints, bridge_surface);
@@ -2174,7 +2373,6 @@ bool generate_world(WorldEditor &editor,
 				auto it_val = way.tags.find("waterway");
 				if (it_val != way.tags.end() &&
 						(it_val->second == "dock" || it_val->second == "riverbank")) {
-					// Rust treats dock and legacy riverbank polygons as water areas.
 					std::optional<int> surface_level;
 					if (still_surfaces.has("way", way.id))
 						surface_level = still_surfaces.get("way", way.id);
@@ -2186,7 +2384,7 @@ bool generate_world(WorldEditor &editor,
 					waterways::generate_waterways(editor, way);
 				}
 			} else if (way.tags.contains("railway")) {
-				railways::generate_railways(editor, way, subway_points,
+				railways::generate_railways(editor, way, state.subway_points,
 						rail_bridge_internal_endpoints, bridge_outlines, road_mask,
 						building_footprints, rail_mask, bridge_structures,
 						bridge_surface);
@@ -2217,17 +2415,12 @@ bool generate_world(WorldEditor &editor,
 						landmark_plan.suppressed.end(),
 						std::pair<std::string, std::uint64_t>{"node", node.id}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-				continue;
+				release_task_fills(task_index);
+				return;
 			}
-			// Rust resolves node signage before the feature dispatcher.  Keep
-			// this phase ordering so signage sees the same world state.
 			if (editor.signage_enabled())
 				signage::generate_node_signage(
 						editor, node, building_footprints, road_mask);
-
-			if (editor.ground)
-				args.ground_level = editor.ground->level(node.xz());
 
 			if (node.tags.contains("door") || node.tags.contains("entrance")) {
 				doors::generate_doors(editor, node);
@@ -2242,12 +2435,12 @@ bool generate_world(WorldEditor &editor,
 			} else if (node.tags.contains("barrier")) {
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
 			} else if (node.tags.contains("highway")) {
-				if (!highway_connectivity)
-					highway_connectivity =
+				if (!state.highway_connectivity)
+					state.highway_connectivity =
 							highways::build_highway_connectivity_map(elements);
 				highways::generate_highways_internal(editor, element, args,
-						*highway_connectivity, args.timeout, road_mask, bridge_structures,
-						bridge_surface, tunnel_portals, marking_index,
+						*state.highway_connectivity, args.timeout, road_mask,
+						bridge_structures, bridge_surface, tunnel_portals, marking_index,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 			} else if (node.tags.get("aeroway") ==
 					   std::optional<std::string>(std::string("helipad"))) {
@@ -2271,21 +2464,13 @@ bool generate_world(WorldEditor &editor,
 						landmark_plan.suppressed.end(),
 						std::pair<std::string, std::uint64_t>{"relation", rel.id}) !=
 					landmark_plan.suppressed.end()) {
-				release_finished_fills(flood_fill_cache, expiring_fills, task_index);
-				continue;
+				release_task_fills(task_index);
+				return;
 			}
-
-			if (editor.ground && !rel.members.empty() &&
-					!rel.members.begin()->way.nodes.empty()) {
-				args.ground_level = editor.ground->level(
-						rel.members.begin()->way.nodes.begin()->xz());
-			}
-
-			bool is_building_relation =
+			const bool is_building_relation =
 					rel.tags.contains("building") || rel.tags.contains("building:part") ||
 					(rel.tags.get("type") ==
 							std::optional<std::string>(std::string("building")));
-
 			if (is_building_relation) {
 				buildings::generate_building_from_relation(editor, rel, args,
 						flood_fill_cache, xzbbox, building_passages,
@@ -2316,10 +2501,158 @@ bool generate_world(WorldEditor &editor,
 				man_made::generate_man_made(editor, ProcessedElement(rel), args);
 			}
 		}
-
-		// Do this after processing: a relation may consume fills belonging to
-		// member ways, so eviction before dispatch would cause a refill.
-		release_finished_fills(flood_fill_cache, expiring_fills, task_index);
+		// Run after processing: relation processors may consume fills for their ways.
+		release_task_fills(task_index);
+	};
+	if (parallel_tile_workers) {
+		using TileWorkerResult = std::pair<WorldEditor, ElementDispatchState>;
+		bool tile_pipeline_ok = true;
+		for (std::size_t batch_begin = 0; batch_begin < element_tiles.size();
+				batch_begin += tile_batch_size) {
+			const auto batch_end =
+					std::min(element_tiles.size(), batch_begin + tile_batch_size);
+			std::vector<std::future<TileWorkerResult>> workers;
+			workers.reserve(batch_end - batch_begin);
+			for (std::size_t tile_index = batch_begin; tile_index < batch_end;
+					++tile_index) {
+				workers.push_back(std::async(std::launch::async, [&, tile_index] {
+					auto tile_editor = editor.make_tile_worker();
+					ElementDispatchState tile_state;
+					if (!begin_generation_tile(tile_editor, tile_index))
+						throw std::runtime_error("failed to begin Arnis tile worker");
+					for (const auto element_index : element_assignments[tile_index])
+						process_assigned_element(
+								tile_editor, tile_state, element_index, element_index);
+					if (!finish_ground_tile(tile_editor, tile_state, tile_index, true))
+						throw std::runtime_error("failed to finish Arnis tile worker");
+					return TileWorkerResult{
+							std::move(tile_editor), std::move(tile_state)};
+				}));
+			}
+			for (std::size_t offset = 0; offset < workers.size(); ++offset) {
+				const auto tile_index = batch_begin + offset;
+				try {
+					auto [tile_editor, tile_state] = workers[offset].get();
+					const auto &tile = element_tiles[tile_index];
+					if (!editor.merge_tile_worker(std::move(tile_editor), tile.min_x,
+								tile.min_z, tile.max_x - 1, tile.max_z - 1))
+						throw std::runtime_error("failed to merge Arnis tile worker");
+					collect_tile_dispatch_state(tile_state);
+					release_tile_fills_for(tile_index);
+					if (++deferred_tiles_in_batch >= tile_batch_size) {
+						deferred_tiles_in_batch = 0;
+						if (!editor.flush_deferred_tile_merges())
+							throw std::runtime_error(
+									"failed to merge tile overlay batch");
+					}
+				} catch (const std::exception &error) {
+					editor.report_generation_error(error.what());
+					std::cerr << "Arnis tile worker failed: " << error.what() << '\n';
+					tile_pipeline_ok = false;
+					break;
+				}
+			}
+			if (!tile_pipeline_ok) {
+				for (auto &worker : workers)
+					if (worker.valid())
+						worker.wait();
+				if (editor.mg)
+					editor.mg->discardTileOverlay();
+				editor.flush_deferred_tile_merges();
+				editor.set_defer_tile_merges(false);
+				editor.finish_tile_pass();
+				return false;
+			}
+		}
+		next_ground_tile = element_tiles.size();
+	} else {
+		for (std::size_t task_index = 0; task_index < element_tasks.size();
+				++task_index) {
+			const auto [element_index, tile_index] = element_tasks[task_index];
+			if (tile_index != active_tile) {
+				if (active_tile != std::numeric_limits<std::size_t>::max())
+					release_tile_fills_for(active_tile);
+				if (regional_ground_passes &&
+						active_tile != std::numeric_limits<std::size_t>::max()) {
+					WorldEditor &tile_editor =
+							active_tile_worker ? *active_tile_worker : editor;
+					ElementDispatchState &tile_state =
+							active_tile_worker ? active_tile_dispatch_state
+											   : dispatch_state;
+					if (!finish_ground_tile(tile_editor, tile_state, active_tile)) {
+						std::cerr << "Failed to merge generated Arnis tile\n";
+						editor.flush_deferred_tile_merges();
+						editor.set_defer_tile_merges(false);
+						editor.finish_tile_pass();
+						return false;
+					}
+					if (active_tile_worker)
+						collect_tile_dispatch_state(active_tile_dispatch_state);
+					active_tile_worker.reset();
+					next_ground_tile = active_tile + 1;
+				}
+				while (regional_ground_passes && next_ground_tile < tile_index) {
+					bool finished = false;
+					if (parallel_tile_workers) {
+						auto empty_worker = editor.make_tile_worker();
+						ElementDispatchState empty_state;
+						finished =
+								begin_generation_tile(empty_worker, next_ground_tile) &&
+								finish_ground_tile(
+										empty_worker, empty_state, next_ground_tile);
+					} else {
+						finished = begin_generation_tile(editor, next_ground_tile) &&
+								   finish_ground_tile(
+										   editor, dispatch_state, next_ground_tile);
+					}
+					if (!finished) {
+						std::cerr << "Failed to generate or merge empty Arnis tile\n";
+						editor.flush_deferred_tile_merges();
+						editor.set_defer_tile_merges(false);
+						editor.finish_tile_pass();
+						return false;
+					}
+					++next_ground_tile;
+				}
+				active_tile = tile_index;
+				if (tiled_element_dispatch) {
+					const auto &tile = element_tiles[tile_index];
+					if (regional_ground_passes) {
+						bool began = false;
+						if (parallel_tile_workers) {
+							active_tile_worker.emplace(editor.make_tile_worker());
+							active_tile_dispatch_state = {};
+							began = begin_generation_tile(
+									*active_tile_worker, tile_index);
+						} else {
+							began = begin_generation_tile(editor, tile_index);
+						}
+						if (!began) {
+							std::cerr << "Failed to begin Arnis tile generation\n";
+							editor.flush_deferred_tile_merges();
+							editor.set_defer_tile_merges(false);
+							editor.finish_tile_pass();
+							return false;
+						}
+					} else {
+						editor.set_strict_bounds(std::max(tile.min_x, xzbbox.min_x()),
+								std::max(tile.min_z, xzbbox.min_z()),
+								std::min(tile.max_x - 1, xzbbox.max_x()),
+								std::min(tile.max_z - 1, xzbbox.max_z()));
+					}
+				} else {
+					editor.clear_strict_bounds();
+				}
+			}
+			if (active_tile_worker)
+				process_assigned_element(*active_tile_worker, active_tile_dispatch_state,
+						task_index, element_index);
+			else
+				process_assigned_element(
+						editor, dispatch_state, task_index, element_index);
+		}
+		if (active_tile != std::numeric_limits<std::size_t>::max())
+			release_tile_fills_for(active_tile);
 	}
 	editor.clear_strict_bounds();
 	// Tagged nodes precede ways in OSM input.  Defer address and POI facade
@@ -2355,22 +2688,49 @@ bool generate_world(WorldEditor &editor,
 
 	if (regional_ground_passes) {
 		if (active_tile != std::numeric_limits<std::size_t>::max()) {
-			if (!finish_ground_tile(active_tile)) {
+			WorldEditor &tile_editor = active_tile_worker ? *active_tile_worker : editor;
+			ElementDispatchState &tile_state =
+					active_tile_worker ? active_tile_dispatch_state : dispatch_state;
+			if (!finish_ground_tile(tile_editor, tile_state, active_tile)) {
 				std::cerr << "Failed to merge generated Arnis tile\n";
+				editor.flush_deferred_tile_merges();
+				editor.set_defer_tile_merges(false);
 				editor.finish_tile_pass();
 				return false;
 			}
+			if (active_tile_worker)
+				collect_tile_dispatch_state(active_tile_dispatch_state);
+			active_tile_worker.reset();
 			next_ground_tile = active_tile + 1;
 		}
 		while (next_ground_tile < element_tiles.size()) {
-			if (!begin_generation_tile(next_ground_tile) ||
-					!finish_ground_tile(next_ground_tile)) {
+			bool finished = false;
+			if (parallel_tile_workers) {
+				auto empty_worker = editor.make_tile_worker();
+				ElementDispatchState empty_state;
+				finished =
+						begin_generation_tile(empty_worker, next_ground_tile) &&
+						finish_ground_tile(empty_worker, empty_state, next_ground_tile);
+			} else {
+				finished = begin_generation_tile(editor, next_ground_tile) &&
+						   finish_ground_tile(editor, dispatch_state, next_ground_tile);
+			}
+			if (!finished) {
 				std::cerr << "Failed to generate or merge empty Arnis tile\n";
+				editor.flush_deferred_tile_merges();
+				editor.set_defer_tile_merges(false);
 				editor.finish_tile_pass();
 				return false;
 			}
 			++next_ground_tile;
 		}
+		if (!editor.flush_deferred_tile_merges()) {
+			std::cerr << "Failed to merge generated Arnis tile batch\n";
+			editor.set_defer_tile_merges(false);
+			editor.finish_tile_pass();
+			return false;
+		}
+		editor.set_defer_tile_merges(false);
 		editor.finish_tile_pass();
 	}
 	editor.clear_strict_bounds();
@@ -2383,12 +2743,6 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (!regional_ground_passes) {
 		if (args.caves) {
-			// Rust establishes the deepslate host transition on the filled
-			// terrain before any cave carving.  Applying it afterwards leaves
-			// carved cells untouched (and changes the host set seen by cave
-			// decoration), so keep this phase ahead of both cave passes.
-			caves::apply_deepslate(editor, xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(),
-					xzbbox.max_z());
 			std::unordered_set<std::int64_t> cave_air;
 			caves::carve_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
@@ -2400,8 +2754,8 @@ bool generate_world(WorldEditor &editor,
 			caves::WaterPlan cave_water_plan;
 			const caves::CaveRect cave_world{
 					xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
-			const caves::CaveShapeQuery cave_shape(editor, cave_world, CAVE_SEED,
-					world_editor::terrain_floor_y(), cave_ellipsoids);
+			const caves::CaveShapeQuery cave_shape(editor, cave_world, cave_world,
+					CAVE_SEED, world_editor::terrain_floor_y(), cave_ellipsoids);
 			caves::generate_water_features(editor, cave_world, cave_world, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, cave_shape, &cave_basin_fluid,
 					&cave_water_cells, &cave_air, &cave_water_plan);
@@ -2430,10 +2784,13 @@ bool generate_world(WorldEditor &editor,
 	editor.release_sealed_surface();
 	// Tunnel interiors must be reopened after underground fill, but before
 	// models: a late carve can cut holes into an already placed landmark.
-	if (!(regional_ground_passes && streaming_order) && !subway_points.empty())
-		railways::carve_subway_interior(editor, subway_points);
-	if (!(regional_ground_passes && streaming_order) && !highway_tunnel_cells.empty())
-		highways::carve_highway_tunnel_interior(editor, highway_tunnel_cells);
+	if (!(regional_ground_passes && streaming_order) &&
+			!dispatch_state.subway_points.empty())
+		railways::carve_subway_interior(editor, dispatch_state.subway_points);
+	if (!(regional_ground_passes && streaming_order) &&
+			!dispatch_state.highway_tunnel_cells.empty())
+		highways::carve_highway_tunnel_interior(
+				editor, dispatch_state.highway_tunnel_cells);
 	if (args.caves && !(regional_ground_passes && streaming_order))
 		caves::seal_floating_fluid_region(editor,
 				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
@@ -2449,6 +2806,9 @@ bool generate_world(WorldEditor &editor,
 	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 
 	railways::advtrains::finish_network(editor);
+	// Rust settles Mapillary photo candidates only after all generated blocks
+	// are final; the shared C++ editor has no disk-eviction region to flush.
+	mapillary::facades::finalize_displays(editor);
 	// Resolve preset facade candidates only after all neighbouring building
 	// blocks exist; party-wall panels are cropped from their finished rooflines.
 	building_facades::finalize(editor);
@@ -2462,6 +2822,8 @@ bool generate_world(WorldEditor &editor,
 		std::cerr << "Arnis generation failed while finalizing backend persistence\n";
 		return false;
 	}
+	if (editor.signage_context)
+		std::cout << editor.signage_context->summary(args.debug) << '\n';
 
 	return true;
 }

@@ -10,6 +10,11 @@
 #include <utility>
 #include <vector>
 
+namespace arnis::interior_uses
+{
+class InteriorUseIndex;
+}
+
 namespace arnis::building_facade
 {
 inline constexpr std::size_t MIN_FACADE_FOOTPRINT = 12;
@@ -35,6 +40,7 @@ struct BuildingContext
 	const CoordinateBitmap &road_mask;
 	const CoordinateBitmap &building_footprints;
 	const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> &group_members;
+	const arnis::interior_uses::InteriorUseIndex &interior_uses;
 };
 
 enum class FacadeClass

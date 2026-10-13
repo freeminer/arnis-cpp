@@ -68,6 +68,12 @@ inline std::string model_json(const std::string &name, Sprite sprite)
 }
 std::vector<Piece> pieces(const std::vector<std::pair<int, int>> &cells,
 		std::pair<double, double> normal, double step, int base_y, int total_height);
+// Place a facade sprite as a backend-native item-display entity when the host
+// accepts entities, retaining the named sprite for the host's resource pack.
+// Returns false when the entity backend is unavailable or rejects the entity.
+bool place_item_display(arnis::world_editor::WorldEditor &, const std::string &name,
+		const Quad &, std::int8_t facing, std::vector<std::uint8_t> &&pixels,
+		std::uint32_t pixel_width, std::uint32_t pixel_height);
 class Registry
 {
 	bool enabled_ = false;

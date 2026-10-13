@@ -15,10 +15,11 @@ double lerp(double t, double a, double b)
 } // namespace
 
 CaveShapeQuery::CaveShapeQuery(const world_editor::WorldEditor &editor,
-		const CaveRect &world, std::int64_t seed, int floor_y,
+		const CaveRect &world, const CaveRect &region, std::int64_t seed, int floor_y,
 		const CaveEllipsoids &ellipsoids) :
-		editor_(editor), world_(world), floor_y_(floor_y),
-		gen_(seed, floor_y, world_editor::world_max_y()), ellipsoids_(ellipsoids)
+		editor_(editor), ext_(region.grow(CAVE_SHAPE_MARGIN).clip(world)),
+		floor_y_(floor_y), gen_(seed, floor_y, world_editor::world_max_y()),
+		ellipsoids_(ellipsoids)
 {
 	density_cache_.reserve(4096);
 	for (std::size_t i = 0; i < ellipsoids_.size(); ++i) {
@@ -43,7 +44,7 @@ CaveShapeQuery::CaveShapeQuery(const world_editor::WorldEditor &editor,
 
 bool CaveShapeQuery::is_cave(int x, int y, int z) const
 {
-	if (!world_.contains(x, z) || y <= floor_y_ || y > editor_.get_ground_level(x, z) - 6)
+	if (!ext_.contains(x, z) || y <= floor_y_ || y > editor_.get_ground_level(x, z) - 6)
 		return false;
 	if (const auto it = carvers_by_chunk_.find(
 				{CaveRect::floor_div(x, 16), CaveRect::floor_div(z, 16)});
@@ -59,8 +60,8 @@ bool CaveShapeQuery::solid(int x, int y, int z) const
 	// The roof gate limits where the cave predicate may carve, not the terrain
 	// envelope that supports planned water/features. Rust CaveShape::surf keeps
 	// the sealed cap above `top()` solid, so use the actual surface here too.
-	return world_.contains(x, z) && y >= floor_y_ &&
-		   y <= editor_.get_ground_level(x, z) && !is_cave(x, y, z);
+	return ext_.contains(x, z) && y >= floor_y_ && y <= editor_.get_ground_level(x, z) &&
+		   !is_cave(x, y, z);
 }
 
 double CaveShapeQuery::density_at(int x, int y, int z) const

@@ -14,6 +14,7 @@
 #include "../structures/structures.h"
 #include "surfaces.h"
 #include "signage.h"
+#include "road_mask_search.h"
 #include "../strict_parse.h"
 
 namespace arnis
@@ -282,19 +283,7 @@ bool place_furniture_decals(WorldEditor &editor,
 static std::optional<std::pair<int, int>> get_nearest_road_block(
 		int x, int z, int max_radius, const RoadMaskBitmap &road_mask)
 {
-	for (int dist = 0; dist <= max_radius; ++dist) {
-		for (int dx = -dist; dx <= dist; ++dx) {
-			for (int dz = -dist; dz <= dist; ++dz) {
-				if (std::max(std::abs(dx), std::abs(dz)) != dist)
-					continue;
-				int cx = x + dx;
-				int cz = z + dz;
-				if (road_mask.contains(cx, cz))
-					return std::make_pair(cx, cz);
-			}
-		}
-	}
-	return std::nullopt;
+	return element_processing::get_nearest_road_block(x, z, max_radius, road_mask);
 }
 
 void generate_amenities(crate::world_editor::WorldEditor &editor,

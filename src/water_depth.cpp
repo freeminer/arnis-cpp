@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <array>
+#include <cassert>
 #include <cmath>
 #include <cstddef>
 #include <cstdint>
@@ -413,8 +414,13 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 	const int smax_z = std::min(wmax_z + 1, max_z);
 	const auto sw = static_cast<std::size_t>(smax_x - smin_x + 1);
 	const auto sh = static_cast<std::size_t>(smax_z - smin_z + 1);
+	if (sw == 0 || sh == 0 || sw > std::numeric_limits<std::size_t>::max() / sh) {
+		std::cerr
+				<< "Warning: water area too large for depth carving; rendering flat water\n";
+		return {};
+	}
 	const auto total = sw * sh;
-	if (sw == 0 || sh == 0 || total > MAX_WATER_FIELD_CELLS || total / sw != sh) {
+	if (total > MAX_WATER_FIELD_CELLS) {
 		std::cerr
 				<< "Warning: water area too large for depth carving; rendering flat water\n";
 		return {};
@@ -508,6 +514,7 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int depth,
 		const RoadMaskBitmap &road_mask, const BigWaterField &bwf)
 {
+	assert(depth <= MAX_WATER_DEPTH && "water carve depth exceeds the max tier");
 	depth = std::clamp(depth, 0, MAX_WATER_DEPTH);
 	depth = std::min(depth, std::max(0, water_y - world_editor::min_y() - 2));
 	// Bridge piers are registered by the bridge pass before water carving.  Rust

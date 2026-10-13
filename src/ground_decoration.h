@@ -25,6 +25,8 @@ struct WorldEditor;
 
 namespace arnis::ground_decoration
 {
+inline constexpr double ALPINE_BAND_METRES = 1000.0;
+
 enum class Habitat
 {
 	Meadow,
@@ -54,6 +56,8 @@ std::optional<Habitat> habitat(std::uint8_t cover, biome::Climate climate,
 // keeping the loose-plant classification shared with Rust's ground pass.
 bool is_undergrowth(const Block &block);
 const std::vector<Block> &loose_plant_blocks();
+const std::vector<Block> &wood_blocks();
+const std::vector<Block> &plant_lower_half_blocks();
 const std::vector<Block> &stacked_plant_parts();
 void clear_undergrowth_under_trunk(
 		world_editor::WorldEditor &editor, int x, int y, int z);

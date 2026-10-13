@@ -507,14 +507,7 @@ void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &
 			region.max_z >= 0 ? region.max_z / 16 : (region.max_z - 15) / 16;
 	for (int cx = min_chunk_x; cx <= max_chunk_x; ++cx) {
 		for (int cz = min_chunk_z; cz <= max_chunk_z; ++cz) {
-			const std::uint64_t chunk_seed =
-					std::bit_cast<std::uint64_t>(seed) ^
-					static_cast<std::uint64_t>(static_cast<std::int64_t>(cx)) *
-							341873128712ULL ^
-					static_cast<std::uint64_t>(static_cast<std::int64_t>(cz)) *
-							132897987541ULL ^
-					0x5CE35CE3ULL;
-			auto random = XoroRandom::from_seed(std::bit_cast<std::int64_t>(chunk_seed));
+			auto random = XoroRandom::from_seed(chunk_seed(seed, cx, cz, 0x5CE35CE3LL));
 			int placed = 0;
 			for (int attempt = 0; attempt < 6 && placed < 2; ++attempt) {
 				const int x = cx * 16 + random.next_int(16);

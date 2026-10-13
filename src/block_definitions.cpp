@@ -206,6 +206,8 @@ Block get_stair_block_for_material(const Block &material)
 		return ANDESITE_STAIRS;
 	else if (material == DIORITE || material == POLISHED_DIORITE)
 		return POLISHED_DIORITE_STAIRS;
+	else if (material == GRANITE)
+		return POLISHED_GRANITE_STAIRS;
 	else if (material == DEEPSLATE || material == DEEPSLATE_BRICKS ||
 			 material == COBBLED_DEEPSLATE)
 		return DEEPSLATE_BRICK_STAIRS;
@@ -217,7 +219,7 @@ Block get_stair_block_for_material(const Block &material)
 		return OAK_STAIRS;
 	else if (material == SPRUCE_PLANKS || material == SPRUCE_LOG)
 		return SPRUCE_STAIRS;
-	else if (material == DARK_OAK_PLANKS || material == DARK_OAK_LOG)
+	else if (material == DARK_OAK_PLANKS)
 		return DARK_OAK_STAIRS;
 	else if (material == OAK_LOG)
 		return OAK_STAIRS;
@@ -233,9 +235,10 @@ Block get_stair_block_for_material(const Block &material)
 		return POLISHED_BLACKSTONE_BRICK_STAIRS;
 	else if (material == BLUE_TERRACOTTA || material == CYAN_TERRACOTTA)
 		return DEEPSLATE_BRICK_STAIRS;
-	else if (material == BRICK)
+	else if (material == BRICK || material == TERRACOTTA ||
+			 material == ORANGE_TERRACOTTA || material == RED_TERRACOTTA)
 		return BRICK_STAIRS;
-	else if (material == BROWN_CONCRETE)
+	else if (material == BROWN_CONCRETE || material == BROWN_CONCRETE_POWDER)
 		return MUD_BRICK_STAIRS;
 	else if (material == BROWN_TERRACOTTA)
 		return MUD_BRICK_STAIRS;
@@ -243,7 +246,7 @@ Block get_stair_block_for_material(const Block &material)
 		return END_STONE_BRICK_STAIRS;
 	else if (material == GRAY_CONCRETE)
 		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == GRAY_TERRACOTTA)
+	else if (material == GRAY_TERRACOTTA || material == LIGHT_GRAY_TERRACOTTA)
 		return MUD_BRICK_STAIRS;
 	else if (material == LIGHT_BLUE_TERRACOTTA)
 		return POLISHED_DIORITE_STAIRS;
@@ -289,7 +292,9 @@ Block get_stair_block_for_material(const Block &material)
 			 material == WAXED_EXPOSED_CHISELED_COPPER ||
 			 material == WAXED_EXPOSED_CUT_COPPER)
 		return WAXED_EXPOSED_CUT_COPPER_STAIRS;
-	else if (material == IRON_BLOCK || material == NETHERITE_BLOCK)
+	else if (material == IRON_BLOCK)
+		return POLISHED_DIORITE_STAIRS;
+	else if (material == NETHERITE_BLOCK)
 		return POLISHED_BLACKSTONE_BRICK_STAIRS;
 	else if (material == HAY_BALE)
 		return OAK_STAIRS;
@@ -303,7 +308,8 @@ Block get_stair_block_for_material(const Block &material)
 
 Block get_slab_block_for_material(const Block &material)
 {
-	if (material == BRICK || material == BROWN_TERRACOTTA)
+	if (material == BRICK || material == BROWN_TERRACOTTA ||
+			material == BROWN_CONCRETE_POWDER)
 		return BRICK_SLAB;
 	if (material == MUD_BRICKS || material == WHITE_TERRACOTTA ||
 			material == GRAY_TERRACOTTA || material == LIGHT_BLUE_TERRACOTTA)

@@ -370,6 +370,40 @@ std::optional<double> sample_aws_tile_pixel(
 			found->second
 					.pixels[std::size_t(py) * found->second.width + std::size_t(px)]);
 }
+
+template <typename Function>
+void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
+{
+	if (begin >= end)
+		return;
+	const auto worker_count = std::min<std::size_t>(8, end - begin);
+	if (worker_count == 1) {
+		for (auto row = begin; row < end; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{begin};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= end)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> threads;
+	threads.reserve(worker_count - 1);
+	for (std::size_t i = 1; i < worker_count; ++i) {
+		try {
+			threads.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	}
+	worker();
+	for (auto &thread : threads)
+		thread.join();
+}
 } // namespace
 
 std::vector<std::vector<double>> fetch_aws_terrain_grid(
@@ -439,7 +473,7 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 			tiles.emplace(packed, std::move(*decoded[i]));
 		}
 	const double n = std::ldexp(1.0, static_cast<int>(zoom));
-	for (std::size_t gy = 0; gy < height; ++gy) {
+	parallel_rows(0, height, [&](std::size_t gy) {
 		const double lat = bbox.max_lat - double(gy) /
 												  std::max<std::size_t>(1, height - 1) *
 												  (bbox.max_lat - bbox.min_lat);
@@ -472,7 +506,7 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 				grid[gy][gx] = top + (bottom - top) * dy;
 			}
 		}
-	}
+	});
 	return grid;
 }
 

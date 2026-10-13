@@ -48,9 +48,10 @@ struct Placement
 struct SuppressionClaim
 {
 	std::pair<std::string, std::uint64_t> key;
-	// OSM id of the successful model placement that owns this claim.  The
-	// claimed key may be a different building inside that model's footprint.
-	std::uint64_t owner_osm_id = 0;
+	// Identity of the successful model placement that owns this claim. The
+	// claimed key may be another building in its footprint; include kind because
+	// OSM node, way, and relation ID spaces can overlap.
+	std::pair<std::string, std::uint64_t> owner_key;
 };
 struct PrescanResult
 {

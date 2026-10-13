@@ -1168,25 +1168,45 @@ MaskGrid level_water_surfaces(
 		std::optional<OtherWaterSteps> from_body;
 		if (reach)
 			from_body = steps_from_other_water(cells, members, cover, fall_reach);
-		std::vector<bool> falls(cells.size());
-		for (std::size_t i = 0; i < cells.size(); ++i) {
+		std::vector<std::uint8_t> falls(cells.size());
+		const auto calculate_falls = [&](std::size_t i) {
 			const auto [x, y] = cells[i];
 			const auto walk = walk_from_bank(*bank_dist, members, w, x, y, wall_step);
 			falls[i] = on_channel_wall(heights, walk, x, y, meters_per_cell) &&
 					   (!from_body || !falls_away(*from_body, walk, w, x, y));
+		};
+		if (cells.size() >= 4096)
+			parallel_rows(0, cells.size(), calculate_falls);
+		else
+			for (std::size_t i = 0; i < cells.size(); ++i)
+				calculate_falls(i);
+		for (std::size_t i = 0; i < cells.size(); ++i) {
+			const auto [x, y] = cells[i];
 			if (falls[i])
 				set_bit(walls_mask, y * w + x);
 		}
-		std::vector<bool> walls(cells.size());
-		for (std::size_t i = 0; i < cells.size(); ++i) {
+		std::vector<std::uint8_t> wall_flags(cells.size());
+		const auto classify_walls = [&](std::size_t i) {
 			if (!falls[i])
-				continue;
+				return;
 			const auto [x, y] = cells[i];
-			walls[i] = !under_level_water(
+			wall_flags[i] = !under_level_water(
 					heights, cover, *bank_dist, walls_mask, x, y, level_run);
-			if (!walls[i])
+		};
+		if (cells.size() >= 4096)
+			parallel_rows(0, cells.size(), classify_walls);
+		else
+			for (std::size_t i = 0; i < cells.size(); ++i)
+				classify_walls(i);
+		for (std::size_t i = 0; i < cells.size(); ++i) {
+			if (falls[i] && !wall_flags[i]) {
+				const auto [x, y] = cells[i];
 				clear_bit(walls_mask, y * w + x);
+			}
 		}
+		std::vector<bool> walls(cells.size());
+		for (std::size_t i = 0; i < cells.size(); ++i)
+			walls[i] = wall_flags[i] != 0;
 		keep_anchored_walls(walls_mask, cover, cells, walls);
 		std::size_t wall_count = 0;
 		for (std::size_t i = 0; i < cells.size(); ++i) {
@@ -1196,22 +1216,37 @@ MaskGrid level_water_surfaces(
 			clear_bit(members, y * w + x);
 			++wall_count;
 		}
-		std::vector<FlowingWaterCell> local_surfaces;
-		local_surfaces.reserve(cells.size() - std::min(cells.size(), wall_count));
-		for (std::size_t i = 0; i < cells.size(); ++i) {
+		std::vector<FlowingWaterCell> local_surfaces(cells.size());
+		std::vector<std::uint8_t> sampled(cells.size());
+		const auto sample_surface = [&](std::size_t i) {
 			if (walls[i])
-				continue;
+				return;
 			const auto [x, y] = cells[i];
 			if (!std::isfinite(heights[y][x]))
-				continue;
+				return;
 			const auto local = reach ? local_reach_median(heights, members, cover, x, y,
 											   LOCAL_SURFACE_RADIUS, 8)
 									 : local_water_median(heights, members, x, y,
 											   LOCAL_SURFACE_RADIUS, 8);
-			local_surfaces.push_back(
-					{static_cast<std::uint32_t>(x), static_cast<std::uint32_t>(y),
-							static_cast<float>(local.value_or(fallback))});
+			local_surfaces[i] = FlowingWaterCell{static_cast<std::uint32_t>(x),
+					static_cast<std::uint32_t>(y),
+					static_cast<float>(local.value_or(fallback))};
+			sampled[i] = 1;
+		};
+		if (cells.size() >= 4096)
+			parallel_rows(0, cells.size(), sample_surface);
+		else
+			for (std::size_t i = 0; i < cells.size(); ++i)
+				sample_surface(i);
+		std::size_t sampled_count = 0;
+		for (std::size_t i = 0; i < sampled.size(); ++i) {
+			if (!sampled[i])
+				continue;
+			if (sampled_count != i)
+				local_surfaces[sampled_count] = local_surfaces[i];
+			++sampled_count;
 		}
+		local_surfaces.resize(sampled_count);
 		return std::pair{std::move(local_surfaces), wall_count};
 	};
 	std::size_t components_leveled = 0, still_components = 0, flowing_count = 0;
@@ -1612,7 +1647,7 @@ void apply_land_cover_repair(HeightGrid &heights, land_cover::LandCoverData &dat
 	if (dropped + reclassified) {
 		data.water_distance =
 				land_cover::compute_water_distance(data.grid, data.width, data.height);
-		data.water_blend_grid.clear();
+		data.invalidate_water_blend_grid();
 	}
 	smooth_built_up_gaussian(heights, data.grid, surface, built_up_sigma_cells, report);
 	pull_coastal_land_toward_water(heights, surface, coastal_pull_distance_cells);

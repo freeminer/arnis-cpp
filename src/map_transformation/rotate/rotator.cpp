@@ -3,10 +3,15 @@
 
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <limits>
+#include <optional>
+#include <string>
+#include <string_view>
 #include <variant>
 #include <cstdint>
 #include <utility>
+#include <cstdlib>
 
 namespace arnis::map_transformation::rotate
 {
@@ -33,6 +38,73 @@ void rotate_node(ProcessedNode &node, double cx, double cz, double sin_r, double
 	auto [rx, rz] = rotate_point(node.x, node.z, cx, cz, sin_r, cos_r);
 	node.x = static_cast<int>(std::round(rx));
 	node.z = static_cast<int>(std::round(rz));
+}
+
+std::optional<double> compass_bearing_degrees(std::string_view value)
+{
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+		value.remove_prefix(1);
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+		value.remove_suffix(1);
+	std::string lowered(value);
+	std::transform(lowered.begin(), lowered.end(), lowered.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	if (lowered == "n" || lowered == "north")
+		return 0.0;
+	if (lowered == "nne")
+		return 22.5;
+	if (lowered == "ne")
+		return 45.0;
+	if (lowered == "ene")
+		return 67.5;
+	if (lowered == "e" || lowered == "east")
+		return 90.0;
+	if (lowered == "ese")
+		return 112.5;
+	if (lowered == "se")
+		return 135.0;
+	if (lowered == "sse")
+		return 157.5;
+	if (lowered == "s" || lowered == "south")
+		return 180.0;
+	if (lowered == "ssw")
+		return 202.5;
+	if (lowered == "sw")
+		return 225.0;
+	if (lowered == "wsw")
+		return 247.5;
+	if (lowered == "w" || lowered == "west")
+		return 270.0;
+	if (lowered == "wnw")
+		return 292.5;
+	if (lowered == "nw")
+		return 315.0;
+	if (lowered == "nnw")
+		return 337.5;
+	if (lowered.empty())
+		return std::nullopt;
+	char *end = nullptr;
+	const double degrees = std::strtod(lowered.c_str(), &end);
+	if (end != lowered.c_str() + lowered.size() || !std::isfinite(degrees))
+		return std::nullopt;
+	return degrees;
+}
+
+void rotate_bearing_tags(tags_t &tags, double angle_degrees)
+{
+	auto it = tags.find("roof:direction");
+	if (it == tags.end())
+		return;
+	const auto bearing = compass_bearing_degrees(it->second);
+	if (!bearing)
+		return;
+	double turned = std::fmod(*bearing + angle_degrees, 360.0);
+	if (!std::isfinite(turned))
+		turned = 0.0;
+	else if (turned < 0.0)
+		turned += 360.0;
+	const auto rounded = static_cast<std::int64_t>(std::llround(turned));
+	it->second = std::to_string(rounded % 360);
 }
 
 }
@@ -84,15 +156,20 @@ void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
 		if (element.is_node()) {
 			auto &node = std::get<ProcessedNode>(element);
 			rotate_node(node, cx, cz, sin_r, cos_r);
+			rotate_bearing_tags(node.tags, angle_degrees);
 		} else if (element.is_way()) {
 			auto &way = std::get<ProcessedWay>(element);
 			for (auto &node : way.nodes)
 				rotate_node(node, cx, cz, sin_r, cos_r);
+			rotate_bearing_tags(way.tags, angle_degrees);
 		} else if (element.is_relation()) {
 			auto &rel = std::get<ProcessedRelation>(element);
-			for (auto &member : rel.members)
+			for (auto &member : rel.members) {
 				for (auto &node : member.way.nodes)
 					rotate_node(node, cx, cz, sin_r, cos_r);
+				rotate_bearing_tags(member.way.tags, angle_degrees);
+			}
+			rotate_bearing_tags(rel.tags, angle_degrees);
 		}
 	}
 
@@ -218,7 +295,7 @@ void rotate_world_with_ground(double angle_degrees,
 				heights, grid_width, grid_height, new_width, new_height);
 	ground.set_world_dims(new_width, new_height);
 	if (had_land_cover)
-		ground.set_land_cover_data(cover, water, new_width, new_height);
+		ground.set_land_cover_data(cover, water, grid_width, grid_height);
 	if (had_canopy)
 		ground.set_canopy_data(
 				canopy::CanopyData(std::move(canopy), grid_width, grid_height), new_width,

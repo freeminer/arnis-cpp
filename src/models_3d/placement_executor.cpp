@@ -13,6 +13,9 @@
 #include <bit>
 #include <cctype>
 #include <cmath>
+#include <exception>
+#include <iostream>
+#include <new>
 #include <optional>
 #include <thread>
 #include <unordered_map>
@@ -58,7 +61,9 @@ std::size_t stl_up_axis(const std::array<float, 3> &extent)
 {
 	std::array<std::pair<std::size_t, float>, 3> sorted{
 			{{0, extent[0]}, {1, extent[1]}, {2, extent[2]}}};
-	std::sort(sorted.begin(), sorted.end(),
+	// Rust's slice::sort_by is stable, so equal extents keep the original X/Y/Z
+	// order. Preserve that tie-breaking when inferring a model's up axis.
+	std::stable_sort(sorted.begin(), sorted.end(),
 			[](const auto &a, const auto &b) { return a.second < b.second; });
 	const auto [min_axis, min_extent] = sorted[0];
 	const auto [unused, median_extent] = sorted[1];
@@ -130,12 +135,14 @@ std::vector<Voxel> voxelize_fitted_stl(const ModelAsset &asset,
 {
 	const auto triangles = parse_binary_stl(asset.bytes);
 	const auto bounds = stl_bbox(triangles);
-	auto fit = derive_stl_fit(bounds.first, bounds.second, placement, blocks_per_meter);
+	if (!bounds)
+		return {};
+	auto fit = derive_stl_fit(bounds->first, bounds->second, placement, blocks_per_meter);
 	if (!fit)
 		return {};
 	const auto centre = [&](std::size_t axis) {
 		const auto [source, sign] = fit->axes[axis];
-		return (bounds.first[source] + bounds.second[source]) * .5f * sign *
+		return (bounds->first[source] + bounds->second[source]) * .5f * sign *
 			   fit->scale[axis];
 	};
 	const float centre_x = centre(0), centre_z = centre(2);
@@ -458,83 +465,107 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 	ModelPlacementStats stats;
 	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0)
 		return stats;
+	// Rust's prescan fetches each distinct Commons URL once and shares the
+	// resulting bytes across every placement that references it. Keep that
+	// behavior here too: providers may be keyed by QID, while multiple QIDs can
+	// resolve to the same model URL.
+	std::unordered_map<std::string, std::optional<ModelAsset>> assets_by_url;
 	for (const auto &placement : prescan.placements) {
 		++stats.attempted;
-		auto asset = provider.fetch(placement.qid);
-		if (!asset)
-			continue;
-		const int ground =
-				ground_for(editor, placement.footprint.min_x, placement.footprint.min_z,
-						placement.footprint.max_x, placement.footprint.max_z);
-		if (asset->format == ModelFormat::BinarySTL) {
-			const auto triangles = parse_binary_stl(asset->bytes);
-			const auto bounds = stl_bbox(triangles);
-			auto fit = derive_stl_fit(
-					bounds.first, bounds.second, placement, blocks_per_meter);
-			if (!fit)
+		// Keep one malformed Commons asset from aborting the remaining
+		// Wikidata placements, matching Rust's per-model error handling.
+		try {
+			const auto *entry = lookup_wikidata(placement.qid);
+			const std::string cache_key =
+					entry && !entry->url.empty() ? entry->url : placement.qid;
+			auto [cached, inserted] = assets_by_url.try_emplace(cache_key);
+			if (inserted)
+				cached->second = provider.fetch(placement.qid);
+			if (!cached->second)
 				continue;
-			std::array<float, 3> raw{};
-			std::array<float, 3> extent{};
-			for (std::size_t i = 0; i < raw.size(); ++i)
-				raw[i] = bounds.second[i] - bounds.first[i];
-			for (std::size_t i = 0; i < extent.size(); ++i)
-				extent[i] = std::abs(raw[fit->axes[i].first] * fit->scale[i]) /
-							float(blocks_per_meter);
-			const float largest = std::max({extent[0], extent[1], extent[2]});
-			if (!std::isfinite(largest) || std::max(extent[0], extent[2]) > 225.0f ||
-					extent[1] > 600.0f || largest < 2.0f)
+			const auto &asset = *cached->second;
+			const int ground = ground_for(editor, placement.footprint.min_x,
+					placement.footprint.min_z, placement.footprint.max_x,
+					placement.footprint.max_z);
+			if (asset.format == ModelFormat::BinarySTL) {
+				const auto triangles = parse_binary_stl(asset.bytes);
+				const auto bounds = stl_bbox(triangles);
+				if (!bounds)
+					continue;
+				auto fit = derive_stl_fit(
+						bounds->first, bounds->second, placement, blocks_per_meter);
+				if (!fit)
+					continue;
+				std::array<float, 3> raw{};
+				std::array<float, 3> extent{};
+				for (std::size_t i = 0; i < raw.size(); ++i)
+					raw[i] = bounds->second[i] - bounds->first[i];
+				for (std::size_t i = 0; i < extent.size(); ++i)
+					extent[i] = std::abs(raw[fit->axes[i].first] * fit->scale[i]) /
+								float(blocks_per_meter);
+				const float largest = std::max({extent[0], extent[1], extent[2]});
+				if (!std::isfinite(largest) || std::max(extent[0], extent[2]) > 225.0f ||
+						extent[1] > 600.0f || largest < 2.0f)
+					continue;
+				WorldTransform transform(0, 1, {0, 0, 0}, {1, 1, 1},
+						placement.yaw_degrees, float(placement.anchor_x), float(ground),
+						float(placement.anchor_z));
+				std::uint64_t qid_seed = 0xcbf29ce484222325ULL;
+				for (unsigned char c : placement.qid) {
+					qid_seed ^= c;
+					qid_seed *= 0x100000001b3ULL;
+				}
+				place_grounded_voxels(editor,
+						voxelize_fitted_stl(
+								asset, placement, blocks_per_meter, transform),
+						ground, 0, stats, &placement.palette, &placement.palette_layers,
+						qid_seed);
 				continue;
-			WorldTransform transform(0, 1, {0, 0, 0}, {1, 1, 1}, placement.yaw_degrees,
-					float(placement.anchor_x), float(ground), float(placement.anchor_z));
-			std::uint64_t qid_seed = 0xcbf29ce484222325ULL;
-			for (unsigned char c : placement.qid) {
-				qid_seed ^= c;
-				qid_seed *= 0x100000001b3ULL;
 			}
-			place_grounded_voxels(editor,
-					voxelize_fitted_stl(*asset, placement, blocks_per_meter, transform),
-					ground, 0, stats, &placement.palette, &placement.palette_layers,
-					qid_seed);
+			float scale = 1.0f;
+			if (placement.height_m && *placement.height_m > 0)
+				scale = wikidata::scale_for_height(
+						asset, float(*placement.height_m * blocks_per_meter));
+			else if (placement.xz_extent_m && *placement.xz_extent_m > 0) {
+				const float extent = std::max(
+						asset.max[0] - asset.min[0], asset.max[2] - asset.min[2]);
+				if (extent > 1e-4f)
+					scale = float(*placement.xz_extent_m * blocks_per_meter) / extent;
+			}
+			if (!std::isfinite(scale) || scale <= 0)
+				continue;
+			// Same final-world safety envelope as Rust's GLB/STL placement code.
+			// `scale` is in blocks/model-unit here, so convert the transformed bbox
+			// back to metres before expensive voxelisation.
+			const float ex = std::abs(asset.max[0] - asset.min[0]) * scale /
+							 float(blocks_per_meter);
+			const float ey = std::abs(asset.max[1] - asset.min[1]) * scale /
+							 float(blocks_per_meter);
+			const float ez = std::abs(asset.max[2] - asset.min[2]) * scale /
+							 float(blocks_per_meter);
+			const float largest = std::max({ex, ey, ez});
+			if (!std::isfinite(largest) || std::max(ex, ez) > 225.0f || ey > 600.0f ||
+					largest < 2.0f)
+				continue;
+			// Rust's Wikidata GLB path anchors the transformed model origin at the
+			// OSM coordinate; it does not recenter the model's XZ bounds. Keep the
+			// same origin here so off-center GLB geometry lands at the same place.
+			WorldTransform transform(0, scale, {0, 0, 0}, {1, 1, 1},
+					placement.yaw_degrees, float(placement.anchor_x),
+					float(ground) - asset.min[1] * scale, float(placement.anchor_z));
+			// Rust preserves GLB-authored material and vertex colors. Contextual
+			// Wikidata palettes are only used for STL, whose triangles carry no
+			// reliable material colors; do not recolor the GLB voxelizer's
+			// STONE_BRICKS fallback here.
+			place_grounded(editor, asset, transform, ground, 0, stats);
+		} catch (const std::bad_alloc &) {
+			throw;
+		} catch (const std::exception &error) {
+			std::cerr << "Warning: Wikidata model voxelization/fetch failed ("
+					  << placement.qid << ", OSM " << placement.osm_kind << ' '
+					  << placement.osm_id << "): " << error.what() << '\n';
 			continue;
 		}
-		float scale = 1.0f;
-		if (placement.height_m && *placement.height_m > 0)
-			scale = wikidata::scale_for_height(
-					*asset, float(*placement.height_m * blocks_per_meter));
-		else if (placement.xz_extent_m && *placement.xz_extent_m > 0) {
-			const float extent = std::max(
-					asset->max[0] - asset->min[0], asset->max[2] - asset->min[2]);
-			if (extent > 1e-4f)
-				scale = float(*placement.xz_extent_m * blocks_per_meter) / extent;
-		}
-		if (!std::isfinite(scale) || scale <= 0)
-			continue;
-		// Same final-world safety envelope as Rust's GLB/STL placement code.
-		// `scale` is in blocks/model-unit here, so convert the transformed bbox
-		// back to metres before expensive voxelisation.
-		const float ex =
-				std::abs(asset->max[0] - asset->min[0]) * scale / float(blocks_per_meter);
-		const float ey =
-				std::abs(asset->max[1] - asset->min[1]) * scale / float(blocks_per_meter);
-		const float ez =
-				std::abs(asset->max[2] - asset->min[2]) * scale / float(blocks_per_meter);
-		const float largest = std::max({ex, ey, ez});
-		if (!std::isfinite(largest) || std::max(ex, ez) > 225.0f || ey > 600.0f ||
-				largest < 2.0f)
-			continue;
-		const auto offset =
-				rotated_center_offset(*asset, scale, float(placement.yaw_degrees));
-		WorldTransform transform(0, scale, {0, 0, 0}, {1, 1, 1}, placement.yaw_degrees,
-				float(placement.anchor_x) - offset[0],
-				float(ground) - asset->min[1] * scale,
-				float(placement.anchor_z) - offset[2]);
-		std::uint64_t qid_seed = 0xcbf29ce484222325ULL;
-		for (unsigned char c : placement.qid) {
-			qid_seed ^= c;
-			qid_seed *= 0x100000001b3ULL;
-		}
-		place_grounded(editor, *asset, transform, ground, 0, stats, &placement.palette,
-				&placement.palette_layers, qid_seed);
 	}
 	return stats;
 }
@@ -608,20 +639,29 @@ ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 
 	for (const auto &placement : prescan.placements) {
 		++stats.attempted;
-		const auto asset = assets.find(placement.model_id);
-		const auto info = infos.find(placement.model_id);
-		if (asset == assets.end() || info == infos.end())
+		try {
+			const auto asset = assets.find(placement.model_id);
+			const auto info = infos.find(placement.model_id);
+			if (asset == assets.end() || info == infos.end())
+				continue;
+			const int ground = ground_for(editor, placement.footprint.min_x,
+					placement.footprint.min_z, placement.footprint.max_x,
+					placement.footprint.max_z);
+			WorldTransform transform(info->second.rotation, info->second.scale,
+					info->second.translation,
+					{float(blocks_per_meter), float(blocks_per_meter),
+							float(blocks_per_meter)},
+					placement.world_yaw_degrees, float(placement.anchor_x), float(ground),
+					float(placement.anchor_z));
+			place_grounded(editor, asset->second, transform, ground, 0, stats);
+		} catch (const std::bad_alloc &) {
+			throw;
+		} catch (const std::exception &error) {
+			std::cerr << "Warning: 3DMR model " << placement.model_id << " (OSM "
+					  << placement.osm_id << ") voxelization failed: " << error.what()
+					  << '\n';
 			continue;
-		const int ground =
-				ground_for(editor, placement.footprint.min_x, placement.footprint.min_z,
-						placement.footprint.max_x, placement.footprint.max_z);
-		WorldTransform transform(info->second.rotation, info->second.scale,
-				info->second.translation,
-				{float(blocks_per_meter), float(blocks_per_meter),
-						float(blocks_per_meter)},
-				placement.world_yaw_degrees, float(placement.anchor_x), float(ground),
-				float(placement.anchor_z));
-		place_grounded(editor, asset->second, transform, ground, 0, stats);
+		}
 	}
 	return stats;
 }

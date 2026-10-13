@@ -11,7 +11,9 @@
 #include "stb_image.h"
 
 #include <algorithm>
+#include <bit>
 #include <cctype>
+#include <cmath>
 #include <fstream>
 #include <limits>
 #include <map>
@@ -33,8 +35,21 @@ std::optional<std::uint64_t> u64(const nlohmann::json &value)
 {
 	if (value.is_number_unsigned())
 		return value.get<std::uint64_t>();
-	if (value.is_number_integer() && value.get<std::int64_t>() >= 0)
-		return static_cast<std::uint64_t>(value.get<std::int64_t>());
+	if (value.is_number_integer()) {
+		const auto number = value.get<std::int64_t>();
+		return number < 0 ? std::uint64_t{0} : static_cast<std::uint64_t>(number);
+	}
+	// Rust's serde_json Value::as_u64() also falls back to as_f64() and casts
+	// the result. Preserve that behavior for exports whose ids were serialized
+	// as floating-point numbers (the cast saturates at the integer limits).
+	if (value.is_number_float()) {
+		const double number = value.get<double>();
+		if (std::isnan(number) || number <= 0.0)
+			return std::uint64_t{0};
+		if (number >= static_cast<double>(std::numeric_limits<std::uint64_t>::max()))
+			return std::numeric_limits<std::uint64_t>::max();
+		return static_cast<std::uint64_t>(number);
+	}
 	if (value.is_string()) {
 		try {
 			return std::stoull(value.get<std::string>());
@@ -42,6 +57,38 @@ std::optional<std::uint64_t> u64(const nlohmann::json &value)
 		}
 	}
 	return std::nullopt;
+}
+
+std::int32_t i32_or(const nlohmann::json &object, const char *key, std::int32_t fallback)
+{
+	if (!object.is_object())
+		return fallback;
+	const auto it = object.find(key);
+	if (it == object.end())
+		return fallback;
+	if (it->is_number_unsigned()) {
+		const auto value = it->get<std::uint64_t>();
+		if (value > static_cast<std::uint64_t>(std::numeric_limits<std::int64_t>::max()))
+			return std::numeric_limits<std::int32_t>::max();
+		const auto low = static_cast<std::uint32_t>(value);
+		return std::bit_cast<std::int32_t>(low);
+	}
+	if (it->is_number_integer()) {
+		const auto value = it->get<std::int64_t>();
+		const auto low = static_cast<std::uint32_t>(value);
+		return std::bit_cast<std::int32_t>(low);
+	}
+	if (it->is_number_float()) {
+		const double value = it->get<double>();
+		if (std::isnan(value))
+			return 0;
+		if (value <= std::numeric_limits<std::int32_t>::min())
+			return std::numeric_limits<std::int32_t>::min();
+		if (value >= std::numeric_limits<std::int32_t>::max())
+			return std::numeric_limits<std::int32_t>::max();
+		return static_cast<std::int32_t>(value);
+	}
+	return fallback;
 }
 
 std::shared_mutex store_mutex;
@@ -78,6 +125,23 @@ std::unordered_map<CellKey, std::uint64_t, CellHash> projected_photo_cells;
 std::unordered_map<std::uint64_t, imgops::Rgb> projected_building_colors;
 std::unordered_set<std::uint64_t> projected_buildings;
 bool displays_enabled = false;
+
+struct PendingDisplay
+{
+	std::string name;
+	displays::Quad quad;
+	std::int8_t facing{};
+	std::size_t building{}, wall{};
+	std::vector<std::pair<int, int>> wall_cells;
+	int top{};
+	std::uint32_t x0{}, y0{}, x1{}, y1{};
+	double pixels_per_block{};
+	bool flip{};
+};
+
+std::mutex pending_displays_mutex;
+std::vector<PendingDisplay> pending_displays;
+std::unordered_set<std::string> pending_display_names;
 
 std::optional<Owner> owner_for(const nlohmann::json &record)
 {
@@ -258,11 +322,16 @@ std::optional<Export> load_export(
 				entry.path().filename() == "manifest.json")
 			continue;
 		std::ifstream input(entry.path());
-		if (!input)
-			continue;
+		if (!input) {
+			if (error)
+				*error = entry.path().string() + ": unable to read facade record";
+			return std::nullopt;
+		}
 		try {
 			nlohmann::json record;
 			input >> record;
+			if (!record.is_object())
+				continue;
 			const auto owner = owner_for(record);
 			if (!owner)
 				continue;
@@ -273,87 +342,148 @@ std::optional<Export> load_export(
 					color["rgb"].is_array() && color["rgb"].size() == 3) {
 				imgops::Rgb rgb{};
 				for (std::size_t i = 0; i < 3; ++i)
-					rgb[i] = static_cast<std::uint8_t>(std::min<std::uint64_t>(
-							255, color["rgb"][i].is_number()
-										 ? color["rgb"][i].get<std::uint64_t>()
-										 : 0));
+					// Rust's Value::as_u64() rejects fractional values, then defaults
+					// malformed/negative channels to zero before clamping to 255.
+					if (color["rgb"][i].is_number_unsigned()) {
+						rgb[i] = static_cast<std::uint8_t>(std::min<std::uint64_t>(
+								255, color["rgb"][i].get<std::uint64_t>()));
+					} else if (color["rgb"][i].is_number_integer()) {
+						const auto channel = color["rgb"][i].get<std::int64_t>();
+						rgb[i] = channel < 0
+										 ? 0
+										 : static_cast<std::uint8_t>(
+												   std::min<std::int64_t>(255, channel));
+					} else {
+						rgb[i] = 0;
+					}
 				building.building_color = rgb;
 			}
-			for (const auto &wall : record.value("walls", nlohmann::json::array())) {
-				const auto tier = wall.value("tier", "D");
-				if (tier != "A" && tier != "B")
-					continue;
-				ExportWall out;
-				out.owner = *owner;
-				out.tier = tier;
-				out.columns = wall.value("cols", wall.value("columns", 0u));
-				out.rows = wall.value("rows", 0u);
-				if (out.columns == 0 || out.rows == 0 || out.columns > 16384 ||
-						out.rows > 16384)
-					continue;
-				const auto color_name = wall.value("png", "");
-				const auto color_path = safe_image_path(directory, color_name);
-				if (!color_path || !load_wall_pixels(*color_path, out))
-					continue;
-				out.color_png = *color_path;
-				if (const auto name = wall.value("tex", ""); !name.empty())
-					if (const auto path = safe_image_path(directory, name))
-						if (load_texture_pixels(*path, out))
-							out.texture_png = *path;
-				if (const auto extent = wall.value("extent", nlohmann::json{});
-						extent.is_object() &&
-						extent.value("s_l", nlohmann::json{}).is_number())
-					out.col0_m = extent["s_l"].get<double>();
-				for (const auto &edge : wall.value("edges", nlohmann::json::array())) {
-					const auto node_a = edge.is_object() && edge.contains("node_a")
-												? u64(edge["node_a"])
-												: std::nullopt;
-					const auto node_b = edge.is_object() && edge.contains("node_b")
-												? u64(edge["node_b"])
-												: std::nullopt;
-					if (!node_a || !node_b)
+			const auto walls_it = record.find("walls");
+			if (walls_it != record.end() && walls_it->is_array())
+				for (const auto &wall : *walls_it) {
+					if (!wall.is_object())
 						continue;
-					ExportWall::Edge parsed;
-					parsed.node_a = *node_a;
-					parsed.node_b = *node_b;
-					parsed.col0 = edge.value("col0", 0);
-					parsed.col1 = edge.value("col1", static_cast<int>(out.columns) - 1);
-					if (edge.contains("s0") && edge.contains("s1") &&
-							edge["s0"].is_number() && edge["s1"].is_number()) {
-						const double s0 = edge["s0"].get<double>();
-						const double s1 = edge["s1"].get<double>();
-						if (s1 > s0)
-							parsed.span_m = std::pair{s0, s1};
-					}
-					out.edges.push_back(std::move(parsed));
-				}
-				if (out.edges.empty()) {
-					const auto node_a =
-							wall.contains("node_a") ? u64(wall["node_a"]) : std::nullopt;
-					const auto node_b =
-							wall.contains("node_b") ? u64(wall["node_b"]) : std::nullopt;
-					if (!node_a || !node_b)
+					const auto tier_it = wall.find("tier");
+					const auto tier = tier_it != wall.end() && tier_it->is_string()
+											  ? tier_it->get<std::string>()
+											  : std::string("D");
+					if (tier != "A" && tier != "B")
 						continue;
-					out.edges.push_back({*node_a, *node_b, 0,
-							static_cast<std::int32_t>(out.columns) - 1, std::nullopt});
-				}
-				for (const auto &view : wall.value("views", nlohmann::json::array())) {
-					const auto id = view.is_string() ? view.get<std::string>()
-													 : view.value("pano", "");
-					if (!id.empty()) {
-						out.views.push_back(id);
-						images.insert(id);
+					ExportWall out;
+					out.owner = *owner;
+					out.tier = tier;
+					const auto cols_it = wall.find("cols");
+					const auto legacy_cols_it = wall.find("columns");
+					const auto columns = cols_it != wall.end() ? u64(*cols_it)
+										 : legacy_cols_it != wall.end()
+												 ? u64(*legacy_cols_it)
+												 : std::nullopt;
+					const auto rows_it = wall.find("rows");
+					const auto rows =
+							rows_it != wall.end() ? u64(*rows_it) : std::nullopt;
+					if (!columns || !rows ||
+							*columns > std::numeric_limits<std::uint32_t>::max() ||
+							*rows > std::numeric_limits<std::uint32_t>::max())
+						continue;
+					out.columns = static_cast<std::uint32_t>(*columns);
+					out.rows = static_cast<std::uint32_t>(*rows);
+					if (out.columns == 0 || out.rows == 0 || out.columns > 16384 ||
+							out.rows > 16384)
+						continue;
+					const auto png_it = wall.find("png");
+					const auto color_name = png_it != wall.end() && png_it->is_string()
+													? png_it->get<std::string>()
+													: std::string{};
+					const auto color_path = safe_image_path(directory, color_name);
+					if (!color_path || !load_wall_pixels(*color_path, out))
+						continue;
+					out.color_png = *color_path;
+					const auto texture_it = wall.find("tex");
+					const auto texture_name =
+							texture_it != wall.end() && texture_it->is_string()
+									? texture_it->get<std::string>()
+									: std::string{};
+					if (const auto &name = texture_name; !name.empty())
+						if (const auto path = safe_image_path(directory, name))
+							if (load_texture_pixels(*path, out))
+								out.texture_png = *path;
+					if (const auto extent = wall.value("extent", nlohmann::json{});
+							extent.is_object() &&
+							extent.value("s_l", nlohmann::json{}).is_number())
+						out.col0_m = extent["s_l"].get<double>();
+					const auto edges_it = wall.find("edges");
+					if (edges_it != wall.end() && edges_it->is_array())
+						for (const auto &edge : *edges_it) {
+							const auto node_a =
+									edge.is_object() && edge.contains("node_a")
+											? u64(edge["node_a"])
+											: std::nullopt;
+							const auto node_b =
+									edge.is_object() && edge.contains("node_b")
+											? u64(edge["node_b"])
+											: std::nullopt;
+							if (!node_a || !node_b)
+								continue;
+							ExportWall::Edge parsed;
+							parsed.node_a = *node_a;
+							parsed.node_b = *node_b;
+							parsed.col0 = i32_or(edge, "col0", 0);
+							parsed.col1 = i32_or(edge, "col1",
+									static_cast<std::int32_t>(out.columns) - 1);
+							if (edge.contains("s0") && edge.contains("s1") &&
+									edge["s0"].is_number() && edge["s1"].is_number()) {
+								const double s0 = edge["s0"].get<double>();
+								const double s1 = edge["s1"].get<double>();
+								if (s1 > s0)
+									parsed.span_m = std::pair{s0, s1};
+							}
+							out.edges.push_back(std::move(parsed));
+						}
+					if (out.edges.empty()) {
+						const auto node_a = wall.contains("node_a") ? u64(wall["node_a"])
+																	: std::nullopt;
+						const auto node_b = wall.contains("node_b") ? u64(wall["node_b"])
+																	: std::nullopt;
+						if (!node_a || !node_b)
+							continue;
+						out.edges.push_back({*node_a, *node_b, 0,
+								static_cast<std::int32_t>(out.columns) - 1,
+								std::nullopt});
 					}
+					const auto views_it = wall.find("views");
+					if (views_it != wall.end() && views_it->is_array())
+						for (const auto &view : *views_it) {
+							std::string id;
+							if (view.is_string()) {
+								id = view.get<std::string>();
+							} else if (view.is_object()) {
+								const auto pano_it = view.find("pano");
+								if (pano_it != view.end() && pano_it->is_string())
+									id = pano_it->get<std::string>();
+							}
+							if (!id.empty()) {
+								out.views.push_back(id);
+								images.insert(id);
+							}
+						}
+					building.walls.push_back(std::move(out));
 				}
-				building.walls.push_back(std::move(out));
-			}
-			if (!building.walls.empty())
+			// Rust keeps each record's whole-building colour independently of
+			// whether any of that record's A/B wall images could be loaded. Once
+			// another record makes the export usable, this colour still applies to
+			// procedural walls on the corresponding way/relation rings.
+			if (!building.walls.empty() || building.building_color)
 				result.buildings.push_back(std::move(building));
 		} catch (const std::exception &e) {
 			if (error)
 				*error = entry.path().string() + ": " + e.what();
 			return std::nullopt;
 		}
+	}
+	if (ec) {
+		if (error)
+			*error = "read " + directory.string() + ": " + ec.message();
+		return std::nullopt;
 	}
 	result.image_ids.assign(images.begin(), images.end());
 	return result;
@@ -362,12 +492,22 @@ std::optional<Export> load_export(
 void install_export(Export value)
 {
 	std::unique_lock lock(store_mutex);
-	store = std::move(value);
+	const bool has_walls = std::any_of(value.buildings.begin(), value.buildings.end(),
+			[](const ExportBuilding &building) { return !building.walls.empty(); });
+	if (has_walls)
+		store = std::move(value);
+	else
+		store.reset();
 	displays_enabled = false;
 	projected_cells.clear();
 	projected_photo_cells.clear();
 	projected_building_colors.clear();
 	projected_buildings.clear();
+	{
+		std::lock_guard pending_lock(pending_displays_mutex);
+		pending_displays.clear();
+		pending_display_names.clear();
+	}
 }
 
 void set_displays_enabled(bool enabled)
@@ -386,6 +526,11 @@ void clear()
 	projected_building_colors.clear();
 	projected_buildings.clear();
 	world_scale = 1.0;
+	{
+		std::lock_guard pending_lock(pending_displays_mutex);
+		pending_displays.clear();
+		pending_display_names.clear();
+	}
 }
 
 void project_export(const std::vector<arnis::ProcessedElement> &elements,
@@ -691,11 +836,6 @@ std::size_t collect_displays(arnis::world_editor::WorldEditor &editor,
 		if (total_height <= 0)
 			continue;
 		const int top = base_y + total_height;
-		if (std::none_of(group.cells.begin(), group.cells.end(), [&](const auto &cell) {
-				const int x = std::get<0>(cell), z = std::get<1>(cell);
-				return top > editor.get_absolute_y(x, 0, z) + 1;
-			}))
-			continue;
 		const auto right = displays::right_of(*normal);
 		std::sort(group.cells.begin(), group.cells.end(),
 				[&](const auto &a, const auto &b) {
@@ -754,98 +894,157 @@ std::size_t collect_displays(arnis::world_editor::WorldEditor &editor,
 							static_cast<std::size_t>(texture.texture_width) *
 									texture.texture_height)
 				continue;
-			const auto count = static_cast<std::size_t>(crop_width) * crop_height;
-			std::vector<std::array<std::uint8_t, 3>> rgb(count);
-			std::vector<bool> valid(count);
-			std::vector<std::array<std::uint8_t, 3>> valid_rgb;
-			for (std::uint32_t y = 0; y < crop_height; ++y)
-				for (std::uint32_t x = 0; x < crop_width; ++x) {
-					const auto &px =
-							texture.texture_pixels[static_cast<std::size_t>(y + y0) *
-														   texture.texture_width +
-												   x + x0];
-					const auto i = static_cast<std::size_t>(y) * crop_width + x;
-					rgb[i] = {px[0], px[1], px[2]};
-					valid[i] = px[3] > 0;
-					if (valid[i])
-						valid_rgb.push_back(rgb[i]);
-				}
-			if (valid_rgb.empty() ||
-					static_cast<double>(valid_rgb.size()) < MIN_VALID_FRACTION * count)
-				continue;
-			auto median = [](std::vector<std::array<std::uint8_t, 3>> values) {
-				std::array<std::uint8_t, 3> result{};
-				for (std::size_t channel = 0; channel < 3; ++channel) {
-					std::vector<std::uint8_t> values_channel;
-					values_channel.reserve(values.size());
-					for (const auto &value : values)
-						values_channel.push_back(value[channel]);
-					std::sort(values_channel.begin(), values_channel.end());
-					result[channel] = values_channel[values_channel.size() / 2];
-				}
-				return result;
-			};
-			const auto crop_median = median(valid_rgb);
-			std::vector<std::array<std::uint8_t, 3>> filled = rgb;
-			for (std::uint32_t y = 0; y < crop_height; ++y) {
-				std::vector<std::array<std::uint8_t, 3>> row_pixels;
-				for (std::uint32_t x = 0; x < crop_width; ++x) {
-					const auto i = static_cast<std::size_t>(y) * crop_width + x;
-					if (valid[i])
-						row_pixels.push_back(rgb[i]);
-				}
-				const auto fill = row_pixels.empty() ? crop_median : median(row_pixels);
-				for (std::uint32_t x = 0; x < crop_width; ++x) {
-					const auto i = static_cast<std::size_t>(y) * crop_width + x;
-					if (!valid[i])
-						filled[i] = fill;
+			const auto panel_name =
+					"mapillary_" + std::to_string(way_id) + "_" +
+					std::to_string(owner.first) + "_" + std::to_string(owner.second) +
+					"_" + std::to_string(piece.p0) + "_" + std::to_string(piece.b0);
+			const auto facing = displays::facing_index(*normal);
+			const bool flip = displays::flip_crop(direction, *normal);
+			{
+				std::lock_guard pending_lock(pending_displays_mutex);
+				if (pending_display_names.insert(panel_name).second) {
+					std::vector<std::pair<int, int>> visibility_cells;
+					visibility_cells.reserve(group.cells.size());
+					for (const auto &cell : group.cells)
+						visibility_cells.emplace_back(
+								std::get<0>(cell), std::get<1>(cell));
+					pending_displays.push_back({panel_name, piece.quad, facing,
+							owner.first, owner.second, std::move(visibility_cells), top,
+							x0, y0, x1, y1, static_cast<double>(pixels_per_block), flip});
+					++placed;
 				}
 			}
-			std::vector<std::array<std::uint8_t, 3>> smooth = filled;
-			for (std::uint32_t y = 0; y < crop_height; ++y)
-				for (std::uint32_t x = 0; x < crop_width; ++x) {
-					const auto i = static_cast<std::size_t>(y) * crop_width + x;
-					if (valid[i])
-						continue;
-					std::array<std::uint32_t, 3> sum{};
-					std::uint32_t samples = 0;
-					for (std::uint32_t sy = y > 0 ? y - 1 : y;
-							sy <= std::min(crop_height - 1, y + 1); ++sy)
-						for (std::uint32_t sx = x > 0 ? x - 1 : x;
-								sx <= std::min(crop_width - 1, x + 1); ++sx) {
-							const auto &pixel =
-									filled[static_cast<std::size_t>(sy) * crop_width +
-											sx];
-							for (std::size_t c = 0; c < 3; ++c)
-								sum[c] += pixel[c];
-							++samples;
-						}
-					for (std::size_t c = 0; c < 3; ++c)
-						smooth[i][c] = static_cast<std::uint8_t>(sum[c] / samples);
-				}
-			if (displays::flip_crop(direction, *normal))
-				for (std::uint32_t y = 0; y < crop_height; ++y)
-					std::reverse(
-							smooth.begin() + static_cast<std::size_t>(y) * crop_width,
-							smooth.begin() +
-									static_cast<std::size_t>(y + 1) * crop_width);
-			std::vector<std::uint8_t> crop_rgb;
-			crop_rgb.reserve(count * 3);
-			for (const auto &pixel : smooth)
-				crop_rgb.insert(crop_rgb.end(), pixel.begin(), pixel.end());
-			const auto sprite =
-					displays::Sprite::of(piece.quad.w, piece.quad.h, pixels_per_block);
-			const auto panel_rgb =
-					displays::lay_out_rgb(crop_rgb, crop_width, crop_height, sprite);
-			if (!panel_rgb.empty() &&
-					editor.place_facade_panel(
-							static_cast<int>(std::llround(piece.quad.cx)),
-							static_cast<int>(std::llround(piece.quad.cy)),
-							static_cast<int>(std::llround(piece.quad.cz)),
-							displays::facing_index(*normal), panel_rgb, sprite.side_w,
-							sprite.side_h))
-				++placed;
 		}
+	}
+	return placed;
+}
+
+std::size_t finalize_displays(arnis::world_editor::WorldEditor &editor)
+{
+	std::vector<PendingDisplay> pending;
+	{
+		std::lock_guard lock(pending_displays_mutex);
+		pending.swap(pending_displays);
+		pending_display_names.clear();
+	}
+	std::shared_lock store_lock(store_mutex);
+	if (!store)
+		return 0;
+	std::size_t placed = 0;
+	for (auto &panel : pending) {
+		const bool visible = std::any_of(
+				panel.wall_cells.begin(), panel.wall_cells.end(), [&](const auto &cell) {
+					return panel.top >
+						   editor.get_absolute_y(cell.first, 0, cell.second) + 1;
+				});
+		if (!visible)
+			continue;
+		if (panel.building >= store->buildings.size() ||
+				panel.wall >= store->buildings[panel.building].walls.size())
+			continue;
+		const auto &texture = store->buildings[panel.building].walls[panel.wall];
+		if (panel.x0 >= panel.x1 || panel.y0 >= panel.y1 ||
+				panel.x1 > texture.texture_width || panel.y1 > texture.texture_height ||
+				texture.texture_pixels.size() <
+						static_cast<std::size_t>(texture.texture_width) *
+								texture.texture_height)
+			continue;
+		const auto crop_width = panel.x1 - panel.x0;
+		const auto crop_height = panel.y1 - panel.y0;
+		const auto count = static_cast<std::size_t>(crop_width) * crop_height;
+		if (count == 0 || count > 16 * 1024 * 1024)
+			continue;
+		std::vector<std::array<std::uint8_t, 3>> rgb(count);
+		std::vector<bool> valid(count);
+		std::vector<std::array<std::uint8_t, 3>> valid_rgb;
+		for (std::uint32_t y = 0; y < crop_height; ++y)
+			for (std::uint32_t x = 0; x < crop_width; ++x) {
+				const auto &px =
+						texture.texture_pixels[static_cast<std::size_t>(y + panel.y0) *
+													   texture.texture_width +
+											   x + panel.x0];
+				const auto i = static_cast<std::size_t>(y) * crop_width + x;
+				rgb[i] = {px[0], px[1], px[2]};
+				valid[i] = px[3] > 0;
+				if (valid[i])
+					valid_rgb.push_back(rgb[i]);
+			}
+		if (valid_rgb.empty() ||
+				static_cast<double>(valid_rgb.size()) < MIN_VALID_FRACTION * count)
+			continue;
+		auto median = [](std::vector<std::array<std::uint8_t, 3>> values) {
+			std::array<std::uint8_t, 3> result{};
+			for (std::size_t channel = 0; channel < 3; ++channel) {
+				std::vector<std::uint8_t> values_channel;
+				values_channel.reserve(values.size());
+				for (const auto &value : values)
+					values_channel.push_back(value[channel]);
+				std::sort(values_channel.begin(), values_channel.end());
+				result[channel] = values_channel[values_channel.size() / 2];
+			}
+			return result;
+		};
+		const auto crop_median = median(valid_rgb);
+		std::vector<std::array<std::uint8_t, 3>> filled = rgb;
+		for (std::uint32_t y = 0; y < crop_height; ++y) {
+			std::vector<std::array<std::uint8_t, 3>> row_pixels;
+			for (std::uint32_t x = 0; x < crop_width; ++x) {
+				const auto i = static_cast<std::size_t>(y) * crop_width + x;
+				if (valid[i])
+					row_pixels.push_back(rgb[i]);
+			}
+			const auto fill = row_pixels.empty() ? crop_median : median(row_pixels);
+			for (std::uint32_t x = 0; x < crop_width; ++x) {
+				const auto i = static_cast<std::size_t>(y) * crop_width + x;
+				if (!valid[i])
+					filled[i] = fill;
+			}
+		}
+		std::vector<std::array<std::uint8_t, 3>> smooth = filled;
+		for (std::uint32_t y = 0; y < crop_height; ++y)
+			for (std::uint32_t x = 0; x < crop_width; ++x) {
+				const auto i = static_cast<std::size_t>(y) * crop_width + x;
+				if (valid[i])
+					continue;
+				std::array<std::uint32_t, 3> sum{};
+				std::uint32_t samples = 0;
+				for (std::uint32_t sy = y > 0 ? y - 1 : y;
+						sy <= std::min(crop_height - 1, y + 1); ++sy)
+					for (std::uint32_t sx = x > 0 ? x - 1 : x;
+							sx <= std::min(crop_width - 1, x + 1); ++sx) {
+						const auto &pixel =
+								filled[static_cast<std::size_t>(sy) * crop_width + sx];
+						for (std::size_t c = 0; c < 3; ++c)
+							sum[c] += pixel[c];
+						++samples;
+					}
+				for (std::size_t c = 0; c < 3; ++c)
+					smooth[i][c] = static_cast<std::uint8_t>(sum[c] / samples);
+			}
+		if (panel.flip)
+			for (std::uint32_t y = 0; y < crop_height; ++y)
+				std::reverse(smooth.begin() + static_cast<std::size_t>(y) * crop_width,
+						smooth.begin() + static_cast<std::size_t>(y + 1) * crop_width);
+		std::vector<std::uint8_t> crop_rgb;
+		crop_rgb.reserve(count * 3);
+		for (const auto &pixel : smooth)
+			crop_rgb.insert(crop_rgb.end(), pixel.begin(), pixel.end());
+		const auto sprite =
+				displays::Sprite::of(panel.quad.w, panel.quad.h, panel.pixels_per_block);
+		auto pixels = displays::lay_out_rgb(crop_rgb, crop_width, crop_height, sprite);
+		if (pixels.empty())
+			continue;
+		bool accepted =
+				editor.has_entity_sink() &&
+				displays::place_item_display(editor, panel.name, panel.quad, panel.facing,
+						std::move(pixels), sprite.side_w, sprite.side_h);
+		if (!accepted)
+			accepted = editor.place_facade_panel(
+					static_cast<int>(std::llround(panel.quad.cx)),
+					static_cast<int>(std::llround(panel.quad.cy)),
+					static_cast<int>(std::llround(panel.quad.cz)), panel.facing,
+					std::move(pixels), sprite.side_w, sprite.side_h);
+		placed += accepted;
 	}
 	return placed;
 }

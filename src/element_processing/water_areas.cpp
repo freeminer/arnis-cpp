@@ -452,28 +452,6 @@ static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
 	return surface;
 }
 
-// Rust parity: resolve one stable level for a body seen consistently by ESA.
-static std::optional<int> still_surface_level(WorldEditor &editor, int min_x, int min_z,
-		int max_x, int max_z, const std::vector<std::vector<XZPoint>> &outers,
-		const std::vector<std::vector<XZPoint>> &inners)
-{
-	if (!editor.ground)
-		return std::nullopt;
-	// Rust samples the raw Ground elevation on coordinates relative to the
-	// generation bbox. Do not route this through get_ground_level(): its road
-	// surface overrides are for placement, not for resolving a water body's
-	// source elevation.
-	const auto [origin_x, origin_z] = editor.get_min_coords();
-	const auto *ground = editor.ground;
-	return resolve_still_surface(
-			editor.ground, min_x, min_z, max_x, max_z, outers, inners,
-			[origin_x, origin_z](
-					int x, int z) { return XZPoint{x - origin_x, z - origin_z}; },
-			[ground, origin_x, origin_z](int x, int z) {
-				return ground->level({x - origin_x, z - origin_z});
-			});
-}
-
 static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 		const std::vector<std::vector<XZPoint>> &outers,
 		const std::vector<std::vector<XZPoint>> &inners, WorldEditor &editor,
@@ -579,7 +557,8 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 					// Rust fills down to terrain over a tunnel bore, but never
 					// excavates or replaces the bore below the terrain surface.
 					if (tunnel_footprint && tunnel_footprint->contains(x, z)) {
-						for (int y = ground_y + 1; y <= water_y; ++y)
+						const int first_water_y = std::min(ground_y + 1, water_y);
+						for (int y = first_water_y; y <= water_y; ++y)
 							editor.set_block_absolute(
 									WATER, x, y, z, std::nullopt, std::nullopt);
 						continue;
@@ -651,13 +630,8 @@ static void generate_water_areas(WorldEditor &editor,
 		inners_xz.push_back(std::move(v));
 	}
 
-	std::optional<int> still_surface = precomputed_surface;
-	if (!still_surface.has_value()) {
-		still_surface = still_surface_level(
-				editor, min_x, min_z, max_x, max_z, outers_xz, inners_xz);
-	}
 	scanline_fill_water(min_x, min_z, max_x, max_z, outers_xz, inners_xz, editor, bwf,
-			road_mask, tunnel_footprint, bridge_surface, still_surface);
+			road_mask, tunnel_footprint, bridge_surface, precomputed_surface);
 	structures::boat::scatter_boats(editor, min_x, min_z, max_x, max_z);
 }
 
@@ -824,6 +798,12 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
 			clipped_outers.push_back(std::move(*clipped));
 	outers = std::move(clipped_outers);
+	merge_loopy_loops(inners);
+	std::vector<std::vector<ProcessedNode>> clipped_inners;
+	for (const auto &ring : inners)
+		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
+			clipped_inners.push_back(std::move(*clipped));
+	inners = std::move(clipped_inners);
 
 	// Filter: Keep only loops that are already closed OR can be closed within 1 block
 	outers.erase(std::remove_if(outers.begin(), outers.end(),
@@ -868,15 +848,6 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 	}
 
 	merge_loopy_loops(inners);
-	std::vector<std::vector<ProcessedNode>> clipped_inners;
-	for (const auto &ring : inners)
-		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
-			clipped_inners.push_back(std::move(*clipped));
-	inners = std::move(clipped_inners);
-	// Clipping can leave adjacent fragments of a hole as separate segments.
-	// Rust reassembles those fragments before deciding whether the inner rings
-	// are valid, matching the outer-ring handling above.
-	merge_loopy_loops(inners);
 	if (!verify_closed_rings(inners)) {
 		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
 				  << std::endl;
@@ -891,13 +862,14 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 		const Ground *ground, const XZBBox &xzbbox)
 {
 	StillWaterSurfaces result;
-	if (!ground || !ground->has_land_cover() ||
-			(!ground->elevation_enabled && !ground->mg))
+	// Match Rust's prescan_still_surfaces gate: a still-water level is only
+	// inferred when the same elevation-backed land-cover repair ran. Native
+	// mapgen terrain alone must keep the per-column water-level path.
+	if (!ground || !ground->has_land_cover() || !ground->elevation_enabled)
 		return result;
 
-	// Keep raster coordinates anchored to the exact generation bbox, as in
-	// water_areas::still_surface_level. The active Freeminer chunk bbox normally
-	// starts at mg->node_min, but callers may provide a clipped/tiled bbox.
+	// Keep raster coordinates anchored to the exact generation bbox, as in the
+	// Rust global still-water pre-scan. Callers may provide a clipped/tiled bbox.
 	const int origin_x = xzbbox.min_x();
 	const int origin_z = xzbbox.min_z();
 	auto point_at = [=](int x, int z) { return XZPoint{x - origin_x, z - origin_z}; };
@@ -947,7 +919,9 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 						clipped.push_back(std::move(*part));
 				rings = std::move(clipped);
 			};
+			merge_loopy_loops(inners);
 			clip_rings(outers);
+			clip_rings(inners);
 			auto invalid_outer = [](const auto &ring) {
 				if (ring.size() < 3)
 					return true;
@@ -963,8 +937,6 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 					ring.push_back(ring.front());
 			if (outers.empty() || !verify_closed_rings(outers))
 				continue;
-			merge_loopy_loops(inners);
-			clip_rings(inners);
 			merge_loopy_loops(inners);
 			if (!verify_closed_rings(inners))
 				continue;

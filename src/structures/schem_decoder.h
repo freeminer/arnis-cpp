@@ -84,6 +84,10 @@ struct ColumnSchematic
 // Decode and derive reusable placement forms once per normalized asset path.
 std::shared_ptr<const StructureSchematic> load_structure_cached(
 		const std::filesystem::path &file);
+// Rust's OnceLock<Option<StructureSchematic>> counterpart: cache both successful
+// parses and missing/invalid assets so repeated placements do not retry failures.
+std::shared_ptr<const StructureSchematic> try_load_structure_cached(
+		const std::filesystem::path &file);
 std::shared_ptr<const StructureSchematic> load_centered_structure_cached(
 		const std::filesystem::path &file);
 std::shared_ptr<const ColumnSchematic> load_column_schematic_cached(

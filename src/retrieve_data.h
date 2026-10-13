@@ -44,16 +44,17 @@ bool remark_means_truncated(const std::string &remark);
 const char *fallback_reason(const std::string &error);
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &,
 		const OverpassFetcher &, std::uint64_t seed = 0,
-		bool probe_official_first = false);
+		bool probe_official_first = false, std::string *error = nullptr);
 // Rust's unified source-selection entry point: try the archive first, then
 // fall back to the caller-provided Overpass transport.
 std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &,
 		const OverpassFetcher &, bool use_tile_archive = true,
 		const std::string &tiles_url = osm_tiles::DEFAULT_OSM_TILES_URL,
-		std::uint64_t seed = 0, bool probe_official_first = false);
+		std::uint64_t seed = 0, bool probe_official_first = false,
+		std::string *error = nullptr);
 std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &,
 		const OverpassFetcher &, const arnis::Args &, std::uint64_t seed = 0,
-		bool probe_official_first = false);
+		bool probe_official_first = false, std::string *error = nullptr);
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body);
 std::optional<std::string> fetch_area_name(double lat, double lon);
 }

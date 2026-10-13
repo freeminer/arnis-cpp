@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <utility>
+#include <unordered_map>
 
 #include "../../arnis_adapter.h"
 #include "args.h"
@@ -33,6 +34,34 @@ struct OvertureOsmRef
 	bool operator==(const OvertureOsmRef &) const = default;
 };
 
+struct OvertureOsmRefHash
+{
+	std::size_t operator()(const OvertureOsmRef &key) const noexcept
+	{
+		const auto id_hash = std::hash<std::uint64_t>{}(key.id);
+		return id_hash ^ (std::hash<bool>{}(key.relation) + 0x9e3779b9U + (id_hash << 6) +
+								 (id_hash >> 2));
+	}
+};
+
+struct OsmAttributeHint
+{
+	std::optional<double> height_m;
+	std::optional<int> num_floors;
+};
+
+// Compact Rust-compatible map of OSM references to validated Overture hints.
+class OvertureHints
+{
+	std::unordered_map<OvertureOsmRef, OsmAttributeHint, OvertureOsmRefHash> hints_;
+
+public:
+	std::size_t size() const { return hints_.size(); }
+	bool empty() const { return hints_.empty(); }
+	void insert(OvertureOsmRef key, OsmAttributeHint hint);
+	std::size_t apply(std::vector<ProcessedElement> &elements) const;
+};
+
 std::size_t overture_building_budget(const geographic::LLBBox &bbox);
 
 // Provider-neutral decoded GeoParquet row.  A host can use Arrow/Parquet,
@@ -56,7 +85,7 @@ struct OvertureBuilding
 struct OvertureData
 {
 	std::vector<ProcessedElement> elements;
-	std::vector<OvertureBuilding> hints;
+	OvertureHints hints;
 	std::size_t apply_hints(std::vector<ProcessedElement> &osm_elements) const;
 	// Apply hints, remove spatial duplicates, then append the supplemental
 	// footprints. Call before preparing flood-fill and building-footprint data.

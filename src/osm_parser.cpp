@@ -1,9 +1,12 @@
 #include "osm_parser.h"
 
+#include <algorithm>
+#include <initializer_list>
 #include <regex>
 #include <iostream>
 #include <sstream>
 #include <stdexcept>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <cstring>
@@ -157,55 +160,58 @@ void filter_tags(tags_t &tags)
 
 StyleHint building_style_hint(const tags_t &tags)
 {
-	const auto material = norm_style(!tags.get("building:material").empty()
-											 ? tags.get("building:material")
-									 : !tags.get("building:facade:material").empty()
-											 ? tags.get("building:facade:material")
-											 : tags.get("facade:material"));
+	const auto first_value =
+			[&](std::initializer_list<const char *> keys) -> std::string_view {
+		for (const auto *key : keys)
+			if (auto it = tags.find(key); it != tags.end())
+				return it->second;
+		return {};
+	};
+	const auto material = norm_style(std::string(first_value(
+			{"building:material", "building:facade:material", "facade:material"})));
 	if (material == "glass" || material == "mirror" ||
 			norm_style(tags.get("roof:material")) == "glass")
 		return StyleHint::Glass;
-	auto present = [&](const char *k) {
-		return !tags.get(k).empty() && norm_style(tags.get(k)) != "no";
+	auto present_and_not_no = [&](const char *key) {
+		auto it = tags.find(key);
+		if (it == tags.end())
+			return false;
+		const auto &value = it->second;
+		return value.size() != 2 ||
+			   std::tolower(static_cast<unsigned char>(value[0])) != 'n' ||
+			   std::tolower(static_cast<unsigned char>(value[1])) != 'o';
 	};
-	if (present("historic") || present("heritage") || tags.contains("ref:nrhp") ||
-			present("listed_status"))
+	if (present_and_not_no("historic") || present_and_not_no("heritage") ||
+			tags.contains("ref:nrhp") || present_and_not_no("listed_status"))
 		return StyleHint::Masonry;
-	static constexpr const char *masonry[] = {"brick", "bricks", "redbrick",
-			"silicatebrick", "stone", "naturalstone", "sandstone", "limestone", "masonry",
-			"granite", "marble", "terracotta", "adobe", "stucco", "pebbledash"};
-	for (const auto *v : masonry)
-		if (material == v)
-			return StyleHint::Masonry;
-	const auto cladding = norm_style(tags.get("building:cladding").empty()
-											 ? tags.get("cladding")
-											 : tags.get("building:cladding"));
-	static constexpr const char *cladding_types[] = {"brick", "brickmonolith", "plaster",
-			"rendered", "rendering", "stone", "tiling"};
-	for (const auto *v : cladding_types)
-		if (cladding == v)
-			return StyleHint::Masonry;
-	const auto arch = norm_style(!tags.get("building:architecture").empty()
-										 ? tags.get("building:architecture")
-										 : tags.get("architecture"));
-	static constexpr const char *ornate[] = {"artdeco", "artnouveau", "gothic",
-			"neogothic", "gothicrevival", "baroque", "neobaroque", "rococo",
-			"renaissance", "neorenaissance", "romanesque", "victorian", "georgian",
-			"federal", "italianate", "beauxarts", "queenanne", "classicism",
-			"neoclassical"};
-	for (const auto *v : ornate)
-		if (arch == v)
-			return StyleHint::Masonry;
-	static constexpr const char *brutalist[] = {
-			"brutalist", "constructivism", "stalinistneoclassicism"};
-	for (const auto *v : brutalist)
-		if (arch == v)
-			return StyleHint::Masonry;
-	static constexpr const char *modern[] = {"modern", "contemporary", "modernism",
-			"functionalism", "newobjectivity", "bauhaus", "postmodern"};
-	for (const auto *v : modern)
-		if (arch == v)
-			return StyleHint::Contemporary;
+	auto matches = [](std::string_view value,
+						   std::initializer_list<std::string_view> choices) {
+		return std::find(choices.begin(), choices.end(), value) != choices.end();
+	};
+	if (matches(material,
+				{"brick", "bricks", "redbrick", "silicatebrick", "stone", "naturalstone",
+						"sandstone", "limestone", "masonry", "granite", "marble",
+						"terracotta", "adobe", "stucco", "pebbledash"}))
+		return StyleHint::Masonry;
+	if (matches(norm_style(std::string(first_value({"building:cladding"}))),
+				{"brick", "brickmonolith", "plaster", "rendered", "rendering", "stone",
+						"tiling"}))
+		return StyleHint::Masonry;
+	const auto arch = norm_style(
+			std::string(first_value({"building:architecture", "architecture"})));
+	if (matches(arch,
+				{"artdeco", "artnouveau", "gothic", "neogothic", "gothicrevival",
+						"neoclassicism", "neoclassical", "classicism", "classicalrevival",
+						"greekrevival", "baroque", "neobaroque", "rococo", "barocco",
+						"historicism", "eclectic", "renaissance", "neorenaissance",
+						"romanesque", "neoromanesque", "romanesquerevival", "victorian",
+						"georgian", "federal", "italianate", "beauxarts",
+						"wilhelminianstyle", "queenanne", "brutalist", "constructivism",
+						"stalinistneoclassicism"}))
+		return StyleHint::Masonry;
+	if (matches(arch, {"modern", "contemporary", "modernism", "functionalism",
+							  "newobjectivity", "postmodern", "bauhaus"}))
+		return StyleHint::Contemporary;
 	for (const char *key : {"start_date", "construction_date", "year_of_construction"}) {
 		const auto value = tags.get(key);
 		for (std::size_t i = 0; i + 3 < value.size(); ++i) {
@@ -219,8 +225,8 @@ StyleHint building_style_hint(const tags_t &tags)
 			}
 		}
 	}
-	if (material == "concrete" || material == "reinforcedconcrete" ||
-			material == "concretereinforced" || material == "concretemasonryunit")
+	if (matches(material, {"concrete", "reinforcedconcrete", "concretereinforced",
+								  "concretemasonryunit"}))
 		return StyleHint::Contemporary;
 	return StyleHint::None;
 }

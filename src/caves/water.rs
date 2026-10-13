@@ -126,14 +126,20 @@ pub(super) fn apply(
 ) -> (HashSet<i64>, HashSet<i64>) {
     let mut carved: HashSet<i64> = HashSet::default();
     let mut water: HashSet<i64> = HashSet::default();
-    for &p in &plan.carved {
+    // Match the C++ backend's canonical ordering rather than depending on either
+    // language's hash-table traversal order while emitting world edits.
+    let mut ordered_carved: Vec<i64> = plan.carved.iter().copied().collect();
+    ordered_carved.sort_unstable();
+    for p in ordered_carved {
         let (x, y, z) = unpack(p);
         if region.contains(x, z) {
             editor.set_block_absolute(AIR, x, y, z, Some(cave_host), None);
             carved.insert(p);
         }
     }
-    for &p in &plan.water {
+    let mut ordered_water: Vec<i64> = plan.water.iter().copied().collect();
+    ordered_water.sort_unstable();
+    for p in ordered_water {
         let (x, y, z) = unpack(p);
         if region.contains(x, z) {
             editor.set_block_absolute(WATER, x, y, z, Some(&[AIR]), None);

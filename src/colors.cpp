@@ -13,6 +13,10 @@
 
 std::optional<RGBTuple> color_text_to_rgb_tuple(std::string_view text)
 {
+	while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
+		text.remove_prefix(1);
+	while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
+		text.remove_suffix(1);
 	if (auto rgb = full_hex_color_to_rgb_tuple(text))
 		return rgb;
 	if (auto rgb = short_hex_color_to_rgb_tuple(text))
@@ -89,6 +93,8 @@ std::optional<RGBTuple> color_name_to_rgb_tuple(std::string_view text)
 	if (text == "fuchsia" || text == "magenta")
 		return std::make_optional(
 				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 0, 255));
+	if (text == "gold")
+		return RGBTuple{255, 215, 0};
 	if (text == "gray" || text == "grey")
 		return std::make_optional(
 				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(128, 128, 128));
@@ -143,7 +149,7 @@ std::optional<RGBTuple> color_name_to_rgb_tuple(std::string_view text)
 		return RGBTuple{210, 180, 140};
 	if (text == "teal")
 		return std::make_optional(
-				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 128, 0));
+				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(0, 128, 128));
 	if (text == "white")
 		return std::make_optional(
 				std::make_tuple<std::uint8_t, std::uint8_t, std::uint8_t>(255, 255, 255));

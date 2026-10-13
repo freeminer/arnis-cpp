@@ -207,6 +207,25 @@ std::string model_json_for(const std::string &texture_name, Sprite sprite)
 	return model.dump();
 }
 
+bool place_item_display(arnis::world_editor::WorldEditor &editor, const std::string &name,
+		const Quad &quad, std::int8_t facing, std::vector<std::uint8_t> &&pixels,
+		std::uint32_t pixel_width, std::uint32_t pixel_height)
+{
+	if (!editor.has_entity_sink() || name.empty() || pixel_width == 0 ||
+			pixel_height == 0 ||
+			pixels.size() != std::size_t(pixel_width) * pixel_height * 3)
+		return false;
+	const auto x = static_cast<int>(std::llround(quad.cx));
+	const auto y = static_cast<int>(std::llround(quad.cy));
+	const auto z = static_cast<int>(std::llround(quad.cz));
+	if (!editor.add_item_display(
+				quad.cx, quad.cy, quad.cz, name_seed(name), display_nbt(name, quad)))
+		return false;
+	editor.record_facade_panel(
+			x, y, z, facing, std::move(pixels), pixel_width, pixel_height, name);
+	return true;
+}
+
 bool Registry::collect(const std::string &name,
 		const std::vector<std::pair<int, int>> &cells, std::pair<double, double> normal,
 		double step, int base_y, int total_height, const std::vector<std::uint8_t> &rgb,
@@ -258,11 +277,11 @@ bool Registry::collect_to_editor(arnis::world_editor::WorldEditor &editor,
 				if (editor.has_entity_sink() &&
 						editor.add_item_display(quad.cx, quad.cy, quad.cz,
 								name_seed(name), display_nbt(name, quad))) {
-					editor.record_facade_panel(x, y, z, facing, panel.pixels,
-							panel.pixel_width, panel.pixel_height);
+					editor.record_facade_panel(x, y, z, facing, std::move(panel.pixels),
+							panel.pixel_width, panel.pixel_height, name);
 					return true;
 				}
-				return editor.place_facade_panel(x, y, z, facing, panel.pixels,
+				return editor.place_facade_panel(x, y, z, facing, std::move(panel.pixels),
 						panel.pixel_width, panel.pixel_height);
 			});
 }

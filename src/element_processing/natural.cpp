@@ -7,6 +7,7 @@
 #include <cmath>
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cstdint>
 
 #include "../../../arnis_adapter.h"
@@ -119,20 +120,10 @@ std::uint64_t cell_key(int x, int z)
 	return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
 }
 
-trees::Habitat habitat_for_mapped_tree(TreeType type)
+int wrap_add_i32(int value, int offset)
 {
-	switch (type) {
-	case TreeType::Spruce:
-	case TreeType::Pine:
-		return trees::Habitat::Conifer;
-	case TreeType::Willow:
-	case TreeType::Mangrove:
-		return trees::Habitat::Wet;
-	case TreeType::Acacia:
-		return trees::Habitat::Dry;
-	default:
-		return trees::Habitat::Lowland;
-	}
+	return std::bit_cast<std::int32_t>(
+			static_cast<std::uint32_t>(value) + static_cast<std::uint32_t>(offset));
 }
 
 bool near_beach(const WorldEditor &editor, int x, int z)
@@ -347,6 +338,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				const auto mapped = trees::mapped::MappedTree::from_tags(
 						tags, static_cast<std::uint64_t>(element.id()));
 				trees::MappedRequest mapped_request;
+				mapped_request.habitat = trees::habitat_for_tree_type(mapped.kind);
 				if (mapped.genus)
 					mapped_request.genus = *mapped.genus;
 				mapped_request.conifer = mapped.conifer;
@@ -979,12 +971,16 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 							 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 					const int nx = px + dx, nz = pz + dz;
 					if (!area.contains(cell_key(nx, nz)) || !editor.owns(nx, nz) ||
-							coord_hash(nx + 89, nz + 97) % 100 >= 20 ||
+							coord_hash(wrap_add_i32(nx, 89), wrap_add_i32(nz, 97)) %
+											100 >=
+									20 ||
 							!editor.check_for_block(nx, 0, nz,
 									std::vector<Block>{GRASS_BLOCK, MUD, DIRT,
 											COARSE_DIRT, MOSS_BLOCK}))
 						continue;
-					const int height = 1 + int(coord_hash(nx + 131, nz + 137) % 3);
+					const int height = 1 + int(coord_hash(wrap_add_i32(nx, 131),
+													   wrap_add_i32(nz, 137)) %
+												   3);
 					for (int y = 1; y <= height; ++y) {
 						// Match Rust's block_at guard: reeds never replace a
 						// structure or float through an occupied column.

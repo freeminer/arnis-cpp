@@ -17,9 +17,7 @@ namespace
 {
 bool is_log_block(Block block)
 {
-	using namespace block_definitions;
-	static const std::array<Block, 8> logs = {OAK_LOG, BIRCH_LOG, SPRUCE_LOG,
-			DARK_OAK_LOG, JUNGLE_LOG, ACACIA_LOG, CHERRY_LOG, MANGROVE_LOG};
+	const auto &logs = ground_decoration::wood_blocks();
 	return std::find(logs.begin(), logs.end(), block) != logs.end();
 }
 
