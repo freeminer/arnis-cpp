@@ -1,11 +1,67 @@
 #include "one_world.h"
 #include "args.h"
+#include "../../arnis_ground.h"
+#include "elevation/postprocess.h"
+#include "projection/web_mercator.h"
 #include "world_utils.h"
+#include "coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
+#include "coordinate_system/geographic/llbbox.h"
 #include <nlohmann/json.hpp>
+#include <chrono>
+#include <cctype>
 #include <fstream>
+#include <limits>
 namespace arnis::one_world
 {
 using json = nlohmann::json;
+
+namespace
+{
+std::uint64_t unix_now()
+{
+	const auto now = std::chrono::system_clock::now().time_since_epoch();
+	return static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::seconds>(now).count());
+}
+
+ElevationAffine from_elevation_affine(const elevation::ElevationAffine &affine)
+{
+	return {affine.min_height_m, affine.blocks_per_meter, affine.ground_level,
+			affine.soft_top ? std::optional<SoftTop>(SoftTop{affine.soft_top->knee_m,
+									  affine.soft_top->width_blocks})
+							: std::nullopt};
+}
+} // namespace
+
+Manifest Manifest::create(const ::arnis::Args &args, double origin_lat, double origin_lon,
+		const std::string &version)
+{
+	Manifest manifest;
+	manifest.version = MANIFEST_VERSION;
+	manifest.created_with = "arnis " + version;
+	manifest.created_at = unix_now();
+	manifest.origin_lat = stable(origin_lat, 7);
+	manifest.origin_lon = stable(origin_lon, 7);
+	manifest.scale = stable(args.scale, 9);
+	manifest.ground_level = args.ground_level;
+	manifest.terrain = args.terrain_enabled();
+	manifest.disable_height_limit = args.disable_height_limit;
+	manifest.aws_only_elevation = args.aws_only_elevation;
+	manifest.height_multiplier = stable(args.height_multiplier, 6);
+	if (manifest.terrain) {
+		auto affine = elevation::ElevationAffine::whole_earth(
+				manifest.scale * manifest.height_multiplier,
+				min_ground_level_for(args) + 16, extended_max_y_for(args));
+		if (affine.soft_top) {
+			affine.soft_top->knee_m = stable(affine.soft_top->knee_m, 6);
+			affine.soft_top->width_blocks =
+					stable(affine.soft_top->width_blocks - 5e-7, 6);
+		}
+		manifest.elevation = from_elevation_affine(affine);
+	}
+	return manifest;
+}
+
 std::filesystem::path Manifest::path_in(const std::filesystem::path &w)
 {
 	return w / MANIFEST_FILE;
@@ -121,6 +177,12 @@ std::optional<std::array<int, 4>> Manifest::extent() const
 	}
 	return e;
 }
+
+projection::WebMercatorProjection Manifest::projection() const
+{
+	return {origin_lat, origin_lon, scale};
+}
+
 bool Manifest::valid(std::string *error) const
 {
 	if (!std::isfinite(origin_lat) || std::abs(origin_lat) > 85.0 ||
@@ -182,15 +244,99 @@ std::uint64_t existing_chunks(
 std::optional<std::filesystem::path> safe_preview_path(
 		const std::filesystem::path &world, const std::string &relative)
 {
-	const std::filesystem::path p(relative), prefix(PREVIEW_DIR);
-	if (p.is_absolute() || p.extension() != ".png")
+	const std::string prefix = std::string(PREVIEW_DIR) + "/";
+	if (!relative.starts_with(prefix))
 		return std::nullopt;
-	const auto normalized = p.lexically_normal();
-	if (normalized != prefix && normalized.string().rfind(prefix.string() + "/", 0) != 0)
+	const auto name = relative.substr(prefix.size());
+	if (!name.ends_with(".png") || name.find("..") != std::string::npos ||
+			!std::all_of(name.begin(), name.end(), [](unsigned char c) {
+				return std::isalnum(c) || c == '-' || c == '_' || c == '.';
+			}))
 		return std::nullopt;
-	const auto rel = normalized.lexically_relative(prefix);
-	if (rel.empty() || rel.has_parent_path() || rel.filename() != rel)
-		return std::nullopt;
-	return world / prefix / rel;
+	return world / prefix / name;
+}
+
+bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
+		const cartesian::XZBBox &xzbbox, std::optional<ElevationAffine> elevation,
+		const std::optional<std::filesystem::path> &preview,
+		const std::string &arnis_version, std::string *error)
+{
+	std::string load_error;
+	auto manifest = Manifest::load(run.world_dir, &load_error);
+	if (!manifest) {
+		if (error)
+			*error = load_error.empty() ? Manifest::path_in(run.world_dir).string() +
+												  " vanished during generation"
+										: std::move(load_error);
+		return false;
+	}
+	if (!manifest->elevation)
+		manifest->elevation = std::move(elevation);
+
+	std::optional<std::string> preview_relative;
+	if (preview) {
+		const auto relative = preview->lexically_relative(run.world_dir);
+		if (!relative.empty() && !relative.is_absolute()) {
+			const auto first = relative.begin();
+			if (first == relative.end() || *first != "..") {
+				std::string value = relative.generic_string();
+				std::replace(value.begin(), value.end(), '\\', '/');
+				preview_relative = std::move(value);
+			}
+		}
+	}
+
+	std::vector<GeneratedArea> kept;
+	std::vector<GeneratedArea> covered;
+	kept.reserve(manifest->areas.size() + 1);
+	for (auto &area : manifest->areas) {
+		if (xzbbox.min_x() <= area.min_x && xzbbox.min_z() <= area.min_z &&
+				xzbbox.max_x() >= area.max_x && xzbbox.max_z() >= area.max_z)
+			covered.push_back(std::move(area));
+		else
+			kept.push_back(std::move(area));
+	}
+	manifest->areas = std::move(kept);
+	const auto &min = llbbox.min();
+	const auto &max = llbbox.max();
+	manifest->areas.push_back({run.area_id, unix_now(), arnis_version, xzbbox.min_x(),
+			xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z(), min.lat(), min.lng(),
+			max.lat(), max.lng(), preview_relative});
+	const auto next_id = run.area_id == std::numeric_limits<std::uint32_t>::max()
+								 ? run.area_id
+								 : run.area_id + 1;
+	manifest->next_area_id = std::max(manifest->next_area_id, next_id);
+	if (!manifest->save(run.world_dir, error))
+		return false;
+
+	for (const auto &old : covered) {
+		if (!old.preview || old.preview == preview_relative)
+			continue;
+		if (const auto old_path = safe_preview_path(run.world_dir, *old.preview)) {
+			std::error_code remove_error;
+			std::filesystem::remove(*old_path, remove_error);
+		}
+	}
+	return true;
+}
+
+bool remember_elevation(
+		const RunContext &run, const ElevationAffine &elevation, std::string *error)
+{
+	if (run.elevation)
+		return true;
+	std::string load_error;
+	auto manifest = Manifest::load(run.world_dir, &load_error);
+	if (!manifest) {
+		const bool missing = load_error.empty();
+		if (!missing && error)
+			*error = std::move(load_error);
+		return missing;
+	}
+	if (!manifest->elevation) {
+		manifest->elevation = elevation;
+		return manifest->save(run.world_dir, error);
+	}
+	return true;
 }
 }

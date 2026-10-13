@@ -56,7 +56,9 @@ std::optional<std::vector<Entry>> decode_directory(const std::vector<std::uint8_
 	if (!r.next(count) || count > MAX_ENTRIES || count > (bytes.size() - r.p) / 4)
 		return {};
 	std::vector<Entry> e;
-	e.reserve(std::size_t(count));
+	// Rust grows entries as they are decoded instead of trusting a corrupt
+	// directory count to reserve the full maximum up front.
+	e.reserve(static_cast<std::size_t>(std::min<std::uint64_t>(count, 4096)));
 	std::uint64_t id = 0, v;
 	for (std::uint64_t i = 0; i < count; ++i) {
 		if (!r.next(v) || v > UINT64_MAX - id)
@@ -101,18 +103,19 @@ std::optional<std::vector<std::uint8_t>> decompress_gzip(
 	output.reserve(std::min<std::uint64_t>(limit, compressed.size() * 4 + 1024));
 	int result = Z_OK;
 	while (result == Z_OK) {
-		if (output.size() >= limit) {
-			inflateEnd(&stream);
-			return {};
-		}
 		const auto old_size = output.size();
+		const auto remaining = limit - old_size;
 		const auto chunk = static_cast<std::size_t>(
-				std::min<std::uint64_t>(64 * 1024, limit - old_size));
+				std::min<std::uint64_t>(64 * 1024, remaining + 1));
 		output.resize(old_size + chunk);
 		stream.next_out = reinterpret_cast<Bytef *>(output.data() + old_size);
 		stream.avail_out = static_cast<uInt>(chunk);
 		result = inflate(&stream, Z_NO_FLUSH);
 		output.resize(old_size + chunk - stream.avail_out);
+		if (output.size() > limit) {
+			inflateEnd(&stream);
+			return {};
+		}
 	}
 	inflateEnd(&stream);
 	return result == Z_STREAM_END
@@ -134,9 +137,12 @@ std::optional<std::vector<std::uint8_t>> decompress_zstd(
 	std::array<std::uint8_t, 64 * 1024> buffer{};
 	std::size_t result = 1;
 	while (input.pos < input.size || result != 0) {
-		ZSTD_outBuffer chunk{buffer.data(), buffer.size(), 0};
+		const auto remaining = limit - output.size();
+		const auto capacity = static_cast<std::size_t>(
+				std::min<std::uint64_t>(buffer.size(), remaining + 1));
+		ZSTD_outBuffer chunk{buffer.data(), capacity, 0};
 		result = ZSTD_decompressStream(stream, &chunk, &input);
-		if (ZSTD_isError(result) || output.size() > limit - chunk.pos) {
+		if (ZSTD_isError(result) || chunk.pos > limit - output.size()) {
 			ZSTD_freeDStream(stream);
 			return {};
 		}

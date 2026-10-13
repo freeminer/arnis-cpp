@@ -8,6 +8,23 @@
 #include <vector>
 #include <array>
 
+namespace arnis
+{
+struct Args;
+}
+namespace arnis::geographic
+{
+class LLBBox;
+}
+namespace arnis::cartesian
+{
+class XZBBox;
+}
+namespace arnis::projection
+{
+class WebMercatorProjection;
+}
+
 namespace arnis::one_world
 {
 inline constexpr const char *MANIFEST_FILE = "arnis_one_world.json";
@@ -73,6 +90,9 @@ struct Manifest
 	std::optional<ElevationAffine> elevation;
 	std::uint32_t next_area_id = 1;
 	std::vector<GeneratedArea> areas;
+	static Manifest create(const ::arnis::Args &args, double origin_lat,
+			double origin_lon, const std::string &arnis_version);
+	projection::WebMercatorProjection projection() const;
 	static std::filesystem::path path_in(const std::filesystem::path &world);
 	static std::optional<Manifest> load(
 			const std::filesystem::path &world, std::string *error = nullptr);
@@ -96,4 +116,11 @@ struct RunContext
 		return world_dir / PREVIEW_DIR / ("area-" + std::to_string(area_id) + ".png");
 	}
 };
+
+bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
+		const cartesian::XZBBox &xzbbox, std::optional<ElevationAffine> elevation,
+		const std::optional<std::filesystem::path> &preview,
+		const std::string &arnis_version, std::string *error = nullptr);
+bool remember_elevation(const RunContext &run, const ElevationAffine &elevation,
+		std::string *error = nullptr);
 }

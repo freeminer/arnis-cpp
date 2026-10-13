@@ -209,7 +209,7 @@ void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Ar
 	// Use the MINIMUM ground level so the pyramid sits on the lowest point
 	// and doesn't float in areas with elevation differences
 	int base_y = args.ground_level;
-	if (args.terrain) {
+	if (args.terrain_enabled()) {
 		int min_ground_level = args.ground_level;
 		for (const auto &p : footprint) {
 			int ground_level = editor.get_ground_level(p.first, p.second);

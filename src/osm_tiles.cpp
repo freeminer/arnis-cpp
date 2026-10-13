@@ -307,10 +307,13 @@ std::optional<std::vector<std::uint8_t>> zstd_decode(
 		const auto allowance = MAX_TILE_BYTES + 1 - output.size();
 		ZSTD_outBuffer out{buffer.data(), std::min(buffer.size(), allowance), 0};
 		remaining = ZSTD_decompressStream(stream, &out, &in);
-		if (ZSTD_isError(remaining) || output.size() > MAX_TILE_BYTES - out.pos) {
+		// Compare the chunk against the remaining capacity. Subtracting out.pos
+		// from MAX_TILE_BYTES first can underflow when a frame emits cap + 1
+		// bytes in one call, silently accepting output beyond Rust's unpack cap.
+		if (ZSTD_isError(remaining) || out.pos > MAX_TILE_BYTES - output.size()) {
 			ZSTD_freeDStream(stream);
 			if (error)
-				*error = "tile zstd decompression failed";
+				*error = "tile expands past the size cap or has invalid zstd data";
 			return std::nullopt;
 		}
 		output.insert(output.end(), buffer.begin(), buffer.begin() + out.pos);

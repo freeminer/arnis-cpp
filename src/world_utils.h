@@ -24,6 +24,7 @@ struct WorldLayout
 };
 
 std::optional<std::int32_t> level_data_version(const std::filesystem::path &world);
+std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path);
 bool replace_file_atomically(
 		const std::filesystem::path &, const std::vector<std::uint8_t> &);
 std::filesystem::path get_bedrock_output_directory();

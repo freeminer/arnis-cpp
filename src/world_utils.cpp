@@ -142,6 +142,49 @@ class NbtReader
 			}
 		}
 	}
+	std::optional<std::int32_t> read_map_data_compound(unsigned depth)
+	{
+		if (depth > 64)
+			return std::nullopt;
+		std::optional<std::int32_t> map_id;
+		for (;;) {
+			std::uint8_t type = 0;
+			if (!read_u8(type) || type == 0)
+				return map_id;
+			std::string name;
+			if (!read_name(name))
+				return std::nullopt;
+			if (name == "map" && type == 3) {
+				std::int32_t value = 0;
+				if (!read_i32(value))
+					return std::nullopt;
+				map_id = value;
+			} else if (!skip_payload(type, depth + 1)) {
+				return std::nullopt;
+			}
+		}
+	}
+	std::optional<std::int32_t> read_map_root()
+	{
+		std::uint8_t root_type = 0;
+		std::string root_name;
+		if (!read_u8(root_type) || root_type != 10 || !read_name(root_name))
+			return std::nullopt;
+		for (;;) {
+			std::uint8_t type = 0;
+			if (!read_u8(type) || type == 0)
+				return std::nullopt;
+			std::string name;
+			if (!read_name(name))
+				return std::nullopt;
+			if (name == "data" && type == 10) {
+				if (const auto id = read_map_data_compound(1))
+					return id;
+			} else if (!skip_payload(type, 1)) {
+				return std::nullopt;
+			}
+		}
+	}
 
 public:
 	explicit NbtReader(const std::vector<std::uint8_t> &bytes) : bytes_(bytes) {}
@@ -153,6 +196,7 @@ public:
 			return std::nullopt;
 		return read_data_compound(0);
 	}
+	std::optional<std::int32_t> map_id() { return read_map_root(); }
 };
 
 std::optional<std::vector<std::uint8_t>> decompress_level_dat(
@@ -190,6 +234,12 @@ std::optional<std::int32_t> level_data_version(const std::filesystem::path &worl
 {
 	const auto bytes = decompress_level_dat(world / "level.dat");
 	return bytes ? NbtReader(*bytes).data_version() : std::nullopt;
+}
+
+std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path)
+{
+	const auto bytes = decompress_level_dat(path);
+	return bytes ? NbtReader(*bytes).map_id() : std::nullopt;
 }
 
 WorldLayout WorldLayout::of(const std::filesystem::path &world)

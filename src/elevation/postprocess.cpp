@@ -23,6 +23,18 @@ namespace arnis::elevation
 {
 namespace
 {
+// Match Rust's saturating float-to-usize `as` conversion (NaN/negative -> 0,
+// positive overflow -> usize::MAX) without invoking undefined C++ behavior.
+std::size_t rust_float_to_size_t(double value)
+{
+	if (std::isnan(value) || value <= 0.0)
+		return 0;
+	if (!std::isfinite(value) ||
+			value >= static_cast<double>(std::numeric_limits<std::size_t>::max()))
+		return std::numeric_limits<std::size_t>::max();
+	return static_cast<std::size_t>(value);
+}
+
 std::size_t elevation_worker_count()
 {
 	if (const char *value = std::getenv("RAYON_NUM_THREADS")) {
@@ -276,7 +288,7 @@ std::vector<std::uint8_t> bank_distances(const CoverGrid &cover, double meters_p
 			distance.push_back(value == land_cover::LC_WATER ? 255 : 0);
 	const auto min_bank_cells =
 			meters_per_cell > 0.0 && std::isfinite(meters_per_cell)
-					? static_cast<std::size_t>(
+					? rust_float_to_size_t(
 							  MIN_BANK_AREA_M2 / (meters_per_cell * meters_per_cell))
 					: 0;
 	if (min_bank_cells > 0) {
@@ -588,8 +600,8 @@ OtherLevels split_off_other_levels(const std::vector<Cell> &body, double level,
 	};
 	const std::size_t max_shadow_cells =
 			meters_per_cell > 0.0 && std::isfinite(meters_per_cell)
-					? static_cast<std::size_t>(MAX_STEEP_WATER_AREA_M2 /
-											   (meters_per_cell * meters_per_cell))
+					? rust_float_to_size_t(MAX_STEEP_WATER_AREA_M2 /
+										   (meters_per_cell * meters_per_cell))
 					: 0;
 	const auto step = slope_step(meters_per_cell);
 	OtherLevels out;
@@ -977,10 +989,7 @@ std::size_t drop_water_on_steep_terrain(
 			1, 16);
 	const double max_cell_count =
 			MAX_STEEP_WATER_AREA_M2 / (meters_per_cell * meters_per_cell);
-	const std::size_t max_cells =
-			max_cell_count >= double(std::numeric_limits<std::size_t>::max())
-					? std::numeric_limits<std::size_t>::max()
-					: static_cast<std::size_t>(max_cell_count);
+	const std::size_t max_cells = rust_float_to_size_t(max_cell_count);
 	const std::size_t cell_count = w * h;
 	std::vector<std::uint64_t> visited((cell_count + 63) / 64);
 	std::vector<std::uint64_t> in_component((cell_count + 63) / 64);
@@ -1114,25 +1123,6 @@ std::size_t drop_water_on_steep_terrain(
 				  << " water blob(s) (" << replacements.size()
 				  << " cells) sitting on steep terrain (ESA shadow misclassification)\n";
 	return replacements.size();
-}
-
-std::optional<double> local_water_median_cover(const HeightGrid &heights,
-		const CoverGrid &cover, std::size_t x, std::size_t y, int radius)
-{
-	const auto h = heights.size(), w = heights.front().size();
-	std::vector<double> samples;
-	samples.reserve(static_cast<std::size_t>((radius * 2 + 1) * (radius * 2 + 1)));
-	for (int dy = -radius; dy <= radius; ++dy)
-		for (int dx = -radius; dx <= radius; ++dx) {
-			const int nx = static_cast<int>(x) + dx;
-			const int ny = static_cast<int>(y) + dy;
-			if (inside(nx, ny, w, h) && cover[ny][nx] == land_cover::LC_WATER &&
-					std::isfinite(heights[ny][nx]))
-				samples.push_back(heights[ny][nx]);
-		}
-	if (samples.size() < 8)
-		return std::nullopt;
-	return median(std::move(samples));
 }
 
 MaskGrid level_water_surfaces(

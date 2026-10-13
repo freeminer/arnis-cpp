@@ -1727,15 +1727,38 @@ pub(crate) fn calculate_start_y_offset(
     args: &Args,
     min_level_offset: i32,
 ) -> i32 {
+    calculate_start_y_offset_with_footprint(
+        editor,
+        element,
+        args,
+        min_level_offset,
+        &[],
+    )
+}
+
+fn calculate_start_y_offset_with_footprint(
+    editor: &WorldEditor,
+    element: &ProcessedWay,
+    args: &Args,
+    min_level_offset: i32,
+    footprint: &[(i32, i32)],
+) -> i32 {
     if args.terrain() {
         // Seeded from the terrain itself, never from args.ground_level: with the extended
         // floor the scaler sinks the terrain base far below it, and a seeded max would
-        // strand every low-lying building up at the requested ground level.
+        // strand every low-lying building up at the requested ground level. Include the
+        // generated footprint: a terrain peak inside a way must not bury its shell.
         let mut max_ground_level: Option<i32> = None;
-        for node in &element.nodes {
-            if let Some(level) = editor.terrain_level(node.x, node.z) {
+        let mut include = |x, z| {
+            if let Some(level) = editor.terrain_level(x, z) {
                 max_ground_level = Some(max_ground_level.map_or(level, |m: i32| m.max(level)));
             }
+        };
+        for node in &element.nodes {
+            include(node.x, node.z);
+        }
+        for &(x, z) in footprint {
+            include(x, z);
         }
         max_ground_level.unwrap_or(args.ground_level) + min_level_offset
     } else {
@@ -2925,7 +2948,13 @@ fn generate_roof_only_structure(
         0
     };
 
-    let start_y_offset = calculate_start_y_offset(editor, element, args, min_level_offset);
+    let start_y_offset = calculate_start_y_offset_with_footprint(
+        editor,
+        element,
+        args,
+        min_level_offset,
+        cached_floor_area,
+    );
 
     // Determine roof thickness / height.
     let roof_thickness: i32 = if let Some(h) = parse_building_height_tag(&element.tags) {
@@ -7458,7 +7487,13 @@ pub fn generate_buildings(
     }
 
     // Calculate start Y offset
-    let start_y_offset = calculate_start_y_offset(editor, element, args, min_level_offset);
+    let start_y_offset = calculate_start_y_offset_with_footprint(
+        editor,
+        element,
+        args,
+        min_level_offset,
+        &cached_floor_area,
+    );
 
     // Calculate building bounds
     let bounds = BuildingBounds::from_nodes(&element.nodes);

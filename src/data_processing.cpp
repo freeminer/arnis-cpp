@@ -26,6 +26,16 @@
 #include <tuple>
 #include <stdexcept>
 
+#if defined(_WIN32)
+#ifndef WIN32_LEAN_AND_MEAN
+#define WIN32_LEAN_AND_MEAN
+#endif
+#include <windows.h>
+#elif defined(__APPLE__)
+#include <mach/mach.h>
+#include <mach/mach_host.h>
+#endif
+
 #include "../../arnis_adapter.h"
 #include "../../arnis_ground.h"
 #include "assets_root.h"
@@ -83,7 +93,9 @@
 #include "landmarks.h"
 #include "trees/engine.h"
 #include "decals/render.h"
+#include "map_item.h"
 #include "map_item_palette.h"
+#include "world_utils.h"
 #include "util/base64.h"
 #include "util/png.h"
 
@@ -541,6 +553,32 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground)
 	const std::uint64_t per_region_mb =
 			fillground ? base_region_mb * span / static_cast<std::uint64_t>(vanilla_span)
 					   : base_region_mb;
+#if defined(_WIN32)
+	MEMORYSTATUSEX memory{};
+	memory.dwLength = sizeof(memory);
+	const std::uint64_t available_mb =
+			GlobalMemoryStatusEx(&memory) ? memory.ullAvailPhys / (1024 * 1024) : 0;
+#elif defined(__APPLE__)
+	vm_statistics64_data_t statistics{};
+	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
+	vm_size_t page_size = 0;
+	const auto host = mach_host_self();
+	const auto page_status = host_page_size(host, &page_size);
+	const auto stats_status =
+			page_status == KERN_SUCCESS && page_size > 0
+					? host_statistics64(host, HOST_VM_INFO64,
+							  reinterpret_cast<host_info64_t>(&statistics), &count)
+					: KERN_FAILURE;
+	mach_port_deallocate(mach_task_self(), host);
+	const bool have_memory =
+			page_status == KERN_SUCCESS && page_size > 0 && stats_status == KERN_SUCCESS;
+	const std::uint64_t available_mb =
+			have_memory
+					? (std::uint64_t(statistics.free_count) + statistics.inactive_count +
+							  statistics.speculative_count) *
+							  page_size / (1024 * 1024)
+					: 0;
+#elif defined(__linux__)
 	std::uint64_t available_mb = 0;
 	std::ifstream mem("/proc/meminfo");
 	std::string key;
@@ -553,6 +591,10 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground)
 		std::string unit;
 		std::getline(mem, unit);
 	}
+#else
+	// Like Rust's sysinfo fallback, unknown platforms preserve the fast path.
+	constexpr std::uint64_t available_mb = 0;
+#endif
 	return available_mb > 0 &&
 		   (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
 }
@@ -1378,6 +1420,11 @@ bool generate_world(WorldEditor &editor,
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
+	if (args.one_world_run)
+		editor.set_climate_anchor(std::pair{
+				args.one_world_run->origin_lat, args.one_world_run->origin_lon});
+	else
+		editor.set_climate_anchor(std::nullopt);
 	if (const auto validation_error = args.validation_error()) {
 		editor.report_generation_error("options rejected: " + *validation_error);
 		std::cerr << "Arnis generation options rejected: " << *validation_error << '\n';
@@ -1414,6 +1461,16 @@ bool generate_world(WorldEditor &editor,
 	editor.set_bake_lighting(args.bake_lighting || (args.voxy_lod && java_format));
 	editor.set_start_with_map(args.map_item);
 	editor.set_map_decals(java_format);
+	int first_decal_map_id = decals::DecalRegistry::FIRST_ID;
+	if (java_format && args.one_world_run) {
+		const auto &run = *args.one_world_run;
+		const auto maps_dir =
+				world_utils::WorldLayout::of(run.world_dir).maps_dir(run.world_dir);
+		first_decal_map_id = map_item::next_map_id(maps_dir);
+		if (!run.extending)
+			first_decal_map_id += args.map_item ? 2 : 1;
+	}
+	editor.set_first_decal_map_id(first_decal_map_id);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
 	std::optional<std::filesystem::path> facade_directory =
@@ -1522,8 +1579,10 @@ bool generate_world(WorldEditor &editor,
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
 	if (editor.ground)
 		editor.ground->set_snow_line_for_latitude(centre_lat);
-	// Rust loads the global ecoregion raster for Earth runs and keeps it on
-	// Ground so vegetation and climate decoration can query it per column.
+	// Rust loads the global ecoregion raster as a source, then builds and keeps
+	// a bbox-aligned EcoMap on Ground so vegetation can query it per column.
+	// Freeminer may not have run Rust's Ground constructor, so seed the same
+	// source map here before materializing the local map below.
 	if (editor.ground && args.body == CelestialBody::Earth &&
 			(!editor.ground->ecoregion_map() ||
 					!editor.ground->ecoregion_map()->is_local())) {
@@ -1584,6 +1643,11 @@ bool generate_world(WorldEditor &editor,
 								dominant_tree_realm = std::string(mix->first);
 						area_ecoregion_ids.push_back(id);
 					}
+					// Rust Ground keeps the bbox-aligned EcoMap, not the global source
+					// raster: Ground::ecoregion_at only indexes local maps. Retain the
+					// same local map used for the area summary so vegetation and other
+					// ground consumers can resolve per-cell ecoregions as well.
+					editor.ground->set_ecoregion_map(std::move(*area_map));
 				}
 			}
 		}

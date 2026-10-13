@@ -2201,12 +2201,31 @@ int scaled_blocks(int value, double scale_factor)
 	return static_cast<int>(std::floor(static_cast<double>(value) * scale_factor));
 }
 
+int terrain_base_level(WorldEditor &editor, const ProcessedWay &element,
+		const std::vector<std::pair<int, int>> &footprint, int fallback)
+{
+	std::optional<int> highest;
+	auto include = [&](int x, int z) {
+		if (const auto level = editor.terrain_level(x, z))
+			highest = highest ? std::max(*highest, *level) : *level;
+	};
+	for (const auto &node : element.nodes)
+		include(node.x, node.z);
+	// Outline samples alone can miss a local high point enclosed by the way.
+	// Anchor the shell to the highest terrain it actually covers so its lower
+	// storeys are not buried by the later ground pass.
+	for (const auto &[x, z] : footprint)
+		include(x, z);
+	return highest.value_or(fallback);
+}
+
 void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &element,
 		const std::vector<std::pair<int, int>> &cached_floor_area, const Args &args,
 		std::uint64_t seed)
 {
 	const double scale_factor = args.scale;
-	const int abs_terrain_offset = !args.terrain ? args.ground_level : 0;
+	const bool terrain_enabled = args.terrain_enabled();
+	const int abs_terrain_offset = !terrain_enabled ? args.ground_level : 0;
 	const std::string building_type =
 			element.tags.contains("building")
 					? element.tags.get("building")
@@ -2229,15 +2248,10 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	}
 
 	int start_y_offset = min_level_offset;
-	if (args.terrain) {
-		std::optional<int> max_ground_level;
-		for (const auto &node : element.nodes) {
-			if (const auto level = editor.terrain_level(node.x, node.z))
-				max_ground_level =
-						max_ground_level ? std::max(*max_ground_level, *level) : *level;
-		}
-		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
-	}
+	if (terrain_enabled)
+		start_y_offset = terrain_base_level(
+								 editor, element, cached_floor_area, args.ground_level) +
+						 min_level_offset;
 
 	int roof_thickness = 5;
 	if (const auto height = parse_building_height_tag(element.tags)) {
@@ -2268,7 +2282,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 		const int springing = start_y_offset + roof_thickness;
 		for (const auto &node : element.nodes) {
 			const int pillar_base =
-					args.terrain ? editor.get_ground_level(node.x, node.z) : 0;
+					terrain_enabled ? editor.get_ground_level(node.x, node.z) : 0;
 			for (int y = pillar_base + 1; y < springing; ++y)
 				editor.set_block_absolute(
 						COBBLESTONE_WALL, node.x, y + abs_terrain_offset, node.z);
@@ -2301,7 +2315,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 		}
 
 		const int pillar_base =
-				args.terrain ? editor.get_ground_level(node.x, node.z) : 0;
+				terrain_enabled ? editor.get_ground_level(node.x, node.z) : 0;
 		for (int y = pillar_base + 1; y < slab_y; ++y)
 			editor.set_block_absolute(
 					COBBLESTONE_WALL, node.x, y + abs_terrain_offset, node.z);
@@ -3630,7 +3644,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const int min_level =
 			strict_parse::i32(element.tags.get("building:min_level")).value_or(0);
 
-	int abs_terrain_offset = (!args.terrain) ? args.ground_level : 0;
+	const bool terrain_enabled = args.terrain_enabled();
+	int abs_terrain_offset = (!terrain_enabled) ? args.ground_level : 0;
 	double scale_factor = args.scale;
 	const std::string early_building_type =
 			!element.tags.get("building").empty()
@@ -3693,14 +3708,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	if (cached_footprint_size == 0)
 		return std::nullopt;
 	int start_y_offset = 0;
-	if (args.terrain) {
-		std::optional<int> max_ground_level;
-		for (const auto &node : element.nodes) {
-			if (const auto level = editor->terrain_level(node.x, node.z))
-				max_ground_level =
-						max_ground_level ? std::max(*max_ground_level, *level) : *level;
-		}
-		start_y_offset = max_ground_level.value_or(args.ground_level) + min_level_offset;
+	if (terrain_enabled) {
+		start_y_offset = terrain_base_level(
+								 *editor, element, cached_floor_area, args.ground_level) +
+						 min_level_offset;
 	} else {
 		start_y_offset = min_level_offset;
 	}
@@ -4491,7 +4502,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 										!foreign_building_at(bx + 2 * outward.first,
 												bz + 2 * outward.second)));
 
-				if (args.terrain && min_level_offset == 0 && !is_passage) {
+				if (terrain_enabled && min_level_offset == 0 && !is_passage) {
 					const int local_ground_level =
 							editor->terrain_level(bx, bz).value_or(args.ground_level);
 					for (int y = local_ground_level; y <= start_y_offset; ++y) {
@@ -4801,7 +4812,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				start_y_offset + abs_terrain_offset + 2, z, std::nullopt, std::nullopt);
 	};
 	const auto put_doorstep = [&](int x, int z, int nx, int nz) {
-		if (!args.terrain || min_level_offset != 0)
+		if (!terrain_enabled || min_level_offset != 0)
 			return;
 		constexpr int max_steps = 3;
 		const auto ground = editor->terrain_level(x + nx, z + nz);

@@ -22,6 +22,10 @@
 #include <system_error>
 #include <utility>
 #include <unordered_map>
+#include <atomic>
+#include <cstdlib>
+#include <string_view>
+#include <thread>
 
 namespace arnis::highways
 {
@@ -34,6 +38,52 @@ namespace arnis::land_cover
 namespace
 {
 constexpr int BRIDGE_STAMP_MARGIN_CELLS = 8;
+
+template <typename Function>
+void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
+{
+	if (begin >= end)
+		return;
+	std::size_t worker_limit = 0;
+	if (const char *configured = std::getenv("RAYON_NUM_THREADS")) {
+		const std::string_view text(configured);
+		const auto [ptr, ec] =
+				std::from_chars(text.data(), text.data() + text.size(), worker_limit);
+		if (ec != std::errc{} || ptr != text.data() + text.size() || worker_limit == 0)
+			worker_limit = 0;
+	}
+	if (worker_limit == 0) {
+		const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+		worker_limit = std::max<std::size_t>(1, static_cast<std::size_t>(hardware * 0.9));
+	}
+	const auto workers = std::min<std::size_t>(end - begin, worker_limit);
+	if (workers == 1) {
+		for (auto row = begin; row < end; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{begin};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= end)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> threads;
+	threads.reserve(workers - 1);
+	for (std::size_t i = 1; i < workers; ++i) {
+		try {
+			threads.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	}
+	worker();
+	for (auto &thread : threads)
+		thread.join();
+}
 
 int scaled_block_range(int raw, double scale)
 {
@@ -216,7 +266,7 @@ void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 			kernel[std::size_t(z + radius) * side + std::size_t(x + radius)] =
 					std::exp(-(x * x + z * z) / (2.0 * sigma * sigma));
 	const auto snapshot = grid;
-	for (std::size_t z = 0; z < height; ++z) {
+	parallel_rows(0, height, [&](std::size_t z) {
 		std::array<double, 256> votes{};
 		std::array<std::uint8_t, 16> seen{};
 		std::size_t seen_len = 0;
@@ -267,7 +317,7 @@ void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 			if (best_vote > 0.0)
 				grid[z][x] = best;
 		}
-	}
+	});
 }
 
 LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t width,

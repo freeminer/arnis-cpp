@@ -633,8 +633,10 @@ FloodFillResult FloodFillCache::get_or_compute(const ProcessedWay &way,
 	}
 
 	// Compute without holding the cache lock so different polygons can be
-	// filled concurrently. If another thread wins the insertion race, reuse its
-	// result and discard this duplicate computation.
+	// filled concurrently. Match Rust: cache misses (including synthetic or
+	// combined relation ways) are computed on demand but are not inserted into
+	// the long-lived cache. This keeps temporary fills from accumulating after
+	// the precomputed OSM ways have been released.
 	std::vector<std::pair<int32_t, int32_t>> polygon_coords;
 	polygon_coords.reserve(way.nodes.size());
 	for (const auto &n : way.nodes)
@@ -642,14 +644,8 @@ FloodFillResult FloodFillCache::get_or_compute(const ProcessedWay &way,
 	auto filled = flood_fill_area(polygon_coords, timeout);
 	if (filled.empty())
 		return empty_flood_fill_result();
-	auto entry = std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
+	return std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
 			std::move(filled));
-
-	std::lock_guard<std::mutex> lock(way_cache_mutex);
-	auto it = way_cache.find(way.id);
-	if (it != way_cache.end())
-		return it->second ? it->second : entry;
-	return way_cache.emplace(way.id, std::move(entry)).first->second;
 }
 
 std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>
