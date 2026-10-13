@@ -42,6 +42,11 @@
 #include <unordered_set>
 #include <utility>
 
+#if __EMSCRIPTEN__
+#undef read
+#endif
+
+
 namespace arnis::overture
 {
 

@@ -20,6 +20,10 @@
 #include <webp/decode.h>
 #endif
 
+#if __EMSCRIPTEN__
+#undef write
+#endif
+
 namespace arnis::elevation::providers
 {
 namespace
