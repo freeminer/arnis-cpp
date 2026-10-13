@@ -23,9 +23,20 @@ namespace arnis::caves
 {
 namespace
 {
-const std::vector<Block> HOSTS{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRAVEL, DIRT,
-		ANDESITE, GRANITE, DIORITE};
-const std::vector<Block> FLUIDS{WATER, LAVA};
+const std::vector<Block> &host_blocks()
+{
+	// Rust's HOSTS stores logical IDs. Capture mapped host IDs only when cave
+	// generation first uses the palette, after the block mapping is initialized.
+	static const std::vector<Block> blocks{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE,
+			GRAVEL, DIRT, ANDESITE, GRANITE, DIORITE};
+	return blocks;
+}
+
+const std::vector<Block> &fluid_blocks()
+{
+	static const std::vector<Block> blocks{WATER, LAVA};
+	return blocks;
+}
 
 double lerp(double t, double a, double b)
 {
@@ -39,7 +50,7 @@ int chunk_floor(int v)
 
 bool host(const world_editor::WorldEditor &e, int x, int y, int z)
 {
-	return e.check_for_block_absolute(x, y, z, HOSTS);
+	return e.check_for_block_absolute(x, y, z, host_blocks());
 }
 
 bool planned_solid(const world_editor::WorldEditor &editor, const CaveRect &world,
@@ -386,7 +397,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
 				host(editor, x, y, z))
-			editor.set_block_absolute(AIR, x, y, z, HOSTS, std::nullopt);
+			editor.set_block_absolute(AIR, x, y, z, host_blocks(), std::nullopt);
 	}
 	std::vector<std::int64_t> ordered_water(water_cells.begin(), water_cells.end());
 	std::sort(ordered_water.begin(), ordered_water.end());
@@ -438,7 +449,7 @@ void seal_floating_fluid_region(
 		for (int z = region.min_z; z <= region.max_z; ++z) {
 			const int top = std::min(editor.get_ground_level(x, z) + 2, write_max_y);
 			for (int y = top; y >= min_y; --y)
-				if (editor.check_for_block_absolute(x, y, z, FLUIDS) &&
+				if (editor.check_for_block_absolute(x, y, z, fluid_blocks()) &&
 						!editor.block_exists_absolute(x, y - 1, z))
 					plugs.push_back({x, y, z});
 		}

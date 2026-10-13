@@ -368,6 +368,8 @@ struct Args
 				height_multiplier > MAX_HEIGHT_MULTIPLIER ||
 				!std::isfinite(height_multiplier) || timeout_ref().count() < 0)
 			return "invalid scale, height multiplier, or timeout";
+		if (world_time < 0 || world_time >= 24000)
+			return "world time must be between 0 and 23999";
 		if (bedrock && luanti)
 			return "Bedrock and Luanti output cannot both be enabled";
 		if (spawn_lat.has_value() != spawn_lng.has_value())
@@ -395,10 +397,10 @@ struct Args
 						std::abs(rotation) > std::numeric_limits<double>::epsilon() ||
 						mapillary_probe))
 			return "One World mode conflicts with the selected format, body, rotation, or Mapillary probe";
-		// Web Mercator is supported for the shared One World coordinate frame;
-		// for standalone generation the Rust CLI warns because scale varies with latitude.
-		if (projection == projection::ProjectionKind::WebMercator && !one_world_run)
-			return "Web Mercator projection requires One World mode";
+		if (!one_world_run && world_name)
+			return "--world-name only applies to --one-world.";
+		// Rust accepts standalone Web Mercator and warns that scale varies with
+		// latitude; the library validator must not turn that warning into a rejection.
 		if ((mapillary_facades == std::optional<bool>(true) || mapillary_probe) &&
 				!mapillary_api_token().has_value())
 			return "Mapillary facade/probe mode requires an API token";
@@ -413,6 +415,8 @@ struct Args
 			return "Mapillary photo facades are incompatible with Bedrock/Luanti output";
 		if (building_facades && (bedrock || luanti))
 			return "building facades are incompatible with Bedrock/Luanti output";
+		if (building_facades_dir && !std::filesystem::is_directory(*building_facades_dir))
+			return "building facade directory does not exist";
 		if (cave_biomes && !caves)
 			return "cave biome weights require cave generation";
 		if (cave_biomes) {

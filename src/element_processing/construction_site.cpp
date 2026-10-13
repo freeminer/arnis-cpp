@@ -21,7 +21,11 @@ namespace
 {
 constexpr int PLOT = 13;
 constexpr int MAX_EXTENT = PLOT - 2;
-const std::vector<Block> SITE_GROUND{GRAVEL, COARSE_DIRT, DIRT, MUD};
+std::vector<Block> site_ground()
+{
+	// Rust's constants are logical IDs; resolve the host palette after mapping.
+	return {GRAVEL, COARSE_DIRT, DIRT, MUD};
+}
 
 std::uint64_t key(int x, int z)
 {
@@ -49,7 +53,7 @@ struct Site
 			return false;
 		const int y = editor.get_absolute_y(x, 0, z);
 		return editor.check_for_block_absolute(
-					   x, y, z, std::optional<std::vector<Block>>(SITE_GROUND)) &&
+					   x, y, z, std::optional<std::vector<Block>>(site_ground())) &&
 			   !editor.block_exists_absolute(x, editor.get_absolute_y(x, 1, z), z);
 	}
 
@@ -250,7 +254,7 @@ void prop(WorldEditor &editor, const Site &site, int x, int z, Rolls &r)
 		for (auto [cx, cz, u, v] : cells) {
 			const bool edge = u == 0 || v == 0 || u == along - 1 || v == across - 1;
 			editor.set_block_absolute(LIGHT_GRAY_CONCRETE, cx, *base - 1, cz,
-					std::optional<std::vector<Block>>(SITE_GROUND), std::nullopt);
+					std::optional<std::vector<Block>>(site_ground()), std::nullopt);
 			if (edge)
 				editor.set_block_absolute(SPRUCE_SLAB, cx, *base, cz);
 			else if (u % 2 && v % 2) {

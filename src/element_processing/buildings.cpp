@@ -7131,7 +7131,11 @@ void generate_building_from_relation(WorldEditor &editor,
 		const ProcessedRelation &relation, const Args &args,
 		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
 		const CoordinateBitmap &building_passages,
-		const interior_uses::InteriorUseIndex *interior_index)
+		const interior_uses::InteriorUseIndex *interior_index,
+		const RoadMaskBitmap *road_mask,
+		const BuildingFootprintBitmap *building_footprints,
+		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
+				*group_members)
 {
 	if (should_skip_underground_tags(relation.tags)) {
 		return;
@@ -7179,7 +7183,8 @@ void generate_building_from_relation(WorldEditor &editor,
 	for (auto &merged_way : outer_ways) {
 		generate_buildings(&editor, merged_way, args, relation_levels, flood_fill_cache,
 				building_passages, hole_polygons.empty() ? nullptr : &hole_polygons,
-				std::nullopt, nullptr, nullptr, nullptr, interior_index);
+				std::nullopt, road_mask, building_footprints, group_members,
+				interior_index);
 	}
 }
 
@@ -7198,27 +7203,29 @@ std::vector<ProcessedWay> facade_outer_rings(
 						return member.role == ProcessedMemberRole::Part;
 					}))
 			return {};
-
-		bool has_outer = false;
-		bool all_outer_parts_are_standalone = true;
-		for (const auto &member : relation.members) {
-			if (member.role != ProcessedMemberRole::Outer)
-				continue;
-			has_outer = true;
-			const auto part = member.way.tags.find("building:part");
-			const bool explicitly_not_a_part =
-					part != member.way.tags.end() && part->second.size() == 2 &&
-					std::tolower(static_cast<unsigned char>(part->second[0])) == 'n' &&
-					std::tolower(static_cast<unsigned char>(part->second[1])) == 'o';
-			const bool is_part = part != member.way.tags.end() && !explicitly_not_a_part;
-			const bool is_closed =
-					member.way.nodes.size() >= 4 &&
-					member.way.nodes.front().id == member.way.nodes.back().id;
-			all_outer_parts_are_standalone &= is_part && is_closed;
-		}
-		if (has_outer && all_outer_parts_are_standalone)
-			return {};
 	}
+
+	// Closed building:part outer rings render as their own ways for every
+	// relation type. Match Rust's relation_outer_rings(): rendering the parent
+	// relation as well would stack a second shell over those standalone parts.
+	bool has_outer = false;
+	bool all_outer_parts_are_standalone = true;
+	for (const auto &member : relation.members) {
+		if (member.role != ProcessedMemberRole::Outer)
+			continue;
+		has_outer = true;
+		const auto part = member.way.tags.find("building:part");
+		const bool explicitly_not_a_part =
+				part != member.way.tags.end() && part->second.size() == 2 &&
+				std::tolower(static_cast<unsigned char>(part->second[0])) == 'n' &&
+				std::tolower(static_cast<unsigned char>(part->second[1])) == 'o';
+		const bool is_part = part != member.way.tags.end() && !explicitly_not_a_part;
+		const bool is_closed = member.way.nodes.size() >= 4 &&
+							   member.way.nodes.front().id == member.way.nodes.back().id;
+		all_outer_parts_are_standalone &= is_part && is_closed;
+	}
+	if (has_outer && all_outer_parts_are_standalone)
+		return {};
 
 	auto nodes = collect_merged_rings(relation, ProcessedMemberRole::Outer, xzbbox);
 	std::vector<ProcessedWay> ways;

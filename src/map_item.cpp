@@ -8,11 +8,14 @@ namespace arnis::map_item
 std::tuple<int, std::int8_t, bool> map_geometry(int d)
 {
 	for (int s = 0; s <= 4; ++s) {
-		int blocks = 16 << s;
+		const int blocks = 1 << s;
 		if (d <= MAP_SIZE * blocks)
 			return {blocks, static_cast<std::int8_t>(s), true};
 	}
-	return {16 << 4, 4, false};
+	// An oversized preview still uses scale 4, but fit the full world into its
+	// 128 pixels instead of clipping it to Minecraft's largest standard map.
+	const int blocks = d / MAP_SIZE + (d % MAP_SIZE != 0);
+	return {blocks, 4, false};
 }
 }
 

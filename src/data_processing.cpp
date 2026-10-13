@@ -1200,7 +1200,11 @@ void generate_building_from_relation(WorldEditor &editor,
 		const ProcessedRelation &relation, const Args &args,
 		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
 		const CoordinateBitmap &building_passages,
-		const interior_uses::InteriorUseIndex *interior_index);
+		const interior_uses::InteriorUseIndex *interior_index,
+		const RoadMaskBitmap *road_mask,
+		const BuildingFootprintBitmap *building_footprints,
+		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
+				*group_members);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels);
@@ -2538,7 +2542,8 @@ bool generate_world(WorldEditor &editor,
 			if (is_building_relation) {
 				buildings::generate_building_from_relation(editor, rel, args,
 						flood_fill_cache, xzbbox, building_passages,
-						interior_use_index ? &*interior_use_index : nullptr);
+						interior_use_index ? &*interior_use_index : nullptr, &road_mask,
+						&building_footprints, &building_group_members);
 			} else if (rel.tags.contains("water") ||
 					   rel.tags.get("natural") ==
 							   std::optional<std::string>(std::string("water")) ||
@@ -2571,62 +2576,72 @@ bool generate_world(WorldEditor &editor,
 	if (parallel_tile_workers) {
 		using TileWorkerResult = std::pair<WorldEditor, ElementDispatchState>;
 		bool tile_pipeline_ok = true;
-		for (std::size_t batch_begin = 0; batch_begin < element_tiles.size();
-				batch_begin += tile_batch_size) {
-			const auto batch_end =
-					std::min(element_tiles.size(), batch_begin + tile_batch_size);
-			std::vector<std::future<TileWorkerResult>> workers;
-			workers.reserve(batch_end - batch_begin);
-			for (std::size_t tile_index = batch_begin; tile_index < batch_end;
-					++tile_index) {
-				workers.push_back(std::async(std::launch::async, [&, tile_index] {
-					auto tile_editor = editor.make_tile_worker();
-					ElementDispatchState tile_state;
-					if (!begin_generation_tile(tile_editor, tile_index))
-						throw std::runtime_error("failed to begin Arnis tile worker");
-					for (const auto element_index : element_assignments[tile_index])
-						process_assigned_element(
-								tile_editor, tile_state, element_index, element_index);
-					if (!finish_ground_tile(tile_editor, tile_state, tile_index, true))
-						throw std::runtime_error("failed to finish Arnis tile worker");
-					return TileWorkerResult{
-							std::move(tile_editor), std::move(tile_state)};
-				}));
-			}
-			for (std::size_t offset = 0; offset < workers.size(); ++offset) {
-				const auto tile_index = batch_begin + offset;
-				try {
-					auto [tile_editor, tile_state] = workers[offset].get();
-					const auto &tile = element_tiles[tile_index];
-					if (!editor.merge_tile_worker(std::move(tile_editor), tile.min_x,
-								tile.min_z, tile.max_x - 1, tile.max_z - 1))
-						throw std::runtime_error("failed to merge Arnis tile worker");
-					collect_tile_dispatch_state(tile_state);
-					release_tile_fills_for(tile_index);
-					if (++deferred_tiles_in_batch >= tile_batch_size) {
-						deferred_tiles_in_batch = 0;
-						if (!editor.flush_deferred_tile_merges())
+		// Keep a bounded sliding window of tile jobs. Merge in the original
+		// LPT/band order for deterministic first-writer semantics, but launch
+		// the next tile as soon as its slot is freed so placement overlaps the
+		// sequential merge instead of waiting for a whole batch to finish.
+		const auto worker_count =
+				std::min<std::size_t>(tile_batch_size, element_tiles.size());
+		std::vector<std::future<TileWorkerResult>> workers(worker_count);
+		auto launch_tile = [&](std::size_t slot, std::size_t tile_index) {
+			// Snapshot the host editor on this thread: merging another completed
+			// worker may mutate the host while the tile itself is being processed.
+			auto tile_editor = editor.make_tile_worker();
+			workers[slot] = std::async(std::launch::async,
+					[&, tile_index, tile_editor = std::move(tile_editor)]() mutable {
+						ElementDispatchState tile_state;
+						if (!begin_generation_tile(tile_editor, tile_index))
+							throw std::runtime_error("failed to begin Arnis tile worker");
+						for (const auto element_index : element_assignments[tile_index])
+							process_assigned_element(tile_editor, tile_state,
+									element_index, element_index);
+						if (!finish_ground_tile(
+									tile_editor, tile_state, tile_index, true))
 							throw std::runtime_error(
-									"failed to merge tile overlay batch");
-					}
-				} catch (const std::exception &error) {
-					editor.report_generation_error(error.what());
-					std::cerr << "Arnis tile worker failed: " << error.what() << '\n';
-					tile_pipeline_ok = false;
-					break;
+									"failed to finish Arnis tile worker");
+						return TileWorkerResult{
+								std::move(tile_editor), std::move(tile_state)};
+					});
+		};
+		try {
+			for (std::size_t i = 0; i < worker_count; ++i)
+				launch_tile(i, i);
+			for (std::size_t tile_index = 0; tile_index < element_tiles.size();
+					++tile_index) {
+				const auto slot = tile_index % worker_count;
+				if (!workers[slot].valid())
+					throw std::runtime_error("missing Arnis tile worker result");
+				auto [tile_editor, tile_state] = workers[slot].get();
+				const auto next_tile = tile_index + worker_count;
+				if (next_tile < element_tiles.size())
+					launch_tile(slot, next_tile);
+				const auto &tile = element_tiles[tile_index];
+				if (!editor.merge_tile_worker(std::move(tile_editor), tile.min_x,
+							tile.min_z, tile.max_x - 1, tile.max_z - 1))
+					throw std::runtime_error("failed to merge Arnis tile worker");
+				collect_tile_dispatch_state(tile_state);
+				release_tile_fills_for(tile_index);
+				if (++deferred_tiles_in_batch >= tile_batch_size) {
+					deferred_tiles_in_batch = 0;
+					if (!editor.flush_deferred_tile_merges())
+						throw std::runtime_error("failed to merge tile overlay batch");
 				}
 			}
-			if (!tile_pipeline_ok) {
-				for (auto &worker : workers)
-					if (worker.valid())
-						worker.wait();
-				if (editor.mg)
-					editor.mg->discardTileOverlay();
-				editor.flush_deferred_tile_merges();
-				editor.set_defer_tile_merges(false);
-				editor.finish_tile_pass();
-				return false;
-			}
+		} catch (const std::exception &error) {
+			editor.report_generation_error(error.what());
+			std::cerr << "Arnis tile worker failed: " << error.what() << '\n';
+			tile_pipeline_ok = false;
+		}
+		if (!tile_pipeline_ok) {
+			for (auto &worker : workers)
+				if (worker.valid())
+					worker.wait();
+			if (editor.mg)
+				editor.mg->discardTileOverlay();
+			editor.flush_deferred_tile_merges();
+			editor.set_defer_tile_merges(false);
+			editor.finish_tile_pass();
+			return false;
 		}
 		next_ground_tile = element_tiles.size();
 	} else {

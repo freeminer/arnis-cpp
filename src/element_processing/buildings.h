@@ -102,7 +102,11 @@ void generate_building_from_relation(WorldEditor &editor,
 		const ProcessedRelation &relation, const Args &args,
 		const FloodFillCache &flood_fill_cache, const XZBBox &xzbbox,
 		const CoordinateBitmap &building_passages,
-		const interior_uses::InteriorUseIndex *interior_index = nullptr);
+		const interior_uses::InteriorUseIndex *interior_index = nullptr,
+		const RoadMaskBitmap *road_mask = nullptr,
+		const BuildingFootprintBitmap *building_footprints = nullptr,
+		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
+				*group_members = nullptr);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels);

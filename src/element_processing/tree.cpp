@@ -280,7 +280,7 @@ Tree Tree::get_tree(TreeType kind)
 		Tree t;
 		t.log_block = OAK_LOG;
 		t.log_height = 0;
-		t.leaves_block = kind == TreeType::AzaleaBush ? CHERRY_LEAVES : OAK_LEAVES;
+		t.leaves_block = kind == TreeType::AzaleaBush ? AZALEA_LEAVES : OAK_LEAVES;
 		t.leaves_fill = std::span<const std::pair<Coord, Coord>>(BUSH_LEAVES_FILL);
 		return t;
 	}
@@ -558,11 +558,15 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 				break;
 			}
 	}
-	if (editor.scale() >= MICRO_TREE_MAX_SCALE &&
-			editor.place_mapped_regional_tree(pos.x,
-						  editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request)
-					.has_value())
-		return;
+	if (editor.scale() >= MICRO_TREE_MAX_SCALE) {
+		const auto placed = editor.place_mapped_regional_tree(
+				pos.x, editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request);
+		// Rust returns after consulting an active tree pack even if no mapped
+		// schematic was selected. Falling through here would add a procedural
+		// tree where the pack intentionally leaves the mapped slot empty.
+		if (placed.has_value() || editor.has_schematic_tree_pack())
+			return;
+	}
 
 	create_of_type(editor, pos, mapped.kind, building_footprints, bridge_surface, true,
 			mapped.height_m, false, false, true);
@@ -779,8 +783,9 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 				trees::habitat_for_tree_type(tree_type), from_tags, wet_ground,
 				allow_on_paved, density_decided);
 		// A present false result is still handled: Rust's active pack may choose
-		// a clearing, which must not fall through to a procedural tree.
-		if (handled.has_value())
+		// a clearing, which must not fall through to a procedural tree. The pack
+		// itself is authoritative even if no regional callback is installed.
+		if (handled.has_value() || editor.has_schematic_tree_pack())
 			return;
 	}
 
