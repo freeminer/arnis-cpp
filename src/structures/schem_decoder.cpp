@@ -53,6 +53,23 @@ std::shared_ptr<const SchemProperties> properties_for_rotation(const SchemVoxel 
 				rotate_schem_properties(*voxel.properties, rotation & 3u));
 	return it->second;
 }
+
+void place_native_entity(world_editor::WorldEditor &editor, int x, int y, int z,
+		const SchemEntity &entity);
+
+void update_structure_extent(StructureSchematic &structure)
+{
+	structure.max_extent = 0;
+	const auto include = [&](int x, int z) {
+		structure.max_extent =
+				std::max(structure.max_extent, std::max(std::abs(x - structure.anchor_x),
+													   std::abs(z - structure.anchor_z)));
+	};
+	for (const auto &voxel : structure.voxels)
+		include(voxel.x, voxel.z);
+	for (const auto &entity : structure.entities)
+		include(entity.x, entity.z);
+}
 } // namespace
 
 StructureSchematic structure_schematic(const SchemDocument &document)
@@ -70,6 +87,9 @@ StructureSchematic structure_schematic(const SchemDocument &document)
 		for (auto &voxel : out.voxels)
 			voxel.y -= min_y;
 	out.entities = document.entities;
+	if (min_y != std::numeric_limits<int>::max())
+		for (auto &entity : out.entities)
+			entity.y -= min_y;
 	int tallest = std::numeric_limits<int>::min();
 	for (const auto &v : out.voxels)
 		if (v.y > tallest) {
@@ -77,9 +97,7 @@ StructureSchematic structure_schematic(const SchemDocument &document)
 			out.anchor_x = v.x;
 			out.anchor_z = v.z;
 		}
-	for (const auto &v : out.voxels)
-		out.max_extent = std::max(out.max_extent,
-				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
+	update_structure_extent(out);
 	return out;
 }
 namespace
@@ -103,10 +121,9 @@ bool place_structure_yaw(world_editor::WorldEditor &editor,
 		const StructureSchematic &structure, int base_x, int base_y, int base_z,
 		double yaw_degrees, double pitch_degrees)
 {
-	const auto columns =
-			ColumnSchematic::from_document(document_from_structure(structure));
-	return place_structure_yaw(
-			editor, columns, base_x, base_y, base_z, yaw_degrees, pitch_degrees);
+	const auto document = document_from_structure(structure);
+	return place_schem_document_yaw(
+			editor, document, base_x, base_y, base_z, yaw_degrees, pitch_degrees);
 }
 
 bool place_structure_yaw(world_editor::WorldEditor &editor,
@@ -234,6 +251,12 @@ bool place_structure(world_editor::WorldEditor &editor,
 			editor.set_block_absolute(*ground, wx, base_y - 1, wz, nullptr, &replace_all);
 		placed = true;
 	}
+	for (const auto &entity : structure.entities) {
+		const auto [rx, rz] = rotate_cell(entity.x, entity.z);
+		place_native_entity(editor, base_x + rx - anchor_x, base_y + entity.y,
+				base_z + rz - anchor_z, entity);
+		placed = true;
+	}
 	return placed;
 }
 StructureSchematic StructureSchematic::centered() const
@@ -241,10 +264,7 @@ StructureSchematic StructureSchematic::centered() const
 	auto out = *this;
 	out.anchor_x = out.width / 2;
 	out.anchor_z = out.length / 2;
-	out.max_extent = 0;
-	for (const auto &v : out.voxels)
-		out.max_extent = std::max(out.max_extent,
-				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
+	update_structure_extent(out);
 	return out;
 }
 StructureSchematic StructureSchematic::base_anchored() const
@@ -261,10 +281,7 @@ StructureSchematic StructureSchematic::base_anchored() const
 		out.anchor_x = int(sx / count);
 		out.anchor_z = int(sz / count);
 	}
-	out.max_extent = 0;
-	for (const auto &v : out.voxels)
-		out.max_extent = std::max(out.max_extent,
-				std::max(std::abs(v.x - out.anchor_x), std::abs(v.z - out.anchor_z)));
+	update_structure_extent(out);
 	return out;
 }
 namespace
@@ -1808,7 +1825,8 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 		const SchemDocument &document, int base_x, int base_y, int base_z,
 		double yaw_degrees, double pitch_degrees)
 {
-	if (document.width <= 0 || document.length <= 0 || document.voxels.empty())
+	if (document.width <= 0 || document.length <= 0 ||
+			(document.voxels.empty() && document.entities.empty()))
 		return false;
 	const double quarter = yaw_degrees / 90.0;
 	const auto quarter_turn = std::llround(quarter);
@@ -1847,6 +1865,8 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 	int lift_floor = std::numeric_limits<int>::max();
 	for (const auto &voxel : document.voxels)
 		lift_floor = std::min(lift_floor, voxel.y + pitch_lift(voxel.z));
+	if (lift_floor == std::numeric_limits<int>::max())
+		lift_floor = 0;
 	std::map<std::pair<int, int>, std::vector<const SchemVoxel *>> columns;
 	std::unordered_map<const SchemProperties *, std::shared_ptr<const SchemProperties>>
 			rotated_properties;
@@ -1855,40 +1875,80 @@ bool place_schem_document_yaw(world_editor::WorldEditor &editor,
 	int min_x = std::numeric_limits<int>::max(), max_x = std::numeric_limits<int>::min();
 	int min_z = std::numeric_limits<int>::max(), max_z = std::numeric_limits<int>::min();
 	const std::vector<Block> replace_all;
-	for (const auto &[mx, mz] : {std::pair{0.0, 0.0}, {double(document.width), 0.0},
-				 {0.0, double(document.length)},
-				 {double(document.width), double(document.length)}}) {
-		const double dx = mx - cx, dz = mz - cz;
-		const double wx = base_x + dx * cosine - dz * sine;
-		const double wz = base_z + dx * sine + dz * cosine;
-		min_x = std::min(min_x, int(std::floor(wx)));
-		max_x = std::max(max_x, int(std::ceil(wx)));
-		min_z = std::min(min_z, int(std::floor(wz)));
-		max_z = std::max(max_z, int(std::ceil(wz)));
-	}
 	bool placed = false;
-	for (int wz = min_z; wz <= max_z; ++wz)
-		for (int wx = min_x; wx <= max_x; ++wx) {
-			const double dx = wx - base_x, dz = wz - base_z;
-			const int mx = int(std::floor(cx + dx * cosine + dz * sine));
-			const int mz = int(std::floor(cz - dx * sine + dz * cosine));
-			auto column = columns.find({mx, mz});
-			if (column == columns.end())
-				continue;
-			const int lift = pitch_lift(mz) - lift_floor;
-			for (const auto *voxel : column->second) {
-				// State has no arbitrary-angle representation. Snap it to the
-				// nearest cardinal while preserving the hull's true free yaw.
-				BlockWithProperties block{voxel->resolved_block,
-						properties_for_rotation(
-								*voxel, state_rotation, rotated_properties)};
-				if (block.block == block_definitions::AIR)
-					continue;
-				editor.set_block_with_properties_absolute(std::move(block), wx,
-						base_y + voxel->y + lift, wz, nullptr, &replace_all);
-				placed = true;
-			}
+	if (!document.voxels.empty()) {
+		for (const auto &[mx, mz] : {std::pair{0.0, 0.0}, {double(document.width), 0.0},
+					 {0.0, double(document.length)},
+					 {double(document.width), double(document.length)}}) {
+			const double dx = mx - cx, dz = mz - cz;
+			const double wx = base_x + dx * cosine - dz * sine;
+			const double wz = base_z + dx * sine + dz * cosine;
+			min_x = std::min(min_x, int(std::floor(wx)));
+			max_x = std::max(max_x, int(std::ceil(wx)));
+			min_z = std::min(min_z, int(std::floor(wz)));
+			max_z = std::max(max_z, int(std::ceil(wz)));
 		}
+	}
+	if (!document.voxels.empty()) {
+		for (int wz = min_z; wz <= max_z; ++wz)
+			for (int wx = min_x; wx <= max_x; ++wx) {
+				const double dx = wx - base_x, dz = wz - base_z;
+				const int mx = int(std::floor(cx + dx * cosine + dz * sine));
+				const int mz = int(std::floor(cz - dx * sine + dz * cosine));
+				auto column = columns.find({mx, mz});
+				if (column == columns.end())
+					continue;
+				const int lift = pitch_lift(mz) - lift_floor;
+				for (const auto *voxel : column->second) {
+					// State has no arbitrary-angle representation. Snap it to the
+					// nearest cardinal while preserving the hull's true free yaw.
+					BlockWithProperties block{voxel->resolved_block,
+							properties_for_rotation(
+									*voxel, state_rotation, rotated_properties)};
+					if (block.block == block_definitions::AIR)
+						continue;
+					editor.set_block_with_properties_absolute(std::move(block), wx,
+							base_y + voxel->y + lift, wz, nullptr, &replace_all);
+					placed = true;
+				}
+			}
+	}
+	for (const auto &entity : document.entities) {
+		int entity_dx, entity_dz;
+		if (std::abs(quarter - double(quarter_turn)) < 1e-9) {
+			// Use the exact cell permutation for quarter-turns, including the
+			// asymmetric center cell of odd-sized schematics.
+			const auto rotate_cell = [&](int x, int z) {
+				switch (state_rotation) {
+				case 1:
+					return std::pair{document.length - 1 - z, x};
+				case 2:
+					return std::pair{document.width - 1 - x, document.length - 1 - z};
+				case 3:
+					return std::pair{z, document.width - 1 - x};
+				default:
+					return std::pair{x, z};
+				}
+			};
+			const auto [rotated_x, rotated_z] = rotate_cell(entity.x, entity.z);
+			const auto [anchor_x, anchor_z] =
+					rotate_cell(document.width / 2, document.length / 2);
+			entity_dx = rotated_x - anchor_x;
+			entity_dz = rotated_z - anchor_z;
+		} else {
+			// Keep free-yaw entities on the same centered destination lattice as
+			// the sampled voxel columns.
+			const double dx = entity.x - document.width / 2;
+			const double dz = entity.z - document.length / 2;
+			entity_dx = static_cast<int>(std::lround(dx * cosine - dz * sine));
+			entity_dz = static_cast<int>(std::lround(dx * sine + dz * cosine));
+		}
+		const int wx = base_x + entity_dx;
+		const int wz = base_z + entity_dz;
+		const int wy = base_y + entity.y + pitch_lift(entity.z) - lift_floor;
+		place_native_entity(editor, wx, wy, wz, entity);
+		placed = true;
+	}
 	return placed;
 }
 

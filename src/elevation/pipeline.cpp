@@ -104,7 +104,8 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 
 	auto [minecraft_heights, mapping] =
 			scale_to_minecraft_with(raw.heights, scale * height_multiplier, ground_level,
-					min_ground_level, disable_height_limit, extended_max_y, policy);
+					min_ground_level, disable_height_limit, extended_max_y, policy,
+					[&](std::string_view message) { report(progress, -1.0, message); });
 	ProcessedElevationData out;
 	out.height = minecraft_heights.size();
 	out.width = out.height ? minecraft_heights.front().size() : 0;

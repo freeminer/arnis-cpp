@@ -198,8 +198,9 @@ std::int64_t slope_step(double meters_per_cell)
 {
 	if (!(meters_per_cell > 0.0) || !std::isfinite(meters_per_cell))
 		return 1;
-	return std::clamp<std::int64_t>(
-			static_cast<std::int64_t>(std::llround(10.0 / meters_per_cell)), 1, 16);
+	return std::clamp<std::int64_t>(static_cast<std::int64_t>(std::llround(std::clamp(
+											10.0 / meters_per_cell, 0.0, 16.0))),
+			1, 16);
 }
 
 struct Walk
@@ -912,8 +913,13 @@ double histogram_mode(const std::vector<double> &values, double bin_size)
 				std::min(count - 1, static_cast<std::size_t>((value - *lo) / bin_size));
 		++bins[index];
 	}
-	const auto peak = static_cast<std::size_t>(
-			std::max_element(bins.begin(), bins.end()) - bins.begin());
+	// Rust's Iterator::max_by_key keeps the last item on ties. std::max_element
+	// keeps the first, so select with >= to preserve the same water level when
+	// two elevation bins have equal counts.
+	std::size_t peak = 0;
+	for (std::size_t i = 1; i < bins.size(); ++i)
+		if (bins[i] >= bins[peak])
+			peak = i;
 	return *lo + (static_cast<double>(peak) + 0.5) * bin_size;
 }
 
@@ -1676,14 +1682,22 @@ std::pair<ElevationAffine, FitRange> derive_affine(
 		const std::vector<std::vector<double>> &grid, double scale, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y)
 {
+	std::vector<std::pair<double, double>> row_ranges(grid.size(),
+			{std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()});
+	parallel_rows(0, grid.size(), [&](std::size_t y) {
+		auto &[row_lo, row_hi] = row_ranges[y];
+		for (double value : grid[y])
+			if (std::isfinite(value)) {
+				row_lo = std::min(row_lo, value);
+				row_hi = std::max(row_hi, value);
+			}
+	});
 	double lo = std::numeric_limits<double>::max();
 	double hi = std::numeric_limits<double>::lowest();
-	for (const auto &row : grid)
-		for (double value : row)
-			if (std::isfinite(value)) {
-				lo = std::min(lo, value);
-				hi = std::max(hi, value);
-			}
+	for (const auto &[row_lo, row_hi] : row_ranges) {
+		lo = std::min(lo, row_lo);
+		hi = std::max(hi, row_hi);
+	}
 	double height_range;
 	if (!std::isfinite(lo) || !std::isfinite(hi) || lo >= hi) {
 		const double real_min = std::isfinite(lo) && lo <= hi ? lo : 0.0;
@@ -1769,7 +1783,8 @@ ElevationAffine ElevationAffine::whole_earth(double scale, int floor, int extend
 std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_with(
 		const std::vector<std::vector<double>> &in, double scale, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
-		const AffinePolicy &policy)
+		const AffinePolicy &policy,
+		const std::function<void(std::string_view)> &message_callback)
 {
 	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y);
 	std::optional<FitRange> fit;
@@ -1820,7 +1835,9 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 	const double base = affine.ground_level;
 	const double upper = ceiling;
 	std::vector<std::vector<double>> out = in;
-	for (std::size_t y = 0; y < in.size(); ++y)
+	// Match Rust's Rayon row mapping. Elevation grids can contain millions of
+	// cells, and each output row is independent of every other row.
+	parallel_rows(0, in.size(), [&](std::size_t y) {
 		for (std::size_t x = 0; x < in[y].size(); ++x) {
 			const double value = in[y][x];
 			double mapped;
@@ -1835,15 +1852,24 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 			}
 			out[y][x] = std::clamp(mapped, base, upper);
 		}
+	});
 	if (policy.kind == AffinePolicy::Kind::Fixed) {
-		std::size_t total = 0, clamped = 0;
-		for (const auto &row : in)
-			for (double value : row)
+		std::vector<std::pair<std::size_t, std::size_t>> row_counts(in.size());
+		parallel_rows(0, in.size(), [&](std::size_t y) {
+			auto &[row_clamped, row_total] = row_counts[y];
+			for (double value : in[y])
 				if (std::isfinite(value)) {
-					++total;
+					++row_total;
 					const double mapped = affine.y_for_metres(value);
-					clamped += (mapped < base && value > LOWEST_LAND_M) || mapped > upper;
+					row_clamped +=
+							(mapped < base && value > LOWEST_LAND_M) || mapped > upper;
 				}
+		});
+		std::size_t total = 0, clamped = 0;
+		for (const auto &[row_clamped, row_total] : row_counts) {
+			total += row_total;
+			clamped += row_clamped;
+		}
 		if (total && clamped * 200 > total) {
 			const double percentage = 100.0 * clamped / total;
 			std::ostringstream message;
@@ -1856,16 +1882,27 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 									   : " The band was fixed by the first area; a new One World has room for all of Earth.")
 					<< '\n';
 			std::clog << message.str();
+			if (message_callback) {
+				std::ostringstream status;
+				status << "Note: " << std::fixed << std::setprecision(0) << percentage
+					   << "% of the area exceeds the world's height band";
+				message_callback(status.str());
+			}
 		}
 	}
 	double top = base;
 	if (fit)
 		top = affine.ground_level + fit->scaled_range;
-	else
-		for (const auto &row : out)
-			for (double value : row)
+	else {
+		std::vector<double> row_tops(out.size(), std::numeric_limits<double>::lowest());
+		parallel_rows(0, out.size(), [&](std::size_t y) {
+			for (double value : out[y])
 				if (std::isfinite(value))
-					top = std::max(top, value);
+					row_tops[y] = std::max(row_tops[y], value);
+		});
+		for (double row_top : row_tops)
+			top = std::max(top, row_top);
+	}
 	world_editor::set_terrain_top_y(static_cast<int>(std::lround(std::min(top, upper))));
 	return {std::move(out), affine};
 }

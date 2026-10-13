@@ -414,7 +414,9 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			place_decoration(GRASS, ground_y + 1);
 		else if (choice < 64) {
 			place_decoration(TALL_GRASS_BOTTOM, ground_y + 1);
-			place_decoration(TALL_GRASS_TOP, ground_y + 2);
+			// Rust writes the upper half unconditionally after the open-ground
+			// check at ground_y + 1; preserve that behavior if an overhang is here.
+			editor.set_block_absolute(TALL_GRASS_TOP, x, ground_y + 2, z);
 		}
 	} else if (cover == land_cover::LC_BARE && ground_is_natural) {
 		const bool coarse =
@@ -441,7 +443,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			const auto tall_share = stand ? 35u : 4u;
 			if (rng.uniform(100) < tall_share) {
 				place_decoration(TALL_GRASS_BOTTOM, ground_y + 1);
-				place_decoration(TALL_GRASS_TOP, ground_y + 2);
+				editor.set_block_absolute(TALL_GRASS_TOP, x, ground_y + 2, z);
 			} else {
 				place_decoration(GRASS, ground_y + 1);
 			}
@@ -688,7 +690,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						}
 						if (talus_field)
 							talus_block = terrain_surface::talus_palette(x, z,
-									talus_field->nearr(
+									talus_field->near(
 											x, z, editor.ground->level_exact(relative)),
 									cover_here);
 					}
@@ -910,18 +912,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							}
 						}
 
-						if (process_surface && !place_esa_water && !planetary &&
-								has_cover)
-							maybe_place_vegetation(editor, x, ground_y, z,
-									building_footprints, xzbbox.min_x(), xzbbox.min_z(),
-									tunnel_footprint, bridge_surface, args.scale, slope,
-									forest_fern_share, tree_spacing, schematic_trees);
-
-						// Snow is a separate cap, so climate/land-cover material selection is
-						// preserved below it just as in the Rust ground pass.
-						// Match Rust's softened climatic snow edge.  A small deterministic
-						// jitter avoids an artificial contour line at exactly the threshold;
-						// MAX_INT disables snow for low/flat worlds.
+						// Rust places snow before vegetation; the layer occupies the open
+						// space above ground and therefore suppresses plants on that column.
 						if (process_surface && !place_esa_water && !planetary &&
 								editor.ground && water_blend <= .5 &&
 								!editor.check_for_block_type_absolute(
@@ -947,6 +939,13 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										editor, x, ground_y, z, eighths);
 							}
 						}
+
+						if (process_surface && !place_esa_water && !planetary &&
+								has_cover)
+							maybe_place_vegetation(editor, x, ground_y, z,
+									building_footprints, xzbbox.min_x(), xzbbox.min_z(),
+									tunnel_footprint, bridge_surface, args.scale, slope,
+									forest_fern_share, tree_spacing, schematic_trees);
 					}
 
 					// Rust's fallback depth pass closes gaps beneath authored surfaces

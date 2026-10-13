@@ -13,14 +13,17 @@ std::filesystem::path cache_root(const std::filesystem::path &b)
 }
 std::string url_hash(const std::string &u)
 {
-	// `fnv::FnvHasher` in the Rust source is 64-bit FNV-1a.  Unlike
-	// std::hash this is stable across libstdc++ versions and processes, so
-	// both implementations choose the same cache filename for a URL.
+	// Rust's `url.hash(&mut FnvHasher)` invokes `Hash for str`, which writes
+	// the UTF-8 bytes followed by the 0xff string terminator. Preserve that
+	// marker as well as FNV-1a so both implementations share cache filenames.
 	std::uint64_t hash = 0xcbf29ce484222325ULL;
-	for (const unsigned char c : u) {
+	auto add = [&hash](unsigned char c) {
 		hash ^= c;
 		hash *= 0x100000001b3ULL;
-	}
+	};
+	for (const unsigned char c : u)
+		add(c);
+	add(0xff);
 	char b[17];
 	std::snprintf(b, sizeof(b), "%016llx", static_cast<unsigned long long>(hash));
 	return b;

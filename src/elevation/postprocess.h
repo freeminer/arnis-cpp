@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <tuple>
@@ -69,7 +70,8 @@ namespace arnis::elevation
 std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_with(
 		const std::vector<std::vector<double>> &, double scale, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
-		const AffinePolicy &policy = {});
+		const AffinePolicy &policy = {},
+		const std::function<void(std::string_view)> &message = {});
 
 std::tuple<std::vector<std::vector<double>>, double, double, int> scale_to_minecraft(
 		const std::vector<std::vector<double>> &, double scale, int ground_level,
