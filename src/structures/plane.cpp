@@ -385,7 +385,10 @@ std::vector<Placement> build_placements(const std::vector<AerowayStrip> &strips,
 		const double hi = strip.max_along - PLANE_LENGTH_BLOCKS * 0.5;
 		if (hi <= lo)
 			continue;
-		const double along = rng.uniform_real(lo, hi);
+		// Mirror Rust's `lo + (hi - lo) * random_range(0.0..1.0)` path.
+		// Sampling the final range directly is mathematically equivalent, but
+		// can round differently at block boundaries and change the anchor.
+		const double along = lo + (hi - lo) * rng.uniform_real(0.0, 1.0);
 		const int x = static_cast<int>(
 				std::lround(strip.centroid_x + along * strip.direction_x));
 		const int z = static_cast<int>(

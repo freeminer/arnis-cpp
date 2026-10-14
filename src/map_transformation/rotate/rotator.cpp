@@ -1,4 +1,5 @@
 #include "rotator.h"
+#include "../../ecoregion.h"
 #include "../../elevation/elevation.h"
 
 #include <algorithm>
@@ -188,6 +189,37 @@ void rotate_world_with_ground(double angle_degrees,
 	const bool had_land_cover = ground.has_land_cover();
 	const bool had_canopy = ground.has_canopy();
 	const auto *original_ecoregions = ground.ecoregion_map();
+	std::optional<ecoregion::EcoMap> materialized_ecoregions;
+	// Rust Ground always owns an area-local EcoMap and rotates that map with
+	// the other ground grids. Freeminer may attach the global geographic raster
+	// instead; materialize the current bbox into local coordinates first so the
+	// same inverse-rotation resampling applies to both host configurations.
+	if (original_ecoregions && !original_ecoregions->is_local() && ground.mg) {
+		const auto source_width =
+				static_cast<std::int64_t>(bbox.max_x()) - bbox.min_x() + 1;
+		const auto source_height =
+				static_cast<std::int64_t>(bbox.max_z()) - bbox.min_z() + 1;
+		if (source_width > 0 && source_height > 0 &&
+				source_width <= std::numeric_limits<std::int32_t>::max() &&
+				source_height <= std::numeric_limits<std::int32_t>::max()) {
+			const int source_min_x = bbox.min_x();
+			const int source_min_z = bbox.min_z();
+			if (auto local = ecoregion::EcoMap::build(
+						static_cast<std::size_t>(source_width),
+						static_cast<std::size_t>(source_height),
+						{source_min_x, source_min_z},
+						[&ground, source_min_x, source_min_z](double x, double z) {
+							const auto ll = ground.mg->pos_to_ll(
+									static_cast<pos_t>(source_min_x + std::floor(x)),
+									static_cast<pos_t>(source_min_z + std::floor(z)));
+							return std::pair{static_cast<double>(ll.lat),
+									static_cast<double>(ll.lon)};
+						})) {
+				materialized_ecoregions = std::move(*local);
+				original_ecoregions = &*materialized_ecoregions;
+			}
+		}
+	}
 	const double rad = -angle_degrees * M_PI / 180.0;
 	const double cx = (bbox.min_x() + bbox.max_x()) / 2.0;
 	const double cz = (bbox.min_z() + bbox.max_z()) / 2.0;

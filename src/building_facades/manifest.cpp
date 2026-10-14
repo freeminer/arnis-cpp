@@ -64,14 +64,12 @@ std::optional<buildings::BuildingCategory> category(const std::string &name)
 	return {};
 }
 } // namespace
-std::vector<std::size_t> FacadeSet::in_category(buildings::BuildingCategory wanted) const
+const std::vector<std::size_t> &FacadeSet::in_category(
+		buildings::BuildingCategory wanted) const
 {
-	std::vector<std::size_t> result;
-	for (std::size_t i = 0; i < entries_.size(); ++i)
-		if (std::find(entries_[i].categories.begin(), entries_[i].categories.end(),
-					wanted) != entries_[i].categories.end())
-			result.push_back(i);
-	return result;
+	static const std::vector<std::size_t> empty;
+	const auto it = by_category_.find(wanted);
+	return it == by_category_.end() ? empty : it->second;
 }
 std::optional<FacadeSet> FacadeSet::validate(std::vector<Entry> entries)
 {
@@ -88,6 +86,17 @@ std::optional<FacadeSet> FacadeSet::validate(std::vector<Entry> entries)
 		return {};
 	FacadeSet set;
 	set.entries_ = std::move(entries);
+	for (std::size_t i = 0; i < set.entries_.size(); ++i) {
+		auto &categories = set.entries_[i].categories;
+		std::vector<buildings::BuildingCategory> unique;
+		unique.reserve(categories.size());
+		for (const auto category : categories)
+			if (std::find(unique.begin(), unique.end(), category) == unique.end())
+				unique.push_back(category);
+		categories = std::move(unique);
+		for (const auto category : categories)
+			set.by_category_[category].push_back(i);
+	}
 	return set;
 }
 
@@ -138,8 +147,8 @@ std::optional<FacadeSet> FacadeSet::load_directory(const std::filesystem::path &
 			// The schema check above rejects malformed entries as a group. Keep
 			// this guard so rejection reporting remains robust if that check changes.
 		}
+		Entry entry;
 		try {
-			Entry entry;
 			entry.file = entry_file;
 			const std::filesystem::path file(entry.file);
 			if (!safe_name(entry.file) || file.is_absolute() || file.has_parent_path()) {

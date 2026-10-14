@@ -364,13 +364,13 @@ double glacier_depth(double d)
 {
 	return std::max(d, -.2);
 }
-void place_snow_layer(WorldEditor &e, int x, int y, int z, unsigned eighths)
+void place_snow_layer(WorldEditor &e, int x, int y, int z, std::optional<Block> top,
+		std::uint8_t eighths)
 {
-	const auto top = e.get_block_absolute(x, y, z);
 	if (!top)
 		return;
 	if (eighths != 0) {
-		const auto layer = snow_layer_with_depth(std::min(eighths, 7u));
+		const auto layer = snow_layer_with_depth(std::min(eighths, decltype(eighths)(7)));
 		// Match Rust's set_block_if_absent_absolute without discarding the layer
 		// depth state. AIR as the replacement whitelist also allows a generated
 		// empty cell, matching Rust's distinction between empty and occupied.

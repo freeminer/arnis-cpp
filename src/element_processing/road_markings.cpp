@@ -745,6 +745,30 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		for (const auto &arm : directions)
 			max_half = std::max(max_half, roads[arm.road].half_width);
 		const std::size_t near = sign_reach + 2 * static_cast<std::size_t>(max_half);
+		// Most shared nodes are residential junctions with neither lane paint nor
+		// controls. Rust avoids building full arm geometry for those nodes; keep
+		// the prescan bounded on dense OSM extracts while retaining the junction
+		// index built above for nearby signal/crossing decisions.
+		const auto has_control = [](const ProcessedNode *node) {
+			if (!node)
+				return false;
+			const auto highway = node->tags.get("highway");
+			return highway == "traffic_signals" || highway == "stop" ||
+				   highway == "give_way";
+		};
+		const bool anything_to_resolve = std::any_of(
+				directions.begin(), directions.end(), [&](const RoadArm &direction) {
+					const auto cells = arm_cells(roads, node_uses, direction.road,
+							direction.node, direction.dir, near + 1);
+					return std::any_of(
+							cells.begin(), cells.end(), [&](const ArmCell &cell) {
+								const auto &road = roads[cell.road];
+								return road.marked || road.ring ||
+									   has_control(node_at(roads, cell));
+							});
+				});
+		if (!anything_to_resolve)
+			continue;
 		const std::size_t cap = static_cast<std::size_t>(2 * (2 * max_half + 1) + 8);
 		const std::size_t reach =
 				std::max(cap + 3 * static_cast<std::size_t>(max_half) + 4,

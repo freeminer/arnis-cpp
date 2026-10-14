@@ -1,4 +1,5 @@
 #include "choose.h"
+#include "manifest.h"
 #include <algorithm>
 #include <cmath>
 namespace arnis::building_facades
@@ -88,14 +89,12 @@ double score(const Entry &e, double h)
 		   (e.has_ground_floor ? 0 : NO_GROUND);
 }
 std::pair<std::vector<std::size_t>, Fallback> candidates(
-		const std::vector<Entry> &entries, buildings::BuildingCategory category)
+		const FacadeSet &set, buildings::BuildingCategory category)
 {
 	std::vector<std::size_t> out;
 	const auto append = [&](buildings::BuildingCategory wanted) {
-		for (std::size_t i = 0; i < entries.size(); ++i)
-			if (std::find(entries[i].categories.begin(), entries[i].categories.end(),
-						wanted) != entries[i].categories.end() &&
-					std::find(out.begin(), out.end(), i) == out.end())
+		for (const auto i : set.in_category(wanted))
+			if (std::find(out.begin(), out.end(), i) == out.end())
 				out.push_back(i);
 	};
 	append(category);
@@ -108,14 +107,15 @@ std::pair<std::vector<std::size_t>, Fallback> candidates(
 	append(buildings::BuildingCategory::Default);
 	if (!out.empty())
 		return {std::move(out), Fallback::Default};
-	for (std::size_t i = 0; i < entries.size(); ++i)
+	for (std::size_t i = 0; i < set.entries().size(); ++i)
 		out.push_back(i);
 	return {std::move(out), Fallback::WholeSet};
 }
 std::vector<std::size_t> shortlist(
-		const std::vector<Entry> &entries, buildings::BuildingCategory category, double h)
+		const FacadeSet &set, buildings::BuildingCategory category, double h)
 {
-	auto [out, fallback] = candidates(entries, category);
+	const auto &entries = set.entries();
+	auto [out, fallback] = candidates(set, category);
 	(void)fallback;
 	std::sort(out.begin(), out.end(), [&](auto a, auto b) {
 		auto sa = score(entries[a], h), sb = score(entries[b], h);
@@ -140,13 +140,14 @@ std::size_t slot(int x, int z, std::size_t n)
 	auto v = (cx + 2 * cz + static_cast<long long>(rot)) % static_cast<long long>(n);
 	return std::size_t(v < 0 ? v + static_cast<long long>(n) : v);
 }
-std::optional<Choice> choose(const std::vector<Entry> &e, buildings::BuildingCategory c,
+std::optional<Choice> choose(const FacadeSet &set, buildings::BuildingCategory c,
 		double h, std::uint64_t id, int x, int z)
 {
-	auto list = shortlist(e, c, h);
+	const auto &entries = set.entries();
+	auto list = shortlist(set, c, h);
 	if (list.empty())
 		return {};
 	auto i = list[slot(x, z, list.size())];
-	return Choice{i, double(hash64(id) % 16) / 16 * e[i].metres_wide};
+	return Choice{i, double(hash64(id) % 16) / 16 * entries[i].metres_wide};
 }
 }

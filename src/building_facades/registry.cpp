@@ -313,7 +313,7 @@ building_facade::PointSet collect(world_editor::WorldEditor &editor,
 		anchor_x = std::min(anchor_x, node.x);
 		anchor_z = std::min(anchor_z, node.z);
 	}
-	const auto choice = choose(set->entries(), category,
+	const auto choice = choose(*set, category,
 			static_cast<double>(building_height) / std::max(0.001, scale), way_id,
 			anchor_x, anchor_z);
 	if (!choice)

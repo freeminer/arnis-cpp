@@ -1,5 +1,6 @@
 #include "biome.h"
 #include "celestial.h"
+#include "ground_decoration.h"
 #include "land_cover/land_cover.h"
 #include "../../arnis_adapter.h"
 #include <cmath>
@@ -71,7 +72,7 @@ std::optional<std::string> ecoregion_biome(
 }
 
 std::optional<std::string> mountain_biome(std::uint8_t lc, Climate climate,
-		std::uint8_t water_distance, double above_m, int slope, double alpine_band_metres)
+		std::uint8_t water_distance, double above_m, int slope)
 {
 	using namespace land_cover;
 	if (lc == LC_WATER)
@@ -85,8 +86,8 @@ std::optional<std::string> mountain_biome(std::uint8_t lc, Climate climate,
 			return "minecraft:snowy_slopes";
 		return "minecraft:jagged_peaks";
 	}
-	if (above_m < -alpine_band_metres || climate == Climate::HotDesert ||
-			climate == Climate::ColdDesert)
+	if (above_m < -ground_decoration::ALPINE_BAND_METRES ||
+			climate == Climate::HotDesert || climate == Climate::ColdDesert)
 		return std::nullopt;
 	switch (lc) {
 	case LC_GRASSLAND:

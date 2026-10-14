@@ -2126,14 +2126,22 @@ bool generate_world(WorldEditor &editor,
 	// Rust's ARNIS_NO_BAND override forces LPT ordering even when the memory
 	// estimate would otherwise select row-major bands for streaming.
 	const bool force_lpt_tile_order = std::getenv("ARNIS_NO_BAND") != nullptr;
-	const bool streaming_order =
-			java_format && !force_lpt_tile_order &&
-			should_stream_to_disk(element_tiles.size(), args.fillground);
+	bool streaming_order = false;
 	std::vector<std::vector<std::size_t>> element_assignments;
 	std::vector<std::pair<std::size_t, std::size_t>> element_tasks;
+	std::optional<TileFillReaders> tile_fill_reader_state;
+	FillExpirations expiring_fills;
 	if (tiled_element_dispatch) {
 		element_assignments =
 				assign_elements_to_tiles(render_elements, element_tiles, args.scale);
+		// Rust samples available memory after the expensive tile/fill precompute.
+		// Do the same here so streaming reflects the working set this pass has
+		// actually allocated, not the more optimistic pre-assignment snapshot.
+		tile_fill_reader_state =
+				compute_tile_fill_readers(element_assignments, render_elements,
+						building_part_groups, building_group_members, flood_fill_cache);
+		streaming_order = java_format && !force_lpt_tile_order &&
+						  should_stream_to_disk(element_tiles.size(), args.fillground);
 		// Rust schedules dense tiles first for LPT unless memory pressure enables
 		// streaming, where row-major region bands keep the eviction frontier
 		// monotonic. The C++ Freeminer backend still processes overlays serially,
@@ -2153,14 +2161,19 @@ bool generate_world(WorldEditor &editor,
 				});
 		std::vector<TileBounds> ordered_tiles;
 		std::vector<std::vector<std::size_t>> ordered_assignments;
+		std::vector<std::vector<std::uint64_t>> ordered_fill_ids;
 		ordered_tiles.reserve(element_tiles.size());
 		ordered_assignments.reserve(element_assignments.size());
+		ordered_fill_ids.reserve(tile_fill_reader_state->tile_ids.size());
 		for (const auto index : tile_order) {
 			ordered_tiles.push_back(std::move(element_tiles[index]));
 			ordered_assignments.push_back(std::move(element_assignments[index]));
+			ordered_fill_ids.push_back(
+					std::move(tile_fill_reader_state->tile_ids[index]));
 		}
 		element_tiles = std::move(ordered_tiles);
 		element_assignments = std::move(ordered_assignments);
+		tile_fill_reader_state->tile_ids = std::move(ordered_fill_ids);
 		std::size_t task_count = 0;
 		for (const auto &assigned : element_assignments)
 			task_count += assigned.size();
@@ -2176,18 +2189,7 @@ bool generate_world(WorldEditor &editor,
 			element_tasks.emplace_back(
 					element_index, std::numeric_limits<std::size_t>::max());
 	}
-	std::optional<TileFillReaders> tile_fill_reader_state;
-	FillExpirations expiring_fills;
-	if (tiled_element_dispatch) {
-		// Rust counts one reader per tile, including relation members and every
-		// building-part sibling that can be reached from that tile. Keep this
-		// accounting even while the Freeminer host executes tiles serially: it is
-		// the correct lifetime boundary for the bounded tile-worker path and frees
-		// a fill as soon as its last assigned tile has consumed it.
-		tile_fill_reader_state =
-				compute_tile_fill_readers(element_assignments, render_elements,
-						building_part_groups, building_group_members, flood_fill_cache);
-	} else {
+	if (!tiled_element_dispatch) {
 		auto last_fill_use = compute_last_fill_use(render_elements, element_tasks,
 				building_part_groups, building_group_members);
 		expiring_fills = fills_expiring_at(last_fill_use);
@@ -2624,20 +2626,25 @@ bool generate_world(WorldEditor &editor,
 				if (!workers[slot].valid())
 					throw std::runtime_error("missing Arnis tile worker result");
 				auto [tile_editor, tile_state] = workers[slot].get();
-				const auto next_tile = tile_index + worker_count;
-				if (next_tile < element_tiles.size())
-					launch_tile(slot, next_tile);
+				// A finished tile no longer needs its cached flood fills. Release
+				// readers before merging so out-of-order completed workers do not keep
+				// their inputs resident while waiting for deterministic merge order.
+				release_tile_fills_for(tile_index);
 				const auto &tile = element_tiles[tile_index];
 				if (!editor.merge_tile_worker(std::move(tile_editor), tile.min_x,
 							tile.min_z, tile.max_x - 1, tile.max_z - 1))
 					throw std::runtime_error("failed to merge Arnis tile worker");
 				collect_tile_dispatch_state(tile_state);
-				release_tile_fills_for(tile_index);
 				if (++deferred_tiles_in_batch >= tile_batch_size) {
 					deferred_tiles_in_batch = 0;
 					if (!editor.flush_deferred_tile_merges())
 						throw std::runtime_error("failed to merge tile overlay batch");
 				}
+				// Match Rust's sliding window: only free a worker slot after its
+				// result has crossed the ordered merge frontier.
+				const auto next_tile = tile_index + worker_count;
+				if (next_tile < element_tiles.size())
+					launch_tile(slot, next_tile);
 			}
 		} catch (const std::exception &error) {
 			editor.report_generation_error(error.what());

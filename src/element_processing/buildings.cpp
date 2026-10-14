@@ -2211,6 +2211,9 @@ int terrain_base_level(WorldEditor &editor, const ProcessedWay &element,
 	};
 	for (const auto &node : element.nodes)
 		include(node.x, node.z);
+	// Rust's calculate_start_y_offset_with_footprint includes the rasterized
+	// interior as well as the outline. A terrain peak inside an irregular
+	// building must raise its base too, otherwise the walls end up buried.
 	for (const auto &[x, z] : footprint)
 		include(x, z);
 	return highest.value_or(fallback);

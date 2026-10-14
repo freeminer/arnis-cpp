@@ -905,7 +905,8 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			std::string ignored_error;
 			return http_range(archive_url, archive_cache, off, len, &ignored_error);
 		};
-		auto archive = overture::pmtiles::open_archive(range);
+		auto archive = overture::pmtiles::open_archive(
+				range, {overture::pmtiles::TILE_TYPE_UNKNOWN});
 		if (!archive) {
 			if (error)
 				*error = "could not open tile archive " + file;

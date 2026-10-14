@@ -232,13 +232,11 @@ struct Args
 	bool terrain_enabled() const { return mode != GenerationMode::GeoOnly; }
 	bool skip_objects() const
 	{
-		return mode == GenerationMode::TerrainOnly || !is_earth(body) ||
-			   scale < OBJECT_SKIP_SCALE;
+		return mode == GenerationMode::TerrainOnly || scale < OBJECT_SKIP_SCALE;
 	}
 	bool skip_objects_due_to_scale() const
 	{
-		return mode != GenerationMode::TerrainOnly &&
-			   (!is_earth(body) || scale < OBJECT_SKIP_SCALE);
+		return mode != GenerationMode::TerrainOnly && scale < OBJECT_SKIP_SCALE;
 	}
 	void apply_body_defaults()
 	{

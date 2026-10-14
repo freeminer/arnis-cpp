@@ -16,6 +16,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <charconv>
 #include <chrono>
 #include <cctype>
 #include <curl/curl.h>
@@ -462,11 +463,32 @@ std::optional<double> attribute_number(
 	if (!attribute)
 		return {};
 	if (const auto value = std::get_if<double>(&*attribute))
-		return std::isfinite(*value) ? std::optional<double>(*value) : std::nullopt;
+		return *value;
 	if (const auto value = std::get_if<std::int64_t>(&*attribute))
 		return static_cast<double>(*value);
 	if (const auto value = std::get_if<std::uint64_t>(&*attribute))
 		return static_cast<double>(*value);
+	if (const auto value = std::get_if<std::string>(&*attribute)) {
+		constexpr std::string_view whitespace = " \t\n\r\f\v";
+		const auto first = value->find_first_not_of(whitespace);
+		if (first == std::string::npos)
+			return {};
+		const auto last = value->find_last_not_of(whitespace);
+		const char *begin = value->data() + first;
+		const char *end = value->data() + last + 1;
+		// Rust's Value::as_f64 parses trimmed numeric strings as well as numeric
+		// protobuf encodings. std::from_chars does not accept a leading '+', which
+		// Rust does, so skip that one character explicitly.
+		if (*begin == '+')
+			++begin;
+		if (begin == end)
+			return {};
+		double parsed = 0.0;
+		const auto result =
+				std::from_chars(begin, end, parsed, std::chars_format::general);
+		if (result.ec == std::errc{} && result.ptr == end)
+			return parsed;
+	}
 	return {};
 }
 

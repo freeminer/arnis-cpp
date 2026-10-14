@@ -538,10 +538,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		std::cout << "[6/7] Generating ground...\n";
 	const bool terrain_enabled = editor.ground ? editor.ground->elevation_enabled
 											   : generation_mode_terrain(args.mode);
-	// Rust's generator treats Ground as the authoritative source for the active
-	// celestial body. Args is only a fallback for host callers that do not
-	// attach a Ground instance.
-	const auto body = editor.ground ? editor.ground->celestial_body() : args.body;
+	// Keep the terrain palette decision on the same source as Rust's
+	// generate_ground_region: the configured generation body.
+	const auto body = args.body;
 	const int tree_spacing = std::max(1, editor.get_tree_slot_spacing());
 	const bool schematic_trees = editor.has_schematic_tree_pack();
 	const auto geographic_bounds = editor.geographic_bounds();
@@ -923,13 +922,12 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								!editor.check_for_block_type_absolute(
 										x, ground_y, z, WATER)) {
 							const auto surface_block =
-									editor.get_block_absolute(x, ground_y, z)
-											.value_or(AIR);
+									editor.get_block_absolute(x, ground_y, z);
 							if (!snow.is_none()) {
 								const bool natural_top =
 										natural_snow_surface == surface_block ||
-										surface_block == PACKED_ICE;
-								const unsigned eighths =
+										(surface_block && *surface_block == PACKED_ICE);
+								const auto eighths =
 										natural_top
 												? terrain_surface::snow_eighths(snow,
 														  terrain_enabled
@@ -940,7 +938,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 																  : std::nullopt)
 												: 1;
 								terrain_surface::place_snow_layer(
-										editor, x, ground_y, z, eighths);
+										editor, x, ground_y, z, surface_block, eighths);
 							}
 						}
 

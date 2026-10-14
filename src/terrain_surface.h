@@ -72,18 +72,19 @@ struct Snow
 };
 // Convert partial snow cover to its Java snow-layer depth (one through seven
 // eighths), following the terrain's unrounded height within the top block.
-inline unsigned snow_eighths(
+inline std::uint8_t snow_eighths(
 		Snow snow, const std::optional<double> &terrain_rise = std::nullopt)
 {
 	if (snow.kind == Snow::Kind::None)
 		return 0;
-	const unsigned smooth = terrain_rise && *terrain_rise >= 0.0 && *terrain_rise < 1.0
-									? static_cast<unsigned>(std::min(
-											  std::round(*terrain_rise * 8.0), 7.0))
-									: 0;
+	const auto smooth = static_cast<std::uint8_t>(
+			terrain_rise && *terrain_rise >= 0.0 && *terrain_rise < 1.0
+					? std::min(std::round(*terrain_rise * 8.0), 7.0)
+					: 0.0);
 	if (snow.kind == Snow::Kind::Block)
 		return smooth;
-	return std::clamp(smooth, 1u, std::max<unsigned>(snow.max_layers, 1u));
+	return std::clamp<std::uint8_t>(
+			smooth, 1, std::max<std::uint8_t>(snow.max_layers, 1));
 }
 struct SnowLine
 {
@@ -102,8 +103,8 @@ Snow snow_cover(double depth, double slope, const std::function<double()> &conve
 		double shade, int x, int z);
 double glacier_depth(double depth);
 inline const std::pair<Block, Block> GLACIER_ICE{PACKED_ICE, PACKED_ICE};
-void place_snow_layer(
-		::arnis::WorldEditor &editor, int x, int ground_y, int z, unsigned eighths = 1);
+void place_snow_layer(::arnis::WorldEditor &editor, int x, int ground_y, int z,
+		std::optional<Block> top, std::uint8_t eighths = 1);
 inline bool is_glacier_cover(uint8_t cover)
 {
 	return cover == land_cover::LC_SNOW_ICE;

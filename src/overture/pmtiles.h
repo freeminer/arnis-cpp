@@ -1,6 +1,7 @@
 #pragma once
 #include <cstdint>
 #include <functional>
+#include <initializer_list>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -9,6 +10,7 @@ namespace arnis::overture::pmtiles
 // PMTiles type 0 means the archive carries a private payload rather than MVT.
 // Arnis OSM archives use this for AOT1 tiles.
 inline constexpr std::uint8_t TILE_TYPE_UNKNOWN = 0;
+inline constexpr std::uint8_t TILE_TYPE_MVT = 1;
 struct Header
 {
 	std::uint64_t root_offset = 0, root_length = 0, leaf_offset = 0, tile_data_offset = 0;
@@ -51,8 +53,10 @@ struct Archive
 // safe for concurrent calls; tile bodies are fetched by a bounded worker set.
 using RangeReader = std::function<std::optional<std::vector<std::uint8_t>>(
 		std::uint64_t offset, std::uint64_t length)>;
-std::optional<Header> parse_header(const std::vector<std::uint8_t> &);
-std::optional<Archive> open_archive(const RangeReader &);
+std::optional<Header> parse_header(const std::vector<std::uint8_t> &,
+		std::initializer_list<std::uint8_t> allowed_tile_types = {TILE_TYPE_MVT});
+std::optional<Archive> open_archive(const RangeReader &,
+		std::initializer_list<std::uint8_t> allowed_tile_types = {TILE_TYPE_MVT});
 std::optional<std::uint64_t> zxy_to_tile_id(
 		std::uint8_t zoom, std::uint32_t x, std::uint32_t y);
 std::pair<std::uint32_t, std::uint32_t> lonlat_to_tile(

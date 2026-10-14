@@ -189,30 +189,30 @@ std::optional<Entry> entry_for(const std::vector<Entry> &entries, std::uint64_t 
 }
 namespace arnis::overture::pmtiles
 {
-std::optional<Header> parse_header(const std::vector<std::uint8_t> &b)
+std::optional<Header> parse_header(const std::vector<std::uint8_t> &b,
+		std::initializer_list<std::uint8_t> allowed_tile_types)
 {
 	if (b.size() < HEADER_LEN || !std::equal(b.begin(), b.begin() + 7, "PMTiles") ||
 			b[7] != 3)
 		return {};
 	Header h{le64(b, 8), le64(b, 16), le64(b, 40), le64(b, 56), b[97], b[98], b[100],
 			b[101]};
-	// Overture archives commonly leave tile type unspecified (0) because
-	// their payload is a private MVT-compatible stream. Rust accepts both the
-	// declared MVT type and PMTiles' "unknown" type.
 	if (!h.root_length || h.root_length > MAX_DIRECTORY_BYTES ||
-			(b[99] != 0 && b[99] != 1))
+			std::find(allowed_tile_types.begin(), allowed_tile_types.end(), b[99]) ==
+					allowed_tile_types.end())
 		return {};
 	return h;
 }
 
-std::optional<Archive> open_archive(const RangeReader &read_range)
+std::optional<Archive> open_archive(const RangeReader &read_range,
+		std::initializer_list<std::uint8_t> allowed_tile_types)
 {
 	if (!read_range)
 		return {};
 	const auto bytes = read_range(0, HEADER_LEN);
 	if (!bytes || bytes->size() != HEADER_LEN)
 		return {};
-	const auto header = parse_header(*bytes);
+	const auto header = parse_header(*bytes, allowed_tile_types);
 	if (!header)
 		return {};
 	const auto root = read_range(header->root_offset, header->root_length);
@@ -337,13 +337,18 @@ TileLocateResult locate_id_checked(const Header &header,
 		if (!entry)
 			return {TileReadStatus::Missing, {}};
 		if (entry->run != 0) {
-			if (!entry->length || entry->length > MAX_TILE_BYTES ||
+			if (entry->length > MAX_TILE_BYTES ||
 					UINT64_MAX - header.tile_data_offset < entry->offset)
 				return {TileReadStatus::Error, {}};
 			return {TileReadStatus::Found,
 					TileLocation{header.tile_data_offset + entry->offset, entry->length}};
 		}
-		if (!entry->length || entry->length > MAX_DIRECTORY_BYTES ||
+		// Rust treats a zero-length leaf pointer as a missing tile rather than
+		// an invalid archive; following it would otherwise repeatedly read the
+		// same empty range.
+		if (!entry->length)
+			return {TileReadStatus::Missing, {}};
+		if (entry->length > MAX_DIRECTORY_BYTES ||
 				UINT64_MAX - header.leaf_offset < entry->offset ||
 				UINT64_MAX - header.leaf_offset - entry->offset < entry->length)
 			return {TileReadStatus::Error, {}};
@@ -370,7 +375,9 @@ TileLocateResult locate_id_checked(const Header &header,
 TileReadResult read_tile_payload_checked(
 		const Header &header, const TileLocation &location, const RangeReader &read_range)
 {
-	if (!read_range || !location.length || location.length > MAX_TILE_BYTES ||
+	if (!location.length)
+		return {TileReadStatus::Found, {}};
+	if (!read_range || location.length > MAX_TILE_BYTES ||
 			UINT64_MAX - location.offset < location.length)
 		return {TileReadStatus::Error, {}};
 	const auto raw = read_range(location.offset, location.length);
