@@ -7,6 +7,7 @@
 #include <cmath>
 #include <cstdint>
 #include <exception>
+#include <limits>
 #include <numbers>
 #include <vector>
 
@@ -167,14 +168,40 @@ std::optional<RgbImage> gather_region(const Fit &fit, const RgbImage &source, do
 	if (!ow || !oh)
 		return std::nullopt;
 	RgbImage out{ow, oh, std::vector<std::uint8_t>(std::size_t(ow) * oh * 3)};
+	const std::size_t stride = std::size_t(ow) * 3;
+	const std::size_t source_stride = std::size_t(source.width) * 3;
+	// Rust's fitter builds these separable lookup tables once per panel. Repeated
+	// storeys often address the same source row, so copy that completed row
+	// rather than repeating a per-pixel gather.
+	std::vector<std::size_t> columns;
+	columns.reserve(ow);
+	for (std::uint32_t x = 0; x < ow; ++x) {
+		const auto sx =
+				fit.source_x(x0_m + (static_cast<double>(x) + .5) / ppm, source.width);
+		columns.push_back(std::size_t(sx) * 3);
+	}
+	std::vector<std::uint32_t> rows;
+	rows.reserve(oh);
+	for (std::uint32_t y = 0; y < oh; ++y)
+		rows.push_back(
+				fit.source_y(y1_m - (static_cast<double>(y) + .5) / ppm, source.height));
+	std::vector<std::size_t> built(
+			source.height, std::numeric_limits<std::size_t>::max());
 	for (std::uint32_t y = 0; y < oh; ++y) {
-		const auto sy = fit.source_y(y1_m - (y + .5) / ppm, source.height);
-		for (std::uint32_t x = 0; x < ow; ++x) {
-			const auto sx = fit.source_x(x0_m + (x + .5) / ppm, source.width);
-			const auto *p = source.pixel(sx, sy);
-			if (p)
-				std::copy_n(p, 3, out.pixels.data() + (std::size_t(y) * ow + x) * 3);
+		const std::size_t destination = std::size_t(y) * stride;
+		const auto sy = rows[y];
+		if (built[sy] != std::numeric_limits<std::size_t>::max()) {
+			std::copy_n(out.pixels.data() + built[sy], stride,
+					out.pixels.data() + destination);
+			continue;
 		}
+		const auto source_row = std::size_t(sy) * source_stride;
+		for (std::size_t x = 0; x < columns.size(); ++x) {
+			const auto from = source_row + columns[x];
+			std::copy_n(source.pixels.data() + from, 3,
+					out.pixels.data() + destination + x * 3);
+		}
+		built[sy] = destination;
 	}
 	return out;
 }

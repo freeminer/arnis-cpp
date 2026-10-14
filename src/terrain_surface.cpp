@@ -88,7 +88,14 @@ Block bed_kind(int x, int z, int layer)
 	if (h < 70)
 		return STONE;
 	const Block kind = h < 90 ? ANDESITE : TUFF;
-	return noise(x + layer * 97, z - layer * 61, 24, BED_LENS) < .7 ? kind : STONE;
+	// Rust computes these layer offsets with wrapping_mul. Do the arithmetic in
+	// unsigned space before bit-casting back so extreme projected coordinates do
+	// not rely on signed-overflow behavior in C++.
+	const auto x_offset = std::bit_cast<std::int32_t>(
+			static_cast<std::uint32_t>(x) + static_cast<std::uint32_t>(layer) * 97u);
+	const auto z_offset = std::bit_cast<std::int32_t>(
+			static_cast<std::uint32_t>(z) - static_cast<std::uint32_t>(layer) * 61u);
+	return noise(x_offset, z_offset, 24, BED_LENS) < .7 ? kind : STONE;
 }
 
 int ramp_step(Block kind, double tone, int depth)
@@ -363,11 +370,13 @@ void place_snow_layer(WorldEditor &e, int x, int y, int z, unsigned eighths)
 	if (!top)
 		return;
 	if (eighths != 0) {
-		if (e.block_exists_absolute(x, y + 1, z))
-			return;
 		const auto layer = snow_layer_with_depth(std::min(eighths, 7u));
+		// Match Rust's set_block_if_absent_absolute without discarding the layer
+		// depth state. AIR as the replacement whitelist also allows a generated
+		// empty cell, matching Rust's distinction between empty and occupied.
+		const std::optional<std::vector<Block>> air_only{{AIR}};
 		if (!e.try_set_block_with_properties_absolute(
-					layer, x, y + 1, z, std::nullopt, std::nullopt))
+					layer, x, y + 1, z, air_only, std::nullopt))
 			return;
 	} else if (!is_ice(*top) || e.block_exists_absolute(x, y + 1, z)) {
 		return;

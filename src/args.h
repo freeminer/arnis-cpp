@@ -344,6 +344,10 @@ struct Args
 	bool caves{false};
 	std::optional<std::string> cave_biomes{std::nullopt};
 	std::optional<std::string> cave_asset_pack{std::nullopt};
+	// Rust's diagnostic cave-zone preview controls. The renderer itself is
+	// exposed as a library API; callers provide the already-projected block bbox.
+	std::optional<std::filesystem::path> cave_zone_map{std::nullopt};
+	std::optional<std::uint32_t> cave_zone_map_step{std::nullopt};
 
 	// Enable city boundary ground generation (optional)
 	// When enabled, detects building clusters and places stone ground in urban areas.
@@ -418,8 +422,9 @@ struct Args
 		if (building_facades_dir && std::filesystem::exists(*building_facades_dir) &&
 				!std::filesystem::is_directory(*building_facades_dir))
 			return "building facade path exists but is not a directory";
-		if (cave_biomes && !caves)
-			return "cave biome weights require cave generation";
+		const bool cave_preview = cave_zone_map.has_value();
+		if (cave_biomes && !caves && !cave_preview)
+			return "cave biome weights require cave generation or a cave-zone preview";
 		if (cave_biomes) {
 			std::string error;
 			if (caves::BiomeAmounts::parse(*cave_biomes, &error), !error.empty())
@@ -431,6 +436,10 @@ struct Args
 				!std::filesystem::is_regular_file(
 						std::filesystem::path(*cave_asset_pack) / "cave_pack.json"))
 			return "cave asset pack is missing cave_pack.json";
+		if (cave_zone_map_step && !cave_preview)
+			return "cave-zone-map step requires a cave-zone preview";
+		if (cave_preview && rotation != 0.0)
+			return "cave-zone preview does not support rotation";
 		if (!mapillary_facade_debug_walls.empty() && !mapillary_facade_debug_dir)
 			return "Mapillary facade debug walls require a debug output directory";
 		if (mapillary_facade_debug_dir && !mapillary_pipeline_on())

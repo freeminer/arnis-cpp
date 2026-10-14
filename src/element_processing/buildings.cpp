@@ -2205,15 +2205,12 @@ int terrain_base_level(WorldEditor &editor, const ProcessedWay &element,
 		const std::vector<std::pair<int, int>> &footprint, int fallback)
 {
 	std::optional<int> highest;
-	auto include = [&](int x, int z) {
+	const auto include = [&](int x, int z) {
 		if (const auto level = editor.terrain_level(x, z))
 			highest = highest ? std::max(*highest, *level) : *level;
 	};
 	for (const auto &node : element.nodes)
 		include(node.x, node.z);
-	// Outline samples alone can miss a local high point enclosed by the way.
-	// Anchor the shell to the highest terrain it actually covers so its lower
-	// storeys are not buried by the later ground pass.
 	for (const auto &[x, z] : footprint)
 		include(x, z);
 	return highest.value_or(fallback);

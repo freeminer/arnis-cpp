@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <limits>
 #include <optional>
 
 namespace arnis::structures::plane
@@ -40,6 +41,13 @@ std::vector<std::shared_ptr<const SchemDocument>> available_plane_assets(
 		if (auto asset = plane_asset(editor, gear_down, i))
 			assets.push_back(std::move(asset));
 	return assets;
+}
+
+double yaw_for_direction(double direction_x, double direction_z)
+{
+	// Schematic model nose points along local -Z. This is the inverse yaw
+	// convention used by place_schem_document_yaw and Rust's yaw_for_dir.
+	return std::atan2(direction_x, -direction_z) * 180.0 / M_PI;
 }
 } // namespace
 
@@ -94,7 +102,7 @@ bool extract_parking_stand(const ProcessedElement &element, Stand &out)
 		return false;
 	const double dx = double(b.x - a.x), dz = double(b.z - a.z);
 	const double length = std::hypot(dx, dz);
-	if (length <= 0.0)
+	if (length < 1.0)
 		return false;
 	out = {way.id, b.x, b.z, dx / length, dz / length};
 	return true;
@@ -116,11 +124,15 @@ bool make_stand_placement(const Stand &stand, Placement &out)
 	auto rng = element_rng(stand.way_id);
 	if (!rng.random_bool(STAND_OCCUPANCY_PROBABILITY))
 		return false;
-	const double yaw = std::atan2(stand.direction_z, stand.direction_x) * 180.0 / M_PI;
-	const int anchor_x = static_cast<int>(
-			std::lround(stand.x - stand.direction_x * NOSE_GEAR_OFFSET_BLOCKS));
-	const int anchor_z = static_cast<int>(
-			std::lround(stand.z - stand.direction_z * NOSE_GEAR_OFFSET_BLOCKS));
+	const double yaw = yaw_for_direction(stand.direction_x, stand.direction_z);
+	// The mapped point is the nose-wheel position. The bundled plane's nose wheel
+	// sits 6 blocks behind the nose tip, so its model centre is 14 blocks behind
+	// the mapped point (half the 40-block hull minus that offset).
+	const double back = PLANE_LENGTH_BLOCKS * 0.5 - NOSE_GEAR_OFFSET_BLOCKS;
+	const int anchor_x =
+			static_cast<int>(std::lround(stand.x - stand.direction_x * back));
+	const int anchor_z =
+			static_cast<int>(std::lround(stand.z - stand.direction_z * back));
 	out = make_placement(
 			stand.way_id, PlaneKind::Parked, anchor_x, anchor_z, yaw, 0.0, 0);
 	return true;
@@ -170,7 +182,9 @@ bool principal_geometry(const std::vector<std::pair<double, double>> &points,
 	};
 	auto along = extent(c, s), across = extent(-s, c);
 	if (across.second - across.first > along.second - along.first) {
-		std::swap(s, c);
+		const double previous_s = s;
+		s = c;
+		c = -previous_s;
 		along = extent(c, s);
 		across = extent(-s, c);
 	}
@@ -186,24 +200,18 @@ bool eligible_strip(const AerowayStrip &strip, double scale)
 	if (scale <= 0.0)
 		return false;
 	const double length_m = strip.length_blocks / scale;
-	const double width_m = strip.perpendicular_blocks / scale;
-	if (width_m < 10.0 || width_m > 400.0 || length_m > 8000.0)
+	if (length_m > 8000.0)
 		return false;
 	if (strip.kind == AerowayKind::Runway)
-		return strip.perpendicular_blocks / std::max(1.0, strip.length_blocks) <= 0.5;
-	return strip.perpendicular_blocks / std::max(1.0, strip.length_blocks) <= 0.12;
+		return strip.perpendicular_blocks / strip.length_blocks <= 0.5;
+	return strip.perpendicular_blocks / strip.length_blocks <= 0.12;
 }
 
 Footprint plane_footprint(int anchor_x, int anchor_z, double yaw_degrees)
 {
-	const double yaw = yaw_degrees * M_PI / 180.0;
-	const double s = std::sin(yaw), c = std::cos(yaw);
-	const double hx = PLANE_WINGSPAN_BLOCKS * 0.5;
-	const double hz = PLANE_LENGTH_BLOCKS * 0.5;
-	const int reach_x = static_cast<int>(std::ceil(std::abs(c) * hx + std::abs(s) * hz));
-	const int reach_z = static_cast<int>(std::ceil(std::abs(s) * hx + std::abs(c) * hz));
-	return {anchor_x - reach_x, anchor_z - reach_z, anchor_x + reach_x,
-			anchor_z + reach_z};
+	(void)yaw_degrees;
+	return {anchor_x - PLANE_REACH_BLOCKS, anchor_z - PLANE_REACH_BLOCKS,
+			anchor_x + PLANE_REACH_BLOCKS, anchor_z + PLANE_REACH_BLOCKS};
 }
 
 Placement make_placement(std::uint64_t representative_id, PlaneKind kind, int anchor_x,
@@ -273,9 +281,14 @@ void thin_by_spacing(std::vector<Placement> &placements)
 	std::vector<Placement> kept;
 	kept.reserve(placements.size());
 	auto floor_div = [cell](int value) {
-		return value >= 0 ? value / cell : -(((-value) + cell - 1) / cell);
+		const int quotient = value / cell;
+		return value % cell < 0 ? quotient - 1 : quotient;
 	};
 	for (const auto &candidate : placements) {
+		if (candidate.kind == PlaneKind::Ascending) {
+			kept.push_back(candidate);
+			continue;
+		}
 		{
 			const int cx = floor_div(candidate.anchor_x),
 					  cz = floor_div(candidate.anchor_z);
@@ -306,7 +319,6 @@ void thin_by_spacing(std::vector<Placement> &placements)
 
 void finalize_placements(std::vector<Placement> &placements)
 {
-	sort_placements(placements);
 	thin_by_spacing(placements);
 	cap_placements(placements);
 }
@@ -318,10 +330,6 @@ void filter_and_finalize_strips(std::vector<AerowayStrip> &strips, double scale)
 							 return !eligible_strip(strip, scale);
 						 }),
 			strips.end());
-	std::stable_sort(strips.begin(), strips.end(),
-			[](const AerowayStrip &a, const AerowayStrip &b) {
-				return a.rep_id < b.rep_id;
-			});
 }
 
 bool make_centerline_placement(const AerowayStrip &strip, double scale, Placement &out)
@@ -331,7 +339,7 @@ bool make_centerline_placement(const AerowayStrip &strip, double scale, Placemen
 		return false;
 	const int x = static_cast<int>(std::lround(strip.centroid_x));
 	const int z = static_cast<int>(std::lround(strip.centroid_z));
-	const double yaw = std::atan2(strip.direction_z, strip.direction_x) * 180.0 / M_PI;
+	const double yaw = yaw_for_direction(strip.direction_x, strip.direction_z);
 	out = make_placement(strip.rep_id, PlaneKind::Parked, x, z, yaw, 0.0, 0);
 	return true;
 }
@@ -341,33 +349,54 @@ bool make_ascending_placement(const AerowayStrip &strip, double scale, Placement
 	if (strip.kind != AerowayKind::Runway || !eligible_strip(strip, scale) ||
 			strip.length_blocks / scale < ASCENDING_MIN_LENGTH_M)
 		return false;
-	const double x = strip.centroid_x + strip.direction_x * strip.length_blocks * 0.5;
-	const double z = strip.centroid_z + strip.direction_z * strip.length_blocks * 0.5;
-	const double yaw = std::atan2(strip.direction_z, strip.direction_x) * 180.0 / M_PI;
+	const double x = strip.centroid_x + strip.direction_x * strip.max_along;
+	const double z = strip.centroid_z + strip.direction_z * strip.max_along;
+	const double yaw = yaw_for_direction(strip.direction_x, strip.direction_z);
 	out = make_placement(strip.rep_id, PlaneKind::Ascending,
 			static_cast<int>(std::lround(x)), static_cast<int>(std::lround(z)), yaw,
 			ASCENDING_PITCH_DEG,
-			static_cast<int>(std::lround(PLANE_LENGTH_BLOCKS * 0.45 + 20.0 / scale)));
+			static_cast<int>(std::lround(PLANE_LENGTH_BLOCKS * 0.45 + 20.0 * scale)));
 	return true;
 }
 
-std::vector<Placement> build_strip_placements(
-		const std::vector<AerowayStrip> &strips, double scale)
+std::vector<Placement> build_placements(const std::vector<AerowayStrip> &strips,
+		const std::vector<Stand> &stands, double scale)
 {
 	std::vector<Placement> placements;
 	for (const auto &strip : strips) {
-		Placement candidate;
-		if (make_ascending_placement(strip, scale, candidate)) {
-			placements.push_back(candidate);
+		if (!eligible_strip(strip, scale))
 			continue;
+		const double length_m = strip.length_blocks / scale;
+		const double yaw = yaw_for_direction(strip.direction_x, strip.direction_z);
+		if (strip.kind == AerowayKind::Runway && length_m >= ASCENDING_MIN_LENGTH_M) {
+			Placement ascending;
+			if (make_ascending_placement(strip, scale, ascending))
+				placements.push_back(std::move(ascending));
 		}
+		if (length_m < PARKED_MIN_LENGTH_M)
+			continue;
 		const double probability = strip.kind == AerowayKind::Runway
 										   ? RUNWAY_PARK_PROBABILITY
 										   : TAXIWAY_PARK_PROBABILITY;
 		auto rng = element_rng(strip.rep_id);
-		if (rng.random_bool(probability) &&
-				make_centerline_placement(strip, scale, candidate))
-			placements.push_back(candidate);
+		if (!rng.random_bool(probability))
+			continue;
+		const double lo = strip.min_along + PLANE_LENGTH_BLOCKS * 0.5;
+		const double hi = strip.max_along - PLANE_LENGTH_BLOCKS * 0.5;
+		if (hi <= lo)
+			continue;
+		const double along = rng.uniform_real(lo, hi);
+		const int x = static_cast<int>(
+				std::lround(strip.centroid_x + along * strip.direction_x));
+		const int z = static_cast<int>(
+				std::lround(strip.centroid_z + along * strip.direction_z));
+		placements.push_back(
+				make_placement(strip.rep_id, PlaneKind::Parked, x, z, yaw, 0.0, 0));
+	}
+	for (const auto &stand : stands) {
+		Placement candidate;
+		if (make_stand_placement(stand, candidate))
+			placements.push_back(std::move(candidate));
 	}
 	finalize_placements(placements);
 	return placements;
@@ -378,15 +407,7 @@ std::vector<Placement> prescan_placements(
 {
 	auto strips = collect_aeroway_strips(elements);
 	filter_and_finalize_strips(strips, scale);
-	auto placements = build_strip_placements(strips, scale);
-	for (const auto &stand : collect_parking_stands(elements)) {
-		Placement candidate;
-		if (make_stand_placement(stand, candidate) &&
-				placement_separated(candidate, placements))
-			placements.push_back(candidate);
-	}
-	finalize_placements(placements);
-	return placements;
+	return build_placements(strips, collect_parking_stands(elements), scale);
 }
 
 bool place_plane_placement(WorldEditor &editor, const Placement &placement)
@@ -420,40 +441,57 @@ std::size_t place_plane_placements(
 
 std::vector<AerowayStrip> merge_aeroways(const std::vector<Segment> &segments)
 {
-	std::vector<AerowayStrip> result;
-	std::vector<bool> used(segments.size());
+	std::vector<std::size_t> parent(segments.size());
+	for (std::size_t i = 0; i < parent.size(); ++i)
+		parent[i] = i;
+	auto find_root = [&](std::size_t value) {
+		std::size_t root = value;
+		while (parent[root] != root)
+			root = parent[root];
+		while (parent[value] != value) {
+			const auto next = parent[value];
+			parent[value] = root;
+			value = next;
+		}
+		return root;
+	};
+	auto unite = [&](std::size_t a, std::size_t b) {
+		const auto ra = find_root(a), rb = find_root(b);
+		if (ra != rb)
+			parent[ra] = rb;
+	};
+	std::unordered_map<std::uint64_t, std::vector<std::size_t>> endpoint_map;
 	for (std::size_t i = 0; i < segments.size(); ++i) {
-		if (used[i])
-			continue;
-		used[i] = true;
-		std::vector<std::pair<double, double>> points = segments[i].points;
-		std::vector<std::uint64_t> endpoints{
-				segments[i].first_node, segments[i].last_node};
-		std::uint64_t rep = segments[i].way_id;
-		bool changed = true;
-		while (changed) {
-			changed = false;
-			for (std::size_t j = i + 1; j < segments.size(); ++j) {
-				if (used[j] || segments[j].kind != segments[i].kind ||
-						!collinear(segments[i].angle, segments[j].angle))
-					continue;
-				const bool joined = std::find(endpoints.begin(), endpoints.end(),
-											segments[j].first_node) != endpoints.end() ||
-									std::find(endpoints.begin(), endpoints.end(),
-											segments[j].last_node) != endpoints.end();
-				if (!joined)
-					continue;
-				used[j] = true;
-				points.insert(points.end(), segments[j].points.begin(),
-						segments[j].points.end());
-				endpoints.push_back(segments[j].first_node);
-				endpoints.push_back(segments[j].last_node);
-				rep = std::min(rep, segments[j].way_id);
-				changed = true;
+		endpoint_map[segments[i].first_node].push_back(i);
+		endpoint_map[segments[i].last_node].push_back(i);
+	}
+	for (const auto &[node, indices] : endpoint_map) {
+		(void)node;
+		for (std::size_t a = 0; a < indices.size(); ++a)
+			for (std::size_t b = a + 1; b < indices.size(); ++b) {
+				const auto ia = indices[a], ib = indices[b];
+				if (segments[ia].kind == segments[ib].kind &&
+						collinear(segments[ia].angle, segments[ib].angle))
+					unite(ia, ib);
 			}
+	}
+	std::vector<std::vector<std::size_t>> groups(segments.size());
+	for (std::size_t i = 0; i < segments.size(); ++i)
+		groups[find_root(i)].push_back(i);
+	std::vector<AerowayStrip> result;
+	for (const auto &group : groups) {
+		if (group.empty())
+			continue;
+		std::vector<std::pair<double, double>> points;
+		std::uint64_t representative = std::numeric_limits<std::uint64_t>::max();
+		for (const auto i : group) {
+			representative = std::min(representative, segments[i].way_id);
+			points.insert(
+					points.end(), segments[i].points.begin(), segments[i].points.end());
 		}
 		AerowayStrip strip;
-		if (principal_geometry(points, rep, segments[i].kind, strip))
+		if (principal_geometry(
+					points, representative, segments[group.front()].kind, strip))
 			result.push_back(strip);
 	}
 	return result;

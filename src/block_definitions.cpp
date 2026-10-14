@@ -417,13 +417,51 @@ Block get_stair_block_for_material(const Block &material) {
 }
 */
 
-static const std::array<Block *, 10> WINDOW_VARIATIONS = {&GLASS,
+static const std::array<Block, 11> WINDOW_VARIATIONS = {GLASS, GRAY_STAINED_GLASS,
+		LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, BROWN_STAINED_GLASS,
+		WHITE_STAINED_GLASS, TINTED_GLASS, LIGHT_BLUE_STAINED_GLASS, CYAN_STAINED_GLASS,
+		BLACK_STAINED_GLASS, BROWN_STAINED_GLASS};
 
-		&GRAY_STAINED_GLASS, &LIGHT_GRAY_STAINED_GLASS, &GRAY_STAINED_GLASS,
-		&BROWN_STAINED_GLASS, &WHITE_STAINED_GLASS, &TINTED_GLASS,
-		&LIGHT_BLUE_STAINED_GLASS, &CYAN_STAINED_GLASS, &BLUE_STAINED_GLASS
-
-};
+namespace
+{
+const std::vector<Block> &window_options_for_building_type(const std::string &type)
+{
+	static const std::vector<Block> residential{GLASS, WHITE_STAINED_GLASS,
+			LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS, TINTED_GLASS,
+			LIGHT_BLUE_STAINED_GLASS};
+	static const std::vector<Block> institutional{GLASS, WHITE_STAINED_GLASS,
+			LIGHT_GRAY_STAINED_GLASS, LIGHT_BLUE_STAINED_GLASS};
+	static const std::vector<Block> hospitality{GLASS, WHITE_STAINED_GLASS,
+			GRAY_STAINED_GLASS, LIGHT_BLUE_STAINED_GLASS, BROWN_STAINED_GLASS};
+	static const std::vector<Block> industrial{
+			GLASS, GRAY_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS};
+	static const std::vector<Block> religious{BLUE_STAINED_GLASS, CYAN_STAINED_GLASS,
+			LIGHT_BLUE_STAINED_GLASS, BROWN_STAINED_GLASS, WHITE_STAINED_GLASS};
+	static const std::vector<Block> farm{
+			GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS};
+	static const std::vector<Block> historic{
+			GLASS, LIGHT_GRAY_STAINED_GLASS, WHITE_STAINED_GLASS};
+	static const std::vector<Block> variations(
+			WINDOW_VARIATIONS.begin(), WINDOW_VARIATIONS.end());
+	if (type == "residential" || type == "house" || type == "apartment")
+		return residential;
+	if (type == "hospital" || type == "school" || type == "university" ||
+			type == "office" || type == "commercial")
+		return institutional;
+	if (type == "hotel" || type == "restaurant")
+		return hospitality;
+	if (type == "industrial" || type == "warehouse")
+		return industrial;
+	if (type == "religious" || type == "church" || type == "chapel" || type == "mosque" ||
+			type == "temple")
+		return religious;
+	if (type == "farm")
+		return farm;
+	if (type == "historic" || type == "heritage")
+		return historic;
+	return variations;
+}
+} // namespace
 
 static const std::vector<std::pair<RGB, std::vector<Block *>>> DEFINED_COLORS = {
 		{{233, 107, 57}, {&BRICK, &NETHER_BRICK}},
@@ -488,61 +526,16 @@ inline Block random_choice_from_array(const std::vector<Block>::const_iterator b
 Block get_window_block_for_building_type(const std::string &building_type)
 {
 	std::mt19937 &rng = global_rng();
-	if (building_type == "residential" || building_type == "house" ||
-			building_type == "apartment") {
-		const std::vector<Block> residential_windows = {GLASS, WHITE_STAINED_GLASS,
-				LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS};
-		std::uniform_int_distribution<std::size_t> dist(
-				0, residential_windows.size() - 1);
-		return residential_windows[dist(rng)];
-	}
-	if (building_type == "hospital" || building_type == "school" ||
-			building_type == "university") {
-		const std::vector<Block> institutional_windows = {
-				GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS};
-		std::uniform_int_distribution<std::size_t> dist(
-				0, institutional_windows.size() - 1);
-		return institutional_windows[dist(rng)];
-	}
-	if (building_type == "hotel" || building_type == "restaurant") {
-		const std::vector<Block> hospitality_windows = {GLASS, WHITE_STAINED_GLASS};
-		std::uniform_int_distribution<std::size_t> dist(
-				0, hospitality_windows.size() - 1);
-		return hospitality_windows[dist(rng)];
-	}
-	if (building_type == "industrial" || building_type == "warehouse") {
-		const std::vector<Block> industrial_windows = {
-				GLASS, GRAY_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS};
-		std::uniform_int_distribution<std::size_t> dist(0, industrial_windows.size() - 1);
-		return industrial_windows[dist(rng)];
-	}
-	{
-		std::uniform_int_distribution<std::size_t> dist(0, WINDOW_VARIATIONS.size() - 1);
-		return *WINDOW_VARIATIONS[dist(rng)];
-	}
+	const auto &options = window_options_for_building_type(building_type);
+	std::uniform_int_distribution<std::size_t> dist(0, options.size() - 1);
+	return options[dist(rng)];
 }
 
 Block get_window_block_for_building_type(
 		const std::string &building_type, ChaCha8Rng &rng)
 {
-	const auto choose = [&rng](const auto &options) -> Block {
-		return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
-	};
-	if (building_type == "residential" || building_type == "house" ||
-			building_type == "apartment")
-		return choose(std::vector<Block>{GLASS, WHITE_STAINED_GLASS,
-				LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS});
-	if (building_type == "hospital" || building_type == "school" ||
-			building_type == "university")
-		return choose(
-				std::vector<Block>{GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS});
-	if (building_type == "hotel" || building_type == "restaurant")
-		return choose(std::vector<Block>{GLASS, WHITE_STAINED_GLASS});
-	if (building_type == "industrial" || building_type == "warehouse")
-		return choose(std::vector<Block>{GLASS, GRAY_STAINED_GLASS,
-				LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS});
-	return *WINDOW_VARIATIONS[rng.uniform(
-			static_cast<std::uint32_t>(WINDOW_VARIATIONS.size()))];
+	const auto &options = window_options_for_building_type(building_type);
+	return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
 }
 
 Block get_random_floor_block()

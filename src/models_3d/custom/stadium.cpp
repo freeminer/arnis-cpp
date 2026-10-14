@@ -229,9 +229,13 @@ std::vector<std::pair<int, int>> deferred_regions(
 	std::vector<std::pair<int, int>> o;
 	for (auto &a : p) {
 		int d = std::ceil(.5 * std::hypot(a.long_m, a.short_m) * scale);
-		for (int z = region_floor(a.anchor_z - d); z <= region_floor(a.anchor_z + d); ++z)
-			for (int x = region_floor(a.anchor_x - d); x <= region_floor(a.anchor_x + d);
-					++x)
+		// Match Rust's models_3d::region_keys_around: include a full region
+		// safety ring around the model's half-diagonal, not just regions whose
+		// nominal bounds intersect the rotated footprint.
+		for (int z = region_floor(a.anchor_z - d) - 1;
+				z <= region_floor(a.anchor_z + d) + 1; ++z)
+			for (int x = region_floor(a.anchor_x - d) - 1;
+					x <= region_floor(a.anchor_x + d) + 1; ++x)
 				o.push_back({x, z});
 	}
 	std::sort(o.begin(), o.end());

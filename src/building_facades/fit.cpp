@@ -66,7 +66,8 @@ std::uint64_t Fit::region_key_at(
 			std::clamp(std::llround((y1_m - y0_m) * ppm), 0LL, 1LL << 15));
 	if (!out_width || !out_height)
 		return 0;
-	std::uint64_t key = 1469598103934665603ULL;
+	// fnv::FnvHasher's FNV-1a offset basis, matching Rust's default hasher.
+	std::uint64_t key = 14695981039346656037ULL;
 	const auto add = [&](std::uint64_t value, unsigned bytes) {
 		for (unsigned i = 0; i != bytes; ++i) {
 			key ^= static_cast<std::uint8_t>(value);
@@ -80,7 +81,8 @@ std::uint64_t Fit::region_key_at(
 	add(out_height, sizeof(std::size_t));
 	for (std::uint32_t i = 0; i < out_width; ++i)
 		add(static_cast<std::uint64_t>(at.source_x(
-					x0_m + (static_cast<double>(i) + .5) / ppm, source_width)),
+					x0_m + (static_cast<double>(i) + .5) / ppm, source_width)) *
+						3,
 				8);
 	for (std::uint32_t j = 0; j < out_height; ++j)
 		add(at.source_y(y1_m - (static_cast<double>(j) + .5) / ppm, source_height), 4);
@@ -91,10 +93,13 @@ std::uint32_t Fit::source_x(double metres, std::uint32_t source_width) const
 {
 	if (!source_width)
 		return 0;
-	const auto [u, run] = map_u(metres);
+	// map_u() already reflects the metre coordinate for a mirrored run, just
+	// as the Rust fitter does; applying Run::Mirrored to the pixel index here
+	// would mirror the texture a second time.
+	const auto u = map_u(metres).first;
 	const auto scaled = static_cast<long long>(std::floor(u * pixels_per_metre));
 	const auto clamped = std::clamp<long long>(scaled, 0, source_width - 1);
-	return run == Run::Mirrored ? source_width - 1 - clamped : clamped;
+	return static_cast<std::uint32_t>(clamped);
 }
 
 std::uint32_t Fit::source_y(double metres, std::uint32_t source_height) const

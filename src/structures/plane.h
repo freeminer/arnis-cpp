@@ -87,8 +87,8 @@ void finalize_placements(std::vector<Placement> &placements);
 void filter_and_finalize_strips(std::vector<AerowayStrip> &strips, double scale);
 bool make_centerline_placement(const AerowayStrip &strip, double scale, Placement &out);
 bool make_ascending_placement(const AerowayStrip &strip, double scale, Placement &out);
-std::vector<Placement> build_strip_placements(
-		const std::vector<AerowayStrip> &strips, double scale);
+std::vector<Placement> build_placements(const std::vector<AerowayStrip> &strips,
+		const std::vector<Stand> &stands, double scale);
 std::vector<Placement> prescan_placements(
 		const std::vector<ProcessedElement> &elements, double scale);
 bool place_plane_placement(WorldEditor &editor, const Placement &placement);

@@ -1,5 +1,7 @@
 #include "caves_zone_map.h"
 
+#include "args.h"
+
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -147,5 +149,18 @@ std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 	}
 	result["_bbox_blocks"] = {bounds.min_x, bounds.min_z, bounds.max_x, bounds.max_z};
 	return "ZONEMAP " + result.dump();
+}
+
+std::optional<std::string> render_zone_map(const ::arnis::Args &args,
+		const CaveRect &bounds, int floor_y, std::string *error)
+{
+	if (!args.cave_zone_map) {
+		if (error)
+			*error = "cave-zone map output path is not configured";
+		return std::nullopt;
+	}
+	return render_zone_map(*args.cave_zone_map, bounds,
+			args.cave_biomes.value_or(std::string{}), args.cave_zone_map_step, floor_y,
+			error);
 }
 } // namespace arnis::caves

@@ -293,10 +293,12 @@ std::vector<std::pair<int, int>> deferred_regions(const PrescanResult &r, double
 	std::vector<std::pair<int, int>> o;
 	int d = std::ceil(225 * scale);
 	for (auto &p : r.placements)
-		for (int z = tiles::region_floor(p.anchor_z - d);
-				z <= tiles::region_floor(p.anchor_z + d); ++z)
-			for (int x = tiles::region_floor(p.anchor_x - d);
-					x <= tiles::region_floor(p.anchor_x + d); ++x)
+		// Rust's region_keys_around reserves one extra region on each side.
+		// Keep the same safety ring for streamed model voxelization.
+		for (int z = tiles::region_floor(p.anchor_z - d) - 1;
+				z <= tiles::region_floor(p.anchor_z + d) + 1; ++z)
+			for (int x = tiles::region_floor(p.anchor_x - d) - 1;
+					x <= tiles::region_floor(p.anchor_x + d) + 1; ++x)
 				o.push_back({x, z});
 	std::sort(o.begin(), o.end());
 	o.erase(std::unique(o.begin(), o.end()), o.end());

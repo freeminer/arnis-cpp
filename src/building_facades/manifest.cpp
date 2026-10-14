@@ -1,9 +1,11 @@
 #include "manifest.h"
 #include <algorithm>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <limits>
 #include <nlohmann/json.hpp>
 #include <stdexcept>
 namespace arnis::building_facades
@@ -87,13 +89,16 @@ std::optional<FacadeSet> FacadeSet::load_directory(const std::filesystem::path &
 		return {};
 	}
 	if (!manifest.contains("version") || !manifest["version"].is_number_unsigned() ||
-			manifest["version"].get<unsigned>() == 0 || !manifest.contains("textures") ||
-			!manifest["textures"].is_array()) {
+			manifest["version"].get<std::uint64_t>() == 0 ||
+			manifest["version"].get<std::uint64_t>() >
+					std::numeric_limits<std::uint32_t>::max() ||
+			!manifest.contains("textures") || !manifest["textures"].is_array()) {
 		if (error)
 			*error = "manifest must contain a positive version and a textures array";
 		return {};
 	}
-	const auto version = manifest["version"].get<unsigned>();
+	const auto version =
+			static_cast<std::uint32_t>(manifest["version"].get<std::uint64_t>());
 	if (version > SCHEMA_VERSION)
 		std::cerr << "Warning: preset facade manifest is version " << version
 				  << " and this build knows version " << SCHEMA_VERSION
@@ -106,23 +111,41 @@ std::optional<FacadeSet> FacadeSet::load_directory(const std::filesystem::path &
 			entry.file = raw.at("file").get<std::string>();
 			entry_file = entry.file;
 			const std::filesystem::path file(entry.file);
-			if (!safe_name(entry.file) || file.is_absolute() || file.has_parent_path() ||
-					!std::filesystem::is_regular_file(directory / file)) {
+			if (!safe_name(entry.file) || file.is_absolute() || file.has_parent_path()) {
 				if (rejected)
-					rejected->push_back(entry.file + ": missing or unsafe image");
+					rejected->push_back(entry.file + ": not a plain file name");
 				continue;
 			}
+			if (!std::filesystem::is_regular_file(directory / file)) {
+				if (rejected)
+					rejected->push_back(entry.file + ": no such file in the set");
+				continue;
+			}
+			entry.metres_wide = raw.at("metres_wide").get<double>();
+			if (!std::isfinite(entry.metres_wide) || entry.metres_wide <= 0.0)
+				throw std::runtime_error("metres_wide must be positive");
+			entry.metres_tall = raw.at("metres_tall").get<double>();
+			if (!std::isfinite(entry.metres_tall) || entry.metres_tall <= 0.0)
+				throw std::runtime_error("metres_tall must be positive");
+			const auto &storeys = raw.at("storeys");
+			if (!storeys.is_number_unsigned() ||
+					storeys.get<std::uint64_t>() >
+							std::numeric_limits<std::uint32_t>::max())
+				throw std::runtime_error("storeys must be an unsigned 32-bit integer");
+			entry.storeys = static_cast<unsigned>(storeys.get<std::uint64_t>());
+			if (entry.storeys == 0)
+				throw std::runtime_error("storeys must be at least 1");
 			for (const auto &name : raw.at("categories")) {
-				auto value = category(name.get<std::string>());
+				const auto category_name = name.get<std::string>();
+				auto value = category(category_name);
 				if (!value)
-					throw std::runtime_error("unknown category");
+					throw std::runtime_error("unknown category " + category_name);
 				if (std::find(entry.categories.begin(), entry.categories.end(), *value) ==
 						entry.categories.end())
 					entry.categories.push_back(*value);
 			}
-			entry.metres_wide = raw.at("metres_wide").get<double>();
-			entry.metres_tall = raw.at("metres_tall").get<double>();
-			entry.storeys = raw.at("storeys").get<unsigned>();
+			if (entry.categories.empty())
+				throw std::runtime_error("no categories");
 			entry.tiles_horizontally = raw.value("tiles_horizontally", false);
 			entry.has_ground_floor = raw.value("has_ground_floor", false);
 			entries.push_back(std::move(entry));

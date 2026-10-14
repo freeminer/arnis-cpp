@@ -225,18 +225,21 @@ std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relat
 				}
 				nodes.insert(nodes.begin(), prefix.begin(), prefix.end());
 			}
-			open.erase(found);
+			// Rust Vec::swap_remove keeps the same candidate ordering while
+			// replacing the removed segment with the last remaining segment.
+			if (found + 1 != open.end())
+				*found = std::move(open.back());
+			open.pop_back();
 		}
 		if (nodes.size() < 4 || nodes.front()->id != nodes.back()->id)
 			continue;
 		std::vector<GeoPoint> ring;
 		ring.reserve(nodes.size());
 		for (const auto *node : nodes) {
-			if (!std::isfinite(node->latitude) || !std::isfinite(node->longitude)) {
-				ring.clear();
-				break;
-			}
-			ring.push_back({node->latitude, node->longitude});
+			// Rust's stitch_rings uses filter_map over node_ll: unavailable
+			// coordinates drop only that vertex, not the whole closed ring.
+			if (std::isfinite(node->latitude) && std::isfinite(node->longitude))
+				ring.push_back({node->latitude, node->longitude});
 		}
 		if (ring.size() >= 4)
 			result.push_back(std::move(ring));

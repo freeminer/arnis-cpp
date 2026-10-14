@@ -61,11 +61,17 @@ std::uint8_t koppen_class(double latitude, double longitude)
 	// Keep accepting older raw assets supplied by library users.
 	if (bytes.size() != KOPPEN_COLS * KOPPEN_ROWS)
 		return 0;
-	const auto col =
-			std::clamp<double>(std::floor((longitude + 180.) / .1), 0, KOPPEN_COLS - 1);
-	const auto row =
-			std::clamp<double>(std::floor((90. - latitude) / .1), 0, KOPPEN_ROWS - 1);
-	return bytes[std::size_t(row) * KOPPEN_COLS + std::size_t(col)];
+	// Match TiledGrid::cell: longitude wraps at the dateline, while latitude
+	// clamps to the first/last grid row.
+	const auto col_unwrapped =
+			static_cast<std::int64_t>(std::floor((longitude + 180.) / .1));
+	const auto col = static_cast<std::size_t>(
+			((col_unwrapped % static_cast<std::int64_t>(KOPPEN_COLS)) +
+					static_cast<std::int64_t>(KOPPEN_COLS)) %
+			static_cast<std::int64_t>(KOPPEN_COLS));
+	const auto row = static_cast<std::size_t>(
+			std::clamp<double>(std::floor((90. - latitude) / .1), 0, KOPPEN_ROWS - 1));
+	return bytes[row * KOPPEN_COLS + col];
 }
 }
 std::optional<std::pair<Block, Block>> surface_palette(

@@ -9,6 +9,11 @@
 #include <string>
 #include <string_view>
 
+namespace arnis
+{
+struct Args;
+}
+
 namespace arnis::caves
 {
 // Render the same two cave-theme bands as Rust's caves::zone_map diagnostic.
@@ -19,4 +24,11 @@ std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 		const CaveRect &bounds, std::string_view biome_spec = {},
 		std::optional<std::uint32_t> sample_step = std::nullopt,
 		int floor_y = VANILLA_FLOOR, std::string *error = nullptr);
+
+// Args-driven counterpart to Rust's `render(&Args)`. The projected block
+// bounds remain an explicit input because the C++ library Args deliberately
+// does not own a geographic bbox.
+std::optional<std::string> render_zone_map(const ::arnis::Args &args,
+		const CaveRect &bounds, int floor_y = VANILLA_FLOOR,
+		std::string *error = nullptr);
 } // namespace arnis::caves

@@ -533,14 +533,9 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 			return std::nullopt;
 		}
 		state.saw_network_success |= canary.network_success;
-		const auto packed = pack_key(canary.key);
-		if (canary.status == FetchStatus::Hit)
-			state.available.insert(packed);
-		else {
-			state.confirmed_missing.insert(packed);
-			if (canary.new_missing)
-				state.pending_markers.push_back(canary.key);
-		}
+		// Match Rust: the canary only detects an outage. It is not coverage for
+		// the requested bbox and must not suppress spread-probing large sparse
+		// levels. The regular level fetch will reuse its cached result.
 	}
 	while (state.available.empty() && level > floor &&
 			level_keys.size() > PROBE_MIN_LEVEL_TILES) {
