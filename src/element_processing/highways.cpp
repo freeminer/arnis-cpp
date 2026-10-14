@@ -29,6 +29,7 @@
 #include "../floodfill.h"
 #include "../structures/helicopter.h"
 #include "fm_highway_connectivity.h"
+#include "fm_traffic_signals.h"
 #include "../strict_parse.h"
 namespace arnis
 {
@@ -760,6 +761,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					set_block(IRON_BARS, x, head_base + 2, z);
 					set_block(IRON_BARS, x, head_base + 3, z);
 				}
+
+				if (fm_place_native_traffic_signals(editor, x, head_base, z))
+					return;
 
 				set_block(BLACK_WOOL, x, head_base + 4, z);
 				set_block(BLACK_WOOL, x, head_base + 5, z);
