@@ -1,8 +1,8 @@
 #include "uses.h"
 
 #include <algorithm>
+#include <charconv>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <string>
 
@@ -13,6 +13,27 @@ namespace
 constexpr std::size_t CELLS_PER_UNIT = 36;
 constexpr std::size_t HOST_SHARE_CELLS = 140;
 constexpr int SAME_TENANT_DIST = 4;
+
+std::optional<double> parse_float(std::string_view value)
+{
+	const auto first = value.find_first_not_of(" \t\n\r\f\v");
+	if (first == std::string_view::npos)
+		return std::nullopt;
+	const auto last = value.find_last_not_of(" \t\n\r\f\v");
+	value = value.substr(first, last - first + 1);
+	// from_chars is locale-independent like Rust's f64 parser, but unlike
+	// strtod/std::stod it does not accept a leading plus sign.
+	if (value.front() == '+')
+		value.remove_prefix(1);
+	if (value.empty())
+		return std::nullopt;
+	double parsed = 0.0;
+	const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(),
+			parsed, std::chars_format::general);
+	if (error != std::errc{} || end != value.data() + value.size())
+		return std::nullopt;
+	return parsed;
+}
 
 std::string_view tag(const tags_t &tags, std::string_view key)
 {
@@ -361,29 +382,19 @@ bool area_use_fits(Use use, std::size_t footprint)
 std::optional<int> parse_level(std::string_view value)
 {
 	const auto end = value.find_first_of(";,");
-	value = value.substr(0, end);
-	const auto first = value.find_first_not_of(" \t\n\r\f\v");
-	if (first == std::string_view::npos)
+	const auto parsed = parse_float(value.substr(0, end));
+	if (!parsed)
 		return std::nullopt;
-	const auto last = value.find_last_not_of(" \t\n\r\f\v");
-	try {
-		std::size_t consumed = 0;
-		const double level =
-				std::stod(std::string(value.substr(first, last - first + 1)), &consumed);
-		if (consumed != last - first + 1)
-			return std::nullopt;
-		// Rust's `f64::round() as i32` maps NaN to zero and saturates infinities
-		// and out-of-range values; preserve those cast semantics for malformed tags.
-		if (std::isnan(level))
-			return 0;
-		if (level <= std::numeric_limits<int>::min())
-			return std::numeric_limits<int>::min();
-		if (level >= std::numeric_limits<int>::max())
-			return std::numeric_limits<int>::max();
-		return static_cast<int>(std::lround(level));
-	} catch (...) {
-		return std::nullopt;
-	}
+	const double level = *parsed;
+	// Rust's `f64::round() as i32` maps NaN to zero and saturates infinities
+	// and out-of-range values; preserve those cast semantics for malformed tags.
+	if (std::isnan(level))
+		return 0;
+	if (level <= std::numeric_limits<int>::min())
+		return std::numeric_limits<int>::min();
+	if (level >= std::numeric_limits<int>::max())
+		return std::numeric_limits<int>::max();
+	return static_cast<int>(std::lround(level));
 }
 
 InteriorPlan plan_interior(const PlanInputs &input)
@@ -421,20 +432,8 @@ InteriorPlan plan_interior(const PlanInputs &input)
 		if ((!typed || tenant.use != *typed) && (!own || tenant.use != *own))
 			tenants.push_back(&tenant);
 	const auto levels = tag(input.tags, "building:levels");
-	bool levels_tagged = false;
-	if (!levels.empty()) {
-		try {
-			const auto first = levels.find_first_not_of(" \t\n\r\f\v");
-			const auto last = levels.find_last_not_of(" \t\n\r\f\v");
-			if (first != std::string_view::npos) {
-				std::size_t consumed = 0;
-				const auto value = std::string(levels.substr(first, last - first + 1));
-				const double parsed = std::stod(value, &consumed);
-				levels_tagged = consumed == value.size() && parsed >= 2.0;
-			}
-		} catch (...) {
-		}
-	}
+	const auto parsed_levels = parse_float(levels);
+	const bool levels_tagged = parsed_levels && *parsed_levels >= 2.0;
 	const bool open_hall = tenants.empty() && ground_default == upper_default &&
 						   ground_default.is_hall() &&
 						   (ground_default.always_open() || !levels_tagged);

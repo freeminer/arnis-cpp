@@ -22,6 +22,26 @@ bool safe_name(const std::string &name)
 			   (c >= '0' && c <= '9') || c == '_' || c == '-' || c == '.';
 	});
 }
+
+bool has_manifest_entry_schema(const nlohmann::json &entry)
+{
+	if (!entry.is_object() || !entry.contains("file") || !entry["file"].is_string() ||
+			!entry.contains("categories") || !entry["categories"].is_array() ||
+			!entry.contains("metres_wide") || !entry["metres_wide"].is_number() ||
+			!entry.contains("metres_tall") || !entry["metres_tall"].is_number() ||
+			!entry.contains("storeys") || !entry["storeys"].is_number_unsigned() ||
+			entry["storeys"].get<std::uint64_t>() >
+					std::numeric_limits<std::uint32_t>::max())
+		return false;
+	for (const auto &name : entry["categories"])
+		if (!name.is_string())
+			return false;
+	for (const char *key : {"tiles_horizontally", "has_ground_floor"})
+		if (entry.contains(key) && !entry[key].is_boolean())
+			return false;
+	return !entry.contains("note") || entry["note"].is_string();
+}
+
 std::optional<buildings::BuildingCategory> category(const std::string &name)
 {
 	using C = buildings::BuildingCategory;
@@ -103,13 +123,24 @@ std::optional<FacadeSet> FacadeSet::load_directory(const std::filesystem::path &
 		std::cerr << "Warning: preset facade manifest is version " << version
 				  << " and this build knows version " << SCHEMA_VERSION
 				  << "; reading it and ignoring anything newer.\n";
+	if (!std::all_of(manifest["textures"].begin(), manifest["textures"].end(),
+				[](const auto &entry) { return has_manifest_entry_schema(entry); })) {
+		if (error)
+			*error = "manifest contains a texture with invalid field types";
+		return {};
+	}
 	std::vector<Entry> entries;
 	for (const auto &raw : manifest["textures"]) {
 		std::string entry_file;
 		try {
+			entry_file = raw.at("file").get<std::string>();
+		} catch (const std::exception &) {
+			// The schema check above rejects malformed entries as a group. Keep
+			// this guard so rejection reporting remains robust if that check changes.
+		}
+		try {
 			Entry entry;
-			entry.file = raw.at("file").get<std::string>();
-			entry_file = entry.file;
+			entry.file = entry_file;
 			const std::filesystem::path file(entry.file);
 			if (!safe_name(entry.file) || file.is_absolute() || file.has_parent_path()) {
 				if (rejected)

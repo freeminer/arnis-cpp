@@ -1,13 +1,14 @@
 #include "image.h"
 
-#include "../../../png_holder.h"
 #include "../../../arnis_world_editor.h"
+#include "stb_image.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
 #include <cstdint>
 #include <exception>
 #include <limits>
+#include <memory>
 #include <numbers>
 #include <vector>
 
@@ -65,22 +66,14 @@ std::vector<std::vector<SampleWeight>> lanczos_weights(int source_size, int targ
 	return result;
 }
 
-RgbImage resize_lanczos3(
-		const PngImage &source, std::uint32_t width, std::uint32_t height)
+RgbImage resize_lanczos3(int source_width, int source_height,
+		const std::uint8_t *source_pixels, std::uint32_t width, std::uint32_t height)
 {
-	const int source_width = source.width(), source_height = source.height();
 	RgbImage out{width, height,
 			std::vector<std::uint8_t>(static_cast<std::size_t>(width) * height * 3)};
 	if (source_width == static_cast<int>(width) &&
 			source_height == static_cast<int>(height)) {
-		for (int y = 0; y < source_height; ++y)
-			for (int x = 0; x < source_width; ++x) {
-				const auto color = source.get_pixel(x, y);
-				const auto offset = (static_cast<std::size_t>(y) * width + x) * 3;
-				out.pixels[offset] = color->getRed();
-				out.pixels[offset + 1] = color->getGreen();
-				out.pixels[offset + 2] = color->getBlue();
-			}
+		std::copy_n(source_pixels, out.pixels.size(), out.pixels.data());
 		return out;
 	}
 
@@ -92,12 +85,10 @@ RgbImage resize_lanczos3(
 		for (std::uint32_t x = 0; x < width; ++x) {
 			std::array<double, 3> value{};
 			for (const auto &sample : x_weights[x]) {
-				const auto color = source.get_pixel(sample.index, y);
-				if (!color)
-					continue;
-				value[0] += color->getRed() * sample.weight;
-				value[1] += color->getGreen() * sample.weight;
-				value[2] += color->getBlue() * sample.weight;
+				const auto offset =
+						(static_cast<std::size_t>(y) * source_width + sample.index) * 3;
+				for (std::size_t channel = 0; channel < value.size(); ++channel)
+					value[channel] += source_pixels[offset + channel] * sample.weight;
 			}
 			horizontal[static_cast<std::size_t>(y) * width + x] = value;
 		}
@@ -135,10 +126,16 @@ std::optional<RgbImage> load_image(const std::filesystem::path &directory,
 		return std::nullopt;
 	}
 	try {
-		const PngImage source((directory / entry.file).string());
-		if (source.width() <= 0 || source.height() <= 0) {
+		int source_width = 0, source_height = 0, channels = 0;
+		const auto path = (directory / entry.file).string();
+		std::unique_ptr<stbi_uc, decltype(&stbi_image_free)> source(
+				stbi_load(path.c_str(), &source_width, &source_height, &channels, 3),
+				stbi_image_free);
+		if (!source || source_width <= 0 || source_height <= 0) {
 			if (error)
-				*error = "image has no pixels";
+				*error = source ? "image has no pixels"
+								: (stbi_failure_reason() ? stbi_failure_reason()
+														 : "image decoder failed");
 			return std::nullopt;
 		}
 		const auto [w, h] = entry.scaled_size(pixels_per_metre);
@@ -147,7 +144,7 @@ std::optional<RgbImage> load_image(const std::filesystem::path &directory,
 				*error = "scaled image dimensions are empty";
 			return std::nullopt;
 		}
-		return resize_lanczos3(source, w, h);
+		return resize_lanczos3(source_width, source_height, source.get(), w, h);
 	} catch (const std::exception &e) {
 		if (error)
 			*error = e.what();

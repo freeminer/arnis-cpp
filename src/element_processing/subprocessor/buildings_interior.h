@@ -20,7 +20,7 @@ struct InteriorRequest
 	int building_height;
 	int abs_terrain_offset;
 	Block wall_block;
-	const interior_uses::InteriorPlan *plan;
+	const interior_uses::InteriorPlan &plan;
 	bool abandoned;
 	const CoordinateBitmap &passages;
 	const std::vector<interior_uses::Entry> &entrances;

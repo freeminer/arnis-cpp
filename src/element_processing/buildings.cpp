@@ -5411,7 +5411,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		generate_hospital_wall_cross(*editor, element, category, start_y_offset,
 				building_height, abs_terrain_offset);
 
-		if (interior_allowed) {
+		if (interior_plan) {
 			const bool is_abandoned_building =
 					condition == BuildingCondition::Abandoned ||
 					condition == BuildingCondition::Ruined;
@@ -5425,9 +5425,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 												  : no_interior_claims;
 			const InteriorRequest interior_request{floor_area, floor_levels,
 					start_y_offset, building_height, abs_terrain_offset, wall_block,
-					interior_plan ? &*interior_plan : nullptr, is_abandoned_building,
-					interior_passages, interior_entries, {{min_x, min_z}, {max_x, max_z}},
-					interior_claims, args.scale, floor_block, clean_visual_seed};
+					*interior_plan, is_abandoned_building, interior_passages,
+					interior_entries, {{min_x, min_z}, {max_x, max_z}}, interior_claims,
+					args.scale, floor_block, clean_visual_seed};
 			generate_building_interior(*editor, interior_request);
 		}
 	}

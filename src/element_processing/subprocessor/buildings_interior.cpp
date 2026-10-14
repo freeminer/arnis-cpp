@@ -4367,12 +4367,12 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 	const int min_z = request.bounds.first.second;
 	const int max_x = request.bounds.second.first;
 	const int max_z = request.bounds.second.second;
-	const auto *plan = request.plan;
+	const auto &plan = request.plan;
 	const auto &claims = request.claims;
 	const double scale = request.scale;
 	const std::uint64_t interior_seed = request.seed;
 	const auto building_wood = interior_wood(interior_seed);
-	if (floor_area.empty() || floor_levels.empty())
+	if (floor_area.empty() || floor_levels.empty() || plan.floors.empty())
 		return;
 	// Small footprints still receive Rust's use-specific cottage/shop
 	// furnishings; only tiled home plans require the larger footprint below.
@@ -4518,7 +4518,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 		std::vector<std::pair<int, int>> connectivity_starts;
 		std::vector<std::pair<int, int>> partition_walls;
 		std::unordered_set<std::uint64_t> cottage_cells;
-		if (plan && !plan->floors.empty() && !is_abandoned_building) {
+		if (!is_abandoned_building) {
 			// Canvas reserves exterior entries on the ground storey and the
 			// stair/ladder cells on every storey before it partitions unit zones.
 			auto keep_pair = [&](std::pair<int, int> cell) {
@@ -4526,25 +4526,6 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				if (initially_walkable_cells.contains(key))
 					kept_cells.insert(key);
 			};
-			// Match Rust Canvas::clear_doorways: furniture must not obstruct the
-			// interior side of any shell door, even when it was not discovered as
-			// a planned building entry.
-			for (const auto &[x, z] : floor_area) {
-				if (editor.get_block_absolute(x, floor_y + abs_terrain_offset + 1, z))
-					continue;
-				for (const auto &[dx, dz] : INTERIOR_DIRS) {
-					const int wall_x = x + dx;
-					const int wall_z = z + dz;
-					const auto block_name = editor.block_name_absolute(
-							wall_x, floor_y + abs_terrain_offset + 1, wall_z);
-					if (!block_name || !block_name->ends_with("_door") ||
-							std::find(door_positions.begin(), door_positions.end(),
-									std::pair{wall_x, wall_z}) != door_positions.end())
-						continue;
-					keep_pair({x, z});
-					keep_pair({x - dx, z - dz});
-				}
-			}
 			if (floor_index == 0) {
 				for (const auto &entry : entries) {
 					keep_pair(entry.cell);
@@ -4557,9 +4538,9 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				keep_pair({shaft->first.first + shaft->second.first,
 						shaft->first.second + shaft->second.second});
 			}
-			const auto &units = floor_index < plan->floors.size()
-										? plan->floors[floor_index]
-										: plan->floors.back();
+			const auto &units = floor_index < plan.floors.size()
+										? plan.floors[floor_index]
+										: plan.floors.back();
 			floor_units = units;
 			std::vector<std::pair<int, int>> anchors;
 			anchors.reserve(units.size());
@@ -4713,7 +4694,33 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 					planned_partition_cells, partition_walls, door_positions, kept_cells,
 					connectivity_starts, floor_abs, top_abs);
 		}
-		if (plan && !plan->floors.empty() && !is_abandoned_building) {
+		// Rust calls Canvas::clear_doorways after partition connectivity for every
+		// interior, including abandoned buildings. Keep the inner cell and the
+		// cell beyond it clear unless this is a generated partition door.
+		auto keep_doorway_pair = [&](int x, int z) {
+			const auto key = interior_cell_key(x, z);
+			if (initially_walkable_cells.contains(key))
+				kept_cells.insert(key);
+		};
+		for (const auto &[x, z] : floor_area) {
+			const auto key = interior_cell_key(x, z);
+			if (!initially_walkable_cells.contains(key) || kept_cells.contains(key) ||
+					editor.get_block_absolute(x, floor_y + abs_terrain_offset + 1, z))
+				continue;
+			for (const auto &[dx, dz] : INTERIOR_DIRS) {
+				const int wall_x = x + dx;
+				const int wall_z = z + dz;
+				const auto block_name = editor.block_name_absolute(
+						wall_x, floor_y + abs_terrain_offset + 1, wall_z);
+				if (!block_name || !block_name->ends_with("_door") ||
+						std::find(door_positions.begin(), door_positions.end(),
+								std::pair{wall_x, wall_z}) != door_positions.end())
+					continue;
+				keep_doorway_pair(x, z);
+				keep_doorway_pair(x - dx, z - dz);
+			}
+		}
+		if (!is_abandoned_building) {
 			for (std::size_t i = 0; i < floor_units.size() && i < unit_zone_cells.size();
 					++i) {
 				if (floor_units[i].use.kind == interior_uses::UseKind::Home && homes_fit)
@@ -4789,25 +4796,20 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 
 		// Rust dispatches the tiled house plan only to Home units. Non-residential
 		// zones are furnished by their own processors below; abandoned buildings
-		// retain their dedicated tiled plan, and callers without an InteriorPlan
-		// keep the legacy whole-footprint fallback.
+		// retain their dedicated tiled plan.
 		std::vector<std::pair<int, int>> residential_pattern_cells;
-		if (plan && !plan->floors.empty() && !is_abandoned_building) {
+		if (!is_abandoned_building) {
 			if (homes_fit)
 				for (std::size_t i = 0;
 						i < floor_units.size() && i < unit_zone_cells.size(); ++i)
 					if (floor_units[i].use.kind == interior_uses::UseKind::Home)
 						residential_pattern_cells.insert(residential_pattern_cells.end(),
 								unit_zone_cells[i].begin(), unit_zone_cells[i].end());
-		} else if (is_abandoned_building) {
+		} else {
 			if (homes_fit)
 				for (const auto &[x, z] : floor_area)
 					if (initially_walkable_cells.contains(interior_cell_key(x, z)))
 						residential_pattern_cells.emplace_back(x, z);
-		} else {
-			for (const auto &[x, z] : floor_area)
-				if (initially_walkable_cells.contains(interior_cell_key(x, z)))
-					residential_pattern_cells.emplace_back(x, z);
 		}
 		std::sort(residential_pattern_cells.begin(), residential_pattern_cells.end(),
 				[](const auto &a, const auto &b) {
@@ -4922,7 +4924,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 		// legacy pattern: add a small, use-specific focal furnishing in each unit.
 		// Candidate cells stay inside that unit's nearest-anchor zone and avoid
 		// structural cells; the rest of the existing floor layout remains intact.
-		if (plan && !is_abandoned_building && !floor_units.empty()) {
+		if (!is_abandoned_building && !floor_units.empty()) {
 			std::unordered_set<std::uint64_t> structural_cells = planned_partition_cells;
 			for (const auto &[x, z] : wall_positions)
 				structural_cells.insert(interior_cell_key(x, z));

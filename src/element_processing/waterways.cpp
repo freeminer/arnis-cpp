@@ -94,9 +94,9 @@ int waterway_width(const std::string &type, const tags_t &tags)
 			consumed = 0;
 		}
 		if (consumed == token.size() && std::isfinite(width)) {
-			if (width < 1)
-				return get_waterway_width(type);
 			const double rounded = std::round(width);
+			if (rounded < 1)
+				return get_waterway_width(type);
 			return rounded >= MAX_WATERWAY_WIDTH ? MAX_WATERWAY_WIDTH
 												 : static_cast<int>(rounded);
 		}
