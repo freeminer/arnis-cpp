@@ -12,6 +12,7 @@
 #include "../../arnis_adapter.h"
 #include "args.h"
 #include "coordinate_system/geographic/llbbox.h"
+#include "projection/projection_spec.h"
 #include "elevation/cache.h"
 #include "overture/pmtiles.h"
 
@@ -106,9 +107,15 @@ std::string overture_class_to_osm_building(const std::optional<std::string> &sub
 		const std::optional<std::string> &clazz);
 std::optional<ProcessedWay> overture_building_to_way(
 		const OvertureBuilding &, const geographic::LLBBox &, double scale);
+std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &,
+		const geographic::LLBBox &, const projection::ProjectionSpec &);
 std::vector<ProcessedElement> convert_overture_buildings(
 		const std::vector<OvertureBuilding> &, const geographic::LLBBox &, double scale,
 		bool include_osm_sourced = false, std::size_t maximum = 100000);
+std::vector<ProcessedElement> convert_overture_buildings(
+		const std::vector<OvertureBuilding> &, const geographic::LLBBox &,
+		const projection::ProjectionSpec &, bool include_osm_sourced = false,
+		std::size_t maximum = 100000);
 
 // Source seam for Arrow/GeoParquet/STAC clients.  It intentionally exchanges
 // normalized rows, so the mapgen library owns geometry conversion, bounds
@@ -134,12 +141,23 @@ BuildingSource parquet_building_source(std::filesystem::path);
 std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource &,
 		const geographic::LLBBox &, double scale, bool include_osm_sourced = false,
 		std::size_t maximum = 0);
+std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource &,
+		const geographic::LLBBox &, const projection::ProjectionSpec &,
+		bool include_osm_sourced = false, std::size_t maximum = 0);
 OvertureData fetch_overture_data_from(const BuildingSource &, const geographic::LLBBox &,
 		double scale, bool include_osm_sourced = false, std::size_t maximum = 0);
+OvertureData fetch_overture_data_from(const BuildingSource &, const geographic::LLBBox &,
+		const projection::ProjectionSpec &, bool include_osm_sourced = false,
+		std::size_t maximum = 0);
 OvertureData fetch_overture_data_from_transports(
 		const BuildingTransportSource &tile_source,
 		const BuildingTransportSource &parquet_source, const geographic::LLBBox &,
 		double scale, OvertureSource source = OvertureSource::Auto,
+		bool include_osm_sourced = false, std::size_t maximum = 0);
+OvertureData fetch_overture_data_from_transports(
+		const BuildingTransportSource &tile_source,
+		const BuildingTransportSource &parquet_source, const geographic::LLBBox &,
+		const projection::ProjectionSpec &, OvertureSource source = OvertureSource::Auto,
 		bool include_osm_sourced = false, std::size_t maximum = 0);
 
 // Decode the Overture buildings MVT layer after PMTiles has supplied one
@@ -179,6 +197,8 @@ std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double mi
 		double max_lat, double max_lng, double scale, bool debug, OvertureSource source);
 OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 		double max_lng, double scale, bool debug, OvertureSource source);
+OvertureData fetch_overture_data(const geographic::LLBBox &,
+		const projection::ProjectionSpec &, bool debug, OvertureSource source);
 
 std::vector<ProcessedElement> deduplicate_against_osm(
 		std::vector<ProcessedElement> overture_elements,

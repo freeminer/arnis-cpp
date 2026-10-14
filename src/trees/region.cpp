@@ -14,6 +14,7 @@
 #include <utility>
 #include <array>
 #include <memory>
+#include <map>
 #include <unordered_map>
 #include <unordered_set>
 #include <tuple>
@@ -634,7 +635,11 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	// Rust prepares one palm-only community per ecoregion mix. Beach selection
 	// then samples that community, instead of biasing toward mixes with more
 	// palm species or selecting a palm from an unrelated community.
-	for (const auto &[id, community_ids] : data->eco_communities) {
+	for (const auto id : ecoregion_ids) {
+		const auto communities_it = data->eco_communities.find(id);
+		if (communities_it == data->eco_communities.end())
+			continue;
+		const auto &community_ids = communities_it->second;
 		Data::Community grove;
 		grove.name = "__beach_palms_" + std::to_string(id);
 		grove.habitat = Habitat::Wet;
@@ -742,7 +747,13 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		}
 		return result;
 	};
-	for (const auto &[id, choices] : data->eco_choices) {
+	// Reuse leaf-type variants across all ecoregions resolved by this load.
+	std::map<std::pair<std::size_t, bool>, std::size_t> typed_variants;
+	for (const auto id : ecoregion_ids) {
+		const auto choices_it = data->eco_choices.find(id);
+		if (choices_it == data->eco_choices.end())
+			continue;
+		const auto &choices = choices_it->second;
 		const auto eco = ecoregion::lookup(id);
 		if (!eco)
 			continue;
@@ -753,8 +764,60 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 					sprinkle.push_back({i, weight, Data::Niche::Any});
 					break;
 				}
-		data->eco_pools[id][0] = build_pools(choices, data->realm, false);
-		data->eco_pools[id][1] = build_pools(choices, data->realm, true);
+		auto pools_without_palms = build_pools(choices, data->realm, false);
+		auto pools_with_palms = build_pools(choices, data->realm, true);
+		// Rust's attach_ecoregions replaces each tagged pool entry with a
+		// community variant containing only the requested leaf type. Preserve
+		// that community-level weighting here instead of selecting from a mixed
+		// community and filtering its species only after the grove roll.
+		auto leaf_type_variant = [&](std::size_t community_id, bool conifer) {
+			const auto key = std::make_pair(community_id, conifer);
+			if (const auto found = typed_variants.find(key);
+					found != typed_variants.end())
+				return found->second;
+			if (community_id >= data->realm.communities.size())
+				return community_id;
+			const auto &base = data->realm.communities[community_id];
+			std::vector<std::size_t> keep;
+			for (std::size_t si = 0; si < base.species_conifer.size(); ++si)
+				if (base.species_conifer[si] == conifer)
+					keep.push_back(si);
+			if (keep.empty() || keep.size() == base.species.size()) {
+				typed_variants.emplace(key, community_id);
+				return community_id;
+			}
+			Data::Community variant = base;
+			variant.species.clear();
+			variant.species_names.clear();
+			variant.species_conifer.clear();
+			variant.species_palm.clear();
+			for (const auto si : keep) {
+				variant.species.push_back(base.species[si]);
+				if (si < base.species_names.size())
+					variant.species_names.push_back(base.species_names[si]);
+				variant.species_conifer.push_back(base.species_conifer[si]);
+				if (si < base.species_palm.size())
+					variant.species_palm.push_back(base.species_palm[si]);
+			}
+			const auto variant_id = data->realm.communities.size();
+			data->realm.communities.push_back(std::move(variant));
+			typed_variants.emplace(key, variant_id);
+			return variant_id;
+		};
+		auto apply_leaf_type_variants = [&](Data::Pools &pools) {
+			for (auto &place : pools) {
+				for (const auto [tag, conifer] :
+						std::array<std::pair<std::size_t, bool>, 2>{
+								{{1, true}, {2, false}}}) {
+					for (auto &choice : place[tag])
+						choice.community = leaf_type_variant(choice.community, conifer);
+				}
+			}
+		};
+		apply_leaf_type_variants(pools_without_palms);
+		apply_leaf_type_variants(pools_with_palms);
+		data->eco_pools[id][0] = std::move(pools_without_palms);
+		data->eco_pools[id][1] = std::move(pools_with_palms);
 		data->vanilla_pools[id][0] = build_pools(sprinkle, data->vanilla, false);
 		data->vanilla_pools[id][1] = build_pools(sprinkle, data->vanilla, true);
 	}
@@ -1027,10 +1090,17 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 			if (same_genus(species))
 				mapped_species.push_back(community.species[si]);
 		}
-		if ((want_conifer && si < community.species_conifer.size() &&
-					community.species_conifer[si]) ||
-				(want_broadleaf && si < community.species_conifer.size() &&
-						!community.species_conifer[si]))
+		// Procedural trees without an ecoregion mix use the selected habitat
+		// community as-is, just like Rust's pick_community -> pick_in_community
+		// path. Leaf-type filtering is already baked into the mix pools; an
+		// explicit type filter here is only needed for mapped OSM trees, whose
+		// requested conifer/broadleaf type may require searching beyond the
+		// locality-selected community.
+		if (mapped_selection &&
+				((want_conifer && si < community.species_conifer.size() &&
+						 community.species_conifer[si]) ||
+						(want_broadleaf && si < community.species_conifer.size() &&
+								!community.species_conifer[si])))
 			typed_species.push_back(community.species[si]);
 	}
 	// Rust's mapped path searches every community in the active mix, then the

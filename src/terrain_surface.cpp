@@ -374,10 +374,10 @@ void place_snow_layer(WorldEditor &e, int x, int y, int z, unsigned eighths)
 	}
 	const std::optional<std::vector<Block>> replacements{{*top}};
 	if (*top == GRASS_BLOCK)
-		e.set_block_absolute(SNOWY_GRASS_BLOCK, x, y, z, std::nullopt, replacements);
+		e.set_block_absolute(SNOWY_GRASS_BLOCK, x, y, z, replacements, std::nullopt);
 	else if (*top == PODZOL)
-		e.set_block_absolute(SNOWY_PODZOL, x, y, z, std::nullopt, replacements);
+		e.set_block_absolute(SNOWY_PODZOL, x, y, z, replacements, std::nullopt);
 	else if (is_ice(*top))
-		e.set_block_absolute(SNOW_BLOCK, x, y, z, std::nullopt, replacements);
+		e.set_block_absolute(SNOW_BLOCK, x, y, z, replacements, std::nullopt);
 }
 }

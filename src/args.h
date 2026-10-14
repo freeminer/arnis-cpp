@@ -415,8 +415,9 @@ struct Args
 			return "Mapillary photo facades are incompatible with Bedrock/Luanti output";
 		if (building_facades && (bedrock || luanti))
 			return "building facades are incompatible with Bedrock/Luanti output";
-		if (building_facades_dir && !std::filesystem::is_directory(*building_facades_dir))
-			return "building facade directory does not exist";
+		if (building_facades_dir && std::filesystem::exists(*building_facades_dir) &&
+				!std::filesystem::is_directory(*building_facades_dir))
+			return "building facade path exists but is not a directory";
 		if (cave_biomes && !caves)
 			return "cave biome weights require cave generation";
 		if (cave_biomes) {

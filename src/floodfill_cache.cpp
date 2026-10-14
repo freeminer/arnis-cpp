@@ -294,56 +294,50 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 	std::vector<FloodFillResult> managed;
 	std::vector<FloodFillResult> paving;
 	std::vector<FloodFillResult> planted;
-	// Copy shared results while holding the cache lock, then do the full bitmap
-	// pass without serializing other cache readers.
-	{
-		std::lock_guard<std::mutex> lock(way_cache_mutex);
-		for (const auto &element : elements) {
-			if (!element.is_way())
-				continue;
-			const auto &way = element.as_way();
-			const auto fill = way_cache.find(way.id);
-			if (fill == way_cache.end() || !fill->second)
-				continue;
-			const auto leisure = way.tags.find("leisure");
-			const auto amenity = way.tags.find("amenity");
-			const auto landuse = way.tags.find("landuse");
-			const auto natural = way.tags.find("natural");
-			const auto highway = way.tags.find("highway");
-			const auto area = way.tags.find("area");
-			const bool leisure_paving =
-					leisure != way.tags.end() && sealed_leisure.contains(leisure->second);
-			const bool amenity_paving =
-					amenity != way.tags.end() && sealed_amenity.contains(amenity->second);
-			const bool highway_area = highway != way.tags.end() &&
-									  area != way.tags.end() && area->second == "yes";
-			if (leisure_paving || amenity_paving || highway_area) {
-				const bool yields =
-						highway_area || amenity_paving ||
-						(leisure != way.tags.end() && leisure->second == "schoolyard");
-				(yields ? paving : managed).push_back(fill->second);
-			} else {
-				bool is_planted = false;
-				if (!way.tags.contains("building") &&
-						!way.tags.contains("building:part") &&
-						highway == way.tags.end()) {
-					if (landuse != way.tags.end()) {
-						is_planted = planted_landuse.contains(landuse->second);
-					} else if (natural != way.tags.end()) {
-						is_planted = natural->second != "tree" &&
-									 natural->second != "tree_row" &&
-									 !(amenity != way.tags.end() &&
-											 amenity->second == "fountain");
-					} else {
-						is_planted = amenity == way.tags.end() &&
-									 leisure != way.tags.end() &&
-									 (leisure->second == "park" ||
-											 leisure->second == "garden");
-					}
+	// Snapshot each shared fill independently; unrelated ways need not wait for
+	// a full-world bitmap pass performed by another reader.
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto fill = get_cached(way.id);
+		if (!fill)
+			continue;
+		const auto leisure = way.tags.find("leisure");
+		const auto amenity = way.tags.find("amenity");
+		const auto landuse = way.tags.find("landuse");
+		const auto natural = way.tags.find("natural");
+		const auto highway = way.tags.find("highway");
+		const auto area = way.tags.find("area");
+		const bool leisure_paving =
+				leisure != way.tags.end() && sealed_leisure.contains(leisure->second);
+		const bool amenity_paving =
+				amenity != way.tags.end() && sealed_amenity.contains(amenity->second);
+		const bool highway_area = highway != way.tags.end() && area != way.tags.end() &&
+								  area->second == "yes";
+		if (leisure_paving || amenity_paving || highway_area) {
+			const bool yields =
+					highway_area || amenity_paving ||
+					(leisure != way.tags.end() && leisure->second == "schoolyard");
+			(yields ? paving : managed).push_back(fill);
+		} else {
+			bool is_planted = false;
+			if (!way.tags.contains("building") && !way.tags.contains("building:part") &&
+					highway == way.tags.end()) {
+				if (landuse != way.tags.end()) {
+					is_planted = planted_landuse.contains(landuse->second);
+				} else if (natural != way.tags.end()) {
+					is_planted =
+							natural->second != "tree" && natural->second != "tree_row" &&
+							!(amenity != way.tags.end() && amenity->second == "fountain");
+				} else {
+					is_planted =
+							amenity == way.tags.end() && leisure != way.tags.end() &&
+							(leisure->second == "park" || leisure->second == "garden");
 				}
-				if (is_planted)
-					planted.push_back(fill->second);
 			}
+			if (is_planted)
+				planted.push_back(fill);
 		}
 	}
 
@@ -609,12 +603,14 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		}
 		for (auto &job : jobs) {
 			auto result = job.get();
-			if (result.second.empty())
-				cache.way_cache.emplace(result.first, empty_flood_fill_result());
-			else
-				cache.way_cache.emplace(result.first,
-						std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
-								std::move(result.second)));
+			FloodFillResult fill =
+					result.second.empty()
+							? empty_flood_fill_result()
+							: std::make_shared<
+									  const std::vector<std::pair<int32_t, int32_t>>>(
+									  std::move(result.second));
+			cache.way_cache.emplace(
+					result.first, std::make_shared<CachedFill>(std::move(fill)));
 		}
 	}
 
@@ -624,13 +620,8 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 FloodFillResult FloodFillCache::get_or_compute(const ProcessedWay &way,
 		const std::optional<std::chrono::milliseconds> &timeout) const
 {
-
-	{
-		std::lock_guard<std::mutex> lock(way_cache_mutex);
-		auto it = way_cache.find(way.id);
-		if (it != way_cache.end() && it->second)
-			return it->second;
-	}
+	if (auto cached = get_cached(way.id))
+		return cached;
 
 	// Compute without holding the cache lock so different polygons can be
 	// filled concurrently. Match Rust: cache misses (including synthetic or
@@ -651,8 +642,18 @@ FloodFillResult FloodFillCache::get_or_compute(const ProcessedWay &way,
 std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>
 FloodFillCache::get_cached(uint64_t way_id) const
 {
+	auto entry = find_cached_fill(way_id);
+	if (!entry)
+		return nullptr;
+	std::lock_guard<std::mutex> lock(entry->mutex);
+	return entry->result;
+}
+
+std::shared_ptr<FloodFillCache::CachedFill> FloodFillCache::find_cached_fill(
+		uint64_t way_id) const
+{
 	std::lock_guard<std::mutex> lock(way_cache_mutex);
-	auto it = way_cache.find(way_id);
+	const auto it = way_cache.find(way_id);
 	return it == way_cache.end() ? nullptr : it->second;
 }
 
@@ -666,9 +667,10 @@ void FloodFillCache::release(uint64_t way_id) const
 {
 	if (retain_entries_)
 		return;
-	std::lock_guard<std::mutex> lock(way_cache_mutex);
-	if (const auto it = way_cache.find(way_id); it != way_cache.end())
-		it->second.reset();
+	if (auto entry = find_cached_fill(way_id)) {
+		std::lock_guard<std::mutex> lock(entry->mutex);
+		entry->result.reset();
+	}
 }
 
 FloodFillResult FloodFillCache::get_or_compute_element(const ProcessedElement &element,
@@ -717,12 +719,9 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 
 			if ((it_building != way.tags.end() || it_building_part != way.tags.end()) &&
 					!is_underground_building(way.tags)) {
-				std::lock_guard<std::mutex> lock(way_cache_mutex);
-				if (auto cached = way_cache.find(way.id);
-						cached != way_cache.end() && cached->second) {
-					for (const auto &coord : *cached->second) {
+				if (auto cached = get_cached(way.id)) {
+					for (const auto &coord : *cached)
 						footprints.set(coord.first, coord.second);
-					}
 				}
 			}
 		}
@@ -736,7 +735,6 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 {
 
 	std::vector<std::pair<int32_t, int32_t>> centroids;
-	std::lock_guard<std::mutex> lock(way_cache_mutex);
 
 	for (const auto &element : elements) {
 		if (element.is_way()) {
@@ -745,9 +743,8 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 			auto it_building_part = way.tags.find("building:part");
 
 			if (it_building != way.tags.end() || it_building_part != way.tags.end()) {
-				auto it = way_cache.find(way.id);
-				if (it != way_cache.end() && it->second) {
-					auto centroid = compute_centroid(*it->second);
+				if (auto fill = get_cached(way.id)) {
+					auto centroid = compute_centroid(*fill);
 					if (centroid.has_value()) {
 						centroids.push_back(centroid.value());
 					}
@@ -769,10 +766,9 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 				std::vector<std::pair<int32_t, int32_t>> all_coords;
 				for (const auto &member : rel.members) {
 					if (member.role == ProcessedMemberRole::Outer) {
-						auto it = way_cache.find(member.way.id);
-						if (it != way_cache.end() && it->second) {
-							all_coords.insert(all_coords.end(), it->second->begin(),
-									it->second->end());
+						if (auto fill = get_cached(member.way.id)) {
+							all_coords.insert(
+									all_coords.end(), fill->begin(), fill->end());
 						}
 					}
 				}

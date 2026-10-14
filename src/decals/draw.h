@@ -7,6 +7,13 @@
 namespace arnis::decals
 {
 inline constexpr std::uint32_t TILE = 128;
+struct RgbaImage
+{
+	std::uint32_t width{};
+	std::uint32_t height{};
+	// Row-major RGBA bytes, matching image::RgbaImage's pixel layout.
+	std::vector<std::uint8_t> pixels;
+};
 namespace colors
 {
 constexpr std::uint8_t id(std::uint8_t base, std::uint8_t shade)
@@ -55,6 +62,7 @@ public:
 	void blit_rgba(const std::uint8_t *pixels, std::uint32_t source_width,
 			std::uint32_t source_height, int x = 0, int y = 0);
 	std::vector<std::int8_t> tile(std::uint32_t col, std::uint32_t row) const;
+	RgbaImage to_rgba() const;
 	const std::vector<std::uint8_t> &pixels() const { return pixels_; }
 };
 

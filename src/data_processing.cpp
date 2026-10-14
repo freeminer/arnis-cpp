@@ -62,6 +62,7 @@
 #include "httpfetch.h"
 #include "floodfill_cache.h"
 #include "ground_generation.h"
+#include "projection/projection_spec.h"
 #include "ecoregion.h"
 #include "land_cover/land_cover.h"
 #include "ore_generation.h"
@@ -1438,6 +1439,10 @@ bool generate_world(WorldEditor &editor,
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.
 	editor.set_place_schematics(args.use_3d);
+	// Rust initializes these on every generation run; do not inherit stale
+	// game settings when a backend reuses its WorldEditor instance.
+	editor.set_game_settings(args.gamemode, args.world_time);
+	editor.set_projection_info(projection::to_string(args.projection), args.scale);
 	// Structure schematics and cave packs are distinct asset families. Keep
 	// their roots separate so the installed Arnis assets directory can be
 	// supplied independently from an optional user cave pack.
@@ -1477,6 +1482,18 @@ bool generate_world(WorldEditor &editor,
 	editor.set_first_decal_map_id(first_decal_map_id);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
+	if (args.building_facades && args.building_facades_dir) {
+		std::error_code create_error;
+		std::filesystem::create_directories(*args.building_facades_dir, create_error);
+		if (create_error) {
+			const auto message = "cannot create building facade directory: " +
+								 *args.building_facades_dir + ": " +
+								 create_error.message();
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
 	std::optional<std::filesystem::path> facade_directory =
 			args.building_facades_dir
 					? std::optional<std::filesystem::path>(*args.building_facades_dir)
@@ -1785,20 +1802,15 @@ bool generate_world(WorldEditor &editor,
 			args.use_3d
 					? structures::plane::prescan_placements(render_elements, args.scale)
 					: std::vector<structures::plane::Placement>{};
-	const int interior_pad = args.one_world_run ? one_world::CLIP_PAD_BLOCKS : 0;
-	const ::XZBBox interior_clip_bbox(
-			static_cast<int>(std::max<std::int64_t>(
-					std::numeric_limits<int>::min(), std::int64_t(min_x) - interior_pad)),
-			static_cast<int>(std::max<std::int64_t>(
-					std::numeric_limits<int>::min(), std::int64_t(min_z) - interior_pad)),
-			static_cast<int>(std::min<std::int64_t>(
-					std::numeric_limits<int>::max(), std::int64_t(max_x) + interior_pad)),
-			static_cast<int>(std::min<std::int64_t>(std::numeric_limits<int>::max(),
-					std::int64_t(max_z) + interior_pad)));
+	const auto projection_spec = projection::ProjectionSpec::from_args(args);
+	const cartesian::XZBBoxRect padded_clip =
+			projection_spec.clip_bbox({{min_x, min_z}, {max_x, max_z}});
+	const ::XZBBox clip_bbox(padded_clip.min().x, padded_clip.min().z,
+			padded_clip.max().x, padded_clip.max().z);
 	std::optional<interior_uses::InteriorUseIndex> interior_use_index;
 	if (args.interior)
 		interior_use_index.emplace(
-				interior_uses::InteriorUseIndex::build(elements, interior_clip_bbox));
+				interior_uses::InteriorUseIndex::build(elements, clip_bbox));
 	// Rust waits for precomputation after terrain/OSM preparation, immediately
 	// before its export is projected and buildings are placed. Explicit review
 	// exports were installed above and remain authoritative.
@@ -2541,7 +2553,7 @@ bool generate_world(WorldEditor &editor,
 							std::optional<std::string>(std::string("building")));
 			if (is_building_relation) {
 				buildings::generate_building_from_relation(editor, rel, args,
-						flood_fill_cache, xzbbox, building_passages,
+						flood_fill_cache, clip_bbox, building_passages,
 						interior_use_index ? &*interior_use_index : nullptr, &road_mask,
 						&building_footprints, &building_group_members);
 			} else if (rel.tags.contains("water") ||
@@ -2552,7 +2564,7 @@ bool generate_world(WorldEditor &editor,
 				std::optional<int> surface_level;
 				if (still_surfaces.has("relation", rel.id))
 					surface_level = still_surfaces.get("relation", rel.id);
-				water_areas::generate_water_areas_from_relation(editor, rel, xzbbox,
+				water_areas::generate_water_areas_from_relation(editor, rel, clip_bbox,
 						big_water_field, road_mask,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 						bridge_surface, surface_level);
@@ -2630,6 +2642,15 @@ bool generate_world(WorldEditor &editor,
 		} catch (const std::exception &error) {
 			editor.report_generation_error(error.what());
 			std::cerr << "Arnis tile worker failed: " << error.what() << '\n';
+			tile_pipeline_ok = false;
+		} catch (...) {
+			// Rust's AbortOnPanic guard wakes the tile pipeline when a worker
+			// unwinds. Match that failure path for non-std C++ exceptions too, so
+			// the cleanup below always discards partial overlays and releases the
+			// generation pass instead of leaving a half-open tile transaction.
+			constexpr const char *message = "unknown exception in Arnis tile worker";
+			editor.report_generation_error(message);
+			std::cerr << "Arnis tile worker failed: " << message << '\n';
 			tile_pipeline_ok = false;
 		}
 		if (!tile_pipeline_ok) {

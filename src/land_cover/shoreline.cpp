@@ -15,6 +15,7 @@ namespace
 {
 using Pt = std::pair<int, int>;
 using FPt = std::pair<double, double>;
+constexpr double MIN_CELLS_PER_PIXEL = 2.0;
 constexpr double MIDPOINT_TOLERANCE_PX = 0.72;
 constexpr double CORNER_TOLERANCE_PX = 1.0;
 
@@ -306,16 +307,17 @@ std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
 }
 }
 
-bool reconstruct_water_shoreline(LandCoverData &data)
+bool reconstruct_water_shoreline(
+		LandCoverData &data, const std::vector<EsaRasterTile> &source_tiles)
 try {
 	const auto &bbox = data.source_bounds;
 	const auto gw = data.width, gh = data.height;
-	if (gw < 2 || gh < 2 || data.source_tiles.empty() || !(bbox.max_lng > bbox.min_lng) ||
+	if (gw < 2 || gh < 2 || source_tiles.empty() || !(bbox.max_lng > bbox.min_lng) ||
 			!(bbox.max_lat > bbox.min_lat))
 		return false;
 	// Join raw windows before tracing, avoiding artificial COG tile-edge shores.
 	double ppd = 0;
-	for (const auto &tile : data.source_tiles) {
+	for (const auto &tile : source_tiles) {
 		if (!tile.valid())
 			continue;
 		const double dx =
@@ -333,7 +335,7 @@ try {
 		return false;
 	const double sx = (gw - 1) / ((bbox.max_lng - bbox.min_lng) * ppd);
 	const double sy = (gh - 1) / ((bbox.max_lat - bbox.min_lat) * ppd);
-	if (!std::isfinite(sx) || !std::isfinite(sy) || std::max(sx, sy) < 2.0)
+	if (!std::isfinite(sx) || !std::isfinite(sy))
 		return false;
 	const double ox = (bbox.min_lng + 180.0) * ppd, oy = (90.0 - bbox.max_lat) * ppd;
 	const double x0 = std::floor(ox), y0 = std::floor(oy);
@@ -345,10 +347,14 @@ try {
 			wd * hd > double(std::uint64_t{1} << 31))
 		return false;
 	const int w = int(wd), h = int(hd);
+	if (data.grid.size() < gh ||
+			std::any_of(data.grid.begin(), data.grid.begin() + gh,
+					[&](const auto &row) { return row.size() < gw; }))
+		return false;
 	std::vector<std::uint8_t> raster(std::size_t(w) * h);
 	for (int y = 0; y < h; ++y)
 		for (int x = 0; x < w; ++x)
-			for (const auto &tile : data.source_tiles) {
+			for (const auto &tile : source_tiles) {
 				const auto cls = tile.sample(
 						90.0 - (y0 + y + 0.5) / ppd, (x0 + x + 0.5) / ppd - 180.0);
 				if (cls) {
@@ -356,6 +362,53 @@ try {
 					break;
 				}
 			}
+	// Match Rust EsaPixelRaster::sample_grid: a source pixel paints the
+	// half-open span of grid coordinates it covers. Sampling the grid directly
+	// at its endpoints shifts narrow classes and coastlines when the grid and
+	// ESA raster have different resolutions.
+	const double x_origin = (bbox.min_lng + 180.0) * ppd;
+	const double y_origin = (90.0 - bbox.max_lat) * ppd;
+	const auto cell_span = [](double a, double b, std::size_t limit) {
+		const auto edge = [limit](double value) {
+			return static_cast<std::size_t>(
+					std::clamp(std::ceil(value), 0.0, static_cast<double>(limit)));
+		};
+		return std::pair{edge(a), edge(b)};
+	};
+	std::vector<std::tuple<std::size_t, std::size_t, std::size_t>> col_spans;
+	col_spans.reserve(std::min<std::size_t>(w, gw + 1));
+	for (std::size_t px = 0; px < static_cast<std::size_t>(w); ++px) {
+		const double global_x = x0 + static_cast<double>(px);
+		const auto [lo, hi] = cell_span(
+				(global_x - x_origin) * sx, (global_x + 1.0 - x_origin) * sx, gw);
+		if (lo < hi)
+			col_spans.emplace_back(px, lo, hi);
+	}
+	std::vector<std::uint8_t> row_buf(gw);
+	for (int py = 0; py < h; ++py) {
+		const double global_y = y0 + static_cast<double>(py);
+		const auto [z_lo, z_hi] = cell_span(
+				(global_y - y_origin) * sy, (global_y + 1.0 - y_origin) * sy, gh);
+		if (z_lo >= z_hi)
+			continue;
+		std::fill(row_buf.begin(), row_buf.end(), 0);
+		const auto *source = raster.data() + std::size_t(py) * w;
+		for (const auto &[px, lo, hi] : col_spans)
+			std::fill(row_buf.begin() + static_cast<std::ptrdiff_t>(lo),
+					row_buf.begin() + static_cast<std::ptrdiff_t>(hi), source[px]);
+		for (std::size_t z = z_lo; z < z_hi; ++z)
+			std::copy(row_buf.begin(), row_buf.end(), data.grid[z].begin());
+	}
+	// Rust first samples the source raster onto the requested grid, then treats
+	// shoreline reconstruction as an optional refinement. Keep that sampled
+	// result for coarse grids instead of returning an all-nodata grid here.
+	if (std::max(sx, sy) < MIN_CELLS_PER_PIXEL)
+		return false;
+	// Match shoreline.rs: an empty water mask needs no boundary trace, and the
+	// nearest-neighbour sample already contains the desired non-water classes.
+	if (std::none_of(raster.begin(), raster.end(),
+				[&](std::uint8_t cls) { return cls == LC_WATER; }))
+		return false;
 	const auto rings = trace_boundaries(raster, w, h);
 	if (!rings || rings->empty())
 		return false;

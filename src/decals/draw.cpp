@@ -175,6 +175,22 @@ std::vector<std::int8_t> Canvas::tile(std::uint32_t col, std::uint32_t row) cons
 					std::int8_t(get(int(col * TILE + x), int(row * TILE + y)));
 	return result;
 }
+RgbaImage Canvas::to_rgba() const
+{
+	RgbaImage image;
+	image.width = width;
+	image.height = height;
+	image.pixels.resize(std::size_t(width) * height * 4);
+	for (std::size_t i = 0; i < std::size_t(width) * height; ++i) {
+		const auto [r, g, b] = map_palette::map_color_rgb(pixels_[i]);
+		const auto offset = i * 4;
+		image.pixels[offset] = r;
+		image.pixels[offset + 1] = g;
+		image.pixels[offset + 2] = b;
+		image.pixels[offset + 3] = pixels_[i] == TRANSPARENT ? 0 : 255;
+	}
+	return image;
+}
 std::uint8_t mix(std::uint8_t first, std::uint8_t second, float weight)
 {
 	const auto [ar, ag, ab] = map_palette::map_color_rgb(first);

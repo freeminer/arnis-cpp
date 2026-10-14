@@ -9,6 +9,7 @@
 #include <fstream>
 #include <functional>
 #include <iterator>
+#include <iostream>
 #include <limits>
 #include <mutex>
 #include <numbers>
@@ -93,6 +94,7 @@ struct FetchResult
 	FetchStatus status = FetchStatus::Failed;
 	bool new_missing = false;
 	bool network_success = false;
+	std::string error;
 };
 
 std::uint64_t pack_key(const XyzTileKey &key)
@@ -273,6 +275,7 @@ FetchResult fetch_tile(const std::filesystem::path &root, const XyzTileKey &key)
 		[[maybe_unused]] auto permit = arnis::net::request_permit();
 		const auto response = http_get(mapterhorn_tile_url(key));
 		if (response.result != CURLE_OK) {
+			out.error = curl_easy_strerror(response.result);
 			continue;
 		}
 		if (response.status == 404) {
@@ -280,20 +283,34 @@ FetchResult fetch_tile(const std::filesystem::path &root, const XyzTileKey &key)
 			out.new_missing = true;
 			return out;
 		}
-		if (response.status == 403 || response.status == 429)
+		if (response.status == 403 || response.status == 429) {
+			out.error = "HTTP " + std::to_string(response.status);
 			continue;
-		if (response.status >= 400 && response.status < 500)
+		}
+		if (response.status >= 400 && response.status < 500) {
+			out.error = "HTTP " + std::to_string(response.status);
 			return out;
-		if (response.status < 200 || response.status >= 300)
+		}
+		if (response.status < 200 || response.status >= 300) {
+			out.error = "HTTP " + std::to_string(response.status);
 			continue;
+		}
 		RgbRaster decoded;
-		if (!decode_webp(response.bytes.data(), response.bytes.size(), decoded))
+		if (!decode_webp(response.bytes.data(), response.bytes.size(), decoded)) {
+			out.error = "invalid WebP tile response";
 			continue;
+		}
 		out.network_success = true;
-		out.status = write_cache_file(file, response.bytes) ? FetchStatus::Hit
-															: FetchStatus::Failed;
+		if (write_cache_file(file, response.bytes)) {
+			out.status = FetchStatus::Hit;
+		} else {
+			out.status = FetchStatus::Failed;
+			out.error = "could not write tile cache file " + file.string();
+		}
 		return out;
 	}
+	if (out.error.empty())
+		out.error = "tile request failed";
 	return out;
 }
 
@@ -347,6 +364,11 @@ bool fetch_level(const std::filesystem::path &root, const std::vector<XyzTileKey
 				} else {
 					++state.failed;
 					++failures;
+					std::cerr << "Warning: Mapterhorn tile z" << result.key.zoom << " x"
+							  << result.key.x << " y" << result.key.y << " failed: "
+							  << (result.error.empty() ? "tile request failed"
+													   : result.error)
+							  << '\n';
 				}
 			}
 		}
@@ -503,8 +525,13 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 	// probe spread-out keys before fetching an entire level with no local data.
 	if (!level_keys.empty()) {
 		const auto canary = fetch_tile(root, level_keys.front());
-		if (canary.status == FetchStatus::Failed)
+		if (canary.status == FetchStatus::Failed) {
+			std::cerr << "Warning: Mapterhorn tile z" << canary.key.zoom << " x"
+					  << canary.key.x << " y" << canary.key.y << " failed: "
+					  << (canary.error.empty() ? "tile request failed" : canary.error)
+					  << '\n';
 			return std::nullopt;
+		}
 		state.saw_network_success |= canary.network_success;
 		const auto packed = pack_key(canary.key);
 		if (canary.status == FetchStatus::Hit)

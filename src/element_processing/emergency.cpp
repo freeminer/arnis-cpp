@@ -2,6 +2,10 @@
 #include "signage.h"
 #include "../strict_parse.h"
 #include <algorithm>
+#include <array>
+#include <tuple>
+#include <utility>
+#include <vector>
 
 namespace arnis
 {
@@ -44,13 +48,25 @@ void generate_fire_hydrant(WorldEditor &editor, const ProcessedNode &node)
 	}
 
 	editor.set_block(REDSTONE_BLOCK, x, 1, z, std::nullopt, std::nullopt);
+	const int abs_y = editor.get_absolute_y(x, 1, z);
 	if (const auto key = signage::furniture_pictogram(node.tags);
 			key && editor.signage_context && editor.signage_context->has(*key)) {
-		const int y = editor.get_ground_level(x, z) + 1;
 		for (const std::int8_t facing :
 				{std::int8_t(2), std::int8_t(3), std::int8_t(4), std::int8_t(5)})
-			editor.place_decal(x, y, z, facing, *key);
+			editor.place_decal(x, abs_y, z, facing, *key);
+		return;
 	}
+
+	// Match Rust's non-Java fallback when no registered furniture pictogram is
+	// available: a red wall banner with a simple flame-like pattern on each side.
+	const std::vector<std::pair<std::string, std::string>> patterns{
+			{"orange", "minecraft:triangle_top"}, {"yellow", "minecraft:triangle_bottom"},
+			{"red", "minecraft:border"}};
+	const std::array<std::tuple<int, int, const char *>, 4> faces{
+			{{0, 1, "south"}, {0, -1, "north"}, {1, 0, "east"}, {-1, 0, "west"}}};
+	for (const auto &[dx, dz, facing] : faces)
+		editor.place_wall_banner(
+				RED_WALL_BANNER, x + dx, abs_y, z + dz, facing, "red", patterns);
 }
 
 }

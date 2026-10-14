@@ -705,23 +705,53 @@ ModelPlacementStats place_stadium_prescan(ModelProvider &provider,
 	auto asset = provider.fetch(custom::stadium_model_key());
 	if (!asset)
 		return stats;
+	const float model_x = asset->max[0] - asset->min[0];
+	const float model_y = asset->max[1] - asset->min[1];
+	const float model_z = asset->max[2] - asset->min[2];
+	if (!std::isfinite(model_x) || !std::isfinite(model_y) || !std::isfinite(model_z) ||
+			model_x < 1e-3f || model_y < 1e-3f || model_z < 1e-3f)
+		return stats;
+	const bool model_x_is_long = model_x >= model_z;
+	const float model_long = std::max(model_x, model_z);
+	const float model_short = std::min(model_x, model_z);
+	const float center_x = -(asset->min[0] + asset->max[0]) * 0.5f;
+	const float center_z = -(asset->min[2] + asset->max[2]) * 0.5f;
+	const float block_per_meter = static_cast<float>(blocks_per_meter);
 	for (const auto &placement : placements) {
 		++stats.attempted;
-		const double scale =
-				custom::stadium_model_scale(*asset, placement.long_m * blocks_per_meter,
-						placement.short_m * blocks_per_meter);
-		if (!std::isfinite(scale) || scale <= 0)
+		const float target_long = placement.long_m * block_per_meter;
+		const float target_short = placement.short_m * block_per_meter;
+		const float target_height =
+				custom::stadium_target_height_m(
+						placement.osm_height_m, placement.has_osm_height) *
+				block_per_meter;
+		const float scale_x = target_long / model_long;
+		const float scale_y = target_height / model_y;
+		const float scale_z = target_short / model_short;
+		if (!std::isfinite(scale_x) || !std::isfinite(scale_y) ||
+				!std::isfinite(scale_z) || scale_x <= 0 || scale_y <= 0 || scale_z <= 0)
 			continue;
 		const int ground =
 				ground_for(editor, placement.footprint.min_x, placement.footprint.min_z,
 						placement.footprint.max_x, placement.footprint.max_z);
-		const auto offset =
-				rotated_center_offset(*asset, float(scale), float(placement.yaw_degrees));
-		WorldTransform transform(0, scale, {0, 0, 0}, {1, 1, 1}, placement.yaw_degrees,
-				float(placement.anchor_x) - offset[0],
-				float(ground) - asset->min[1] * float(scale),
-				float(placement.anchor_z) - offset[2]);
-		place_grounded(editor, *asset, transform, ground, 0, stats);
+		const double intrinsic_yaw = model_x_is_long ? 0.0 : 90.0;
+		const double intrinsic_tx = model_x_is_long ? center_x : -center_z;
+		const double intrinsic_tz = model_x_is_long ? center_z : center_x;
+		const auto transform = WorldTransform::with_world_scale_xyz(intrinsic_yaw, 1.0,
+				{intrinsic_tx, 0.0, intrinsic_tz}, {scale_x, scale_y, scale_z},
+				placement.yaw_degrees, float(placement.anchor_x), float(ground),
+				float(placement.anchor_z));
+		try {
+			place_grounded(editor, *asset, transform, ground, 0, stats);
+		} catch (const std::bad_alloc &) {
+			throw;
+		} catch (const std::exception &e) {
+			std::cerr << "Warning: stadium (OSM " << placement.osm_id
+					  << ") voxelization failed: " << e.what() << '\n';
+		} catch (...) {
+			std::cerr << "Warning: stadium (OSM " << placement.osm_id
+					  << ") voxelization failed with an unknown error\n";
+		}
 	}
 	return stats;
 }

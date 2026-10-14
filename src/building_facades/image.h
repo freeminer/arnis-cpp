@@ -5,6 +5,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include <vector>
 
 namespace arnis::world_editor
@@ -25,7 +26,7 @@ struct RgbImage
 // Decode an entry's PNG and resample it to the requested pixels-per-metre.
 // The decoded image is RGB (not RGBA), matching Rust's RgbImage contract.
 std::optional<RgbImage> load_image(const std::filesystem::path &directory,
-		const Entry &entry, double pixels_per_metre);
+		const Entry &entry, double pixels_per_metre, std::string *error = nullptr);
 
 // Gather a wall region through Fit's lookup tables.  The source image is
 // already scaled to pixels_per_metre, so this never stretches individual

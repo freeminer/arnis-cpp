@@ -21,10 +21,18 @@ namespace
 {
 constexpr int PLOT = 13;
 constexpr int MAX_EXTENT = PLOT - 2;
-std::vector<Block> site_ground()
+const std::optional<std::vector<Block>> &site_ground()
 {
 	// Rust's constants are logical IDs; resolve the host palette after mapping.
-	return {GRAVEL, COARSE_DIRT, DIRT, MUD};
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{GRAVEL, COARSE_DIRT, DIRT, MUD}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &water_block()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{WATER}};
+	return blocks;
 }
 
 std::uint64_t key(int x, int z)
@@ -52,8 +60,7 @@ struct Site
 				editor.surface_is_sealed(x, z) || editor.is_lc_water(x, z))
 			return false;
 		const int y = editor.get_absolute_y(x, 0, z);
-		return editor.check_for_block_absolute(
-					   x, y, z, std::optional<std::vector<Block>>(site_ground())) &&
+		return editor.check_for_block_absolute(x, y, z, site_ground()) &&
 			   !editor.block_exists_absolute(x, editor.get_absolute_y(x, 1, z), z);
 	}
 
@@ -139,8 +146,7 @@ void fence(WorldEditor &editor, const ProcessedWay &way, const Site &site)
 	for (auto [x, z] : connected_blocks::four_connected_line(points)) {
 		if (site.footprints.contains(x, z) || editor.surface_is_sealed(x, z) ||
 				editor.is_lc_water(x, z) ||
-				editor.check_for_block(
-						x, 0, z, std::optional<std::vector<Block>>{{WATER}}))
+				editor.check_for_block(x, 0, z, water_block()))
 			continue;
 		const int base = editor.get_absolute_y(x, 1, z);
 		if (editor.block_exists_absolute(x, base, z))
@@ -253,8 +259,8 @@ void prop(WorldEditor &editor, const Site &site, int x, int z, Rolls &r)
 		const bool tall_bars = r.next(2) == 0;
 		for (auto [cx, cz, u, v] : cells) {
 			const bool edge = u == 0 || v == 0 || u == along - 1 || v == across - 1;
-			editor.set_block_absolute(LIGHT_GRAY_CONCRETE, cx, *base - 1, cz,
-					std::optional<std::vector<Block>>(site_ground()), std::nullopt);
+			editor.set_block_absolute(
+					LIGHT_GRAY_CONCRETE, cx, *base - 1, cz, site_ground(), std::nullopt);
 			if (edge)
 				editor.set_block_absolute(SPRUCE_SLAB, cx, *base, cz);
 			else if (u % 2 && v % 2) {

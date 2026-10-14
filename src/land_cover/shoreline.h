@@ -7,5 +7,7 @@
 namespace arnis::land_cover
 {
 struct LandCoverData;
-bool reconstruct_water_shoreline(LandCoverData &data);
+struct EsaRasterTile;
+bool reconstruct_water_shoreline(
+		LandCoverData &data, const std::vector<EsaRasterTile> &source_tiles);
 }

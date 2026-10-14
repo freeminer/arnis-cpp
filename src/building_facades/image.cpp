@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <exception>
 #include <numbers>
 #include <vector>
 
@@ -125,19 +126,30 @@ const std::uint8_t *RgbImage::pixel(std::uint32_t x, std::uint32_t y) const
 }
 
 std::optional<RgbImage> load_image(const std::filesystem::path &directory,
-		const Entry &entry, double pixels_per_metre)
+		const Entry &entry, double pixels_per_metre, std::string *error)
 {
-	if (!(pixels_per_metre > 0.0) || entry.file.empty())
+	if (!(pixels_per_metre > 0.0) || entry.file.empty()) {
+		if (error)
+			*error = "invalid image scale or empty file name";
 		return std::nullopt;
+	}
 	try {
 		const PngImage source((directory / entry.file).string());
-		if (source.width() <= 0 || source.height() <= 0)
+		if (source.width() <= 0 || source.height() <= 0) {
+			if (error)
+				*error = "image has no pixels";
 			return std::nullopt;
+		}
 		const auto [w, h] = entry.scaled_size(pixels_per_metre);
-		if (!w || !h)
+		if (!w || !h) {
+			if (error)
+				*error = "scaled image dimensions are empty";
 			return std::nullopt;
+		}
 		return resize_lanczos3(source, w, h);
-	} catch (...) {
+	} catch (const std::exception &e) {
+		if (error)
+			*error = e.what();
 		return std::nullopt;
 	}
 }

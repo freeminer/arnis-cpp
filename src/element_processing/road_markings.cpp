@@ -373,6 +373,7 @@ int chebyshev_distance_to(const std::vector<std::pair<int, int>> &cells, int x, 
 		distance = std::min(distance, std::max(std::abs(x - cx), std::abs(z - cz)));
 	return distance;
 }
+
 } // namespace
 
 bool WayMarks::in_gap(std::uint32_t t) const
@@ -536,16 +537,16 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				const std::array<std::vector<ArmCell>, 2> sides{
 						arm_cells(roads, node_uses, ri, ni, 1, limit),
 						arm_cells(roads, node_uses, ri, ni, -1, limit)};
+				std::vector<std::pair<int, int>> centreline;
+				for (const auto &side : sides)
+					for (const auto &cell : side)
+						if (chebyshev_distance_to(crossing_cells, cell.x, cell.z) <=
+								road.half_width + crossing_half)
+							centreline.emplace_back(cell.x, cell.z);
 				CarriagewayClip clip;
 				clip.half_width = road.half_width;
 				clip.surface = road.surface;
-				for (const auto &side : sides) {
-					for (const auto &cell : side) {
-						if (chebyshev_distance_to(crossing_cells, cell.x, cell.z) <=
-								road.half_width + crossing_half)
-							clip.centreline.emplace_back(cell.x, cell.z);
-					}
-				}
+				clip.centreline = std::move(centreline);
 				if (clip.centreline.empty())
 					continue;
 				result.crossings_[crossing->id].push_back(clip);

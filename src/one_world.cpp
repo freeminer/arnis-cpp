@@ -290,8 +290,8 @@ bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
 	std::vector<GeneratedArea> covered;
 	kept.reserve(manifest->areas.size() + 1);
 	for (auto &area : manifest->areas) {
-		if (xzbbox.min_x() <= area.min_x && xzbbox.min_z() <= area.min_z &&
-				xzbbox.max_x() >= area.max_x && xzbbox.max_z() >= area.max_z)
+		if (area.is_inside(
+					xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()))
 			covered.push_back(std::move(area));
 		else
 			kept.push_back(std::move(area));

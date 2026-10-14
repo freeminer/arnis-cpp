@@ -5159,8 +5159,12 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						mapillary::facades::photo_column(x2, z2, element.id))
 					continue;
 				for (const auto &[x, z] : {std::pair{x1, z1}, std::pair{x2, z2}}) {
-					editor->set_block_absolute(SPRUCE_DOOR_LOWER, x, door_y, z);
-					editor->set_block_absolute(SPRUCE_DOOR_UPPER, x, door_y + 1, z);
+					editor->set_block_absolute(SPRUCE_DOOR_LOWER, x, door_y, z,
+							std::nullopt,
+							std::optional<std::vector<Block>>(std::vector<Block>{}));
+					editor->set_block_absolute(SPRUCE_DOOR_UPPER, x, door_y + 1, z,
+							std::nullopt,
+							std::optional<std::vector<Block>>(std::vector<Block>{}));
 					facade_plan.mark_door_column(x, z);
 				}
 				break;
@@ -5171,8 +5175,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					static_cast<std::uint32_t>(current_building.size()))];
 			if (!passage_at(effective_passages, x, z) &&
 					!mapillary::facades::photo_column(x, z, element.id)) {
-				editor->set_block_absolute(OAK_DOOR, x, door_y, z);
-				editor->set_block_absolute(OAK_DOOR_UPPER, x, door_y + 1, z);
+				editor->set_block_absolute(OAK_DOOR, x, door_y, z, std::nullopt,
+						std::optional<std::vector<Block>>(std::vector<Block>{}));
+				editor->set_block_absolute(OAK_DOOR_UPPER, x, door_y + 1, z, std::nullopt,
+						std::optional<std::vector<Block>>(std::vector<Block>{}));
 				facade_plan.mark_door_column(x, z);
 			}
 		}

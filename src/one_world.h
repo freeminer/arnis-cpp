@@ -29,6 +29,7 @@ namespace arnis::one_world
 {
 inline constexpr const char *MANIFEST_FILE = "arnis_one_world.json";
 inline constexpr const char *PREVIEW_DIR = "arnis_one_world/previews";
+inline constexpr const char *DEFAULT_WORLD_NAME = "Arnis One World";
 inline constexpr std::uint32_t MANIFEST_VERSION = 3;
 inline constexpr int CLIP_PAD_BLOCKS = 64;
 inline int ground_pad_blocks(double scale)
@@ -51,6 +52,12 @@ struct GeneratedArea
 	bool contains(int x0, int z0, int x1, int z1) const
 	{
 		return x0 <= min_x && z0 <= min_z && x1 >= max_x && z1 >= max_z;
+	}
+	// Rust's GeneratedArea::is_inside uses this same containment direction:
+	// return true when the requested rectangle fully covers this saved area.
+	bool is_inside(int x0, int z0, int x1, int z1) const
+	{
+		return contains(x0, z0, x1, z1);
 	}
 };
 struct SoftTop

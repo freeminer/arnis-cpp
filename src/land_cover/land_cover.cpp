@@ -1,44 +1,34 @@
 #include "land_cover.h"
 #include "../grid_ops.h"
-#include "bridge_repair.h"
 #include "cog.h"
 #include "shoreline.h"
 #include "../../http.h"
 #include <filesystem>
 #include "../../arnis_adapter.h"
-#include "../element_processing/bridges.h"
-#include "../element_processing/way_segments.h"
 #include "../element_processing/waterways.h"
+#include "../element_processing/way_segments.h"
 #include "../bresenham.h"
 #include "../clipping.h"
 #include <algorithm>
 #include <charconv>
 #include <cmath>
-#include <deque>
 #include <array>
+#include <deque>
 #include <limits>
 #include <iomanip>
 #include <sstream>
 #include <system_error>
 #include <utility>
-#include <unordered_map>
 #include <atomic>
 #include <cstdlib>
 #include <string_view>
 #include <thread>
-
-namespace arnis::highways
-{
-int highway_block_range(const std::string &highway_type,
-		const std::unordered_map<std::string, std::string> &tags, double scale);
-}
+#include <iostream>
 
 namespace arnis::land_cover
 {
 namespace
 {
-constexpr int BRIDGE_STAMP_MARGIN_CELLS = 8;
-
 template <typename Function>
 void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
 {
@@ -83,37 +73,6 @@ void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
 	worker();
 	for (auto &thread : threads)
 		thread.join();
-}
-
-int scaled_block_range(int raw, double scale)
-{
-	return scale < 1.0 ? std::max(1, static_cast<int>(std::floor(raw * scale))) : raw;
-}
-
-int bridge_block_range_world(const ProcessedWay &way, double scale)
-{
-	const auto highway = way.tags.get("highway");
-	if (!highway.empty())
-		return highways::highway_block_range(highway, way.tags, scale);
-	if (way.tags.find("railway") != way.tags.end()) {
-		int tracks = 1;
-		const auto tracks_tag = way.tags.get("tracks");
-		if (!tracks_tag.empty()) {
-			int parsed_tracks = 0;
-			const auto *begin = tracks_tag.data();
-			const auto *end = begin + tracks_tag.size();
-			const auto parsed = std::from_chars(begin, end, parsed_tracks);
-			if (parsed.ec == std::errc{} && parsed.ptr == end)
-				tracks = std::max(1, parsed_tracks);
-		}
-		return scaled_block_range(1 + tracks - 1, scale);
-	}
-	return scaled_block_range(1, scale);
-}
-
-int world_to_grid(int relative, double scale)
-{
-	return static_cast<int>(std::lround(std::max(relative, 0) * scale));
 }
 
 double cells_per_meter(const GeographicBounds &bbox, std::size_t grid_width)
@@ -328,188 +287,26 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 	if (!bbox.valid() || width == 0 || height == 0)
 		return out;
 	out.source_bounds = bbox;
-	out.source_tiles = tiles;
 	out.width = width;
 	out.height = height;
 	out.cells_per_meter = cells_per_meter(bbox, width);
 	out.grid.assign(height, std::vector<uint8_t>(width));
-	bool has_data = false;
-	const double lat_span = bbox.max_lat - bbox.min_lat;
-	const double lng_span = bbox.max_lng - bbox.min_lng;
-	for (std::size_t z = 0; z < height; ++z)
-		for (std::size_t x = 0; x < width; ++x) {
-			const double lon =
-					bbox.min_lng +
-					(width == 1 ? 0.0 : (double(x) / double(width - 1)) * lng_span);
-			const double lat =
-					bbox.max_lat -
-					(height == 1 ? 0.0 : (double(z) / double(height - 1)) * lat_span);
-			for (const auto &tile : tiles) {
-				const auto cls = tile.sample(lat, lon);
-				if (cls != 0) {
-					out.grid[z][x] = cls;
-					has_data = true;
-					break;
-				}
-			}
-		}
+	// The shoreline assembler also performs Rust-compatible pixel-span
+	// sampling. Do not pre-sample at grid endpoints here: a coarse output grid
+	// can miss all valid ESA pixels even though the requested raster overlaps.
+	reconstruct_water_shoreline(out, tiles);
+	const bool has_data =
+			std::any_of(out.grid.begin(), out.grid.end(), [](const auto &row) {
+				return std::any_of(
+						row.begin(), row.end(), [](std::uint8_t c) { return c != 0; });
+			});
 	if (!has_data)
 		return {};
-	reconstruct_water_shoreline(out);
 	fill_land_cover_gaps(out.grid, width, height);
 	if (smooth_boundaries)
 		smooth_land_cover_boundaries(out.grid, width, height, out.cells_per_meter);
 	out.water_distance = compute_water_distance(out.grid, width, height);
 	return out;
-}
-
-void apply_bridge_land_cover_repair(LandCoverData &data,
-		std::vector<std::vector<float>> &heights, std::size_t world_width,
-		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox, double scale)
-{
-	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
-			heights.size() < data.height ||
-			std::any_of(heights.begin(), heights.begin() + data.height,
-					[&](const auto &row) { return row.size() < data.width; }))
-		return;
-	if (std::none_of(elements.begin(), elements.end(), [](const auto &element) {
-			return element.is_way() && bridges::is_bridge_way(element.as_way());
-		}))
-		return;
-	// Rust uses a compact bit-mask and stamps only ESA built-up cells.  Keeping
-	// real water/vegetation out of the mask is what lets bridge footprints be
-	// reclassified from their surrounding land-cover rather than overwritten.
-	std::vector<std::uint64_t> mask((data.width * data.height + 63) / 64);
-	std::vector<std::uint32_t> bridge_cells;
-	const double sx = double(data.width - 1) / double(world_width - 1);
-	const double sz = double(data.height - 1) / double(world_height - 1);
-	for (const auto &e : elements) {
-		if (!e.is_way() || !bridges::is_bridge_way(e.as_way()) ||
-				e.as_way().nodes.size() < 2)
-			continue;
-		const auto &way = e.as_way();
-		const int block_range_world =
-				bridge_block_range_world(way, scale) + BRIDGE_STAMP_MARGIN_CELLS;
-		const int range_x = std::max(1, int(std::ceil(block_range_world * sx)));
-		const int range_z = std::max(1, int(std::ceil(block_range_world * sz)));
-		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
-			const int x0 = world_to_grid(way.nodes[i - 1].x - bbox.min_x(), sx);
-			const int z0 = world_to_grid(way.nodes[i - 1].z - bbox.min_z(), sz);
-			const int x1 = world_to_grid(way.nodes[i].x - bbox.min_x(), sx);
-			const int z1 = world_to_grid(way.nodes[i].z - bbox.min_z(), sz);
-			for (auto [x, y, z] : bresenham::bresenham_line(x0, 0, z0, x1, 0, z1))
-				for (int dz = -range_z; dz <= range_z; ++dz)
-					for (int dx = -range_x; dx <= range_x; ++dx) {
-						int gx = x + dx, gz = z + dz;
-						if (gx < 0 || gz < 0 || gx >= int(data.width) ||
-								gz >= int(data.height) ||
-								data.grid[gz][gx] != LC_BUILT_UP)
-							continue;
-						const auto index = std::size_t(gz) * data.width + gx;
-						const auto bit = std::uint64_t(1) << (index & 63);
-						if (!(mask[index >> 6] & bit)) {
-							mask[index >> 6] |= bit;
-							bridge_cells.push_back(index);
-						}
-					}
-		}
-	}
-	if (bridge_cells.empty())
-		return;
-	auto marked = [&](std::size_t i) { return (mask[i >> 6] >> (i & 63)) & 1U; };
-	constexpr std::array<std::pair<int, int>, 4> neighbours{
-			{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
-	struct Assignment
-	{
-		std::uint32_t cell;
-		std::uint8_t cls;
-		float water_level;
-	};
-	std::unordered_map<std::uint32_t, std::uint8_t> assigned;
-	std::unordered_map<std::uint32_t, float> water_levels;
-	std::deque<Assignment> current, next;
-	auto water_reachable = [&](std::size_t cell, float level) {
-		const float h = heights[cell / data.width][cell % data.width];
-		return !std::isfinite(h) || !std::isfinite(level) || h <= level + 6.f;
-	};
-	// Water-adjacent cells seed first, deliberately giving river crossings water
-	// precedence over neighbouring built-up terrain.
-	for (const auto &cell : bridge_cells) {
-		const int x = cell % data.width, z = cell / data.width;
-		for (const auto &[dx, dz] : neighbours) {
-			const int nx = x + dx, nz = z + dz;
-			if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
-				continue;
-			const auto ni = std::size_t(nz) * data.width + nx;
-			if (!marked(ni) && data.grid[nz][nx] == LC_WATER) {
-				const float level = heights[nz][nx];
-				if (!water_reachable(cell, level))
-					continue;
-				assigned[cell] = LC_WATER;
-				water_levels[cell] = level;
-				current.push_back({cell, LC_WATER, level});
-				break;
-			}
-		}
-	}
-	for (const auto &cell : bridge_cells)
-		if (!assigned.contains(cell)) {
-			const int x = cell % data.width, z = cell / data.width;
-			for (const auto &[dx, dz] : neighbours) {
-				const int nx = x + dx, nz = z + dz;
-				if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
-					continue;
-				const auto ni = std::size_t(nz) * data.width + nx;
-				const auto cls = data.grid[nz][nx];
-				if (!marked(ni) && cls && cls != LC_WATER) {
-					assigned[cell] = cls;
-					current.push_back(
-							{cell, cls, std::numeric_limits<float>::quiet_NaN()});
-					break;
-				}
-			}
-		}
-	for (int ring = 1; !current.empty() && ring < 64; ++ring) {
-		while (!current.empty()) {
-			auto [cell, cls, level] = current.front();
-			current.pop_front();
-			const int x = cell % data.width, z = cell / data.width;
-			for (const auto &[dx, dz] : neighbours) {
-				const int nx = x + dx, nz = z + dz;
-				if (nx < 0 || nz < 0 || nx >= int(data.width) || nz >= int(data.height))
-					continue;
-				const auto ni = std::size_t(nz) * data.width + nx;
-				if (marked(ni) && !assigned.contains(ni) &&
-						(cls != LC_WATER || water_reachable(ni, level))) {
-					assigned[ni] = cls;
-					if (cls == LC_WATER)
-						water_levels[ni] = level;
-					next.push_back({std::uint32_t(ni), cls, level});
-				}
-			}
-		}
-		current.swap(next);
-	}
-	bool water_changed = false;
-	for (const auto &cell : bridge_cells)
-		if (const auto it = assigned.find(cell); it != assigned.end()) {
-			const int x = cell % data.width, z = cell / data.width;
-			const auto old = data.grid[z][x];
-			if (old != it->second) {
-				data.grid[z][x] = it->second;
-				if (it->second == LC_WATER)
-					if (const auto level = water_levels.find(cell);
-							level != water_levels.end() && std::isfinite(level->second) &&
-							std::isfinite(heights[z][x]) && heights[z][x] > level->second)
-						heights[z][x] = level->second;
-				water_changed |= (old == LC_WATER) != (it->second == LC_WATER);
-			}
-		}
-	if (water_changed) {
-		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
-		data.invalidate_water_blend_grid();
-	}
 }
 
 void apply_osm_water_override(LandCoverData &data,
@@ -565,7 +362,10 @@ void apply_osm_water_override(LandCoverData &data,
 	};
 	std::size_t changed = 0;
 	const auto write_water = [&](std::size_t x, std::size_t z) {
-		if (data.grid[z][x] == LC_WATER || !guard.allows(heights, x, z))
+		// Match Rust's passes_water_guard for both polygon fills and line rasterization:
+		// OSM water must not overwrite large compact land components or climb above
+		// the nearest ESA-water elevation by more than the configured tolerance.
+		if (data.grid[z][x] == LC_WATER || !guard.allows(heights, x, z, 1.5f))
 			return std::size_t{0};
 		data.grid[z][x] = LC_WATER;
 		return std::size_t{1};
@@ -725,12 +525,15 @@ void apply_osm_water_override(LandCoverData &data,
 		}
 	}
 	if (changed) {
+		std::clog << "OSM water override: reclassified " << changed
+				  << " cells to LC_WATER inside OSM water polygons/lines\n";
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
 		data.invalidate_water_blend_grid();
 		// OSM water may extend ESA water slightly, but should not float on a raised
 		// bank. Sink only newly reachable cells that are within Rust's 1.5-block
 		// elevation guard; the ESA water seeds remain at their sampled heights.
-		if (guard.has_elevation)
+		if (guard.has_elevation) {
+			std::size_t sunk = 0;
 			for (std::size_t z = 0; z < data.height; ++z)
 				for (std::size_t x = 0; x < data.width; ++x) {
 					if (data.grid[z][x] != LC_WATER || !std::isfinite(heights[z][x]) ||
@@ -739,9 +542,15 @@ void apply_osm_water_override(LandCoverData &data,
 						continue;
 					const float water_y = guard.nearest_water_y[z][x];
 					if (std::isfinite(water_y) && heights[z][x] > water_y &&
-							heights[z][x] <= water_y + 1.5f)
+							heights[z][x] <= water_y + 1.5f) {
 						heights[z][x] = water_y;
+						++sunk;
+					}
 				}
+			if (sunk)
+				std::clog << "OSM water override: sank " << sunk
+						  << " overridden cells onto the adjacent water surface\n";
+		}
 	}
 }
 

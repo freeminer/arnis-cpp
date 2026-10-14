@@ -102,9 +102,8 @@ struct LandCoverData
 	std::size_t height{0};
 	double cells_per_meter{1.0};
 	// Retain source data for shoreline/vector operations, matching Rust's
-	// raster-plus-mapping lifetime through shoreline reconstruction.
+	// geographic mapping through shoreline reconstruction.
 	GeographicBounds source_bounds{};
-	std::vector<EsaRasterTile> source_tiles;
 
 	const std::vector<std::vector<float>> &water_blend_grid() const;
 	void invalidate_water_blend_grid();
@@ -135,7 +134,8 @@ void fill_land_cover_gaps(
 		std::vector<std::vector<uint8_t>> &grid, std::size_t width, std::size_t height);
 void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 		std::size_t width, std::size_t height, double cells_per_meter = 1.0);
-bool reconstruct_water_shoreline(LandCoverData &data);
+bool reconstruct_water_shoreline(
+		LandCoverData &data, const std::vector<EsaRasterTile> &source_tiles);
 
 uint64_t coord_hash(int32_t x, int32_t z);
 

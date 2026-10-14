@@ -734,8 +734,8 @@ void place_bed_flower(WorldEditor &editor, int x, int z)
 void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox,
 		int min_x, int max_x, int min_z, int max_z)
 {
-	if (!editor.ground || !editor.ground->has_land_cover() || !is_earth(args.body) ||
-			min_x > max_x || min_z > max_z)
+	if (!editor.ground || !editor.ground->has_land_cover() ||
+			!editor.ground->is_earth() || min_x > max_x || min_z > max_z)
 		return;
 	constexpr int max_spread = 7;
 	const int chunk_min_x = div_euclid(min_x - max_spread, 16);
@@ -791,8 +791,8 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 						static_cast<std::uint32_t>(rng.uniform(1000)));
 				if (!selected)
 					continue;
-				// Rust uses ecoregion realm when available, with the bbox longitude
-				// window as its fallback for areas without ecoregion coverage.
+				// Match Rust's site.cactus_country: a resolved ecoregion realm takes
+				// precedence; longitude is only the fallback when no realm is known.
 				const bool cactus_country =
 						origin_eco
 								? ecoregion::realm_is_americas(origin_eco->realm)

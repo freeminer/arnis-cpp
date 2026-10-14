@@ -69,15 +69,14 @@ std::vector<Block> get_blocks_for_surface_way(
 	return default_blocks;
 }
 
-std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
+std::optional<std::vector<Block>> cycleway_palette(const tags_t &tags)
 {
-	if (way.tags.get("cycleway") == "crossing" || way.tags.contains("crossing"))
+	if (tags.get("cycleway") == "crossing" || tags.contains("crossing"))
 		return std::nullopt;
-	const auto surface_colour = way.tags.find("surface:colour");
-	const auto colour = way.tags.find("colour");
-	const auto selected_colour =
-			surface_colour != way.tags.end() ? surface_colour : colour;
-	if (selected_colour != way.tags.end()) {
+	const auto surface_colour = tags.find("surface:colour");
+	const auto colour = tags.find("colour");
+	const auto selected_colour = surface_colour != tags.end() ? surface_colour : colour;
+	if (selected_colour != tags.end()) {
 		std::string value = selected_colour->second;
 		const auto not_space = [](unsigned char c) { return !std::isspace(c); };
 		value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
@@ -104,7 +103,7 @@ std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
 		if (!red)
 			return std::nullopt;
 	}
-	const auto surface = way.tags.get("surface");
+	const auto surface = tags.get("surface");
 	if (!surface.empty() && surface != "asphalt" && surface != "paved" &&
 			surface != "concrete" && surface != "concrete:plates" &&
 			surface != "concrete:lanes" && surface != "cement" && surface != "chipseal" &&
@@ -113,6 +112,11 @@ std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
 		return std::nullopt;
 	return std::vector<Block>{block_definitions::RED_TERRACOTTA,
 			block_definitions::RED_TERRACOTTA, block_definitions::RED_CONCRETE};
+}
+
+std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
+{
+	return cycleway_palette(way.tags);
 }
 
 Block semirandom_surface(int x, int z, const std::vector<Block> &block_types)

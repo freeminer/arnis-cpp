@@ -69,22 +69,30 @@ std::optional<FacadeSet> FacadeSet::validate(std::vector<Entry> entries)
 	return set;
 }
 
-std::optional<FacadeSet> FacadeSet::load_directory(
-		const std::filesystem::path &directory, std::vector<std::string> *rejected)
+std::optional<FacadeSet> FacadeSet::load_directory(const std::filesystem::path &directory,
+		std::vector<std::string> *rejected, std::string *error)
 {
 	std::ifstream input(directory / "manifest.json");
-	if (!input)
+	if (!input) {
+		if (error)
+			*error = "no manifest.json";
 		return {};
+	}
 	nlohmann::json manifest;
 	try {
 		input >> manifest;
-	} catch (...) {
+	} catch (const std::exception &e) {
+		if (error)
+			*error = std::string("invalid manifest JSON: ") + e.what();
 		return {};
 	}
 	if (!manifest.contains("version") || !manifest["version"].is_number_unsigned() ||
 			manifest["version"].get<unsigned>() == 0 || !manifest.contains("textures") ||
-			!manifest["textures"].is_array())
+			!manifest["textures"].is_array()) {
+		if (error)
+			*error = "manifest must contain a positive version and a textures array";
 		return {};
+	}
 	const auto version = manifest["version"].get<unsigned>();
 	if (version > SCHEMA_VERSION)
 		std::cerr << "Warning: preset facade manifest is version " << version
@@ -92,9 +100,11 @@ std::optional<FacadeSet> FacadeSet::load_directory(
 				  << "; reading it and ignoring anything newer.\n";
 	std::vector<Entry> entries;
 	for (const auto &raw : manifest["textures"]) {
+		std::string entry_file;
 		try {
 			Entry entry;
 			entry.file = raw.at("file").get<std::string>();
+			entry_file = entry.file;
 			const std::filesystem::path file(entry.file);
 			if (!safe_name(entry.file) || file.is_absolute() || file.has_parent_path() ||
 					!std::filesystem::is_regular_file(directory / file)) {
@@ -116,11 +126,17 @@ std::optional<FacadeSet> FacadeSet::load_directory(
 			entry.tiles_horizontally = raw.value("tiles_horizontally", false);
 			entry.has_ground_floor = raw.value("has_ground_floor", false);
 			entries.push_back(std::move(entry));
-		} catch (...) {
+		} catch (const std::exception &e) {
 			if (rejected)
-				rejected->push_back("invalid manifest entry");
+				rejected->push_back(
+						entry_file.empty()
+								? std::string("invalid manifest entry: ") + e.what()
+								: entry_file + ": " + e.what());
 		}
 	}
-	return validate(std::move(entries));
+	auto set = validate(std::move(entries));
+	if (!set && error)
+		*error = "no usable textures";
+	return set;
 }
 }

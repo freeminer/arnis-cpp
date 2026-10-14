@@ -199,11 +199,13 @@ void connect_partition_zones(WorldEditor &editor,
 					{{"half", "lower"}, {"facing", facing}, {"hinge", "left"}}};
 			const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
 					{{"half", "upper"}, {"facing", facing}, {"hinge", "left"}}};
-			editor.set_block_with_properties_absolute(
-					lower, x, floor_abs + 1, z, std::nullopt, std::nullopt);
+			editor.set_block_with_properties_absolute(lower, x, floor_abs + 1, z,
+					std::nullopt,
+					std::optional<std::vector<Block>>(std::vector<Block>{}));
 			if (top_abs >= floor_abs + 2)
-				editor.set_block_with_properties_absolute(
-						upper, x, floor_abs + 2, z, std::nullopt, std::nullopt);
+				editor.set_block_with_properties_absolute(upper, x, floor_abs + 2, z,
+						std::nullopt,
+						std::optional<std::vector<Block>>(std::vector<Block>{}));
 			if (std::find(doors.begin(), doors.end(), opening.wall) == doors.end())
 				doors.push_back(opening.wall);
 			door_cells.insert(interior_cell_key(x, z));
@@ -343,8 +345,11 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 			unit_entry ? local(unit_entry->cell.first, unit_entry->cell.second).first
 					   : width / 2;
 	auto free = [&](int x, int z, int dy = 1) {
+		if (dy < 0 || dy > ceiling_y - floor_y)
+			return false;
 		const auto key = zone_key(x, z);
-		if (!zone.contains(key) || structural.contains(key) || kept.contains(key))
+		if (!zone.contains(key) || structural.contains(key) ||
+				(dy == 1 && kept.contains(key)))
 			return false;
 		const auto claim = claimed_top.find(key);
 		if (claim != claimed_top.end() && claim->second > floor_metres + 1.0)
@@ -705,8 +710,11 @@ void furnish_supermarket(WorldEditor &editor,
 	const int entry_u =
 			entry ? local(entry->cell.first, entry->cell.second).first : width / 2;
 	auto free = [&](int x, int z, int dy = 1) {
+		if (dy < 0 || dy > ceiling_y - floor_y)
+			return false;
 		const auto cell = key(x, z);
-		if (!zone.contains(cell) || structural.contains(cell) || kept.contains(cell))
+		if (!zone.contains(cell) || structural.contains(cell) ||
+				(dy == 1 && kept.contains(cell)))
 			return false;
 		const auto top = claimed_top.find(cell);
 		if (top != claimed_top.end() && top->second > floor_metres + 1.0)
@@ -820,17 +828,21 @@ void furnish_supermarket(WorldEditor &editor,
 void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 		const std::vector<std::pair<int, int>> &cells,
 		const std::vector<interior_uses::Entry> &entries,
-		const std::vector<std::pair<int, int>> &door_positions,
-		const std::unordered_set<std::uint64_t> &structural,
+		std::vector<std::pair<int, int>> &door_positions,
+		std::unordered_set<std::uint64_t> &structural,
+		std::vector<std::pair<int, int>> &wall_positions,
+		std::unordered_set<std::uint64_t> &planned_partition_cells,
+		std::vector<std::pair<int, int>> &partition_walls,
 		std::unordered_set<std::uint64_t> &kept,
 		const std::unordered_map<std::uint64_t, double> &claimed_top,
 		const CoordinateBitmap &passages, double floor_metres, int passage_top,
-		int floor_y, int base_y, int ceiling_y, std::uint64_t seed,
+		int floor_y, int base_y, int ceiling_y, Block wall_block, std::uint64_t seed,
 		std::uint64_t wood_seed, unsigned loot_salt)
 {
 	if (cells.empty())
 		return;
 	const auto wood = interior_wood(wood_seed);
+	const int top_y = base_y + (ceiling_y - floor_y) - 1;
 	auto key = [](int x, int z) { return interior_cell_key(x, z); };
 	std::unordered_set<std::uint64_t> zone;
 	int min_x = cells.front().first, max_x = min_x;
@@ -879,9 +891,103 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 	};
 	const int entry_u =
 			entry ? local(entry->cell.first, entry->cell.second).first : width / 2;
+	const bool has_kitchen = depth >= 13 && cells.size() >= 90;
+	const int kitchen_wall_v = depth - 5;
+	std::unordered_set<std::uint64_t> kitchen_partition;
+	std::optional<std::pair<int, int>> kitchen_door;
+	// Rust's eatery split_back creates a separate kitchen zone behind this
+	// partition; preserve the dining/kitchen boundary in the procedural C++ path.
+	if (has_kitchen) {
+		const auto back_area =
+				std::count_if(cells.begin(), cells.end(), [&](const auto &cell) {
+					return local(cell.first, cell.second).second > kitchen_wall_v;
+				});
+		std::vector<std::pair<int, int>> wall_cells;
+		for (const auto &[x, z] : cells)
+			if (local(x, z).second == kitchen_wall_v && !structural.contains(key(x, z)) &&
+					!kept.contains(key(x, z)) && !passages.contains(x, z) &&
+					(!claimed_top.contains(key(x, z)) ||
+							claimed_top.at(key(x, z)) <= floor_metres + 1.0) &&
+					!editor.get_block_absolute(x, base_y, z))
+				wall_cells.emplace_back(x, z);
+		std::stable_sort(
+				wall_cells.begin(), wall_cells.end(), [&](const auto &a, const auto &b) {
+					return std::abs(local(a.first, a.second).first - width / 2) <
+						   std::abs(local(b.first, b.second).first - width / 2);
+				});
+		auto kitchen_walkable = [&](int x, int z) {
+			const auto cell = key(x, z);
+			const auto claim = claimed_top.find(cell);
+			return zone.contains(cell) && !structural.contains(cell) &&
+				   (claim == claimed_top.end() || claim->second <= floor_metres + 1.0) &&
+				   (!passages.contains(x, z) || floor_y >= passage_top) &&
+				   (kept.contains(cell) || !editor.get_block_absolute(x, base_y, z));
+		};
+		if (back_area >= 6) {
+			for (const auto &[x, z] : wall_cells) {
+				const auto [u, v] = local(x, z);
+				const auto [front_x, front_z] = world(u, v - 1);
+				const auto [back_x, back_z] = world(u, v + 1);
+				if (kitchen_walkable(front_x, front_z) &&
+						kitchen_walkable(back_x, back_z)) {
+					kitchen_door = std::pair{x, z};
+					break;
+				}
+			}
+		}
+		if (kitchen_door) {
+			for (const auto &[x, z] : wall_cells) {
+				if (std::pair{x, z} == *kitchen_door)
+					continue;
+				const auto cell = key(x, z);
+				kitchen_partition.insert(cell);
+				structural.insert(cell);
+				planned_partition_cells.insert(cell);
+				partition_walls.emplace_back(x, z);
+				wall_positions.emplace_back(x, z);
+				for (int y = base_y; y <= top_y; ++y)
+					editor.set_block_absolute(wall_block, x, y, z);
+			}
+			const auto facing = ladder_facing(n);
+			const BlockWithProperties lower{DARK_OAK_DOOR_LOWER,
+					{{"half", "lower"}, {"facing", facing}, {"hinge", "left"}}};
+			const BlockWithProperties upper{DARK_OAK_DOOR_UPPER,
+					{{"half", "upper"}, {"facing", facing}, {"hinge", "left"}}};
+			editor.set_block_with_properties_absolute(lower, kitchen_door->first, base_y,
+					kitchen_door->second, std::nullopt, std::nullopt);
+			if (top_y > base_y)
+				editor.set_block_with_properties_absolute(upper, kitchen_door->first,
+						base_y + 1, kitchen_door->second, std::nullopt, std::nullopt);
+			for (int y = base_y + 2; y <= top_y; ++y)
+				editor.set_block_absolute(
+						wall_block, kitchen_door->first, y, kitchen_door->second);
+			const auto door_key = key(kitchen_door->first, kitchen_door->second);
+			structural.insert(door_key);
+			planned_partition_cells.insert(door_key);
+			door_positions.push_back(*kitchen_door);
+			kept.insert(door_key);
+			// Canvas::door keeps both cells across the doorway walkable. The
+			// procedural kitchen path must reserve them from counters and tables.
+			for (const int side : {-1, 1}) {
+				const int x = kitchen_door->first + side * n.first;
+				const int z = kitchen_door->second + side * n.second;
+				const auto cell = key(x, z);
+				if (zone.contains(cell) && !structural.contains(cell) &&
+						!kitchen_partition.contains(cell) &&
+						!(passages.contains(x, z) && floor_y < passage_top) &&
+						!editor.get_block_absolute(x, base_y, z))
+					kept.insert(cell);
+			}
+		} else {
+			kitchen_partition.clear();
+		}
+	}
 	auto free = [&](int x, int z, int dy = 1) {
+		if (dy < 0 || dy > ceiling_y - floor_y)
+			return false;
 		const auto cell = key(x, z);
-		if (!zone.contains(cell) || structural.contains(cell) || kept.contains(cell))
+		if (!zone.contains(cell) || structural.contains(cell) ||
+				kitchen_partition.contains(cell) || (dy == 1 && kept.contains(cell)))
 			return false;
 		const auto top = claimed_top.find(cell);
 		if (top != claimed_top.end() && top->second > floor_metres + 1.0)
@@ -925,7 +1031,7 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 			const int nx = x + d.first, nz = z + d.second;
 			const auto cell = key(nx, nz);
 			if (zone.contains(cell) && !structural.contains(cell) &&
-					!distance.contains(cell) &&
+					!kitchen_partition.contains(cell) && !distance.contains(cell) &&
 					!editor.get_block_absolute(nx, base_y, nz)) {
 				distance.emplace(cell, next);
 				queue.emplace_back(nx, nz);
@@ -934,37 +1040,90 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 	}
 	const auto kind = unit.use.eatery;
 	const int mid = width / 2;
-	const bool has_kitchen = depth >= 13 && cells.size() >= 90;
-	const int service_v = std::max(2, has_kitchen ? depth - 7 : depth - 3);
-	if (has_kitchen) {
+	// Rust only moves the service counter forward when split_back actually
+	// created the kitchen zone. If the partition cannot fit (door, passage, or
+	// structural collision), keep the counter at the ordinary back-wall row.
+	const int service_v = kitchen_door ? depth - 7 : depth - 3;
+	if (kitchen_door) {
+		std::unordered_set<std::uint64_t> kitchen_cells;
 		for (const auto &[x, z] : cells) {
-			const auto [u, v] = local(x, z);
-			if (v == depth - 2 && free(x, z)) {
-				const auto h = interior_mix(x, z, seed ^ 0x4C17ULL);
-				const char *facing = ladder_facing({-n.first, -n.second});
-				if (h % 5 == 0 || h % 5 == 1) {
-					const BlockWithProperties appliance{
-							h % 5 == 0 ? SMOKER : FURNACE, {{"facing", facing}}};
-					put_with(x, z, 1, appliance);
-				} else if (h % 5 == 2) {
-					put(x, z, 1, WATER_CAULDRON);
-				} else if (h % 5 == 3) {
-					put(x, z, 1, CRAFTING_TABLE);
-				} else {
-					put(x, z, 1, BARREL);
+			const auto cell = key(x, z);
+			const auto claim = claimed_top.find(cell);
+			const bool claim_clear =
+					claim == claimed_top.end() || claim->second <= floor_metres + 1.0;
+			const bool clear = !structural.contains(cell) &&
+							   !kitchen_partition.contains(cell) && claim_clear &&
+							   !(passages.contains(x, z) && floor_y < passage_top) &&
+							   !editor.get_block_absolute(x, base_y, z);
+			if (local(x, z).second > kitchen_wall_v && clear)
+				kitchen_cells.insert(key(x, z));
+		}
+		std::unordered_map<std::uint64_t, int> kitchen_depth;
+		std::deque<std::pair<int, int>> kitchen_queue;
+		for (const auto &[x, z] : cells) {
+			const auto cell = key(x, z);
+			if (!kitchen_cells.contains(cell))
+				continue;
+			if (std::any_of(
+						INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
+							return !kitchen_cells.contains(
+									key(x + d.first, z + d.second));
+						})) {
+				kitchen_depth.emplace(cell, 1);
+				kitchen_queue.emplace_back(x, z);
+			}
+		}
+		while (!kitchen_queue.empty()) {
+			const auto [x, z] = kitchen_queue.front();
+			kitchen_queue.pop_front();
+			const int next = kitchen_depth.at(key(x, z)) + 1;
+			for (const auto &d : INTERIOR_DIRS) {
+				const int nx = x + d.first, nz = z + d.second;
+				const auto cell = key(nx, nz);
+				if (kitchen_cells.contains(cell) && !kitchen_depth.contains(cell)) {
+					kitchen_depth.emplace(cell, next);
+					kitchen_queue.emplace_back(nx, nz);
 				}
-			} else if (v == depth - 4 && distance.contains(key(x, z)) &&
-					   distance.at(key(x, z)) >= 3 && interior_mix(x, z, seed) % 2 == 0) {
+			}
+		}
+		// Rust furnishes every kitchen wall, then adds prep counters and food
+		// stores throughout the back room rather than only on its last row.
+		for (const auto &[x, z] : cells) {
+			if (!kitchen_cells.contains(key(x, z)) || !free(x, z))
+				continue;
+			std::optional<std::pair<int, int>> inward;
+			for (const auto &d : INTERIOR_DIRS)
+				if (!kitchen_cells.contains(key(x + d.first, z + d.second))) {
+					inward = std::pair{-d.first, -d.second};
+					break;
+				}
+			if (!inward)
+				continue;
+			const auto h = interior_mix(x, z, seed ^ 0x4C17ULL);
+			if (h % 5 == 0 || h % 5 == 1) {
+				const BlockWithProperties appliance{h % 5 == 0 ? SMOKER : FURNACE,
+						{{"facing", ladder_facing(*inward)}}};
+				put_with(x, z, 1, appliance);
+			} else if (h % 5 == 2) {
+				put(x, z, 1, WATER_CAULDRON);
+			} else if (h % 5 == 3) {
+				put(x, z, 1, CRAFTING_TABLE);
+			} else {
+				put(x, z, 1, BARREL);
+			}
+		}
+		for (const auto &[x, z] : cells) {
+			if (!kitchen_cells.contains(key(x, z)))
+				continue;
+			const auto depth = kitchen_depth.find(key(x, z));
+			if (depth != kitchen_depth.end() && depth->second >= 3 &&
+					interior_mix(x, z, seed) % 2 == 0) {
 				const BlockWithProperties prep{SMOOTH_STONE_SLAB, {{"type", "top"}}};
 				put_with(x, z, 1, prep);
 			}
-			(void)u;
 		}
-		// The Rust kitchen sub-zone keeps a few deterministic food-stock chests
-		// along the back prep area, in addition to its counters and appliances.
 		for (const auto &[x, z] : cells) {
-			const int v = local(x, z).second;
-			if (v < depth - 5 || !free(x, z) ||
+			if (!kitchen_cells.contains(key(x, z)) || !free(x, z) ||
 					interior_mix(x, z, seed ^ 0xF00DULL) % 9 != 0)
 				continue;
 			std::vector<std::tuple<std::string, int, int>> items;
@@ -1156,8 +1315,11 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 	const int entry_u =
 			entry ? local(entry->cell.first, entry->cell.second).first : width / 2;
 	auto free = [&](int x, int z, int dy = 1) {
+		if (dy < 0 || dy > ceiling_y - floor_y)
+			return false;
 		const auto cell = key(x, z);
-		if (!zone.contains(cell) || structural.contains(cell) || kept.contains(cell))
+		if (!zone.contains(cell) || structural.contains(cell) ||
+				(dy == 1 && kept.contains(cell)))
 			return false;
 		const auto top = claimed_top.find(cell);
 		if (top != claimed_top.end() && top->second > floor_metres + 1.0)
@@ -1504,9 +1666,13 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 	if (kind == interior_uses::UseKind::SportsHall) {
 		// Rust Canvas::floor replaces the hall's walkable floor cells with the
 		// selected wood planks before painting court markings and seating.
-		for (const auto &[x, z] : cells)
-			editor.set_block_absolute(
-					wood.planks, x, base_y - 1, z, std::nullopt, std::nullopt);
+		for (const auto &[x, z] : cells) {
+			const auto cell = key(x, z);
+			if (structural.contains(cell) || editor.get_block_absolute(x, base_y, z))
+				continue;
+			editor.set_block_absolute(wood.planks, x, base_y - 1, z, std::nullopt,
+					std::optional<std::vector<Block>>(std::vector<Block>{}));
+		}
 		const bool stands = width >= 16;
 		if (stands) {
 			for (int v = 2; v < depth - 2; ++v) {
@@ -1950,7 +2116,8 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		std::uint64_t wood_seed, unsigned loot_salt, std::size_t floor_index,
 		std::size_t floor_count, Block wall_block,
 		std::unordered_set<std::uint64_t> &planned,
-		std::vector<std::pair<int, int>> &wall_positions)
+		std::vector<std::pair<int, int>> &wall_positions,
+		std::vector<std::pair<int, int>> &partition_walls)
 {
 	if (cells.empty())
 		return;
@@ -2063,8 +2230,11 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 	const int entry_u =
 			entry ? local(entry->cell.first, entry->cell.second).first : width / 2;
 	auto free = [&](int x, int z, int dy = 1) {
+		if (dy < 0 || dy > ceiling_y - floor_y)
+			return false;
 		const auto cell = key(x, z);
-		if (!zone.contains(cell) || structural.contains(cell) || kept.contains(cell))
+		if (!zone.contains(cell) || structural.contains(cell) ||
+				(dy == 1 && kept.contains(cell)))
 			return false;
 		const auto top = claimed_top.find(cell);
 		if (top != claimed_top.end() && top->second > floor_metres + 1.0)
@@ -3469,9 +3639,11 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 						const std::vector<interior_uses::Entry> restaurant_entries = {
 								{restaurant_entry_cell, n}};
 						furnish_eatery(editor, restaurant, restaurant_cells,
-								restaurant_entries, door_positions, structural, kept,
+								restaurant_entries, door_positions, structural,
+								wall_positions, planned, partition_walls, kept,
 								claimed_top, passages, floor_metres, passage_top, floor_y,
-								base_y, ceiling_y, seed, wood_seed, loot_salt);
+								base_y, ceiling_y, wall_block, seed, wood_seed,
+								loot_salt);
 					}
 				}
 				std::deque<std::pair<int, int>> lobby_queue;
@@ -4351,9 +4523,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			// stair/ladder cells on every storey before it partitions unit zones.
 			auto keep_pair = [&](std::pair<int, int> cell) {
 				const auto key = interior_cell_key(cell.first, cell.second);
-				if (floor_area_set.contains(key) &&
-						!editor.get_block_absolute(cell.first,
-								floor_y + abs_terrain_offset + 1, cell.second))
+				if (initially_walkable_cells.contains(key))
 					kept_cells.insert(key);
 			};
 			// Match Rust Canvas::clear_doorways: furniture must not obstruct the
@@ -4789,13 +4959,14 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				if (unit.use.kind == interior_uses::UseKind::Food) {
 					if (unit_index < unit_zone_cells.size())
 						furnish_eatery(editor, unit, unit_zone_cells[unit_index], entries,
-								door_positions, structural_cells, kept_cells, claimed_top,
-								building_passages, floor_metres,
+								door_positions, structural_cells, wall_positions,
+								planned_partition_cells, partition_walls, kept_cells,
+								claimed_top, building_passages, floor_metres,
 								start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
 														 building_height),
 								floor_y, floor_y + y_offset + abs_terrain_offset,
-								current_floor_ceiling, floor_seed, interior_seed,
-								building_salt);
+								current_floor_ceiling, wall_block, floor_seed,
+								interior_seed, building_salt);
 					continue;
 				}
 				if (unit.use.kind == interior_uses::UseKind::School ||
@@ -4818,7 +4989,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 								floor_y, floor_y + y_offset + abs_terrain_offset,
 								current_floor_ceiling, floor_seed, interior_seed,
 								building_salt, floor_index, floor_levels.size(),
-								wall_block, planned_partition_cells, wall_positions);
+								wall_block, planned_partition_cells, wall_positions,
+								partition_walls);
 					continue;
 				}
 				if (unit.use.kind == interior_uses::UseKind::Worship ||
@@ -5415,11 +5587,13 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 										{"hinge", "left"}}};
 						editor.set_block_with_properties_absolute(lower, x,
 								floor_y + y_offset + abs_terrain_offset, z, std::nullopt,
-								std::nullopt);
+								std::optional<std::vector<Block>>(std::vector<Block>{}));
 						if (current_floor_ceiling >= floor_y + y_offset + 1)
 							editor.set_block_with_properties_absolute(upper, x,
 									floor_y + y_offset + abs_terrain_offset + 1, z,
-									std::nullopt, std::nullopt);
+									std::nullopt,
+									std::optional<std::vector<Block>>(
+											std::vector<Block>{}));
 					}
 				}
 			}

@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <iterator>
 #include <memory>
 #include <mutex>
@@ -109,11 +110,28 @@ void reset(bool want, const std::optional<std::filesystem::path> &directory,
 	const auto px_per_block = pixels_per_block ? pixels_per_block : 16u;
 	s.ppm = std::min(
 			SET_PX_PER_M, static_cast<double>(px_per_block) * std::max(0.0, s.scale));
-	if (!want || !directory)
+	if (!want)
 		return;
+	if (!directory) {
+		std::cerr << "Warning: Preset facades: no facade directory was resolved; "
+					 "buildings keep their blocks.\n";
+		return;
+	}
 	s.directory = *directory;
-	s.set = FacadeSet::load_directory(s.directory);
+	std::vector<std::string> rejected;
+	std::string error;
+	s.set = FacadeSet::load_directory(s.directory, &rejected, &error);
 	s.enabled = s.set && !s.set->entries().empty();
+	if (!s.enabled) {
+		std::cerr << "Warning: Preset facades: " << error << " in "
+				  << s.directory.string() << "; buildings keep their blocks.\n";
+		return;
+	}
+	std::cerr << "Preset facades: " << s.set->entries().size() << " textures";
+	if (!rejected.empty())
+		std::cerr << ", " << rejected.size() << " entries skipped (" << rejected.front()
+				  << (rejected.size() > 1 ? ", and others" : "") << ')';
+	std::cerr << " from " << s.directory.string() << '\n';
 }
 
 void set_world_extent(int min_x, int min_z, int max_x, int max_z)
@@ -150,7 +168,9 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		ppm = s.ppm;
 		scale = s.scale;
 	}
-	std::unordered_map<std::size_t, RgbImage> images;
+	// Cache failed decodes too. Rust's FacadeSet::image stores `None` for a
+	// broken photograph, so every later wall skips it without decoding again.
+	std::unordered_map<std::size_t, std::optional<RgbImage>> images;
 	std::size_t placed = 0;
 	for (auto &run : pending) {
 		const auto group = groups.find(run.group);
@@ -170,11 +190,17 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 			continue;
 		auto image = images.find(choice.entry);
 		if (image == images.end()) {
-			auto loaded = load_image(directory, set->entries()[choice.entry], ppm);
+			std::string decode_error;
+			auto loaded = load_image(
+					directory, set->entries()[choice.entry], ppm, &decode_error);
 			if (!loaded)
-				continue;
-			image = images.emplace(choice.entry, std::move(*loaded)).first;
+				std::cerr << "Warning: preset facade "
+						  << set->entries()[choice.entry].file << ": " << decode_error
+						  << "; skipping it.\n";
+			image = images.emplace(choice.entry, std::move(loaded)).first;
 		}
+		if (!image->second)
+			continue;
 		const auto normal = mapillary::displays::outward_normal(
 				run.dir, run.normal.first, run.normal.second);
 		if (!normal)
@@ -241,7 +267,7 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 					const double y0 =
 							static_cast<double>(rows_hidden) / std::max(0.001, scale);
 					const double y1 = height;
-					const auto panel = gather_region(fit, image->second, x0, x1, y0, y1);
+					const auto panel = gather_region(fit, *image->second, x0, x1, y0, y1);
 					if (!panel)
 						continue;
 					const auto &[x, z] = run.cells[piece];

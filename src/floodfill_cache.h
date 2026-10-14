@@ -6,6 +6,7 @@
 #include <chrono>
 #include <optional>
 #include <mutex>
+#include <utility>
 
 #include "mapgen/earth/arnis_adapter.h"
 #include "osm_parser.h"
@@ -114,12 +115,18 @@ class FloodFillCache;
 class FloodFillCache
 {
 private:
+	struct CachedFill
+	{
+		mutable std::mutex mutex;
+		FloodFillResult result;
+		explicit CachedFill(FloodFillResult value) : result(std::move(value)) {}
+	};
+
 	/// Cached results: element_id -> filled coordinates
-	mutable std::unordered_map<uint64_t,
-			std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>>
-			way_cache;
+	mutable std::unordered_map<uint64_t, std::shared_ptr<CachedFill>> way_cache;
 	mutable std::mutex way_cache_mutex;
 	bool retain_entries_{false};
+	std::shared_ptr<CachedFill> find_cached_fill(uint64_t way_id) const;
 
 	/// Determines if a way element needs flood fill based on its tags.
 	static bool way_needs_flood_fill(const ProcessedWay &way);

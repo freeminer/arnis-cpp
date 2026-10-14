@@ -538,6 +538,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		std::cout << "[6/7] Generating ground...\n";
 	const bool terrain_enabled = editor.ground ? editor.ground->elevation_enabled
 											   : generation_mode_terrain(args.mode);
+	// Rust's generator treats Ground as the authoritative source for the active
+	// celestial body. Args is only a fallback for host callers that do not
+	// attach a Ground instance.
+	const auto body = editor.ground ? editor.ground->celestial_body() : args.body;
 	const int tree_spacing = std::max(1, editor.get_tree_slot_spacing());
 	const bool schematic_trees = editor.has_schematic_tree_pack();
 	const auto geographic_bounds = editor.geographic_bounds();
@@ -653,7 +657,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					const bool steep_override =
 							terrain_enabled && slope > 4 && (slope > 6 || !mapped_sand);
 					const auto relative = editor.ground_point(x, z);
-					const bool planetary = !is_earth(args.body);
+					const bool planetary = !is_earth(body);
 					const bool has_cover = !planetary && editor.ground &&
 										   editor.ground->has_land_cover();
 					const std::uint8_t cover_here =
@@ -758,8 +762,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						// that surface while the selected under-block still closes the terrain.
 						if (process_surface) {
 							const auto planetary_palette =
-									planetary ? celestial_surface_palette(args.body,
-														slope, celestial_center_latitude,
+									planetary ? celestial_surface_palette(body, slope,
+														celestial_center_latitude,
 														ground_y, x, z)
 											  : std::pair<Block, Block>{};
 							const std::pair<Block, Block> palette =

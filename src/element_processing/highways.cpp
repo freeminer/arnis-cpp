@@ -142,6 +142,9 @@ bool is_pedestrian_way_tags(const crate::tags_t &tags)
 std::vector<crate::block_definitions::Block> surface_palette(
 		const std::string &highway, const crate::tags_t &tags)
 {
+	if (highway == "cycleway")
+		if (const auto blocks = crate::surfaces::cycleway_palette(tags))
+			return *blocks;
 	const auto surface = tags.get("surface");
 	if (is_pedestrian_way_tags(tags) &&
 			(surface == "concrete" || surface == "paving_stones" || surface == "sett"))
@@ -538,12 +541,11 @@ int highway_block_range(const std::string &highway_type,
 		const std::unordered_map<std::string, std::string> &tags, double scale)
 {
 	int block_range = 2;
+	bool scales_with_lanes = true;
 	if (highway_type == "footway" || highway_type == "pedestrian" ||
-			highway_type == "path" || highway_type == "cycleway" ||
-			highway_type == "track" || highway_type == "secondary_link" ||
-			highway_type == "tertiary_link" || highway_type == "escape" ||
-			highway_type == "steps") {
+			highway_type == "path" || highway_type == "cycleway") {
 		block_range = 1;
+		scales_with_lanes = false;
 	} else if (highway_type == "motorway" || highway_type == "primary" ||
 			   highway_type == "trunk") {
 		block_range = 5;
@@ -551,27 +553,22 @@ int highway_block_range(const std::string &highway_type,
 		block_range = 4;
 	} else if (highway_type == "tertiary") {
 		block_range = 2;
+	} else if (highway_type == "track" || highway_type == "escape" ||
+			   highway_type == "steps") {
+		block_range = 1;
+		scales_with_lanes = false;
 	} else if (highway_type == "service") {
 		block_range = 2;
-	} else {
-		auto it_lanes = tags.find("lanes");
-		if (it_lanes != tags.end()) {
-			if (it_lanes->second == "2")
-				block_range = 3;
-			else if (it_lanes->second != "1")
-				block_range = 4;
-		}
+	} else if (highway_type == "secondary_link" || highway_type == "tertiary_link") {
+		block_range = 1;
 	}
-	const auto default_lanes =
-			(highway_type == "motorway" || highway_type == "primary" ||
-					highway_type == "trunk" || highway_type == "secondary" ||
-					highway_type == "tertiary")
-					? 2
-					: 1;
-	int lanes = default_lanes;
-	if (const auto it = tags.find("lanes"); it != tags.end())
-		lanes = std::clamp(
-				crate::strict_parse::i32(it->second).value_or(default_lanes), 1, 16);
+	const int default_lanes = highway_default_lanes(highway_type);
+	const auto lane_tag = tags.find("lanes");
+	const int lanes = std::clamp(
+			lane_tag == tags.end()
+					? default_lanes
+					: crate::strict_parse::i32(lane_tag->second).value_or(default_lanes),
+			1, 16);
 	// An explicitly mapped physical width takes precedence. Otherwise retain the
 	// historic type width as a minimum and enlarge multi-lane carriageways.
 	if (const auto it = tags.find("width"); it != tags.end()) {
@@ -587,12 +584,10 @@ int highway_block_range(const std::string &highway_type,
 		if (const auto metres = crate::strict_parse::f64(width);
 				metres && std::isfinite(*metres) && *metres > 0.0) {
 			const double rounded = std::round(*metres / 2.0);
-			block_range = rounded > 8.0 ? 9 : static_cast<int>(rounded);
+			block_range = static_cast<int>(
+					std::clamp(rounded, 1.0, static_cast<double>(MAX_BLOCK_RANGE)));
 		}
-	} else if (highway_type != "footway" && highway_type != "pedestrian" &&
-			   highway_type != "path" && highway_type != "cycleway" &&
-			   highway_type != "track" && highway_type != "escape" &&
-			   highway_type != "steps") {
+	} else if (scales_with_lanes) {
 		block_range = std::max(
 				block_range, static_cast<int>(std::round((lanes * 3.5 - 1.0) / 2.0)));
 	}
@@ -942,11 +937,6 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		place_way_lamps(editor, way, block_range, road_mask);
 
 	auto block_types = surface_palette(highway_type, way.tags);
-	const auto cycleway_blocks = highway_type == "cycleway"
-										 ? crate::surfaces::cycleway_palette(way)
-										 : std::nullopt;
-	if (cycleway_blocks)
-		block_types = *cycleway_blocks;
 	const bool pedestrian = is_pedestrian_way_tags(way.tags);
 	const auto crossing_paint =
 			pedestrian ? markings.crossing_way_paint(way.tags) : std::nullopt;

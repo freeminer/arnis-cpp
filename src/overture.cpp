@@ -46,7 +46,6 @@
 #undef read
 #endif
 
-
 namespace arnis::overture
 {
 
@@ -1293,10 +1292,17 @@ BuildingSource parquet_building_source(std::filesystem::path path)
 std::optional<ProcessedWay> overture_building_to_way(
 		const OvertureBuilding &building, const geographic::LLBBox &bbox, double scale)
 {
+	return overture_building_to_way(building, bbox,
+			projection::ProjectionSpec{
+					projection::ProjectionKind::Local, std::nullopt, scale, 0});
+}
+
+std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &building,
+		const geographic::LLBBox &bbox, const projection::ProjectionSpec &projection_spec)
+{
 	if (building.exterior_ring.size() < 3)
 		return std::nullopt;
-	const auto [transformer, rectangle] =
-			coordinate_system::CoordTransformer::llbbox_to_xzbbox(bbox, scale);
+	const auto [transformer, rectangle] = projection_spec.transformer(bbox);
 	const auto base = gers_id_to_u64(building.id);
 	ProcessedWay way;
 	way.id = base;
@@ -1327,8 +1333,9 @@ std::optional<ProcessedWay> overture_building_to_way(
 		closing_node.id = base + building.exterior_ring.size();
 		way.nodes.push_back(std::move(closing_node));
 	}
-	XZBBox clipbox(
-			rectangle.min().x, rectangle.min().z, rectangle.max().x, rectangle.max().z);
+	const auto clip_rectangle = projection_spec.clip_bbox(rectangle);
+	XZBBox clipbox(clip_rectangle.min().x, clip_rectangle.min().z, clip_rectangle.max().x,
+			clip_rectangle.max().z);
 	const auto source_nodes = way.nodes;
 	way.nodes = clipping::clip_way_to_bbox(source_nodes, clipbox);
 	// The generic clipper emits projected nodes. Restore their geographic
@@ -1358,6 +1365,18 @@ std::optional<ProcessedWay> overture_building_to_way(
 				node.longitude = a.longitude + t * (b.longitude - a.longitude);
 			}
 		}
+	}
+	// In padded runs, retain only ways that can contribute blocks inside the
+	// requested world rectangle. The padding keeps crossing footprints whole
+	// for clipping/rendering without admitting detached geometry.
+	if (projection_spec.clip_pad > 0 && !way.nodes.empty()) {
+		const auto [min_x, max_x] = std::minmax_element(way.nodes.begin(),
+				way.nodes.end(), [](const auto &a, const auto &b) { return a.x < b.x; });
+		const auto [min_z, max_z] = std::minmax_element(way.nodes.begin(),
+				way.nodes.end(), [](const auto &a, const auto &b) { return a.z < b.z; });
+		if (max_x->x < rectangle.min().x || min_x->x > rectangle.max().x ||
+				max_z->z < rectangle.min().z || min_z->z > rectangle.max().z)
+			return std::nullopt;
 	}
 	if (way.nodes.size() < 4)
 		return std::nullopt;
@@ -1410,6 +1429,17 @@ std::vector<ProcessedElement> convert_overture_buildings(
 		const std::vector<OvertureBuilding> &buildings, const geographic::LLBBox &bbox,
 		double scale, bool include_osm_sourced, std::size_t maximum)
 {
+	return convert_overture_buildings(buildings, bbox,
+			projection::ProjectionSpec{
+					projection::ProjectionKind::Local, std::nullopt, scale, 0},
+			include_osm_sourced, maximum);
+}
+
+std::vector<ProcessedElement> convert_overture_buildings(
+		const std::vector<OvertureBuilding> &buildings, const geographic::LLBBox &bbox,
+		const projection::ProjectionSpec &projection_spec, bool include_osm_sourced,
+		std::size_t maximum)
+{
 	std::vector<ProcessedElement> out;
 	out.reserve(std::min(maximum, buildings.size()));
 	for (const auto &building : buildings) {
@@ -1422,7 +1452,7 @@ std::vector<ProcessedElement> convert_overture_buildings(
 			continue;
 		if (!include_osm_sourced && building.is_osm_sourced)
 			continue;
-		if (auto way = overture_building_to_way(building, bbox, scale))
+		if (auto way = overture_building_to_way(building, bbox, projection_spec))
 			out.push_back(ProcessedElement::FromWay(*way));
 	}
 	return out;
@@ -1436,12 +1466,31 @@ std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource
 			.elements;
 }
 
+std::vector<ProcessedElement> fetch_overture_buildings_from(const BuildingSource &source,
+		const geographic::LLBBox &bbox, const projection::ProjectionSpec &projection_spec,
+		bool include_osm_sourced, std::size_t maximum)
+{
+	return fetch_overture_data_from(
+			source, bbox, projection_spec, include_osm_sourced, maximum)
+			.elements;
+}
+
 OvertureData fetch_overture_data_from(const BuildingSource &source,
 		const geographic::LLBBox &bbox, double scale, bool include_osm_sourced,
 		std::size_t maximum)
 {
+	return fetch_overture_data_from(source, bbox,
+			projection::ProjectionSpec{
+					projection::ProjectionKind::Local, std::nullopt, scale, 0},
+			include_osm_sourced, maximum);
+}
+
+OvertureData fetch_overture_data_from(const BuildingSource &source,
+		const geographic::LLBBox &bbox, const projection::ProjectionSpec &projection_spec,
+		bool include_osm_sourced, std::size_t maximum)
+{
 	OvertureData out;
-	if (!source || scale <= 0)
+	if (!source || projection_spec.scale <= 0)
 		return out;
 	if (maximum == 0)
 		maximum = overture_building_budget(bbox);
@@ -1465,7 +1514,7 @@ OvertureData fetch_overture_data_from(const BuildingSource &source,
 				continue;
 			if (out.elements.size() >= maximum)
 				continue;
-			if (auto way = overture_building_to_way(building, bbox, scale))
+			if (auto way = overture_building_to_way(building, bbox, projection_spec))
 				out.elements.push_back(ProcessedElement::FromWay(*way));
 		}
 	} catch (...) {
@@ -1481,6 +1530,18 @@ OvertureData fetch_overture_data_from_transports(
 		const BuildingTransportSource &parquet_source, const geographic::LLBBox &bbox,
 		double scale, OvertureSource source, bool include_osm_sourced,
 		std::size_t maximum)
+{
+	return fetch_overture_data_from_transports(tile_source, parquet_source, bbox,
+			projection::ProjectionSpec{
+					projection::ProjectionKind::Local, std::nullopt, scale, 0},
+			source, include_osm_sourced, maximum);
+}
+
+OvertureData fetch_overture_data_from_transports(
+		const BuildingTransportSource &tile_source,
+		const BuildingTransportSource &parquet_source, const geographic::LLBBox &bbox,
+		const projection::ProjectionSpec &projection_spec, OvertureSource source,
+		bool include_osm_sourced, std::size_t maximum)
 {
 	const auto collect =
 			[&](const BuildingTransportSource &transport) -> std::optional<OvertureData> {
@@ -1500,7 +1561,7 @@ OvertureData fetch_overture_data_from_transports(
 			return std::vector<OvertureBuilding>{};
 		};
 		auto result = fetch_overture_data_from(
-				adapter, bbox, scale, include_osm_sourced, maximum);
+				adapter, bbox, projection_spec, include_osm_sourced, maximum);
 		if (failed)
 			return std::nullopt;
 		return result;
@@ -1529,7 +1590,18 @@ OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 		double max_lng, double scale, bool debug, OvertureSource source)
 {
 	const geographic::LLBBox bbox(min_lat, min_lng, max_lat, max_lng);
-	if (scale <= 0.0 || min_lat > max_lat || min_lng > max_lng)
+	return fetch_overture_data(bbox,
+			projection::ProjectionSpec{
+					projection::ProjectionKind::Local, std::nullopt, scale, 0},
+			debug, source);
+}
+
+OvertureData fetch_overture_data(const geographic::LLBBox &bbox,
+		const projection::ProjectionSpec &projection_spec, bool debug,
+		OvertureSource source)
+{
+	if (projection_spec.scale <= 0.0 || bbox.min().lat() > bbox.max().lat() ||
+			bbox.min().lng() > bbox.max().lng())
 		return {};
 	const bool tiles_cover = overture_tiles_cover(bbox);
 	if (source == OvertureSource::Tiles && !tiles_cover) {
@@ -1546,7 +1618,7 @@ OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 					  << "using GeoParquet.\n";
 		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
 												"overture-buildings.parquet")),
-				bbox, scale);
+				bbox, projection_spec);
 #else
 		if (debug)
 			std::cerr
@@ -1625,7 +1697,8 @@ OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 		const BuildingSource rows_source =
 				[rows = std::move(*rows)](const geographic::LLBBox &,
 						std::size_t) mutable { return std::move(rows); };
-		auto result = fetch_overture_data_from(rows_source, bbox, scale, false, maximum);
+		auto result = fetch_overture_data_from(
+				rows_source, bbox, projection_spec, false, maximum);
 		if (!release_env) {
 			cache::set_last_good_release(cache::cache_root(), release);
 			cache::prune_releases_older_than(cache::cache_root(), release);
@@ -1639,7 +1712,7 @@ OvertureData fetch_overture_data(double min_lat, double min_lng, double max_lat,
 				  << "); falling back to the GeoParquet source.\n";
 		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
 												"overture-buildings.parquet")),
-				bbox, scale);
+				bbox, projection_spec);
 #else
 		std::cerr << "Warning: Overture vector tiles unavailable and Arrow/Parquet "
 				  << "fallback is disabled.\n";
