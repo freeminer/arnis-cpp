@@ -1342,7 +1342,7 @@ using RailBridgeInternalEndpoints = std::vector<std::pair<int, int>>;
 void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &way);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element,
-		std::vector<std::pair<int, int>> &subway_points,
+		std::vector<std::pair<int, int>> &rail_tunnel_points,
 		const RailBridgeInternalEndpoints &rail_bridge_internal_endpoints,
 		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
 		const CoordinateBitmap &road_mask, const CoordinateBitmap &building_footprints,
@@ -1355,8 +1355,8 @@ CoordinateBitmap collect_at_grade_rail_mask(
 		const std::vector<ProcessedElement> &elements, const XZBBox &xzbbox);
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		const XZBBox &xzbbox, CoordinateBitmap &footprint);
-void carve_subway_interior(
-		WorldEditor &editor, const std::vector<std::pair<int, int>> &subway_points);
+void carve_rail_tunnel_interior(
+		WorldEditor &editor, const std::vector<std::pair<int, int>> &rail_tunnel_points);
 }
 
 namespace tourisms
@@ -2106,7 +2106,7 @@ bool generate_world(WorldEditor &editor,
 		prepare_elements_for_generation(ordered_elements);
 	struct ElementDispatchState
 	{
-		std::vector<std::pair<int, int>> subway_points;
+		std::vector<std::pair<int, int>> rail_tunnel_points;
 		std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
 	};
 	ElementDispatchState dispatch_state;
@@ -2358,8 +2358,9 @@ bool generate_world(WorldEditor &editor,
 		// this tile is merged. The editor's strict bounds keep the global tunnel
 		// indexes from writing outside the tile being finalized.
 		if (regional_ground_passes && streaming_order) {
-			if (!tile_state.subway_points.empty())
-				railways::carve_subway_interior(editor, tile_state.subway_points);
+			if (!tile_state.rail_tunnel_points.empty())
+				railways::carve_rail_tunnel_interior(
+						editor, tile_state.rail_tunnel_points);
 			if (!tile_state.highway_tunnel_cells.empty())
 				highways::carve_highway_tunnel_interior(
 						editor, tile_state.highway_tunnel_cells);
@@ -2377,8 +2378,8 @@ bool generate_world(WorldEditor &editor,
 	std::optional<WorldEditor> active_tile_worker;
 	ElementDispatchState active_tile_dispatch_state;
 	auto collect_tile_dispatch_state = [&](const ElementDispatchState &state) {
-		dispatch_state.subway_points.insert(dispatch_state.subway_points.end(),
-				state.subway_points.begin(), state.subway_points.end());
+		dispatch_state.rail_tunnel_points.insert(dispatch_state.rail_tunnel_points.end(),
+				state.rail_tunnel_points.begin(), state.rail_tunnel_points.end());
 		dispatch_state.highway_tunnel_cells.insert(
 				dispatch_state.highway_tunnel_cells.end(),
 				state.highway_tunnel_cells.begin(), state.highway_tunnel_cells.end());
@@ -2492,7 +2493,7 @@ bool generate_world(WorldEditor &editor,
 					waterways::generate_waterways(editor, way);
 				}
 			} else if (way.tags.contains("railway")) {
-				railways::generate_railways(editor, way, state.subway_points,
+				railways::generate_railways(editor, way, state.rail_tunnel_points,
 						rail_bridge_internal_endpoints, bridge_outlines, road_mask,
 						building_footprints, rail_mask, bridge_structures,
 						bridge_surface);
@@ -2915,8 +2916,8 @@ bool generate_world(WorldEditor &editor,
 	// Tunnel interiors must be reopened after underground fill, but before
 	// models: a late carve can cut holes into an already placed landmark.
 	if (!(regional_ground_passes && streaming_order) &&
-			!dispatch_state.subway_points.empty())
-		railways::carve_subway_interior(editor, dispatch_state.subway_points);
+			!dispatch_state.rail_tunnel_points.empty())
+		railways::carve_rail_tunnel_interior(editor, dispatch_state.rail_tunnel_points);
 	if (!(regional_ground_passes && streaming_order) &&
 			!dispatch_state.highway_tunnel_cells.empty())
 		highways::carve_highway_tunnel_interior(

@@ -32,7 +32,7 @@ namespace arnis
 namespace railways
 {
 
-const int SUBWAY_DEPTH = 3;
+const int RAIL_TUNNEL_DEPTH = 3;
 const std::size_t CATENARY_MAST_INTERVAL = 16;
 const int CATENARY_MAST_OFFSET = 3;
 const int CATENARY_WIRE_HEIGHT = 6;
@@ -71,7 +71,7 @@ bool contains_endpoint(
 	return std::find(endpoints.begin(), endpoints.end(), xz) != endpoints.end();
 }
 
-Block subway_shell_block(int x, int y, int z)
+Block rail_tunnel_shell_block(int x, int y, int z)
 {
 	uint32_t h = static_cast<uint32_t>(x) * 73856093u +
 				 static_cast<uint32_t>(y) * 19349663u +
@@ -874,8 +874,8 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 			0, start_is_boundary, end_is_boundary);
 }
 
-void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
-		vector<pair<int, int>> &subway_points)
+void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element,
+		vector<pair<int, int>> &rail_tunnel_points)
 {
 	const auto *plan = advtrains::get_plan(element);
 	// Rust builds subway shells one OSM segment at a time. Keep that same
@@ -891,12 +891,12 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 			for (std::size_t j = 0; j < smoothed_segment.size(); ++j) {
 				const auto [bx, unused_y, bz] = smoothed_segment[j];
 				(void)unused_y;
-				if (subway_points.empty() ||
-						subway_points.back() != pair<int, int>{bx, bz})
-					subway_points.emplace_back(bx, bz);
+				if (rail_tunnel_points.empty() ||
+						rail_tunnel_points.back() != pair<int, int>{bx, bz})
+					rail_tunnel_points.emplace_back(bx, bz);
 
 				const int ground_y = editor.get_ground_level(bx, bz);
-				const pos_t ceil_y = ground_y - SUBWAY_DEPTH;
+				const pos_t ceil_y = ground_y - RAIL_TUNNEL_DEPTH;
 				const pos_t floor_y = ceil_y - INTERIOR_HEIGHT - 1;
 				if (floor_y <= world_editor::min_y())
 					continue;
@@ -921,7 +921,7 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 							const Block block =
 									y == floor_y ? POLISHED_DEEPSLATE
 									: wall_or_ceiling
-											? subway_shell_block(bx + dx, y, bz + dz)
+											? rail_tunnel_shell_block(bx + dx, y, bz + dz)
 											: STONE_BRICKS;
 							editor.set_block_absolute(
 									block, bx + dx, y, bz + dz, nullopt, nullopt);
@@ -952,12 +952,13 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 	for (size_t j = 0; j < smoothed.size(); ++j) {
 		int bx = smoothed[j].first;
 		int bz = smoothed[j].second;
-		if (subway_points.empty() || subway_points.back() != pair<int, int>{bx, bz})
-			subway_points.emplace_back(bx, bz);
+		if (rail_tunnel_points.empty() ||
+				rail_tunnel_points.back() != pair<int, int>{bx, bz})
+			rail_tunnel_points.emplace_back(bx, bz);
 
 		const int ground_y = editor.get_ground_level(bx, bz);
-		const pos_t floor_y =
-				plan ? plan->heights[j] : ground_y - SUBWAY_DEPTH - INTERIOR_HEIGHT - 1;
+		const pos_t floor_y = plan ? plan->heights[j]
+								   : ground_y - RAIL_TUNNEL_DEPTH - INTERIOR_HEIGHT - 1;
 		const pos_t ceil_y = floor_y + INTERIOR_HEIGHT + 1;
 		if (floor_y <= world_editor::min_y())
 			continue;
@@ -978,11 +979,11 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 					const bool wall_or_ceiling =
 							dx == -WALL_RADIUS || dx == WALL_RADIUS ||
 							dz == -WALL_RADIUS || dz == WALL_RADIUS || y == ceil_y;
-					Block block = y == floor_y
-										  ? POLISHED_DEEPSLATE
-										  : (wall_or_ceiling ? subway_shell_block(bx + dx,
-																	   y, bz + dz)
-															 : STONE_BRICKS);
+					Block block =
+							y == floor_y ? POLISHED_DEEPSLATE
+										 : (wall_or_ceiling ? rail_tunnel_shell_block(
+																	  bx + dx, y, bz + dz)
+															: STONE_BRICKS);
 					editor.set_block_absolute(
 							block, bx + dx, y, bz + dz, nullopt, nullopt);
 				}
@@ -1006,8 +1007,8 @@ void generate_subway_shell(WorldEditor &editor, const ProcessedWay &element,
 	}
 }
 
-void carve_subway_interior(
-		WorldEditor &editor, const vector<pair<int, int>> &subway_points)
+void carve_rail_tunnel_interior(
+		WorldEditor &editor, const vector<pair<int, int>> &rail_tunnel_points)
 {
 	const std::optional<std::vector<Block>> carve_whitelist(std::vector<Block>{
 			STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, STONE});
@@ -1015,9 +1016,10 @@ void carve_subway_interior(
 	if (ADVTRAINS_AVAILABLE) {
 		floors = advtrains::tunnel_floors;
 	} else {
-		for (const auto &[x, z] : subway_points)
+		for (const auto &[x, z] : rail_tunnel_points)
 			floors.emplace_back(x,
-					editor.get_ground_level(x, z) - SUBWAY_DEPTH - INTERIOR_HEIGHT - 1,
+					editor.get_ground_level(x, z) - RAIL_TUNNEL_DEPTH - INTERIOR_HEIGHT -
+							1,
 					z);
 	}
 	std::unordered_set<std::uint64_t> carved_points;
@@ -1052,7 +1054,7 @@ void carve_subway_interior(
 }
 
 void generate_railways(WorldEditor &editor, const ProcessedWay &element,
-		vector<pair<int, int>> &subway_points,
+		vector<pair<int, int>> &rail_tunnel_points,
 		const RailBridgeInternalEndpoints &rail_bridge_internal_endpoints,
 		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
 		const CoordinateBitmap &road_mask, const CoordinateBitmap &building_footprints,
@@ -1070,7 +1072,7 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		advtrains::mark_generated(element);
 	if (wants_rail_tunnel(element)) {
 		if (renders_as_rail_tunnel(element))
-			generate_subway_shell(editor, element, subway_points);
+			generate_rail_tunnel_shell(editor, element, rail_tunnel_points);
 		return;
 	}
 
@@ -1097,16 +1099,16 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element)
 {
 	if (ADVTRAINS_AVAILABLE)
 		advtrains::prepare_network({ProcessedElement(element)}, editor);
-	vector<pair<int, int>> subway_points;
+	vector<pair<int, int>> rail_tunnel_points;
 	RailBridgeInternalEndpoints internal_endpoints;
 	bridge_styles::BridgeOutlineIndex bridge_outlines;
 	CoordinateBitmap empty = CoordinateBitmap::new_empty();
 	bridges::BridgeStructureMap bridge_structures;
 	bridges::BridgeSurfaceMap bridge_surface;
-	generate_railways(editor, element, subway_points, internal_endpoints, bridge_outlines,
-			empty, empty, empty, bridge_structures, bridge_surface);
-	if (!subway_points.empty())
-		carve_subway_interior(editor, subway_points);
+	generate_railways(editor, element, rail_tunnel_points, internal_endpoints,
+			bridge_outlines, empty, empty, empty, bridge_structures, bridge_surface);
+	if (!rail_tunnel_points.empty())
+		carve_rail_tunnel_interior(editor, rail_tunnel_points);
 	advtrains::finish_network(editor);
 }
 

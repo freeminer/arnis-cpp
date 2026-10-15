@@ -717,8 +717,9 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			*error = "tile archive URL is empty";
 		return std::nullopt;
 	}
-	const auto root =
-			base_url.back() == '/' ? base_url.substr(0, base_url.size() - 1) : base_url;
+	auto root = base_url;
+	while (!root.empty() && root.back() == '/')
+		root.pop_back();
 	std::vector<std::uint8_t> manifest_bytes;
 	const auto cache = cache_root();
 	const auto archive_cache =
@@ -849,6 +850,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	// unique objects needed by selection and relation completion.
 	DecodedTile decoded;
 	std::unordered_set<std::uint64_t> seen_nodes, seen_ways, seen_relations;
+	std::size_t tiles_read = 0;
 	auto absorb = [&](DecodedTile &&tile) {
 		for (auto &node : tile.nodes)
 			if (seen_nodes.insert(node.id).second)
@@ -870,14 +872,6 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	std::vector<OpenArchive> opened;
 	for (const auto &entry : json["archives"]) {
 		const auto file = entry.value("file", std::string{});
-		if (file.empty() || file.size() > 96 || file.find("..") != std::string::npos ||
-				file.find_first_not_of(
-						"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") !=
-						std::string::npos) {
-			if (error)
-				*error = "archive index has an unusable name";
-			return std::nullopt;
-		}
 		// Legacy manifests have no coarse cells; retain their bbox coverage
 		// check so unrelated archives are not opened in that format.
 		if (!entry.contains("cells") || !entry["cells"].is_array() ||
@@ -903,6 +897,17 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		}
 		if (!covers)
 			continue;
+		// Match Rust's ordering: validate a name only after its archive covers
+		// this request. An unrelated malformed entry must not prevent fetching
+		// otherwise usable data, while every path we actually open stays safe.
+		if (file.empty() || file.size() > 96 || file.find("..") != std::string::npos ||
+				file.find_first_not_of(
+						"abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-_.") !=
+						std::string::npos) {
+			if (error)
+				*error = "archive index has an unusable name";
+			return std::nullopt;
+		}
 		const auto archive_url = root + "/" + file;
 		auto range = [archive_url, archive_cache](std::uint64_t off, std::uint64_t len) {
 			std::string ignored_error;
@@ -972,6 +977,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 				}
 				if (!result.valid)
 					continue;
+				++tiles_read;
 				archive_state.aot2 |= result.aot2;
 				for (const auto &relation : result.tile.relations)
 					archive_state.relation_ids.insert(relation.id);
@@ -980,7 +986,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		}
 		opened.push_back(std::move(archive_state));
 	}
-	if (decoded.nodes.empty() && decoded.ways.empty() && decoded.relations.empty()) {
+	if (tiles_read == 0) {
 		if (error)
 			*error = "the tile archive has no data for this area";
 		return std::nullopt;
@@ -1117,11 +1123,6 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		std::cerr << "Warning: " << skipped_relations << " relations left partial ("
 				  << first_skipped_relation << ")\n";
 	const auto selected = select_for_bbox(decoded, bbox);
-	if (selected.empty()) {
-		if (error)
-			*error = "the tile archive has no intersecting OSM elements";
-		return std::nullopt;
-	}
 	return assemble(selected);
 }
 } // namespace arnis::osm_tiles

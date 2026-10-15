@@ -392,8 +392,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	// Apply edits in the same canonical packed-position order as Rust's
-	// WaterPlan::apply. Hash-table traversal order is not a cross-language
-	// contract, and overlapping cave features can make write order observable.
+	// WaterPlan::apply. Overlapping cave features can make write order observable.
 	std::vector<std::int64_t> ordered_carved(carved_cells.begin(), carved_cells.end());
 	std::sort(ordered_carved.begin(), ordered_carved.end());
 	for (const auto p : ordered_carved) {
@@ -477,8 +476,6 @@ bool WaterPlan::solid(const CaveShapeQuery &shape, int x, int y, int z) const
 void WaterPlan::apply(world_editor::WorldEditor &editor, const CaveRect &region,
 		const std::vector<Block> &cave_host) const
 {
-	// Rust sorts both masks by packed position before applying world writes.
-	// Keep the same order: cells from overlapping planned features may compete.
 	std::vector<std::int64_t> ordered_carved(carved.begin(), carved.end());
 	std::sort(ordered_carved.begin(), ordered_carved.end());
 	for (const auto p : ordered_carved) {
