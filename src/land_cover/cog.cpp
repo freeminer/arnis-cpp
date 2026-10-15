@@ -6,6 +6,7 @@
 #include <cmath>
 #include <limits>
 #include <new>
+#include <stdexcept>
 #include <unordered_map>
 #include <zlib.h>
 
@@ -312,6 +313,10 @@ bool read_esa_cog_into_raster(const std::string &url, int south, int west, doubl
 	try {
 		out.pixels.resize(out.width * out.height);
 	} catch (const std::bad_alloc &) {
+		return false;
+	} catch (const std::length_error &) {
+		// Rust's try_reserve_exact also rejects capacities beyond the container's
+		// maximum size without aborting the whole generation pass.
 		return false;
 	}
 	const auto across = (info.image_width + info.tile_width - 1) / info.tile_width;

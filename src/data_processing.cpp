@@ -1134,26 +1134,8 @@ land_cover::LandCoverData build_osm_water_land_cover(
 
 void prepare_elements_for_generation(std::vector<ProcessedElement> &elements)
 {
-	static constexpr std::array<const char *, 6> priority_tags = {
-			"entrance", "building", "highway", "waterway", "water", "barrier"};
-	std::vector<std::pair<std::size_t, std::size_t>> ranked;
-	ranked.reserve(elements.size());
-	for (std::size_t i = 0; i < elements.size(); ++i) {
-		std::size_t priority = priority_tags.size();
-		for (std::size_t p = 0; p < priority_tags.size(); ++p)
-			if (elements[i].tags().contains(priority_tags[p])) {
-				priority = p;
-				break;
-			}
-		ranked.emplace_back(priority, i);
-	}
-	std::stable_sort(ranked.begin(), ranked.end(),
-			[](const auto &a, const auto &b) { return a.first < b.first; });
-	std::vector<ProcessedElement> ordered;
-	ordered.reserve(elements.size());
-	for (const auto &rank : ranked)
-		ordered.push_back(std::move(elements[rank.second]));
-	elements = std::move(ordered);
+	// Rust preserves source order except for ground-filling areas, which are
+	// moved into specificity order by sort_ground_fill_areas below.
 	sort_ground_fill_areas(elements);
 }
 
@@ -1424,7 +1406,7 @@ void generate_advertising(WorldEditor &editor, const ProcessedNode &node);
 bool generate_world(WorldEditor &editor,
 		const std::vector<ProcessedElement> &input_elements, const Args &args_,
 		FloodFillCache &flood_fill_cache,
-		BuildingFootprintBitmap const &building_footprints, bool elements_prepared,
+		BuildingFootprintBitmap const &input_building_footprints, bool elements_prepared,
 		const PreparedBuildingData *prepared_buildings, mapillary::FacadeJob *facade_job)
 {
 	Args effective_args = args_;
@@ -1592,16 +1574,24 @@ bool generate_world(WorldEditor &editor,
 	static const std::vector<ProcessedElement> no_elements;
 	std::vector<ProcessedElement> aircraft_filtered_elements;
 	const std::vector<ProcessedElement> *elements_source = &input_elements;
+	std::size_t dropped_aircraft_buildings = 0;
 	if (!args.skip_objects()) {
-		const auto dropped = drop_buildings_on_aircraft_pavement(
+		dropped_aircraft_buildings = drop_buildings_on_aircraft_pavement(
 				input_elements, aircraft_filtered_elements, args.scale);
-		if (dropped > 0) {
-			std::cout << "  Skipped " << dropped
+		if (dropped_aircraft_buildings > 0) {
+			std::cout << "  Skipped " << dropped_aircraft_buildings
 					  << " building(s) on runways, taxiways and aprons\n";
 			elements_source = &aircraft_filtered_elements;
 		}
 	}
-	const auto &elements = args.skip_objects() ? no_elements : *elements_source;
+	const auto &source_elements = args.skip_objects() ? no_elements : *elements_source;
+	// Rust applies ground-fill ordering after its source-order prescans. Preserve
+	// that sequence for direct library callers while keeping the host's prepared
+	// cached-extract vector zero-copy.
+	std::vector<ProcessedElement> ordered_elements;
+	if (!elements_prepared)
+		ordered_elements = source_elements;
+	const auto &elements = elements_prepared ? source_elements : ordered_elements;
 	// Build the authored-trunk index once per generation.  Ground decoration
 	// can then suppress only procedural crowns overlapping mapped trees, while
 	// preserving deterministic results for streamed tiles.
@@ -1612,6 +1602,18 @@ bool generate_world(WorldEditor &editor,
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	// Rust filters aircraft-pavement buildings before deriving its footprint
+	// bitmap. The Freeminer host normally supplies an already-filtered bitmap,
+	// but direct library callers may pass one derived from the unfiltered input.
+	// Rebuild only in that case so removed airport buildings do not continue to
+	// suppress trees, ground decoration, or other footprint-aware features.
+	std::optional<BuildingFootprintBitmap> filtered_building_footprints;
+	if (dropped_aircraft_buildings > 0)
+		filtered_building_footprints.emplace(
+				flood_fill_cache.collect_building_footprints(elements, xzbbox));
+	const BuildingFootprintBitmap &building_footprints =
+			filtered_building_footprints ? *filtered_building_footprints
+										 : input_building_footprints;
 	// Persist the elevation mapping before terrain or structures are written so
 	// a later failed generation cannot leave chunks using an unrecorded mapping.
 	if (args.one_world_run && editor.ground) {
@@ -1818,18 +1820,9 @@ bool generate_world(WorldEditor &editor,
 									  },
 									  args.rotation, landmark_plan.suppressed))
 					: std::nullopt;
-	// Match Rust's specificity ordering: smaller ground-cover polygons render
-	// first, then larger areas fill the remaining uncovered cells.
-	std::vector<ProcessedElement> ordered_elements;
-	if (!elements_prepared) {
-		ordered_elements = elements;
-		prepare_elements_for_generation(ordered_elements);
-	}
-	const auto &render_elements = elements_prepared ? elements : ordered_elements;
 	const auto plane_candidates =
-			args.use_3d
-					? structures::plane::prescan_placements(render_elements, args.scale)
-					: std::vector<structures::plane::Placement>{};
+			args.use_3d ? structures::plane::prescan_placements(elements, args.scale)
+						: std::vector<structures::plane::Placement>{};
 	const auto projection_spec = projection::ProjectionSpec::from_args(args);
 	const cartesian::XZBBoxRect padded_clip =
 			projection_spec.clip_bbox({{min_x, min_z}, {max_x, max_z}});
@@ -1925,9 +1918,12 @@ bool generate_world(WorldEditor &editor,
 		if (args.debug)
 			editor.ground->save_land_cover_debug_image(
 					"landcover_debug_post_bridge_repair");
-		// The shoreline field stays invalidated until Rust's first water-blend
-		// access in ground generation, after all land-cover mutations are done.
 	}
+	// Rust materializes the lazy ESA water-blend grid after all ground/shoreline
+	// preparation and before terrain workers start. This also keeps the call
+	// harmless when a backend supplied no land-cover data.
+	if (editor.ground)
+		editor.ground->warm_water_blend();
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
 			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
 	const auto &road_mask = *road_mask_owner;
@@ -2095,9 +2091,21 @@ bool generate_world(WorldEditor &editor,
 	} regional_tree_scope{editor};
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
+	// Build once for the full area, as Rust does; tile workers only read it.
+	const auto highway_connectivity = highways::build_highway_connectivity_map(elements);
+	// Rust also builds the junction/crossing index before it reorders ground
+	// fills; only then does element dispatch begin.
+	const auto geo_bounds = editor.geographic_bounds();
+	const auto marking_index =
+			road_markings::RoadMarkingIndex::build(elements, args.scale,
+					decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
+							(geo_bounds[2] + geo_bounds[3]) * .5));
+	// Rust sorts only after source-order prescans (notably highway connectivity
+	// and road markings), immediately before the generation passes.
+	if (!elements_prepared)
+		prepare_elements_for_generation(ordered_elements);
 	struct ElementDispatchState
 	{
-		std::optional<highways::HighwayConnectivity> highway_connectivity;
 		std::vector<std::pair<int, int>> subway_points;
 		std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
 	};
@@ -2121,10 +2129,11 @@ bool generate_world(WorldEditor &editor,
 	// projected-space approximation here loses split relation rings and can
 	// render duplicate building outlines.
 	std::optional<PreparedBuildingData> computed_buildings;
-	if (!prepared_buildings)
+	if (!prepared_buildings || dropped_aircraft_buildings > 0)
 		computed_buildings = prepare_building_data(elements);
 	const PreparedBuildingData &building_data =
-			prepared_buildings ? *prepared_buildings : *computed_buildings;
+			prepared_buildings && dropped_aircraft_buildings == 0 ? *prepared_buildings
+																  : *computed_buildings;
 	std::unordered_set<std::uint64_t> suppressed_building_outlines;
 	auto building_part_groups = building_data.part_groups;
 	for (const auto &[kind, id] : building_data.outline_suppression)
@@ -2161,13 +2170,12 @@ bool generate_world(WorldEditor &editor,
 	FillExpirations expiring_fills;
 	if (tiled_element_dispatch) {
 		element_assignments =
-				assign_elements_to_tiles(render_elements, element_tiles, args.scale);
+				assign_elements_to_tiles(elements, element_tiles, args.scale);
 		// Rust samples available memory after the expensive tile/fill precompute.
 		// Do the same here so streaming reflects the working set this pass has
 		// actually allocated, not the more optimistic pre-assignment snapshot.
-		tile_fill_reader_state =
-				compute_tile_fill_readers(element_assignments, render_elements,
-						building_part_groups, building_group_members, flood_fill_cache);
+		tile_fill_reader_state = compute_tile_fill_readers(element_assignments, elements,
+				building_part_groups, building_group_members, flood_fill_cache);
 		streaming_order = java_format && !force_lpt_tile_order &&
 						  should_stream_to_disk(element_tiles.size(), args.fillground);
 		// Rust schedules dense tiles first for LPT unless memory pressure enables
@@ -2211,15 +2219,15 @@ bool generate_world(WorldEditor &editor,
 			for (const auto element_index : element_assignments[tile_index])
 				element_tasks.emplace_back(element_index, tile_index);
 	} else {
-		element_tasks.reserve(render_elements.size());
-		for (std::size_t element_index = 0; element_index < render_elements.size();
+		element_tasks.reserve(elements.size());
+		for (std::size_t element_index = 0; element_index < elements.size();
 				++element_index)
 			element_tasks.emplace_back(
 					element_index, std::numeric_limits<std::size_t>::max());
 	}
 	if (!tiled_element_dispatch) {
-		auto last_fill_use = compute_last_fill_use(render_elements, element_tasks,
-				building_part_groups, building_group_members);
+		auto last_fill_use = compute_last_fill_use(
+				elements, element_tasks, building_part_groups, building_group_members);
 		expiring_fills = fills_expiring_at(last_fill_use);
 	}
 	auto release_task_fills = [&](std::size_t task_index) {
@@ -2233,12 +2241,7 @@ bool generate_world(WorldEditor &editor,
 					tile_fill_reader_state->remaining_readers, flood_fill_cache);
 	};
 
-	// All roads share the same immutable connectivity for this pass.
-	const auto geo_bounds = editor.geographic_bounds();
-	const auto marking_index =
-			road_markings::RoadMarkingIndex::build(elements, args.scale,
-					decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
-							(geo_bounds[2] + geo_bounds[3]) * .5));
+	// All roads share the same immutable connectivity and marking index.
 	// Rust builds Java tiles against independent editors, then merges results in
 	// stable order in bounded batches. Only use worker editors when the host
 	// supplies overlay-backed writes and backend callbacks are tile-safe.
@@ -2308,7 +2311,7 @@ bool generate_world(WorldEditor &editor,
 		// ground decoration just like other tile-owned element writes.
 		if (editor.signage_enabled())
 			for (const auto element_index : element_assignments[tile_index]) {
-				const auto &element = render_elements[element_index];
+				const auto &element = elements[element_index];
 				if (element.is_node())
 					signage::generate_node_facade_signage(
 							editor, element.as_node(), building_footprints, road_mask);
@@ -2379,14 +2382,12 @@ bool generate_world(WorldEditor &editor,
 		dispatch_state.highway_tunnel_cells.insert(
 				dispatch_state.highway_tunnel_cells.end(),
 				state.highway_tunnel_cells.begin(), state.highway_tunnel_cells.end());
-		if (!dispatch_state.highway_connectivity && state.highway_connectivity)
-			dispatch_state.highway_connectivity = state.highway_connectivity;
 	};
 	auto process_assigned_element = [&](WorldEditor &target, ElementDispatchState &state,
 											std::size_t task_index,
 											std::size_t element_index) {
 		WorldEditor &editor = target;
-		const auto &element = render_elements[element_index];
+		const auto &element = elements[element_index];
 		// Rust passes the same normalized generation options to every element;
 		// terrain-aware handlers query their own coordinates rather than mutating
 		// the shared flat-ground fallback from an element's first node.
@@ -2449,11 +2450,8 @@ bool generate_world(WorldEditor &editor,
 								tunnel_internal_endpoints, tunnel_portals,
 								state.highway_tunnel_cells);
 				if (!tunnel_rendered) {
-					if (!state.highway_connectivity)
-						state.highway_connectivity =
-								highways::build_highway_connectivity_map(elements);
 					highways::generate_highways_internal(editor, element, args,
-							*state.highway_connectivity, args.timeout, road_mask,
+							highway_connectivity, args.timeout, road_mask,
 							bridge_structures, bridge_surface, tunnel_portals,
 							marking_index,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
@@ -2545,12 +2543,9 @@ bool generate_world(WorldEditor &editor,
 			} else if (node.tags.contains("barrier")) {
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
 			} else if (node.tags.contains("highway")) {
-				if (!state.highway_connectivity)
-					state.highway_connectivity =
-							highways::build_highway_connectivity_map(elements);
 				highways::generate_highways_internal(editor, element, args,
-						*state.highway_connectivity, args.timeout, road_mask,
-						bridge_structures, bridge_surface, tunnel_portals, marking_index,
+						highway_connectivity, args.timeout, road_mask, bridge_structures,
+						bridge_surface, tunnel_portals, marking_index,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 			} else if (node.tags.get("aeroway") ==
 					   std::optional<std::string>(std::string("helipad"))) {
@@ -2806,7 +2801,7 @@ bool generate_world(WorldEditor &editor,
 					continue;
 				editor.set_strict_bounds(min_x, min_z, max_x, max_z);
 				for (const auto element_index : element_assignments[tile_index]) {
-					const auto &element = render_elements[element_index];
+					const auto &element = elements[element_index];
 					if (element.is_node())
 						signage::generate_node_facade_signage(editor, element.as_node(),
 								building_footprints, road_mask);
@@ -2814,7 +2809,7 @@ bool generate_world(WorldEditor &editor,
 			}
 			editor.clear_strict_bounds();
 		} else {
-			for (const auto &element : render_elements)
+			for (const auto &element : elements)
 				if (element.is_node())
 					signage::generate_node_facade_signage(
 							editor, element.as_node(), building_footprints, road_mask);
@@ -2986,7 +2981,8 @@ bool generate_world(WorldEditor &editor,
 			}
 		} catch (const std::exception &error) {
 			const auto message =
-					std::string{"The area was written but could not be recorded: "} + error.what();
+					std::string{"The area was written but could not be recorded: "} +
+					error.what();
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';
 			return false;
