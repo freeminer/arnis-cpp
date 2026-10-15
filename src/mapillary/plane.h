@@ -8,6 +8,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <utility>
 #include <vector>
@@ -56,6 +57,17 @@ inline double dot(const std::array<double, 2> &a, const std::array<double, 2> &b
 {
 	return a[0] * b[0] + a[1] * b[1];
 }
+/// Stable per-wall CRC32 seed, matching Rust's `plane::wall_seed`.
+inline std::uint32_t wall_seed(std::string_view wall_key)
+{
+	std::uint32_t crc = 0xFFFFFFFFu;
+	for (const unsigned char byte : wall_key) {
+		crc ^= byte;
+		for (int bit = 0; bit < 8; ++bit)
+			crc = (crc & 1u) ? ((crc >> 1) ^ 0xEDB88320u) : (crc >> 1);
+	}
+	return ~crc;
+}
 /// Move a typed OSM wall onto its fitted plane, preserving the fit's endpoints
 /// and identifiers. This is the wall geometry consumed by rectification.
 inline ::arnis::mapillary::Wall fitted_wall(
@@ -91,6 +103,13 @@ inline std::array<double, 2> project_onto(
 {
 	const double off = fit.d - dot(fit.normal, point);
 	return {point[0] + off * fit.normal[0], point[1] + off * fit.normal[1]};
+}
+/// Signed distance of the fitted line from the OSM wall at its midpoint,
+/// positive when the fitted plane is outward of the OSM line.
+inline double offset_of(
+		const ::arnis::mapillary::PlaneFit &fit, const ::arnis::mapillary::Wall &wall)
+{
+	return fit.d - dot(fit.normal, wall.midpoint());
 }
 inline double angle_of(const std::array<double, 2> &normal, const Wall &wall)
 {

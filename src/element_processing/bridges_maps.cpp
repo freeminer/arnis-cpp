@@ -248,11 +248,8 @@ int effective_layer(const ProcessedWay &way)
 	const auto it = way.tags.find("layer");
 	if (it == way.tags.end())
 		return is_bridge_way(way) ? 1 : 0;
-	try {
-		return std::max(0, std::stoi(it->second));
-	} catch (...) {
-		return is_bridge_way(way) ? 1 : 0;
-	}
+	return std::max(
+			0, strict_parse::i32(it->second).value_or(is_bridge_way(way) ? 1 : 0));
 }
 
 int highway_block_range(const ProcessedWay &way, double scale)
@@ -322,14 +319,8 @@ bool is_ramp_candidate(const ProcessedWay &way)
 		return true;
 	if (way.tags.get("man_made") == "embankment")
 		return true;
-	if (const auto it = way.tags.find("layer"); it != way.tags.end()) {
-		try {
-			return std::stoi(it->second) >= 1;
-		} catch (...) {
-			return false;
-		}
-	}
-	return false;
+	const auto layer = strict_parse::i32(way.tags.get("layer"));
+	return layer && *layer >= 1;
 }
 
 std::size_t way_length_blocks(const ProcessedWay &way)
@@ -578,13 +569,13 @@ bool side_by_side(const ProcessedWay &a, const ProcessedWay &b, double scale)
 
 std::optional<int> decide_internal_ramp(const std::pair<int, int> &xz, int deck_y,
 		const std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash>
-				&endpoint_counts,
+				&node_members,
 		const std::unordered_map<std::pair<int, int>, bool, XZPairHash>
 				&boundary_with_external_ramp,
 		const WorldEditor &editor)
 {
-	const auto count_it = endpoint_counts.find(xz);
-	if (count_it != endpoint_counts.end() && count_it->second > 1)
+	const auto count_it = node_members.find(xz);
+	if (count_it != node_members.end() && count_it->second > 1)
 		return std::nullopt;
 	const auto ramp_it = boundary_with_external_ramp.find(xz);
 	if (ramp_it != boundary_with_external_ramp.end() && ramp_it->second)
@@ -1066,9 +1057,8 @@ BridgeStructureMap BridgeStructureMap::build(
 			const auto &us = path_axis[idx];
 			const auto collect_endpoint = [&](const ProcessedNode &node, float u) {
 				const std::pair<int, int> xz{node.x, node.z};
-				const auto count = endpoint_counts.find(xz);
-				const bool boundary =
-						count == endpoint_counts.end() || count->second == 1;
+				const auto count = node_members.find(xz);
+				const bool boundary = count == node_members.end() || count->second <= 1;
 				bool joins_other_bridge = false;
 				if (const auto members = node_to_bridge_indices.find(xz);
 						members != node_to_bridge_indices.end()) {
@@ -1102,7 +1092,7 @@ BridgeStructureMap BridgeStructureMap::build(
 												  candidate.nodes.front().z == node.z;
 							const auto &far = at_start ? candidate.nodes.back()
 													   : candidate.nodes.front();
-							if (!endpoint_counts.contains({far.x, far.z})) {
+							if (!node_members.contains({far.x, far.z})) {
 								has_external_ramp = true;
 								break;
 							}
@@ -1178,8 +1168,16 @@ BridgeStructureMap BridgeStructureMap::build(
 				}
 			}
 		}
-		const bool has_boundary_endpoint =
-				!profile_anchors.empty() || !profile_free_ends.empty();
+		const bool has_boundary_endpoint = std::any_of(
+				group_indices.begin(), group_indices.end(), [&](std::size_t idx) {
+					const auto &way = *bridge_ways[idx];
+					for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
+						const auto count = node_members.find({node->x, node->z});
+						if (count == node_members.end() || count->second <= 1)
+							return true;
+					}
+					return false;
+				});
 		const bool flat_span = has_boundary_endpoint &&
 							   dip < FLAT_TERRAIN_DIP_THRESHOLD &&
 							   total_length >= SHORT_BRIDGE_LENGTH_BLOCKS;
@@ -1296,8 +1294,8 @@ BridgeStructureMap BridgeStructureMap::build(
 				boundary_with_external_ramp;
 		for (const auto &entry : endpoint_counts) {
 			const auto xz = entry.first;
-			const auto count = entry.second;
-			if (count > 1)
+			const auto member_count = node_members.find(xz);
+			if (member_count != node_members.end() && member_count->second > 1)
 				continue;
 			const auto other_it = node_to_other_highways.find(xz);
 			if (other_it == node_to_other_highways.end()) {
@@ -1316,7 +1314,7 @@ BridgeStructureMap BridgeStructureMap::build(
 												  candidate.nodes.front().z == xz.second;
 				const auto &far_node = bridge_side_at_start ? candidate.nodes.back()
 															: candidate.nodes.front();
-				if (endpoint_counts.contains({far_node.x, far_node.z}))
+				if (node_members.contains({far_node.x, far_node.z}))
 					continue;
 
 				BridgeRampInfo info;
@@ -1360,9 +1358,9 @@ BridgeStructureMap BridgeStructureMap::build(
 			info.end_is_group_boundary =
 					end_members == node_members.end() || end_members->second <= 1;
 			info.start_internal_ramp = decide_internal_ramp({s.x, s.z}, deck_y,
-					endpoint_counts, boundary_with_external_ramp, editor);
+					node_members, boundary_with_external_ramp, editor);
 			info.end_internal_ramp = decide_internal_ramp({e.x, e.z}, deck_y,
-					endpoint_counts, boundary_with_external_ramp, editor);
+					node_members, boundary_with_external_ramp, editor);
 			info.covered_by_wider = covered_ids.contains(way.id);
 			if (cable_carriers.contains(way.id))
 				info.cable_pylons = cable_pylons;

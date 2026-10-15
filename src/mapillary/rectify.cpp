@@ -591,10 +591,7 @@ LooseCrop loose_crop(const ::arnis::mapillary::Wall &wall, const View &view,
 	for (std::size_t x = 0; x < width; ++x)
 		columns[x] = s_min + (static_cast<double>(x) + 0.5) / ppm;
 	if (!buildings.empty()) {
-		const double setback =
-				std::max(view.fit->d - (view.fit->normal[0] * wall.midpoint()[0] +
-											   view.fit->normal[1] * wall.midpoint()[1]),
-						0.0);
+		const double setback = std::max(-plane::offset_of(*view.fit, wall), 0.0);
 		const auto blocked = footprint_columns(
 				fitted, camera.centre, columns, buildings, wall.building_key, setback);
 		for (std::size_t y = 0; y < height; ++y)

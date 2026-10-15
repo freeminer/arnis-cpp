@@ -15,6 +15,12 @@ namespace arnis::trees
 {
 namespace
 {
+// Keep these placement limits aligned with schematic.rs. The first determines
+// which low log columns are treated as grounded trunks; the second bounds root
+// extension at tile seams.
+constexpr int ROOT_BASE_VY = 2;
+constexpr int ROOT_MAX = 64;
+
 bool is_log_block(Block block)
 {
 	const auto &logs = ground_decoration::wood_blocks();
@@ -294,7 +300,8 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 			continue;
 		if (log && (editor.check_for_block(
 							wx, 0, wz, std::optional<std::vector<Block>>({WATER})) ||
-						   (v.y <= s.min_log_vy + 2 && editor.is_lc_water(wx, wz))))
+						   (v.y <= s.min_log_vy + ROOT_BASE_VY &&
+								   editor.is_lc_water(wx, wz))))
 			continue;
 		const Block block = v.block;
 		placed |=
@@ -320,10 +327,10 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 										  GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, DIRT_PATH});
 	for (const auto &[cell, root] : trunk_bottom) {
 		const auto [wx, wz] = cell;
-		if (root.top > lowest + 2 || editor.is_lc_water(wx, wz))
+		if (root.top > lowest + ROOT_BASE_VY || editor.is_lc_water(wx, wz))
 			continue;
-		const int from =
-				std::max(root.top - 1 - 64, editor.get_absolute_y(wx, y_offset, wz));
+		const int from = std::max(
+				root.top - 1 - ROOT_MAX, editor.get_absolute_y(wx, y_offset, wz));
 		for (int wy = from; wy < root.top; ++wy)
 			placed |= editor.try_set_block_absolute(
 					root.block, wx, wy, wz, std::nullopt, root_blacklist);
