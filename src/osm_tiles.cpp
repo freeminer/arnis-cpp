@@ -628,7 +628,7 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	}
 	osm_parser::RawOsmDocument out;
 	using Coordinate = std::pair<std::int32_t, std::int32_t>;
-	std::map<Coordinate, std::uint64_t> lowest_source_id;
+	std::map<Coordinate, std::uint64_t> tagged_at;
 	// Rust sorts archive nodes by ID before exposing them to the parser.  Do
 	// the same here: unordered_map iteration otherwise changes element order
 	// between processes, which changes seeded tree/structure decisions.
@@ -640,7 +640,7 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	for (const auto &id : ni) {
 		const auto &node = nodes.at(id);
 		const Coordinate coordinate{node.lat, node.lon};
-		lowest_source_id.emplace(coordinate, id);
+		tagged_at.emplace(coordinate, id);
 	}
 	std::vector<std::uint64_t> wi;
 	for (const auto &[id, _] : ways)
@@ -649,24 +649,27 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 	CoordinateNodeIds node_ids;
 	std::map<Coordinate, std::uint64_t> vertex_ids;
 	std::vector<Coordinate> synthetic;
+	std::unordered_set<std::uint64_t> vertex_nodes;
 	for (const auto id : wi)
 		for (const auto &coordinate : ways.at(id).points) {
 			if (vertex_ids.contains(coordinate))
 				continue;
 			const auto [node_id, first] = node_ids.get(coordinate);
 			vertex_ids.emplace(coordinate, node_id);
-			if (first && !lowest_source_id.contains(coordinate))
+			if (!first)
+				continue;
+			if (const auto tagged = tagged_at.find(coordinate); tagged != tagged_at.end())
+				vertex_nodes.insert(tagged->second);
+			else
 				synthetic.push_back(coordinate);
 		}
 	for (const auto &id : ni) {
 		const auto &node = nodes.at(id);
 		const Coordinate coordinate{node.lat, node.lon};
-		const auto source = lowest_source_id.find(coordinate);
-		const bool promoted = vertex_ids.contains(coordinate) &&
-							  (source == lowest_source_id.end() || source->second == id);
-		out.nodes.push_back({promoted ? vertex_ids.at(coordinate) : id,
-				double(node.lat) / COORD_SCALE, double(node.lon) / COORD_SCALE,
-				node.tags});
+		const auto output_id =
+				vertex_nodes.contains(id) ? node_ids.get(coordinate).first : id;
+		out.nodes.push_back({output_id, double(node.lat) / COORD_SCALE,
+				double(node.lon) / COORD_SCALE, node.tags});
 	}
 	for (auto id : wi) {
 		const auto &w = ways.at(id);

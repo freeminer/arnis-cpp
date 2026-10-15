@@ -4,6 +4,7 @@
 #include "../../../arnis_adapter.h"
 
 #include <cstring>
+#include <exception>
 #include <stdexcept>
 #include <unordered_map>
 #include <algorithm>
@@ -31,6 +32,57 @@ std::string trim_state_component(std::string value)
 	return value.substr(begin, end - begin + 1);
 }
 
+SchemProperties parse_schem_properties(const std::string &name)
+{
+	SchemProperties properties;
+	const auto open = name.find('['), close = name.rfind(']');
+	if (open == std::string::npos || close == std::string::npos || close <= open + 1)
+		return properties;
+	for (std::size_t start = open + 1; start < close;) {
+		std::size_t end = start;
+		int depth = 0;
+		bool quoted = false;
+		for (; end < close; ++end) {
+			const char ch = name[end];
+			if (ch == '"' && (end == start || name[end - 1] != '\\'))
+				quoted = !quoted;
+			if (!quoted && (ch == '[' || ch == '{'))
+				++depth;
+			else if (!quoted && (ch == ']' || ch == '}') && depth)
+				--depth;
+			else if (!quoted && ch == ',' && depth == 0)
+				break;
+		}
+		const auto equals = name.find('=', start);
+		if (equals != std::string::npos && equals < end)
+			properties.insert_or_assign(
+					trim_state_component(name.substr(start, equals - start)),
+					trim_state_component(name.substr(equals + 1, end - equals - 1)));
+		start = end < close ? end + 1 : close;
+	}
+	return properties;
+}
+
+void index_schematic_columns(ColumnSchematic &schematic)
+{
+	std::sort(schematic.voxels.begin(), schematic.voxels.end(),
+			[](const auto &a, const auto &b) {
+				return std::tie(a.x, a.z, a.y) < std::tie(b.x, b.z, b.y);
+			});
+	schematic.columns.assign(
+			static_cast<std::size_t>(schematic.width) * schematic.length, {});
+	for (std::size_t i = 0; i < schematic.voxels.size();) {
+		const auto &first = schematic.voxels[i];
+		std::size_t end = i + 1;
+		while (end < schematic.voxels.size() && schematic.voxels[end].x == first.x &&
+				schematic.voxels[end].z == first.z)
+			++end;
+		schematic.columns[static_cast<std::size_t>(first.z) * schematic.width + first.x] =
+				{static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(end - i)};
+		i = end;
+	}
+}
+
 std::string schematic_cache_key(const std::filesystem::path &file)
 {
 	std::error_code path_error;
@@ -38,6 +90,38 @@ std::string schematic_cache_key(const std::filesystem::path &file)
 	if (path_error)
 		normalized = file;
 	return normalized.lexically_normal().string();
+}
+
+template <typename T>
+struct SchematicCacheEntry
+{
+	std::shared_ptr<const T> value;
+	std::exception_ptr error;
+};
+
+template <typename T, typename Decode>
+std::shared_ptr<const T> load_cached_schematic(const std::filesystem::path &file,
+		std::mutex &mutex, std::unordered_map<std::string, SchematicCacheEntry<T>> &cache,
+		Decode decode)
+{
+	const auto key = schematic_cache_key(file);
+	std::lock_guard lock(mutex);
+	auto [it, inserted] = cache.try_emplace(key);
+	if (inserted) {
+		try {
+			std::ifstream input(key, std::ios::binary);
+			if (!input)
+				throw std::runtime_error("unable to open schematic: " + key);
+			std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
+			it->second.value = std::make_shared<const T>(decode(bytes));
+		} catch (...) {
+			// Immutable assets follow Rust's OnceLock lifetime on failure too.
+			it->second.error = std::current_exception();
+		}
+	}
+	if (it->second.error)
+		std::rethrow_exception(it->second.error);
+	return it->second.value;
 }
 
 std::shared_ptr<const SchemProperties> properties_for_rotation(const SchemVoxel &voxel,
@@ -70,6 +154,18 @@ void update_structure_extent(StructureSchematic &structure)
 	for (const auto &entity : structure.entities)
 		include(entity.x, entity.z);
 }
+
+void anchor_structure(StructureSchematic &structure)
+{
+	int tallest = std::numeric_limits<int>::min();
+	for (const auto &voxel : structure.voxels)
+		if (voxel.y > tallest) {
+			tallest = voxel.y;
+			structure.anchor_x = voxel.x;
+			structure.anchor_z = voxel.z;
+		}
+	update_structure_extent(structure);
+}
 } // namespace
 
 StructureSchematic structure_schematic(const SchemDocument &document)
@@ -90,14 +186,7 @@ StructureSchematic structure_schematic(const SchemDocument &document)
 	if (min_y != std::numeric_limits<int>::max())
 		for (auto &entity : out.entities)
 			entity.y -= min_y;
-	int tallest = std::numeric_limits<int>::min();
-	for (const auto &v : out.voxels)
-		if (v.y > tallest) {
-			tallest = v.y;
-			out.anchor_x = v.x;
-			out.anchor_z = v.z;
-		}
-	update_structure_extent(out);
+	anchor_structure(out);
 	return out;
 }
 namespace
@@ -259,30 +348,38 @@ bool place_structure(world_editor::WorldEditor &editor,
 	}
 	return placed;
 }
-StructureSchematic StructureSchematic::centered() const
+StructureSchematic StructureSchematic::centered() const &
 {
 	auto out = *this;
-	out.anchor_x = out.width / 2;
-	out.anchor_z = out.length / 2;
-	update_structure_extent(out);
-	return out;
+	return std::move(out).centered();
 }
-StructureSchematic StructureSchematic::base_anchored() const
+StructureSchematic StructureSchematic::centered() &&
+{
+	anchor_x = width / 2;
+	anchor_z = length / 2;
+	update_structure_extent(*this);
+	return std::move(*this);
+}
+StructureSchematic StructureSchematic::base_anchored() const &
 {
 	auto out = *this;
+	return std::move(out).base_anchored();
+}
+StructureSchematic StructureSchematic::base_anchored() &&
+{
 	long long sx = 0, sz = 0, count = 0;
-	for (const auto &v : out.voxels)
+	for (const auto &v : voxels)
 		if (v.y == 0) {
 			sx += v.x;
 			sz += v.z;
 			++count;
 		}
 	if (count) {
-		out.anchor_x = int(sx / count);
-		out.anchor_z = int(sz / count);
+		anchor_x = int(sx / count);
+		anchor_z = int(sz / count);
 	}
-	update_structure_extent(out);
-	return out;
+	update_structure_extent(*this);
+	return std::move(*this);
 }
 namespace
 {
@@ -701,7 +798,7 @@ int read_dimension(Reader &r, std::uint8_t type, SchemDimensionMode dimension_mo
 void decode_schematic_fields(Reader &r, SchemDocument &doc,
 		std::unordered_map<int, std::string> &palette,
 		std::vector<std::pair<std::size_t, std::size_t>> &data_ranges,
-		const SchemDecodeOptions &options)
+		const SchemDecodeOptions &options, bool &has_palette)
 {
 	for (;;) {
 		const auto type = r.u8();
@@ -729,6 +826,7 @@ void decode_schematic_fields(Reader &r, SchemDocument &doc,
 					doc.offset_z = value;
 			}
 		} else if (name == "Palette" && type == 10) {
+			has_palette = true;
 			decode_palette(r, palette);
 		} else if ((name == "BlockData" || name == "Data") && type == 7) {
 			decode_block_data(r, data_ranges);
@@ -738,7 +836,7 @@ void decode_schematic_fields(Reader &r, SchemDocument &doc,
 			else
 				skip_payload(r, type);
 		} else if ((name == "Schematic" || name == "Blocks") && type == 10) {
-			decode_schematic_fields(r, doc, palette, data_ranges, options);
+			decode_schematic_fields(r, doc, palette, data_ranges, options, has_palette);
 		} else {
 			skip_payload(r, type);
 		}
@@ -767,75 +865,39 @@ SchemDocument decode_sponge_schem(
 	if (r.u8() != 10)
 		throw std::runtime_error("schem root is not compound");
 	r.str();
-	// V3 and wrapped v2 schematics are handled by the recursive reader.  Keep
-	// the legacy loop below for compatibility with old direct-root files.
-	for (;;) {
-		auto type = r.u8();
-		if (!type)
-			break;
-		auto name = r.str();
-		if ((name == "Schematic" || name == "Blocks") && type == 10) {
-			decode_schematic_fields(r, doc, palette, data_ranges, options);
-			continue;
-		}
-		if ((name == "Width" || name == "Height" || name == "Length") &&
-				(type == 2 || type == 3)) {
-			const int v = read_dimension(r, type, options.dimension_mode);
-			if (name == "Width")
-				doc.width = v;
-			else if (name == "Height")
-				doc.height = v;
-			else
-				doc.length = v;
-		} else if (name == "Offset" && type == 11) {
-			// Sponge stores three big-endian ints describing the schematic's
-			// world-space origin.  Keep the values even when placement chooses
-			// a different anchor.
-			auto n = r.u32();
-			for (std::uint32_t i = 0; i < n; ++i) {
-				const auto v = r.i32();
-				if (i == 0)
-					doc.offset_x = v;
-				else if (i == 1)
-					doc.offset_y = v;
-				else if (i == 2)
-					doc.offset_z = v;
-			}
-		} else if (name == "Palette" && type == 10) {
-			for (;;) {
-				auto t = r.u8();
-				if (!t)
-					break;
-				auto n = r.str();
-				if (t != 3) {
-					skip_payload(r, t);
-					continue;
-				}
-				int id = static_cast<int>(r.u32());
-				palette[id] = n;
-			}
-		} else if (name == "BlockData" && type == 7) {
-			decode_block_data(r, data_ranges);
-		} else if ((name == "BlockEntities" || name == "TileEntities") && type == 9) {
-			if (options.include_entities)
-				decode_block_entities(r, doc);
-			else
-				skip_payload(r, type);
-		} else
-			skip_payload(r, type);
-	}
+	bool has_palette = false;
+	decode_schematic_fields(r, doc, palette, data_ranges, options, has_palette);
+	if (!has_palette)
+		throw std::runtime_error("schem Palette missing");
 	if (doc.width <= 0 || doc.height <= 0 || doc.length <= 0)
 		throw std::runtime_error("schem dimensions missing or non-positive");
+	if (options.max_dimension > 0 &&
+			(doc.width > options.max_dimension || doc.height > options.max_dimension ||
+					doc.length > options.max_dimension))
+		throw std::runtime_error("schem dimensions exceed the voxel coordinate range");
+	if (bool(options.palette_mapper) != bool(options.indexed_voxel_sink))
+		throw std::invalid_argument(
+				"schem indexed decoding needs both palette and voxel callbacks");
+	if (options.palette_mapper && options.block_mapper)
+		throw std::invalid_argument(
+				"schem palette and block projections are mutually exclusive");
 	// Rust rejects volumes beyond the signed 32-bit index range before
 	// allocating or iterating BlockData.  Besides matching that contract, the
 	// checked multiplication prevents hostile dimensions from wrapping size_t.
 	constexpr std::uint64_t max_cells = std::numeric_limits<std::int32_t>::max();
-	const auto volume = static_cast<std::uint64_t>(doc.width) *
-						static_cast<std::uint64_t>(doc.height) *
-						static_cast<std::uint64_t>(doc.length);
-	if (volume > max_cells)
+	const auto width = static_cast<std::uint64_t>(doc.width);
+	const auto height = static_cast<std::uint64_t>(doc.height);
+	const auto length = static_cast<std::uint64_t>(doc.length);
+	if (width > max_cells / height || width * height > max_cells / length)
 		throw std::runtime_error("schem volume exceeds the supported range");
-	const std::size_t cells = static_cast<std::size_t>(volume);
+	const std::size_t cells = static_cast<std::size_t>(width * height * length);
+	std::unordered_map<int, std::uint8_t> palette_slots;
+	if (options.palette_mapper) {
+		palette_slots.reserve(palette.size());
+		for (const auto &[index, name] : palette)
+			if (auto slot = options.palette_mapper(name))
+				palette_slots.emplace(index, *slot);
+	}
 	std::unordered_map<int, Block> mapped_palette;
 	if (options.block_mapper) {
 		mapped_palette.reserve(palette.size());
@@ -877,6 +939,12 @@ SchemDocument decode_sponge_schem(
 			const auto i = decoded_cells++;
 			const int x = i % doc.width, z = (i / doc.width) % doc.length,
 					  y = i / (doc.width * doc.length);
+			if (options.palette_mapper) {
+				if (const auto slot = palette_slots.find(index);
+						slot != palette_slots.end())
+					options.indexed_voxel_sink(x, y, z, slot->second);
+				continue;
+			}
 			if (options.block_mapper) {
 				const auto mapped = mapped_palette.find(index);
 				if (mapped != mapped_palette.end()) {
@@ -890,39 +958,8 @@ SchemDocument decode_sponge_schem(
 			std::shared_ptr<const SchemProperties> properties;
 			auto state = state_properties.find(it->second);
 			if (state == state_properties.end()) {
-				SchemProperties parsed;
-				const auto open = it->second.find('['), close = it->second.rfind(']');
-				if (open != std::string::npos && close != std::string::npos &&
-						close > open + 1) {
-					std::size_t start = open + 1;
-					while (start < close) {
-						std::size_t end = start;
-						int depth = 0;
-						bool quoted = false;
-						for (; end < close; ++end) {
-							const char ch = it->second[end];
-							if (ch == '"' &&
-									(end == start || it->second[end - 1] != '\\'))
-								quoted = !quoted;
-							if (!quoted && (ch == '[' || ch == '{'))
-								++depth;
-							else if (!quoted && (ch == ']' || ch == '}') && depth)
-								--depth;
-							else if (!quoted && ch == ',' && depth == 0)
-								break;
-						}
-						const auto equals = it->second.find('=', start);
-						if (equals != std::string::npos && equals < end) {
-							auto key = trim_state_component(
-									it->second.substr(start, equals - start));
-							auto value = trim_state_component(
-									it->second.substr(equals + 1, end - equals - 1));
-							parsed.insert_or_assign(std::move(key), std::move(value));
-						}
-						start = end < close ? end + 1 : close;
-					}
-				}
-				properties = BlockWithProperties::intern_properties(std::move(parsed));
+				properties = BlockWithProperties::intern_properties(
+						parse_schem_properties(it->second));
 				state = state_properties.emplace(it->second, std::move(properties)).first;
 			}
 			auto [mapped, inserted] = resolved_blocks.try_emplace(it->second);
@@ -939,41 +976,17 @@ SchemDocument decode_sponge_schem(
 std::shared_ptr<const SchemDocument> load_schem_cached(const std::filesystem::path &file)
 {
 	static std::mutex cache_mutex;
-	static std::unordered_map<std::string, std::shared_ptr<const SchemDocument>> cache;
-	const auto key = schematic_cache_key(file);
-
-	// Serialize misses as well as cache access: concurrent mapgen workers must
-	// not independently read and decode the same large landmark schematic.
-	std::lock_guard lock(cache_mutex);
-	if (const auto found = cache.find(key); found != cache.end())
-		return found->second;
-
-	std::ifstream input(key, std::ios::binary);
-	if (!input)
-		throw std::runtime_error("unable to open schematic: " + key);
-	std::vector<std::uint8_t> bytes((std::istreambuf_iterator<char>(input)), {});
-	auto document = std::make_shared<const SchemDocument>(decode_sponge_schem(bytes));
-	cache.emplace(key, document);
-	return document;
+	static std::unordered_map<std::string, SchematicCacheEntry<SchemDocument>> cache;
+	return load_cached_schematic(file, cache_mutex, cache,
+			[](const auto &bytes) { return decode_sponge_schem(bytes); });
 }
 
 std::shared_ptr<const StructureSchematic> load_structure_cached(
 		const std::filesystem::path &file)
 {
 	static std::mutex cache_mutex;
-	static std::unordered_map<std::string, std::shared_ptr<const StructureSchematic>>
-			cache;
-	const auto key = schematic_cache_key(file);
-	{
-		std::lock_guard lock(cache_mutex);
-		if (const auto found = cache.find(key); found != cache.end())
-			return found->second;
-	}
-	auto document = load_schem_cached(file);
-	auto structure =
-			std::make_shared<const StructureSchematic>(structure_schematic(*document));
-	std::lock_guard lock(cache_mutex);
-	return cache.emplace(key, std::move(structure)).first->second;
+	static std::unordered_map<std::string, SchematicCacheEntry<StructureSchematic>> cache;
+	return load_cached_schematic(file, cache_mutex, cache, load_structure);
 }
 
 std::shared_ptr<const StructureSchematic> try_load_structure_cached(
@@ -1001,46 +1014,94 @@ std::shared_ptr<const StructureSchematic> load_centered_structure_cached(
 		const std::filesystem::path &file)
 {
 	static std::mutex cache_mutex;
-	static std::unordered_map<std::string, std::shared_ptr<const StructureSchematic>>
-			cache;
-	const auto key = schematic_cache_key(file);
-	{
-		std::lock_guard lock(cache_mutex);
-		if (const auto found = cache.find(key); found != cache.end())
-			return found->second;
-	}
-	auto structure = load_structure_cached(file)->centered();
-	auto centered = std::make_shared<const StructureSchematic>(std::move(structure));
-	std::lock_guard lock(cache_mutex);
-	return cache.emplace(key, std::move(centered)).first->second;
+	static std::unordered_map<std::string, SchematicCacheEntry<StructureSchematic>> cache;
+	return load_cached_schematic(file, cache_mutex, cache,
+			[](const auto &bytes) { return load_structure(bytes).centered(); });
 }
 
 std::shared_ptr<const ColumnSchematic> load_column_schematic_cached(
 		const std::filesystem::path &file)
 {
 	static std::mutex cache_mutex;
-	static std::unordered_map<std::string, std::shared_ptr<const ColumnSchematic>> cache;
-	const auto key = schematic_cache_key(file);
-	{
-		std::lock_guard lock(cache_mutex);
-		if (const auto found = cache.find(key); found != cache.end())
-			return found->second;
-	}
-	auto document = load_schem_cached(file);
-	auto columns = std::make_shared<const ColumnSchematic>(
-			ColumnSchematic::from_document(*document));
-	std::lock_guard lock(cache_mutex);
-	return cache.emplace(key, std::move(columns)).first->second;
+	static std::unordered_map<std::string, SchematicCacheEntry<ColumnSchematic>> cache;
+	return load_cached_schematic(file, cache_mutex, cache, load_column_schematic);
 }
 
-SchemDocument load_palettized(const std::vector<std::uint8_t> &gzip_bytes)
+std::shared_ptr<const PalettizedSchematic> load_palettized_cached(
+		const std::filesystem::path &file)
 {
-	return decode_sponge_schem(gzip_bytes);
+	static std::mutex cache_mutex;
+	static std::unordered_map<std::string, SchematicCacheEntry<PalettizedSchematic>>
+			cache;
+	return load_cached_schematic(file, cache_mutex, cache, load_palettized);
 }
+
+namespace
+{
+struct DecodedPalettized
+{
+	PalettizedSchematic schematic;
+	std::vector<std::string> palette_names;
+	SchemDocument metadata;
+};
+
+DecodedPalettized decode_palettized(
+		const std::vector<std::uint8_t> &gzip_bytes, bool include_entities)
+{
+	DecodedPalettized decoded;
+	auto &out = decoded.schematic;
+	int min_y = std::numeric_limits<int>::max();
+	SchemDecodeOptions options;
+	options.include_entities = include_entities;
+	options.max_dimension = std::numeric_limits<std::int16_t>::max();
+	options.palette_mapper = [&](const std::string &name) -> std::optional<std::uint8_t> {
+		auto block = resolve_schem_block_with_properties(name);
+		if (block.block == block_definitions::AIR)
+			return std::nullopt;
+		if (out.palette.size() >= 256)
+			throw std::runtime_error("schem has more than 256 rendered palette entries");
+		const auto slot = static_cast<std::uint8_t>(out.palette.size());
+		out.palette.push_back(std::move(block));
+		decoded.palette_names.push_back(name);
+		return slot;
+	};
+	options.indexed_voxel_sink = [&](int x, int y, int z, std::uint8_t slot) {
+		min_y = std::min(min_y, y);
+		out.voxels.push_back({static_cast<std::int16_t>(x), static_cast<std::int16_t>(y),
+				static_cast<std::int16_t>(z), slot});
+	};
+	decoded.metadata = decode_sponge_schem(gzip_bytes, options);
+	out.width = decoded.metadata.width;
+	out.length = decoded.metadata.length;
+	if (min_y != std::numeric_limits<int>::max()) {
+		for (auto &voxel : out.voxels)
+			voxel.y = static_cast<std::int16_t>(voxel.y - min_y);
+		for (auto &entity : decoded.metadata.entities)
+			entity.y -= min_y;
+	}
+	out.voxels.shrink_to_fit();
+	return decoded;
+}
+} // namespace
 
 StructureSchematic load_structure(const std::vector<std::uint8_t> &gzip_bytes)
 {
-	return structure_schematic(decode_sponge_schem(gzip_bytes));
+	// Expand only accepted palette entries, after releasing the NBT buffer as
+	// Rust's load_structure does. Retain C++'s native entity payload extension.
+	auto decoded = decode_palettized(gzip_bytes, true);
+	StructureSchematic out;
+	out.width = decoded.schematic.width;
+	out.length = decoded.schematic.length;
+	out.entities = std::move(decoded.metadata.entities);
+	out.voxels.reserve(decoded.schematic.voxels.size());
+	for (const auto &voxel : decoded.schematic.voxels) {
+		const auto &state = decoded.schematic.palette[voxel.palette_slot];
+		out.voxels.push_back(
+				{voxel.x, voxel.y, voxel.z, decoded.palette_names[voxel.palette_slot],
+						state.block, state.properties});
+	}
+	anchor_structure(out);
+	return out;
 }
 
 ColumnSchematic ColumnSchematic::from_document(const SchemDocument &document)
@@ -1055,7 +1116,6 @@ ColumnSchematic ColumnSchematic::from_document(const SchemDocument &document)
 	const auto area = static_cast<std::uint64_t>(out.width) * out.length;
 	if (area > std::numeric_limits<std::size_t>::max())
 		throw std::runtime_error("schem column index exceeds addressable range");
-	out.columns.resize(static_cast<std::size_t>(area));
 
 	using StateKey = std::pair<std::string, std::map<std::string, std::string>>;
 	std::map<StateKey, std::uint8_t> slots;
@@ -1094,20 +1154,7 @@ ColumnSchematic ColumnSchematic::from_document(const SchemDocument &document)
 				static_cast<std::int16_t>(voxel.y - min_y),
 				static_cast<std::int16_t>(voxel.z), slot->second});
 	}
-	std::sort(out.voxels.begin(), out.voxels.end(), [](const auto &a, const auto &b) {
-		return std::tie(a.x, a.z, a.y) < std::tie(b.x, b.z, b.y);
-	});
-	for (std::size_t i = 0; i < out.voxels.size();) {
-		const auto &first = out.voxels[i];
-		std::size_t end = i + 1;
-		while (end < out.voxels.size() && out.voxels[end].x == first.x &&
-				out.voxels[end].z == first.z)
-			++end;
-		const auto index = static_cast<std::size_t>(first.z) * out.width + first.x;
-		out.columns[index] = {
-				static_cast<std::uint32_t>(i), static_cast<std::uint32_t>(end - i)};
-		i = end;
-	}
+	index_schematic_columns(out);
 	return out;
 }
 
@@ -1121,9 +1168,23 @@ std::pair<const ColumnVoxel *, std::size_t> ColumnSchematic::column(int x, int z
 	return {voxels.data() + offset, count};
 }
 
+PalettizedSchematic load_palettized(const std::vector<std::uint8_t> &gzip_bytes)
+{
+	return decode_palettized(gzip_bytes, false).schematic;
+}
+
 ColumnSchematic load_column_schematic(const std::vector<std::uint8_t> &gzip_bytes)
 {
-	return ColumnSchematic::from_document(decode_sponge_schem(gzip_bytes));
+	auto palettized = load_palettized(gzip_bytes);
+	if (palettized.voxels.empty())
+		throw std::runtime_error("schem has no mapped blocks");
+	ColumnSchematic out;
+	out.width = palettized.width;
+	out.length = palettized.length;
+	out.palette = std::move(palettized.palette);
+	out.voxels = std::move(palettized.voxels);
+	index_schematic_columns(out);
+	return out;
 }
 
 Block resolve_schem_block(const std::string &name)
@@ -1803,22 +1864,7 @@ std::unordered_map<std::string, std::string> rotate_schem_properties(
 
 BlockWithProperties resolve_schem_block_with_properties(const std::string &name)
 {
-	std::unordered_map<std::string, std::string> properties;
-	const auto open = name.find('['), close = name.rfind(']');
-	if (open != std::string::npos && close != std::string::npos && close > open + 1)
-		for (std::size_t start = open + 1, end; start < close; start = end + 1) {
-			end = name.find(',', start);
-			if (end == std::string::npos || end > close)
-				end = close;
-			const auto equals = name.find('=', start);
-			if (equals != std::string::npos && equals < end)
-				properties.insert_or_assign(
-						trim_state_component(name.substr(start, equals - start)),
-						trim_state_component(name.substr(equals + 1, end - equals - 1)));
-			if (end == close)
-				break;
-		}
-	return BlockWithProperties{resolve_schem_block(name), std::move(properties)};
+	return BlockWithProperties{resolve_schem_block(name), parse_schem_properties(name)};
 }
 
 bool place_schem_document_yaw(world_editor::WorldEditor &editor,

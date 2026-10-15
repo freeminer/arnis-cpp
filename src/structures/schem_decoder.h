@@ -58,14 +58,25 @@ struct StructureSchematic
 	std::vector<SchemVoxel> voxels;
 	std::vector<SchemEntity> entities;
 	int anchor_x = 0, anchor_z = 0, max_extent = 0;
-	StructureSchematic centered() const;
-	StructureSchematic base_anchored() const;
+	StructureSchematic centered() const &;
+	StructureSchematic centered() &&;
+	StructureSchematic base_anchored() const &;
+	StructureSchematic base_anchored() &&;
 };
 
 struct ColumnVoxel
 {
 	std::int16_t x = 0, y = 0, z = 0;
 	std::uint8_t palette_slot = 0;
+};
+
+// Rust schematic::PalettizedSchematic: one entry per accepted source palette
+// ID, with the lowest mapped voxel layer shifted to zero.
+struct PalettizedSchematic
+{
+	int width = 0, length = 0;
+	std::vector<BlockWithProperties> palette;
+	std::vector<ColumnVoxel> voxels;
 };
 
 // Palette-indexed layout for free-yaw models. Column ranges are contiguous,
@@ -89,6 +100,8 @@ std::shared_ptr<const StructureSchematic> load_structure_cached(
 std::shared_ptr<const StructureSchematic> try_load_structure_cached(
 		const std::filesystem::path &file);
 std::shared_ptr<const StructureSchematic> load_centered_structure_cached(
+		const std::filesystem::path &file);
+std::shared_ptr<const PalettizedSchematic> load_palettized_cached(
 		const std::filesystem::path &file);
 std::shared_ptr<const ColumnSchematic> load_column_schematic_cached(
 		const std::filesystem::path &file);
@@ -116,6 +129,13 @@ struct SchemDecodeOptions
 	bool include_entities = true;
 	std::function<std::optional<Block>(const std::string &)> block_mapper;
 	std::function<void(int, int, int, Block)> voxel_sink;
+	// Compact structure consumers retain source palette slots instead of one
+	// block-state string and properties pointer per voxel. Supply both callbacks.
+	std::function<std::optional<std::uint8_t>(const std::string &)> palette_mapper;
+	std::function<void(int, int, int, std::uint8_t)> indexed_voxel_sink;
+	// Zero keeps the general decoder's dimension range; compact structures use
+	// Rust's i16 coordinate limit for all three dimensions.
+	int max_dimension = 0;
 };
 
 SchemDocument decode_sponge_schem(const std::vector<std::uint8_t> &gzip_data,
@@ -125,7 +145,7 @@ SchemDocument decode_sponge_schem(
 // Decode a file-backed schematic once per normalized path. This preserves the
 // Rust OnceLock behavior while allowing callers to supply an external asset root.
 std::shared_ptr<const SchemDocument> load_schem_cached(const std::filesystem::path &file);
-SchemDocument load_palettized(const std::vector<std::uint8_t> &gzip_data);
+PalettizedSchematic load_palettized(const std::vector<std::uint8_t> &gzip_data);
 StructureSchematic load_structure(const std::vector<std::uint8_t> &gzip_data);
 ColumnSchematic load_column_schematic(const std::vector<std::uint8_t> &gzip_data);
 StructureSchematic structure_schematic(const SchemDocument &document);

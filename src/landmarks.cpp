@@ -6,9 +6,8 @@
 
 #include <algorithm>
 #include <cmath>
-#include <fstream>
 #include <limits>
-#include <map>
+#include <memory>
 #include <numeric>
 #include <tuple>
 
@@ -116,16 +115,14 @@ int median_base_y(WorldEditor &editor, const Placement &placement, double scale,
 			world_editor::min_y() + 2);
 }
 
-struct ModelVoxel
-{
-	std::int16_t x, y, z;
-	std::uint8_t palette_slot;
-};
+using ModelVoxel = structures::ColumnVoxel;
 
 struct LandmarkModel
 {
-	std::vector<BlockWithProperties> palette;
-	std::vector<ModelVoxel> voxels;
+	std::shared_ptr<const structures::PalettizedSchematic> schematic;
+	// Sorted indices make columns contiguous without duplicating the compact
+	// palette-indexed voxel records held by the shared asset cache.
+	std::vector<std::uint32_t> voxel_order;
 	std::vector<std::pair<std::uint32_t, std::uint32_t>> columns;
 	std::vector<std::uint8_t> excavated;
 	int min_x = 0, max_x = -1, min_z = 0, max_z = -1, max_y = 0;
@@ -135,53 +132,32 @@ struct LandmarkModel
 		return static_cast<std::size_t>(x - min_x) +
 			   static_cast<std::size_t>(z - min_z) * (max_x - min_x + 1);
 	}
-	std::pair<const ModelVoxel *, std::size_t> column(int x, int z) const
+	std::pair<const std::uint32_t *, std::size_t> column(int x, int z) const
 	{
-		if (x < min_x || x > max_x || z < min_z || z > max_z)
+		if (!schematic || x < min_x || x > max_x || z < min_z || z > max_z)
 			return {nullptr, 0};
 		const auto [start, count] = columns[slot(x, z)];
 		if (!count)
 			return {nullptr, 0};
-		return {voxels.data() + start, static_cast<std::size_t>(count)};
+		return {voxel_order.data() + start, static_cast<std::size_t>(count)};
+	}
+	const ModelVoxel &voxel(std::uint32_t order_index) const
+	{
+		return schematic->voxels[voxel_order[order_index]];
 	}
 };
 
-LandmarkModel make_model(
-		const structures::SchemDocument &document, const Landmark &landmark)
+LandmarkModel make_model(std::shared_ptr<const structures::PalettizedSchematic> schematic,
+		const Landmark &landmark)
 {
 	LandmarkModel model;
-	using PaletteKey = std::pair<content_t, const structures::SchemProperties *>;
-	std::map<PaletteKey, std::uint8_t> slots;
-	int min_y = std::numeric_limits<int>::max();
-	for (const auto &voxel : document.voxels) {
-		const Block block = voxel.resolved_block == AIR
-									? structures::resolve_schem_block(voxel.block)
-									: voxel.resolved_block;
-		if (block == AIR)
-			continue;
-		const PaletteKey key{block.id(), voxel.properties.get()};
-		auto [it, inserted] =
-				slots.try_emplace(key, static_cast<std::uint8_t>(model.palette.size()));
-		if (inserted)
-			model.palette.emplace_back(block, voxel.properties);
-		model.voxels.push_back(
-				{static_cast<std::int16_t>(voxel.x), static_cast<std::int16_t>(voxel.y),
-						static_cast<std::int16_t>(voxel.z), it->second});
-		min_y = std::min(min_y, voxel.y);
-	}
-	if (model.voxels.empty())
+	model.schematic = std::move(schematic);
+	if (!model.schematic || model.schematic->voxels.empty())
 		return model;
-	// Rust's load_palettized() removes empty lower layers before constructing
-	// landmark columns. Keep the landmark ground_y metadata relative to the
-	// lowest rendered block rather than to the schematic's raw NBT origin.
-	for (auto &voxel : model.voxels)
-		voxel.y = static_cast<std::int16_t>(static_cast<int>(voxel.y) - min_y);
-	std::sort(model.voxels.begin(), model.voxels.end(), [](const auto &a, const auto &b) {
-		return std::tie(a.x, a.z, a.y) < std::tie(b.x, b.z, b.y);
-	});
-	model.min_x = model.max_x = model.voxels.front().x;
-	model.min_z = model.max_z = model.voxels.front().z;
-	for (const auto &voxel : model.voxels) {
+	const auto &voxels = model.schematic->voxels;
+	model.min_x = model.max_x = voxels.front().x;
+	model.min_z = model.max_z = voxels.front().z;
+	for (const auto &voxel : voxels) {
 		model.min_x = std::min(model.min_x, int(voxel.x));
 		model.max_x = std::max(model.max_x, int(voxel.x));
 		model.min_z = std::min(model.min_z, int(voxel.z));
@@ -192,25 +168,36 @@ LandmarkModel make_model(
 	const auto length = static_cast<std::size_t>(model.max_z - model.min_z + 1);
 	const auto cell_count = width * length;
 	model.columns.assign(cell_count, {0, 0});
+	model.voxel_order.resize(voxels.size());
+	std::iota(model.voxel_order.begin(), model.voxel_order.end(), 0);
+	std::sort(model.voxel_order.begin(), model.voxel_order.end(), [&](auto a, auto b) {
+		const auto &lhs = voxels[a];
+		const auto &rhs = voxels[b];
+		return std::tie(lhs.x, lhs.z, lhs.y) < std::tie(rhs.x, rhs.z, rhs.y);
+	});
 	std::vector<std::uint8_t> marker(cell_count, 0);
 	std::vector<Block> marker_blocks;
 	for (const auto &name : landmark.interior_markers)
 		marker_blocks.push_back(structures::resolve_schem_block(name));
-	for (std::size_t start = 0; start < model.voxels.size();) {
-		const auto x = model.voxels[start].x;
-		const auto z = model.voxels[start].z;
+	for (std::size_t start = 0; start < model.voxel_order.size();) {
+		const auto &first = model.voxel(static_cast<std::uint32_t>(start));
+		const auto x = first.x;
+		const auto z = first.z;
 		std::size_t end = start + 1;
-		while (end < model.voxels.size() && model.voxels[end].x == x &&
-				model.voxels[end].z == z)
+		while (end < model.voxel_order.size() &&
+				model.voxel(static_cast<std::uint32_t>(end)).x == x &&
+				model.voxel(static_cast<std::uint32_t>(end)).z == z)
 			++end;
 		const auto index = model.slot(x, z);
 		model.columns[index] = {static_cast<std::uint32_t>(start),
 				static_cast<std::uint32_t>(end - start)};
-		for (std::size_t i = start; i < end; ++i)
+		for (std::size_t i = start; i < end; ++i) {
+			const auto &voxel = model.voxel(static_cast<std::uint32_t>(i));
 			if (std::find(marker_blocks.begin(), marker_blocks.end(),
-						model.palette[model.voxels[i].palette_slot].block) !=
+						model.schematic->palette[voxel.palette_slot].block) !=
 					marker_blocks.end())
 				marker[index] = 1;
+		}
 		start = end;
 	}
 
@@ -379,16 +366,16 @@ bool place(WorldEditor &editor, const Placement &placement, double scale,
 	if (!placement.landmark || scale <= 0.0 || !std::isfinite(scale) ||
 			!std::isfinite(rotation_degrees) || !editor.place_schematics())
 		return false;
-	std::shared_ptr<const structures::SchemDocument> document;
+	std::shared_ptr<const structures::PalettizedSchematic> schematic;
 	try {
-		document = structures::load_schem_cached(asset_path(*placement.landmark));
+		schematic = structures::load_palettized_cached(asset_path(*placement.landmark));
 	} catch (...) {
 		return false;
 	}
-	if (!document)
+	if (!schematic)
 		return false;
-	const auto model = make_model(*document, *placement.landmark);
-	if (model.voxels.empty() || model.columns.empty())
+	const auto model = make_model(std::move(schematic), *placement.landmark);
+	if (!model.schematic || model.schematic->voxels.empty() || model.columns.empty())
 		return false;
 	const int base = median_base_y(editor, placement, scale, rotation_degrees);
 	const auto [min_x, min_z] = editor.get_min_coords();
@@ -437,8 +424,8 @@ bool place(WorldEditor &editor, const Placement &placement, double scale,
 	const unsigned property_rotation =
 			static_cast<unsigned>((std::llround(rotation_degrees / 90.0) % 4 + 4) % 4);
 	std::vector<BlockWithProperties> rotated_palette;
-	rotated_palette.reserve(model.palette.size());
-	for (const auto &block : model.palette) {
+	rotated_palette.reserve(model.schematic->palette.size());
+	for (const auto &block : model.schematic->palette) {
 		auto properties = block.properties;
 		if (property_rotation && properties)
 			properties = BlockWithProperties::intern_properties(
@@ -455,15 +442,15 @@ bool place(WorldEditor &editor, const Placement &placement, double scale,
 			auto [column, count] = model.column(model_x, model_z);
 			if (!column || !count)
 				continue;
-			const int column_low = column[0].y;
+			const int column_low = model.schematic->voxels[column[0]].y;
 			const int column_bottom =
 					base + static_cast<int>(std::lround(
 								   (column_low - placement.landmark->ground_y) * scale));
 			const int column_top = std::max(column_bottom + 1,
-					base + static_cast<int>(
-								   std::lround((column[count - 1].y + 1 -
-													   placement.landmark->ground_y) *
-											   scale)));
+					base + static_cast<int>(std::lround(
+								   (model.schematic->voxels[column[count - 1]].y + 1 -
+										   placement.landmark->ground_y) *
+								   scale)));
 			const auto index = model.slot(model_x, model_z);
 			const int terrain = editor.get_ground_level(wx, wz);
 			const int clear_from = model.excavated[index]
@@ -485,7 +472,7 @@ bool place(WorldEditor &editor, const Placement &placement, double scale,
 							STONE, wx, y, wz, std::nullopt, empty_replacements);
 			}
 			for (std::size_t i = 0; i < count; ++i) {
-				const auto &voxel = column[i];
+				const auto &voxel = model.schematic->voxels[column[i]];
 				const int y0 =
 						base + static_cast<int>(std::lround(
 									   (voxel.y - placement.landmark->ground_y) * scale));

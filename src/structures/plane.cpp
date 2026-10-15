@@ -8,39 +8,51 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <filesystem>
+#include <iostream>
 #include <limits>
+#include <memory>
+#include <mutex>
 #include <optional>
+#include <string>
+#include <unordered_map>
 
 namespace arnis::structures::plane
 {
 namespace
 {
-std::shared_ptr<const SchemDocument> plane_asset(
-		const WorldEditor &editor, bool gear_down, unsigned livery)
+using PlaneFleet = std::vector<std::shared_ptr<const ColumnSchematic>>;
+
+std::shared_ptr<const PlaneFleet> available_plane_assets(
+		const WorldEditor &editor, bool gear_down)
 {
-	if (livery < 1 || livery > 6)
-		return {};
 	const auto root = editor.get_schematic_asset_root().empty()
 							  ? assets::path("structures")
 							  : editor.get_schematic_asset_root();
-	const auto path = root / "planes" /
-					  (std::string("plane_gear_") + (gear_down ? "down_" : "up_") +
-							  std::to_string(livery) + ".schem");
-	try {
-		return load_schem_cached(path);
-	} catch (...) {
-		return {};
-	}
-}
+	const auto normalized_root =
+			std::filesystem::absolute(root).lexically_normal().string();
+	const auto key = normalized_root + (gear_down ? "|gear-down" : "|gear-up");
+	static std::mutex fleet_mutex;
+	static std::unordered_map<std::string, std::shared_ptr<const PlaneFleet>> fleet_cache;
+	std::lock_guard lock(fleet_mutex);
+	if (const auto found = fleet_cache.find(key); found != fleet_cache.end())
+		return found->second;
 
-std::vector<std::shared_ptr<const SchemDocument>> available_plane_assets(
-		const WorldEditor &editor, bool gear_down)
-{
-	std::vector<std::shared_ptr<const SchemDocument>> assets;
-	for (unsigned i = 1; i <= 6; ++i)
-		if (auto asset = plane_asset(editor, gear_down, i))
-			assets.push_back(std::move(asset));
-	return assets;
+	auto fleet = std::make_shared<PlaneFleet>();
+	fleet->reserve(6);
+	for (unsigned livery = 1; livery <= 6; ++livery) {
+		const auto path = root / "planes" /
+						  (std::string("plane_gear_") + (gear_down ? "down_" : "up_") +
+								  std::to_string(livery) + ".schem");
+		try {
+			fleet->push_back(load_column_schematic_cached(path));
+		} catch (const std::exception &error) {
+			std::cerr << "Warning: plane model failed to load: " << error.what() << '\n';
+		} catch (...) {
+			std::cerr << "Warning: plane model failed to load: " << path.string() << '\n';
+		}
+	}
+	return fleet_cache.emplace(key, std::move(fleet)).first->second;
 }
 
 double yaw_for_direction(double direction_x, double direction_z)
@@ -419,15 +431,15 @@ bool place_plane_placement(WorldEditor &editor, const Placement &placement)
 		return false;
 	const bool gear_down = placement.kind == PlaneKind::Parked;
 	const auto fleet = available_plane_assets(editor, gear_down);
-	if (fleet.empty())
+	if (fleet->empty())
 		return false;
 	auto rng = element_rng(placement.representative_id * 31 + 7);
-	const auto livery = static_cast<std::size_t>(rng()) % fleet.size();
-	const auto &document = fleet[livery];
+	const auto livery = static_cast<std::size_t>(rng()) % fleet->size();
+	const auto &schematic = *(*fleet)[livery];
 	const int ground_y = models_3d::lowest_ground_in_bbox(editor,
 			placement.footprint.min_x, placement.footprint.min_z,
 			placement.footprint.max_x, placement.footprint.max_z);
-	return place_schem_document_yaw(editor, *document, placement.anchor_x,
+	return place_structure_yaw(editor, schematic, placement.anchor_x,
 			ground_y + 1 + placement.elevation_blocks, placement.anchor_z,
 			placement.yaw_degrees, placement.pitch_degrees);
 }

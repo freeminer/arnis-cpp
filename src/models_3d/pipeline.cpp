@@ -1,6 +1,5 @@
 #include "pipeline.h"
 #include "placement_pipeline.h"
-#include "custom/plane.h"
 #include "custom/stadium.h"
 #include "three_dmr/prescan.h"
 #include "wikidata/prescan.h"
@@ -37,8 +36,6 @@ Models3dPipeline Models3dPipeline::prescan(const std::vector<ProcessedElement> &
 	append_unique(out.suppressed_, out.wikidata_.suppressed);
 	out.stadium_ = custom::stadium::prescan(elements, scale, out.suppressed_);
 	append_unique(out.suppressed_, out.stadium_.suppressed);
-	// Planes are decorative runway props and deliberately suppress nothing.
-	out.plane_ = custom::plane::prescan(elements, scale);
 	return out;
 }
 
@@ -57,7 +54,6 @@ Models3dPipeline Models3dPipeline::prescan_fetchable_wikidata(
 	append_unique(out.suppressed_, out.wikidata_.suppressed);
 	out.stadium_ = custom::stadium::prescan(elements, scale, out.suppressed_);
 	append_unique(out.suppressed_, out.stadium_.suppressed);
-	out.plane_ = custom::plane::prescan(elements, scale);
 	return out;
 }
 
@@ -83,7 +79,6 @@ Models3dPipeline Models3dPipeline::prescan_fetchable_models(
 		custom::stadium::retain_fetchable(
 				out.stadium_, !stadium_fetchable || stadium_fetchable());
 	append_unique(out.suppressed_, out.stadium_.suppressed);
-	out.plane_ = custom::plane::prescan(elements, scale);
 	return out;
 }
 
@@ -105,7 +100,6 @@ std::vector<std::pair<int, int>> Models3dPipeline::deferred_regions(double scale
 	append_unique(out, three_dmr::deferred_regions(three_dmr_, scale));
 	append_unique(out, wikidata::deferred_regions(wikidata_, scale));
 	append_unique(out, custom::stadium::deferred_regions(stadium_.placements, scale));
-	append_unique(out, custom::plane::deferred_regions(plane_, scale));
 	return out;
 }
 
@@ -113,7 +107,6 @@ ModelDiscovery Models3dPipeline::discovery(double scale) const
 {
 	ModelDiscovery out;
 	out.suppressed = suppressed_;
-	out.plane_count = plane_.size();
 	out.stadium_count = stadium_.placements.size();
 	out.three_dmr_count = three_dmr_.placements.size();
 	out.wikidata_count = wikidata_.placements.size();
@@ -189,13 +182,11 @@ ModelPlacementStats place_custom_models(const Models3dPipeline &pipeline,
 		double blocks_per_meter)
 {
 	ModelPlacementStats out;
-	const auto planes =
-			place_plane_prescan(provider, editor, pipeline.planes(), blocks_per_meter);
 	const auto stadiums = place_stadium_prescan(
 			provider, editor, pipeline.stadium().placements, blocks_per_meter);
-	out.attempted = planes.attempted + stadiums.attempted;
-	out.placed = planes.placed + stadiums.placed;
-	out.voxels = planes.voxels + stadiums.voxels;
+	out.attempted = stadiums.attempted;
+	out.placed = stadiums.placed;
+	out.voxels = stadiums.voxels;
 	return out;
 }
 

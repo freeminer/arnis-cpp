@@ -85,6 +85,8 @@
 #include "canopy/canopy.h"
 #include "elevation/elevation.h"
 #include "one_world.h"
+#include "coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
+#include "coordinate_system/geographic/llbbox.h"
 #include "projection/web_mercator.h"
 #include "trees/mapped.h"
 #include "models_3d/pipeline.h"
@@ -105,6 +107,18 @@ namespace arnis
 
 namespace
 {
+// Keep the manifest's per-area generator version aligned with the Rust package
+// version in Cargo.toml. The C++ library is built independently of Cargo.
+constexpr char ARNIS_PACKAGE_VERSION[] = "3.3.0";
+one_world::ElevationAffine one_world_elevation(const elevation::ElevationAffine &affine)
+{
+	return {affine.min_height_m, affine.blocks_per_meter, affine.ground_level,
+			affine.soft_top
+					? std::optional<one_world::SoftTop>(one_world::SoftTop{
+							  affine.soft_top->knee_m, affine.soft_top->width_blocks})
+					: std::nullopt};
+}
+
 struct GroundFetchPlan
 {
 	std::array<double, 4>
@@ -1598,6 +1612,20 @@ bool generate_world(WorldEditor &editor,
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	// Persist the elevation mapping before terrain or structures are written so
+	// a later failed generation cannot leave chunks using an unrecorded mapping.
+	if (args.one_world_run && editor.ground) {
+		if (const auto affine = editor.ground->elevation_affine()) {
+			std::string error;
+			if (!one_world::remember_elevation(
+						*args.one_world_run, one_world_elevation(*affine), &error)) {
+				const auto message = "could not remember One World elevation: " + error;
+				editor.report_generation_error(message);
+				std::cerr << "Arnis generation error: " << message << '\n';
+				return false;
+			}
+		}
+	}
 	if (editor.ground)
 		editor.ground->set_snow_line_for_latitude(centre_lat);
 	// Rust loads the global ecoregion raster as a source, then builds and keeps
@@ -2928,6 +2956,41 @@ bool generate_world(WorldEditor &editor,
 		editor.report_generation_error("backend persistence finalization failed");
 		std::cerr << "Arnis generation failed while finalizing backend persistence\n";
 		return false;
+	}
+	if (args.one_world_run) {
+		const auto &run = *args.one_world_run;
+		const auto preview_path = run.preview_path();
+		std::error_code preview_error;
+		const auto preview = std::filesystem::is_regular_file(preview_path, preview_error)
+									 ? std::optional<std::filesystem::path>(preview_path)
+									 : std::nullopt;
+		const auto geographic_bounds = editor.geographic_bounds();
+		try {
+			const geographic::LLBBox llbbox(geographic_bounds[0], geographic_bounds[2],
+					geographic_bounds[1], geographic_bounds[3]);
+			const auto manifest_bbox = cartesian::XZBBox::rect_from_min_max(
+					xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+			std::string error;
+			const auto affine =
+					editor.ground ? editor.ground->elevation_affine() : std::nullopt;
+			if (!one_world::record_area(run, llbbox, manifest_bbox,
+						affine ? std::optional<one_world::ElevationAffine>(
+										 one_world_elevation(*affine))
+							   : std::nullopt,
+						preview, ARNIS_PACKAGE_VERSION, &error)) {
+				const auto message =
+						"The area was written but could not be recorded: " + error;
+				editor.report_generation_error(message);
+				std::cerr << "Arnis generation error: " << message << '\n';
+				return false;
+			}
+		} catch (const std::exception &error) {
+			const auto message =
+					std::string{"The area was written but could not be recorded: "} + error.what();
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
 	}
 	if (editor.signage_context)
 		std::cout << editor.signage_context->summary(args.debug) << '\n';

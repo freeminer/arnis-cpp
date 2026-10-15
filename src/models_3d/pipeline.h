@@ -1,7 +1,6 @@
 #pragma once
 #include "provider.h"
 #include "placement_executor.h"
-#include "custom/plane.h"
 #include "custom/stadium.h"
 #include "three_dmr/prescan.h"
 #include "wikidata/prescan.h"
@@ -24,8 +23,7 @@ struct ModelDiscovery
 {
 	std::vector<std::pair<std::string, std::uint64_t>> suppressed;
 	std::vector<std::pair<int, int>> deferred_regions;
-	std::size_t plane_count = 0, stadium_count = 0, three_dmr_count = 0,
-				wikidata_count = 0;
+	std::size_t stadium_count = 0, three_dmr_count = 0, wikidata_count = 0;
 };
 // Library equivalent of Rust's Models3dPipeline.  It deliberately separates
 // discovery from model fetching/voxelization so a mapgen host can keep only
@@ -35,7 +33,6 @@ class Models3dPipeline
 	three_dmr::PrescanResult three_dmr_;
 	wikidata::PrescanResult wikidata_;
 	custom::stadium::PrescanResult stadium_;
-	std::vector<custom::plane::Placement> plane_;
 	// Claims visible before Wikidata is considered (caller + 3DMR).  Retention
 	// uses this to avoid leaving stale Wikidata claims in `suppressed_`.
 	std::vector<std::pair<std::string, std::uint64_t>> pre_wikidata_suppressed_;
@@ -65,7 +62,6 @@ public:
 	const three_dmr::PrescanResult &three_dmr() const { return three_dmr_; }
 	const wikidata::PrescanResult &wikidata() const { return wikidata_; }
 	const custom::stadium::PrescanResult &stadium() const { return stadium_; }
-	const std::vector<custom::plane::Placement> &planes() const { return plane_; }
 	const std::vector<std::pair<std::string, std::uint64_t>> &suppressed() const
 	{
 		return suppressed_;
@@ -74,9 +70,8 @@ public:
 	std::vector<std::pair<int, int>> deferred_regions(double scale) const;
 	ModelDiscovery discovery(double scale) const;
 	// Execute the selected providers in the same deterministic order as the
-	// Rust Models3dPipeline::place path. C++-only plane archetypes are included
-	// with the custom provider stage; the separate OSM plane structures remain
-	// owned by their structures module.
+	// Rust Models3dPipeline::place path. Runway aircraft are owned by
+	// structures::plane, after the model providers, just as in Rust.
 	ModelPlacementStats place(three_dmr::Client &three_dmr_provider,
 			ModelProvider &wikidata_provider, ModelProvider &custom_provider,
 			world_editor::WorldEditor &, double blocks_per_meter) const;
