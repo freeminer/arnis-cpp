@@ -179,6 +179,20 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 		trees_ok_to_generate.push_back(TreeType::Bush);
 		trees_ok_to_generate.push_back(TreeType::AzaleaBush);
 	}
+	// Rust uses a shared slice for this palette. Keep the equivalent C++ list
+	// outside the cell loop; constructing a vector for every landuse cell caused
+	// needless allocation churn on large forests and fields.
+	const std::optional<std::vector<Block>> protected_blocks(std::vector<Block>{
+			BLACK_CONCRETE,
+			GRAY_CONCRETE_POWDER,
+			CYAN_TERRACOTTA,
+			GRAY_CONCRETE,
+			LIGHT_GRAY_CONCRETE,
+			WHITE_CONCRETE,
+			DIRT_PATH,
+			SMOOTH_STONE,
+			WATER,
+	});
 
 	for (auto const &coord : floor_area) {
 		int x = coord.first;
@@ -216,17 +230,6 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 			}
 		}
 
-		const std::optional<std::vector<Block>> protected_blocks(std::vector<Block>{
-				BLACK_CONCRETE,
-				GRAY_CONCRETE_POWDER,
-				CYAN_TERRACOTTA,
-				GRAY_CONCRETE,
-				LIGHT_GRAY_CONCRETE,
-				WHITE_CONCRETE,
-				DIRT_PATH,
-				SMOOTH_STONE,
-				WATER,
-		});
 		// The persistent surface mask covers tracks and paved areas whose material
 		// is not distinguishable through the legacy block palette alone.
 		const bool is_protected = editor.surface_is_sealed(x, z) ||

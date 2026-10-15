@@ -1080,20 +1080,6 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		if (railway_type == s)
 			return;
 	}
-	if (railway_type == "platform" || railway_type == "station" ||
-			railway_type == "halt") {
-		for (std::size_t i = 1; i < element.nodes.size(); ++i) {
-			const auto &a = element.nodes[i - 1];
-			const auto &b = element.nodes[i];
-			Block platform = ADV_PLATFORM_HIGH;
-			platform.setParam2(std::abs(b.x - a.x) >= std::abs(b.z - a.z) ? 0 : 1);
-			for (const auto &point : bresenham_line(a.x, 0, a.z, b.x, 0, b.z))
-				editor.set_block(platform, std::get<0>(point), 1, std::get<2>(point),
-						nullopt, nullopt);
-		}
-		return;
-	}
-
 	if (element.nodes.size() < 2)
 		return;
 	if (is_rail_bridge(element)) {

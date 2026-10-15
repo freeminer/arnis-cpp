@@ -508,6 +508,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 	};
 	std::unordered_map<std::uint64_t, std::uint32_t> crossing_reach;
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint64_t>> signal_crossings;
+	std::unordered_set<std::uint64_t> signalled_crossing_way_nodes;
 	std::unordered_set<std::uint64_t> crossing_way_nodes;
 
 	// Find the carriageway footprints intersected by each painted crossing way.
@@ -606,12 +607,24 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 						reach = std::max(reach, static_cast<std::uint32_t>(*last));
 					}
 				}
-				if (signalled_crossing(road.way->nodes[ni].tags) ||
-						signalled_crossing(crossing->tags)) {
-					signal_crossings.emplace_back(ri, ni, crossing_node.id);
-				}
+				if (signalled_crossing(crossing->tags))
+					signalled_crossing_way_nodes.insert(crossing_node.id);
 			}
 		}
+	}
+	// Rust emits one signal-crossing record per shared node, anchored on the
+	// first road arm; signal_crossing_stops then walks both directions from
+	// that arm, carrying across plain way joints. Recording every road ref here
+	// placed duplicate stop lines on multi-arm intersections.
+	for (const auto &[node_id, reach] : crossing_reach) {
+		(void)reach;
+		const auto refs = node_uses.find(node_id);
+		if (refs == node_uses.end() || refs->second.empty())
+			continue;
+		const auto [ri, ni] = refs->second.front();
+		if (signalled_crossing(roads[ri].way->nodes[ni].tags) ||
+				signalled_crossing_way_nodes.contains(node_id))
+			signal_crossings.emplace_back(ri, ni, node_id);
 	}
 
 	// Node-mapped pedestrian crossings are rendered as transverse paint on every

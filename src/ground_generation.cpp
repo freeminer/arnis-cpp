@@ -44,6 +44,67 @@ int chunk_origin(int chunk)
 	return chunk * CHUNK_SIZE;
 }
 
+// Rust passes these palettes as static slices. Keep the C++ equivalents shared
+// too: this pass visits every cell, so rebuilding vectors per column needlessly
+// allocates millions of times on large regions.
+const std::optional<std::vector<Block>> &protected_surfaces()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{BLACK_CONCRETE, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA,
+					GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, YELLOW_CONCRETE,
+					DIRT_PATH, SMOOTH_STONE, WATER}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &natural_tree_ground()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{
+			GRASS_BLOCK, COARSE_DIRT, DIRT, MUD, FARMLAND, PODZOL, MOSS_BLOCK}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &tree_ground()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &farmland_ground()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{FARMLAND}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &wetland_ground()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{MUD, GRASS_BLOCK}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &bedrock_only()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{BEDROCK}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &steep_replacements()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{WATER, BEDROCK, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA,
+					GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, YELLOW_CONCRETE,
+					DIRT_PATH, STONE_BRICKS, BRICK, OAK_PLANKS, BLACK_CONCRETE}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &talus_bury_replacements()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			terrain_surface::talus_buries()};
+	return blocks;
+}
+
 class WaterColumnMemo
 {
 	int base_x_{};
@@ -216,19 +277,7 @@ std::pair<double, std::pair<double, double>> local_slope(WorldEditor &editor, in
 
 bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 {
-	return editor.check_for_block_absolute(x, y, z,
-			std::optional<std::vector<Block>>(std::vector<Block>{
-					BLACK_CONCRETE,
-					GRAY_CONCRETE_POWDER,
-					CYAN_TERRACOTTA,
-					GRAY_CONCRETE,
-					LIGHT_GRAY_CONCRETE,
-					WHITE_CONCRETE,
-					YELLOW_CONCRETE,
-					DIRT_PATH,
-					SMOOTH_STONE,
-					WATER,
-			}));
+	return editor.check_for_block_absolute(x, y, z, protected_surfaces());
 }
 
 std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int z,
@@ -322,17 +371,12 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		return;
 	const auto natural_ground = [&] {
 		return !sealed &&
-			   editor.check_for_block_absolute(x, ground_y, z,
-					   std::optional<std::vector<Block>>(std::vector<Block>{GRASS_BLOCK,
-							   COARSE_DIRT, DIRT, MUD, FARMLAND, PODZOL, MOSS_BLOCK}));
+			   editor.check_for_block_absolute(x, ground_y, z, natural_tree_ground());
 	};
 	const bool ground_is_natural = natural_ground();
 	const bool ground_allows_trees =
 			ground_is_natural ||
-			(!sealed &&
-					editor.check_for_block_absolute(x, ground_y, z,
-							std::optional<std::vector<Block>>(std::vector<Block>{
-									SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS})));
+			(!sealed && editor.check_for_block_absolute(x, ground_y, z, tree_ground()));
 
 	const auto cover =
 			editor.ground ? editor.ground->cover_class(editor.ground_point(x, z)) : 0;
@@ -388,9 +432,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const bool farmland =
 				editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND);
 		if (farmland && x % 9 == 0 && z % 9 == 0 && editor.water_source_is_enclosed(x, z))
-			editor.set_block_absolute(WATER, x, ground_y, z,
-					std::optional<std::vector<Block>>(std::vector<Block>{FARMLAND}),
-					std::nullopt);
+			editor.set_block_absolute(
+					WATER, x, ground_y, z, farmland_ground(), std::nullopt);
 		else if (farmland && rng.uniform(76) == 0) {
 			if (rng.uniform(10) < 4)
 				place_decoration(HAY_BALE, ground_y + 1);
@@ -406,10 +449,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const auto choice = rng.uniform(100);
 		if (patch_noise(x, z, 5, SALT_WETLAND_POOLS) < .28 &&
 				editor.water_source_is_enclosed(x, z))
-			editor.set_block_absolute(WATER, x, ground_y, z,
-					std::optional<std::vector<Block>>(
-							std::vector<Block>{MUD, GRASS_BLOCK}),
-					std::nullopt);
+			editor.set_block_absolute(
+					WATER, x, ground_y, z, wetland_ground(), std::nullopt);
 		else if (choice < 50)
 			place_decoration(GRASS, ground_y + 1);
 		else if (choice < 64) {
@@ -827,20 +868,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								// Match Rust's steep-face blacklist: roads, structures, bedrock,
 								// and water remain authored even when terrain rock is forced.
 								editor.set_block_absolute(surface, x, ground_y, z,
-										std::nullopt,
-										std::optional<std::vector<Block>>(
-												std::vector<Block>{WATER, BEDROCK,
-														GRAY_CONCRETE_POWDER,
-														CYAN_TERRACOTTA, GRAY_CONCRETE,
-														LIGHT_GRAY_CONCRETE,
-														WHITE_CONCRETE, YELLOW_CONCRETE,
-														DIRT_PATH, STONE_BRICKS, BRICK,
-														OAK_PLANKS, BLACK_CONCRETE}));
+										std::nullopt, steep_replacements());
 							} else if (talus_block && surface == talus_block->first) {
 								editor.set_block_absolute(surface, x, ground_y, z,
-										std::optional<std::vector<Block>>(
-												terrain_surface::talus_buries()),
-										std::nullopt);
+										talus_bury_replacements(), std::nullopt);
 							} else {
 								editor.set_block_if_absent_absolute(
 										surface, x, ground_y, z);
@@ -982,9 +1013,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					// Rust keeps bedrock as a flat floor independently of fillground,
 					// replacing any generated block there except existing bedrock.
 					editor.set_block_absolute(BEDROCK, x, world_editor::terrain_floor_y(),
-							z, std::nullopt,
-							std::optional<std::vector<Block>>(
-									std::vector<Block>{BEDROCK}));
+							z, std::nullopt, bedrock_only());
 					// This column may now contain water placed by the ground pass; do not
 					// let a neighbour reuse the pre-write answer.
 					water_columns.forget(x, z);

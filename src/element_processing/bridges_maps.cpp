@@ -31,6 +31,7 @@ constexpr std::size_t SHORT_BRIDGE_LENGTH_BLOCKS = 30;
 constexpr int BRIDGE_NAME_FUSE_DISTANCE_BLOCKS = 200;
 constexpr float DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS = 12.0f;
 constexpr float DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG = 20.0f;
+constexpr float SIDE_DECK_EDGE_GAP_BLOCKS = 2.0f;
 constexpr int ROAD_HEADROOM = 6;
 constexpr int PATH_HEADROOM = 5;
 constexpr int RAIL_HEADROOM = 8;
@@ -331,12 +332,6 @@ bool is_ramp_candidate(const ProcessedWay &way)
 	return false;
 }
 
-bool is_oneway(const ProcessedWay &way)
-{
-	const auto oneway = way.tags.get("oneway");
-	return oneway == "yes" || oneway == "-1" || oneway == "true";
-}
-
 std::size_t way_length_blocks(const ProcessedWay &way)
 {
 	std::size_t total = 0;
@@ -348,6 +343,26 @@ std::size_t way_length_blocks(const ProcessedWay &way)
 		total += static_cast<std::size_t>(std::sqrt(dx * dx + dz * dz));
 	}
 	return total;
+}
+
+std::array<int, 4> way_bbox(const ProcessedWay &way)
+{
+	std::array<int, 4> bounds{std::numeric_limits<int>::max(),
+			std::numeric_limits<int>::max(), std::numeric_limits<int>::lowest(),
+			std::numeric_limits<int>::lowest()};
+	for (const auto &node : way.nodes) {
+		bounds[0] = std::min(bounds[0], node.x);
+		bounds[1] = std::min(bounds[1], node.z);
+		bounds[2] = std::max(bounds[2], node.x);
+		bounds[3] = std::max(bounds[3], node.z);
+	}
+	return bounds;
+}
+
+bool bboxes_touch(const std::array<int, 4> &a, const std::array<int, 4> &b, int margin)
+{
+	return a[0] - margin <= b[2] && b[0] - margin <= a[2] && a[1] - margin <= b[3] &&
+		   b[1] - margin <= a[3];
 }
 
 bool is_non_vehicular_bridge_highway(const ProcessedWay &way)
@@ -513,33 +528,6 @@ std::optional<float> heading_deg(const ProcessedWay &way)
 	return std::atan2(dz, dx) * 180.0f / pi;
 }
 
-std::pair<int, int> midpoint(const ProcessedWay &way)
-{
-	const auto &n = way.nodes[way.nodes.size() / 2];
-	return {n.x, n.z};
-}
-
-bool are_dual_carriageway_pair(const ProcessedWay &a, const ProcessedWay &b)
-{
-	const auto ha = heading_deg(a);
-	const auto hb = heading_deg(b);
-	if (!ha || !hb)
-		return false;
-	float diff = std::fmod(std::abs(*ha - *hb), 360.0f);
-	if (diff > 180.0f)
-		diff = 360.0f - diff;
-	const bool parallel =
-			diff <= DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG ||
-			std::abs(180.0f - diff) <= DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG;
-	if (!parallel)
-		return false;
-	const auto ma = midpoint(a);
-	const auto mb = midpoint(b);
-	const float dx = static_cast<float>(ma.first - mb.first);
-	const float dz = static_cast<float>(ma.second - mb.second);
-	return std::sqrt(dx * dx + dz * dz) <= DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS;
-}
-
 bool headings_parallel(const ProcessedWay &a, const ProcessedWay &b)
 {
 	const auto ha = heading_deg(a);
@@ -551,6 +539,41 @@ bool headings_parallel(const ProcessedWay &a, const ProcessedWay &b)
 		diff = 360.0f - diff;
 	return diff <= DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG ||
 		   std::abs(180.0f - diff) <= DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG;
+}
+
+// Parallel bridge ways form one structure when their sampled footprints run
+// alongside each other. Across layers, require the actual deck edges to touch;
+// on the same layer, allow the wider tolerance used for split carriageways.
+bool side_by_side(const ProcessedWay &a, const ProcessedWay &b, double scale)
+{
+	if (!heading_deg(a) || !heading_deg(b) || !headings_parallel(a, b))
+		return false;
+	const bool same_layer = effective_layer(a) == effective_layer(b);
+	const float touching = static_cast<float>((highway_block_range(a, scale) +
+											   highway_block_range(b, scale) + 1)) +
+						   SIDE_DECK_EDGE_GAP_BLOCKS;
+	const float max_distance =
+			same_layer ? std::max(touching, DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS)
+					   : touching;
+	const ProcessedWay *short_way = &a;
+	const ProcessedWay *long_way = &b;
+	if (way_length_blocks(a) > way_length_blocks(b))
+		std::swap(short_way, long_way);
+	const auto samples = coverage_samples(*short_way);
+	if (samples.empty())
+		return false;
+	float offset_sum = 0.0f;
+	std::size_t alongside = 0;
+	for (const auto &[x, z] : samples) {
+		const float offset = lateral_offset_to_way(x, z, *long_way);
+		offset_sum += offset;
+		if (offset <= max_distance)
+			++alongside;
+	}
+	if (same_layer)
+		return alongside * 2 > samples.size();
+	const float mean = offset_sum / static_cast<float>(samples.size());
+	return alongside == samples.size() && mean >= 1.5f;
 }
 
 std::optional<int> decide_internal_ramp(const std::pair<int, int> &xz, int deck_y,
@@ -731,20 +754,26 @@ BridgeStructureMap BridgeStructureMap::build(
 		}
 	}
 
-	std::vector<std::size_t> oneway_indices;
-	for (std::size_t i = 0; i < bridge_ways.size(); ++i) {
-		if (is_oneway(*bridge_ways[i]))
-			oneway_indices.push_back(i);
-	}
-	for (std::size_t ai = 0; ai < oneway_indices.size(); ++ai) {
-		for (std::size_t bi = ai + 1; bi < oneway_indices.size(); ++bi) {
-			const auto a = oneway_indices[ai];
-			const auto b = oneway_indices[bi];
+	// Step 3: group parallel decks by their sampled footprints. Rust handles
+	// ordinary carriageways, sidewalks, and touching decks across layers here;
+	// the previous C++ midpoint/oneway-only heuristic missed the latter cases.
+	std::vector<std::array<int, 4>> bridge_bounds;
+	bridge_bounds.reserve(bridge_ways.size());
+	for (const auto *way : bridge_ways)
+		bridge_bounds.push_back(way_bbox(*way));
+	for (std::size_t a = 0; a < bridge_ways.size(); ++a) {
+		for (std::size_t b = a + 1; b < bridge_ways.size(); ++b) {
 			if (uf.find(a) == uf.find(b))
 				continue;
-			if (effective_layer(*bridge_ways[a]) != effective_layer(*bridge_ways[b]))
+			const int reach_a = highway_block_range(*bridge_ways[a], scale) + 1;
+			const int reach_b = highway_block_range(*bridge_ways[b], scale) + 1;
+			const int margin = static_cast<int>(std::ceil(
+									   std::max(static_cast<float>(reach_a + reach_b),
+											   DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS))) +
+							   2;
+			if (!bboxes_touch(bridge_bounds[a], bridge_bounds[b], margin))
 				continue;
-			if (are_dual_carriageway_pair(*bridge_ways[a], *bridge_ways[b]))
+			if (side_by_side(*bridge_ways[a], *bridge_ways[b], scale))
 				uf.unite(a, b);
 		}
 	}
@@ -804,6 +833,7 @@ BridgeStructureMap BridgeStructureMap::build(
 	for (const auto &group_indices : ordered_groups) {
 		const auto group_style = majority_style(group_indices, bridge_ways, outlines);
 		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> endpoint_counts;
+		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> node_members;
 		for (const auto &idx : group_indices) {
 			const auto &way = *bridge_ways[idx];
 			const auto &s = way.nodes.front();
@@ -811,6 +841,11 @@ BridgeStructureMap BridgeStructureMap::build(
 			++endpoint_counts[{s.x, s.z}];
 			if (e.x != s.x || e.z != s.z)
 				++endpoint_counts[{e.x, e.z}];
+			std::unordered_set<std::pair<int, int>, XZPairHash> seen_nodes;
+			for (const auto &node : way.nodes)
+				seen_nodes.emplace(node.x, node.z);
+			for (const auto &xz : seen_nodes)
+				++node_members[xz];
 		}
 
 		int max_layer = 0;
@@ -1318,6 +1353,12 @@ BridgeStructureMap BridgeStructureMap::build(
 			BridgeMemberInfo info;
 			info.deck_y = deck_y;
 			info.style = group_style;
+			const auto start_members = node_members.find({s.x, s.z});
+			const auto end_members = node_members.find({e.x, e.z});
+			info.start_is_group_boundary =
+					start_members == node_members.end() || start_members->second <= 1;
+			info.end_is_group_boundary =
+					end_members == node_members.end() || end_members->second <= 1;
 			info.start_internal_ramp = decide_internal_ramp({s.x, s.z}, deck_y,
 					endpoint_counts, boundary_with_external_ramp, editor);
 			info.end_internal_ramp = decide_internal_ramp({e.x, e.z}, deck_y,
@@ -1669,14 +1710,15 @@ std::optional<int> BridgeSurfaceMap::nearby_deck_y(int x, int z, int radius) con
 	if (auto direct = deck_y_at(x, z))
 		return direct;
 	std::optional<int> found;
-	for (int r = 1; r <= radius; ++r) {
-		for (int dx = -r; dx <= r; ++dx) {
-			for (int dz = -r; dz <= r; ++dz) {
-				if (std::abs(dx) != r && std::abs(dz) != r)
-					continue;
-				if (auto y = deck_y_at(x + dx, z + dz))
-					found = found ? std::max(*found, *y) : *y;
-			}
+	// Rust scans the complete neighborhood and returns its highest deck. A
+	// nearest-ring early return can select a lower deck when parallel or stacked
+	// bridge footprints overlap the search area.
+	for (int dx = -radius; dx <= radius; ++dx) {
+		for (int dz = -radius; dz <= radius; ++dz) {
+			if (dx == 0 && dz == 0)
+				continue;
+			if (auto y = deck_y_at(x + dx, z + dz))
+				found = found ? std::max(*found, *y) : *y;
 		}
 	}
 	return found;

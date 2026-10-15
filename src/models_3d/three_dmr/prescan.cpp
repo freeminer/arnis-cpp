@@ -81,13 +81,16 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 				continue;
 			const auto last = raw.find_last_not_of(" \t\r\n");
 			raw = raw.substr(first, last - first + 1);
-			if (raw.empty() || !std::all_of(raw.begin(), raw.end(), [](unsigned char c) {
-					return c >= '0' && c <= '9';
-				}))
+			const auto digits_begin =
+					raw.starts_with('+') ? std::size_t{1} : std::size_t{0};
+			if (digits_begin == raw.size() ||
+					!std::all_of(raw.begin() + static_cast<std::ptrdiff_t>(digits_begin),
+							raw.end(),
+							[](unsigned char c) { return c >= '0' && c <= '9'; }))
 				continue;
 			std::size_t n = 0;
-			model = std::stoull(raw, &n);
-			if (n != raw.size() || model == 0)
+			model = std::stoull(raw.substr(digits_begin), &n);
+			if (n != raw.size() - digits_begin)
 				continue;
 		} catch (...) {
 			continue;

@@ -39,6 +39,8 @@ struct BridgeMemberInfo
 {
 	int deck_y = 0;
 	bridge_styles::BridgeStyle style = bridge_styles::BridgeStyle::Beam;
+	bool start_is_group_boundary = true;
+	bool end_is_group_boundary = true;
 	std::optional<int> start_internal_ramp;
 	std::optional<int> end_internal_ramp;
 	std::optional<std::size_t> module_idx;

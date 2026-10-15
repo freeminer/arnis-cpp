@@ -589,6 +589,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 				{{"direction", 2}, {"head_piece_bit", false}, {"occupied_bit", false}});
 	if (block == REDSTONE_LAMP)
 		return simple("redstone_lamp");
+	if (block == REDSTONE_WALL_TORCH)
+		return simple("redstone_torch");
 	if (block == EMPTY_FLOWER_POT)
 		return state("flower_pot", {{"update_bit", false}});
 	if (block == TERRACOTTA)
@@ -598,6 +600,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == MANGROVE_LEAVES)
 		return state(
 				"mangrove_leaves", {{"persistent_bit", true}, {"update_bit", false}});
+	if (block == AZALEA_LEAVES)
+		return state("azalea_leaves", {{"persistent_bit", true}, {"update_bit", false}});
 	for (const auto &[value,
 				 name] : std::initializer_list<std::pair<Block, const char *>>{
 				 {LANTERN, "lantern"}, {SOUL_LANTERN, "soul_lantern"}, {SMOKER, "smoker"},
@@ -620,11 +624,10 @@ BedrockBlock to_bedrock_block(const Block &block)
 				 {DEEPSLATE_DIAMOND_ORE, "deepslate_diamond_ore"}, {CALCITE, "calcite"},
 				 {BASALT, "basalt"}, {SMOOTH_BASALT, "smooth_basalt"},
 				 {SPORE_BLOSSOM, "spore_blossom"}, {AZALEA, "azalea"},
-				 {FLOWERING_AZALEA, "flowering_azalea"}, {AZALEA_LEAVES, "azalea_leaves"},
-				 {SHROOMLIGHT, "shroomlight"}, {SCULK, "sculk"},
-				 {SCULK_CATALYST, "sculk_catalyst"}, {SCULK_SENSOR, "sculk_sensor"},
-				 {SCULK_SHRIEKER, "sculk_shrieker"}, {GREEN_CARPET, "green_carpet"},
-				 {LIGHT_BLUE_CARPET, "light_blue_carpet"},
+				 {FLOWERING_AZALEA, "flowering_azalea"}, {SHROOMLIGHT, "shroomlight"},
+				 {SCULK, "sculk"}, {SCULK_CATALYST, "sculk_catalyst"},
+				 {SCULK_SENSOR, "sculk_sensor"}, {SCULK_SHRIEKER, "sculk_shrieker"},
+				 {GREEN_CARPET, "green_carpet"}, {LIGHT_BLUE_CARPET, "light_blue_carpet"},
 				 {LIGHT_GRAY_CARPET, "light_gray_carpet"}})
 		if (block == value)
 			return simple(name);
@@ -861,6 +864,16 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 		return state("daylight_detector_inverted", {{"redstone_signal", 11}});
 	if (name == "redstone_lamp" && is_true("lit"))
 		return simple("lit_redstone_lamp");
+	if (value.block == block_definitions::REDSTONE_WALL_TORCH) {
+		const auto facing = string_prop("facing", "north");
+		const auto mounted = facing == "north"	 ? "south"
+							 : facing == "south" ? "north"
+							 : facing == "east"	 ? "west"
+							 : facing == "west"	 ? "east"
+												 : "south";
+		return state(
+				"redstone_torch", {{"torch_facing_direction", std::string(mounted)}});
+	}
 	if (has_suffix(name, "_slab") || name.rfind("stone_block_slab", 0) == 0 ||
 			name == "wooden_slab") {
 		const auto type = string_prop("type", "bottom");

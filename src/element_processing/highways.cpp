@@ -1713,8 +1713,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	}
 	if (is_bridge_member) {
 		const bool start_is_boundary =
-				!(bridge_member && bridge_member->start_internal_ramp);
-		const bool end_is_boundary = !(bridge_member && bridge_member->end_internal_ramp);
+				!bridge_member || bridge_member->start_is_group_boundary;
+		const bool end_is_boundary =
+				!bridge_member || bridge_member->end_is_group_boundary;
 		const bool schematic =
 				bridge_module_selected &&
 				crate::bridge_styles::sweep_bridge_schematic(editor, bridge_surface,

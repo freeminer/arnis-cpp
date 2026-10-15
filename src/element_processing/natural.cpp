@@ -95,9 +95,67 @@ bool wetland_puddle_cell(const tags_t &tags, int x, int z)
 	return wetland_wet_zone(x, z) && wetland_puddle_noise(x, z);
 }
 
+const std::optional<std::vector<Block>> &grass_block_only()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{GRASS_BLOCK}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &water_block_only()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{WATER}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &sand_block_only()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{SAND}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &wetland_ground_blocks()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{MUD, GRASS_BLOCK}};
+	return blocks;
+}
+
+const std::vector<Block> &wetland_decoration_ground()
+{
+	static const std::vector<Block> blocks{
+			MUD, MOSS_BLOCK, COARSE_DIRT, GRASS_BLOCK, DIRT};
+	return blocks;
+}
+
+const std::vector<Block> &wetland_puddle_fringe()
+{
+	static const std::vector<Block> blocks{MUD, GRASS_BLOCK, DIRT, COARSE_DIRT};
+	return blocks;
+}
+
+const std::vector<Block> &wetland_puddle_outer_fringe()
+{
+	static const std::vector<Block> blocks{MUD, GRASS_BLOCK, DIRT};
+	return blocks;
+}
+
+const std::vector<Block> &wetland_reed_ground()
+{
+	static const std::vector<Block> blocks{
+			GRASS_BLOCK, MUD, DIRT, COARSE_DIRT, MOSS_BLOCK};
+	return blocks;
+}
+
+const std::vector<Block> &mud_only()
+{
+	static const std::vector<Block> blocks{MUD};
+	return blocks;
+}
+
 bool try_place_wetland_puddle(WorldEditor &editor, int x, int z)
 {
-	const std::optional<std::vector<Block>> ground{std::vector<Block>{MUD, GRASS_BLOCK}};
+	const auto &ground = wetland_ground_blocks();
 	if (!editor.check_for_block(x, 0, z, ground))
 		return false;
 	editor.set_block(WATER, x, 0, z, ground, std::nullopt);
@@ -570,8 +628,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			}
 
 			// Generate surface elements
-			if (editor.check_for_block(x, 0, z,
-						std::optional<std::vector<Block>>{std::vector<Block>{WATER}})) {
+			if (editor.check_for_block(x, 0, z, water_block_only())) {
 				continue;
 			}
 			if (!editor.owns(x, z)) {
@@ -583,18 +640,14 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			}
 
 			if (natural_type == "grassland") {
-				if (!editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}})) {
+				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
 				if (rng.random_bool(.6)) {
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				}
 			} else if (natural_type == "heath") {
-				if (!editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}})) {
+				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
 				int random_choice = static_cast<int>(rng.uniform(500));
@@ -609,9 +662,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					}
 				}
 			} else if (natural_type == "scrub") {
-				if (!editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}})) {
+				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
 				int random_choice = static_cast<int>(rng.uniform(500));
@@ -634,9 +685,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					}
 				}
 			} else if (natural_type == "tree_row" || natural_type == "wood") {
-				if (!editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}})) {
+				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
 				const double density = ground_generation::value_noise_01(x, z, 32);
@@ -665,10 +714,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				}
 			} else if (natural_type == "sand") {
-				if (arid &&
-						editor.check_for_block(x, 0, z,
-								std::optional<std::vector<Block>>{
-										std::vector<Block>{SAND}}) &&
+				if (arid && editor.check_for_block(x, 0, z, sand_block_only()) &&
 						rng.uniform(100) == 1) {
 					editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
 				}
@@ -685,15 +731,13 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						wet_it == tags.end() ? "" : wet_it->second;
 				if (wetland_type == "wet_meadow" || wetland_type == "fen") {
 					if (rng.random_bool(.3))
-						editor.set_block(GRASS_BLOCK, x, 0, z, std::vector<Block>{MUD},
-								std::nullopt);
+						editor.set_block(GRASS_BLOCK, x, 0, z, mud_only(), std::nullopt);
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					continue;
 				}
 				if (wetland_type == "tidalflat") {
 					if (rng.random_bool(.3))
-						editor.set_block(
-								WATER, x, 0, z, std::vector<Block>{MUD}, std::nullopt);
+						editor.set_block(WATER, x, 0, z, mud_only(), std::nullopt);
 					continue;
 				}
 				const bool wet = wetland_wet_zone(x, z);
@@ -704,15 +748,11 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				}
 				if (wet) {
 					if (ground_generation::value_noise_01(x + 53, z + 71, 8) > .55)
-						editor.set_block(COARSE_DIRT, x, 0, z, std::vector<Block>{MUD},
-								std::nullopt);
+						editor.set_block(COARSE_DIRT, x, 0, z, mud_only(), std::nullopt);
 				} else if (rng.random_bool(.4)) {
-					editor.set_block(
-							GRASS_BLOCK, x, 0, z, std::vector<Block>{MUD}, std::nullopt);
+					editor.set_block(GRASS_BLOCK, x, 0, z, mud_only(), std::nullopt);
 				}
-				if (!editor.check_for_block(x, 0, z,
-							std::vector<Block>{
-									MUD, MOSS_BLOCK, COARSE_DIRT, GRASS_BLOCK, DIRT}))
+				if (!editor.check_for_block(x, 0, z, wetland_decoration_ground()))
 					continue;
 				if (wetland_type == "reedbed") {
 					if (rng.uniform(100) < 45) {
@@ -736,8 +776,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						place_grass_or_tall(editor, rng, x, z);
 				} else if (wetland_type == "bog") {
 					if (rng.random_bool(.2))
-						editor.set_block(MOSS_BLOCK, x, 0, z, std::vector<Block>{MUD},
-								std::nullopt);
+						editor.set_block(MOSS_BLOCK, x, 0, z, mud_only(), std::nullopt);
 					if (rng.random_bool(.08))
 						place_grass_or_tall(editor, rng, x, z);
 				} else {
@@ -874,9 +913,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				}
 			} else if (natural_type == "tundra") {
 				// Treeless habitat with low vegetation, mosses, lichens
-				if (!editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}})) {
+				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
 				int tundra_chance = static_cast<int>(rng.uniform(100));
@@ -885,10 +922,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				} else if (tundra_chance < 60) {
 					// 20% chance for moss
-					editor.set_block(MOSS_BLOCK, x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}},
-							std::nullopt);
+					editor.set_block(
+							MOSS_BLOCK, x, 0, z, grass_block_only(), std::nullopt);
 				} else if (tundra_chance < 70) {
 					// 10% chance for dead bush (lichens)
 					editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
@@ -916,9 +951,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				}
 			} else if (natural_type == "hill") {
 				// Hill areas - elevated terrain with sparse trees and mostly grass
-				if (!editor.check_for_block(x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{GRASS_BLOCK}})) {
+				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
 				int hill_chance = static_cast<int>(rng.uniform(1000));
@@ -958,13 +991,10 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 							continue;
 						if (d == 1)
 							editor.set_block(MOSS_BLOCK, nx, 0, nz,
-									std::vector<Block>{
-											MUD, GRASS_BLOCK, DIRT, COARSE_DIRT},
-									std::nullopt);
+									wetland_puddle_fringe(), std::nullopt);
 						else
 							editor.set_block(COARSE_DIRT, nx, 0, nz,
-									std::vector<Block>{MUD, GRASS_BLOCK, DIRT},
-									std::nullopt);
+									wetland_puddle_outer_fringe(), std::nullopt);
 					}
 			for (const auto &[px, pz] : wetland_puddles)
 				for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
@@ -974,9 +1004,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 							coord_hash(wrap_add_i32(nx, 89), wrap_add_i32(nz, 97)) %
 											100 >=
 									20 ||
-							!editor.check_for_block(nx, 0, nz,
-									std::vector<Block>{GRASS_BLOCK, MUD, DIRT,
-											COARSE_DIRT, MOSS_BLOCK}))
+							!editor.check_for_block(nx, 0, nz, wetland_reed_ground()))
 						continue;
 					const int height = 1 + int(coord_hash(wrap_add_i32(nx, 131),
 													   wrap_add_i32(nz, 137)) %
