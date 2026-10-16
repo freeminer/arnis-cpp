@@ -38,6 +38,18 @@ bool closed(const std::vector<ProcessedNode> &nodes)
 										(nodes.front().x == nodes.back().x &&
 												nodes.front().z == nodes.back().z));
 }
+bool ring_outside_box(const std::vector<ProcessedNode> &nodes, const XZBBox &box)
+{
+	return std::all_of(nodes.begin(), nodes.end(), [&](const auto &node) {
+		return node.x < box.min_x();
+	}) || std::all_of(nodes.begin(), nodes.end(), [&](const auto &node) {
+		return node.x > box.max_x();
+	}) || std::all_of(nodes.begin(), nodes.end(), [&](const auto &node) {
+		return node.z < box.min_z();
+	}) || std::all_of(nodes.begin(), nodes.end(), [&](const auto &node) {
+		return node.z > box.max_z();
+	});
+}
 std::vector<P> clip_polygon(std::vector<P> points, const XZBBox &box)
 {
 	if (points.size() > 1 && points.front().x == points.back().x &&
@@ -196,12 +208,20 @@ std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 			return inside_box({double(node.x), double(node.z)}, box);
 		}))
 		return ring;
+	// Match Rust's fast rejection before polygon clipping. Besides avoiding work
+	// for distant OSM water, this prevents a degenerate all-outside ring from
+	// producing a spurious clipped sliver after coordinate rounding.
+	if (ring_outside_box(ring, box))
+		return std::nullopt;
 	std::vector<P> input;
 	input.reserve(ring.size());
 	for (const auto &node : ring)
 		input.push_back({double(node.x), double(node.z)});
 	auto p = clip_polygon(std::move(input), box);
 	if (p.size() < 3)
+		return std::nullopt;
+	if (!std::all_of(p.begin(), p.end(),
+				[&](const P point) { return inside_box(point, box); }))
 		return std::nullopt;
 	std::vector<ProcessedNode> out;
 	out.reserve(p.size() + 1);

@@ -127,6 +127,9 @@ bool placement(const ProcessedElement &e, double scale, Placement &o)
 			value = value.substr(first, last - first + 1);
 		if (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
 			value.pop_back();
+		const auto numeric_end = value.find_last_not_of(" \t\r\n");
+		if (numeric_end != std::string::npos)
+			value.resize(numeric_end + 1);
 		try {
 			std::size_t consumed = 0;
 			const float parsed = std::stof(value, &consumed);
