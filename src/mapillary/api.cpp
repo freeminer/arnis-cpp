@@ -9,6 +9,7 @@
 #include <chrono>
 #include <cmath>
 #include <array>
+#include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <nlohmann/json.hpp>
@@ -26,6 +27,17 @@ constexpr long graph_timeout_ms = 30000L;
 constexpr long media_timeout_ms = 240000L;
 constexpr long graph_connect_timeout_ms = 10000L;
 constexpr long media_connect_timeout_ms = 20000L;
+
+std::optional<double> retry_after_seconds(const std::string &value)
+{
+	if (value.empty())
+		return std::nullopt;
+	char *end = nullptr;
+	const double seconds = std::strtod(value.c_str(), &end);
+	if (end == value.c_str() || *end != '\0' || !std::isfinite(seconds) || seconds < 0.0)
+		return std::nullopt;
+	return seconds;
+}
 
 std::string encode_query_value(const std::string &value)
 {
@@ -104,7 +116,8 @@ Client::Client(cache::Layout cache) : cache_(std::move(cache))
 		if (response.response_code <= 0 || response.data.size() > max_bytes)
 			return std::nullopt;
 		return HttpReply{static_cast<int>(response.response_code),
-				std::vector<std::uint8_t>(response.data.begin(), response.data.end())};
+				std::vector<std::uint8_t>(response.data.begin(), response.data.end()),
+				retry_after_seconds(response.retry_after)};
 	};
 }
 
@@ -361,10 +374,13 @@ std::optional<HttpReply> Client::fetch_retrying(
 
 		// The Rust client uses a five-second linear backoff for ordinary
 		// transient statuses and exponential backoff for rate limiting.
-		const auto seconds = reply && reply->status == 429
-									 ? std::min(120U, 5U << std::min(attempt, 4U))
-									 : 5U * (attempt + 1);
-		std::this_thread::sleep_for(std::chrono::seconds(seconds));
+		const double seconds =
+				reply && reply->status == 429
+						? std::clamp(reply->retry_after_s.value_or(
+											 5.0 * (1U << std::min(attempt, 4U))),
+								  0.0, 120.0)
+						: 5.0 * (attempt + 1);
+		std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
 	}
 	return {};
 }
@@ -680,8 +696,13 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 				if (attempt + 1 < request_attempts) {
 					const auto wait =
 							reply && reply->status == 429
-									? std::chrono::seconds(std::min(120U, 5U << attempt))
-									: request_backoff * (attempt + 1);
+									? std::chrono::duration<double>(std::clamp(
+											  reply->retry_after_s.value_or(
+													  5.0 *
+													  (1U << std::min(attempt, 4U))),
+											  0.0, 120.0))
+									: std::chrono::duration<double>(
+											  request_backoff * (attempt + 1));
 					std::this_thread::sleep_for(wait);
 				}
 			}

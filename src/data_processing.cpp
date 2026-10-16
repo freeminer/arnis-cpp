@@ -1428,7 +1428,8 @@ bool generate_world(WorldEditor &editor,
 		const std::vector<ProcessedElement> &input_elements, const Args &args_,
 		FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &input_building_footprints, bool elements_prepared,
-		const PreparedBuildingData *prepared_buildings, mapillary::FacadeJob *facade_job)
+		const PreparedBuildingData *prepared_buildings, mapillary::FacadeJob *facade_job,
+		std::optional<std::pair<int, int>> spawn_point)
 {
 	Args effective_args = args_;
 	// Rust's CLI and GUI both make cave generation imply underground fill.
@@ -2994,6 +2995,28 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (args.one_world_run) {
 		const auto &run = *args.one_world_run;
+		// Rust moves the Java spawn only when an extension includes an explicit
+		// marker. Derive Y from the generated ground, not the prior world's level.
+		if (run.extending && spawn_point &&
+				editor.get_generation_format() ==
+						static_cast<int>(WorldFormat::JavaAnvil) &&
+				spawn_point->first >= xzbbox.min_x() &&
+				spawn_point->first <= xzbbox.max_x() &&
+				spawn_point->second >= xzbbox.min_z() &&
+				spawn_point->second <= xzbbox.max_z()) {
+			const auto ground_point =
+					editor.ground_point(spawn_point->first, spawn_point->second);
+			const int spawn_y = (editor.ground ? editor.ground->level(ground_point)
+											   : args.ground_level) +
+								3;
+			if (world_utils::set_spawn_in_level_dat(run.world_dir, spawn_point->first,
+						spawn_y, spawn_point->second)) {
+				std::cout << "Spawn point moved to " << spawn_point->first << ", "
+						  << spawn_y << ", " << spawn_point->second << ".\n";
+			} else {
+				std::cerr << "Warning: Failed to move the Java world spawn point\n";
+			}
+		}
 		const auto preview_path = run.preview_path();
 		std::error_code preview_error;
 		const auto preview = std::filesystem::is_regular_file(preview_path, preview_error)
@@ -3061,7 +3084,7 @@ bool generate_world_with_options(WorldEditor &editor,
 	return generate_world(editor, elements, args, flood_fill_cache, building_footprints,
 			elements_prepared,
 			options.prepared_buildings ? &*options.prepared_buildings : nullptr,
-			facade_job.get());
+			facade_job.get(), options.spawn_point);
 }
 
 }

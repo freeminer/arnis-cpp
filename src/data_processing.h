@@ -8,7 +8,9 @@
 #include <algorithm>
 #include <filesystem>
 #include <memory>
+#include <optional>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace arnis
@@ -70,6 +72,9 @@ struct GenerationOptions
 	OvertureSource overture_source = OvertureSource::Auto;
 	int ground_level = 0;
 	int spawn_x = 0, spawn_y = 0, spawn_z = 0;
+	// Optional map marker in world coordinates; used to move the spawn when
+	// extending an existing Java One World, matching Rust's GenerationOptions.
+	std::optional<std::pair<int, int>> spawn_point;
 	std::string projection_name;
 	double projection_scale = 1.0;
 	double min_lat = 0.0, max_lat = 0.0, min_lon = 0.0, max_lon = 0.0;
@@ -297,7 +302,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 		BuildingFootprintBitmap const &building_footprints,
 		bool elements_prepared = false,
 		const PreparedBuildingData *prepared_buildings = nullptr,
-		mapillary::FacadeJob *facade_job = nullptr);
+		mapillary::FacadeJob *facade_job = nullptr,
+		std::optional<std::pair<int, int>> spawn_point = std::nullopt);
 // Options-aware entry point matching Rust's generate_world_with_options for
 // library callers that already own the backend editor instance.
 bool generate_world_with_options(WorldEditor &editor,

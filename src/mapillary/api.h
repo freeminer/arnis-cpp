@@ -15,6 +15,7 @@ struct HttpReply
 {
 	int status = 200;
 	std::vector<std::uint8_t> body;
+	std::optional<double> retry_after_s;
 };
 // Status-aware Graph fetch path, required to distinguish a dense-cell 500
 // (which Rust subdivides) from an unavailable response or rejected token.
