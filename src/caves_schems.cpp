@@ -144,6 +144,30 @@ std::optional<Block> map_cave_block(const structures::SchemVoxel &voxel)
 	return std::nullopt;
 }
 
+std::unordered_map<std::string, std::string> rotate_cave_properties(
+		const std::unordered_map<std::string, std::string> &properties, unsigned rotation)
+{
+	static constexpr std::array<const char *, 4> directions = {
+			"north", "east", "south", "west"};
+	const auto rotate_direction = [&](const std::string &direction) {
+		for (unsigned i = 0; i < directions.size(); ++i)
+			if (direction == directions[i])
+				return std::string(directions[(i + (rotation & 3u)) & 3u]);
+		return direction;
+	};
+	std::unordered_map<std::string, std::string> rotated;
+	rotated.reserve(properties.size());
+	for (const auto &[key, value] : properties) {
+		if (key == "facing")
+			rotated.emplace(key, rotate_direction(value));
+		else if (key == "north" || key == "east" || key == "south" || key == "west")
+			rotated.emplace(rotate_direction(key), value);
+		else
+			rotated.emplace(key, value);
+	}
+	return rotated;
+}
+
 std::optional<CaveSchematic> decode_cave_schematic(const std::filesystem::path &file)
 {
 	std::ifstream in(file, std::ios::binary);
@@ -418,6 +442,11 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 		}
 	}
 	std::vector<std::tuple<int, int, int, Block>> placed_solids;
+	// Rust tests support against the complete set of landed schematic voxels,
+	// even while it subsequently removes unsupported entries. Keep that planned
+	// set separate from the mutating world so pruning order cannot change which
+	// neighboring schematic blocks count as support.
+	std::set<std::tuple<int, int, int>> placed_solid_positions;
 	std::vector<std::tuple<int, int, int, Block>> top_row;
 	for (const auto &v : schem.voxels) {
 		const auto index = static_cast<std::size_t>(&v - schem.voxels.data());
@@ -437,8 +466,7 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 				editor.set_block_absolute(AIR, wx, wy, wz, rock, std::nullopt);
 			continue;
 		}
-		const auto properties =
-				structures::rotate_schem_properties(entry.properties, rotation);
+		const auto properties = rotate_cave_properties(entry.properties, rotation);
 		const std::vector<Block> air_only{AIR};
 		const auto &allowed = (embedded || wy < ay) ? rock_air : air_only;
 		editor.set_block_with_properties_absolute(
@@ -452,6 +480,7 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 					basin_fluid->insert(pack_cave_pos(wx, wy, wz));
 			} else {
 				placed_solids.emplace_back(wx, wy, wz, entry.block);
+				placed_solid_positions.emplace(wx, wy, wz);
 				if (orientation == Orientation::EmbedFloor && v.y == schem.height - 1)
 					top_row.emplace_back(wx, wy, wz, entry.block);
 			}
@@ -462,7 +491,9 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 		bool supported = false;
 		for (const auto &offset : neighbours) {
 			const auto [dx, dy, dz] = offset;
-			if (editor.block_exists_absolute(wx + dx, wy + dy, wz + dz)) {
+			const auto neighbour = std::tuple{wx + dx, wy + dy, wz + dz};
+			if (placed_solid_positions.contains(neighbour) ||
+					editor.block_exists_absolute(wx + dx, wy + dy, wz + dz)) {
 				supported = true;
 				break;
 			}

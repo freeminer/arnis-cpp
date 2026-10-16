@@ -55,6 +55,7 @@
 #include "building_facades/registry.h"
 #include "ground_decoration.h"
 #include "mapillary/atlas.h"
+#include "mapillary/credits.h"
 #include "mapillary/facades.h"
 #include "mapillary/pipeline.h"
 #include "mapillary/fetch.h"
@@ -1164,6 +1165,7 @@ void prepare_elements_for_generation(std::vector<ProcessedElement> &elements)
 std::shared_ptr<mapillary::FacadeJob> start_mapillary_facade_job(
 		const Args &args, const std::array<double, 4> &geo)
 {
+	mapillary::credits::reset();
 	const bool geographic_bounds_valid =
 			std::all_of(geo.begin(), geo.end(),
 					[](double value) { return std::isfinite(value); }) &&
@@ -1444,6 +1446,10 @@ bool generate_world(WorldEditor &editor,
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
+	// A prestarted FacadeJob resets before its worker can record credits. Direct
+	// generation without a job still starts with fresh attribution.
+	if (!facade_job)
+		mapillary::credits::reset();
 	if (args.one_world_run)
 		editor.set_climate_anchor(std::pair{
 				args.one_world_run->origin_lat, args.one_world_run->origin_lon});
@@ -1851,17 +1857,20 @@ bool generate_world(WorldEditor &editor,
 												   landmark_max_x, landmark_max_z},
 										   args.scale, args.rotation)
 								 : landmarks::PrescanResult{};
+	// Match Rust's Models3dPipeline::prescan: a Wikidata or stadium feature is
+	// suppressed only after its model is fetchable. The providers memoize/cache
+	// successful fetches, so placement below reuses these assets rather than
+	// downloading them a second time.
 	const auto model_pipeline =
 			args.use_3d
 					? std::optional<models_3d::Models3dPipeline>(
 							  models_3d::Models3dPipeline::prescan_fetchable_models(
 									  elements, args.scale,
-									  [&](const std::string &key) {
-										  return wikidata_provider.fetch(key).has_value();
+									  [&](const std::string &qid) {
+										  return wikidata_provider.fetch(qid).has_value();
 									  },
-									  [&]() {
-										  return custom_model_provider
-												  .fetch("stadium.glb")
+									  [&] {
+										  return custom_model_provider.fetch("stadium")
 												  .has_value();
 									  },
 									  args.rotation, landmark_plan.suppressed))

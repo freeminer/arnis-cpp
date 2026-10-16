@@ -12,6 +12,7 @@
 
 #include <cstddef>
 #include <atomic>
+#include <chrono>
 #include <filesystem>
 #include <functional>
 #include <memory>
@@ -44,6 +45,10 @@ struct PipelineConfig
 	std::filesystem::path facade_cache = cache::Layout{}.facade_dir(params.digest(), 1);
 	std::filesystem::path exports_dir() const { return facade_cache / "exports"; }
 	std::size_t threads = 0;
+	// Rust's FetchConfig batch guard: stop after this much silence or this many
+	// consecutive failures since the last cached/downloaded item.
+	std::chrono::milliseconds batch_deadline{std::chrono::minutes(5)};
+	std::size_t batch_give_up_failures = 24;
 	std::shared_ptr<std::atomic_bool> cancel;
 	std::optional<std::string> cache_only;
 	std::optional<std::string> area_label;

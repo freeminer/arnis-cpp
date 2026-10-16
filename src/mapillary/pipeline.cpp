@@ -1,4 +1,5 @@
 #include "pipeline.h"
+#include "credits.h"
 
 #include "pose.h"
 #include "register.h"
@@ -54,8 +55,6 @@ constexpr double SKY_B = -0.05;
 constexpr double COLOUR_MAD_SCALE = 50.0;
 constexpr double HIRES_MAX_DIST_M = 30.0;
 constexpr std::size_t DEFAULT_IMAGE_DOWNLOAD_THREADS = 12;
-constexpr std::size_t CLUSTER_BATCH_GIVE_UP_FAILURES = 2 * DEFAULT_IMAGE_DOWNLOAD_THREADS;
-constexpr auto CLUSTER_BATCH_DEADLINE = std::chrono::seconds(300);
 constexpr const char *BLOCK_NOTE =
 		"Blocks are 1 m x 1 m at Arnis scale 1 (worlds with scale != 1 must "
 		"resample). Columns run from node_a (col 0, s = s_l) towards node_b; if the "
@@ -538,14 +537,14 @@ std::optional<Geometry> stage_geometry(const PipelineConfig &config,
 	std::atomic<std::uint64_t> cluster_last_delivery_ms{0};
 	auto cluster_batch_stopped = [&] {
 		if (cluster_failures_since_delivery.load(std::memory_order_relaxed) >=
-				CLUSTER_BATCH_GIVE_UP_FAILURES)
+				config.batch_give_up_failures)
 			return true;
 		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 				std::chrono::steady_clock::now() - cluster_batch_started)
 									 .count();
 		return elapsed - static_cast<std::int64_t>(cluster_last_delivery_ms.load(
 								 std::memory_order_relaxed)) >
-			   CLUSTER_BATCH_DEADLINE.count() * 1000;
+			   config.batch_deadline.count();
 	};
 	std::vector<std::thread> cluster_workers;
 	cluster_workers.reserve(cluster_threads);
@@ -1717,14 +1716,15 @@ AlignmentRun run_alignment(
 		std::atomic_size_t failures_since_delivery{0};
 		std::atomic<std::uint64_t> last_delivery_ms{0};
 		auto batch_stopped = [&] {
-			if (failures_since_delivery.load(std::memory_order_relaxed) >= 24)
+			if (failures_since_delivery.load(std::memory_order_relaxed) >=
+					config.batch_give_up_failures)
 				return true;
 			const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
 					std::chrono::steady_clock::now() - batch_started)
 										 .count();
 			return elapsed - static_cast<std::int64_t>(
 									 last_delivery_ms.load(std::memory_order_relaxed)) >
-				   300000;
+				   config.batch_deadline.count();
 		};
 		const std::size_t requested =
 				config.threads == 0 ? DEFAULT_IMAGE_DOWNLOAD_THREADS : config.threads;
@@ -1980,6 +1980,7 @@ AlignmentPipelineResult run_alignment_pipeline(
 					handle.empty() ? std::string{}
 								   : "https://www.mapillary.com/app/user/" + handle,
 					"https://www.mapillary.com/app/?pKey=" + id + "&focus=photo"});
+			credits::record({id, title, creator, creator_id});
 		}
 		std::set<std::string> exported_buildings;
 		output.acquisition.stats.exported_walls = 0;
@@ -2172,6 +2173,9 @@ FacadeJob::~FacadeJob()
 
 FacadeJob FacadeJob::start(Client client, PipelineConfig config)
 {
+	// Match Rust's per-generation attribution lifecycle, including direct API
+	// users who start a facade job without going through generate_world.
+	credits::reset();
 	auto state = std::make_shared<State>();
 	state->cancel =
 			config.cancel ? config.cancel : std::make_shared<std::atomic_bool>(false);

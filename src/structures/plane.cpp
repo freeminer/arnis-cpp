@@ -252,8 +252,11 @@ std::vector<std::pair<int, int>> deferred_region_keys(
 
 void cap_placements(std::vector<Placement> &placements)
 {
-	if (placements.size() > MAX_PLANES)
+	if (placements.size() > MAX_PLANES) {
+		std::cerr << "Warning: " << placements.size()
+				  << " plane spots found, placing the first " << MAX_PLANES << '\n';
 		placements.resize(MAX_PLANES);
+	}
 }
 
 void sort_placements(std::vector<Placement> &placements)

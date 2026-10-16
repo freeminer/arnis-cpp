@@ -8,6 +8,8 @@
 #include <iterator>
 #include <limits>
 #include <string_view>
+#include <charconv>
+#include <system_error>
 #include <zlib.h>
 
 namespace arnis::world_utils
@@ -15,6 +17,9 @@ namespace arnis::world_utils
 namespace
 {
 constexpr std::size_t MAX_LEVEL_DAT_SIZE = 64 * 1024 * 1024;
+constexpr std::size_t REGION_HEADER_SIZE = 8192;
+constexpr std::size_t REGION_SECTOR_SIZE = 4096;
+constexpr std::size_t MAX_CHUNK_NBT_SIZE = 64 * 1024 * 1024;
 
 enum class NbtContext
 {
@@ -24,6 +29,181 @@ enum class NbtContext
 	Spawn,
 	Player
 };
+
+bool read_be_u16(
+		const std::vector<std::uint8_t> &bytes, std::size_t &pos, std::uint16_t &value)
+{
+	if (pos > bytes.size() || bytes.size() - pos < 2)
+		return false;
+	value = (std::uint16_t(bytes[pos]) << 8) | bytes[pos + 1];
+	pos += 2;
+	return true;
+}
+
+bool read_be_i32(
+		const std::vector<std::uint8_t> &bytes, std::size_t &pos, std::int32_t &value)
+{
+	if (pos > bytes.size() || bytes.size() - pos < 4)
+		return false;
+	const auto raw = (std::uint32_t(bytes[pos]) << 24) |
+					 (std::uint32_t(bytes[pos + 1]) << 16) |
+					 (std::uint32_t(bytes[pos + 2]) << 8) | bytes[pos + 3];
+	pos += 4;
+	value = static_cast<std::int32_t>(raw);
+	return true;
+}
+
+bool skip_nbt_payload(const std::vector<std::uint8_t> &bytes, std::size_t &pos,
+		std::uint8_t type, unsigned depth)
+{
+	if (depth > 64 || pos > bytes.size())
+		return false;
+	std::uint16_t short_len = 0;
+	std::int32_t len = 0;
+	std::uint8_t item_type = 0;
+	switch (type) {
+	case 1:
+		if (pos >= bytes.size())
+			return false;
+		++pos;
+		return true;
+	case 2:
+		if (bytes.size() - pos < 2)
+			return false;
+		pos += 2;
+		return true;
+	case 3:
+	case 5:
+		if (bytes.size() - pos < 4)
+			return false;
+		pos += 4;
+		return true;
+	case 4:
+	case 6:
+		if (bytes.size() - pos < 8)
+			return false;
+		pos += 8;
+		return true;
+	case 7:
+		if (!read_be_i32(bytes, pos, len) || len < 0 ||
+				std::size_t(len) > bytes.size() - pos)
+			return false;
+		pos += std::size_t(len);
+		return true;
+	case 8:
+		if (!read_be_u16(bytes, pos, short_len) || short_len > bytes.size() - pos)
+			return false;
+		pos += short_len;
+		return true;
+	case 9:
+		if (pos >= bytes.size())
+			return false;
+		item_type = bytes[pos++];
+		if (!read_be_i32(bytes, pos, len) || len < 0 || (item_type == 0 && len != 0))
+			return false;
+		for (std::int32_t i = 0; i < len; ++i)
+			if (!skip_nbt_payload(bytes, pos, item_type, depth + 1))
+				return false;
+		return true;
+	case 10:
+		for (;;) {
+			if (pos >= bytes.size())
+				return false;
+			const auto child_type = bytes[pos++];
+			if (child_type == 0)
+				return true;
+			if (!read_be_u16(bytes, pos, short_len) || short_len > bytes.size() - pos)
+				return false;
+			pos += short_len;
+			if (!skip_nbt_payload(bytes, pos, child_type, depth + 1))
+				return false;
+		}
+	case 11:
+		if (!read_be_i32(bytes, pos, len) || len < 0 ||
+				std::size_t(len) > (bytes.size() - pos) / 4)
+			return false;
+		pos += std::size_t(len) * 4;
+		return true;
+	case 12:
+		if (!read_be_i32(bytes, pos, len) || len < 0 ||
+				std::size_t(len) > (bytes.size() - pos) / 8)
+			return false;
+		pos += std::size_t(len) * 8;
+		return true;
+	default:
+		return false;
+	}
+}
+
+std::optional<std::pair<std::int32_t, std::int32_t>> chunk_position(
+		const std::vector<std::uint8_t> &bytes)
+{
+	std::size_t pos = 0;
+	std::uint16_t root_name_len = 0;
+	if (bytes.empty() || bytes[pos++] != 10 || !read_be_u16(bytes, pos, root_name_len) ||
+			root_name_len > bytes.size() - pos)
+		return std::nullopt;
+	pos += root_name_len;
+	std::optional<std::int32_t> x, z;
+	for (;;) {
+		if (pos >= bytes.size())
+			return std::nullopt;
+		const auto type = bytes[pos++];
+		if (type == 0)
+			break;
+		std::uint16_t name_len = 0;
+		if (!read_be_u16(bytes, pos, name_len) || name_len > bytes.size() - pos)
+			return std::nullopt;
+		const std::string_view name(
+				reinterpret_cast<const char *>(bytes.data() + pos), name_len);
+		pos += name_len;
+		if (type == 3 && (name == "xPos" || name == "zPos")) {
+			std::int32_t value = 0;
+			if (!read_be_i32(bytes, pos, value))
+				return std::nullopt;
+			(name == "xPos" ? x : z) = value;
+		} else if (!skip_nbt_payload(bytes, pos, type, 0)) {
+			return std::nullopt;
+		}
+	}
+	if (!x || !z)
+		return std::nullopt;
+	return std::pair{*x, *z};
+}
+
+std::optional<std::vector<std::uint8_t>> decompress_chunk(
+		std::uint8_t compression, const std::uint8_t *data, std::size_t size)
+{
+	if (size == 0)
+		return std::nullopt;
+	if (compression == 3) {
+		if (size > MAX_CHUNK_NBT_SIZE)
+			return std::nullopt;
+		return std::vector<std::uint8_t>(data, data + size);
+	}
+	if ((compression != 1 && compression != 2) || size > std::numeric_limits<uInt>::max())
+		return std::nullopt;
+	z_stream stream{};
+	const int window_bits = compression == 1 ? 16 + MAX_WBITS : MAX_WBITS;
+	if (inflateInit2(&stream, window_bits) != Z_OK)
+		return std::nullopt;
+	stream.next_in = const_cast<Bytef *>(data);
+	stream.avail_in = static_cast<uInt>(size);
+	std::vector<std::uint8_t> output;
+	std::array<std::uint8_t, 32768> chunk{};
+	int status = Z_OK;
+	while (status == Z_OK && output.size() <= MAX_CHUNK_NBT_SIZE) {
+		stream.next_out = chunk.data();
+		stream.avail_out = static_cast<uInt>(chunk.size());
+		status = inflate(&stream, Z_NO_FLUSH);
+		const auto produced = chunk.size() - stream.avail_out;
+		output.insert(output.end(), chunk.begin(), chunk.begin() + produced);
+	}
+	inflateEnd(&stream);
+	if (status != Z_STREAM_END || output.size() > MAX_CHUNK_NBT_SIZE)
+		return std::nullopt;
+	return output;
+}
 
 std::optional<std::vector<std::uint8_t>> read_gzip_nbt(const std::filesystem::path &path)
 {
@@ -509,6 +689,123 @@ bool patch_gzip_file(const std::filesystem::path &path, std::int32_t x, std::int
 	return compressed && replace_file_atomically(path, *compressed);
 }
 } // namespace
+
+std::optional<std::size_t> drop_misplaced_chunks(
+		const std::filesystem::path &world, std::string *error)
+{
+	auto fail = [&](std::string message) -> std::optional<std::size_t> {
+		if (error)
+			*error = std::move(message);
+		return std::nullopt;
+	};
+	if (error)
+		error->clear();
+	const auto region_dir = WorldLayout::of(world).overworld_dir(world) / "region";
+	std::error_code ec;
+	if (!std::filesystem::is_directory(region_dir, ec)) {
+		if (ec)
+			return fail("failed to inspect " + region_dir.string() + ": " + ec.message());
+		return std::size_t{0};
+	}
+	std::size_t removed = 0;
+	for (std::filesystem::directory_iterator it(region_dir, ec), end; !ec && it != end;
+			it.increment(ec)) {
+		const auto path = it->path();
+		const auto filename = path.filename().string();
+		if (!filename.starts_with("r.") || path.extension() != ".mca")
+			continue;
+		const auto stem = filename.substr(2, filename.size() - 6);
+		const auto dot = stem.find('.');
+		if (dot == std::string::npos || stem.find('.', dot + 1) != std::string::npos)
+			continue;
+		std::int32_t region_x = 0, region_z = 0;
+		const auto [x_end, x_error] =
+				std::from_chars(stem.data(), stem.data() + dot, region_x);
+		const auto [z_end, z_error] = std::from_chars(
+				stem.data() + dot + 1, stem.data() + stem.size(), region_z);
+		if (x_error != std::errc{} || x_end != stem.data() + dot ||
+				z_error != std::errc{} || z_end != stem.data() + stem.size())
+			continue;
+		const auto base_x = std::int64_t(region_x) * 32;
+		const auto base_z = std::int64_t(region_z) * 32;
+		if (base_x < std::numeric_limits<std::int32_t>::min() ||
+				base_x + 31 > std::numeric_limits<std::int32_t>::max() ||
+				base_z < std::numeric_limits<std::int32_t>::min() ||
+				base_z + 31 > std::numeric_limits<std::int32_t>::max())
+			continue;
+		std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+		if (!file)
+			return fail("failed to open " + path.string());
+		file.seekg(0, std::ios::end);
+		const auto end_position = file.tellg();
+		if (end_position < 0)
+			continue;
+		const auto file_size =
+				static_cast<std::uint64_t>(static_cast<std::streamoff>(end_position));
+		if (file_size < REGION_HEADER_SIZE)
+			continue;
+		std::array<std::uint8_t, REGION_HEADER_SIZE> header{};
+		file.seekg(0, std::ios::beg);
+		if (!file.read(reinterpret_cast<char *>(header.data()), header.size()))
+			continue;
+		for (std::size_t cz = 0; cz < 32; ++cz)
+			for (std::size_t cx = 0; cx < 32; ++cx) {
+				const auto index = cx + cz * 32;
+				const auto slot = index * 4;
+				const std::uint32_t sector = (std::uint32_t(header[slot]) << 16) |
+											 (std::uint32_t(header[slot + 1]) << 8) |
+											 header[slot + 2];
+				const auto sector_count = header[slot + 3];
+				if (sector == 0 || sector_count == 0)
+					continue;
+				const auto chunk_offset = std::uint64_t(sector) * REGION_SECTOR_SIZE;
+				if (chunk_offset + 5 > file_size)
+					continue;
+				file.seekg(static_cast<std::streamoff>(chunk_offset), std::ios::beg);
+				std::array<std::uint8_t, 5> prefix{};
+				if (!file.read(reinterpret_cast<char *>(prefix.data()), prefix.size())) {
+					file.clear();
+					continue;
+				}
+				const std::uint32_t length = (std::uint32_t(prefix[0]) << 24) |
+											 (std::uint32_t(prefix[1]) << 16) |
+											 (std::uint32_t(prefix[2]) << 8) | prefix[3];
+				const auto allocation = std::uint64_t(sector_count) * REGION_SECTOR_SIZE;
+				if (length < 1 || std::uint64_t(length) + 4 > allocation ||
+						chunk_offset + std::uint64_t(length) + 4 > file_size ||
+						(prefix[4] & 0x80))
+					continue;
+				std::vector<std::uint8_t> compressed(length - 1);
+				if (!compressed.empty() &&
+						!file.read(reinterpret_cast<char *>(compressed.data()),
+								compressed.size())) {
+					file.clear();
+					continue;
+				}
+				auto nbt =
+						decompress_chunk(prefix[4], compressed.data(), compressed.size());
+				if (!nbt)
+					continue;
+				const auto position = chunk_position(*nbt);
+				if (!position ||
+						position->first == static_cast<std::int32_t>(base_x + cx) &&
+								position->second ==
+										static_cast<std::int32_t>(base_z + cz))
+					continue;
+				const std::array<char, 4> empty_slot{};
+				file.seekp(static_cast<std::streamoff>(slot), std::ios::beg);
+				if (!file.write(empty_slot.data(), empty_slot.size()) || !file.flush())
+					return fail(
+							"failed to clear misplaced chunk slot in " + path.string());
+				++removed;
+			}
+		if (file.bad())
+			return fail("I/O error while repairing " + path.string());
+	}
+	if (ec)
+		return fail("failed to list " + region_dir.string() + ": " + ec.message());
+	return removed;
+}
 
 bool set_spawn_in_level_dat(const std::filesystem::path &world, std::int32_t x,
 		std::int32_t y, std::int32_t z)

@@ -120,9 +120,10 @@ bool point_in_ring(int x, int z, const std::vector<std::pair<int, int>> &ring)
 	for (std::size_t i = 0; i < ring.size(); ++i) {
 		const auto [xi, zi] = ring[i];
 		const auto [xj, zj] = ring[j];
-		if ((zi > z) != (zj > z) && x < ((static_cast<double>(xj) - xi) * (z - zi) /
-												(static_cast<double>(zj) - zi)) +
-													xi)
+		if ((zi > z) != (zj > z) &&
+				x < ((static_cast<double>(xj) - xi) * (static_cast<double>(z) - zi) /
+							(static_cast<double>(zj) - zi)) +
+								xi)
 			inside = !inside;
 		j = i;
 	}
@@ -133,9 +134,10 @@ bool segments_cross(std::pair<int, int> a, std::pair<int, int> b, std::pair<int,
 		std::pair<int, int> d)
 {
 	auto side = [](auto p, auto q, auto r) {
-		const auto cross =
-				static_cast<std::int64_t>(q.first - p.first) * (r.second - p.second) -
-				static_cast<std::int64_t>(q.second - p.second) * (r.first - p.first);
+		const auto cross = (static_cast<std::int64_t>(q.first) - p.first) *
+								   (static_cast<std::int64_t>(r.second) - p.second) -
+						   (static_cast<std::int64_t>(q.second) - p.second) *
+								   (static_cast<std::int64_t>(r.first) - p.first);
 		return cross > 0 ? 1 : cross < 0 ? -1 : 0;
 	};
 	return side(a, b, c) * side(a, b, d) < 0 && side(c, d, a) * side(c, d, b) < 0;
@@ -272,9 +274,11 @@ bool covers(const std::vector<std::pair<int, int>> &ring, int x, int z)
 		const double dx = bx - ax, dz = bz - az;
 		const double length2 = dx * dx + dz * dz;
 		const double t =
-				length2 > 0.0
-						? std::clamp(((x - ax) * dx + (z - az) * dz) / length2, 0.0, 1.0)
-						: 0.0;
+				length2 > 0.0 ? std::clamp(((static_cast<double>(x) - ax) * dx +
+												   (static_cast<double>(z) - az) * dz) /
+												   length2,
+										0.0, 1.0)
+							  : 0.0;
 		const double cx = ax + t * dx - x, cz = az + t * dz - z;
 		if (cx * cx + cz * cz <= 0.5625)
 			return true;

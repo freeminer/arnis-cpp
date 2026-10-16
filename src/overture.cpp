@@ -942,7 +942,9 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 		const auto width = std::uint64_t(max_x) - min_x + 1;
 		const auto height = std::uint64_t(max_y) - min_y + 1;
 		if (width > max_tiles || height > max_tiles || width * height > max_tiles)
-			return buildings;
+			// Rust returns an error here so Auto can choose GeoParquet; an empty
+			// success would incorrectly bless the tile source and drop the area.
+			return std::nullopt;
 		struct TileResult
 		{
 			pmtiles::TileReadStatus status = pmtiles::TileReadStatus::Error;

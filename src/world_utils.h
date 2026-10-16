@@ -59,6 +59,10 @@ std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path);
 // single-player position. Returns false when the NBT files cannot be updated.
 bool set_spawn_in_level_dat(const std::filesystem::path &world, std::int32_t x,
 		std::int32_t y, std::int32_t z);
+// Remove Anvil chunks whose embedded xPos/zPos do not match their region slot.
+// Used once when upgrading legacy One World manifests.
+std::optional<std::size_t> drop_misplaced_chunks(
+		const std::filesystem::path &world, std::string *error = nullptr);
 bool replace_file_atomically(
 		const std::filesystem::path &, const std::vector<std::uint8_t> &);
 std::filesystem::path get_bedrock_output_directory();

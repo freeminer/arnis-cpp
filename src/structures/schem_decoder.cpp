@@ -916,6 +916,11 @@ SchemDocument decode_sponge_schem(
 			std::uint32_t value = 0;
 			unsigned shift = 0;
 			for (;;) {
+				// Cave-pack schematics are decoded by Rust's checked loader, which
+				// rejects palette indices encoded with more than five LEB128 bytes.
+				// Keep the general structure decoder's existing behavior unchanged.
+				if (options.dimension_mode == SchemDimensionMode::CavePack && shift > 28)
+					throw std::runtime_error("schem BlockData varint exceeds five bytes");
 				if (data_offset >= range_end)
 					throw std::runtime_error("truncated schem BlockData varint");
 				const std::uint8_t byte = r.b[data_offset++];

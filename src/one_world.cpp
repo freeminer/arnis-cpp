@@ -13,6 +13,7 @@
 #include <fstream>
 #include <limits>
 #include <cmath>
+#include <iostream>
 #include <system_error>
 namespace arnis::one_world
 {
@@ -278,9 +279,10 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		return std::nullopt;
 	}
 	std::shared_ptr<world_utils::SessionLock> lock(std::move(unique_lock));
+	bool owned = false;
 	auto fail_locked = [&](std::string message) -> std::optional<Session> {
 		lock.reset();
-		if (fresh_dir) {
+		if (fresh_dir && owned) {
 			std::error_code cleanup_error;
 			std::filesystem::remove_all(world_dir, cleanup_error);
 		}
@@ -304,8 +306,13 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		if (ec)
 			return fail_locked(
 					"failed to read " + world_dir.string() + ": " + ec.message());
+		owned = true;
 	}
 	if (manifest) {
+		if (!std::filesystem::is_regular_file(world_dir / "level.dat"))
+			return fail_locked(
+					world_dir.string() +
+					" has a One World manifest but no level.dat; the world seems damaged.");
 		std::vector<std::string> mismatches;
 		if (std::abs(manifest->scale - args.scale) > 1e-9)
 			mismatches.push_back("world scale " + std::to_string(args.scale) +
@@ -339,6 +346,20 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		manifest = Manifest::create(args,
 				(requested.min().lat() + requested.max().lat()) * 0.5,
 				(requested.min().lng() + requested.max().lng()) * 0.5, arnis_version);
+	}
+	if (manifest->version < 2) {
+		std::string repair_error;
+		const auto removed = world_utils::drop_misplaced_chunks(world_dir, &repair_error);
+		if (!removed)
+			return fail_locked("Failed to repair the One World at " + world_dir.string() +
+							   ": " + repair_error);
+		std::cout << "One World: repaired a world from an earlier build (" << *removed
+				  << " stray chunks dropped).\n";
+		manifest->version = 2;
+		if (!manifest->save(world_dir, error))
+			return fail_locked(error && !error->empty()
+									   ? *error
+									   : "failed to save One World manifest");
 	}
 
 	args.scale = manifest->scale;
