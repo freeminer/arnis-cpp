@@ -627,8 +627,10 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 			signal_crossings.emplace_back(ri, ni, node_id);
 	}
 
-	// Node-mapped pedestrian crossings are rendered as transverse paint on every
-	// carriageway way sharing the node, including both halves of a split way.
+	// Node-mapped pedestrian crossings are rendered once from the first road
+	// arm; arm_cells follows linked way splits in both directions.  This matches
+	// Rust's crossing_reach guard, which prevents duplicate marks at a shared
+	// node while still painting across both halves of a split road.
 	// Match Rust's source of truth: crossing tags are read from each processed
 	// road's embedded nodes, which remain available even when the parser does not
 	// emit standalone ProcessedNode elements for them.
@@ -666,27 +668,24 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 					}
 			node_refs = &standalone_refs;
 		}
-		if (road_arms_at(roads, *node_refs).size() > 2)
+		if (node_refs->empty() || road_arms_at(roads, *node_refs).size() > 2)
 			continue;
+		const auto [ri, ni] = node_refs->front();
 		const std::size_t near_crossing =
 				static_cast<std::size_t>(std::max(2.0, 8.0 * scale));
 		if (is_signal(node)) {
 			bool beside_crossing = false;
-			for (const auto &[ri, ni] : *node_refs) {
-				for (const int dir : {1, -1}) {
-					const auto cells =
-							arm_cells(roads, node_uses, ri, ni, dir, near_crossing + 1);
-					for (std::size_t s = 1; s < cells.size(); ++s) {
-						const auto *candidate = node_at(roads, cells[s]);
-						if (candidate &&
-								(crossing_way_nodes.contains(candidate->id) ||
-										candidate->tags.get("highway") == "crossing")) {
-							beside_crossing = true;
-							break;
-						}
-					}
-					if (beside_crossing)
+			for (const int dir : {1, -1}) {
+				const auto cells =
+						arm_cells(roads, node_uses, ri, ni, dir, near_crossing + 1);
+				for (std::size_t s = 1; s < cells.size(); ++s) {
+					const auto *candidate = node_at(roads, cells[s]);
+					if (candidate &&
+							(crossing_way_nodes.contains(candidate->id) ||
+									candidate->tags.get("highway") == "crossing")) {
+						beside_crossing = true;
 						break;
+					}
 				}
 				if (beside_crossing)
 					break;
@@ -696,37 +695,35 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		}
 		const std::uint32_t reach = paint->kind == CrossingPaint::Kind::Zebra ? 2 : 3;
 		crossing_reach[node_id] = std::max(crossing_reach[node_id], reach);
-		for (const auto &[ri, ni] : *node_refs) {
-			for (const int dir : {1, -1}) {
-				const auto cells = arm_cells(roads, node_uses, ri, ni, dir, reach + 1);
-				add_gap(cells, cells.size());
-			}
-			const auto ahead = arm_cells(roads, node_uses, ri, ni, 1, 3);
-			const auto behind = arm_cells(roads, node_uses, ri, ni, -1, 3);
-			if (paint->kind == CrossingPaint::Kind::Zebra) {
-				for (const int row : {-1, 0, 1}) {
-					const auto &line = row >= 0 ? ahead : behind;
-					const auto index = static_cast<std::size_t>(std::abs(row));
-					if (index < line.size()) {
-						const auto &cell = line[index];
-						result.ways_[roads[cell.road].way->id].marks.push_back(
-								{cell.t, TransverseMark::Kind::Zebra, false, 0});
-					}
-				}
-			} else {
-				for (const int row : {-2, 2}) {
-					const auto &line = row >= 0 ? ahead : behind;
-					const auto index = static_cast<std::size_t>(std::abs(row));
-					if (index < line.size()) {
-						const auto &cell = line[index];
-						result.ways_[roads[cell.road].way->id].marks.push_back({cell.t,
-								TransverseMark::Kind::CrossingLines, paint->broken, 0});
-					}
-				}
-			}
-			if (signalled_crossing(node.tags))
-				signal_crossings.emplace_back(ri, ni, node_id);
+		for (const int dir : {1, -1}) {
+			const auto cells = arm_cells(roads, node_uses, ri, ni, dir, reach + 1);
+			add_gap(cells, cells.size());
 		}
+		const auto ahead = arm_cells(roads, node_uses, ri, ni, 1, 3);
+		const auto behind = arm_cells(roads, node_uses, ri, ni, -1, 3);
+		if (paint->kind == CrossingPaint::Kind::Zebra) {
+			for (const int row : {-1, 0, 1}) {
+				const auto &line = row >= 0 ? ahead : behind;
+				const auto index = static_cast<std::size_t>(std::abs(row));
+				if (index < line.size()) {
+					const auto &cell = line[index];
+					result.ways_[roads[cell.road].way->id].marks.push_back(
+							{cell.t, TransverseMark::Kind::Zebra, false, 0});
+				}
+			}
+		} else {
+			for (const int row : {-2, 2}) {
+				const auto &line = row >= 0 ? ahead : behind;
+				const auto index = static_cast<std::size_t>(std::abs(row));
+				if (index < line.size()) {
+					const auto &cell = line[index];
+					result.ways_[roads[cell.road].way->id].marks.push_back({cell.t,
+							TransverseMark::Kind::CrossingLines, paint->broken, 0});
+				}
+			}
+		}
+		if (signalled_crossing(node.tags))
+			signal_crossings.emplace_back(ri, ni, node_id);
 	}
 
 	// Resolve controls and priority at shared street nodes. This mirrors the Rust
