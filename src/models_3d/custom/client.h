@@ -8,6 +8,8 @@
 #include <vector>
 namespace arnis::models_3d::custom
 {
+std::filesystem::path cache_root();
+
 class Client : public ModelProvider
 {
 	std::filesystem::path root_;

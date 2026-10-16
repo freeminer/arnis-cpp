@@ -153,6 +153,16 @@ void filter_tags_impl(tags_t &tags)
 
 } // namespace
 
+std::size_t get_priority(const ProcessedElement &element)
+{
+	static constexpr std::array<const char *, 6> priority_order{
+			"entrance", "building", "highway", "waterway", "water", "barrier"};
+	for (std::size_t i = 0; i < priority_order.size(); ++i)
+		if (element.tags().contains(priority_order[i]))
+			return i;
+	return priority_order.size();
+}
+
 void filter_tags(tags_t &tags)
 {
 	filter_tags_impl(tags);

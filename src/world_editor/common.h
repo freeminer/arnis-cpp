@@ -610,26 +610,68 @@ struct WorldToModify
 				.get_or_create_chunk(cx & 31, cz & 31)
 				.set_block(x & 15, y, z & 15, b);
 	}
-	void set_block_if_absent(int x, int y, int z, Block b)
+	bool set_block_if_absent(int x, int y, int z, Block b)
 	{
-		auto old = get_block(x, y, z);
-		if (!old || old->id() == block_definitions::AIR.id())
-			set_block(x, y, z, b);
+		if (y > world_editor::world_max_y())
+			return false;
+		y = std::max(y, world_editor::min_y());
+		const int chunk_x = x >> 4, chunk_z = z >> 4;
+		auto &chunk = get_or_create_region(chunk_x >> 5, chunk_z >> 5)
+							  .get_or_create_chunk(chunk_x & 31, chunk_z & 31);
+		auto &section = chunk.section(y);
+		const auto index = section_index(x & 15, y & 15, z & 15);
+		if (section.storage.get(index).id() != block_definitions::AIR.id())
+			return false;
+		section.storage.set(index, b);
+		return true;
+	}
+	template <typename BlockAt>
+	void fill_column_with(int x, int z, int y_min, int y_max, BlockAt &&block_at)
+	{
+		if (y_min > world_editor::world_max_y())
+			return;
+		const int chunk_x = x >> 4, chunk_z = z >> 4;
+		auto &chunk = get_or_create_region(chunk_x >> 5, chunk_z >> 5)
+							  .get_or_create_chunk(chunk_x & 31, chunk_z & 31);
+		const int local_x = x & 15, local_z = z & 15;
+		const int last_y =
+				std::clamp(y_max, world_editor::min_y(), world_editor::world_max_y());
+		int y = std::clamp(y_min, world_editor::min_y(), world_editor::world_max_y());
+		while (y <= last_y) {
+			auto &section = chunk.sections[y >> 4];
+			const int section_top = std::min(last_y, y | 15);
+			for (; y <= section_top; ++y) {
+				const auto index = section_index(local_x, y & 15, local_z);
+				const Block block = block_at(y);
+				if (section.storage.get(index).id() == block_definitions::AIR.id())
+					section.storage.set(index, block);
+			}
+		}
 	}
 	void fill_column(
 			int x, int z, int y_min, int y_max, Block b, bool skip_existing = false)
 	{
 		if (y_min > world_editor::world_max_y())
 			return;
-		y_min = std::clamp(y_min, world_editor::min_y(), world_editor::world_max_y());
-		y_max = std::clamp(y_max, world_editor::min_y(), world_editor::world_max_y());
-		if (y_min > y_max)
+		const int first_y =
+				std::clamp(y_min, world_editor::min_y(), world_editor::world_max_y());
+		const int last_y =
+				std::clamp(y_max, world_editor::min_y(), world_editor::world_max_y());
+		if (first_y > last_y)
 			return;
-		for (int y = y_min; y <= y_max; ++y) {
-			if (skip_existing)
-				set_block_if_absent(x, y, z, b);
-			else
-				set_block(x, y, z, b);
+		const int chunk_x = x >> 4, chunk_z = z >> 4;
+		auto &chunk = get_or_create_region(chunk_x >> 5, chunk_z >> 5)
+							  .get_or_create_chunk(chunk_x & 31, chunk_z & 31);
+		const int local_x = x & 15, local_z = z & 15;
+		for (int y = first_y; y <= last_y;) {
+			auto &section = chunk.sections[y >> 4];
+			const int section_top = std::min(last_y, y | 15);
+			for (; y <= section_top; ++y) {
+				const auto index = section_index(local_x, y & 15, local_z);
+				if (!skip_existing ||
+						section.storage.get(index).id() == block_definitions::AIR.id())
+					section.storage.set(index, b);
+			}
 		}
 	}
 	bool bulk_fill_chunk_sections_below(
@@ -1628,10 +1670,30 @@ struct WorldToModify
 		auto *c = r->get_chunk(cx & 31, cz & 31);
 		if (!c)
 			return std::nullopt;
-		for (int y = max_y; y >= min_y; --y)
-			if (c->get_block(x & 15, y, z & 15).id() != block_definitions::AIR.id())
-				return y;
-		return std::nullopt;
+		const int min_section = min_y >> 4;
+		const int max_section = max_y >> 4;
+		const int local_x = x & 15, local_z = z & 15;
+		std::optional<int> highest;
+		// Match Rust's section-first lookup. Canopy placement probes this for many
+		// adjacent columns; calling ChunkToModify::get_block for every Y repeats a
+		// section hash lookup thousands of times per column.
+		for (const auto &[section_y, section] : c->sections) {
+			if (section_y < min_section || section_y > max_section)
+				continue;
+			const int section_base_y = section_y * 16;
+			const int from_y = std::max(min_y, section_base_y);
+			const int to_y = std::min(max_y, section_base_y + 15);
+			for (int y = to_y; y >= from_y; --y) {
+				const auto index = section_index(local_x, y - section_base_y, local_z);
+				if (section.storage.get(index).id() != block_definitions::AIR.id()) {
+					highest = highest ? std::max(*highest, y) : y;
+					break;
+				}
+			}
+			if (highest && *highest == max_y)
+				return highest;
+		}
+		return highest;
 	}
 };
 inline void invalidate_tiles(WorldToModify &world,

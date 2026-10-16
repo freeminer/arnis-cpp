@@ -569,7 +569,7 @@ BuildingCategory building_category(const ProcessedWay &element, bool tall, int h
 		}
 		return BuildingCategory::TallBuilding;
 	}
-	const auto type = !element.tags.get("building").empty()
+	const auto type = element.tags.contains("building")
 							  ? element.tags.get("building")
 							  : element.tags.get("building:part");
 	if (type == "religious" || type == "church" || type == "cathedral" ||
@@ -852,9 +852,9 @@ DetailTier compute_detail_tier(const ProcessedWay &element, BuildingCategory cat
 	if (tourism == "attraction" || tourism == "museum" || tourism == "gallery" ||
 			tourism == "viewpoint")
 		score += 15;
-	if (!element.tags.get("heritage").empty() && element.tags.get("heritage") != "no")
+	if (element.tags.contains("heritage") && element.tags.get("heritage") != "no")
 		score += 20;
-	if (!element.tags.get("historic").empty() && element.tags.get("historic") != "no")
+	if (element.tags.contains("historic") && element.tags.get("historic") != "no")
 		score += 15;
 	if (element.tags.contains("building:architecture") ||
 			element.tags.contains("architecture"))
@@ -3650,9 +3650,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	int abs_terrain_offset = (!terrain_enabled) ? args.ground_level : 0;
 	double scale_factor = args.scale;
 	const std::string early_building_type =
-			!element.tags.get("building").empty()
+			element.tags.contains("building")
 					? element.tags.get("building")
-					: (!element.tags.get("building:part").empty()
+					: (element.tags.contains("building:part")
 									  ? element.tags.get("building:part")
 									  : "yes");
 	int min_level_offset =
@@ -5102,8 +5102,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			element.nodes.begin(), element.nodes.end(), [](const ProcessedNode &node) {
 				const auto entrance = node.tags.get("entrance");
 				const auto door = node.tags.get("door");
-				if ((entrance.empty() || entrance == "no") &&
-						(door.empty() || door == "no"))
+				if ((!node.tags.contains("entrance") || entrance == "no") &&
+						(!node.tags.contains("door") || door == "no"))
 					return false;
 				if (const auto level = node.tags.get("level"); !level.empty()) {
 					if (const auto parsed = strict_parse::f64(level);
@@ -5129,9 +5129,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		for (std::size_t node_index = 0; node_index < element.nodes.size();
 				++node_index) {
 			const auto &node = element.nodes[node_index];
-			if ((!node.tags.get("entrance").empty() &&
-						node.tags.get("entrance") != "no") ||
-					(!node.tags.get("door").empty() && node.tags.get("door") != "no")) {
+			if ((node.tags.contains("entrance") && node.tags.get("entrance") != "no") ||
+					(node.tags.contains("door") && node.tags.get("door") != "no")) {
 				if (const auto level_it = node.tags.find("level");
 						level_it != node.tags.end()) {
 					std::string_view level_text = level_it->second;

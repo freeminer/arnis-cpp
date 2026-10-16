@@ -885,8 +885,10 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 	return area > 0.0 ? std::optional<double>(area) : std::nullopt;
 }
 
-void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
+std::vector<size_t> ground_fill_area_order(const std::vector<ProcessedElement> &elements)
 {
+	std::vector<size_t> order(elements.size());
+	std::iota(order.begin(), order.end(), 0);
 	std::vector<size_t> slots;
 	std::vector<double> areas;
 	for (size_t i = 0; i < elements.size(); ++i) {
@@ -897,7 +899,7 @@ void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
 	}
 	const size_t count = slots.size();
 	if (count < 2)
-		return;
+		return order;
 
 	// src[k] is the compact area index that belongs at slots[k].
 	std::vector<size_t> src(count);
@@ -916,15 +918,20 @@ void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
 		return elements[slots[a]].id() < elements[slots[b]].id();
 	});
 
-	// Invert into "where does compact element j belong", then apply in place.
-	std::vector<size_t> dest(count);
+	// At each ground-fill slot, select the source element in ascending-area order.
 	for (size_t k = 0; k < count; ++k)
-		dest[src[k]] = k;
-	for (size_t k = 0; k < count; ++k)
-		while (dest[k] != k) {
-			const size_t target = dest[k];
-			std::swap(elements[slots[k]], elements[slots[target]]);
-			std::swap(dest[k], dest[target]);
+		order[slots[k]] = slots[src[k]];
+	return order;
+}
+
+void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
+{
+	auto order = ground_fill_area_order(elements);
+	for (size_t k = 0; k < order.size(); ++k)
+		while (order[k] != k) {
+			const size_t target = order[k];
+			std::swap(elements[k], elements[target]);
+			std::swap(order[k], order[target]);
 		}
 }
 
@@ -1132,10 +1139,24 @@ land_cover::LandCoverData build_osm_water_land_cover(
 
 }
 
+void sort_elements_by_priority(std::vector<ProcessedElement> &elements)
+{
+	// Match the Rust GUI dispatch order: landuse is applied after other
+	// features; the remaining elements follow osm_parser::get_priority().
+	std::stable_sort(elements.begin(), elements.end(),
+			[](const ProcessedElement &a, const ProcessedElement &b) {
+				const bool a_landuse = a.tags().contains("landuse");
+				const bool b_landuse = b.tags().contains("landuse");
+				if (a_landuse != b_landuse)
+					return !a_landuse;
+				return osm_parser::get_priority(a) < osm_parser::get_priority(b);
+			});
+}
+
 void prepare_elements_for_generation(std::vector<ProcessedElement> &elements)
 {
-	// Rust preserves source order except for ground-filling areas, which are
-	// moved into specificity order by sort_ground_fill_areas below.
+	sort_elements_by_priority(elements);
+	// Nested ground areas then render smallest-first, matching Rust's later pass.
 	sort_ground_fill_areas(elements);
 }
 
@@ -1585,12 +1606,14 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 	const auto &source_elements = args.skip_objects() ? no_elements : *elements_source;
-	// Rust applies ground-fill ordering after its source-order prescans. Preserve
-	// that sequence for direct library callers while keeping the host's prepared
-	// cached-extract vector zero-copy.
+	// The host caches the Rust priority order once. Direct library callers get a
+	// local ordered copy; the later ground-fill pass uses only an index order.
 	std::vector<ProcessedElement> ordered_elements;
-	if (!elements_prepared)
+	if (!elements_prepared) {
 		ordered_elements = source_elements;
+		// Rust orders elements before applying OSM shoreline/land overrides.
+		sort_elements_by_priority(ordered_elements);
+	}
 	const auto &elements = elements_prepared ? source_elements : ordered_elements;
 	// Build the authored-trunk index once per generation.  Ground decoration
 	// can then suppress only procedural crowns overlapping mapped trees, while
@@ -1628,8 +1651,15 @@ bool generate_world(WorldEditor &editor,
 			}
 		}
 	}
-	if (editor.ground)
-		editor.ground->set_snow_line_for_latitude(centre_lat);
+	if (editor.ground) {
+		// Rust derives the snow threshold from GroundFrame::anchor_lat: One World
+		// keeps the run's origin latitude across generated tiles, unless the
+		// projection is local or falls back to local coordinates.
+		const geographic::LLBBox geographic_bbox(geo[0], geo[2], geo[1], geo[3]);
+		const auto ground_frame = GroundFrame::from_args(args, geographic_bbox);
+		const double snow_line_lat = ground_frame.anchor_lat(geographic_bbox);
+		editor.ground->set_snow_line_for_latitude(snow_line_lat);
+	}
 	// Rust loads the global ecoregion raster as a source, then builds and keeps
 	// a bbox-aligned EcoMap on Ground so vegetation can query it per column.
 	// Freeminer may not have run Rust's Ground constructor, so seed the same
@@ -2100,10 +2130,13 @@ bool generate_world(WorldEditor &editor,
 			road_markings::RoadMarkingIndex::build(elements, args.scale,
 					decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 							(geo_bounds[2] + geo_bounds[3]) * .5));
-	// Rust sorts only after source-order prescans (notably highway connectivity
-	// and road markings), immediately before the generation passes.
-	if (!elements_prepared)
-		prepare_elements_for_generation(ordered_elements);
+	// Rust reorders only ground-fill elements here, after applying OSM ground
+	// overrides and building the shared indexes. Keep the cached element vector
+	// immutable and carry this order as indices to avoid a deep copy per chunk.
+	const auto dispatch_order = ground_fill_area_order(elements);
+	std::vector<std::size_t> dispatch_rank(elements.size());
+	for (std::size_t rank = 0; rank < dispatch_order.size(); ++rank)
+		dispatch_rank[dispatch_order[rank]] = rank;
 	struct ElementDispatchState
 	{
 		std::vector<std::pair<int, int>> rail_tunnel_points;
@@ -2171,6 +2204,11 @@ bool generate_world(WorldEditor &editor,
 	if (tiled_element_dispatch) {
 		element_assignments =
 				assign_elements_to_tiles(elements, element_tiles, args.scale);
+		for (auto &assigned : element_assignments)
+			std::stable_sort(
+					assigned.begin(), assigned.end(), [&](std::size_t a, std::size_t b) {
+						return dispatch_rank[a] < dispatch_rank[b];
+					});
 		// Rust samples available memory after the expensive tile/fill precompute.
 		// Do the same here so streaming reflects the working set this pass has
 		// actually allocated, not the more optimistic pre-assignment snapshot.
@@ -2220,8 +2258,7 @@ bool generate_world(WorldEditor &editor,
 				element_tasks.emplace_back(element_index, tile_index);
 	} else {
 		element_tasks.reserve(elements.size());
-		for (std::size_t element_index = 0; element_index < elements.size();
-				++element_index)
+		for (const auto element_index : dispatch_order)
 			element_tasks.emplace_back(
 					element_index, std::numeric_limits<std::size_t>::max());
 	}
@@ -2301,10 +2338,11 @@ bool generate_world(WorldEditor &editor,
 		const int min_z = std::max(tile.min_z, xzbbox.min_z());
 		const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
 		if (min_x > max_x || min_z > max_z) {
-			if (return_worker_result)
-				return tile_editor.merge_tile(
-						tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
-			return merge_finished_tile(tile_editor, tile);
+			const bool merged = return_worker_result
+										? tile_editor.merge_tile(tile.min_x, tile.min_z,
+												  tile.max_x - 1, tile.max_z - 1)
+										: merge_finished_tile(tile_editor, tile);
+			return merged;
 		}
 		editor.set_strict_bounds(min_x, min_z, max_x, max_z);
 		// These POI/address plates need their host building, and must precede
@@ -2368,10 +2406,11 @@ bool generate_world(WorldEditor &editor,
 				caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
 						world_editor::terrain_floor_y());
 		}
-		if (return_worker_result)
-			return tile_editor.merge_tile(
-					tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
-		return merge_finished_tile(tile_editor, tile);
+		const bool merged = return_worker_result
+									? tile_editor.merge_tile(tile.min_x, tile.min_z,
+											  tile.max_x - 1, tile.max_z - 1)
+									: merge_finished_tile(tile_editor, tile);
+		return merged;
 	};
 	std::size_t active_tile = std::numeric_limits<std::size_t>::max();
 	std::size_t next_ground_tile = 0;

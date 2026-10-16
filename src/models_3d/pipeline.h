@@ -1,10 +1,12 @@
 #pragma once
 #include "provider.h"
+#include "../elevation/cache.h"
 #include "placement_executor.h"
 #include "custom/stadium.h"
 #include "three_dmr/prescan.h"
 #include "wikidata/prescan.h"
 #include <cstdint>
+#include <filesystem>
 #include <functional>
 #include <string>
 #include <utility>
@@ -19,6 +21,11 @@ struct WorldEditor;
 }
 namespace arnis::models_3d
 {
+// Cache-management counterparts to Rust's public models_3d module helpers.
+// Hosts can surface these paths and stats without depending on exporter code.
+std::vector<std::filesystem::path> model_cache_roots();
+elevation::CacheClearStats clear_model_caches();
+
 struct ModelDiscovery
 {
 	std::vector<std::pair<std::string, std::uint64_t>> suppressed;

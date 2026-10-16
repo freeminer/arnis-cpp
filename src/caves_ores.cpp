@@ -40,7 +40,7 @@ struct Ore
 	Distribution distribution;
 	int y_min;
 	int y_max;
-	double discard;
+	float discard;
 };
 
 const std::vector<Block> &replaceable_rock()
@@ -56,13 +56,13 @@ const std::vector<Ore> &ore_table()
 		std::vector<Ore> result;
 		auto fixed = [&](Block stone, Block deep, int size, int count,
 							 Distribution distribution, int ymin, int ymax,
-							 double discard) {
+							 float discard) {
 			result.push_back({stone, deep, size, CountKind::Attempts, count, false,
 					distribution, ymin, ymax, discard});
 		};
 		auto rare = [&](Block stone, Block deep, int size, int rarity,
 							Distribution distribution, int ymin, int ymax,
-							double discard) {
+							float discard) {
 			result.push_back({stone, deep, size, CountKind::Rarity, rarity, false,
 					distribution, ymin, ymax, discard});
 		};

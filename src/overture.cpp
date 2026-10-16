@@ -1001,7 +1001,8 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 					// and cross-tile deduplication below.
 					auto decoded = try_decode_overture_building_tile(tile.bytes,
 							located_tile.x, located_tile.y, zoom,
-							std::numeric_limits<std::size_t>::max(), include_osm_sourced);
+							std::numeric_limits<std::size_t>::max(),
+							include_osm_sourced || footprint_budget > 0);
 					if (decoded)
 						result.buildings = std::move(*decoded);
 					else
@@ -1029,38 +1030,39 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 						const bool usable_floors = building.num_floors &&
 												   *building.num_floors >= 2 &&
 												   *building.num_floors < 200;
-						if (!building.osm_ref || (!usable_height && !usable_floors))
-							continue;
-						if (!usable_height)
-							building.height.reset();
-						if (!usable_floors)
-							building.num_floors.reset();
-						const auto hint_key =
-								building.osm_ref->id ^
-								(building.osm_ref->relation ? OVERTURE_ID_HIGH_BIT : 0);
-						const auto existing_hint = hint_by_osm_ref.find(hint_key);
-						if (existing_hint != hint_by_osm_ref.end()) {
-							auto &prior = buildings[existing_hint->second];
-							if (!prior.height && usable_height)
-								prior.height = building.height;
-							if (!prior.num_floors && usable_floors)
-								prior.num_floors = building.num_floors;
-							continue;
+						if (building.osm_ref && (usable_height || usable_floors)) {
+							if (!usable_height)
+								building.height.reset();
+							if (!usable_floors)
+								building.num_floors.reset();
+							const auto hint_key =
+									building.osm_ref->id ^
+									(building.osm_ref->relation ? OVERTURE_ID_HIGH_BIT
+																: 0);
+							const auto existing_hint = hint_by_osm_ref.find(hint_key);
+							if (existing_hint != hint_by_osm_ref.end()) {
+								auto &prior = buildings[existing_hint->second];
+								if (!prior.height && usable_height)
+									prior.height = building.height;
+								if (!prior.num_floors && usable_floors)
+									prior.num_floors = building.num_floors;
+							} else if (hint_by_osm_ref.size() < osm_hint_budget) {
+								hint_by_osm_ref.emplace(hint_key, buildings.size());
+								// Rust keeps OSM hints and optional OSM footprints as separate
+								// outputs. This empty-ring row carries the hint through the
+								// existing transport API without retaining a duplicate polygon.
+								OvertureBuilding hint;
+								hint.is_osm_sourced = true;
+								hint.osm_ref = building.osm_ref;
+								hint.height = building.height;
+								hint.num_floors = building.num_floors;
+								buildings.push_back(std::move(hint));
+							}
 						}
-						if (hint_by_osm_ref.size() >= osm_hint_budget)
+						// Rust returns both the hint and footprint when requested. The
+						// hint-only mode drops the geometry after recording its metadata.
+						if (!include_osm_sourced)
 							continue;
-						hint_by_osm_ref.emplace(hint_key, buildings.size());
-						// Rust stores OSM enrichments as compact OsmAttributeHint values;
-						// do not retain the decoded polygon ring in this temporary row.
-						OvertureBuilding hint;
-						hint.is_osm_sourced = true;
-						hint.osm_ref = building.osm_ref;
-						if (usable_height)
-							hint.height = building.height;
-						if (usable_floors)
-							hint.num_floors = building.num_floors;
-						buildings.push_back(std::move(hint));
-						continue;
 					}
 					const auto previous = by_id.find(building.id);
 					if (previous == by_id.end()) {
@@ -1102,7 +1104,9 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 			std::size_t kept_footprints = 0;
 			std::size_t kept_hints = 0;
 			for (auto &building : buildings) {
-				if (building.is_osm_sourced) {
+				const bool hint_only =
+						building.is_osm_sourced && building.exterior_ring.empty();
+				if (hint_only) {
 					if (kept_hints < osm_hint_budget) {
 						capped.push_back(std::move(building));
 						++kept_hints;
@@ -1705,7 +1709,7 @@ OvertureData fetch_overture_data(const geographic::LLBBox &bbox,
 					  << " buildings.\n";
 		auto transport = http_pmtiles_building_transport_source_impl(archive,
 				OVERTURE_TILE_ZOOM, cache::cache_root() / release / "tiles" / "buildings",
-				debug, true, maximum, MAX_OVERTURE_OSM_HINTS, true);
+				debug, false, maximum, MAX_OVERTURE_OSM_HINTS, true);
 		auto rows = transport(bbox, raw_limit);
 		if (!rows) {
 			tile_errors.push_back(release + ": tile archive read failed");

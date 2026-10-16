@@ -82,7 +82,10 @@ BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 }
 double BiomeAmounts::effective_threshold(double base, double amount)
 {
-	if (amount <= 0.0 || !std::isfinite(amount))
+	// Match Rust's eff_thr: only non-positive amounts disable a biome.  The
+	// parsed CLI path rejects non-finite values, but callers constructing
+	// BiomeAmounts directly still get f64::max semantics for NaN and infinity.
+	if (amount <= 0.0)
 		return std::numeric_limits<double>::quiet_NaN();
 	return std::max(0.02, base - 0.10 * std::log2(amount));
 }

@@ -72,7 +72,7 @@ std::optional<int> over_water_half_width(const ProcessedWay &way, double scale)
 	if (!structure)
 		return std::nullopt;
 	const auto highway = way.tags.get("highway");
-	if (highway.empty())
+	if (!way.tags.contains("highway"))
 		return 2;
 	return std::max(2, arnis::highways::highway_block_range(highway, way.tags, scale));
 }
@@ -83,7 +83,7 @@ std::optional<int> land_line_half_width(const ProcessedWay &way, double scale)
 			way.tags.contains("man_made"))
 		return std::nullopt;
 	const auto highway = way.tags.get("highway");
-	if (!highway.empty()) {
+	if (way.tags.contains("highway")) {
 		if (highway == "proposed" || highway == "construction" || highway == "raceway")
 			return std::nullopt;
 		return std::max(
@@ -331,7 +331,7 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 			continue;
 		}
 		const auto waterway = way.tags.get("waterway");
-		if (!waterway.empty()) {
+		if (way.tags.contains("waterway")) {
 			if (waterways::is_channel_waterway(waterway) &&
 					!waterways::is_underground_waterway(way.tags)) {
 				const int half_width =

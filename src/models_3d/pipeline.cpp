@@ -1,8 +1,11 @@
 #include "pipeline.h"
 #include "placement_pipeline.h"
 #include "custom/stadium.h"
+#include "custom/client.h"
 #include "three_dmr/prescan.h"
+#include "three_dmr/client.h"
 #include "wikidata/prescan.h"
+#include "wikidata/client.h"
 #include "../../../arnis_adapter.h"
 #include "../tile.h"
 #include <array>
@@ -10,6 +13,18 @@
 #include <limits>
 namespace arnis::models_3d
 {
+std::vector<std::filesystem::path> model_cache_roots()
+{
+	return {three_dmr::cache_root(), wikidata_client::cache_root(), custom::cache_root()};
+}
+
+elevation::CacheClearStats clear_model_caches()
+{
+	return elevation::clear_cache_dir(three_dmr::cache_root())
+			.combined(elevation::clear_cache_dir(wikidata_client::cache_root()))
+			.combined(elevation::clear_cache_dir(custom::cache_root()));
+}
+
 namespace
 {
 template <typename T>

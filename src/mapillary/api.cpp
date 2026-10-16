@@ -162,15 +162,21 @@ std::vector<cache::ImageRecord> parse_search_response(
 	std::vector<cache::ImageRecord> result;
 	try {
 		auto response = nlohmann::json::parse(bytes.begin(), bytes.end());
-		if (!response.contains("data") || !response["data"].is_array())
-			return result;
+		// Rust's fetch::parse_records treats any valid JSON without a data array
+		// as an empty search result. Only malformed JSON is a failed cell; Graph
+		// occasionally answers a successful empty query without the usual shape.
 		if (valid)
 			*valid = true;
+		if (!response.is_object() || !response.contains("data") ||
+				!response["data"].is_array())
+			return result;
 		for (const auto &entry : response["data"]) {
 			auto encoded = entry.dump();
 			std::vector<std::uint8_t> one(encoded.begin(), encoded.end());
 			auto image = parse_image_record(one);
-			if (image && image->panorama)
+			// Rust fetch_metadata keeps every camera class returned by Graph;
+			// admission is decided later by the pipeline's camera_types setting.
+			if (image)
 				result.push_back(std::move(*image));
 		}
 		std::sort(result.begin(), result.end(),
@@ -642,7 +648,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 						   std::to_string(cell.max_latitude);
 		std::string url =
 				endpoint + "?access_token=" + encode_query_value(token) +
-				"&is_pano=true&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +
+				"&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +
 				bbox;
 		constexpr unsigned max_subdivision_depth = 5;
 		constexpr unsigned leaf_retry_count = 2;

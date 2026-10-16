@@ -6,10 +6,12 @@
 #include <array>
 #include <fstream>
 #include <algorithm>
+#include <cstdint>
+#include <functional>
 #include <limits>
-#include <map>
 #include <bit>
 #include <mutex>
+#include <optional>
 #include <unordered_map>
 namespace arnis::trees
 {
@@ -20,6 +22,17 @@ namespace
 // extension at tile seams.
 constexpr int ROOT_BASE_VY = 2;
 constexpr int ROOT_MAX = 64;
+
+struct TreeCellHash
+{
+	std::size_t operator()(const std::pair<int, int> &cell) const noexcept
+	{
+		const auto packed =
+				(std::uint64_t(static_cast<std::uint32_t>(cell.first)) << 32) |
+				static_cast<std::uint32_t>(cell.second);
+		return std::hash<std::uint64_t>{}(packed);
+	}
+};
 
 bool is_log_block(Block block)
 {
@@ -263,36 +276,50 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 	if (fw <= 0 || fl <= 0)
 		return false;
 	const int cx = (fw - 1) / 2, cz = (fl - 1) / 2;
-	const auto position = [&](const auto &v) {
-		const auto [rx, rz] = rotate_xz(v.x, v.z, s.width, s.length, rot);
-		return std::pair{anchor_x + rx - cx, anchor_z + rz - cz};
-	};
 	const auto is_log = is_log_block;
 	// Snapshot before stamping: tree voxels must never count as their own roof.
-	std::map<std::pair<int, int>, int> roof_tops;
-	if (footprints)
-		for (int rx = 0; rx < fw; ++rx)
-			for (int rz = 0; rz < fl; ++rz) {
-				const int wx = anchor_x + rx - cx, wz = anchor_z + rz - cz;
-				if (footprints->contains(wx, wz))
-					roof_tops[{wx, wz}] = editor.highest_block_between(
-														wx, wz, base_y, base_y + s.height)
-												  .value_or(base_y + s.height);
-			}
+	// Match Rust's compact per-column array and skip the whole probe when the
+	// footprint does not intersect this crown. Most trees are outside buildings,
+	// so avoiding a map allocation and height scan there is significant.
+	std::optional<std::vector<int>> roof_tops;
+	if (footprints) {
+		bool overlaps = false;
+		for (int rx = 0; rx < fw && !overlaps; ++rx)
+			for (int rz = 0; rz < fl; ++rz)
+				if (footprints->contains(anchor_x + rx - cx, anchor_z + rz - cz)) {
+					overlaps = true;
+					break;
+				}
+		if (overlaps) {
+			roof_tops.emplace(
+					static_cast<std::size_t>(fw) * fl, std::numeric_limits<int>::min());
+			for (int rx = 0; rx < fw; ++rx)
+				for (int rz = 0; rz < fl; ++rz) {
+					const int wx = anchor_x + rx - cx, wz = anchor_z + rz - cz;
+					if (footprints->contains(wx, wz))
+						(*roof_tops)[static_cast<std::size_t>(rx) * fl + rz] =
+								editor.highest_block_between(
+											  wx, wz, base_y, base_y + s.height)
+										.value_or(base_y + s.height);
+				}
+		}
+	}
 	struct Root
 	{
 		int top;
 		Block block;
 	};
-	std::map<std::pair<int, int>, Root> trunk_bottom;
-	std::map<std::pair<int, int>, Root> base_logs;
+	std::unordered_map<std::pair<int, int>, Root, TreeCellHash> trunk_bottom;
+	trunk_bottom.reserve(static_cast<std::size_t>(s.width) * s.length);
+	std::unordered_map<std::pair<int, int>, Root, TreeCellHash> base_logs;
 	bool placed = false;
 	for (const auto &v : s.voxels) {
-		const auto cell = position(v);
-		const auto [wx, wz] = cell;
+		const auto [rx, rz] = rotate_xz(v.x, v.z, s.width, s.length, rot);
+		const int wx = anchor_x + rx - cx, wz = anchor_z + rz - cz;
 		const int wy = base_y + v.y;
-		const auto roof = roof_tops.find(cell);
-		if (roof != roof_tops.end() && wy <= roof->second)
+		const int roof = roof_tops ? (*roof_tops)[static_cast<std::size_t>(rx) * fl + rz]
+								   : std::numeric_limits<int>::min();
+		if (roof != std::numeric_limits<int>::min() && wy <= roof)
 			continue;
 		const bool log = is_log(v.block);
 		if (!log && editor.check_for_block_absolute(
@@ -308,6 +335,7 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 				editor.try_set_block_absolute(block, wx, wy, wz, std::nullopt, blacklist);
 		if (log) {
 			ground_decoration::clear_undergrowth_under_trunk(editor, wx, wy, wz);
+			const auto cell = std::pair{wx, wz};
 			const auto it = trunk_bottom.find(cell);
 			if (it == trunk_bottom.end() || wy < it->second.top)
 				trunk_bottom[cell] = {wy, block};

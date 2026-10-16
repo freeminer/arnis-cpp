@@ -6,6 +6,7 @@
 
 #include <algorithm>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <sstream>
 #include <unordered_map>
@@ -171,11 +172,11 @@ std::optional<nlohmann::json> fetch_osm(const OsmFetchConfig &config, std::strin
 		if (auto document = osm_tiles::fetch_data_from_tiles_quietly(
 					archive_bbox, *config.osm_tiles, &archive_error))
 			return buildings_as_overpass_json(*document, bbox);
-		if (error)
-			*error = "tile archive unavailable: " + archive_error;
+		std::clog << "Note: facade buildings not read from the tile archive ("
+				  << archive_error << ")\n";
 	}
 	if (!config.fetcher || config.overpass.empty()) {
-		if (error && error->empty())
+		if (error)
 			*error = "no OSM source for the facade buildings";
 		return std::nullopt;
 	}

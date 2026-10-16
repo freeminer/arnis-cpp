@@ -427,7 +427,7 @@ IntersectionIndex build_intersection_index(
 		const auto &way = element.as_way();
 		const auto highway = way.tags.get("highway");
 		if (!named_street(highway) || way.tags.get("area") == "yes" ||
-				(!way.tags.get("tunnel").empty() && way.tags.get("tunnel") != "no") ||
+				(way.tags.contains("tunnel") && way.tags.get("tunnel") != "no") ||
 				way.tags.get("indoor") == "yes")
 			continue;
 		auto name = clean_street_name(way.tags.get("name"));

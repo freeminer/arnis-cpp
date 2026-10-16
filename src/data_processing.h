@@ -282,7 +282,9 @@ void release_finished_fills(FloodFillCache &cache,
 std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
 		const std::vector<ProcessedElement> &elements);
 
-// Sorts broad ground-cover polygons once before a parsed extract is shared.
+// Matches Rust's GUI dispatch priority (landuse after non-landuse elements).
+void sort_elements_by_priority(std::vector<ProcessedElement> &elements);
+// Applies dispatch priority and then orders nested ground-fill polygons.
 void prepare_elements_for_generation(std::vector<ProcessedElement> &elements);
 
 // Start Rust's asynchronous Mapillary facade pipeline for geographic bounds

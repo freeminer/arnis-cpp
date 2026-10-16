@@ -465,8 +465,11 @@ void apply_osm_water_override(LandCoverData &data,
 				for (int dx = -half_width; dx <= half_width; ++dx)
 					for (int dz = -half_width; dz <= half_width; ++dz) {
 						const int wx = bx + dx, wz = bz + dz;
-						if (wx < bbox.min_x() || wz < bbox.min_z() || wx > bbox.max_x() ||
-								wz > bbox.max_z())
+						// Match Rust's rasterize_line: reject coordinates below the
+						// bbox origin, map the remaining world coordinate to the
+						// land-cover grid, then clip by grid dimensions. A point just
+						// beyond the positive edge can round onto the last raster cell.
+						if (wx < bbox.min_x() || wz < bbox.min_z())
 							continue;
 						const auto gx = static_cast<std::size_t>(
 								std::llround((wx - bbox.min_x()) * sx));
@@ -677,6 +680,16 @@ WaterOverrideGuard build_water_override_guard(
 	const std::size_t height = grid.size(), width = height ? grid.front().size() : 0;
 	if (width < 2 || height < 2)
 		return out;
+	// Rust's build_water_context rejects malformed grid/elevation dimensions before
+	// constructing either guard. Keep the public C++ helper's behavior consistent,
+	// even when it is called outside apply_osm_water_override's validation path.
+	if (std::any_of(grid.begin(), grid.end(),
+				[&](const auto &row) { return row.size() < width; }) ||
+			heights.size() < height ||
+			std::any_of(heights.begin(),
+					heights.begin() + std::min(height, heights.size()),
+					[&](const auto &row) { return row.size() < width; }))
+		return out;
 	// Rust returns no WaterContext when the source grid has no ESA-water seed.
 	// In that case OSM water must not be constrained by a land-component mask:
 	// with no reference water, every component would otherwise be classified as
@@ -757,8 +770,7 @@ WaterOverrideGuard build_water_override_guard(
 			}
 		}
 	}
-	if (heights.size() < height || heights.front().size() < width ||
-			width * height > 100U * 1024U * 1024U)
+	if (width * height > 100U * 1024U * 1024U)
 		return out;
 	out.nearest_water_y.assign(
 			height, std::vector<float>(width, std::numeric_limits<float>::quiet_NaN()));

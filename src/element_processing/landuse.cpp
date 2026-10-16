@@ -189,6 +189,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 			GRAY_CONCRETE,
 			LIGHT_GRAY_CONCRETE,
 			WHITE_CONCRETE,
+			YELLOW_CONCRETE,
 			DIRT_PATH,
 			SMOOTH_STONE,
 			WATER,

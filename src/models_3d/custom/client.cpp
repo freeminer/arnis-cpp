@@ -17,10 +17,8 @@ std::mutex plane_model_fetch_mutex;
 std::mutex stadium_model_fetch_mutex;
 } // namespace
 
-static std::filesystem::path cache_root(const std::filesystem::path &configured)
+std::filesystem::path cache_root()
 {
-	if (!configured.empty())
-		return configured;
 	return arnis::cache::provider_cache_root("custom_models");
 }
 
@@ -35,7 +33,7 @@ std::optional<ModelAsset> Client::fetch(const std::string &key)
 		return std::nullopt;
 	// Resolve the shared Arnis cache base for library callers without an
 	// application-specific provider directory.
-	const std::filesystem::path root = cache_root(root_);
+	const std::filesystem::path root = root_.empty() ? cache_root() : root_;
 	constexpr std::size_t max_glb_bytes = 16 * 1024 * 1024;
 	std::string base = key;
 	std::replace(base.begin(), base.end(), ':', '_');

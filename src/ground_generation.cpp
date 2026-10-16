@@ -17,6 +17,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <optional>
@@ -221,9 +222,9 @@ double climate_sward(const biome::Climate climate)
 bool undergrowth_roll(int x, int z, double mean, std::uint32_t salt)
 {
 	const double density = std::min(.95, mean * (.3 + 1.4 * patch_noise(x, z, 11, salt)));
-	const auto roll = land_cover::coord_hash(x ^ static_cast<int>(salt),
-							  z ^ static_cast<int>((salt << 9) | (salt >> 23))) %
-					  1000;
+	const auto salt_x = std::bit_cast<std::int32_t>(salt);
+	const auto salt_z = std::bit_cast<std::int32_t>(std::rotl(salt, 9));
+	const auto roll = land_cover::coord_hash(x ^ salt_x, z ^ salt_z) % 1000;
 	return static_cast<double>(roll) < density * 1000.0;
 }
 

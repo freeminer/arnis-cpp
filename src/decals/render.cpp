@@ -1,7 +1,9 @@
 #include "render.h"
+#include "font.h"
 #include "pictograms.h"
 #include "posters.h"
 #include "templates.h"
+#include "../map_item_palette.h"
 #include "stb_image.h"
 #include <fstream>
 #include <iterator>
@@ -9,6 +11,48 @@ namespace arnis::decals
 {
 namespace
 {
+void local_map(Canvas &canvas, int x, int z, const std::optional<PreviewRaster> &preview)
+{
+	const int w = static_cast<int>(canvas.width), h = static_cast<int>(canvas.height);
+	const int span = LOCAL_MAP_HALF_SPAN * 2;
+	if (preview && preview->image && preview->step > 0 && preview->image->width &&
+			preview->image->height) {
+		const auto &image = *preview->image;
+		for (int j = 0; j < h; ++j)
+			for (int i = 0; i < w; ++i) {
+				const int wx = x - LOCAL_MAP_HALF_SPAN + i * span / w;
+				const int wz = z - LOCAL_MAP_HALF_SPAN + j * span / h;
+				const int px = (wx - preview->min_x) / static_cast<int>(preview->step);
+				const int pz = (wz - preview->min_z) / static_cast<int>(preview->step);
+				std::uint8_t color = colors::LIGHT_GRAY;
+				if (px >= 0 && pz >= 0 && px < static_cast<int>(image.width) &&
+						pz < static_cast<int>(image.height)) {
+					const auto offset =
+							(static_cast<std::size_t>(pz) * image.width + px) * 4;
+					if (offset + 2 < image.pixels.size())
+						color = map_palette::nearest_map_color(image.pixels[offset],
+								image.pixels[offset + 1], image.pixels[offset + 2]);
+				}
+				canvas.set(i, j, color);
+			}
+	} else {
+		canvas.fill(colors::LIGHT_GRAY);
+	}
+
+	canvas.stroke_rect(0, 0, w, h, 4, colors::NEAR_BLACK);
+	const int cx = w / 2, cy = h / 2;
+	canvas.disc(cx, cy, 11, colors::WHITE);
+	canvas.disc(cx, cy, 8, colors::RED);
+	canvas.polygon({{float(w - 26), 12.0f}, {float(w - 14), 40.0f},
+						   {float(w - 26), 32.0f}, {float(w - 38), 40.0f}},
+			colors::WHITE);
+	canvas.polygon({{float(w - 26), 16.0f}, {float(w - 18), 36.0f},
+						   {float(w - 26), 30.0f}, {float(w - 34), 36.0f}},
+			colors::RED);
+	font::Font::get(font::FontSize::S18)
+			.draw_centered(canvas, w - 26, 42, "N", colors::WHITE, 1);
+}
+
 bool image(Canvas &canvas, const std::filesystem::path &path)
 {
 	std::ifstream file(path, std::ios::binary);
@@ -39,7 +83,7 @@ bool image(Canvas &canvas, const std::filesystem::path &path)
 	return true;
 }
 }
-Canvas render(const DecalKey &key)
+Canvas render(const DecalKey &key, const std::optional<PreviewRaster> &preview)
 {
 	const auto [cols, rows] = key.dims();
 	Canvas canvas(cols, rows);
@@ -68,7 +112,9 @@ Canvas render(const DecalKey &key)
 						templates::blank_plate(canvas, colors::LIGHT_GRAY);
 					canvas.stroke_rect(
 							0, 0, canvas.width, canvas.height, 3, colors::NEAR_BLACK);
-				} else
+				} else if constexpr (std::is_same_v<Key, LocalMapKey>)
+					local_map(canvas, value.x, value.z, preview);
+				else
 					templates::blank_plate(canvas, colors::LIGHT_GRAY);
 			},
 			key);

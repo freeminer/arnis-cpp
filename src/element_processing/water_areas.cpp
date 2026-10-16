@@ -560,7 +560,7 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 						const int first_water_y = std::min(ground_y + 1, water_y);
 						for (int y = first_water_y; y <= water_y; ++y)
 							editor.set_block_absolute(
-									WATER, x, y, z, std::nullopt, std::nullopt);
+									WATER, x, y, z, std::nullopt, std::vector<Block>{});
 						continue;
 					}
 					water_depth::carve_water_column(

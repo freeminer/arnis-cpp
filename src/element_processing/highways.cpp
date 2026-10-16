@@ -137,7 +137,9 @@ bool is_pedestrian_way_tags(const crate::tags_t &tags)
 	if (highway == "footway" || highway == "pedestrian" || highway == "steps")
 		return true;
 	const auto footway = tags.get("footway");
-	return !footway.empty() && footway != "no";
+	// Match Rust's Some(v) check: a present-but-empty footway tag is still a
+	// pedestrian-way hint; only the explicit negative value opts out.
+	return tags.contains("footway") && footway != "no";
 }
 
 std::vector<crate::block_definitions::Block> surface_palette(

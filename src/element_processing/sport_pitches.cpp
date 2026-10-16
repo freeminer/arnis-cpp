@@ -25,9 +25,13 @@ std::optional<PitchKind> pitch_kind(const ProcessedWay &way)
 		return std::nullopt;
 	std::istringstream values(it->second);
 	std::string sport;
+	constexpr const char *whitespace = " \t\n\r\f\v";
 	while (std::getline(values, sport, ';')) {
-		sport.erase(0, sport.find_first_not_of(" \t"));
-		sport.erase(sport.find_last_not_of(" \t") + 1);
+		const auto first = sport.find_first_not_of(whitespace);
+		if (first == std::string::npos)
+			continue;
+		const auto last = sport.find_last_not_of(whitespace);
+		sport = sport.substr(first, last - first + 1);
 		if (sport == "soccer" || sport == "football")
 			return PitchKind::Soccer;
 		if (sport == "basketball")
