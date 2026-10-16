@@ -73,6 +73,7 @@
 #include "trees/region.h"
 #include "water_depth.h"
 #include "world_editor/floor_state.h"
+#include "progress.h"
 #include "clipping.h"
 #include "structures/boat.h"
 #include "structures/starship.h"
@@ -2018,6 +2019,7 @@ bool generate_world(WorldEditor &editor,
 	if (editor.ground)
 		still_surfaces =
 				water_areas::prescan_still_surfaces(elements, editor.ground, xzbbox);
+	progress::emit_gui_progress_update(19.5, "Processing data...");
 	auto bridge_outlines = bridge_styles::BridgeOutlineIndex::build(elements);
 	auto bridge_structures = bridges::BridgeStructureMap::build(
 			elements, editor, bridge_outlines, args.scale);
@@ -2328,6 +2330,32 @@ bool generate_world(WorldEditor &editor,
 		}
 		return true;
 	};
+	progress::emit_gui_progress_update(20.0, "Generating area...");
+	const std::size_t generation_work_total =
+			regional_ground_passes ? element_tiles.size() : element_tasks.size();
+	std::atomic<std::size_t> completed_generation_tiles{0};
+	std::atomic<int> last_generation_progress_bucket{regional_ground_passes ? 20 : 80};
+	auto report_generation_work = [&](std::size_t completed) {
+		if (generation_work_total == 0)
+			return;
+		const double pct = 20.0 + 50.0 * std::min(completed, generation_work_total) /
+										  static_cast<double>(generation_work_total);
+		const int bucket =
+				static_cast<int>(std::floor(pct * (regional_ground_passes ? 1.0 : 4.0)));
+		int previous = last_generation_progress_bucket.load(std::memory_order_relaxed);
+		while (bucket > previous) {
+			if (last_generation_progress_bucket.compare_exchange_weak(previous, bucket,
+						std::memory_order_relaxed, std::memory_order_relaxed)) {
+				progress::emit_gui_progress_update_ex(pct, "", streaming_order);
+				break;
+			}
+		}
+	};
+	auto report_finished_tile = [&] {
+		const auto completed =
+				completed_generation_tiles.fetch_add(1, std::memory_order_relaxed) + 1;
+		report_generation_work(completed);
+	};
 	auto finish_ground_tile = [&](WorldEditor &tile_editor,
 									  ElementDispatchState &tile_state,
 									  std::size_t tile_index,
@@ -2343,6 +2371,8 @@ bool generate_world(WorldEditor &editor,
 										? tile_editor.merge_tile(tile.min_x, tile.min_z,
 												  tile.max_x - 1, tile.max_z - 1)
 										: merge_finished_tile(tile_editor, tile);
+			if (merged && regional_ground_passes)
+				report_finished_tile();
 			return merged;
 		}
 		editor.set_strict_bounds(min_x, min_z, max_x, max_z);
@@ -2411,6 +2441,8 @@ bool generate_world(WorldEditor &editor,
 									? tile_editor.merge_tile(tile.min_x, tile.min_z,
 											  tile.max_x - 1, tile.max_z - 1)
 									: merge_finished_tile(tile_editor, tile);
+		if (merged && regional_ground_passes)
+			report_finished_tile();
 		return merged;
 	};
 	std::size_t active_tile = std::numeric_limits<std::size_t>::max();
@@ -2821,6 +2853,8 @@ bool generate_world(WorldEditor &editor,
 			else
 				process_assigned_element(
 						editor, dispatch_state, task_index, element_index);
+			if (!regional_ground_passes)
+				report_generation_work(task_index + 1);
 		}
 		if (active_tile != std::numeric_limits<std::size_t>::max())
 			release_tile_fills_for(active_tile);
@@ -2904,6 +2938,7 @@ bool generate_world(WorldEditor &editor,
 		editor.set_defer_tile_merges(false);
 		editor.finish_tile_pass();
 	}
+	progress::emit_gui_progress_update_ex(70.0, "", streaming_order);
 	editor.clear_strict_bounds();
 	caves::CaveEllipsoids cave_ellipsoids;
 	if (!regional_ground_passes) {
@@ -2914,6 +2949,7 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (!regional_ground_passes) {
 		if (args.caves) {
+			progress::emit_gui_progress_update(89.0, "Carving caves...");
 			std::unordered_set<std::int64_t> cave_air;
 			caves::carve_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
@@ -2943,7 +2979,7 @@ bool generate_world(WorldEditor &editor,
 					&cave_basin_fluid, &cave_water_cells, &cave_air);
 		} else if (args.fillground) {
 			ore_generation::generate_ores(editor, xzbbox.min_x(), xzbbox.max_x(),
-					xzbbox.min_z(), xzbbox.max_z());
+					xzbbox.min_z(), xzbbox.max_z(), true);
 		}
 	}
 
@@ -2986,6 +3022,7 @@ bool generate_world(WorldEditor &editor,
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.
+	progress::emit_gui_progress_update(97.0, "Finalizing world...");
 	editor.request_flush();
 	editor.request_save();
 	if (!editor.finalize_persistence()) {
@@ -3053,6 +3090,7 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (editor.signage_context)
 		std::cout << editor.signage_context->summary(args.debug) << '\n';
+	progress::emit_gui_progress_update(99.5, "Finalizing world...");
 
 	return true;
 }

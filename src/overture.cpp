@@ -60,6 +60,19 @@ namespace
 constexpr std::uint8_t OVERTURE_TILE_ZOOM = 14;
 constexpr std::uint64_t OVERTURE_MAX_TILES = 4096;
 
+constexpr unsigned char ascii_lower(unsigned char c)
+{
+	return c >= 'A' && c <= 'Z' ? static_cast<unsigned char>(c + ('a' - 'A')) : c;
+}
+
+bool ascii_iequals(std::string_view a, std::string_view b)
+{
+	return a.size() == b.size() && std::equal(a.begin(), a.end(), b.begin(),
+										   [](unsigned char x, unsigned char y) {
+											   return ascii_lower(x) == ascii_lower(y);
+										   });
+}
+
 // Keep the known transient ML false positives out of both transports before
 // they can consume an in-bbox footprint budget slot.
 bool is_skipped_footprint(std::string_view id)
@@ -495,11 +508,8 @@ std::optional<double> attribute_number(
 bool source_is_osm(const std::optional<std::string> &geometry_source,
 		const std::optional<std::string> &sources)
 {
-	constexpr std::string_view expected = "openstreetmap";
 	const bool primary_source_is_osm =
-			geometry_source && geometry_source->size() == expected.size() &&
-			std::equal(geometry_source->begin(), geometry_source->end(), expected.begin(),
-					[](unsigned char a, char b) { return std::tolower(a) == b; });
+			geometry_source && ascii_iequals(*geometry_source, "openstreetmap");
 	return primary_source_is_osm ||
 		   (sources && sources->find("OpenStreetMap") != std::string::npos);
 }
@@ -515,8 +525,7 @@ std::optional<OvertureOsmRef> parse_osm_reference(const std::string &sources)
 		const auto value = record_id.substr(first, last - first + 1);
 		if (value.size() < 2)
 			return std::nullopt;
-		const char kind = static_cast<char>(
-				std::tolower(static_cast<unsigned char>(value.front())));
+		const char kind = static_cast<char>(ascii_lower(value.front()));
 		if (kind != 'w' && kind != 'r')
 			return std::nullopt;
 		const auto at = value.find('@', 1);
@@ -535,10 +544,7 @@ std::optional<OvertureOsmRef> parse_osm_reference(const std::string &sources)
 	if (document.is_discarded())
 		return std::nullopt;
 	const auto is_osm_dataset = [](const std::string &dataset) {
-		constexpr std::string_view expected = "openstreetmap";
-		return dataset.size() == expected.size() &&
-			   std::equal(dataset.begin(), dataset.end(), expected.begin(),
-					   [](unsigned char a, char b) { return std::tolower(a) == b; });
+		return ascii_iequals(dataset, "openstreetmap");
 	};
 
 	std::function<std::optional<OvertureOsmRef>(const nlohmann::json &)> find_reference;

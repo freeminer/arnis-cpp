@@ -138,7 +138,7 @@ void create_water_channel(
 	}
 }
 
-void generate_waterways(WorldEditor &editor, const ProcessedWay &element)
+void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element)
 {
 	auto it = element.tags.find("waterway");
 	if (it == element.tags.end()) {

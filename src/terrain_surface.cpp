@@ -38,6 +38,20 @@ double value_noise_salted(int x, int z, int scale, uint32_t salt)
 	return ground_generation::value_noise_salted(x, z, scale, salt);
 }
 
+// Rust's optimized i32 arithmetic wraps for these hash coordinates. Express
+// the same modulo-2^32 arithmetic explicitly instead of relying on signed
+// overflow, which is undefined in C++.
+int wrapped_twice(int value)
+{
+	return std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(value) * 2u);
+}
+
+int wrapped_strata_edge_x(int x, int z)
+{
+	return std::bit_cast<std::int32_t>(
+			static_cast<std::uint32_t>(x) * 2u + static_cast<std::uint32_t>(z) * 3u);
+}
+
 const std::vector<int> &bed_starts()
 {
 	static const std::vector<int> starts = [] {
@@ -71,7 +85,8 @@ int stratum_layer(int x, int z, double warp, int y, std::size_t &cursor)
 	const int bed = static_cast<int>(i) - 1;
 	if (w - start >= .5 && end - w > .5)
 		return bed;
-	const double edge = value_noise_salted(2 * x + 3 * z, y, 4, BED_EDGE) - .5;
+	const double edge =
+			value_noise_salted(wrapped_strata_edge_x(x, z), y, 4, BED_EDGE) - .5;
 	const double jittered = w + edge;
 	if (jittered < start)
 		return std::max(0, bed - 1);
@@ -142,8 +157,8 @@ void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks
 	int layer = stratum_layer(x, z, s.warp, lo, cursor);
 	Block kind = bed_kind(x, z, layer);
 	auto sample_tone = [&](int y) {
-		return value_noise_salted(2 * x, y, 12, SHADE_X) * .5 +
-			   value_noise_salted(2 * z, y, 12, SHADE_Z) * .5;
+		return value_noise_salted(wrapped_twice(x), y, 12, SHADE_X) * .5 +
+			   value_noise_salted(wrapped_twice(z), y, 12, SHADE_Z) * .5;
 	};
 	int tone_y = lo;
 	double tone_a = sample_tone(tone_y);
@@ -271,10 +286,11 @@ std::pair<Block, Block> steep_palette(
 					   : std::pair{
 								 face_ramp()[std::min(TOP_RAMP_MAX,
 										 ramp_step(Strata::at(x, z).block(ground_y),
-												 value_noise_salted(
-														 2 * x, ground_y, 12, SHADE_X) *
+												 value_noise_salted(wrapped_twice(x),
+														 ground_y, 12, SHADE_X) *
 																 .5 +
-														 value_noise_salted(2 * z,
+														 value_noise_salted(
+																 wrapped_twice(z),
 																 ground_y, 12, SHADE_Z) *
 																 .5,
 												 0))],

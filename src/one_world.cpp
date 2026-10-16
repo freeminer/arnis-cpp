@@ -75,45 +75,53 @@ std::optional<Manifest> Manifest::load(const std::filesystem::path &w, std::stri
 		std::ifstream in(p);
 		json j;
 		in >> j;
+		if (!j.is_object())
+			throw std::runtime_error("manifest root is not an object");
 		Manifest m;
-		m.version = j.value("version", 0u);
+		// Match Rust's serde schema: only height_multiplier and optional fields
+		// have defaults. Missing required keys must not make a damaged manifest
+		// look like a valid, empty One World.
+		m.version = j.at("version").get<std::uint32_t>();
 		if (m.version > MANIFEST_VERSION)
 			throw std::runtime_error("manifest version is newer");
-		m.created_with = j.value("created_with", "");
-		m.created_at = j.value("created_at", 0ull);
-		m.origin_lat = j.value("origin_lat", 0.);
-		m.origin_lon = j.value("origin_lon", 0.);
-		m.scale = j.value("scale", 1.);
-		m.ground_level = j.value("ground_level", 0);
-		m.terrain = j.value("terrain", true);
-		m.disable_height_limit = j.value("disable_height_limit", false);
-		m.aws_only_elevation = j.value("aws_only_elevation", false);
+		m.created_with = j.at("created_with").get<std::string>();
+		m.created_at = j.at("created_at").get<std::uint64_t>();
+		m.origin_lat = j.at("origin_lat").get<double>();
+		m.origin_lon = j.at("origin_lon").get<double>();
+		m.scale = j.at("scale").get<double>();
+		m.ground_level = j.at("ground_level").get<int>();
+		m.terrain = j.at("terrain").get<bool>();
+		m.disable_height_limit = j.at("disable_height_limit").get<bool>();
+		m.aws_only_elevation = j.at("aws_only_elevation").get<bool>();
 		m.height_multiplier = j.value("height_multiplier", 1.);
 		if (j.contains("elevation") && !j["elevation"].is_null()) {
 			ElevationAffine e;
 			const auto &ej = j.at("elevation");
-			e.min_height_m = ej.value("min_height_m", 0.);
-			e.blocks_per_meter = ej.value("blocks_per_meter", 0.);
-			e.ground_level = ej.value("ground_level", 0);
+			e.min_height_m = ej.at("min_height_m").get<double>();
+			e.blocks_per_meter = ej.at("blocks_per_meter").get<double>();
+			e.ground_level = ej.at("ground_level").get<int>();
 			if (ej.contains("soft_top") && !ej["soft_top"].is_null())
-				e.soft_top = SoftTop{ej["soft_top"].value("knee_m", 0.),
-						ej["soft_top"].value("width_blocks", 0.)};
+				e.soft_top = SoftTop{ej["soft_top"].at("knee_m").get<double>(),
+						ej["soft_top"].at("width_blocks").get<double>()};
 			m.elevation = e;
 		}
-		m.next_area_id = j.value("next_area_id", 1u);
-		for (const auto &x : j.value("areas", json::array())) {
+		m.next_area_id = j.at("next_area_id").get<std::uint32_t>();
+		const auto &areas = j.at("areas");
+		if (!areas.is_array())
+			throw std::runtime_error("manifest areas is not an array");
+		for (const auto &x : areas) {
 			GeneratedArea a;
-			a.id = x.value("id", 0u);
-			a.generated_at = x.value("generated_at", 0ull);
-			a.arnis_version = x.value("arnis_version", "");
-			a.min_x = x.at("min_x");
-			a.min_z = x.at("min_z");
-			a.max_x = x.at("max_x");
-			a.max_z = x.at("max_z");
-			a.min_lat = x.at("min_lat");
-			a.min_lon = x.at("min_lon");
-			a.max_lat = x.at("max_lat");
-			a.max_lon = x.at("max_lon");
+			a.id = x.at("id").get<std::uint32_t>();
+			a.generated_at = x.at("generated_at").get<std::uint64_t>();
+			a.arnis_version = x.at("arnis_version").get<std::string>();
+			a.min_x = x.at("min_x").get<int>();
+			a.min_z = x.at("min_z").get<int>();
+			a.max_x = x.at("max_x").get<int>();
+			a.max_z = x.at("max_z").get<int>();
+			a.min_lat = x.at("min_lat").get<double>();
+			a.min_lon = x.at("min_lon").get<double>();
+			a.max_lat = x.at("max_lat").get<double>();
+			a.max_lon = x.at("max_lon").get<double>();
 			if (x.contains("preview") && !x["preview"].is_null())
 				a.preview = x.at("preview").get<std::string>();
 			if (!a.contains(a.min_x, a.min_z, a.max_x, a.max_z))
@@ -250,7 +258,8 @@ std::optional<std::filesystem::path> safe_preview_path(
 	const auto name = relative.substr(prefix.size());
 	if (!name.ends_with(".png") || name.find("..") != std::string::npos ||
 			!std::all_of(name.begin(), name.end(), [](unsigned char c) {
-				return std::isalnum(c) || c == '-' || c == '_' || c == '.';
+				return (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+					   (c >= '0' && c <= '9') || c == '-' || c == '_' || c == '.';
 			}))
 		return std::nullopt;
 	return world / prefix / name;

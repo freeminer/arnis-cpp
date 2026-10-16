@@ -2411,21 +2411,13 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 			return !footprint.contains({x - 1, z}) || !footprint.contains({x + 1, z}) ||
 				   !footprint.contains({x, z - 1}) || !footprint.contains({x, z + 1});
 		};
-		std::unordered_set<std::pair<int, int>, PairHash> non_edge;
-		non_edge.reserve(area.size());
-		for (const auto &[x, z] : area)
-			if (!terrace_edge(x, z))
-				non_edge.insert({x, z});
-		auto is_terrace_interior = [&](int x, int z) {
-			return non_edge.contains({x - 1, z}) && non_edge.contains({x + 1, z}) &&
-				   non_edge.contains({x, z - 1}) && non_edge.contains({x, z + 1});
-		};
 		for (const auto &[x, z] : area)
 			if (terrace_edge(x, z))
 				force_rooftop_block(STONE_BRICKS, x, roof_y + 1, z);
 		std::vector<std::pair<int, int>> terrace_interior;
 		for (const auto &[x, z] : area)
-			if (is_terrace_interior(x, z))
+			if (footprint.contains({x - 1, z}) && footprint.contains({x + 1, z}) &&
+					footprint.contains({x, z - 1}) && footprint.contains({x, z + 1}))
 				terrace_interior.emplace_back(x, z);
 		for (const auto &[x, z] : terrace_interior) {
 			auto rng = coord_rng(x, z, element.id);

@@ -4,7 +4,9 @@
 #include "../land_cover/land_cover.h"
 #include "../floodfill_cache.h"
 #include <algorithm>
+#include <bit>
 #include <cmath>
+#include <cstdint>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -13,11 +15,20 @@
 #include <vector>
 namespace arnis::structures
 {
+namespace
+{
+int wrapping_add(int value, std::uint32_t offset)
+{
+	return std::bit_cast<std::int32_t>(static_cast<std::uint32_t>(value) + offset);
+}
+}
+
 namespace tombstone
 {
 namespace
 {
 constexpr int SMALL_GRID = 4, LARGE_GRID = 32, LARGE_HALF = 6;
+
 std::filesystem::path asset(const WorldEditor &editor, const std::string &name)
 {
 	const auto root = editor.get_schematic_asset_root().empty()
@@ -91,8 +102,8 @@ void maybe_place(WorldEditor &e, int x, int z, const RoadMaskBitmap &road_mask)
 	}
 	if (!near_large_crypt(x, z)) {
 		// Rust uses wrapping_add for the deterministic offset hash.
-		const int hashed_x = static_cast<int>(static_cast<std::uint32_t>(x) + 0x5f5fU);
-		const int hashed_z = static_cast<int>(static_cast<std::uint32_t>(z) + 0x3c3cU);
+		const int hashed_x = wrapping_add(x, 0x5f5fU);
+		const int hashed_z = wrapping_add(z, 0x3c3cU);
 		const auto small_hash = land_cover::coord_hash(hashed_x, hashed_z);
 		if (small_hash % 100 < 28) {
 			const auto &models = variants(e, 1, 9);
@@ -112,8 +123,7 @@ void scatter_tombstones(WorldEditor &e, int minx, int minz, int maxx, int maxz)
 	for (int z = grid_start(minz); z <= maxz; z += 4)
 		for (int x = grid_start(minx); x <= maxx; x += 4) {
 			auto h = land_cover::coord_hash(
-					static_cast<int>(static_cast<std::uint32_t>(x) + 0x5f5fU),
-					static_cast<int>(static_cast<std::uint32_t>(z) + 0x3c3cU));
+					wrapping_add(x, 0x5f5fU), wrapping_add(z, 0x3c3cU));
 			if (h % 100 >= 28 || e.is_lc_water(x, z))
 				continue;
 			auto p = tombstone::asset(e, h % 9 ? "tombstone1" : "tombstone10");

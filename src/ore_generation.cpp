@@ -2,6 +2,7 @@
 #include "block_definitions.h"
 #include "deterministic_rng.h"
 #include "../../arnis_adapter.h"
+#include "progress.h"
 #include "world_editor/floor_state.h"
 #include <algorithm>
 #include <array>
@@ -69,8 +70,10 @@ const std::array<OreRule, 6> &rules()
 void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z,
 		int max_z, bool show_progress)
 {
-	if (show_progress)
+	if (show_progress) {
 		std::cout << "[6b/7] Sprinkling ore veins...\n";
+		progress::emit_gui_progress_update(89.0, "Sprinkling ore veins...");
+	}
 	int floor = world_editor::terrain_floor_y();
 	for (int cx = chunk_floor(min_x); cx <= chunk_floor(max_x); ++cx)
 		for (int cz = chunk_floor(min_z); cz <= chunk_floor(max_z); ++cz) {

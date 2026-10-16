@@ -6,7 +6,6 @@
 #include "mapped.h"
 #include <algorithm>
 #include <charconv>
-#include <cctype>
 #include <cmath>
 #include <fstream>
 #include <iostream>
@@ -28,7 +27,8 @@ bool is_palm(const std::string &s)
 	const auto end = s.find('_');
 	std::string genus = s.substr(0, end == std::string::npos ? s.size() : end);
 	for (char &c : genus)
-		c = char(std::tolower(static_cast<unsigned char>(c)));
+		if (c >= 'A' && c <= 'Z')
+			c = char(c + ('a' - 'A'));
 	static constexpr const char *genera[] = {"acrocomia", "archontophoenix", "areca",
 			"astrocarym", "attalea", "beccariophoenix", "bismarckia", "borassus",
 			"calyptronoma", "ceroxylon", "cocos", "cyrtostachys", "elaeis", "euterpe",
@@ -1073,9 +1073,12 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				species.substr(0, sep == std::string::npos ? species.size() : sep);
 		if (genus.size() != request.genus->size())
 			return false;
+		const auto ascii_lower = [](unsigned char c) {
+			return c >= 'A' && c <= 'Z' ? static_cast<unsigned char>(c + ('a' - 'A')) : c;
+		};
 		for (std::size_t n = 0; n < genus.size(); ++n)
-			if (std::tolower(static_cast<unsigned char>(genus[n])) !=
-					std::tolower(static_cast<unsigned char>((*request.genus)[n])))
+			if (ascii_lower(static_cast<unsigned char>(genus[n])) !=
+					ascii_lower(static_cast<unsigned char>((*request.genus)[n])))
 				return false;
 		return true;
 	};

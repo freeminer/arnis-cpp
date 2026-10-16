@@ -164,6 +164,32 @@ class NbtReader
 			}
 		}
 	}
+	std::optional<std::pair<std::int32_t, std::int32_t>> read_spawn_data_compound(
+			unsigned depth)
+	{
+		if (depth > 64)
+			return std::nullopt;
+		std::optional<std::int32_t> spawn_x, spawn_z;
+		for (;;) {
+			std::uint8_t type = 0;
+			if (!read_u8(type) || type == 0) {
+				if (!spawn_x || !spawn_z)
+					return std::nullopt;
+				return std::pair{*spawn_x, *spawn_z};
+			}
+			std::string name;
+			if (!read_name(name))
+				return std::nullopt;
+			if ((name == "SpawnX" || name == "SpawnZ") && type == 3) {
+				std::int32_t value = 0;
+				if (!read_i32(value))
+					return std::nullopt;
+				(name == "SpawnX" ? spawn_x : spawn_z) = value;
+			} else if (!skip_payload(type, depth + 1)) {
+				return std::nullopt;
+			}
+		}
+	}
 	std::optional<std::int32_t> read_map_root()
 	{
 		std::uint8_t root_type = 0;
@@ -185,6 +211,25 @@ class NbtReader
 			}
 		}
 	}
+	std::optional<std::pair<std::int32_t, std::int32_t>> read_spawn_root()
+	{
+		std::uint8_t root_type = 0;
+		std::string root_name;
+		if (!read_u8(root_type) || root_type != 10 || !read_name(root_name))
+			return std::nullopt;
+		for (;;) {
+			std::uint8_t type = 0;
+			if (!read_u8(type) || type == 0)
+				return std::nullopt;
+			std::string name;
+			if (!read_name(name))
+				return std::nullopt;
+			if (name == "Data" && type == 10)
+				return read_spawn_data_compound(1);
+			if (!skip_payload(type, 1))
+				return std::nullopt;
+		}
+	}
 
 public:
 	explicit NbtReader(const std::vector<std::uint8_t> &bytes) : bytes_(bytes) {}
@@ -197,6 +242,10 @@ public:
 		return read_data_compound(0);
 	}
 	std::optional<std::int32_t> map_id() { return read_map_root(); }
+	std::optional<std::pair<std::int32_t, std::int32_t>> spawn_xz()
+	{
+		return read_spawn_root();
+	}
 };
 
 std::optional<std::vector<std::uint8_t>> decompress_level_dat(
@@ -234,6 +283,13 @@ std::optional<std::int32_t> level_data_version(const std::filesystem::path &worl
 {
 	const auto bytes = decompress_level_dat(world / "level.dat");
 	return bytes ? NbtReader(*bytes).data_version() : std::nullopt;
+}
+
+std::optional<std::pair<std::int32_t, std::int32_t>> level_spawn_xz(
+		const std::filesystem::path &world)
+{
+	const auto bytes = decompress_level_dat(world / "level.dat");
+	return bytes ? NbtReader(*bytes).spawn_xz() : std::nullopt;
 }
 
 std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path)

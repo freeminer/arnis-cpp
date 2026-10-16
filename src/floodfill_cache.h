@@ -28,6 +28,15 @@ struct XZBBox
 	int32_t min_z() const { return min_z_; }
 	int32_t max_x() const { return max_x_; }
 	int32_t max_z() const { return max_z_; }
+	bool contains(int32_t x, int32_t z) const
+	{
+		return x >= min_x_ && x <= max_x_ && z >= min_z_ && z <= max_z_;
+	}
+	template <typename Point>
+	bool contains(const Point &point) const
+	{
+		return contains(point.x, point.z);
+	}
 };
 
 namespace arnis

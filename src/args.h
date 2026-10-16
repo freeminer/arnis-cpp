@@ -148,7 +148,9 @@ inline FacadeMode facade_mode_from_string(const std::string &value)
 	const auto last = normalized.find_last_not_of(" \t\n\r\f\v");
 	normalized = normalized.substr(first, last - first + 1);
 	std::transform(normalized.begin(), normalized.end(), normalized.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			[](unsigned char c) {
+				return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+			});
 	return normalized == "blocks" ? FacadeMode::Blocks : FacadeMode::Photos;
 }
 inline OvertureSource overture_source_from_string(const std::string &value)
@@ -417,9 +419,11 @@ struct Args
 			return "Mapillary photo facades are incompatible with Bedrock/Luanti output";
 		if (building_facades && (bedrock || luanti))
 			return "building facades are incompatible with Bedrock/Luanti output";
-		if (building_facades_dir && std::filesystem::exists(*building_facades_dir) &&
-				!std::filesystem::is_directory(*building_facades_dir))
-			return "building facade path exists but is not a directory";
+		if (building_facades_dir) {
+			std::error_code ec;
+			if (!std::filesystem::is_directory(*building_facades_dir, ec))
+				return "building facade directory does not exist or is not a directory";
+		}
 		const bool cave_preview = cave_zone_map.has_value();
 		if (cave_biomes && !caves && !cave_preview)
 			return "cave biome weights require cave generation or a cave-zone preview";

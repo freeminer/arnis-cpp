@@ -17,6 +17,11 @@ std::tuple<int, std::int8_t, bool> map_geometry(int d)
 	const int blocks = d / MAP_SIZE + (d % MAP_SIZE != 0);
 	return {blocks, 4, false};
 }
+
+std::optional<std::pair<int, int>> read_spawn_xz(const std::filesystem::path &world_path)
+{
+	return world_utils::level_spawn_xz(world_path);
+}
 }
 
 namespace arnis::map_item

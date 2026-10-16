@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 #include <optional>
 #include "coordinate_system/geographic/llbbox.h"
@@ -24,6 +25,9 @@ struct WorldLayout
 };
 
 std::optional<std::int32_t> level_data_version(const std::filesystem::path &world);
+// Read SpawnX/SpawnZ from level.dat, returning no value for absent or invalid NBT.
+std::optional<std::pair<std::int32_t, std::int32_t>> level_spawn_xz(
+		const std::filesystem::path &world);
 std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path);
 // Update the Java world spawn and, for post-26.1 worlds, the separately stored
 // single-player position. Returns false when the NBT files cannot be updated.

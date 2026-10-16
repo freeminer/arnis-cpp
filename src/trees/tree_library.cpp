@@ -51,7 +51,8 @@ TreeSize tree_size_from_string(const std::string &s)
 	}).base();
 	std::string n(first, std::max(first, last));
 	for (char &c : n)
-		c = char(std::tolower((unsigned char)c));
+		if (c >= 'A' && c <= 'Z')
+			c = char(c + ('a' - 'A'));
 	return n == "small"	   ? TreeSize::Small
 		   : n == "medium" ? TreeSize::Medium
 		   : n == "big"	   ? TreeSize::Big

@@ -6,12 +6,14 @@
 #include <algorithm>
 #include <set>
 #include <filesystem>
+#include <optional>
 #include "map_item_palette.h"
 namespace arnis::map_item
 {
 constexpr int MAP_SIZE = 128;
 constexpr int BUS_STOP_MAP_ID = 2, RECYCLING_MAP_ID = 3, HYDRANT_MAP_ID = 4;
 std::tuple<int, std::int8_t, bool> map_geometry(int max_dimension);
+std::optional<std::pair<int, int>> read_spawn_xz(const std::filesystem::path &world_path);
 }
 namespace arnis::map_item
 {
