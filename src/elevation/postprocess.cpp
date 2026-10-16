@@ -1,6 +1,7 @@
 #include "postprocess.h"
 #include "elevation.h"
 #include "../land_cover/land_cover.h"
+#include "../water_depth.h"
 #include "../world_editor/floor_state.h"
 #include <algorithm>
 #include <array>
@@ -338,47 +339,7 @@ std::vector<std::uint8_t> bank_distances(const CoverGrid &cover, double meters_p
 			}
 		}
 	}
-	// Chamfer 3-4 distance transform, saturating at u8::MAX like Rust.
-	for (std::size_t y = 0; y < h; ++y)
-		for (std::size_t x = 0; x < w; ++x) {
-			const auto i = y * w + x;
-			if (!distance[i])
-				continue;
-			auto best = distance[i];
-			const auto add = [](std::uint8_t v, unsigned n) {
-				return static_cast<std::uint8_t>(std::min(255u, unsigned(v) + n));
-			};
-			if (x > 0)
-				best = std::min(best, add(distance[i - 1], 3));
-			if (y > 0) {
-				best = std::min(best, add(distance[i - w], 3));
-				if (x > 0)
-					best = std::min(best, add(distance[i - w - 1], 4));
-				if (x + 1 < w)
-					best = std::min(best, add(distance[i - w + 1], 4));
-			}
-			distance[i] = best;
-		}
-	for (std::size_t y = h; y-- > 0;)
-		for (std::size_t x = w; x-- > 0;) {
-			const auto i = y * w + x;
-			if (!distance[i])
-				continue;
-			auto best = distance[i];
-			const auto add = [](std::uint8_t v, unsigned n) {
-				return static_cast<std::uint8_t>(std::min(255u, unsigned(v) + n));
-			};
-			if (x + 1 < w)
-				best = std::min(best, add(distance[i + 1], 3));
-			if (y + 1 < h) {
-				best = std::min(best, add(distance[i + w], 3));
-				if (x > 0)
-					best = std::min(best, add(distance[i + w - 1], 4));
-				if (x + 1 < w)
-					best = std::min(best, add(distance[i + w + 1], 4));
-			}
-			distance[i] = best;
-		}
+	water_depth::chamfer_3_4_dt(distance, w, h);
 	return distance;
 }
 

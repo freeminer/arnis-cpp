@@ -1,9 +1,11 @@
 #include "land_cover.h"
 #include "../grid_ops.h"
+#include "../cache_root.h"
 #include "cog.h"
 #include "shoreline.h"
 #include "../../http.h"
 #include <filesystem>
+#include <fstream>
 #include "../../arnis_adapter.h"
 #include "../element_processing/waterways.h"
 #include "../element_processing/way_segments.h"
@@ -24,11 +26,72 @@
 #include <string_view>
 #include <thread>
 #include <iostream>
+#include <mutex>
 
 namespace arnis::land_cover
 {
 namespace
 {
+// COG reads are HTTP byte ranges. Cache each range rather than downloading the
+// full 3-degree TIFF: Rust uses the same header + internal-tile cache, and this
+// also lets separate chunk generations reuse the same ESA source data.
+std::vector<std::uint8_t> fetch_cached_esa_range(const std::string &url,
+		std::uint64_t offset, std::uint64_t length,
+		const std::filesystem::path &cache_dir)
+{
+	if (length == 0 || length > std::numeric_limits<std::size_t>::max())
+		return {};
+	const auto slash = url.find_last_of('/');
+	const auto basename = slash == std::string::npos ? url : url.substr(slash + 1);
+	const auto path = cache_dir / (basename + "_range_" + std::to_string(offset) + "_" +
+										  std::to_string(length) + ".bin");
+	// A fixed set of locks avoids duplicate concurrent downloads without keeping
+	// an unbounded mutex entry for every TIFF tile/range ever visited.
+	static std::array<std::mutex, 97> range_mutexes;
+	auto &mutex =
+			range_mutexes[std::hash<std::string>{}(path.string()) % range_mutexes.size()];
+	const std::lock_guard<std::mutex> lock(mutex);
+	std::error_code ec;
+	if (std::filesystem::is_regular_file(path, ec) && !ec &&
+			std::filesystem::file_size(path, ec) == length && !ec) {
+		std::ifstream input(path, std::ios::binary);
+		if (input) {
+			std::vector<std::uint8_t> bytes(static_cast<std::size_t>(length));
+			input.read(reinterpret_cast<char *>(bytes.data()),
+					static_cast<std::streamsize>(bytes.size()));
+			if (input.gcount() == static_cast<std::streamsize>(bytes.size()))
+				return bytes;
+		}
+	}
+	const auto response = http_get_range(url, offset, length);
+	std::vector<std::uint8_t> bytes(response.begin(), response.end());
+	if (bytes.empty() || bytes.size() != static_cast<std::size_t>(length))
+		return {};
+	std::filesystem::create_directories(cache_dir, ec);
+	if (ec)
+		return bytes;
+	// Write through a temporary file so an interrupted request cannot leave a
+	// partial range that a later generation mistakes for a valid cache hit.
+	const auto temporary =
+			path.string() + ".tmp." +
+			std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id()));
+	{
+		std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
+		if (!output)
+			return bytes;
+		output.write(reinterpret_cast<const char *>(bytes.data()),
+				static_cast<std::streamsize>(bytes.size()));
+		if (!output)
+			return bytes;
+	}
+	std::filesystem::rename(temporary, path, ec);
+	if (ec) {
+		std::filesystem::remove(temporary, ec);
+		// Another process may have published the same complete range meanwhile.
+	}
+	return bytes;
+}
+
 template <typename Function>
 void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
 {
@@ -132,10 +195,12 @@ LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t wi
 {
 	if (!bbox.valid() || width == 0 || height == 0)
 		return {};
-	const auto fetch = [](const std::string &url, std::uint64_t offset,
+	const auto cache_dir = cache::provider_cache_root("land_cover");
+	std::error_code cache_error;
+	std::filesystem::create_directories(cache_dir, cache_error);
+	const auto fetch = [cache_dir](const std::string &url, std::uint64_t offset,
 							   std::uint64_t length) {
-		const auto bytes = http_get_range(url, offset, length);
-		return std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+		return fetch_cached_esa_range(url, offset, length, cache_dir);
 	};
 	std::vector<EsaRasterTile> tiles;
 	for (const auto &[lat, lng, url] :

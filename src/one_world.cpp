@@ -1,6 +1,7 @@
 #include "one_world.h"
 #include "args.h"
 #include "../../arnis_ground.h"
+#include "projection/projection_spec.h"
 #include "elevation/postprocess.h"
 #include "projection/web_mercator.h"
 #include "world_utils.h"
@@ -11,6 +12,8 @@
 #include <cctype>
 #include <fstream>
 #include <limits>
+#include <cmath>
+#include <system_error>
 namespace arnis::one_world
 {
 using json = nlohmann::json;
@@ -219,6 +222,156 @@ bool Manifest::valid(std::string *error) const
 		}
 	return true;
 }
+
+std::optional<Session> prepare(const std::filesystem::path &world_dir,
+		const geographic::LLBBox &requested, Args &args, const std::string &arnis_version,
+		std::string *error)
+{
+	auto fail = [&](std::string message) -> std::optional<Session> {
+		if (error)
+			*error = std::move(message);
+		return std::nullopt;
+	};
+	args.apply_mode_defaults();
+	args.apply_body_defaults();
+	if (args.bedrock || args.luanti)
+		return fail("One World is available for Java Edition worlds only.");
+	if (!is_earth(args.body))
+		return fail("One World is available for Earth only.");
+	if (std::abs(args.rotation) > std::numeric_limits<double>::epsilon())
+		return fail(
+				"One World keeps the world aligned to real-world coordinates, so rotation must be 0.");
+	if (requested.min().lat() < -85.0 || requested.max().lat() > 85.0)
+		return fail("One World covers latitudes up to 85 degrees north and south.");
+	if (!valid_scale(args.scale))
+		return fail("options rejected: invalid world scale");
+
+	const bool fresh_dir = !std::filesystem::exists(world_dir);
+	std::error_code ec;
+	if (!fresh_dir) {
+		std::string load_error;
+		if (!Manifest::load(world_dir, &load_error)) {
+			if (!load_error.empty())
+				return fail("invalid One World manifest: " + load_error);
+			const auto it = std::filesystem::directory_iterator(world_dir, ec);
+			if (ec)
+				return fail("failed to read " + world_dir.string() + ": " + ec.message());
+			if (it != std::filesystem::directory_iterator{})
+				return fail(world_dir.string() + " exists but is not a One World (no " +
+							std::string(MANIFEST_FILE) +
+							"). Choose another world name or delete the folder.");
+		}
+	}
+	if (world_utils::world_is_locked(world_dir))
+		return fail(
+				"The One World at " + world_dir.string() +
+				" is open in Minecraft. Leave the world (or close the game) and try again.");
+	std::filesystem::create_directories(world_dir, ec);
+	if (ec)
+		return fail("Failed to create " + world_dir.string() + ": " + ec.message());
+	auto unique_lock = world_utils::SessionLock::acquire(world_dir, error);
+	if (!unique_lock) {
+		if (error && error->empty())
+			*error =
+					"The One World at " + world_dir.string() +
+					" is open in Minecraft. Leave the world (or close the game) and try again.";
+		return std::nullopt;
+	}
+	std::shared_ptr<world_utils::SessionLock> lock(std::move(unique_lock));
+	auto fail_locked = [&](std::string message) -> std::optional<Session> {
+		lock.reset();
+		if (fresh_dir) {
+			std::error_code cleanup_error;
+			std::filesystem::remove_all(world_dir, cleanup_error);
+		}
+		return fail(std::move(message));
+	};
+
+	std::string load_error;
+	auto manifest = Manifest::load(world_dir, &load_error);
+	if (!manifest && !load_error.empty())
+		return fail_locked("invalid One World manifest: " + load_error);
+	bool created = !manifest;
+	if (created) {
+		for (std::filesystem::directory_iterator it(world_dir, ec), end; !ec && it != end;
+				it.increment(ec)) {
+			if (it->path().filename() != "session.lock")
+				return fail_locked(world_dir.string() +
+								   " exists but is not a One World (no " +
+								   std::string(MANIFEST_FILE) +
+								   "). Choose another world name or delete the folder.");
+		}
+		if (ec)
+			return fail_locked(
+					"failed to read " + world_dir.string() + ": " + ec.message());
+	}
+	if (manifest) {
+		std::vector<std::string> mismatches;
+		if (std::abs(manifest->scale - args.scale) > 1e-9)
+			mismatches.push_back("world scale " + std::to_string(args.scale) +
+								 " does not match the world's " +
+								 std::to_string(manifest->scale));
+		if (manifest->ground_level != args.ground_level)
+			mismatches.push_back("ground level " + std::to_string(args.ground_level) +
+								 " does not match the world's " +
+								 std::to_string(manifest->ground_level));
+		if (manifest->terrain != args.terrain_enabled())
+			mismatches.push_back(std::string("the world was generated ") +
+								 (manifest->terrain ? "with" : "without") +
+								 " terrain, so this area must be too");
+		if (!mismatches.empty()) {
+			std::string joined;
+			for (const auto &item : mismatches) {
+				if (!joined.empty())
+					joined += "; ";
+				joined += item;
+			}
+			return fail_locked(
+					"This area cannot be added to the One World at " +
+					world_dir.string() + ": " + joined +
+					". Change the setting, or use another world name to start a new One World.");
+		}
+		args.disable_height_limit = manifest->disable_height_limit;
+		args.height_multiplier = manifest->height_multiplier;
+	} else {
+		// The first area must not limit the vertical range of future locations.
+		args.disable_height_limit = true;
+		manifest = Manifest::create(args,
+				(requested.min().lat() + requested.max().lat()) * 0.5,
+				(requested.min().lng() + requested.max().lng()) * 0.5, arnis_version);
+	}
+
+	args.scale = manifest->scale;
+	const auto [rect, effective_bbox] =
+			projection::snap_bbox_to_chunks(manifest->projection(), requested);
+	if (created && !manifest->save(world_dir, error))
+		return fail_locked(
+				error && !error->empty() ? *error : "failed to save One World manifest");
+	args.aws_only_elevation = manifest->aws_only_elevation;
+	const auto replaced = created ? 0
+								  : existing_chunks(world_dir, rect.min().x, rect.min().z,
+											rect.max().x, rect.max().z);
+	const auto area_id = manifest->next_area_id;
+	RunContext run;
+	run.world_dir = world_dir;
+	run.origin_lat = manifest->origin_lat;
+	run.origin_lon = manifest->origin_lon;
+	run.extending = !manifest->areas.empty();
+	run.elevation = manifest->elevation;
+	run.replaced_chunks = replaced;
+	run.area_id = area_id;
+	run.session_lock = lock;
+	args.one_world_run = std::move(run);
+	args.projection = projection::ProjectionKind::WebMercator;
+	args.voxy_lod = false;
+	if (args.mapillary_facades_wanted() &&
+			facade_mode_places_displays(args.mapillary_facade_mode))
+		args.mapillary_facade_mode = FacadeMode::Blocks;
+	args.building_facades = false;
+	args.map_preview = true;
+	return Session{created, effective_bbox, rect, std::move(lock)};
+}
+
 std::uint64_t existing_chunks(
 		const std::filesystem::path &world, int min_x, int min_z, int max_x, int max_z)
 {

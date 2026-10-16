@@ -10,11 +10,45 @@
 #include <limits>
 #include <system_error>
 #include <array>
+#include <mutex>
+#include <cerrno>
 #include <zlib.h>
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#else
+#include <fcntl.h>
+#include <sys/stat.h>
+#include <unistd.h>
+#endif
 namespace arnis::world_utils
 {
 namespace
 {
+struct HeldSessionLock
+{
+	std::filesystem::path path;
+	std::uint64_t a = 0, b = 0;
+};
+std::mutex session_lock_mutex;
+std::vector<HeldSessionLock> held_session_locks;
+
+bool same_lock(const HeldSessionLock &held, const std::filesystem::path &path,
+		std::uint64_t a, std::uint64_t b)
+{
+	if (a != 0 || b != 0)
+		return held.a == a && held.b == b;
+	return held.path.lexically_normal() == path.lexically_normal();
+}
+
+void set_lock_error(std::string *out, const std::string &message)
+{
+	if (out)
+		*out = message;
+}
+
 class NbtReader
 {
 	const std::vector<std::uint8_t> &bytes_;
@@ -170,9 +204,14 @@ class NbtReader
 		if (depth > 64)
 			return std::nullopt;
 		std::optional<std::int32_t> spawn_x, spawn_z;
+		std::optional<std::pair<std::int32_t, std::int32_t>> modern_spawn;
 		for (;;) {
 			std::uint8_t type = 0;
-			if (!read_u8(type) || type == 0) {
+			if (!read_u8(type))
+				return std::nullopt;
+			if (type == 0) {
+				if (modern_spawn)
+					return modern_spawn;
 				if (!spawn_x || !spawn_z)
 					return std::nullopt;
 				return std::pair{*spawn_x, *spawn_z};
@@ -180,12 +219,69 @@ class NbtReader
 			std::string name;
 			if (!read_name(name))
 				return std::nullopt;
-			if ((name == "SpawnX" || name == "SpawnZ") && type == 3) {
+			if (name == "spawn" && type == 10) {
+				bool valid = true;
+				const auto parsed = read_modern_spawn_compound(depth + 1, valid);
+				if (!valid)
+					return std::nullopt;
+				if (parsed)
+					modern_spawn = parsed;
+			} else if ((name == "SpawnX" || name == "SpawnZ") && type == 3) {
 				std::int32_t value = 0;
 				if (!read_i32(value))
 					return std::nullopt;
 				(name == "SpawnX" ? spawn_x : spawn_z) = value;
 			} else if (!skip_payload(type, depth + 1)) {
+				return std::nullopt;
+			}
+		}
+	}
+	std::optional<std::pair<std::int32_t, std::int32_t>> read_modern_spawn_compound(
+			unsigned depth, bool &valid)
+	{
+		if (depth > 64) {
+			valid = false;
+			return std::nullopt;
+		}
+		std::optional<std::pair<std::int32_t, std::int32_t>> spawn;
+		for (;;) {
+			std::uint8_t type = 0;
+			if (!read_u8(type)) {
+				valid = false;
+				return std::nullopt;
+			}
+			if (type == 0)
+				return spawn;
+			std::string name;
+			if (!read_name(name)) {
+				valid = false;
+				return std::nullopt;
+			}
+			if (name == "pos" && type == 11) {
+				std::int32_t count = 0;
+				if (!read_i32(count) || count < 0 ||
+						std::size_t(count) > (bytes_.size() - pos_) / 4) {
+					valid = false;
+					return std::nullopt;
+				}
+				std::int32_t x = 0, y = 0, z = 0;
+				if (count >= 3 && (!read_i32(x) || !read_i32(y) || !read_i32(z))) {
+					valid = false;
+					return std::nullopt;
+				}
+				const auto remaining = std::size_t(count) - (count >= 3 ? 3 : 0);
+				if (!skip(remaining * 4)) {
+					valid = false;
+					return std::nullopt;
+				}
+				if (count >= 3) {
+					(void)y;
+					spawn = std::pair{x, z};
+				}
+				continue;
+			}
+			if (!skip_payload(type, depth + 1)) {
+				valid = false;
 				return std::nullopt;
 			}
 		}
@@ -278,6 +374,223 @@ std::optional<std::vector<std::uint8_t>> decompress_level_dat(
 	return output;
 }
 } // namespace
+
+SessionLock::SessionLock(std::filesystem::path path, std::intptr_t handle,
+		std::uint64_t identity_a, std::uint64_t identity_b) :
+		path_(std::move(path)), handle_(handle), identity_a_(identity_a),
+		identity_b_(identity_b)
+{
+}
+
+std::unique_ptr<SessionLock> SessionLock::acquire(
+		const std::filesystem::path &world, std::string *error)
+{
+	const auto path = world / "session.lock";
+	std::lock_guard<std::mutex> guard(session_lock_mutex);
+#if defined(_WIN32)
+	HANDLE native = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_ALWAYS,
+			FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (native == INVALID_HANDLE_VALUE) {
+		set_lock_error(error,
+				"Failed to create session.lock file: " +
+						std::system_category().message(static_cast<int>(GetLastError())));
+		return {};
+	}
+	BY_HANDLE_FILE_INFORMATION info{};
+	if (!GetFileInformationByHandle(native, &info)) {
+		const auto message =
+				std::system_category().message(static_cast<int>(GetLastError()));
+		CloseHandle(native);
+		set_lock_error(error, "Failed to identify session.lock file: " + message);
+		return {};
+	}
+	const auto identity_a = std::uint64_t(info.dwVolumeSerialNumber);
+	const auto identity_b =
+			(std::uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+#else
+	const int fd = ::open(path.c_str(), O_RDWR | O_CREAT, 0666);
+	if (fd < 0) {
+		set_lock_error(
+				error, "Failed to create session.lock file: " +
+							   std::error_code(errno, std::generic_category()).message());
+		return {};
+	}
+	struct stat info
+	{
+	};
+	if (::fstat(fd, &info) != 0) {
+		const auto message = std::error_code(errno, std::generic_category()).message();
+		::close(fd);
+		set_lock_error(error, "Failed to identify session.lock file: " + message);
+		return {};
+	}
+	const auto identity_a = static_cast<std::uint64_t>(info.st_dev);
+	const auto identity_b = static_cast<std::uint64_t>(info.st_ino);
+#endif
+	if (std::any_of(held_session_locks.begin(), held_session_locks.end(),
+				[&](const auto &held) {
+					return same_lock(held, path, identity_a, identity_b);
+				})) {
+#if defined(_WIN32)
+		CloseHandle(native);
+#else
+		::close(fd);
+#endif
+		set_lock_error(
+				error, "Failed to acquire lock on session.lock file: already held");
+		return {};
+	}
+#if defined(_WIN32)
+	OVERLAPPED overlap{};
+	if (!LockFileEx(native, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+				MAXDWORD, MAXDWORD, &overlap)) {
+		const auto message =
+				std::system_category().message(static_cast<int>(GetLastError()));
+		CloseHandle(native);
+		set_lock_error(error, "Failed to acquire lock on session.lock file: " + message);
+		return {};
+	}
+	LARGE_INTEGER zero{};
+	constexpr char marker[] = "\xe2\x98\x83";
+	DWORD written = 0;
+	if (!SetFilePointerEx(native, zero, nullptr, FILE_BEGIN) || !SetEndOfFile(native) ||
+			!WriteFile(native, marker, sizeof(marker) - 1, &written, nullptr) ||
+			written != sizeof(marker) - 1) {
+		const auto message =
+				std::system_category().message(static_cast<int>(GetLastError()));
+		UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlap);
+		CloseHandle(native);
+		set_lock_error(error, "Failed to write session.lock file: " + message);
+		return {};
+	}
+#else
+	struct flock lock
+	{
+	};
+	lock.l_type = F_WRLCK;
+	lock.l_whence = SEEK_SET;
+	if (::fcntl(fd, F_SETLK, &lock) != 0) {
+		const auto message = std::error_code(errno, std::generic_category()).message();
+		::close(fd);
+		set_lock_error(error, "Failed to acquire lock on session.lock file: " + message);
+		return {};
+	}
+	constexpr char marker[] = "\xe2\x98\x83";
+	if (::ftruncate(fd, 0) != 0 || ::write(fd, marker, sizeof(marker) - 1) !=
+										   static_cast<ssize_t>(sizeof(marker) - 1)) {
+		const auto message = std::error_code(errno, std::generic_category()).message();
+		struct flock unlock
+		{
+		};
+		unlock.l_type = F_UNLCK;
+		unlock.l_whence = SEEK_SET;
+		::fcntl(fd, F_SETLK, &unlock);
+		::close(fd);
+		set_lock_error(error, "Failed to write session.lock file: " + message);
+		return {};
+	}
+#endif
+	held_session_locks.push_back({path, identity_a, identity_b});
+#if defined(_WIN32)
+	const auto handle = reinterpret_cast<std::intptr_t>(native);
+#else
+	const auto handle = static_cast<std::intptr_t>(fd);
+#endif
+	return std::unique_ptr<SessionLock>(
+			new SessionLock(path, handle, identity_a, identity_b));
+}
+
+SessionLock::~SessionLock()
+{
+	if (handle_ < 0)
+		return;
+	std::lock_guard<std::mutex> guard(session_lock_mutex);
+	std::error_code ignored;
+	std::filesystem::remove(path_, ignored);
+#if defined(_WIN32)
+	const auto native = reinterpret_cast<HANDLE>(handle_);
+	OVERLAPPED overlap{};
+	UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlap);
+	CloseHandle(native);
+#else
+	const int fd = static_cast<int>(handle_);
+	struct flock unlock
+	{
+	};
+	unlock.l_type = F_UNLCK;
+	unlock.l_whence = SEEK_SET;
+	::fcntl(fd, F_SETLK, &unlock);
+	::close(fd);
+#endif
+	held_session_locks.erase(
+			std::remove_if(held_session_locks.begin(), held_session_locks.end(),
+					[&](const auto &held) {
+						return same_lock(held, path_, identity_a_, identity_b_);
+					}),
+			held_session_locks.end());
+}
+
+bool world_is_locked(const std::filesystem::path &world)
+{
+	const auto path = world / "session.lock";
+	std::error_code ec;
+	if (!std::filesystem::exists(path, ec) || ec)
+		return false;
+	std::lock_guard<std::mutex> guard(session_lock_mutex);
+#if defined(_WIN32)
+	HANDLE native = CreateFileW(path.c_str(), GENERIC_READ | GENERIC_WRITE,
+			FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+			OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+	if (native == INVALID_HANDLE_VALUE)
+		return GetLastError() == ERROR_SHARING_VIOLATION ||
+			   GetLastError() == ERROR_ACCESS_DENIED;
+	BY_HANDLE_FILE_INFORMATION info{};
+	if (GetFileInformationByHandle(native, &info)) {
+		const auto a = std::uint64_t(info.dwVolumeSerialNumber);
+		const auto b = (std::uint64_t(info.nFileIndexHigh) << 32) | info.nFileIndexLow;
+		if (std::any_of(held_session_locks.begin(), held_session_locks.end(),
+					[&](const auto &held) { return same_lock(held, path, a, b); })) {
+			CloseHandle(native);
+			return false;
+		}
+	}
+	OVERLAPPED overlap{};
+	const bool locked =
+			!LockFileEx(native, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY, 0,
+					MAXDWORD, MAXDWORD, &overlap);
+	if (!locked)
+		UnlockFileEx(native, 0, MAXDWORD, MAXDWORD, &overlap);
+	CloseHandle(native);
+	return locked;
+#else
+	const int fd = ::open(path.c_str(), O_RDWR);
+	if (fd < 0)
+		return errno == EACCES || errno == EAGAIN;
+	struct stat info
+	{
+	};
+	if (::fstat(fd, &info) != 0) {
+		::close(fd);
+		return false;
+	}
+	const auto a = static_cast<std::uint64_t>(info.st_dev);
+	const auto b = static_cast<std::uint64_t>(info.st_ino);
+	if (std::any_of(held_session_locks.begin(), held_session_locks.end(),
+				[&](const auto &held) { return same_lock(held, path, a, b); })) {
+		::close(fd);
+		return false;
+	}
+	struct flock lock
+	{
+	};
+	lock.l_type = F_WRLCK;
+	lock.l_whence = SEEK_SET;
+	const bool locked = ::fcntl(fd, F_GETLK, &lock) == 0 && lock.l_type != F_UNLCK;
+	::close(fd);
+	return locked;
+#endif
+}
 
 std::optional<std::int32_t> level_data_version(const std::filesystem::path &world)
 {

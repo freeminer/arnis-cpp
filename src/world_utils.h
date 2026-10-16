@@ -5,6 +5,7 @@
 #include <utility>
 #include <vector>
 #include <optional>
+#include <memory>
 #include "coordinate_system/geographic/llbbox.h"
 namespace arnis::world_utils
 {
@@ -24,8 +25,33 @@ struct WorldLayout
 	std::filesystem::path maps_dir(const std::filesystem::path &world) const;
 };
 
+// Holds Java's session.lock while a One World area is being written. The lock
+// is compatible with Java's whole-file fcntl lock on Unix and LockFileEx on
+// Windows; destruction releases it and removes the marker file.
+class SessionLock
+{
+public:
+	~SessionLock();
+	SessionLock(const SessionLock &) = delete;
+	SessionLock &operator=(const SessionLock &) = delete;
+	static std::unique_ptr<SessionLock> acquire(
+			const std::filesystem::path &world, std::string *error = nullptr);
+
+private:
+	SessionLock(std::filesystem::path path, std::intptr_t handle,
+			std::uint64_t identity_a, std::uint64_t identity_b);
+	std::filesystem::path path_;
+	std::intptr_t handle_ = -1;
+	std::uint64_t identity_a_ = 0, identity_b_ = 0;
+};
+
+// True only when another process currently holds session.lock. A lock held by
+// this process is reported as available, matching Rust's One World behavior.
+bool world_is_locked(const std::filesystem::path &world);
+
 std::optional<std::int32_t> level_data_version(const std::filesystem::path &world);
-// Read SpawnX/SpawnZ from level.dat, returning no value for absent or invalid NBT.
+// Read the world spawn X/Z from legacy SpawnX/SpawnZ or the modern spawn.pos
+// int array in level.dat; return no value for absent or invalid NBT.
 std::optional<std::pair<std::int32_t, std::int32_t>> level_spawn_xz(
 		const std::filesystem::path &world);
 std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path);

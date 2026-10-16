@@ -1840,6 +1840,11 @@ PipelineResult acquire_images(const Client &client, const PipelineConfig &config
 		const nlohmann::json *preloaded_osm)
 {
 	PipelineResult result;
+	struct CaptureNetStats
+	{
+		PipelineResult &result;
+		~CaptureNetStats() { result.stats.net = net_counts(); }
+	} capture_net_stats{result};
 	// Keep the selected cache root visible to later facade stages and library
 	// hosts, even when acquisition returns early (cache-only or cancelled).
 	result.export_dir = config.facade_cache;
@@ -1939,6 +1944,15 @@ AlignmentPipelineResult run_alignment_pipeline(
 		const Client &client, const PipelineConfig &config)
 {
 	AlignmentPipelineResult output;
+	// The counters are process-wide (as in Rust), but each pipeline run starts
+	// with a fresh snapshot. A scope guard captures them on every return path,
+	// including cache hits, cancellation, and errors.
+	net_reset();
+	struct CaptureNetStats
+	{
+		PipelineResult &result;
+		~CaptureNetStats() { result.stats.net = net_counts(); }
+	} capture_net_stats{output.acquisition};
 	const auto pipeline_started = std::chrono::steady_clock::now();
 	const auto finish = [&] {
 		output.acquisition.stats.total_seconds = std::chrono::duration<double>(

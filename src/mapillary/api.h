@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <memory>
 #include <mutex>
+#include <cstdint>
 namespace arnis::mapillary
 {
 using JsonFetcher = std::function<std::optional<std::vector<std::uint8_t>>(
@@ -17,6 +18,20 @@ struct HttpReply
 	std::vector<std::uint8_t> body;
 	std::optional<double> retry_after_s;
 };
+// Per-run HTTP activity, parallel to the Rust fetch::NetCounts contract.
+// Durations are summed across concurrent workers, so request_ms can exceed
+// wall-clock runtime.
+struct NetCounts
+{
+	std::uint64_t requests = 0;
+	std::uint64_t retries = 0;
+	std::uint64_t rate_limited = 0;
+	std::uint64_t slept_ms = 0;
+	std::uint64_t request_ms = 0;
+	std::uint64_t bytes = 0;
+};
+void net_reset();
+NetCounts net_counts();
 // Status-aware Graph fetch path, required to distinguish a dense-cell 500
 // (which Rust subdivides) from an unavailable response or rejected token.
 using GraphFetcher =

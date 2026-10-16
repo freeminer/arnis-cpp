@@ -7,6 +7,10 @@
 #include <filesystem>
 #include <vector>
 #include <array>
+#include <memory>
+
+#include "coordinate_system/geographic/llbbox.h"
+#include "coordinate_system/cartesian/xzbbox/rectangle.h"
 
 namespace arnis
 {
@@ -23,6 +27,10 @@ class XZBBox;
 namespace arnis::projection
 {
 class WebMercatorProjection;
+}
+namespace arnis::world_utils
+{
+class SessionLock;
 }
 
 namespace arnis::one_world
@@ -118,11 +126,29 @@ struct RunContext
 	bool extending = false;
 	std::uint64_t replaced_chunks = 0;
 	std::uint32_t area_id = 0;
+	// Optional lock acquired by prepare(). Direct library callers that construct
+	// RunContext themselves are still protected by generate_world's local guard.
+	std::shared_ptr<world_utils::SessionLock> session_lock;
 	std::filesystem::path preview_path() const
 	{
 		return world_dir / PREVIEW_DIR / ("area-" + std::to_string(area_id) + ".png");
 	}
 };
+
+// Backend-neutral portion of Rust's One World prepare lifecycle. It configures
+// Args and keeps the session lock alive through generation, but deliberately
+// leaves world-format files (level.dat, region layout, etc.) to the host backend.
+struct Session
+{
+	bool created = false;
+	geographic::LLBBox llbbox;
+	cartesian::XZBBoxRect xzbbox;
+	std::shared_ptr<world_utils::SessionLock> lock;
+};
+
+std::optional<Session> prepare(const std::filesystem::path &world_dir,
+		const geographic::LLBBox &requested, Args &args, const std::string &arnis_version,
+		std::string *error = nullptr);
 
 bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
 		const cartesian::XZBBox &xzbbox, std::optional<ElevationAffine> elevation,

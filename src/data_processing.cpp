@@ -1454,6 +1454,20 @@ bool generate_world(WorldEditor &editor,
 		std::cerr << "Arnis generation options rejected: " << *validation_error << '\n';
 		return false;
 	}
+	// Rust holds Minecraft's session.lock across every write into a One World.
+	// Keep the guard alive until persistence and manifest recording both finish.
+	std::unique_ptr<world_utils::SessionLock> one_world_lock;
+	if (args.one_world_run && !args.one_world_run->session_lock) {
+		std::string lock_error;
+		one_world_lock = world_utils::SessionLock::acquire(
+				args.one_world_run->world_dir, &lock_error);
+		if (!one_world_lock) {
+			const auto message = "cannot acquire One World session lock: " + lock_error;
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
 	// Rust uses the same 3D toggle for bundled schematic props and model
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.

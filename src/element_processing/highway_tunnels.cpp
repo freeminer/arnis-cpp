@@ -158,10 +158,14 @@ bool beyond_portal(const std::vector<PortalFace> &faces, int x, int z)
 bool tunnel_bore_fits_impl(
 		const WorldEditor &editor, const ProcessedWay &way, double scale)
 {
+	// Match the Rust preflight contract: malformed/non-highway ways must not
+	// inherit the default road width and accidentally qualify for a tunnel bore.
+	if (!way.tags.contains("highway") || way.nodes.size() < 2)
+		return false;
 	const auto points = way_centerline(way);
 	if (points.size() < 2)
 		return false;
-	const int wall = highway_half_width(way, scale) + 1;
+	const int wall = highway_block_range(way.tags.get("highway"), way.tags, scale) + 1;
 	const auto [terrain, cover] = tunnel_cover_profile(editor, points, wall);
 	(void)terrain;
 	return std::any_of(cover.begin(), cover.end(),
@@ -442,9 +446,13 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 	const int start_drop = start_internal ? 0 : portals.drop_at(pts.front());
 	const int end_drop = end_internal ? 0 : portals.drop_at(pts.back());
 	for (size_t i = 0; i < pts.size(); ++i) {
-		const double t = static_cast<double>(i) / last;
-		const int grade =
-				std::lround(terrain.front() + (terrain.back() - terrain.front()) * t);
+		// Keep Rust's f32 interpolation: using double changes rounding on long
+		// centerlines and can introduce a one-block grade mismatch between ports.
+		const float denom = static_cast<float>(std::max<std::size_t>(1, last));
+		const float t = static_cast<float>(i) / denom;
+		const int grade = static_cast<int>(
+				std::round(static_cast<float>(terrain.front()) +
+						   static_cast<float>(terrain.back() - terrain.front()) * t));
 		const int cover_drop = COVER_DROP + extra;
 		const int desired = std::min(grade, cover[i] - cover_drop);
 		const int rs = start_internal ? INT_MIN
@@ -572,8 +580,13 @@ void carve_highway_tunnel_interior(
 			STONE, WATER, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA, GRAY_CONCRETE,
 			BLACK_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, YELLOW_CONCRETE,
 			GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, MUD, CLAY, SAND, SANDSTONE, GRAVEL,
-			ANDESITE, COBBLESTONE, TUFF, DEEPSLATE, SNOW_BLOCK, SNOW_LAYER, MOSS_BLOCK,
-			FARMLAND};
+			ANDESITE, COBBLESTONE, TUFF, DEEPSLATE, SNOW_BLOCK, SNOW_LAYER,
+			// Rust's SNOW_LAYERS whitelist includes every Minecraft layer state; the
+			// C++ backend maps these logical IDs to mcl_core:snow_2 through snow_7.
+			Block{static_cast<content_t>(474)}, Block{static_cast<content_t>(475)},
+			Block{static_cast<content_t>(476)}, Block{static_cast<content_t>(477)},
+			Block{static_cast<content_t>(478)}, Block{static_cast<content_t>(479)},
+			MOSS_BLOCK, FARMLAND};
 	const std::vector<Block> road_wl{AIR, STONE, STONE_BRICKS, CRACKED_STONE_BRICKS,
 			MOSSY_STONE_BRICKS, WATER, SEA_LANTERN};
 	for (const auto &c : cells) {

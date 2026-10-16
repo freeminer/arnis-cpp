@@ -20,6 +20,53 @@
 namespace arnis::water_depth
 {
 
+void chamfer_3_4_dt(std::vector<std::uint8_t> &d, std::size_t w, std::size_t h)
+{
+	if (w == 0 || h == 0 || w > std::numeric_limits<std::size_t>::max() / h ||
+			d.size() != w * h)
+		return;
+	const auto step = [](std::uint8_t value, unsigned increment) {
+		return static_cast<std::uint8_t>(
+				std::min<unsigned>(std::numeric_limits<std::uint8_t>::max(),
+						static_cast<unsigned>(value) + increment));
+	};
+	for (std::size_t y = 0; y < h; ++y) {
+		for (std::size_t x = 0; x < w; ++x) {
+			const auto i = y * w + x;
+			if (d[i] == 0)
+				continue;
+			auto best = d[i];
+			if (x > 0)
+				best = std::min(best, step(d[i - 1], 3));
+			if (y > 0) {
+				best = std::min(best, step(d[i - w], 3));
+				if (x > 0)
+					best = std::min(best, step(d[i - w - 1], 4));
+				if (x + 1 < w)
+					best = std::min(best, step(d[i - w + 1], 4));
+			}
+			d[i] = best;
+		}
+	}
+	for (std::size_t y = h; y-- > 0;)
+		for (std::size_t x = w; x-- > 0;) {
+			const auto i = y * w + x;
+			if (d[i] == 0)
+				continue;
+			auto best = d[i];
+			if (x + 1 < w)
+				best = std::min(best, step(d[i + 1], 3));
+			if (y + 1 < h) {
+				best = std::min(best, step(d[i + w], 3));
+				if (x > 0)
+					best = std::min(best, step(d[i + w - 1], 4));
+				if (x + 1 < w)
+					best = std::min(best, step(d[i + w + 1], 4));
+			}
+			d[i] = best;
+		}
+}
+
 std::pair<int, int> grid_span_to_block_span(std::size_t grid_lo, std::size_t grid_hi,
 		std::size_t world_dim, std::size_t grid_dim)
 {
@@ -73,52 +120,6 @@ void bit_set(std::vector<std::uint64_t> &bits, std::size_t i)
 double value_noise_01(int x, int z, int scale)
 {
 	return ground_generation::value_noise_01(x, z, scale);
-}
-
-void chamfer_3_4_dt(std::vector<std::uint8_t> &d, std::size_t w, std::size_t h)
-{
-	auto step = [](std::uint8_t v, std::uint8_t add) {
-		const unsigned sum = static_cast<unsigned>(v) + static_cast<unsigned>(add);
-		return static_cast<std::uint8_t>(std::min<unsigned>(sum, DT_MAX));
-	};
-
-	for (std::size_t j = 0; j < h; ++j) {
-		for (std::size_t i = 0; i < w; ++i) {
-			const std::size_t idx = j * w + i;
-			if (d[idx] == 0)
-				continue;
-			std::uint8_t best = d[idx];
-			if (i > 0)
-				best = std::min(best, step(d[idx - 1], 3));
-			if (j > 0) {
-				best = std::min(best, step(d[idx - w], 3));
-				if (i > 0)
-					best = std::min(best, step(d[idx - w - 1], 4));
-				if (i + 1 < w)
-					best = std::min(best, step(d[idx - w + 1], 4));
-			}
-			d[idx] = best;
-		}
-	}
-
-	for (std::size_t j = h; j-- > 0;) {
-		for (std::size_t i = w; i-- > 0;) {
-			const std::size_t idx = j * w + i;
-			if (d[idx] == 0)
-				continue;
-			std::uint8_t best = d[idx];
-			if (i + 1 < w)
-				best = std::min(best, step(d[idx + 1], 3));
-			if (j + 1 < h) {
-				best = std::min(best, step(d[idx + w], 3));
-				if (i > 0)
-					best = std::min(best, step(d[idx + w - 1], 4));
-				if (i + 1 < w)
-					best = std::min(best, step(d[idx + w + 1], 4));
-			}
-			d[idx] = best;
-		}
-	}
 }
 
 int polygon_local_max(std::uint16_t component_max_units)

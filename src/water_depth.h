@@ -15,6 +15,12 @@ class BridgeSurfaceMap;
 namespace arnis::water_depth
 {
 
+// In-place 3-4 chamfer distance transform, saturating at u8::MAX. Shared with
+// elevation postprocessing for the bank-distance raster, matching Rust's
+// crate-visible helper.
+void chamfer_3_4_dt(
+		std::vector<std::uint8_t> &distances, std::size_t width, std::size_t height);
+
 // Convert an inclusive grid-cell interval into a conservative inclusive block
 // interval. This mirrors Rust's mapping helper and is used when carving only
 // the water sub-region instead of scanning the complete world rectangle.

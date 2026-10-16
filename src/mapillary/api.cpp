@@ -28,6 +28,47 @@ constexpr long media_timeout_ms = 240000L;
 constexpr long graph_connect_timeout_ms = 10000L;
 constexpr long media_connect_timeout_ms = 20000L;
 
+struct AtomicNetCounts
+{
+	std::atomic<std::uint64_t> requests{0};
+	std::atomic<std::uint64_t> retries{0};
+	std::atomic<std::uint64_t> rate_limited{0};
+	std::atomic<std::uint64_t> slept_ms{0};
+	std::atomic<std::uint64_t> request_ms{0};
+	std::atomic<std::uint64_t> bytes{0};
+};
+
+AtomicNetCounts &net_counters()
+{
+	static AtomicNetCounts counters;
+	return counters;
+}
+
+void record_retry()
+{
+	net_counters().retries.fetch_add(1, std::memory_order_relaxed);
+}
+
+void counted_sleep(std::chrono::duration<double> wait)
+{
+	const auto ms = static_cast<std::uint64_t>(std::max(0.0, wait.count() * 1000.0));
+	auto &counts = net_counters();
+	counts.slept_ms.fetch_add(ms, std::memory_order_relaxed);
+	// Rust measures request_ms around the complete retrying get, including its
+	// backoff. Track sleep time here in addition to its dedicated counter.
+	counts.request_ms.fetch_add(ms, std::memory_order_relaxed);
+	std::this_thread::sleep_for(wait);
+}
+
+void counted_sleep(std::chrono::milliseconds wait)
+{
+	const auto ms = static_cast<std::uint64_t>(std::max<std::int64_t>(0, wait.count()));
+	auto &counts = net_counters();
+	counts.slept_ms.fetch_add(ms, std::memory_order_relaxed);
+	counts.request_ms.fetch_add(ms, std::memory_order_relaxed);
+	std::this_thread::sleep_for(wait);
+}
+
 std::optional<double> retry_after_seconds(const std::string &value)
 {
 	if (value.empty())
@@ -97,6 +138,28 @@ std::optional<std::vector<std::uint8_t>> normalize_cluster(
 	return compressed;
 }
 } // namespace
+
+void net_reset()
+{
+	auto &counts = net_counters();
+	counts.requests.store(0, std::memory_order_relaxed);
+	counts.retries.store(0, std::memory_order_relaxed);
+	counts.rate_limited.store(0, std::memory_order_relaxed);
+	counts.slept_ms.store(0, std::memory_order_relaxed);
+	counts.request_ms.store(0, std::memory_order_relaxed);
+	counts.bytes.store(0, std::memory_order_relaxed);
+}
+
+NetCounts net_counts()
+{
+	const auto &counts = net_counters();
+	return {counts.requests.load(std::memory_order_relaxed),
+			counts.retries.load(std::memory_order_relaxed),
+			counts.rate_limited.load(std::memory_order_relaxed),
+			counts.slept_ms.load(std::memory_order_relaxed),
+			counts.request_ms.load(std::memory_order_relaxed),
+			counts.bytes.load(std::memory_order_relaxed)};
+}
 
 Client::Client(cache::Layout cache) : cache_(std::move(cache))
 {
@@ -335,20 +398,38 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_bytes(
 std::optional<HttpReply> Client::fetch_reply(
 		const std::string &url, std::size_t max_bytes) const
 {
+	const auto started = std::chrono::steady_clock::now();
+	auto &counts = net_counters();
+	counts.requests.fetch_add(1, std::memory_order_relaxed);
+	auto finish = [&](std::optional<HttpReply> reply) {
+		const auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+				std::chrono::steady_clock::now() - started)
+									 .count();
+		counts.request_ms.fetch_add(
+				static_cast<std::uint64_t>(std::max<std::int64_t>(0, elapsed)),
+				std::memory_order_relaxed);
+		if (reply) {
+			if (reply->status == 429)
+				counts.rate_limited.fetch_add(1, std::memory_order_relaxed);
+			if (reply->status >= 200 && reply->status < 300)
+				counts.bytes.fetch_add(reply->body.size(), std::memory_order_relaxed);
+		}
+		return reply;
+	};
 	// Rust's request permit covers every transport, not just the built-in HTTP
 	// client. Keep injected library/test transports under the same process-wide
 	// request cap and avoid nested permits in the default fetcher.
 	[[maybe_unused]] auto permit = arnis::net::request_permit();
 	if (graph_fetch_) {
 		auto reply = graph_fetch_(url, max_bytes);
-		return !reply || reply->body.size() > max_bytes ? std::nullopt : reply;
+		return finish(!reply || reply->body.size() > max_bytes ? std::nullopt : reply);
 	}
 	if (fetch_) {
 		auto body = fetch_(url, max_bytes);
 		if (body && body->size() <= max_bytes)
-			return HttpReply{200, std::move(*body)};
+			return finish(HttpReply{200, std::move(*body)});
 	}
-	return std::nullopt;
+	return finish(std::nullopt);
 }
 
 std::optional<HttpReply> Client::fetch_retrying(
@@ -359,6 +440,8 @@ std::optional<HttpReply> Client::fetch_retrying(
 	constexpr unsigned attempts = 5;
 	unsigned undelivered = 0;
 	for (unsigned attempt = 0; attempt < attempts; ++attempt) {
+		if (attempt > 0)
+			record_retry();
 		auto reply = fetch_reply(url, max_bytes);
 		if (!reply) {
 			if (++undelivered >= 2)
@@ -380,7 +463,7 @@ std::optional<HttpReply> Client::fetch_retrying(
 											 5.0 * (1U << std::min(attempt, 4U))),
 								  0.0, 120.0)
 						: 5.0 * (attempt + 1);
-		std::this_thread::sleep_for(std::chrono::duration<double>(seconds));
+		counted_sleep(std::chrono::duration<double>(seconds));
 	}
 	return {};
 }
@@ -683,6 +766,8 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 			unsigned undelivered = 0;
 			std::optional<HttpReply> reply;
 			for (unsigned attempt = 0; attempt < request_attempts; ++attempt) {
+				if (attempt > 0)
+					record_retry();
 				reply = fetch_reply(url, max_search_bytes);
 				if (!reply) {
 					if (++undelivered >= 2)
@@ -703,7 +788,7 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 											  0.0, 120.0))
 									: std::chrono::duration<double>(
 											  request_backoff * (attempt + 1));
-					std::this_thread::sleep_for(wait);
+					counted_sleep(wait);
 				}
 			}
 			if (!reply) {
@@ -774,7 +859,8 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 				if (failure_reason.empty())
 					failure_reason = describe_failure(*reply);
 				for (unsigned retry = 1; retry <= leaf_retry_count; ++retry) {
-					std::this_thread::sleep_for(std::chrono::milliseconds(750 * retry));
+					counted_sleep(std::chrono::milliseconds(750 * retry));
+					record_retry();
 					reply = fetch_reply(url, max_search_bytes);
 					if (!reply)
 						continue;

@@ -76,6 +76,7 @@ struct PipelineStats
 	double texture_seconds = 0.0;
 	double export_seconds = 0.0;
 	double total_seconds = 0.0;
+	NetCounts net;
 };
 
 struct PipelineResult
