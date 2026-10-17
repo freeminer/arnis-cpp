@@ -741,7 +741,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							}
 							if (talus_field)
 								talus_block = terrain_surface::talus_palette(x, z,
-										talus_field->near(x, z,
+										talus_field->near_(x, z,
 												editor.ground->level_exact(relative)),
 										cover_here);
 						}
