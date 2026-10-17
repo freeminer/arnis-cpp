@@ -934,7 +934,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			pending.reserve(end - begin);
 			for (std::size_t i = begin; i < end; ++i) {
 				const auto [x, y] = wanted[i];
-				pending.push_back(std::async(std::launch::async, [&, x, y] {
+				pending.push_back(std::async(std::launch::async, [&, x=x, y=y] {
 					TileResult result;
 					const auto read = overture::pmtiles::read_tile_checked(
 							archive->header, archive->root_directory, ZOOM, x, y, range);

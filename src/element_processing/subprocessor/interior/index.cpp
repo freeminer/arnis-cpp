@@ -362,7 +362,8 @@ InteriorUseIndex InteriorUseIndex::build(
 					grid.within(area.min_x, area.min_z, area.max_x, area.max_z)) {
 				const auto [cx, cz] = o->center();
 				if (std::none_of(areas.begin(), areas.end(),
-							[&](const auto &r) { return r.contains(cx, cz); }))
+							[&, cx = cx, cz = cz](
+									const auto &r) { return r.contains(cx, cz); }))
 					continue;
 				const AreaChoice candidate{area_rank(use), -area.area, use};
 				auto it = best_area.find(o->id);

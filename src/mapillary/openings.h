@@ -1080,7 +1080,7 @@ inline Result classify_texture(const Texture &texture, std::size_t columns,
 			wall_reference(lab, reference_valid, width, height);
 	if (!sub_rows || !sub_cols)
 		return out;
-	auto sub_at = [&](std::size_t x, std::size_t y) {
+	auto sub_at = [&,sub_rows=sub_rows, sub_cols=sub_cols](std::size_t x, std::size_t y) {
 		return std::min(y / subcell_pixels, sub_rows - 1) * sub_cols +
 			   std::min(x / subcell_pixels, sub_cols - 1);
 	};

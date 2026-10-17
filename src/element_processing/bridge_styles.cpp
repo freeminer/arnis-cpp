@@ -336,7 +336,7 @@ void place_pylon(WorldEditor &editor, std::pair<int, int> base,
 	const std::pair<float, float> along{outward.second, -outward.first};
 	const int top_y = deck_y + height;
 	std::vector<std::pair<int, int>> cells;
-	for (const auto [a, b] :
+	for (const auto &[a, b] :
 			std::array<std::pair<float, float>, 4>{{{0, 0}, {1, 0}, {0, 1}, {1, 1}}}) {
 		const std::pair<int, int> cell{
 				static_cast<int>(

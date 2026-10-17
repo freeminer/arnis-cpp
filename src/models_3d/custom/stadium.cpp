@@ -193,7 +193,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double scal
 		// as pitches/tracks. Claim these before testing the inner footprint so a
 		// single mapped stadium never places overlapping GLB models.
 		if (std::any_of(r.placements.begin(), r.placements.end(),
-					[&](const auto &p) { return p.footprint.contains(cx, cz); })) {
+					[&,cx=cx, cz=cz](const auto &p) { return p.footprint.contains(cx, cz); })) {
 			r.suppressed.push_back(std::move(key));
 			continue;
 		}

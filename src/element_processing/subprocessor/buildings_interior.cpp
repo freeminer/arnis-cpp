@@ -312,7 +312,7 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 	}
 	if (!unit_entry) {
 		for (const auto &[dx, dz] : door_positions) {
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(zone_key(x, z))) {
 					unit_entry = interior_uses::Entry{{x, z}, d};
@@ -422,9 +422,11 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 		const auto key = zone_key(x, z);
 		if (!open_geometry.contains(key))
 			continue;
-		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
-				return !open_geometry.contains(zone_key(x + d.first, z + d.second));
-			})) {
+		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
+					[&, x = x, z = z](const auto &d) {
+						return !open_geometry.contains(
+								zone_key(x + d.first, z + d.second));
+					})) {
 			depth_at.emplace(key, 1);
 			depth_queue.emplace_back(x, z);
 		}
@@ -433,7 +435,7 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 		const auto [x, z] = depth_queue.front();
 		depth_queue.pop_front();
 		const int next_depth = depth_at.at(zone_key(x, z)) + 1;
-		for (const auto d : INTERIOR_DIRS) {
+		for (const auto &d : INTERIOR_DIRS) {
 			const int nx = x + d.first, nz = z + d.second;
 			const auto key = zone_key(nx, nz);
 			if (open_geometry.contains(key) && !depth_at.contains(key)) {
@@ -478,7 +480,7 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 	for (const auto &[x, z] : cells) {
 		if (!free(x, z))
 			continue;
-		for (const auto d : INTERIOR_DIRS) {
+		for (const auto &d : INTERIOR_DIRS) {
 			const int nx = x + d.first, nz = z + d.second;
 			if (!zone.contains(zone_key(nx, nz)) ||
 					structural.contains(zone_key(nx, nz)) ||
@@ -680,7 +682,7 @@ void furnish_supermarket(WorldEditor &editor,
 		}
 	if (!entry) {
 		for (const auto &[dx, dz] : door_positions) {
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(key(x, z))) {
 					entry = interior_uses::Entry{{x, z}, d};
@@ -778,7 +780,7 @@ void furnish_supermarket(WorldEditor &editor,
 			continue;
 		bool wall = false;
 		std::pair<int, int> inward{};
-		for (const auto d : INTERIOR_DIRS) {
+		for (const auto &d : INTERIOR_DIRS) {
 			const int nx = x + d.first, nz = z + d.second;
 			if (!zone.contains(key(nx, nz)) || structural.contains(key(nx, nz)) ||
 					editor.get_block_absolute(nx, base_y, nz)) {
@@ -862,7 +864,7 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 		}
 	if (!entry) {
 		for (const auto &[dx, dz] : door_positions) {
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(key(x, z))) {
 					entry = interior_uses::Entry{{x, z}, d};
@@ -1015,10 +1017,11 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 	for (const auto &[x, z] : cells) {
 		if (structural.contains(key(x, z)) || editor.get_block_absolute(x, base_y, z))
 			continue;
-		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
-				return !zone.contains(key(x + d.first, z + d.second)) ||
-					   structural.contains(key(x + d.first, z + d.second));
-			})) {
+		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
+					[&, x = x, z = z](const auto &d) {
+						return !zone.contains(key(x + d.first, z + d.second)) ||
+							   structural.contains(key(x + d.first, z + d.second));
+					})) {
 			distance.emplace(key(x, z), 1);
 			queue.emplace_back(x, z);
 		}
@@ -1027,7 +1030,7 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 		const auto [x, z] = queue.front();
 		queue.pop_front();
 		const int next = distance.at(key(x, z)) + 1;
-		for (const auto d : INTERIOR_DIRS) {
+		for (const auto &d : INTERIOR_DIRS) {
 			const int nx = x + d.first, nz = z + d.second;
 			const auto cell = key(nx, nz);
 			if (zone.contains(cell) && !structural.contains(cell) &&
@@ -1064,8 +1067,8 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto cell = key(x, z);
 			if (!kitchen_cells.contains(cell))
 				continue;
-			if (std::any_of(
-						INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
+			if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
+						[&, x = x, z = z](const auto &d) {
 							return !kitchen_cells.contains(
 									key(x + d.first, z + d.second));
 						})) {
@@ -1167,8 +1170,8 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 		for (const auto &[x, z] : cells) {
 			if (local(x, z).second <= service_v || !free(x, z))
 				continue;
-			if (std::any_of(
-						INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
+			if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
+						[&, x = x, z = z](const auto &d) {
 							return !zone.contains(key(x + d.first, z + d.second));
 						}))
 				put(x, z, 1, BARREL);
@@ -1276,7 +1279,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 		}
 	if (!entry) {
 		for (const auto &[dx, dz] : door_positions) {
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(key(x, z))) {
 					entry = interior_uses::Entry{{x, z}, d};
@@ -1370,7 +1373,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 		for (const auto &[x, z] : cells) {
 			if (!free(x, z))
 				continue;
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int nx = x + d.first, nz = z + d.second;
 				if (!zone.contains(key(nx, nz)) || structural.contains(key(nx, nz)) ||
 						editor.get_block_absolute(nx, base_y, nz)) {
@@ -1399,7 +1402,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 		std::deque<std::pair<int, int>> queue;
 		for (const auto &[x, z] : cells) {
 			if (walkable(x, z) && std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-										  [&](const auto &d) {
+										  [&, x = x, z = z](const auto &d) {
 											  return !walkable(x + d.first, z + d.second);
 										  })) {
 				distances.emplace(key(x, z), 1);
@@ -1853,7 +1856,7 @@ void split_civic_corridor(WorldEditor &editor,
 		}
 	if (!entry) {
 		for (const auto &[dx, dz] : existing_doors) {
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(key(x, z))) {
 					entry = interior_uses::Entry{{x, z}, d};
@@ -2153,7 +2156,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		const auto &fallback_entry_doors =
 				clinic_layout ? existing_doors : door_positions;
 		for (const auto &[dx, dz] : fallback_entry_doors) {
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int x = dx + d.first, z = dz + d.second;
 				if (zone.contains(key(x, z))) {
 					entry = interior_uses::Entry{{x, z}, d};
@@ -2325,10 +2328,11 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 	for (const auto &[x, z] : cells) {
 		if (structural.contains(key(x, z)) || editor.get_block_absolute(x, base_y, z))
 			continue;
-		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
-				return !zone.contains(key(x + d.first, z + d.second)) ||
-					   structural.contains(key(x + d.first, z + d.second));
-			})) {
+		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
+					[&, x = x, z = z](const auto &d) {
+						return !zone.contains(key(x + d.first, z + d.second)) ||
+							   structural.contains(key(x + d.first, z + d.second));
+					})) {
 			depth_at.emplace(key(x, z), 1);
 			queue.emplace_back(x, z);
 		}
@@ -2337,7 +2341,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		const auto [x, z] = queue.front();
 		queue.pop_front();
 		const int next = depth_at.at(key(x, z)) + 1;
-		for (const auto d : INTERIOR_DIRS) {
+		for (const auto &d : INTERIOR_DIRS) {
 			const int nx = x + d.first, nz = z + d.second;
 			const auto k = key(nx, nz);
 			if (zone.contains(k) && !structural.contains(k) && !depth_at.contains(k) &&
@@ -2352,7 +2356,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		for (const auto &[x, z] : cells) {
 			if (!free(x, z))
 				continue;
-			for (const auto d : INTERIOR_DIRS) {
+			for (const auto &d : INTERIOR_DIRS) {
 				const int nx = x + d.first, nz = z + d.second;
 				if (!zone.contains(key(nx, nz)) || structural.contains(key(nx, nz)) ||
 						editor.get_block_absolute(nx, base_y, nz)) {
@@ -2545,7 +2549,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					}
 					std::optional<interior_uses::Entry> room_entry;
 					for (const auto &[dx, dz] : door_positions) {
-						for (const auto d : INTERIOR_DIRS) {
+						for (const auto &d : INTERIOR_DIRS) {
 							const int x = dx + d.first, z = dz + d.second;
 							if (room_set.contains(key(x, z))) {
 								room_entry = interior_uses::Entry{{x, z}, d};
@@ -2835,7 +2839,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				const auto [x, z] = pending.front();
 				pending.pop_front();
 				room.emplace_back(x, z);
-				for (const auto d : INTERIOR_DIRS) {
+				for (const auto &d : INTERIOR_DIRS) {
 					const int nx = x + d.first, nz = z + d.second;
 					const auto neighbor = key(nx, nz);
 					if (zone.contains(neighbor) && !hall.contains(neighbor) &&
@@ -2861,7 +2865,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			std::pair<int, int> room_n = n;
 			for (const auto &[dx, dz] : door_positions) {
 				bool found = false;
-				for (const auto d : INTERIOR_DIRS)
+				for (const auto &d : INTERIOR_DIRS)
 					if (room_set.contains(key(dx + d.first, dz + d.second)) &&
 							hall.contains(key(dx - d.first, dz - d.second))) {
 						room_n = d;
@@ -2887,7 +2891,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				if (!free(x, z))
 					continue;
 				const int v = room_local(x, z).second;
-				for (const auto d : INTERIOR_DIRS) {
+				for (const auto &d : INTERIOR_DIRS) {
 					const auto neighbor = key(x + d.first, z + d.second);
 					if (room_set.contains(neighbor) && !structural.contains(neighbor) &&
 							(!editor.get_block_absolute(
@@ -3022,7 +3026,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					if (v < 1 || std::abs(u - hall_entry_u) <= 3 ||
 							interior_mix(x, z, seed) % 3 == 0)
 						continue;
-					for (const auto d : INTERIOR_DIRS)
+					for (const auto &d : INTERIOR_DIRS)
 						if (!hall.contains(key(x + d.first, z + d.second)) ||
 								structural.contains(key(x + d.first, z + d.second))) {
 							seat(x, z, {-d.first, -d.second});
@@ -3089,7 +3093,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 						for (const auto &[x, z] : room) {
 							if (!free(x, z))
 								continue;
-							for (const auto d : INTERIOR_DIRS)
+							for (const auto &d : INTERIOR_DIRS)
 								if (!room_set.contains(key(x + d.first, z + d.second)) ||
 										structural.contains(
 												key(x + d.first, z + d.second)) ||
@@ -3188,7 +3192,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					for (const auto &[x, z] : room) {
 						if (!free(x, z))
 							continue;
-						for (const auto d : INTERIOR_DIRS)
+						for (const auto &d : INTERIOR_DIRS)
 							if (!room_set.contains(key(x + d.first, z + d.second)) ||
 									structural.contains(key(x + d.first, z + d.second)) ||
 									editor.get_block_absolute(
@@ -3429,7 +3433,9 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 															 : positive;
 					const auto [room_ox, room_oz, room_frame_n, room_t, room_width,
 							room_depth] = frame_for(room_n);
-					auto room_world = [&](int u, int v) {
+					auto room_world = [&, room_ox = room_ox, room_oz = room_oz,
+											  room_frame_n = room_frame_n,
+											  room_t = room_t](int u, int v) {
 						return std::pair{
 								room_ox + room_t.first * u + room_frame_n.first * v,
 								room_oz + room_t.second * u + room_frame_n.second * v};
@@ -3652,7 +3658,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 							editor.get_block_absolute(x, base_y, z))
 						continue;
 					if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-								[&](const auto &d) {
+								[&, x = x, z = z](const auto &d) {
 									return !lobby_zone.contains(
 												   key(x + d.first, z + d.second)) ||
 										   structural.contains(
@@ -3666,7 +3672,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					const auto [x, z] = lobby_queue.front();
 					lobby_queue.pop_front();
 					const int next = lobby_depth.at(key(x, z)) + 1;
-					for (const auto d : INTERIOR_DIRS) {
+					for (const auto &d : INTERIOR_DIRS) {
 						const int nx = x + d.first, nz = z + d.second;
 						if (!lobby_zone.contains(key(nx, nz)) ||
 								structural.contains(key(nx, nz)) ||
@@ -3754,7 +3760,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 						const auto [x, z] = pending.front();
 						pending.pop_front();
 						room.emplace_back(x, z);
-						for (const auto d : INTERIOR_DIRS) {
+						for (const auto &d : INTERIOR_DIRS) {
 							const int nx = x + d.first, nz = z + d.second;
 							const auto neighbor = key(nx, nz);
 							if (zone.contains(neighbor) && !hall.contains(neighbor) &&
@@ -3784,7 +3790,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				if (hall_span.first >= 0)
 					for (const auto &[dx, dz] : door_positions) {
 						bool found = false;
-						for (const auto d : INTERIOR_DIRS)
+						for (const auto &d : INTERIOR_DIRS)
 							if (room_cells.contains(key(dx + d.first, dz + d.second)) &&
 									hall.contains(key(dx - d.first, dz - d.second))) {
 								room_n = d;
@@ -3832,7 +3838,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				for (const auto &[x, z] : room) {
 					if (!free(x, z))
 						continue;
-					for (const auto d : INTERIOR_DIRS)
+					for (const auto &d : INTERIOR_DIRS)
 						if (!room_cells.contains(key(x + d.first, z + d.second)) ||
 								structural.contains(key(x + d.first, z + d.second)) ||
 								editor.get_block_absolute(
@@ -4431,7 +4437,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			if (!own.contains(key) || building_passages.contains(x, z))
 				continue;
 			std::vector<std::pair<int, int>> walls;
-			for (const auto direction : INTERIOR_DIRS) {
+			for (const auto &direction : INTERIOR_DIRS) {
 				const auto neighbour =
 						interior_cell_key(x + direction.first, z + direction.second);
 				if (!own.contains(neighbour))
@@ -4448,7 +4454,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				far_ = std::numeric_limits<int>::max();
 				for (const auto &entry : entries)
 					far_ = std::min(far_, std::abs(entry.cell.first - x) +
-												std::abs(entry.cell.second - z));
+												  std::abs(entry.cell.second - z));
 				far_ = std::min(far_, 30);
 			}
 			if (far_ < 4)
@@ -4589,7 +4595,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						borders;
 				for (const auto &[x, z] : layout_cells) {
 					const auto here = zone_of.at(interior_cell_key(x, z));
-					for (const auto direction : INTERIOR_DIRS) {
+					for (const auto &direction : INTERIOR_DIRS) {
 						const auto it = zone_of.find(interior_cell_key(
 								x + direction.first, z + direction.second));
 						if (it != zone_of.end() && it->second != here &&
@@ -4618,7 +4624,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 					});
 					for (const auto i : order) {
 						const auto [x, z] = border[i];
-						for (const auto direction : INTERIOR_DIRS) {
+						for (const auto &direction : INTERIOR_DIRS) {
 							const int lx = x - direction.first, lz = z - direction.second;
 							const int hx = x + direction.first, hz = z + direction.second;
 							auto walkable = [&](int cx, int cz) {
@@ -4782,7 +4788,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 		if (floor_index == 0) {
 			for (const auto &entry : entries) {
 				const auto [x, z] = entry.cell;
-				for (const auto [cx, cz] :
+				for (const auto &[cx, cz] :
 						{entry.cell, std::pair{x + entry.inward.first,
 											 z + entry.inward.second}}) {
 					if (!floor_area_set.contains(interior_cell_key(cx, cz)))
@@ -4832,11 +4838,14 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			if (kept_cells.contains(key))
 				continue;
 			if (floor_index == 0 &&
-					std::any_of(entries.begin(), entries.end(), [&](const auto &entry) {
-						return (entry.cell.first == x && entry.cell.second == z) ||
-							   (entry.cell.first + entry.inward.first == x &&
-									   entry.cell.second + entry.inward.second == z);
-					}))
+					std::any_of(entries.begin(), entries.end(),
+							[x = x, z = z](const auto &entry) {
+								return (entry.cell.first == x &&
+											   entry.cell.second == z) ||
+									   (entry.cell.first + entry.inward.first == x &&
+											   entry.cell.second + entry.inward.second ==
+													   z);
+							}))
 				continue;
 			if (shaft_open && shaft &&
 					((shaft->first.first == x && shaft->first.second == z) ||
@@ -5062,7 +5071,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 					if (!has_zone_entry)
 						for (const auto &[door_x, door_z] : door_positions) {
 							bool found = false;
-							for (const auto direction : INTERIOR_DIRS) {
+							for (const auto &direction : INTERIOR_DIRS) {
 								if (zone_set.contains(
 											interior_cell_key(door_x + direction.first,
 													door_z + direction.second))) {
@@ -5105,7 +5114,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 					for (const auto &[x, z] : ordered_zone_cells) {
 						if (!free_cell(x, z))
 							continue;
-						for (const auto direction : INTERIOR_DIRS) {
+						for (const auto &direction : INTERIOR_DIRS) {
 							if (!zone_set.contains(interior_cell_key(
 										x + direction.first, z + direction.second))) {
 								walls.emplace_back(std::pair{x, z},
@@ -5142,7 +5151,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						if (!depth_open(x, z))
 							continue;
 						if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-									[&](const auto &d) {
+									[&, x = x, z = z](const auto &d) {
 										const auto neighbour = interior_cell_key(
 												x + d.first, z + d.second);
 										return !zone_set.contains(neighbour) ||
@@ -5156,7 +5165,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						const auto [x, z] = depth_queue.front();
 						depth_queue.pop_front();
 						const int next = cell_depth.at(interior_cell_key(x, z)) + 1;
-						for (const auto d : INTERIOR_DIRS) {
+						for (const auto &d : INTERIOR_DIRS) {
 							const int nx = x + d.first, nz = z + d.second;
 							const auto key = interior_cell_key(nx, nz);
 							if (depth_open(nx, nz) &&
@@ -5495,7 +5504,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 					while (!queue.empty()) {
 						const auto [x, z] = queue.front();
 						queue.pop_front();
-						for (const auto direction : INTERIOR_DIRS) {
+						for (const auto &direction : INTERIOR_DIRS) {
 							const int nx = x + direction.first, nz = z + direction.second;
 							const auto key = interior_cell_key(nx, nz);
 							if (passable(key, planned, doors) &&
@@ -5518,7 +5527,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						while (!component.empty()) {
 							const auto [cx, cz] = component.front();
 							component.pop_front();
-							for (const auto direction : INTERIOR_DIRS) {
+							for (const auto &direction : INTERIOR_DIRS) {
 								const int nx = cx + direction.first,
 										  nz = cz + direction.second;
 								const auto key = interior_cell_key(nx, nz);
@@ -5546,7 +5555,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						const auto wall_key = interior_cell_key(wall.first, wall.second);
 						if (doors.contains(wall_key))
 							continue;
-						for (const auto direction : INTERIOR_DIRS) {
+						for (const auto &direction : INTERIOR_DIRS) {
 							const auto from =
 									interior_cell_key(wall.first - direction.first,
 											wall.second - direction.second);

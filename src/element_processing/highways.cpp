@@ -749,7 +749,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					const std::unordered_set<std::pair<int, int>, PairHash> arm_cells(
 							arm.begin(), arm.end());
 					for (const auto &[lx, lz] : arm) {
-						auto joins = [&](int dx, int dz) {
+						auto joins = [&, lx=lx, lz=lz](int dx, int dz) {
 							return arm_cells.contains({lx + dx, lz + dz});
 						};
 						const auto bars = crate::connected_blocks::connected_fence(

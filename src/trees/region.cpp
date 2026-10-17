@@ -806,7 +806,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		};
 		auto apply_leaf_type_variants = [&](Data::Pools &pools) {
 			for (auto &place : pools) {
-				for (const auto [tag, conifer] :
+				for (const auto &[tag, conifer] :
 						std::array<std::pair<std::size_t, bool>, 2>{
 								{{1, true}, {2, false}}}) {
 					for (auto &choice : place[tag])
@@ -948,7 +948,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 			request.conifer ? !*request.conifer
 							: request.tagged && tagged_hint == Habitat::Lowland;
 	const Data::Pack *pack = &data_->realm;
-	auto choose_community = [&](const Data::Pack &source) {
+	auto choose_community = [&, sz = sz, sx = sx](const Data::Pack &source) {
 		const auto &preferred = source.by_habitat[habitat_index(effective_hint)];
 		const auto &original = source.by_habitat[habitat_index(tagged_hint)];
 		const auto *candidates = !preferred.empty()	 ? &preferred
@@ -966,7 +966,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 
 	// Pools are prepared when the region library loads, matching Rust's O(1)
 	// pool resolution and avoiding per-slot temporary allocations.
-	auto choose_cached = [&](const Data::Pools &pools,
+	auto choose_cached = [&, sx = sx, sz = sz](const Data::Pools &pools,
 								 std::uint32_t salt) -> std::optional<std::size_t> {
 		const std::size_t place = montane ? 1 : want_wet ? 2 : 0;
 		const std::size_t tag = want_conifer ? 1 : want_broadleaf ? 2 : 0;
@@ -987,7 +987,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		}
 		return pool.back().community;
 	};
-	auto choose_vanilla = [&]() -> std::optional<std::size_t> {
+	auto choose_vanilla = [&, sx = sx, sz = sz]() -> std::optional<std::size_t> {
 		if (!request.eco || data_->vanilla.empty())
 			return std::nullopt;
 		const auto pools = data_->vanilla_pools.find(request.eco->id);

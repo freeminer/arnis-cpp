@@ -206,10 +206,11 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		if (!normal)
 			continue;
 		const auto [right_x, right_z] = mapillary::displays::right_of(*normal);
-		std::sort(run.cells.begin(), run.cells.end(), [&](const auto &a, const auto &b) {
-			return a.first * right_x + a.second * right_z <
-				   b.first * right_x + b.second * right_z;
-		});
+		std::sort(run.cells.begin(), run.cells.end(),
+				[&, right_x = right_x, right_z = right_z](const auto &a, const auto &b) {
+					return a.first * right_x + a.second * right_z <
+						   b.first * right_x + b.second * right_z;
+				});
 		std::vector<double> positions;
 		positions.reserve(run.cells.size());
 		for (const auto &[x, z] : run.cells)

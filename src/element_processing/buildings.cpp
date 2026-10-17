@@ -1936,8 +1936,8 @@ void place_roof_dormer_windows(WorldEditor &editor,
 		const auto pos =
 				candidates[rng.uniform(static_cast<std::uint32_t>(candidates.size()))];
 		const auto [x, z, h] = pos;
-		const bool too_close =
-				std::any_of(chosen.begin(), chosen.end(), [&](const auto &other) {
+		const bool too_close = std::any_of(chosen.begin(), chosen.end(),
+				[&, x = x, z = z, px = px, pz = pz](const auto &other) {
 					const auto [cx, cz, unused_h] = other;
 					(void)unused_h;
 					return std::abs((cx - x) * px + (cz - z) * pz) < 4;
@@ -2235,7 +2235,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
 		min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
 	} else if (auto it = element.tags.find("building:min_level");
-			   it != element.tags.end()) {
+			it != element.tags.end()) {
 		if (auto level = parse_i32_tag(element.tags, "building:min_level");
 				level && *level > 0)
 			min_level_offset = scaled_blocks(*level * floor_cycle + 2, scale_factor);
@@ -4895,12 +4895,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								static const std::array<Block, 4> trapdoor_options{
 										OAK_TRAPDOOR, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR,
 										BIRCH_TRAPDOOR};
-								const Block trapdoor = trapdoor_options
-										[element_rng(element.id)
-														.uniform(static_cast<
-																std::uint32_t>(
-																trapdoor_options
-																		.size()))];
+								const Block trapdoor = trapdoor_options[element_rng(
+										element.id)
+												.uniform(static_cast<std::uint32_t>(
+														trapdoor_options.size()))];
 								const auto balcony_floor = BlockWithProperties{
 										SMOOTH_STONE_SLAB, {{"type", "top"}}};
 								const auto front_fence = open_trapdoor(
@@ -5346,7 +5344,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 										category == BuildingCategory::Residential ||
 										category == BuildingCategory::Historic) &&
 								dress_rng.random_bool(.35);
-						const auto set_trapdoor = [&](int x, int y, int z) {
+						const auto set_trapdoor = [&, trapdoor_block = trapdoor_block](
+														  int x, int y, int z) {
 							editor->set_block_with_properties_absolute(
 									BlockWithProperties{trapdoor_block,
 											{{"half", "top"}, {"open", "false"},

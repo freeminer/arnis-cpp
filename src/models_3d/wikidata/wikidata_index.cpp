@@ -35,7 +35,7 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 				e.url = v.value("url", "");
 				e.license = v.value("license", "");
 				const auto optional_string =
-						[&](const char *key) -> std::optional<std::string> {
+						[&, v = v](const char *key) -> std::optional<std::string> {
 					const auto field = v.find(key);
 					if (field == v.end() || field->is_null())
 						return std::nullopt;

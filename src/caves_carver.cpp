@@ -435,7 +435,7 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 				continue;
 			centers.emplace_back(gx, gy, gz);
 		}
-	auto place_cluster = [&](int gx, int gy, int gz, int bx, int by, int bz) {
+	auto place_cluster = [&, write_min_y=write_min_y,write_max_y=write_max_y](int gx, int gy, int gz, int bx, int by, int bz) {
 		if (decor_hash(bx, by, bz, seed ^ 0xC1A5ULL) % 100 >= 70)
 			return;
 		const int dx = gx - bx, dy = gy - by, dz = gz - bz;
