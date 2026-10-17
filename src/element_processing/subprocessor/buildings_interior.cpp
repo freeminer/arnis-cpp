@@ -4443,18 +4443,18 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			const auto inner = interior_cell_key(x + inward.first, z + inward.second);
 			if (walls.size() > 2 || !own.contains(inner))
 				continue;
-			int far = 30;
+			int far_ = 30;
 			if (!entries.empty()) {
-				far = std::numeric_limits<int>::max();
+				far_ = std::numeric_limits<int>::max();
 				for (const auto &entry : entries)
-					far = std::min(far, std::abs(entry.cell.first - x) +
+					far_ = std::min(far_, std::abs(entry.cell.first - x) +
 												std::abs(entry.cell.second - z));
-				far = std::min(far, 30);
+				far_ = std::min(far_, 30);
 			}
-			if (far < 4)
+			if (far_ < 4)
 				continue;
 			const ShaftKey candidate{
-					walls.size() == 2, far, interior_mix(x, z, 0x01ADDE25ULL)};
+					walls.size() == 2, far_, interior_mix(x, z, 0x01ADDE25ULL)};
 			if (!best || candidate > best->first)
 				best = std::pair{candidate, std::pair{std::pair{x, z}, inward}};
 		}

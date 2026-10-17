@@ -754,7 +754,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		int max_half = 1;
 		for (const auto &arm : directions)
 			max_half = std::max(max_half, roads[arm.road].half_width);
-		const std::size_t near = sign_reach + 2 * static_cast<std::size_t>(max_half);
+		const std::size_t near_ = sign_reach + 2 * static_cast<std::size_t>(max_half);
 		// Most shared nodes are residential junctions with neither lane paint nor
 		// controls. Rust avoids building full arm geometry for those nodes; keep
 		// the prescan bounded on dense OSM extracts while retaining the junction
@@ -769,7 +769,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		const bool anything_to_resolve = std::any_of(
 				directions.begin(), directions.end(), [&](const RoadArm &direction) {
 					const auto cells = arm_cells(roads, node_uses, direction.road,
-							direction.node, direction.dir, near + 1);
+							direction.node, direction.dir, near_ + 1);
 					return std::any_of(
 							cells.begin(), cells.end(), [&](const ArmCell &cell) {
 								const auto &road = roads[cell.road];
@@ -795,7 +795,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				continue;
 			JunctionArm arm{direction.road, direction.node, direction.dir,
 					std::move(cells), *unit, std::nullopt};
-			for (std::size_t s = 1; s < arm.cells.size() && s <= near; ++s) {
+			for (std::size_t s = 1; s < arm.cells.size() && s <= near_; ++s) {
 				const auto *node = node_at(roads, arm.cells[s]);
 				if (!node)
 					continue;
