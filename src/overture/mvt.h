@@ -11,7 +11,7 @@ namespace arnis::overture::mvt
 {
 inline constexpr std::uint32_t GEOM_POLYGON = 3;
 using Value = std::variant<std::string, double, std::int64_t, std::uint64_t, bool>;
-using Area = __int128_t;
+using Area = double;
 struct Ring
 {
 	std::vector<std::pair<int, int>> points;

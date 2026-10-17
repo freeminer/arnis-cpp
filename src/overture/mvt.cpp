@@ -106,7 +106,7 @@ void decode_geometry(const std::vector<std::uint32_t> &commands, Feature &featur
 			for (std::size_t p = 0; p < ring.points.size(); ++p) {
 				const auto a = ring.points[p];
 				const auto b = ring.points[(p + 1) % ring.points.size()];
-				area += Area(a.first) * b.second - Area(b.first) * a.second;
+				area += double(a.first) * b.second - double(b.first) * a.second;
 			}
 			ring.area2 = area;
 			feature.rings.push_back(std::move(ring));
