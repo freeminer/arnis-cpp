@@ -139,6 +139,11 @@ bool reconstruct_water_shoreline(
 
 uint64_t coord_hash(int32_t x, int32_t z);
 
+// First non-water, non-nodata class found on successive Chebyshev rings,
+// matching Rust's nearest_land_class helper.
+std::optional<uint8_t> nearest_land_class(const std::vector<std::vector<uint8_t>> &grid,
+		std::size_t width, std::size_t height, std::size_t x, std::size_t z, int radius);
+
 std::vector<std::vector<uint8_t>> compute_water_distance(
 		const std::vector<std::vector<uint8_t>> &grid, std::size_t width,
 		std::size_t height);

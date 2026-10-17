@@ -47,7 +47,7 @@ std::vector<std::pair<int, int>> points(const ProcessedElement &element)
 			result.push_back({node.x, node.z});
 	else if (element.is_relation())
 		for (const auto &member : element.as_relation().members)
-			for (const auto &node : member.way.nodes)
+			for (const auto &node : member.way->nodes)
 				result.push_back({node.x, node.z});
 	return result;
 }

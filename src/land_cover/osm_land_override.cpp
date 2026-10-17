@@ -121,12 +121,12 @@ std::vector<std::vector<ProcessedNode>> relation_rings(
 {
 	std::vector<std::vector<ProcessedNode>> outer, inner;
 	for (const auto &member : relation.members) {
-		if (member.way.nodes.size() < 2)
+		if (member.way->nodes.size() < 2)
 			continue;
 		if (member.role == ProcessedMemberRole::Outer)
-			outer.push_back(member.way.nodes);
+			outer.push_back(member.way->nodes);
 		else if (member.role == ProcessedMemberRole::Inner)
-			inner.push_back(member.way.nodes);
+			inner.push_back(member.way->nodes);
 	}
 	merge_way_segments(outer);
 	merge_way_segments(inner);
@@ -264,23 +264,6 @@ std::vector<std::uint64_t> dilate(const std::vector<std::uint64_t> &seeds,
 	return out;
 }
 
-std::optional<std::uint8_t> nearest_land(
-		const LandCoverData &data, int x, int z, int radius)
-{
-	for (int r = 1; r <= radius; ++r)
-		for (int dz = -r; dz <= r; ++dz)
-			for (int dx = -r; dx <= r; ++dx) {
-				if (std::abs(dx) != r && std::abs(dz) != r)
-					continue;
-				const int nx = x + dx, nz = z + dz;
-				if (nx >= 0 && nz >= 0 && nx < int(data.width) && nz < int(data.height)) {
-					const auto value = data.grid[nz][nx];
-					if (value && value != LC_WATER)
-						return value;
-				}
-			}
-	return std::nullopt;
-}
 }
 
 void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
@@ -378,7 +361,8 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 				(!bit(land, i) && !bit(past_outline, i)))
 			continue;
 		const int x = i % data.width, z = i / data.width;
-		if (const auto cls = nearest_land(data, x, z, band + 2))
+		if (const auto cls = nearest_land_class(
+					data.grid, data.width, data.height, x, z, band + 2))
 			changes.emplace_back(x, z, *cls);
 	}
 	for (const auto &[x, z, cls] : changes)

@@ -335,12 +335,12 @@ void apply_osm_water_override(LandCoverData &data,
 				continue;
 			std::vector<std::vector<ProcessedNode>> outer_nodes, inner_nodes;
 			for (const auto &m : rel.members) {
-				if (m.way.nodes.size() < 2)
+				if (m.way->nodes.size() < 2)
 					continue;
 				if (m.role == ProcessedMemberRole::Outer)
-					outer_nodes.push_back(m.way.nodes);
+					outer_nodes.push_back(m.way->nodes);
 				else if (m.role == ProcessedMemberRole::Inner)
-					inner_nodes.push_back(m.way.nodes);
+					inner_nodes.push_back(m.way->nodes);
 			}
 			merge_way_segments(outer_nodes);
 			merge_way_segments(inner_nodes);

@@ -17,6 +17,14 @@
 #include <unordered_map>
 #include <unordered_set>
 
+#if defined(_WIN32)
+#include <process.h>
+#define ARNIS_ELEVATION_GETPID _getpid
+#else
+#include <unistd.h>
+#define ARNIS_ELEVATION_GETPID getpid
+#endif
+
 #ifdef FM_HAVE_WEBP
 #include <webp/decode.h>
 #endif
@@ -226,10 +234,8 @@ bool write_cache_file(
 	if (ec)
 		return false;
 	auto temporary = path;
-	temporary +=
-			".tmp-" +
-			std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
-			"-" + std::to_string(counter.fetch_add(1));
+	temporary += ".tmp" + std::to_string(ARNIS_ELEVATION_GETPID()) + "-" +
+				 std::to_string(counter.fetch_add(1, std::memory_order_relaxed));
 	{
 		std::ofstream output(temporary, std::ios::binary);
 		if (!output)

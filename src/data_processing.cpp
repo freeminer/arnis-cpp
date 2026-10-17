@@ -695,7 +695,7 @@ std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
 		} else if (element.is_relation()) {
 			record_with_siblings(element.as_relation().id, task_index);
 			for (const auto &member : element.as_relation().members)
-				record_with_siblings(member.way.id, task_index);
+				record_with_siblings(member.way->id, task_index);
 		}
 	}
 	return result;
@@ -736,7 +736,7 @@ TileFillReaders compute_tile_fill_readers(
 			} else if (element.is_relation()) {
 				add_with_siblings(element.as_relation().id);
 				for (const auto &member : element.as_relation().members)
-					add_with_siblings(member.way.id);
+					add_with_siblings(member.way->id);
 			}
 		}
 		ids.erase(std::remove_if(ids.begin(), ids.end(),
@@ -879,7 +879,7 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 			return std::nullopt;
 		for (const auto &member : rel.members) {
 			if (member.role == ProcessedMemberRole::Outer)
-				area += ring_area(member.way.nodes);
+				area += ring_area(member.way->nodes);
 		}
 	} else {
 		return std::nullopt;
@@ -1107,12 +1107,12 @@ land_cover::LandCoverData build_osm_water_land_cover(
 			std::vector<std::vector<ProcessedNode>> outers;
 			std::vector<std::vector<ProcessedNode>> inners;
 			for (const auto &member : rel.members) {
-				if (member.way.nodes.empty())
+				if (member.way->nodes.empty())
 					continue;
 				if (member.role == ProcessedMemberRole::Inner)
-					inners.push_back(member.way.nodes);
+					inners.push_back(member.way->nodes);
 				else if (member.role == ProcessedMemberRole::Outer)
-					outers.push_back(member.way.nodes);
+					outers.push_back(member.way->nodes);
 			}
 			stitch_way_segments(outers);
 			stitch_way_segments(inners);
@@ -1446,6 +1446,18 @@ bool generate_world(WorldEditor &editor,
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
+	// Rust removes buildings covered by aircraft pavement before any pass that
+	// derives building-dependent state (facade projection, tree masks, indices).
+	// Keep one filtered view for the rest of this generation call.
+	std::vector<ProcessedElement> aircraft_filtered_elements;
+	std::size_t dropped_aircraft_buildings = drop_buildings_on_aircraft_pavement(
+			input_elements, aircraft_filtered_elements, args.scale);
+	const std::vector<ProcessedElement> *elements_source = &input_elements;
+	if (dropped_aircraft_buildings > 0) {
+		std::cout << "  Skipped " << dropped_aircraft_buildings
+				  << " building(s) on runways, taxiways and aprons\n";
+		elements_source = &aircraft_filtered_elements;
+	}
 	// A prestarted FacadeJob resets before its worker can record credits. Direct
 	// generation without a job still starts with fresh attribution.
 	if (!facade_job)
@@ -1615,18 +1627,6 @@ bool generate_world(WorldEditor &editor,
 					: (args.body == CelestialBody::Mars ? RED_TERRACOTTA : GRASS_BLOCK);
 	world_editor::set_base_chunk_block_id(filler.id());
 	static const std::vector<ProcessedElement> no_elements;
-	std::vector<ProcessedElement> aircraft_filtered_elements;
-	const std::vector<ProcessedElement> *elements_source = &input_elements;
-	std::size_t dropped_aircraft_buildings = 0;
-	if (!args.skip_objects()) {
-		dropped_aircraft_buildings = drop_buildings_on_aircraft_pavement(
-				input_elements, aircraft_filtered_elements, args.scale);
-		if (dropped_aircraft_buildings > 0) {
-			std::cout << "  Skipped " << dropped_aircraft_buildings
-					  << " building(s) on runways, taxiways and aprons\n";
-			elements_source = &aircraft_filtered_elements;
-		}
-	}
 	const auto &source_elements = args.skip_objects() ? no_elements : *elements_source;
 	// The host caches the Rust priority order once. Direct library callers get a
 	// local ordered copy; the later ground-fill pass uses only an index order.
@@ -1831,7 +1831,7 @@ bool generate_world(WorldEditor &editor,
 					points.emplace_back(n.x, n.z);
 			else
 				for (const auto &m : element.as_relation().members)
-					for (const auto &n : m.way.nodes)
+					for (const auto &n : m.way->nodes)
 						points.emplace_back(n.x, n.z);
 			if (points.empty())
 				continue;

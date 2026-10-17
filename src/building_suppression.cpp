@@ -175,8 +175,9 @@ std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relat
 		}
 	} else {
 		for (const auto &member : relation.members)
-			if (member.role == ProcessedMemberRole::Outer && member.way.nodes.size() >= 2)
-				open.push_back({&member.way});
+			if (member.role == ProcessedMemberRole::Outer &&
+					member.way->nodes.size() >= 2)
+				open.push_back({member.way.get()});
 	}
 	std::vector<std::vector<GeoPoint>> result;
 	while (!open.empty()) {
@@ -276,7 +277,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 					relation_ways.insert(member.id);
 		} else {
 			for (const auto &member : relation->members)
-				relation_ways.insert(member.way.id);
+				relation_ways.insert(member.way->id);
 		}
 	}
 	for (const auto *relation : building_relations) {
@@ -296,7 +297,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 					}
 				} else {
 					for (const auto &member : relation->members) {
-						value = osm_parser::building_style_hint(member.way.tags);
+						value = osm_parser::building_style_hint(member.way->tags);
 						if (value != osm_parser::StyleHint::None)
 							break;
 					}
@@ -311,7 +312,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		const auto &refs = relation->source_members;
 		if (refs.empty())
 			for (const auto &member : relation->members)
-				fallback_refs.push_back({"way", member.way.id,
+				fallback_refs.push_back({"way", member.way->id,
 						member.role == ProcessedMemberRole::Part	? "part"
 						: member.role == ProcessedMemberRole::Inner ? "inner"
 																	: "outer"});

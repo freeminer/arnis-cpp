@@ -9,10 +9,12 @@
 #include <chrono>
 #include <cmath>
 #include <array>
+#include <charconv>
 #include <cstdlib>
 #include <limits>
 #include <numeric>
 #include <nlohmann/json.hpp>
+#include <sstream>
 #include <thread>
 #include <zlib.h>
 namespace arnis::mapillary
@@ -97,6 +99,21 @@ std::string encode_query_value(const std::string &value)
 		}
 	}
 	return encoded;
+}
+
+std::string format_coordinate(double value)
+{
+	char buffer[64];
+	const auto result = std::to_chars(
+			buffer, buffer + sizeof(buffer), value, std::chars_format::general);
+	if (result.ec == std::errc{})
+		return std::string(buffer, result.ptr);
+	// Every finite double fits in the buffer above, but retain a round-trip
+	// fallback for standard-library implementations without floating to_chars.
+	std::ostringstream out;
+	out.precision(std::numeric_limits<double>::max_digits10);
+	out << value;
+	return out.str();
 }
 
 std::optional<std::vector<std::uint8_t>> normalize_cluster(
@@ -741,10 +758,10 @@ std::vector<cache::ImageRecord> Client::search(const SearchCell &bounds,
 							  std::vector<cache::ImageRecord> &records,
 							  std::size_t &failures, std::uint8_t &answered,
 							  std::size_t &refused, std::string &failure_reason) -> void {
-		std::string bbox = std::to_string(cell.min_longitude) + "," +
-						   std::to_string(cell.min_latitude) + "," +
-						   std::to_string(cell.max_longitude) + "," +
-						   std::to_string(cell.max_latitude);
+		std::string bbox = format_coordinate(cell.min_longitude) + "," +
+						   format_coordinate(cell.min_latitude) + "," +
+						   format_coordinate(cell.max_longitude) + "," +
+						   format_coordinate(cell.max_latitude);
 		std::string url =
 				endpoint + "?access_token=" + encode_query_value(token) +
 				"&fields=id,computed_geometry,geometry,computed_compass_angle,compass_angle,computed_rotation,computed_altitude,altitude,atomic_scale,camera_type,is_pano,camera_parameters,quality_score,width,height,captured_at,sequence,creator,thumb_1024_url,thumb_2048_url,thumb_original_url,sfm_cluster&bbox=" +

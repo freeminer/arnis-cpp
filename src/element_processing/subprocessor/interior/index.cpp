@@ -415,7 +415,7 @@ InteriorUseIndex InteriorUseIndex::build(
 			std::vector<std::vector<ProcessedNode>> rings;
 			for (const auto &member : relation.members)
 				if (member.role == ProcessedMemberRole::Outer)
-					rings.push_back(member.way.nodes);
+					rings.push_back(member.way->nodes);
 			arnis::merge_way_segments(rings);
 			std::vector<Outline> outlines;
 			for (const auto &ring : rings)

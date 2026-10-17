@@ -3,6 +3,7 @@
 #include "../palette.h"
 #include "../../colors.h"
 #include "../../block_definitions.h"
+#include "../../strict_parse.h"
 #include "../../tile.h"
 #include <algorithm>
 #include <atomic>
@@ -44,7 +45,7 @@ std::vector<std::pair<int, int>> points(const ProcessedElement &e)
 			o.push_back({n.x, n.z});
 	else
 		for (auto &m : e.as_relation().members)
-			for (auto &n : m.way.nodes)
+			for (auto &n : m.way->nodes)
 				o.push_back({n.x, n.z});
 	return o;
 }
@@ -53,14 +54,10 @@ bool direction(const std::string &s, double &o)
 	const auto value = trim(s);
 	if (value.empty())
 		return false;
-	try {
-		std::size_t n = 0;
-		o = std::stod(value, &n);
-		if (n == value.size() && std::isfinite(o)) {
-			o = std::fmod(std::fmod(o, 360) + 360, 360);
-			return true;
-		}
-	} catch (...) {
+	if (const auto degrees = strict_parse::f64(value);
+			degrees && std::isfinite(*degrees)) {
+		o = std::fmod(std::fmod(*degrees, 360.0) + 360.0, 360.0);
+		return true;
 	}
 	static const std::pair<const char *, double> v[] = {{"N", 0}, {"NORTH", 0},
 			{"NE", 45}, {"E", 90}, {"EAST", 90}, {"SE", 135}, {"S", 180}, {"SOUTH", 180},
@@ -79,26 +76,21 @@ bool direction(const std::string &s, double &o)
 }
 std::optional<double> meters(std::string s)
 {
-	std::size_t first = 0;
-	while (first < s.size() && std::isspace(static_cast<unsigned char>(s[first])))
-		++first;
-	s.erase(0, first);
-	while (!s.empty() && std::isspace((unsigned char)s.back()))
-		s.pop_back();
-	if (!s.empty() && (s.back() == 'm' || s.back() == 'M'))
-		s.pop_back();
-	try {
-		std::size_t consumed = 0;
-		double d = std::stod(s, &consumed);
-		while (consumed < s.size() &&
-				std::isspace(static_cast<unsigned char>(s[consumed])))
-			++consumed;
-		if (consumed != s.size())
-			return std::nullopt;
-		return std::isfinite(d) && d > 0 ? std::optional<double>(d) : std::nullopt;
-	} catch (...) {
+	auto first = s.find_first_not_of(" \t\r\n\f\v");
+	if (first == std::string::npos)
 		return std::nullopt;
-	}
+	auto last = s.find_last_not_of(" \t\r\n\f\v");
+	std::string_view value(s.data() + first, last - first + 1);
+	const auto positive = [](std::optional<double> parsed) -> std::optional<double> {
+		return parsed && std::isfinite(*parsed) && *parsed > 0.0 ? parsed : std::nullopt;
+	};
+	if (auto parsed = positive(strict_parse::f64(value)))
+		return parsed;
+	while (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
+		value.remove_suffix(1);
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+		value.remove_suffix(1);
+	return positive(strict_parse::f64(value));
 }
 std::vector<Block> palette_for(const ProcessedElement &e)
 {
@@ -126,17 +118,20 @@ std::vector<Block> palette_for(const ProcessedElement &e)
 			WHITE_CONCRETE, QUARTZ_BLOCK, SMOOTH_QUARTZ, POLISHED_DIORITE};
 	static const std::vector<Block> fallback = {
 			STONE_BRICKS, ANDESITE, POLISHED_ANDESITE, COBBLESTONE, SMOOTH_STONE};
-	auto rgb = [&](const char *key) -> std::optional<RGBTuple> {
-		auto value = tag(e, key);
-		return value.empty() ? std::nullopt : color_text_to_rgb_tuple(value);
-	};
-	// An explicit colour wins over every category, exactly like Rust.
-	if (auto c = rgb("building:colour"))
-		return closest_blocks(*c, 5);
-	if (auto c = rgb("colour"))
-		return closest_blocks(*c, 5);
-	if (auto c = rgb("color"))
-		return closest_blocks(*c, 5);
+	// Rust selects the first present explicit-colour key, then parses only that
+	// value. An invalid `building:colour` therefore does not fall through to a
+	// later `colour`/`color` tag; it proceeds to the material/category fallback.
+	std::optional<std::string> explicit_color;
+	for (const char *key : {"building:colour", "colour", "color"}) {
+		const auto it = e.tags().find(key);
+		if (it != e.tags().end()) {
+			explicit_color = it->second;
+			break;
+		}
+	}
+	if (explicit_color)
+		if (auto c = color_text_to_rgb_tuple(*explicit_color))
+			return closest_blocks(*c, 5);
 	const auto material = tag(e, "building:material");
 	const auto lower = [&] {
 		std::string v = material;

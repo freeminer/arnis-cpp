@@ -785,9 +785,9 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 
 	for (const auto &mem : element.members) {
 		if (mem.role == ProcessedMemberRole::Outer) {
-			outers.push_back(mem.way.nodes);
+			outers.push_back(mem.way->nodes);
 		} else if (mem.role == ProcessedMemberRole::Inner) {
-			inners.push_back(mem.way.nodes);
+			inners.push_back(mem.way->nodes);
 		}
 	}
 
@@ -907,9 +907,9 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 				continue;
 			for (const auto &member : relation.members) {
 				if (member.role == ProcessedMemberRole::Outer)
-					outers.push_back(member.way.nodes);
+					outers.push_back(member.way->nodes);
 				else if (member.role == ProcessedMemberRole::Inner)
-					inners.push_back(member.way.nodes);
+					inners.push_back(member.way->nodes);
 			}
 			merge_loopy_loops(outers);
 			auto clip_rings = [&](std::vector<std::vector<ProcessedNode>> &rings) {

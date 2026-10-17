@@ -67,7 +67,8 @@ void generate_jet_bridge(WorldEditor &editor, const ProcessedWay &way,
 		return;
 	const auto [terminal, apron] =
 			terminal_end(way.nodes.front(), way.nodes.back(), building_footprints);
-	const double dx = double(apron->x - terminal->x), dz = double(apron->z - terminal->z);
+	const double dx = double(apron->x) - double(terminal->x);
+	const double dz = double(apron->z) - double(terminal->z);
 	if (std::hypot(dx, dz) < MINIMUM_LENGTH)
 		return;
 	const double yaw =

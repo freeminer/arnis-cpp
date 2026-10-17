@@ -173,11 +173,6 @@ void place_grass_or_tall(WorldEditor &editor, ChaCha8Rng &rng, int x, int z)
 	}
 }
 
-std::uint64_t cell_key(int x, int z)
-{
-	return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
-}
-
 int wrap_add_i32(int value, int offset)
 {
 	return std::bit_cast<std::int32_t>(
@@ -976,18 +971,28 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			}
 		}
 		if (!wetland_puddles.empty()) {
-			std::unordered_set<std::uint64_t> area;
-			// Only owned cells can receive the puddle fringe. Do not duplicate
-			// millions of off-chunk polygon cells in an unordered_set.
-			for (const auto &[ax, az] : filled_area)
-				if (editor.pos_ok(ax, az))
-					area.insert(cell_key(ax, az));
+			// Rust uses one bit per polygon cell rather than one hash entry per
+			// coordinate. Keep the complete fill, including the tile halo, so
+			// fringe membership is consistent across adjacent generation tiles.
+			int min_x = filled_area.front().first;
+			int max_x = min_x;
+			int min_z = filled_area.front().second;
+			int max_z = min_z;
+			for (const auto &[x, z] : filled_area) {
+				min_x = std::min(min_x, x);
+				max_x = std::max(max_x, x);
+				min_z = std::min(min_z, z);
+				max_z = std::max(max_z, z);
+			}
+			CoordinateBitmap area{XZBBox(min_x, min_z, max_x, max_z)};
+			for (const auto &[x, z] : filled_area)
+				area.set(x, z);
 			for (const auto &[px, pz] : wetland_puddles)
 				for (int dx = -2; dx <= 2; ++dx)
 					for (int dz = -2; dz <= 2; ++dz) {
 						const int d = std::max(std::abs(dx), std::abs(dz));
 						const int nx = px + dx, nz = pz + dz;
-						if (d == 0 || !area.contains(cell_key(nx, nz)))
+						if (d == 0 || !area.contains(nx, nz))
 							continue;
 						if (d == 1)
 							editor.set_block(MOSS_BLOCK, nx, 0, nz,
@@ -1000,7 +1005,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				for (const auto &[dx, dz] : std::array<std::pair<int, int>, 4>{
 							 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
 					const int nx = px + dx, nz = pz + dz;
-					if (!area.contains(cell_key(nx, nz)) || !editor.owns(nx, nz) ||
+					if (!area.contains(nx, nz) || !editor.owns(nx, nz) ||
 							coord_hash(wrap_add_i32(nx, 89), wrap_add_i32(nz, 97)) %
 											100 >=
 									20 ||
@@ -1034,7 +1039,7 @@ void generate_natural_from_relation(WorldEditor &editor, const ProcessedRelation
 
 	for (const auto &member : rel.members) {
 		if (member.role == ProcessedMemberRole::Outer) {
-			ProcessedWay inherited = member.way;
+			ProcessedWay inherited = *member.way;
 			inherited.tags = rel.tags;
 			ProcessedElement elem = ProcessedElement::FromWay(inherited);
 			generate_natural(editor, elem, args, flood_fill_cache, building_footprints,

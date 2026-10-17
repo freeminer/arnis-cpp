@@ -3,12 +3,32 @@
 #include "../strict_parse.h"
 #include "../structures/structures.h"
 #include <algorithm>
+#include <array>
+#include <cctype>
 #include <cmath>
 
 namespace arnis
 {
 namespace power
 {
+
+static std::optional<double> parse_rust_metre_tag(const std::string &text)
+{
+	std::string_view value(text);
+	while (!value.empty() && value.back() == 'm')
+		value.remove_suffix(1);
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
+		value.remove_suffix(1);
+	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
+		value.remove_prefix(1);
+	return strict_parse::f64(value);
+}
+
+static int rem_euclid_4(int value)
+{
+	const int remainder = value % 4;
+	return remainder < 0 ? remainder + 4 : remainder;
+}
 
 template <typename Tags>
 static bool is_mounted_or_micro_turbine(const Tags &tags)
@@ -17,14 +37,7 @@ static bool is_mounted_or_micro_turbine(const Tags &tags)
 		auto it = tags.find(key);
 		if (it == tags.end())
 			return false;
-		try {
-			std::string value = it->second;
-			if (!value.empty() && value.back() == 'm')
-				value.pop_back();
-			return std::stod(value) > 0.0;
-		} catch (...) {
-			return false;
-		}
+		return parse_rust_metre_tag(it->second).value_or(0.0) > 0.0;
 	};
 	if (positive("min_height") || positive("level"))
 		return true;
@@ -35,13 +48,8 @@ static bool is_mounted_or_micro_turbine(const Tags &tags)
 			it != tags.end() && it->second == "vertical_axis")
 		return true;
 	if (auto it = tags.find("rotor:diameter"); it != tags.end()) {
-		try {
-			std::string value = it->second;
-			if (!value.empty() && value.back() == 'm')
-				value.pop_back();
-			return std::stod(value) < 10.0;
-		} catch (...) {
-		}
+		if (const auto diameter = parse_rust_metre_tag(it->second))
+			return *diameter < 10.0;
 	}
 	return false;
 }
@@ -119,8 +127,8 @@ void generate_power(WorldEditor &editor, const ProcessedElement &element,
 					const int x = x0, z = z0;
 					if (building_footprints.contains(x, z) || editor.is_lc_water(x, z))
 						continue;
-					const int lane = rows_along_x ? (z - min_z + 4000000) % 4
-												  : (x - min_x + 4000000) % 4;
+					const int lane = rows_along_x ? rem_euclid_4(z - min_z)
+												  : rem_euclid_4(x - min_x);
 					editor.set_block(lane < 3 ? DAYLIGHT_DETECTOR : GRAVEL, x,
 							lane < 3 ? 1 : 0, z, std::nullopt, std::nullopt);
 				}
@@ -183,11 +191,7 @@ void generate_power_tower(WorldEditor &editor, const ProcessedElement &element)
 	int height = 25;
 	auto it_height = element.tags().find("height");
 	if (it_height != element.tags().end()) {
-		try {
-			height = std::stoi(it_height->second);
-		} catch (...) {
-			// ignore parse errors
-		}
+		height = strict_parse::i32(it_height->second).value_or(height);
 	}
 	height = std::clamp(height, 15, 40);
 
@@ -199,11 +203,7 @@ void generate_power_tower_from_node(WorldEditor &editor, const ProcessedNode &no
 	int height = 25;
 	auto it_height = node.tags.find("height");
 	if (it_height != node.tags.end()) {
-		try {
-			height = std::stoi(it_height->second);
-		} catch (...) {
-			// ignore parse errors
-		}
+		height = strict_parse::i32(it_height->second).value_or(height);
 	}
 	height = std::clamp(height, 15, 40);
 
@@ -327,11 +327,7 @@ void generate_power_pole(WorldEditor &editor, const ProcessedElement &element)
 	int height = 10;
 	auto it_height = element.tags().find("height");
 	if (it_height != element.tags().end()) {
-		try {
-			height = std::stoi(it_height->second);
-		} catch (...) {
-			// ignore parse errors
-		}
+		height = strict_parse::i32(it_height->second).value_or(height);
 	}
 	height = std::clamp(height, 6, 15);
 
@@ -350,11 +346,7 @@ void generate_power_pole_from_node(WorldEditor &editor, const ProcessedNode &nod
 	int height = 10;
 	auto it_height = node.tags.find("height");
 	if (it_height != node.tags.end()) {
-		try {
-			height = std::stoi(it_height->second);
-		} catch (...) {
-			// ignore parse errors
-		}
+		height = strict_parse::i32(it_height->second).value_or(height);
 	}
 	height = std::clamp(height, 6, 15);
 
@@ -405,8 +397,8 @@ void generate_power_line(WorldEditor &editor, const ProcessedWay &way)
 	int base_height = 15;
 	auto it_voltage = way.tags.find("voltage");
 	if (it_voltage != way.tags.end()) {
-		try {
-			int voltage = std::stoi(it_voltage->second);
+		if (const auto parsed_voltage = strict_parse::i32(it_voltage->second)) {
+			const int voltage = *parsed_voltage;
 			if (voltage >= 220000) {
 				base_height = 22; // High voltage transmission
 			} else if (voltage >= 110000) {
@@ -416,8 +408,6 @@ void generate_power_line(WorldEditor &editor, const ProcessedWay &way)
 			} else {
 				base_height = 10; // Distribution lines
 			}
-		} catch (...) {
-			// ignore parse errors
 		}
 	}
 
@@ -426,9 +416,9 @@ void generate_power_line(WorldEditor &editor, const ProcessedWay &way)
 		const auto &start = way.nodes[i - 1];
 		const auto &end = way.nodes[i];
 
-		// Calculate distance between nodes
-		double dx = static_cast<double>(end.x - start.x);
-		double dz = static_cast<double>(end.z - start.z);
+		// Widen before subtracting so projected-coordinate deltas cannot overflow.
+		const double dx = static_cast<double>(end.x) - static_cast<double>(start.x);
+		const double dz = static_cast<double>(end.z) - static_cast<double>(start.z);
 		double distance = std::sqrt(dx * dx + dz * dz);
 
 		// Calculate sag based on span length (longer spans = more sag)
@@ -438,7 +428,17 @@ void generate_power_line(WorldEditor &editor, const ProcessedWay &way)
 		// If the line runs more along X-axis, use CHAIN_X; if more along Z-axis, use CHAIN_Z
 		Block chain_block = (std::abs(dx) >= std::abs(dz)) ? CHAIN_X : CHAIN_Z;
 
-		// Generate points along the line using Bresenham
+		// Absolute endpoint heights let the wire span remain level with its supports,
+		// while the interpolated sag follows the terrain clearance below.
+		const int start_y = editor.get_ground_level(start.x, start.z) + base_height;
+		const int end_y = editor.get_ground_level(end.x, end.z) + base_height;
+		const bool three_phase = base_height >= 18;
+		const std::array<std::pair<int, int>, 2> offsets =
+				(std::abs(dx) >= std::abs(dz))
+						? std::array<std::pair<int, int>, 2>{{{0, 1}, {0, -1}}}
+						: std::array<std::pair<int, int>, 2>{{{1, 0}, {-1, 0}}};
+
+		// Generate points along the line using Bresenham.
 		std::vector<std::tuple<int, int, int>> line_points =
 				bresenham_line(start.x, 0, start.z, end.x, 0, end.z);
 
@@ -452,33 +452,25 @@ void generate_power_line(WorldEditor &editor, const ProcessedWay &way)
 								   : 1.0;
 			double t = static_cast<double>(idx) / denom;
 
-			// Catenary approximation: sag is maximum at center, zero at ends
-			// Using parabola: sag = 4 * max_sag * t * (1 - t)
-			int sag = static_cast<int>(4.0 * max_sag * t * (1.0 - t));
-
-			// Ensure wire doesn't go underground (minimum height of 3 blocks above ground)
-			int wire_y = std::max(3, base_height - sag);
-
-			// Place the wire block (chain aligned with line direction)
-			editor.set_block(chain_block, lx, wire_y, lz, std::nullopt, std::nullopt);
-
-			// For high voltage lines, add parallel wires offset to sides
-			if (base_height >= 18) {
-				// Three-phase power: 3 parallel lines
-				// Offset perpendicular to the line direction
-				if (std::abs(dx) >= std::abs(dz)) {
-					// Line runs along X, offset in Z
-					editor.set_block(
-							chain_block, lx, wire_y, lz + 1, std::nullopt, std::nullopt);
-					editor.set_block(
-							chain_block, lx, wire_y, lz - 1, std::nullopt, std::nullopt);
-				} else {
-					// Line runs along Z, offset in X
-					editor.set_block(
-							chain_block, lx + 1, wire_y, lz, std::nullopt, std::nullopt);
-					editor.set_block(
-							chain_block, lx - 1, wire_y, lz, std::nullopt, std::nullopt);
-				}
+			// Match Rust's truncating conversion of the parabolic sag and rounded
+			// interpolation between terrain-relative support heights.
+			const int sag = static_cast<int>(4.0 * max_sag * t * (1.0 - t));
+			const int line_y = static_cast<int>(
+					std::round(static_cast<double>(start_y) +
+							   static_cast<double>(end_y - start_y) * t));
+			int floor = editor.get_ground_level(lx, lz) + 3;
+			if (three_phase) {
+				for (const auto &[ox, oz] : offsets)
+					floor = std::max(
+							floor, editor.get_ground_level(lx + ox, lz + oz) + 3);
+			}
+			const int wire_y = std::max(line_y - sag, floor);
+			editor.set_block_absolute(
+					chain_block, lx, wire_y, lz, std::nullopt, std::nullopt);
+			if (three_phase) {
+				for (const auto &[ox, oz] : offsets)
+					editor.set_block_absolute(chain_block, lx + ox, wire_y, lz + oz,
+							std::nullopt, std::nullopt);
 			}
 		}
 	}

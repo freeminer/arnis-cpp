@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <iostream>
 #include <limits>
 #include <optional>
 #include <new>
@@ -410,7 +411,12 @@ try {
 				[&](std::uint8_t cls) { return cls == LC_WATER; }))
 		return false;
 	const auto rings = trace_boundaries(raster, w, h);
-	if (!rings || rings->empty())
+	if (!rings) {
+		std::cerr
+				<< "Shoreline reconstruction: boundary tracing failed; keeping the pixel-exact water mask\n";
+		return false;
+	}
+	if (rings->empty())
 		return false;
 	std::vector<std::vector<double>> rows(gh);
 	const auto span = [](double v, std::size_t limit) {
@@ -445,8 +451,11 @@ try {
 			after += mask[z * gw + x];
 		}
 	}
-	if (std::abs(double(after) - double(before)) > 0.10 * before + 4 * sx * sy)
+	if (std::abs(double(after) - double(before)) > 0.10 * before + 4 * sx * sy) {
+		std::cerr << "Shoreline reconstruction: water area changed " << before << " -> "
+				  << after << " cells; keeping the pixel-exact water mask\n";
 		return false;
+	}
 	const int radius = int(std::clamp(std::ceil(1.5 * std::max(sx, sy)), 2.0, 64.0));
 	// Defer all writes so nearest-land choices see the original classification.
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint8_t>> changes;
@@ -459,24 +468,18 @@ try {
 				changes.emplace_back(x, z, LC_WATER);
 				continue;
 			}
-			bool found = false;
-			for (int r = 1; r <= radius && !found; ++r)
-				for (int dz = -r; dz <= r && !found; ++dz)
-					for (int dx = -r; dx <= r; dx += std::abs(dz) == r ? 1 : 2 * r) {
-						const auto nx = std::int64_t(x) + dx, nz = std::int64_t(z) + dz;
-						if (nx < 0 || nz < 0 || nx >= std::int64_t(gw) ||
-								nz >= std::int64_t(gh))
-							continue;
-						const auto cls = data.grid[nz][nx];
-						if (cls && cls != LC_WATER) {
-							changes.emplace_back(x, z, cls);
-							found = true;
-							break;
-						}
-					}
+			if (const auto cls = nearest_land_class(data.grid, gw, gh, x, z, radius))
+				changes.emplace_back(x, z, *cls);
 		}
 	for (const auto &[x, z, cls] : changes)
 		data.grid[z][x] = cls;
+	if (!changes.empty()) {
+		const auto to_water = std::count_if(changes.begin(), changes.end(),
+				[](const auto &c) { return std::get<2>(c) == LC_WATER; });
+		std::cerr << "Shoreline reconstruction: " << rings->size() << " rings, "
+				  << to_water << " cells to water, " << changes.size() - to_water
+				  << " cells to land\n";
+	}
 	return !changes.empty();
 } catch (const std::bad_alloc &) {
 	// All writes are deferred until allocation and reconstruction succeed.

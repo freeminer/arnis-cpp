@@ -385,6 +385,34 @@ uint64_t coord_hash(int32_t x, int32_t z)
 	return h ^ (h >> 32);
 }
 
+std::optional<uint8_t> nearest_land_class(const std::vector<std::vector<uint8_t>> &grid,
+		std::size_t width, std::size_t height, std::size_t x, std::size_t z, int radius)
+{
+	if (x >= width || z >= height || grid.size() < height || radius <= 0)
+		return std::nullopt;
+	const auto center_x = static_cast<std::int64_t>(x);
+	const auto center_z = static_cast<std::int64_t>(z);
+	for (int r = 1; r <= radius; ++r) {
+		for (int dz = -r; dz <= r; ++dz) {
+			const auto nz = center_z + dz;
+			if (nz < 0 || nz >= static_cast<std::int64_t>(height) ||
+					grid[static_cast<std::size_t>(nz)].size() < width)
+				continue;
+			const int step = std::abs(dz) == r ? 1 : 2 * r;
+			for (int dx = -r; dx <= r; dx += step) {
+				const auto nx = center_x + dx;
+				if (nx < 0 || nx >= static_cast<std::int64_t>(width))
+					continue;
+				const auto cls =
+						grid[static_cast<std::size_t>(nz)][static_cast<std::size_t>(nx)];
+				if (cls != 0 && cls != LC_WATER)
+					return cls;
+			}
+		}
+	}
+	return std::nullopt;
+}
+
 static std::vector<double> gaussian_kernel(double sigma)
 {
 	const int radius = std::max(1, static_cast<int>(std::ceil(sigma * 3.0)));

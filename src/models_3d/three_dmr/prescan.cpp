@@ -28,7 +28,7 @@ std::vector<std::pair<int, int>> points(const ProcessedElement &e)
 			o.push_back({n.x, n.z});
 	else
 		for (auto &m : e.as_relation().members)
-			for (auto &n : m.way.nodes)
+			for (auto &n : m.way->nodes)
 				o.push_back({n.x, n.z});
 	return o;
 }
@@ -111,16 +111,15 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 		// Keep the divisor signed, as in Rust's i64 centroid, for negative X/Z.
 		const auto count = static_cast<long long>(pts.size());
 		int ax = static_cast<int>(sx / count), az = static_cast<int>(sz / count);
-		Bounds raw{x0, z0, x1, z1},
-				fp = pts.size() == 1 ? Bounds{ax - 8, az - 8, ax + 8, az + 8} : raw;
+		// Match Rust's osm_bbox: a node (or degenerate one-point geometry)
+		// retains its actual point-sized footprint. Do not synthesize an area.
+		Bounds fp{x0, z0, x1, z1};
 		double yaw = 0;
 		direction(tag(e, "direction"), yaw);
 		r.placements.push_back({e.id(), model, ax, az, fp, yaw + rotation});
 		r.suppressed.push_back(key);
-		// Rust uses the raw OSM bbox for suppression even when it is a point
-		// or a degenerate way. `fp` above may be expanded for model ground
-		// lookup, but that synthetic footprint is not used for suppression.
-		footprints.push_back(raw);
+		// Rust also uses this raw OSM bbox for building suppression.
+		footprints.push_back(fp);
 	}
 	for (const auto &e : elements) {
 		auto key = std::make_pair(std::string(e.kind()), e.id());

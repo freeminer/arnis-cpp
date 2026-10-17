@@ -357,63 +357,327 @@ inline bool tile_owns(
 }
 class BlockStorage
 {
-	bool is_uniform_ = true;
+	enum class Mode
+	{
+		Uniform,
+		Dense,
+		Paletted,
+		Direct
+	};
+	static constexpr std::size_t MAX_PALETTE_SIZE = 256;
+	Mode mode_ = Mode::Uniform;
 	Block uniform_block_{};
-	std::vector<std::uint16_t> blocks_;
+	std::vector<std::uint8_t> dense_;
+	std::vector<std::uint8_t> indices_;
+	std::vector<std::uint16_t> palette_;
+	std::vector<std::uint16_t> direct_;
+	std::unordered_map<std::uint16_t, std::uint8_t> reverse_;
+	struct RecentSlot
+	{
+		std::uint16_t id = 0;
+		std::uint8_t slot = 0;
+	};
+	static constexpr std::size_t RECENT_LOOKUPS = 4;
+	std::array<RecentSlot, RECENT_LOOKUPS> recent_{};
+	std::size_t recent_len_ = 0;
+	static constexpr std::size_t REVERSE_LOOKUP_THRESHOLD = 32;
+
+	static bool fits_dense(Block b) { return b.id() <= UINT8_MAX; }
+	void clear_recent() { recent_len_ = 0; }
+	void touch_recent(std::uint16_t id, std::uint8_t slot)
+	{
+		const auto len = recent_len_;
+		for (std::size_t i = 0; i < len; ++i)
+			if (recent_[i].id == id && recent_[i].slot == slot) {
+				for (std::size_t j = i; j > 0; --j)
+					recent_[j] = recent_[j - 1];
+				recent_[0] = {id, slot};
+				return;
+			}
+		const auto capped = std::min(len, RECENT_LOOKUPS - 1);
+		for (std::size_t i = capped; i > 0; --i)
+			recent_[i] = recent_[i - 1];
+		recent_[0] = {id, slot};
+		if (len < RECENT_LOOKUPS)
+			++recent_len_;
+	}
+	void seed_recent()
+	{
+		clear_recent();
+		if (!palette_.empty())
+			touch_recent(palette_.front(), 0);
+	}
+	std::optional<std::uint8_t> find_slot(std::uint16_t id)
+	{
+		for (std::size_t i = 0; i < recent_len_; ++i) {
+			const auto &entry = recent_[i];
+			if (entry.id == id && entry.slot < palette_.size() &&
+					palette_[entry.slot] == id) {
+				const auto slot = entry.slot;
+				touch_recent(id, slot);
+				return slot;
+			}
+		}
+		std::optional<std::uint8_t> slot;
+		if (!reverse_.empty()) {
+			const auto it = reverse_.find(id);
+			if (it != reverse_.end())
+				slot = it->second;
+		} else {
+			const auto it = std::find(palette_.begin(), palette_.end(), id);
+			if (it != palette_.end())
+				slot = static_cast<std::uint8_t>(it - palette_.begin());
+		}
+		if (slot)
+			touch_recent(id, *slot);
+		return slot;
+	}
+	void make_dense(const std::vector<Block> &values)
+	{
+		dense_.resize(SECTION_VOLUME);
+		for (std::size_t i = 0; i < SECTION_VOLUME; ++i)
+			dense_[i] = static_cast<std::uint8_t>(values[i].id());
+		std::vector<std::uint8_t>().swap(indices_);
+		std::vector<std::uint16_t>().swap(palette_);
+		std::vector<std::uint16_t>().swap(direct_);
+		reverse_.clear();
+		reverse_.rehash(0);
+		clear_recent();
+		mode_ = Mode::Dense;
+	}
+	bool make_paletted(const std::vector<Block> &values)
+	{
+		std::unordered_map<std::uint16_t, std::uint8_t> slots;
+		std::vector<std::uint16_t> palette;
+		std::vector<std::uint8_t> indices(SECTION_VOLUME);
+		for (std::size_t i = 0; i < SECTION_VOLUME; ++i) {
+			const auto id = static_cast<std::uint16_t>(values[i].id());
+			auto it = slots.find(id);
+			if (it == slots.end()) {
+				if (palette.size() == MAX_PALETTE_SIZE)
+					return false;
+				const auto slot = static_cast<std::uint8_t>(palette.size());
+				palette.push_back(id);
+				it = slots.emplace(id, slot).first;
+			}
+			indices[i] = it->second;
+		}
+		indices_ = std::move(indices);
+		palette_ = std::move(palette);
+		if (palette_.size() >= REVERSE_LOOKUP_THRESHOLD)
+			reverse_ = std::move(slots);
+		else {
+			reverse_.clear();
+			reverse_.rehash(0);
+		}
+		seed_recent();
+		std::vector<std::uint8_t>().swap(dense_);
+		std::vector<std::uint16_t>().swap(direct_);
+		mode_ = Mode::Paletted;
+		return true;
+	}
+	void set_paletted(std::size_t index, Block b)
+	{
+		const auto id = static_cast<std::uint16_t>(b.id());
+		if (const auto slot = find_slot(id)) {
+			indices_[index] = *slot;
+			return;
+		}
+		if (palette_.size() == MAX_PALETTE_SIZE) {
+			std::array<bool, MAX_PALETTE_SIZE> used{};
+			for (std::size_t i = 0; i < SECTION_VOLUME; ++i) {
+				if (i != index)
+					used[indices_[i]] = true;
+				else
+					indices_[i] = 0;
+			}
+			std::array<std::uint8_t, MAX_PALETTE_SIZE> remap{};
+			std::vector<std::uint16_t> live_palette;
+			live_palette.reserve(MAX_PALETTE_SIZE);
+			for (std::size_t slot = 0; slot < palette_.size(); ++slot)
+				if (used[slot]) {
+					remap[slot] = static_cast<std::uint8_t>(live_palette.size());
+					live_palette.push_back(palette_[slot]);
+				}
+			for (std::size_t i = 0; i < SECTION_VOLUME; ++i)
+				if (i != index)
+					indices_[i] = remap[indices_[i]];
+			palette_ = std::move(live_palette);
+			reverse_.clear();
+			if (palette_.size() >= REVERSE_LOOKUP_THRESHOLD) {
+				reverse_.reserve(palette_.size());
+				for (std::size_t slot = 0; slot < palette_.size(); ++slot)
+					reverse_.emplace(palette_[slot], static_cast<std::uint8_t>(slot));
+			} else {
+				reverse_.rehash(0);
+			}
+			seed_recent();
+			if (const auto slot = find_slot(id)) {
+				indices_[index] = *slot;
+				return;
+			}
+			if (palette_.size() == MAX_PALETTE_SIZE) {
+				direct_.resize(SECTION_VOLUME);
+				for (std::size_t i = 0; i < SECTION_VOLUME; ++i)
+					direct_[i] = palette_[indices_[i]];
+				direct_[index] = id;
+				std::vector<std::uint8_t>().swap(indices_);
+				std::vector<std::uint16_t>().swap(palette_);
+				reverse_.clear();
+				reverse_.rehash(0);
+				clear_recent();
+				mode_ = Mode::Direct;
+				return;
+			}
+		}
+		indices_[index] = static_cast<std::uint8_t>(palette_.size());
+		palette_.push_back(id);
+		touch_recent(id, indices_[index]);
+		if (!reverse_.empty())
+			reverse_.emplace(id, indices_[index]);
+		else if (palette_.size() >= REVERSE_LOOKUP_THRESHOLD) {
+			reverse_.reserve(palette_.size());
+			for (std::size_t slot = 0; slot < palette_.size(); ++slot)
+				reverse_.emplace(palette_[slot], static_cast<std::uint8_t>(slot));
+		}
+	}
 
 public:
 	BlockStorage() = default;
 	explicit BlockStorage(Block b) : uniform_block_(b) {}
 	Block get(std::size_t i) const
 	{
-		return is_uniform_ ? uniform_block_ : Block(static_cast<content_t>(blocks_[i]));
+		switch (mode_) {
+		case Mode::Uniform:
+			return uniform_block_;
+		case Mode::Dense:
+			return Block(static_cast<content_t>(dense_[i]));
+		case Mode::Paletted:
+			return Block(static_cast<content_t>(palette_[indices_[i]]));
+		case Mode::Direct:
+			return Block(static_cast<content_t>(direct_[i]));
+		}
+		return Block{};
 	}
 	void set(std::size_t i, Block b)
 	{
-		if (is_uniform_ && uniform_block_.id() == b.id())
+		if (i >= SECTION_VOLUME)
 			return;
-		if (is_uniform_) {
-			blocks_.assign(SECTION_VOLUME, uniform_block_.id());
-			is_uniform_ = false;
+		switch (mode_) {
+		case Mode::Uniform:
+			if (uniform_block_.id() == b.id())
+				return;
+			if (fits_dense(uniform_block_) && fits_dense(b)) {
+				dense_.assign(
+						SECTION_VOLUME, static_cast<std::uint8_t>(uniform_block_.id()));
+				dense_[i] = static_cast<std::uint8_t>(b.id());
+				mode_ = Mode::Dense;
+			} else {
+				indices_.assign(SECTION_VOLUME, 0);
+				palette_ = {static_cast<std::uint16_t>(uniform_block_.id())};
+				mode_ = Mode::Paletted;
+				seed_recent();
+				set_paletted(i, b);
+			}
+			return;
+		case Mode::Dense:
+			if (fits_dense(b)) {
+				dense_[i] = static_cast<std::uint8_t>(b.id());
+				return;
+			}
+			{
+				std::vector<Block> values;
+				values.reserve(SECTION_VOLUME);
+				for (const auto id : dense_)
+					values.emplace_back(static_cast<content_t>(id));
+				make_paletted(values);
+				set_paletted(i, b);
+			}
+			return;
+		case Mode::Paletted:
+			set_paletted(i, b);
+			return;
+		case Mode::Direct:
+			direct_[i] = static_cast<std::uint16_t>(b.id());
+			return;
 		}
-		blocks_[i] = b.id();
 	}
-	bool uniform() const { return is_uniform_; }
-	std::size_t size() const { return is_uniform_ ? SECTION_VOLUME : blocks_.size(); }
+	bool uniform() const { return mode_ == Mode::Uniform; }
+	std::size_t size() const { return SECTION_VOLUME; }
 	void fill(Block b)
 	{
-		is_uniform_ = true;
+		mode_ = Mode::Uniform;
 		uniform_block_ = b;
-		blocks_.clear();
+		std::vector<std::uint8_t>().swap(dense_);
+		std::vector<std::uint8_t>().swap(indices_);
+		std::vector<std::uint16_t>().swap(palette_);
+		std::vector<std::uint16_t>().swap(direct_);
+		reverse_.clear();
+		reverse_.rehash(0);
+		clear_recent();
 	}
-	const std::vector<std::uint16_t> &raw() const { return blocks_; }
 	std::vector<Block> materialize() const
 	{
 		std::vector<Block> out;
 		out.reserve(SECTION_VOLUME);
-		if (is_uniform_) {
-			out.assign(SECTION_VOLUME, uniform_block_);
-		} else
-			for (auto id : blocks_)
-				out.emplace_back(static_cast<content_t>(id));
+		for (std::size_t i = 0; i < SECTION_VOLUME; ++i)
+			out.push_back(get(i));
 		return out;
 	}
 	void compact()
 	{
-		if (is_uniform_ || blocks_.empty())
+		if (mode_ == Mode::Uniform)
 			return;
-		const auto first = blocks_.front();
-		for (auto id : blocks_)
-			if (id != first)
-				return;
-		uniform_block_ = Block(static_cast<content_t>(first));
-		is_uniform_ = true;
-		blocks_.clear();
+		auto values = materialize();
+		const auto first = values.front();
+		if (std::all_of(values.begin(), values.end(),
+					[&](Block b) { return b.id() == first.id(); })) {
+			fill(first);
+			return;
+		}
+		if (mode_ == Mode::Paletted) {
+			if (make_paletted(values)) {
+				if (palette_.size() == 1) {
+					fill(Block(static_cast<content_t>(palette_.front())));
+					return;
+				}
+				if (std::all_of(palette_.begin(), palette_.end(),
+							[](std::uint16_t id) { return id <= UINT8_MAX; })) {
+					make_dense(values);
+				}
+			}
+		} else if (mode_ == Mode::Direct) {
+			if (std::all_of(values.begin(), values.end(), fits_dense)) {
+				make_dense(values);
+			} else {
+				make_paletted(values);
+			}
+		}
+	}
+	std::size_t resident_bytes() const
+	{
+		switch (mode_) {
+		case Mode::Uniform:
+			return 0;
+		case Mode::Dense:
+			return dense_.capacity() * sizeof(std::uint8_t);
+		case Mode::Paletted:
+			return indices_.capacity() * sizeof(std::uint8_t) +
+				   palette_.capacity() * sizeof(std::uint16_t) +
+				   reverse_.bucket_count() * sizeof(void *) +
+				   reverse_.size() *
+						   (sizeof(std::pair<const std::uint16_t, std::uint8_t>) +
+								   2 * sizeof(void *));
+		case Mode::Direct:
+			return direct_.capacity() * sizeof(std::uint16_t);
+		}
+		return 0;
 	}
 };
 struct PaletteItem
 {
 	std::string name;
+	BlockWithProperties::Properties properties;
 };
 struct PackedPalette
 {
@@ -443,6 +707,18 @@ struct Section
 struct SectionToModify
 {
 	BlockStorage storage;
+	// Per-cell Java/Sponge block-state properties. Shared immutable maps mirror
+	// Rust's Arc-backed section properties while keeping common property sets
+	// cheap across large schematics and repeated structure palettes.
+	std::unordered_map<std::size_t,
+			std::shared_ptr<const BlockWithProperties::Properties>>
+			properties;
+	BlockWithProperties get_block_with_properties(int x, int y, int z) const
+	{
+		const auto index = section_index(x, y, z);
+		const auto state = properties.find(index);
+		return {storage.get(index), state == properties.end() ? nullptr : state->second};
+	}
 	Block get_block(int x, int y, int z) const
 	{
 		auto b = storage.get(section_index(x, y, z));
@@ -450,25 +726,60 @@ struct SectionToModify
 	}
 	void set_block(int x, int y, int z, Block b)
 	{
-		storage.set(section_index(x, y, z), b);
+		const auto index = section_index(x, y, z);
+		storage.set(index, b);
+		properties.erase(index);
+	}
+	void set_block_with_properties(int x, int y, int z, const BlockWithProperties &bwp)
+	{
+		const auto index = section_index(x, y, z);
+		storage.set(index, bwp.block);
+		if (bwp.properties && !bwp.properties->empty())
+			properties[index] = bwp.properties;
+		else
+			properties.erase(index);
 	}
 	Block get_block_at_index(std::size_t i) const { return storage.get(i); }
-	void compact() { storage.compact(); }
+	void set_block_with_properties_at_index(std::size_t i, Block b,
+			std::shared_ptr<const BlockWithProperties::Properties> state)
+	{
+		if (i >= SECTION_VOLUME)
+			return;
+		storage.set(i, b);
+		if (state && !state->empty())
+			properties[i] = std::move(state);
+		else
+			properties.erase(i);
+	}
+	void compact()
+	{
+		if (properties.empty())
+			storage.compact();
+	}
 	void merge_non_air(const SectionToModify &other, bool overwrite)
 	{
 		auto src = other.storage.materialize();
 		for (std::size_t i = 0; i < src.size(); ++i)
 			if (src[i].id() != block_definitions::AIR.id() &&
-					(overwrite || storage.get(i).id() == block_definitions::AIR.id()))
-				storage.set(i, src[i]);
+					(overwrite || storage.get(i).id() == block_definitions::AIR.id())) {
+				const auto state = other.properties.find(i);
+				set_block_with_properties_at_index(i, src[i],
+						state == other.properties.end() ? nullptr : state->second);
+			}
 	}
 	void merge_air_only(const SectionToModify &other) { merge_non_air(other, false); }
-	void fill(Block b) { storage.fill(b); }
+	void fill(Block b)
+	{
+		storage.fill(b);
+		properties.clear();
+	}
 	Block get_index(std::size_t i) const { return storage.get(i); }
 	void set_index(std::size_t i, Block b)
 	{
-		if (i < SECTION_VOLUME)
+		if (i < SECTION_VOLUME) {
 			storage.set(i, b);
+			properties.erase(i);
+		}
 	}
 	std::size_t replace(Block from, Block to)
 	{
@@ -476,6 +787,7 @@ struct SectionToModify
 		for (std::size_t i = 0; i < SECTION_VOLUME; ++i)
 			if (storage.get(i).id() == from.id()) {
 				storage.set(i, to);
+				properties.erase(i);
 				++n;
 			}
 		return n;
@@ -487,6 +799,7 @@ struct SectionToModify
 			auto b = storage.get(i);
 			if (predicate(b)) {
 				storage.set(i, to);
+				properties.erase(i);
 				++n;
 			}
 		}
@@ -522,12 +835,28 @@ struct ChunkToModify
 		auto *s = find_section(y);
 		return s ? s->get_block(x & 15, y & 15, z & 15) : Block{};
 	}
+	BlockWithProperties get_block_with_properties(int x, int y, int z) const
+	{
+		if (y > world_editor::world_max_y())
+			return {};
+		y = std::max(y, world_editor::min_y());
+		auto *s = find_section(y);
+		return s ? s->get_block_with_properties(x & 15, y & 15, z & 15)
+				 : BlockWithProperties{};
+	}
 	void set_block(int x, int y, int z, Block b)
 	{
 		if (y > world_editor::world_max_y())
 			return;
 		y = std::max(y, world_editor::min_y());
 		section(y).set_block(x & 15, y & 15, z & 15, b);
+	}
+	void set_block_with_properties(int x, int y, int z, const BlockWithProperties &bwp)
+	{
+		if (y > world_editor::world_max_y())
+			return;
+		y = std::max(y, world_editor::min_y());
+		section(y).set_block_with_properties(x & 15, y & 15, z & 15, bwp);
 	}
 	void prune_empty_sections()
 	{
@@ -603,6 +932,25 @@ struct WorldToModify
 			return std::nullopt;
 		return c->get_block(x & 15, y, z & 15);
 	}
+	std::optional<BlockWithProperties> get_block_with_properties(
+			int x, int y, int z) const
+	{
+		int cx = x >> 4, cz = z >> 4;
+		auto *r = get_region(cx >> 5, cz >> 5);
+		if (!r)
+			return std::nullopt;
+		auto *c = r->get_chunk(cx & 31, cz & 31);
+		if (!c || y > world_editor::world_max_y())
+			return std::nullopt;
+		y = std::max(y, world_editor::min_y());
+		auto *s = c->find_section(y);
+		if (!s)
+			return std::nullopt;
+		auto bwp = s->get_block_with_properties(x & 15, y & 15, z & 15);
+		if (bwp.block.id() == block_definitions::AIR.id())
+			return std::nullopt;
+		return bwp;
+	}
 	void set_block(int x, int y, int z, Block b)
 	{
 		int cx = x >> 4, cz = z >> 4;
@@ -610,7 +958,14 @@ struct WorldToModify
 				.get_or_create_chunk(cx & 31, cz & 31)
 				.set_block(x & 15, y, z & 15, b);
 	}
-	bool set_block_if_absent(int x, int y, int z, Block b)
+	void set_block_with_properties(int x, int y, int z, const BlockWithProperties &bwp)
+	{
+		int cx = x >> 4, cz = z >> 4;
+		get_or_create_region(cx >> 5, cz >> 5)
+				.get_or_create_chunk(cx & 31, cz & 31)
+				.set_block_with_properties(x & 15, y, z & 15, bwp);
+	}
+	bool set_with_props_if_absent(int x, int y, int z, const BlockWithProperties &bwp)
 	{
 		if (y > world_editor::world_max_y())
 			return false;
@@ -622,8 +977,12 @@ struct WorldToModify
 		const auto index = section_index(x & 15, y & 15, z & 15);
 		if (section.storage.get(index).id() != block_definitions::AIR.id())
 			return false;
-		section.storage.set(index, b);
+		section.set_block_with_properties_at_index(index, bwp.block, bwp.properties);
 		return true;
+	}
+	bool set_block_if_absent(int x, int y, int z, Block b)
+	{
+		return set_with_props_if_absent(x, y, z, BlockWithProperties{b});
 	}
 	template <typename BlockAt>
 	void fill_column_with(int x, int z, int y_min, int y_max, BlockAt &&block_at)
@@ -644,7 +1003,7 @@ struct WorldToModify
 				const auto index = section_index(local_x, y & 15, local_z);
 				const Block block = block_at(y);
 				if (section.storage.get(index).id() == block_definitions::AIR.id())
-					section.storage.set(index, block);
+					section.set_index(index, block);
 			}
 		}
 	}
@@ -670,7 +1029,7 @@ struct WorldToModify
 				const auto index = section_index(local_x, y & 15, local_z);
 				if (!skip_existing ||
 						section.storage.get(index).id() == block_definitions::AIR.id())
-					section.storage.set(index, b);
+					section.set_index(index, b);
 			}
 		}
 	}
@@ -684,7 +1043,7 @@ struct WorldToModify
 		bool clean = true;
 		for (int sy = section_y_min; sy <= section_y_max; ++sy) {
 			auto &s = c.sections[sy];
-			bool empty = s.storage.uniform() &&
+			bool empty = s.properties.empty() && s.storage.uniform() &&
 						 s.storage.get(0).id() == block_definitions::AIR.id();
 			if (empty)
 				s.storage.fill(b);
@@ -814,7 +1173,7 @@ struct WorldToModify
 					auto vals = sk.second.storage.materialize();
 					for (std::size_t i = 0; i < vals.size(); ++i)
 						if (vals[i].id() == from.id()) {
-							sk.second.storage.set(i, to);
+							sk.second.set_index(i, to);
 							++n;
 						}
 				}
@@ -878,7 +1237,7 @@ struct WorldToModify
 			for (const auto &sk : ck.second.sections) {
 				auto &ds = dc.sections[sk.first];
 				if (overwrite)
-					ds.storage = sk.second.storage;
+					ds = sk.second;
 				else
 					ds.merge_air_only(sk.second);
 			}
@@ -963,8 +1322,7 @@ struct WorldToModify
 		for (const auto &rk : regions)
 			for (const auto &ck : rk.second.chunks)
 				for (const auto &sk : ck.second.sections)
-					n += sizeof(SectionToModify) +
-						 sk.second.storage.size() * sizeof(std::uint16_t);
+					n += sizeof(SectionToModify) + sk.second.storage.resident_bytes();
 		return n;
 	}
 	std::optional<std::pair<int, int>> smallest_region() const
@@ -978,7 +1336,7 @@ struct WorldToModify
 			std::size_t n = 0;
 			for (const auto &c : r.second.chunks)
 				for (const auto &s : c.second.sections)
-					n += s.second.storage.size();
+					n += s.second.storage.resident_bytes();
 			if (n < best) {
 				best = n;
 				key = {key_x(r.first), key_z(r.first)};
@@ -1091,7 +1449,7 @@ struct WorldToModify
 			std::size_t n = 0;
 			for (const auto &c : r.second.chunks)
 				for (const auto &s : c.second.sections)
-					n += s.second.storage.size() * sizeof(std::uint16_t);
+					n += s.second.storage.resident_bytes();
 			out.emplace_back(key_x(r.first), key_z(r.first), n);
 		}
 		std::sort(out.begin(), out.end(), [](const auto &a, const auto &b) {
@@ -1207,10 +1565,10 @@ struct WorldToModify
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
 						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
-					set_block(x + dx, y + dy, z + dz, *b);
+					set_block_with_properties(x + dx, y + dy, z + dz, *b);
 				}
 	}
 	void copy_box_mirror_x(const WorldToModify &src, int min_x, int min_y, int min_z,
@@ -1221,10 +1579,10 @@ struct WorldToModify
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
 						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
-					set_block(dst_x + (max_x - x), dst_y + (y - min_y),
+					set_block_with_properties(dst_x + (max_x - x), dst_y + (y - min_y),
 							dst_z + (z - min_z), *b);
 				}
 	}
@@ -1236,10 +1594,10 @@ struct WorldToModify
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
 						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
-					set_block(dst_x + (z - min_z), dst_y + (y - min_y),
+					set_block_with_properties(dst_x + (z - min_z), dst_y + (y - min_y),
 							dst_z + (max_x - x), *b);
 				}
 	}
@@ -1251,10 +1609,10 @@ struct WorldToModify
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
 						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
-					set_block(dst_x + (x - min_x), dst_y + (y - min_y),
+					set_block_with_properties(dst_x + (x - min_x), dst_y + (y - min_y),
 							dst_z + (max_z - z), *b);
 				}
 	}
@@ -1266,10 +1624,10 @@ struct WorldToModify
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
 						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
-					set_block(dst_x + (max_x - x), dst_y + (y - min_y),
+					set_block_with_properties(dst_x + (max_x - x), dst_y + (y - min_y),
 							dst_z + (max_z - z), *b);
 				}
 	}
@@ -1283,8 +1641,8 @@ struct WorldToModify
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = std::max(min_y, world_editor::min_y());
 						y <= std::min(max_y, world_editor::world_max_y()); ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
 					int a = x - min_x, c = z - min_z;
 					if (mirror_x)
@@ -1309,7 +1667,8 @@ struct WorldToModify
 						ox = a;
 						oz = c;
 					}
-					set_block(dst_x + ox, dst_y + (y - min_y), dst_z + oz, *b);
+					set_block_with_properties(
+							dst_x + ox, dst_y + (y - min_y), dst_z + oz, *b);
 				}
 	}
 	std::array<int, 6> transformed_bounds(int width, int height, int depth, int dst_x,
@@ -1361,10 +1720,10 @@ struct WorldToModify
 					int wy = dst_y + (y - min_y);
 					if (wy < world_editor::min_y() || wy > world_editor::world_max_y())
 						continue;
-					auto b = src.get_block(x, y, z);
-					if (!b || (skip_air && b->id() == block_definitions::AIR.id()))
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || (skip_air && b->block.id() == block_definitions::AIR.id()))
 						continue;
-					set_block(dst_x + ox, wy, dst_z + oz, *b);
+					set_block_with_properties(dst_x + ox, wy, dst_z + oz, *b);
 				}
 	}
 	std::size_t copy_box_transform_count(const WorldToModify &src, int min_x, int min_y,
@@ -1411,8 +1770,8 @@ struct WorldToModify
 						oz = c;
 					}
 					int wy = dst_y + y - min_y;
-					auto b = src.get_block(x, y, z);
-					if (!b || b->id() == block_definitions::AIR.id() ||
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || b->block.id() == block_definitions::AIR.id() ||
 							wy < world_editor::min_y() ||
 							wy > world_editor::world_max_y())
 						continue;
@@ -1420,7 +1779,7 @@ struct WorldToModify
 						++skipped;
 						continue;
 					}
-					set_block(dst_x + ox, wy, dst_z + oz, *b);
+					set_block_with_properties(dst_x + ox, wy, dst_z + oz, *b);
 					++placed;
 				}
 		return {placed, skipped};
@@ -1434,8 +1793,8 @@ struct WorldToModify
 		for (int z = min_z; z <= max_z; ++z)
 			for (int x = min_x; x <= max_x; ++x)
 				for (int y = min_y; y <= max_y; ++y) {
-					auto b = src.get_block(x, y, z);
-					if (!b || b->id() == block_definitions::AIR.id())
+					auto b = src.get_block_with_properties(x, y, z);
+					if (!b || b->block.id() == block_definitions::AIR.id())
 						continue;
 					int a = x - min_x, c = z - min_z, ox = 0, oz = 0;
 					switch (quarter_turns) {
@@ -1467,7 +1826,7 @@ struct WorldToModify
 						++skipped;
 						continue;
 					}
-					set_block(dst_x + ox, wy, dst_z + oz, *b);
+					set_block_with_properties(dst_x + ox, wy, dst_z + oz, *b);
 					++placed;
 				}
 		return {placed, skipped};
@@ -1479,8 +1838,8 @@ struct WorldToModify
 				for (const auto &s : c.second.sections) {
 					if (s.second.storage.size() != SECTION_VOLUME)
 						return false;
-					for (auto id : s.second.storage.raw())
-						if (id > MAX_BLOCK_ID)
+					for (const auto &block : s.second.storage.materialize())
+						if (block.id() > MAX_BLOCK_ID)
 							return false;
 				}
 		return true;
@@ -1520,7 +1879,7 @@ struct WorldToModify
 				for (auto &sk : ck.second.sections) {
 					auto vals = sk.second.storage.materialize();
 					for (std::size_t i = 0; i < vals.size(); ++i)
-						sk.second.storage.set(i, fn(vals[i]));
+						sk.second.set_index(i, fn(vals[i]));
 				}
 		prune_empty();
 	}
@@ -1648,10 +2007,12 @@ struct WorldToModify
 									wy = (sy << 4) + ly;
 								bool auth = wx >= min_x && wx <= max_x && wz >= min_z &&
 											wz <= max_z;
+								const auto bwp =
+										sk.second.get_block_with_properties(lx2, ly, lz2);
 								if (auth)
-									set_block(wx, wy, wz, b);
+									set_block_with_properties(wx, wy, wz, bwp);
 								else
-									set_block_if_absent(wx, wy, wz, b);
+									set_with_props_if_absent(wx, wy, wz, bwp);
 							}
 				}
 			}
@@ -2544,6 +2905,54 @@ inline PackedPalette pack_palette(const BlockStorage &storage)
 			used = 0;
 		}
 		word |= p << used;
+		used += bits;
+	}
+	if (used)
+		out.data.push_back(word);
+	return out;
+}
+inline PackedPalette pack_palette(const SectionToModify &section)
+{
+	PackedPalette out;
+	const auto blocks = section.storage.materialize();
+	std::vector<std::uint16_t> indices(SECTION_VOLUME, 0);
+	std::unordered_map<std::string, std::uint16_t> palette_lookup;
+	for (std::size_t i = 0; i < blocks.size(); ++i) {
+		const auto id = static_cast<std::size_t>(blocks[i].id());
+		if (id >= MAX_BLOCK_ID)
+			continue;
+		BlockWithProperties::Properties state;
+		if (const auto it = section.properties.find(i);
+				it != section.properties.end() && it->second)
+			state = *it->second;
+		auto ordered = std::vector<std::pair<std::string, std::string>>(
+				state.begin(), state.end());
+		std::sort(ordered.begin(), ordered.end());
+		std::string key = std::to_string(id) + ':';
+		for (const auto &[name, value] : ordered) {
+			key += std::to_string(name.size()) + ':' + name;
+			key += std::to_string(value.size()) + ':' + value;
+		}
+		auto [it, inserted] = palette_lookup.emplace(
+				std::move(key), static_cast<std::uint16_t>(out.palette.size()));
+		if (inserted)
+			out.palette.push_back({std::to_string(id), std::move(state)});
+		indices[i] = it->second;
+	}
+	const std::size_t bits = std::max<std::size_t>(4,
+			out.palette.size() <= 1 ? 4
+									: static_cast<std::size_t>(std::ceil(std::log2(
+											  static_cast<double>(out.palette.size())))));
+	out.bits_per_block = bits;
+	std::uint64_t word = 0;
+	std::size_t used = 0;
+	for (const auto index : indices) {
+		if (used + bits > 64) {
+			out.data.push_back(word);
+			word = 0;
+			used = 0;
+		}
+		word |= static_cast<std::uint64_t>(index) << used;
 		used += bits;
 	}
 	if (used)

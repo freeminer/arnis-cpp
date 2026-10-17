@@ -189,8 +189,8 @@ void generate_leisure_from_relation(WorldEditor &editor, const ProcessedRelation
 			if (member.role == ProcessedMemberRole::Outer) {
 				// Use relation tags so the member inherits the relation's leisure=* type
 				ProcessedWay way_with_rel_tags;
-				way_with_rel_tags.id = member.way.id;
-				way_with_rel_tags.nodes = member.way.nodes;
+				way_with_rel_tags.id = member.way->id;
+				way_with_rel_tags.nodes = member.way->nodes;
 				way_with_rel_tags.tags = rel.tags;
 				generate_leisure(editor, way_with_rel_tags, args, flood_fill_cache,
 						building_footprints, bridge_surface);

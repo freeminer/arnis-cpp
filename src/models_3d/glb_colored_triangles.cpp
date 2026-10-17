@@ -5,6 +5,7 @@
 #include <cmath>
 #include <cstdint>
 #include <cstring>
+#include <limits>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -159,31 +160,208 @@ bool index_value(const unsigned char *p, int type, std::uint32_t &out)
 		return false;
 	}
 }
-std::optional<std::array<float, 3>> color_at(
-		const tinygltf::Model &m, int accessor, std::size_t index)
+
+bool element_offset(std::size_t view_offset, std::size_t accessor_offset,
+		std::size_t ordinal, std::size_t stride, std::size_t &out)
 {
-	if (accessor < 0 || std::size_t(accessor) >= m.accessors.size())
+	const auto max = std::numeric_limits<std::size_t>::max();
+	if (stride == 0 || accessor_offset > max - view_offset)
+		return false;
+	const auto base = view_offset + accessor_offset;
+	if (ordinal > (max - base) / stride)
+		return false;
+	out = base + ordinal * stride;
+	return true;
+}
+
+bool sparse_index(const tinygltf::Model &m, int view_index, std::size_t byte_offset,
+		int component_type, std::size_t ordinal, std::uint32_t &out)
+{
+	if (view_index < 0 || std::size_t(view_index) >= m.bufferViews.size())
+		return false;
+	const auto &view = m.bufferViews[view_index];
+	if (view.buffer < 0 || std::size_t(view.buffer) >= m.buffers.size())
+		return false;
+	const auto size = component_size(component_type);
+	std::size_t offset = 0;
+	if (!size || !element_offset(view.byteOffset, byte_offset, ordinal, size, offset))
+		return false;
+	const auto &data = m.buffers[view.buffer].data;
+	return offset <= data.size() && size <= data.size() - offset &&
+		   index_value(data.data() + offset, component_type, out);
+}
+
+bool sparse_value_offset(const tinygltf::Model &m, int view_index,
+		std::size_t byte_offset, std::size_t ordinal, std::size_t element_size,
+		const unsigned char *&out)
+{
+	if (view_index < 0 || std::size_t(view_index) >= m.bufferViews.size() ||
+			element_size == 0)
+		return false;
+	const auto &view = m.bufferViews[view_index];
+	std::size_t offset = 0;
+	if (view.buffer < 0 || std::size_t(view.buffer) >= m.buffers.size() ||
+			!element_offset(view.byteOffset, byte_offset, ordinal, element_size, offset))
+		return false;
+	const auto &data = m.buffers[view.buffer].data;
+	if (offset > data.size() || element_size > data.size() - offset)
+		return false;
+	out = data.data() + offset;
+	return true;
+}
+
+std::optional<std::vector<std::array<float, 3>>> read_positions(
+		const tinygltf::Model &m, const tinygltf::Accessor &a)
+{
+	if (a.type != TINYGLTF_TYPE_VEC3 || a.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT)
 		return std::nullopt;
-	const auto &a = m.accessors[accessor];
-	if ((a.type != TINYGLTF_TYPE_VEC3 && a.type != TINYGLTF_TYPE_VEC4) ||
-			a.bufferView < 0 || index >= a.count ||
-			std::size_t(a.bufferView) >= m.bufferViews.size())
+	std::vector<std::array<float, 3>> positions(a.count, {0.f, 0.f, 0.f});
+	if (a.bufferView >= 0) {
+		if (std::size_t(a.bufferView) >= m.bufferViews.size())
+			return std::nullopt;
+		const auto &view = m.bufferViews[a.bufferView];
+		if (view.buffer < 0 || std::size_t(view.buffer) >= m.buffers.size())
+			return std::nullopt;
+		const auto &data = m.buffers[view.buffer].data;
+		const int stride = a.ByteStride(view);
+		if (stride < int(3 * sizeof(float)) || a.sparse.count < 0)
+			return std::nullopt;
+		for (std::size_t i = 0; i < a.count; ++i) {
+			std::size_t offset = 0;
+			if (!element_offset(
+						view.byteOffset, a.byteOffset, i, std::size_t(stride), offset))
+				return std::nullopt;
+			if (offset > data.size() || 3 * sizeof(float) > data.size() - offset)
+				return std::nullopt;
+			std::memcpy(positions[i].data(), data.data() + offset, 3 * sizeof(float));
+		}
+	} else if (!a.sparse.isSparse) {
 		return std::nullopt;
-	const auto &v = m.bufferViews[a.bufferView];
-	if (v.buffer < 0 || std::size_t(v.buffer) >= m.buffers.size())
+	}
+	if (a.sparse.count < 0)
 		return std::nullopt;
-	const std::size_t cs = component_size(a.componentType);
-	const int raw = a.ByteStride(v);
-	if (!cs || raw < int(cs * 3))
+	if (a.sparse.isSparse) {
+		const auto value_size = 3 * sizeof(float);
+		for (int i = 0; i < a.sparse.count; ++i) {
+			std::uint32_t index = 0;
+			const unsigned char *value = nullptr;
+			if (!sparse_index(m, a.sparse.indices.bufferView, a.sparse.indices.byteOffset,
+						a.sparse.indices.componentType, std::size_t(i), index) ||
+					index >= positions.size() ||
+					!sparse_value_offset(m, a.sparse.values.bufferView,
+							a.sparse.values.byteOffset, std::size_t(i), value_size,
+							value))
+				return std::nullopt;
+			std::memcpy(positions[index].data(), value, value_size);
+		}
+	}
+	return positions;
+}
+
+std::optional<std::vector<std::uint32_t>> read_indices(
+		const tinygltf::Model &m, const tinygltf::Accessor &a)
+{
+	if (a.type != TINYGLTF_TYPE_SCALAR ||
+			(a.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_BYTE &&
+					a.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_SHORT &&
+					a.componentType != TINYGLTF_COMPONENT_TYPE_UNSIGNED_INT))
 		return std::nullopt;
-	const auto &b = m.buffers[v.buffer];
-	const std::size_t off = v.byteOffset + a.byteOffset + index * std::size_t(raw);
-	if (off + cs * 3 > b.data.size())
+	std::vector<std::uint32_t> indices(a.count, 0);
+	const auto size = component_size(a.componentType);
+	if (a.bufferView >= 0) {
+		if (std::size_t(a.bufferView) >= m.bufferViews.size())
+			return std::nullopt;
+		const auto &view = m.bufferViews[a.bufferView];
+		if (view.buffer < 0 || std::size_t(view.buffer) >= m.buffers.size())
+			return std::nullopt;
+		const auto &data = m.buffers[view.buffer].data;
+		const int stride = a.ByteStride(view);
+		if (stride < int(size) || a.sparse.count < 0)
+			return std::nullopt;
+		for (std::size_t i = 0; i < a.count; ++i) {
+			std::size_t offset = 0;
+			if (!element_offset(
+						view.byteOffset, a.byteOffset, i, std::size_t(stride), offset))
+				return std::nullopt;
+			if (offset > data.size() || size > data.size() - offset ||
+					!index_value(data.data() + offset, a.componentType, indices[i]))
+				return std::nullopt;
+		}
+	} else if (!a.sparse.isSparse) {
 		return std::nullopt;
-	return std::array<float, 3>{
-			component_value(b.data.data() + off, a.componentType, a.normalized),
-			component_value(b.data.data() + off + cs, a.componentType, a.normalized),
-			component_value(b.data.data() + off + cs * 2, a.componentType, a.normalized)};
+	}
+	if (a.sparse.count < 0)
+		return std::nullopt;
+	if (a.sparse.isSparse)
+		for (int i = 0; i < a.sparse.count; ++i) {
+			std::uint32_t index = 0, value = 0;
+			const unsigned char *value_ptr = nullptr;
+			if (!sparse_index(m, a.sparse.indices.bufferView, a.sparse.indices.byteOffset,
+						a.sparse.indices.componentType, std::size_t(i), index) ||
+					index >= indices.size() ||
+					!sparse_value_offset(m, a.sparse.values.bufferView,
+							a.sparse.values.byteOffset, std::size_t(i), size,
+							value_ptr) ||
+					!index_value(value_ptr, a.componentType, value))
+				return std::nullopt;
+			indices[index] = value;
+		}
+	return indices;
+}
+
+std::optional<std::vector<std::array<float, 3>>> read_colors(
+		const tinygltf::Model &m, const tinygltf::Accessor &a)
+{
+	if (a.type != TINYGLTF_TYPE_VEC3 && a.type != TINYGLTF_TYPE_VEC4)
+		return std::nullopt;
+	const auto size = component_size(a.componentType);
+	const auto components = a.type == TINYGLTF_TYPE_VEC4 ? 4u : 3u;
+	const auto element_size = size * components;
+	if (!size || !element_size)
+		return std::nullopt;
+	std::vector<std::array<float, 3>> colors(a.count, {0.f, 0.f, 0.f});
+	if (a.bufferView >= 0) {
+		if (std::size_t(a.bufferView) >= m.bufferViews.size())
+			return std::nullopt;
+		const auto &view = m.bufferViews[a.bufferView];
+		if (view.buffer < 0 || std::size_t(view.buffer) >= m.buffers.size())
+			return std::nullopt;
+		const auto &data = m.buffers[view.buffer].data;
+		const int stride = a.ByteStride(view);
+		if (stride < int(element_size) || a.sparse.count < 0)
+			return std::nullopt;
+		for (std::size_t i = 0; i < a.count; ++i) {
+			std::size_t offset = 0;
+			if (!element_offset(
+						view.byteOffset, a.byteOffset, i, std::size_t(stride), offset))
+				return std::nullopt;
+			if (offset > data.size() || element_size > data.size() - offset)
+				return std::nullopt;
+			for (std::size_t c = 0; c < 3; ++c)
+				colors[i][c] = component_value(
+						data.data() + offset + c * size, a.componentType, a.normalized);
+		}
+	} else if (!a.sparse.isSparse) {
+		return std::nullopt;
+	}
+	if (a.sparse.count < 0)
+		return std::nullopt;
+	if (a.sparse.isSparse)
+		for (int i = 0; i < a.sparse.count; ++i) {
+			std::uint32_t index = 0;
+			const unsigned char *value = nullptr;
+			if (!sparse_index(m, a.sparse.indices.bufferView, a.sparse.indices.byteOffset,
+						a.sparse.indices.componentType, std::size_t(i), index) ||
+					index >= colors.size() ||
+					!sparse_value_offset(m, a.sparse.values.bufferView,
+							a.sparse.values.byteOffset, std::size_t(i), element_size,
+							value))
+				return std::nullopt;
+			for (std::size_t c = 0; c < 3; ++c)
+				colors[index][c] =
+						component_value(value + c * size, a.componentType, a.normalized);
+		}
+	return colors;
 }
 }
 
@@ -206,61 +384,20 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 					std::size_t(pi->second) >= model.accessors.size())
 				continue;
 			const auto &a = model.accessors[pi->second];
-			if (a.bufferView < 0 ||
-					std::size_t(a.bufferView) >= model.bufferViews.size() ||
-					a.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT ||
-					a.type != TINYGLTF_TYPE_VEC3)
+			auto positions = read_positions(model, a);
+			if (!positions)
 				continue;
-			const auto &v = model.bufferViews[a.bufferView];
-			if (v.buffer < 0 || std::size_t(v.buffer) >= model.buffers.size())
-				continue;
-			const auto &b = model.buffers[v.buffer];
-			const std::size_t po = v.byteOffset + a.byteOffset;
-			const int raw = a.ByteStride(v);
-			if (raw < int(3 * sizeof(float)))
-				continue;
-			auto position = [&](std::size_t i, std::array<float, 3> &p) {
-				const auto off = po + i * std::size_t(raw);
-				if (i >= a.count || off + 3 * sizeof(float) > b.data.size())
-					return false;
-				std::memcpy(p.data(), b.data.data() + off, 3 * sizeof(float));
-				p = transform_point(world, p);
-				return true;
-			};
 			std::vector<std::uint32_t> indices;
 			if (prim.indices >= 0 && std::size_t(prim.indices) < model.accessors.size()) {
 				const auto &ia = model.accessors[prim.indices];
-				if (ia.type != TINYGLTF_TYPE_SCALAR || ia.bufferView < 0 ||
-						std::size_t(ia.bufferView) >= model.bufferViews.size())
+				auto decoded = read_indices(model, ia);
+				if (!decoded)
 					continue;
-				const auto &iv = model.bufferViews[ia.bufferView];
-				if (iv.buffer < 0 || std::size_t(iv.buffer) >= model.buffers.size())
-					continue;
-				const auto &ib = model.buffers[iv.buffer];
-				const auto size = component_size(ia.componentType);
-				const int iraw = ia.ByteStride(iv);
-				if (!size || iraw < int(size))
-					continue;
-				for (std::size_t i = 0; i < ia.count; ++i) {
-					const auto off =
-							iv.byteOffset + ia.byteOffset + i * std::size_t(iraw);
-					if (off + size > ib.data.size()) {
-						indices.clear();
-						break;
-					}
-					std::uint32_t index;
-					if (!index_value(ib.data.data() + off, ia.componentType, index)) {
-						indices.clear();
-						break;
-					}
-					indices.push_back(index);
-				}
-				if (indices.empty() && ia.count)
-					continue;
+				indices = std::move(*decoded);
 			} else {
-				indices.resize(a.count);
-				for (std::size_t i = 0; i < a.count; ++i)
-					indices[i] = std::uint32_t(i);
+				indices.resize(positions->size());
+				for (std::size_t i = 0; i < positions->size(); ++i)
+					indices[i] = static_cast<std::uint32_t>(i);
 			}
 			std::array<float, 3> material{1, 1, 1};
 			bool material_has_texture = false;
@@ -276,25 +413,32 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 				}
 			}
 			const bool uncolored = !material_has_texture && is_default_white(material);
+			std::optional<std::vector<std::array<float, 3>>> vertex_colors;
 			auto ci = prim.attributes.find("COLOR_0");
+			if (ci != prim.attributes.end() && ci->second >= 0 &&
+					std::size_t(ci->second) < model.accessors.size())
+				vertex_colors = read_colors(model, model.accessors[ci->second]);
 			for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
-				ColoredTriangle t;
-				if (!position(indices[i], t.vertices[0]) ||
-						!position(indices[i + 1], t.vertices[1]) ||
-						!position(indices[i + 2], t.vertices[2]))
+				const auto ia = indices[i], ib = indices[i + 1], ic = indices[i + 2];
+				if (ia >= positions->size() || ib >= positions->size() ||
+						ic >= positions->size())
 					continue;
+				ColoredTriangle t;
+				for (int vertex = 0; vertex < 3; ++vertex)
+					t.vertices[vertex] =
+							transform_point(world, (*positions)[vertex == 0	  ? ia
+																: vertex == 1 ? ib
+																			  : ic]);
 				t.color = material;
 				t.uncolored = uncolored;
-				if (ci != prim.attributes.end()) {
-					auto c0 = color_at(model, ci->second, indices[i]),
-						 c1 = color_at(model, ci->second, indices[i + 1]),
-						 c2 = color_at(model, ci->second, indices[i + 2]);
-					if (c0 && c1 && c2) {
-						for (int k = 0; k < 3; ++k)
-							t.color[k] =
-									material[k] * ((*c0)[k] + (*c1)[k] + (*c2)[k]) / 3;
-						t.uncolored = false;
-					}
+				if (vertex_colors && ia < vertex_colors->size() &&
+						ib < vertex_colors->size() && ic < vertex_colors->size()) {
+					const auto &c0 = (*vertex_colors)[ia];
+					const auto &c1 = (*vertex_colors)[ib];
+					const auto &c2 = (*vertex_colors)[ic];
+					for (int k = 0; k < 3; ++k)
+						t.color[k] = material[k] * (c0[k] + c1[k] + c2[k]) / 3;
+					t.uncolored = false;
 				}
 				out.push_back(t);
 			}
@@ -358,26 +502,11 @@ std::pair<std::array<float, 3>, std::array<float, 3>> glb_vertex_bounds(
 				if (position == primitive.attributes.end() || position->second < 0 ||
 						std::size_t(position->second) >= model.accessors.size())
 					continue;
-				const auto &accessor = model.accessors[position->second];
-				if (accessor.type != TINYGLTF_TYPE_VEC3 ||
-						accessor.componentType != TINYGLTF_COMPONENT_TYPE_FLOAT ||
-						accessor.bufferView < 0 ||
-						std::size_t(accessor.bufferView) >= model.bufferViews.size())
+				auto positions = read_positions(model, model.accessors[position->second]);
+				if (!positions)
 					continue;
-				const auto &view = model.bufferViews[accessor.bufferView];
-				if (view.buffer < 0 || std::size_t(view.buffer) >= model.buffers.size())
-					continue;
-				const auto &buffer = model.buffers[view.buffer];
-				const int stride = accessor.ByteStride(view);
-				if (stride < int(3 * sizeof(float)))
-					continue;
-				const std::size_t offset = view.byteOffset + accessor.byteOffset;
-				for (std::size_t i = 0; i < accessor.count; ++i) {
-					const std::size_t at = offset + i * std::size_t(stride);
-					if (at + 3 * sizeof(float) > buffer.data.size())
-						break;
-					std::array<float, 3> point;
-					std::memcpy(point.data(), buffer.data.data() + at, 3 * sizeof(float));
+				for (const auto &vertex : *positions) {
+					std::array<float, 3> point = vertex;
 					point = transform_point(world, point);
 					for (std::size_t axis = 0; axis < 3; ++axis)
 						if (std::isfinite(point[axis])) {

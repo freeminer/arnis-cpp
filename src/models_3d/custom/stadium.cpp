@@ -30,7 +30,7 @@ std::vector<P> points(const ProcessedElement &e)
 			o.push_back({n.x, n.z});
 	else if (e.is_relation())
 		for (auto &m : e.as_relation().members)
-			for (auto &n : m.way.nodes)
+			for (auto &n : m.way->nodes)
 				o.push_back({n.x, n.z});
 	return o;
 }

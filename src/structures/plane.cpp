@@ -83,8 +83,10 @@ bool extract_aeroway_segment(const ProcessedElement &element, Segment &out)
 			way.tags.get("area") == std::optional<std::string>("yes") ||
 			way.nodes.size() < 2 || way.nodes.front().id == way.nodes.back().id)
 		return false;
-	const double dx = double(way.nodes.back().x - way.nodes.front().x);
-	const double dz = double(way.nodes.back().z - way.nodes.front().z);
+	// Convert before subtracting: the projected coordinates are signed 32-bit,
+	// and their full-range difference must not overflow before widening.
+	const double dx = double(way.nodes.back().x) - double(way.nodes.front().x);
+	const double dz = double(way.nodes.back().z) - double(way.nodes.front().z);
 	if (dx == 0.0 && dz == 0.0)
 		return false;
 	out.way_id = way.id;
@@ -112,7 +114,7 @@ bool extract_parking_stand(const ProcessedElement &element, Stand &out)
 	const auto &b = way.nodes.back();
 	if (a.id == b.id)
 		return false;
-	const double dx = double(b.x - a.x), dz = double(b.z - a.z);
+	const double dx = double(b.x) - double(a.x), dz = double(b.z) - double(a.z);
 	const double length = std::hypot(dx, dz);
 	if (length < 1.0)
 		return false;

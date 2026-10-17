@@ -166,9 +166,13 @@ void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
 		} else if (element.is_relation()) {
 			auto &rel = std::get<ProcessedRelation>(element);
 			for (auto &member : rel.members) {
-				for (auto &node : member.way.nodes)
+				// Arc::make_mut in the Rust implementation: relation ways can be
+				// shared with other relations until a transform changes their points.
+				if (!member.way.unique())
+					member.way = std::make_shared<ProcessedWay>(*member.way);
+				for (auto &node : member.way->nodes)
 					rotate_node(node, cx, cz, sin_r, cos_r);
-				rotate_bearing_tags(member.way.tags, angle_degrees);
+				rotate_bearing_tags(member.way->tags, angle_degrees);
 			}
 			rotate_bearing_tags(rel.tags, angle_degrees);
 		}

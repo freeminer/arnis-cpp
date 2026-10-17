@@ -113,7 +113,7 @@ void for_relation_ring_cells(const ProcessedRelation &relation, ProcessedMemberR
 	std::vector<std::vector<ProcessedNode>> rings;
 	for (const auto &member : relation.members) {
 		if (member.role == role)
-			rings.push_back(member.way.nodes);
+			rings.push_back(member.way->nodes);
 	}
 	merge_way_segments(rings);
 
@@ -565,8 +565,8 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 			continue;
 		for (const auto &member : relation.members)
 			if (member.role == ProcessedMemberRole::Outer &&
-					seen.insert(member.way.id).second)
-				ways_needing_fill.push_back(&member.way);
+					seen.insert(member.way->id).second)
+				ways_needing_fill.push_back(member.way.get());
 	}
 
 	// Compute fills concurrently, as Rayon does in Rust.  Keep the number of
@@ -766,7 +766,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 				std::vector<std::pair<int32_t, int32_t>> all_coords;
 				for (const auto &member : rel.members) {
 					if (member.role == ProcessedMemberRole::Outer) {
-						if (auto fill = get_cached(member.way.id)) {
+						if (auto fill = get_cached(member.way->id)) {
 							all_coords.insert(
 									all_coords.end(), fill->begin(), fill->end());
 						}

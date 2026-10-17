@@ -102,7 +102,9 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	} else if (landuse_tag == "industrial") {
 		block_type = STONE;
 	} else if (landuse_tag == "military") {
-		block_type = GRAY_CONCRETE;
+		// The per-cell palette below selects the actual military surface. Keep
+		// this default consistent with Rust's landuse match arm as well.
+		block_type = GRASS_BLOCK;
 	} else if (landuse_tag == "railway") {
 		block_type = GRAVEL;
 	} else if (landuse_tag == "vineyard" || landuse_tag == "brownfield" ||
@@ -130,12 +132,6 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 					military_tag->second == "trench");
 	const auto climate = editor.climate();
 	const bool site_arid = construction_site::is_arid(climate);
-
-	std::vector<std::pair<int, int>> polygon_coords;
-	polygon_coords.reserve(element.nodes.size());
-	for (auto const &n : element.nodes) {
-		polygon_coords.emplace_back(n.x, n.z);
-	}
 
 	// Use deterministic RNG seeded by element ID for consistent results across region boundaries
 	auto rng = element_rng(element.id);
@@ -189,7 +185,6 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 			GRAY_CONCRETE,
 			LIGHT_GRAY_CONCRETE,
 			WHITE_CONCRETE,
-			YELLOW_CONCRETE,
 			DIRT_PATH,
 			SMOOTH_STONE,
 			WATER,
@@ -531,7 +526,8 @@ void generate_landuse_from_relation(WorldEditor &editor, ProcessedRelation const
 		for (auto const &member : rel.members) {
 			if (member.role == ProcessedMemberRole::Outer) {
 				// Use relation tags so the member inherits the relation's landuse=* type
-				ProcessedWay way_with_rel_tags{member.way.id, member.way.nodes, rel.tags};
+				ProcessedWay way_with_rel_tags{
+						member.way->id, member.way->nodes, rel.tags};
 				generate_landuse(editor, way_with_rel_tags, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
 			}

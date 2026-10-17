@@ -374,9 +374,9 @@ std::vector<std::vector<ProcessedNode>> collect_merged_rings(
 	for (const auto &member : relation.members) {
 		const bool skip = role == ProcessedMemberRole::Outer &&
 						  std::find(skipped_outer_ids.begin(), skipped_outer_ids.end(),
-								  member.way.id) != skipped_outer_ids.end();
+								  member.way->id) != skipped_outer_ids.end();
 		if (member.role == role && !skip)
-			rings.push_back(member.way.nodes);
+			rings.push_back(member.way->nodes);
 	}
 	merge_way_segments(rings);
 	std::vector<std::vector<ProcessedNode>> out;
@@ -7403,9 +7403,9 @@ void generate_building_from_relation(WorldEditor &editor,
 		return;
 	}
 	for (const auto &member : relation.members)
-		if (member.way.id == structures::starship::STARBASE_PAD2_INNER_RING_WAY &&
+		if (member.way->id == structures::starship::STARBASE_PAD2_INNER_RING_WAY &&
 				member.role == ProcessedMemberRole::Inner)
-			structures::place_starship(editor, member.way);
+			structures::place_starship(editor, *member.way);
 
 	std::optional<int> relation_levels;
 	if (const auto levels_tag = relation.tags.find("building:levels");
@@ -7476,14 +7476,15 @@ std::vector<ProcessedWay> facade_outer_rings(
 		if (member.role != ProcessedMemberRole::Outer)
 			continue;
 		has_outer = true;
-		const auto part = member.way.tags.find("building:part");
+		const auto part = member.way->tags.find("building:part");
 		const bool explicitly_not_a_part =
-				part != member.way.tags.end() && part->second.size() == 2 &&
+				part != member.way->tags.end() && part->second.size() == 2 &&
 				std::tolower(static_cast<unsigned char>(part->second[0])) == 'n' &&
 				std::tolower(static_cast<unsigned char>(part->second[1])) == 'o';
-		const bool is_part = part != member.way.tags.end() && !explicitly_not_a_part;
-		const bool is_closed = member.way.nodes.size() >= 4 &&
-							   member.way.nodes.front().id == member.way.nodes.back().id;
+		const bool is_part = part != member.way->tags.end() && !explicitly_not_a_part;
+		const bool is_closed =
+				member.way->nodes.size() >= 4 &&
+				member.way->nodes.front().id == member.way->nodes.back().id;
 		all_outer_parts_are_standalone &= is_part && is_closed;
 	}
 	if (has_outer && all_outer_parts_are_standalone)

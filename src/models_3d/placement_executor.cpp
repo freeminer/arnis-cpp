@@ -163,12 +163,6 @@ std::vector<Voxel> voxelize_fitted_stl(const ModelAsset &asset,
 Block named_palette_block(const std::string &name)
 {
 	std::string n = name;
-	n.erase(n.begin(), std::find_if(n.begin(), n.end(),
-							   [](unsigned char c) { return !std::isspace(c); }));
-	n.erase(std::find_if(n.rbegin(), n.rend(),
-					[](unsigned char c) { return !std::isspace(c); })
-					.base(),
-			n.end());
 	std::transform(n.begin(), n.end(), n.begin(),
 			[](unsigned char c) { return std::toupper(c); });
 	if (n == "STONE_BRICKS")
@@ -522,16 +516,19 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 						qid_seed);
 				continue;
 			}
-			float scale = 1.0f;
-			if (placement.height_m && *placement.height_m > 0)
-				scale = wikidata::scale_for_height(
-						asset, float(*placement.height_m * blocks_per_meter));
-			else if (placement.xz_extent_m && *placement.xz_extent_m > 0) {
-				const float extent = std::max(
-						asset.max[0] - asset.min[0], asset.max[2] - asset.min[2]);
-				if (extent > 1e-4f)
-					scale = float(*placement.xz_extent_m * blocks_per_meter) / extent;
-			}
+			// Rust derives an intrinsic GLB scale in model/metre units, then applies
+			// Args::scale in WorldTransform. Fold that world scale into `scale` here.
+			// Keep Rust's guarded match order: a valid height wins; otherwise a valid
+			// footprint can still size a model whose vertical bounds are degenerate.
+			float intrinsic_scale = 1.0f;
+			const float model_y = asset.max[1] - asset.min[1];
+			const float model_xz =
+					std::max(asset.max[0] - asset.min[0], asset.max[2] - asset.min[2]);
+			if (placement.height_m && model_y > 1e-4f)
+				intrinsic_scale = float(*placement.height_m) / model_y;
+			else if (placement.xz_extent_m && model_xz > 1e-4f)
+				intrinsic_scale = float(*placement.xz_extent_m) / model_xz;
+			const float scale = intrinsic_scale * float(blocks_per_meter);
 			if (!std::isfinite(scale) || scale <= 0)
 				continue;
 			// Same final-world safety envelope as Rust's GLB/STL placement code.

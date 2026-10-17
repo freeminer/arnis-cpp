@@ -15,6 +15,15 @@
 #include <thread>
 #include <unordered_map>
 #include <numbers>
+
+#if defined(_WIN32)
+#include <process.h>
+#define ARNIS_ELEVATION_GETPID _getpid
+#else
+#include <unistd.h>
+#define ARNIS_ELEVATION_GETPID getpid
+#endif
+
 namespace arnis::elevation::providers
 {
 std::pair<double, double> bbox_dimensions_m(const GeoBBox &bbox)
@@ -746,9 +755,8 @@ bool download_tile(const std::string &url, const std::filesystem::path &file,
 	std::filesystem::create_directories(file.parent_path());
 	static std::atomic_uint64_t temp_counter{0};
 	auto tmp = file;
-	tmp += ".tmp-" +
-		   std::to_string(std::hash<std::thread::id>{}(std::this_thread::get_id())) +
-		   "-" + std::to_string(temp_counter.fetch_add(1, std::memory_order_relaxed));
+	tmp += ".tmp" + std::to_string(ARNIS_ELEVATION_GETPID()) + "-" +
+		   std::to_string(temp_counter.fetch_add(1, std::memory_order_relaxed));
 	std::error_code ec;
 	[[maybe_unused]] auto permit = arnis::net::request_permit();
 	if (!http_to_file(url, tmp.string())) {
