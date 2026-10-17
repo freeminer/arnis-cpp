@@ -130,8 +130,7 @@ std::vector<std::vector<std::size_t>> assign_elements_to_tiles(
 		const std::vector<TileBounds> &tiles, double scale)
 {
 	std::vector<std::vector<std::size_t>> assigned(tiles.size());
-	const int32_t linear_halo = std::max<int32_t>(
-			TILE_EDITOR_HALO,
+	const int32_t linear_halo = std::max<int32_t>(TILE_EDITOR_HALO,
 			rust_saturating_i32(std::ceil(MAX_LINEAR_HALF_WIDTH_M * scale)));
 	std::unordered_map<Region, std::size_t, RegionHash> tile_grid;
 	tile_grid.reserve(tiles.size());

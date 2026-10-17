@@ -1090,9 +1090,9 @@ BridgeStructureMap BridgeStructureMap::build(
 								continue;
 							const bool at_start = candidate.nodes.front().x == node.x &&
 												  candidate.nodes.front().z == node.z;
-							const auto &far = at_start ? candidate.nodes.back()
+							const auto &far_ = at_start ? candidate.nodes.back()
 													   : candidate.nodes.front();
-							if (!node_members.contains({far.x, far.z})) {
+							if (!node_members.contains({far_.x, far_.z})) {
 								has_external_ramp = true;
 								break;
 							}

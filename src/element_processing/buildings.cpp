@@ -234,7 +234,7 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 		}
 		const double ux = px / distance, uz = pz / distance;
 		const auto &edges = buckets[bucket_of(std::atan2(pz, px))];
-		double hit = std::numeric_limits<double>::infinity(), far = 0.0;
+		double hit = std::numeric_limits<double>::infinity(), far_ = 0.0;
 		before.clear();
 		for (const std::size_t i : edges) {
 			const auto [ax, az] = points[i];
@@ -248,7 +248,7 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 			const double s = (wx * uz - wz * ux) / denom;
 			if (t <= 0.0 || s < -1e-9 || s > 1.0 + 1e-9)
 				continue;
-			far = std::max(far, t);
+			far_ = std::max(far_, t);
 			if (t + 0.5 >= distance)
 				hit = std::min(hit, t);
 			else
@@ -258,7 +258,7 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 		for (std::size_t i = 1; i < before.size(); i += 2)
 			if (before[i] - before[i - 1] > 1.0)
 				return std::nullopt;
-		const double boundary = std::isfinite(hit) ? hit : far;
+		const double boundary = std::isfinite(hit) ? hit : far_;
 		fractions.push_back(boundary > 0.0 ? std::min(1.0, distance / boundary) : 1.0);
 	}
 	return fractions;
