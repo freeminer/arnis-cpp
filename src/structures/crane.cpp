@@ -1,4 +1,5 @@
 #include "structures.h"
+#include "../assets_root.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
 #include <algorithm>
@@ -8,6 +9,12 @@ namespace arnis::structures::crane
 void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
 	if (!editor.place_schematics() || cells.size() < 1500)
+		return;
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	auto schematic = try_load_structure_cached(root / "crane.schem");
+	if (!schematic)
 		return;
 	long long sx = 0, sz = 0;
 	for (const auto &[x, z] : cells) {
@@ -29,7 +36,7 @@ void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int
 	const auto h = land_cover::coord_hash(x, z);
 	if (editor.is_lc_water(x, z) || h % 100 >= 60)
 		return;
-	place_named_schem(
-			editor, "crane", x, editor.get_absolute_y(x, 1, z), z, (h >> 8) & 3);
+	place_structure(editor, *schematic, x, editor.get_absolute_y(x, 1, z), z,
+			(unsigned)((h >> 8) & 3));
 }
 }

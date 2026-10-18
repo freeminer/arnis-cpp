@@ -1,4 +1,5 @@
 #include "structures.h"
+#include "../assets_root.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
 #include <algorithm>
@@ -9,6 +10,12 @@ void scatter_excavators(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
 	if (!editor.place_schematics() || cells.size() < 1500)
+		return;
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	auto schematic = try_load_structure_cached(root / "excavator.schem");
+	if (!schematic)
 		return;
 	const auto target = std::clamp<std::size_t>(cells.size() / 2000, 1, 6);
 	std::vector<std::pair<int, int>> placed;
@@ -27,8 +34,8 @@ void scatter_excavators(
 		// the water and spacing checks, it consumes a scatter slot even if the
 		// editor clips every voxel at a tile boundary. Keep later deterministic
 		// candidate selection independent of the stamp result.
-		place_named_schem(
-				editor, "excavator", x, editor.get_absolute_y(x, 1, z), z, (h >> 5) & 3);
+		place_structure(editor, *schematic, x, editor.get_absolute_y(x, 1, z), z,
+				(unsigned)((h >> 5) & 3));
 		placed.emplace_back(x, z);
 	}
 }

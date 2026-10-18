@@ -2,6 +2,7 @@
 #include "assets_root.h"
 #include "fm_ecoregion_cache.h"
 #include "coordinate_system/cartesian/xzpoint.h"
+#include "ground_generation.h"
 
 #include <algorithm>
 #include <array>
@@ -17,7 +18,6 @@
 #include <sstream>
 #include <unordered_map>
 #include <vector>
-#include "land_cover/land_cover.h"
 
 namespace arnis::ecoregion
 {
@@ -82,30 +82,13 @@ const Row *row(std::uint16_t id)
 	return id < r.size() && r[id] ? &*r[id] : nullptr;
 }
 
-double warped_noise(int x, int z, int scale, std::uint32_t salt)
-{
-	constexpr double c = 0.891006524188368, s = 0.453990499739547;
-	const double u = (x * c - z * s) / std::max(1, scale);
-	const double v = (x * s + z * c) / std::max(1, scale);
-	const int u0 = static_cast<int>(std::floor(u)), v0 = static_cast<int>(std::floor(v));
-	const double tu = u - u0, tv = v - v0;
-	const double su = tu * tu * (3.0 - 2.0 * tu), sv = tv * tv * (3.0 - 2.0 * tv);
-	const int sx = static_cast<int>(salt),
-			  sz = static_cast<int>((salt << 16) | (salt >> 16));
-	const auto sample = [&](int a, int b) {
-		return double(land_cover::coord_hash(a ^ sx, b ^ sz) % 1000) / 1000.0;
-	};
-	const double a = sample(u0, v0) * (1.0 - su) + sample(u0 + 1, v0) * su;
-	const double b = sample(u0, v0 + 1) * (1.0 - su) + sample(u0 + 1, v0 + 1) * su;
-	return a * (1.0 - sv) + b * sv;
-}
-
 std::pair<double, double> warp(double col, double row)
 {
 	const int x = static_cast<int>(std::floor(col * 64.0));
 	const int z = static_cast<int>(std::floor(row * 64.0));
 	const auto octave = [&](std::uint32_t salt, int period, double amp) {
-		return (warped_noise(x, z, period, salt) - .5) * 2.0 * amp;
+		return (ground_generation::value_noise_salted(x, z, period, salt) - .5) * 2.0 *
+			   amp;
 	};
 	return {octave(0xEC00001, 384, .9) + octave(0xEC00002, 96, .35) +
 					octave(0xEC00005, 16, .12),

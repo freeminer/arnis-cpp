@@ -16,6 +16,8 @@
 #include "schem_decoder.h"
 #include "starship.h"
 #include "tombstone.h"
+#include "boat.h"
+#include "helicopter.h"
 
 namespace arnis::structures
 {
@@ -632,20 +634,6 @@ void simple_tractor(WorldEditor &editor, int x, int z, uint8_t rot)
 	rel(editor, BLACK_CONCRETE, x, z, base_y, 2, 0, 1, rot);
 }
 
-void simple_boat(WorldEditor &editor, int x, int z, uint8_t rot)
-{
-	const int base_y = editor.get_water_level(x, z);
-	for (int dx = -4; dx <= 4; ++dx) {
-		const int half = 2 - (std::abs(dx) / 3);
-		for (int dz = -half; dz <= half; ++dz)
-			rel(editor, OAK_PLANKS, x, z, base_y, dx, 0, dz, rot);
-	}
-	for (int dx = -2; dx <= 2; ++dx)
-		rel(editor, WHITE_WOOL, x, z, base_y, dx, 3, 0, rot);
-	for (int y = 1; y <= 4; ++y)
-		rel(editor, OAK_FENCE, x, z, base_y, 0, y, 0, rot);
-}
-
 void simple_car(WorldEditor &editor, int x, int z, uint8_t rot, uint64_t variant)
 {
 	const int y = editor.get_absolute_y(x, 1, z);
@@ -661,20 +649,6 @@ void simple_car(WorldEditor &editor, int x, int z, uint8_t rot, uint64_t variant
 	for (int dx : {-2, 2})
 		for (int dz : {-1, 1})
 			rel(editor, BLACK_CONCRETE, x, z, y, dx, 0, dz, rot);
-}
-
-void simple_helicopter(WorldEditor &editor, int x, int z, uint8_t rot)
-{
-	const int y = editor.get_absolute_y(x, 1, z);
-	for (int dx = -3; dx <= 3; ++dx)
-		rel(editor, WHITE_CONCRETE, x, z, y, dx, 1, 0, rot);
-	for (int dx = -1; dx <= 1; ++dx)
-		for (int dz = -1; dz <= 1; ++dz)
-			rel(editor, dx == 1 ? GLASS : WHITE_CONCRETE, x, z, y, dx, 2, dz, rot);
-	for (int d = -5; d <= 5; ++d) {
-		rel(editor, IRON_BLOCK, x, z, y, d, 4, 0, rot);
-		rel(editor, IRON_BLOCK, x, z, y, 0, 4, d, rot);
-	}
 }
 
 void simple_windturbine(WorldEditor &editor, int x, int z, uint8_t rot)
@@ -839,26 +813,7 @@ namespace boat
 {
 void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max_z)
 {
-	constexpr int spacing = 400;
-	constexpr int max_boats = 200;
-	int count = 0;
-	for (int gz = min_z - ((min_z % spacing) + spacing) % spacing; gz <= max_z;
-			gz += spacing) {
-		for (int gx = min_x - ((min_x % spacing) + spacing) % spacing; gx <= max_x;
-				gx += spacing) {
-			if (count >= max_boats)
-				return;
-			const auto h = coord_hash(gx, gz);
-			if (h % 100 >= 45)
-				continue;
-			const int ax = gx + static_cast<int>(h % 7);
-			const int az = gz + static_cast<int>((h >> 3) % 7);
-			if (editor.is_lc_water(ax, az) && editor.water_distance(ax, az) == 0) {
-				simple_boat(editor, ax, az, static_cast<uint8_t>((h >> 5) & 3));
-				++count;
-			}
-		}
-	}
+	::arnis::structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 }
 }
 
@@ -899,10 +854,7 @@ namespace helicopter
 {
 void maybe_place_helicopter(WorldEditor &editor, int cx, int cz)
 {
-	const auto h = coord_hash(cx, cz);
-	if (h % 100 >= 60 || editor.is_lc_water(cx, cz))
-		return;
-	simple_helicopter(editor, cx, cz, static_cast<uint8_t>((h >> 8) & 3));
+	::arnis::structures::maybe_place_helicopter(editor, cx, cz);
 }
 }
 
@@ -910,24 +862,7 @@ namespace starship
 {
 void place_on_launch_mount(WorldEditor &editor, const ProcessedWay &ring)
 {
-	if (ring.nodes.empty())
-		return;
-	int64_t sx = 0, sz = 0;
-	for (const auto &node : ring.nodes) {
-		sx += node.x;
-		sz += node.z;
-	}
-	const int x = static_cast<int>(sx / static_cast<int64_t>(ring.nodes.size()));
-	const int z = static_cast<int>(sz / static_cast<int64_t>(ring.nodes.size()));
-	const int y = editor.get_absolute_y(x, 1, z);
-	for (int dy = 0; dy < 48; ++dy) {
-		const int radius = dy < 8 ? 2 : 1;
-		for (int dx = -radius; dx <= radius; ++dx)
-			for (int dz = -radius; dz <= radius; ++dz)
-				if (dx * dx + dz * dz <= radius * radius)
-					block(editor, dy < 5 ? BLACKSTONE : LIGHT_GRAY_CONCRETE, x + dx,
-							y + dy, z + dz);
-	}
+	place_starship(editor, ring);
 }
 }
 

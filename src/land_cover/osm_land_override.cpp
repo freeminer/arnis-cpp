@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <iostream>
 #include <iterator>
 #include <limits>
 #include <tuple>
@@ -180,28 +181,47 @@ void stamp_line(std::vector<std::uint64_t> &mask, const std::vector<ProcessedNod
 void fill_rings(std::vector<std::uint64_t> &mask,
 		const std::vector<std::vector<ProcessedNode>> &rings, const GridMap &map)
 {
-	for (int z = 0; z < int(map.height); ++z) {
-		std::vector<double> crossings;
-		for (const auto &nodes : rings) {
-			if (!closed(nodes))
+	// Match Rust's half-open scanline fill exactly. Sampling crossings at integer
+	// rows with an `az > z` predicate shifts edges that land on grid rows and can
+	// change which land-cover cells are considered inside an OSM water/building
+	// ring. Collect only rows touched by each non-horizontal edge, then fill the
+	// inclusive horizontal span for each paired crossing.
+	std::vector<std::vector<double>> rows(map.height);
+	for (const auto &nodes : rings) {
+		if (!closed(nodes))
+			continue;
+		for (std::size_t i = 0; i < nodes.size(); ++i) {
+			const auto &a = nodes[i];
+			const auto &b = nodes[(i + 1) % nodes.size()];
+			const double ay = (a.z - map.min_z) * map.sz;
+			const double by = (b.z - map.min_z) * map.sz;
+			if (ay == by)
 				continue;
-			for (std::size_t i = 0, j = nodes.size() - 1; i < nodes.size(); j = i++) {
-				const auto &a = nodes[j];
-				const auto &b = nodes[i];
-				const double ax = (a.x - map.min_x) * map.sx;
-				const double az = (a.z - map.min_z) * map.sz;
-				const double bx = (b.x - map.min_x) * map.sx;
-				const double bz = (b.z - map.min_z) * map.sz;
-				if ((az > z) != (bz > z))
-					crossings.push_back(ax + (z - az) * (bx - ax) / (bz - az));
+			const double ax = (a.x - map.min_x) * map.sx;
+			const double bx = (b.x - map.min_x) * map.sx;
+			const double y_lo = std::min(ay, by);
+			const double y_hi = std::max(ay, by);
+			const auto z_start = static_cast<std::int64_t>(std::ceil(y_lo));
+			const auto z_end =
+					std::min<std::int64_t>(static_cast<std::int64_t>(std::ceil(y_hi)),
+							static_cast<std::int64_t>(map.height));
+			for (auto z = std::max<std::int64_t>(0, z_start); z < z_end; ++z) {
+				const double t = (static_cast<double>(z) - ay) / (by - ay);
+				rows[static_cast<std::size_t>(z)].push_back(ax + t * (bx - ax));
 			}
 		}
+	}
+	for (std::size_t z = 0; z < rows.size(); ++z) {
+		auto &crossings = rows[z];
 		std::sort(crossings.begin(), crossings.end());
-		for (std::size_t i = 1; i < crossings.size(); i += 2) {
-			const int begin = std::max(0, int(std::ceil(crossings[i - 1])));
-			const int end = std::min(int(map.width) - 1, int(std::floor(crossings[i])));
-			for (int x = begin; x <= end; ++x)
-				set_bit(mask, std::size_t(z) * map.width + x);
+		for (std::size_t i = 0; i + 1 < crossings.size(); i += 2) {
+			const auto begin = std::max<std::int64_t>(
+					0, static_cast<std::int64_t>(std::ceil(crossings[i])));
+			const auto end =
+					std::min<std::int64_t>(static_cast<std::int64_t>(map.width) - 1,
+							static_cast<std::int64_t>(std::floor(crossings[i + 1])));
+			for (auto x = begin; x <= end; ++x)
+				set_bit(mask, z * map.width + static_cast<std::size_t>(x));
 		}
 	}
 }
@@ -282,14 +302,19 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 	std::vector<std::uint64_t> water_area((count + 63) / 64),
 			water_line((count + 63) / 64), land((count + 63) / 64),
 			over_water((count + 63) / 64);
+	bool any_area = false;
+	bool any_land = false;
 	for (const auto &element : elements) {
 		if (element.is_relation()) {
 			const auto &relation = element.as_relation();
 			std::vector<std::uint64_t> *target = nullptr;
-			if (is_water_area_relation(relation.tags))
+			if (is_water_area_relation(relation.tags)) {
+				any_area = true;
 				target = &water_area;
-			else if (building(relation.tags))
+			} else if (building(relation.tags)) {
+				any_land = true;
 				target = &land;
+			}
 			if (target) {
 				fill_rings(*target, relation_rings(relation, bbox), map);
 			}
@@ -309,8 +334,10 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 		}
 		if (is_water_area_way(way.tags)) {
 			if (closed(way.nodes))
-				if (auto ring = clipping::clip_water_ring_to_bbox(way.nodes, bbox))
+				if (auto ring = clipping::clip_water_ring_to_bbox(way.nodes, bbox)) {
 					fill_ring(water_area, *ring, map);
+					any_area = true;
+				}
 			continue;
 		}
 		const auto waterway = way.tags.get("waterway");
@@ -325,20 +352,19 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 		}
 		if (const auto half_width = land_line_half_width(way, scale)) {
 			stamp_line(land, way.nodes, *half_width, map, bbox);
+			any_land = true;
 			continue;
 		}
 		if (building(way.tags) && closed(way.nodes))
-			if (auto ring = clipping::clip_water_ring_to_bbox(way.nodes, bbox))
+			if (auto ring = clipping::clip_water_ring_to_bbox(way.nodes, bbox)) {
 				fill_ring(land, *ring, map);
+				any_land = true;
+			}
 	}
+	if (!any_area && !any_land)
+		return;
 	for (std::size_t i = 0; i < land.size(); ++i)
 		land[i] &= ~over_water[i];
-	const bool has_land =
-			std::any_of(land.begin(), land.end(), [](auto word) { return word != 0; });
-	const bool has_water_area = std::any_of(
-			water_area.begin(), water_area.end(), [](auto word) { return word != 0; });
-	if (!has_land && !has_water_area)
-		return;
 	std::vector<std::uint64_t> land_seed((count + 63) / 64);
 	for (std::size_t i = 0; i < count; ++i)
 		if (data.grid[i / data.width][i % data.width] != LC_WATER)
@@ -352,9 +378,8 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 							   : std::max(1, static_cast<int>(std::lround(raw_band)));
 	const auto rim = dilate(land_seed, data.grid, data.width, data.height, band, true);
 	const auto past_outline =
-			has_water_area
-					? dilate(water_area, data.grid, data.width, data.height, band, true)
-					: std::vector<std::uint64_t>((count + 63) / 64);
+			any_area ? dilate(water_area, data.grid, data.width, data.height, band, true)
+					 : std::vector<std::uint64_t>((count + 63) / 64);
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint8_t>> changes;
 	for (std::size_t i = 0; i < count; ++i) {
 		if (!bit(rim, i) || bit(water_area, i) || bit(water_line, i) ||
@@ -368,6 +393,8 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 	for (const auto &[x, z, cls] : changes)
 		data.grid[z][x] = cls;
 	if (!changes.empty()) {
+		std::cerr << "OSM land override: " << changes.size()
+				  << " shore cells reclassified from ESA water to land\n";
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
 		data.invalidate_water_blend_grid();
 	}

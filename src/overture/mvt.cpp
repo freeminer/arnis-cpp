@@ -4,6 +4,7 @@
 #include <bit>
 #include <cstring>
 #include <limits>
+#include <string_view>
 
 namespace arnis::overture::mvt
 {
@@ -16,16 +17,20 @@ struct Reader
 	bool varint(std::uint64_t &out)
 	{
 		out = 0;
-		for (unsigned shift = 0; shift < 64; shift += 7) {
+		for (unsigned byte_index = 0; byte_index < 10; ++byte_index) {
 			if (pos == data.size())
 				return false;
 			const auto byte = data[pos++];
-			out |= std::uint64_t(byte & 127) << shift;
+			// Match Rust's u64 shift behavior on the tenth terminating byte:
+			// payload bits beyond bit 63 are truncated, while a continuation
+			// after this byte is rejected by exhausting the ten-byte loop.
+			out |= std::uint64_t(byte & 127) << (byte_index * 7);
 			if (!(byte & 128))
 				return true;
 		}
 		return false;
 	}
+	bool key(std::uint64_t &out) { return varint(out) && (out >> 3) <= UINT32_MAX; }
 	bool bytes(std::vector<std::uint8_t> &out)
 	{
 		std::uint64_t n;
@@ -61,6 +66,66 @@ struct Reader
 		return false;
 	}
 };
+std::string utf8_lossy(const std::vector<std::uint8_t> &bytes)
+{
+	constexpr std::string_view replacement = "\xef\xbf\xbd";
+	std::string result;
+	result.reserve(bytes.size());
+	for (std::size_t i = 0; i < bytes.size();) {
+		const auto first = bytes[i];
+		if (first <= 0x7f) {
+			result.push_back(static_cast<char>(first));
+			++i;
+			continue;
+		}
+
+		unsigned length = 0;
+		std::uint8_t second_min = 0x80, second_max = 0xbf;
+		if (first >= 0xc2 && first <= 0xdf) {
+			length = 2;
+		} else if (first >= 0xe0 && first <= 0xef) {
+			length = 3;
+			if (first == 0xe0)
+				second_min = 0xa0;
+			else if (first == 0xed)
+				second_max = 0x9f;
+		} else if (first >= 0xf0 && first <= 0xf4) {
+			length = 4;
+			if (first == 0xf0)
+				second_min = 0x90;
+			else if (first == 0xf4)
+				second_max = 0x8f;
+		}
+		if (length == 0) {
+			result.append(replacement);
+			++i;
+			continue;
+		}
+		if (i + 1 == bytes.size()) {
+			result.append(replacement);
+			break;
+		}
+		const auto second = bytes[i + 1];
+		if (second < second_min || second > second_max) {
+			result.append(replacement);
+			++i;
+			continue;
+		}
+
+		std::size_t valid = 2;
+		while (valid < length && i + valid < bytes.size() &&
+				(bytes[i + valid] & 0xc0) == 0x80)
+			++valid;
+		if (valid == length) {
+			result.append(reinterpret_cast<const char *>(bytes.data() + i), length);
+			i += length;
+		} else {
+			result.append(replacement);
+			i += valid;
+		}
+	}
+	return result;
+}
 std::int64_t zigzag64(std::uint64_t value)
 {
 	const auto decoded = (value >> 1) ^ (std::uint64_t{0} - (value & 1));
@@ -106,7 +171,7 @@ void decode_geometry(const std::vector<std::uint32_t> &commands, Feature &featur
 			for (std::size_t p = 0; p < ring.points.size(); ++p) {
 				const auto a = ring.points[p];
 				const auto b = ring.points[(p + 1) % ring.points.size()];
-				area += double(a.first) * b.second - double(b.first) * a.second;
+				area += Area(a.first) * Area(b.second) - Area(b.first) * Area(a.second);
 			}
 			ring.area2 = area;
 			feature.rings.push_back(std::move(ring));
@@ -141,14 +206,14 @@ bool decode_value(const std::vector<std::uint8_t> &bytes, Value &value)
 	value = false;
 	while (r.pos < bytes.size()) {
 		std::uint64_t key;
-		if (!r.varint(key))
+		if (!r.key(key))
 			return false;
 		const auto field = key >> 3, wire = key & 7;
 		if (field == 1 && wire == 2) {
 			std::vector<std::uint8_t> s;
 			if (!r.bytes(s))
 				return false;
-			value = std::string(s.begin(), s.end());
+			value = utf8_lossy(s);
 			continue;
 		}
 		if (field == 2 && wire == 5) {
@@ -201,7 +266,7 @@ bool decode_feature(const std::vector<std::uint8_t> &bytes, Feature &out)
 	std::vector<std::uint32_t> geometry;
 	while (r.pos < bytes.size()) {
 		std::uint64_t key;
-		if (!r.varint(key))
+		if (!r.key(key))
 			return false;
 		auto field = key >> 3, wire = key & 7;
 		if (field == 2) {
@@ -246,7 +311,7 @@ bool decode_layer(const std::vector<std::uint8_t> &bytes, Layer &out)
 	Reader r{bytes};
 	while (r.pos < bytes.size()) {
 		std::uint64_t key;
-		if (!r.varint(key))
+		if (!r.key(key))
 			return false;
 		auto field = key >> 3, wire = key & 7;
 		std::vector<std::uint8_t> b;
@@ -254,7 +319,7 @@ bool decode_layer(const std::vector<std::uint8_t> &bytes, Layer &out)
 			if (!r.bytes(b))
 				return false;
 			if (field == 1)
-				out.name.assign(b.begin(), b.end());
+				out.name = utf8_lossy(b);
 			else if (field == 2) {
 				Feature f;
 				if (decode_feature(b, f))
@@ -268,7 +333,7 @@ bool decode_layer(const std::vector<std::uint8_t> &bytes, Layer &out)
 		} else if (field == 3 && wire == 2) {
 			if (!r.bytes(b))
 				return false;
-			out.keys.emplace_back(b.begin(), b.end());
+			out.keys.push_back(utf8_lossy(b));
 		} else if (field == 5 && wire == 0) {
 			std::uint64_t v;
 			if (!r.varint(v))
@@ -299,7 +364,7 @@ std::optional<std::vector<Layer>> decode(const std::vector<std::uint8_t> &data)
 	std::vector<Layer> out;
 	while (r.pos < data.size()) {
 		std::uint64_t key;
-		if (!r.varint(key))
+		if (!r.key(key))
 			return std::nullopt;
 		if ((key >> 3) == 3 && (key & 7) == 2) {
 			std::vector<std::uint8_t> b;

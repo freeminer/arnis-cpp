@@ -335,7 +335,6 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	data->ground_level = ground_level;
 	data->palms_default = !exclude_palms;
 	data->sizes = sizes;
-	data->realm_name = source.realm();
 	std::unordered_map<std::string, std::size_t> asset_entries;
 	auto build_community = [&](const nlohmann::json &json,
 								   const std::filesystem::path &manifest,
@@ -403,16 +402,62 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		return community;
 	};
 	auto load_pack = [&](const std::filesystem::path &manifest, Data::Pack &out,
-							 const std::string &pack_name) {
+							 const std::string &pack_name) -> std::string {
 		std::ifstream in(manifest);
 		if (!in)
-			return;
+			return {};
 		nlohmann::json root;
 		try {
 			in >> root;
 		} catch (...) {
-			return;
+			return {};
 		}
+		// Mirror Rust's required MRegion/MCommunity fields and serde defaults:
+		// only species width lists and community density are optional. Reject a
+		// malformed pack instead of silently generating from a partial manifest.
+		if (!root.is_object() || !root.contains("realm") || !root["realm"].is_string() ||
+				!root.contains("default_community") ||
+				!root["default_community"].is_string() || !root.contains("communities") ||
+				!root["communities"].is_array())
+			return {};
+		for (const auto &community : root["communities"]) {
+			if (!community.is_object() || !community.contains("name") ||
+					!community["name"].is_string() || !community.contains("habitat") ||
+					!community["habitat"].is_string() || !community.contains("species") ||
+					!community["species"].is_array())
+				return {};
+			if (community.contains("density")) {
+				const auto &density = community["density"];
+				const bool valid_density =
+						density.is_number_unsigned()
+								? density.get<std::uint64_t>() <=
+										  std::numeric_limits<std::uint32_t>::max()
+								: density.is_number_integer() &&
+										  density.get<std::int64_t>() >= 0 &&
+										  static_cast<std::uint64_t>(
+												  density.get<std::int64_t>()) <=
+												  std::numeric_limits<
+														  std::uint32_t>::max();
+				if (!valid_density)
+					return {};
+			}
+			for (const auto &species : community["species"]) {
+				if (!species.is_object())
+					return {};
+				if (species.contains("name") && !species["name"].is_string())
+					return {};
+				for (const char *field : {"w1", "w2", "w3"}) {
+					if (!species.contains(field))
+						continue;
+					const auto &paths = species[field];
+					if (!paths.is_array() ||
+							std::any_of(paths.begin(), paths.end(),
+									[](const auto &path) { return !path.is_string(); }))
+						return {};
+				}
+			}
+		}
+		const auto manifest_realm = root.value("realm", std::string{});
 		const auto communities = root.value("communities", nlohmann::json::array());
 		const std::string fallback = root.value("default_community", "");
 		bool explicit_fallback = false;
@@ -435,16 +480,17 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 					out.fallback = i;
 					break;
 				}
+		return manifest_realm;
 	};
-	load_pack(source.realm_path("region.json"), data->realm, source.realm());
+	const auto manifest_realm =
+			load_pack(source.realm_path("region.json"), data->realm, source.realm());
 	if (data->realm.empty())
 		return std::nullopt;
+	data->realm_name = manifest_realm;
 	data->total_realm = data->entries.size();
-	// The directory name is `vanilla-plus`, while its manifest identifies the
-	// realm as `vnplus`.  Rust checks the manifest value; accept both spellings
-	// so callers constructing a source directly do not load the vanilla pack
-	// twice.
-	if (source.realm() != "vanilla-plus" && source.realm() != "vnplus")
+	// Match Rust: whether to load the vanilla sprinkle is determined by the
+	// selected pack's manifest realm, not by the source directory name.
+	if (manifest_realm != "vnplus")
 		load_pack(source.vanilla_path("region.json"), data->vanilla, "vanilla-plus");
 	else
 		data->vanilla.own_count = data->vanilla.communities.size();

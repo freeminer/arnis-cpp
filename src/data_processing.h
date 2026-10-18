@@ -3,6 +3,7 @@
 #include "floodfill_cache.h"
 #include "args.h"
 #include <array>
+#include <cstdint>
 #include <unordered_map>
 #include <unordered_set>
 #include <algorithm>
@@ -161,6 +162,10 @@ inline void apply_generation_options(WorldEditor &editor, const GenerationOption
 // Rust pipeline policy: region streaming is worthwhile only when enough tiles
 // exist to amortize flush-worker setup and memory bookkeeping.
 bool should_stream_to_disk(std::size_t tile_count, bool fillground = false);
+// Deterministic form of the Rust policy, exposed separately from OS memory
+// probing so callers can make the same decision from their own memory source.
+bool should_stream_to_disk(
+		std::size_t tile_count, std::uint64_t available_mb, bool fillground);
 bool should_use_parallel_tiles(std::size_t tile_count, bool java_format);
 struct GenerationFeatureFlags
 {

@@ -86,6 +86,7 @@
 #include "models_3d/wikidata/remote_provider.h"
 #include "canopy/canopy.h"
 #include "elevation/elevation.h"
+#include "elevation/cache.h"
 #include "one_world.h"
 #include "coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 #include "coordinate_system/geographic/llbbox.h"
@@ -193,6 +194,28 @@ GroundFetchPlan make_ground_fetch_plan(
 		// original request and its unpadded dimensions.
 	}
 	return plan;
+}
+
+int area_floor_for(const Ground *ground, const Args &args)
+{
+	if (!ground)
+		return args.ground_level;
+	int floor = ground->base_level(args.ground_level);
+	if (!args.one_world_run || !args.disable_height_limit || !ground->elevation_enabled)
+		return floor;
+	std::optional<int> lowest;
+	for (const auto &row : ground->elevation_grid)
+		for (const float height : row)
+			if (std::isfinite(height)) {
+				const double floored = std::floor(static_cast<double>(height));
+				const int y = floored <= std::numeric_limits<int>::min()
+									  ? std::numeric_limits<int>::min()
+							  : floored >= std::numeric_limits<int>::max()
+									  ? std::numeric_limits<int>::max()
+									  : static_cast<int>(floored);
+				lowest = lowest ? std::min(*lowest, y) : y;
+			}
+	return lowest.value_or(floor);
 }
 
 std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
@@ -553,7 +576,8 @@ std::optional<std::string> decal_texture(
 
 } // anonymous namespace
 
-bool should_stream_to_disk(std::size_t tile_count, bool fillground)
+bool should_stream_to_disk(
+		std::size_t tile_count, std::uint64_t available_mb, bool fillground)
 {
 	if (const char *v = std::getenv("ARNIS_STREAM_TO_DISK")) {
 		if (std::string(v) == "1")
@@ -570,6 +594,12 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground)
 	const std::uint64_t per_region_mb =
 			fillground ? base_region_mb * span / static_cast<std::uint64_t>(vanilla_span)
 					   : base_region_mb;
+	return available_mb > 0 &&
+		   (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
+}
+
+bool should_stream_to_disk(std::size_t tile_count, bool fillground)
+{
 #if defined(_WIN32)
 	MEMORYSTATUSEX memory{};
 	memory.dwLength = sizeof(memory);
@@ -612,8 +642,7 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground)
 	// Like Rust's sysinfo fallback, unknown platforms preserve the fast path.
 	constexpr std::uint64_t available_mb = 0;
 #endif
-	return available_mb > 0 &&
-		   (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
+	return should_stream_to_disk(tile_count, available_mb, fillground);
 }
 
 bool should_use_parallel_tiles(std::size_t tile_count, bool java_format)
@@ -1434,6 +1463,12 @@ bool generate_world(WorldEditor &editor,
 		const PreparedBuildingData *prepared_buildings, mapillary::FacadeJob *facade_job,
 		std::optional<std::pair<int, int>> spawn_point)
 {
+	// Rust starts this best-effort sweep from both CLI and GUI entry points.
+	// The C++ library has a single generation boundary, so do it here using
+	// the caller-configured Arnis cache root; its daily stamp makes repeated
+	// mapchunk/world requests cheap.
+	elevation::spawn_throttled_cleanup(cache::base_directory());
+
 	Args effective_args = args_;
 	// Rust's CLI and GUI both make cave generation imply underground fill.
 	// Keep direct C++ library callers on the same path as well.
@@ -1598,26 +1633,7 @@ bool generate_world(WorldEditor &editor,
 				args.disable_height_limit &&
 				extended_max_y_for(args) > world_editor::DEFAULT_MAX_Y);
 	}
-	const int base_level = editor.ground ? editor.ground->base_level(args.ground_level)
-										 : args.ground_level;
-	int area_floor = base_level;
-	if (args.one_world_run && args.disable_height_limit && editor.ground &&
-			editor.ground->elevation_enabled) {
-		std::optional<int> lowest;
-		for (const auto &row : editor.ground->elevation_grid)
-			for (const float height : row)
-				if (std::isfinite(height)) {
-					const double floored = std::floor(static_cast<double>(height));
-					const int y = floored <= std::numeric_limits<int>::min()
-										  ? std::numeric_limits<int>::min()
-								  : floored >= std::numeric_limits<int>::max()
-										  ? std::numeric_limits<int>::max()
-										  : static_cast<int>(floored);
-					lowest = lowest ? std::min(*lowest, y) : y;
-				}
-		if (lowest)
-			area_floor = *lowest;
-	}
+	int area_floor = area_floor_for(editor.ground, args);
 	world_editor::set_terrain_floor_y(area_floor);
 	world_editor::set_base_chunk_y(area_floor);
 	// Match Rust's filler palette for out-of-bounds chunks on non-Earth bodies.
@@ -1914,15 +1930,42 @@ bool generate_world(WorldEditor &editor,
 	const auto ground_geographic = editor.geographic_bounds();
 	const auto ground_fetch_plan =
 			make_ground_fetch_plan(args, ground_geographic, xzbbox);
-	if (editor.ground && args.body == CelestialBody::Earth &&
-			!editor.ground->has_land_cover()) {
+	const bool fetch_land_cover = editor.ground && args.body == CelestialBody::Earth &&
+								  !editor.ground->has_land_cover();
+	const bool fetch_canopy = editor.ground && args.canopy_height &&
+							  args.body == CelestialBody::Earth &&
+							  !editor.ground->has_canopy();
+	std::optional<std::future<land_cover::LandCoverData>> land_cover_job;
+	std::optional<std::future<std::optional<canopy::CanopyData>>> canopy_job;
+	// Rust starts the independent Earth rasters together. Keep the host adapter's
+	// fetches overlapped too, then install each completed grid on this generation's
+	// Ground before the elevation-dependent surface passes begin.
+	if (fetch_land_cover) {
+		const auto bounds = land_cover::GeographicBounds{ground_fetch_plan.bounds[0],
+				ground_fetch_plan.bounds[2], ground_fetch_plan.bounds[1],
+				ground_fetch_plan.bounds[3]};
+		const auto width = ground_fetch_plan.grid_width;
+		const auto height = ground_fetch_plan.grid_height;
+		land_cover_job.emplace(std::async(std::launch::async, [bounds, width, height] {
+			return land_cover::fetch_land_cover_data(bounds, width, height);
+		}));
+	}
+	if (fetch_canopy) {
+		const auto bounds = ground_fetch_plan.bounds;
+		const auto width = ground_fetch_plan.grid_width;
+		const auto height = ground_fetch_plan.grid_height;
+		const auto cache_root = cache::provider_cache_root("canopy");
+		canopy_job.emplace(
+				std::async(std::launch::async, [bounds, width, height, cache_root] {
+					return canopy::fetch_canopy_data(cache_root, bounds[0], bounds[2],
+							bounds[1], bounds[3], width, height);
+				}));
+	}
+	if (land_cover_job) {
 		// Match Ground::new_enabled: land-cover samples use the same world/grid
 		// dimensions as elevation. One World additionally fetches a padded,
 		// Mercator-row-remapped source grid and crops to the generated rectangle.
-		auto land_cover = land_cover::fetch_land_cover_data(
-				{ground_fetch_plan.bounds[0], ground_fetch_plan.bounds[2],
-						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[3]},
-				ground_fetch_plan.grid_width, ground_fetch_plan.grid_height);
+		auto land_cover = land_cover_job->get();
 		if (land_cover.width == 0 || land_cover.height == 0) {
 			land_cover = build_osm_water_land_cover(elements, xzbbox);
 		} else {
@@ -1942,12 +1985,8 @@ bool generate_world(WorldEditor &editor,
 	// Keep the acquisition optional for library hosts: a missing canopy tile
 	// must not prevent terrain generation, while a successful raster is shared
 	// by tree placement and the natural-surface pass.
-	if (editor.ground && args.canopy_height && args.body == CelestialBody::Earth &&
-			!editor.ground->has_canopy()) {
-		if (auto canopy = canopy::fetch_canopy_data(cache::provider_cache_root("canopy"),
-					ground_fetch_plan.bounds[0], ground_fetch_plan.bounds[2],
-					ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[3],
-					ground_fetch_plan.grid_width, ground_fetch_plan.grid_height)) {
+	if (canopy_job) {
+		if (auto canopy = canopy_job->get()) {
 			if (ground_fetch_plan.remap_mercator)
 				canopy->remap_rows_to_mercator(
 						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[0]);
@@ -1970,6 +2009,12 @@ bool generate_world(WorldEditor &editor,
 			editor.ground->save_land_cover_debug_image("landcover_debug_post_osm_water");
 		editor.ground->apply_bridge_land_cover_repair(elements, xzbbox, args.scale);
 		editor.ground->mark_beaches();
+		// Rust applies OSM water/land and bridge repairs before area_floor_for;
+		// these can lower cells in an extended One World, so refresh the global
+		// filler/bedrock plane and the floor passed to tree placement here.
+		area_floor = area_floor_for(editor.ground, args);
+		world_editor::set_terrain_floor_y(area_floor);
+		world_editor::set_base_chunk_y(area_floor);
 		if (args.debug)
 			editor.ground->save_land_cover_debug_image(
 					"landcover_debug_post_bridge_repair");
@@ -2148,18 +2193,17 @@ bool generate_world(WorldEditor &editor,
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
 	// Build once for the full area, as Rust does; tile workers only read it.
-	const auto highway_connectivity = highways::build_highway_connectivity_map(elements);
+	auto highway_connectivity = highways::build_highway_connectivity_map(elements);
 	// Rust also builds the junction/crossing index before it reorders ground
 	// fills; only then does element dispatch begin.
 	const auto geo_bounds = editor.geographic_bounds();
-	const auto marking_index =
-			road_markings::RoadMarkingIndex::build(elements, args.scale,
-					decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
-							(geo_bounds[2] + geo_bounds[3]) * .5));
+	auto marking_index = road_markings::RoadMarkingIndex::build(elements, args.scale,
+			decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
+					(geo_bounds[2] + geo_bounds[3]) * .5));
 	// Rust reorders only ground-fill elements here, after applying OSM ground
 	// overrides and building the shared indexes. Keep the cached element vector
 	// immutable and carry this order as indices to avoid a deep copy per chunk.
-	const auto dispatch_order = ground_fill_area_order(elements);
+	auto dispatch_order = ground_fill_area_order(elements);
 	std::vector<std::size_t> dispatch_rank(elements.size());
 	for (std::size_t rank = 0; rank < dispatch_order.size(); ++rank)
 		dispatch_rank[dispatch_order[rank]] = rank;
@@ -3005,6 +3049,10 @@ bool generate_world(WorldEditor &editor,
 					xzbbox.min_z(), xzbbox.max_z(), true);
 		}
 	}
+	// Cave geometry is only needed while carving and decorating the cave pass;
+	// release it before the later model/landmark work, as Rust does when that
+	// phase's local state goes out of scope.
+	cave_ellipsoids = {};
 
 	if (!regional_ground_passes)
 		water_depth::carve_lc_water_pass(
@@ -3025,6 +3073,41 @@ bool generate_world(WorldEditor &editor,
 		caves::seal_floating_fluid_region(editor,
 				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 				world_editor::terrain_floor_y());
+	// Rust drops the generation-only indexes and masks before model placement.
+	// Keep the same lifetime boundary here: these can scale with the full area,
+	// but every consumer (including regional tree placement and tunnel carving)
+	// has finished by this point.
+	editor.set_regional_tree_placer({});
+	editor.set_mapped_regional_tree_placer({});
+	editor.mapped_trunks.reset();
+	shared_selector.reset();
+	road_mask_owner.reset();
+	big_water_field = {};
+	tunnel_footprint = {};
+	rail_mask = {};
+	building_passages = {};
+	highway_connectivity = {};
+	marking_index = {};
+	still_surfaces = {};
+	decltype(tunnel_internal_endpoints){}.swap(tunnel_internal_endpoints);
+	tunnel_portals = {};
+	decltype(rail_bridge_internal_endpoints){}.swap(rail_bridge_internal_endpoints);
+	bridge_outlines = {};
+	bridge_structures = {};
+	bridge_surface = {};
+	decltype(dispatch_state.rail_tunnel_points){}.swap(dispatch_state.rail_tunnel_points);
+	decltype(dispatch_state.highway_tunnel_cells){}.swap(
+			dispatch_state.highway_tunnel_cells);
+	filtered_building_footprints.reset();
+	building_part_groups = {};
+	building_group_members = {};
+	std::vector<TileBounds>{}.swap(element_tiles);
+	decltype(element_assignments){}.swap(element_assignments);
+	decltype(element_tasks){}.swap(element_tasks);
+	decltype(dispatch_order){}.swap(dispatch_order);
+	decltype(dispatch_rank){}.swap(dispatch_rank);
+	tile_fill_reader_state.reset();
+	expiring_fills = {};
 	if (model_pipeline) {
 		model_pipeline->place(three_dmr_provider, wikidata_provider,
 				custom_model_provider, editor, args.scale);

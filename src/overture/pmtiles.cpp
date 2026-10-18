@@ -9,7 +9,8 @@ namespace arnis::overture::pmtiles
 {
 namespace
 {
-constexpr std::size_t HEADER_LEN = 127, MAX_DIRECTORY_BYTES = 64 * 1024 * 1024,
+constexpr std::size_t HEADER_LEN = 127, HEADER_PROBE_LEN = 16 * 1024,
+					  MAX_DIRECTORY_BYTES = 64 * 1024 * 1024,
 					  MAX_ENTRIES = 8 * 1024 * 1024;
 constexpr std::uint64_t MAX_TILE_BYTES = 64 * 1024 * 1024;
 constexpr std::uint8_t COMPRESSION_NONE = 1, COMPRESSION_GZIP = 2, COMPRESSION_BROTLI = 3,
@@ -42,11 +43,7 @@ struct Reader
 		return false;
 	}
 };
-struct Entry
-{
-	std::uint64_t id = 0, offset = 0;
-	std::uint32_t run = 0, length = 0;
-};
+using Entry = DirectoryEntry;
 std::optional<std::vector<Entry>> decode_directory(const std::vector<std::uint8_t> &bytes)
 {
 	if (bytes.size() > MAX_DIRECTORY_BYTES)
@@ -209,13 +206,23 @@ std::optional<Archive> open_archive(const RangeReader &read_range,
 {
 	if (!read_range)
 		return {};
-	const auto bytes = read_range(0, HEADER_LEN);
-	if (!bytes || bytes->size() != HEADER_LEN)
+	// Rust fetches a 16 KiB probe so the header and the typical root directory
+	// arrive in one range request. Large roots still use a second bounded read.
+	const auto probe = read_range(0, HEADER_PROBE_LEN);
+	if (!probe || probe->size() < HEADER_LEN)
 		return {};
-	const auto header = parse_header(*bytes, allowed_tile_types);
-	if (!header)
+	const auto header = parse_header(*probe, allowed_tile_types);
+	if (!header || header->root_offset > std::numeric_limits<std::uint64_t>::max() -
+												 header->root_length)
 		return {};
-	const auto root = read_range(header->root_offset, header->root_length);
+	const auto root_end = header->root_offset + header->root_length;
+	std::optional<std::vector<std::uint8_t>> root;
+	if (root_end <= probe->size()) {
+		root.emplace(probe->begin() + static_cast<std::ptrdiff_t>(header->root_offset),
+				probe->begin() + static_cast<std::ptrdiff_t>(root_end));
+	} else {
+		root = read_range(header->root_offset, header->root_length);
+	}
 	if (!root || root->size() != header->root_length)
 		return {};
 	return Archive{*header, *root};
@@ -325,15 +332,28 @@ TileLocateResult locate_id_checked(const Header &header,
 {
 	if (!read_range)
 		return {TileReadStatus::Error, {}};
-	auto directory =
-			decompress(root_directory, header.internal_compression, MAX_DIRECTORY_BYTES);
-	if (!directory)
-		return {TileReadStatus::Error, {}};
-	for (unsigned depth = 0; depth < 4; ++depth) {
-		const auto entries = decode_directory(*directory);
+	std::optional<std::vector<Entry>> owned_directory;
+	const std::vector<Entry> *directory = nullptr;
+	if (leaf_cache && leaf_cache->root) {
+		directory = &*leaf_cache->root;
+	} else {
+		auto decoded = decompress(
+				root_directory, header.internal_compression, MAX_DIRECTORY_BYTES);
+		if (!decoded)
+			return {TileReadStatus::Error, {}};
+		auto entries = decode_directory(*decoded);
 		if (!entries)
 			return {TileReadStatus::Error, {}};
-		const auto entry = entry_for(*entries, tile_id);
+		if (leaf_cache) {
+			leaf_cache->root = std::move(*entries);
+			directory = &*leaf_cache->root;
+		} else {
+			owned_directory = std::move(*entries);
+			directory = &*owned_directory;
+		}
+	}
+	for (unsigned depth = 0; depth < 4; ++depth) {
+		const auto entry = entry_for(*directory, tile_id);
 		if (!entry)
 			return {TileReadStatus::Missing, {}};
 		if (entry->run != 0) {
@@ -353,21 +373,32 @@ TileLocateResult locate_id_checked(const Header &header,
 				UINT64_MAX - header.leaf_offset - entry->offset < entry->length)
 			return {TileReadStatus::Error, {}};
 		const auto leaf_offset = header.leaf_offset + entry->offset;
+		const auto key = std::pair{entry->offset, entry->length};
 		if (leaf_cache) {
-			const auto cached = leaf_cache->find(leaf_offset);
-			if (cached != leaf_cache->end()) {
-				directory = cached->second;
+			const auto cached = leaf_cache->leaves.find(key);
+			if (cached != leaf_cache->leaves.end()) {
+				directory = &cached->second;
 				continue;
 			}
 		}
 		auto raw = read_range(leaf_offset, entry->length);
 		if (!raw || raw->size() != entry->length)
 			return {TileReadStatus::Error, {}};
-		directory = decompress(*raw, header.internal_compression, MAX_DIRECTORY_BYTES);
-		if (!directory)
+		auto decoded = decompress(*raw, header.internal_compression, MAX_DIRECTORY_BYTES);
+		if (!decoded)
 			return {TileReadStatus::Error, {}};
-		if (leaf_cache)
-			leaf_cache->insert_or_assign(leaf_offset, *directory);
+		auto entries = decode_directory(*decoded);
+		if (!entries)
+			return {TileReadStatus::Error, {}};
+		if (leaf_cache) {
+			auto [cached, inserted] =
+					leaf_cache->leaves.emplace(key, std::move(*entries));
+			(void)inserted;
+			directory = &cached->second;
+		} else {
+			owned_directory = std::move(*entries);
+			directory = &*owned_directory;
+		}
 	}
 	return {TileReadStatus::Error, {}};
 }

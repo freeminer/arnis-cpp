@@ -41,6 +41,27 @@ namespace highways
 const int VALLEY_BRIDGE_THRESHOLD = 7;
 constexpr int MAX_BLOCK_RANGE = 8;
 
+std::optional<double> parse_width_tag_m(
+		const std::unordered_map<std::string, std::string> &tags)
+{
+	const auto it = tags.find("width");
+	if (it == tags.end())
+		return std::nullopt;
+	std::string_view width = it->second;
+	while (!width.empty() && std::isspace(static_cast<unsigned char>(width.front())))
+		width.remove_prefix(1);
+	while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
+		width.remove_suffix(1);
+	while (!width.empty() && width.back() == 'm')
+		width.remove_suffix(1);
+	while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
+		width.remove_suffix(1);
+	const auto metres = crate::strict_parse::f64(width);
+	if (!metres || !std::isfinite(*metres) || *metres <= 0.0)
+		return std::nullopt;
+	return metres;
+}
+
 std::vector<crate::block_definitions::Block> default_road_mix()
 {
 	return {crate::block_definitions::GRAY_CONCRETE_POWDER,
@@ -574,22 +595,10 @@ int highway_block_range(const std::string &highway_type,
 			1, 16);
 	// An explicitly mapped physical width takes precedence. Otherwise retain the
 	// historic type width as a minimum and enlarge multi-lane carriageways.
-	if (const auto it = tags.find("width"); it != tags.end()) {
-		std::string_view width = it->second;
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-			width.remove_suffix(1);
-		while (!width.empty() && width.back() == 'm')
-			width.remove_suffix(1);
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-			width.remove_suffix(1);
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.front())))
-			width.remove_prefix(1);
-		if (const auto metres = crate::strict_parse::f64(width);
-				metres && std::isfinite(*metres) && *metres > 0.0) {
-			const double rounded = std::round(*metres / 2.0);
-			block_range = static_cast<int>(
-					std::clamp(rounded, 1.0, static_cast<double>(MAX_BLOCK_RANGE)));
-		}
+	if (const auto metres = parse_width_tag_m(tags)) {
+		const double rounded = std::round(*metres / 2.0);
+		block_range = static_cast<int>(
+				std::clamp(rounded, 1.0, static_cast<double>(MAX_BLOCK_RANGE)));
 	} else if (scales_with_lanes) {
 		block_range = std::max(
 				block_range, static_cast<int>(std::round((lanes * 3.5 - 1.0) / 2.0)));
@@ -749,7 +758,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					const std::unordered_set<std::pair<int, int>, PairHash> arm_cells(
 							arm.begin(), arm.end());
 					for (const auto &[lx, lz] : arm) {
-						auto joins = [&, lx=lx, lz=lz](int dx, int dz) {
+						auto joins = [&, lx = lx, lz = lz](int dx, int dz) {
 							return arm_cells.contains({lx + dx, lz + dz});
 						};
 						const auto bars = crate::connected_blocks::connected_fence(
@@ -1090,6 +1099,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	std::optional<int> previous_bridge_y;
 	std::optional<std::pair<int, int>> previous_rail_left;
 	std::optional<std::pair<int, int>> previous_rail_right;
+	std::optional<std::pair<std::pair<int, int>, int>> previous_parapet_left;
+	std::optional<std::pair<std::pair<int, int>, int>> previous_parapet_right;
 	const auto bridge_style = bridge_member ? bridge_member->style
 											: crate::bridge_styles::BridgeStyle::Beam;
 	const auto *bridge_pylons = bridge_member && bridge_member->cable_pylons
@@ -1268,13 +1279,13 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						crossing_paint->kind ==
 								crate::road_markings::CrossingPaint::Kind::Lines &&
 						segment_norm > 0.0f &&
-						(!crossing_paint->broken || (tds % 2) == 0)) {
+						(!crossing_paint->broken ||
+								((dir_horizontal ? x : z) % 2 + 2) % 2 == 0)) {
 					const auto line_block = crate::block_definitions::WHITE_CONCRETE;
 					for (const int side : {-1, 1}) {
-						const int lx = static_cast<int>(
-								std::lround(x + perp_x * side * (block_range + 1)));
-						const int lz = static_cast<int>(
-								std::lround(z + perp_z * side * (block_range + 1)));
+						const int offset = side * (block_range + 1);
+						const int lx = dir_horizontal ? x + offset : x;
+						const int lz = dir_horizontal ? z : z + offset;
 						const auto *line_road = markings.carriageway_at(way.id, lx, lz);
 						if (!line_road)
 							continue;
@@ -1521,9 +1532,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					}
 				}
 
-				if (bridge_like && bridge_rail_perp.has_value() &&
-						!(is_bridge_member &&
-								!crate::bridge_styles::has_side_railing(bridge_style))) {
+				if (bridge_like && bridge_rail_perp.has_value()) {
 					const float perp_x = bridge_rail_perp->first;
 					const float perp_z = bridge_rail_perp->second;
 					const auto rail_block =
@@ -1548,6 +1557,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						const float sign = side == 0 ? 1.0f : -1.0f;
 						auto &previous_rail =
 								side == 0 ? previous_rail_left : previous_rail_right;
+						auto &previous_parapet = side == 0 ? previous_parapet_left
+														   : previous_parapet_right;
 						const int rail_x = static_cast<int>(std::round(
 								static_cast<float>(x) + perp_x * rail_dist * sign));
 						const int rail_z = static_cast<int>(std::round(
@@ -1557,10 +1568,22 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 								previous_rail.has_value()
 										? stair_fill_cells(*previous_rail, rail_cell)
 										: std::vector<std::pair<int, int>>{rail_cell};
+						const bool skip_side_railing =
+								is_bridge_member &&
+								(!crate::bridge_styles::has_side_railing(bridge_style) ||
+										bridge_module_selected);
 						for (const auto &rail_fill : cells_to_fill) {
 							const int rx = rail_fill.first;
 							const int rz = rail_fill.second;
-							if (bridge_surface.contains(rx, rz)) {
+							if (skip_side_railing)
+								continue;
+							if (bridge_surface.deck_near(rx, rz, current_y, 2)) {
+								previous_parapet.reset();
+								continue;
+							}
+							if (is_bridge_ramp &&
+									current_y <= editor.get_ground_level(rx, rz)) {
+								previous_parapet.reset();
 								continue;
 							}
 							editor.set_block_absolute(rail_block, rx, current_y, rz,
@@ -1576,11 +1599,25 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 												crate::block_definitions::Block>>());
 							}
 							if (parapet) {
-								editor.set_block_absolute(*parapet, rx, current_y + 1, rz,
-										std::optional<std::vector<
-												crate::block_definitions::Block>>(),
-										std::optional<std::vector<
-												crate::block_definitions::Block>>());
+								const int top = current_y + 1;
+								crate::connected_blocks::place_connected(
+										editor, *parapet, rx, top, rz);
+								if (previous_parapet.has_value()) {
+									const auto &[previous_cell, previous_top] =
+											*previous_parapet;
+									const int px = previous_cell.first;
+									const int pz = previous_cell.second;
+									const bool adjacent =
+											std::abs(px - rx) + std::abs(pz - rz) == 1;
+									if (adjacent && previous_top == top - 1) {
+										crate::connected_blocks::place_connected(
+												editor, *parapet, px, top, pz);
+									} else if (adjacent && previous_top == top + 1) {
+										crate::connected_blocks::place_connected(
+												editor, *parapet, rx, previous_top, rz);
+									}
+								}
+								previous_parapet = std::make_pair(rail_cell, top);
 							}
 						}
 						previous_rail = rail_cell;
@@ -1820,26 +1857,9 @@ void generate_aeroway(crate::world_editor::WorldEditor &editor,
 	const bool taxiway = way.tags.get("aeroway") == "taxiway";
 	const bool stand_line = way.tags.get("aeroway") == "parking_position";
 	double half_width_m = stand_line ? 2.5 : 12.0;
-	if (!stand_line) {
-		auto it = way.tags.find("width");
-		if (it != way.tags.end()) {
-			std::string_view width = it->second;
-			while (!width.empty() &&
-					std::isspace(static_cast<unsigned char>(width.front())))
-				width.remove_prefix(1);
-			while (!width.empty() &&
-					std::isspace(static_cast<unsigned char>(width.back())))
-				width.remove_suffix(1);
-			while (!width.empty() && width.back() == 'm')
-				width.remove_suffix(1);
-			while (!width.empty() &&
-					std::isspace(static_cast<unsigned char>(width.back())))
-				width.remove_suffix(1);
-			if (const auto metres = crate::strict_parse::f64(width);
-					metres && std::isfinite(*metres) && *metres > 0.0)
-				half_width_m = std::clamp(*metres * 0.5, 6.0, 40.0);
-		}
-	}
+	if (!stand_line)
+		if (const auto metres = parse_width_tag_m(way.tags))
+			half_width_m = std::clamp(*metres * 0.5, 6.0, 40.0);
 	const int half_width =
 			std::max(1, static_cast<int>(std::round(half_width_m * args.scale)));
 	const auto base = runway ? crate::block_definitions::GRAY_CONCRETE

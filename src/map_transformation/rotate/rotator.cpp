@@ -20,11 +20,30 @@ namespace arnis::map_transformation::rotate
 void Rotator::operate(
 		std::vector<ProcessedElement> &elements, cartesian::XZBBox &bbox, Ground &ground)
 {
-	rotate_world_with_ground(angle_degrees, elements, bbox, ground);
+	rotate_world(angle_degrees, elements, bbox, ground);
 }
 
 namespace
 {
+
+// Rust's `f64 as i32` saturates and maps NaN to zero. Keep transformed
+// coordinates and bounds consistent with the Rust rotator at extreme values;
+// direct floating-point-to-integer casts are undefined when out of range.
+int rust_i32(double value)
+{
+	if (std::isnan(value))
+		return 0;
+	if (value <= static_cast<double>(std::numeric_limits<int>::min()))
+		return std::numeric_limits<int>::min();
+	if (value >= static_cast<double>(std::numeric_limits<int>::max()))
+		return std::numeric_limits<int>::max();
+	return static_cast<int>(value);
+}
+
+int rust_round_i32(double value)
+{
+	return rust_i32(std::round(value));
+}
 
 std::pair<double, double> rotate_point(
 		double x, double z, double cx, double cz, double sin_r, double cos_r)
@@ -37,8 +56,8 @@ std::pair<double, double> rotate_point(
 void rotate_node(ProcessedNode &node, double cx, double cz, double sin_r, double cos_r)
 {
 	auto [rx, rz] = rotate_point(node.x, node.z, cx, cz, sin_r, cos_r);
-	node.x = static_cast<int>(std::round(rx));
-	node.z = static_cast<int>(std::round(rz));
+	node.x = rust_round_i32(rx);
+	node.z = rust_round_i32(rz);
 }
 
 std::optional<double> compass_bearing_degrees(std::string_view value)
@@ -119,7 +138,7 @@ std::pair<int, int> rotate_xz_point(
 	const double cx = (xzbbox.min_x() + xzbbox.max_x()) / 2.0;
 	const double cz = (xzbbox.min_z() + xzbbox.max_z()) / 2.0;
 	auto [rx, rz] = rotate_point(x, z, cx, cz, std::sin(rad), std::cos(rad));
-	return {static_cast<int>(std::round(rx)), static_cast<int>(std::round(rz))};
+	return {rust_round_i32(rx), rust_round_i32(rz)};
 }
 
 void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
@@ -178,9 +197,9 @@ void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
 		}
 	}
 
-	xzbbox = cartesian::XZBBox::rect_from_min_max(static_cast<int>(std::floor(min_x)),
-			static_cast<int>(std::floor(min_z)), static_cast<int>(std::ceil(max_x)),
-			static_cast<int>(std::ceil(max_z)));
+	xzbbox = cartesian::XZBBox::rect_from_min_max(rust_i32(std::floor(min_x)),
+			rust_i32(std::floor(min_z)), rust_i32(std::ceil(max_x)),
+			rust_i32(std::ceil(max_z)));
 }
 
 void rotate_world_with_ground(double angle_degrees,
@@ -246,10 +265,8 @@ void rotate_world_with_ground(double angle_degrees,
 						const auto [ox, oz] = rotate_point(
 								wx, wz, cx, cz, -std::sin(rad), std::cos(rad));
 						return std::pair<std::int32_t, std::int32_t>{
-								static_cast<std::int32_t>(std::lround(ox)) -
-										original_bbox.min_x(),
-								static_cast<std::int32_t>(std::lround(oz)) -
-										original_bbox.min_z()};
+								rust_round_i32(ox) - original_bbox.min_x(),
+								rust_round_i32(oz) - original_bbox.min_z()};
 					}))
 			ground.set_ecoregion_map(std::move(*rotated));
 	}
@@ -276,19 +293,17 @@ void rotate_world_with_ground(double angle_degrees,
 		canopy.assign(grid_width * grid_height, canopy::CANOPY_NODATA);
 	for (std::size_t zi = 0; zi < grid_height; ++zi) {
 		for (std::size_t xi = 0; xi < grid_width; ++xi) {
-			const int wx = bbox.min_x() +
-						   static_cast<int>(std::llround(
-								   double(xi) / std::max<std::size_t>(1, grid_width - 1) *
-								   (new_width - 1)));
-			const int wz =
-					bbox.min_z() +
-					static_cast<int>(std::llround(
-							double(zi) / std::max<std::size_t>(1, grid_height - 1) *
-							(new_height - 1)));
+			const int wx =
+					bbox.min_x() +
+					rust_round_i32(double(xi) / std::max<std::size_t>(1, grid_width - 1) *
+								   (new_width - 1));
+			const int wz = bbox.min_z() +
+						   rust_round_i32(double(zi) /
+										  std::max<std::size_t>(1, grid_height - 1) *
+										  (new_height - 1));
 			auto [ox, oz] = rotate_point(wx, wz, cx, cz, -std::sin(rad), std::cos(rad));
-			const XZPoint source{
-					static_cast<int>(std::llround(ox)) - original_bbox.min_x(),
-					static_cast<int>(std::llround(oz)) - original_bbox.min_z()};
+			const XZPoint source{rust_round_i32(ox) - original_bbox.min_x(),
+					rust_round_i32(oz) - original_bbox.min_z()};
 			if (had_elevation) {
 				heights[zi][xi] = ground.level(source);
 				has_data[zi][xi] = source.x >= 0 && source.z >= 0 &&
@@ -341,6 +356,12 @@ void rotate_world_with_ground(double angle_degrees,
 	// the important safety half of Rust's rotation flow and prevents the
 	// expanded AABB corners from generating terrain outside the original map.
 	ground.set_rotation_mask(mask);
+}
+
+void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
+		cartesian::XZBBox &bbox, Ground &ground)
+{
+	rotate_world_with_ground(angle_degrees, elements, bbox, ground);
 }
 
 }

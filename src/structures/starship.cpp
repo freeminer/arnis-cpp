@@ -16,9 +16,10 @@ void place_starship(WorldEditor &e, const ProcessedWay &w)
 	const auto root = e.get_schematic_asset_root().empty() ? assets::path("structures")
 														   : e.get_schematic_asset_root();
 	const auto p = root / "starship.schem";
-	// Rust anchors the embedded model at the launch-mount centreline with an
-	// explicit upright rotation; use the rotated path so property-bearing
-	// schematic blocks follow the same placement contract.
-	place_schem_file_rotated(e, p, x, e.get_absolute_y(x, 1, z), z, 0);
+	// Rust loads a StructureSchematic and anchors it at its tallest column;
+	// do not place the raw Sponge document using its optional Offset fields.
+	auto schematic = try_load_structure_cached(p);
+	if (schematic)
+		place_structure(e, *schematic, x, e.get_absolute_y(x, 1, z), z, 0);
 }
 }

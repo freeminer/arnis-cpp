@@ -26,6 +26,7 @@
 #include <condition_variable>
 #include <exception>
 #include <functional>
+#include <iomanip>
 #include <iostream>
 #include <iterator>
 #include <limits>
@@ -35,6 +36,7 @@
 #include <optional>
 #include <queue>
 #include <regex>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <thread>
@@ -586,6 +588,13 @@ double ring_area2(const std::vector<std::pair<double, double>> &ring)
 	return std::abs(sum);
 }
 
+std::string format_one_decimal(double value)
+{
+	std::ostringstream formatted;
+	formatted << std::fixed << std::setprecision(1) << value;
+	return formatted.str();
+}
+
 bool ring_overlaps_bbox(const std::vector<std::pair<double, double>> &ring,
 		const geographic::LLBBox &bbox)
 {
@@ -789,10 +798,7 @@ std::size_t OvertureHints::apply(std::vector<ProcessedElement> &elements) const
 		if (hint->second.num_floors)
 			(*tags)["building:levels"] = std::to_string(*hint->second.num_floors);
 		if (hint->second.height_m) {
-			std::ostringstream formatted_height;
-			formatted_height << std::fixed << std::setprecision(1)
-							 << *hint->second.height_m;
-			(*tags)["height"] = formatted_height.str();
+			(*tags)["height"] = format_one_decimal(*hint->second.height_m);
 		}
 		(*tags)["arnis:height_source"] = "overture_maps";
 		++enriched;
@@ -870,7 +876,7 @@ std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
 			const mvt::Ring *ring = nullptr;
 			for (const auto &candidate : feature.rings)
 				if (candidate.exterior() && candidate.points.size() >= 3 &&
-						(!ring || candidate.area2 >= ring->area2))
+						(!ring || candidate.area2_abs() >= ring->area2_abs()))
 					ring = &candidate;
 			if (!ring)
 				continue;
@@ -929,7 +935,8 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 				   std::size_t maximum) -> std::optional<std::vector<OvertureBuilding>> {
 		std::vector<OvertureBuilding> buildings;
 		std::unordered_map<std::string, std::size_t> by_id;
-		std::unordered_map<std::uint64_t, std::size_t> hint_by_osm_ref;
+		std::unordered_map<OvertureOsmRef, std::size_t, OvertureOsmRefHash>
+				hint_by_osm_ref;
 		std::size_t footprint_count = 0;
 		if (maximum == 0 || !read_range || zoom < header.min_zoom ||
 				zoom > header.max_zoom)
@@ -1043,10 +1050,7 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 								building.height.reset();
 							if (!usable_floors)
 								building.num_floors.reset();
-							const auto hint_key =
-									building.osm_ref->id ^
-									(building.osm_ref->relation ? OVERTURE_ID_HIGH_BIT
-																: 0);
+							const auto hint_key = *building.osm_ref;
 							const auto existing_hint = hint_by_osm_ref.find(hint_key);
 							if (existing_hint != hint_by_osm_ref.end()) {
 								auto &prior = buildings[existing_hint->second];
@@ -1420,9 +1424,9 @@ std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &bui
 	if (building.height && *building.height > 0. && *building.height < 1000. &&
 			((useful_floors && *building.height > 28.) ||
 					(!useful_floors && *building.height >= 10.)))
-		way.tags["height"] = std::to_string(*building.height);
+		way.tags["height"] = format_one_decimal(*building.height);
 	if (building.min_height && *building.min_height > 0. && *building.min_height < 1000.)
-		way.tags["min_height"] = std::to_string(*building.min_height);
+		way.tags["min_height"] = format_one_decimal(*building.min_height);
 	if (building.num_floors && *building.num_floors >= 2 && *building.num_floors < 200)
 		way.tags["building:levels"] = std::to_string(*building.num_floors);
 	if (building.roof_shape) {
@@ -1454,7 +1458,7 @@ std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &bui
 	if (building.roof_height && *building.roof_height >= 0.5 &&
 			*building.roof_height < 100.0 &&
 			(!building.height || *building.roof_height < *building.height * 0.75))
-		way.tags["roof:height"] = std::to_string(*building.roof_height);
+		way.tags["roof:height"] = format_one_decimal(*building.roof_height);
 	way.tags["source"] = "overture_maps";
 	return way;
 }

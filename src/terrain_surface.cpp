@@ -305,7 +305,7 @@ std::pair<Block, Block> steep_palette(
 	return bare_rock_palette(x, z);
 }
 SnowLine::SnowLine(int threshold, double bpm, double latitude, double rotation) :
-		threshold_y(threshold), band_blocks(std::max(200.0 * bpm, 4.0))
+		threshold_y(threshold), band_blocks(std::fmax(200.0 * bpm, 4.0))
 {
 	const double radians = rotation * (std::acos(-1.0) / 180.0);
 	const double reach = std::clamp((std::abs(latitude) - 10.0) / 15.0, 0.0, 1.0) *
@@ -321,8 +321,8 @@ double SnowLine::depth(int x, int z, int y) const
 		return -std::numeric_limits<double>::infinity();
 	if (threshold_y == std::numeric_limits<int>::min())
 		return 2.5;
-	return std::min(((double(y) - double(threshold_y)) / band_blocks) +
-							(noise(x, z, 32, SNOW_LINE) - .5) * .6,
+	return std::fmin(((double(y) - double(threshold_y)) / band_blocks) +
+							 (noise(x, z, 32, SNOW_LINE) - .5) * .6,
 			2.5);
 }
 double SnowLine::shade(double gradient_x, double gradient_z, double slope) const
@@ -333,7 +333,7 @@ double SnowLine::shade(double gradient_x, double gradient_z, double slope) const
 	if (rise < 1e-9)
 		return 0.0;
 	const double weight =
-			std::min(slope / 4.0, 1.0) - std::clamp((slope - 8.0) / 4.0, 0.0, 0.75);
+			std::fmin(slope / 4.0, 1.0) - std::clamp((slope - 8.0) / 4.0, 0.0, 0.75);
 	return -(gradient_x * pole_x + gradient_z * pole_z) / rise * weight;
 }
 bool is_plausible_ice(double d, biome::Climate c)
@@ -371,14 +371,16 @@ Snow snow_cover(double d, double slope, const std::function<double()> &convexity
 										   shade_term + drift;
 	if (score >= full_cover)
 		return Snow::block();
-	if (score < 0.0)
+	// Rust only creates a partial layer in its `score >= 0` branch. Writing
+	// this as the inverse `score < 0` would let NaN reach the integer cast.
+	if (!(score >= 0.0))
 		return Snow::none();
 	const unsigned layers = 1 + static_cast<unsigned>(score / full_cover * 7.0);
 	return Snow::layer(static_cast<std::uint8_t>(std::clamp(layers, 1u, 7u)));
 }
 double glacier_depth(double d)
 {
-	return std::max(d, -.2);
+	return std::fmax(d, -.2);
 }
 void place_snow_layer(WorldEditor &e, int x, int y, int z, std::optional<Block> top,
 		std::uint8_t eighths)

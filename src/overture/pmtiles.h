@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
+#include <map>
 #include <optional>
 #include <unordered_map>
 #include <vector>
@@ -38,8 +39,18 @@ struct TileLocateResult
 	TileReadStatus status = TileReadStatus::Error;
 	TileLocation location;
 };
-// Decompressed leaf directories reused while serially locating one bbox's tiles.
-using LeafDirectoryCache = std::unordered_map<std::uint64_t, std::vector<std::uint8_t>>;
+// Parsed PMTiles directory entries. Keep these decoded for the lifetime of one
+// bbox lookup: a city commonly resolves many tiles through the same root/leaf.
+struct DirectoryEntry
+{
+	std::uint64_t id = 0, offset = 0;
+	std::uint32_t run = 0, length = 0;
+};
+struct LeafDirectoryCache
+{
+	std::optional<std::vector<DirectoryEntry>> root;
+	std::map<std::pair<std::uint64_t, std::uint32_t>, std::vector<DirectoryEntry>> leaves;
+};
 struct Archive
 {
 	Header header;

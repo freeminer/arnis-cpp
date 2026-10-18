@@ -1,6 +1,8 @@
 #include "bedrock_block_map.h"
 #include "../../arnis_block.h"
 #include <algorithm>
+#include <array>
+#include <charconv>
 #include <initializer_list>
 #include <optional>
 #include <string_view>
@@ -682,8 +684,7 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return state("stone_block_slab",
 				{{"stone_slab_type", std::string("quartz")}, {"top_slot_bit", true}});
 	if (block == MUD_BRICK_SLAB)
-		return state("stone_block_slab",
-				{{"stone_slab_type", std::string("mud_brick")}, {"top_slot_bit", false}});
+		return simple("mud_brick_slab");
 	if (block == OAK_STAIRS)
 		return simple("oak_stairs");
 	if (block == SPRUCE_STAIRS)
@@ -786,11 +787,10 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 		const auto *v = prop(key);
 		if (!v)
 			return fallback;
-		try {
-			return std::stoi(*v);
-		} catch (...) {
-			return fallback;
-		}
+		int parsed = 0;
+		const auto [end, error] =
+				std::from_chars(v->data(), v->data() + v->size(), parsed);
+		return error == std::errc{} && end == v->data() + v->size() ? parsed : fallback;
 	};
 	const auto set = [&](const char *key, BedrockStateValue state_value) {
 		out.states.insert_or_assign(key, std::move(state_value));
@@ -852,7 +852,9 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 	}
 	if (name == "barrel") {
 		set("facing_direction", facing_direction());
-		set("open_bit", is_true("open"));
+		// Rust's Bedrock converter intentionally emits closed barrels regardless
+		// of the Java open state; keep the state encoding identical.
+		set("open_bit", false);
 		return out;
 	}
 	if (name == "amethyst_cluster" || name == "small_amethyst_bud" ||
@@ -878,6 +880,69 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 			name == "wooden_slab") {
 		const auto type = string_prop("type", "bottom");
 		set("top_slot_bit", type == "top");
+		// Java's pre-flattened stone slabs use four Bedrock family ids and a
+		// material state. The Rust converter deliberately keeps this encoding
+		// even for newer Java slab names, since it works across Bedrock versions.
+		using namespace block_definitions;
+		struct StoneSlabFamily
+		{
+			Block block;
+			const char *bedrock_name;
+			const char *state_name;
+			const char *material;
+		};
+		static const std::array<StoneSlabFamily, 18> stone_slabs{{
+				{SMOOTH_STONE_SLAB, "stone_block_slab", "stone_slab_type",
+						"smooth_stone"},
+				{COBBLESTONE_SLAB, "stone_block_slab", "stone_slab_type", "cobblestone"},
+				{BRICK_SLAB, "stone_block_slab", "stone_slab_type", "brick"},
+				{STONE_BRICK_SLAB, "stone_block_slab", "stone_slab_type", "stone_brick"},
+				{QUARTZ_SLAB_TOP, "stone_block_slab", "stone_slab_type", "quartz"},
+				{DARK_PRISMARINE_SLAB, "stone_block_slab2", "stone_slab_type_2",
+						"prismarine_dark"},
+				{PURPUR_SLAB, "stone_block_slab2", "stone_slab_type_2", "purpur"},
+				{END_STONE_BRICK_SLAB, "stone_block_slab3", "stone_slab_type_3",
+						"end_stone_brick"},
+				{ANDESITE_SLAB, "stone_block_slab3", "stone_slab_type_3", "andesite"},
+				{POLISHED_ANDESITE_SLAB, "stone_block_slab3", "stone_slab_type_3",
+						"polished_andesite"},
+				{POLISHED_DIORITE_SLAB, "stone_block_slab3", "stone_slab_type_3",
+						"polished_diorite"},
+				{MOSSY_COBBLESTONE_SLAB, "stone_block_slab2", "stone_slab_type_2",
+						"mossy_cobblestone"},
+				{MOSSY_STONE_BRICK_SLAB, "stone_block_slab4", "stone_slab_type_4",
+						"mossy_stone_brick"},
+				{SMOOTH_QUARTZ_SLAB, "stone_block_slab4", "stone_slab_type_4",
+						"smooth_quartz"},
+				{STONE_BLOCK_SLAB, "stone_block_slab4", "stone_slab_type_4", "stone"},
+				{CUT_SANDSTONE_SLAB, "stone_block_slab4", "stone_slab_type_4",
+						"cut_sandstone"},
+				{SMOOTH_RED_SANDSTONE_SLAB, "stone_block_slab3", "stone_slab_type_3",
+						"smooth_red_sandstone"},
+				{RED_NETHER_BRICK_SLAB, "stone_block_slab2", "stone_slab_type_2",
+						"red_nether_brick"},
+		}};
+		for (const auto &family : stone_slabs) {
+			if (value.block != family.block)
+				continue;
+			out.name = "minecraft:" + std::string(type == "double" ? "double_" : "") +
+					   family.bedrock_name;
+			set(family.state_name, std::string(family.material));
+			return out;
+		}
+		// The six legacy wood slabs share one Bedrock id and encode their
+		// species as wood_type. Other wood families keep their native ids.
+		const char *wood_type = value.block == OAK_SLAB		   ? "oak"
+								: value.block == SPRUCE_SLAB   ? "spruce"
+								: value.block == JUNGLE_SLAB   ? "jungle"
+								: value.block == DARK_OAK_SLAB ? "dark_oak"
+															   : nullptr;
+		if (wood_type) {
+			out.name = type == "double" ? "minecraft:double_wooden_slab"
+										: "minecraft:wooden_slab";
+			set("wood_type", std::string(wood_type));
+			return out;
+		}
 		if (type == "double") {
 			if (name.rfind("stone_block_slab", 0) == 0 || name == "wooden_slab")
 				out.name = "minecraft:double_" + std::string(name);

@@ -1,4 +1,5 @@
 #include "structures.h"
+#include "../assets_root.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
 
@@ -9,6 +10,12 @@ void place(WorldEditor &editor, int x, int z)
 	if (!editor.place_schematics())
 		return;
 	const auto h = land_cover::coord_hash(x, z);
-	place_named_schem(editor, "lighthouse", x, editor.get_absolute_y(x, 1, z), z, h & 3);
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	auto schematic = try_load_structure_cached(root / "lighthouse.schem");
+	if (schematic)
+		place_structure(editor, *schematic, x, editor.get_absolute_y(x, 1, z), z,
+				(unsigned)(h & 3));
 }
 }

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <boost/multiprecision/cpp_int.hpp>
 #include <cstdint>
 #include <optional>
 #include <string>
@@ -11,12 +12,15 @@ namespace arnis::overture::mvt
 {
 inline constexpr std::uint32_t GEOM_POLYGON = 3;
 using Value = std::variant<std::string, double, std::int64_t, std::uint64_t, bool>;
-using Area = double;
+// Coordinates are accumulated as i32 deltas, so cross products need 64 bits
+// and the sum needs 128 bits to match Rust's i128 shoelace calculation.
+using Area = boost::multiprecision::int128_t;
 struct Ring
 {
 	std::vector<std::pair<int, int>> points;
 	Area area2 = 0;
 	bool exterior() const { return area2 > 0; }
+	Area area2_abs() const { return area2 < 0 ? -area2 : area2; }
 };
 struct Feature
 {

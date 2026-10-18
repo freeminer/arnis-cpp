@@ -241,7 +241,12 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 					: std::vector<float>(
 							  sample_count, std::numeric_limits<float>::quiet_NaN());
 	std::size_t successful_rows = fetched ? window.lines : 0;
+	std::size_t failed_rows = 0;
+	std::optional<std::size_t> first_failed_row;
 	if (!fetched) {
+		std::fprintf(stdout,
+				"Fetching %zu source rows from NASA PDS (%zu px per row)...\n",
+				window.lines, window.samples);
 		const auto fetch_row = [&](std::size_t row) -> std::optional<std::vector<float>> {
 			std::vector<float> values(
 					window.samples, std::numeric_limits<float>::quiet_NaN());
@@ -315,15 +320,25 @@ std::optional<ElevationData> fetch_planetary_elevation(CelestialBody body,
 		for (auto &thread : workers)
 			thread.join();
 		for (std::size_t row = 0; row < window.lines; ++row) {
-			if (!rows[row])
+			if (!rows[row]) {
+				if (!first_failed_row)
+					first_failed_row = row;
+				++failed_rows;
 				continue;
+			}
 			std::copy(rows[row]->begin(), rows[row]->end(),
 					source.begin() + static_cast<std::ptrdiff_t>(row * window.samples));
 			++successful_rows;
 		}
 	}
+	if (failed_rows > 0)
+		std::fprintf(stderr, "Warning: PDS row fetch failed at source row %zu\n",
+				*first_failed_row);
 	if (successful_rows == 0)
 		return std::nullopt;
+	if (failed_rows > 0)
+		std::fprintf(stderr, "Warning: %zu of %zu PDS rows unavailable\n", failed_rows,
+				window.lines);
 	if (!fetched && !cached.empty())
 		save_window(cached, source);
 	ElevationData result;

@@ -209,19 +209,23 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	// Rust maps tree_row ways at a fixed 8 m spacing (including both ends),
 	// rather than scattering trees from the entire filled polygon.  Handle the
 	// mapped row before the generic natural-area decoration pass.
-	if (natural_type == "tree_row" && element.is_way()) {
-		const auto &nodes = element.as_way().nodes;
-		const auto mapped_row = trees::mapped::MappedTree::from_tags(
-				tags, static_cast<std::uint64_t>(element.id()));
-		std::vector<std::pair<int, int>> row_nodes;
-		row_nodes.reserve(nodes.size());
-		for (const auto &node : nodes)
-			row_nodes.emplace_back(node.x, node.z);
-		for (const auto &[x, z] :
-				trees::mapped::tree_row_positions(row_nodes, args.scale)) {
-			Tree::create_mapped(
-					editor, {x, 1, z}, mapped_row, &building_footprints, &bridge_surface);
+	if (natural_type == "tree_row") {
+		if (element.is_way()) {
+			const auto &nodes = element.as_way().nodes;
+			const auto mapped_row = trees::mapped::MappedTree::from_tags(
+					tags, static_cast<std::uint64_t>(element.id()));
+			std::vector<std::pair<int, int>> row_nodes;
+			row_nodes.reserve(nodes.size());
+			for (const auto &node : nodes)
+				row_nodes.emplace_back(node.x, node.z);
+			for (const auto &[x, z] :
+					trees::mapped::tree_row_positions(row_nodes, args.scale)) {
+				Tree::create_mapped(editor, {x, 1, z}, mapped_row, &building_footprints,
+						&bridge_surface);
+			}
 		}
+		// Rust's natural=tree_row handler only accepts ways. A relation carrying
+		// the tag is intentionally ignored rather than filled as a polygon.
 		return;
 	}
 
