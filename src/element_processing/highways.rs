@@ -8,13 +8,14 @@ use crate::element_processing::bridge_styles::{
 };
 use crate::element_processing::bridges::{is_bridge_way, BridgeStructureMap, BridgeSurfaceMap};
 use crate::element_processing::connected_blocks::{
-    connected_iron_bars, place_connected, stair_steps,
+    connected_iron_bars, four_connected_line, place_connected, stair_steps,
 };
 use crate::element_processing::get_nearest_non_road_block;
 use crate::element_processing::road_markings::{self, CrossMark, CrossingPaint, RoadMarkingIndex};
 use crate::element_processing::surfaces::{
     cycleway_palette, get_blocks_for_surface, get_blocks_for_surface_way, semirandom_surface,
 };
+use crate::element_processing::traffic_lights::is_signal;
 use crate::floodfill::flood_fill_area;
 use crate::floodfill_cache::{CoordinateBitmap, FloodFillCache, RoadMaskBitmap};
 use crate::osm_parser::{ProcessedElement, ProcessedNode, ProcessedWay};
@@ -314,6 +315,9 @@ pub fn generate_highways(
     markings: &RoadMarkingIndex,
 ) {
     if let ProcessedElement::Way(way) = element {
+        if let Some(cars) = editor.car_network() {
+            cars.place_way(editor, way.id);
+        }
         // A way with no room to be bored falls through and renders at grade.
         if renders_as_highway_tunnel(way)
             && generate_highway_tunnel_shell(
@@ -1305,6 +1309,9 @@ fn generate_highways_internal(
     };
     const LAYER_HEIGHT_STEP: i32 = 6;
     let layer_boost = layer_value_effective * LAYER_HEIGHT_STEP;
+    let signal_base = |ed: &WorldEditor, x: i32, z: i32, radius: i32| {
+        node_feature_base_y(ed, bridge_surface, x, z, layer_boost, radius)
+    };
 
     if let Some(highway_type) = element.tags().get("highway") {
         if highway_type == "street_lamp" {
@@ -1318,7 +1325,15 @@ fn generate_highways_internal(
             // Signal heads for signalised crossings and standalone traffic_signals nodes.
             let signalised = highway_type == "traffic_signals"
                 || element.tags().get("crossing").map(String::as_str) == Some("traffic_signals");
-            if signalised {
+            // With the extras' lights on, a signal they have no road for gets no head: a
+            // banner one would never change.
+            let cycling = editor.traffic_signals();
+            if let (true, ProcessedElement::Node(node), Some(signals)) =
+                (signalised, element, &cycling)
+            {
+                signals.place(editor, node, &signal_base);
+            }
+            if signalised && cycling.is_none() {
                 if let ProcessedElement::Node(node) = element {
                     let x = node.x;
                     let z = node.z;
@@ -1353,10 +1368,12 @@ fn generate_highways_internal(
 
                             // One level for the whole arm, so its bars are true neighbours and
                             // can be joined; a per-cell terrain height would step them apart.
-                            let arm: Vec<(i32, i32)> = bresenham_line(x, 0, z, ax, 0, az)
-                                .into_iter()
-                                .map(|(lx, _, lz)| (lx, lz))
-                                .collect();
+                            let arm: Vec<(i32, i32)> = four_connected_line(
+                                &bresenham_line(x, 0, z, ax, 0, az)
+                                    .into_iter()
+                                    .map(|(lx, _, lz)| (lx, lz))
+                                    .collect::<Vec<_>>(),
+                            );
                             let arm_cells: HashSet<(i32, i32)> = arm.iter().copied().collect();
                             for &(lx, lz) in &arm {
                                 let joins =
@@ -1610,6 +1627,13 @@ fn generate_highways_internal(
             // Cable carriers hang from pylons; other members stand on piers.
             let bridge_pylons = bridge_member.and_then(|m| m.cable_pylons.as_deref());
             let bridge_cables_carry_deck = bridge_pylons.is_some();
+            // Under mapped towers only the suspended stretch hangs, and it is painted.
+            let bridge_cable_span = bridge_member.and_then(|m| m.cable_span.as_deref());
+            let hangs_at = |x: i32, z: i32| match bridge_cable_span {
+                Some(span) => span.suspends(x, z),
+                None => bridge_cables_carry_deck,
+            };
+            let bridge_paint = bridge_cable_span.map(|s| s.paint);
 
             let is_short_isolated_elevated = !is_bridge_member
                 && !is_bridge_ramp
@@ -1870,8 +1894,8 @@ fn generate_highways_internal(
 
                                 // A crossing on the road is painted on the road's own
                                 // surface, not the footway's grey.
-                                let crossing_here = crossing_paint
-                                    .and_then(|p| carriageway_at(set_x, set_z).map(|r| (p, r)));
+                                let crossing_here =
+                                    crossing_paint.zip(carriageway_at(set_x, set_z));
                                 if let Some((paint, road)) = crossing_here {
                                     let along = if dir_horizontal { set_x } else { set_z };
                                     let on_stripe =
@@ -1954,7 +1978,7 @@ fn generate_highways_internal(
                                 if is_elevated_deck && (use_absolute_y || cell_y > 0) {
                                     // Foundation: stone bricks for everything except wooden boardwalks.
                                     let foundation = if is_bridge_member {
-                                        bridge_foundation_block
+                                        bridge_paint.unwrap_or(bridge_foundation_block)
                                     } else {
                                         STONE_BRICKS
                                     };
@@ -2005,7 +2029,7 @@ fn generate_highways_internal(
                                         }
                                         if is_center
                                             && use_absolute_y
-                                            && !bridge_cables_carry_deck
+                                            && !hangs_at(set_x, set_z)
                                             && on_pier_step(bridge_style.pier_interval(block_range))
                                         {
                                             if let Some(perp) = bridge_rail_perp {
@@ -2083,7 +2107,7 @@ fn generate_highways_internal(
                                             continue;
                                         }
                                         let rail_block = if is_bridge_member {
-                                            bridge_rail_block_choice
+                                            bridge_paint.unwrap_or(bridge_rail_block_choice)
                                         } else {
                                             LIGHT_GRAY_CONCRETE
                                         };
@@ -2096,7 +2120,9 @@ fn generate_highways_internal(
                                             Some(ROAD_PROTECTED_SURFACES),
                                         );
                                         let rail_foundation = if is_bridge_member {
-                                            bridge_style.rail_foundation_block()
+                                            bridge_paint.unwrap_or_else(|| {
+                                                bridge_style.rail_foundation_block()
+                                            })
                                         } else {
                                             STONE_BRICKS
                                         };
@@ -2270,9 +2296,17 @@ fn generate_highways_internal(
                         bridge_start_is_boundary,
                         bridge_end_is_boundary,
                         bridge_pylons,
+                        bridge_cable_span,
                     );
                 }
             }
+        }
+    } else if let (ProcessedElement::Node(node), Some(signals)) =
+        (element, editor.traffic_signals())
+    {
+        // Tram crossings carry the signal tags but no highway tag.
+        if is_signal(&node.tags) {
+            signals.place(editor, node, &signal_base);
         }
     }
 }
