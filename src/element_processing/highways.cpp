@@ -30,6 +30,7 @@
 #include "../structures/helicopter.h"
 #include "fm_highway_connectivity.h"
 #include "fm_traffic_signals.h"
+#include "traffic_lights.h"
 #include "../strict_parse.h"
 namespace arnis
 {
@@ -680,10 +681,19 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	(void)WHITE_WOOL;
 
 	auto it_highway = element.tags().find("highway");
+	std::string fallback_highway_type;
 	if (it_highway == element.tags().end()) {
-		return;
+		const auto crossing = element.tags().find("crossing");
+		if (!element.is_node() || crossing == element.tags().end() ||
+				crossing->second != "traffic_signals")
+			return;
+		// Rust sends signalised crossings through the highway processor even
+		// when OSM omits highway=crossing on the node.
+		fallback_highway_type = "crossing";
 	}
-	const std::string &highway_type = it_highway->second;
+	const std::string &highway_type = it_highway == element.tags().end()
+											  ? fallback_highway_type
+											  : it_highway->second;
 	auto protected_surface_blocks = road_protected_surfaces();
 	if (highway_type == "cycleway" && element.is_way() &&
 			crate::surfaces::cycleway_palette(element.as_way())) {
@@ -726,6 +736,14 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				(it_crossing != element.tags().end() &&
 						it_crossing->second == "traffic_signals")) {
 			if (element.is_node()) {
+				const auto &signal_node = element.as_node();
+				if (editor.traffic_signal_index &&
+						editor.traffic_signal_index->place_node(
+								editor, signal_node, [&](int px, int pz) {
+									return node_feature_base_y(editor, bridge_surface,
+											element.tags(), px, pz);
+								}))
+					return;
 				int x = element.as_node().x;
 				int z = element.as_node().z;
 				const int head_base =
@@ -1106,6 +1124,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const auto *bridge_pylons = bridge_member && bridge_member->cable_pylons
 										? &*bridge_member->cable_pylons
 										: nullptr;
+	const auto *bridge_cable_span = bridge_member && bridge_member->cable_span
+											? bridge_member->cable_span.get()
+											: nullptr;
 	const bool bridge_cables_carry_deck = bridge_pylons != nullptr;
 	std::vector<crate::bridge_styles::BridgePathSample> bridge_path;
 	const auto [min_x, min_z] = editor.get_min_coords();
@@ -1765,7 +1786,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		if (!schematic && (!cable_style || bridge_pylons))
 			crate::bridge_styles::decorate_bridge_above_deck(editor, bridge_style,
 					bridge_surface, bridge_path, block_range, start_is_boundary,
-					end_is_boundary, bridge_pylons);
+					end_is_boundary, bridge_pylons, bridge_cable_span);
 	}
 }
 

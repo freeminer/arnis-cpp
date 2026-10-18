@@ -11,6 +11,8 @@
 
 namespace arnis::road_markings
 {
+int oneway_sign(const std::string &highway, const tags_t &tags);
+
 struct TransverseMark
 {
 	enum class Kind

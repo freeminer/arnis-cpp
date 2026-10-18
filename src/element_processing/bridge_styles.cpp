@@ -2,6 +2,7 @@
 #include "../assets_root.h"
 #include "../structures/schem_decoder.h"
 #include "bridge_modules.h"
+#include "bridge_towers.h"
 #include "bridges.h"
 #include "connected_blocks.h"
 #include <fstream>
@@ -836,10 +837,27 @@ void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
 		const bridges::BridgeSurfaceMap &surface,
 		const std::vector<BridgePathSample> &path, int block_range,
 		bool start_is_boundary, bool end_is_boundary,
-		const std::vector<std::pair<int, int>> *pylon_points)
+		const std::vector<std::pair<int, int>> *pylon_points,
+		const bridge_towers::CableSpan *cable_span)
 {
 	if (path.size() < 4)
 		return;
+	const OpenSides sides = open_sides(surface, path, block_range);
+	if (cable_span) {
+		const auto open_edges = [&](std::size_t i) {
+			std::vector<std::pair<std::size_t, std::pair<int, int>>> result;
+			const auto &sample = path[i];
+			const auto [left, right] = side_offsets(
+					sample.x, sample.z, sample.perp_x, sample.perp_z, block_range);
+			if (sides.left)
+				result.emplace_back(0, left);
+			if (sides.right)
+				result.emplace_back(1, right);
+			return result;
+		};
+		bridge_towers::decorate(editor, path, open_edges, *cable_span, IRON_BARS);
+		return;
+	}
 	std::vector<std::size_t> pylons;
 	if (pylon_points) {
 		for (const auto &[px, pz] : *pylon_points) {
@@ -861,7 +879,6 @@ void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
 	}
 	std::sort(pylons.begin(), pylons.end());
 	pylons.erase(std::unique(pylons.begin(), pylons.end()), pylons.end());
-	const OpenSides sides = open_sides(surface, path, block_range);
 	switch (style) {
 	case BridgeStyle::Truss:
 		decorate_truss(

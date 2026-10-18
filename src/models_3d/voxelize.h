@@ -1,8 +1,12 @@
 #pragma once
 #include <array>
+#include <cstddef>
 #include <vector>
 #include <cstdint>
 #include <utility>
+#include <memory>
+#include <optional>
+#include <functional>
 #include "../../../arnis_block.h"
 namespace arnis::world_editor
 {
@@ -22,6 +26,39 @@ struct ColoredTriangle
 	// glTF's default white factor has no authored material; Rust emits stone bricks.
 	bool uncolored = false;
 };
+struct GlbMipLevel
+{
+	std::size_t width = 0, height = 0;
+	std::vector<std::array<float, 4>> pixels;
+};
+struct GlbMipTexture
+{
+	std::vector<GlbMipLevel> levels;
+	int wrap_s = 10497, wrap_t = 10497;
+};
+struct GlbPaintTriangle
+{
+	std::array<std::array<float, 3>, 3> vertices{};
+	std::array<std::array<float, 2>, 3> uv{};
+	std::array<float, 4> factor{1, 1, 1, 1};
+	std::array<float, 4> vertex_color{1, 1, 1, 1};
+	std::shared_ptr<const GlbMipTexture> texture;
+	std::optional<float> alpha_cutoff;
+	bool has_uv = false;
+	bool has_vertex_color = false;
+	bool uncolored = false;
+};
+struct VoxelPaint
+{
+	enum class Kind : std::uint8_t
+	{
+		Rgb,
+		Glass,
+		Uncolored
+	};
+	Kind kind = Kind::Uncolored;
+	std::array<std::uint8_t, 3> rgb{};
+};
 std::pair<std::array<float, 3>, std::array<float, 3>> glb_model_bbox(
 		const std::vector<std::uint8_t> &bytes);
 std::vector<std::array<std::array<float, 3>, 3>> glb_triangles(
@@ -32,6 +69,7 @@ std::pair<std::array<float, 3>, std::array<float, 3>> glb_vertex_bounds(
 		const std::vector<std::uint8_t> &bytes);
 std::vector<ColoredTriangle> glb_colored_triangles(
 		const std::vector<std::uint8_t> &bytes);
+std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t> &bytes);
 Block block_for_model_color(std::array<float, 3> color);
 class WorldTransform
 {
@@ -61,9 +99,23 @@ std::vector<Voxel> voxelize_triangles(
 std::vector<Voxel> voxelize_uniform_triangles(
 		const std::vector<std::array<std::array<float, 3>, 3>> &, const WorldTransform &,
 		Block);
+// Fill closed triangle meshes by pairing vertical-ray crossings per XZ column.
+std::vector<Voxel> voxelize_solid_triangles(
+		const std::vector<std::array<std::array<float, 3>, 3>> &, const WorldTransform &,
+		Block);
 std::vector<Voxel> voxelize_colored_triangles(
 		const std::vector<ColoredTriangle> &, const WorldTransform &);
+std::vector<Voxel> voxelize_colored_triangles(const std::vector<ColoredTriangle> &,
+		const WorldTransform &,
+		const std::vector<std::pair<std::array<float, 3>, Block>> &palette);
 std::vector<Voxel> voxelize_glb(
 		const std::vector<std::uint8_t> &, const WorldTransform &);
+std::vector<Voxel> voxelize_glb_with_palette(const std::vector<std::uint8_t> &,
+		const WorldTransform &,
+		const std::vector<std::pair<std::array<float, 3>, Block>> &palette);
+std::vector<std::pair<std::array<int, 3>, VoxelPaint>> voxelize_glb_paint(
+		const std::vector<std::uint8_t> &, const WorldTransform &);
+void visit_triangle_voxels(const std::array<std::array<float, 3>, 3> &,
+		const std::function<void(std::array<int, 3>)> &);
 void place_voxels(world_editor::WorldEditor &, const std::vector<Voxel> &);
 }

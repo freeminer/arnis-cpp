@@ -1631,7 +1631,8 @@ struct FitRange
 
 std::pair<ElevationAffine, FitRange> derive_affine(
 		const std::vector<std::vector<double>> &grid, double scale, int ground_level,
-		int min_ground_level, bool disable_height_limit, int extended_max_y)
+		int min_ground_level, bool disable_height_limit, int extended_max_y,
+		int top_reserve = 0)
 {
 	std::vector<std::pair<double, double>> row_ranges(grid.size(),
 			{std::numeric_limits<double>::max(), std::numeric_limits<double>::lowest()});
@@ -1658,7 +1659,8 @@ std::pair<ElevationAffine, FitRange> derive_affine(
 		height_range = hi - lo;
 	}
 	const double ideal_scaled_range = height_range * scale;
-	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y);
+	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y) -
+						std::max(0, top_reserve);
 	if (disable_height_limit && min_ground_level < ground_level &&
 			std::isfinite(ideal_scaled_range)) {
 		const double rounded = std::ceil(ideal_scaled_range);
@@ -1735,27 +1737,28 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 		const std::vector<std::vector<double>> &in, double scale, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
 		const AffinePolicy &policy,
-		const std::function<void(std::string_view)> &message_callback)
+		const std::function<void(std::string_view)> &message_callback, int top_reserve)
 {
 	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y);
+	const int fit_ceiling = ceiling - std::max(0, top_reserve);
 	std::optional<FitRange> fit;
 	ElevationAffine affine;
 	switch (policy.kind) {
 	case AffinePolicy::Kind::Fit: {
 		auto derived = derive_affine(in, scale, ground_level, min_ground_level,
-				disable_height_limit, extended_max_y);
+				disable_height_limit, extended_max_y, top_reserve);
 		affine = derived.first;
 		fit = derived.second;
 		break;
 	}
 	case AffinePolicy::Kind::FitWithHeadroom: {
 		auto derived = derive_affine(in, scale, ground_level, min_ground_level,
-				disable_height_limit, extended_max_y);
+				disable_height_limit, extended_max_y, top_reserve);
 		affine = derived.first;
 		fit = derived.second;
 		if (affine.blocks_per_meter <= 0.0)
 			affine.blocks_per_meter = scale;
-		const double free = (ceiling - affine.ground_level) - fit->scaled_range;
+		const double free = (fit_ceiling - affine.ground_level) - fit->scaled_range;
 		const double margin =
 				std::max(0.0, std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)));
 		if (margin > 0.0 && affine.blocks_per_meter > 0.0) {
@@ -1856,6 +1859,84 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 	}
 	world_editor::set_terrain_top_y(static_cast<int>(std::lround(std::min(top, upper))));
 	return {std::move(out), affine};
+}
+
+std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_reserving(
+		const std::vector<std::vector<double>> &in, double scale, int ground_level,
+		int min_ground_level, bool disable_height_limit, int extended_max_y,
+		const AffinePolicy &policy, int top_reserve,
+		const std::function<void(std::string_view)> &message_callback)
+{
+	return scale_to_minecraft_with(in, scale, ground_level, min_ground_level,
+			disable_height_limit, extended_max_y, policy, message_callback, top_reserve);
+}
+
+int top_reserve_for(const std::vector<std::vector<double>> &heights,
+		const std::vector<std::pair<double, double>> &models, double scale,
+		double model_scale, int ground_level, int min_ground_level,
+		bool disable_height_limit, int extended_max_y, bool headroom)
+{
+	if (models.empty())
+		return 0;
+	double lo = std::numeric_limits<double>::max();
+	double hi = std::numeric_limits<double>::lowest();
+	for (const auto &row : heights)
+		for (const double h : row)
+			if (std::isfinite(h)) {
+				lo = std::min(lo, h);
+				hi = std::max(hi, h);
+			}
+	if (lo > hi)
+		return 0;
+	const double range = hi - lo;
+	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y);
+	const double limit = static_cast<double>(ceiling + TERRAIN_HEIGHT_BUFFER - 2);
+	auto model_top = [&](int reserve) {
+		const int top = ceiling - reserve;
+		const double ideal_scaled = range * scale;
+		int base = ground_level;
+		if (disable_height_limit && min_ground_level < ground_level &&
+				std::isfinite(ideal_scaled)) {
+			const double rounded = std::ceil(ideal_scaled);
+			const int needed = rounded >= std::numeric_limits<int>::max()
+									   ? std::numeric_limits<int>::max()
+							   : rounded <= std::numeric_limits<int>::min()
+									   ? std::numeric_limits<int>::min()
+									   : static_cast<int>(rounded);
+			base = static_cast<int>(
+					std::clamp<long long>(static_cast<long long>(top) - needed,
+							min_ground_level, ground_level));
+		}
+		const double available = static_cast<double>(top - base);
+		const double scaled = ideal_scaled <= available
+									  ? ideal_scaled
+									  : (range > 0.0 ? range * (available / range) : 0.0);
+		const double bpm = range > 0.0 ? scaled / range : 0.0;
+		const double free = available - scaled;
+		const double lift =
+				headroom ? std::max(0.0,
+								   std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)))
+						 : 0.0;
+		double max_top = std::numeric_limits<double>::lowest();
+		for (const auto &[ground_m, height_m] : models)
+			max_top = std::max(max_top,
+					base + lift + (ground_m - lo) * bpm + height_m * model_scale);
+		return max_top;
+	};
+	if (model_top(0) <= limit)
+		return 0;
+	const int cap = std::max(ceiling - ground_level, 0) / 2;
+	if (model_top(cap) > limit)
+		return cap;
+	int fits = cap, short_of_fit = 0;
+	while (fits - short_of_fit > 1) {
+		const int mid = short_of_fit + (fits - short_of_fit) / 2;
+		if (model_top(mid) <= limit)
+			fits = mid;
+		else
+			short_of_fit = mid;
+	}
+	return fits;
 }
 
 std::tuple<std::vector<std::vector<double>>, double, double, int> scale_to_minecraft(

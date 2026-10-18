@@ -10,6 +10,9 @@
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
 #include "bridge_styles.h"
+#include "bridge_towers.h"
+
+#include <memory>
 
 namespace arnis::railways
 {
@@ -48,6 +51,7 @@ struct BridgeMemberInfo
 	bool covered_by_wider = false;
 	std::vector<int> ys;
 	std::optional<std::vector<std::pair<int, int>>> cable_pylons;
+	std::shared_ptr<const bridge_towers::CableSpan> cable_span;
 
 	int y_at(std::size_t tds, std::size_t total_bresenham, std::size_t ramp_length) const;
 };

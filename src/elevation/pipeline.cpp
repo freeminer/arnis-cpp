@@ -56,7 +56,8 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		ElevationData raw, double scale, double height_multiplier, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
 		bool apply_earth_repairs, land_cover::LandCoverData *land_cover,
-		const AffinePolicy &policy, const ProgressCallback &progress)
+		const AffinePolicy &policy, const ProgressCallback &progress,
+		const TerrainHints &terrain_hints)
 {
 	const auto grid_height = raw.heights.size();
 	const auto grid_width = grid_height ? raw.heights.front().size() : 0;
@@ -101,11 +102,26 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 				meters_per_cell, subprogress);
 	}
 	report(progress, 16.0, "Processing elevation...");
+	// Restore surveyed natural summits after smoothing, then fit terrain with
+	// room for tall landmark models at their actual terrain elevations.
+	if (apply_earth_repairs)
+		raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell);
+	const int top_reserve =
+			policy.kind == AffinePolicy::Kind::Fixed
+					? 0
+					: top_reserve_for(raw.heights,
+							  apply_earth_repairs
+									  ? model_cells(raw.heights, bbox,
+												terrain_hints.tall_models)
+									  : std::vector<std::pair<double, double>>{},
+							  scale * height_multiplier, scale, ground_level,
+							  min_ground_level, disable_height_limit, extended_max_y,
+							  policy.kind == AffinePolicy::Kind::FitWithHeadroom);
 
-	auto [minecraft_heights, mapping] =
-			scale_to_minecraft_with(raw.heights, scale * height_multiplier, ground_level,
-					min_ground_level, disable_height_limit, extended_max_y, policy,
-					[&](std::string_view message) { report(progress, -1.0, message); });
+	auto [minecraft_heights, mapping] = scale_to_minecraft_reserving(raw.heights,
+			scale * height_multiplier, ground_level, min_ground_level,
+			disable_height_limit, extended_max_y, policy, top_reserve,
+			[&](std::string_view message) { report(progress, -1.0, message); });
 	ProcessedElevationData out;
 	out.height = minecraft_heights.size();
 	out.width = out.height ? minecraft_heights.front().size() : 0;
@@ -133,7 +149,7 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		double height_multiplier, int ground_level, int min_ground_level,
 		bool disable_height_limit, int extended_max_y, bool apply_earth_repairs,
 		land_cover::LandCoverData *land_cover, const AffinePolicy &affine,
-		const ProgressCallback &progress)
+		const ProgressCallback &progress, const TerrainHints &terrain_hints)
 {
 	if (selector.source_mode() == providers::SourceMode::Planetary)
 		throw std::invalid_argument(
@@ -147,7 +163,7 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 	raw.world_height = world_height;
 	return process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
 			ground_level, min_ground_level, disable_height_limit, extended_max_y,
-			apply_earth_repairs, land_cover, affine, progress);
+			apply_earth_repairs, land_cover, affine, progress, terrain_hints);
 }
 
 } // namespace arnis::elevation

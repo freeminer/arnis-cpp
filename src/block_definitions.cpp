@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <optional>
 
 #include "colors.h"
 #include "block_palette.h"
@@ -123,9 +124,9 @@ public:
 struct StairKeyHash
 {
 	std::size_t operator()(
-			std::tuple<std::uint8_t, StairFacing, StairShape> const &t) const noexcept
+			std::tuple<content_t, StairFacing, StairShape> const &t) const noexcept
 	{
-		std::size_t h1 = std::hash<std::uint8_t>{}(std::get<0>(t));
+		std::size_t h1 = std::hash<content_t>{}(std::get<0>(t));
 		std::size_t h2 = std::hash<int>{}(static_cast<int>(std::get<1>(t)));
 		std::size_t h3 = std::hash<int>{}(static_cast<int>(std::get<2>(t)));
 		// boost::hash_combine style
@@ -136,9 +137,13 @@ struct StairKeyHash
 };
 
 static std::mutex STAIR_CACHE_MUTEX;
-static std::unordered_map<std::tuple<std::uint8_t, StairFacing, StairShape>,
+static std::unordered_map<std::tuple<content_t, StairFacing, StairShape>,
 		BlockWithProperties, StairKeyHash>
 		STAIR_CACHE;
+static std::mutex TOP_STAIR_CACHE_MUTEX;
+static std::unordered_map<std::tuple<content_t, StairFacing, StairShape>,
+		std::shared_ptr<const BlockWithProperties::Properties>, StairKeyHash>
+		TOP_STAIR_CACHE;
 struct Value
 {
 	static Value String(std::string);
@@ -158,20 +163,11 @@ BlockWithProperties create_stair_with_properties(
 			return it->second;
 		}
 	}
-	/*
-    // Create properties
-    std::unordered_map<std::string, Value> map;
-    map.emplace("facing", Value::String(std::string(StairFacing_as_str(facing))));
-
-    // Only add shape if it's not straight (default)
-    if (!(shape == StairShape::Straight)) {
-        map.emplace("shape", Value::String(std::string(StairShape_as_str(shape))));
-    }
-
-    Value properties = Value::Compound(std::move(map));
-    BlockWithProperties block_with_props(base_stair_block, std::optional<Value>(properties));
-*/
-	BlockWithProperties block_with_props(base_stair_block);
+	BlockWithProperties::Properties properties;
+	properties.emplace("facing", StairFacing_as_str(facing));
+	if (shape != StairShape::Straight)
+		properties.emplace("shape", StairShape_as_str(shape));
+	BlockWithProperties block_with_props(base_stair_block, std::move(properties));
 
 	// Cache the result
 	{
@@ -184,146 +180,205 @@ BlockWithProperties create_stair_with_properties(
 
 BlockWithProperties top_stair(BlockWithProperties stair)
 {
+	if (!stair.properties)
+		return stair;
+	const auto &properties = *stair.properties;
+	const auto facing_it = properties.find("facing");
+	if (facing_it == properties.end() || properties.size() > 2)
+		return stair;
+	std::optional<StairFacing> facing;
+	for (const auto candidate : {StairFacing::North, StairFacing::East,
+				 StairFacing::South, StairFacing::West})
+		if (facing_it->second == StairFacing_as_str(candidate)) {
+			facing = candidate;
+			break;
+		}
+	if (!facing)
+		return stair;
+	StairShape shape = StairShape::Straight;
+	if (const auto shape_it = properties.find("shape"); shape_it != properties.end()) {
+		if (properties.size() != 2)
+			return stair;
+		bool found = false;
+		for (const auto candidate :
+				{StairShape::Straight, StairShape::InnerLeft, StairShape::InnerRight,
+						StairShape::OuterLeft, StairShape::OuterRight})
+			if (shape_it->second == StairShape_as_str(candidate)) {
+				shape = candidate;
+				found = true;
+				break;
+			}
+		if (!found)
+			return stair;
+	} else if (properties.size() != 1) {
+		return stair;
+	}
+	const auto key = std::make_tuple(stair.block.id(), *facing, shape);
+	{
+		std::lock_guard<std::mutex> lock(TOP_STAIR_CACHE_MUTEX);
+		if (const auto it = TOP_STAIR_CACHE.find(key); it != TOP_STAIR_CACHE.end()) {
+			stair.properties = it->second;
+			return stair;
+		}
+	}
+	auto top_properties = properties;
+	top_properties["half"] = "top";
+	auto shared = BlockWithProperties::intern_properties(std::move(top_properties));
+	{
+		std::lock_guard<std::mutex> lock(TOP_STAIR_CACHE_MUTEX);
+		auto [it, inserted] = TOP_STAIR_CACHE.emplace(key, std::move(shared));
+		(void)inserted;
+		stair.properties = it->second;
+	}
 	return stair;
 }
 
 Block get_stair_block_for_material(const Block &material)
 {
-
 	if (material == STONE || material == COBBLESTONE)
 		return COBBLESTONE_STAIRS;
-	else if (material == STONE_BRICKS)
+	if (material == STONE_BRICKS || material == CRACKED_STONE_BRICKS ||
+			material == CHISELED_STONE_BRICKS)
 		return STONE_BRICK_STAIRS;
-	else if (material == MOSSY_COBBLESTONE)
+	if (material == MOSSY_COBBLESTONE)
 		return MOSSY_COBBLESTONE_STAIRS;
-	else if (material == MOSSY_STONE_BRICKS)
+	if (material == MOSSY_STONE_BRICKS)
 		return MOSSY_STONE_BRICK_STAIRS;
-	else if (material == CRACKED_STONE_BRICKS)
-		return STONE_BRICK_STAIRS;
-	else if (material == TUFF)
+	if (material == TUFF)
 		return COBBLESTONE_STAIRS;
-	else if (material == ANDESITE)
-		return ANDESITE_STAIRS;
-	else if (material == DIORITE || material == POLISHED_DIORITE)
-		return POLISHED_DIORITE_STAIRS;
-	else if (material == GRANITE)
-		return POLISHED_GRANITE_STAIRS;
-	else if (material == DEEPSLATE || material == DEEPSLATE_BRICKS ||
-			 material == COBBLED_DEEPSLATE)
-		return DEEPSLATE_BRICK_STAIRS;
-	else if (material == POLISHED_DEEPSLATE)
-		return POLISHED_DEEPSLATE_STAIRS;
-	else if (material == MUD_BRICKS || material == MUD)
-		return MUD_BRICK_STAIRS;
-	else if (material == OAK_PLANKS)
-		return OAK_STAIRS;
-	else if (material == SPRUCE_PLANKS || material == SPRUCE_LOG)
-		return SPRUCE_STAIRS;
-	else if (material == DARK_OAK_PLANKS)
-		return DARK_OAK_STAIRS;
-	else if (material == OAK_LOG)
-		return OAK_STAIRS;
-	else if (material == POLISHED_ANDESITE)
-		return POLISHED_ANDESITE_STAIRS;
-	else if (material == SMOOTH_STONE)
-		return POLISHED_ANDESITE_STAIRS;
-	else if (material == CHISELED_STONE_BRICKS)
-		return STONE_BRICK_STAIRS;
-	else if (material == BLACK_TERRACOTTA)
-		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == BLACKSTONE)
-		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == BLUE_TERRACOTTA || material == CYAN_TERRACOTTA)
-		return DEEPSLATE_BRICK_STAIRS;
-	else if (material == BRICK || material == TERRACOTTA ||
-			 material == ORANGE_TERRACOTTA || material == RED_TERRACOTTA)
-		return BRICK_STAIRS;
-	else if (material == BROWN_CONCRETE || material == BROWN_CONCRETE_POWDER)
-		return MUD_BRICK_STAIRS;
-	else if (material == BROWN_TERRACOTTA)
-		return MUD_BRICK_STAIRS;
-	else if (material == END_STONE_BRICKS)
+	if (material == END_STONE_BRICKS)
 		return END_STONE_BRICK_STAIRS;
-	else if (material == GRAY_CONCRETE)
-		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == GRAY_TERRACOTTA || material == LIGHT_GRAY_TERRACOTTA)
-		return MUD_BRICK_STAIRS;
-	else if (material == LIGHT_BLUE_TERRACOTTA)
+	if (material == ANDESITE)
+		return ANDESITE_STAIRS;
+	if (material == DIORITE || material == POLISHED_DIORITE ||
+			material == LIGHT_BLUE_TERRACOTTA || material == QUARTZ_BRICKS ||
+			material == IRON_BLOCK)
 		return POLISHED_DIORITE_STAIRS;
-	else if (material == LIGHT_GRAY_CONCRETE)
-		return STONE_BRICK_STAIRS;
-	else if (material == BLACK_CONCRETE)
-		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == LIGHT_BLUE_CONCRETE)
-		return POLISHED_DIORITE_STAIRS;
-	else if (material == CYAN_CONCRETE)
-		return DEEPSLATE_BRICK_STAIRS;
-	else if (material == GREEN_CONCRETE)
-		return MOSSY_COBBLESTONE_STAIRS;
-	else if (material == NETHER_BRICK)
-		return NETHER_BRICK_STAIRS;
-	else if (material == POLISHED_BLACKSTONE)
-		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == POLISHED_BLACKSTONE_BRICKS)
-		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == POLISHED_GRANITE)
+	if (material == GRANITE || material == TERRACOTTA)
+		return GRANITE_STAIRS;
+	if (material == POLISHED_GRANITE)
 		return POLISHED_GRANITE_STAIRS;
-	else if (material == QUARTZ_BLOCK)
-		return POLISHED_DIORITE_STAIRS;
-	else if (material == QUARTZ_BRICKS)
-		return POLISHED_DIORITE_STAIRS;
-	else if (material == SMOOTH_QUARTZ || material == GLASS)
-		return QUARTZ_STAIRS;
-	else if (material == SANDSTONE)
-		return SMOOTH_SANDSTONE_STAIRS;
-	else if (material == SMOOTH_SANDSTONE)
-		return SMOOTH_SANDSTONE_STAIRS;
-	else if (material == WHITE_CONCRETE)
-		return QUARTZ_STAIRS;
-	else if (material == WHITE_TERRACOTTA)
-		return QUARTZ_STAIRS;
-	else if (material == RED_NETHER_BRICKS)
-		return RED_NETHER_BRICK_STAIRS;
-	else if (material == WAXED_OXIDIZED_COPPER)
-		return WAXED_OXIDIZED_CUT_COPPER_STAIRS;
-	else if (material == WAXED_COPPER_BLOCK)
-		return WAXED_CUT_COPPER_STAIRS;
-	else if (material == WAXED_EXPOSED_COPPER ||
-			 material == WAXED_EXPOSED_CHISELED_COPPER ||
-			 material == WAXED_EXPOSED_CUT_COPPER)
-		return WAXED_EXPOSED_CUT_COPPER_STAIRS;
-	else if (material == IRON_BLOCK)
-		return POLISHED_DIORITE_STAIRS;
-	else if (material == NETHERITE_BLOCK)
+	if (material == DEEPSLATE || material == DEEPSLATE_BRICKS)
+		return DEEPSLATE_BRICK_STAIRS;
+	if (material == POLISHED_DEEPSLATE)
+		return POLISHED_DEEPSLATE_STAIRS;
+	if (material == COBBLED_DEEPSLATE)
+		return COBBLED_DEEPSLATE_STAIRS;
+	if (material == DEEPSLATE_TILES)
+		return DEEPSLATE_TILE_STAIRS;
+	if (material == BLACKSTONE || material == POLISHED_BLACKSTONE ||
+			material == POLISHED_BLACKSTONE_BRICKS || material == BLACK_TERRACOTTA ||
+			material == NETHERITE_BLOCK || material == BLACK_CONCRETE)
 		return POLISHED_BLACKSTONE_BRICK_STAIRS;
-	else if (material == HAY_BALE)
+	if (material == MUD_BRICKS || material == MUD || material == BROWN_CONCRETE ||
+			material == BROWN_CONCRETE_POWDER || material == BROWN_TERRACOTTA ||
+			material == GRAY_TERRACOTTA || material == LIGHT_GRAY_TERRACOTTA)
+		return MUD_BRICK_STAIRS;
+	if (material == BRICK || material == ORANGE_TERRACOTTA || material == RED_TERRACOTTA)
+		return BRICK_STAIRS;
+	if (material == BLUE_TERRACOTTA || material == CYAN_TERRACOTTA ||
+			material == CYAN_CONCRETE)
+		return DEEPSLATE_BRICK_STAIRS;
+	if (material == OAK_PLANKS || material == OAK_LOG || material == HAY_BALE)
 		return OAK_STAIRS;
-	else if (material == GRAVEL)
-		return COBBLESTONE_STAIRS;
-	else if (material == GRASS_BLOCK || material == MOSS_BLOCK)
-		return MOSSY_COBBLESTONE_STAIRS;
-	else
+	if (material == SPRUCE_PLANKS || material == SPRUCE_LOG)
+		return SPRUCE_STAIRS;
+	if (material == DARK_OAK_PLANKS)
+		return DARK_OAK_STAIRS;
+	if (material == MANGROVE_PLANKS)
+		return MANGROVE_STAIRS;
+	if (material == CHERRY_PLANKS)
+		return CHERRY_STAIRS;
+	if (material == BIRCH_PLANKS || material == YELLOW_TERRACOTTA ||
+			material == SANDSTONE || material == SMOOTH_SANDSTONE)
+		return SMOOTH_SANDSTONE_STAIRS;
+	if (material == POLISHED_ANDESITE || material == SMOOTH_STONE ||
+			material == LIGHT_GRAY_CONCRETE_POWDER)
+		return POLISHED_ANDESITE_STAIRS;
+	if (material == PINK_TERRACOTTA || material == LIME_TERRACOTTA ||
+			material == WHITE_TERRACOTTA || material == MUSHROOM_STEM ||
+			material == CALCITE || material == QUARTZ_BLOCK ||
+			material == WHITE_CONCRETE || material == GLASS)
+		return QUARTZ_STAIRS;
+	if (material == SMOOTH_QUARTZ)
+		return SMOOTH_QUARTZ_STAIRS;
+	if (material == LIGHT_BLUE_CONCRETE)
+		return POLISHED_DIORITE_STAIRS;
+	if (material == GRAY_CONCRETE)
+		return POLISHED_BLACKSTONE_BRICK_STAIRS;
+	if (material == LIGHT_GRAY_CONCRETE)
 		return STONE_BRICK_STAIRS;
+	if (material == GREEN_CONCRETE || material == GRASS_BLOCK || material == MOSS_BLOCK)
+		return MOSSY_COBBLESTONE_STAIRS;
+	if (material == NETHER_BRICK)
+		return NETHER_BRICK_STAIRS;
+	if (material == RED_NETHER_BRICKS)
+		return RED_NETHER_BRICK_STAIRS;
+	if (material == DARK_PRISMARINE)
+		return DARK_PRISMARINE_STAIRS;
+	if (material == WAXED_OXIDIZED_COPPER)
+		return WAXED_OXIDIZED_CUT_COPPER_STAIRS;
+	if (material == WAXED_COPPER_BLOCK)
+		return WAXED_CUT_COPPER_STAIRS;
+	if (material == WAXED_EXPOSED_COPPER || material == WAXED_EXPOSED_CHISELED_COPPER ||
+			material == WAXED_EXPOSED_CUT_COPPER)
+		return WAXED_EXPOSED_CUT_COPPER_STAIRS;
+	return STONE_BRICK_STAIRS;
 }
 
 Block get_slab_block_for_material(const Block &material)
 {
+	if (material == STONE_BRICKS || material == CHISELED_STONE_BRICKS ||
+			material == CRACKED_STONE_BRICKS)
+		return STONE_BRICK_SLAB;
 	if (material == BRICK || material == BROWN_TERRACOTTA ||
-			material == BROWN_CONCRETE_POWDER)
+			material == BROWN_CONCRETE_POWDER || material == RED_TERRACOTTA)
 		return BRICK_SLAB;
+	if (material == GRANITE || material == POLISHED_GRANITE || material == TERRACOTTA)
+		return POLISHED_GRANITE_SLAB;
 	if (material == MUD_BRICKS || material == WHITE_TERRACOTTA ||
 			material == GRAY_TERRACOTTA || material == LIGHT_BLUE_TERRACOTTA)
 		return MUD_BRICK_SLAB;
-	if (material == OAK_PLANKS || material == OAK_LOG || material == SPRUCE_PLANKS ||
-			material == DARK_OAK_PLANKS)
+	if (material == OAK_PLANKS || material == OAK_LOG)
 		return OAK_SLAB;
+	if (material == SPRUCE_PLANKS)
+		return SPRUCE_SLAB;
+	if (material == DARK_OAK_PLANKS)
+		return DARK_OAK_SLAB;
 	if (material == QUARTZ_BLOCK || material == QUARTZ_BRICKS ||
-			material == WHITE_CONCRETE)
+			material == WHITE_CONCRETE || material == MUSHROOM_STEM ||
+			material == CALCITE || material == PINK_TERRACOTTA ||
+			material == LIME_TERRACOTTA)
 		return QUARTZ_SLAB_TOP;
-	if (material == SMOOTH_STONE || material == POLISHED_ANDESITE ||
-			material == ANDESITE || material == GRAY_CONCRETE ||
-			material == LIGHT_GRAY_CONCRETE)
+	if (material == POLISHED_ANDESITE)
+		return POLISHED_ANDESITE_SLAB;
+	if (material == SMOOTH_STONE || material == ANDESITE || material == GRAY_CONCRETE ||
+			material == LIGHT_GRAY_CONCRETE || material == LIGHT_GRAY_CONCRETE_POWDER)
 		return SMOOTH_STONE_SLAB;
+	if (material == DEEPSLATE_BRICKS || material == POLISHED_DEEPSLATE)
+		return POLISHED_DEEPSLATE_SLAB;
+	if (material == DEEPSLATE_TILES)
+		return DEEPSLATE_TILE_SLAB;
+	if (material == COBBLED_DEEPSLATE)
+		return COBBLED_DEEPSLATE_SLAB;
+	if (material == POLISHED_BLACKSTONE_BRICKS || material == POLISHED_BLACKSTONE)
+		return POLISHED_BLACKSTONE_SLAB;
+	if (material == BLACKSTONE)
+		return BLACKSTONE_SLAB;
+	if (material == RED_NETHER_BRICKS)
+		return RED_NETHER_BRICK_SLAB;
+	if (material == NETHER_BRICK)
+		return NETHER_BRICK_SLAB;
+	if (material == DARK_PRISMARINE)
+		return DARK_PRISMARINE_SLAB;
+	if (material == WAXED_OXIDIZED_COPPER)
+		return WAXED_OXIDIZED_CUT_COPPER_SLAB;
+	if (material == MANGROVE_PLANKS)
+		return MANGROVE_SLAB;
+	if (material == CHERRY_PLANKS)
+		return CHERRY_SLAB;
+	if (material == BIRCH_PLANKS)
+		return CUT_SANDSTONE_SLAB;
 	if (material == SANDSTONE || material == SMOOTH_SANDSTONE)
 		return STONE_BLOCK_SLAB;
 	return STONE_BRICK_SLAB;
@@ -336,13 +391,18 @@ Block get_wall_piece_for_material(const Block &material)
 			material == WHITE_TERRACOTTA)
 		return BRICK_WALL;
 	if (material == ANDESITE || material == GRAY_CONCRETE ||
-			material == LIGHT_GRAY_CONCRETE)
+			material == LIGHT_GRAY_CONCRETE || material == LIGHT_GRAY_CONCRETE_POWDER ||
+			material == CYAN_TERRACOTTA)
 		return ANDESITE_WALL;
 	if (material == STONE_BRICKS || material == CHISELED_STONE_BRICKS ||
 			material == CRACKED_STONE_BRICKS || material == POLISHED_ANDESITE ||
 			material == SMOOTH_STONE || material == POLISHED_DEEPSLATE ||
 			material == DEEPSLATE_BRICKS)
 		return STONE_BRICK_WALL;
+	if (material == SANDSTONE || material == SMOOTH_SANDSTONE)
+		return SANDSTONE_WALL;
+	if (material == MUSHROOM_STEM || material == CALCITE)
+		return DIORITE_WALL;
 	return COBBLESTONE_WALL;
 }
 

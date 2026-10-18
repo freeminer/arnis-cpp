@@ -126,6 +126,31 @@ Block closest_block(RGBTuple color)
 	})->block;
 }
 
+Block paint_block_for_color(RGBTuple color)
+{
+	const auto target = oklab_components(color);
+	const auto &palette = current_palette();
+	const std::array metal_look = {WAXED_COPPER_BLOCK, WAXED_EXPOSED_COPPER,
+			WAXED_OXIDIZED_COPPER, IRON_BLOCK, GOLD_BLOCK, NETHERITE_BLOCK};
+	Block best = STONE_BRICKS;
+	float best_distance = std::numeric_limits<float>::infinity();
+	for (const auto &entry : palette) {
+		if ((entry.usage & USE_WALL) == 0 ||
+				std::find(metal_look.begin(), metal_look.end(), entry.block) !=
+						metal_look.end())
+			continue;
+		const float dl = .25f * (target[0] - entry.lab[0]);
+		const float da = target[1] - entry.lab[1];
+		const float db = target[2] - entry.lab[2];
+		const float distance = dl * dl + da * da + db * db;
+		if (distance < best_distance) {
+			best = entry.block;
+			best_distance = distance;
+		}
+	}
+	return best;
+}
+
 Block facade_block_for_color(RGBTuple color)
 {
 	static const auto palette = [] {

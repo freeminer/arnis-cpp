@@ -309,7 +309,7 @@ std::optional<std::vector<std::uint32_t>> read_indices(
 	return indices;
 }
 
-std::optional<std::vector<std::array<float, 3>>> read_colors(
+std::optional<std::vector<std::array<float, 4>>> read_colors(
 		const tinygltf::Model &m, const tinygltf::Accessor &a)
 {
 	if (a.type != TINYGLTF_TYPE_VEC3 && a.type != TINYGLTF_TYPE_VEC4)
@@ -319,7 +319,7 @@ std::optional<std::vector<std::array<float, 3>>> read_colors(
 	const auto element_size = size * components;
 	if (!size || !element_size)
 		return std::nullopt;
-	std::vector<std::array<float, 3>> colors(a.count, {0.f, 0.f, 0.f});
+	std::vector<std::array<float, 4>> colors(a.count, {1.f, 1.f, 1.f, 1.f});
 	if (a.bufferView >= 0) {
 		if (std::size_t(a.bufferView) >= m.bufferViews.size())
 			return std::nullopt;
@@ -337,9 +337,11 @@ std::optional<std::vector<std::array<float, 3>>> read_colors(
 				return std::nullopt;
 			if (offset > data.size() || element_size > data.size() - offset)
 				return std::nullopt;
-			for (std::size_t c = 0; c < 3; ++c)
+			for (std::size_t c = 0; c < components; ++c)
 				colors[i][c] = component_value(
 						data.data() + offset + c * size, a.componentType, a.normalized);
+			if (components == 3)
+				colors[i][3] = 1.0f;
 		}
 	} else if (!a.sparse.isSparse) {
 		return std::nullopt;
@@ -357,11 +359,136 @@ std::optional<std::vector<std::array<float, 3>>> read_colors(
 							a.sparse.values.byteOffset, std::size_t(i), element_size,
 							value))
 				return std::nullopt;
-			for (std::size_t c = 0; c < 3; ++c)
+			for (std::size_t c = 0; c < components; ++c)
 				colors[index][c] =
 						component_value(value + c * size, a.componentType, a.normalized);
+			if (components == 3)
+				colors[index][3] = 1.0f;
 		}
 	return colors;
+}
+
+std::optional<std::vector<std::array<float, 2>>> read_texcoords(
+		const tinygltf::Model &m, const tinygltf::Accessor &a)
+{
+	if (a.type != TINYGLTF_TYPE_VEC2)
+		return std::nullopt;
+	const auto size = component_size(a.componentType);
+	const auto element_size = size * 2;
+	if (!size)
+		return std::nullopt;
+	std::vector<std::array<float, 2>> uv(a.count, {0, 0});
+	if (a.bufferView >= 0) {
+		if (std::size_t(a.bufferView) >= m.bufferViews.size())
+			return std::nullopt;
+		const auto &view = m.bufferViews[a.bufferView];
+		if (view.buffer < 0 || std::size_t(view.buffer) >= m.buffers.size())
+			return std::nullopt;
+		const auto &data = m.buffers[view.buffer].data;
+		const int stride = a.ByteStride(view);
+		if (stride < int(element_size) || a.sparse.count < 0)
+			return std::nullopt;
+		for (std::size_t i = 0; i < a.count; ++i) {
+			std::size_t offset = 0;
+			if (!element_offset(
+						view.byteOffset, a.byteOffset, i, std::size_t(stride), offset) ||
+					offset > data.size() || element_size > data.size() - offset)
+				return std::nullopt;
+			for (std::size_t c = 0; c < 2; ++c)
+				uv[i][c] = component_value(
+						data.data() + offset + c * size, a.componentType, a.normalized);
+		}
+	} else if (!a.sparse.isSparse) {
+		return std::nullopt;
+	}
+	if (a.sparse.count < 0)
+		return std::nullopt;
+	if (a.sparse.isSparse)
+		for (int i = 0; i < a.sparse.count; ++i) {
+			std::uint32_t index = 0;
+			const unsigned char *value = nullptr;
+			if (!sparse_index(m, a.sparse.indices.bufferView, a.sparse.indices.byteOffset,
+						a.sparse.indices.componentType, std::size_t(i), index) ||
+					index >= uv.size() ||
+					!sparse_value_offset(m, a.sparse.values.bufferView,
+							a.sparse.values.byteOffset, std::size_t(i), element_size,
+							value))
+				return std::nullopt;
+			for (std::size_t c = 0; c < 2; ++c)
+				uv[index][c] =
+						component_value(value + c * size, a.componentType, a.normalized);
+		}
+	return uv;
+}
+
+float srgb_to_linear(float c)
+{
+	return c <= .04045f ? c / 12.92f : std::pow((c + .055f) / 1.055f, 2.4f);
+}
+
+std::shared_ptr<const GlbMipTexture> make_mips(
+		const tinygltf::Image &image, int wrap_s, int wrap_t, bool use_alpha)
+{
+	if (image.bits != 8 || (image.component != 3 && image.component != 4) ||
+			image.width <= 0 || image.height <= 0)
+		return {};
+	const auto w = static_cast<std::size_t>(image.width);
+	const auto h = static_cast<std::size_t>(image.height);
+	const auto stride = static_cast<std::size_t>(image.component);
+	if (w > std::numeric_limits<std::size_t>::max() / h ||
+			w * h > image.image.size() / stride)
+		return {};
+	auto texture = std::make_shared<GlbMipTexture>();
+	texture->wrap_s = wrap_s;
+	texture->wrap_t = wrap_t;
+	std::size_t factor = 1;
+	while (std::max(w / factor, h / factor) > 512)
+		factor *= 2;
+	GlbMipLevel base;
+	base.width = std::max<std::size_t>(1, w / factor);
+	base.height = std::max<std::size_t>(1, h / factor);
+	base.pixels.reserve(base.width * base.height);
+	const float norm = 1.0f / static_cast<float>(factor * factor);
+	for (std::size_t y = 0; y < base.height; ++y)
+		for (std::size_t x = 0; x < base.width; ++x) {
+			std::array<float, 4> sum{};
+			for (std::size_t sy = y * factor; sy < (y + 1) * factor; ++sy)
+				for (std::size_t sx = x * factor; sx < (x + 1) * factor; ++sx) {
+					const auto p =
+							(std::min(sy, h - 1) * w + std::min(sx, w - 1)) * stride;
+					const float a = image.component == 4 && use_alpha
+											? image.image[p + 3] / 255.0f
+											: 1.0f;
+					for (int c = 0; c < 3; ++c)
+						sum[c] += srgb_to_linear(image.image[p + c] / 255.0f) * a;
+					sum[3] += a;
+				}
+			for (float &v : sum)
+				v *= norm;
+			base.pixels.push_back(sum);
+		}
+	texture->levels.push_back(std::move(base));
+	while (texture->levels.back().width > 1 || texture->levels.back().height > 1) {
+		const auto &prev = texture->levels.back();
+		GlbMipLevel next;
+		next.width = std::max<std::size_t>(1, prev.width / 2);
+		next.height = std::max<std::size_t>(1, prev.height / 2);
+		next.pixels.reserve(next.width * next.height);
+		for (std::size_t y = 0; y < next.height; ++y)
+			for (std::size_t x = 0; x < next.width; ++x) {
+				std::array<float, 4> sum{};
+				for (const auto &[dx, dy] : {std::pair{0, 0}, {1, 0}, {0, 1}, {1, 1}}) {
+					const auto sx = std::min(2 * x + dx, prev.width - 1);
+					const auto sy = std::min(2 * y + dy, prev.height - 1);
+					const auto &px = prev.pixels[sy * prev.width + sx];
+					for (int c = 0; c < 4; ++c)
+						sum[c] += px[c] * .25f;
+				}
+				next.pixels.push_back(sum);
+			}
+		texture->levels.push_back(std::move(next));
+	}
+	return texture;
 }
 }
 
@@ -413,7 +540,7 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 				}
 			}
 			const bool uncolored = !material_has_texture && is_default_white(material);
-			std::optional<std::vector<std::array<float, 3>>> vertex_colors;
+			std::optional<std::vector<std::array<float, 4>>> vertex_colors;
 			auto ci = prim.attributes.find("COLOR_0");
 			if (ci != prim.attributes.end() && ci->second >= 0 &&
 					std::size_t(ci->second) < model.accessors.size())
@@ -462,6 +589,143 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 		const auto world = multiply(parent, local_matrix(n));
 		append_mesh(n.mesh, world);
 		for (int child : n.children)
+			stack.push_back({child, world});
+	}
+	return out;
+}
+
+std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t> &bytes)
+{
+	tinygltf::TinyGLTF loader;
+	tinygltf::Model model;
+	std::string err, warn;
+	if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes.data(), bytes.size()))
+		throw std::runtime_error("GLB parse: " + err);
+	std::vector<GlbPaintTriangle> out;
+	const auto append_mesh = [&](int mesh_id, const Matrix &world) {
+		if (mesh_id < 0 || std::size_t(mesh_id) >= model.meshes.size())
+			return;
+		for (const auto &primitive : model.meshes[mesh_id].primitives) {
+			if (primitive.mode != TINYGLTF_MODE_TRIANGLES)
+				continue;
+			const auto pi = primitive.attributes.find("POSITION");
+			if (pi == primitive.attributes.end() || pi->second < 0 ||
+					std::size_t(pi->second) >= model.accessors.size())
+				continue;
+			auto positions = read_positions(model, model.accessors[pi->second]);
+			if (!positions)
+				continue;
+			std::vector<std::uint32_t> indices;
+			if (primitive.indices >= 0 &&
+					std::size_t(primitive.indices) < model.accessors.size()) {
+				auto decoded = read_indices(model, model.accessors[primitive.indices]);
+				if (!decoded)
+					continue;
+				indices = std::move(*decoded);
+			} else {
+				indices.resize(positions->size());
+				for (std::size_t i = 0; i < positions->size(); ++i)
+					indices[i] = static_cast<std::uint32_t>(i);
+			}
+
+			GlbPaintTriangle base;
+			std::shared_ptr<const GlbMipTexture> texture;
+			int uv_set = 0;
+			if (primitive.material >= 0 &&
+					std::size_t(primitive.material) < model.materials.size()) {
+				const auto &mat = model.materials[primitive.material];
+				const auto &pbr = mat.pbrMetallicRoughness;
+				for (int c = 0; c < 4; ++c)
+					base.factor[c] = static_cast<float>(pbr.baseColorFactor[c]);
+				if (mat.alphaMode == "MASK")
+					base.alpha_cutoff = static_cast<float>(mat.alphaCutoff);
+				else if (mat.alphaMode == "BLEND")
+					base.alpha_cutoff = .25f;
+				const auto &info = pbr.baseColorTexture;
+				if (info.index >= 0 && std::size_t(info.index) < model.textures.size()) {
+					const auto &tex = model.textures[info.index];
+					uv_set = info.texCoord;
+					int wrap_s = TINYGLTF_TEXTURE_WRAP_REPEAT;
+					int wrap_t = TINYGLTF_TEXTURE_WRAP_REPEAT;
+					if (tex.sampler >= 0 &&
+							std::size_t(tex.sampler) < model.samplers.size()) {
+						wrap_s = model.samplers[tex.sampler].wrapS;
+						wrap_t = model.samplers[tex.sampler].wrapT;
+					}
+					if (tex.source >= 0 && std::size_t(tex.source) < model.images.size())
+						texture = make_mips(model.images[tex.source], wrap_s, wrap_t,
+								base.alpha_cutoff.has_value());
+				}
+			}
+			base.texture = texture;
+			base.uncolored = !texture && std::abs(base.factor[0] - 1.0f) < 1e-3f &&
+							 std::abs(base.factor[1] - 1.0f) < 1e-3f &&
+							 std::abs(base.factor[2] - 1.0f) < 1e-3f;
+			std::optional<std::vector<std::array<float, 4>>> colors;
+			if (const auto ci = primitive.attributes.find("COLOR_0");
+					ci != primitive.attributes.end() && ci->second >= 0 &&
+					std::size_t(ci->second) < model.accessors.size())
+				colors = read_colors(model, model.accessors[ci->second]);
+			std::optional<std::vector<std::array<float, 2>>> texcoords;
+			const auto uv_attribute =
+					primitive.attributes.find("TEXCOORD_" + std::to_string(uv_set));
+			if (texture && uv_attribute != primitive.attributes.end() &&
+					uv_attribute->second >= 0 &&
+					std::size_t(uv_attribute->second) < model.accessors.size())
+				texcoords = read_texcoords(model, model.accessors[uv_attribute->second]);
+
+			for (std::size_t i = 0; i + 2 < indices.size(); i += 3) {
+				const std::array<std::uint32_t, 3> ids{
+						indices[i], indices[i + 1], indices[i + 2]};
+				if (std::any_of(ids.begin(), ids.end(),
+							[&](std::uint32_t id) { return id >= positions->size(); }))
+					continue;
+				GlbPaintTriangle triangle = base;
+				bool valid_uv = texcoords.has_value();
+				bool valid_color = colors.has_value();
+				for (int vertex = 0; vertex < 3; ++vertex) {
+					const auto index = ids[vertex];
+					triangle.vertices[vertex] =
+							transform_point(world, (*positions)[index]);
+					if (valid_uv) {
+						if (index >= texcoords->size())
+							valid_uv = false;
+						else
+							triangle.uv[vertex] = (*texcoords)[index];
+					}
+					if (valid_color && index >= colors->size())
+						valid_color = false;
+				}
+				triangle.has_uv = valid_uv;
+				triangle.has_vertex_color = valid_color;
+				if (valid_color)
+					for (int c = 0; c < 4; ++c)
+						triangle.vertex_color[c] =
+								((*colors)[ids[0]][c] + (*colors)[ids[1]][c] +
+										(*colors)[ids[2]][c]) /
+								3.0f;
+				out.push_back(std::move(triangle));
+			}
+		}
+	};
+	std::vector<int> roots;
+	if (model.defaultScene >= 0 && std::size_t(model.defaultScene) < model.scenes.size())
+		roots = model.scenes[model.defaultScene].nodes;
+	else
+		for (const auto &scene : model.scenes)
+			roots.insert(roots.end(), scene.nodes.begin(), scene.nodes.end());
+	std::vector<std::pair<int, Matrix>> stack;
+	for (int node : roots)
+		stack.push_back({node, identity});
+	while (!stack.empty()) {
+		auto [id, parent] = stack.back();
+		stack.pop_back();
+		if (id < 0 || std::size_t(id) >= model.nodes.size())
+			continue;
+		const auto &node = model.nodes[id];
+		const auto world = multiply(parent, local_matrix(node));
+		append_mesh(node.mesh, world);
+		for (int child : node.children)
 			stack.push_back({child, world});
 	}
 	return out;

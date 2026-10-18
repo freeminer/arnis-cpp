@@ -49,6 +49,7 @@
 #include "element_processing/bridges.h"
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
+#include "element_processing/traffic_lights.h"
 #include "element_processing/buildings.h"
 #include "element_processing/tree.h"
 #include "element_processing/subprocessor/interior/index.h"
@@ -574,37 +575,12 @@ std::optional<std::string> decal_texture(
 	return "[png:" + base64_encode(png);
 }
 
-} // anonymous namespace
-
-bool should_stream_to_disk(
-		std::size_t tile_count, std::uint64_t available_mb, bool fillground)
-{
-	if (const char *v = std::getenv("ARNIS_STREAM_TO_DISK")) {
-		if (std::string(v) == "1")
-			return true;
-		if (std::string(v) == "0")
-			return false;
-	}
-	constexpr std::uint64_t base_mb = 500;
-	constexpr std::uint64_t base_region_mb = 26;
-	constexpr int vanilla_span =
-			world_editor::DEFAULT_MAX_Y - world_editor::DEFAULT_MIN_Y;
-	const auto span = static_cast<std::uint64_t>(std::max(
-			world_editor::world_max_y() - world_editor::terrain_floor_y(), vanilla_span));
-	const std::uint64_t per_region_mb =
-			fillground ? base_region_mb * span / static_cast<std::uint64_t>(vanilla_span)
-					   : base_region_mb;
-	return available_mb > 0 &&
-		   (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
-}
-
-bool should_stream_to_disk(std::size_t tile_count, bool fillground)
+std::uint64_t available_memory_mb()
 {
 #if defined(_WIN32)
 	MEMORYSTATUSEX memory{};
 	memory.dwLength = sizeof(memory);
-	const std::uint64_t available_mb =
-			GlobalMemoryStatusEx(&memory) ? memory.ullAvailPhys / (1024 * 1024) : 0;
+	return GlobalMemoryStatusEx(&memory) ? memory.ullAvailPhys / (1024 * 1024) : 0;
 #elif defined(__APPLE__)
 	vm_statistics64_data_t statistics{};
 	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
@@ -617,32 +593,78 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground)
 							  reinterpret_cast<host_info64_t>(&statistics), &count)
 					: KERN_FAILURE;
 	mach_port_deallocate(mach_task_self(), host);
-	const bool have_memory =
-			page_status == KERN_SUCCESS && page_size > 0 && stats_status == KERN_SUCCESS;
-	const std::uint64_t available_mb =
-			have_memory
-					? (std::uint64_t(statistics.free_count) + statistics.inactive_count +
-							  statistics.speculative_count) *
-							  page_size / (1024 * 1024)
-					: 0;
+	if (page_status != KERN_SUCCESS || page_size == 0 || stats_status != KERN_SUCCESS)
+		return 0;
+	return (std::uint64_t(statistics.free_count) + statistics.inactive_count +
+				   statistics.speculative_count) *
+		   page_size / (1024 * 1024);
 #elif defined(__linux__)
-	std::uint64_t available_mb = 0;
 	std::ifstream mem("/proc/meminfo");
 	std::string key;
 	std::uint64_t kb;
 	while (mem >> key >> kb) {
-		if (key == "MemAvailable:") {
-			available_mb = kb / 1024;
-			break;
-		}
+		if (key == "MemAvailable:")
+			return kb / 1024;
 		std::string unit;
 		std::getline(mem, unit);
 	}
+	return 0;
 #else
-	// Like Rust's sysinfo fallback, unknown platforms preserve the fast path.
-	constexpr std::uint64_t available_mb = 0;
+	return 0;
 #endif
-	return should_stream_to_disk(tile_count, available_mb, fillground);
+}
+
+std::uint64_t per_region_estimate_mb(bool fillground)
+{
+	constexpr std::uint64_t BASE_REGION_MB = 26;
+	constexpr int VANILLA_SPAN =
+			world_editor::DEFAULT_MAX_Y - world_editor::DEFAULT_MIN_Y;
+	const auto span = static_cast<std::uint64_t>(std::max(
+			world_editor::world_max_y() - world_editor::terrain_floor_y(), VANILLA_SPAN));
+	return fillground ? BASE_REGION_MB * span / static_cast<std::uint64_t>(VANILLA_SPAN)
+					  : BASE_REGION_MB;
+}
+
+std::size_t tile_processing_threads(
+		std::size_t pool_threads, std::uint64_t available_mb, bool fillground)
+{
+	pool_threads = std::max<std::size_t>(1, pool_threads);
+	if (available_mb == 0)
+		return pool_threads;
+	constexpr std::uint64_t TILE_RAM_BUDGET_PERCENT = 20;
+	constexpr std::uint64_t REGIONS_PER_TILE_ESTIMATE = 2;
+	const auto per_tile_mb =
+			std::max<std::uint64_t>(1, per_region_estimate_mb(fillground)) *
+			REGIONS_PER_TILE_ESTIMATE;
+	const auto tile_budget_mb = (available_mb / 100) * TILE_RAM_BUDGET_PERCENT +
+								(available_mb % 100) * TILE_RAM_BUDGET_PERCENT / 100;
+	const auto memory_bound = std::max<std::uint64_t>(1, tile_budget_mb / per_tile_mb);
+	return std::min<std::size_t>(
+			pool_threads, memory_bound > std::numeric_limits<std::size_t>::max()
+								  ? std::numeric_limits<std::size_t>::max()
+								  : static_cast<std::size_t>(memory_bound));
+}
+
+} // anonymous namespace
+
+bool should_stream_to_disk(
+		std::size_t tile_count, std::uint64_t available_mb, bool fillground)
+{
+	if (const char *v = std::getenv("ARNIS_STREAM_TO_DISK")) {
+		if (std::string(v) == "1")
+			return true;
+		if (std::string(v) == "0")
+			return false;
+	}
+	constexpr std::uint64_t base_mb = 500;
+	const auto per_region_mb = per_region_estimate_mb(fillground);
+	return available_mb > 0 &&
+		   (base_mb + per_region_mb * tile_count) * 100 > available_mb * 55;
+}
+
+bool should_stream_to_disk(std::size_t tile_count, bool fillground)
+{
+	return should_stream_to_disk(tile_count, available_memory_mb(), fillground);
 }
 
 bool should_use_parallel_tiles(std::size_t tile_count, bool java_format)
@@ -2200,6 +2222,9 @@ bool generate_world(WorldEditor &editor,
 	auto marking_index = road_markings::RoadMarkingIndex::build(elements, args.scale,
 			decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 					(geo_bounds[2] + geo_bounds[3]) * .5));
+	auto traffic_signal_index = highways::SignalIndex::build(
+			elements, args.scale, marking_index.drives_on_left, road_mask);
+	editor.traffic_signal_index = traffic_signal_index;
 	// Rust reorders only ground-fill elements here, after applying OSM ground
 	// overrides and building the shared indexes. Keep the cached element vector
 	// immutable and carry this order as indices to avoid a deep copy per chunk.
@@ -2357,8 +2382,10 @@ bool generate_world(WorldEditor &editor,
 	const bool parallel_tile_workers =
 			regional_ground_passes && bool(editor.begin_tile_sink) &&
 			bool(editor.merge_tile_sink) && editor.tile_worker_callbacks_safe();
+	const auto pool_threads = static_cast<std::size_t>(
+			std::max(1u, std::min(16u, std::thread::hardware_concurrency())));
 	const auto tile_batch_size =
-			std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+			tile_processing_threads(pool_threads, available_memory_mb(), args.fillground);
 	std::size_t deferred_tiles_in_batch = 0;
 	if (regional_ground_passes)
 		editor.set_defer_tile_merges(true);
@@ -2682,7 +2709,10 @@ bool generate_world(WorldEditor &editor,
 						editor, element, args, flood_fill_cache, road_mask);
 			} else if (node.tags.contains("barrier")) {
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
-			} else if (node.tags.contains("highway")) {
+			} else if (node.tags.contains("highway") ||
+					   node.tags.get("crossing") ==
+							   std::optional<std::string>(
+									   std::string("traffic_signals"))) {
 				highways::generate_highways_internal(editor, element, args,
 						highway_connectivity, args.timeout, road_mask, bridge_structures,
 						bridge_surface, tunnel_portals, marking_index,
@@ -3082,6 +3112,7 @@ bool generate_world(WorldEditor &editor,
 	editor.mapped_trunks.reset();
 	shared_selector.reset();
 	road_mask_owner.reset();
+	editor.traffic_signal_index.reset();
 	big_water_field = {};
 	tunnel_footprint = {};
 	rail_mask = {};

@@ -369,7 +369,12 @@ void place_roadside_sign(world_editor::WorldEditor &editor, const char *kind,
 	idx = std::clamp<std::size_t>(idx, 1, cells.size() - 2);
 	const int x = cells[idx].first;
 	const int z = cells[idx].second;
-	if (!editor.owns(x, z) || !ctx.has(key))
+	// Rust gates placement on ownership of the road sample as well as the
+	// eventual post cell. This keeps adjacent tile passes from claiming the
+	// same roadside sign through opposite shoulders.
+	if (!editor.owns(x, z))
+		return;
+	if (!ctx.has(key))
 		return;
 	const int bx = cells[idx - 1].first, bz = cells[idx - 1].second;
 	const int fx = cells[idx + 1].first, fz = cells[idx + 1].second;
@@ -1431,6 +1436,8 @@ void generate_highway_way_signage(world_editor::WorldEditor &editor,
 			const auto found = ctx.intersections.find(way.nodes[i].id);
 			if (found == ctx.intersections.end() || found->second.owner_way != way.id)
 				continue;
+			if (!editor.owns(way.nodes[i].x, way.nodes[i].z))
+				continue;
 			if (auto direction = way_direction_at(way.nodes, i))
 				place_street_name_post(editor, way.nodes[i], *direction, found->second,
 						footprints, road_mask);
@@ -1540,6 +1547,9 @@ void generate_parking_signage(world_editor::WorldEditor &editor, const Processed
 	editor.set_block_absolute(block_definitions::STONE_BRICK_WALL, x, ground + 1, z);
 	editor.set_block_absolute(block_definitions::STONE_BRICK_WALL, x, ground + 2, z);
 	editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE, x, head, z);
+	const auto placed_head = editor.get_block_absolute(x, head, z);
+	if (!placed_head || *placed_head == block_definitions::AIR)
+		return;
 
 	std::int8_t facing = 3; // default south
 	if (const auto road = get_nearest_road_block(x, z, 10, road_mask))

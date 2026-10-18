@@ -323,6 +323,16 @@ void place_underwater_vegetation(
 
 }
 
+bool is_tree_block(const std::optional<std::string> &name)
+{
+	return is_tree_part(name);
+}
+
+void clear_tree(WorldEditor &editor, int x, int y, int z)
+{
+	clear_tree_from(editor, x, y, z);
+}
+
 int BigWaterField::depth_at(int x, int z) const
 {
 	const auto lx = static_cast<long long>(x) - static_cast<long long>(min_x_);

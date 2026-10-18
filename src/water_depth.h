@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstdint>
+#include <optional>
+#include <string>
 #include <vector>
 #include <utility>
 
@@ -74,5 +76,10 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
 		int min_x, int max_x, int min_z, int max_z,
 		const bridges::BridgeSurfaceMap *bridge_surface);
+
+// Shared model-placement helpers: remove a connected tree and classify tree
+// blocks without exposing the water-carving implementation details.
+bool is_tree_block(const std::optional<std::string> &name);
+void clear_tree(WorldEditor &editor, int x, int y, int z);
 
 }

@@ -1,4 +1,5 @@
 #include "bridges.h"
+#include "bridge_towers.h"
 
 #include <algorithm>
 #include <cctype>
@@ -31,6 +32,8 @@ constexpr std::size_t SHORT_BRIDGE_LENGTH_BLOCKS = 30;
 constexpr int BRIDGE_NAME_FUSE_DISTANCE_BLOCKS = 200;
 constexpr float DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS = 12.0f;
 constexpr float DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG = 20.0f;
+constexpr int TOWER_PASS_MARGIN = 12;
+constexpr double MAPPED_TOWER_APPROACH_REACH_M = 1500.0;
 constexpr float SIDE_DECK_EDGE_GAP_BLOCKS = 2.0f;
 constexpr int ROAD_HEADROOM = 6;
 constexpr int PATH_HEADROOM = 5;
@@ -673,6 +676,7 @@ BridgeStructureMap BridgeStructureMap::build(
 		const bridge_styles::BridgeOutlineIndex &outlines, double scale)
 {
 	BridgeStructureMap result;
+	const auto mapped_supports = bridge_towers::collect(elements, editor, scale);
 	std::vector<const ProcessedWay *> bridge_ways;
 	std::vector<const ProcessedWay *> other_highway_ways;
 	for (const auto &element : elements) {
@@ -685,6 +689,31 @@ BridgeStructureMap BridgeStructureMap::build(
 			bridge_ways.push_back(&way);
 		else
 			other_highway_ways.push_back(&way);
+	}
+	std::unordered_set<std::string> mapped_tower_bridge_names;
+	if (!mapped_supports.towers.empty()) {
+		for (const auto *way : bridge_ways) {
+			const auto reach = static_cast<std::int64_t>(
+					highway_block_range(*way, scale) + TOWER_PASS_MARGIN);
+			const auto reach_squared = reach * reach;
+			const auto cells = way_cells(*way);
+			const bool passes_mapped_tower =
+					std::any_of(cells.begin(), cells.end(), [&](const auto &cell) {
+						return std::any_of(mapped_supports.towers.begin(),
+								mapped_supports.towers.end(), [&](const auto &tower) {
+									const std::int64_t dx = cell.first - tower.x;
+									const std::int64_t dz = cell.second - tower.z;
+									return dx * dx + dz * dz <= reach_squared;
+								});
+					});
+			if (!passes_mapped_tower)
+				continue;
+			for (const char *key : {"bridge:name", "name"}) {
+				const auto name = way->tags.get(key);
+				if (!name.empty())
+					mapped_tower_bridge_names.insert(name);
+			}
+		}
 	}
 	std::unordered_map<std::pair<int, int>, std::vector<std::size_t>, XZPairHash>
 			node_to_bridge_indices;
@@ -960,6 +989,70 @@ BridgeStructureMap BridgeStructureMap::build(
 		std::vector<std::pair<int, int>> cable_pylons;
 		if (group_style == bridge_styles::BridgeStyle::Suspension ||
 				group_style == bridge_styles::BridgeStyle::CableStayed) {
+			if (group_style == bridge_styles::BridgeStyle::Suspension) {
+				int group_half_width = 0;
+				for (const auto index : group_indices)
+					group_half_width = std::max(group_half_width,
+							highway_block_range(*bridge_ways[index], scale));
+				const auto reach =
+						static_cast<std::int64_t>(group_half_width + TOWER_PASS_MARGIN);
+				const auto reach_squared = reach * reach;
+				for (const auto &tower : mapped_supports.towers) {
+					const bool close = std::any_of(group_indices.begin(),
+							group_indices.end(), [&](std::size_t index) {
+								return std::any_of(paths[index].begin(),
+										paths[index].end(), [&](const auto &point) {
+											const std::int64_t dx = point.first - tower.x;
+											const std::int64_t dz =
+													point.second - tower.z;
+											return dx * dx + dz * dz <= reach_squared;
+										});
+							});
+					if (close)
+						cable_pylons.emplace_back(tower.x, tower.z);
+				}
+				if (cable_pylons.size() < 2)
+					cable_pylons.clear();
+			}
+			bool approach_of_mapped_tower = false;
+			if (cable_pylons.empty() && !mapped_tower_bridge_names.empty() &&
+					!mapped_supports.towers.empty()) {
+				bool has_mapped_tower_name = false;
+				for (const auto idx : group_indices) {
+					const auto &way = *bridge_ways[idx];
+					for (const char *key : {"bridge:name", "name"}) {
+						const auto name = way.tags.get(key);
+						if (!name.empty() && mapped_tower_bridge_names.contains(name)) {
+							has_mapped_tower_name = true;
+							break;
+						}
+					}
+					if (has_mapped_tower_name)
+						break;
+				}
+				if (has_mapped_tower_name) {
+					const auto reach = static_cast<std::int64_t>(
+							MAPPED_TOWER_APPROACH_REACH_M * scale);
+					const auto reach_squared = reach * reach;
+					approach_of_mapped_tower = std::any_of(group_indices.begin(),
+							group_indices.end(), [&](std::size_t idx) {
+								return std::any_of(paths[idx].begin(), paths[idx].end(),
+										[&](const auto &cell) {
+											return std::any_of(
+													mapped_supports.towers.begin(),
+													mapped_supports.towers.end(),
+													[&](const auto &tower) {
+														const std::int64_t dx =
+																cell.first - tower.x;
+														const std::int64_t dz =
+																cell.second - tower.z;
+														return dx * dx + dz * dz <=
+															   reach_squared;
+													});
+										});
+							});
+				}
+			}
 			std::optional<std::size_t> main_idx;
 			for (const auto idx : group_indices) {
 				if (covered_ids.contains(bridge_ways[idx]->id))
@@ -972,25 +1065,25 @@ BridgeStructureMap BridgeStructureMap::build(
 								bridge_ways[idx]->id < bridge_ways[*main_idx]->id))
 					main_idx = idx;
 			}
-			if (main_idx) {
-				const auto &main_way = *bridge_ways[*main_idx];
+			if (main_idx && cable_pylons.empty() && !approach_of_mapped_tower) {
 				const auto &main_path = paths[*main_idx];
 				for (const auto point : bridge_styles::default_pylons(
 							 group_style, main_path.size(), true, true))
 					if (point < main_path.size())
 						cable_pylons.push_back(main_path[point]);
-				if (!cable_pylons.empty()) {
-					const auto main_length = way_length_blocks(main_way);
-					for (const auto idx : group_indices) {
-						const auto &way = *bridge_ways[idx];
-						if (idx == *main_idx ||
-								(!covered_ids.contains(way.id) &&
-										way_length_blocks(way) * 10 >= main_length * 6 &&
-										bridge_styles::resolve_bridge_style_with_outline(
-												way, outlines) == group_style &&
-										headings_parallel(way, main_way)))
-							cable_carriers.insert(way.id);
-					}
+			}
+			if (main_idx && !cable_pylons.empty()) {
+				const auto &main_way = *bridge_ways[*main_idx];
+				const auto main_length = way_length_blocks(main_way);
+				for (const auto idx : group_indices) {
+					const auto &way = *bridge_ways[idx];
+					if (idx == *main_idx ||
+							(!covered_ids.contains(way.id) &&
+									way_length_blocks(way) * 10 >= main_length * 6 &&
+									bridge_styles::resolve_bridge_style_with_outline(
+											way, outlines) == group_style &&
+									headings_parallel(way, main_way)))
+						cable_carriers.insert(way.id);
 				}
 			}
 		}
@@ -1048,6 +1141,18 @@ BridgeStructureMap BridgeStructureMap::build(
 		std::vector<float> profile_anchors;
 		std::vector<std::pair<float, int>> profile_anchor_levels;
 		std::vector<float> profile_free_ends;
+		if (group_style == bridge_styles::BridgeStyle::Suspension &&
+				cable_pylons.size() >= 2) {
+			for (const auto &tower : mapped_supports.towers) {
+				if (!tower.deck_y ||
+						std::find(cable_pylons.begin(), cable_pylons.end(),
+								std::pair{tower.x, tower.z}) == cable_pylons.end())
+					continue;
+				const float u = (tower.x - axis_start.first) * axis_dx +
+								(tower.z - axis_start.second) * axis_dz;
+				profile_requirements.emplace_back(u, static_cast<float>(*tower.deck_y));
+			}
+		}
 		std::unordered_set<std::pair<int, int>, XZPairHash> group_nodes;
 		for (const auto idx : group_indices) {
 			for (const auto &node : bridge_ways[idx]->nodes)
@@ -1091,7 +1196,7 @@ BridgeStructureMap BridgeStructureMap::build(
 							const bool at_start = candidate.nodes.front().x == node.x &&
 												  candidate.nodes.front().z == node.z;
 							const auto &far_ = at_start ? candidate.nodes.back()
-													   : candidate.nodes.front();
+														: candidate.nodes.front();
 							if (!node_members.contains({far_.x, far_.z})) {
 								has_external_ramp = true;
 								break;
@@ -1220,6 +1325,102 @@ BridgeStructureMap BridgeStructureMap::build(
 		const auto profile_hull = follows_axis
 										  ? upper_hull(std::move(profile_requirements))
 										  : std::vector<std::pair<float, float>>{};
+		std::shared_ptr<const bridge_towers::CableSpan> mapped_cable_span;
+		if (group_style == bridge_styles::BridgeStyle::Suspension && follows_axis &&
+				cable_pylons.size() >= 2) {
+			std::vector<const bridge_towers::MappedTower *> towers;
+			for (const auto &tower : mapped_supports.towers) {
+				if (std::find(cable_pylons.begin(), cable_pylons.end(),
+							std::pair{tower.x, tower.z}) != cable_pylons.end())
+					towers.push_back(&tower);
+			}
+			std::sort(towers.begin(), towers.end(), [&](const auto *a, const auto *b) {
+				const float ua = (a->x - axis_start.first) * axis_dx +
+								 (a->z - axis_start.second) * axis_dz;
+				const float ub = (b->x - axis_start.first) * axis_dx +
+								 (b->z - axis_start.second) * axis_dz;
+				return ua < ub;
+			});
+			if (towers.size() >= 2) {
+				std::vector<std::pair<float, int>> saddles;
+				saddles.reserve(towers.size());
+				for (const auto *tower : towers) {
+					const float u = (tower->x - axis_start.first) * axis_dx +
+									(tower->z - axis_start.second) * axis_dz;
+					saddles.emplace_back(
+							u, tower->top_y - bridge_towers::SADDLE_BELOW_TOP);
+				}
+				const float main_length = (saddles.back().first - saddles.front().first) /
+										  static_cast<float>(saddles.size() - 1);
+				const std::int64_t pier_reach = static_cast<std::int64_t>(30.0 * scale);
+				const std::int64_t pier_reach_squared = pier_reach * pier_reach;
+				const auto near_path = [&](int x, int z) {
+					for (const auto idx : group_indices)
+						for (const auto &[px, pz] : paths[idx]) {
+							const std::int64_t dx = px - x;
+							const std::int64_t dz = pz - z;
+							if (dx * dx + dz * dz <= pier_reach_squared)
+								return true;
+						}
+					return false;
+				};
+				std::vector<float> pier_us;
+				for (const auto &[x, z] : mapped_supports.minor)
+					if (near_path(x, z))
+						pier_us.push_back((x - axis_start.first) * axis_dx +
+										  (z - axis_start.second) * axis_dz);
+				const auto side_end = [&](float tower_u, float direction) {
+					std::optional<float> nearest;
+					for (const float u : pier_us) {
+						const float distance = (u - tower_u) * direction;
+						if (distance < 0.15f * main_length ||
+								distance > 0.6f * main_length)
+							continue;
+						if (!nearest || distance < *nearest)
+							nearest = distance;
+					}
+					return tower_u + direction * (nearest.value_or(0.27f * main_length));
+				};
+				float min_u = std::numeric_limits<float>::max();
+				float max_u = std::numeric_limits<float>::lowest();
+				for (const auto &[idx, values] : path_axis) {
+					(void)idx;
+					for (const float u : values) {
+						min_u = std::min(min_u, u);
+						max_u = std::max(max_u, u);
+					}
+				}
+				const std::pair<float, float> anchors{
+						std::max(side_end(saddles.front().first, -1.0f), min_u),
+						std::min(side_end(saddles.back().first, 1.0f), max_u)};
+				const auto deck_at = [&](float u) {
+					return static_cast<int>(std::lround(hull_at(profile_hull, u)));
+				};
+				if (auto span = bridge_towers::make_cable_span(axis_start.first,
+							axis_start.second, axis_dx, axis_dz, saddles, anchors,
+							deck_at, towers.front()->paint, scale))
+					mapped_cable_span = std::make_shared<const bridge_towers::CableSpan>(
+							std::move(*span));
+			}
+			if (mapped_cable_span) {
+				for (auto it = cable_carriers.begin(); it != cable_carriers.end();) {
+					const auto member = std::find_if(group_indices.begin(),
+							group_indices.end(),
+							[&](std::size_t idx) { return bridge_ways[idx]->id == *it; });
+					const bool hangs =
+							member != group_indices.end() &&
+							std::any_of(paths[*member].begin(), paths[*member].end(),
+									[&](const auto &point) {
+										return mapped_cable_span->suspends(
+												point.first, point.second);
+									});
+					if (!hangs)
+						it = cable_carriers.erase(it);
+					else
+						++it;
+				}
+			}
+		}
 		deck_y = profile_level;
 		std::unordered_map<std::size_t, std::vector<int>> member_profiles;
 		for (const auto &[idx, path] : paths) {
@@ -1364,6 +1565,8 @@ BridgeStructureMap BridgeStructureMap::build(
 			info.covered_by_wider = covered_ids.contains(way.id);
 			if (cable_carriers.contains(way.id))
 				info.cable_pylons = cable_pylons;
+			if (cable_carriers.contains(way.id))
+				info.cable_span = mapped_cable_span;
 			if (const auto profile = member_profiles.find(idx);
 					profile != member_profiles.end())
 				info.ys = profile->second;
@@ -1769,5 +1972,4 @@ bool BridgeSurfaceMap::over_grade_way(int x, int z) const
 {
 	return grade_crossings_.contains({x, z});
 }
-
 }

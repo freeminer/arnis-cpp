@@ -71,6 +71,17 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 		const std::vector<std::vector<double>> &, double scale, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
 		const AffinePolicy &policy = {},
+		const std::function<void(std::string_view)> &message = {}, int top_reserve = 0);
+
+int top_reserve_for(const std::vector<std::vector<double>> &heights,
+		const std::vector<std::pair<double, double>> &models, double scale,
+		double model_scale, int ground_level, int min_ground_level,
+		bool disable_height_limit, int extended_max_y, bool headroom);
+
+std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_reserving(
+		const std::vector<std::vector<double>> &, double scale, int ground_level,
+		int min_ground_level, bool disable_height_limit, int extended_max_y,
+		const AffinePolicy &policy = {}, int top_reserve = 0,
 		const std::function<void(std::string_view)> &message = {});
 
 std::tuple<std::vector<std::vector<double>>, double, double, int> scale_to_minecraft(

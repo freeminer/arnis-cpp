@@ -10,6 +10,8 @@
 #include <cmath>
 #include <optional>
 #include <utility>
+#include <algorithm>
+#include <limits>
 
 #include "../../../arnis_adapter.h"
 #include "bridges.h"
@@ -23,6 +25,30 @@ const int BRIDGE_BARRIER_NEARBY_RADIUS = 2;
 
 namespace
 {
+std::optional<double> parse_min_height(const std::string &raw)
+{
+	std::string value = raw;
+	const auto last = value.find_last_not_of(" \t\r\n");
+	if (last == std::string::npos)
+		return std::nullopt;
+	value.erase(last + 1);
+	while (!value.empty() && value.back() == 'm')
+		value.pop_back();
+	const auto first = value.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return std::nullopt;
+	value.erase(0, first);
+	try {
+		std::size_t used = 0;
+		const double height = std::stod(value, &used);
+		if (used != value.size() || !std::isfinite(height))
+			return std::nullopt;
+		return height;
+	} catch (...) {
+		return std::nullopt;
+	}
+}
+
 std::vector<std::optional<int>> barrier_bases(world_editor::WorldEditor &editor,
 		const bridges::BridgeSurfaceMap &surface,
 		const std::vector<std::pair<int, int>> &cells)
@@ -161,19 +187,32 @@ void generate_barriers(world_editor::WorldEditor &editor,
 	}
 	const osm_parser::Way &way = maybe_way.value();
 
+	// Mapped barrier parts can be suspended above the ground (for example,
+	// railings attached to a bridge tower). Scale both their lift and tagged
+	// height with the world, but keep ordinary ground barriers at their legacy
+	// one-block-per-metre height.
+	const double scale = editor.scale();
+	int lift = 0;
+	if (const auto it = element.tags().find("min_height"); it != element.tags().end()) {
+		if (const auto metres = parse_min_height(it->second))
+			lift = static_cast<int>(std::max(0.0, std::round(*metres * scale)));
+	}
+	const double height_scale = lift > 0 ? scale : 1.0;
 	int wall_height = barrier_height;
 	{
 		const std::unordered_map<std::string, std::string> &tags = element.tags();
 		auto hit = tags.find("height");
 		if (hit != tags.end()) {
 			try {
-				float h = std::stof(hit->second);
-				wall_height = static_cast<int>(std::lround(h));
+				std::size_t used = 0;
+				const double h = std::stod(hit->second, &used);
+				if (used == hit->second.size() && std::isfinite(h))
+					wall_height = static_cast<int>(std::lround(h * height_scale)) - lift;
 			} catch (...) {
 				wall_height = barrier_height;
 			}
 		}
-		const int minimum_height = single_height ? 1 : 2;
+		const int minimum_height = lift > 0 ? 1 : (single_height ? 1 : 2);
 		if (wall_height < minimum_height) {
 			wall_height = minimum_height;
 		}
@@ -195,7 +234,13 @@ void generate_barriers(world_editor::WorldEditor &editor,
 	}
 	if (joined)
 		cells = connected_blocks::four_connected_line(cells);
-	const auto bases = barrier_bases(editor, bridge_surface, cells);
+	auto bases = barrier_bases(editor, bridge_surface, cells);
+	if (lift > 0 && !cells.empty()) {
+		int lowest = std::numeric_limits<int>::max();
+		for (const auto &[x, z] : cells)
+			lowest = std::min(lowest, editor.get_absolute_y(x, 0, z));
+		bases.assign(cells.size(), std::optional<int>(lowest));
+	}
 	for (std::size_t i = 0; i < cells.size(); ++i) {
 		if (!bases[i])
 			continue;
@@ -205,7 +250,7 @@ void generate_barriers(world_editor::WorldEditor &editor,
 				base == editor.get_absolute_y(x, 0, z))
 			editor.set_block_absolute(block_definitions::GRASS_BLOCK, x, base, z,
 					std::nullopt, std::nullopt);
-		for (int y = 1; y <= wall_height; ++y) {
+		for (int y = lift + 1; y <= lift + wall_height; ++y) {
 			if (joined)
 				connected_blocks::place_connected(
 						editor, barrier_material, x, base + y, z);
@@ -215,7 +260,7 @@ void generate_barriers(world_editor::WorldEditor &editor,
 		}
 		if (capped)
 			editor.set_block_absolute(block_definitions::STONE_BRICK_SLAB, x,
-					base + wall_height + 1, z, std::nullopt, std::nullopt);
+					base + lift + wall_height + 1, z, std::nullopt, std::nullopt);
 	}
 }
 

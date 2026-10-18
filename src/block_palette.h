@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <vector>
+#include <utility>
 
 namespace arnis::block_palette
 {
@@ -15,6 +16,8 @@ inline constexpr std::uint8_t USE_ROOF = 4;
 inline constexpr std::uint8_t USE_FACADE = 8;
 
 Block closest_block(RGBTuple color);
+Block closest_of(const std::vector<std::pair<RGBTuple, Block>> &choices, RGBTuple color);
+Block paint_block_for_color(RGBTuple color);
 Block facade_block_for_color(RGBTuple color);
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k);
 Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng);

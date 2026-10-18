@@ -1,6 +1,7 @@
 #include "voxelize.h"
 #include "palette.h"
 #include "../block_definitions.h"
+#include "../colors.h"
 
 #include <algorithm>
 #include <cmath>
@@ -242,6 +243,16 @@ std::array<Vec3, 3> transformed_triangle(
 
 } // namespace
 
+void visit_triangle_voxels(const std::array<std::array<float, 3>, 3> &triangle,
+		const std::function<void(std::array<int, 3>)> &visit)
+{
+	std::unordered_set<VoxelKey, VoxelKeyHash> seen;
+	rasterize_triangle(triangle, [&](const VoxelKey &key) {
+		if (seen.insert(key).second)
+			visit({key.x, key.y, key.z});
+	});
+}
+
 std::vector<Voxel> voxelize_triangles(
 		const std::vector<std::array<std::array<float, 3>, 3>> &triangles,
 		const WorldTransform &transform)
@@ -281,6 +292,14 @@ std::vector<Voxel> voxelize_uniform_triangles(
 
 std::vector<Voxel> voxelize_colored_triangles(
 		const std::vector<ColoredTriangle> &triangles, const WorldTransform &transform)
+
+{
+	return voxelize_colored_triangles(triangles, transform, {});
+}
+
+std::vector<Voxel> voxelize_colored_triangles(
+		const std::vector<ColoredTriangle> &triangles, const WorldTransform &transform,
+		const std::vector<std::pair<std::array<float, 3>, Block>> &palette)
 {
 	std::unordered_map<VoxelKey, std::size_t, VoxelKeyHash> seen;
 	std::vector<Voxel> output;
@@ -296,7 +315,28 @@ std::vector<Voxel> voxelize_colored_triangles(
 				   std::abs(triangle.color[2] - 1.0f) < 0.001f) {
 			block = block_definitions::GLASS;
 		} else {
-			block = block_for_model_color(triangle.color);
+			if (palette.empty()) {
+				block = block_for_model_color(triangle.color);
+			} else {
+				const auto rgb = [](const std::array<float, 3> &color) {
+					return RGBTuple{static_cast<std::uint8_t>(
+											std::clamp(color[0], 0.0f, 1.0f) * 255.0f),
+							static_cast<std::uint8_t>(
+									std::clamp(color[1], 0.0f, 1.0f) * 255.0f),
+							static_cast<std::uint8_t>(
+									std::clamp(color[2], 0.0f, 1.0f) * 255.0f)};
+				};
+				const auto target = rgb(triangle.color);
+				block = palette.front().second;
+				float best = std::numeric_limits<float>::infinity();
+				for (const auto &[color, candidate] : palette) {
+					const float distance = ::oklab_distance(target, rgb(color));
+					if (distance < best) {
+						best = distance;
+						block = candidate;
+					}
+				}
+			}
 		}
 		rasterize_triangle(world, [&](const VoxelKey &key) {
 			if (seen.emplace(key, output.size()).second)

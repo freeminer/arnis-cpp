@@ -1,6 +1,7 @@
 #pragma once
 
 #include "elevation.h"
+#include "peaks.h"
 #include "postprocess.h"
 
 #include <functional>
@@ -50,7 +51,8 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		ElevationData raw, double scale, double height_multiplier, int ground_level,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
 		bool apply_earth_repairs, land_cover::LandCoverData *land_cover,
-		const AffinePolicy &affine = {}, const ProgressCallback &progress = {});
+		const AffinePolicy &affine = {}, const ProgressCallback &progress = {},
+		const TerrainHints &terrain_hints = {});
 
 ProcessedElevationData fetch_elevation_data(Selector &selector,
 		const geographic::LLBBox &bbox, std::size_t world_width, std::size_t world_height,
@@ -58,6 +60,6 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		double height_multiplier, int ground_level, int min_ground_level,
 		bool disable_height_limit, int extended_max_y, bool apply_earth_repairs,
 		land_cover::LandCoverData *land_cover, const AffinePolicy &affine = {},
-		const ProgressCallback &progress = {});
+		const ProgressCallback &progress = {}, const TerrainHints &terrain_hints = {});
 
 } // namespace arnis::elevation

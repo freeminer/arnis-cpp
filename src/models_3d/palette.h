@@ -8,6 +8,7 @@ namespace arnis::models_3d
 {
 inline constexpr std::uint8_t USE_MODEL = 1, USE_WALL = 2, USE_ROOF = 4, USE_FACADE = 8;
 Block closest_block(RGBTuple color);
+Block paint_block_for_color(RGBTuple color);
 Block facade_block_for_color(RGBTuple color);
 std::vector<Block> closest_blocks(RGBTuple color, std::size_t k);
 Block wall_block_for_color(RGBTuple color, ChaCha8Rng &rng);

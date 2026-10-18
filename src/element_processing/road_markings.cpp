@@ -141,7 +141,7 @@ bool is_roundabout(const tags_t &tags)
 	return tags.get("junction") == "roundabout" || tags.get("junction") == "circular";
 }
 
-int oneway_sign(const std::string &highway, const tags_t &tags)
+int oneway_sign_impl(const std::string &highway, const tags_t &tags)
 {
 	const auto value = tags.get("oneway");
 	if (value == "yes" || value == "true" || value == "1")
@@ -376,6 +376,11 @@ int chebyshev_distance_to(const std::vector<std::pair<int, int>> &cells, int x, 
 
 } // namespace
 
+int oneway_sign(const std::string &highway, const tags_t &tags)
+{
+	return oneway_sign_impl(highway, tags);
+}
+
 bool WayMarks::in_gap(std::uint32_t t) const
 {
 	for (const auto &[a, b] : gaps)
@@ -452,7 +457,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 			surface = *cycleway;
 		const auto [rank, link] = road_class(highway);
 		roads.push_back({&way, rank, link, is_roundabout(way.tags),
-				oneway_sign(highway, way.tags),
+				oneway_sign_impl(highway, way.tags),
 				arnis::highways::lane_marking_count(highway, way.tags) >= 2, range,
 				std::move(surface), node_path_index(way)});
 	}

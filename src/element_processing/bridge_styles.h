@@ -15,6 +15,11 @@ namespace arnis::bridges
 class BridgeSurfaceMap;
 }
 
+namespace arnis::bridge_towers
+{
+struct CableSpan;
+}
+
 namespace arnis::bridge_styles
 {
 
@@ -87,7 +92,8 @@ void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
 		const bridges::BridgeSurfaceMap &surface,
 		const std::vector<BridgePathSample> &path, int block_range,
 		bool start_is_boundary, bool end_is_boundary,
-		const std::vector<std::pair<int, int>> *pylon_points = nullptr);
+		const std::vector<std::pair<int, int>> *pylon_points = nullptr,
+		const bridge_towers::CableSpan *cable_span = nullptr);
 
 bool sweep_bridge_schematic(WorldEditor &editor, const bridges::BridgeSurfaceMap &surface,
 		const std::vector<BridgePathSample> &path, std::optional<std::size_t> module_idx,

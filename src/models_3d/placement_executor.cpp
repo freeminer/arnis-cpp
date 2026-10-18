@@ -5,6 +5,7 @@
 #include "wikidata/placement.h"
 #include "wikidata/stl.h"
 #include "../land_cover/land_cover.h"
+#include "../water_depth.h"
 #include "palette.h"
 #include "../colors.h"
 #include <algorithm>
@@ -15,10 +16,12 @@
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <map>
 #include <new>
 #include <optional>
 #include <thread>
 #include <unordered_map>
+#include <queue>
 
 namespace arnis::models_3d
 {
@@ -37,6 +40,70 @@ std::uint64_t palette_hash(std::uint64_t seed, const std::array<int, 3> &positio
 		h ^= h >> 31;
 	}
 	return h;
+}
+
+// Match Rust stamp_voxels: fill enclosed footprint holes before the tree sweep
+// so trees beneath legs and platform edges are removed too.
+void clear_trees_under_model(
+		world_editor::WorldEditor &editor, const std::vector<Voxel> &voxels)
+{
+	if (voxels.empty())
+		return;
+	int min_x = voxels.front().position[0], max_x = min_x;
+	int min_z = voxels.front().position[2], max_z = min_z;
+	int top = voxels.front().position[1];
+	for (const auto &voxel : voxels) {
+		min_x = std::min(min_x, voxel.position[0]);
+		max_x = std::max(max_x, voxel.position[0]);
+		min_z = std::min(min_z, voxel.position[2]);
+		max_z = std::max(max_z, voxel.position[2]);
+		top = std::max(top, voxel.position[1]);
+	}
+	const auto width = static_cast<std::size_t>(max_x - min_x + 1);
+	const auto height = static_cast<std::size_t>(max_z - min_z + 1);
+	if (!width || !height || width > 16'000'000 / height)
+		return;
+	std::vector<std::uint8_t> inside(width * height, 0);
+	for (const auto &voxel : voxels)
+		inside[static_cast<std::size_t>(voxel.position[2] - min_z) * width +
+				static_cast<std::size_t>(voxel.position[0] - min_x)] = 1;
+	std::queue<std::pair<int, int>> outside;
+	const auto enqueue = [&](int x, int z) {
+		auto &value = inside[static_cast<std::size_t>(z) * width + x];
+		if (value == 0) {
+			value = 2;
+			outside.emplace(x, z);
+		}
+	};
+	for (int x = 0; x < static_cast<int>(width); ++x) {
+		enqueue(x, 0);
+		enqueue(x, static_cast<int>(height) - 1);
+	}
+	for (int z = 0; z < static_cast<int>(height); ++z) {
+		enqueue(0, z);
+		enqueue(static_cast<int>(width) - 1, z);
+	}
+	while (!outside.empty()) {
+		const auto [x, z] = outside.front();
+		outside.pop();
+		for (const auto &[dx, dz] : {std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+			const int nx = x + dx, nz = z + dz;
+			if (nx >= 0 && nz >= 0 && nx < static_cast<int>(width) &&
+					nz < static_cast<int>(height))
+				enqueue(nx, nz);
+		}
+	}
+	constexpr int tree_sweep_height = 64;
+	for (int z = 0; z < static_cast<int>(height); ++z)
+		for (int x = 0; x < static_cast<int>(width); ++x) {
+			if (inside[static_cast<std::size_t>(z) * width + x] == 2)
+				continue;
+			const int wx = min_x + x, wz = min_z + z;
+			const int ground = editor.get_ground_level(wx, wz);
+			for (int y = ground; y <= std::min(ground + tree_sweep_height, top); ++y)
+				if (water_depth::is_tree_block(editor.block_name_absolute(wx, y, wz)))
+					water_depth::clear_tree(editor, wx, y, wz);
+		}
 }
 
 std::vector<Voxel> voxelize_asset(
@@ -157,7 +224,7 @@ std::vector<Voxel> voxelize_fitted_stl(const ModelAsset &asset,
 		}
 		fitted.push_back(out);
 	}
-	return voxelize_uniform_triangles(fitted, transform, block_definitions::STONE_BRICKS);
+	return voxelize_solid_triangles(fitted, transform, block_definitions::STONE_BRICKS);
 }
 
 Block named_palette_block(const std::string &name)
@@ -339,7 +406,7 @@ bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel>
 		int ground_y, int elevation, ModelPlacementStats &stats,
 		const std::vector<Block> *fallback_palette = nullptr,
 		const std::optional<wikidata::ResolvedPaletteLayers> *layers = nullptr,
-		std::uint64_t palette_seed = 0)
+		std::uint64_t palette_seed = 0, bool wikidata_foundation = false)
 {
 	if (voxels.empty())
 		return false;
@@ -375,11 +442,55 @@ bool place_grounded_voxels(world_editor::WorldEditor &editor, std::vector<Voxel>
 	int min_y = voxels.front().position[1];
 	for (const auto &voxel : voxels)
 		min_y = std::min(min_y, voxel.position[1]);
-	const int dy = ground_y + elevation - min_y;
+	int target_ground = ground_y;
+	if (wikidata_foundation) {
+		constexpr int load_bearing_band = 2;
+		std::map<std::pair<int, int>, int> bottoms;
+		for (const auto &voxel : voxels) {
+			auto [it, inserted] = bottoms.try_emplace(
+					std::pair{voxel.position[0], voxel.position[2]}, voxel.position[1]);
+			if (!inserted)
+				it->second = std::min(it->second, voxel.position[1]);
+		}
+		std::vector<int> levels;
+		for (const auto &[column, y] : bottoms)
+			if (y <= min_y + load_bearing_band)
+				levels.push_back(editor.get_ground_level(column.first, column.second));
+		if (!levels.empty()) {
+			std::sort(levels.begin(), levels.end());
+			target_ground = levels[levels.size() / 2];
+		}
+	}
+	const int dy = target_ground + elevation - min_y;
 	if (dy)
 		for (auto &voxel : voxels)
 			voxel.position[1] += dy;
+	clear_trees_under_model(editor, voxels);
 	place_voxels(editor, voxels);
+	if (wikidata_foundation) {
+		constexpr int load_bearing_band = 2;
+		constexpr int max_foundation_depth = 64;
+		std::map<std::pair<int, int>, std::pair<int, Block>> bottoms;
+		for (const auto &voxel : voxels) {
+			auto [it, inserted] =
+					bottoms.try_emplace(std::pair{voxel.position[0], voxel.position[2]},
+							std::pair{voxel.position[1], voxel.block});
+			if (!inserted && voxel.position[1] < it->second.first)
+				it->second = {voxel.position[1], voxel.block};
+		}
+		const int base_y = min_y + dy;
+		for (const auto &[column, bottom] : bottoms) {
+			const auto [x, z] = column;
+			const auto [y, block] = bottom;
+			if (y > base_y + load_bearing_band)
+				continue;
+			const int floor =
+					std::max(y - max_foundation_depth, editor.get_ground_level(x, z) + 1);
+			for (int fy = floor; fy < y; ++fy)
+				editor.set_block_absolute(block, x, fy, z, std::nullopt,
+						std::optional<std::vector<Block>>(std::vector<Block>{}));
+		}
+	}
 	++stats.placed;
 	stats.voxels += voxels.size();
 	return true;
@@ -389,10 +500,11 @@ bool place_grounded(world_editor::WorldEditor &editor, const ModelAsset &asset,
 		const WorldTransform &transform, int ground_y, int elevation,
 		ModelPlacementStats &stats, const std::vector<Block> *fallback_palette = nullptr,
 		const std::optional<wikidata::ResolvedPaletteLayers> *layers = nullptr,
-		std::uint64_t palette_seed = 0)
+		std::uint64_t palette_seed = 0, bool wikidata_foundation = false)
 {
 	return place_grounded_voxels(editor, voxelize_asset(asset, transform), ground_y,
-			elevation, stats, fallback_palette, layers, palette_seed);
+			elevation, stats, fallback_palette, layers, palette_seed,
+			wikidata_foundation);
 }
 
 int ground_for(
@@ -513,7 +625,7 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 						voxelize_fitted_stl(
 								asset, placement, blocks_per_meter, transform),
 						ground, 0, stats, &placement.palette, &placement.palette_layers,
-						qid_seed);
+						qid_seed, true);
 				continue;
 			}
 			// Rust derives an intrinsic GLB scale in model/metre units, then applies
@@ -554,7 +666,8 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 			// Wikidata palettes are only used for STL, whose triangles carry no
 			// reliable material colors; do not recolor the GLB voxelizer's
 			// STONE_BRICKS fallback here.
-			place_grounded(editor, asset, transform, ground, 0, stats);
+			place_grounded(editor, asset, transform, ground, 0, stats, nullptr, nullptr,
+					0, true);
 		} catch (const std::bad_alloc &) {
 			throw;
 		} catch (const std::exception &error) {
@@ -644,13 +757,30 @@ ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 			const int ground = ground_for(editor, placement.footprint.min_x,
 					placement.footprint.min_z, placement.footprint.max_x,
 					placement.footprint.max_z);
-			WorldTransform transform(info->second.rotation, info->second.scale,
+			// The Eiffel Tower's 3DMR metadata leaves it quarter-turned and a little
+			// undersized. Rust applies this correction before voxelization and keeps
+			// its iron colours within a two-block family palette.
+			const bool eiffel_tower = placement.model_id == 4;
+			const double model_scale = info->second.scale * (eiffel_tower ? 1.035 : 1.0);
+			const double extra_yaw = eiffel_tower ? 44.3 : 0.0;
+			WorldTransform transform(info->second.rotation, model_scale,
 					info->second.translation,
 					{float(blocks_per_meter), float(blocks_per_meter),
 							float(blocks_per_meter)},
-					placement.world_yaw_degrees, float(placement.anchor_x), float(ground),
-					float(placement.anchor_z));
-			place_grounded(editor, asset->second, transform, ground, 0, stats);
+					placement.world_yaw_degrees + extra_yaw, float(placement.anchor_x),
+					float(ground), float(placement.anchor_z));
+			if (eiffel_tower && asset->second.format == ModelFormat::GLB) {
+				const std::vector<std::pair<std::array<float, 3>, Block>> iron_palette{
+						{{77.0f / 255.0f, 51.0f / 255.0f, 36.0f / 255.0f},
+								BROWN_TERRACOTTA},
+						{{137.0f / 255.0f, 104.0f / 255.0f, 79.0f / 255.0f}, MUD_BRICKS}};
+				place_grounded_voxels(editor,
+						voxelize_glb_with_palette(
+								asset->second.bytes, transform, iron_palette),
+						ground, 0, stats);
+			} else {
+				place_grounded(editor, asset->second, transform, ground, 0, stats);
+			}
 		} catch (const std::bad_alloc &) {
 			throw;
 		} catch (const std::exception &error) {
