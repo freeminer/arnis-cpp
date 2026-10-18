@@ -46,8 +46,12 @@ std::optional<double> metres(const tags_t &tags, const char *key)
 		return std::nullopt;
 	auto last = value.find_last_not_of(" \t\r\n");
 	value = value.substr(first, last - first + 1);
-	if (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
+	while (!value.empty() && value.back() == 'm')
 		value.pop_back();
+	const auto trimmed = value.find_last_not_of(" \t\r\n");
+	if (trimmed == std::string::npos)
+		return std::nullopt;
+	value.erase(trimmed + 1);
 	return strict_parse::f64(value);
 }
 
@@ -351,6 +355,29 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 				   oz <= box.max_z + 3;
 		};
 		std::optional<Part> deck_part;
+		const auto consider_deck = [&](const Part &part) {
+			if (part.min_height_m < 2.0 || !part.height_m ||
+					*part.height_m > 0.6 * *tallest->height_m)
+				return;
+			const int width = part.max_x - part.min_x;
+			const int depth = part.max_z - part.min_z;
+			if (std::min(width, depth) < static_cast<int>(MIN_DECK_PART_M * scale) ||
+					cx < part.min_x || cx > part.max_x || cz < part.min_z ||
+					cz > part.max_z)
+				return;
+			const auto area = static_cast<std::int64_t>(width) * depth;
+			const auto old_area = deck_part
+										  ? static_cast<std::int64_t>(
+													deck_part->max_x - deck_part->min_x) *
+													(deck_part->max_z - deck_part->min_z)
+										  : -1;
+			if (area >= old_area)
+				deck_part = part;
+		};
+		// Rust considers both the clustered support ways and nearby untagged
+		// building parts. A support slab can itself be the raised deck.
+		for (const auto index : group)
+			consider_deck(supports[index]);
 		for (const auto &element : elements) {
 			if (!element.is_way())
 				continue;
@@ -359,20 +386,8 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 					!is_near_tower(way))
 				continue;
 			auto part = make_part(way, editor);
-			if (!part || part->min_height_m < 2.0 || !part->height_m ||
-					*part->height_m > 0.6 * *tallest->height_m)
-				continue;
-			const int width = part->max_x - part->min_x;
-			const int depth = part->max_z - part->min_z;
-			if (std::min(width, depth) < static_cast<int>(MIN_DECK_PART_M * scale) ||
-					cx < part->min_x || cx > part->max_x || cz < part->min_z ||
-					cz > part->max_z)
-				continue;
-			if (!deck_part || (static_cast<std::int64_t>(width) * depth) >
-									  static_cast<std::int64_t>(
-											  deck_part->max_x - deck_part->min_x) *
-											  (deck_part->max_z - deck_part->min_z))
-				deck_part = std::move(part);
+			if (part)
+				consider_deck(*part);
 		}
 		std::optional<int> deck_y;
 		if (deck_part && deck_part->height_m)

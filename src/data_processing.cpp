@@ -50,6 +50,7 @@
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"
+#include "element_processing/cars.h"
 #include "element_processing/buildings.h"
 #include "element_processing/tree.h"
 #include "element_processing/subprocessor/interior/index.h"
@@ -2222,9 +2223,30 @@ bool generate_world(WorldEditor &editor,
 	auto marking_index = road_markings::RoadMarkingIndex::build(elements, args.scale,
 			decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 					(geo_bounds[2] + geo_bounds[3]) * .5));
-	auto traffic_signal_index = highways::SignalIndex::build(
-			elements, args.scale, marking_index.drives_on_left, road_mask);
-	editor.traffic_signal_index = traffic_signal_index;
+	const bool java_world =
+			editor.get_generation_format() == static_cast<int>(WorldFormat::JavaAnvil);
+	const bool extras_enabled = !args.one_world_run;
+	if (extras_enabled && args.traffic_lights && java_world) {
+		editor.traffic_signal_index = highways::SignalIndex::build(
+				elements, args.scale, marking_index.drives_on_left, road_mask);
+	} else {
+		editor.traffic_signal_index.reset();
+	}
+	if (extras_enabled && args.moving_cars && java_world) {
+		auto surface_y = [&](int x, int z) {
+			if (const auto deck = bridge_surface.nearby_deck_y(x, z, 0))
+				return *deck;
+			if (editor.ground)
+				return editor.ground->level(editor.ground_point(x, z));
+			return args.ground_level;
+		};
+		editor.car_network = std::make_shared<const highways::cars::CarNetwork>(
+				highways::cars::CarNetwork::build(elements, args.scale,
+						marking_index.drives_on_left, args.traffic_lights, xzbbox,
+						surface_y));
+	} else {
+		editor.car_network.reset();
+	}
 	// Rust reorders only ground-fill elements here, after applying OSM ground
 	// overrides and building the shared indexes. Keep the cached element vector
 	// immutable and carry this order as indices to avoid a deep copy per chunk.
@@ -2611,6 +2633,8 @@ bool generate_world(WorldEditor &editor,
 				structures::jetbridge::generate_jet_bridge(
 						editor, way, building_footprints);
 			} else if (way.tags.contains("highway")) {
+				if (editor.car_network)
+					editor.car_network->place_way(editor, way.id);
 				const bool tunnel_rendered =
 						highways::renders_as_highway_tunnel(way) &&
 						highways::generate_highway_tunnel_shell(editor, way, args,
@@ -3113,6 +3137,7 @@ bool generate_world(WorldEditor &editor,
 	shared_selector.reset();
 	road_mask_owner.reset();
 	editor.traffic_signal_index.reset();
+	editor.car_network.reset();
 	big_water_field = {};
 	tunnel_footprint = {};
 	rail_mask = {};

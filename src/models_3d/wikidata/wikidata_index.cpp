@@ -48,6 +48,9 @@ static const std::unordered_map<std::string, WikidataEntry> &index_data()
 				if (v.contains("height_m"))
 					if (v["height_m"].is_number())
 						e.height_m = v["height_m"].get<double>();
+				if (v.contains("yaw_deg"))
+					if (v["yaw_deg"].is_number())
+						e.yaw_deg = v["yaw_deg"].get<double>();
 				if (v.contains("palette_layers") && !v["palette_layers"].is_null()) {
 					if (v["palette_layers"].is_array()) {
 						std::vector<WikidataEntry::PaletteLayer> layers;

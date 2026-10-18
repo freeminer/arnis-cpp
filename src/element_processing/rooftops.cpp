@@ -740,7 +740,10 @@ void fit_out_roof(WorldEditor &editor, RoofDeck &deck, const RooftopBrief &brief
 	}
 
 	std::optional<std::tuple<int, int, int>> bulkhead_top;
-	if (!penthouse && brief.whole_building && brief.storeys() >= 4 && usable >= 24 &&
+	// Stair/lift bulkheads are fitted to roof sections as well as whole
+	// buildings. Rust only restricts water tanks and penthouses to the main roof;
+	// keep those guards separate from this general rooftop equipment pass.
+	if (!penthouse && brief.storeys() >= 4 && usable >= 24 &&
 			rng.random_bool(na ? .9 : (europe ? .6 : .8))) {
 		const bool pair = usable >= 500 && rng.random_bool(.5);
 		const bool big = usable >= 400;

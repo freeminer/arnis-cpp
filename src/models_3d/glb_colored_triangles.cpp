@@ -594,14 +594,14 @@ std::vector<ColoredTriangle> glb_colored_triangles(const std::vector<std::uint8_
 	return out;
 }
 
-std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t> &bytes)
+void for_each_glb_paint_triangle(const std::vector<std::uint8_t> &bytes,
+		const std::function<void(const GlbPaintTriangle &)> &sink)
 {
 	tinygltf::TinyGLTF loader;
 	tinygltf::Model model;
 	std::string err, warn;
 	if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes.data(), bytes.size()))
 		throw std::runtime_error("GLB parse: " + err);
-	std::vector<GlbPaintTriangle> out;
 	const auto append_mesh = [&](int mesh_id, const Matrix &world) {
 		if (mesh_id < 0 || std::size_t(mesh_id) >= model.meshes.size())
 			return;
@@ -704,7 +704,7 @@ std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t
 								((*colors)[ids[0]][c] + (*colors)[ids[1]][c] +
 										(*colors)[ids[2]][c]) /
 								3.0f;
-				out.push_back(std::move(triangle));
+				sink(triangle);
 			}
 		}
 	};
@@ -728,6 +728,13 @@ std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t
 		for (int child : node.children)
 			stack.push_back({child, world});
 	}
+}
+
+std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t> &bytes)
+{
+	std::vector<GlbPaintTriangle> out;
+	for_each_glb_paint_triangle(
+			bytes, [&](const GlbPaintTriangle &triangle) { out.push_back(triangle); });
 	return out;
 }
 

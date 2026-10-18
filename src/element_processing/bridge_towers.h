@@ -15,6 +15,9 @@ struct BridgePathSample;
 namespace arnis::bridge_towers
 {
 inline constexpr int SADDLE_BELOW_TOP = 3;
+// Used when no mapped pier is close enough to define the cable anchor.
+inline constexpr float DEFAULT_SIDE_SPAN = 0.27f;
+inline constexpr double SIDE_PIER_REACH_M = 30.0;
 
 struct MappedTower
 {

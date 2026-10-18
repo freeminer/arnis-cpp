@@ -69,6 +69,8 @@ std::pair<std::array<float, 3>, std::array<float, 3>> glb_vertex_bounds(
 		const std::vector<std::uint8_t> &bytes);
 std::vector<ColoredTriangle> glb_colored_triangles(
 		const std::vector<std::uint8_t> &bytes);
+void for_each_glb_paint_triangle(const std::vector<std::uint8_t> &bytes,
+		const std::function<void(const GlbPaintTriangle &)> &sink);
 std::vector<GlbPaintTriangle> glb_paint_triangles(const std::vector<std::uint8_t> &bytes);
 Block block_for_model_color(std::array<float, 3> color);
 class WorldTransform
@@ -117,5 +119,20 @@ std::vector<std::pair<std::array<int, 3>, VoxelPaint>> voxelize_glb_paint(
 		const std::vector<std::uint8_t> &, const WorldTransform &);
 void visit_triangle_voxels(const std::array<std::array<float, 3>, 3> &,
 		const std::function<void(std::array<int, 3>)> &);
+class TriangleVoxelVisitCache
+{
+	struct Impl;
+	std::unique_ptr<Impl> impl_;
+
+public:
+	TriangleVoxelVisitCache();
+	~TriangleVoxelVisitCache();
+	TriangleVoxelVisitCache(TriangleVoxelVisitCache &&) noexcept;
+	TriangleVoxelVisitCache &operator=(TriangleVoxelVisitCache &&) noexcept;
+	TriangleVoxelVisitCache(const TriangleVoxelVisitCache &) = delete;
+	TriangleVoxelVisitCache &operator=(const TriangleVoxelVisitCache &) = delete;
+	void visit(const std::array<std::array<float, 3>, 3> &,
+			const std::function<void(std::array<int, 3>)> &);
+};
 void place_voxels(world_editor::WorldEditor &, const std::vector<Voxel> &);
 }

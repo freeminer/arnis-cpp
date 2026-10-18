@@ -389,12 +389,7 @@ void place_snow_layer(WorldEditor &e, int x, int y, int z, std::optional<Block> 
 		return;
 	if (eighths != 0) {
 		const auto layer = snow_layer_with_depth(std::min(eighths, decltype(eighths)(7)));
-		// Match Rust's set_block_if_absent_absolute without discarding the layer
-		// depth state. AIR as the replacement whitelist also allows a generated
-		// empty cell, matching Rust's distinction between empty and occupied.
-		const std::optional<std::vector<Block>> air_only{{AIR}};
-		if (!e.try_set_block_with_properties_absolute(
-					layer, x, y + 1, z, air_only, std::nullopt))
+		if (!e.set_block_with_properties_if_absent_absolute(layer, x, y + 1, z))
 			return;
 	} else if (!is_ice(*top) || e.block_exists_absolute(x, y + 1, z)) {
 		return;

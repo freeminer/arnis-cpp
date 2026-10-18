@@ -253,26 +253,28 @@ std::vector<std::pair<std::array<int, 3>, VoxelPaint>> voxelize_glb_paint(
 		const std::vector<std::uint8_t> &bytes, const WorldTransform &transform)
 {
 	std::unordered_map<Position, Accum, PositionHash> accum;
-	for (auto triangle : glb_paint_triangles(bytes)) {
-		for (auto &point : triangle.vertices)
+	TriangleVoxelVisitCache visits;
+	for_each_glb_paint_triangle(bytes, [&](const GlbPaintTriangle &triangle) {
+		auto transformed = triangle;
+		for (auto &point : transformed.vertices)
 			point = transform.apply(point);
-		if (!std::all_of(triangle.vertices.begin(), triangle.vertices.end(),
+		if (!std::all_of(transformed.vertices.begin(), transformed.vertices.end(),
 					[](const Vec3 &p) {
 						return std::all_of(p.begin(), p.end(),
 								[](float x) { return std::isfinite(x); });
 					}))
-			continue;
+			return;
 		const auto frame =
-				triangle.has_uv ? Frame::make(triangle.vertices) : std::nullopt;
-		const float density = texel_density(triangle);
-		visit_triangle_voxels(triangle.vertices, [&](Position p) {
-			Accum sample = frame ? shade_footprint(triangle, *frame, p, density)
-								 : shade_sample(triangle, {1.0f / 3, 1.0f / 3, 1.0f / 3},
-										   density);
+				transformed.has_uv ? Frame::make(transformed.vertices) : std::nullopt;
+		const float density = texel_density(transformed);
+		visits.visit(transformed.vertices, [&](Position p) {
+			Accum sample = frame ? shade_footprint(transformed, *frame, p, density)
+								 : shade_sample(transformed,
+										   {1.0f / 3, 1.0f / 3, 1.0f / 3}, density);
 			sample.occupancy = sample.coverage / std::max<unsigned>(1, sample.samples);
 			accum[p].add(sample);
 		});
-	}
+	});
 
 	constexpr float rescue_min = .25f;
 	const auto coverage = [&](const Position &p) -> std::optional<float> {

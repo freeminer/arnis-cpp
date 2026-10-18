@@ -16,9 +16,14 @@ namespace
 {
 int round_block_coordinate(float value)
 {
-	const float lo = static_cast<float>(std::numeric_limits<int>::min());
-	const float hi = static_cast<float>(std::numeric_limits<int>::max());
-	return static_cast<int>(std::lround(std::clamp(value, lo, hi)));
+	// Rust's `f32::round() as i32` rounds ties away from zero, then saturates
+	// the conversion. `float(INT_MAX)` rounds up to 2^31, so clamping to that
+	// float and casting the rounded result to `int` would overflow here.
+	if (value <= static_cast<float>(std::numeric_limits<int>::min()))
+		return std::numeric_limits<int>::min();
+	if (value >= static_cast<float>(std::numeric_limits<int>::max()))
+		return std::numeric_limits<int>::max();
+	return static_cast<int>(std::round(value));
 }
 
 struct VoxelKey
@@ -59,7 +64,11 @@ Block block_for_model_color(std::array<float, 3> c)
 void place_voxels(world_editor::WorldEditor &e, const std::vector<Voxel> &v)
 {
 	for (const auto &q : v)
-		e.set_block_absolute(q.block, q.position[0], q.position[1], q.position[2]);
+		// Rust's stamp_voxels uses None/Some(&[]): model cells replace any
+		// terrain or previously generated block rather than inheriting the
+		// editor's None/None first-write-wins behavior.
+		e.set_block_absolute(q.block, q.position[0], q.position[1], q.position[2],
+				std::nullopt, std::vector<Block>{});
 }
 std::vector<Voxel> voxelize_points(const std::vector<std::array<float, 3>> &points,
 		const std::vector<std::array<float, 3>> &colors, const WorldTransform &t)

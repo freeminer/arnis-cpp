@@ -336,6 +336,9 @@ struct Args
 	GameMode gamemode{GameMode::Creative};
 	int64_t world_time{6000};
 	SignageLevel signage{SignageLevel::Basic};
+	// Java backend extras mirrored from Rust. Entity generation is opt-in.
+	bool traffic_lights{false};
+	bool moving_cars{false};
 
 	// Enable filling ground (optional)
 	bool fillground{false};

@@ -27,6 +27,30 @@ namespace arnis::models_3d
 {
 namespace
 {
+struct ModelOverride
+{
+	std::uint64_t id;
+	double yaw_degrees;
+	double scale;
+	std::vector<std::pair<std::array<float, 3>, Block>> palette;
+};
+
+const ModelOverride *model_override(std::uint64_t id)
+{
+	// Keep per-model corrections as data, matching the Rust 3DMR placement
+	// override table. A model can independently correct orientation, size, and
+	// material matching without adding another branch to placement execution.
+	static const std::array<ModelOverride, 1> overrides{{
+			{4, 44.3, 1.035,
+					{{{77.0f / 255.0f, 51.0f / 255.0f, 36.0f / 255.0f}, BROWN_TERRACOTTA},
+							{{137.0f / 255.0f, 104.0f / 255.0f, 79.0f / 255.0f},
+									MUD_BRICKS}}},
+	}};
+	const auto it = std::find_if(overrides.begin(), overrides.end(),
+			[&](const ModelOverride &entry) { return entry.id == id; });
+	return it == overrides.end() ? nullptr : &*it;
+}
+
 std::uint64_t palette_hash(std::uint64_t seed, const std::array<int, 3> &position)
 {
 	// Exact counterpart of Rust's splitmix-style pick_voxel_block.  Using the
@@ -262,6 +286,8 @@ Block named_palette_block(const std::string &name)
 		return LIGHT_GRAY_CONCRETE;
 	if (n == "BRICK")
 		return BRICK;
+	if (n == "CALCITE")
+		return CALCITE;
 	if (n == "MUD_BRICKS")
 		return MUD_BRICKS;
 	if (n == "GRANITE")
@@ -757,26 +783,21 @@ ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 			const int ground = ground_for(editor, placement.footprint.min_x,
 					placement.footprint.min_z, placement.footprint.max_x,
 					placement.footprint.max_z);
-			// The Eiffel Tower's 3DMR metadata leaves it quarter-turned and a little
-			// undersized. Rust applies this correction before voxelization and keeps
-			// its iron colours within a two-block family palette.
-			const bool eiffel_tower = placement.model_id == 4;
-			const double model_scale = info->second.scale * (eiffel_tower ? 1.035 : 1.0);
-			const double extra_yaw = eiffel_tower ? 44.3 : 0.0;
+			const auto *correction = model_override(placement.model_id);
+			const double model_scale =
+					info->second.scale * (correction ? correction->scale : 1.0);
+			const double extra_yaw = correction ? correction->yaw_degrees : 0.0;
 			WorldTransform transform(info->second.rotation, model_scale,
 					info->second.translation,
 					{float(blocks_per_meter), float(blocks_per_meter),
 							float(blocks_per_meter)},
 					placement.world_yaw_degrees + extra_yaw, float(placement.anchor_x),
 					float(ground), float(placement.anchor_z));
-			if (eiffel_tower && asset->second.format == ModelFormat::GLB) {
-				const std::vector<std::pair<std::array<float, 3>, Block>> iron_palette{
-						{{77.0f / 255.0f, 51.0f / 255.0f, 36.0f / 255.0f},
-								BROWN_TERRACOTTA},
-						{{137.0f / 255.0f, 104.0f / 255.0f, 79.0f / 255.0f}, MUD_BRICKS}};
+			if (correction && !correction->palette.empty() &&
+					asset->second.format == ModelFormat::GLB) {
 				place_grounded_voxels(editor,
 						voxelize_glb_with_palette(
-								asset->second.bytes, transform, iron_palette),
+								asset->second.bytes, transform, correction->palette),
 						ground, 0, stats);
 			} else {
 				place_grounded(editor, asset->second, transform, ground, 0, stats);

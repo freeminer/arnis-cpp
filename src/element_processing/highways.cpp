@@ -31,6 +31,7 @@
 #include "fm_highway_connectivity.h"
 #include "fm_traffic_signals.h"
 #include "traffic_lights.h"
+#include "cars.h"
 #include "../strict_parse.h"
 namespace arnis
 {
@@ -1805,6 +1806,8 @@ void generate_highways(crate::world_editor::WorldEditor &editor,
 	const auto regional_markings = crate::road_markings::RoadMarkingIndex::build(
 			all_elements, args.scale,
 			crate::decals::detect_region((geo[0] + geo[1]) * .5, (geo[2] + geo[3]) * .5));
+	if (editor.car_network && element.is_way())
+		editor.car_network->place_way(editor, element.as_way().id);
 	generate_highways_internal(editor, element, args, highway_connectivity,
 			floodfill_timeout, road_mask, bridge_structures, bridge_surface,
 			tunnel_portals, regional_markings, tunnel_footprint);

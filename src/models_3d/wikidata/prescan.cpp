@@ -252,7 +252,7 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			extent = std::max(fp.max_x - fp.min_x, fp.max_z - fp.min_z) / scale;
 		}
 		r.placements.push_back({e.id(), std::string(e.kind()), raw, qid, ax, az, fp,
-				yaw + rotation, h, extent, palette_for(e),
+				yaw + rotation + entry->yaw_deg.value_or(0.0), h, extent, palette_for(e),
 				resolve_palette_layers(entry->palette_layers)});
 		r.suppressed.push_back(key);
 		r.suppression_claims.push_back({key, key});

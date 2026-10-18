@@ -183,9 +183,16 @@ BlockWithProperties top_stair(BlockWithProperties stair)
 	if (!stair.properties)
 		return stair;
 	const auto &properties = *stair.properties;
+	const auto add_top_half = [&]() {
+		auto top_properties = *stair.properties;
+		top_properties["half"] = "top";
+		stair.properties =
+				BlockWithProperties::intern_properties(std::move(top_properties));
+		return stair;
+	};
 	const auto facing_it = properties.find("facing");
 	if (facing_it == properties.end() || properties.size() > 2)
-		return stair;
+		return add_top_half();
 	std::optional<StairFacing> facing;
 	for (const auto candidate : {StairFacing::North, StairFacing::East,
 				 StairFacing::South, StairFacing::West})
@@ -194,11 +201,11 @@ BlockWithProperties top_stair(BlockWithProperties stair)
 			break;
 		}
 	if (!facing)
-		return stair;
+		return add_top_half();
 	StairShape shape = StairShape::Straight;
 	if (const auto shape_it = properties.find("shape"); shape_it != properties.end()) {
 		if (properties.size() != 2)
-			return stair;
+			return add_top_half();
 		bool found = false;
 		for (const auto candidate :
 				{StairShape::Straight, StairShape::InnerLeft, StairShape::InnerRight,
@@ -209,9 +216,9 @@ BlockWithProperties top_stair(BlockWithProperties stair)
 				break;
 			}
 		if (!found)
-			return stair;
+			return add_top_half();
 	} else if (properties.size() != 1) {
-		return stair;
+		return add_top_half();
 	}
 	const auto key = std::make_tuple(stair.block.id(), *facing, shape);
 	{
@@ -477,30 +484,30 @@ Block get_stair_block_for_material(const Block &material) {
 }
 */
 
-static const std::array<Block, 11> WINDOW_VARIATIONS = {GLASS, GRAY_STAINED_GLASS,
-		LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, BROWN_STAINED_GLASS,
-		WHITE_STAINED_GLASS, TINTED_GLASS, LIGHT_BLUE_STAINED_GLASS, CYAN_STAINED_GLASS,
-		BLACK_STAINED_GLASS, BROWN_STAINED_GLASS};
+static const std::array<Block, 5> WINDOW_VARIATIONS = {GRAY_STAINED_GLASS,
+		LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS, GLASS};
 
 namespace
 {
 const std::vector<Block> &window_options_for_building_type(const std::string &type)
 {
-	static const std::vector<Block> residential{GLASS, WHITE_STAINED_GLASS,
-			LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS, TINTED_GLASS,
-			LIGHT_BLUE_STAINED_GLASS};
-	static const std::vector<Block> institutional{GLASS, WHITE_STAINED_GLASS,
-			LIGHT_GRAY_STAINED_GLASS, LIGHT_BLUE_STAINED_GLASS};
-	static const std::vector<Block> hospitality{GLASS, WHITE_STAINED_GLASS,
-			GRAY_STAINED_GLASS, LIGHT_BLUE_STAINED_GLASS, BROWN_STAINED_GLASS};
+	static const std::vector<Block> residential{GRAY_STAINED_GLASS,
+			LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS,
+			GLASS};
+	static const std::vector<Block> institutional{GRAY_STAINED_GLASS,
+			LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, BLACK_STAINED_GLASS};
+	static const std::vector<Block> hospitality{GRAY_STAINED_GLASS,
+			LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, BLACK_STAINED_GLASS};
 	static const std::vector<Block> industrial{
-			GLASS, GRAY_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS, BROWN_STAINED_GLASS};
+			GRAY_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS, GLASS};
+	static const std::vector<Block> tower{GRAY_STAINED_GLASS, GRAY_STAINED_GLASS,
+			LIGHT_GRAY_STAINED_GLASS, BLACK_STAINED_GLASS, CYAN_STAINED_GLASS};
 	static const std::vector<Block> religious{BLUE_STAINED_GLASS, CYAN_STAINED_GLASS,
 			LIGHT_BLUE_STAINED_GLASS, BROWN_STAINED_GLASS, WHITE_STAINED_GLASS};
 	static const std::vector<Block> farm{
 			GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS};
 	static const std::vector<Block> historic{
-			GLASS, LIGHT_GRAY_STAINED_GLASS, WHITE_STAINED_GLASS};
+			LIGHT_GRAY_STAINED_GLASS, GRAY_STAINED_GLASS, GLASS};
 	static const std::vector<Block> variations(
 			WINDOW_VARIATIONS.begin(), WINDOW_VARIATIONS.end());
 	if (type == "residential" || type == "house" || type == "apartment")
@@ -512,6 +519,8 @@ const std::vector<Block> &window_options_for_building_type(const std::string &ty
 		return hospitality;
 	if (type == "industrial" || type == "warehouse")
 		return industrial;
+	if (type == "tower" || type == "skyscraper")
+		return tower;
 	if (type == "religious" || type == "church" || type == "chapel" || type == "mosque" ||
 			type == "temple")
 		return religious;

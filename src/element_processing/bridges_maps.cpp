@@ -1352,7 +1352,8 @@ BridgeStructureMap BridgeStructureMap::build(
 				}
 				const float main_length = (saddles.back().first - saddles.front().first) /
 										  static_cast<float>(saddles.size() - 1);
-				const std::int64_t pier_reach = static_cast<std::int64_t>(30.0 * scale);
+				const std::int64_t pier_reach = static_cast<std::int64_t>(
+						bridge_towers::SIDE_PIER_REACH_M * scale);
 				const std::int64_t pier_reach_squared = pier_reach * pier_reach;
 				const auto near_path = [&](int x, int z) {
 					for (const auto idx : group_indices)
@@ -1379,7 +1380,9 @@ BridgeStructureMap BridgeStructureMap::build(
 						if (!nearest || distance < *nearest)
 							nearest = distance;
 					}
-					return tower_u + direction * (nearest.value_or(0.27f * main_length));
+					return tower_u +
+						   direction * nearest.value_or(bridge_towers::DEFAULT_SIDE_SPAN *
+														main_length);
 				};
 				float min_u = std::numeric_limits<float>::max();
 				float max_u = std::numeric_limits<float>::lowest();

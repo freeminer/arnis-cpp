@@ -12,6 +12,7 @@
 #include <cmath>
 #include <functional>
 #include <iterator>
+#include <numbers>
 #include <optional>
 #include <tuple>
 #include <unordered_set>
@@ -24,6 +25,10 @@ constexpr double DIR_REACH = 6.0;
 constexpr int COVER = 6;
 constexpr int MAST_Y = 7;
 constexpr int MAST_HALF = 3;
+constexpr double CAR_HEAD_Y = 3.9;
+constexpr double BIKE_HEAD_Y = 3.0;
+constexpr double PED_HEAD_Y = 2.3;
+constexpr double BIKE_SCALE = 0.62;
 
 using Kind = SignalIndex::Kind;
 
@@ -157,6 +162,111 @@ bool crossable(const ProcessedWay &way)
 		return it->second == "tram" || it->second == "light_rail" ||
 			   it->second == "rail" || it->second == "narrow_gauge";
 	return false;
+}
+
+enum class Lamp
+{
+	Red,
+	Amber,
+	Green
+};
+
+const char *lamp_block(Lamp lamp)
+{
+	switch (lamp) {
+	case Lamp::Red:
+		return "minecraft:redstone_block";
+	case Lamp::Amber:
+		return "minecraft:yellow_concrete";
+	case Lamp::Green:
+		return "minecraft:emerald_block";
+	}
+	return "minecraft:redstone_block";
+}
+
+char lamp_tag(Lamp lamp)
+{
+	switch (lamp) {
+	case Lamp::Red:
+		return 'r';
+	case Lamp::Amber:
+		return 'y';
+	case Lamp::Green:
+		return 'g';
+	}
+	return 'r';
+}
+
+void add_signal_part(world_editor::WorldEditor &editor, std::array<double, 3> centre,
+		double facing_x, double facing_z, double vertical, double forward,
+		std::array<float, 3> size, const std::string &block,
+		std::vector<std::string> tags, std::optional<std::pair<int, int>> brightness,
+		std::int64_t seed)
+{
+	const double x = centre[0] + facing_x * forward;
+	const double y = centre[1] + vertical;
+	const double z = centre[2] + facing_z * forward;
+	const auto floats = [](std::array<float, 3> value) {
+		return nlohmann::json::array({value[0], value[1], value[2]});
+	};
+	nlohmann::json extra = {{"block_state", {{"Name", block}}},
+			{"transformation",
+					{{"left_rotation", {0.0f, 0.0f, 0.0f, 1.0f}},
+							{"right_rotation", {0.0f, 0.0f, 0.0f, 1.0f}},
+							{"translation", floats({-size[0] / 2.0f, -size[1] / 2.0f,
+													-size[2] / 2.0f})},
+							{"scale", floats(size)}}},
+			{"Rotation", {static_cast<float>(std::atan2(-facing_x, facing_z) * 180.0 /
+											 std::numbers::pi),
+								 0.0f}}};
+	if (!tags.empty())
+		extra["Tags"] = tags;
+	if (brightness)
+		extra["brightness"] = {{"sky", brightness->first}, {"block", brightness->second}};
+	editor.add_block_display(x, y, z, seed, std::move(extra));
+}
+
+void add_signal_head(world_editor::WorldEditor &editor, std::array<double, 3> centre,
+		Kind kind, double facing_x, double facing_z, char group, double scale,
+		std::int64_t &seed)
+{
+	const double k = scale;
+	const auto part =
+			[&](double vertical, double forward, std::array<float, 3> size,
+					const std::string &block, std::vector<std::string> tags = {},
+					std::optional<std::pair<int, int>> brightness = std::nullopt) {
+				add_signal_part(editor, centre, facing_x, facing_z, vertical, forward,
+						size, block, std::move(tags), brightness, seed++);
+			};
+	if (kind == Kind::Pedestrian) {
+		part(0.0, 0.0, {0.34f, 0.72f, 0.26f}, "minecraft:black_concrete");
+		for (const auto &[lamp, y] : std::array<std::pair<Lamp, double>, 2>{
+					 {{Lamp::Red, 0.17}, {Lamp::Green, -0.17}}}) {
+			const bool lit = group == 'a' ? lamp == Lamp::Red : lamp == Lamp::Green;
+			const std::string tag =
+					std::string("arnis.tl_p") + group + "_" + lamp_tag(lamp);
+			part(y, 0.15, {0.24f, 0.24f, 0.04f}, lamp_block(lamp), {"arnis.tl", tag},
+					lit ? std::pair{15, 15} : std::pair{3, 0});
+			part(y + 0.135, 0.19, {0.28f, 0.03f, 0.12f}, "minecraft:black_concrete");
+		}
+		return;
+	}
+	part(0.0, 0.0,
+			{static_cast<float>(0.42 * k), static_cast<float>(1.10 * k),
+					static_cast<float>(0.30 * k)},
+			"minecraft:black_concrete");
+	for (const auto &[lamp, y] : std::array<std::pair<Lamp, double>, 3>{
+				 {{Lamp::Red, 0.34}, {Lamp::Amber, 0.0}, {Lamp::Green, -0.34}}}) {
+		const bool lit = group == 'a' ? lamp == Lamp::Green : lamp == Lamp::Red;
+		const std::string tag = std::string("arnis.tl_") + group + "_" + lamp_tag(lamp);
+		const float lamp_size = static_cast<float>(0.26 * k);
+		part(y * k, 0.17 * k, {lamp_size, lamp_size, 0.04f}, lamp_block(lamp),
+				{"arnis.tl", tag}, lit ? std::pair{15, 15} : std::pair{3, 0});
+		part((y + 0.15) * k, 0.225 * k,
+				{static_cast<float>(0.32 * k), static_cast<float>(0.035 * k),
+						static_cast<float>(0.15 * k)},
+				"minecraft:black_concrete");
+	}
 }
 
 char group_of_impl(double dx, double dz)
@@ -396,16 +506,31 @@ bool SignalIndex::place_node(world_editor::WorldEditor &editor, const ProcessedN
 		editor.set_block_absolute(COBBLESTONE_WALL, pole.x, base_y + 1, pole.z);
 		for (int y = base_y + 2; y <= base_y + pole.top; ++y)
 			editor.set_block_absolute(IRON_BARS, pole.x, y, pole.z);
+		const bool entity_backend =
+				editor.map_decals_enabled() || editor.has_entity_sink();
+		std::int64_t display_seed = static_cast<std::int64_t>(index) * 1000;
 		for (const auto &head : pole.heads) {
-			const int height = head.kind == Kind::Car ? 4 : 3;
-			const int fx = std::abs(head.facing_x) >= std::abs(head.facing_z)
-								   ? (head.facing_x > 0 ? 1 : -1)
-								   : 0;
-			const int fz = fx == 0 ? (head.facing_z > 0 ? 1 : -1) : 0;
-			if (!fm_place_native_traffic_signal_head(
-						editor, pole.x, base_y + height, pole.z, fx, fz))
-				editor.set_block_absolute(
-						BLACK_WOOL, pole.x + fx, base_y + height, pole.z + fz);
+			if (entity_backend) {
+				const double scale = head.kind == Kind::Bike ? BIKE_SCALE : 1.0;
+				const double height = head.kind == Kind::Car	? CAR_HEAD_Y
+									  : head.kind == Kind::Bike ? BIKE_HEAD_Y
+																: PED_HEAD_Y;
+				const double out = 0.0625 + 0.15 * scale;
+				const std::array<double, 3> centre{pole.x + 0.5 + head.facing_x * out,
+						base_y + height, pole.z + 0.5 + head.facing_z * out};
+				add_signal_head(editor, centre, head.kind, head.facing_x, head.facing_z,
+						head.group, scale, display_seed);
+			} else {
+				const int height = head.kind == Kind::Car ? 4 : 3;
+				const int fx = std::abs(head.facing_x) >= std::abs(head.facing_z)
+									   ? (head.facing_x > 0 ? 1 : -1)
+									   : 0;
+				const int fz = fx == 0 ? (head.facing_z > 0 ? 1 : -1) : 0;
+				if (!fm_place_native_traffic_signal_head(
+							editor, pole.x, base_y + height, pole.z, fx, fz))
+					editor.set_block_absolute(
+							BLACK_WOOL, pole.x + fx, base_y + height, pole.z + fz);
+			}
 		}
 		if (pole.has_mast) {
 			std::vector<std::pair<int, int>> points;
@@ -430,8 +555,17 @@ bool SignalIndex::place_node(world_editor::WorldEditor &editor, const ProcessedN
 							? (pole.mast_head.facing_x > 0 ? 1 : -1)
 							: 0;
 			const int fz = fx == 0 ? (pole.mast_head.facing_z > 0 ? 1 : -1) : 0;
-			fm_place_native_traffic_signal_head(
-					editor, pole.mast_x, base_y + MAST_Y, pole.mast_z, fx, fz);
+			if (entity_backend) {
+				const auto &head = pole.mast_head;
+				const double scale = head.kind == Kind::Bike ? BIKE_SCALE : 1.0;
+				const std::array<double, 3> centre{
+						pole.mast_x + 0.5, base_y + MAST_Y - 0.62, pole.mast_z + 0.5};
+				add_signal_head(editor, centre, head.kind, head.facing_x, head.facing_z,
+						head.group, scale, display_seed);
+			} else {
+				fm_place_native_traffic_signal_head(
+						editor, pole.mast_x, base_y + MAST_Y, pole.mast_z, fx, fz);
+			}
 		}
 	}
 	return true;

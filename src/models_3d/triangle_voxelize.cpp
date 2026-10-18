@@ -243,6 +243,34 @@ std::array<Vec3, 3> transformed_triangle(
 
 } // namespace
 
+struct TriangleVoxelVisitCache::Impl
+{
+	std::unordered_map<VoxelKey, std::uint32_t, VoxelKeyHash> last_triangle;
+	std::uint32_t triangle_id = 0;
+};
+
+TriangleVoxelVisitCache::TriangleVoxelVisitCache() : impl_(std::make_unique<Impl>())
+{
+}
+TriangleVoxelVisitCache::~TriangleVoxelVisitCache() = default;
+TriangleVoxelVisitCache::TriangleVoxelVisitCache(
+		TriangleVoxelVisitCache &&) noexcept = default;
+TriangleVoxelVisitCache &TriangleVoxelVisitCache::operator=(
+		TriangleVoxelVisitCache &&) noexcept = default;
+
+void TriangleVoxelVisitCache::visit(const std::array<std::array<float, 3>, 3> &triangle,
+		const std::function<void(std::array<int, 3>)> &visit_cell)
+{
+	const auto id = ++impl_->triangle_id;
+	rasterize_triangle(triangle, [&](const VoxelKey &key) {
+		auto [it, inserted] = impl_->last_triangle.try_emplace(key, id);
+		if (inserted || it->second != id) {
+			it->second = id;
+			visit_cell({key.x, key.y, key.z});
+		}
+	});
+}
+
 void visit_triangle_voxels(const std::array<std::array<float, 3>, 3> &triangle,
 		const std::function<void(std::array<int, 3>)> &visit)
 {

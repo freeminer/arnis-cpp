@@ -11,6 +11,8 @@ struct WikidataEntry
 	std::string label, url, license;
 	std::optional<std::string> license_url, artist;
 	std::optional<double> height_m;
+	// Curated model orientation correction, added to the OSM and world yaw.
+	std::optional<double> yaw_deg;
 	// Rust index palette_layers: optional Y-banded palette override used by
 	// coloured/voxelized models before falling back to OSM surface colours.
 	struct PaletteLayer

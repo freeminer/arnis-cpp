@@ -51,6 +51,34 @@ std::optional<double> parse_elevation(const std::string &input)
 	return parsed;
 }
 
+// Rust's Wikidata tall-model fallback uses placement::parse_meters: unlike a
+// surveyed summit's `ele`, an OSM model `height` must be positive, and may
+// carry either lower- or upper-case metre suffixes.
+std::optional<double> parse_model_height(const std::string &input)
+{
+	std::string value = input;
+	auto trim = [](std::string &s) {
+		const auto first = s.find_first_not_of(" \t\r\n");
+		if (first == std::string::npos) {
+			s.clear();
+			return;
+		}
+		const auto last = s.find_last_not_of(" \t\r\n");
+		s = s.substr(first, last - first + 1);
+	};
+	trim(value);
+	while (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
+		value.pop_back();
+	trim(value);
+	if (value.empty())
+		return std::nullopt;
+	char *end = nullptr;
+	const double parsed = std::strtod(value.c_str(), &end);
+	if (end != value.c_str() + value.size() || !std::isfinite(parsed) || parsed <= 0.0)
+		return std::nullopt;
+	return parsed;
+}
+
 std::optional<double> model_height(const tags_t &tags)
 {
 	const auto qid = tags.find("wikidata");
@@ -62,10 +90,15 @@ std::optional<double> model_height(const tags_t &tags)
 	const auto last = qid->second.find_last_not_of(" \t\r\n");
 	const auto *entry =
 			models_3d::lookup_wikidata(qid->second.substr(first, last - first + 1));
-	if (entry && entry->height_m)
+	// Rust's terrain fit reserves space only for models in the bundled
+	// Wikidata index. An arbitrary/unknown QID with a height tag is not a model
+	// that the placement pipeline can actually generate.
+	if (!entry)
+		return std::nullopt;
+	if (entry->height_m)
 		return entry->height_m;
 	const auto height = tags.find("height");
-	return height == tags.end() ? std::nullopt : parse_elevation(height->second);
+	return height == tags.end() ? std::nullopt : parse_model_height(height->second);
 }
 
 template <typename F>

@@ -220,8 +220,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 	for (const auto &[value, color] :
 			std::initializer_list<std::pair<Block, const char *>>{{WHITE_WOOL, "white"},
 					{BLACK_WOOL, "black"}, {GREEN_WOOL, "green"}, {BROWN_WOOL, "brown"},
-					{CYAN_WOOL, "cyan"}, {BLUE_WOOL, "blue"}, {RED_WOOL, "red"},
-					{YELLOW_WOOL, "yellow"}, {ORANGE_WOOL, "orange"}})
+					{LIGHT_GRAY_WOOL, "silver"}, {CYAN_WOOL, "cyan"}, {BLUE_WOOL, "blue"},
+					{RED_WOOL, "red"}, {YELLOW_WOOL, "yellow"}, {ORANGE_WOOL, "orange"}})
 		if (auto mapped = wool(value, color))
 			return *mapped;
 	const auto terracotta = [&](Block value,
@@ -233,7 +233,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 	for (const auto &[value, color] :
 			std::initializer_list<std::pair<Block, const char *>>{
 					{WHITE_TERRACOTTA, "white"}, {ORANGE_TERRACOTTA, "orange"},
-					{YELLOW_TERRACOTTA, "yellow"}, {LIGHT_BLUE_TERRACOTTA, "light_blue"},
+					{YELLOW_TERRACOTTA, "yellow"}, {PINK_TERRACOTTA, "pink"},
+					{LIME_TERRACOTTA, "lime"}, {LIGHT_BLUE_TERRACOTTA, "light_blue"},
 					{BLUE_TERRACOTTA, "blue"}, {CYAN_TERRACOTTA, "cyan"},
 					{GRAY_TERRACOTTA, "gray"}, {RED_TERRACOTTA, "red"},
 					{BLACK_TERRACOTTA, "black"}, {BROWN_TERRACOTTA, "brown"},
@@ -584,6 +585,9 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == FLOWERING_AZALEA_LEAVES)
 		return state("azalea_leaves_flowered",
 				{{"persistent_bit", true}, {"update_bit", false}});
+	// Legacy Java light uses a maximum-level Bedrock light block, matching Rust.
+	if (block == LIGHT)
+		return state("light_block", {{"block_light_level", 15}});
 	if (block == MELON)
 		return simple("melon_block");
 	if (block == WHITE_BED)
