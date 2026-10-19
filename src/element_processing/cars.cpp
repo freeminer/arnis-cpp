@@ -12,6 +12,7 @@
 #include <charconv>
 #include <cmath>
 #include <iterator>
+#include <limits>
 #include <numbers>
 #include <string_view>
 #include <tuple>
@@ -113,7 +114,14 @@ struct Mark
 
 std::int32_t step_speed(double kmh, double scale)
 {
-	return static_cast<std::int32_t>(std::lround(kmh / 3.6 * 0.1 * scale * 1000.0));
+	const double rounded = std::round(kmh / 3.6 * 0.1 * scale * 1000.0);
+	if (std::isnan(rounded))
+		return 0;
+	if (rounded >= std::numeric_limits<std::int32_t>::max())
+		return std::numeric_limits<std::int32_t>::max();
+	if (rounded <= std::numeric_limits<std::int32_t>::min())
+		return std::numeric_limits<std::int32_t>::min();
+	return static_cast<std::int32_t>(rounded);
 }
 
 std::optional<double> parse_maxspeed(const std::string &raw)
@@ -135,8 +143,11 @@ std::optional<double> parse_maxspeed(const std::string &raw)
 		value.resize(value.size() - 3);
 		trim(value);
 		try {
-			const double mph = std::stod(value);
-			return std::isfinite(mph) ? std::optional<double>(mph * 1.609) : std::nullopt;
+			std::size_t used = 0;
+			const double mph = std::stod(value, &used);
+			if (used != value.size())
+				return std::nullopt;
+			return mph * 1.609;
 		} catch (...) {
 			return std::nullopt;
 		}
@@ -144,7 +155,7 @@ std::optional<double> parse_maxspeed(const std::string &raw)
 	try {
 		std::size_t used = 0;
 		const double kmh = std::stod(value, &used);
-		if (used == value.size() && std::isfinite(kmh) && kmh > 0.0)
+		if (used == value.size() && kmh > 0.0)
 			return kmh;
 	} catch (...) {
 	}

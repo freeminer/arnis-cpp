@@ -727,13 +727,14 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						it_crossing->second == "traffic_signals")) {
 			if (element.is_node()) {
 				const auto &signal_node = element.as_node();
-				if (editor.traffic_signal_index &&
-						editor.traffic_signal_index->place_node(
-								editor, signal_node, [&](int px, int pz) {
-									return node_feature_base_y(editor, bridge_surface,
-											element.tags(), px, pz);
-								}))
+				if (editor.traffic_signal_index) {
+					editor.traffic_signal_index->place_node(
+							editor, signal_node, [&](int px, int pz) {
+								return node_feature_base_y(
+										editor, bridge_surface, element.tags(), px, pz);
+							});
 					return;
+				}
 				int x = element.as_node().x;
 				int z = element.as_node().z;
 				const int head_base =

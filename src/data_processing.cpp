@@ -2803,6 +2803,20 @@ bool generate_world(WorldEditor &editor,
 		// Run after processing: relation processors may consume fills for their ways.
 		release_task_fills(task_index);
 	};
+	auto process_element_with_context = [&](WorldEditor &target,
+												ElementDispatchState &state,
+												std::size_t task_index,
+												std::size_t element_index) {
+		try {
+			process_assigned_element(target, state, task_index, element_index);
+		} catch (const std::out_of_range &error) {
+			const auto &element = elements[element_index];
+			// Keep the failure visible but identify the OSM feature; the STL's
+			// unordered_map::at message alone cannot point to the bad input.
+			throw std::runtime_error("OSM " + std::string(element.kind()) + " " +
+									 std::to_string(element.id()) + ": " + error.what());
+		}
+	};
 	if (parallel_tile_workers) {
 		using TileWorkerResult = std::pair<WorldEditor, ElementDispatchState>;
 		bool tile_pipeline_ok = true;
@@ -2823,7 +2837,7 @@ bool generate_world(WorldEditor &editor,
 						if (!begin_generation_tile(tile_editor, tile_index))
 							throw std::runtime_error("failed to begin Arnis tile worker");
 						for (const auto element_index : element_assignments[tile_index])
-							process_assigned_element(tile_editor, tile_state,
+							process_element_with_context(tile_editor, tile_state,
 									element_index, element_index);
 						if (!finish_ground_tile(
 									tile_editor, tile_state, tile_index, true))
@@ -2968,10 +2982,10 @@ bool generate_world(WorldEditor &editor,
 				}
 			}
 			if (active_tile_worker)
-				process_assigned_element(*active_tile_worker, active_tile_dispatch_state,
-						task_index, element_index);
+				process_element_with_context(*active_tile_worker,
+						active_tile_dispatch_state, task_index, element_index);
 			else
-				process_assigned_element(
+				process_element_with_context(
 						editor, dispatch_state, task_index, element_index);
 			if (!regional_ground_passes)
 				report_generation_work(task_index + 1);

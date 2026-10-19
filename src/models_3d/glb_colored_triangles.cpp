@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <cstring>
 #include <limits>
+#include <map>
 #include <optional>
 #include <stdexcept>
 #include <vector>
@@ -602,6 +603,9 @@ void for_each_glb_paint_triangle(const std::vector<std::uint8_t> &bytes,
 	std::string err, warn;
 	if (!loader.LoadBinaryFromMemory(&model, &err, &warn, bytes.data(), bytes.size()))
 		throw std::runtime_error("GLB parse: " + err);
+	// A GLB may reuse the same texture on many primitives. Build its mip chain
+	// once per texture and alpha interpretation, matching Rust's voxelizer cache.
+	std::map<std::pair<int, bool>, std::shared_ptr<const GlbMipTexture>> texture_cache;
 	const auto append_mesh = [&](int mesh_id, const Matrix &world) {
 		if (mesh_id < 0 || std::size_t(mesh_id) >= model.meshes.size())
 			return;
@@ -643,18 +647,26 @@ void for_each_glb_paint_triangle(const std::vector<std::uint8_t> &bytes,
 					base.alpha_cutoff = .25f;
 				const auto &info = pbr.baseColorTexture;
 				if (info.index >= 0 && std::size_t(info.index) < model.textures.size()) {
-					const auto &tex = model.textures[info.index];
-					uv_set = info.texCoord;
-					int wrap_s = TINYGLTF_TEXTURE_WRAP_REPEAT;
-					int wrap_t = TINYGLTF_TEXTURE_WRAP_REPEAT;
-					if (tex.sampler >= 0 &&
-							std::size_t(tex.sampler) < model.samplers.size()) {
-						wrap_s = model.samplers[tex.sampler].wrapS;
-						wrap_t = model.samplers[tex.sampler].wrapT;
+					const auto cache_key =
+							std::pair{info.index, base.alpha_cutoff.has_value()};
+					auto [cached, inserted] = texture_cache.try_emplace(cache_key);
+					if (inserted) {
+						const auto &tex = model.textures[info.index];
+						if (tex.source >= 0 &&
+								std::size_t(tex.source) < model.images.size()) {
+							int wrap_s = TINYGLTF_TEXTURE_WRAP_REPEAT;
+							int wrap_t = TINYGLTF_TEXTURE_WRAP_REPEAT;
+							if (tex.sampler >= 0 &&
+									std::size_t(tex.sampler) < model.samplers.size()) {
+								wrap_s = model.samplers[tex.sampler].wrapS;
+								wrap_t = model.samplers[tex.sampler].wrapT;
+							}
+							cached->second = make_mips(model.images[tex.source], wrap_s,
+									wrap_t, cache_key.second);
+						}
 					}
-					if (tex.source >= 0 && std::size_t(tex.source) < model.images.size())
-						texture = make_mips(model.images[tex.source], wrap_s, wrap_t,
-								base.alpha_cutoff.has_value());
+					uv_set = info.texCoord;
+					texture = cached->second;
 				}
 			}
 			base.texture = texture;

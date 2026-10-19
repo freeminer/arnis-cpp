@@ -195,8 +195,10 @@ void place_props(
 	editor.set_block_with_properties_absolute(block, x, y, z, std::nullopt, std::nullopt);
 }
 
-bool is_glass(Block block)
+bool is_glass(const WorldEditor &editor, const Block &block)
 {
+	if (const auto name = editor.block_name(block))
+		return name->find("glass") != std::string::npos;
 	return is_glass_block(block);
 }
 
@@ -423,8 +425,9 @@ bool place_penthouse(
 								: 1;
 	const int height = std::max(3, brief.floor_cycle) * storeys;
 	const Block walls[] = {LIGHT_GRAY_CONCRETE, GRAY_CONCRETE, SMOOTH_STONE};
-	const Block wall = is_glass(brief.wall) || rng.random_bool(.5) ? walls[rng.uniform(3)]
-																   : brief.wall;
+	const Block wall = is_glass(editor, brief.wall) || rng.random_bool(.5)
+							   ? walls[rng.uniform(3)]
+							   : brief.wall;
 	const Block roofs[] = {GRAY_CONCRETE, POLISHED_ANDESITE, SMOOTH_STONE};
 	const Block roof = roofs[rng.uniform(3)];
 	const int y1 = deck.surface_y + 1;
@@ -763,7 +766,7 @@ void fit_out_roof(WorldEditor &editor, RoofDeck &deck, const RooftopBrief &brief
 				oriented(brief.scaled(big ? 5 : 4), brief.scaled(big ? 4 : 3));
 		const int h = std::max(2, brief.scaled(brief.height >= 40 ? 4 : 3));
 		const Block wall_choices[] = {LIGHT_GRAY_CONCRETE, SMOOTH_STONE, WHITE_CONCRETE};
-		const Block wall = !is_glass(brief.wall) && rng.random_bool(.55)
+		const Block wall = !is_glass(editor, brief.wall) && rng.random_bool(.55)
 								   ? brief.wall
 								   : wall_choices[rng.uniform(3)];
 		const Block cap =

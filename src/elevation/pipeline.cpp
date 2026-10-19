@@ -104,16 +104,14 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 	report(progress, 16.0, "Processing elevation...");
 	// Restore surveyed natural summits after smoothing, then fit terrain with
 	// room for tall landmark models at their actual terrain elevations.
-	if (apply_earth_repairs)
-		raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell);
+	// Match Rust: surveyed summits are restored after smoothing for every body;
+	// only the Earth-specific DSM outlier/anomaly repairs above are conditional.
+	raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell);
 	const int top_reserve =
 			policy.kind == AffinePolicy::Kind::Fixed
 					? 0
 					: top_reserve_for(raw.heights,
-							  apply_earth_repairs
-									  ? model_cells(raw.heights, bbox,
-												terrain_hints.tall_models)
-									  : std::vector<std::pair<double, double>>{},
+							  model_cells(raw.heights, bbox, terrain_hints.tall_models),
 							  scale * height_multiplier, scale, ground_level,
 							  min_ground_level, disable_height_limit, extended_max_y,
 							  policy.kind == AffinePolicy::Kind::FitWithHeadroom);

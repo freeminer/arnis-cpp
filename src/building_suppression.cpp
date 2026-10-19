@@ -43,7 +43,8 @@ bool is_building_part(const tags_t &tags)
 	const auto it = tags.find("building:part");
 	if (it == tags.end())
 		return false;
-	return !std::equal(it->second.begin(), it->second.end(), "no", "no" + 2,
+	constexpr std::string_view no = "no";
+	return !std::equal(it->second.begin(), it->second.end(), no.begin(), no.end(),
 			[](unsigned char a, unsigned char b) {
 				return std::tolower(a) == std::tolower(b);
 			});
