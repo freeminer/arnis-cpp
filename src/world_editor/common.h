@@ -2,6 +2,7 @@
 #include "../block_definitions.h"
 #include "../../../arnis_block.h"
 #include "floor_state.h"
+#include <nlohmann/json.hpp>
 #include <array>
 #include <cstdint>
 #include <vector>
@@ -11,7 +12,9 @@
 #include <unordered_map>
 #include <optional>
 #include <functional>
+#include <limits>
 #include <tuple>
+#include <unordered_set>
 namespace arnis::world_editor
 {
 // Forward declarations
@@ -719,10 +722,12 @@ struct SectionToModify
 		const auto state = properties.find(index);
 		return {storage.get(index), state == properties.end() ? nullptr : state->second};
 	}
-	Block get_block(int x, int y, int z) const
+	std::optional<Block> get_block(int x, int y, int z) const
 	{
-		auto b = storage.get(section_index(x, y, z));
-		return b.id() == block_definitions::AIR.id() ? Block{} : b;
+		auto block = storage.get(section_index(x, y, z));
+		if (block.id() == block_definitions::AIR.id())
+			return std::nullopt;
+		return block;
 	}
 	void set_block(int x, int y, int z, Block b)
 	{
@@ -821,19 +826,20 @@ struct SectionToModify
 struct ChunkToModify
 {
 	std::unordered_map<int, SectionToModify> sections;
+	std::unordered_map<std::string, nlohmann::json> other;
 	SectionToModify &section(int y) { return sections[static_cast<int>(y >> 4)]; }
 	const SectionToModify *find_section(int y) const
 	{
 		auto it = sections.find(static_cast<int>(y >> 4));
 		return it == sections.end() ? nullptr : &it->second;
 	}
-	Block get_block(int x, int y, int z) const
+	std::optional<Block> get_block(int x, int y, int z) const
 	{
 		if (y > world_editor::world_max_y())
-			return Block{};
+			return std::nullopt;
 		y = std::max(y, world_editor::min_y());
 		auto *s = find_section(y);
-		return s ? s->get_block(x & 15, y & 15, z & 15) : Block{};
+		return s ? s->get_block(x & 15, y & 15, z & 15) : std::nullopt;
 	}
 	BlockWithProperties get_block_with_properties(int x, int y, int z) const
 	{
@@ -870,7 +876,7 @@ struct ChunkToModify
 				++it;
 		}
 	}
-	bool empty() const { return sections.empty(); }
+	bool empty() const { return sections.empty() && other.empty(); }
 };
 struct RegionToModify
 {
@@ -901,6 +907,129 @@ struct RegionToModify
 };
 struct WorldToModify
 {
+	using EntityMergeKey = std::tuple<int, int, int, int, int, int, int, int>;
+	struct EntityMergeKeyHash
+	{
+		std::size_t operator()(const EntityMergeKey &key) const noexcept
+		{
+			std::size_t seed = 0;
+			for (int value : {std::get<0>(key), std::get<1>(key), std::get<2>(key),
+						 std::get<3>(key), std::get<4>(key), std::get<5>(key),
+						 std::get<6>(key), std::get<7>(key)})
+				seed ^= std::hash<int>{}(value) + 0x9e3779b9 + (seed << 6) + (seed >> 2);
+			return seed;
+		}
+	};
+	static std::optional<int> entity_int(const nlohmann::json &value)
+	{
+		if (value.is_number_float()) {
+			const double number = value.get<double>();
+			if (std::isnan(number))
+				return 0;
+			if (number <= std::numeric_limits<int>::min())
+				return std::numeric_limits<int>::min();
+			if (number >= std::numeric_limits<int>::max())
+				return std::numeric_limits<int>::max();
+			return static_cast<int>(number);
+		}
+		if (!value.is_number_integer())
+			return std::nullopt;
+		if (value.is_number_unsigned()) {
+			const auto number = value.get<std::uint64_t>();
+			if (number > static_cast<std::uint64_t>(std::numeric_limits<int>::max()))
+				return std::nullopt;
+			return static_cast<int>(number);
+		}
+		const auto number = value.get<std::int64_t>();
+		if (number < std::numeric_limits<int>::min() ||
+				number > std::numeric_limits<int>::max())
+			return std::nullopt;
+		return static_cast<int>(number);
+	}
+	static std::optional<EntityMergeKey> entity_merge_key(const nlohmann::json &value)
+	{
+		if (!value.is_object())
+			return std::nullopt;
+		std::array<int, 3> position{};
+		bool has_position = false;
+		const auto pos = value.find("Pos");
+		if (pos != value.end() && pos->is_array() && pos->size() == 3) {
+			has_position = true;
+			for (std::size_t i = 0; i < position.size(); ++i) {
+				auto component = entity_int((*pos)[i]);
+				if (!component) {
+					has_position = false;
+					break;
+				}
+				position[i] = *component;
+			}
+		}
+		if (!has_position) {
+			const auto x = value.find("x"), y = value.find("y"), z = value.find("z");
+			if (x == value.end() || y == value.end() || z == value.end())
+				return std::nullopt;
+			auto px = entity_int(*x), py = entity_int(*y), pz = entity_int(*z);
+			if (!px || !py || !pz)
+				return std::nullopt;
+			position = {*px, *py, *pz};
+		}
+
+		int identity_kind = 0;
+		std::array<int, 4> identity{-1, 0, 0, 0};
+		const auto uuid = value.find("UUID");
+		if (uuid != value.end() && uuid->is_array() && uuid->size() == identity.size()) {
+			bool valid_uuid = true;
+			for (std::size_t i = 0; i < identity.size(); ++i) {
+				auto component = entity_int((*uuid)[i]);
+				if (!component) {
+					valid_uuid = false;
+					break;
+				}
+				identity[i] = *component;
+			}
+			if (valid_uuid)
+				identity_kind = 1;
+		}
+		if (identity_kind == 0) {
+			const auto facing = value.find("Facing");
+			identity[0] = facing == value.end() ? -1 : entity_int(*facing).value_or(-1);
+		}
+		return EntityMergeKey{position[0], position[1], position[2], identity_kind,
+				identity[0], identity[1], identity[2], identity[3]};
+	}
+	static bool merges_as_list(const std::string &key)
+	{
+		return key == "block_entities" || key == "entities" || key == "fluid_ticks";
+	}
+	static void dedup_extend(nlohmann::json &destination, const nlohmann::json &source)
+	{
+		if (!destination.is_array() || !source.is_array())
+			return;
+		std::unordered_set<EntityMergeKey, EntityMergeKeyHash> seen;
+		for (const auto &entry : destination)
+			if (auto key = entity_merge_key(entry))
+				seen.insert(*key);
+		for (const auto &entry : source) {
+			auto key = entity_merge_key(entry);
+			if (!key || seen.insert(*key).second)
+				destination.push_back(entry);
+		}
+	}
+	static void merge_chunk_data(ChunkToModify &destination, const ChunkToModify &source,
+			bool copy_all = false)
+	{
+		if (copy_all) {
+			destination.other = source.other;
+			return;
+		}
+		for (const auto &[key, value] : source.other) {
+			if (!merges_as_list(key))
+				continue;
+			auto [it, inserted] = destination.other.try_emplace(key, value);
+			if (!inserted)
+				dedup_extend(it->second, value);
+		}
+	}
 	enum class PlacementMode
 	{
 		Overwrite,
@@ -931,6 +1060,23 @@ struct WorldToModify
 		if (!c)
 			return std::nullopt;
 		return c->get_block(x & 15, y, z & 15);
+	}
+	void set_chunk_data(int chunk_x, int chunk_z, std::string key, nlohmann::json value)
+	{
+		get_or_create_region(chunk_x >> 5, chunk_z >> 5)
+				.get_or_create_chunk(chunk_x & 31, chunk_z & 31)
+				.other[std::move(key)] = std::move(value);
+	}
+	const nlohmann::json *get_chunk_data(
+			int chunk_x, int chunk_z, const std::string &key) const
+	{
+		const auto *region = get_region(chunk_x >> 5, chunk_z >> 5);
+		const auto *chunk =
+				region ? region->get_chunk(chunk_x & 31, chunk_z & 31) : nullptr;
+		if (!chunk)
+			return nullptr;
+		const auto it = chunk->other.find(key);
+		return it == chunk->other.end() ? nullptr : &it->second;
 	}
 	std::optional<BlockWithProperties> get_block_with_properties(
 			int x, int y, int z) const
@@ -1241,6 +1387,7 @@ struct WorldToModify
 				else
 					ds.merge_air_only(sk.second);
 			}
+			merge_chunk_data(dc, ck.second, overwrite);
 		}
 	}
 	bool transfer_region_to(WorldToModify &dst, int rx, int rz, bool erase_after = true)
@@ -1994,6 +2141,12 @@ struct WorldToModify
 			for (auto &ck : rk.second.chunks) {
 				int lx = key_x(ck.first), lz = key_z(ck.first);
 				int base_x = ((rx << 5) + lx) << 4, base_z = ((rz << 5) + lz) << 4;
+				const bool chunk_authoritative = base_x >= min_x &&
+												 base_x + 15 <= max_x &&
+												 base_z >= min_z && base_z + 15 <= max_z;
+				const auto *existing_region = get_region(rx, rz);
+				const bool chunk_existed =
+						existing_region && existing_region->get_chunk(lx, lz);
 				for (auto &sk : ck.second.sections) {
 					int sy = sk.first;
 					auto vals = sk.second.storage.materialize();
@@ -2015,6 +2168,10 @@ struct WorldToModify
 									set_with_props_if_absent(wx, wy, wz, bwp);
 							}
 				}
+				auto &destination_chunk =
+						get_or_create_region(rx, rz).get_or_create_chunk(lx, lz);
+				merge_chunk_data(destination_chunk, ck.second,
+						chunk_authoritative && !chunk_existed);
 			}
 		}
 	}
