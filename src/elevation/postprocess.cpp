@@ -1501,43 +1501,61 @@ std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 
 	std::vector<std::vector<float>> output(h, std::vector<float>(w));
 	const auto col_chunk = (w + BLUR_CHUNKS - 1) / BLUR_CHUNKS;
+	// Gather a few adjacent columns together. The horizontal grid is row-major;
+	// reading eight columns per row avoids the cache-miss-heavy one-column
+	// stride while retaining the same independent vertical convolutions.
+	constexpr std::size_t COLUMN_GROUP = 8;
 	for (std::size_t x0 = 0; x0 < w; x0 += col_chunk) {
 		const auto x1 = std::min(w, x0 + col_chunk);
-		parallel_rows(x0, x1, [&](std::size_t x) {
-			std::vector<std::size_t> ones(h + 1, 0), zeros(h + 1, 0);
-			for (std::size_t y = 0; y < h; ++y) {
-				const double value = horizontal[y][x];
-				ones[y + 1] = ones[y] + (value == 1.0);
-				zeros[y + 1] = zeros[y] + (value == 0.0);
-			}
-			for (std::size_t y = 0; y < h; ++y) {
-				const auto top = y > static_cast<std::size_t>(radius)
-										 ? y - static_cast<std::size_t>(radius)
-										 : 0;
-				const auto bottom = std::min(h, y + static_cast<std::size_t>(radius) + 1);
-				const auto window = bottom - top;
-				if (ones[bottom] - ones[top] == window) {
-					output[y][x] = 1.0f;
-					continue;
+		const auto groups = (x1 - x0 + COLUMN_GROUP - 1) / COLUMN_GROUP;
+		parallel_rows(0, groups, [&](std::size_t group) {
+			const auto gx = x0 + group * COLUMN_GROUP;
+			const auto group_width = std::min(COLUMN_GROUP, x1 - gx);
+			std::vector<std::vector<double>> columns(group_width, std::vector<double>(h));
+			for (std::size_t y = 0; y < h; ++y)
+				for (std::size_t c = 0; c < group_width; ++c)
+					columns[c][y] = horizontal[y][gx + c];
+			for (std::size_t c = 0; c < group_width; ++c) {
+				const auto x = gx + c;
+				const auto &column = columns[c];
+				std::vector<std::size_t> ones(h + 1, 0), zeros(h + 1, 0);
+				for (std::size_t y = 0; y < h; ++y) {
+					const double value = column[y];
+					ones[y + 1] = ones[y] + (value == 1.0);
+					zeros[y + 1] = zeros[y] + (value == 0.0);
 				}
-				if (zeros[bottom] - zeros[top] == window) {
-					output[y][x] = 0.0f;
-					continue;
-				}
-				double sum = 0.0, weight_sum = 0.0;
-				for (int k = -radius; k <= radius; ++k) {
-					const auto ny = static_cast<std::int64_t>(y) + k;
-					if (ny < 0 || ny >= static_cast<std::int64_t>(h))
+				for (std::size_t y = 0; y < h; ++y) {
+					const auto top = y > static_cast<std::size_t>(radius)
+											 ? y - static_cast<std::size_t>(radius)
+											 : 0;
+					const auto bottom =
+							std::min(h, y + static_cast<std::size_t>(radius) + 1);
+					const auto window = bottom - top;
+					if (ones[bottom] - ones[top] == window) {
+						output[y][x] = 1.0f;
 						continue;
-					const double value = horizontal[static_cast<std::size_t>(ny)][x];
-					if (!std::isfinite(value))
+					}
+					if (zeros[bottom] - zeros[top] == window) {
+						output[y][x] = 0.0f;
 						continue;
-					const double weight = kernel[static_cast<std::size_t>(k + radius)];
-					sum += value * weight;
-					weight_sum += weight;
+					}
+					double sum = 0.0, weight_sum = 0.0;
+					for (int k = -radius; k <= radius; ++k) {
+						const auto ny = static_cast<std::int64_t>(y) + k;
+						if (ny < 0 || ny >= static_cast<std::int64_t>(h))
+							continue;
+						const double value = column[static_cast<std::size_t>(ny)];
+						if (!std::isfinite(value))
+							continue;
+						const double weight =
+								kernel[static_cast<std::size_t>(k + radius)];
+						sum += value * weight;
+						weight_sum += weight;
+					}
+					output[y][x] = weight_sum > 0.0
+										   ? static_cast<float>(sum / weight_sum)
+										   : std::numeric_limits<float>::quiet_NaN();
 				}
-				output[y][x] = weight_sum > 0.0 ? static_cast<float>(sum / weight_sum)
-												: std::numeric_limits<float>::quiet_NaN();
 			}
 		});
 		if (report)
