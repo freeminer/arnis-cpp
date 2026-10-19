@@ -227,7 +227,7 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 	if (!ground)
 		return names;
 	if (!ground->is_earth()) {
-		names.fill(std::string(celestial_body_biome(ground->celestial_body())));
+		names.fill(std::string(celestial_body_biome(ground->body())));
 		return names;
 	}
 	for (int zi = 0; zi < 4; ++zi)
@@ -242,12 +242,12 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 			std::optional<std::string> selected;
 			const auto bpm = ground->blocks_per_meter();
 			if (ground->elevation_enabled &&
-					ground->snow_threshold() != std::numeric_limits<int>::max())
+					ground->snow_threshold_y() != std::numeric_limits<int>::max())
 				selected = mountain_biome(lc, climate, water_distance,
-						ground->snow_threshold() == std::numeric_limits<int>::min()
+						ground->snow_threshold_y() == std::numeric_limits<int>::min()
 								? std::numeric_limits<double>::infinity()
 								: (double(ground->level(local)) -
-										  ground->snow_threshold()) /
+										  ground->snow_threshold_y()) /
 										  bpm,
 						ground->slope(local));
 			if (!selected)

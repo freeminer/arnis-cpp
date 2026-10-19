@@ -95,9 +95,9 @@ double value_noise(std::uint64_t seed, std::int32_t x, std::int32_t z, int cell)
 	};
 	const auto ease = [](double t) { return t * t * (3.0 - 2.0 * t); };
 	const double sx = ease(fx), sz = ease(fz);
-	const double near = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * sx;
-	const double far = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * sx;
-	return near + (far - near) * sz;
+	const double near_ = corner(0, 0) + (corner(1, 0) - corner(0, 0)) * sx;
+	const double far_ = corner(0, 1) + (corner(1, 1) - corner(0, 1)) * sx;
+	return near_ + (far_ - near_) * sz;
 }
 
 int div_euclid(int value, int divisor)

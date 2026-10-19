@@ -597,7 +597,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const double celestial_center_latitude =
 			geographic_bounds_valid ? center_latitude : args.celestial_latitude_degrees;
 	const terrain_surface::SnowLine snow_line(editor.ground
-													  ? editor.ground->snow_threshold()
+													  ? editor.ground->snow_threshold_y()
 													  : std::numeric_limits<int>::max(),
 			editor.ground ? editor.ground->blocks_per_meter() : 0.0,
 			celestial_center_latitude, args.rotation);

@@ -731,8 +731,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				if (editor.traffic_signal_index) {
 					editor.traffic_signal_index->place_node(
 							editor, signal_node, [&](int px, int pz) {
-								return node_feature_base_y(
-										editor, bridge_surface, element.tags(), px, pz);
+								return node_feature_base_y(editor, bridge_surface,
+										element.tags(), px, pz, 1);
 							});
 					return;
 				}
@@ -819,8 +819,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			editor.set_block_absolute(crate::block_definitions::WHITE_WOOL, x, base + 4,
 					z, std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>());
-			const int neighbour_base =
-					node_feature_base_y(editor, bridge_surface, element.tags(), x + 1, z);
+			const int neighbour_base = node_feature_base_y(
+					editor, bridge_surface, element.tags(), x + 1, z, 1);
 			editor.set_block_absolute(crate::block_definitions::WHITE_WOOL, x + 1,
 					neighbour_base + 4, z, std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>());

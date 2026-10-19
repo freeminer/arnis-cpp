@@ -954,16 +954,16 @@ std::vector<ViewCandidate> select_views(std::vector<ViewCandidate> &candidates,
 	std::vector<std::size_t> rest(passing.begin() + 1, passing.end());
 	const auto first_camera = cameras.find(candidates[passing.front()].pano_id);
 	if (first_camera != cameras.end() && max_views >= 2) {
-		const auto far = std::find_if(rest.begin(), rest.end(), [&](std::size_t index) {
+		const auto far_ = std::find_if(rest.begin(), rest.end(), [&](std::size_t index) {
 			const auto camera = cameras.find(candidates[index].pano_id);
 			return camera != cameras.end() &&
 				   std::hypot(camera->second.centre[0] - first_camera->second.centre[0],
 						   camera->second.centre[1] - first_camera->second.centre[1]) >=
 						   min_position_sep_m;
 		});
-		if (far != rest.end()) {
-			chosen.push_back(*far);
-			rest.erase(far);
+		if (far_ != rest.end()) {
+			chosen.push_back(*far_);
+			rest.erase(far_);
 		}
 	}
 	for (const auto index : rest) {

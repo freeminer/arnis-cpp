@@ -758,7 +758,7 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 	const double center_longitude =
 			has_geographic_bounds ? (geographic_bounds[2] + geographic_bounds[3]) * .5
 								  : 0.0;
-	const int snow_y = editor.ground->snow_threshold();
+	const int snow_y = editor.ground->snow_threshold_y();
 	const int alpine_from_y =
 			snow_y == std::numeric_limits<int>::max() ||
 							snow_y == std::numeric_limits<int>::min()
