@@ -1111,8 +1111,10 @@ static BuildingTransportSource pmtiles_building_transport_source_impl(
 					  << " tile read(s) failed.\n";
 		if (report_gaps && capped)
 			std::cerr
-					<< "Warning: Overture Maps reached the building limit (" << maximum
-					<< "); later footprints may be missing. Use a smaller area for full coverage.\n";
+					<< "Warning: Overture Maps reached the building limit ("
+					<< (footprint_budget > 0 ? footprint_budget : maximum)
+					<< "); footprints beyond it were dropped, which leaves whole districts "
+					   "without them. Use a smaller area for full coverage.\n";
 		std::sort(buildings.begin(), buildings.end(),
 				[](const OvertureBuilding &a, const OvertureBuilding &b) {
 					return a.id < b.id;
