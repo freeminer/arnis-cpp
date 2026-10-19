@@ -3610,7 +3610,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
 		min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
 	} else if (auto it = element.tags.find("building:min_level");
-			   it != element.tags.end()) {
+			it != element.tags.end()) {
 		if (auto level = parse_i32_tag(element.tags, "building:min_level");
 				level && *level > 0)
 			min_level_offset = scaled_blocks(*level * floor_cycle + 2, scale_factor);
@@ -4890,13 +4890,13 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 			if ((falling_sides & (1U << i)) == 0)
 				continue;
 			const auto [dx, dz] = sides[i];
-			const Cell near{x + dx, z + dz};
-			const Cell far{x + 2 * dx, z + 2 * dz};
-			if (!open(near))
+			const Cell near_{x + dx, z + dz};
+			const Cell far_{x + 2 * dx, z + 2 * dz};
+			if (!open(near_))
 				continue;
-			inner[near] |= std::uint8_t(1U << i);
-			if (!short_eave && open(far))
-				outer[far] |= std::uint8_t(1U << i);
+			inner[near_] |= std::uint8_t(1U << i);
+			if (!short_eave && open(far_))
+				outer[far_] |= std::uint8_t(1U << i);
 		}
 		constexpr std::array<std::pair<std::size_t, std::size_t>, 4> corner_sides{
 				{{0, 2}, {1, 2}, {0, 3}, {1, 3}}};
@@ -6946,7 +6946,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																  : DARK_PRISMARINE};
 	const Block shop_frame =
 			shop_frame_options[element_rng(group_seed ^ 0x5409F2A300000003ULL)
-									   .uniform(4)];
+							.uniform(4)];
 	const Block awning_options[] = {WARPED_TRAPDOOR, SPRUCE_TRAPDOOR, DARK_OAK_TRAPDOOR,
 			JUNGLE_TRAPDOOR, ACACIA_TRAPDOOR};
 	auto awning_rng = element_rng(group_seed ^ 0x0A3B11B60000000BULL);
@@ -7912,12 +7912,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								static const std::array<Block, 4> trapdoor_options{
 										OAK_TRAPDOOR, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR,
 										BIRCH_TRAPDOOR};
-								const Block trapdoor = trapdoor_options
-										[element_rng(element.id)
-														.uniform(static_cast<
-																std::uint32_t>(
-																trapdoor_options
-																		.size()))];
+								const Block trapdoor = trapdoor_options[element_rng(
+										element.id)
+												.uniform(static_cast<std::uint32_t>(
+														trapdoor_options.size()))];
 								const auto balcony_floor = BlockWithProperties{
 										SMOOTH_STONE_SLAB, {{"type", "top"}}};
 								const auto front_fence = open_trapdoor(
@@ -8121,7 +8119,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			};
 			const auto glass_at = [&](int y) {
 				const auto pane = at(ix, y, iz);
-				return pane && is_glass_wall_block(*pane) && clear(wc.x, y, wc.z);
+				// Match Rust's window-life pass: decorate the configured pane (or
+				// ordinary clear glass), not every stained-glass block that happens
+				// to be present behind this facade column.
+				return pane && (*pane == window_block || *pane == GLASS) &&
+					   clear(wc.x, y, wc.z);
 			};
 			const auto room_behind = [&]() {
 				if (!current_footprint.contains({bx, bz}) ||
@@ -8174,8 +8176,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const bool covers =
 								draw == 0 ||
 								(draw == 1 &&
-										(wc.width >= 3			? (wc.k == 0 ||
-																  wc.k == wc.width - 1)
+										(wc.width >= 3 ? (wc.k == 0 ||
+																 wc.k == wc.width - 1)
 												: wc.width == 2 ? wc.k == 0
 																: top_row)) ||
 								(draw == 2 && top_row);
