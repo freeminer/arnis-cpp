@@ -7,6 +7,7 @@
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <iterator>
 #include <limits>
 #include <map>
 #include <optional>
@@ -160,7 +161,30 @@ struct RelationFootprint
 std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relation,
 		const std::unordered_map<std::uint64_t, const ProcessedWay *> &source_ways)
 {
-	std::vector<std::vector<const ProcessedWay *>> open;
+	std::unordered_map<std::uint64_t, GeoPoint> node_coordinates;
+	std::vector<std::vector<std::uint64_t>> open;
+	auto way_refs = [](const ProcessedWay &way) {
+		std::vector<std::uint64_t> refs;
+		if (!way.source_node_refs.empty())
+			return way.source_node_refs;
+		refs.reserve(way.nodes.size());
+		for (const auto &node : way.nodes)
+			refs.push_back(node.id);
+		return refs;
+	};
+	auto add_segment = [&](std::uint64_t id) {
+		const auto way = source_ways.find(id);
+		if (way == source_ways.end())
+			return;
+		auto refs = way_refs(*way->second);
+		if (refs.size() < 2)
+			return;
+		for (const auto &node : way->second->nodes)
+			if (std::isfinite(node.latitude) && std::isfinite(node.longitude))
+				node_coordinates.emplace(
+						node.id, GeoPoint{node.latitude, node.longitude});
+		open.push_back(std::move(refs));
+	};
 	if (!relation.source_members.empty()) {
 		// Rust evaluates suppression from the original OSM records, before relation
 		// members are clipped for rendering. The parser also normalizes roleless
@@ -170,62 +194,53 @@ std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relat
 			const auto role = normalized_role(member.role);
 			if (member.type != "way" || (role != "outer" && role != "outline"))
 				continue;
-			const auto way = source_ways.find(member.id);
-			if (way != source_ways.end() && way->second->nodes.size() >= 2)
-				open.push_back({way->second});
+			add_segment(member.id);
 		}
 	} else {
 		for (const auto &member : relation.members)
-			if (member.role == ProcessedMemberRole::Outer &&
-					member.way->nodes.size() >= 2)
-				open.push_back({member.way.get()});
+			if (member.role == ProcessedMemberRole::Outer) {
+				const auto refs = way_refs(*member.way);
+				if (refs.size() >= 2) {
+					for (const auto &node : member.way->nodes)
+						if (std::isfinite(node.latitude) && std::isfinite(node.longitude))
+							node_coordinates.emplace(
+									node.id, GeoPoint{node.latitude, node.longitude});
+					open.push_back(refs);
+				}
+			}
 	}
 	std::vector<std::vector<GeoPoint>> result;
 	while (!open.empty()) {
-		auto segments = std::move(open.back());
+		auto ring_ids = std::move(open.back());
 		open.pop_back();
-		std::vector<const ProcessedNode *> nodes;
-		for (const auto *way : segments)
-			for (const auto &node : way->nodes)
-				nodes.push_back(&node);
-		while (nodes.size() >= 2 && nodes.front()->id != nodes.back()->id) {
-			const auto head = nodes.front()->id;
-			const auto tail = nodes.back()->id;
-			auto found = open.end();
-			bool reverse = false;
-			for (auto it = open.begin(); it != open.end(); ++it) {
-				const auto *way = it->front();
-				if (way->nodes.front().id == tail || way->nodes.back().id == tail) {
-					found = it;
-					reverse = way->nodes.back().id == tail;
-					break;
-				}
-				if (way->nodes.front().id == head || way->nodes.back().id == head) {
-					found = it;
-					reverse = way->nodes.front().id == head;
-					break;
-				}
-			}
+		while (ring_ids.size() >= 2 && ring_ids.front() != ring_ids.back()) {
+			const auto head = ring_ids.front();
+			const auto tail = ring_ids.back();
+			auto found = std::find_if(open.begin(), open.end(), [&](const auto &segment) {
+				return segment.front() == tail || segment.back() == tail ||
+					   segment.front() == head || segment.back() == head;
+			});
 			if (found == open.end())
 				break;
-			auto *way = found->front();
-			if (way->nodes.front().id == tail || way->nodes.back().id == tail) {
-				if (!reverse)
-					for (std::size_t i = 1; i < way->nodes.size(); ++i)
-						nodes.push_back(&way->nodes[i]);
-				else
-					for (std::size_t i = way->nodes.size() - 1; i-- > 0;)
-						nodes.push_back(&way->nodes[i]);
+			auto segment = std::move(*found);
+			const auto first = segment.front();
+			const auto last = segment.back();
+			if (first == tail) {
+				ring_ids.insert(
+						ring_ids.end(), std::next(segment.begin()), segment.end());
+			} else if (last == tail) {
+				std::reverse(segment.begin(), segment.end());
+				ring_ids.insert(
+						ring_ids.end(), std::next(segment.begin()), segment.end());
+			} else if (last == head) {
+				segment.pop_back();
+				segment.insert(segment.end(), ring_ids.begin(), ring_ids.end());
+				ring_ids = std::move(segment);
 			} else {
-				std::vector<const ProcessedNode *> prefix;
-				if (!reverse) {
-					for (std::size_t i = 0; i + 1 < way->nodes.size(); ++i)
-						prefix.push_back(&way->nodes[i]);
-				} else {
-					for (std::size_t i = way->nodes.size(); i-- > 1;)
-						prefix.push_back(&way->nodes[i]);
-				}
-				nodes.insert(nodes.begin(), prefix.begin(), prefix.end());
+				std::reverse(segment.begin(), segment.end());
+				segment.pop_back();
+				segment.insert(segment.end(), ring_ids.begin(), ring_ids.end());
+				ring_ids = std::move(segment);
 			}
 			// Rust Vec::swap_remove keeps the same candidate ordering while
 			// replacing the removed segment with the last remaining segment.
@@ -233,18 +248,19 @@ std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relat
 				*found = std::move(open.back());
 			open.pop_back();
 		}
-		if (nodes.size() < 4 || nodes.front()->id != nodes.back()->id)
+		if (ring_ids.size() < 4 || ring_ids.front() != ring_ids.back())
 			continue;
-		std::vector<GeoPoint> ring;
-		ring.reserve(nodes.size());
-		for (const auto *node : nodes) {
+		std::vector<GeoPoint> ring_points;
+		ring_points.reserve(ring_ids.size());
+		for (const auto id : ring_ids) {
 			// Rust's stitch_rings uses filter_map over node_ll: unavailable
 			// coordinates drop only that vertex, not the whole closed ring.
-			if (std::isfinite(node->latitude) && std::isfinite(node->longitude))
-				ring.push_back({node->latitude, node->longitude});
+			if (const auto node = node_coordinates.find(id);
+					node != node_coordinates.end())
+				ring_points.push_back(node->second);
 		}
-		if (ring.size() >= 4)
-			result.push_back(std::move(ring));
+		if (ring_points.size() >= 4)
+			result.push_back(std::move(ring_points));
 	}
 	return result;
 }
@@ -358,8 +374,12 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	std::vector<const ProcessedWay *> parts;
 	for (const auto *way : ordered_ways) {
 		const auto id = way->id;
-		if (relation_ways.contains(id) || way->nodes.size() < 4 ||
-				way->nodes.front().id != way->nodes.back().id)
+		const auto &refs = way->source_node_refs;
+		const bool closed =
+				refs.empty() ? way->nodes.size() >= 4 &&
+									   way->nodes.front().id == way->nodes.back().id
+							 : refs.size() >= 4 && refs.front() == refs.back();
+		if (relation_ways.contains(id) || !closed)
 			continue;
 		const bool part = is_building_part(way->tags);
 		if (!part && !way->tags.contains("building"))

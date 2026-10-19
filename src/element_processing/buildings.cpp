@@ -1919,7 +1919,7 @@ std::optional<Block> get_wall_block_for_material_cpp(
 			m == "timberplanks" || m == "halftimber" || m == "halftimbered" ||
 			m == "loghouse" || m == "logs" || m == "bamboo")
 		return choose_block({OAK_PLANKS, SPRUCE_PLANKS, DARK_OAK_PLANKS, OAK_LOG}, rng);
-	if (m == "reed" || m == "thatch" || m == "straw")
+	if (m == "reed")
 		return HAY_BALE;
 	if (m == "metal" || m == "steel" || m == "iron" || m == "aluminium" ||
 			m == "aluminum" || m == "corrugatedsteel" || m == "corrugatediron" ||
@@ -1960,7 +1960,7 @@ std::optional<Block> get_wall_block_for_material_cpp(
 	if (m == "mixed" || m == "masonry")
 		return choose_block({STONE_BRICKS, BRICK, SMOOTH_STONE, COBBLESTONE}, rng);
 	if (m == "pebbledash")
-		return choose_block({ANDESITE, COBBLESTONE, STONE_BRICKS, GRAVEL}, rng);
+		return choose_block({ANDESITE, COBBLESTONE, STONE_BRICKS}, rng);
 	return std::nullopt;
 }
 
@@ -1974,8 +1974,7 @@ std::optional<Block> get_roof_block_for_material_cpp(
 	if (normalized == "tile" || normalized == "tiles" || normalized == "rooftile" ||
 			normalized == "rooftiles" || normalized == "ceramic" ||
 			normalized == "ceramictiles" || normalized == "claytile" ||
-			normalized == "claytiles" || normalized == "cementtile" ||
-			normalized == "cementtiles" || normalized == "terracotta")
+			normalized == "claytiles" || normalized == "terracotta")
 		return choose_block({RED_TERRACOTTA, BRICK, BRICK, TERRACOTTA}, rng);
 	if (normalized == "slate" || normalized == "slates")
 		return choose_block({COBBLED_DEEPSLATE, DEEPSLATE_TILES}, rng);

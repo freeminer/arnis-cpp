@@ -1297,6 +1297,7 @@ namespace highways
 {
 void generate_highways_internal(WorldEditor &editor, const ProcessedElement &element,
 		const Args &args, const HighwayConnectivity &highway_connectivity,
+		const FloodFillCache *flood_fill_cache,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
 		const RoadMaskBitmap &road_mask,
 		const bridges::BridgeStructureMap &bridge_structures,
@@ -2641,8 +2642,8 @@ bool generate_world(WorldEditor &editor,
 								state.highway_tunnel_cells);
 				if (!tunnel_rendered) {
 					highways::generate_highways_internal(editor, element, args,
-							highway_connectivity, args.timeout, road_mask,
-							bridge_structures, bridge_surface, tunnel_portals,
+							highway_connectivity, &flood_fill_cache, args.timeout,
+							road_mask, bridge_structures, bridge_surface, tunnel_portals,
 							marking_index,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 				}
@@ -2732,13 +2733,10 @@ bool generate_world(WorldEditor &editor,
 						editor, element, args, flood_fill_cache, road_mask);
 			} else if (node.tags.contains("barrier")) {
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
-			} else if (node.tags.contains("highway") ||
-					   node.tags.get("crossing") ==
-							   std::optional<std::string>(
-									   std::string("traffic_signals"))) {
+			} else if (node.tags.contains("highway") || highways::is_signal(node.tags)) {
 				highways::generate_highways_internal(editor, element, args,
-						highway_connectivity, args.timeout, road_mask, bridge_structures,
-						bridge_surface, tunnel_portals, marking_index,
+						highway_connectivity, &flood_fill_cache, args.timeout, road_mask,
+						bridge_structures, bridge_surface, tunnel_portals, marking_index,
 						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint);
 			} else if (node.tags.get("aeroway") ==
 					   std::optional<std::string>(std::string("helipad"))) {
@@ -3185,7 +3183,6 @@ bool generate_world(WorldEditor &editor,
 	// before landmarks; preserve that ordering for overlap and suppression.
 	structures::plane::place_plane_placements(editor, plane_candidates);
 	landmarks::place_all(editor, landmark_plan, args.scale, args.rotation);
-	structures::scatter_boats(editor, min_x, min_z, max_x, max_z);
 
 	railways::advtrains::finish_network(editor);
 	// Rust settles Mapillary photo candidates only after all generated blocks

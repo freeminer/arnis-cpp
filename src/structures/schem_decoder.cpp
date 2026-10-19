@@ -36,29 +36,50 @@ SchemProperties parse_schem_properties(const std::string &name)
 {
 	SchemProperties properties;
 	const auto open = name.find('['), close = name.rfind(']');
-	if (open == std::string::npos || close == std::string::npos || close <= open + 1)
-		return properties;
-	for (std::size_t start = open + 1; start < close;) {
-		std::size_t end = start;
-		int depth = 0;
-		bool quoted = false;
-		for (; end < close; ++end) {
-			const char ch = name[end];
-			if (ch == '"' && (end == start || name[end - 1] != '\\'))
-				quoted = !quoted;
-			if (!quoted && (ch == '[' || ch == '{'))
-				++depth;
-			else if (!quoted && (ch == ']' || ch == '}') && depth)
-				--depth;
-			else if (!quoted && ch == ',' && depth == 0)
-				break;
+	if (open != std::string::npos && close != std::string::npos && close > open + 1) {
+		for (std::size_t start = open + 1; start < close;) {
+			std::size_t end = start;
+			int depth = 0;
+			bool quoted = false;
+			for (; end < close; ++end) {
+				const char ch = name[end];
+				if (ch == '"' && (end == start || name[end - 1] != '\\'))
+					quoted = !quoted;
+				if (!quoted && (ch == '[' || ch == '{'))
+					++depth;
+				else if (!quoted && (ch == ']' || ch == '}') && depth)
+					--depth;
+				else if (!quoted && ch == ',' && depth == 0)
+					break;
+			}
+			const auto equals = name.find('=', start);
+			if (equals != std::string::npos && equals < end)
+				properties.insert_or_assign(
+						trim_state_component(name.substr(start, equals - start)),
+						trim_state_component(name.substr(equals + 1, end - equals - 1)));
+			start = end < close ? end + 1 : close;
 		}
-		const auto equals = name.find('=', start);
-		if (equals != std::string::npos && equals < end)
-			properties.insert_or_assign(
-					trim_state_component(name.substr(start, equals - start)),
-					trim_state_component(name.substr(equals + 1, end - equals - 1)));
-		start = end < close ? end + 1 : close;
+	}
+
+	// Rust's Block::properties supplies palette defaults when no explicit block
+	// state was stored for the schematic entry.
+	if (properties.empty()) {
+		auto block_name = name.substr(0, open == std::string::npos ? name.size() : open);
+		const auto namespace_separator = block_name.rfind(':');
+		if (namespace_separator != std::string::npos)
+			block_name.erase(0, namespace_separator + 1);
+		if (block_name == "oak_leaves") {
+			properties.emplace("persistent", "true");
+		} else if (block_name == "sea_pickle") {
+			properties.emplace("pickles", "2");
+			properties.emplace("waterlogged", "true");
+		} else if (block_name == "chain") {
+			properties.emplace("axis", "x");
+		} else if (block_name == "smooth_stone_slab") {
+			properties.emplace("type", "bottom");
+		} else if (block_name == "oak_slab" || block_name == "quartz_slab") {
+			properties.emplace("type", "top");
+		}
 	}
 	return properties;
 }

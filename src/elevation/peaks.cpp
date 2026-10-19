@@ -287,9 +287,15 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 {
 	const auto height = grid.size();
 	const auto width = height ? grid.front().size() : 0;
-	if (width < 2 || height < 2 || meters_per_cell <= 0.0)
+	if (width < 2 || height < 2 || !std::isfinite(meters_per_cell) ||
+			meters_per_cell <= 0.0)
 		return;
 	for (const auto &peak : peaks) {
+		// `RangeInclusive::contains` in the Rust implementation rejects NaN.
+		// Ordered comparisons alone do not, so reject non-finite public hints
+		// here before they can propagate NaNs through the elevation grid.
+		if (!std::isfinite(peak.ele_m))
+			continue;
 		std::size_t cx, cy;
 		if (!grid_cell(bbox, width, height, peak.lat, peak.lon, cx, cy))
 			continue;
@@ -308,7 +314,7 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 				dem_top = std::max(dem_top, grid[y][x]);
 		});
 		const double shortfall = peak.ele_m - dem_top;
-		if (shortfall < MIN_DEFICIT_M || shortfall > MAX_DEFICIT_M ||
+		if (!(shortfall >= MIN_DEFICIT_M && shortfall <= MAX_DEFICIT_M) ||
 				shortfall > local_relief(grid, cx, cy, meters_per_cell))
 			continue;
 		const double lift = peak.ele_m - at_node;

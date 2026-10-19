@@ -262,6 +262,14 @@ struct Args
 		// Minecraft midnight (Rust's MIDNIGHT_TICKS).
 		if (world_time == DEFAULT_WORLD_TIME)
 			world_time = MIDNIGHT_TICKS;
+		// Roads and their signal/car extras are Earth-only. Match Rust's body
+		// defaults even when a library caller enabled these before adapting the
+		// requested celestial body.
+		traffic_lights = false;
+		moving_cars = false;
+		// Body defaults replace the requested generation mode, so refresh the
+		// compatibility cache after that normalization as well.
+		apply_mode_defaults();
 	}
 	// Keep the legacy boolean cache synchronized with the Rust generation mode.
 	// Library callers may still inspect `terrain` while the generator uses the

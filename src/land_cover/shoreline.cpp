@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <array>
 #include <cmath>
+#include <cstddef>
 #include <iostream>
 #include <limits>
 #include <optional>
@@ -202,8 +203,12 @@ std::optional<std::size_t> split_point(
 		const auto u = worst_edge, v = u + 1;
 		if (u >= 1 && v <= n - 2)
 			split = residuals[u] >= residuals[v] ? u : v;
+		else if (u >= 1)
+			split = u;
+		else if (v <= n - 2)
+			split = v;
 		else
-			split = u >= 1 ? u : v;
+			return std::nullopt;
 	}
 	worst_corner = residuals[split];
 	const auto flank = [&](std::size_t i) {
@@ -224,14 +229,17 @@ std::optional<std::size_t> split_point(
 	return split;
 }
 
-std::vector<Pt> cyclic_points(const std::vector<Pt> &ring, std::size_t i, std::size_t j)
+// ext contains the closed duplicate at ext[n]. Keep recursion ranges linear, like
+// shoreline.rs, so splits in the wrapped half never escape the keep-index array.
+std::vector<Pt> cyclic_points(const std::vector<Pt> &ext, std::size_t i, std::size_t j)
 {
-	std::vector<Pt> out{ring[i]};
-	do {
-		i = (i + 1) % ring.size();
-		out.push_back(ring[i]);
-	} while (i != j);
-	return out;
+	if (i < j)
+		return std::vector<Pt>(ext.begin() + static_cast<std::ptrdiff_t>(i),
+				ext.begin() + static_cast<std::ptrdiff_t>(j + 1));
+	std::vector<Pt> points(ext.begin() + static_cast<std::ptrdiff_t>(i), ext.end());
+	points.insert(points.end(), ext.begin() + 1,
+			ext.begin() + static_cast<std::ptrdiff_t>(j + 1));
+	return points;
 }
 
 std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
@@ -240,6 +248,8 @@ std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
 	const auto exact = [&] { return std::vector<FPt>(ring.begin(), ring.end()); };
 	if (n <= 4)
 		return exact();
+	std::vector<Pt> ext = ring;
+	ext.push_back(ring.front());
 	std::size_t k = 1;
 	double best = -1;
 	for (std::size_t i = 1; i < n; ++i) {
@@ -250,7 +260,8 @@ std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
 			k = i;
 		}
 	}
-	std::vector<bool> keep(n);
+	std::vector<bool> keep(n + 1);
+	keep[n] = true;
 	keep[0] = keep[k] = true;
 	std::vector<std::pair<std::size_t, std::size_t>> stack{{0, k}, {k, n}};
 	while (!stack.empty()) {
@@ -258,7 +269,9 @@ std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
 		stack.pop_back();
 		if (j <= i + 1)
 			continue;
-		if (auto m = split_point(cyclic_points(ring, i, j % n))) {
+		if (auto m = split_point(
+					std::vector<Pt>(ext.begin() + static_cast<std::ptrdiff_t>(i),
+							ext.begin() + static_cast<std::ptrdiff_t>(j + 1)))) {
 			keep[i + *m] = true;
 			stack.emplace_back(i, i + *m);
 			stack.emplace_back(i + *m, j);
@@ -276,7 +289,7 @@ std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
 		if (kept.size() <= 3)
 			break;
 		const auto pos = std::find(kept.begin(), kept.end(), seed) - kept.begin();
-		if (!split_point(cyclic_points(ring, kept[(pos + kept.size() - 1) % kept.size()],
+		if (!split_point(cyclic_points(ext, kept[(pos + kept.size() - 1) % kept.size()],
 					kept[(pos + 1) % kept.size()])))
 			keep[seed] = false;
 	}
@@ -288,12 +301,12 @@ std::vector<FPt> simplify_ring(const std::vector<Pt> &ring)
 		std::vector<std::vector<Pt>> runs;
 		std::vector<FitLine> lines;
 		for (std::size_t s = 0; s < m; ++s) {
-			runs.push_back(cyclic_points(ring, kept[s], kept[(s + 1) % m]));
+			runs.push_back(cyclic_points(ext, kept[s], kept[(s + 1) % m]));
 			lines.push_back(FitLine::fit_run(runs.back()));
 		}
 		std::vector<FPt> placed;
 		for (std::size_t s = 0; s < m; ++s)
-			placed.push_back(lines[(s + m - 1) % m].join(lines[s], ring[kept[s]]));
+			placed.push_back(lines[(s + m - 1) % m].join(lines[s], ext[kept[s]]));
 		bool split_any = false;
 		for (std::size_t s = 0; s < m; ++s) {
 			const auto rendered = FitLine::through(placed[s], placed[(s + 1) % m]);

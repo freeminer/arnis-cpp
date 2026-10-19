@@ -649,6 +649,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		const crate::osm_parser::ProcessedElement &element, const crate::args::Args &args,
 		const std::unordered_map<std::pair<int, int>, std::vector<int>, PairHash>
 				&highway_connectivity,
+		const crate::FloodFillCache *flood_fill_cache,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
 		const crate::RoadMaskBitmap &road_mask,
 		const crate::bridges::BridgeStructureMap &bridge_structures,
@@ -837,14 +838,21 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			auto surface_blocks = crate::surfaces::get_blocks_for_surface_way(
 					way, std::vector<crate::block_definitions::Block>{
 								 crate::block_definitions::STONE});
-			std::vector<std::pair<int, int>> polygon_coords;
-			polygon_coords.reserve(way.nodes.size());
-			for (const auto &n : way.nodes) {
-				polygon_coords.emplace_back(n.x, n.z);
+			crate::FloodFillResult filled_area;
+			if (flood_fill_cache) {
+				filled_area = flood_fill_cache->get_or_compute(way, args.timeout);
+			} else {
+				std::vector<std::pair<int, int>> polygon_coords;
+				polygon_coords.reserve(way.nodes.size());
+				for (const auto &n : way.nodes)
+					polygon_coords.emplace_back(n.x, n.z);
+				auto cells = crate::floodfill::flood_fill_area(
+						polygon_coords, floodfill_timeout);
+				filled_area =
+						std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
+								std::move(cells));
 			}
-			std::vector<std::pair<int, int>> filled_area =
-					crate::floodfill::flood_fill_area(polygon_coords, floodfill_timeout);
-			for (const auto &p : filled_area) {
+			for (const auto &p : *filled_area) {
 				const auto surface_block = crate::surfaces::semirandom_surface(
 						p.first, p.second, surface_blocks);
 				editor.set_block(surface_block, p.first, 0, p.second,
@@ -1728,7 +1736,7 @@ void generate_highways(crate::world_editor::WorldEditor &editor,
 			crate::decals::detect_region((geo[0] + geo[1]) * .5, (geo[2] + geo[3]) * .5));
 	if (editor.car_network && element.is_way())
 		editor.car_network->place_way(editor, element.as_way().id);
-	generate_highways_internal(editor, element, args, highway_connectivity,
+	generate_highways_internal(editor, element, args, highway_connectivity, nullptr,
 			floodfill_timeout, road_mask, bridge_structures, bridge_surface,
 			tunnel_portals, regional_markings, tunnel_footprint);
 }
