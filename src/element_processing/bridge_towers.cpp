@@ -355,7 +355,7 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 				   oz <= box.max_z + 3;
 		};
 		std::optional<Part> deck_part;
-		const auto consider_deck = [&](const Part &part) {
+		const auto consider_deck = [&, cx = cx, cz = cz](const Part &part) {
 			if (part.min_height_m < 2.0 || !part.height_m ||
 					*part.height_m > 0.6 * *tallest->height_m)
 				return;

@@ -206,7 +206,7 @@ void place_bulkhead(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> ori
 		int width, int depth, int height, Block wall, Block cap, Block door,
 		std::pair<int, int> door_side)
 {
-	const auto [x0, z0] = origin;
+	const auto &[x0, z0] = origin;
 	const int y1 = deck.surface_y + 1;
 	const auto cap_block = bottom_slab(cap);
 	for (int z = z0; z < z0 + depth; ++z)
@@ -216,7 +216,7 @@ void place_bulkhead(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> ori
 					place(editor, wall, x, y, z);
 			place_props(editor, cap_block, x, y1 + height, z);
 		}
-	const auto middle_of = [&](std::pair<int, int> normal) {
+	const auto middle_of = [&, x0 = x0, z0 = z0](std::pair<int, int> normal) {
 		if (normal.first == 1)
 			return std::pair{x0 + width - 1, z0 + depth / 2};
 		if (normal.first == -1)
