@@ -391,8 +391,9 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		water_cells.erase(p);
 
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	// Apply edits in the same canonical packed-position order as Rust's
-	// WaterPlan::apply. Overlapping cave features can make write order observable.
+	// Rust WaterPlan::apply sorts both sets before emitting world writes. Keep
+	// that canonical order here: region overlays can observe write order, and
+	// unordered_set traversal is not stable across implementations.
 	std::vector<std::int64_t> ordered_carved(carved_cells.begin(), carved_cells.end());
 	std::sort(ordered_carved.begin(), ordered_carved.end());
 	for (const auto p : ordered_carved) {

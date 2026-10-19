@@ -54,8 +54,16 @@ std::array<float, 3> oklab_components(const RGBTuple &c)
 float oklab_distance(const RGBTuple &from, const RGBTuple &to)
 {
 	const auto a = oklab_components(from), b = oklab_components(to);
-	const float dl = a[0] - b[0], da = a[1] - b[1], db = a[2] - b[2];
+	return oklab_distance_lab(a, b);
+}
+float oklab_distance_lab(const std::array<float, 3> &from, const std::array<float, 3> &to)
+{
+	const float dl = from[0] - to[0], da = from[1] - to[1], db = from[2] - to[2];
 	return dl * dl + da * da + db * db;
+}
+std::array<float, 3> rgb_to_oklab(std::uint8_t red, std::uint8_t green, std::uint8_t blue)
+{
+	return oklab_components(RGBTuple{red, green, blue});
 }
 std::optional<RGBTuple> color_name_to_rgb_tuple(std::string_view text)
 {

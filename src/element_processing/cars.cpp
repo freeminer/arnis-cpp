@@ -4,11 +4,11 @@
 #include "road_markings.h"
 #include "traffic_lights.h"
 #include "../clipping.h"
+#include "../strict_parse.h"
 #include "../../../arnis_world_editor.h"
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <charconv>
 #include <cmath>
 #include <iterator>
@@ -127,8 +127,9 @@ std::int32_t step_speed(double kmh, double scale)
 std::optional<double> parse_maxspeed(const std::string &raw)
 {
 	std::string value = raw;
-	std::transform(value.begin(), value.end(), value.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+	});
 	const auto trim = [](std::string &s) {
 		const auto first = s.find_first_not_of(" \t\r\n");
 		if (first == std::string::npos) {
@@ -142,33 +143,18 @@ std::optional<double> parse_maxspeed(const std::string &raw)
 	if (value.ends_with("mph")) {
 		value.resize(value.size() - 3);
 		trim(value);
-		try {
-			std::size_t used = 0;
-			const double mph = std::stod(value, &used);
-			if (used != value.size())
-				return std::nullopt;
-			return mph * 1.609;
-		} catch (...) {
-			return std::nullopt;
-		}
+		if (const auto mph = strict_parse::f64(value))
+			return *mph * 1.609;
+		return std::nullopt;
 	}
-	try {
-		std::size_t used = 0;
-		const double kmh = std::stod(value, &used);
-		if (used == value.size() && kmh > 0.0)
-			return kmh;
-	} catch (...) {
-	}
+	if (const auto kmh = strict_parse::f64(value); kmh && *kmh > 0.0)
+		return *kmh;
 	if (value.find("zone") != std::string::npos) {
 		std::string digits;
 		std::copy_if(value.begin(), value.end(), std::back_inserter(digits),
-				[](unsigned char c) { return std::isdigit(c); });
-		if (!digits.empty()) {
-			try {
-				return std::stod(digits);
-			} catch (...) {
-			}
-		}
+				[](unsigned char c) { return c >= '0' && c <= '9'; });
+		if (const auto zone_speed = strict_parse::f64(digits))
+			return *zone_speed;
 	}
 	const auto colon = value.rfind(':');
 	const auto zone = value.substr(colon == std::string::npos ? 0 : colon + 1);

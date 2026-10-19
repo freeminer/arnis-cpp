@@ -47,6 +47,7 @@
 #include "element_processing/emergency.h"
 #include "element_processing/advertising.h"
 #include "element_processing/bridges.h"
+#include "element_processing/highways.h"
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"

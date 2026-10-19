@@ -2,6 +2,7 @@
 
 #include "data_processing.h"
 #include "osm_parser.h"
+#include "strict_parse.h"
 
 #include <algorithm>
 #include <cctype>
@@ -85,11 +86,10 @@ bool covers_ground(const tags_t &tags)
 			}
 			break;
 		}
-		try {
-			if (std::stod(text.substr(start, end - start)) > 0.0)
-				return false;
-		} catch (const std::exception &) {
-		}
+		if (const auto height = strict_parse::f64(
+					std::string_view(text).substr(start, end - start));
+				height && *height > 0.0)
+			return false;
 	}
 	return true;
 }

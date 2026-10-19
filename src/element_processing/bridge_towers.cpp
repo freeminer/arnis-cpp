@@ -131,8 +131,7 @@ std::optional<CableSpan> make_cable_span(float origin_x, float origin_z, float d
 		Block paint, double scale)
 {
 	if (towers.size() < 2 || anchors.first >= towers.front().first ||
-			anchors.second <= towers.back().first || !std::isfinite(scale) ||
-			scale <= 0.0)
+			anchors.second <= towers.back().first)
 		return std::nullopt;
 	CableSpan span;
 	span.origin_x = origin_x;
@@ -169,7 +168,11 @@ std::optional<CableSpan> make_cable_span(float origin_x, float origin_z, float d
 			static_cast<int>(std::lround(
 					(main_span / static_cast<float>(tower_intervals)) / 170.0f)),
 			2, 8);
-	span.hanger_spacing = static_cast<float>(std::max(HANGER_SPACING_M * scale, 2.0));
+	const double hanger_spacing = HANGER_SPACING_M * scale;
+	// Rust's f64::max selects the non-NaN operand, so malformed scale input still
+	// gets the minimum hanger pitch rather than propagating NaN into the index.
+	span.hanger_spacing = static_cast<float>(
+			std::isnan(hanger_spacing) ? 2.0 : std::max(hanger_spacing, 2.0));
 	return span;
 }
 

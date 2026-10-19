@@ -15,6 +15,10 @@ inline constexpr double HELIPAD_NODE_RADIUS_M = 8.0;
 // Kept public within the generator module to match Rust's pre-scan API.
 int highway_default_lanes(const std::string &highway_type);
 
+// True when a node's OSM tags identify a traffic signal accepted by the
+// highway-node dispatcher.
+bool is_signal(const tags_t &tags);
+
 // Effective half-width of a paved way, including lane and explicit width tags.
 int highway_block_range(const std::string &highway_type,
 		const std::unordered_map<std::string, std::string> &tags, double scale);

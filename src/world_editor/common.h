@@ -763,6 +763,26 @@ struct SectionToModify
 	}
 	void merge_non_air(const SectionToModify &other, bool overwrite)
 	{
+		const bool destination_all_air =
+				storage.uniform() && storage.get(0).id() == block_definitions::AIR.id();
+		const bool source_uniform = other.storage.uniform();
+		if (source_uniform) {
+			const auto source = other.storage.get(0);
+			if (source.id() == block_definitions::AIR.id())
+				return;
+			if (overwrite) {
+				storage.fill(source);
+				properties = other.properties;
+				return;
+			}
+			if (storage.uniform() && !destination_all_air)
+				return;
+		}
+		if (destination_all_air && properties.empty() && other.properties.empty()) {
+			storage = other.storage;
+			properties = other.properties;
+			return;
+		}
 		auto src = other.storage.materialize();
 		for (std::size_t i = 0; i < src.size(); ++i)
 			if (src[i].id() != block_definitions::AIR.id() &&
@@ -2138,15 +2158,52 @@ struct WorldToModify
 	{
 		for (auto &rk : other.regions) {
 			int rx = key_x(rk.first), rz = key_z(rk.first);
+			const int region_min_x = rx * 512, region_min_z = rz * 512;
+			const int region_max_x = region_min_x + 511;
+			const int region_max_z = region_min_z + 511;
+			const bool region_authoritative =
+					region_min_x >= min_x && region_max_x <= max_x &&
+					region_min_z >= min_z && region_max_z <= max_z;
+			const bool region_outside = region_max_x < min_x || region_min_x > max_x ||
+										region_max_z < min_z || region_min_z > max_z;
 			for (auto &ck : rk.second.chunks) {
 				int lx = key_x(ck.first), lz = key_z(ck.first);
 				int base_x = ((rx << 5) + lx) << 4, base_z = ((rz << 5) + lz) << 4;
-				const bool chunk_authoritative = base_x >= min_x &&
-												 base_x + 15 <= max_x &&
-												 base_z >= min_z && base_z + 15 <= max_z;
-				const auto *existing_region = get_region(rx, rz);
-				const bool chunk_existed =
-						existing_region && existing_region->get_chunk(lx, lz);
+				auto &destination_region = get_or_create_region(rx, rz);
+				const bool chunk_authoritative =
+						region_authoritative ||
+						(base_x >= min_x && base_x + 15 <= max_x && base_z >= min_z &&
+								base_z + 15 <= max_z);
+				const bool chunk_outside = region_outside || base_x + 15 < min_x ||
+										   base_x > max_x || base_z + 15 < min_z ||
+										   base_z > max_z;
+
+				// The common tile-aligned cases can merge section storage directly,
+				// avoiding per-voxel world-coordinate checks. Keep the same precedence
+				// as Rust: authored non-air replaces prior halo data; halo data only
+				// fills air. A previously absent authored chunk can be moved wholesale.
+				if (chunk_authoritative || chunk_outside) {
+					auto existing = destination_region.chunks.find(ck.first);
+					if (chunk_authoritative &&
+							existing == destination_region.chunks.end()) {
+						destination_region.chunks.emplace(ck.first, std::move(ck.second));
+						continue;
+					}
+					auto &destination_chunk =
+							existing == destination_region.chunks.end()
+									? destination_region.chunks[ck.first]
+									: existing->second;
+					for (const auto &section : ck.second.sections) {
+						auto &destination_section =
+								destination_chunk.sections[section.first];
+						destination_section.merge_non_air(
+								section.second, chunk_authoritative);
+					}
+					merge_chunk_data(destination_chunk, ck.second, false);
+					continue;
+				}
+
+				// Rare partial-chunk intersection: retain exact per-block clipping.
 				for (auto &sk : ck.second.sections) {
 					int sy = sk.first;
 					auto vals = sk.second.storage.materialize();
@@ -2168,10 +2225,8 @@ struct WorldToModify
 									set_with_props_if_absent(wx, wy, wz, bwp);
 							}
 				}
-				auto &destination_chunk =
-						get_or_create_region(rx, rz).get_or_create_chunk(lx, lz);
-				merge_chunk_data(destination_chunk, ck.second,
-						chunk_authoritative && !chunk_existed);
+				auto &destination_chunk = destination_region.get_or_create_chunk(lx, lz);
+				merge_chunk_data(destination_chunk, ck.second, false);
 			}
 		}
 	}

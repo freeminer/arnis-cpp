@@ -78,6 +78,13 @@ int div_euclid(int value, int divisor)
 	return quotient;
 }
 
+std::int64_t dist2(std::pair<int, int> a, std::pair<int, int> b)
+{
+	const auto dx = static_cast<std::int64_t>(a.first) - b.first;
+	const auto dz = static_cast<std::int64_t>(a.second) - b.second;
+	return dx * dx + dz * dz;
+}
+
 std::optional<std::pair<int, int>> grade_obstacle(const ProcessedWay &way, double scale)
 {
 	if (way.nodes.size() < 2 || way.tags.get("area") == "yes" ||
@@ -653,9 +660,8 @@ BridgeStructureMap BridgeStructureMap::build(
 					std::any_of(cells.begin(), cells.end(), [&](const auto &cell) {
 						return std::any_of(mapped_supports.towers.begin(),
 								mapped_supports.towers.end(), [&](const auto &tower) {
-									const std::int64_t dx = cell.first - tower.x;
-									const std::int64_t dz = cell.second - tower.z;
-									return dx * dx + dz * dz <= reach_squared;
+									return dist2(cell, {tower.x, tower.z}) <=
+										   reach_squared;
 								});
 					});
 			if (!passes_mapped_tower)
@@ -953,9 +959,7 @@ BridgeStructureMap BridgeStructureMap::build(
 		std::int64_t axis_distance_squared = 0;
 		for (std::size_t a = 0; a < profile_ends.size(); ++a) {
 			for (std::size_t b = a + 1; b < profile_ends.size(); ++b) {
-				const std::int64_t dx = profile_ends[b].first - profile_ends[a].first;
-				const std::int64_t dz = profile_ends[b].second - profile_ends[a].second;
-				const std::int64_t distance = dx * dx + dz * dz;
+				const std::int64_t distance = dist2(profile_ends[b], profile_ends[a]);
 				if (distance > axis_distance_squared) {
 					axis_distance_squared = distance;
 					axis_start = profile_ends[a];
@@ -1003,10 +1007,8 @@ BridgeStructureMap BridgeStructureMap::build(
 							group_indices.end(), [&](std::size_t index) {
 								return std::any_of(paths[index].begin(),
 										paths[index].end(), [&](const auto &point) {
-											const std::int64_t dx = point.first - tower.x;
-											const std::int64_t dz =
-													point.second - tower.z;
-											return dx * dx + dz * dz <= reach_squared;
+											return dist2(point, {tower.x, tower.z}) <=
+												   reach_squared;
 										});
 							});
 					if (close) {
@@ -1047,11 +1049,9 @@ BridgeStructureMap BridgeStructureMap::build(
 													mapped_supports.towers.begin(),
 													mapped_supports.towers.end(),
 													[&](const auto &tower) {
-														const std::int64_t dx =
-																cell.first - tower.x;
-														const std::int64_t dz =
-																cell.second - tower.z;
-														return dx * dx + dz * dz <=
+														return dist2(cell,
+																	   {tower.x,
+																			   tower.z}) <=
 															   reach_squared;
 													});
 										});
@@ -1316,10 +1316,8 @@ BridgeStructureMap BridgeStructureMap::build(
 				const std::int64_t pier_reach_squared = pier_reach * pier_reach;
 				const auto near_path = [&](int x, int z) {
 					for (const auto idx : group_indices)
-						for (const auto &[px, pz] : paths[idx]) {
-							const std::int64_t dx = px - x;
-							const std::int64_t dz = pz - z;
-							if (dx * dx + dz * dz <= pier_reach_squared)
+						for (const auto &point : paths[idx]) {
+							if (dist2(point, {x, z}) <= pier_reach_squared)
 								return true;
 						}
 					return false;

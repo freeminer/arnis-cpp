@@ -516,6 +516,13 @@ void set_displays_enabled(bool enabled)
 	displays_enabled = enabled && store.has_value();
 }
 
+bool has_photo_shell(std::uint64_t way_id)
+{
+	std::shared_lock lock(store_mutex);
+	return store && projected_buildings.contains(way_id) &&
+		   (world_scale >= 2.0 || displays_enabled);
+}
+
 void clear()
 {
 	std::unique_lock lock(store_mutex);
@@ -777,7 +784,7 @@ std::optional<imgops::Rgb> building_color(std::uint64_t way_id)
 bool photo_column(int x, int z, std::uint64_t way_id)
 {
 	std::shared_lock lock(store_mutex);
-	if (!store || world_scale < 2.0)
+	if (!store || (world_scale < 2.0 && !displays_enabled))
 		return false;
 	const auto found = projected_photo_cells.find({x, z});
 	return found != projected_photo_cells.end() && found->second == way_id;

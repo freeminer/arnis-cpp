@@ -63,7 +63,6 @@ private:
 	std::unordered_map<std::uint64_t, std::vector<std::size_t>> by_node_;
 };
 
-bool is_signal(const tags_t &tags);
 bool is_vehicular(const std::string &highway);
 
 } // namespace arnis::highways

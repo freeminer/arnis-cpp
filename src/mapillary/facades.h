@@ -78,6 +78,7 @@ std::optional<Export> load_export(
 		const std::filesystem::path &, std::string *error = nullptr);
 void install_export(Export);
 void set_displays_enabled(bool enabled);
+bool has_photo_shell(std::uint64_t way_id);
 void project_export(const std::vector<arnis::ProcessedElement> &, const XZBBox &,
 		double scale,
 		const std::optional<std::filesystem::path> &attribution_dir = std::nullopt);

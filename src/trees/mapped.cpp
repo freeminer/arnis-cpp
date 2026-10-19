@@ -20,6 +20,44 @@ int div_euclid(int value, int divisor)
 	const int remainder = value % divisor;
 	return remainder < 0 ? quotient - 1 : quotient;
 }
+
+// OSM species/genus values are UTF-8. Rust's char::is_alphabetic scans Unicode
+// scalar values; treating each byte as a character can split an accented genus
+// and accidentally map the ASCII suffix (for example, "éPinus") to another
+// tree type. Keep valid non-ASCII UTF-8 sequences in the token and normalize
+// ASCII letters as before. Unicode case conversion is intentionally left intact
+// rather than applying locale-dependent C library rules.
+std::size_t alphabetic_char_bytes(const std::string &value, std::size_t offset)
+{
+	const auto first = static_cast<unsigned char>(value[offset]);
+	if (first < 0x80)
+		return std::isalpha(first) ? 1 : 0;
+
+	std::size_t length = 0;
+	if ((first & 0xE0) == 0xC0)
+		length = 2;
+	else if ((first & 0xF0) == 0xE0)
+		length = 3;
+	else if ((first & 0xF8) == 0xF0)
+		length = 4;
+	else
+		return 0;
+	if (offset + length > value.size())
+		return 0;
+	std::uint32_t codepoint = first & (length == 2 ? 0x1F : length == 3 ? 0x0F : 0x07);
+	for (std::size_t i = 1; i < length; ++i) {
+		const auto continuation = static_cast<unsigned char>(value[offset + i]);
+		if ((continuation & 0xC0) != 0x80)
+			return 0;
+		codepoint = (codepoint << 6) | (continuation & 0x3F);
+	}
+	if ((length == 2 && codepoint < 0x80) || (length == 3 && codepoint < 0x800) ||
+			(length == 4 && codepoint < 0x10000) ||
+			(codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)
+		return 0;
+	return length;
+}
+
 std::optional<std::vector<TreeType>> genus_pool(const std::string &g)
 {
 	if (g == "Betula")
@@ -57,17 +95,27 @@ std::optional<std::string> parse_genus(
 		if (it == tags.end())
 			continue;
 		const auto &value = it->second;
-		const auto first = std::find_if(value.begin(), value.end(),
-				[](unsigned char c) { return std::isalpha(c); });
-		if (first == value.end())
+		std::size_t start = 0;
+		while (start < value.size() && alphabetic_char_bytes(value, start) == 0)
+			++start;
+		if (start == value.size())
 			continue;
-		const auto last = std::find_if_not(
-				first, value.end(), [](unsigned char c) { return std::isalpha(c); });
-		std::string out(first, last);
+		std::size_t end = start;
+		while (end < value.size()) {
+			const auto bytes = alphabetic_char_bytes(value, end);
+			if (bytes == 0)
+				break;
+			end += bytes;
+		}
+		std::string out = value.substr(start, end - start);
 		if (!out.empty()) {
-			out[0] = static_cast<char>(std::toupper(static_cast<unsigned char>(out[0])));
-			std::transform(out.begin() + 1, out.end(), out.begin() + 1,
-					[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			if (static_cast<unsigned char>(out[0]) < 0x80)
+				out[0] = static_cast<char>(
+						std::toupper(static_cast<unsigned char>(out[0])));
+			for (std::size_t i = 1; i < out.size(); ++i)
+				if (static_cast<unsigned char>(out[i]) < 0x80)
+					out[i] = static_cast<char>(
+							std::tolower(static_cast<unsigned char>(out[i])));
 			return out;
 		}
 	}

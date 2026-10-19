@@ -438,6 +438,15 @@ std::shared_ptr<const GlbMipTexture> make_mips(
 	if (w > std::numeric_limits<std::size_t>::max() / h ||
 			w * h > image.image.size() / stride)
 		return {};
+	const auto &linear_lut = []() -> const std::array<float, 256> & {
+		static const std::array<float, 256> lut = [] {
+			std::array<float, 256> values{};
+			for (std::size_t i = 0; i < values.size(); ++i)
+				values[i] = srgb_to_linear(static_cast<float>(i) / 255.0f);
+			return values;
+		}();
+		return lut;
+	}();
 	auto texture = std::make_shared<GlbMipTexture>();
 	texture->wrap_s = wrap_s;
 	texture->wrap_t = wrap_t;
@@ -460,7 +469,7 @@ std::shared_ptr<const GlbMipTexture> make_mips(
 											? image.image[p + 3] / 255.0f
 											: 1.0f;
 					for (int c = 0; c < 3; ++c)
-						sum[c] += srgb_to_linear(image.image[p + c] / 255.0f) * a;
+						sum[c] += linear_lut[image.image[p + c]] * a;
 					sum[3] += a;
 				}
 			for (float &v : sum)

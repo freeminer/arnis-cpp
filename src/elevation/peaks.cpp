@@ -3,10 +3,10 @@
 #include "../coordinate_system/geographic/llbbox.h"
 #include "../models_3d/wikidata/wikidata_index.h"
 #include "../osm_parser.h"
+#include "../strict_parse.h"
 
 #include <algorithm>
 #include <cmath>
-#include <cstdlib>
 #include <limits>
 #include <optional>
 #include <string>
@@ -44,11 +44,10 @@ std::optional<double> parse_elevation(const std::string &input)
 	}
 	if (value.empty())
 		return std::nullopt;
-	char *end = nullptr;
-	const double parsed = std::strtod(value.c_str(), &end);
-	if (end != value.c_str() + value.size() || !std::isfinite(parsed))
+	const auto parsed = strict_parse::f64(value);
+	if (!parsed || !std::isfinite(*parsed))
 		return std::nullopt;
-	return parsed;
+	return *parsed;
 }
 
 // Rust's Wikidata tall-model fallback uses placement::parse_meters: unlike a
@@ -72,11 +71,10 @@ std::optional<double> parse_model_height(const std::string &input)
 	trim(value);
 	if (value.empty())
 		return std::nullopt;
-	char *end = nullptr;
-	const double parsed = std::strtod(value.c_str(), &end);
-	if (end != value.c_str() + value.size() || !std::isfinite(parsed) || parsed <= 0.0)
+	const auto parsed = strict_parse::f64(value);
+	if (!parsed || !std::isfinite(*parsed) || *parsed <= 0.0)
 		return std::nullopt;
-	return parsed;
+	return *parsed;
 }
 
 std::optional<double> model_height(const tags_t &tags)

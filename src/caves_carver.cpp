@@ -435,7 +435,8 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 				continue;
 			centers.emplace_back(gx, gy, gz);
 		}
-	auto place_cluster = [&, write_min_y=write_min_y,write_max_y=write_max_y](int gx, int gy, int gz, int bx, int by, int bz) {
+	auto place_cluster = [&, write_min_y = write_min_y, write_max_y = write_max_y](
+								 int gx, int gy, int gz, int bx, int by, int bz) {
 		if (decor_hash(bx, by, bz, seed ^ 0xC1A5ULL) % 100 >= 70)
 			return;
 		const int dx = gx - bx, dy = gy - by, dz = gz - bz;
@@ -655,6 +656,9 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	const auto &air_cells = cave_air ? *cave_air : empty_air;
 	// Match Rust: decorate only the explicitly tracked cave-air cells. Fluid
 	// cells are consulted separately and unrelated voids are not candidates.
+	// Rust uses a deterministic FNV set, then sorts packed positions before
+	// applying edits. Keep that write order here too: vines and tall plants can
+	// overlap nearby cells, so unordered_set iteration changes the result.
 	std::vector<std::int64_t> ordered_air(air_cells.begin(), air_cells.end());
 	std::sort(ordered_air.begin(), ordered_air.end());
 	for (const auto p : ordered_air) {

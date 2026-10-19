@@ -387,6 +387,10 @@ struct Args
 			return "world time must be between 0 and 23999";
 		if (bedrock && luanti)
 			return "Bedrock and Luanti output cannot both be enabled";
+		if ((bedrock || luanti) && (traffic_lights || moving_cars))
+			return "traffic lights and moving cars require Java Edition output";
+		if (one_world_run && (traffic_lights || moving_cars))
+			return "traffic lights and moving cars are not available with One World yet";
 		if (spawn_lat.has_value() != spawn_lng.has_value())
 			return "Both --spawn-lat and --spawn-lng must be provided together.";
 		if (spawn_lat && spawn_lng &&
