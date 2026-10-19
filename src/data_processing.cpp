@@ -2225,14 +2225,13 @@ bool generate_world(WorldEditor &editor,
 					(geo_bounds[2] + geo_bounds[3]) * .5));
 	const bool java_world =
 			editor.get_generation_format() == static_cast<int>(WorldFormat::JavaAnvil);
-	const bool extras_enabled = !args.one_world_run;
-	if (extras_enabled && args.traffic_lights && java_world) {
+	if (args.traffic_lights && java_world) {
 		editor.traffic_signal_index = highways::SignalIndex::build(
 				elements, args.scale, marking_index.drives_on_left, road_mask);
 	} else {
 		editor.traffic_signal_index.reset();
 	}
-	if (extras_enabled && args.moving_cars && java_world) {
+	if (args.moving_cars && java_world) {
 		auto surface_y = [&](int x, int z) {
 			if (const auto deck = bridge_surface.nearby_deck_y(x, z, 0))
 				return *deck;

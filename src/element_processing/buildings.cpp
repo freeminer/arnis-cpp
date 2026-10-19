@@ -69,6 +69,7 @@ void generate_tank_structure(
 
 namespace buildings
 {
+using building_facade::BaySlot;
 
 Block rust_category_wall_block(
 		BuildingCategory category, ArchEra era, biome::Climate climate, ChaCha8Rng &rng);
@@ -1131,14 +1132,6 @@ struct BayRhythm
 	int corner;
 };
 
-struct BaySlot
-{
-	bool window = false;
-	int k = 0;
-	int width = 0;
-	int bay = 0;
-};
-
 struct BayLayout
 {
 	int len = 0;
@@ -1180,20 +1173,20 @@ struct BayLayout
 	BaySlot slot(int i) const
 	{
 		if (count == 0 || i < lead || i >= len - lead)
-			return {};
+			return {BaySlot::Kind::End};
 		const int mid = count / 2;
 		int offset = i - lead;
 		for (int bay = 0; bay < count; ++bay) {
 			const int width = window + (wide_window && bay == mid ? 1 : 0);
 			if (offset < width)
-				return {true, offset, width, bay};
+				return {BaySlot::Kind::Window, offset, width, bay};
 			offset -= width;
 			const int pier_width = pier + (wide_pier && bay + 1 == mid ? 1 : 0);
 			if (offset < pier_width)
-				return {};
+				return {BaySlot::Kind::Pier};
 			offset -= pier_width;
 		}
-		return {};
+		return {BaySlot::Kind::End};
 	}
 };
 
@@ -1411,6 +1404,34 @@ Block base_course_for_wall(Block wall)
 	return STONE_BRICKS;
 }
 
+Block trim_block_for_wall(Block wall, std::uint64_t seed)
+{
+	if (wall == BRICK || wall == TERRACOTTA || wall == RED_TERRACOTTA ||
+			wall == ORANGE_TERRACOTTA || wall == GRANITE || wall == POLISHED_GRANITE ||
+			wall == NETHER_BRICK || wall == RED_NETHER_BRICKS || wall == MUD_BRICKS ||
+			wall == BROWN_TERRACOTTA || wall == BROWN_CONCRETE) {
+		const Block light_stone[] = {SMOOTH_STONE, POLISHED_DIORITE, SMOOTH_SANDSTONE};
+		return light_stone[element_rng(seed ^ 0x7121A57E00000001ULL).uniform(3)];
+	}
+	if (wall == SANDSTONE)
+		return SMOOTH_SANDSTONE;
+	if (wall == SMOOTH_SANDSTONE || wall == END_STONE_BRICKS || wall == YELLOW_TERRACOTTA)
+		return SANDSTONE;
+	if (wall == QUARTZ_BLOCK || wall == QUARTZ_BRICKS || wall == SMOOTH_QUARTZ ||
+			wall == WHITE_CONCRETE)
+		return STONE_BRICKS;
+	if (wall == WHITE_TERRACOTTA)
+		return QUARTZ_BLOCK;
+	if (wall == SMOOTH_STONE || wall == POLISHED_DIORITE || wall == DIORITE)
+		return QUARTZ_BLOCK;
+	if (wall == OAK_PLANKS || wall == OAK_LOG || wall == SPRUCE_PLANKS ||
+			wall == SPRUCE_LOG)
+		return DARK_OAK_PLANKS;
+	if (wall == DARK_OAK_PLANKS)
+		return SPRUCE_PLANKS;
+	return POLISHED_DIORITE;
+}
+
 WallDepthStyle wall_depth_style_for(BuildingCategory category)
 {
 	// Every non-default category has an explicit Rust BuildingStylePreset depth
@@ -1449,25 +1470,183 @@ WallDepthStyle wall_depth_style_for(BuildingCategory category)
 	}
 }
 
-Block weathered_variant(Block block, std::uint64_t hash)
+Block weathered_variant(Block block, ChaCha8Rng &rng)
 {
 	if (block == STONE_BRICKS) {
 		const std::array options{MOSSY_STONE_BRICKS, CRACKED_STONE_BRICKS, STONE_BRICKS};
-		return options[hash % options.size()];
+		return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
 	}
 	if (block == COBBLESTONE)
 		return MOSSY_COBBLESTONE;
-	if (block == STONE)
-		return (hash & 1) ? ANDESITE : COBBLESTONE;
+	if (block == STONE) {
+		const std::array options{ANDESITE, COBBLESTONE};
+		return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
+	}
 	if (block == SMOOTH_STONE)
 		return STONE;
 	if (block == POLISHED_ANDESITE)
 		return ANDESITE;
-	if (block == OAK_PLANKS)
-		return (hash & 1) ? SPRUCE_PLANKS : DARK_OAK_PLANKS;
+	if (block == OAK_PLANKS) {
+		const std::array options{SPRUCE_PLANKS, DARK_OAK_PLANKS};
+		return options[rng.uniform(static_cast<std::uint32_t>(options.size()))];
+	}
 	if (block == OAK_LOG)
 		return SPRUCE_LOG;
 	return block;
+}
+
+const std::vector<Block> &substitute_pool_only(Block block)
+{
+	static const std::vector<Block> none;
+	static const std::vector<Block> stone_bricks{CRACKED_STONE_BRICKS, STONE};
+	static const std::vector<Block> cobblestone{ANDESITE, STONE};
+	static const std::vector<Block> stone{ANDESITE, COBBLESTONE};
+	static const std::vector<Block> andesite{POLISHED_ANDESITE, STONE};
+	static const std::vector<Block> polished_andesite{ANDESITE};
+	static const std::vector<Block> chiseled_stone_bricks{STONE_BRICKS};
+	static const std::vector<Block> mossy_stone_bricks{MOSSY_COBBLESTONE, STONE_BRICKS};
+	static const std::vector<Block> mossy_cobblestone{MOSSY_STONE_BRICKS, COBBLESTONE};
+	static const std::vector<Block> brick{POLISHED_GRANITE, POLISHED_GRANITE, GRANITE};
+	static const std::vector<Block> polished_granite{BRICK, GRANITE};
+	static const std::vector<Block> granite{POLISHED_GRANITE};
+	static const std::vector<Block> terracotta{POLISHED_GRANITE};
+	static const std::vector<Block> orange_terracotta{TERRACOTTA};
+	static const std::vector<Block> deepslate_bricks{
+			POLISHED_DEEPSLATE, COBBLED_DEEPSLATE};
+	static const std::vector<Block> polished_deepslate{
+			DEEPSLATE_BRICKS, COBBLED_DEEPSLATE};
+	static const std::vector<Block> cobbled_deepslate{
+			DEEPSLATE_BRICKS, POLISHED_DEEPSLATE, DEEPSLATE};
+	static const std::vector<Block> deepslate{COBBLED_DEEPSLATE, DEEPSLATE_BRICKS};
+	static const std::vector<Block> polished_blackstone_bricks{
+			POLISHED_BLACKSTONE, BLACKSTONE};
+	static const std::vector<Block> polished_blackstone{
+			POLISHED_BLACKSTONE_BRICKS, BLACKSTONE};
+	static const std::vector<Block> blackstone{
+			POLISHED_BLACKSTONE, POLISHED_BLACKSTONE_BRICKS};
+	static const std::vector<Block> brown_terracotta{BROWN_CONCRETE};
+	static const std::vector<Block> brown_concrete{BROWN_TERRACOTTA};
+	static const std::vector<Block> quartz_block{SMOOTH_QUARTZ};
+	static const std::vector<Block> quartz_bricks{QUARTZ_BLOCK};
+	static const std::vector<Block> white_concrete{CALCITE};
+	static const std::vector<Block> sandstone{SMOOTH_SANDSTONE};
+	static const std::vector<Block> smooth_sandstone{SANDSTONE};
+	static const std::vector<Block> polished_diorite{DIORITE};
+	static const std::vector<Block> diorite{POLISHED_DIORITE};
+	static const std::vector<Block> gray_concrete{GRAY_CONCRETE_POWDER};
+	static const std::vector<Block> light_gray_concrete{LIGHT_GRAY_CONCRETE_POWDER};
+	static const std::vector<Block> light_gray_powder{LIGHT_GRAY_CONCRETE};
+	static const std::vector<Block> exposed_copper{
+			WAXED_EXPOSED_CHISELED_COPPER, WAXED_EXPOSED_CUT_COPPER};
+	static const std::vector<Block> exposed_chiseled{
+			WAXED_EXPOSED_COPPER, WAXED_EXPOSED_CUT_COPPER};
+	static const std::vector<Block> exposed_cut{
+			WAXED_EXPOSED_COPPER, WAXED_EXPOSED_CHISELED_COPPER};
+	if (block == STONE_BRICKS)
+		return stone_bricks;
+	if (block == COBBLESTONE)
+		return cobblestone;
+	if (block == STONE)
+		return stone;
+	if (block == ANDESITE)
+		return andesite;
+	if (block == POLISHED_ANDESITE)
+		return polished_andesite;
+	if (block == CHISELED_STONE_BRICKS || block == CRACKED_STONE_BRICKS)
+		return chiseled_stone_bricks;
+	if (block == MOSSY_STONE_BRICKS)
+		return mossy_stone_bricks;
+	if (block == MOSSY_COBBLESTONE)
+		return mossy_cobblestone;
+	if (block == BRICK)
+		return brick;
+	if (block == POLISHED_GRANITE)
+		return polished_granite;
+	if (block == GRANITE)
+		return granite;
+	if (block == TERRACOTTA)
+		return terracotta;
+	if (block == ORANGE_TERRACOTTA)
+		return orange_terracotta;
+	if (block == DEEPSLATE_BRICKS)
+		return deepslate_bricks;
+	if (block == POLISHED_DEEPSLATE)
+		return polished_deepslate;
+	if (block == COBBLED_DEEPSLATE)
+		return cobbled_deepslate;
+	if (block == DEEPSLATE)
+		return deepslate;
+	if (block == POLISHED_BLACKSTONE_BRICKS)
+		return polished_blackstone_bricks;
+	if (block == POLISHED_BLACKSTONE)
+		return polished_blackstone;
+	if (block == BLACKSTONE)
+		return blackstone;
+	if (block == BROWN_TERRACOTTA)
+		return brown_terracotta;
+	if (block == BROWN_CONCRETE)
+		return brown_concrete;
+	if (block == QUARTZ_BLOCK)
+		return quartz_block;
+	if (block == QUARTZ_BRICKS || block == SMOOTH_QUARTZ)
+		return quartz_bricks;
+	if (block == WHITE_CONCRETE)
+		return white_concrete;
+	if (block == SANDSTONE)
+		return sandstone;
+	if (block == SMOOTH_SANDSTONE)
+		return smooth_sandstone;
+	if (block == POLISHED_DIORITE)
+		return polished_diorite;
+	if (block == DIORITE)
+		return diorite;
+	if (block == GRAY_CONCRETE)
+		return gray_concrete;
+	if (block == LIGHT_GRAY_CONCRETE)
+		return light_gray_concrete;
+	if (block == LIGHT_GRAY_CONCRETE_POWDER)
+		return light_gray_powder;
+	if (block == WAXED_EXPOSED_COPPER)
+		return exposed_copper;
+	if (block == WAXED_EXPOSED_CHISELED_COPPER)
+		return exposed_chiseled;
+	if (block == WAXED_EXPOSED_CUT_COPPER)
+		return exposed_cut;
+	return none;
+}
+
+int floor_divide(int value, int divisor)
+{
+	return static_cast<int>(std::floor(static_cast<double>(value) / divisor));
+}
+
+Block apply_block_variety(Block chosen, int x, int y, int z, Block wall_block,
+		int start_y_offset, std::uint64_t element_id, Block window_block,
+		BuildingCondition condition)
+{
+	if (const auto facade = mapillary::facades::block_at(
+				x, y, z, start_y_offset, element_id, window_block))
+		return *facade;
+	if (chosen != wall_block)
+		return chosen;
+	if (condition != BuildingCondition::Construction)
+		if (const auto band = mapillary::facades::band_block_at(
+					x, y, z, start_y_offset, element_id))
+			return *band;
+	const auto &pool = substitute_pool_only(chosen);
+	if (pool.empty())
+		return chosen;
+	auto mode_rng = element_rng(element_id ^ 0xBABEF1A122228888ULL);
+	if (mode_rng.random_bool(.20))
+		return chosen;
+	const int band = floor_divide(y, 2);
+	const int shift = band - floor_divide(band, 3) * 3;
+	auto patch_rng = coord_rng(floor_divide(x + shift, 3), floor_divide(z + shift, 3),
+			element_id ^ 0x50503030AAFFBBCCULL ^
+					(std::uint64_t(static_cast<std::int64_t>(band)) << 20));
+	if (patch_rng.uniform(100) < 12)
+		return pool[patch_rng.uniform(static_cast<std::uint32_t>(pool.size()))];
+	return chosen;
 }
 
 Block apply_condition_variation(Block chosen, int x, int y, int z, Block wall_block,
@@ -1476,35 +1655,37 @@ Block apply_condition_variation(Block chosen, int x, int y, int z, Block wall_bl
 {
 	if (condition == BuildingCondition::Construction)
 		return chosen;
-	std::uint64_t hash = std::uint64_t(std::uint32_t(x)) * 0x9E3779B97F4A7C15ULL;
-	hash ^= std::uint64_t(std::uint32_t(z)) * 0x517CC1B727220A95ULL;
-	hash ^= seed ^ (std::uint64_t(std::uint32_t(y)) << 16);
-	hash ^= hash >> 29;
-	const double roll = double(hash % 10000) / 10000.0;
+	double normal_weather_rate = 0.0;
+	if (condition == BuildingCondition::Normal) {
+		const double category_rate =
+				category == BuildingCategory::Historic ||
+								category == BuildingCategory::Religious
+						? .06
+				: category == BuildingCategory::Farm ? .03
+													 : 0.0;
+		const double era_rate = era == ArchEra::HistoricOrnate		? .05
+								: era == ArchEra::TraditionalPreWar ? .02
+																	: 0.0;
+		normal_weather_rate = std::max(category_rate, era_rate);
+	}
+	if (condition == BuildingCondition::Normal && normal_weather_rate == 0.0)
+		return chosen;
+	auto rng =
+			coord_rng(x, z, seed ^ (std::uint64_t(static_cast<std::int64_t>(y)) << 16));
 	const bool window = has_windows && chosen == window_block;
 	const double board_rate = condition == BuildingCondition::Disused	  ? .30
 							  : condition == BuildingCondition::Abandoned ? .50
 																		  : 0.0;
-	if (window && roll < board_rate)
+	if (window && board_rate > 0.0 && rng.random_bool(board_rate))
 		return wall_block;
-	if (window)
-		return chosen;
-	double weather_rate = 0.0;
-	if (condition == BuildingCondition::Abandoned)
-		weather_rate = .05;
-	else if (condition == BuildingCondition::Ruined)
-		weather_rate = .50;
-	else if (condition == BuildingCondition::Normal) {
-		if (category == BuildingCategory::Historic ||
-				category == BuildingCategory::Religious)
-			weather_rate = .06;
-		else if (category == BuildingCategory::Farm)
-			weather_rate = .03;
-		weather_rate = std::max(weather_rate, era == ArchEra::HistoricOrnate	  ? .05
-											  : era == ArchEra::TraditionalPreWar ? .02
-																				  : 0.0);
-	}
-	return roll < weather_rate ? weathered_variant(chosen, hash >> 17) : chosen;
+	const double weather_rate = condition == BuildingCondition::Abandoned ? .05
+								: condition == BuildingCondition::Ruined  ? .50
+								: condition == BuildingCondition::Normal
+										? normal_weather_rate
+										: 0.0;
+	if (!window && weather_rate > 0.0 && rng.random_bool(weather_rate))
+		return weathered_variant(chosen, rng);
+	return chosen;
 }
 
 bool archetype_allows_window(
@@ -4761,7 +4942,7 @@ void generate_facade_cornice_details(WorldEditor &editor, const ProcessedWay &el
 		bool europe, BuildingCondition condition, WindowArchetype window_archetype,
 		Block wall_block, Block trim_block, bool has_windows, bool ground_level,
 		bool storefront, bool sloped, int start_y, int building_height, int abs_offset,
-		int floor_cycle, const CoordinateBitmap *passages,
+		int floor_cycle, int grammar_anchor, const CoordinateBitmap *passages,
 		const building_facade::PointSet *preset_shell,
 		const building_facade::PointSet &own_footprint,
 		const CoordinateBitmap *building_footprints)
@@ -4787,7 +4968,7 @@ void generate_facade_cornice_details(WorldEditor &editor, const ProcessedWay &el
 		return;
 
 	const int top = start_y + building_height;
-	const int course_y = start_y + 2 + floor_cycle;
+	const int course_y = start_y + grammar_anchor + floor_cycle;
 	const Block stair_block = get_stair_block_for_material(trim_block);
 	const auto slab = get_slab_block_for_material(trim_block);
 	const BlockWithProperties ledge{slab, {{"type", "top"}}};
@@ -4874,11 +5055,14 @@ std::optional<PodiumTowerPlan> plan_podium_tower(const ProcessedWay &element,
 	return PodiumTowerPlan{podium_height, inset, building_height};
 }
 
+using InsetWallSelector = std::function<Block(int, int, int, bool, bool)>;
+
 std::optional<int> generate_inset_tiers(WorldEditor &editor,
 		const std::vector<std::pair<int, int>> &roof_area,
 		const RoofDistanceGrid &distances, int base_y, int abs_terrain_offset,
-		const std::vector<InsetTier> &tiers, int floor_cycle, Block wall_block,
-		Block window_block, Block floor_block, bool has_windows)
+		const std::vector<InsetTier> &tiers, int floor_cycle, int floor_row_origin,
+		Block floor_block, const rooftops::RoofMembrane &cover,
+		const InsetWallSelector &select_wall)
 {
 	int current_base = base_y;
 	bool placed = false;
@@ -4900,21 +5084,29 @@ std::optional<int> generate_inset_tiers(WorldEditor &editor,
 								distances.find({x + offset.first, z + offset.second});
 						return it == distances.end() || it->second < tier.inset;
 					});
+			const bool open_x = distances.find({x + 1, z}) == distances.end() ||
+								distances.at({x + 1, z}) < tier.inset ||
+								distances.find({x - 1, z}) == distances.end() ||
+								distances.at({x - 1, z}) < tier.inset;
+			const bool open_z = distances.find({x, z + 1}) == distances.end() ||
+								distances.at({x, z + 1}) < tier.inset ||
+								distances.find({x, z - 1}) == distances.end() ||
+								distances.at({x, z - 1}) < tier.inset;
 			for (int h = 0; h < tier.height; ++h) {
 				const int y = current_base + h;
-				const int row = ((y - base_y) % floor_cycle + floor_cycle) % floor_cycle;
+				const int row = ((y - floor_row_origin) % floor_cycle + floor_cycle) %
+								floor_cycle;
 				if (wall) {
-					const bool window = has_windows && row >= 2 &&
-										row < floor_cycle - 1 && ((x + z) % 3 != 0);
-					editor.set_block_absolute(window ? window_block : wall_block, x,
-							y + abs_terrain_offset, z, std::nullopt, replace_any);
+					const Block selected = select_wall(x, y, z, open_x, open_x && open_z);
+					editor.set_block_absolute(selected, x, y + abs_terrain_offset, z,
+							std::nullopt, replace_any);
 				} else if (tier.with_ceilings && row == 0) {
 					editor.set_block_absolute(
 							(x % 3 == 0 && z % 3 == 0) ? GLOWSTONE : floor_block, x,
 							y + abs_terrain_offset, z, std::nullopt, replace_any);
 				}
 			}
-			editor.set_block_absolute(floor_block, x,
+			editor.set_block_absolute(cover.block_at(x, z), x,
 					current_base + tier.height + abs_terrain_offset, z, std::nullopt,
 					replace_any);
 		}
@@ -4926,8 +5118,9 @@ std::optional<int> generate_inset_tiers(WorldEditor &editor,
 bool generate_setback_crown(WorldEditor &editor,
 		const std::vector<std::pair<int, int>> &roof_area, BuildingCategory category,
 		BuildingCondition condition, bool is_tall_building, int start_y,
-		int building_height, int abs_terrain_offset, int floor_cycle, Block wall_block,
-		Block window_block, Block floor_block, bool has_windows, std::uint64_t element_id)
+		int building_height, int abs_terrain_offset, int floor_cycle,
+		int floor_row_origin, Block floor_block, const rooftops::RoofMembrane &cover,
+		std::uint64_t element_id, const InsetWallSelector &select_wall)
 {
 	if (!is_tall_building || condition != BuildingCondition::Normal ||
 			roof_area.size() < 200 ||
@@ -4940,7 +5133,7 @@ bool generate_setback_crown(WorldEditor &editor,
 		tiers.push_back({3 + tier * 3, floor_cycle, false});
 	const auto top = generate_inset_tiers(editor, roof_area, distances,
 			start_y + building_height + 1, abs_terrain_offset, tiers, floor_cycle,
-			wall_block, window_block, floor_block, has_windows);
+			floor_row_origin, floor_block, cover, select_wall);
 	if (!top)
 		return false;
 	std::optional<std::pair<int, int>> deepest;
@@ -5252,7 +5445,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		int run, bay, k, width;
 		bool street;
 	};
+	struct FacadeWindowColumn
+	{
+		int x, z, nx, nz, run, position;
+		BaySlot slot;
+	};
 	std::vector<WindowLifeColumn> window_life_columns;
+	std::vector<FacadeWindowColumn> facade_window_columns;
 
 	// building type
 	std::string building_type = "yes";
@@ -5374,7 +5573,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			((wall_depth_style == WallDepthStyle::ModernPillars ||
 					 wall_depth_style == WallDepthStyle::InstitutionalBands ||
 					 wall_depth_style == WallDepthStyle::HistoricOrnate ||
-					 wall_depth_style == WallDepthStyle::SkyscraperFins) ||
+					 (wall_depth_style == WallDepthStyle::SkyscraperFins &&
+							 category == BuildingCategory::ModernSkyscraper)) ||
 					(wall_depth_style == WallDepthStyle::SubtlePilasters &&
 							element_rng(visual_seed + 7919).uniform(100) < 60));
 	const auto climate = editor->get_ground() ? editor->get_ground()->climate()
@@ -5474,6 +5674,20 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		window_block = category_window_block(category, rng);
 	const WindowArchetype window_archetype = pick_window_archetype(category, era,
 			building_style::building_region(wall_region), wall_block, clean_visual_seed);
+	// Rust spaces European stucco and sandstone windows a column farther apart
+	// for their flush Faschen surrounds; use the same bay rhythm on the facade
+	// and on inset tower tiers. Brick and the other heavy masonry keep plain
+	// openings.
+	const bool window_surrounds =
+			building_style::building_region(wall_region) ==
+					building_style::BuildingRegion::Europe &&
+			has_windows && wall_block != BRICK && wall_block != TERRACOTTA &&
+			wall_block != RED_TERRACOTTA && wall_block != ORANGE_TERRACOTTA &&
+			wall_block != BROWN_TERRACOTTA && wall_block != NETHER_BRICK &&
+			wall_block != RED_NETHER_BRICKS && wall_block != MUD_BRICKS &&
+			wall_block != GRANITE && wall_block != POLISHED_GRANITE &&
+			wall_block != BROWN_CONCRETE && condition == BuildingCondition::Normal &&
+			detail != DetailTier::Minimal;
 	const bool frame_archetype = window_archetype != WindowArchetype::Ribbon &&
 								 window_archetype != WindowArchetype::Piers &&
 								 window_archetype != WindowArchetype::Strips;
@@ -6024,9 +6238,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					segment_start_axis_x(element.nodes, node_index, segment_is_x);
 			auto bresenham_points = bresenham_line(
 					prev.first, start_y_offset, prev.second, x, start_y_offset, z);
-			const BayLayout facade_bays =
-					BayLayout::plan(static_cast<int>(bresenham_points.size()),
-							window_rhythm(window_archetype));
+			BayRhythm facade_rhythm = window_rhythm(window_archetype);
+			if (window_surrounds)
+				++facade_rhythm.pier;
+			const BayLayout facade_bays = BayLayout::plan(
+					static_cast<int>(bresenham_points.size()), facade_rhythm);
 			const BayLayout shop_bays =
 					BayLayout::plan(static_cast<int>(bresenham_points.size()),
 							BayRhythm{3, 1, std::clamp(facade_bays.lead, 1, 2)});
@@ -6074,7 +6290,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						facade_plan.segments[node_index - 1] &&
 						facade_plan.segments[node_index - 1]->facade_class ==
 								building_facade::FacadeClass::Rear;
-				if (bay_slot.window && outward != std::pair<int, int>{0, 0} &&
+				if (bay_slot.is_window() && !party_wall && !is_passage &&
+						!facade_plan.is_door(bx, bz) && !is_flat_column(bx, bz) &&
+						outward != std::pair<int, int>{0, 0} &&
 						std::none_of(window_life_columns.begin(),
 								window_life_columns.end(),
 								[&](const WindowLifeColumn &column) {
@@ -6083,13 +6301,20 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					window_life_columns.push_back({bx, bz, outward.first, outward.second,
 							static_cast<int>(node_index - 1), bay_slot.bay, bay_slot.k,
 							bay_slot.width, facade_plan.is_street(bx, bz)});
+				if (outward != std::pair<int, int>{0, 0})
+					facade_window_columns.push_back({bx, bz, outward.first,
+							outward.second, static_cast<int>(node_index - 1),
+							static_cast<int>(point_index), bay_slot});
 
 				if (terrain_enabled && min_level_offset == 0 && !is_passage) {
 					const int local_ground_level =
 							editor->terrain_level(bx, bz).value_or(args.ground_level);
 					for (int y = local_ground_level; y <= start_y_offset; ++y) {
+						const Block foundation = apply_block_variety(wall_block, bx, y,
+								bz, wall_block, start_y_offset, element.id, window_block,
+								condition);
 						editor->set_block_absolute(
-								wall_block, bx, y + abs_terrain_offset, bz);
+								foundation, bx, y + abs_terrain_offset, bz);
 					}
 				}
 
@@ -6118,7 +6343,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							((h - start_y_offset - grammar_anchor) % floor_cycle +
 									floor_cycle) %
 							floor_cycle;
-					const int window_col = bay_slot.window ? bay_slot.k : 1000;
+					const int window_col = bay_slot.is_window() ? bay_slot.k : 1000;
 					const int ground_top =
 							start_y_offset + grammar_anchor - 1 + floor_cycle;
 					const FloorRole role =
@@ -6155,7 +6380,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								   window_col < 4) {
 							chosen = GLASS;
 						} else if (attic_style && role == FloorRole::Top) {
-							chosen = above_floor && bay_slot.window &&
+							chosen = above_floor && bay_slot.is_window() &&
 													 floor_row == floor_cycle - 1
 											 ? window_block
 											 : wall_block;
@@ -6170,7 +6395,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 											: category == BuildingCategory::
 																	ContemporarySkyscraper
 													? window_col < 4
-													: bay_slot.window &&
+													: bay_slot.is_window() &&
 															  archetype_allows_window(
 																	  window_archetype,
 																	  window_col,
@@ -6187,12 +6412,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								window = false;
 							if (piano_nobile && role == FloorRole::Body &&
 									h <= ground_top + floor_cycle && above_floor &&
-									floor_row != 0 && bay_slot.window && window_col < 3)
+									floor_row != 0 && bay_slot.is_window() &&
+									window_col < 3)
 								window = true;
 							const bool ribbon_spandrel =
 									above_floor &&
 									window_archetype == WindowArchetype::Ribbon &&
-									bay_slot.window && floor_row < 2;
+									bay_slot.is_window() && floor_row < 2;
 							const bool accent =
 									ribbon_spandrel ||
 									(above_floor && floor_row == 0 &&
@@ -6205,7 +6431,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 															 window_archetype ==
 																	 WindowArchetype::
 																			 Strips) &&
-															bay_slot.window)));
+															bay_slot.is_window())));
 							chosen = window	  ? window_block
 									 : accent ? accent_block
 											  : wall_block;
@@ -6227,7 +6453,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																		base_course_rows
 											 ? base_course_block
 											 : wall_block;
-						} else if (h == ground_top || !shop_slot.window) {
+						} else if (h == ground_top || !shop_slot.is_window()) {
 							chosen = shop_frame;
 						} else {
 							chosen = GLASS;
@@ -6246,25 +6472,20 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					if (mapillary::facades::photo_column(bx, bz, element.id) ||
 							preset_shell.contains({bx, bz}))
 						chosen = wall_block;
-					if (const auto facade = mapillary::facades::block_at(
-								bx, h, bz, start_y_offset, element.id, window_block)) {
-						chosen = *facade;
-					} else if (chosen == wall_block &&
-							   condition != BuildingCondition::Construction) {
-						if (const auto band = mapillary::facades::band_block_at(
-									bx, h, bz, start_y_offset, element.id))
-							chosen = *band;
-					}
+					// Rust resolves facade texture/color first, then same-tone patches,
+					// followed by the separate building-condition weathering pass.
+					chosen = apply_block_variety(chosen, bx, h, bz, wall_block,
+							start_y_offset, element.id, window_block, condition);
 					chosen = apply_condition_variation(chosen, bx, h, bz, wall_block,
 							window_block, has_windows, condition, category, era,
-							clean_visual_seed);
+							element.id);
 					const int inset_x = bx - outward.first;
 					const int inset_z = bz - outward.second;
 					const bool recessed_spandrel =
 							(window_archetype == WindowArchetype::Piers ||
 									window_archetype == WindowArchetype::Strips) &&
 							chosen == accent_block && h > ground_top &&
-							h < start_y_offset + building_height && bay_slot.window;
+							h < start_y_offset + building_height && bay_slot.is_window();
 					const bool recessed_window =
 							has_windows && !args.interior &&
 							condition == BuildingCondition::Normal && !is_tall_building &&
@@ -6284,7 +6505,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							window_archetype == WindowArchetype::Hooded &&
 							condition == BuildingCondition::Normal &&
 							outward != std::pair<int, int>{0, 0} && above_floor &&
-							floor_row == floor_cycle - 1 && bay_slot.window &&
+							floor_row == floor_cycle - 1 && bay_slot.is_window() &&
 							window_col != (bay_slot.width - 1) / 2 &&
 							!facade_plan.is_door(bx, bz) && !party_wall)
 						editor->set_block_absolute(STONE_BRICK_SLAB, bx + outward.first,
@@ -6304,7 +6525,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							condition == BuildingCondition::Normal && !is_passage &&
 							!party_wall && !is_flat_column(bx, bz) &&
 							outward != std::pair<int, int>{0, 0} && floor_row == 1 &&
-							bay_slot.window &&
+							bay_slot.is_window() &&
 							archetype_allows_window(
 									window_archetype, window_col, 1, floor_cycle) &&
 							!window_frame) {
@@ -6323,7 +6544,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 											seg_cross + floor_idx * 5, element.id)
 											.uniform(100);
 							bool wants_balcony = false;
-							if (bay_slot.window &&
+							if (bay_slot.is_window() &&
 									window_col == (bay_slot.width - 1) / 2 &&
 									(min_level_offset != 0 ||
 											sill_y >= start_y_offset + 2 + floor_cycle)) {
@@ -6387,7 +6608,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						}
 					}
 					const bool shutter_flank =
-							bay_slot.window &&
+							bay_slot.is_window() &&
 							(window_col == 0 || window_col == bay_slot.width - 1);
 					const bool shutter_archetype =
 							window_archetype == WindowArchetype::Sash ||
@@ -6432,9 +6653,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							condition == BuildingCondition::Normal &&
 							!horizontal_windows && category != BuildingCategory::Tower) {
 						const bool head_band =
-								floor_row == 0 && bay_slot.window && above_floor;
+								floor_row == 0 && bay_slot.is_window() && above_floor;
 						const bool flank =
-								bay_slot.window &&
+								bay_slot.is_window() &&
 								(window_col == 0 || window_col == bay_slot.width - 1) &&
 								floor_row > 0 && floor_row < floor_cycle - 1;
 						if (head_band || flank)
@@ -6448,7 +6669,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const int ox = bx + outward.first, oz = bz + outward.second;
 						const bool street_facing = facade_plan.is_street(bx, bz);
 						if (street_facing && storefront && awning_enabled &&
-								h == ground_top && window_col < 4 &&
+								h == ground_top && shop_slot.is_window() &&
 								!is_flat_column(bx, bz)) {
 							const char *facing =
 									std::abs(outward.first) >= std::abs(outward.second)
@@ -6461,7 +6682,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									h - 1 + abs_terrain_offset, oz,
 									std::vector<Block>{AIR}, std::nullopt);
 						}
-						if (depth_clear && floor_row == 0 && bay_slot.window &&
+						if (depth_clear && floor_row == 0 && bay_slot.is_window() &&
 								window_col == (bay_slot.width - 1) / 2 &&
 								h >= start_y_offset + 2 + floor_cycle &&
 								h <= start_y_offset + building_height - floor_cycle) {
@@ -6642,8 +6863,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			!args.interior && detail != DetailTier::Minimal &&
 			facade_plan.has_any_street &&
 			(era == ArchEra::Unknown || era == ArchEra::TraditionalPreWar) &&
-			(building_height / std::max(1, floor_cycle) >= 4) &&
-			(building_height / std::max(1, floor_cycle) <= 8) &&
+			((building_height - grammar_anchor) / std::max(1, floor_cycle) >= 4) &&
+			((building_height - grammar_anchor) / std::max(1, floor_cycle) <= 8) &&
 			(category == BuildingCategory::Residential ||
 					category == BuildingCategory::Default) &&
 			window_life_dwelling;
@@ -6652,6 +6873,66 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			detail != DetailTier::Minimal &&
 			(era == ArchEra::TraditionalPreWar || era == ArchEra::HistoricOrnate) &&
 			category != BuildingCategory::Hotel && window_life_dwelling;
+	if (window_surrounds && !facade_window_columns.empty()) {
+		std::unordered_map<std::pair<int, int>, const FacadeWindowColumn *, PairHash>
+				columns_by_position;
+		for (const auto &column : facade_window_columns)
+			columns_by_position.emplace(std::pair{column.run, column.position}, &column);
+		const auto glazed = [&](const FacadeWindowColumn &column, int h) {
+			const auto pane = editor->get_block_absolute(
+					column.x - column.nx, h + abs_terrain_offset, column.z - column.nz);
+			const auto face = editor->get_block_absolute(
+					column.x, h + abs_terrain_offset, column.z);
+			return pane && (*pane == window_block || *pane == GLASS) &&
+				   (!face || *face == AIR);
+		};
+		const int ground_top = start_y_offset + grammar_anchor + floor_cycle - 1;
+		const int top_h = start_y_offset + building_height;
+		for (const auto &column : facade_window_columns) {
+			if (passage_at(effective_passages, column.x, column.z) ||
+					facade_plan.is_party(column.x, column.z))
+				continue;
+			std::array<const FacadeWindowColumn *, 2> neighbours{};
+			std::size_t neighbour_count = 0;
+			if (column.slot.is_window()) {
+				neighbours[neighbour_count++] = &column;
+			} else {
+				for (const int offset : {-1, 1}) {
+					const auto it = columns_by_position.find(
+							{column.run, column.position + offset});
+					if (it != columns_by_position.end() && it->second->slot.is_window())
+						neighbours[neighbour_count++] = it->second;
+				}
+			}
+			for (int h = ground_top + 2; h < top_h; ++h) {
+				bool framed = false;
+				for (std::size_t i = 0; i < neighbour_count && !framed; ++i) {
+					const auto &window = *neighbours[i];
+					const bool head = glazed(window, h - 1) && !glazed(window, h);
+					const bool jamb = !column.slot.is_window() &&
+									  (glazed(window, h) ||
+											  ((((h - start_y_offset - grammar_anchor) %
+																floor_cycle +
+														floor_cycle) %
+													   floor_cycle) == 0 &&
+													  glazed(window, h + 1)));
+					framed = head || jamb;
+				}
+				if (framed)
+					editor->set_block_absolute(
+							trim_block_for_wall(wall_block, group_seed), column.x,
+							h + abs_terrain_offset, column.z, std::nullopt,
+							std::vector<Block>{window_block, GLASS});
+			}
+		}
+	}
+	// Rust only hangs curtains in rooms owned by this complete building. A
+	// building:part can share its volume with later sibling walls, and a grouped
+	// outline with sibling cells does not own the floor behind its facade.
+	// Recessed panes are already required by glass_at() below.
+	const bool window_curtains = !args.interior &&
+								 !element.tags.contains("building:part") &&
+								 sibling_cells.empty();
 	if (condition == BuildingCondition::Normal && has_windows && !is_tall_building &&
 			window_life_dwelling && (!window_life_columns.empty())) {
 		const int ground_top = start_y_offset + grammar_anchor + floor_cycle - 1;
@@ -6679,7 +6960,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				return pane && is_glass_wall_block(*pane) && clear(wc.x, y, wc.z);
 			};
 			const auto room_behind = [&]() {
-				if (!current_footprint.contains({bx, bz}))
+				if (!current_footprint.contains({bx, bz}) ||
+						own_wall_ring.contains({bx, bz}))
 					return false;
 				if (!building_footprints)
 					return true;
@@ -6716,7 +6998,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								h + abs_terrain_offset, wc.z, std::vector<Block>{AIR},
 								std::nullopt);
 				}
-				if (!args.interior && current_footprint.contains({bx, bz}) &&
+				if (window_curtains && current_footprint.contains({bx, bz}) &&
 						room_behind()) {
 					auto curtain_rng = coord_rng(wc.run * 4096 + wc.bay, storey,
 							element.id ^ 0xC0A7A1A500000001ULL);
@@ -8000,11 +8282,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					break;
 				}
 				case WallDepthStyle::SkyscraperFins:
-					place_foundation();
-					if (mod6 == 3)
-						place_vertical(accent_block);
-					else
-						place_floor_slab_bands();
+					if (horizontal_windows) {
+						const BlockWithProperties ledge{
+								get_slab_block_for_material(accent_block),
+								{{"type", "top"}}};
+						for (int h = start_y_offset + 2; h <= top_h; ++h)
+							if (floor_row_at(h) == 0)
+								place_property(ledge, h);
+					}
 					break;
 				case WallDepthStyle::GlassCurtain:
 					if (point_index == 0 || point_index + 1 == points.size())
@@ -8071,8 +8356,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					building_style::BuildingRegion::Europe,
 			condition, window_archetype, wall_block, sill_base, has_windows,
 			min_level_offset == 0, storefront, generated_sloped_roof, start_y_offset,
-			building_height, abs_terrain_offset, floor_cycle, effective_passages,
-			&preset_shell, current_footprint, building_footprints);
+			building_height, abs_terrain_offset, floor_cycle, grammar_anchor,
+			effective_passages, &preset_shell, current_footprint, building_footprints);
 	const bool generated_chimney_roof = generated_roof_type == RoofType::Gabled ||
 										generated_roof_type == RoofType::Hipped ||
 										generated_roof_type == RoofType::Mansard ||
@@ -8081,21 +8366,133 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	if (generated_sloped_roof && generated_chimney_roof && style_has_chimney)
 		generate_chimney(*editor, roof_area, min_x, max_x, min_z, max_z,
 				start_y_offset + building_height + 1, abs_terrain_offset, element.id);
+	// Rust sends crown and podium walls through its normal facade selector.
+	// Preserve the same bay phase and floor grammar here instead of synthesizing
+	// windows from the inset cells' world-coordinate checkerboard.
+	const int inset_style_height =
+			podium_tower ? podium_tower->full_height : building_height;
+	const Block inset_trim_block = trim_block_for_wall(wall_block, group_seed);
+	auto roof_cover_rng = element_rng(group_seed ^ 0xF00FC010BA5EF00DULL);
+	const auto mapped_cover =
+			rust_tagged_roof_block(element, false, std::nullopt, roof_cover_rng);
+	const rooftops::RoofMembrane inset_roof_cover =
+			mapped_cover ? rooftops::RoofMembrane::uniform(*mapped_cover)
+			: roof_block_override
+					? rooftops::RoofMembrane::uniform(*roof_block_override)
+					: rooftops::pick_membrane(
+							  building_style::building_region(wall_region), wall_region,
+							  category, era, inset_style_height, group_seed);
+	const InsetWallSelector select_inset_wall = [&](int x, int h, int z, bool open_x,
+														bool corner) {
+		const bool above_floor = h > start_y_offset + 1;
+		const int floor_row =
+				((h - start_y_offset - grammar_anchor) % floor_cycle + floor_cycle) %
+				floor_cycle;
+		const int ground_top = start_y_offset + grammar_anchor - 1 + floor_cycle;
+		const bool ground_role = h <= ground_top;
+		const bool top_role = h > start_y_offset + inset_style_height - floor_cycle;
+		const int wall_u = open_x ? z : x;
+		auto rhythm = window_rhythm(window_archetype);
+		if (window_surrounds)
+			++rhythm.pier;
+		const int period = std::max(1, rhythm.window + rhythm.pier);
+		const int phase = wall_u + window_phase;
+		const int slot_index = (phase % period + period) % period;
+		const bool slot_window = slot_index < rhythm.window;
+		const bool window_cut = above_floor && has_windows && slot_window &&
+								category != BuildingCategory::Tower &&
+								category != BuildingCategory::GridSkyscraper &&
+								!horizontal_windows;
+		Block chosen = wall_block;
+		if (!has_windows) {
+			const bool glass_tower = category == BuildingCategory::GlassySkyscraper ||
+									 category == BuildingCategory::GlassCornerSkyscraper;
+			if (corner && glass_tower)
+				chosen = is_glass_wall_block(accent_block) ? LIGHT_GRAY_CONCRETE
+														   : accent_block;
+			else if (use_accent_lines && above_floor && floor_row == 0)
+				chosen = accent_block;
+		} else if (horizontal_windows) {
+			chosen = corner || !above_floor ? wall_block
+					 : floor_row == 0		? accent_block
+											: window_block;
+		} else if (category == BuildingCategory::Tower) {
+			const bool slit = above_floor && (floor_row == 1 || floor_row == 2) &&
+							  ((phase % 4 + 4) % 4) == 1;
+			chosen = slit ? window_block
+						  : (use_accent_lines && above_floor && floor_row == 0
+											? accent_block
+											: wall_block);
+		} else if (category == BuildingCategory::GridSkyscraper) {
+			const bool mullion = !above_floor || floor_row == 0 || corner ||
+								 ((phase % 5 + 5) % 5) == 0;
+			chosen = mullion ? wall_block : window_block;
+		} else {
+			if (has_base_course && h <= start_y_offset + base_course_rows && !window_cut)
+				chosen = base_course_block;
+			else if (ground_role) {
+				if (above_floor && slot_window)
+					chosen = window_block;
+				else if (rustication && h > start_y_offset + base_course_rows &&
+						 (h - start_y_offset) % 2 == 0)
+					chosen = has_base_course ? base_course_block : accent_block;
+			} else if (floor_row == 0) {
+				const bool top_band =
+						top_treatment &&
+						h == start_y_offset + inset_style_height - floor_cycle;
+				if (top_band || use_accent_lines)
+					chosen = accent_block;
+				else if (slot_window &&
+						 (window_archetype == WindowArchetype::Piers ||
+								 window_archetype == WindowArchetype::Strips ||
+								 use_vertical_accent))
+					chosen = accent_block;
+				else if (slot_window)
+					chosen = inset_trim_block;
+			} else {
+				bool rows = false;
+				if (attic_style && top_role)
+					rows = floor_row == floor_cycle - 1;
+				else if (top_treatment && top_role && floor_cycle >= 3)
+					rows = floor_row < floor_cycle - 1;
+				else {
+					rows = archetype_allows_window(
+							window_archetype, slot_index, floor_row, floor_cycle);
+					const bool nobile = piano_nobile && h > ground_top &&
+										h <= ground_top + floor_cycle;
+					if (european_punched_window_cap && floor_row > (nobile ? 3 : 2))
+						rows = false;
+				}
+				if (slot_window && rows)
+					chosen = window_block;
+				else if (window_archetype == WindowArchetype::Ribbon && !rows)
+					chosen = accent_block;
+			}
+		}
+		if (mapillary::facades::photo_column(x, z, element.id) ||
+				preset_shell.contains({x, z}))
+			chosen = wall_block;
+		chosen = apply_block_variety(chosen, x, h, z, wall_block, start_y_offset,
+				element.id, window_block, condition);
+		return apply_condition_variation(chosen, x, h, z, wall_block, window_block,
+				has_windows, condition, category, era, element.id);
+	};
 	if (podium_tower) {
 		const auto distances = roof_edge_distances(roof_area);
 		const std::vector<InsetTier> tower{{podium_tower->inset,
 				podium_tower->full_height - podium_tower->podium_height, true}};
 		generate_inset_tiers(*editor, roof_area, distances,
 				start_y_offset + building_height + 1, abs_terrain_offset, tower,
-				floor_cycle, wall_block, window_block, floor_block, has_windows);
+				floor_cycle, start_y_offset + grammar_anchor, floor_block,
+				inset_roof_cover, select_inset_wall);
 	}
-	const bool has_crown = roof_generated && args.roof && !podium_tower &&
-						   !generated_sloped_roof &&
-						   !element.tags.contains("building:part") &&
-						   generate_setback_crown(*editor, roof_area, category, condition,
-								   is_tall_building, start_y_offset, building_height,
-								   abs_terrain_offset, floor_cycle, wall_block,
-								   window_block, floor_block, has_windows, element.id);
+	const bool has_crown =
+			roof_generated && args.roof && !podium_tower && !generated_sloped_roof &&
+			!element.tags.contains("building:part") &&
+			generate_setback_crown(*editor, roof_area, category, condition,
+					is_tall_building, start_y_offset, building_height, abs_terrain_offset,
+					floor_cycle, start_y_offset + grammar_anchor, floor_block,
+					inset_roof_cover, element.id, select_inset_wall);
 	const bool residential_antenna_roof =
 			generated_sloped_roof && category == BuildingCategory::House &&
 			condition == BuildingCondition::Normal &&

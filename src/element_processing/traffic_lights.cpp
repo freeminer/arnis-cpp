@@ -387,9 +387,9 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 		for (std::size_t i = 0; i < result->poles_.size(); ++i)
 			if (std::abs(result->poles_[i].x - x) <= 1 &&
 					std::abs(result->poles_[i].z - z) <= 1) {
-				auto &owned = result->by_node_[owner];
-				if (std::find(owned.begin(), owned.end(), i) == owned.end())
-					owned.push_back(i);
+				// Rust's Plan::pole keeps the first node as the pole's owner.
+				// Later signal nodes may add heads to it, but must not schedule a
+				// second placement of the same assembled pole.
 				return i;
 			}
 		Pole new_pole;
@@ -467,9 +467,6 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 				std::size_t pole{};
 				if (existing) {
 					pole = *existing;
-					auto &owned = result->by_node_[id];
-					if (std::find(owned.begin(), owned.end(), pole) == owned.end())
-						owned.push_back(pole);
 				} else {
 					std::optional<std::tuple<int, int, int>> kerb;
 					for (const double along : {0.0, 2.0, -2.0}) {

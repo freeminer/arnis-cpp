@@ -20,9 +20,12 @@ Block paint_block(const VoxelPaint &paint,
 	if (!palette || palette->empty())
 		return closest_block(target);
 	const auto to_rgb = [](const std::array<float, 3> &c) {
-		return RGBTuple{static_cast<std::uint8_t>(std::clamp(c[0], 0.0f, 1.0f) * 255.0f),
-				static_cast<std::uint8_t>(std::clamp(c[1], 0.0f, 1.0f) * 255.0f),
-				static_cast<std::uint8_t>(std::clamp(c[2], 0.0f, 1.0f) * 255.0f)};
+		return RGBTuple{static_cast<std::uint8_t>(
+								std::lround(std::clamp(c[0], 0.0f, 1.0f) * 255.0f)),
+				static_cast<std::uint8_t>(
+						std::lround(std::clamp(c[1], 0.0f, 1.0f) * 255.0f)),
+				static_cast<std::uint8_t>(
+						std::lround(std::clamp(c[2], 0.0f, 1.0f) * 255.0f))};
 	};
 	Block best_block = palette->front().second;
 	float best_distance = std::numeric_limits<float>::infinity();

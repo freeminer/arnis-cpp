@@ -25,12 +25,35 @@ struct PointHash
 };
 using PointSet = std::unordered_set<std::pair<int, int>, PointHash>;
 
+// Which part of a planned facade bay occupies one wall column. Keep the
+// unplanned lattice distinct from solid end and inter-window piers: callers
+// can fall back to the world-aligned rhythm only for the former.
+struct BaySlot
+{
+	enum class Kind
+	{
+		Lattice,
+		End,
+		Pier,
+		Window
+	};
+
+	Kind kind{Kind::Lattice};
+	int k{0};
+	int width{0};
+	int bay{0};
+
+	bool is_window() const { return kind == Kind::Window; }
+};
+
 struct ColumnFacade
 {
 	int wall_u{0};
 	bool party{false};
 	bool street{true};
 	bool corner{false};
+	BaySlot slot{};
+	BaySlot shop{};
 };
 
 struct BuildingContext

@@ -15,6 +15,7 @@
 #include "../bresenham.h"
 #include "../strict_parse.h"
 #include "bridge_modules.h"
+#include "highways.h"
 
 namespace arnis::railways
 {
@@ -257,58 +258,9 @@ int effective_layer(const ProcessedWay &way)
 
 int highway_block_range(const ProcessedWay &way, double scale)
 {
-	const auto h = way.tags.get("highway");
-	int block_range = 2;
-	if (h == "footway" || h == "pedestrian" || h == "path" || h == "cycleway" ||
-			h == "track" || h == "secondary_link" || h == "tertiary_link" ||
-			h == "escape" || h == "steps") {
-		block_range = 1;
-	} else if (h == "motorway" || h == "primary" || h == "trunk") {
-		block_range = 5;
-	} else if (h == "secondary") {
-		block_range = 4;
-	} else if (h == "tertiary") {
-		block_range = 2;
-	} else if (h == "service") {
-		block_range = 2;
-	} else if (const auto it = way.tags.find("lanes"); it != way.tags.end()) {
-		if (it->second == "2")
-			block_range = 3;
-		else if (it->second != "1")
-			block_range = 4;
-	}
-	const int default_lanes = h == "motorway" || h == "primary" || h == "trunk" ||
-											  h == "secondary" || h == "tertiary"
-									  ? 2
-									  : 1;
-	int lanes = default_lanes;
-	if (const auto lanes_it = way.tags.find("lanes"); lanes_it != way.tags.end())
-		lanes = strict_parse::i32(lanes_it->second).value_or(default_lanes);
-	lanes = std::clamp(lanes, 1, 16);
-	if (const auto width_it = way.tags.find("width"); width_it != way.tags.end()) {
-		std::string_view width = width_it->second;
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-			width.remove_suffix(1);
-		while (!width.empty() && width.back() == 'm')
-			width.remove_suffix(1);
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-			width.remove_suffix(1);
-		while (!width.empty() && std::isspace(static_cast<unsigned char>(width.front())))
-			width.remove_prefix(1);
-		if (const auto metres = strict_parse::f64(width);
-				metres && std::isfinite(*metres) && *metres > 0.0) {
-			const double rounded = std::round(*metres / 2.0);
-			block_range = rounded > 8.0 ? 9 : static_cast<int>(rounded);
-		}
-	} else if (h != "footway" && h != "pedestrian" && h != "path" && h != "cycleway" &&
-			   h != "track" && h != "escape" && h != "steps") {
-		block_range = std::max(
-				block_range, static_cast<int>(std::round((lanes * 3.5 - 1.0) / 2.0)));
-	}
-	block_range = std::clamp(block_range, 1, 8);
-	if (scale < 1.0)
-		block_range = std::max(1, static_cast<int>(std::floor(block_range * scale)));
-	return block_range;
+	const auto highway = way.tags.find("highway");
+	return arnis::highways::highway_block_range(
+			highway == way.tags.end() ? "" : highway->second, way.tags, scale);
 }
 
 bool is_ramp_candidate(const ProcessedWay &way)
@@ -985,11 +937,60 @@ BridgeStructureMap BridgeStructureMap::build(
 		// keeping the profile continuous across connected members.
 		std::unordered_map<std::size_t, std::vector<float>> path_axis;
 		std::vector<std::pair<int, int>> profile_ends;
+		for (const auto idx : group_indices) {
+			if (covered_ids.contains(bridge_ways[idx]->id))
+				continue;
+			const auto &way = *bridge_ways[idx];
+			const auto &path = paths[idx];
+			if (path.empty())
+				continue;
+			profile_ends.emplace_back(way.nodes.front().x, way.nodes.front().z);
+			profile_ends.emplace_back(way.nodes.back().x, way.nodes.back().z);
+			path_axis[idx].reserve(path.size());
+		}
+		std::pair<int, int> axis_start{0, 0};
+		std::pair<int, int> axis_end{0, 0};
+		std::int64_t axis_distance_squared = 0;
+		for (std::size_t a = 0; a < profile_ends.size(); ++a) {
+			for (std::size_t b = a + 1; b < profile_ends.size(); ++b) {
+				const std::int64_t dx = profile_ends[b].first - profile_ends[a].first;
+				const std::int64_t dz = profile_ends[b].second - profile_ends[a].second;
+				const std::int64_t distance = dx * dx + dz * dz;
+				if (distance > axis_distance_squared) {
+					axis_distance_squared = distance;
+					axis_start = profile_ends[a];
+					axis_end = profile_ends[b];
+				}
+			}
+		}
+		const float axis_length = std::sqrt(static_cast<float>(axis_distance_squared));
+		const float axis_dx =
+				axis_length > 0.0f
+						? static_cast<float>(axis_end.first - axis_start.first) /
+								  axis_length
+						: 0.0f;
+		const float axis_dz =
+				axis_length > 0.0f
+						? static_cast<float>(axis_end.second - axis_start.second) /
+								  axis_length
+						: 0.0f;
+		bool follows_axis = axis_length >= 1.0f;
+		for (auto &[idx, path] : paths) {
+			if (covered_ids.contains(bridge_ways[idx]->id))
+				continue;
+			auto &us = path_axis[idx];
+			us.reserve(path.size());
+			for (const auto &[x, z] : path)
+				us.push_back((x - axis_start.first) * axis_dx +
+							 (z - axis_start.second) * axis_dz);
+			follows_axis = follows_axis && is_monotonic(us, 2.0f);
+		}
 		std::unordered_set<std::uint64_t> cable_carriers;
 		std::vector<std::pair<int, int>> cable_pylons;
+		std::vector<std::pair<int, int>> mapped_cable_pylons;
 		if (group_style == bridge_styles::BridgeStyle::Suspension ||
 				group_style == bridge_styles::BridgeStyle::CableStayed) {
-			if (group_style == bridge_styles::BridgeStyle::Suspension) {
+			if (group_style == bridge_styles::BridgeStyle::Suspension && follows_axis) {
 				int group_half_width = 0;
 				for (const auto index : group_indices)
 					group_half_width = std::max(group_half_width,
@@ -1008,11 +1009,15 @@ BridgeStructureMap BridgeStructureMap::build(
 											return dx * dx + dz * dz <= reach_squared;
 										});
 							});
-					if (close)
+					if (close) {
 						cable_pylons.emplace_back(tower.x, tower.z);
+						mapped_cable_pylons.emplace_back(tower.x, tower.z);
+					}
 				}
-				if (cable_pylons.size() < 2)
+				if (mapped_cable_pylons.size() < 2) {
 					cable_pylons.clear();
+					mapped_cable_pylons.clear();
+				}
 			}
 			bool approach_of_mapped_tower = false;
 			if (cable_pylons.empty() && !mapped_tower_bridge_names.empty() &&
@@ -1088,65 +1093,17 @@ BridgeStructureMap BridgeStructureMap::build(
 			}
 		}
 
-		for (const auto idx : group_indices) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			const auto &way = *bridge_ways[idx];
-			const auto &path = paths[idx];
-			if (path.empty())
-				continue;
-			profile_ends.emplace_back(way.nodes.front().x, way.nodes.front().z);
-			profile_ends.emplace_back(way.nodes.back().x, way.nodes.back().z);
-			auto &axis = path_axis[idx];
-			axis.reserve(path.size());
-		}
-		std::pair<int, int> axis_start{0, 0};
-		std::pair<int, int> axis_end{0, 0};
-		std::int64_t axis_distance_squared = 0;
-		for (std::size_t a = 0; a < profile_ends.size(); ++a) {
-			for (std::size_t b = a + 1; b < profile_ends.size(); ++b) {
-				const std::int64_t dx = profile_ends[b].first - profile_ends[a].first;
-				const std::int64_t dz = profile_ends[b].second - profile_ends[a].second;
-				const std::int64_t distance = dx * dx + dz * dz;
-				if (distance > axis_distance_squared) {
-					axis_distance_squared = distance;
-					axis_start = profile_ends[a];
-					axis_end = profile_ends[b];
-				}
-			}
-		}
-		const float axis_length = std::sqrt(static_cast<float>(axis_distance_squared));
-		const float axis_dx =
-				axis_length > 0.0f
-						? static_cast<float>(axis_end.first - axis_start.first) /
-								  axis_length
-						: 0.0f;
-		const float axis_dz =
-				axis_length > 0.0f
-						? static_cast<float>(axis_end.second - axis_start.second) /
-								  axis_length
-						: 0.0f;
-		bool follows_axis = axis_length >= 1.0f;
-		for (auto &[idx, path] : paths) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			auto &us = path_axis[idx];
-			us.reserve(path.size());
-			for (const auto &[x, z] : path)
-				us.push_back((x - axis_start.first) * axis_dx +
-							 (z - axis_start.second) * axis_dz);
-			follows_axis = follows_axis && is_monotonic(us, 2.0f);
-		}
 		std::vector<std::pair<float, float>> profile_requirements;
 		std::vector<float> profile_anchors;
 		std::vector<std::pair<float, int>> profile_anchor_levels;
 		std::vector<float> profile_free_ends;
+		std::unordered_set<std::pair<int, int>, XZPairHash> profile_nonterrain_ends;
 		if (group_style == bridge_styles::BridgeStyle::Suspension &&
-				cable_pylons.size() >= 2) {
+				mapped_cable_pylons.size() >= 2) {
 			for (const auto &tower : mapped_supports.towers) {
 				if (!tower.deck_y ||
-						std::find(cable_pylons.begin(), cable_pylons.end(),
-								std::pair{tower.x, tower.z}) == cable_pylons.end())
+						std::find(mapped_cable_pylons.begin(), mapped_cable_pylons.end(),
+								std::pair{tower.x, tower.z}) == mapped_cable_pylons.end())
 					continue;
 				const float u = (tower.x - axis_start.first) * axis_dx +
 								(tower.z - axis_start.second) * axis_dz;
@@ -1175,6 +1132,7 @@ BridgeStructureMap BridgeStructureMap::build(
 							});
 				}
 				if (joins_other_bridge) {
+					profile_nonterrain_ends.insert(xz);
 					if (const auto joint = resolved_joints.find(xz);
 							joint != resolved_joints.end()) {
 						profile_anchors.push_back(u);
@@ -1209,6 +1167,7 @@ BridgeStructureMap BridgeStructureMap::build(
 					profile_anchor_levels.emplace_back(
 							u, editor.get_ground_level(node.x, node.z));
 				} else if (boundary && has_external_ramp) {
+					profile_nonterrain_ends.insert(xz);
 					profile_free_ends.push_back(u);
 				}
 			};
@@ -1327,11 +1286,11 @@ BridgeStructureMap BridgeStructureMap::build(
 										  : std::vector<std::pair<float, float>>{};
 		std::shared_ptr<const bridge_towers::CableSpan> mapped_cable_span;
 		if (group_style == bridge_styles::BridgeStyle::Suspension && follows_axis &&
-				cable_pylons.size() >= 2) {
+				mapped_cable_pylons.size() >= 2) {
 			std::vector<const bridge_towers::MappedTower *> towers;
 			for (const auto &tower : mapped_supports.towers) {
-				if (std::find(cable_pylons.begin(), cable_pylons.end(),
-							std::pair{tower.x, tower.z}) != cable_pylons.end())
+				if (std::find(mapped_cable_pylons.begin(), mapped_cable_pylons.end(),
+							std::pair{tower.x, tower.z}) != mapped_cable_pylons.end())
 					towers.push_back(&tower);
 			}
 			std::sort(towers.begin(), towers.end(), [&](const auto *a, const auto *b) {
@@ -1406,21 +1365,16 @@ BridgeStructureMap BridgeStructureMap::build(
 							std::move(*span));
 			}
 			if (mapped_cable_span) {
-				for (auto it = cable_carriers.begin(); it != cable_carriers.end();) {
-					const auto member = std::find_if(group_indices.begin(),
-							group_indices.end(),
-							[&](std::size_t idx) { return bridge_ways[idx]->id == *it; });
-					const bool hangs =
-							member != group_indices.end() &&
-							std::any_of(paths[*member].begin(), paths[*member].end(),
-									[&](const auto &point) {
-										return mapped_cable_span->suspends(
-												point.first, point.second);
-									});
-					if (!hangs)
-						it = cable_carriers.erase(it);
-					else
-						++it;
+				cable_carriers.clear();
+				for (const auto idx : group_indices) {
+					if (covered_ids.contains(bridge_ways[idx]->id))
+						continue;
+					if (std::any_of(paths[idx].begin(), paths[idx].end(),
+								[&](const auto &point) {
+									return mapped_cable_span->suspends(
+											point.first, point.second);
+								}))
+						cable_carriers.insert(bridge_ways[idx]->id);
 				}
 			}
 		}
@@ -1439,6 +1393,67 @@ BridgeStructureMap BridgeStructureMap::build(
 										   : profile_level;
 				ys.push_back(std::max(y, terrain[i]));
 			}
+		}
+		// Match Rust's per-member endpoint ramps: bridge profiles meet terrain
+		// gradually at exposed ends, while joints and tagged ramp connections keep
+		// their independently resolved deck height.
+		for (const auto idx : group_indices) {
+			if (covered_ids.contains(bridge_ways[idx]->id))
+				continue;
+			auto profile = member_profiles.find(idx);
+			if (profile == member_profiles.end())
+				continue;
+			auto &ys = profile->second;
+			const auto &terrain = path_terrain[idx];
+			const std::size_t total = ys.size();
+			if (total < 2)
+				continue;
+			const auto &way = *bridge_ways[idx];
+			const std::pair<int, int> start{way.nodes.front().x, way.nodes.front().z};
+			const std::pair<int, int> end{way.nodes.back().x, way.nodes.back().z};
+			const auto boundary = [&](const auto &xz) {
+				const auto it = endpoint_counts.find(xz);
+				const auto members = node_members.find(xz);
+				return it != endpoint_counts.end() && it->second == 1 &&
+					   (members == node_members.end() || members->second <= 1) &&
+					   !profile_nonterrain_ends.contains(xz);
+			};
+			const int ground_start = terrain.front();
+			const int ground_end = terrain.back();
+			const bool ramp_start = boundary(start) && ys.front() > ground_start + 1;
+			const bool ramp_end = boundary(end) && ys.back() > ground_end + 1;
+			if (!ramp_start && !ramp_end) {
+				for (std::size_t i = 0; i < total; ++i)
+					ys[i] = std::max(ys[i], terrain[i]);
+				continue;
+			}
+			const std::size_t cap = ramp_start && ramp_end
+											? std::max<std::size_t>(total / 2, 1)
+											: total - 1;
+			const std::size_t ramp_len = std::clamp<std::size_t>(
+					static_cast<std::size_t>(
+							std::clamp(static_cast<float>(total) * 0.35f, 15.0f, 50.0f)),
+					1, cap);
+			if (ramp_start) {
+				const int top = ys[ramp_len];
+				for (std::size_t k = 0; k < ramp_len; ++k) {
+					const float t = static_cast<float>(k) / ramp_len;
+					const int ramp_y = static_cast<int>(
+							std::lround(ground_start + (top - ground_start) * t));
+					ys[k] = std::min(ys[k], ramp_y);
+				}
+			}
+			if (ramp_end) {
+				const int top = ys[total - 1 - ramp_len];
+				for (std::size_t k = 0; k < ramp_len; ++k) {
+					const float t = static_cast<float>(k) / ramp_len;
+					const int ramp_y = static_cast<int>(
+							std::lround(ground_end + (top - ground_end) * t));
+					ys[total - 1 - k] = std::min(ys[total - 1 - k], ramp_y);
+				}
+			}
+			for (std::size_t i = 0; i < total; ++i)
+				ys[i] = std::max(ys[i], terrain[i]);
 		}
 		for (const auto idx : group_indices) {
 			if (covered_ids.contains(bridge_ways[idx]->id))

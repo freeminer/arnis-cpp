@@ -39,8 +39,6 @@ namespace arnis
 namespace highways
 {
 
-// Minimum terrain dip (in blocks) below max endpoint elevation to classify a bridge as valley-spanning
-const int VALLEY_BRIDGE_THRESHOLD = 7;
 constexpr int MAX_BLOCK_RANGE = 8;
 
 std::optional<double> parse_width_tag_m(
@@ -703,15 +701,6 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const std::optional<std::vector<crate::block_definitions::Block>> protected_surfaces{
 			std::move(protected_surface_blocks)};
 
-	// Check if this is a bridge - bridges need special elevation handling
-	// to span across valleys instead of following terrain
-	// Accept any bridge tag value except "no" (e.g., "yes", "viaduct", "aqueduct", etc.)
-	bool is_bridge = false;
-	auto it_bridge = element.tags().find("bridge");
-	if (it_bridge != element.tags().end() && it_bridge->second != "no") {
-		is_bridge = true;
-	}
-
 	if (highway_type == "street_lamp") {
 		if (element.is_node()) {
 			int x = element.as_node().x;
@@ -774,6 +763,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						(void)unused_y;
 						arm.emplace_back(lx, lz);
 					}
+					arm = crate::connected_blocks::four_connected_line(arm);
 					const std::unordered_set<std::pair<int, int>, PairHash> arm_cells(
 							arm.begin(), arm.end());
 					for (const auto &[lx, lz] : arm) {
@@ -992,71 +982,6 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 
 	std::size_t total_way_length = calculate_way_length(way);
 
-	// For bridges: detect if this spans a valley by checking terrain profile
-	// A valley bridge has terrain that dips significantly below the endpoints
-	// Skip valley detection entirely if terrain is disabled (no valleys in flat terrain)
-	// Skip very short bridges (< 25 blocks) as they're unlikely to span significant valleys
-	bool terrain_enabled = false;
-	auto *ground = editor.get_ground();
-	if (ground) {
-		terrain_enabled = true; // Assuming elevation is always enabled in this context
-	}
-
-	bool is_valley_bridge = false;
-	int bridge_deck_y = 0;
-	if (is_bridge && terrain_enabled && way.nodes.size() >= 2 && total_way_length >= 25) {
-		const crate::osm_parser::ProcessedNode &start_node = way.nodes.front();
-		const crate::osm_parser::ProcessedNode &end_node = way.nodes.back();
-		// Get ground reference from editor
-		auto *ground = editor.get_ground();
-		int start_y = 0;
-		int end_y = 0;
-		if (ground) {
-			start_y = ground->level(crate::coordinate_system::cartesian::XZPoint(
-					start_node.x, start_node.z));
-			end_y = ground->level(
-					crate::coordinate_system::cartesian::XZPoint(end_node.x, end_node.z));
-		}
-		int max_endpoint_y = std::max(start_y, end_y);
-
-		// Sample terrain at middle nodes only (excluding endpoints we already have)
-		// This avoids redundant get_ground_level() calls
-		const std::vector<crate::osm_parser::ProcessedNode> middle_nodes(
-				way.nodes.begin() + 1, way.nodes.end() - 1);
-		int sampled_min = max_endpoint_y;
-		if (!middle_nodes.empty()) {
-			// Sample up to 3 middle points (5 total with endpoints) for performance
-			// Valleys are wide terrain features, so sparse sampling is sufficient
-			std::size_t sample_count =
-					std::min(static_cast<std::size_t>(3), middle_nodes.size());
-			std::size_t step = (sample_count > 1)
-									   ? (middle_nodes.size() - 1) / (sample_count - 1)
-									   : 1;
-
-			for (std::size_t i = 0; i < middle_nodes.size();
-					i += std::max(static_cast<std::size_t>(1), step)) {
-				const auto &node = middle_nodes[i];
-				int node_y = 0;
-				if (ground) {
-					node_y = ground->level(
-							crate::coordinate_system::cartesian::XZPoint(node.x, node.z));
-				}
-				sampled_min = std::min(sampled_min, node_y);
-			}
-		}
-
-		// Include endpoint elevations in the minimum calculation
-		int min_terrain_y = std::min({sampled_min, start_y, end_y});
-
-		// If ANY sampled point along the bridge is significantly lower than the max endpoint,
-		// treat as valley bridge
-		is_valley_bridge = (min_terrain_y < max_endpoint_y - VALLEY_BRIDGE_THRESHOLD);
-
-		if (is_valley_bridge) {
-			bridge_deck_y = max_endpoint_y;
-		}
-	}
-
 	const std::size_t total_bresenham_length = calculate_total_bresenham_length(way);
 	const auto bridge_asset_root = editor.get_schematic_asset_root();
 	const bool bridge_module_selected =
@@ -1205,12 +1130,6 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					use_absolute_y = true;
 				} else if (bridge_ramp) {
 					current_y = bridge_ramp->y_at(tds, total_bresenham_length);
-					use_absolute_y = true;
-				} else if (is_valley_bridge) {
-					// Valley bridge deck is level at the maximum endpoint elevation
-					// Don't add base_elevation - the layer tag indicates it's above water/road,
-					// not that it should be higher than the terrain endpoints
-					current_y = bridge_deck_y;
 					use_absolute_y = true;
 				} else {
 					// Regular road or overpass: use terrain-relative calculation with ramps

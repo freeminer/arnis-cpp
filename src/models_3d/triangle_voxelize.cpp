@@ -347,12 +347,12 @@ std::vector<Voxel> voxelize_colored_triangles(
 				block = block_for_model_color(triangle.color);
 			} else {
 				const auto rgb = [](const std::array<float, 3> &color) {
-					return RGBTuple{static_cast<std::uint8_t>(
-											std::clamp(color[0], 0.0f, 1.0f) * 255.0f),
-							static_cast<std::uint8_t>(
-									std::clamp(color[1], 0.0f, 1.0f) * 255.0f),
-							static_cast<std::uint8_t>(
-									std::clamp(color[2], 0.0f, 1.0f) * 255.0f)};
+					return RGBTuple{static_cast<std::uint8_t>(std::lround(
+											std::clamp(color[0], 0.0f, 1.0f) * 255.0f)),
+							static_cast<std::uint8_t>(std::lround(
+									std::clamp(color[1], 0.0f, 1.0f) * 255.0f)),
+							static_cast<std::uint8_t>(std::lround(
+									std::clamp(color[2], 0.0f, 1.0f) * 255.0f))};
 				};
 				const auto target = rgb(triangle.color);
 				block = palette.front().second;

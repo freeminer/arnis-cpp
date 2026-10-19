@@ -124,32 +124,44 @@ void place_mast(WorldEditor &editor, int x, int y, int z, int height)
 	editor.set_block_absolute(LIGHTNING_ROD, x, y + height, z);
 }
 
-int family_for_region(building_style::MaterialRegion material)
+int regional_family_for_roll(building_style::MaterialRegion material, int roll)
 {
 	using R = building_style::MaterialRegion;
+	using Share = std::pair<int, int>;
+	const auto choose = [roll](std::initializer_list<Share> shares) {
+		int left = roll;
+		for (const auto &[family, share] : shares) {
+			if (left < share)
+				return family;
+			left = std::max(0, left - share);
+		}
+		return 2; // Rust's grey-membrane fallback if shares total less than 100.
+	};
 	switch (material) {
 	case R::EastEurope:
-		return 3; // dark tar 45, grey 35, light 20
+		return choose({{3, 45}, {2, 35}, {1, 20}});
 	case R::CentralAsia:
-		return 10;
+		return choose({{3, 30}, {2, 30}, {6, 25}, {1, 15}});
 	case R::MiddleEast:
-		return 6;
+		return choose({{6, 60}, {1, 20}, {0, 15}, {2, 5}});
 	case R::SouthAsia:
+		return choose({{7, 55}, {1, 20}, {2, 17}, {8, 8}});
 	case R::SoutheastAsia:
-		return 7;
+		return choose({{7, 35}, {2, 27}, {1, 28}, {8, 10}});
 	case R::EastAsia:
-		return 1;
+		return choose({{1, 40}, {2, 35}, {7, 15}, {8, 10}});
 	case R::Korea:
-		return 9;
+		return choose({{9, 45}, {2, 30}, {1, 25}});
 	case R::Japan:
-		return 1;
+		return choose({{1, 50}, {2, 40}, {0, 10}});
 	case R::SubSaharanAfrica:
-		return 1;
+		return choose({{1, 30}, {2, 30}, {6, 25}, {7, 15}});
 	case R::LatinAmerica:
+		return choose({{8, 30}, {0, 25}, {1, 27}, {2, 18}});
 	case R::SouthernCone:
-		return 8;
+		return choose({{8, 20}, {1, 35}, {2, 30}, {0, 15}});
 	case R::Australasia:
-		return 1;
+		return choose({{1, 35}, {2, 35}, {0, 30}});
 	default:
 		return -1;
 	}
@@ -983,36 +995,7 @@ RoofMembrane pick_membrane(building_style::BuildingRegion region,
 	const int roll = static_cast<int>(rng.uniform(100));
 	const bool industrial = category == BuildingCategory::Industrial ||
 							category == BuildingCategory::Warehouse;
-	int family = family_for_region(materials);
-	if (industrial)
-		family = -1;
-	if (family == 3) {
-		if (materials == building_style::MaterialRegion::EastEurope)
-			family = roll < 45 ? 3 : (roll < 80 ? 2 : 1);
-	} else if (family == 10) {
-		family = roll < 30 ? 3 : (roll < 60 ? 2 : (roll < 85 ? 6 : 1));
-	} else if (family == 6) {
-		family = roll < 60 ? 6 : (roll < 80 ? 1 : (roll < 95 ? 0 : 2));
-	} else if (family == 7) {
-		family = materials == building_style::MaterialRegion::SouthAsia
-						 ? (roll < 55 ? 7 : (roll < 75 ? 1 : (roll < 92 ? 2 : 8)))
-						 : (roll < 35 ? 7 : (roll < 62 ? 2 : (roll < 90 ? 1 : 8)));
-	} else if (family == 1) {
-		if (materials == building_style::MaterialRegion::EastAsia)
-			family = roll < 40 ? 1 : (roll < 75 ? 2 : (roll < 90 ? 7 : 8));
-		else if (materials == building_style::MaterialRegion::Japan)
-			family = roll < 50 ? 1 : (roll < 90 ? 2 : 0);
-		else if (materials == building_style::MaterialRegion::SubSaharanAfrica)
-			family = roll < 30 ? 1 : (roll < 60 ? 2 : (roll < 85 ? 6 : 7));
-		else
-			family = roll < 35 ? 1 : (roll < 70 ? 2 : 0);
-	} else if (family == 9) {
-		family = roll < 45 ? 9 : (roll < 75 ? 2 : 1);
-	} else if (family == 8) {
-		family = materials == building_style::MaterialRegion::SouthernCone
-						 ? (roll < 20 ? 8 : (roll < 55 ? 1 : (roll < 85 ? 2 : 0)))
-						 : (roll < 30 ? 8 : (roll < 55 ? 0 : (roll < 82 ? 1 : 2)));
-	}
+	int family = industrial ? -1 : regional_family_for_roll(materials, roll);
 
 	if (family < 0 && region == building_style::BuildingRegion::Europe) {
 		const bool green_forbidden = building_height > 30 ||
