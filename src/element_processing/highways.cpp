@@ -1063,6 +1063,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 											? bridge_member->cable_span.get()
 											: nullptr;
 	const bool bridge_cables_carry_deck = bridge_pylons != nullptr;
+	const auto hangs_at = [&](int x, int z) {
+		return bridge_cable_span ? bridge_cable_span->suspends(x, z)
+								 : bridge_cables_carry_deck;
+	};
 	std::vector<crate::bridge_styles::BridgePathSample> bridge_path;
 	const auto [min_x, min_z] = editor.get_min_coords();
 	const auto [max_x, max_z] = editor.get_max_coords();
@@ -1422,8 +1426,11 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 							// Add 1 layer of stone bricks underneath the highway surface
 							const auto foundation_block =
 									is_bridge_member
-											? crate::bridge_styles::foundation_block(
-													  bridge_style)
+											? (bridge_cable_span
+															  ? bridge_cable_span->paint
+															  : crate::bridge_styles::
+																		foundation_block(
+																				bridge_style))
 											: crate::block_definitions::STONE_BRICKS;
 							if (use_absolute_y) {
 								editor.set_block_absolute(foundation_block, set_x,
@@ -1456,7 +1463,15 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 										static_cast<int>(total_bresenham_length - 1));
 								const int centerline_ground_y =
 										editor.get_ground_level(x, z);
-								if (!bridge_cables_carry_deck)
+								const bool blocked = use_absolute_y &&
+													 bridge_surface.support_blocked(
+															 set_x, set_z, surface_y);
+								if ((bridge_style == crate::bridge_styles::BridgeStyle::
+															 Arch &&
+											!blocked) ||
+										(bridge_style != crate::bridge_styles::
+																 BridgeStyle::Arch &&
+												!hangs_at(set_x, set_z)))
 									crate::bridge_styles::place_bridge_support_below_deck(
 											editor, bridge_style, set_x, surface_y, set_z,
 											centerline_ground_y,
@@ -1464,9 +1479,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 											total_bresenham_length, use_absolute_y,
 											is_centerline, false);
 								if (is_pier_step && use_absolute_y &&
-										!bridge_cables_carry_deck &&
-										!bridge_surface.support_blocked(
-												set_x, set_z, surface_y) &&
+										!hangs_at(set_x, set_z) && !blocked &&
 										bridge_rail_perp.has_value())
 									crate::bridge_styles::place_pier_bent(editor,
 											bridge_surface, bridge_style, set_x, set_z,
@@ -1487,12 +1500,17 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					const float perp_z = bridge_rail_perp->second;
 					const auto rail_block =
 							is_bridge_member
-									? crate::bridge_styles::rail_block(bridge_style)
+									? (bridge_cable_span
+													  ? bridge_cable_span->paint
+													  : crate::bridge_styles::rail_block(
+																bridge_style))
 									: crate::block_definitions::LIGHT_GRAY_CONCRETE;
 					const auto rail_foundation =
 							is_bridge_member
-									? crate::bridge_styles::rail_foundation_block(
-											  bridge_style)
+									? (bridge_cable_span ? bridge_cable_span->paint
+														 : crate::bridge_styles::
+																   rail_foundation_block(
+																		   bridge_style))
 									: crate::block_definitions::STONE_BRICKS;
 					const auto parapet =
 							is_bridge_member

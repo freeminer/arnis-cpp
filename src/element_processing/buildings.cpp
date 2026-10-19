@@ -234,26 +234,46 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 		return std::min(BUCKET_COUNT - 1,
 				static_cast<std::size_t>((angle + PI) / TAU * BUCKET_COUNT));
 	};
-	std::array<std::vector<std::size_t>, BUCKET_COUNT> buckets;
-	for (std::size_t i = 0; i < count; ++i) {
+	const auto edge_ranges = [&](std::size_t i) {
+		using BucketRange = std::optional<std::pair<std::size_t, std::size_t>>;
 		const auto [ax, az] = points[i];
 		const auto [bx, bz] = points[(i + 1) % count];
 		const double a0 = std::atan2(az - centroid_z, ax - centroid_x);
 		const double a1 = std::atan2(bz - centroid_z, bx - centroid_x);
 		const double lo = std::min(a0, a1), hi = std::max(a0, a1);
 		const std::size_t blo = bucket_of(lo), bhi = bucket_of(hi);
+		std::array<BucketRange, 2> ranges{};
 		if (hi - lo > PI) {
-			for (std::size_t b = 0; b <= std::min(BUCKET_COUNT - 1, blo + 1); ++b)
-				buckets[b].push_back(i);
-			for (std::size_t b = bhi == 0 ? 0 : bhi - 1; b < BUCKET_COUNT; ++b)
-				buckets[b].push_back(i);
+			ranges[0] = std::pair<std::size_t, std::size_t>{0, blo + 1};
+			ranges[1] = std::pair<std::size_t, std::size_t>{
+					bhi == 0 ? 0 : bhi - 1, BUCKET_COUNT - 1};
 		} else {
-			const std::size_t from = blo == 0 ? 0 : blo - 1;
-			const std::size_t to = std::min(BUCKET_COUNT - 1, bhi + 1);
-			for (std::size_t b = from; b <= to; ++b)
-				buckets[b].push_back(i);
+			ranges[0] =
+					std::pair<std::size_t, std::size_t>{blo == 0 ? 0 : blo - 1, bhi + 1};
 		}
-	}
+		for (auto &range : ranges)
+			if (range)
+				range->second = std::min(range->second, BUCKET_COUNT - 1);
+		return ranges;
+	};
+	// Store all angular bucket members in one contiguous array. This avoids
+	// hundreds of small vector allocations on building footprints with many
+	// outline nodes, matching Rust's flattened bucket layout.
+	std::vector<std::size_t> bucket_start(BUCKET_COUNT + 1, 0);
+	for (std::size_t i = 0; i < count; ++i)
+		for (const auto &range : edge_ranges(i))
+			if (range)
+				for (std::size_t b = range->first; b <= range->second; ++b)
+					++bucket_start[b + 1];
+	for (std::size_t b = 0; b < BUCKET_COUNT; ++b)
+		bucket_start[b + 1] += bucket_start[b];
+	auto fill = bucket_start;
+	std::vector<std::size_t> bucket_edges(bucket_start[BUCKET_COUNT]);
+	for (std::size_t i = 0; i < count; ++i)
+		for (const auto &range : edge_ranges(i))
+			if (range)
+				for (std::size_t b = range->first; b <= range->second; ++b)
+					bucket_edges[fill[b]++] = i;
 	std::vector<double> fractions;
 	fractions.reserve(cells.size());
 	std::vector<double> before;
@@ -265,10 +285,12 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 			continue;
 		}
 		const double ux = px / distance, uz = pz / distance;
-		const auto &edges = buckets[bucket_of(std::atan2(pz, px))];
+		const std::size_t bucket = bucket_of(std::atan2(pz, px));
 		double hit = std::numeric_limits<double>::infinity(), far_ = 0.0;
 		before.clear();
-		for (const std::size_t i : edges) {
+		for (std::size_t edge = bucket_start[bucket]; edge < bucket_start[bucket + 1];
+				edge++) {
+			const std::size_t i = bucket_edges[edge];
 			const auto [ax, az] = points[i];
 			const auto [bx, bz] = points[(i + 1) % count];
 			const double ex = bx - ax, ez = bz - az;
@@ -3615,7 +3637,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
 		min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
 	} else if (auto it = element.tags.find("building:min_level");
-			it != element.tags.end()) {
+			   it != element.tags.end()) {
 		if (auto level = parse_i32_tag(element.tags, "building:min_level");
 				level && *level > 0)
 			min_level_offset = scaled_blocks(*level * floor_cycle + 2, scale_factor);
@@ -6343,6 +6365,60 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			editor, element, args, relation_levels, empty_cache, empty_passages, nullptr);
 }
 
+namespace
+{
+bool painted_metal(const std::string &material, const tags_t &tags)
+{
+	std::string normalized = material;
+	const auto first = normalized.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return false;
+	const auto last = normalized.find_last_not_of(" \t\r\n");
+	normalized = normalized.substr(first, last - first + 1);
+	std::transform(normalized.begin(), normalized.end(), normalized.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	return (normalized == "steel" || normalized == "metal" || normalized == "iron") &&
+		   (tags.contains("building:colour") || tags.contains("colour"));
+}
+
+Block wall_block_for_colour_tag(RGBTuple rgb, ChaCha8Rng &rng)
+{
+	static const std::array<std::pair<Block, RGBTuple>, 13> render_tones{{
+			{WHITE_CONCRETE, {207, 213, 214}},
+			{WHITE_TERRACOTTA, {210, 178, 161}},
+			{CHERRY_PLANKS, {226, 178, 172}},
+			{SMOOTH_SANDSTONE, {224, 214, 170}},
+			{MUSHROOM_STEM, {203, 196, 185}},
+			{BIRCH_PLANKS, {192, 175, 121}},
+			{END_STONE_BRICKS, {218, 224, 162}},
+			{YELLOW_TERRACOTTA, {186, 133, 35}},
+			{LIGHT_GRAY_CONCRETE_POWDER, {154, 154, 148}},
+			{SMOOTH_STONE, {159, 159, 159}},
+			{RED_TERRACOTTA, {143, 61, 47}},
+			{BRICK, {151, 98, 83}},
+			{TERRACOTTA, {152, 94, 68}},
+	}};
+	const auto target = oklab_components(rgb);
+	if (target[0] < .55f || std::hypot(target[1], target[2]) >= .14f)
+		return block_palette::wall_block_for_color(rgb, rng);
+
+	Block best = WHITE_CONCRETE;
+	float best_distance = std::numeric_limits<float>::infinity();
+	for (const auto &[block, color] : render_tones) {
+		const auto lab = oklab_components(color);
+		const float dl = .5f * (target[0] - lab[0]);
+		const float da = target[1] - lab[1];
+		const float db = target[2] - lab[2];
+		const float distance = dl * dl + da * da + db * db;
+		if (distance < best_distance) {
+			best = block;
+			best_distance = distance;
+		}
+	}
+	return best;
+}
+} // namespace
+
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
@@ -6655,7 +6731,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			it_material = element.tags.find("building:facade:material");
 		if (it_material == element.tags.end())
 			it_material = element.tags.find("facade:material");
-		if (it_material != element.tags.end()) {
+		if (it_material != element.tags.end() &&
+				!painted_metal(it_material->second, element.tags)) {
 			if (auto block = get_wall_block_for_material_cpp(it_material->second, rng))
 				return block;
 		}
@@ -6665,7 +6742,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			it_color = element.tags.find("colour");
 		if (it_color != element.tags.end())
 			if (const auto rgb = color_text_to_rgb_tuple(it_color->second))
-				return get_building_wall_block_for_color(*rgb, rng);
+				return wall_block_for_colour_tag(*rgb, rng);
 
 		return std::nullopt;
 	};
@@ -6951,7 +7028,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																  : DARK_PRISMARINE};
 	const Block shop_frame =
 			shop_frame_options[element_rng(group_seed ^ 0x5409F2A300000003ULL)
-							.uniform(4)];
+									   .uniform(4)];
 	const Block awning_options[] = {WARPED_TRAPDOOR, SPRUCE_TRAPDOOR, DARK_OAK_TRAPDOOR,
 			JUNGLE_TRAPDOOR, ACACIA_TRAPDOOR};
 	auto awning_rng = element_rng(group_seed ^ 0x0A3B11B60000000BULL);
@@ -7917,10 +7994,12 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								static const std::array<Block, 4> trapdoor_options{
 										OAK_TRAPDOOR, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR,
 										BIRCH_TRAPDOOR};
-								const Block trapdoor = trapdoor_options[element_rng(
-										element.id)
-												.uniform(static_cast<std::uint32_t>(
-														trapdoor_options.size()))];
+								const Block trapdoor = trapdoor_options
+										[element_rng(element.id)
+														.uniform(static_cast<
+																std::uint32_t>(
+																trapdoor_options
+																		.size()))];
 								const auto balcony_floor = BlockWithProperties{
 										SMOOTH_STONE_SLAB, {{"type", "top"}}};
 								const auto front_fence = open_trapdoor(
@@ -8181,8 +8260,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const bool covers =
 								draw == 0 ||
 								(draw == 1 &&
-										(wc.width >= 3 ? (wc.k == 0 ||
-																 wc.k == wc.width - 1)
+										(wc.width >= 3			? (wc.k == 0 ||
+																  wc.k == wc.width - 1)
 												: wc.width == 2 ? wc.k == 0
 																: top_row)) ||
 								(draw == 2 && top_row);
@@ -9761,7 +9840,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			const auto empty_facade = building_facade::FacadePlan::empty();
 			generate_parapet(*editor, element, tower_cells, empty_facade, start_y_offset,
 					tower_height, abs_terrain_offset, wall_block, accent_block, category,
-					false, rooftops::coping_for(wall_block, accent_block, group_seed));
+					false,
+					rooftops::coping_for(*editor, wall_block, accent_block, group_seed));
 		}
 		// Rust fits out the inset tower's own roof after its podium/crown pass.
 		// The ordinary rooftop pass is skipped for podium towers, so build the

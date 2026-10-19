@@ -80,7 +80,7 @@ RoofMembrane pick_membrane(building_style::BuildingRegion region,
 		building_style::MaterialRegion materials, BuildingCategory category, ArchEra era,
 		int building_height, std::uint64_t style_seed);
 
-Block coping_for(Block wall, Block accent, std::uint64_t seed);
+Block coping_for(const WorldEditor &editor, Block wall, Block accent, std::uint64_t seed);
 BlockWithProperties bottom_slab(Block slab);
 
 void fit_out_terrace(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells,

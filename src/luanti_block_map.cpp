@@ -1,10 +1,42 @@
 #include "luanti_block_map.h"
 #include "../../arnis_block.h"
 #include <array>
+#include <mutex>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 namespace arnis
 {
+namespace
+{
+LuantiNode apply_slab_type(LuantiNode node, const Block &block, std::string_view type)
+{
+	std::string name = node.name;
+	constexpr std::string_view prefix = "mcl_stairs:slab_";
+	if (!name.starts_with(prefix) || name.ends_with("_double"))
+		return node;
+
+	const bool was_top = name.ends_with("_top");
+	if (was_top)
+		name.resize(name.size() - std::string_view("_top").size());
+	const bool default_top = block == block_definitions::OAK_SLAB_TOP ||
+							 block == block_definitions::QUARTZ_SLAB_TOP;
+	const std::string_view suffix = type == "top" || (type.empty() && default_top)
+											? "_top"
+									: type == "double" ? "_double"
+													   : "";
+	name += suffix;
+	if (suffix.empty() && !was_top)
+		return node;
+	static std::mutex names_mutex;
+	static std::unordered_map<std::string, std::string> interned_names;
+	std::lock_guard lock(names_mutex);
+	const auto [it, inserted] = interned_names.try_emplace(name, name);
+	(void)inserted;
+	return {it->second.c_str(), node.param2};
+}
+} // namespace
+
 LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		const char *facing, bool open, bool top)
 {
@@ -139,8 +171,9 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 									   : (state_half == "top" || state_half == "upper");
 	const auto state_open = property("open");
 	const bool effective_open = state_open.empty() ? open : state_open == "true";
-	return to_luanti_node(
+	auto converted = to_luanti_node(
 			block.block, game, effective_facing, effective_open, effective_top);
+	return apply_slab_type(converted, block.block, property("type"));
 }
 
 LuantiNode to_luanti_node(
@@ -152,6 +185,10 @@ LuantiNode to_luanti_node(
 						 block == RED_BED_WEST_HEAD || block == RED_BED_WEST_FOOT;
 	if (block == WHITE_BED || red_bed)
 		return to_luanti_node(BlockWithProperties{block}, game, facing, open, top);
+	if (block == OAK_SLAB_TOP)
+		return {"mcl_stairs:slab_oak_top", 0};
+	if (block == QUARTZ_SLAB_TOP)
+		return {"mcl_stairs:slab_quartzblock_top", 0};
 
 	const auto id = block.id();
 	if ((id >= 393 && id <= 396) || id == 400 || id == 402 || id == 406 || id == 408 ||
@@ -234,7 +271,7 @@ LuantiNode to_luanti_node(
 	case 17:
 		return stair("mcl_stairs:stair_cobble");
 	case 18:
-		return {"mcl_nether:magma", 0};
+		return {"mcl_wool:grey", 0};
 	case 19:
 		return {"mcl_trees:wood_dark_oak", 0};
 	case 20:
@@ -274,7 +311,7 @@ LuantiNode to_luanti_node(
 	case 37:
 		return {"mcl_core:ironblock", 0};
 	case 38:
-		return stair("mcl_stairs:stair_copper_cut");
+		return {"mcl_amethyst:calcite", 0};
 	case 39:
 		return {"mcl_colorblocks:concrete_yellow", 0};
 	case 40:
@@ -370,7 +407,7 @@ LuantiNode to_luanti_node(
 	case 77:
 		return {"mcl_stairs:slab_stone_double", 0};
 	case 78:
-		return {"mcl_sponges:sponge", 0};
+		return {"mcl_trees:wood_birch", 0};
 	case 79:
 		return {"mcl_trees:tree_spruce", 0};
 	case 80:
@@ -431,7 +468,7 @@ LuantiNode to_luanti_node(
 	case 111:
 		return {"mcl_core:snowblock", 0};
 	case 112:
-		return stair("mcl_stairs:stair_andesite");
+		return {"mcl_trees:wood_cherry_blossom", 0};
 	case 113:
 		return trapdoor("mcl_doors:trapdoor_jungle", "mcl_doors:trapdoor_jungle_open");
 	case 114:
@@ -484,7 +521,7 @@ LuantiNode to_luanti_node(
 	case 142:
 		return {"mcl_books:bookshelf", 0};
 	case 143:
-		return {"mcl_trees:wood_oak", 0};
+		return {"mcl_stairs:slab_quartz_smooth", 0};
 	case 144:
 		return stair("mcl_stairs:stair_oak");
 	case 145:
@@ -514,7 +551,7 @@ LuantiNode to_luanti_node(
 	case 157:
 		return {"mcl_anvils:anvil", 0};
 	case 158:
-		return {"mcl_noteblock:noteblock", 0};
+		return {"mcl_wool:silver", 0};
 	case 159:
 		return {"mcl_deepslate:deepslatepolishedwall", 0};
 	case 160:
@@ -539,7 +576,7 @@ LuantiNode to_luanti_node(
 	case 171:
 		return {"mcl_core:glass_brown", 0};
 	case 172:
-		return {"mcl_core:glass", 0};
+		return {"mcl_colorblocks:concrete_powder_silver", 0};
 	case 173:
 		return {"mcl_colorblocks:concrete_magenta", 0};
 	case 174:
@@ -559,7 +596,7 @@ LuantiNode to_luanti_node(
 	case 181:
 		return stair("mcl_stairs:stair_granite_smooth");
 	case 182:
-		return stair("mcl_stairs:stair_end_bricks");
+		return {"mcl_mushrooms:brown_mushroom_block_stem_full", 0};
 	case 183:
 		return stair("mcl_stairs:stair_diorite_smooth");
 	case 184:
@@ -581,7 +618,7 @@ LuantiNode to_luanti_node(
 	case 192:
 		return {"mcl_panes:pane_grey_flat", 0};
 	case 193:
-		return {"mcl_fences:oak_fence_gate", 0};
+		return {"mcl_stairs:slab_granite_smooth", 0};
 	case 194:
 		return {"mcl_fences:spruce_fence_gate", 0};
 	case 195:
@@ -603,7 +640,7 @@ LuantiNode to_luanti_node(
 	case 203:
 		return {"mcl_ocean:sea_lantern", 0};
 	case 204:
-		return {"mcl_copper:block_exposed_chiseled", 0};
+		return {"mcl_stairs:slab_diorite_smooth", 0};
 	case 205:
 		return {"mcl_stairs:slab_warped", 0};
 	case 206:
@@ -626,7 +663,7 @@ LuantiNode to_luanti_node(
 	case 214:
 		return {"mcl_stairs:slab_stone_double", 0};
 	case 215:
-		return {"mcl_copper:block_exposed_cut", 0};
+		return {"mcl_stairs:slab_deepslate_cobbled", 0};
 	case 216:
 		return {"mcl_colorblocks:hardened_clay_silver", 0};
 	case 217:
@@ -727,7 +764,7 @@ LuantiNode to_luanti_node(
 	case 267:
 		return {"mcl_fences:birch_fence", 0};
 	case 268:
-		return {"mcl_stairs:slab_quartz_smooth", 0};
+		return {"mcl_trees:wood_oak", 0};
 	case 269:
 		return stair("mcl_stairs:stair_quartz_smooth");
 	case 270:
@@ -808,15 +845,15 @@ LuantiNode to_luanti_node(
 	case 310:
 		return {"mcl_stairs:slab_andesite", 0};
 	case 311:
-		return {"mcl_stairs:slab_deepslate_cobbled", 0};
+		return {"mcl_copper:block_exposed_cut", 0};
 	case 312:
-		return stair("mcl_stairs:stair_deepslate_cobbled");
+		return stair("mcl_stairs:stair_red_nether_brick");
 	case 313:
 		return {"mcl_fences:dark_oak_fence", 0};
 	case 314:
 		return {"mcl_pressureplates:pressure_plate_dark_oak_off", 0};
 	case 318:
-		return {"mcl_wool:grey", 0};
+		return {"mcl_nether:magma", 0};
 	case 319:
 		return {"mcl_nether:nether_wart_block", 0};
 	case 321:
@@ -870,7 +907,7 @@ LuantiNode to_luanti_node(
 	case 347:
 		return {"mcl_signs:wall_sign_spruce", 0};
 	case 348:
-		return stair("mcl_stairs:stair_granite");
+		return {"mcl_colorblocks:concrete_powder_brown", 0};
 	case 349:
 		return stair("mcl_stairs:stair_diorite");
 	case 350:
@@ -882,7 +919,7 @@ LuantiNode to_luanti_node(
 	case 353:
 		return {"mcl_stairs:slab_blackstone_polished", 0};
 	case 354:
-		return {"mcl_stairs:slab_diorite_smooth", 0};
+		return {"mcl_copper:block_exposed_chiseled", 0};
 	case 355:
 		return {"mcl_lanterns:soul_lantern_floor", 0};
 	case 356:
@@ -919,7 +956,7 @@ LuantiNode to_luanti_node(
 	case 373:
 		return stair("mcl_stairs:stair_crimson");
 	case 374:
-		return {"mcl_trees:wood_cherry_blossom", 0};
+		return stair("mcl_stairs:stair_andesite");
 	case 375:
 		return {"mcl_stairs:slab_cherry_blossom", 0};
 	case 376:
@@ -947,10 +984,12 @@ LuantiNode to_luanti_node(
 		return {"mcl_core:obsidian", 0};
 	case 387:
 		return {"mcl_core:ice", 0};
+	case 388:
+		return {"mcl_core:blue_ice", 0};
 	case 389:
 		return {"mcl_powder_snow:powder_snow", 0};
 	case 390:
-		return {"mcl_amethyst:calcite", 0};
+		return stair("mcl_stairs:stair_copper_cut");
 	case 391:
 		return {"mcl_amethyst:amethyst_block", 0};
 	case 392:
@@ -996,7 +1035,7 @@ LuantiNode to_luanti_node(
 	case 421:
 		return {"mcl_mushrooms:brown_mushroom_block_cap_111111", 0};
 	case 422:
-		return {"mcl_mushrooms:brown_mushroom_block_stem_full", 0};
+		return stair("mcl_stairs:stair_end_bricks");
 	case 423:
 		return {"mcl_crimson:shroomlight", 0};
 	case 424:
@@ -1097,6 +1136,42 @@ LuantiNode to_luanti_node(
 		return {"mcl_core:dirt_with_grass_snow", 0};
 	case 472:
 		return {"mcl_core:podzol", 0};
+	case 473:
+		return {"mcl_core:glass", 0};
+	case 482:
+		return {"mcl_lectern:lectern", 0};
+	case 483:
+		return {"mcl_cake:cake", 0};
+	case 484:
+		return {"mcl_farming:melon", 0};
+	case 485:
+		return {"mcl_loom:loom", 0};
+	case 486:
+		return {"mcl_smithing_table:table", 0};
+	case 487:
+		return {"mcl_nether:netheriteblock", 0};
+	case 488:
+		return {"mcl_trees:wood_mangrove", 0};
+	case 489:
+		return stair("mcl_stairs:stair_mangrove");
+	case 490:
+		return {"mcl_stairs:slab_mangrove", 0};
+	case 491:
+		return stair("mcl_stairs:stair_deepslate_tiles");
+	case 492:
+		return {"mcl_stairs:slab_nether_brick", 0};
+	case 493:
+		return {"mcl_stairs:slab_copper_oxidized_cut", 0};
+	case 494:
+		return {"mcl_fences:oak_fence_gate", 0};
+	case 495:
+		return {"mcl_sponges:sponge", 0};
+	case 496:
+		return {"mcl_noteblock:noteblock", 0};
+	case 497:
+		return {"mcl_colorblocks:hardened_clay_pink", 0};
+	case 498:
+		return {"mcl_colorblocks:hardened_clay_lime", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

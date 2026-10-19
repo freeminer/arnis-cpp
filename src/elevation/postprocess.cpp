@@ -1641,6 +1641,39 @@ int terrain_ceiling(bool disable_height_limit, int extended_max_y)
 	return (disable_height_limit ? extended_max_y : 319) - TERRAIN_HEIGHT_BUFFER;
 }
 
+std::pair<int, double> fit_geometry(double height_range, double scale, int ceiling,
+		int ground_level, int min_ground_level, bool disable_height_limit)
+{
+	const double ideal_scaled_range = height_range * scale;
+	// Sink only as far as the relief requires. An explicit ground level is
+	// preserved unless the extended-height floor is active.
+	if (disable_height_limit && min_ground_level < ground_level &&
+			std::isfinite(ideal_scaled_range)) {
+		const double rounded = std::ceil(ideal_scaled_range);
+		const int needed = rounded >= std::numeric_limits<int>::max()
+								   ? std::numeric_limits<int>::max()
+						   : rounded <= std::numeric_limits<int>::min()
+								   ? std::numeric_limits<int>::min()
+								   : static_cast<int>(rounded);
+		const long long candidate = static_cast<long long>(ceiling) - needed;
+		ground_level = static_cast<int>(
+				std::clamp(candidate, static_cast<long long>(min_ground_level),
+						static_cast<long long>(ground_level)));
+	}
+	const double available_y_range = static_cast<double>(ceiling - ground_level);
+	const double scaled_range =
+			ideal_scaled_range <= available_y_range
+					? ideal_scaled_range
+					: height_range * (available_y_range / height_range);
+	return {ground_level, scaled_range};
+}
+
+double headroom_margin(int ceiling, int ground_level, double scaled_range)
+{
+	const double free = static_cast<double>(ceiling - ground_level) - scaled_range;
+	return std::max(0.0, std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)));
+}
+
 struct FitRange
 {
 	double height_range;
@@ -1679,31 +1712,17 @@ std::pair<ElevationAffine, FitRange> derive_affine(
 	const double ideal_scaled_range = height_range * scale;
 	const int ceiling = terrain_ceiling(disable_height_limit, extended_max_y) -
 						std::max(0, top_reserve);
-	if (disable_height_limit && min_ground_level < ground_level &&
-			std::isfinite(ideal_scaled_range)) {
-		const double rounded = std::ceil(ideal_scaled_range);
-		const int needed = rounded >= std::numeric_limits<int>::max()
-								   ? std::numeric_limits<int>::max()
-						   : rounded <= std::numeric_limits<int>::min()
-								   ? std::numeric_limits<int>::min()
-								   : static_cast<int>(rounded);
-		const long long candidate = static_cast<long long>(ceiling) - needed;
-		ground_level = static_cast<int>(
-				std::clamp(candidate, static_cast<long long>(min_ground_level),
-						static_cast<long long>(ground_level)));
-	}
+	const auto [fitted_ground_level, scaled_range] = fit_geometry(height_range, scale,
+			ceiling, ground_level, min_ground_level, disable_height_limit);
+	ground_level = fitted_ground_level;
 	const double available_y_range = static_cast<double>(ceiling - ground_level);
-	double scaled_range;
 	if (ideal_scaled_range <= available_y_range) {
-		scaled_range = ideal_scaled_range;
 		std::ostringstream message;
 		message << "Realistic elevation: " << std::fixed << std::setprecision(1)
 				<< height_range << "m range fits in " << std::setprecision(0)
 				<< available_y_range << " available blocks\n";
 		std::clog << message.str();
 	} else {
-		const double compression_factor = available_y_range / height_range;
-		scaled_range = height_range * compression_factor;
 		std::ostringstream message;
 		message << "Elevation compressed: " << std::fixed << std::setprecision(1)
 				<< height_range << "m range -> " << std::setprecision(0) << scaled_range
@@ -1776,9 +1795,8 @@ std::pair<std::vector<std::vector<double>>, ElevationAffine> scale_to_minecraft_
 		fit = derived.second;
 		if (affine.blocks_per_meter <= 0.0)
 			affine.blocks_per_meter = scale;
-		const double free = (fit_ceiling - affine.ground_level) - fit->scaled_range;
 		const double margin =
-				std::max(0.0, std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)));
+				headroom_margin(fit_ceiling, affine.ground_level, fit->scaled_range);
 		if (margin > 0.0 && affine.blocks_per_meter > 0.0) {
 			affine.min_height_m -= margin / affine.blocks_per_meter;
 			std::clog << "One World: keeping " << static_cast<int>(margin)
@@ -1911,30 +1929,10 @@ int top_reserve_for(const std::vector<std::vector<double>> &heights,
 	const double limit = static_cast<double>(ceiling + TERRAIN_HEIGHT_BUFFER - 2);
 	auto model_top = [&](int reserve) {
 		const int top = ceiling - reserve;
-		const double ideal_scaled = range * scale;
-		int base = ground_level;
-		if (disable_height_limit && min_ground_level < ground_level &&
-				std::isfinite(ideal_scaled)) {
-			const double rounded = std::ceil(ideal_scaled);
-			const int needed = rounded >= std::numeric_limits<int>::max()
-									   ? std::numeric_limits<int>::max()
-							   : rounded <= std::numeric_limits<int>::min()
-									   ? std::numeric_limits<int>::min()
-									   : static_cast<int>(rounded);
-			base = static_cast<int>(
-					std::clamp<long long>(static_cast<long long>(top) - needed,
-							min_ground_level, ground_level));
-		}
-		const double available = static_cast<double>(top - base);
-		const double scaled = ideal_scaled <= available
-									  ? ideal_scaled
-									  : (range > 0.0 ? range * (available / range) : 0.0);
+		const auto [base, scaled] = fit_geometry(
+				range, scale, top, ground_level, min_ground_level, disable_height_limit);
 		const double bpm = range > 0.0 ? scaled / range : 0.0;
-		const double free = available - scaled;
-		const double lift =
-				headroom ? std::max(0.0,
-								   std::floor(std::min(free * 0.5, HEADROOM_MAX_BLOCKS)))
-						 : 0.0;
+		const double lift = headroom ? headroom_margin(top, base, scaled) : 0.0;
 		double max_top = std::numeric_limits<double>::lowest();
 		for (const auto &[ground_m, height_m] : models)
 			max_top = std::max(max_top,

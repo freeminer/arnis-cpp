@@ -650,7 +650,7 @@ std::pair<int, int> RoofDeck::heart() const
 			});
 }
 
-Block coping_for(Block wall, Block accent, std::uint64_t seed)
+Block coping_for(const WorldEditor &editor, Block wall, Block accent, std::uint64_t seed)
 {
 	const auto pick = [seed](std::initializer_list<Block> blocks) {
 		const auto i = hash2(seed ^ 0xC0B1460000000001ULL, 0, 0) % blocks.size();
@@ -680,10 +680,10 @@ Block coping_for(Block wall, Block accent, std::uint64_t seed)
 			wall == GRAY_CONCRETE || wall == BLACK_CONCRETE || wall == GRAY_TERRACOTTA ||
 			wall == CYAN_TERRACOTTA || wall == BLUE_TERRACOTTA)
 		return pick({POLISHED_BLACKSTONE_SLAB, SMOOTH_STONE_SLAB, DEEPSLATE_TILE_SLAB});
-	if (is_glass_block(wall) && is_glass_block(accent))
+	if (is_glass(editor, wall) && is_glass(editor, accent))
 		return SMOOTH_STONE_SLAB;
-	return is_glass_block(wall) ? get_slab_block_for_material(accent)
-								: get_slab_block_for_material(wall);
+	return is_glass(editor, wall) ? get_slab_block_for_material(accent)
+								  : get_slab_block_for_material(wall);
 }
 
 BlockWithProperties bottom_slab(Block slab)
