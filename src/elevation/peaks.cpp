@@ -25,6 +25,17 @@ constexpr double MAX_DEFICIT_M = 400.0;
 constexpr double RELIEF_M = 500.0;
 constexpr double RELIEF_SAMPLES = 50.0;
 
+std::ptrdiff_t radius_cells(double meters, double meters_per_cell)
+{
+	const double cells = std::ceil(meters / meters_per_cell);
+	if (std::isnan(cells) || cells <= 0.0)
+		return 0;
+	if (!std::isfinite(cells) ||
+			cells >= static_cast<double>(std::numeric_limits<std::ptrdiff_t>::max()))
+		return std::numeric_limits<std::ptrdiff_t>::max();
+	return static_cast<std::ptrdiff_t>(cells);
+}
+
 std::optional<double> parse_elevation(const std::string &input)
 {
 	std::string value = input;
@@ -103,15 +114,22 @@ template <typename F>
 void cells_within(std::size_t cx, std::size_t cy, std::ptrdiff_t radius,
 		std::size_t width, std::size_t height, F &&fn)
 {
-	const auto x0 = std::max<std::ptrdiff_t>(0, static_cast<std::ptrdiff_t>(cx) - radius);
-	const auto x1 = std::min<std::ptrdiff_t>(static_cast<std::ptrdiff_t>(width) - 1,
-			static_cast<std::ptrdiff_t>(cx) + radius);
-	const auto y0 = std::max<std::ptrdiff_t>(0, static_cast<std::ptrdiff_t>(cy) - radius);
-	const auto y1 = std::min<std::ptrdiff_t>(static_cast<std::ptrdiff_t>(height) - 1,
-			static_cast<std::ptrdiff_t>(cy) + radius);
-	for (auto y = y0; y <= y1; ++y)
-		for (auto x = x0; x <= x1; ++x)
-			fn(static_cast<std::size_t>(x), static_cast<std::size_t>(y));
+	const auto r = static_cast<std::size_t>(radius);
+	const auto x0 = cx > r ? cx - r : 0;
+	const auto x1 = r >= width - 1 - cx ? width - 1 : cx + r;
+	const auto y0 = cy > r ? cy - r : 0;
+	const auto y1 = r >= height - 1 - cy ? height - 1 : cy + r;
+	for (auto y = y0;;) {
+		for (auto x = x0;;) {
+			fn(x, y);
+			if (x == x1)
+				break;
+			++x;
+		}
+		if (y == y1)
+			break;
+		++y;
+	}
 }
 
 double local_relief(const std::vector<std::vector<double>> &grid, std::size_t cx,
@@ -119,25 +137,32 @@ double local_relief(const std::vector<std::vector<double>> &grid, std::size_t cx
 {
 	const auto height = grid.size();
 	const auto width = grid.front().size();
-	const auto radius =
-			static_cast<std::ptrdiff_t>(std::ceil(RELIEF_M / meters_per_cell));
+	const auto radius = radius_cells(RELIEF_M, meters_per_cell);
 	const auto step = std::max<std::size_t>(
 			1, static_cast<std::size_t>(
 					   std::ceil(static_cast<double>(radius) / RELIEF_SAMPLES)));
-	const auto x0 = cx > static_cast<std::size_t>(radius) ? cx - radius : 0;
-	const auto y0 = cy > static_cast<std::size_t>(radius) ? cy - radius : 0;
-	const auto x1 = std::min(width - 1, cx + static_cast<std::size_t>(radius));
-	const auto y1 = std::min(height - 1, cy + static_cast<std::size_t>(radius));
+	const auto r = static_cast<std::size_t>(radius);
+	const auto x0 = cx > r ? cx - r : 0;
+	const auto y0 = cy > r ? cy - r : 0;
+	const auto x1 = r >= width - 1 - cx ? width - 1 : cx + r;
+	const auto y1 = r >= height - 1 - cy ? height - 1 : cy + r;
 	double lo = std::numeric_limits<double>::max();
 	double hi = std::numeric_limits<double>::lowest();
-	for (std::size_t y = y0; y <= y1; y += step)
-		for (std::size_t x = x0; x <= x1; x += step) {
+	for (std::size_t y = y0;;) {
+		for (std::size_t x = x0;;) {
 			const auto v = grid[y][x];
 			if (std::isfinite(v)) {
 				lo = std::min(lo, v);
 				hi = std::max(hi, v);
 			}
+			if (step > x1 - x)
+				break;
+			x += step;
 		}
+		if (step > y1 - y)
+			break;
+		y += step;
+	}
 	return std::isfinite(lo) && std::isfinite(hi) ? std::max(hi - lo, 0.0) : 0.0;
 }
 
@@ -304,8 +329,7 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 		const double at_node = grid[cy][cx];
 		if (!std::isfinite(at_node))
 			continue;
-		const auto search =
-				static_cast<std::ptrdiff_t>(std::ceil(SEARCH_M / meters_per_cell));
+		const auto search = radius_cells(SEARCH_M, meters_per_cell);
 		double dem_top = std::numeric_limits<double>::lowest();
 		cells_within(cx, cy, search, width, height, [&](std::size_t x, std::size_t y) {
 			if (std::isfinite(grid[y][x]))
@@ -316,8 +340,7 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 				shortfall > local_relief(grid, cx, cy, meters_per_cell))
 			continue;
 		const double lift = peak.ele_m - at_node;
-		const auto reach =
-				static_cast<std::ptrdiff_t>(std::ceil(3.0 * SIGMA_M / meters_per_cell));
+		const auto reach = radius_cells(3.0 * SIGMA_M, meters_per_cell);
 		cells_within(cx, cy, reach, width, height, [&](std::size_t x, std::size_t y) {
 			double &v = grid[y][x];
 			if (!std::isfinite(v))

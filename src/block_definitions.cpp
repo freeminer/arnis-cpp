@@ -14,6 +14,140 @@
 namespace arnis
 {
 
+BlockWithProperties::Properties default_block_properties(const Block &block)
+{
+	using Properties = BlockWithProperties::Properties;
+	const auto one = [](const char *key, const char *value) {
+		return Properties{{key, value}};
+	};
+	switch (block.id()) {
+	case 3:
+	case 49:
+	case 220:
+	case 222:
+	case 224:
+	case 225:
+	case 231:
+	case 233:
+	case 234:
+	case 480:
+		return one("persistent", "true");
+	case 70:
+	case 106:
+	case 137:
+	case 197:
+	case 293:
+	case 364:
+	case 415:
+	case 459:
+	case 461:
+	case 463:
+	case 465:
+		return one("half", "lower");
+	case 93:
+	case 107:
+	case 138:
+	case 198:
+	case 299:
+	case 365:
+	case 366:
+	case 416:
+	case 460:
+	case 462:
+	case 464:
+	case 466:
+		return one("half", "upper");
+	case 95:
+		return {{"pickles", "2"}, {"waterlogged", "true"}};
+	case 105:
+	case 108:
+	case 109:
+		return one("age", "7");
+	case 116:
+		return one("shape", "north_south");
+	case 117:
+		return one("shape", "east_west");
+	case 118:
+		return one("shape", "ascending_east");
+	case 119:
+		return one("shape", "ascending_west");
+	case 120:
+		return one("shape", "ascending_north");
+	case 121:
+		return one("shape", "ascending_south");
+	case 122:
+		return one("shape", "north_east");
+	case 123:
+		return one("shape", "north_west");
+	case 124:
+		return one("shape", "south_east");
+	case 125:
+		return one("shape", "south_west");
+	case 161:
+		return {{"facing", "north"}, {"part", "head"}, {"occupied", "false"}};
+	case 162:
+		return {{"facing", "north"}, {"part", "foot"}, {"occupied", "false"}};
+	case 165:
+		return {{"facing", "south"}, {"part", "head"}, {"occupied", "false"}};
+	case 166:
+		return {{"facing", "south"}, {"part", "foot"}, {"occupied", "false"}};
+	case 167:
+		return {{"facing", "west"}, {"part", "head"}, {"occupied", "false"}};
+	case 168:
+		return {{"facing", "west"}, {"part", "foot"}, {"occupied", "false"}};
+	case 182:
+		return {{"north", "true"}, {"south", "true"}, {"east", "true"}, {"west", "true"},
+				{"up", "true"}, {"down", "true"}};
+	case 210:
+		return one("axis", "x");
+	case 214:
+		return one("type", "bottom");
+	case 217:
+	case 240:
+		return one("type", "top");
+	case 236:
+		return {{"facing", "north"}, {"open", "true"}, {"half", "top"}};
+	case 274:
+		return {{"rotation", "6"}, {"waterlogged", "false"}};
+	case 294:
+		return {{"facing", "east"}, {"part", "head"}, {"occupied", "false"}};
+	case 295:
+		return {{"facing", "east"}, {"part", "foot"}, {"occupied", "false"}};
+	case 305:
+		return one("facing", "north");
+	case 316:
+		return one("facing", "east");
+	case 320:
+		return one("facing", "south");
+	case 326:
+		return one("facing", "west");
+	case 362:
+		return one("axis", "z");
+	case 471:
+	case 472:
+		return one("snowy", "true");
+	case 474:
+	case 475:
+	case 476:
+	case 477:
+	case 478:
+	case 479:
+		return {{"layers", std::to_string(block.id() - 472)}};
+	case 467:
+		return one("age", "3");
+	default:
+		return {};
+	}
+}
+
+std::optional<BlockProperties> Block::properties() const
+{
+	auto properties = default_block_properties(*this);
+	if (properties.empty())
+		return std::nullopt;
+	return properties;
+}
+
 /*
 enum class Block {
     GLASS,
@@ -242,7 +376,7 @@ BlockWithProperties top_stair(BlockWithProperties stair)
 
 Block get_stair_block_for_material(const Block &material)
 {
-	if (material == STONE || material == COBBLESTONE)
+	if (material == STONE || material == COBBLESTONE || material == GRAVEL)
 		return COBBLESTONE_STAIRS;
 	if (material == STONE_BRICKS || material == CRACKED_STONE_BRICKS ||
 			material == CHISELED_STONE_BRICKS)

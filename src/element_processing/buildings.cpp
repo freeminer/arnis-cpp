@@ -6942,7 +6942,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	struct FacadeWindowColumn
 	{
 		int x, z, nx, nz, run, position;
-		BaySlot slot;
+		BaySlot slot, shop_slot;
 	};
 	std::vector<WindowLifeColumn> window_life_columns;
 	std::vector<FacadeWindowColumn> facade_window_columns;
@@ -7854,7 +7854,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				if (outward != std::pair<int, int>{0, 0})
 					facade_window_columns.push_back({bx, bz, outward.first,
 							outward.second, static_cast<int>(node_index - 1),
-							static_cast<int>(point_index), bay_slot});
+							static_cast<int>(point_index), bay_slot, shop_slot});
 
 				if (terrain_enabled && min_level_offset == 0 && !is_passage) {
 					const int local_ground_level =
@@ -8407,7 +8407,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					(element.tags.get("building:use") == "residential" ||
 							element.tags.get("building:use") == "apartments"));
 	const auto window_region = building_style::building_region(wall_region);
+	// Rust's window-life pass is limited to punched facades. Do not place
+	// curtains, window boxes, or air conditioners across horizontal bands or
+	// tower curtain grids even when their wall walk has a window bay lattice.
+	const bool punched_windows = has_windows && !horizontal_windows &&
+								 category != BuildingCategory::Tower &&
+								 category != BuildingCategory::GridSkyscraper;
 	const bool walkup_air_conditioners =
+			punched_windows &&
 			window_region == building_style::BuildingRegion::NorthAmerica &&
 			!args.interior && detail != DetailTier::Minimal &&
 			facade_plan.has_any_street &&
@@ -8418,7 +8425,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					category == BuildingCategory::Default) &&
 			window_life_dwelling;
 	const bool window_boxes =
-			window_region == building_style::BuildingRegion::Europe &&
+			punched_windows && window_region == building_style::BuildingRegion::Europe &&
 			detail != DetailTier::Minimal &&
 			(era == ArchEra::TraditionalPreWar || era == ArchEra::HistoricOrnate) &&
 			category != BuildingCategory::Hotel && window_life_dwelling;
@@ -8482,7 +8489,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const bool window_curtains = !args.interior &&
 								 !element.tags.contains("building:part") &&
 								 sibling_cells.empty();
-	if (condition == BuildingCondition::Normal && has_windows && !is_tall_building &&
+	if (condition == BuildingCondition::Normal && punched_windows && !is_tall_building &&
 			window_life_dwelling && (!window_life_columns.empty())) {
 		const int ground_top = start_y_offset + grammar_anchor + floor_cycle - 1;
 		const int top_h = start_y_offset + building_height;
@@ -8645,7 +8652,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	// Rust keeps the selected door species and orientation as block-state
 	// properties. Preserve those states in C++ too; the backend can then map
 	// them to the target game's native door representation.
-	const auto entrance_door_style = [&]() {
+	const auto entrance_door_style = [&](bool lobby_entrance) {
+		if (lobby_entrance && ground_floor == GroundFloorKind::Lobby)
+			return std::pair{IRON_DOOR, IRON_TRAPDOOR};
 		if (category == BuildingCategory::Industrial ||
 				category == BuildingCategory::Warehouse ||
 				category == BuildingCategory::Commercial ||
@@ -8793,7 +8802,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						before && after ? (before->len >= after->len ? before : after)
 										: (before ? before : after);
 				facade_plan.mark_door_column(node.x, node.z);
-				const auto [door_block, unused_trapdoor] = entrance_door_style();
+				const auto [door_block, unused_trapdoor] = entrance_door_style(false);
 				(void)unused_trapdoor;
 				if (entrance_façade) {
 					const auto inward = std::pair{-entrance_façade->normal.first,
@@ -8919,20 +8928,76 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						target = static_cast<std::size_t>(
 								static_cast<double>(points.size()) * (.5 + jitter));
 					}
-					const std::size_t center =
-							std::clamp<std::size_t>(target, 2, points.size() - 3);
-					std::optional<std::pair<int, int>> door;
-					for (const int offset : {0, 1, -1, 2, -2}) {
-						const auto index = std::clamp<int>(
-								int(center) + offset, 2, int(points.size()) - 3);
-						const int dx = std::get<0>(points[index]),
-								  dz = std::get<2>(points[index]);
-						if (!passage_at(effective_passages, dx, dz) &&
-								!facade_plan.is_party(dx, dz)) {
-							door = {dx, dz};
-							break;
+					const bool wants_double =
+							(ground_floor == GroundFloorKind::Lobby ||
+									category == BuildingCategory::Commercial ||
+									category == BuildingCategory::Office ||
+									category == BuildingCategory::Hotel ||
+									category == BuildingCategory::School ||
+									category == BuildingCategory::Hospital) &&
+							segment.len >= 8 &&
+							(segment.tangent.first == 0 || segment.tangent.second == 0);
+					const auto usable = [&](std::size_t index) {
+						if (index < 2 || index + 2 >= points.size())
+							return false;
+						const int x = std::get<0>(points[index]);
+						const int z = std::get<2>(points[index]);
+						return !passage_at(effective_passages, x, z) &&
+							   !facade_plan.is_party(x, z);
+					};
+					const auto bay_accepts = [&](std::size_t index, int leaves) {
+						const auto column = std::find_if(facade_window_columns.begin(),
+								facade_window_columns.end(),
+								[&](const FacadeWindowColumn &c) {
+									return c.run == static_cast<int>(*entrance_segment) &&
+										   c.position == static_cast<int>(index);
+								});
+						if (column == facade_window_columns.end())
+							return false;
+						const bool shopfront_column =
+								(ground_floor != GroundFloorKind::Plain) &&
+								facade_plan.is_street(column->x, column->z) &&
+								!facade_plan.is_party(column->x, column->z) &&
+								has_windows;
+						const BaySlot slot =
+								shopfront_column ? column->shop_slot : column->slot;
+						return slot.kind == BaySlot::Kind::Window &&
+							   slot.k + leaves <= slot.width;
+					};
+					const auto nearest = [&](auto accepts) -> std::optional<std::size_t> {
+						const int reach = static_cast<int>(points.size() / 2);
+						for (int distance = 0; distance <= reach; ++distance) {
+							for (const int sign : {1, -1}) {
+								if (distance == 0 && sign < 0)
+									continue;
+								const int index =
+										static_cast<int>(target) + sign * distance;
+								if (index < 0 || index >= static_cast<int>(points.size()))
+									continue;
+								const auto candidate = static_cast<std::size_t>(index);
+								if (usable(candidate) && accepts(candidate))
+									return candidate;
+							}
 						}
-					}
+						return std::nullopt;
+					};
+					std::optional<std::size_t> door_index;
+					bool double_door = false;
+					if (wants_double)
+						if (const auto index = nearest(
+									[&](std::size_t i) { return bay_accepts(i, 2); })) {
+							door_index = index;
+							double_door = true;
+						}
+					if (!door_index)
+						door_index =
+								nearest([&](std::size_t i) { return bay_accepts(i, 1); });
+					if (!door_index)
+						door_index = nearest([](std::size_t) { return true; });
+					std::optional<std::pair<int, int>> door;
+					if (door_index)
+						door = {std::get<0>(points[*door_index]),
+								std::get<2>(points[*door_index])};
 					if (door) {
 						const auto inward =
 								std::pair{-segment.normal.first, -segment.normal.second};
@@ -8942,19 +9007,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						if (!signage_anchor)
 							signage_anchor = building_facade::FacadeAnchor{door->first,
 									door->second, segment.normal, 0, 0, *door};
-						const auto [door_block, trapdoor_block] = entrance_door_style();
+						const auto [door_block, trapdoor_block] =
+								entrance_door_style(true);
 						facade_plan.mark_door_column(door->first, door->second);
 						put_entrance_door(door_block, door->first, door->second,
 								segment.normal.first, segment.normal.second, "left");
-						const bool double_door =
-								(category == BuildingCategory::Commercial ||
-										category == BuildingCategory::Office ||
-										category == BuildingCategory::Hotel ||
-										category == BuildingCategory::School ||
-										category == BuildingCategory::Hospital) &&
-								segment.len >= 8 &&
-								(segment.tangent.first == 0 ||
-										segment.tangent.second == 0);
 						if (double_door &&
 								!passage_at(effective_passages,
 										door->first + segment.tangent.first,
@@ -8977,6 +9034,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								(double_door ||
 										category == BuildingCategory::Commercial ||
 										category == BuildingCategory::Hotel) &&
+								ground_floor != GroundFloorKind::Shopfront &&
 								dress_rng.random_bool(.6);
 						const bool lantern =
 								!canopy &&
@@ -9159,7 +9217,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				served[unit_of(door.first + entry.inward.first,
 						door.second + entry.inward.second)] = true;
 			}
-			const auto [door_block, unused_trapdoor] = entrance_door_style();
+			const auto [door_block, unused_trapdoor] = entrance_door_style(false);
 			(void)unused_trapdoor;
 			for (std::size_t unit = 0; unit < units.size(); ++unit) {
 				if (served[unit])

@@ -71,8 +71,15 @@ std::vector<Voxel> voxelize_solid_triangles(
 	}
 
 	std::unordered_set<Cell, CellHash> cells;
-	for (const auto &voxel : voxelize_uniform_triangles(triangles, transform, block))
-		cells.insert({voxel.position[0], voxel.position[1], voxel.position[2]});
+	// The shell and the fill scan below must use the same transformed triangles.
+	// Rasterizing the originals through voxelize_uniform_triangles transformed the
+	// whole mesh a second time and built a temporary Voxel vector before copying
+	// every cell into this set. Stream each already-transformed triangle into the
+	// final cell set instead.
+	for (const auto &triangle : world)
+		visit_triangle_voxels(triangle, [&](const std::array<int, 3> &position) {
+			cells.insert({position[0], position[1], position[2]});
+		});
 
 	// Jitter off voxel centres so the ray does not run along a shared mesh edge.
 	constexpr float JX = 0.0123f;

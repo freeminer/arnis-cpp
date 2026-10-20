@@ -125,80 +125,6 @@ one_world::ElevationAffine one_world_elevation(const elevation::ElevationAffine 
 					: std::nullopt};
 }
 
-struct GroundFetchPlan
-{
-	std::array<double, 4>
-			bounds{}; // min latitude, max latitude, min longitude, max longitude
-	std::size_t world_width{0}, world_height{0};
-	std::size_t grid_width{0}, grid_height{0};
-	std::size_t pad{0};
-	bool remap_mercator{false};
-};
-
-GroundFetchPlan make_ground_fetch_plan(
-		const Args &args, const std::array<double, 4> &geographic, const XZBBox &xzbbox)
-{
-	GroundFetchPlan plan;
-	plan.bounds = geographic;
-	plan.world_width = static_cast<std::size_t>(
-			std::max<std::int64_t>(1, std::int64_t(xzbbox.max_x()) - xzbbox.min_x() + 1));
-	plan.world_height = static_cast<std::size_t>(
-			std::max<std::int64_t>(1, std::int64_t(xzbbox.max_z()) - xzbbox.min_z() + 1));
-	const auto original_grid =
-			elevation::compute_grid_dims_for_world(plan.world_width, plan.world_height);
-	plan.grid_width = std::get<2>(original_grid);
-	plan.grid_height = std::get<3>(original_grid);
-
-	// Rust's GroundFrame pads One World's source grids before fetching so the
-	// smoothing kernels have data beyond the generated edge, then crops back to
-	// the exact world rectangle. If the padded grid would be capped, it drops
-	// the padding rather than resampling a non-exact crop.
-	if (!args.one_world_run)
-		return plan;
-	const auto pad_blocks = one_world::ground_pad_blocks(args.scale);
-	if (pad_blocks <= 0)
-		return plan;
-	const auto pad = static_cast<std::size_t>(pad_blocks);
-	if (plan.world_width > std::numeric_limits<std::size_t>::max() - 2 * pad ||
-			plan.world_height > std::numeric_limits<std::size_t>::max() - 2 * pad)
-		return plan;
-	const auto padded_width = plan.world_width + 2 * pad;
-	const auto padded_height = plan.world_height + 2 * pad;
-	const auto padded_grid =
-			elevation::compute_grid_dims_for_world(padded_width, padded_height);
-	const auto padded_grid_width = std::get<2>(padded_grid);
-	const auto padded_grid_height = std::get<3>(padded_grid);
-	if (padded_grid_width != padded_width || padded_grid_height != padded_height)
-		return plan;
-
-	const auto &run = *args.one_world_run;
-	const projection::WebMercatorProjection projected(
-			run.origin_lat, run.origin_lon, args.scale);
-	const double x0 = static_cast<double>(projection::snap_edge(
-							  projected.x_for_lon(geographic[2]), false)) -
-					  static_cast<double>(pad) + 0.5;
-	const double z0 = static_cast<double>(projection::snap_edge(
-							  projected.z_for_lat(geographic[1]), false)) -
-					  static_cast<double>(pad) + 0.5;
-	const double x1 = x0 + static_cast<double>(padded_width - 1);
-	const double z1 = z0 + static_cast<double>(padded_height - 1);
-	try {
-		const ::arnis::geographic::LLBBox padded_bounds(projected.lat_for_z(z1),
-				projected.lon_for_x(x0), projected.lat_for_z(z0),
-				projected.lon_for_x(x1));
-		plan.bounds = {padded_bounds.min().lat(), padded_bounds.max().lat(),
-				padded_bounds.min().lng(), padded_bounds.max().lng()};
-		plan.grid_width = padded_grid_width;
-		plan.grid_height = padded_grid_height;
-		plan.pad = pad;
-		plan.remap_mercator = true;
-	} catch (const std::invalid_argument &) {
-		// Match GroundFrame::fetch_plan: invalid padded bounds fall back to the
-		// original request and its unpadded dimensions.
-	}
-	return plan;
-}
-
 int area_floor_for(const Ground *ground, const Args &args)
 {
 	if (!ground)
@@ -1953,8 +1879,17 @@ bool generate_world(WorldEditor &editor,
 	building_facades::set_world_extent(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	const auto ground_geographic = editor.geographic_bounds();
-	const auto ground_fetch_plan =
-			make_ground_fetch_plan(args, ground_geographic, xzbbox);
+	const geographic::LLBBox ground_bbox(ground_geographic[0], ground_geographic[2],
+			ground_geographic[1], ground_geographic[3]);
+	const auto ground_frame = GroundFrame::from_args(args, ground_bbox);
+	const auto ground_fetch_plan = ground_frame.fetch_plan(ground_bbox, args.scale);
+	const auto grid_width = std::get<2>(ground_fetch_plan.dims);
+	const auto grid_height = std::get<3>(ground_fetch_plan.dims);
+	const auto &[final_width, final_height] = ground_fetch_plan.final_dims;
+	const auto &pad = ground_fetch_plan.pad_blocks;
+	const land_cover::GeographicBounds ground_fetch_bounds{
+			ground_fetch_plan.bbox.min().lat(), ground_fetch_plan.bbox.min().lng(),
+			ground_fetch_plan.bbox.max().lat(), ground_fetch_plan.bbox.max().lng()};
 	const bool fetch_land_cover = editor.ground && args.body == CelestialBody::Earth &&
 								  !editor.ground->has_land_cover();
 	const bool fetch_canopy = editor.ground && args.canopy_height &&
@@ -1966,19 +1901,19 @@ bool generate_world(WorldEditor &editor,
 	// fetches overlapped too, then install each completed grid on this generation's
 	// Ground before the elevation-dependent surface passes begin.
 	if (fetch_land_cover) {
-		const auto bounds = land_cover::GeographicBounds{ground_fetch_plan.bounds[0],
-				ground_fetch_plan.bounds[2], ground_fetch_plan.bounds[1],
-				ground_fetch_plan.bounds[3]};
-		const auto width = ground_fetch_plan.grid_width;
-		const auto height = ground_fetch_plan.grid_height;
+		const auto bounds = ground_fetch_bounds;
+		const auto width = grid_width;
+		const auto height = grid_height;
 		land_cover_job.emplace(std::async(std::launch::async, [bounds, width, height] {
 			return land_cover::fetch_land_cover_data(bounds, width, height);
 		}));
 	}
 	if (fetch_canopy) {
-		const auto bounds = ground_fetch_plan.bounds;
-		const auto width = ground_fetch_plan.grid_width;
-		const auto height = ground_fetch_plan.grid_height;
+		const std::array<double, 4> bounds{ground_fetch_plan.bbox.min().lat(),
+				ground_fetch_plan.bbox.max().lat(), ground_fetch_plan.bbox.min().lng(),
+				ground_fetch_plan.bbox.max().lng()};
+		const auto width = grid_width;
+		const auto height = grid_height;
 		const auto cache_root = cache::provider_cache_root("canopy");
 		canopy_job.emplace(
 				std::async(std::launch::async, [bounds, width, height, cache_root] {
@@ -1994,16 +1929,15 @@ bool generate_world(WorldEditor &editor,
 		if (land_cover.width == 0 || land_cover.height == 0) {
 			land_cover = build_osm_water_land_cover(elements, xzbbox);
 		} else {
-			if (ground_fetch_plan.remap_mercator)
-				land_cover.remap_rows_to_mercator(
-						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[0]);
-			if (ground_fetch_plan.pad > 0)
-				land_cover.crop(ground_fetch_plan.pad, ground_fetch_plan.pad,
-						ground_fetch_plan.world_width, ground_fetch_plan.world_height);
+			if (ground_frame.mercator)
+				land_cover.remap_rows_to_mercator(ground_fetch_plan.bbox.max().lat(),
+						ground_fetch_plan.bbox.min().lat());
+			if (pad > 0)
+				land_cover.crop(pad, pad, final_width, final_height);
 		}
 		if (land_cover.width > 0 && land_cover.height > 0) {
-			editor.ground->set_land_cover_data(std::move(land_cover),
-					ground_fetch_plan.world_width, ground_fetch_plan.world_height);
+			editor.ground->set_land_cover_data(
+					std::move(land_cover), final_width, final_height);
 		}
 	}
 	// Rust fetches canopy alongside land cover and only enables it for Earth.
@@ -2012,14 +1946,12 @@ bool generate_world(WorldEditor &editor,
 	// by tree placement and the natural-surface pass.
 	if (canopy_job) {
 		if (auto canopy = canopy_job->get()) {
-			if (ground_fetch_plan.remap_mercator)
-				canopy->remap_rows_to_mercator(
-						ground_fetch_plan.bounds[1], ground_fetch_plan.bounds[0]);
-			if (ground_fetch_plan.pad > 0)
-				canopy->crop(ground_fetch_plan.pad, ground_fetch_plan.pad,
-						ground_fetch_plan.world_width, ground_fetch_plan.world_height);
-			editor.ground->set_canopy_data(std::move(*canopy),
-					ground_fetch_plan.world_width, ground_fetch_plan.world_height);
+			if (ground_frame.mercator)
+				canopy->remap_rows_to_mercator(ground_fetch_plan.bbox.max().lat(),
+						ground_fetch_plan.bbox.min().lat());
+			if (pad > 0)
+				canopy->crop(pad, pad, final_width, final_height);
+			editor.ground->set_canopy_data(std::move(*canopy), final_width, final_height);
 		}
 	}
 	if (editor.ground && args.body == CelestialBody::Earth &&

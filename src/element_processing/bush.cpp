@@ -179,9 +179,8 @@ Block species_pick(Flora flora, uint64_t roll)
 Block species_at(const WorldEditor &editor, int x, int z, Kind kind)
 {
 	Flora flora = flora_for_climate(editor.climate());
-	if (editor.ground)
-		if (const auto eco = editor.ground->ecoregion_at(editor.ground_point(x, z)))
-			flora = flora_for_ecoregion(eco->biome);
+	if (const auto eco = editor.ecoregion(x, z))
+		flora = flora_for_ecoregion(eco->biome);
 	const uint64_t own = hash(x, z, SALT_DRIFT);
 	const uint64_t roll = own % 4 == 0 ? own >> 8
 									   : hash(floor_div(x, DRIFT_CELL),

@@ -55,18 +55,25 @@ struct OsmAttributeHint
 class OvertureHints
 {
 	std::unordered_map<OvertureOsmRef, OsmAttributeHint, OvertureOsmRefHash> hints_;
+	std::size_t limit_ = MAX_OVERTURE_OSM_HINTS;
 
 public:
+	OvertureHints() = default;
+	explicit OvertureHints(std::size_t limit) :
+			limit_(limit < MAX_OVERTURE_OSM_HINTS ? limit : MAX_OVERTURE_OSM_HINTS)
+	{
+	}
 	std::size_t size() const { return hints_.size(); }
 	bool empty() const { return hints_.empty(); }
 	void insert(OvertureOsmRef key, OsmAttributeHint hint);
+	void merge(const OvertureHints &other);
 	std::size_t apply(std::vector<ProcessedElement> &elements) const;
 };
 
 std::size_t overture_building_budget(const geographic::LLBBox &bbox);
 
-// Provider-neutral decoded GeoParquet row.  A host can use Arrow/Parquet,
-// GDAL, or a custom range reader and pass the normalized data here.
+// Provider-neutral decoded GeoParquet row. A host can use Arrow/Parquet, GDAL,
+// or a custom range reader and return normalized rows in OvertureCollection.
 struct OvertureBuilding
 {
 	std::string id;
@@ -80,11 +87,20 @@ struct OvertureBuilding
 	std::optional<double> roof_height;
 };
 
-// Rust's generation result carries supplementary Overture footprints and
-// height/floor hints separately. Hints are applied after OSM parsing so OSM
-// tags remain authoritative.
+// Rust's tile/Parquet collectors keep supplementary footprints and OSM height
+// hints in separate streams. Hints are applied after OSM parsing so OSM tags
+// remain authoritative and do not consume the footprint limit.
+struct OvertureCollection
+{
+	std::vector<OvertureBuilding> buildings;
+	OvertureHints hints;
+};
+
+// Converted generation result carries supplementary Overture footprints and
+// height/floor hints separately.
 struct OvertureData
 {
+	OvertureData() = default;
 	std::vector<ProcessedElement> elements;
 	OvertureHints hints;
 	std::size_t apply_hints(std::vector<ProcessedElement> &osm_elements) const;
@@ -121,14 +137,13 @@ std::vector<ProcessedElement> convert_overture_buildings(
 // normalized rows, so the mapgen library owns geometry conversion, bounds
 // clipping, limits, and OSM-source filtering while an embedding application
 // owns network credentials and Parquet decoding.
-using BuildingSource = std::function<std::vector<OvertureBuilding>(
+using BuildingSource = std::function<OvertureCollection(
 		const geographic::LLBBox &, std::size_t maximum)>;
 // Failure-aware transport seam: nullopt means the transport failed, while an
-// empty vector is a valid empty-area result. This distinction drives Auto's
+// empty collection is a valid empty-area result. This distinction drives Auto's
 // tile-first, Parquet-on-error policy.
-using BuildingTransportSource =
-		std::function<std::optional<std::vector<OvertureBuilding>>(
-				const geographic::LLBBox &, std::size_t maximum)>;
+using BuildingTransportSource = std::function<std::optional<OvertureCollection>(
+		const geographic::LLBBox &, std::size_t maximum)>;
 
 // Decode a local Overture GeoParquet partition through Apache Arrow/Parquet.
 // Keeping file access at this seam means an embedding application can provide
@@ -178,10 +193,14 @@ BuildingSource pmtiles_building_source(pmtiles::Header,
 		std::vector<std::uint8_t> root_directory, pmtiles::RangeReader read_range,
 		std::uint8_t zoom = 14, bool debug = false, bool include_osm_sourced = true);
 // Failure-aware variant for Auto source selection: nullopt means an archive or
-// tile read failed, while an empty vector is a successfully read empty area.
+// tile read failed, while an empty collection is a successfully read empty area.
+// OSM-sourced rows contribute to the separate hints field even when their
+// duplicate footprints are excluded; hints do not consume the caller's
+// footprint limit and are independently capped by osm_hint_budget.
 BuildingTransportSource pmtiles_building_transport_source(pmtiles::Header,
 		std::vector<std::uint8_t> root_directory, pmtiles::RangeReader read_range,
-		std::uint8_t zoom = 14, bool debug = false, bool include_osm_sourced = true);
+		std::uint8_t zoom = 14, bool debug = false, bool include_osm_sourced = true,
+		std::size_t osm_hint_budget = MAX_OVERTURE_OSM_HINTS);
 // HTTP-backed PMTiles source.  The URL must point at one buildings.pmtiles
 // archive; requests are byte ranges, never a whole planet-scale archive.
 BuildingSource http_pmtiles_building_source(std::string archive_url,
@@ -189,7 +208,8 @@ BuildingSource http_pmtiles_building_source(std::string archive_url,
 		bool debug = false, bool include_osm_sourced = true);
 BuildingTransportSource http_pmtiles_building_transport_source(std::string archive_url,
 		std::uint8_t zoom = 14, std::filesystem::path cache_directory = {},
-		bool debug = false, bool include_osm_sourced = true);
+		bool debug = false, bool include_osm_sourced = true,
+		std::size_t osm_hint_budget = MAX_OVERTURE_OSM_HINTS);
 
 std::vector<ProcessedElement> fetch_overture_buildings(double min_lat, double min_lng,
 		double max_lat, double max_lng, double scale, bool debug);

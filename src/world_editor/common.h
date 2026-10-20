@@ -2246,27 +2246,23 @@ struct WorldToModify
 		const int min_section = min_y >> 4;
 		const int max_section = max_y >> 4;
 		const int local_x = x & 15, local_z = z & 15;
-		std::optional<int> highest;
-		// Match Rust's section-first lookup. Canopy placement probes this for many
-		// adjacent columns; calling ChunkToModify::get_block for every Y repeats a
-		// section hash lookup thousands of times per column.
-		for (const auto &[section_y, section] : c->sections) {
-			if (section_y < min_section || section_y > max_section)
+		// Walk from the requested upper section down, matching Rust and avoiding
+		// scanning every resident section in the chunk for each canopy probe.
+		for (int section_y = max_section; section_y >= min_section; --section_y) {
+			const auto section_it = c->sections.find(section_y);
+			if (section_it == c->sections.end())
 				continue;
+			const auto &section = section_it->second;
 			const int section_base_y = section_y * 16;
 			const int from_y = std::max(min_y, section_base_y);
 			const int to_y = std::min(max_y, section_base_y + 15);
 			for (int y = to_y; y >= from_y; --y) {
 				const auto index = section_index(local_x, y - section_base_y, local_z);
-				if (section.storage.get(index).id() != block_definitions::AIR.id()) {
-					highest = highest ? std::max(*highest, y) : y;
-					break;
-				}
+				if (section.storage.get(index).id() != block_definitions::AIR.id())
+					return y;
 			}
-			if (highest && *highest == max_y)
-				return highest;
 		}
-		return highest;
+		return std::nullopt;
 	}
 };
 inline void invalidate_tiles(WorldToModify &world,
@@ -3091,13 +3087,16 @@ inline PackedPalette pack_palette(const BlockStorage &storage)
 	PackedPalette out;
 	std::array<std::uint16_t, MAX_BLOCK_ID> lookup{};
 	lookup.fill(UINT16_MAX);
-	for (const auto &block : storage.materialize()) {
+	const auto blocks = storage.materialize();
+	for (const auto &block : blocks) {
 		auto id = static_cast<std::size_t>(block.id());
 		if (id >= MAX_BLOCK_ID)
 			continue;
 		if (lookup[id] == UINT16_MAX) {
 			lookup[id] = static_cast<std::uint16_t>(out.palette.size());
-			out.palette.push_back({std::to_string(id)});
+			const auto defaults = block.properties();
+			out.palette.push_back({std::to_string(id),
+					defaults ? *defaults : BlockWithProperties::Properties{}});
 		}
 	}
 	const std::size_t bits = std::max<std::size_t>(4,
@@ -3107,7 +3106,7 @@ inline PackedPalette pack_palette(const BlockStorage &storage)
 	out.bits_per_block = bits;
 	std::uint64_t word = 0;
 	std::size_t used = 0;
-	for (const auto &block : storage.materialize()) {
+	for (const auto &block : blocks) {
 		auto id = static_cast<std::size_t>(block.id());
 		std::uint64_t p =
 				(id < MAX_BLOCK_ID && lookup[id] != UINT16_MAX) ? lookup[id] : 0;
@@ -3137,6 +3136,8 @@ inline PackedPalette pack_palette(const SectionToModify &section)
 		if (const auto it = section.properties.find(i);
 				it != section.properties.end() && it->second)
 			state = *it->second;
+		else if (const auto defaults = blocks[i].properties())
+			state = *defaults;
 		auto ordered = std::vector<std::pair<std::string, std::string>>(
 				state.begin(), state.end());
 		std::sort(ordered.begin(), ordered.end());

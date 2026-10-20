@@ -40,6 +40,11 @@ LuantiNode apply_slab_type(LuantiNode node, const Block &block, std::string_view
 LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		const char *facing, bool open, bool top)
 {
+	const auto defaults = block.block.properties();
+	const BlockProperties empty_properties;
+	const auto &properties = block.properties ? block.property_values()
+							 : defaults		  ? *defaults
+											  : empty_properties;
 	const bool white_bed = block.block == WHITE_BED;
 	const bool red_bed =
 			block.block == RED_BED_NORTH_HEAD || block.block == RED_BED_NORTH_FOOT ||
@@ -58,11 +63,9 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		if (block.block == RED_BED_NORTH_HEAD || block.block == RED_BED_EAST_HEAD ||
 				block.block == RED_BED_SOUTH_HEAD || block.block == RED_BED_WEST_HEAD)
 			bed_part = "head";
-		if (const auto it = block.property_values().find("facing");
-				it != block.property_values().end())
+		if (const auto it = properties.find("facing"); it != properties.end())
 			bed_facing = it->second;
-		if (const auto it = block.property_values().find("part");
-				it != block.property_values().end())
+		if (const auto it = properties.find("part"); it != properties.end())
 			bed_part = it->second;
 		const std::uint8_t direction = bed_facing == "east"	   ? 1
 									   : bed_facing == "south" ? 2
@@ -75,8 +78,8 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		return {name, direction};
 	}
 	auto property = [&](std::string_view key) -> std::string_view {
-		const auto it = block.property_values().find(std::string(key));
-		return it == block.property_values().end() ? std::string_view{} : it->second;
+		const auto it = properties.find(std::string(key));
+		return it == properties.end() ? std::string_view{} : it->second;
 	};
 	auto wallmounted = [](std::string_view direction) -> std::uint8_t {
 		if (direction == "down")
@@ -343,7 +346,9 @@ LuantiNode to_luanti_node(
 	case 46:
 		return {"mcl_nether:nether_brick", 0};
 	case 47:
-		return {"mcl_nether:netheriteblock", 0};
+		// LIGHT has no invisible counterpart in Mineclonia; interior lighting
+		// is represented by visible flush lamps in the Luanti generation path.
+		return {"air", 0};
 	case 48:
 		return {"mcl_fences:oak_fence", 0};
 	case 49:
@@ -439,7 +444,7 @@ LuantiNode to_luanti_node(
 	case 96:
 		return {"mcl_nether:soul_sand", 0};
 	case 97:
-		return stair("mcl_stairs:stair_red_nether_brick");
+		return stair("mcl_stairs:stair_deepslate_cobbled");
 	case 98:
 		return {"mcl_walls:sandstone", 0};
 	case 99:
@@ -697,7 +702,7 @@ LuantiNode to_luanti_node(
 	case 231:
 		return {"mcl_trees:leaves_cherry_blossom", 0};
 	case 232:
-		return {"mcl_colorblocks:concrete_powder_brown", 0};
+		return stair("mcl_stairs:stair_granite");
 	case 233:
 		return {"mcl_trees:leaves_mangrove", 0};
 	case 234:

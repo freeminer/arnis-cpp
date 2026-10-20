@@ -104,7 +104,9 @@ std::optional<float> CableSpan::cable_y(float position) const
 	for (std::size_t i = 0; i + 1 < points.size(); ++i) {
 		const auto [u0, y0] = points[i];
 		const auto [u1, y1] = points[i + 1];
-		if (position < u0 || position > u1)
+		// Rust's inclusive range test rejects NaN. Written this way, ordered
+		// comparisons in C++ would both be false and produce a NaN cable height.
+		if (!(position >= u0 && position <= u1))
 			continue;
 		const float t = u1 > u0 ? (position - u0) / (u1 - u0) : 0.0f;
 		return y0 + (y1 - y0) * t - sags[i] * 4.0f * t * (1.0f - t);
@@ -114,7 +116,16 @@ std::optional<float> CableSpan::cable_y(float position) const
 
 long long CableSpan::hanger_bay(float position) const
 {
-	return static_cast<long long>(std::floor(position / hanger_spacing));
+	// Rust's float-to-int cast saturates (and maps NaN to zero); a direct C++
+	// cast of NaN or an out-of-range float is undefined/implementation-defined.
+	const float bay = std::floor(position / hanger_spacing);
+	if (std::isnan(bay))
+		return 0;
+	if (bay <= static_cast<float>(std::numeric_limits<long long>::min()))
+		return std::numeric_limits<long long>::min();
+	if (bay >= static_cast<float>(std::numeric_limits<long long>::max()))
+		return std::numeric_limits<long long>::max();
+	return static_cast<long long>(bay);
 }
 
 bool CableSpan::suspends(int x, int z) const

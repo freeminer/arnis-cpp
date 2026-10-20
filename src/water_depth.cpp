@@ -174,7 +174,7 @@ bool bridge_adjacent(const RoadMaskBitmap &road_mask, int x, int z)
 int dune_amp(int body_max, int depth)
 {
 	const int target = body_max <= 3 ? 2 : body_max <= 5 ? 3 : 4;
-	return std::min(target, depth - 1);
+	return std::min(target, std::max(depth - 1, 0));
 }
 
 int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y, int bed_y,

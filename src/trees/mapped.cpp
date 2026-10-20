@@ -1,9 +1,12 @@
 #include "mapped.h"
+#include "unicode_alphabetic.h"
+#include "unicode_case.h"
 #include "../deterministic_rng.h"
 #include "../mapillary/geometry.h"
 #include <algorithm>
+#include <array>
 #include <cmath>
-#include <cctype>
+#include <cstdint>
 #include <iterator>
 #include <limits>
 #include <stdexcept>
@@ -24,16 +27,17 @@ int div_euclid(int value, int divisor)
 // OSM species/genus values are UTF-8. Rust's char::is_alphabetic scans Unicode
 // scalar values; treating each byte as a character can split an accented genus
 // and accidentally map the ASCII suffix (for example, "éPinus") to another
-// tree type. Keep valid non-ASCII UTF-8 sequences in the token and normalize
-// ASCII letters as before. Unicode case conversion is intentionally left intact
-// rather than applying locale-dependent C library rules.
-std::size_t alphabetic_char_bytes(const std::string &value, std::size_t offset)
+// tree type. Decode each scalar and use pinned Unicode Alphabetic/casing tables
+// so tokenization and normalization match Rust independently of process locale.
+bool decode_utf8(const std::string &value, std::size_t offset, std::uint32_t &codepoint,
+		std::size_t &length)
 {
 	const auto first = static_cast<unsigned char>(value[offset]);
-	if (first < 0x80)
-		return std::isalpha(first) ? 1 : 0;
-
-	std::size_t length = 0;
+	if (first < 0x80) {
+		codepoint = first;
+		length = 1;
+		return true;
+	}
 	if ((first & 0xE0) == 0xC0)
 		length = 2;
 	else if ((first & 0xF0) == 0xE0)
@@ -41,21 +45,74 @@ std::size_t alphabetic_char_bytes(const std::string &value, std::size_t offset)
 	else if ((first & 0xF8) == 0xF0)
 		length = 4;
 	else
-		return 0;
+		return false;
 	if (offset + length > value.size())
-		return 0;
-	std::uint32_t codepoint = first & (length == 2 ? 0x1F : length == 3 ? 0x0F : 0x07);
+		return false;
+	codepoint = first & (length == 2 ? 0x1F : length == 3 ? 0x0F : 0x07);
 	for (std::size_t i = 1; i < length; ++i) {
 		const auto continuation = static_cast<unsigned char>(value[offset + i]);
 		if ((continuation & 0xC0) != 0x80)
-			return 0;
+			return false;
 		codepoint = (codepoint << 6) | (continuation & 0x3F);
 	}
 	if ((length == 2 && codepoint < 0x80) || (length == 3 && codepoint < 0x800) ||
 			(length == 4 && codepoint < 0x10000) ||
 			(codepoint >= 0xD800 && codepoint <= 0xDFFF) || codepoint > 0x10FFFF)
-		return 0;
-	return length;
+		return false;
+	return true;
+}
+
+std::size_t alphabetic_char_bytes(const std::string &value, std::size_t offset)
+{
+	std::uint32_t codepoint{};
+	std::size_t length{};
+	return decode_utf8(value, offset, codepoint, length) &&
+						   detail::is_alphabetic(codepoint)
+				   ? length
+				   : 0;
+}
+
+void append_utf8(std::string &out, std::uint32_t codepoint)
+{
+	if (codepoint <= 0x7F) {
+		out.push_back(static_cast<char>(codepoint));
+	} else if (codepoint <= 0x7FF) {
+		out.push_back(static_cast<char>(0xC0 | (codepoint >> 6)));
+		out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+	} else if (codepoint <= 0xFFFF) {
+		out.push_back(static_cast<char>(0xE0 | (codepoint >> 12)));
+		out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+		out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+	} else {
+		out.push_back(static_cast<char>(0xF0 | (codepoint >> 18)));
+		out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3F)));
+		out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3F)));
+		out.push_back(static_cast<char>(0x80 | (codepoint & 0x3F)));
+	}
+}
+
+std::string rust_genus_case(const std::string &word)
+{
+	std::string out;
+	out.reserve(word.size());
+	bool uppercase = true;
+	for (std::size_t offset = 0; offset < word.size();) {
+		std::uint32_t codepoint{};
+		std::size_t length{};
+		if (!decode_utf8(word, offset, codepoint, length)) {
+			out.push_back(word[offset++]);
+			uppercase = false;
+			continue;
+		}
+		std::array<std::uint32_t, 3> mapped{};
+		const auto count =
+				::arnis::trees::mapped::detail::case_map(codepoint, uppercase, mapped);
+		for (std::size_t i = 0; i < count; ++i)
+			append_utf8(out, mapped[i]);
+		offset += length;
+		uppercase = false;
+	}
+	return out;
 }
 
 std::optional<std::vector<TreeType>> genus_pool(const std::string &g)
@@ -107,17 +164,7 @@ std::optional<std::string> parse_genus(
 				break;
 			end += bytes;
 		}
-		std::string out = value.substr(start, end - start);
-		if (!out.empty()) {
-			if (static_cast<unsigned char>(out[0]) < 0x80)
-				out[0] = static_cast<char>(
-						std::toupper(static_cast<unsigned char>(out[0])));
-			for (std::size_t i = 1; i < out.size(); ++i)
-				if (static_cast<unsigned char>(out[i]) < 0x80)
-					out[i] = static_cast<char>(
-							std::tolower(static_cast<unsigned char>(out[i])));
-			return out;
-		}
+		return rust_genus_case(value.substr(start, end - start));
 	}
 	auto it = tags.find("genus:wikidata");
 	if (it != tags.end()) {

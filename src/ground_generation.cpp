@@ -396,7 +396,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	if (canopy_tree && slope <= 4 && ground_allows_trees &&
 			!(tunnel_footprint && tunnel_footprint->contains(x, z)) &&
 			!editor.check_for_block_absolute(x, ground_y + 1, z) &&
-			!(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z)))
+			!editor.under_mapped_crown(x, z))
 		Tree::create_from_canopy(
 				editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
 	// Rust runs its land-cover decoration after canopy trees. A placed canopy
@@ -420,8 +420,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		// land-cover tree roll in measured cells, never the forest-floor plants.
 		const auto tree_rate = scale < MICRO_TREE_MAX_SCALE ? 4u : 30u;
 		const auto choice = rng.uniform(tree_rate);
-		if (choice == 0 && !canopy_covered &&
-				!(editor.mapped_trunks && editor.mapped_trunks->under_crown(x, z))) {
+		if (choice == 0 && !canopy_covered && !editor.under_mapped_crown(x, z)) {
 			Tree::create(editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
 		} else if (ground_is_natural &&
 				   undergrowth_roll(x, z, .4 * sward, SALT_FOREST_FLOOR)) {

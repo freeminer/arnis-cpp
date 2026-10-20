@@ -135,18 +135,20 @@ void crop_flat(std::vector<T> &grid, std::size_t source_width, std::size_t x0,
 	if (!source_width)
 		return;
 	const std::size_t rows = grid.size() / source_width;
-	if (z0 >= rows) {
+	height = std::min(height, rows > z0 ? rows - z0 : 0);
+	width = std::min(width, source_width > x0 ? source_width - x0 : 0);
+	if (!width || !height) {
 		grid.clear();
+		grid.shrink_to_fit();
 		return;
 	}
-	width = std::min(width, source_width > x0 ? source_width - x0 : 0);
-	height = std::min(height, rows - z0);
-	std::vector<T> out;
-	out.reserve(width * height);
-	for (std::size_t z = 0; z < height; ++z)
-		out.insert(out.end(), grid.begin() + (z0 + z) * source_width + x0,
-				grid.begin() + (z0 + z) * source_width + x0 + width);
-	grid.swap(out);
+	for (std::size_t z = 0; z < height; ++z) {
+		const auto from = (z0 + z) * source_width + x0;
+		const auto to = z * width;
+		std::copy_n(grid.begin() + from, width, grid.begin() + to);
+	}
+	grid.resize(width * height);
+	grid.shrink_to_fit();
 }
 
 }

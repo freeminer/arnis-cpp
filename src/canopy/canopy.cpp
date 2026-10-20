@@ -1077,7 +1077,7 @@ std::optional<CanopyData> fetch_canopy_data(const std::filesystem::path &base,
 		if (length == 0 ||
 				length > std::uint64_t(std::numeric_limits<std::size_t>::max()))
 			return std::nullopt;
-		const auto body = http_get_range(url, offset, length);
+		const auto body = http_get_range(url, offset, length, 90);
 		if (body.size() != length)
 			return std::nullopt;
 		return std::vector<std::uint8_t>(body.begin(), body.end());
