@@ -71,6 +71,103 @@ namespace buildings
 {
 using building_facade::BaySlot;
 
+namespace
+{
+using PropertyPair = std::pair<std::string_view, std::string_view>;
+
+// Match Rust's facade property cache: recurring states are resolved on the
+// worker thread before allocating an unordered_map for BlockWithProperties.
+BlockWithProperties cached_prop_block(
+		Block base, std::initializer_list<PropertyPair> properties)
+{
+	if (properties.size() == 0)
+		return BlockWithProperties{base};
+	struct Entry
+	{
+		content_t block_id{};
+		std::vector<std::pair<std::string, std::string>> properties;
+		std::weak_ptr<const BlockWithProperties::Properties> state;
+	};
+	struct LocalCache
+	{
+		std::unordered_map<std::size_t, std::vector<Entry>> entries;
+		std::size_t count = 0;
+	};
+	static thread_local LocalCache cache;
+
+	std::size_t hash = std::hash<content_t>{}(base.id());
+	for (const auto &[key, value] : properties) {
+		for (const auto part : {key, value})
+			for (const unsigned char byte : part)
+				hash = (hash ^ byte) * 1099511628211ULL;
+		hash = (hash ^ 0xff) * 1099511628211ULL;
+	}
+	if (const auto found = cache.entries.find(hash); found != cache.entries.end()) {
+		auto &entries = found->second;
+		for (auto it = entries.begin(); it != entries.end();) {
+			if (auto state = it->state.lock()) {
+				bool equal = it->block_id == base.id() &&
+							 it->properties.size() == properties.size();
+				auto requested = properties.begin();
+				for (const auto &[key, value] : it->properties) {
+					if (!equal)
+						break;
+					equal = key == requested->first && value == requested->second;
+					++requested;
+				}
+				if (equal)
+					return BlockWithProperties{base, std::move(state)};
+				++it;
+			} else {
+				it = entries.erase(it);
+				--cache.count;
+			}
+		}
+		if (entries.empty())
+			cache.entries.erase(found);
+	}
+
+	BlockWithProperties::Properties map;
+	map.reserve(properties.size());
+	Entry entry;
+	entry.block_id = base.id();
+	entry.properties.reserve(properties.size());
+	for (const auto &[key, value] : properties) {
+		entry.properties.emplace_back(key, value);
+		map.emplace(entry.properties.back());
+	}
+	entry.state = BlockWithProperties::intern_properties(std::move(map));
+	if (cache.count >= 512) {
+		for (auto bucket = cache.entries.begin(); bucket != cache.entries.end();) {
+			auto &entries = bucket->second;
+			for (auto it = entries.begin(); it != entries.end();) {
+				if (it->state.expired()) {
+					it = entries.erase(it);
+					--cache.count;
+				} else {
+					++it;
+				}
+			}
+			if (entries.empty())
+				bucket = cache.entries.erase(bucket);
+			else
+				++bucket;
+		}
+		if (cache.count >= 512) {
+			auto bucket = cache.entries.begin();
+			bucket->second.erase(bucket->second.begin());
+			--cache.count;
+			if (bucket->second.empty())
+				cache.entries.erase(bucket);
+		}
+	}
+	auto state = entry.state.lock();
+	cache.entries[hash].push_back(std::move(entry));
+	++cache.count;
+	return BlockWithProperties{base, std::move(state)};
+}
+} // namespace
+
 Block rust_category_wall_block(
 		BuildingCategory category, ArchEra era, biome::Climate climate, ChaCha8Rng &rng);
 std::optional<Block> rust_regional_wall_block(BuildingCategory category, ArchEra era,
@@ -3846,18 +3943,12 @@ int scaled_blocks(int value, double scale_factor)
 	return static_cast<int>(std::floor(static_cast<double>(value) * scale_factor));
 }
 
-int terrain_base_level(WorldEditor &editor, const ProcessedWay &element,
-		const std::vector<std::pair<int, int>> &footprint, int fallback)
+int terrain_base_level(WorldEditor &editor, const ProcessedWay &element, int fallback)
 {
 	std::optional<int> highest;
-	const auto include = [&](int x, int z) {
-		if (const auto level = editor.terrain_level(x, z))
-			highest = highest ? std::max(*highest, *level) : *level;
-	};
 	for (const auto &node : element.nodes)
-		include(node.x, node.z);
-	for (const auto &[x, z] : footprint)
-		include(x, z);
+		if (const auto level = editor.terrain_level(node.x, node.z))
+			highest = highest ? std::max(*highest, *level) : *level;
 	return highest.value_or(fallback);
 }
 
@@ -3891,9 +3982,8 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 
 	int start_y_offset = min_level_offset;
 	if (terrain_enabled)
-		start_y_offset = terrain_base_level(
-								 editor, element, cached_floor_area, args.ground_level) +
-						 min_level_offset;
+		start_y_offset =
+				terrain_base_level(editor, element, args.ground_level) + min_level_offset;
 
 	int roof_thickness = 5;
 	if (const auto height = parse_building_height_tag(element.tags)) {
@@ -4394,7 +4484,7 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 			}
 			const Block cap = roof_rng.random_bool(.6) ? POLISHED_BLACKSTONE_SLAB
 													   : SMOOTH_STONE_SLAB;
-			const BlockWithProperties cap_slab{cap, {{"type", "bottom"}}};
+			const auto cap_slab = cached_prop_block(cap, {{"type", "bottom"}});
 			const bool iron_door = roof_rng.random_bool(.5);
 			for (int target_index = 0; target_index < (pair ? 2 : 1); ++target_index) {
 				const auto target = target_index == 0 ? end_a : end_b;
@@ -4433,15 +4523,15 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 				const Block door_lower = iron_door ? IRON_DOOR : DARK_OAK_DOOR_LOWER;
 				const Block door_upper = iron_door ? IRON_DOOR : DARK_OAK_DOOR_UPPER;
 				editor.set_block_with_properties_absolute(
-						BlockWithProperties{
+						cached_prop_block(
 								door_lower, {{"half", "lower"}, {"facing", facing},
-													{"hinge", "left"}}},
+													{"hinge", "left"}}),
 						door_x_pos, roof_y + 1, door_z_pos, std::nullopt,
 						std::optional<std::vector<Block>>(std::vector<Block>{}));
 				editor.set_block_with_properties_absolute(
-						BlockWithProperties{
+						cached_prop_block(
 								door_upper, {{"half", "upper"}, {"facing", facing},
-													{"hinge", "left"}}},
+													{"hinge", "left"}}),
 						door_x_pos, roof_y + 2, door_z_pos, std::nullopt,
 						std::optional<std::vector<Block>>(std::vector<Block>{}));
 				if (room_height >= 3) {
@@ -4464,9 +4554,9 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 		} else if (!penthouse && usable_cells.size() >= 6 && roof_rng.random_bool(.6)) {
 			if (const auto hatch = find_roof_rect(end_a, 1, 1, 2, reach)) {
 				editor.set_block_with_properties_absolute(
-						BlockWithProperties{
+						cached_prop_block(
 								IRON_TRAPDOOR, {{"facing", "north"}, {"half", "bottom"},
-													   {"open", "false"}}},
+													   {"open", "false"}}),
 						hatch->first, roof_y + 1, hatch->second, std::nullopt,
 						std::optional<std::vector<Block>>(std::vector<Block>{}));
 				reserve_rect(hatch->first, hatch->second, 1, 1);
@@ -4531,8 +4621,8 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 						if (rim(dx, dz, radius)) {
 							for (int y = tub; y < tub + barrel_height; ++y)
 								editor.set_block_with_properties_absolute(
-										BlockWithProperties{BARREL,
-												{{"facing", "up"}, {"open", "false"}}},
+										cached_prop_block(BARREL,
+												{{"facing", "up"}, {"open", "false"}}),
 										cx + dx, y, cz + dz, std::nullopt,
 										std::optional<std::vector<Block>>(
 												std::vector<Block>{}));
@@ -4551,8 +4641,8 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 							if (r == 0 ||
 									(rim(dx, dz, r) && std::abs(dx) == std::abs(dz))) {
 								editor.set_block_with_properties_absolute(
-										BlockWithProperties{
-												SPRUCE_SLAB, {{"type", "bottom"}}},
+										cached_prop_block(
+												SPRUCE_SLAB, {{"type", "bottom"}}),
 										x, y, z, std::nullopt,
 										std::optional<std::vector<Block>>(
 												std::vector<Block>{}));
@@ -4564,8 +4654,8 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 												? (dx > 0 ? "west" : "east")
 												: (dz > 0 ? "north" : "south");
 								editor.set_block_with_properties_absolute(
-										BlockWithProperties{
-												SPRUCE_STAIRS, {{"facing", facing}}},
+										cached_prop_block(
+												SPRUCE_STAIRS, {{"facing", facing}}),
 										x, y, z, std::nullopt,
 										std::optional<std::vector<Block>>(
 												std::vector<Block>{}));
@@ -4672,15 +4762,11 @@ void generate_rooftop_systems(WorldEditor &editor, const ProcessedWay &element,
 				const int x = origin->first;
 				const int z = origin->second;
 				const auto place_props =
-						[&](Block block,
-								std::initializer_list<std::pair<std::string, std::string>>
-										props,
+						[&](Block block, std::initializer_list<PropertyPair> props,
 								int y) {
 							editor.set_block_with_properties_absolute(
-									BlockWithProperties{
-											block, BlockWithProperties::Properties(
-														   props.begin(), props.end())},
-									x, y, z, std::nullopt,
+									cached_prop_block(block, props), x, y, z,
+									std::nullopt,
 									std::optional<std::vector<Block>>(
 											std::vector<Block>{}));
 						};
@@ -5102,7 +5188,7 @@ void place_gabled_eave_overhang(WorldEditor &editor,
 	for (const auto &[cell, facing] : inner) {
 		if (slab_pitch && slab) {
 			editor.set_block_with_properties_absolute(
-					BlockWithProperties{*slab, {{"type", "top"}}}, cell.first, stair_y,
+					cached_prop_block(*slab, {{"type", "top"}}), cell.first, stair_y,
 					cell.second, nullptr, nullptr);
 			continue;
 		}
@@ -5118,7 +5204,7 @@ void place_gabled_eave_overhang(WorldEditor &editor,
 		if (!inner.contains(cell)) {
 			if (slab_pitch && slab) {
 				editor.set_block_with_properties_absolute(
-						BlockWithProperties{*slab, {{"type", "bottom"}}}, cell.first,
+						cached_prop_block(*slab, {{"type", "bottom"}}), cell.first,
 						outer_y, cell.second, nullptr, nullptr);
 				continue;
 			}
@@ -5232,7 +5318,7 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 					   bool upper) {
 		if (slab_pitch && slab) {
 			editor.set_block_with_properties_absolute(
-					BlockWithProperties{*slab, {{"type", upper ? "top" : "bottom"}}},
+					cached_prop_block(*slab, {{"type", upper ? "top" : "bottom"}}),
 					cell.first, y, cell.second, nullptr, nullptr);
 			return;
 		}
@@ -5866,14 +5952,14 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 			}
 			if (y == height) {
 				if (roof_level % 2 == 0 && base_slab && slab) {
-					const BlockWithProperties cap{*slab, {{"type", "bottom"}}};
+					const auto cap = cached_prop_block(*slab, {{"type", "bottom"}});
 					put_state(cap, y);
 					rake_caps.insert_or_assign({x, z}, RakeCap{y, cap});
 				} else if (steep_drop) {
 					put_full(cell_roof_block, y);
 				} else if (all_high) {
 					if (slab_pitch && stepped && base_slab && slab) {
-						const BlockWithProperties cap{*slab, {{"type", "top"}}};
+						const auto cap = cached_prop_block(*slab, {{"type", "top"}});
 						put_state(cap, y);
 						rake_caps.insert_or_assign({x, z}, RakeCap{y, cap});
 					} else {
@@ -5889,7 +5975,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 					put_state(surface_stair, y);
 					rake_caps.insert_or_assign({x, z}, RakeCap{y, rake_stair});
 				} else if (all_low && base_slab && slab) {
-					const BlockWithProperties cap{*slab, {{"type", "bottom"}}};
+					const auto cap = cached_prop_block(*slab, {{"type", "bottom"}});
 					put_state(cap, y);
 					rake_caps.insert_or_assign({x, z}, RakeCap{y, cap});
 				} else {
@@ -6269,13 +6355,14 @@ void generate_hospital_wall_cross(WorldEditor &editor, const ProcessedWay &eleme
 		const int outward =
 				(mid_x - center_x) * normal_x + (mid_z - center_z) * normal_z >= 0 ? 1
 																				   : -1;
-		const int nx = (normal_x * outward > 0) - (normal_x * outward < 0);
-		const int nz = (normal_z * outward > 0) - (normal_z * outward < 0);
-		const std::string facing = std::abs(nx) >= std::abs(nz)
-										   ? (nx > 0 ? "east" : "west")
-										   : (nz > 0 ? "south" : "north");
-		editor.place_wall_banner(WHITE_WALL_BANNER, mid_x + nx, banner_y, mid_z + nz,
-				facing, "white", patterns);
+		const int nx = normal_x * outward, nz = normal_z * outward;
+		const bool horizontal = std::abs(nx) >= std::abs(nz);
+		const std::string facing =
+				horizontal ? (nx > 0 ? "east" : "west") : (nz > 0 ? "south" : "north");
+		const int bx = mid_x + (horizontal ? (nx > 0 ? 1 : -1) : 0);
+		const int bz = mid_z + (horizontal ? 0 : (nz > 0 ? 1 : -1));
+		editor.place_wall_banner(
+				WHITE_WALL_BANNER, bx, banner_y, bz, facing, "white", patterns);
 	}
 }
 
@@ -6407,7 +6494,7 @@ void generate_facade_cornice_details(WorldEditor &editor, const ProcessedWay &el
 	const int course_y = start_y + grammar_anchor + floor_cycle;
 	const Block stair_block = get_stair_block_for_material(trim_block);
 	const auto slab = get_slab_block_for_material(trim_block);
-	const BlockWithProperties ledge{slab, {{"type", "top"}}};
+	const auto ledge = cached_prop_block(slab, {{"type", "top"}});
 	const BlockWithProperties cap = rooftops::bottom_slab(slab);
 	std::unordered_set<std::pair<int, int>, PairHash> placed;
 	for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
@@ -6789,8 +6876,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 	int start_y_offset = 0;
 	if (terrain_enabled) {
-		start_y_offset = terrain_base_level(
-								 *editor, element, cached_floor_area, args.ground_level) +
+		start_y_offset = terrain_base_level(*editor, element, args.ground_level) +
 						 min_level_offset;
 	} else {
 		start_y_offset = min_level_offset;
@@ -6944,8 +7030,21 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		int x, z, nx, nz, run, position;
 		BaySlot slot, shop_slot;
 	};
+	struct SyntheticEntrancePlan
+	{
+		std::size_t segment;
+		int x, z;
+		bool double_door;
+	};
+	struct PlannedUnitEntrance
+	{
+		int x, z, nx, nz;
+	};
 	std::vector<WindowLifeColumn> window_life_columns;
 	std::vector<FacadeWindowColumn> facade_window_columns;
+	std::optional<SyntheticEntrancePlan> synthetic_entrance_plan;
+	std::vector<PlannedUnitEntrance> planned_unit_entrances;
+	std::vector<PlannedUnitEntrance> planned_entrances;
 
 	// building type
 	std::string building_type = "yes";
@@ -7775,6 +7874,324 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		}
 	}
 
+	const bool mapped_entrance = std::any_of(
+			element.nodes.begin(), element.nodes.end(), [](const ProcessedNode &node) {
+				const auto entrance = node.tags.get("entrance");
+				const auto door = node.tags.get("door");
+				if ((!node.tags.contains("entrance") || entrance == "no") &&
+						(!node.tags.contains("door") || door == "no"))
+					return false;
+				if (const auto level = node.tags.get("level"); !level.empty()) {
+					if (const auto parsed = strict_parse::f64(level);
+							parsed && *parsed != 0.0)
+						return false;
+				}
+				return true;
+			});
+	const bool interior_allowed =
+			args.interior && cached_floor_area.size() >= 24 &&
+			std::find(INTERIOR_EXCLUSIONS.begin(), INTERIOR_EXCLUSIONS.end(),
+					std::string_view(building_type)) == INTERIOR_EXCLUSIONS.end() &&
+			condition != BuildingCondition::Construction &&
+			condition != BuildingCondition::Ruined;
+	std::vector<int> floor_levels;
+	std::optional<interior_uses::InteriorPlan> interior_plan;
+	bool open_hall = false;
+	if (std::get<2>(corner_addup) != 0) {
+		floor_levels.push_back(start_y_offset);
+		if (building_height > floor_cycle + 2) {
+			const int num_upper_floors = std::max(1, building_height / floor_cycle);
+			for (int floor = 1; floor < num_upper_floors; ++floor)
+				floor_levels.push_back(
+						start_y_offset + grammar_anchor + floor * floor_cycle);
+		}
+		static const std::vector<interior_uses::Tenant> no_interior_tenants;
+		const auto &interior_tenants = interior_index
+											   ? interior_index->tenants(element.id)
+											   : no_interior_tenants;
+		const auto interior_area =
+				interior_index ? interior_index->area(element.id) : std::nullopt;
+		if (interior_allowed) {
+			const interior_uses::PlanInputs plan_inputs{element.tags, building_type,
+					floor_levels.size(), min_level, min_level_offset > 0,
+					cached_floor_area.size(), {(min_x + max_x) / 2, (min_z + max_z) / 2},
+					interior_tenants, interior_area};
+			interior_plan = interior_uses::plan_interior(plan_inputs);
+		}
+		open_hall = interior_plan && interior_plan->open_hall;
+	}
+	const bool thin_ring_footprint = cached_footprint_size <= THIN_RING_MAX_CELLS;
+	const bool allow_preset_utility_door = !mapped_entrance && !thin_ring_footprint &&
+										   condition != BuildingCondition::Construction &&
+										   condition != BuildingCondition::Ruined &&
+										   condition != BuildingCondition::Abandoned;
+	const bool preset_utility_door =
+			allow_preset_utility_door &&
+			(category == BuildingCategory::Garage || category == BuildingCategory::Shed ||
+					category == BuildingCategory::Greenhouse);
+	// Rust plans mapped entrances before drawing the facade so window bays,
+	// sills, shutters, and other details leave both the door and its threshold
+	// clear. C++ renders doors later in this monolithic pass, so reserve the
+	// same columns here, using the segment choice used by the render pass.
+	if (min_level_offset == 0 && condition != BuildingCondition::Construction &&
+			condition != BuildingCondition::Ruined &&
+			category != BuildingCategory::Greenhouse &&
+			category != BuildingCategory::Shed && category != BuildingCategory::Garage) {
+		std::unordered_set<std::pair<int, int>, PairHash> reserved_entrances;
+		for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+			const auto &node = element.nodes[i];
+			if (!((node.tags.contains("entrance") && node.tags.get("entrance") != "no") ||
+						(node.tags.contains("door") && node.tags.get("door") != "no")))
+				continue;
+			if (const auto level_it = node.tags.find("level");
+					level_it != node.tags.end()) {
+				std::string_view level = level_it->second;
+				while (!level.empty() &&
+						std::isspace(static_cast<unsigned char>(level.front())))
+					level.remove_prefix(1);
+				while (!level.empty() &&
+						std::isspace(static_cast<unsigned char>(level.back())))
+					level.remove_suffix(1);
+				if (const auto parsed = strict_parse::f64(level);
+						parsed && *parsed != 0.0)
+					continue;
+			}
+			if (!reserved_entrances.emplace(node.x, node.z).second)
+				continue;
+			const building_facade::SegmentFacade *before =
+					i > 0 && i - 1 < facade_plan.segments.size() &&
+									facade_plan.segments[i - 1]
+							? &*facade_plan.segments[i - 1]
+							: nullptr;
+			const building_facade::SegmentFacade *after =
+					i < facade_plan.segments.size() && facade_plan.segments[i]
+							? &*facade_plan.segments[i]
+							: nullptr;
+			const auto *segment = before && after
+										  ? (before->len >= after->len ? before : after)
+										  : (before ? before : after);
+			if (segment) {
+				facade_plan.mark_door_column(node.x, node.z);
+				facade_plan.mark_door_column(
+						node.x + segment->normal.first, node.z + segment->normal.second);
+				if (node.tags.get("entrance") == "main" &&
+						(category == BuildingCategory::Commercial ||
+								category == BuildingCategory::Office ||
+								category == BuildingCategory::Hotel) &&
+						segment->len >= 8 &&
+						(segment->tangent.first == 0 || segment->tangent.second == 0)) {
+					const bool ends_here =
+							before && (!after || before->len >= after->len);
+					const auto tangent = ends_here ? std::pair{-segment->tangent.first,
+															 -segment->tangent.second}
+												   : segment->tangent;
+					const int x = node.x + tangent.first, z = node.z + tangent.second;
+					if (!passage_at(effective_passages, x, z) &&
+							!facade_plan.is_party(x, z)) {
+						facade_plan.mark_door_column(x, z);
+						facade_plan.mark_door_column(
+								x + segment->normal.first, z + segment->normal.second);
+					}
+				}
+				continue;
+			}
+			// If there is no road-derived facade segment, use the same footprint
+			// inward-neighbour inference as the mapped-door renderer below.
+			std::optional<std::pair<int, int>> inward;
+			int best_score = std::numeric_limits<int>::min();
+			for (const auto direction : {std::pair{0, -1}, std::pair{1, 0},
+						 std::pair{0, 1}, std::pair{-1, 0}}) {
+				if (!current_footprint.contains(
+							{node.x + direction.first, node.z + direction.second}))
+					continue;
+				const int score = direction.first * (min_x + max_x - 2 * node.x) +
+								  direction.second * (min_z + max_z - 2 * node.z);
+				if (!inward || score > best_score) {
+					inward = direction;
+					best_score = score;
+				}
+			}
+			if (inward) {
+				facade_plan.mark_door_column(node.x, node.z);
+				facade_plan.mark_door_column(
+						node.x - inward->first, node.z - inward->second);
+			}
+		}
+	}
+
+	// The wall loop below also records these bay slots as it draws. Build that
+	// compact plan first so a synthetic entrance can reserve its wall and sill
+	// columns before any facade detail is written.
+	for (std::size_t segment_index = 0; segment_index + 1 < element.nodes.size() &&
+										segment_index < facade_plan.segments.size();
+			++segment_index) {
+		if (!facade_plan.segments[segment_index])
+			continue;
+		const auto &a = element.nodes[segment_index];
+		const auto &b = element.nodes[segment_index + 1];
+		auto points = bresenham_line(a.x, start_y_offset, a.z, b.x, start_y_offset, b.z);
+		BayRhythm rhythm = window_rhythm(window_archetype);
+		if (window_surrounds)
+			++rhythm.pier;
+		const auto bays = BayLayout::plan(static_cast<int>(points.size()), rhythm);
+		const auto shop_bays = BayLayout::plan(static_cast<int>(points.size()),
+				BayRhythm{3, 1, std::clamp(bays.lead, 1, 2)});
+		const auto normal = facade_plan.segments[segment_index]->normal;
+		if (normal == std::pair<int, int>{0, 0})
+			continue;
+		for (std::size_t position = 0; position < points.size(); ++position) {
+			const auto &point = points[position];
+			facade_window_columns.push_back({std::get<0>(point), std::get<2>(point),
+					normal.first, normal.second, static_cast<int>(segment_index),
+					static_cast<int>(position), bays.slot(static_cast<int>(position)),
+					shop_bays.slot(static_cast<int>(position))});
+		}
+	}
+
+	// Choose and reserve the same seeded, bay-aware synthetic entry used by the
+	// rendering pass. In particular, its door and outward threshold stay clear
+	// of wall/window details regardless of the later render order.
+	if (!mapped_entrance && min_level_offset == 0 &&
+			condition != BuildingCondition::Construction &&
+			condition != BuildingCondition::Ruined &&
+			category != BuildingCategory::Greenhouse &&
+			category != BuildingCategory::Shed && category != BuildingCategory::Garage) {
+		const bool corner_entrance =
+				facade_plan.corner && (category == BuildingCategory::Commercial ||
+											  category == BuildingCategory::Hotel ||
+											  category == BuildingCategory::Office);
+		std::optional<std::size_t> entrance_segment;
+		if (corner_entrance) {
+			const auto &corner = *facade_plan.corner;
+			const auto length = [&](std::size_t i) {
+				return i < facade_plan.segments.size() && facade_plan.segments[i]
+							   ? facade_plan.segments[i]->len
+							   : 0;
+			};
+			entrance_segment = length(corner.seg_a) >= length(corner.seg_b)
+									   ? corner.seg_a
+									   : corner.seg_b;
+		} else if (facade_plan.front_segment) {
+			entrance_segment = facade_plan.front_segment;
+		} else {
+			for (std::size_t i = 0; i < facade_plan.segments.size(); ++i)
+				if (facade_plan.segments[i] &&
+						facade_plan.segments[i]->facade_class !=
+								building_facade::FacadeClass::Party &&
+						(!entrance_segment ||
+								facade_plan.segments[i]->len >
+										facade_plan.segments[*entrance_segment]->len))
+					entrance_segment = i;
+		}
+		if (entrance_segment && *entrance_segment + 1 < element.nodes.size() &&
+				facade_plan.segments[*entrance_segment]) {
+			const auto &a = element.nodes[*entrance_segment];
+			const auto &b = element.nodes[*entrance_segment + 1];
+			const auto &segment = *facade_plan.segments[*entrance_segment];
+			const auto points = bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
+			if (points.size() >= 5) {
+				auto position_rng = element_rng(group_seed ^ 0xD00E57E900000011ULL);
+				std::size_t target = points.size() / 2;
+				if (corner_entrance) {
+					const int from_corner = 2 + int(position_rng.uniform(2));
+					const bool corner_at_end =
+							facade_plan.corner->seg_a == *entrance_segment;
+					target = corner_at_end ? points.size() - 1 -
+													 static_cast<std::size_t>(from_corner)
+										   : static_cast<std::size_t>(from_corner);
+				} else {
+					const double jitter = position_rng.uniform_real(-.15, .15);
+					target = static_cast<std::size_t>(
+							static_cast<double>(points.size()) * (.5 + jitter));
+				}
+				const bool wants_double =
+						(ground_floor == GroundFloorKind::Lobby ||
+								category == BuildingCategory::Commercial ||
+								category == BuildingCategory::Office ||
+								category == BuildingCategory::Hotel ||
+								category == BuildingCategory::School ||
+								category == BuildingCategory::Hospital) &&
+						segment.len >= 8 &&
+						(segment.tangent.first == 0 || segment.tangent.second == 0);
+				const auto usable = [&](std::size_t index) {
+					if (index < 2 || index + 2 >= points.size())
+						return false;
+					const int x = std::get<0>(points[index]);
+					const int z = std::get<2>(points[index]);
+					return !passage_at(effective_passages, x, z) &&
+						   !facade_plan.is_party(x, z);
+				};
+				const auto bay_accepts = [&](std::size_t index, int leaves) {
+					const auto column = std::find_if(facade_window_columns.begin(),
+							facade_window_columns.end(),
+							[&](const FacadeWindowColumn &c) {
+								return c.run == static_cast<int>(*entrance_segment) &&
+									   c.position == static_cast<int>(index);
+							});
+					if (column == facade_window_columns.end())
+						return false;
+					const bool shopfront_column =
+							(ground_floor != GroundFloorKind::Plain) &&
+							facade_plan.is_street(column->x, column->z) &&
+							!facade_plan.is_party(column->x, column->z) && has_windows;
+					const BaySlot &slot =
+							shopfront_column ? column->shop_slot : column->slot;
+					return slot.kind == BaySlot::Kind::Window &&
+						   slot.k + leaves <= slot.width;
+				};
+				const auto nearest = [&](auto accepts) -> std::optional<std::size_t> {
+					const int reach = static_cast<int>(points.size() / 2);
+					for (int distance = 0; distance <= reach; ++distance)
+						for (const int sign : {1, -1}) {
+							if (distance == 0 && sign < 0)
+								continue;
+							const int index = static_cast<int>(target) + sign * distance;
+							if (index < 0 || index >= static_cast<int>(points.size()))
+								continue;
+							const auto candidate = static_cast<std::size_t>(index);
+							if (usable(candidate) && accepts(candidate))
+								return candidate;
+						}
+					return std::nullopt;
+				};
+				std::optional<std::size_t> door_index;
+				bool double_door = false;
+				if (wants_double)
+					if (const auto index = nearest(
+								[&](std::size_t i) { return bay_accepts(i, 2); })) {
+						door_index = index;
+						double_door = true;
+					}
+				if (!door_index)
+					door_index =
+							nearest([&](std::size_t i) { return bay_accepts(i, 1); });
+				if (!door_index)
+					door_index = nearest([](std::size_t) { return true; });
+				if (door_index) {
+					const int x = std::get<0>(points[*door_index]);
+					const int z = std::get<2>(points[*door_index]);
+					const int nx = segment.normal.first;
+					const int nz = segment.normal.second;
+					facade_plan.mark_door_column(x, z);
+					facade_plan.mark_door_column(x + nx, z + nz);
+					if (double_door) {
+						const int second_x = x + segment.tangent.first;
+						const int second_z = z + segment.tangent.second;
+						if (!passage_at(effective_passages, second_x, second_z) &&
+								!facade_plan.is_party(second_x, second_z)) {
+							facade_plan.mark_door_column(second_x, second_z);
+							facade_plan.mark_door_column(second_x + nx, second_z + nz);
+						} else {
+							double_door = false;
+						}
+					}
+					synthetic_entrance_plan =
+							SyntheticEntrancePlan{*entrance_segment, x, z, double_door};
+				}
+			}
+		}
+	}
+
 	// Process nodes to create walls and corners
 	for (std::size_t node_index = 0; node_index < element.nodes.size(); ++node_index) {
 		const auto &node = element.nodes[node_index];
@@ -7851,11 +8268,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					window_life_columns.push_back({bx, bz, outward.first, outward.second,
 							static_cast<int>(node_index - 1), bay_slot.bay, bay_slot.k,
 							bay_slot.width, facade_plan.is_street(bx, bz)});
-				if (outward != std::pair<int, int>{0, 0})
-					facade_window_columns.push_back({bx, bz, outward.first,
-							outward.second, static_cast<int>(node_index - 1),
-							static_cast<int>(point_index), bay_slot, shop_slot});
-
 				if (terrain_enabled && min_level_offset == 0 && !is_passage) {
 					const int local_ground_level =
 							editor->terrain_level(bx, bz).value_or(args.ground_level);
@@ -8133,8 +8545,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							}
 							const std::uint32_t sill_roll_max = rear_facade ? 8u : 15u;
 							if (!wants_balcony && decoration_roll < sill_roll_max) {
-								const BlockWithProperties sill{
-										sill_base, {{"type", "top"}}};
+								const auto sill =
+										cached_prop_block(sill_base, {{"type", "top"}});
 								editor->set_block_with_properties_absolute(sill,
 										bx + outward.first, sill_y + abs_terrain_offset,
 										bz + outward.second,
@@ -8186,9 +8598,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									std::abs(outward.first) >= std::abs(outward.second)
 											? (outward.first >= 0 ? "east" : "west")
 											: (outward.second >= 0 ? "south" : "north");
-							const BlockWithProperties shutter{
+							const auto shutter = cached_prop_block(
 									shutter_base, {{"facing", facing}, {"open", "true"},
-														  {"half", "top"}}};
+														  {"half", "top"}});
 							editor->set_block_with_properties_absolute(shutter,
 									bx + outward.first, h + abs_terrain_offset,
 									bz + outward.second,
@@ -8224,9 +8636,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									std::abs(outward.first) >= std::abs(outward.second)
 											? (outward.first >= 0 ? "east" : "west")
 											: (outward.second >= 0 ? "south" : "north");
-							const BlockWithProperties awning{
+							const auto awning = cached_prop_block(
 									awning_block, {{"facing", facing}, {"open", "false"},
-														  {"half", "top"}}};
+														  {"half", "top"}});
 							editor->set_block_with_properties_absolute(awning, ox,
 									h - 1 + abs_terrain_offset, oz,
 									std::vector<Block>{AIR}, std::nullopt);
@@ -8290,9 +8702,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								};
 								const auto open_trapdoor = [&](Block block, int nx,
 																   int nz) {
-									return BlockWithProperties{block,
+									return cached_prop_block(block,
 											{{"facing", facing(nx, nz)}, {"open", "true"},
-													{"half", "top"}}};
+													{"half", "top"}});
 								};
 								static const std::array<Block, 4> trapdoor_options{
 										OAK_TRAPDOOR, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR,
@@ -8303,8 +8715,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																std::uint32_t>(
 																trapdoor_options
 																		.size()))];
-								const auto balcony_floor = BlockWithProperties{
-										SMOOTH_STONE_SLAB, {{"type", "top"}}};
+								const auto balcony_floor = cached_prop_block(
+										SMOOTH_STONE_SLAB, {{"type", "top"}});
 								const auto front_fence = open_trapdoor(
 										trapdoor, outward.first, outward.second);
 								const auto left_fence =
@@ -8683,10 +9095,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const auto put_entrance_door = [&](Block base, int x, int z, int nx, int nz,
 										   const char *hinge) {
 		const std::string facing = facing_name(nx, nz);
-		const BlockWithProperties lower{
-				base, {{"half", "lower"}, {"facing", facing}, {"hinge", hinge}}};
-		const BlockWithProperties upper{
-				base, {{"half", "upper"}, {"facing", facing}, {"hinge", hinge}}};
+		const auto lower = cached_prop_block(
+				base, {{"half", "lower"}, {"facing", facing}, {"hinge", hinge}});
+		const auto upper = cached_prop_block(
+				base, {{"half", "upper"}, {"facing", facing}, {"hinge", hinge}});
 		editor->set_block_with_properties_absolute(lower, x,
 				start_y_offset + abs_terrain_offset + 1, z, std::nullopt, std::nullopt);
 		editor->set_block_with_properties_absolute(upper, x,
@@ -8737,28 +9149,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				threshold, x + nx, start_y_offset + abs_terrain_offset, z + nz);
 		put_doorstep(x, z, nx, nz);
 	};
-	const bool mapped_entrance = std::any_of(
-			element.nodes.begin(), element.nodes.end(), [](const ProcessedNode &node) {
-				const auto entrance = node.tags.get("entrance");
-				const auto door = node.tags.get("door");
-				if ((!node.tags.contains("entrance") || entrance == "no") &&
-						(!node.tags.contains("door") || door == "no"))
-					return false;
-				if (const auto level = node.tags.get("level"); !level.empty()) {
-					if (const auto parsed = strict_parse::f64(level);
-							parsed && *parsed != 0.0)
-						return false;
-				}
-				return true;
-			});
-	// Match BuildingStyle::resolve/configuration in Rust: preset utility doors
-	// are suppressed for mapped entrances and thin-ring footprints, and an
-	// abandoned building clears both special-door flags.
-	const bool thin_ring_footprint = cached_footprint_size <= THIN_RING_MAX_CELLS;
-	const bool allow_preset_utility_door = !mapped_entrance && !thin_ring_footprint &&
-										   condition != BuildingCondition::Construction &&
-										   condition != BuildingCondition::Ruined &&
-										   condition != BuildingCondition::Abandoned;
 	if (min_level_offset == 0 && condition != BuildingCondition::Construction &&
 			condition != BuildingCondition::Ruined &&
 			category != BuildingCategory::Greenhouse &&
@@ -8807,6 +9197,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				if (entrance_façade) {
 					const auto inward = std::pair{-entrance_façade->normal.first,
 							-entrance_façade->normal.second};
+					facade_plan.mark_door_column(node.x + entrance_façade->normal.first,
+							node.z + entrance_façade->normal.second);
 					const bool ends_here =
 							before && (!after || before->len >= after->len);
 					const std::pair<int, int> tangent =
@@ -8835,6 +9227,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								entrance_façade->normal.second, "right");
 						facade_plan.mark_door_column(
 								node.x + tangent.first, node.z + tangent.second);
+						facade_plan.mark_door_column(
+								node.x + tangent.first + entrance_façade->normal.first,
+								node.z + tangent.second + entrance_façade->normal.second);
 						second_leaf = true;
 					}
 					interior_entries.push_back(
@@ -8868,6 +9263,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						}
 					}
 					if (inward) {
+						facade_plan.mark_door_column(
+								node.x - inward->first, node.z - inward->second);
 						put_entrance_door(door_block, node.x, node.z, -inward->first,
 								-inward->second, "left");
 						interior_entries.push_back(
@@ -8879,202 +9276,87 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			}
 		}
 		if (!mapped_entrance_rendered) {
-			const bool corner_entrance =
-					facade_plan.corner && (category == BuildingCategory::Commercial ||
-												  category == BuildingCategory::Hotel ||
-												  category == BuildingCategory::Office);
-			std::optional<std::size_t> entrance_segment;
-			if (corner_entrance) {
-				const auto &corner = *facade_plan.corner;
-				const auto length = [&](std::size_t i) {
-					return i < facade_plan.segments.size() && facade_plan.segments[i]
-								   ? facade_plan.segments[i]->len
-								   : 0;
-				};
-				entrance_segment = length(corner.seg_a) >= length(corner.seg_b)
-										   ? corner.seg_a
-										   : corner.seg_b;
-			} else if (facade_plan.front_segment) {
-				entrance_segment = facade_plan.front_segment;
-			} else {
-				for (std::size_t i = 0; i < facade_plan.segments.size(); ++i)
-					if (facade_plan.segments[i] &&
-							facade_plan.segments[i]->facade_class !=
-									building_facade::FacadeClass::Party &&
-							(!entrance_segment ||
-									facade_plan.segments[i]->len >
-											facade_plan.segments[*entrance_segment]->len))
-						entrance_segment = i;
-			}
-			if (entrance_segment && *entrance_segment + 1 < element.nodes.size() &&
-					facade_plan.segments[*entrance_segment]) {
-				const auto &a = element.nodes[*entrance_segment];
-				const auto &b = element.nodes[*entrance_segment + 1];
-				const auto &segment = *facade_plan.segments[*entrance_segment];
-				auto points = bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
-				if (points.size() >= 5) {
-					auto position_rng = element_rng(group_seed ^ 0xD00E57E900000011ULL);
-					std::size_t target = points.size() / 2;
-					if (corner_entrance) {
-						const int from_corner = 2 + int(position_rng.uniform(2));
-						const bool corner_at_end =
-								facade_plan.corner->seg_a == *entrance_segment;
-						target = corner_at_end
-										 ? points.size() - 1 -
-												   static_cast<std::size_t>(from_corner)
-										 : static_cast<std::size_t>(from_corner);
-					} else {
-						const double jitter = position_rng.uniform_real(-.15, .15);
-						target = static_cast<std::size_t>(
-								static_cast<double>(points.size()) * (.5 + jitter));
-					}
-					const bool wants_double =
-							(ground_floor == GroundFloorKind::Lobby ||
-									category == BuildingCategory::Commercial ||
-									category == BuildingCategory::Office ||
-									category == BuildingCategory::Hotel ||
-									category == BuildingCategory::School ||
-									category == BuildingCategory::Hospital) &&
-							segment.len >= 8 &&
-							(segment.tangent.first == 0 || segment.tangent.second == 0);
-					const auto usable = [&](std::size_t index) {
-						if (index < 2 || index + 2 >= points.size())
-							return false;
-						const int x = std::get<0>(points[index]);
-						const int z = std::get<2>(points[index]);
-						return !passage_at(effective_passages, x, z) &&
-							   !facade_plan.is_party(x, z);
-					};
-					const auto bay_accepts = [&](std::size_t index, int leaves) {
-						const auto column = std::find_if(facade_window_columns.begin(),
-								facade_window_columns.end(),
-								[&](const FacadeWindowColumn &c) {
-									return c.run == static_cast<int>(*entrance_segment) &&
-										   c.position == static_cast<int>(index);
-								});
-						if (column == facade_window_columns.end())
-							return false;
-						const bool shopfront_column =
-								(ground_floor != GroundFloorKind::Plain) &&
-								facade_plan.is_street(column->x, column->z) &&
-								!facade_plan.is_party(column->x, column->z) &&
-								has_windows;
-						const BaySlot slot =
-								shopfront_column ? column->shop_slot : column->slot;
-						return slot.kind == BaySlot::Kind::Window &&
-							   slot.k + leaves <= slot.width;
-					};
-					const auto nearest = [&](auto accepts) -> std::optional<std::size_t> {
-						const int reach = static_cast<int>(points.size() / 2);
-						for (int distance = 0; distance <= reach; ++distance) {
-							for (const int sign : {1, -1}) {
-								if (distance == 0 && sign < 0)
-									continue;
-								const int index =
-										static_cast<int>(target) + sign * distance;
-								if (index < 0 || index >= static_cast<int>(points.size()))
-									continue;
-								const auto candidate = static_cast<std::size_t>(index);
-								if (usable(candidate) && accepts(candidate))
-									return candidate;
-							}
-						}
-						return std::nullopt;
-					};
-					std::optional<std::size_t> door_index;
-					bool double_door = false;
-					if (wants_double)
-						if (const auto index = nearest(
-									[&](std::size_t i) { return bay_accepts(i, 2); })) {
-							door_index = index;
-							double_door = true;
-						}
-					if (!door_index)
-						door_index =
-								nearest([&](std::size_t i) { return bay_accepts(i, 1); });
-					if (!door_index)
-						door_index = nearest([](std::size_t) { return true; });
-					std::optional<std::pair<int, int>> door;
-					if (door_index)
-						door = {std::get<0>(points[*door_index]),
-								std::get<2>(points[*door_index])};
-					if (door) {
-						const auto inward =
-								std::pair{-segment.normal.first, -segment.normal.second};
-						interior_entries.push_back({{door->first + inward.first,
-															door->second + inward.second},
-								inward});
-						if (!signage_anchor)
-							signage_anchor = building_facade::FacadeAnchor{door->first,
-									door->second, segment.normal, 0, 0, *door};
-						const auto [door_block, trapdoor_block] =
-								entrance_door_style(true);
-						facade_plan.mark_door_column(door->first, door->second);
-						put_entrance_door(door_block, door->first, door->second,
-								segment.normal.first, segment.normal.second, "left");
-						if (double_door &&
-								!passage_at(effective_passages,
-										door->first + segment.tangent.first,
-										door->second + segment.tangent.second) &&
-								!facade_plan.is_party(door->first + segment.tangent.first,
-										door->second + segment.tangent.second)) {
-							put_entrance_door(door_block,
+			if (synthetic_entrance_plan) {
+				const auto &plan = *synthetic_entrance_plan;
+				const auto &segment = *facade_plan.segments[plan.segment];
+				const std::optional<std::pair<int, int>> door = std::pair{plan.x, plan.z};
+				const bool double_door = plan.double_door;
+				if (door) {
+					const auto inward =
+							std::pair{-segment.normal.first, -segment.normal.second};
+					interior_entries.push_back(
+							{{door->first + inward.first, door->second + inward.second},
+									inward});
+					if (!signage_anchor)
+						signage_anchor = building_facade::FacadeAnchor{
+								door->first, door->second, segment.normal, 0, 0, *door};
+					const auto [door_block, trapdoor_block] = entrance_door_style(true);
+					facade_plan.mark_door_column(door->first, door->second);
+					facade_plan.mark_door_column(door->first + segment.normal.first,
+							door->second + segment.normal.second);
+					put_entrance_door(door_block, door->first, door->second,
+							segment.normal.first, segment.normal.second, "left");
+					if (double_door &&
+							!passage_at(effective_passages,
 									door->first + segment.tangent.first,
-									door->second + segment.tangent.second,
-									segment.normal.first, segment.normal.second, "right");
-							facade_plan.mark_door_column(
-									door->first + segment.tangent.first,
-									door->second + segment.tangent.second);
-							put_threshold(door->first + segment.tangent.first,
-									door->second + segment.tangent.second,
-									segment.normal.first, segment.normal.second);
-						}
-						auto dress_rng = element_rng(group_seed ^ 0xD00E57E900000013ULL);
-						const bool canopy =
-								(double_door ||
-										category == BuildingCategory::Commercial ||
-										category == BuildingCategory::Hotel) &&
-								ground_floor != GroundFloorKind::Shopfront &&
-								dress_rng.random_bool(.6);
-						const bool lantern =
-								!canopy &&
-								(category == BuildingCategory::House ||
-										category == BuildingCategory::Residential ||
-										category == BuildingCategory::Historic) &&
-								dress_rng.random_bool(.35);
-						const auto set_trapdoor = [&, trapdoor_block = trapdoor_block](
-														  int x, int y, int z) {
-							editor->set_block_with_properties_absolute(
-									BlockWithProperties{trapdoor_block,
-											{{"half", "top"}, {"open", "false"},
-													{"facing",
-															facing_name(
-																	segment.normal.first,
-																	segment.normal
-																			.second)}}},
-									x, y, z, std::vector<Block>{AIR}, std::nullopt);
-						};
-						if (canopy) {
-							for (int t = -1; t <= (double_door ? 2 : 1); ++t)
-								set_trapdoor(door->first + segment.normal.first +
-													 segment.tangent.first * t,
-										start_y_offset + abs_terrain_offset + 3,
-										door->second + segment.normal.second +
-												segment.tangent.second * t);
-						} else if (lantern) {
-							const int lantern_x = door->first + segment.normal.first;
-							const int lantern_z = door->second + segment.normal.second;
-							set_trapdoor(lantern_x,
-									start_y_offset + abs_terrain_offset + 4, lantern_z);
-							const BlockWithProperties hanging_lantern{
-									LANTERN, {{"hanging", "true"}}};
-							editor->set_block_with_properties_absolute(hanging_lantern,
-									lantern_x, start_y_offset + abs_terrain_offset + 3,
-									lantern_z, std::vector<Block>{AIR}, std::nullopt);
-						}
-						put_threshold(door->first, door->second, segment.normal.first,
-								segment.normal.second);
+									door->second + segment.tangent.second) &&
+							!facade_plan.is_party(door->first + segment.tangent.first,
+									door->second + segment.tangent.second)) {
+						put_entrance_door(door_block, door->first + segment.tangent.first,
+								door->second + segment.tangent.second,
+								segment.normal.first, segment.normal.second, "right");
+						facade_plan.mark_door_column(door->first + segment.tangent.first,
+								door->second + segment.tangent.second);
+						facade_plan.mark_door_column(door->first + segment.tangent.first +
+															 segment.normal.first,
+								door->second + segment.tangent.second +
+										segment.normal.second);
+						put_threshold(door->first + segment.tangent.first,
+								door->second + segment.tangent.second,
+								segment.normal.first, segment.normal.second);
 					}
+					auto dress_rng = element_rng(group_seed ^ 0xD00E57E900000013ULL);
+					const bool canopy =
+							(double_door || category == BuildingCategory::Commercial ||
+									category == BuildingCategory::Hotel) &&
+							ground_floor != GroundFloorKind::Shopfront &&
+							dress_rng.random_bool(.6);
+					const bool lantern =
+							!canopy &&
+							(category == BuildingCategory::House ||
+									category == BuildingCategory::Residential ||
+									category == BuildingCategory::Historic) &&
+							dress_rng.random_bool(.35);
+					const auto set_trapdoor = [&, trapdoor_block = trapdoor_block](
+													  int x, int y, int z) {
+						editor->set_block_with_properties_absolute(
+								cached_prop_block(trapdoor_block,
+										{{"half", "top"}, {"open", "false"},
+												{"facing",
+														facing_name(segment.normal.first,
+																segment.normal.second)}}),
+								x, y, z, std::vector<Block>{AIR}, std::nullopt);
+					};
+					if (canopy) {
+						for (int t = -1; t <= (double_door ? 2 : 1); ++t)
+							set_trapdoor(door->first + segment.normal.first +
+												 segment.tangent.first * t,
+									start_y_offset + abs_terrain_offset + 3,
+									door->second + segment.normal.second +
+											segment.tangent.second * t);
+					} else if (lantern) {
+						const int lantern_x = door->first + segment.normal.first;
+						const int lantern_z = door->second + segment.normal.second;
+						set_trapdoor(lantern_x, start_y_offset + abs_terrain_offset + 4,
+								lantern_z);
+						const auto hanging_lantern =
+								cached_prop_block(LANTERN, {{"hanging", "true"}});
+						editor->set_block_with_properties_absolute(hanging_lantern,
+								lantern_x, start_y_offset + abs_terrain_offset + 3,
+								lantern_z, std::vector<Block>{AIR}, std::nullopt);
+					}
+					put_threshold(door->first, door->second, segment.normal.first,
+							segment.normal.second);
 				}
 			}
 		}
@@ -9591,7 +9873,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 										btype == "yes" || btype == "terrace" ||
 										civic_or_commercial;
 				const bool eligible_type = urban_type || qualifies_for_auto_roof;
-				if (eligible_type && height_m <= 26.0 && footprint_m2 <= 3000.0) {
+				// Rust leaves unknown-era detached houses to the general roof
+				// rules instead of consuming them in the European fabric rule.
+				if (eligible_type && (era != ArchEra::Unknown || urban_type) &&
+						height_m <= 26.0 && footprint_m2 <= 3000.0) {
 					double bbox_cells = 1.0;
 					if (!element.nodes.empty()) {
 						int min_x = element.nodes.front().x;
@@ -9799,8 +10084,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			!element.nodes.empty() && max_x - min_x >= 4 && max_z - min_z >= 4) {
 		const int height_reduction = generated_sloped_roof ? 2 : 0;
 		const int top_h = start_y_offset + building_height - height_reduction;
-		const BlockWithProperties sill_block{
-				get_slab_block_for_material(wall_block), {{"type", "top"}}};
+		const auto sill_block = cached_prop_block(
+				get_slab_block_for_material(wall_block), {{"type", "top"}});
 		const auto stair_for_outward = [&](int nx, int nz) {
 			const StairFacing facing = nx > 0	? StairFacing::East
 									   : nx < 0 ? StairFacing::West
@@ -9961,9 +10246,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				}
 				case WallDepthStyle::SkyscraperFins:
 					if (horizontal_windows) {
-						const BlockWithProperties ledge{
+						const auto ledge = cached_prop_block(
 								get_slab_block_for_material(accent_block),
-								{{"type", "top"}}};
+								{{"type", "top"}});
 						for (int h = start_y_offset + 2; h <= top_h; ++h)
 							if (floor_row_at(h) == 0)
 								place_property(ledge, h);
@@ -10306,7 +10591,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			generated_roof_type == RoofType::Flat)
 		generate_hospital_helipad(*editor, element, roof_area, start_y_offset,
 				building_height, abs_terrain_offset);
-	if (roof_generated && category == BuildingCategory::Hospital)
+	// Rust only paints the hospital wall-cross pass for a mapped roof:shape
+	// (the hospital preset itself does not request an explicit roof pass).
+	const bool explicit_roof_pass = element.tags.contains("roof:shape");
+	if (roof_generated && explicit_roof_pass && category == BuildingCategory::Hospital)
 		generate_hospital_wall_cross(*editor, element, category, start_y_offset,
 				building_height, abs_terrain_offset);
 	mapillary::facades::collect_displays(*editor, element.id, start_y_offset,
@@ -10977,7 +11265,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				std::optional<BlockWithProperties> cap;
 				if (level % 2 == 0) {
 					if (roof_slab && cell_slab)
-						cap = BlockWithProperties{*cell_slab, {{"type", "bottom"}}};
+						cap = cached_prop_block(*cell_slab, {{"type", "bottom"}});
 				} else {
 					const int floor = slab_pitch ? level - 1 : level;
 					const auto not_lower = [&](int nx, int nz) {
@@ -11010,7 +11298,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 								});
 						sheet = sheet_cells.contains({x, z});
 						if (slab_pitch && stepped && roof_slab && cell_slab)
-							cap = BlockWithProperties{*cell_slab, {{"type", "top"}}};
+							cap = cached_prop_block(*cell_slab, {{"type", "top"}});
 						else
 							cap = BlockWithProperties::simple(
 									sheet ? roof_sheet_block(x, z) : cell_roof_block);
@@ -11018,7 +11306,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 						cap = create_stair_with_properties(
 								cell_stair_material, stair->first, stair->second);
 					} else if (all_low && roof_slab && cell_slab) {
-						cap = BlockWithProperties{*cell_slab, {{"type", "bottom"}}};
+						cap = cached_prop_block(*cell_slab, {{"type", "bottom"}});
 					} else {
 						cap = BlockWithProperties::simple(cell_roof_block);
 					}

@@ -59,6 +59,15 @@ std::optional<std::int32_t> map_id_counter(const std::filesystem::path &path);
 // single-player position. Returns false when the NBT files cannot be updated.
 bool set_spawn_in_level_dat(const std::filesystem::path &world, std::int32_t x,
 		std::int32_t y, std::int32_t z);
+// Rust-equivalent best-effort cleanup: remove only the untouched packaged
+// template region, never chunks changed by generation or the game.
+void remove_untouched_template_region(const std::filesystem::path &world);
+// Update Java level metadata after generation; generator edits apply only when
+// the existing overworld is flat, matching Rust's conservative behavior.
+bool apply_java_world_settings(const std::filesystem::path &world, int game_type,
+		std::int64_t world_time, bool void_world, std::int32_t base_y, std::int32_t min_y,
+		std::string *error = nullptr);
+bool touch_last_played(const std::filesystem::path &world, std::string *error = nullptr);
 // Remove Anvil chunks whose embedded xPos/zPos do not match their region slot.
 // Used once when upgrading legacy One World manifests.
 std::optional<std::size_t> drop_misplaced_chunks(

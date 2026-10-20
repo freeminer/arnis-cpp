@@ -32,6 +32,11 @@ enum class GameMode
 	Creative,
 	Spectator
 };
+enum class WorldType
+{
+	Void,
+	Flat
+};
 constexpr int java_game_type(GameMode mode)
 {
 	return mode == GameMode::Survival ? 0 : (mode == GameMode::Creative ? 1 : 3);
@@ -343,6 +348,7 @@ struct Args
 	OvertureSource overture_source{OvertureSource::Auto};
 	GameMode gamemode{GameMode::Creative};
 	int64_t world_time{6000};
+	WorldType world_type{WorldType::Void};
 	SignageLevel signage{SignageLevel::Basic};
 	// Java backend extras mirrored from Rust. Entity generation is opt-in.
 	bool traffic_lights{false};

@@ -1472,6 +1472,14 @@ bool generate_world(WorldEditor &editor,
 			return false;
 		}
 	}
+	const bool java_world =
+			editor.get_generation_format() == static_cast<int>(WorldFormat::JavaAnvil);
+	const bool extending_world = args.one_world_run && args.one_world_run->extending;
+	const auto java_world_path =
+			args.one_world_run ? args.one_world_run->world_dir : editor.output_path;
+	if (java_world && args.world_type == WorldType::Void && !extending_world &&
+			!java_world_path.empty())
+		world_utils::remove_untouched_template_region(java_world_path);
 	// Rust uses the same 3D toggle for bundled schematic props and model
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.
@@ -2157,8 +2165,6 @@ bool generate_world(WorldEditor &editor,
 	auto marking_index = road_markings::RoadMarkingIndex::build(elements, args.scale,
 			decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 					(geo_bounds[2] + geo_bounds[3]) * .5));
-	const bool java_world =
-			editor.get_generation_format() == static_cast<int>(WorldFormat::JavaAnvil);
 	if (args.traffic_lights && java_world) {
 		editor.traffic_signal_index = highways::SignalIndex::build(
 				elements, args.scale, marking_index.drives_on_left, road_mask);
@@ -2636,7 +2642,7 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.contains("power")) {
 				power::generate_power(editor, element, building_footprints,
 						flood_fill_cache, args.timeout);
-				if (editor.signage_enabled() && signage::power_sign(way.tags))
+				if (editor.signage_enabled())
 					signage::generate_power_signage(editor, way, road_mask);
 			} else if (way.tags.contains("place")) {
 				landuse::generate_place(editor, way, args, flood_fill_cache);
@@ -3192,6 +3198,20 @@ bool generate_world(WorldEditor &editor,
 			std::cerr << "Arnis generation error: " << message << '\n';
 			return false;
 		}
+	}
+	if (args.one_world_run) {
+		std::string error;
+		if (!world_utils::touch_last_played(args.one_world_run->world_dir, &error))
+			std::cerr << "Warning: Failed to update LastPlayed: " << error << '\n';
+	}
+	if (java_world && !extending_world && !java_world_path.empty()) {
+		std::string error;
+		if (!world_utils::apply_java_world_settings(java_world_path,
+					java_game_type(args.gamemode), args.world_time,
+					args.world_type == WorldType::Void, world_editor::base_chunk_y(),
+					world_editor::min_y(), &error))
+			std::cerr << "Warning: Failed to apply Java world settings: " << error
+					  << '\n';
 	}
 	if (editor.signage_context)
 		std::cout << editor.signage_context->summary(args.debug) << '\n';

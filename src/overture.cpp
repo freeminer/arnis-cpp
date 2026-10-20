@@ -10,7 +10,10 @@
 #if defined(USE_ARROW) && USE_ARROW
 #include <arrow/api.h>
 #include <arrow/io/file.h>
+#include <arrow/io/memory.h>
 #include <parquet/arrow/reader.h>
+#include <parquet/metadata.h>
+#include <parquet/statistics.h>
 #endif
 
 #include <algorithm>
@@ -61,6 +64,11 @@ namespace
 {
 constexpr std::uint8_t OVERTURE_TILE_ZOOM = 14;
 constexpr std::uint64_t OVERTURE_MAX_TILES = 4096;
+constexpr std::size_t OVERTURE_MAX_RELEASE_ATTEMPTS = 4;
+constexpr std::size_t OVERTURE_RELEASE_FALLBACK_SLOTS = 2;
+constexpr unsigned OVERTURE_RANGE_ATTEMPTS = 3;
+constexpr std::size_t OVERTURE_UNHEALTHY_FAILURES = 3;
+constexpr const char *OVERTURE_STAC_RELEASE_FALLBACK = "2026-08-19.0";
 
 constexpr unsigned char ascii_lower(unsigned char c)
 {
@@ -221,7 +229,7 @@ std::vector<std::string> discover_overture_releases()
 			"https://overturemaps-us-west-2.s3.amazonaws.com/?delimiter=/&prefix=release/";
 	CURL *curl = curl_easy_init();
 	if (!curl)
-		return {};
+		return std::vector<std::string>{};
 	std::string body;
 	curl_easy_setopt(curl, CURLOPT_URL, listing_url);
 	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, release_listing_write);
@@ -234,7 +242,7 @@ std::vector<std::string> discover_overture_releases()
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
 	if (result != CURLE_OK || status < 200 || status >= 300)
-		return {};
+		return std::vector<std::string>{};
 	std::vector<std::string> releases;
 	const std::regex prefix(
 			R"(<Prefix>release/([0-9]{4}-[0-9]{2}-[0-9]{2}\.[0-9]+)/</Prefix>)");
@@ -256,6 +264,38 @@ std::vector<std::string> discover_overture_releases()
 	});
 	releases.erase(std::unique(releases.begin(), releases.end()), releases.end());
 	return releases;
+}
+
+// Keep release selection aligned with Rust: try the two newest discovered
+// releases, then reserve slots for this installation's last successful
+// release and the bundled fallback. A remembered release that is present in
+// the listing but older than the newest two must still occupy its fallback
+// slot instead of being displaced by another discovered release.
+std::vector<std::string> overture_release_candidates(
+		std::vector<std::string> discovered, const std::optional<std::string> &last_good)
+{
+	const auto discovered_slots =
+			OVERTURE_MAX_RELEASE_ATTEMPTS - OVERTURE_RELEASE_FALLBACK_SLOTS;
+	std::vector<std::string> candidates;
+	candidates.reserve(OVERTURE_MAX_RELEASE_ATTEMPTS);
+	for (const auto &release : discovered) {
+		if (!cache::valid_release(release))
+			continue;
+		candidates.push_back(release);
+		if (candidates.size() == discovered_slots)
+			break;
+	}
+	for (const auto *fallback :
+			{last_good ? last_good->c_str() : nullptr, OVERTURE_STAC_RELEASE_FALLBACK}) {
+		if (!fallback)
+			continue;
+		const std::string release(fallback);
+		if (cache::valid_release(release) &&
+				std::find(candidates.begin(), candidates.end(), release) ==
+						candidates.end())
+			candidates.push_back(release);
+	}
+	return candidates;
 }
 
 // Keep the closed Overture enums aligned between the Parquet and tile
@@ -472,10 +512,10 @@ std::optional<std::string> attribute_string(
 {
 	const auto attribute = layer.attribute(feature, name);
 	if (!attribute)
-		return {};
+		return std::nullopt;
 	if (const auto value = std::get_if<std::string>(&*attribute))
 		return *value;
-	return {};
+	return std::nullopt;
 }
 
 std::optional<double> attribute_number(
@@ -483,7 +523,7 @@ std::optional<double> attribute_number(
 {
 	const auto attribute = layer.attribute(feature, name);
 	if (!attribute)
-		return {};
+		return std::nullopt;
 	if (const auto value = std::get_if<double>(&*attribute))
 		return *value;
 	if (const auto value = std::get_if<std::int64_t>(&*attribute))
@@ -494,7 +534,7 @@ std::optional<double> attribute_number(
 		constexpr std::string_view whitespace = " \t\n\r\f\v";
 		const auto first = value->find_first_not_of(whitespace);
 		if (first == std::string::npos)
-			return {};
+			return std::nullopt;
 		const auto last = value->find_last_not_of(whitespace);
 		const char *begin = value->data() + first;
 		const char *end = value->data() + last + 1;
@@ -504,14 +544,14 @@ std::optional<double> attribute_number(
 		if (*begin == '+')
 			++begin;
 		if (begin == end)
-			return {};
+			return std::nullopt;
 		double parsed = 0.0;
 		const auto result =
 				std::from_chars(begin, end, parsed, std::chars_format::general);
 		if (result.ec == std::errc{} && result.ptr == end)
 			return parsed;
 	}
-	return {};
+	return std::nullopt;
 }
 
 bool source_is_osm(const std::optional<std::string> &geometry_source,
@@ -1178,7 +1218,7 @@ static BuildingTransportSource http_pmtiles_building_transport_source_impl(
 					break;
 			}
 			if (bytes.size() != length)
-				return {};
+				return std::nullopt;
 			auto data = std::vector<std::uint8_t>(bytes.begin(), bytes.end());
 			if (!cache_file.empty())
 				cache::write_atomic(cache_file, data);
@@ -1224,6 +1264,685 @@ BuildingSource http_pmtiles_building_source(std::string archive_url, std::uint8_
 }
 
 #if defined(USE_ARROW) && USE_ARROW
+namespace
+{
+constexpr const char *OVERTURE_STAC_ROOT = "https://stac.overturemaps.org";
+
+std::size_t binary_write(void *data, std::size_t size, std::size_t count, void *opaque)
+{
+	auto *body = static_cast<std::string *>(opaque);
+	body->append(static_cast<const char *>(data), size * count);
+	return size * count;
+}
+
+std::optional<std::string> http_get_bytes(const std::string &url)
+{
+	CURL *curl = curl_easy_init();
+	if (!curl)
+		return std::nullopt;
+	std::string body;
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, binary_write);
+	curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, retrieve_data::OSM_USER_AGENT);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
+	long status = 0;
+	const auto result = curl_easy_perform(curl);
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+	curl_easy_cleanup(curl);
+	if (result != CURLE_OK || status < 200 || status >= 300)
+		return std::nullopt;
+	return body;
+}
+
+std::optional<std::uint64_t> parquet_file_size(
+		const std::string &url, const std::filesystem::path &cache_dir)
+{
+	if (const auto cached = cache::read(cache_dir / "size")) {
+		const std::string value(cached->begin(), cached->end());
+		std::uint64_t size = 0;
+		const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), size);
+		if (error == std::errc{} && end == value.data() + value.size() && size >= 12)
+			return size;
+	}
+	CURL *curl = curl_easy_init();
+	if (!curl)
+		return std::nullopt;
+	curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+	curl_easy_setopt(curl, CURLOPT_NOBODY, 1L);
+	curl_easy_setopt(curl, CURLOPT_USERAGENT, retrieve_data::OSM_USER_AGENT);
+	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
+	long status = 0;
+	const auto result = curl_easy_perform(curl);
+	curl_off_t length = -1;
+	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+	curl_easy_getinfo(curl, CURLINFO_CONTENT_LENGTH_DOWNLOAD_T, &length);
+	curl_easy_cleanup(curl);
+	if (result != CURLE_OK || status < 200 || status >= 300 || length < 12)
+		return std::nullopt;
+	const auto size = static_cast<std::uint64_t>(length);
+	const auto encoded = std::to_string(size);
+	cache::write_atomic(cache_dir / "size", std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
+	return size;
+}
+
+std::optional<std::vector<std::uint8_t>> fetch_parquet_range(
+		const std::string &url, std::uint64_t start, std::uint64_t length,
+		const std::filesystem::path &cache_dir,
+		unsigned attempts = OVERTURE_RANGE_ATTEMPTS)
+{
+	if (length == 0 || length > std::numeric_limits<std::size_t>::max() ||
+			start > std::numeric_limits<std::uint64_t>::max() - (length - 1))
+		return std::nullopt;
+	const auto cache_file = cache_dir /
+			(std::to_string(start) + "_" + std::to_string(length) + ".bin");
+	if (const auto bytes = cache::read(cache_file); bytes && bytes->size() == length)
+		return bytes;
+	std::string body;
+	for (unsigned attempt = 0; attempt < attempts; ++attempt) {
+		if (attempt)
+			std::this_thread::sleep_for(std::chrono::milliseconds(500U << (attempt - 1)));
+		CURL *curl = curl_easy_init();
+		if (!curl)
+			continue;
+		body.clear();
+		const auto range = std::to_string(start) + "-" +
+				std::to_string(start + length - 1);
+		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
+		curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
+		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, binary_write);
+		curl_easy_setopt(curl, CURLOPT_WRITEDATA, &body);
+		curl_easy_setopt(curl, CURLOPT_USERAGENT, retrieve_data::OSM_USER_AGENT);
+		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
+		curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
+		long status = 0;
+		const auto result = curl_easy_perform(curl);
+		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
+		curl_easy_cleanup(curl);
+		if (result == CURLE_OK && status == 206 && body.size() == length)
+			break;
+		body.clear();
+	}
+	if (body.size() != length)
+		return std::nullopt;
+	std::vector<std::uint8_t> bytes(body.begin(), body.end());
+	cache::write_atomic(cache_file, bytes);
+	return bytes;
+}
+
+bool write_sparse_range(const std::filesystem::path &path, std::uint64_t offset,
+		const std::vector<std::uint8_t> &bytes)
+{
+	if (offset > static_cast<std::uint64_t>(std::numeric_limits<std::streamoff>::max()))
+		return false;
+	std::fstream file(path, std::ios::binary | std::ios::in | std::ios::out);
+	if (!file)
+		return false;
+	file.seekp(static_cast<std::streamoff>(offset));
+	file.write(reinterpret_cast<const char *>(bytes.data()),
+			static_cast<std::streamsize>(bytes.size()));
+	return static_cast<bool>(file);
+}
+
+struct SparseFileCleanup
+{
+	std::filesystem::path path;
+	~SparseFileCleanup()
+	{
+		std::error_code error;
+		std::filesystem::remove(path, error);
+	}
+};
+
+std::shared_ptr<arrow::Scalar> struct_value(
+		const std::shared_ptr<arrow::Scalar> &value, const std::string &name)
+{
+	if (!value || !value->is_valid || value->type->id() != arrow::Type::STRUCT)
+		return std::shared_ptr<arrow::Scalar>{};
+	const auto structure = std::static_pointer_cast<arrow::StructScalar>(value);
+	const auto type = std::static_pointer_cast<arrow::StructType>(value->type);
+	const auto index = type->GetFieldIndex(name);
+	return index >= 0 && static_cast<std::size_t>(index) < structure->value.size()
+				   ? structure->value[index]
+				   : std::shared_ptr<arrow::Scalar>{};
+}
+
+struct OvertureSourceInfo
+{
+	bool is_osm = false;
+	std::optional<OvertureOsmRef> osm_ref;
+};
+
+std::optional<std::string> scalar_text(const std::shared_ptr<arrow::Scalar> &value);
+
+void scan_overture_sources(
+		const std::shared_ptr<arrow::Scalar> &value, OvertureSourceInfo &out)
+{
+	if (!value || !value->is_valid)
+		return;
+	if (value->type->id() == arrow::Type::STRING ||
+			value->type->id() == arrow::Type::LARGE_STRING) {
+		const auto text = scalar_text(value);
+		if (text && text->find("OpenStreetMap") != std::string::npos)
+			out.is_osm = true;
+		return;
+	}
+	if (value->type->id() == arrow::Type::STRUCT) {
+		const auto structure = std::static_pointer_cast<arrow::StructScalar>(value);
+		const auto type = std::static_pointer_cast<arrow::StructType>(value->type);
+		const auto dataset_index = type->GetFieldIndex("dataset");
+		const auto record_index = type->GetFieldIndex("record_id");
+		if (dataset_index >= 0 && record_index >= 0 &&
+				static_cast<std::size_t>(dataset_index) < structure->value.size() &&
+				static_cast<std::size_t>(record_index) < structure->value.size()) {
+			const auto dataset = scalar_text(structure->value[dataset_index]);
+			const auto record_id = scalar_text(structure->value[record_index]);
+			if (dataset && ascii_iequals(*dataset, "OpenStreetMap")) {
+				out.is_osm = true;
+				if (!out.osm_ref && record_id) {
+					const auto encoded = nlohmann::json{{"dataset", *dataset},
+							{"record_id",
+									*record_id}}.dump();
+					out.osm_ref = parse_overture_osm_reference(encoded);
+				}
+			}
+		}
+		for (const auto &child : structure->value)
+			scan_overture_sources(child, out);
+		return;
+	}
+	if (value->type->id() == arrow::Type::LIST ||
+			value->type->id() == arrow::Type::LARGE_LIST ||
+			value->type->id() == arrow::Type::LIST_VIEW ||
+			value->type->id() == arrow::Type::LARGE_LIST_VIEW ||
+			value->type->id() == arrow::Type::FIXED_SIZE_LIST ||
+			value->type->id() == arrow::Type::MAP) {
+		const auto list = std::static_pointer_cast<arrow::BaseListScalar>(value);
+		for (int64_t index = 0; index < list->value->length(); ++index) {
+			const auto child = list->value->GetScalar(index);
+			if (child.ok())
+				scan_overture_sources(*child, out);
+		}
+	}
+}
+
+std::optional<std::string> scalar_text(const std::shared_ptr<arrow::Scalar> &value)
+{
+	if (!value || !value->is_valid)
+		return std::nullopt;
+	if (value->type->id() == arrow::Type::STRING)
+		return std::static_pointer_cast<arrow::StringScalar>(value)->value->ToString();
+	if (value->type->id() == arrow::Type::LARGE_STRING)
+		return std::static_pointer_cast<arrow::LargeStringScalar>(value)
+				->value->ToString();
+	return std::nullopt;
+}
+
+std::optional<double> scalar_number(const std::shared_ptr<arrow::Scalar> &value)
+{
+	if (!value || !value->is_valid)
+		return std::nullopt;
+	switch (value->type->id()) {
+	case arrow::Type::DOUBLE:
+		return std::static_pointer_cast<arrow::DoubleScalar>(value)->value;
+	case arrow::Type::FLOAT:
+		return std::static_pointer_cast<arrow::FloatScalar>(value)->value;
+	case arrow::Type::INT64:
+		return static_cast<double>(
+				std::static_pointer_cast<arrow::Int64Scalar>(value)->value);
+	case arrow::Type::INT32:
+		return static_cast<double>(
+				std::static_pointer_cast<arrow::Int32Scalar>(value)->value);
+	default:
+		return std::nullopt;
+	}
+}
+
+std::shared_ptr<arrow::Scalar> scalar_at(
+		const std::shared_ptr<arrow::Table> &table, const char *column, int64_t row)
+{
+	const auto values = table ? table->GetColumnByName(column) : nullptr;
+	if (!values || row < 0 || row >= values->length())
+		return std::shared_ptr<arrow::Scalar>{};
+	auto result = values->GetScalar(row);
+	return result.ok() ? *result : std::shared_ptr<arrow::Scalar>{};
+}
+
+std::optional<std::vector<std::string>> stac_partition_urls(
+		const std::filesystem::path &root, const std::string &release,
+		const geographic::LLBBox &bbox, bool debug)
+{
+	const auto index_path = root / release / "stac_index.parquet";
+	auto index_bytes = cache::read(index_path);
+	if (!index_bytes) {
+		const auto downloaded = http_get_bytes(
+				std::string(OVERTURE_STAC_ROOT) + "/" + release + "/collections.parquet");
+		if (!downloaded)
+			return std::nullopt;
+		index_bytes.emplace(downloaded->begin(), downloaded->end());
+		cache::write_atomic(index_path, *index_bytes);
+	}
+	const auto input = arrow::io::ReadableFile::Open(index_path.string());
+	if (!input.ok())
+		return std::nullopt;
+	auto reader_result = parquet::arrow::OpenFile(*input, arrow::default_memory_pool());
+	if (!reader_result.ok())
+		return std::nullopt;
+	std::shared_ptr<arrow::Table> table;
+	if (!(*reader_result)->ReadTable(&table).ok() || !table)
+		return std::nullopt;
+	auto compact = table->CombineChunks(arrow::default_memory_pool());
+	if (!compact.ok())
+		return std::nullopt;
+	table = *compact;
+	std::vector<std::string> urls;
+	for (int64_t row = 0; row < table->num_rows(); ++row) {
+		if (scalar_text(scalar_at(table, "collection", row)) != "building")
+			continue;
+		const auto bounds = scalar_at(table, "bbox", row);
+		const auto west = scalar_number(struct_value(bounds, "xmin"));
+		const auto south = scalar_number(struct_value(bounds, "ymin"));
+		const auto east = scalar_number(struct_value(bounds, "xmax"));
+		const auto north = scalar_number(struct_value(bounds, "ymax"));
+		if (!west || !south || !east || !north || *west > bbox.max().lng() ||
+				*east < bbox.min().lng() || *south > bbox.max().lat() ||
+				*north < bbox.min().lat())
+			continue;
+		const auto assets = scalar_at(table, "assets", row);
+		auto href = scalar_text(struct_value(struct_value(assets, "azure"), "href"));
+		if (!href)
+			href = scalar_text(struct_value(struct_value(assets, "aws"), "href"));
+		if (href)
+			urls.push_back(std::move(*href));
+	}
+	if (debug)
+		std::cerr << "Overture STAC: " << urls.size()
+				  << " Parquet partition(s) overlap the requested bounds.\n";
+	return urls;
+}
+
+std::optional<std::vector<OvertureBuilding>> read_remote_parquet_partition(
+		const std::string &url, const std::filesystem::path &range_cache,
+		const geographic::LLBBox &bbox, bool debug, std::size_t &failed_row_groups)
+{
+	failed_row_groups = 0;
+	const auto size = parquet_file_size(url, range_cache);
+	if (!size || *size < 12)
+		return std::nullopt;
+	const auto tail = fetch_parquet_range(url, *size - 8, 8, range_cache);
+	if (!tail || (*tail)[4] != 'P' || (*tail)[5] != 'A' || (*tail)[6] != 'R' ||
+			(*tail)[7] != '1')
+		return std::nullopt;
+	const std::uint32_t footer_size =
+			std::uint32_t((*tail)[0]) | (std::uint32_t((*tail)[1]) << 8) |
+			(std::uint32_t((*tail)[2]) << 16) | (std::uint32_t((*tail)[3]) << 24);
+	if (footer_size > *size - 8)
+		return std::nullopt;
+	const auto footer_offset = *size - footer_size - 8;
+	const auto footer = fetch_parquet_range(url, footer_offset, footer_size, range_cache);
+	const auto magic = fetch_parquet_range(url, 0, 4, range_cache);
+	if (!footer || !magic)
+		return std::nullopt;
+	static std::atomic_uint64_t sparse_sequence{0};
+	const auto sparse_path =
+			range_cache /
+			(".sparse-" + std::to_string(sparse_sequence.fetch_add(1)) + ".parquet");
+	const SparseFileCleanup sparse_cleanup{sparse_path};
+	std::error_code filesystem_error;
+	std::filesystem::create_directories(range_cache, filesystem_error);
+	if (filesystem_error)
+		return std::nullopt;
+	{
+		std::ofstream create(sparse_path, std::ios::binary | std::ios::trunc);
+		if (!create)
+			return std::nullopt;
+	}
+	std::filesystem::resize_file(sparse_path, *size, filesystem_error);
+	if (filesystem_error || !write_sparse_range(sparse_path, 0, *magic) ||
+			!write_sparse_range(sparse_path, footer_offset, *footer) ||
+			!write_sparse_range(sparse_path, *size - 8, *tail)) {
+		std::filesystem::remove(sparse_path, filesystem_error);
+		return std::nullopt;
+	}
+	const auto remove_sparse = [&] {
+		std::filesystem::remove(sparse_path, filesystem_error);
+	};
+	auto input = arrow::io::ReadableFile::Open(sparse_path.string());
+	if (!input.ok()) {
+		remove_sparse();
+		return std::nullopt;
+	}
+	auto reader_result = parquet::arrow::OpenFile(*input, arrow::default_memory_pool());
+	if (!reader_result.ok()) {
+		remove_sparse();
+		return std::nullopt;
+	}
+	auto reader = std::move(*reader_result);
+	const auto metadata = reader->parquet_reader()->metadata();
+	if (!metadata) {
+		remove_sparse();
+		return std::nullopt;
+	}
+	std::array<int, 4> bbox_columns{-1, -1, -1, -1};
+	const std::array<std::string, 4> bbox_paths{
+			"bbox.xmin", "bbox.ymin", "bbox.xmax", "bbox.ymax"};
+	for (int column = 0; column < metadata->schema()->num_columns(); ++column) {
+		const auto path = metadata->schema()->Column(column)->path()->ToDotString();
+		for (std::size_t i = 0; i < bbox_paths.size(); ++i)
+			if (path == bbox_paths[i])
+				bbox_columns[i] = column;
+	}
+	std::vector<int> matching_groups;
+	for (int group = 0; group < metadata->num_row_groups(); ++group) {
+		bool overlaps = true;
+		if (std::all_of(bbox_columns.begin(), bbox_columns.end(),
+					[](int i) { return i >= 0; })) {
+			const auto row_group = metadata->RowGroup(group);
+			std::array<std::optional<double>, 4> minimum, maximum;
+			for (std::size_t i = 0; i < bbox_columns.size(); ++i) {
+				const auto column = row_group->ColumnChunk(bbox_columns[i]);
+				const auto stats = column->statistics();
+				if (!stats)
+					continue;
+				std::shared_ptr<arrow::Scalar> low, high;
+				if (!parquet::arrow::StatisticsAsScalars(*stats, &low, &high).ok())
+					continue;
+				minimum[i] = scalar_number(low);
+				maximum[i] = scalar_number(high);
+			}
+			if (minimum[0] && minimum[1] && maximum[2] && maximum[3])
+				overlaps = *maximum[2] >= bbox.min().lng() &&
+						   *minimum[0] <= bbox.max().lng() &&
+						   *maximum[3] >= bbox.min().lat() &&
+						   *minimum[1] <= bbox.max().lat();
+		}
+		if (overlaps)
+			matching_groups.push_back(group);
+	}
+	if (matching_groups.empty()) {
+		reader.reset();
+		remove_sparse();
+		return std::vector<OvertureBuilding>{};
+	}
+	// Keep only the footer, metadata and matching groups in the sparse file.
+	std::unordered_set<int> unavailable_groups;
+	std::size_t failed_downloads = 0;
+	for (const int group_index : matching_groups) {
+		const auto group = metadata->RowGroup(group_index);
+		std::uint64_t first = std::numeric_limits<std::uint64_t>::max();
+		std::uint64_t last = 0;
+		for (int column_index = 0; column_index < group->num_columns(); ++column_index) {
+			const auto column = group->ColumnChunk(column_index);
+			const auto dictionary = column->dictionary_page_offset();
+			const auto start = dictionary >= 0 ? dictionary : column->data_page_offset();
+			if (start < 0 || column->total_compressed_size() < 0)
+				continue;
+			first = std::min(first, static_cast<std::uint64_t>(start));
+			last = std::max(last,
+					static_cast<std::uint64_t>(start + column->total_compressed_size()));
+		}
+		if (first >= last || last > *size) {
+			unavailable_groups.insert(group_index);
+			continue;
+		}
+		const auto attempts = failed_downloads >= OVERTURE_UNHEALTHY_FAILURES
+									  ? 1U
+									  : OVERTURE_RANGE_ATTEMPTS;
+		const auto bytes =
+				fetch_parquet_range(url, first, last - first, range_cache, attempts);
+		if (!bytes || !write_sparse_range(sparse_path, first, *bytes)) {
+			unavailable_groups.insert(group_index);
+			++failed_downloads;
+		}
+	}
+	reader.reset();
+	input = arrow::io::ReadableFile::Open(sparse_path.string());
+	if (!input.ok()) {
+		remove_sparse();
+		return std::nullopt;
+	}
+	reader_result = parquet::arrow::OpenFile(*input, arrow::default_memory_pool());
+	if (!reader_result.ok()) {
+		remove_sparse();
+		return std::nullopt;
+	}
+	reader = std::move(*reader_result);
+	std::vector<OvertureBuilding> buildings;
+	for (const int group : matching_groups) {
+		if (unavailable_groups.contains(group))
+			continue;
+		std::shared_ptr<arrow::Table> table;
+		if (!reader->ReadRowGroup(group, &table).ok() || !table) {
+			unavailable_groups.insert(group);
+			continue;
+		}
+		auto compact = table->CombineChunks(arrow::default_memory_pool());
+		if (!compact.ok()) {
+			unavailable_groups.insert(group);
+			continue;
+		}
+		table = *compact;
+		const auto ids = table->GetColumnByName("id");
+		const auto geometries = table->GetColumnByName("geometry");
+		if (!ids || !geometries) {
+			unavailable_groups.insert(group);
+			continue;
+		}
+		const auto sources = table->GetColumnByName("sources");
+		const auto heights = table->GetColumnByName("height");
+		const auto min_heights = table->GetColumnByName("min_height");
+		const auto floors = table->GetColumnByName("num_floors");
+		const auto subtypes = table->GetColumnByName("subtype");
+		const auto classes = table->GetColumnByName("class");
+		const auto roof_shapes = table->GetColumnByName("roof_shape");
+		const auto roof_materials = table->GetColumnByName("roof_material");
+		const auto roof_orientations = table->GetColumnByName("roof_orientation");
+		const auto facade_colors = table->GetColumnByName("facade_color");
+		const auto roof_colors = table->GetColumnByName("roof_color");
+		const auto roof_heights = table->GetColumnByName("roof_height");
+		const auto facade_materials = table->GetColumnByName("facade_material");
+		for (int64_t row = 0; row < table->num_rows(); ++row) {
+			auto id_scalar = ids->GetScalar(row);
+			auto geometry_scalar = geometries->GetScalar(row);
+			if (!id_scalar.ok() || !geometry_scalar.ok())
+				continue;
+			const auto id = scalar_text(*id_scalar);
+			if (!id || is_skipped_footprint(*id))
+				continue;
+			std::vector<std::uint8_t> wkb;
+			if ((*geometry_scalar)->type->id() == arrow::Type::BINARY) {
+				const auto binary =
+						std::static_pointer_cast<arrow::BinaryScalar>(*geometry_scalar);
+				if (binary->value)
+					wkb.assign(binary->value->data(),
+							binary->value->data() + binary->value->size());
+			} else if ((*geometry_scalar)->type->id() == arrow::Type::LARGE_BINARY) {
+				const auto binary = std::static_pointer_cast<arrow::LargeBinaryScalar>(
+						*geometry_scalar);
+				if (binary->value)
+					wkb.assign(binary->value->data(),
+							binary->value->data() + binary->value->size());
+			}
+			auto ring = parse_overture_wkb_polygon(wkb);
+			if (!ring || ring->size() < 3)
+				continue;
+			const auto row_bbox = scalar_at(table, "bbox", row);
+			const auto xmin = scalar_number(struct_value(row_bbox, "xmin"));
+			const auto ymin = scalar_number(struct_value(row_bbox, "ymin"));
+			const auto xmax = scalar_number(struct_value(row_bbox, "xmax"));
+			const auto ymax = scalar_number(struct_value(row_bbox, "ymax"));
+			if (xmin && ymin && xmax && ymax &&
+					(*xmax < bbox.min().lng() || *xmin > bbox.max().lng() ||
+							*ymax < bbox.min().lat() || *ymin > bbox.max().lat()))
+				continue;
+			if (!(xmin && ymin && xmax && ymax)) {
+				double ring_min_lng = std::numeric_limits<double>::infinity();
+				double ring_min_lat = std::numeric_limits<double>::infinity();
+				double ring_max_lng = -std::numeric_limits<double>::infinity();
+				double ring_max_lat = -std::numeric_limits<double>::infinity();
+				for (const auto &[lng, lat] : *ring) {
+					ring_min_lng = std::min(ring_min_lng, lng);
+					ring_min_lat = std::min(ring_min_lat, lat);
+					ring_max_lng = std::max(ring_max_lng, lng);
+					ring_max_lat = std::max(ring_max_lat, lat);
+				}
+				if (ring_max_lng < bbox.min().lng() || ring_min_lng > bbox.max().lng() ||
+						ring_max_lat < bbox.min().lat() ||
+						ring_min_lat > bbox.max().lat())
+					continue;
+			}
+			const auto text_at = [&](const std::shared_ptr<arrow::ChunkedArray> &column) {
+				if (!column)
+					return std::optional<std::string>{};
+				auto scalar = column->GetScalar(row);
+				return scalar.ok() ? scalar_text(*scalar) : std::optional<std::string>{};
+			};
+			const auto number_at =
+					[&](const std::shared_ptr<arrow::ChunkedArray> &column) {
+						if (!column)
+							return std::optional<double>{};
+						auto scalar = column->GetScalar(row);
+						return scalar.ok() ? scalar_number(*scalar)
+										   : std::optional<double>{};
+					};
+			OvertureSourceInfo source_info;
+			if (sources) {
+				auto source_scalar = sources->GetScalar(row);
+				if (source_scalar.ok())
+					scan_overture_sources(*source_scalar, source_info);
+			}
+			OvertureBuilding building;
+			building.id = *id;
+			building.exterior_ring = std::move(*ring);
+			building.is_osm_sourced = source_info.is_osm;
+			building.osm_ref = source_info.osm_ref;
+			building.height = number_at(heights);
+			building.min_height = number_at(min_heights);
+			if (const auto value = number_at(floors); value && std::isfinite(*value))
+				building.num_floors = static_cast<int>(*value);
+			building.subtype = text_at(subtypes);
+			building.clazz = text_at(classes);
+			building.roof_shape = text_at(roof_shapes);
+			building.roof_material = text_at(roof_materials);
+			building.roof_orientation = text_at(roof_orientations);
+			building.facade_color = text_at(facade_colors);
+			building.roof_color = text_at(roof_colors);
+			building.roof_height = number_at(roof_heights);
+			building.facade_material = text_at(facade_materials);
+			buildings.push_back(std::move(building));
+		}
+	}
+	failed_row_groups = unavailable_groups.size();
+	reader.reset();
+	remove_sparse();
+	if (debug)
+		std::cerr << "Overture Parquet partition yielded " << buildings.size()
+				  << " in-bounds building(s).\n";
+	return buildings;
+}
+
+std::optional<OvertureCollection> collect_overture_parquet_release(
+		const std::filesystem::path &root, const std::string &release,
+		const geographic::LLBBox &bbox, std::size_t maximum, bool debug)
+{
+	const auto urls = stac_partition_urls(root, release, bbox, debug);
+	if (!urls)
+		return std::nullopt;
+	OvertureCollection collection;
+	std::size_t lost_partitions = 0;
+	std::size_t lost_row_groups = 0;
+	bool capped = false;
+	for (const auto &url : *urls) {
+		const auto path_end = url.find_first_of("?#");
+		const auto path = url.substr(0, path_end);
+		const auto slash = path.find_last_of('/');
+		auto filename = slash == std::string::npos ? path : path.substr(slash + 1);
+		const bool safe_name =
+				!filename.empty() && filename.size() <= 128 && filename != "." &&
+				filename != ".." && filename.front() != '.' &&
+				std::all_of(filename.begin(), filename.end(), [](unsigned char c) {
+					return std::isalnum(c) || c == '-' || c == '_' || c == '.';
+				});
+		if (!safe_name) {
+			std::uint64_t hash = 1469598103934665603ULL;
+			for (const unsigned char c : url) {
+				hash ^= c;
+				hash *= 1099511628211ULL;
+			}
+			filename = "partition-" + std::to_string(hash);
+		}
+		std::size_t failed_row_groups = 0;
+		auto buildings = read_remote_parquet_partition(url,
+				root / release / "parquet" / filename, bbox, debug, failed_row_groups);
+		if (!buildings) {
+			++lost_partitions;
+			if (debug)
+				std::cerr << "Warning: failed to process Overture partition " << url
+						  << ".\n";
+			continue;
+		}
+		lost_row_groups += failed_row_groups;
+		for (auto &building : *buildings) {
+			if (building.is_osm_sourced && building.osm_ref &&
+					collection.hints.size() < MAX_OVERTURE_OSM_HINTS)
+				collection.hints.insert(*building.osm_ref,
+						OsmAttributeHint{building.height, building.num_floors});
+			if (building.is_osm_sourced || is_skipped_footprint(building.id))
+				continue;
+			if (collection.buildings.size() >= maximum) {
+				capped = true;
+				break;
+			}
+			collection.buildings.push_back(std::move(building));
+		}
+		if (capped)
+			break;
+	}
+	if (lost_partitions || lost_row_groups)
+		std::cerr << "Warning: Overture Maps data incomplete: " << lost_partitions
+				  << " partition(s) and " << lost_row_groups
+				  << " row group(s) could not be read.\n";
+	if (capped)
+		std::cerr
+				<< "Warning: Overture Maps reached the building limit (" << maximum
+				<< "); later footprints may be missing. Use a smaller area for full coverage.\n";
+	return collection;
+}
+
+std::optional<OvertureData> fetch_overture_parquet_candidates(
+		const std::vector<std::string> &candidates, const geographic::LLBBox &bbox,
+		const projection::ProjectionSpec &projection_spec, std::size_t maximum,
+		bool debug, bool pinned_release)
+{
+	for (const auto &release : candidates) {
+		auto collection = collect_overture_parquet_release(
+				cache::cache_root(), release, bbox, maximum, debug);
+		if (!collection) {
+			if (debug)
+				std::cerr << "Overture Parquet unavailable for release " << release
+						  << "; trying the next release.\n";
+			continue;
+		}
+		const BuildingSource collection_source =
+				[collection = std::move(*collection)](const geographic::LLBBox &,
+						std::size_t) mutable { return std::move(collection); };
+		auto result = fetch_overture_data_from(
+				collection_source, bbox, projection_spec, false, maximum);
+		if (!pinned_release) {
+			cache::set_last_good_release(cache::cache_root(), release);
+			cache::prune_releases_older_than(cache::cache_root(), release);
+		}
+		return result;
+	}
+	return std::nullopt;
+}
+} // namespace
+
 std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::path &path,
 		const geographic::LLBBox &bbox, std::size_t maximum)
 {
@@ -1277,20 +1996,16 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 		auto ring = parse_overture_wkb_polygon(*value_geometry);
 		if (!ring || ring->size() < 3)
 			continue;
-		bool overlaps = false;
-		for (const auto &[longitude, latitude] : *ring) {
-			if (longitude >= bbox.min().lng() && longitude <= bbox.max().lng() &&
-					latitude >= bbox.min().lat() && latitude <= bbox.max().lat()) {
-				overlaps = true;
-				break;
-			}
-		}
-		if (!overlaps)
+		if (!ring_overlaps_bbox(*ring, bbox))
 			continue;
-		auto source_text = display_at(sources, row);
-		buildings.push_back({*value_id, std::move(*ring),
-				source_text && source_text->find("OpenStreetMap") != std::string::npos,
-				source_text ? parse_osm_reference(*source_text) : std::nullopt,
+		OvertureSourceInfo source_info;
+		if (sources) {
+			auto source_scalar = sources->GetScalar(row);
+			if (source_scalar.ok())
+				scan_overture_sources(*source_scalar, source_info);
+		}
+		buildings.push_back({*value_id, std::move(*ring), source_info.is_osm,
+				source_info.osm_ref,
 				number_at(height, row), number_at(min_height, row),
 				integer_at(floors, row), string_at(subtype, row), string_at(clazz, row),
 				intern_roof_shape(string_at(roof_shape, row)),
@@ -1645,15 +2360,29 @@ OvertureData fetch_overture_data(const geographic::LLBBox &bbox,
 					  << " z14 tiles; use auto or parquet for this area.\n";
 		return OvertureData{};
 	}
+	const char *release_env = std::getenv("ARNIS_OVERTURE_RELEASE");
+	const bool pinned_release = release_env && *release_env;
+	std::vector<std::string> candidates;
+	if (pinned_release) {
+		if (cache::valid_release(release_env))
+			candidates.emplace_back(release_env);
+	} else {
+		candidates = overture_release_candidates(discover_overture_releases(),
+				cache::last_good_release(cache::cache_root()));
+	}
+	const auto maximum = std::min(overture_building_budget(bbox), MAX_OVERTURE_BUILDINGS);
 	if (source == OvertureSource::Parquet ||
 			(source == OvertureSource::Auto && !tiles_cover)) {
 #if defined(USE_ARROW) && USE_ARROW
 		if (debug && source == OvertureSource::Auto)
 			std::cerr << "Overture Maps: area exceeds the vector-tile threshold; "
 					  << "using GeoParquet.\n";
-		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
-												"overture-buildings.parquet")),
-				bbox, projection_spec);
+		if (auto result = fetch_overture_parquet_candidates(
+					candidates, bbox, projection_spec, maximum, debug, pinned_release))
+			return std::move(*result);
+		if (debug)
+			std::cerr << "Overture Maps: no GeoParquet release could be read.\n";
+		return OvertureData{};
 #else
 		if (debug)
 			std::cerr
@@ -1661,51 +2390,9 @@ OvertureData fetch_overture_data(const geographic::LLBBox &bbox,
 		return OvertureData{};
 #endif
 	}
-	// Kept as a conservative fallback just as in Rust. An application with a
-	// newer release can use http_pmtiles_building_source() directly; this API
-	// remains useful for existing callers that only supplied a bounding box.
-	// Keep the library usable while release discovery is unavailable, but allow
-	// embedders and deployments to select the current immutable release without
-	// recompiling (Rust's release selector likewise avoids hard-coding transport
-	// policy into the geometry decoder).
-	const char *release_env = std::getenv("ARNIS_OVERTURE_RELEASE");
-	std::vector<std::string> releases;
-	if (release_env && *release_env)
-		releases.emplace_back(release_env);
-	else {
-		releases = discover_overture_releases();
-		if (const auto remembered = cache::last_good_release(cache::cache_root());
-				remembered && std::find(releases.begin(), releases.end(), *remembered) ==
-									  releases.end())
-			releases.push_back(*remembered);
-		releases.push_back("2026-08-19.0");
-	}
-	// Keep a slow or unexpectedly long bucket listing from turning one map
-	// generation into an unbounded sequence of remote archive attempts. Rust
-	// reserves room for the remembered and bundled fallbacks; retain that
-	// guarantee here while removing duplicate release names.
-	std::vector<std::string> candidates;
-	const std::size_t discovered_limit = releases.size() > 2 ? releases.size() - 2 : 0;
-	for (std::size_t i = 0; i < releases.size(); ++i) {
-		if (i >= discovered_limit && discovered_limit != 0)
-			break;
-		const auto &release = releases[i];
-		if (!cache::valid_release(release) ||
-				std::find(candidates.begin(), candidates.end(), release) !=
-						candidates.end())
-			continue;
-		candidates.push_back(release);
-		if (candidates.size() >= 2)
-			break;
-	}
-	for (std::size_t i = discovered_limit; i < releases.size(); ++i) {
-		const auto &release = releases[i];
-		if (cache::valid_release(release) &&
-				std::find(candidates.begin(), candidates.end(), release) ==
-						candidates.end())
-			candidates.push_back(release);
-	}
-	const auto maximum = std::min(overture_building_budget(bbox), MAX_OVERTURE_BUILDINGS);
+	// For tile-sized requests, try the release's PMTiles archive first. The same
+	// candidate list feeds the GeoParquet fallback below, matching Rust's
+	// release-aware transport dispatch.
 	std::vector<std::string> tile_errors;
 	for (const auto &release : candidates) {
 		const std::string archive =
@@ -1732,7 +2419,7 @@ OvertureData fetch_overture_data(const geographic::LLBBox &bbox,
 						std::size_t) mutable { return std::move(collection); };
 		auto result = fetch_overture_data_from(
 				collection_source, bbox, projection_spec, false, maximum);
-		if (!release_env) {
+		if (!pinned_release) {
 			cache::set_last_good_release(cache::cache_root(), release);
 			cache::prune_releases_older_than(cache::cache_root(), release);
 		}
@@ -1743,9 +2430,10 @@ OvertureData fetch_overture_data(const geographic::LLBBox &bbox,
 		std::cerr << "Warning: Overture vector tiles unavailable ("
 				  << (tile_errors.empty() ? "no usable release" : tile_errors.front())
 				  << "); falling back to the GeoParquet source.\n";
-		return fetch_overture_data_from(parquet_building_source(std::filesystem::path(
-												"overture-buildings.parquet")),
-				bbox, projection_spec);
+		if (auto result = fetch_overture_parquet_candidates(
+					candidates, bbox, projection_spec, maximum, debug, pinned_release))
+			return std::move(*result);
+		std::cerr << "Warning: Overture GeoParquet releases were unavailable.\n";
 #else
 		std::cerr << "Warning: Overture vector tiles unavailable and Arrow/Parquet "
 				  << "fallback is disabled.\n";

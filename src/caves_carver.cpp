@@ -656,12 +656,9 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	const auto &air_cells = cave_air ? *cave_air : empty_air;
 	// Match Rust: decorate only the explicitly tracked cave-air cells. Fluid
 	// cells are consulted separately and unrelated voids are not candidates.
-	// Rust uses a deterministic FNV set, then sorts packed positions before
-	// applying edits. Keep that write order here too: vines and tall plants can
-	// overlap nearby cells, so unordered_set iteration changes the result.
-	std::vector<std::int64_t> ordered_air(air_cells.begin(), air_cells.end());
-	std::sort(ordered_air.begin(), ordered_air.end());
-	for (const auto p : ordered_air) {
+	// Match Rust's direct set traversal and avoid an additional full-region
+	// allocation and O(n log n) sort before decoration.
+	for (const auto p : air_cells) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (!region.contains(x, z))
 			continue;
@@ -951,9 +948,7 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				TUBE_CORAL, BRAIN_CORAL, FIRE_CORAL, HORN_CORAL, BUBBLE_CORAL};
 		const Block dead_beds[] = {DEAD_TUBE_CORAL_BLOCK, DEAD_BRAIN_CORAL_BLOCK,
 				DEAD_FIRE_CORAL_BLOCK, DEAD_HORN_CORAL_BLOCK, DEAD_BUBBLE_CORAL_BLOCK};
-		std::vector<std::int64_t> ordered_water(water_cells->begin(), water_cells->end());
-		std::sort(ordered_water.begin(), ordered_water.end());
-		for (const auto packed : ordered_water) {
+		for (const auto packed : *water_cells) {
 			const auto [x, y, z] = unpack_cave_pos(packed);
 			if (!region.contains(x, z) || !themes.coral_zone(x, z) ||
 					!editor.check_for_block_absolute(x, y - 1, z, rock_options))

@@ -1564,6 +1564,106 @@ std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 	return output;
 }
 
+// Separable blur of the elevation grid, treating real water-surface cells as
+// missing samples. Keep the horizontal pass in f64 and reuse that grid for the
+// vertical pass, matching Rust's masked blur without allocating another full
+// height-sized intermediate.
+HeightGrid gaussian_blur_grid_masked(const HeightGrid &heights, const MaskGrid &masked,
+		double sigma, const std::function<void(double)> &report)
+{
+	const std::size_t h = std::min(heights.size(), masked.size());
+	if (h == 0)
+		return {};
+	const std::size_t w = std::min(heights.front().size(), masked.front().size());
+	if (w == 0)
+		return HeightGrid(h);
+
+	const int radius = static_cast<int>(std::ceil(sigma * 3.0));
+	std::vector<double> kernel(static_cast<std::size_t>(radius * 2 + 1));
+	double kernel_sum = 0.0;
+	for (int k = -radius; k <= radius; ++k) {
+		const double d = static_cast<double>(k);
+		const double weight = std::exp(-(d * d) / (2.0 * sigma * sigma));
+		kernel[static_cast<std::size_t>(k + radius)] = weight;
+		kernel_sum += weight;
+	}
+	for (auto &weight : kernel)
+		weight /= kernel_sum;
+
+	constexpr std::size_t BLUR_CHUNKS = 10;
+	const auto row_chunk = std::max<std::size_t>(1, (h + BLUR_CHUNKS - 1) / BLUR_CHUNKS);
+	HeightGrid after_h(h, std::vector<double>(w));
+	for (std::size_t y0 = 0; y0 < h; y0 += row_chunk) {
+		const auto y1 = std::min(h, y0 + row_chunk);
+		parallel_rows(y0, y1, [&](std::size_t y) {
+			const auto len = std::min(w, std::min(heights[y].size(), masked[y].size()));
+			for (std::size_t x = 0; x < len; ++x) {
+				double sum = 0.0, weight_sum = 0.0;
+				for (int k = -radius; k <= radius; ++k) {
+					const auto sx = static_cast<std::int64_t>(x) + k;
+					if (sx < 0 || sx >= static_cast<std::int64_t>(len) ||
+							masked[y][static_cast<std::size_t>(sx)])
+						continue;
+					const double value = heights[y][static_cast<std::size_t>(sx)];
+					if (!std::isfinite(value))
+						continue;
+					const double weight = kernel[static_cast<std::size_t>(k + radius)];
+					sum += value * weight;
+					weight_sum += weight;
+				}
+				after_h[y][x] = weight_sum > 0.0
+										? sum / weight_sum
+										: std::numeric_limits<double>::quiet_NaN();
+			}
+		});
+		if (report)
+			report(0.5 * static_cast<double>(y1) / h);
+	}
+
+	// Gather a small group of row-major columns before writing them back. Every
+	// group reads and writes disjoint columns, so it can run in parallel without
+	// a second full-sized vertical-output grid.
+	const auto col_chunk = std::max<std::size_t>(1, (w + BLUR_CHUNKS - 1) / BLUR_CHUNKS);
+	constexpr std::size_t COLUMN_GROUP = 8;
+	for (std::size_t x0 = 0; x0 < w; x0 += col_chunk) {
+		const auto x1 = std::min(w, x0 + col_chunk);
+		const auto groups = (x1 - x0 + COLUMN_GROUP - 1) / COLUMN_GROUP;
+		parallel_rows(0, groups, [&](std::size_t group) {
+			const auto gx = x0 + group * COLUMN_GROUP;
+			const auto group_width = std::min(COLUMN_GROUP, x1 - gx);
+			std::vector<std::vector<double>> columns(group_width, std::vector<double>(h));
+			for (std::size_t y = 0; y < h; ++y)
+				for (std::size_t c = 0; c < group_width; ++c)
+					columns[c][y] = after_h[y][gx + c];
+			for (std::size_t c = 0; c < group_width; ++c) {
+				const auto x = gx + c;
+				const auto &column = columns[c];
+				for (std::size_t y = 0; y < h; ++y) {
+					double sum = 0.0, weight_sum = 0.0;
+					for (int k = -radius; k <= radius; ++k) {
+						const auto sy = static_cast<std::int64_t>(y) + k;
+						if (sy < 0 || sy >= static_cast<std::int64_t>(h))
+							continue;
+						const double value = column[static_cast<std::size_t>(sy)];
+						if (!std::isfinite(value))
+							continue;
+						const double weight =
+								kernel[static_cast<std::size_t>(k + radius)];
+						sum += value * weight;
+						weight_sum += weight;
+					}
+					after_h[y][x] = weight_sum > 0.0
+											? sum / weight_sum
+											: std::numeric_limits<double>::quiet_NaN();
+				}
+			}
+		});
+		if (report)
+			report(0.5 + 0.5 * static_cast<double>(x1) / w);
+	}
+	return after_h;
+}
+
 void smooth_built_up_gaussian(HeightGrid &heights, const CoverGrid &cover,
 		const MaskGrid &surface, double sigma, const std::function<void(double)> &report)
 {

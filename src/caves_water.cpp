@@ -391,20 +391,15 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		water_cells.erase(p);
 
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	// Rust WaterPlan::apply sorts both sets before emitting world writes. Keep
-	// that canonical order here: region overlays can observe write order, and
-	// unordered_set traversal is not stable across implementations.
-	std::vector<std::int64_t> ordered_carved(carved_cells.begin(), carved_cells.end());
-	std::sort(ordered_carved.begin(), ordered_carved.end());
-	for (const auto p : ordered_carved) {
+	// Match Rust WaterPlan::apply: write the planned sets directly without
+	// allocating and sorting temporary copies of every cave cell.
+	for (const auto p : carved_cells) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
 				host(editor, x, y, z))
 			editor.set_block_absolute(AIR, x, y, z, host_blocks(), std::nullopt);
 	}
-	std::vector<std::int64_t> ordered_water(water_cells.begin(), water_cells.end());
-	std::sort(ordered_water.begin(), ordered_water.end());
-	for (const auto p : ordered_water) {
+	for (const auto p : water_cells) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
 				editor.check_for_block_absolute(x, y, z, std::vector<Block>{AIR})) {
@@ -477,17 +472,13 @@ bool WaterPlan::solid(const CaveShapeQuery &shape, int x, int y, int z) const
 void WaterPlan::apply(world_editor::WorldEditor &editor, const CaveRect &region,
 		const std::vector<Block> &cave_host) const
 {
-	std::vector<std::int64_t> ordered_carved(carved.begin(), carved.end());
-	std::sort(ordered_carved.begin(), ordered_carved.end());
-	for (const auto p : ordered_carved) {
+	for (const auto p : carved) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z))
 			editor.set_block_absolute(AIR, x, y, z,
 					std::optional<std::vector<Block>>(cave_host), std::nullopt);
 	}
-	std::vector<std::int64_t> ordered_water(water.begin(), water.end());
-	std::sort(ordered_water.begin(), ordered_water.end());
-	for (const auto p : ordered_water) {
+	for (const auto p : water) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z)) {
 			editor.set_block_absolute(WATER, x, y, z,
