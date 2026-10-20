@@ -23,6 +23,8 @@ namespace arnis::caves
 {
 namespace
 {
+constexpr int CAVE_TOP_GATE = 6;
+
 const std::vector<Block> &host_blocks()
 {
 	// Rust's HOSTS stores logical IDs. Capture mapped host IDs only when cave
@@ -61,8 +63,9 @@ bool planned_solid(const world_editor::WorldEditor &editor, const CaveRect &worl
 	const auto p = pack_cave_pos(x, y, z);
 	if (water.contains(p))
 		return true;
-	return world.contains(x, z) && y >= floor_y && y <= editor.get_ground_level(x, z) &&
-		   !is_cave(x, y, z) && !carved.contains(p);
+	return world.contains(x, z) && y >= floor_y &&
+		   y <= editor.get_ground_level(x, z) - CAVE_TOP_GATE && !is_cave(x, y, z) &&
+		   !carved.contains(p);
 }
 
 void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int floor_y,
@@ -97,7 +100,7 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 		// whole cross-section to that plane. Re-sampling each neighboring column
 		// lets the channel climb or pinch on a slope, diverging from the planned
 		// cross-section and making the stream irregular across tile boundaries.
-		const int ptop = editor.get_ground_level(cx, cz) - 6;
+		const int ptop = editor.get_ground_level(cx, cz) - CAVE_TOP_GATE;
 		const bool contact_here = is_cave(cx, cy, cz);
 		const bool contact_below = is_cave(cx, cy - 1, cz) || is_cave(cx, cy - 2, cz);
 		if (contact_here && !(descended || contact_below))
@@ -259,7 +262,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 				const int gx = cx * 16 + pool_rng.next_int(16);
 				const int gz = cz * 16 + pool_rng.next_int(16);
 				if (world_bounds.contains(gx, gz)) {
-					const int top = editor.get_ground_level(gx, gz) - 6;
+					const int top = editor.get_ground_level(gx, gz) - CAVE_TOP_GATE;
 					const int lo = floor_y + 16;
 					const int hi = std::min(top - 10, floor_y + 94);
 					if (hi > lo) {
@@ -306,7 +309,8 @@ void generate_water_features(world_editor::WorldEditor &editor,
 								const int px = gx + dx, pz = gz + dz;
 								if (!world_bounds.contains(px, pz))
 									continue;
-								const int ptop = editor.get_ground_level(px, pz) - 6;
+								const int ptop =
+										editor.get_ground_level(px, pz) - CAVE_TOP_GATE;
 								for (int dy = -ri_v; dy <= ri_v; ++dy) {
 									const int py = gy + dy;
 									if (py > ptop)
@@ -391,15 +395,20 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		water_cells.erase(p);
 
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	// Match Rust WaterPlan::apply: write the planned sets directly without
-	// allocating and sorting temporary copies of every cave cell.
-	for (const auto p : carved_cells) {
+	// Match Rust WaterPlan::apply's canonical packed-key write order. The cave
+	// edits may overlap later decoration and fluid updates, so hash iteration
+	// must not decide which write wins.
+	std::vector<std::int64_t> ordered_carved(carved_cells.begin(), carved_cells.end());
+	std::sort(ordered_carved.begin(), ordered_carved.end());
+	for (const auto p : ordered_carved) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
 				host(editor, x, y, z))
 			editor.set_block_absolute(AIR, x, y, z, host_blocks(), std::nullopt);
 	}
-	for (const auto p : water_cells) {
+	std::vector<std::int64_t> ordered_water(water_cells.begin(), water_cells.end());
+	std::sort(ordered_water.begin(), ordered_water.end());
+	for (const auto p : ordered_water) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z) && y >= write_min_y && y <= write_max_y &&
 				editor.check_for_block_absolute(x, y, z, std::vector<Block>{AIR})) {
@@ -472,13 +481,17 @@ bool WaterPlan::solid(const CaveShapeQuery &shape, int x, int y, int z) const
 void WaterPlan::apply(world_editor::WorldEditor &editor, const CaveRect &region,
 		const std::vector<Block> &cave_host) const
 {
-	for (const auto p : carved) {
+	std::vector<std::int64_t> ordered_carved(carved.begin(), carved.end());
+	std::sort(ordered_carved.begin(), ordered_carved.end());
+	for (const auto p : ordered_carved) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z))
 			editor.set_block_absolute(AIR, x, y, z,
 					std::optional<std::vector<Block>>(cave_host), std::nullopt);
 	}
-	for (const auto p : water) {
+	std::vector<std::int64_t> ordered_water(water.begin(), water.end());
+	std::sort(ordered_water.begin(), ordered_water.end());
+	for (const auto p : ordered_water) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (region.contains(x, z)) {
 			editor.set_block_absolute(WATER, x, y, z,

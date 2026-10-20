@@ -305,6 +305,8 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("mud_bricks");
 	if (block == SAND)
 		return state("sand", {{"sand_type", std::string("normal")}});
+	if (block == RED_SAND)
+		return state("sand", {{"sand_type", std::string("red")}});
 	if (block == GRAVEL)
 		return simple("gravel");
 	if (block == DEAD_BUSH)

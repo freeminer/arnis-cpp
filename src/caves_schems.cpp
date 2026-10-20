@@ -472,19 +472,23 @@ bool place_formation(world_editor::WorldEditor &editor, const CaveSchematic &sch
 		editor.set_block_with_properties_absolute(
 				BlockWithProperties{entry.block, properties}, wx, wy, wz,
 				std::optional<std::vector<Block>>{allowed}, std::nullopt);
-		if (editor.check_for_block_absolute(
-					wx, wy, wz, std::vector<Block>{entry.block})) {
-			if (entry.fluid) {
-				editor.schedule_fluid_tick(entry.block, wx, wy, wz);
-				if (basin_fluid)
-					basin_fluid->insert(pack_cave_pos(wx, wy, wz));
-			} else {
-				placed_solids.emplace_back(wx, wy, wz, entry.block);
-				placed_solid_positions.emplace(wx, wy, wz);
-				if (orientation == Orientation::EmbedFloor && v.y == schem.height - 1)
-					top_row.emplace_back(wx, wy, wz, entry.block);
-			}
+		if (entry.fluid) {
+			// Match Rust: fluid updates and basin tracking follow the write attempt,
+			// even when the editor's replacement filter leaves the existing block.
+			editor.schedule_fluid_tick(entry.block, wx, wy, wz);
+			if (basin_fluid)
+				basin_fluid->insert(pack_cave_pos(wx, wy, wz));
+		} else if (editor.check_for_block_absolute(
+						   wx, wy, wz, std::vector<Block>{entry.block})) {
+			placed_solids.emplace_back(wx, wy, wz, entry.block);
+			placed_solid_positions.emplace(wx, wy, wz);
 		}
+		// Rust records the EmbedFloor top row independently of whether the voxel
+		// itself landed. The skirt completes the basin into uneven ground below
+		// that planned rim, including cells where an authored block prevented the
+		// original write.
+		if (!entry.fluid && embedded && v.y == schem.height - 1)
+			top_row.emplace_back(wx, wy, wz, entry.block);
 	}
 	// Remove isolated pieces left behind when the cave roof clipped their support.
 	for (const auto &[wx, wy, wz, block] : placed_solids) {

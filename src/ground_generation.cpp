@@ -7,6 +7,7 @@
 #include "trees/schematic.h"
 #include "climate.h"
 #include "celestial.h"
+#include "canopy/canopy.h"
 #include "deterministic_rng.h"
 #include "world_editor/floor_state.h"
 #include "terrain_surface.h"
@@ -14,6 +15,7 @@
 #include "trees/mapped.h"
 #include "biome.h"
 #include "ground_decoration.h"
+#include "surface.h"
 
 #include <algorithm>
 #include <array>
@@ -54,20 +56,6 @@ const std::optional<std::vector<Block>> &protected_surfaces()
 			std::vector<Block>{BLACK_CONCRETE, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA,
 					GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, YELLOW_CONCRETE,
 					DIRT_PATH, SMOOTH_STONE, WATER}};
-	return blocks;
-}
-
-const std::optional<std::vector<Block>> &natural_tree_ground()
-{
-	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{
-			GRASS_BLOCK, COARSE_DIRT, DIRT, MUD, FARMLAND, PODZOL, MOSS_BLOCK}};
-	return blocks;
-}
-
-const std::optional<std::vector<Block>> &tree_ground()
-{
-	static const std::optional<std::vector<Block>> blocks{
-			std::vector<Block>{SMOOTH_STONE, STONE_BRICKS, CRACKED_STONE_BRICKS}};
 	return blocks;
 }
 
@@ -282,9 +270,9 @@ bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 }
 
 std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int z,
-		int ground_y, int slope, std::uint8_t cover, bool has_cover)
+		int ground_y, int slope, int slope_t27, std::uint8_t cover, bool has_cover)
 {
-	if (slope > 4)
+	if (slope > slope_t27)
 		return terrain_surface::steep_palette(x, z, ground_y, slope, cover);
 	if (has_cover && editor.ground) {
 		auto climate_palette =
@@ -370,14 +358,12 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	const bool sealed = editor.surface_is_sealed(x, z);
 	if (editor.check_for_block_absolute(x, ground_y + 1, z))
 		return;
-	const auto natural_ground = [&] {
-		return !sealed &&
-			   editor.check_for_block_absolute(x, ground_y, z, natural_tree_ground());
-	};
-	const bool ground_is_natural = natural_ground();
+	const auto ground_block = editor.get_block_absolute(x, ground_y, z);
+	const bool ground_is_natural =
+			!sealed && ground_block && surface::takes_wild_plants(*ground_block);
 	const bool ground_allows_trees =
 			ground_is_natural ||
-			(!sealed && editor.check_for_block_absolute(x, ground_y, z, tree_ground()));
+			(!sealed && ground_block && surface::takes_wild_trees(*ground_block));
 
 	const auto cover =
 			editor.ground ? editor.ground->cover_class(editor.ground_point(x, z)) : 0;
@@ -393,6 +379,9 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			canopy_available ? canopy_verdict(*editor.ground, x, z, origin_x, origin_z,
 									   tree_spacing, schematic_trees)
 							 : std::pair{false, false};
+	// Rust's canopy verdict is always gated at slope <= 4 and requires the
+	// same tree-supporting surface as land-cover trees; dryland cliff rules do
+	// not widen this independent canopy pass.
 	if (canopy_tree && slope <= 4 && ground_allows_trees &&
 			!(tunnel_footprint && tunnel_footprint->contains(x, z)) &&
 			!editor.check_for_block_absolute(x, ground_y + 1, z) &&
@@ -577,6 +566,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		editor.ground->warm_water_blend();
 	if (show_progress)
 		std::cout << "[6/7] Generating ground...\n";
+	// Keep the three material tiers in sync with terrain_surface.rs: slopes are
+	// measured in eighths, with the rock tiers above 4, 6, and 8 respectively.
+	constexpr int slope_t27 = 4;
+	constexpr int slope_t37 = 6;
+	constexpr int slope_t45 = 8;
 	const bool terrain_enabled = editor.ground ? editor.ground->elevation_enabled
 											   : generation_mode_terrain(args.mode);
 	// Keep the terrain palette decision on the same source as Rust's
@@ -688,10 +682,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 											  args.ground_level)
 									: std::pair{0.0, std::pair{0.0, 0.0}};
 					const int slope = static_cast<int>(std::lround(slope_f));
-					// Rust treats slopes above four as an explicit rock override.  This
-					// deliberately bypasses authored surface blocks (quarry/park/etc.) so
-					// steep faces cannot retain grass or paving, while still allowing the
-					// lower tiers of the slope palette to choose scree materials.
+					// Match ground_generation.rs: preserve sand through its angle of
+					// repose, but replace mapped surfaces on steeper faces.
 					const bool mapped_sand =
 							editor.check_for_block_type_absolute(x, ground_y, z, SAND);
 					const bool steep_override =
@@ -810,12 +802,13 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							const std::pair<Block, Block> palette =
 									planetary	  ? planetary_palette
 									: talus_block ? *talus_block
-									: slope > 4	  ? terrain_surface::steep_palette(x, z,
-															ground_y, slope, cover_here)
-									: glacier	  ? std::pair{PACKED_ICE, PACKED_ICE}
-												  : natural_surface_palette(editor, x, z,
-															ground_y, slope, cover_here,
-															has_cover);
+									: slope > slope_t27
+											? terrain_surface::steep_palette(
+													  x, z, ground_y, slope, cover_here)
+									: glacier ? std::pair{PACKED_ICE, PACKED_ICE}
+											  : natural_surface_palette(editor, x, z,
+														ground_y, slope, slope_t27,
+														cover_here, has_cover);
 							Block surface = palette.first;
 							std::optional<Block> climate_under = palette.second;
 							// Rust shoreline parity: blend the immediate ring around ESA or
@@ -935,10 +928,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								if (y_max > world_editor::min_y()) {
 									const int y_min = std::max(
 											ground_y - depth, world_editor::min_y() + 1);
-									if (terrain_enabled && !planetary && slope > 4 &&
-											climate_under == STONE)
-										terrain_surface::fill_strata(
-												editor, x, z, y_min, y_max, slope > 6);
+									if (terrain_enabled && !planetary &&
+											slope > slope_t27 && climate_under == STONE)
+										terrain_surface::fill_strata(editor, x, z, y_min,
+												y_max, slope > slope_t37);
 									else
 										editor.fill_column_absolute(
 												*climate_under, x, z, y_min, y_max, true);
@@ -1008,7 +1001,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						if (y_min <= y_max)
 							editor.fill_column_absolute(STONE, x, z, y_min, y_max, true);
 					}
-
 					// Rust performs this post-pass for every body and column: an
 					// authored road or water surface can receive vegetation from an
 					// overlapping element regardless of the active terrain provider.
@@ -1046,4 +1038,5 @@ void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &
 			xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z(), tunnel_footprint,
 			bridge_surface, show_progress);
 }
+
 }

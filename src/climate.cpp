@@ -2,9 +2,8 @@
 #include "assets_root.h"
 #include "land_cover/land_cover.h"
 #include "block_definitions.h"
-#include "ground_generation.h"
-#include "deterministic_rng.h"
 #include "geo_grid.h"
+#include "ground_generation.h"
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
@@ -84,11 +83,11 @@ std::optional<std::pair<Block, Block>> surface_palette(
 			c == Climate::DryContinental)
 		return std::nullopt;
 	const bool veg = cover == LC_TREE_COVER || cover == LC_SHRUBLAND ||
-					 cover == LC_GRASSLAND || cover == LC_CROPLAND || cover == LC_MOSS,
-			   bare = cover == LC_BARE || cover == LC_SNOW_ICE;
+					 cover == LC_GRASSLAND || cover == LC_CROPLAND || cover == LC_MOSS;
+	const bool bare = cover == LC_BARE || cover == LC_SNOW_ICE;
 	if (!veg && !bare)
 		return std::nullopt;
-	const auto n = ground_generation::patch_noise(x, z, 9, 0x00C11A7Eu);
+	const double n = ground_generation::patch_noise(x, z, 9, 0x00C1'1A7Eu);
 	const auto pick =
 			[n](std::initializer_list<std::pair<double, std::pair<Block, Block>>> bands) {
 				for (const auto &band : bands)
@@ -96,37 +95,43 @@ std::optional<std::pair<Block, Block>> surface_palette(
 						return band.second;
 				return bands.end()[-1].second;
 			};
-	if (c == Climate::IceCap)
-		return ground_generation::patch_noise(x, z, 20, 0x001CECA9u) < .17
-					   ? std::make_pair(PACKED_ICE, PACKED_ICE)
-					   : std::make_pair(SNOW_BLOCK, SNOW_BLOCK);
-	if (c == Climate::HotDesert) {
-		if (ground_generation::patch_noise(x, z, 12, 0x00DE5E27u) < .06)
-			return std::make_pair(SANDSTONE, SANDSTONE);
-		return coord_hash(x, z) % 40 == 0 ? std::make_pair(SMOOTH_SANDSTONE, SANDSTONE)
-										  : std::make_pair(SAND, SANDSTONE);
-	}
-	if (c == Climate::HotSteppe)
+	switch (c) {
+	case Climate::IceCap:
+		return ground_generation::patch_noise(x, z, 20, 0x001C'ECA9u) < .17
+					   ? std::pair{PACKED_ICE, PACKED_ICE}
+					   : std::pair{SNOW_BLOCK, SNOW_BLOCK};
+	case Climate::HotDesert:
+		if (ground_generation::patch_noise(x, z, 12, 0x00DE'5E27u) < .06)
+			return std::pair{SANDSTONE, SANDSTONE};
+		return coord_hash(x, z) % 40 == 0 ? std::pair{SMOOTH_SANDSTONE, SANDSTONE}
+										  : std::pair{SAND, SANDSTONE};
+	case Climate::HotSteppe:
 		return bare ? pick({{.35, {SAND, SANDSTONE}}, {1., {COARSE_DIRT, DIRT}}})
 					: pick({{.15, {SAND, SANDSTONE}}, {.5, {COARSE_DIRT, DIRT}},
 							  {1., {GRASS_BLOCK, DIRT}}});
-	if (c == Climate::ColdDesert)
+	case Climate::ColdDesert:
 		return bare ? pick({{.42, {GRAVEL, STONE}}, {.75, {COARSE_DIRT, DIRT}},
 							  {1., {STONE, STONE}}})
 					: pick({{.5, {COARSE_DIRT, DIRT}}, {.8, {GRAVEL, STONE}},
 							  {1., {GRASS_BLOCK, DIRT}}});
-	if (c == Climate::ColdSteppe)
+	case Climate::ColdSteppe:
 		return bare ? pick({{.6, {COARSE_DIRT, DIRT}}, {1., {GRAVEL, STONE}}})
 					: pick({{.3, {COARSE_DIRT, DIRT}}, {1., {GRASS_BLOCK, DIRT}}});
-	if (c == Climate::Boreal)
+	case Climate::Boreal:
 		return bare ? pick({{.5, {COARSE_DIRT, DIRT}}, {1., {GRAVEL, STONE}}})
 					: pick({{.4, {PODZOL, DIRT}}, {.6, {COARSE_DIRT, DIRT}},
 							  {1., {GRASS_BLOCK, DIRT}}});
-	if (c == Climate::Tundra)
+	case Climate::Tundra:
 		return bare ? pick({{.5, {GRAVEL, STONE}}, {.8, {COARSE_DIRT, DIRT}},
 							  {1., {STONE, STONE}}})
 					: pick({{.4, {COARSE_DIRT, DIRT}}, {.6, {MOSS_BLOCK, DIRT}},
 							  {1., {GRASS_BLOCK, DIRT}}});
+	case Climate::TropicalSavanna:
+		return std::nullopt;
+	case Climate::Temperate:
+	case Climate::DryContinental:
+		return std::nullopt;
+	}
 	return std::nullopt;
 }
 arnis::biome::Climate from_koppen_class(unsigned char c)

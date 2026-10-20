@@ -2253,6 +2253,7 @@ bool generate_world(WorldEditor &editor,
 	// estimate would otherwise select row-major bands for streaming.
 	const bool force_lpt_tile_order = std::getenv("ARNIS_NO_BAND") != nullptr;
 	bool streaming_order = false;
+	std::uint64_t tile_available_memory_mb = 0;
 	std::vector<std::vector<std::size_t>> element_assignments;
 	std::vector<std::pair<std::size_t, std::size_t>> element_tasks;
 	std::optional<TileFillReaders> tile_fill_reader_state;
@@ -2270,8 +2271,10 @@ bool generate_world(WorldEditor &editor,
 		// actually allocated, not the more optimistic pre-assignment snapshot.
 		tile_fill_reader_state = compute_tile_fill_readers(element_assignments, elements,
 				building_part_groups, building_group_members, flood_fill_cache);
+		tile_available_memory_mb = available_memory_mb();
 		streaming_order = java_format && !force_lpt_tile_order &&
-						  should_stream_to_disk(element_tiles.size(), args.fillground);
+						  should_stream_to_disk(element_tiles.size(),
+								  tile_available_memory_mb, args.fillground);
 		// Rust schedules dense tiles first for LPT unless memory pressure enables
 		// streaming, where row-major region bands keep the eviction frontier
 		// monotonic. The C++ Freeminer backend still processes overlays serially,
@@ -2345,8 +2348,10 @@ bool generate_world(WorldEditor &editor,
 			bool(editor.merge_tile_sink) && editor.tile_worker_callbacks_safe();
 	const auto pool_threads = static_cast<std::size_t>(
 			std::max(1u, std::min(16u, std::thread::hardware_concurrency())));
-	const auto tile_batch_size =
-			tile_processing_threads(pool_threads, available_memory_mb(), args.fillground);
+	if (!tiled_element_dispatch)
+		tile_available_memory_mb = available_memory_mb();
+	const auto tile_batch_size = tile_processing_threads(
+			pool_threads, tile_available_memory_mb, args.fillground);
 	std::size_t deferred_tiles_in_batch = 0;
 	if (regional_ground_passes)
 		editor.set_defer_tile_merges(true);
@@ -3008,6 +3013,7 @@ bool generate_world(WorldEditor &editor,
 		}
 		editor.set_defer_tile_merges(false);
 		editor.finish_tile_pass();
+		editor.clear_strict_bounds();
 	}
 	progress::emit_gui_progress_update_ex(70.0, "", streaming_order);
 	editor.clear_strict_bounds();

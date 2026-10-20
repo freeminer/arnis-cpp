@@ -219,6 +219,7 @@ extern Block RAIL;
 extern Block POWERED_RAIL;
 extern Block RED_FLOWER;
 extern Block RED_NETHER_BRICK;
+extern Block RED_SAND;
 extern Block RED_TERRACOTTA;
 extern Block RED_TULIP;
 extern Block RED_WOOL;

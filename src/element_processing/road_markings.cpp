@@ -515,6 +515,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint64_t>> signal_crossings;
 	std::unordered_set<std::uint64_t> signalled_crossing_way_nodes;
 	std::unordered_set<std::uint64_t> crossing_way_nodes;
+	std::unordered_set<std::uint64_t> crossing_arms;
 
 	// Find the carriageway footprints intersected by each painted crossing way.
 	// The clip bounds both its surface replacement and the break in lane paint.
@@ -535,6 +536,10 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 			const auto refs = node_uses.find(crossing_node.id);
 			if (refs == node_uses.end())
 				continue;
+			// Rust records every crossing-way node shared with a road before
+			// computing its clip. A node crossing at the same location must not
+			// be painted again even when clipping produces no carriageway cells.
+			crossing_arms.insert(crossing_node.id);
 			for (const auto &[ri, ni] : refs->second) {
 				const auto &road = roads[ri];
 				const std::size_t limit =
@@ -553,8 +558,6 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				clip.half_width = road.half_width;
 				clip.surface = road.surface;
 				clip.centreline = std::move(centreline);
-				if (clip.centreline.empty())
-					continue;
 				result.crossings_[crossing->id].push_back(clip);
 
 				std::unordered_set<std::uint64_t> painted;
@@ -653,7 +656,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 			continue;
 		const auto paint =
 				crossing_paint(node.tags, std::nullopt, result.signal_crossing_lines);
-		if (!paint || crossing_reach.contains(node.id))
+		if (!paint || crossing_arms.contains(node.id) || crossing_reach.contains(node.id))
 			continue;
 		const auto refs = node_uses.find(node.id);
 		std::vector<std::pair<std::size_t, std::size_t>> standalone_refs;
@@ -1156,11 +1159,8 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 	for (auto &[id, marks] : result.ways_) {
 		(void)id;
 		std::sort(marks.gaps.begin(), marks.gaps.end());
-		std::sort(
-				marks.marks.begin(), marks.marks.end(), [](const auto &a, const auto &b) {
-					return std::tie(a.t, a.kind, a.broken, a.side) <
-						   std::tie(b.t, b.kind, b.broken, b.side);
-				});
+		std::stable_sort(marks.marks.begin(), marks.marks.end(),
+				[](const auto &a, const auto &b) { return a.t < b.t; });
 		marks.marks.erase(std::unique(marks.marks.begin(), marks.marks.end(),
 								  [](const auto &a, const auto &b) {
 									  return a.t == b.t && a.kind == b.kind &&

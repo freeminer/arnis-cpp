@@ -46,6 +46,8 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 							 : defaults		  ? *defaults
 											  : empty_properties;
 	const bool white_bed = block.block == WHITE_BED;
+	if (block.block == RED_SAND)
+		return {"mcl_core:red_sand", 0};
 	const bool red_bed =
 			block.block == RED_BED_NORTH_HEAD || block.block == RED_BED_NORTH_FOOT ||
 			block.block == RED_BED_EAST_HEAD || block.block == RED_BED_EAST_FOOT ||
