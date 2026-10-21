@@ -380,7 +380,8 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 	std::sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
 		if (a.size != b.size)
 			return a.size > b.size;
-		return a.paved > b.paved;
+		// Apply planted layers first at equal size, so paving takes precedence.
+		return a.paved < b.paved;
 	});
 	auto mask = roads;
 	for (const auto &layer : layers) {

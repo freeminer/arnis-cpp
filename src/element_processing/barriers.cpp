@@ -146,8 +146,6 @@ RoadClearance RoadClearance::build(const std::vector<ProcessedElement> &elements
 		const auto highway_type = highways::surface_highway_type(way);
 		if (!highway_type || bridges::is_bridge_way(way))
 			continue;
-		if (!highways::tunnel_renders_at_surface(way, &editor, scale))
-			continue;
 		const float reach = static_cast<float>(highways::highway_block_range(
 									*highway_type, way.tags, scale)) +
 							.5f;

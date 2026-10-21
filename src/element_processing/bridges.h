@@ -108,7 +108,9 @@ public:
 	std::optional<int> nearby_deck_y(int x, int z, int radius) const;
 	bool deck_near(int x, int z, int y, int tolerance) const;
 	std::optional<std::pair<std::uint64_t, int>> rail_track_at(int x, int z) const;
-	bool is_empty() const { return deck_y_.empty() && rail_deck_y_.empty(); }
+	// Barrier placement queries road-deck cells via nearby_deck_y; rail-only
+	// shelter footprints must not make this road-deck map appear non-empty.
+	bool is_empty() const { return deck_y_.empty(); }
 	bool support_blocked(int x, int z, int deck_y) const;
 	std::optional<int> supported_top(
 			const WorldEditor &editor, int x, int z, int radius) const;

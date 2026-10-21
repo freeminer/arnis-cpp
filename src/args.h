@@ -261,6 +261,9 @@ struct Args
 	bool skip_osm() const { return scale < OBJECT_SKIP_SCALE || !is_earth(body); }
 	void apply_body_defaults()
 	{
+		// Rust applies mode-derived options before returning for Earth too; keep
+		// direct library callers consistent with CLI and generator entry points.
+		apply_mode_defaults();
 		if (is_earth(body))
 			return;
 		winter = false;

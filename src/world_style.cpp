@@ -17,7 +17,7 @@ namespace arnis::world_style
 {
 namespace
 {
-constexpr std::uint32_t SALT_COLLAPSE = 0x5255'4953, SALT_JAG = 0x4A41'4747,
+constexpr std::uint32_t SALT_COLLAPSE = 0x5255'494E, SALT_JAG = 0x4A41'4747,
 						SALT_HOLE = 0x484F'4C45, SALT_CRACK = 0x4352'4B53,
 						SALT_RUBBLE = 0x5242'4C45, SALT_DEPTH = 0x534E'4F57,
 						SALT_PLOW = 0x504C'4F57, SALT_ICE = 0x4943'4521,

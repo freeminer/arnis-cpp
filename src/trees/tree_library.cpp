@@ -62,7 +62,10 @@ int SizeFilter::max_height() const
 		return size_cap_height(TreeSize::Medium);
 	if (small)
 		return size_cap_height(TreeSize::Small);
-	return 0;
+	// Match Rust's SizeFilter::max_height(): even an empty filter has the
+	// smallest tier's cap. Callers still use allows() to decide whether a
+	// candidate may actually be selected.
+	return size_cap_height(TreeSize::Small);
 }
 TreeSize smaller_enabled(TreeSize requested, const SizeFilter &f)
 {

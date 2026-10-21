@@ -20,4 +20,5 @@ RequestPermit request_permit();
 std::size_t in_flight_requests();
 // Coordinate-free category matching Rust's reqwest failure tags.
 std::string failure_kind(int transport_error, long http_status);
+bool is_failure_kind(const std::string &tag);
 }

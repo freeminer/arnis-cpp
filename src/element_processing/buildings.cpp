@@ -12,6 +12,7 @@
 #include <limits>
 #include <map>
 #include <numbers>
+#include <numeric>
 #include <optional>
 #include <random>
 #include <string>
@@ -428,6 +429,44 @@ struct PairHash
 };
 using pair_hash = PairHash;
 using RoofDistanceGrid = std::unordered_map<std::pair<int, int>, int, PairHash>;
+
+// For each footprint cell, count cells along the contiguous row/column runs
+// toward -x, +x, -z and +z. Sorting the sparse footprint avoids repeatedly
+// walking long rows for every cell when roofs cover large buildings.
+std::vector<std::array<int, 4>> axis_runs(const std::vector<std::pair<int, int>> &area)
+{
+	std::vector<std::array<int, 4>> runs(area.size(), {0, 0, 0, 0});
+	std::vector<std::size_t> order(area.size());
+	std::iota(order.begin(), order.end(), 0);
+	for (const bool along_x : {true, false}) {
+		auto key = [&](std::size_t i) {
+			const auto [x, z] = area[i];
+			return along_x ? std::pair{z, x} : std::pair{x, z};
+		};
+		std::sort(order.begin(), order.end(),
+				[&](std::size_t a, std::size_t b) { return key(a) < key(b); });
+		const std::size_t dir = along_x ? 0 : 2;
+		for (std::size_t begin = 0; begin < order.size();) {
+			std::size_t end = begin + 1;
+			while (end < order.size()) {
+				const auto previous = key(order[end - 1]);
+				const auto next = key(order[end]);
+				if (previous.first != next.first || next.second - previous.second > 1)
+					break;
+				++end;
+			}
+			const int first = key(order[begin]).second;
+			const int last = key(order[end - 1]).second;
+			for (std::size_t i = begin; i < end; ++i) {
+				const int position = key(order[i]).second;
+				runs[order[i]][dir] = position - first;
+				runs[order[i]][dir + 1] = last - position;
+			}
+			begin = end;
+		}
+	}
+	return runs;
+}
 
 inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		int32_t start_y_offset, int32_t building_height, Block floor_block,
@@ -1620,6 +1659,13 @@ Block weathered_variant(Block block, ChaCha8Rng &rng)
 	return block;
 }
 
+bool has_weathered_variant(Block block)
+{
+	return block == STONE_BRICKS || block == COBBLESTONE || block == STONE ||
+		   block == SMOOTH_STONE || block == POLISHED_ANDESITE || block == OAK_PLANKS ||
+		   block == OAK_LOG;
+}
+
 const std::vector<Block> &substitute_pool_only(Block block)
 {
 	static const std::vector<Block> none;
@@ -1745,9 +1791,28 @@ int floor_divide(int value, int divisor)
 	return static_cast<int>(std::floor(static_cast<double>(value) / divisor));
 }
 
+struct WallVariety
+{
+	struct Patch
+	{
+		int x;
+		int z;
+		int band;
+		Block block;
+	};
+	bool flat_field;
+	std::array<std::optional<Patch>, 64> patches{};
+
+	explicit WallVariety(std::uint64_t element_id)
+	{
+		auto rng = element_rng(element_id ^ 0xBABEF1A122228888ULL);
+		flat_field = rng.random_bool(.20);
+	}
+};
+
 Block apply_block_variety(Block chosen, int x, int y, int z, Block wall_block,
 		int start_y_offset, std::uint64_t element_id, Block window_block,
-		BuildingCondition condition)
+		BuildingCondition condition, WallVariety &variety)
 {
 	if (const auto facade = mapillary::facades::block_at(
 				x, y, z, start_y_offset, element_id, window_block))
@@ -1759,19 +1824,25 @@ Block apply_block_variety(Block chosen, int x, int y, int z, Block wall_block,
 					x, y, z, start_y_offset, element_id))
 			return *band;
 	const auto &pool = substitute_pool_only(chosen);
-	if (pool.empty())
-		return chosen;
-	auto mode_rng = element_rng(element_id ^ 0xBABEF1A122228888ULL);
-	if (mode_rng.random_bool(.20))
+	if (pool.empty() || variety.flat_field)
 		return chosen;
 	const int band = floor_divide(y, 2);
 	const int shift = band - floor_divide(band, 3) * 3;
-	auto patch_rng = coord_rng(floor_divide(x + shift, 3), floor_divide(z + shift, 3),
+	const int patch_x = floor_divide(x + shift, 3);
+	const int patch_z = floor_divide(z + shift, 3);
+	const int slot_index = band - floor_divide(band, 64) * 64;
+	auto &slot = variety.patches[static_cast<std::size_t>(slot_index)];
+	if (slot && slot->x == patch_x && slot->z == patch_z && slot->band == band)
+		return slot->block;
+	auto patch_rng = coord_rng(patch_x, patch_z,
 			element_id ^ 0x50503030AAFFBBCCULL ^
 					(std::uint64_t(static_cast<std::int64_t>(band)) << 20));
-	if (patch_rng.uniform(100) < 12)
-		return pool[patch_rng.uniform(static_cast<std::uint32_t>(pool.size()))];
-	return chosen;
+	const Block block =
+			patch_rng.uniform(100) < 12
+					? pool[patch_rng.uniform(static_cast<std::uint32_t>(pool.size()))]
+					: chosen;
+	slot = WallVariety::Patch{patch_x, patch_z, band, block};
+	return block;
 }
 
 Block apply_condition_variation(Block chosen, int x, int y, int z, Block wall_block,
@@ -1795,21 +1866,29 @@ Block apply_condition_variation(Block chosen, int x, int y, int z, Block wall_bl
 	}
 	if (condition == BuildingCondition::Normal && normal_weather_rate == 0.0)
 		return chosen;
-	auto rng =
-			coord_rng(x, z, seed ^ (std::uint64_t(static_cast<std::int64_t>(y)) << 16));
+	const auto make_rng = [&]() {
+		return coord_rng(
+				x, z, seed ^ (std::uint64_t(static_cast<std::int64_t>(y)) << 16));
+	};
 	const bool window = has_windows && chosen == window_block;
 	const double board_rate = condition == BuildingCondition::Disused	  ? .30
 							  : condition == BuildingCondition::Abandoned ? .50
 																		  : 0.0;
-	if (window && board_rate > 0.0 && rng.random_bool(board_rate))
-		return wall_block;
+	if (window && board_rate > 0.0) {
+		auto rng = make_rng();
+		if (rng.random_bool(board_rate))
+			return wall_block;
+	}
 	const double weather_rate = condition == BuildingCondition::Abandoned ? .05
 								: condition == BuildingCondition::Ruined  ? .50
 								: condition == BuildingCondition::Normal
 										? normal_weather_rate
 										: 0.0;
-	if (!window && weather_rate > 0.0 && rng.random_bool(weather_rate))
-		return weathered_variant(chosen, rng);
+	if (!window && weather_rate > 0.0 && has_weathered_variant(chosen)) {
+		auto rng = make_rng();
+		if (rng.random_bool(weather_rate))
+			return weathered_variant(chosen, rng);
+	}
 	return chosen;
 }
 
@@ -2662,16 +2741,100 @@ std::optional<RoofTone> roof_tone_sibling(Block roof)
 	return std::nullopt;
 }
 
-bool roof_tone_patch(int x, int z, std::uint64_t seed)
+using RoofPatchCache = std::unordered_map<std::pair<int, int>, bool, PairHash>;
+
+std::pair<int, int> roof_tone_patch_of(int x, int z)
 {
 	const int row = floor_divide(z, 2);
 	const int shift = (row % 2 + 2) % 2;
-	return coord_rng(floor_divide(x + shift, 2), row, seed ^ 0x7111E5A100000005ULL)
+	return {floor_divide(x + shift, 2), row};
+}
+
+bool roof_tone_patch(std::pair<int, int> patch, std::uint64_t seed)
+{
+	return coord_rng(patch.first, patch.second, seed ^ 0x7111E5A100000005ULL)
 				   .uniform(100) < 8;
+}
+
+bool cached_roof_tone_patch(int x, int z, std::uint64_t seed, RoofPatchCache &cache)
+{
+	const auto patch = roof_tone_patch_of(x, z);
+	if (const auto it = cache.find(patch); it != cache.end())
+		return it->second;
+	const bool selected = roof_tone_patch(patch, seed);
+	cache.emplace(patch, selected);
+	return selected;
 }
 
 using RoofHeightMap = std::unordered_map<std::pair<int, int>, int, PairHash>;
 using RoofCellSet = std::unordered_set<std::pair<int, int>, PairHash>;
+
+class RoofLevelGrid
+{
+	static constexpr int EMPTY = std::numeric_limits<int>::min();
+	const RoofHeightMap *sparse_ = nullptr;
+	int64_t min_x_ = 0;
+	int64_t min_z_ = 0;
+	int64_t width_ = 0;
+	int64_t height_ = 0;
+	std::vector<int> dense_;
+
+public:
+	explicit RoofLevelGrid(const RoofHeightMap &levels) : sparse_(&levels)
+	{
+		if (levels.empty())
+			return;
+		auto it = levels.begin();
+		int64_t min_x = it->first.first, max_x = min_x;
+		int64_t min_z = it->first.second, max_z = min_z;
+		for (const auto &[cell, level] : levels) {
+			(void)level;
+			min_x = std::min(min_x, int64_t(cell.first));
+			max_x = std::max(max_x, int64_t(cell.first));
+			min_z = std::min(min_z, int64_t(cell.second));
+			max_z = std::max(max_z, int64_t(cell.second));
+		}
+		const int64_t width = max_x - min_x + 1;
+		const int64_t height = max_z - min_z + 1;
+		const auto max_size = std::numeric_limits<std::size_t>::max();
+		const uint64_t dense_limit =
+				levels.size() > (std::numeric_limits<uint64_t>::max() - 64) / 8
+						? std::numeric_limits<uint64_t>::max()
+						: 8 * uint64_t(levels.size()) + 64;
+		if (width <= 0 || height <= 0 ||
+				uint64_t(width) >
+						std::numeric_limits<uint64_t>::max() / uint64_t(height) ||
+				uint64_t(width) * uint64_t(height) > dense_limit ||
+				uint64_t(width) > max_size / uint64_t(height))
+			return;
+		min_x_ = min_x;
+		min_z_ = min_z;
+		width_ = width;
+		height_ = height;
+		dense_.assign(static_cast<std::size_t>(width * height), EMPTY);
+		for (const auto &[cell, level] : levels) {
+			const auto x = int64_t(cell.first) - min_x_;
+			const auto z = int64_t(cell.second) - min_z_;
+			dense_[static_cast<std::size_t>(z * width_ + x)] = level;
+		}
+		sparse_ = nullptr;
+	}
+
+	std::optional<int> get(int x, int z) const
+	{
+		if (sparse_) {
+			if (const auto it = sparse_->find({x, z}); it != sparse_->end())
+				return it->second;
+			return std::nullopt;
+		}
+		const auto local_x = int64_t(x) - min_x_;
+		const auto local_z = int64_t(z) - min_z_;
+		if (local_x < 0 || local_z < 0 || local_x >= width_ || local_z >= height_)
+			return std::nullopt;
+		const int value = dense_[static_cast<std::size_t>(local_z * width_ + local_x)];
+		return value == EMPTY ? std::nullopt : std::optional<int>(value);
+	}
+};
 
 RoofHeightMap hip_edge_distances(const std::vector<std::pair<int32_t, int32_t>> &area,
 		const std::unordered_set<std::pair<int32_t, int32_t>, pair_hash> &footprint)
@@ -2760,12 +2923,17 @@ RoofCellSet capped_flat_tops(const HeightMap &levels)
 	return decks;
 }
 
-Block roof_sheet_block(int x, int z)
+Block roof_sheet_block(int x, int z, RoofPatchCache &cache)
 {
-	return coord_rng(floor_divide(x, 3), floor_divide(z, 3), 0x5EE70F7AULL)
-						   .random_bool(.3)
-				   ? LIGHT_GRAY_CONCRETE
-				   : SMOOTH_STONE;
+	const auto patch = std::pair{floor_divide(x, 3), floor_divide(z, 3)};
+	const auto it = cache.find(patch);
+	const bool selected =
+			it != cache.end() ? it->second
+							  : cache.emplace(patch, coord_rng(patch.first, patch.second,
+															 0x5EE70F7AULL)
+															 .random_bool(.3))
+										.first->second;
+	return selected ? LIGHT_GRAY_CONCRETE : SMOOTH_STONE;
 }
 
 std::optional<Block> roof_slab_for_stair(Block stair)
@@ -5411,12 +5579,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	const auto tent = roof_tent_frame(nodes);
 	const std::unordered_set<std::pair<int, int>, PairHash> footprint(
 			area.begin(), area.end());
-	auto scan_dir = [&](int x, int z, int dx, int dz) {
-		int distance = 0;
-		while (footprint.contains({x + (distance + 1) * dx, z + (distance + 1) * dz}))
-			++distance;
-		return distance;
-	};
+	const auto runs = axis_runs(area);
 	int min_x = std::numeric_limits<int>::max();
 	int max_x = std::numeric_limits<int>::min();
 	int min_z = std::numeric_limits<int>::max();
@@ -5487,9 +5650,9 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	std::unordered_map<std::pair<int, int>, int, PairHash> roof_heights;
 	cell_data.reserve(area.size() * 2);
 	roof_heights.reserve(area.size() * 2);
-	for (const auto &[x, z] : area) {
-		const int sm_z = scan_dir(x, z, 0, -1), sp_z = scan_dir(x, z, 0, 1);
-		const int sm_x = scan_dir(x, z, -1, 0), sp_x = scan_dir(x, z, 1, 0);
+	for (std::size_t area_i = 0; area_i < area.size(); ++area_i) {
+		const auto [x, z] = area[area_i];
+		const auto [sm_x, sp_x, sm_z, sp_z] = runs[area_i];
 		int dm_x = sm_x, dp_x = sp_x, dm_z = sm_z, dp_z = sp_z;
 		if (tent) {
 			const auto [u, v] = tent->uv(x, z);
@@ -5793,14 +5956,20 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	const Block stair_material = get_stair_block_for_material(roof_block);
 	const auto base_slab = roof_slab_for_stair(stair_material);
 	const auto tone = tone_patches ? roof_tone_sibling(roof_block) : std::nullopt;
+	RoofPatchCache tone_patch_cache;
+	RoofPatchCache sheet_patch_cache;
 	const auto surface_block = [&](int x, int z) {
-		return tone && roof_tone_patch(x, z, tone_seed) ? tone->full : roof_block;
+		return tone && cached_roof_tone_patch(x, z, tone_seed, tone_patch_cache)
+					   ? tone->full
+					   : roof_block;
 	};
 	const auto surface_stair_material = [&](int x, int z) {
-		return tone && roof_tone_patch(x, z, tone_seed) ? tone->stairs : stair_material;
+		return tone && cached_roof_tone_patch(x, z, tone_seed, tone_patch_cache)
+					   ? tone->stairs
+					   : stair_material;
 	};
 	const auto surface_slab = [&](int x, int z) {
-		return tone && roof_tone_patch(x, z, tone_seed)
+		return tone && cached_roof_tone_patch(x, z, tone_seed, tone_patch_cache)
 					   ? tone->slab
 					   : roof_slab_for_stair(stair_material);
 	};
@@ -5868,6 +6037,13 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	};
 	std::unordered_map<std::pair<int, int>, RakeCap, PairHash> rake_caps;
 	const std::vector<Block> replace_any;
+	const RoofLevelGrid surface_grid(slab_pitch ? roof_levels : roof_heights);
+	const auto stored_level_at = [&](int nx, int nz) -> std::optional<int> {
+		const auto stored = surface_grid.get(nx, nz);
+		if (!stored)
+			return std::nullopt;
+		return slab_pitch ? *stored : 2 * *stored + 1;
+	};
 	for (const auto &[x, z] : area) {
 		const int height = roof_heights.at({x, z});
 		const auto &cell = cell_data.at({x, z});
@@ -5895,15 +6071,8 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 		}
 		const int roof_level = slab_pitch ? roof_levels.at({x, z}) : 2 * height + 1;
 		const auto level_at = [&, x = x, z = z](int nx, int nz) -> std::optional<int> {
-			if (slab_pitch) {
-				auto it = roof_levels.find({nx, nz});
-				if (it != roof_levels.end())
-					return it->second;
-			} else {
-				auto it = roof_heights.find({nx, nz});
-				if (it != roof_heights.end())
-					return 2 * it->second + 1;
-			}
+			if (const auto stored = stored_level_at(nx, nz))
+				return stored;
 			// Continue the roof plane beyond a gable end, but not beyond an eave.
 			if (!wings && !tent &&
 					((ridge_runs_along_x && nz == z && nx != x) ||
@@ -5915,16 +6084,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 				{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
 		bool steep_drop = false;
 		for (const auto &[dx, dz] : cap_sides) {
-			std::optional<int> neighbor_level;
-			if (slab_pitch) {
-				auto it = roof_levels.find({x + dx, z + dz});
-				if (it != roof_levels.end())
-					neighbor_level = it->second;
-			} else {
-				auto it = roof_heights.find({x + dx, z + dz});
-				if (it != roof_heights.end())
-					neighbor_level = 2 * it->second + 1;
-			}
+			const auto neighbor_level = stored_level_at(x + dx, z + dz);
 			steep_drop |= neighbor_level && *neighbor_level < roof_level &&
 						  roof_level - *neighbor_level > 4;
 		}
@@ -5972,8 +6132,9 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 						put_state(cap, y);
 						rake_caps.insert_or_assign({x, z}, RakeCap{y, cap});
 					} else {
-						put_full(sheet_cells.contains({x, z}) ? roof_sheet_block(x, z)
-															  : cell_roof_block,
+						put_full(sheet_cells.contains({x, z})
+										 ? roof_sheet_block(x, z, sheet_patch_cache)
+										 : cell_roof_block,
 								y);
 					}
 				} else if (cap_stair) {
@@ -8203,6 +8364,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 
 	// Process nodes to create walls and corners
+	WallVariety wall_variety(element.id);
 	for (std::size_t node_index = 0; node_index < element.nodes.size(); ++node_index) {
 		const auto &node = element.nodes[node_index];
 		int x = node.x;
@@ -8284,7 +8446,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					for (int y = local_ground_level; y <= start_y_offset; ++y) {
 						const Block foundation = apply_block_variety(wall_block, bx, y,
 								bz, wall_block, start_y_offset, element.id, window_block,
-								condition);
+								condition, wall_variety);
 						editor->set_block_absolute(
 								foundation, bx, y + abs_terrain_offset, bz);
 					}
@@ -8446,7 +8608,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					// Rust resolves facade texture/color first, then same-tone patches,
 					// followed by the separate building-condition weathering pass.
 					chosen = apply_block_variety(chosen, bx, h, bz, wall_block,
-							start_y_offset, element.id, window_block, condition);
+							start_y_offset, element.id, window_block, condition,
+							wall_variety);
 					chosen = apply_condition_variation(chosen, bx, h, bz, wall_block,
 							window_block, has_windows, condition, category, era,
 							element.id);
@@ -10410,6 +10573,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					: rooftops::pick_membrane(
 							  building_style::building_region(wall_region), wall_region,
 							  category, era, inset_style_height, group_seed);
+	WallVariety inset_wall_variety(element.id);
 	const InsetWallSelector select_inset_wall = [&](int x, int h, int z, bool open_x,
 														bool corner) {
 		const bool above_floor = h > start_y_offset + 1;
@@ -10500,7 +10664,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		if (photo_shell.contains({x, z}) || preset_shell.contains({x, z}))
 			chosen = wall_block;
 		chosen = apply_block_variety(chosen, x, h, z, wall_block, start_y_offset,
-				element.id, window_block, condition);
+				element.id, window_block, condition, inset_wall_variety);
 		return apply_condition_variation(chosen, x, h, z, wall_block, window_block,
 				has_windows, condition, category, era, element.id);
 	};
@@ -10782,8 +10946,11 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			return *regional_pitched_roof;
 		return default_roof_surface_block(wall_block, style_seed);
 	};
+	RoofPatchCache tone_patch_cache;
+	RoofPatchCache sheet_patch_cache;
 	const auto roof_tone_at = [&](int x, int z) -> std::optional<RoofTone> {
-		if (!tone_patches || tagged_roof_block || !roof_tone_patch(x, z, element.id))
+		if (!tone_patches || tagged_roof_block ||
+				!cached_roof_tone_patch(x, z, element.id, tone_patch_cache))
 			return std::nullopt;
 		return roof_tone_sibling(selected_roof_block());
 	};
@@ -11141,13 +11308,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			const std::unordered_set<std::pair<int32_t, int32_t>, pair_hash> footprint(
 					floor_area.begin(), floor_area.end());
 			const auto edge_distances = hip_edge_distances(floor_area, footprint);
-			auto scan_dir = [&](int32_t x, int32_t z, int32_t dx, int32_t dz) {
-				int distance = 0;
-				while (footprint.contains(
-						{x + (distance + 1) * dx, z + (distance + 1) * dz}))
-					++distance;
-				return distance;
-			};
+			const auto runs = axis_runs(floor_area);
 			struct HipCell
 			{
 				int dist_to_edge;
@@ -11164,11 +11325,9 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			dormer_edge_scans.reserve(floor_area.size() * 2);
 			const bool ridge_runs_along_x = width >= length;
 			int max_dist = 0;
-			for (const auto &[x, z] : floor_area) {
-				const int dm_x = scan_dir(x, z, -1, 0);
-				const int dp_x = scan_dir(x, z, 1, 0);
-				const int dm_z = scan_dir(x, z, 0, -1);
-				const int dp_z = scan_dir(x, z, 0, 1);
+			for (std::size_t area_i = 0; area_i < floor_area.size(); ++area_i) {
+				const auto [x, z] = floor_area[area_i];
+				const auto [dm_x, dp_x, dm_z, dp_z] = runs[area_i];
 				// Rust treats cells absent from the distance field as eaves. Keep
 				// malformed/disconnected raster footprints from throwing here too.
 				const auto edge_it = edge_distances.find({x, z});
@@ -11263,6 +11422,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}};
 			constexpr std::array<std::pair<int, int>, 4> roof_quarters{
 					{{-1, -1}, {1, -1}, {-1, 1}, {1, 1}}};
+			const RoofLevelGrid roof_level_grid(roof_levels);
 			for (const auto &[x, z] : floor_area) {
 				const int roof_y = roof_heights.at({x, z});
 				const int level = roof_levels.at({x, z});
@@ -11281,8 +11441,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				} else {
 					const int floor = slab_pitch ? level - 1 : level;
 					const auto not_lower = [&](int nx, int nz) {
-						auto it = roof_levels.find({nx, nz});
-						return it != roof_levels.end() && it->second >= floor;
+						const auto neighbor = roof_level_grid.get(nx, nz);
+						return neighbor && *neighbor >= floor;
 					};
 					std::array<bool, 4> high{};
 					for (std::size_t i = 0; i < roof_quarters.size(); ++i) {
@@ -11292,8 +11452,9 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					}
 					const bool steep_drop = std::any_of(roof_sides.begin(),
 							roof_sides.end(), [&, x = x, z = z](const auto &d) {
-								auto it = roof_levels.find({x + d.first, z + d.second});
-								return it != roof_levels.end() && level - it->second > 4;
+								const auto neighbor =
+										roof_level_grid.get(x + d.first, z + d.second);
+								return neighbor && level - *neighbor > 4;
 							});
 					const bool all_high = std::all_of(
 							high.begin(), high.end(), [](bool value) { return value; });
@@ -11304,16 +11465,17 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					} else if (all_high) {
 						const bool stepped = std::any_of(roof_sides.begin(),
 								roof_sides.end(), [&, x = x, z = z](const auto &d) {
-									auto it =
-											roof_levels.find({x + d.first, z + d.second});
-									return it != roof_levels.end() && it->second < level;
+									const auto neighbor = roof_level_grid.get(
+											x + d.first, z + d.second);
+									return neighbor && *neighbor < level;
 								});
 						sheet = sheet_cells.contains({x, z});
 						if (slab_pitch && stepped && roof_slab && cell_slab)
 							cap = cached_prop_block(*cell_slab, {{"type", "top"}});
 						else
 							cap = BlockWithProperties::simple(
-									sheet ? roof_sheet_block(x, z) : cell_roof_block);
+									sheet ? roof_sheet_block(x, z, sheet_patch_cache)
+										  : cell_roof_block);
 					} else if (const auto stair = roof_stair_for_high_quarters(high)) {
 						cap = create_stair_with_properties(
 								cell_stair_material, stair->first, stair->second);
@@ -11477,9 +11639,10 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 									stair_block_with_props, x, y + abs_terrain_offset, z,
 									nullptr, nullptr);
 						} else {
-							editor.set_block_absolute(sheet_cells.contains({x, z})
-															  ? roof_sheet_block(x, z)
-															  : roof_block,
+							editor.set_block_absolute(
+									sheet_cells.contains({x, z})
+											? roof_sheet_block(x, z, sheet_patch_cache)
+											: roof_block,
 									x, y + abs_terrain_offset, z, nullptr, nullptr);
 						}
 					} else {

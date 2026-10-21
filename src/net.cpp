@@ -1,4 +1,6 @@
 #include "net.h"
+#include <algorithm>
+#include <cctype>
 #include <curl/curl.h>
 #include <condition_variable>
 #include <mutex>
@@ -59,6 +61,18 @@ std::string failure_kind(int transport_error, long http_status)
 		return "reset";
 	if (code == CURLE_COULDNT_CONNECT)
 		return "connect";
+	if (code == CURLE_BAD_CONTENT_ENCODING)
+		return "body";
 	return "other";
+}
+bool is_failure_kind(const std::string &tag)
+{
+	if (tag == "timeout" || tag == "dns" || tag == "tls" || tag == "reset" ||
+			tag == "connect" || tag == "body" || tag == "other")
+		return true;
+	if (tag.size() != 8 || tag.compare(0, 5, "http_") != 0)
+		return false;
+	return std::all_of(
+			tag.begin() + 5, tag.end(), [](unsigned char c) { return std::isdigit(c); });
 }
 }

@@ -32,7 +32,8 @@ std::pair<int, int> jib_direction(const StructureSchematic &schem, unsigned rota
 		const int dx = vx - ax, dz = vz - az;
 		const long long d =
 				static_cast<long long>(dx) * dx + static_cast<long long>(dz) * dz;
-		if (d > farthest) {
+		// Rust Iterator::max_by_key keeps the later item on ties.
+		if (d >= farthest) {
 			farthest = d;
 			best = {dx, dz};
 		}
@@ -51,7 +52,8 @@ unsigned quarter_for_bearing(const StructureSchematic &schem, double degrees)
 	for (unsigned rotation = 0; rotation < 4; ++rotation) {
 		const auto [dx, dz] = jib_direction(schem, rotation);
 		const double dot = dx * want_x + dz * want_z;
-		if (dot > best_dot) {
+		// Match Rust Iterator::max_by: equal bearings select the later quarter turn.
+		if (dot >= best_dot) {
 			best_dot = dot;
 			best_rotation = rotation;
 		}
@@ -131,7 +133,8 @@ void place_mapped(WorldEditor &editor, int x, int z, const tags_t &tags,
 	unsigned rotation = 0, best_water = 0;
 	for (unsigned candidate = 0; candidate < 4; ++candidate) {
 		const unsigned count = water_toward(candidate);
-		if (count > best_water) {
+		// Rust Iterator::max_by_key keeps the later rotation when water counts tie.
+		if (count >= best_water) {
 			best_water = count;
 			rotation = candidate;
 		}

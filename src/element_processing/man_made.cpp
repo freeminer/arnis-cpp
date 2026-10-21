@@ -121,15 +121,29 @@ void mast_cabinet(WorldEditor &editor, int x, int z)
 
 void lattice_ring(WorldEditor &editor, int x, int z, int y, const Block &corner)
 {
+	const bool walls = corner.id() == ANDESITE_WALL.id();
 	for (const auto &[dx, dz] :
 			{std::pair{-1, -1}, std::pair{1, -1}, std::pair{-1, 1}, std::pair{1, 1}})
-		editor.set_block_absolute(corner, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+		if (walls) {
+			editor.set_block_absolute(
+					AIR, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+			connected_blocks::place_connected(editor, corner, x + dx, y, z + dz);
+		} else {
+			editor.set_block_absolute(
+					corner, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+		}
 	for (const auto &[dx, dz] :
 			{std::pair{0, -1}, std::pair{0, 1}, std::pair{-1, 0}, std::pair{1, 0}}) {
-		const auto bars =
-				connected_blocks::connected_iron_bars(dx != 0, dx != 0, dz != 0, dz != 0);
-		editor.set_block_with_properties_absolute(bars, x + dx, y, z + dz,
-				std::optional<std::vector<Block>>{CANOPY_BLOCKS}, std::nullopt);
+		if (walls) {
+			editor.set_block_absolute(
+					AIR, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+			connected_blocks::place_connected(editor, IRON_BARS, x + dx, y, z + dz);
+		} else {
+			const auto bars = connected_blocks::connected_iron_bars(
+					dx != 0, dx != 0, dz != 0, dz != 0);
+			editor.set_block_with_properties_absolute(bars, x + dx, y, z + dz,
+					std::optional<std::vector<Block>>{CANOPY_BLOCKS}, std::nullopt);
+		}
 	}
 }
 

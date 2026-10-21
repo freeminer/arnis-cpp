@@ -4,7 +4,9 @@
 #include "floor_state.h"
 #include <nlohmann/json.hpp>
 #include <array>
+#include <atomic>
 #include <cstdint>
+#include <exception>
 #include <vector>
 #include <string>
 #include <cmath>
@@ -12,9 +14,13 @@
 #include <unordered_map>
 #include <optional>
 #include <functional>
+#include <iterator>
 #include <limits>
 #include <tuple>
+#include <thread>
+#include <type_traits>
 #include <unordered_set>
+#include <utility>
 namespace arnis::world_editor
 {
 // Forward declarations
@@ -607,6 +613,37 @@ public:
 	}
 	bool uniform() const { return mode_ == Mode::Uniform; }
 	std::size_t size() const { return SECTION_VOLUME; }
+	void merge_non_air(const BlockStorage &source, bool overwrite)
+	{
+		const auto air_id = block_definitions::AIR.id();
+		if (mode_ == Mode::Dense) {
+			if (source.mode_ == Mode::Dense) {
+				for (std::size_t i = 0; i < SECTION_VOLUME; ++i) {
+					const auto source_id = source.dense_[i];
+					if (source_id != air_id && (overwrite || dense_[i] == air_id))
+						dense_[i] = source_id;
+				}
+				return;
+			}
+			if (source.mode_ == Mode::Uniform &&
+					source.uniform_block_.id() <= UINT8_MAX) {
+				const auto source_id =
+						static_cast<std::uint8_t>(source.uniform_block_.id());
+				if (source_id == air_id)
+					return;
+				for (auto &destination_id : dense_)
+					if (overwrite || destination_id == air_id)
+						destination_id = source_id;
+				return;
+			}
+		}
+
+		for (std::size_t i = 0; i < SECTION_VOLUME; ++i) {
+			const auto source_block = source.get(i);
+			if (source_block.id() != air_id && (overwrite || get(i).id() == air_id))
+				set(i, source_block);
+		}
+	}
 	void fill(Block b)
 	{
 		mode_ = Mode::Uniform;
@@ -702,6 +739,7 @@ inline int section_world_y(int sy, int local_y)
 {
 	return (sy << 4) + (local_y & 15);
 }
+
 struct Section
 {
 	std::int8_t y = 0;
@@ -762,6 +800,29 @@ struct SectionToModify
 		else
 			clear_properties_at(i);
 	}
+	template <typename Written>
+	void reconcile_properties(const SectionToModify &source, Written &&written)
+	{
+		if (!properties.empty())
+			for (auto it = properties.begin(); it != properties.end();)
+				if (written(it->first))
+					it = properties.erase(it);
+				else
+					++it;
+		for (const auto &[index, state] : source.properties)
+			if (written(index))
+				properties[index] = state;
+	}
+	void retain_properties_on_blocks()
+	{
+		if (!properties.empty())
+			for (auto it = properties.begin(); it != properties.end();)
+				if (it->first >= SECTION_VOLUME ||
+						storage.get(it->first).id() == block_definitions::AIR.id())
+					it = properties.erase(it);
+				else
+					++it;
+	}
 	void compact()
 	{
 		if (properties.empty())
@@ -769,16 +830,18 @@ struct SectionToModify
 	}
 	void merge_non_air(const SectionToModify &other, bool overwrite)
 	{
+		const auto air_id = block_definitions::AIR.id();
 		const bool destination_all_air =
-				storage.uniform() && storage.get(0).id() == block_definitions::AIR.id();
+				storage.uniform() && storage.get(0).id() == air_id;
 		const bool source_uniform = other.storage.uniform();
 		if (source_uniform) {
 			const auto source = other.storage.get(0);
-			if (source.id() == block_definitions::AIR.id())
+			if (source.id() == air_id)
 				return;
 			if (overwrite) {
 				storage.fill(source);
 				properties = other.properties;
+				retain_properties_on_blocks();
 				return;
 			}
 			if (storage.uniform() && !destination_all_air)
@@ -786,17 +849,16 @@ struct SectionToModify
 		}
 		if (destination_all_air && properties.empty() && other.properties.empty()) {
 			storage = other.storage;
-			properties = other.properties;
 			return;
 		}
-		auto src = other.storage.materialize();
-		for (std::size_t i = 0; i < src.size(); ++i)
-			if (src[i].id() != block_definitions::AIR.id() &&
-					(overwrite || storage.get(i).id() == block_definitions::AIR.id())) {
-				const auto state = other.properties.find(i);
-				set_block_with_properties_at_index(i, src[i],
-						state == other.properties.end() ? nullptr : state->second);
-			}
+
+		const auto written = [&](std::size_t index) {
+			if (index >= SECTION_VOLUME || other.storage.get(index).id() == air_id)
+				return false;
+			return overwrite || storage.get(index).id() == air_id;
+		};
+		reconcile_properties(other, written);
+		storage.merge_non_air(other.storage, overwrite);
 	}
 	void merge_air_only(const SectionToModify &other) { merge_non_air(other, false); }
 	void fill(Block b)
@@ -849,9 +911,142 @@ struct SectionToModify
 		return false;
 	}
 };
+
+class SectionMap
+{
+public:
+	template <bool IsConst>
+	class Iterator
+	{
+		using Map = std::conditional_t<IsConst, const SectionMap, SectionMap>;
+		using Section =
+				std::conditional_t<IsConst, const SectionToModify, SectionToModify>;
+
+	public:
+		struct Entry
+		{
+			int first;
+			Section &second;
+		};
+
+		Entry &operator*() const
+		{
+			entry_.emplace(map_->base_ + static_cast<int>(index_), *map_->slots_[index_]);
+			return *entry_;
+		}
+		Entry *operator->() const { return &**this; }
+		Iterator &operator++()
+		{
+			entry_.reset();
+			++index_;
+			skip_empty();
+			return *this;
+		}
+		bool operator==(const Iterator &other) const
+		{
+			return map_ == other.map_ && index_ == other.index_;
+		}
+		bool operator!=(const Iterator &other) const { return !(*this == other); }
+		Iterator &operator=(const Iterator &other)
+		{
+			if (this != &other) {
+				entry_.reset();
+				map_ = other.map_;
+				index_ = other.index_;
+			}
+			return *this;
+		}
+		Iterator(const Iterator &) = default;
+
+	private:
+		friend class SectionMap;
+		Iterator(Map *map, std::size_t index) : map_(map), index_(index) { skip_empty(); }
+		void skip_empty()
+		{
+			while (index_ < map_->slots_.size() && !map_->slots_[index_])
+				++index_;
+		}
+		Map *map_;
+		std::size_t index_;
+		mutable std::optional<Entry> entry_;
+	};
+
+	using iterator = Iterator<false>;
+	using const_iterator = Iterator<true>;
+
+	iterator begin() { return iterator(this, 0); }
+	iterator end() { return iterator(this, slots_.size()); }
+	const_iterator begin() const { return const_iterator(this, 0); }
+	const_iterator end() const { return const_iterator(this, slots_.size()); }
+	const_iterator cbegin() const { return begin(); }
+	const_iterator cend() const { return end(); }
+	std::size_t size() const { return size_; }
+	bool empty() const { return size_ == 0; }
+	void clear()
+	{
+		slots_.clear();
+		base_ = 0;
+		size_ = 0;
+	}
+	SectionToModify &operator[](int key) { return get_or_default(key); }
+	iterator find(int key)
+	{
+		const auto index = offset(key);
+		return index < slots_.size() && slots_[index] ? iterator(this, index) : end();
+	}
+	const_iterator find(int key) const
+	{
+		const auto index = offset(key);
+		return index < slots_.size() && slots_[index] ? const_iterator(this, index)
+													  : end();
+	}
+	iterator erase(iterator it)
+	{
+		if (it.map_ != this || it.index_ >= slots_.size() || !slots_[it.index_])
+			return end();
+		slots_[it.index_].reset();
+		--size_;
+		return iterator(this, it.index_ + 1);
+	}
+
+private:
+	std::size_t offset(int key) const { return static_cast<std::size_t>(key - base_); }
+	std::size_t ensure(int key)
+	{
+		if (slots_.empty()) {
+			base_ = key;
+			slots_.resize(1);
+			return 0;
+		}
+		if (key < base_) {
+			const auto prepend = static_cast<std::size_t>(base_ - key);
+			slots_.insert(slots_.begin(), prepend, std::nullopt);
+			base_ = key;
+			return 0;
+		}
+		const auto index = offset(key);
+		if (index >= slots_.size())
+			slots_.resize(index + 1);
+		return index;
+	}
+	SectionToModify &get_or_default(int key)
+	{
+		auto &slot = slots_[ensure(key)];
+		if (!slot) {
+			slot.emplace();
+			++size_;
+		}
+		return *slot;
+	}
+
+	int base_ = 0;
+	std::vector<std::optional<SectionToModify>> slots_;
+	std::size_t size_ = 0;
+};
+
 struct ChunkToModify
 {
-	std::unordered_map<int, SectionToModify> sections;
+	SectionMap sections;
 	std::unordered_map<std::string, nlohmann::json> other;
 	SectionToModify &section(int y) { return sections[static_cast<int>(y >> 4)]; }
 	const SectionToModify *find_section(int y) const
@@ -904,21 +1099,180 @@ struct ChunkToModify
 	}
 	bool empty() const { return sections.empty() && other.empty(); }
 };
-struct RegionToModify
+
+class ChunkGrid
 {
-	std::unordered_map<std::uint64_t, ChunkToModify> chunks;
+public:
+	static constexpr std::size_t SLOT_COUNT = 32 * 32;
+
+	template <bool IsConst>
+	class Iterator
+	{
+		using Grid = std::conditional_t<IsConst, const ChunkGrid, ChunkGrid>;
+		using Chunk = std::conditional_t<IsConst, const ChunkToModify, ChunkToModify>;
+
+	public:
+		struct Entry
+		{
+			std::uint64_t first;
+			Chunk &second;
+		};
+
+		Entry &operator*() const
+		{
+			const auto [x, z] = ChunkGrid::coordinates(index_);
+			entry_.emplace(ChunkGrid::key(x, z), *grid_->slots_[index_]);
+			return *entry_;
+		}
+		Entry *operator->() const { return &**this; }
+		Iterator &operator++()
+		{
+			entry_.reset();
+			++index_;
+			skip_empty();
+			return *this;
+		}
+		bool operator==(const Iterator &other) const
+		{
+			return grid_ == other.grid_ && index_ == other.index_;
+		}
+		bool operator!=(const Iterator &other) const { return !(*this == other); }
+		Iterator &operator=(const Iterator &other)
+		{
+			if (this != &other) {
+				entry_.reset();
+				grid_ = other.grid_;
+				index_ = other.index_;
+			}
+			return *this;
+		}
+		Iterator(const Iterator &) = default;
+
+	private:
+		friend class ChunkGrid;
+		Iterator(Grid *grid, std::size_t index) : grid_(grid), index_(index)
+		{
+			skip_empty();
+		}
+		void skip_empty()
+		{
+			while (index_ < SLOT_COUNT && !grid_->slots_[index_])
+				++index_;
+		}
+		Grid *grid_;
+		std::size_t index_;
+		mutable std::optional<Entry> entry_;
+	};
+
+	using iterator = Iterator<false>;
+	using const_iterator = Iterator<true>;
+
+	iterator begin() { return iterator(this, 0); }
+	iterator end() { return iterator(this, SLOT_COUNT); }
+	const_iterator begin() const { return const_iterator(this, 0); }
+	const_iterator end() const { return const_iterator(this, SLOT_COUNT); }
+	const_iterator cbegin() const { return begin(); }
+	const_iterator cend() const { return end(); }
+	std::size_t size() const { return size_; }
+	bool empty() const { return size_ == 0; }
+	void clear()
+	{
+		for (auto &slot : slots_)
+			slot.reset();
+		size_ = 0;
+	}
+
+	ChunkToModify &operator[](std::uint64_t packed_key)
+	{
+		return get_or_default(unpack_x(packed_key), unpack_z(packed_key));
+	}
+	std::pair<iterator, bool> emplace(std::uint64_t packed_key, ChunkToModify &&chunk)
+	{
+		const auto index = slot_index(unpack_x(packed_key), unpack_z(packed_key));
+		if (slots_[index])
+			return {iterator(this, index), false};
+		slots_[index].emplace(std::move(chunk));
+		++size_;
+		return {iterator(this, index), true};
+	}
+	iterator find(std::uint64_t packed_key)
+	{
+		const auto index = slot_index(unpack_x(packed_key), unpack_z(packed_key));
+		return iterator(this, slots_[index] ? index : SLOT_COUNT);
+	}
+	const_iterator find(std::uint64_t packed_key) const
+	{
+		const auto index = slot_index(unpack_x(packed_key), unpack_z(packed_key));
+		return const_iterator(this, slots_[index] ? index : SLOT_COUNT);
+	}
+	iterator erase(iterator it)
+	{
+		if (it.grid_ != this || it.index_ >= SLOT_COUNT || !slots_[it.index_])
+			return end();
+		slots_[it.index_].reset();
+		--size_;
+		return iterator(this, it.index_ + 1);
+	}
+	ChunkToModify &get_or_default(int x, int z)
+	{
+		const auto index = slot_index(x, z);
+		if (!slots_[index]) {
+			slots_[index].emplace();
+			++size_;
+		}
+		return *slots_[index];
+	}
+	ChunkToModify *get(int x, int z)
+	{
+		auto &slot = slots_[slot_index(x, z)];
+		return slot ? &*slot : nullptr;
+	}
+	const ChunkToModify *get(int x, int z) const
+	{
+		const auto &slot = slots_[slot_index(x, z)];
+		return slot ? &*slot : nullptr;
+	}
+
+private:
+	static std::size_t slot_index(int x, int z)
+	{
+		return (static_cast<std::size_t>(x & 31) << 5) | static_cast<std::size_t>(z & 31);
+	}
+	static std::pair<int, int> coordinates(std::size_t index)
+	{
+		return {static_cast<int>(index >> 5), static_cast<int>(index & 31)};
+	}
 	static std::uint64_t key(int x, int z)
 	{
 		return (std::uint64_t(static_cast<std::uint32_t>(x)) << 32) | std::uint32_t(z);
 	}
-	ChunkToModify &get_or_create_chunk(int x, int z) { return chunks[key(x, z)]; }
-	const ChunkToModify *get_chunk(int x, int z) const
+	static int unpack_x(std::uint64_t key) { return static_cast<int>(key >> 32); }
+	static int unpack_z(std::uint64_t key) { return static_cast<int>(key); }
+
+	std::array<std::optional<ChunkToModify>, SLOT_COUNT> slots_{};
+	std::size_t size_ = 0;
+};
+
+struct RegionToModify
+{
+	ChunkGrid chunks;
+	static std::uint64_t key(int x, int z)
 	{
-		auto it = chunks.find(key(x, z));
-		return it == chunks.end() ? nullptr : &it->second;
+		return (std::uint64_t(static_cast<std::uint32_t>(x)) << 32) | std::uint32_t(z);
 	}
+	ChunkToModify &get_or_create_chunk(int x, int z)
+	{
+		return chunks.get_or_default(x, z);
+	}
+	const ChunkToModify *get_chunk(int x, int z) const { return chunks.get(x, z); }
 	void clear() { chunks.clear(); }
 	std::size_t chunk_count() const { return chunks.size(); }
+	void compact_sections()
+	{
+		for (auto &chunk : chunks)
+			for (auto &section : chunk.second.sections)
+				section.second.compact();
+	}
 	void prune_empty_chunks()
 	{
 		for (auto it = chunks.begin(); it != chunks.end();) {
@@ -1301,10 +1655,47 @@ struct WorldToModify
 	}
 	void compact()
 	{
-		for (auto &rk : regions)
-			for (auto &ck : rk.second.chunks)
-				for (auto &sk : ck.second.sections)
-					sk.second.compact();
+		std::vector<RegionToModify *> pending;
+		pending.reserve(regions.size());
+		for (auto &region : regions)
+			pending.push_back(&region.second);
+		if (pending.size() < 2) {
+			for (auto *region : pending)
+				region->compact_sections();
+			return;
+		}
+		const auto available = std::max(1u, std::thread::hardware_concurrency());
+		const auto workers = std::min<std::size_t>({pending.size(), available, 16});
+		std::atomic<std::size_t> next{0};
+		std::vector<std::exception_ptr> failures(workers);
+		std::vector<std::thread> threads;
+		threads.reserve(workers - 1);
+		auto compact_regions = [&](std::size_t worker) {
+			try {
+				for (auto index = next.fetch_add(1, std::memory_order_relaxed);
+						index < pending.size();
+						index = next.fetch_add(1, std::memory_order_relaxed))
+					pending[index]->compact_sections();
+			} catch (...) {
+				failures[worker] = std::current_exception();
+			}
+		};
+		try {
+			for (std::size_t worker = 1; worker < workers; ++worker)
+				threads.emplace_back(compact_regions, worker);
+		} catch (...) {
+			const auto launch_failure = std::current_exception();
+			compact_regions(0);
+			for (auto &thread : threads)
+				thread.join();
+			std::rethrow_exception(launch_failure);
+		}
+		compact_regions(0);
+		for (auto &thread : threads)
+			thread.join();
+		for (const auto &failure : failures)
+			if (failure)
+				std::rethrow_exception(failure);
 	}
 	void prune_empty()
 	{

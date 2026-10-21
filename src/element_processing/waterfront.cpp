@@ -224,10 +224,14 @@ std::vector<std::pair<double, double>> stations(
 			const double length = std::hypot(dx, dz);
 			if (length <= 0.0)
 				continue;
-			for (double distance = carry; distance < length; distance += spacing)
+			double distance = carry;
+			for (; distance < length; distance += spacing)
 				out.emplace_back(
 						ax + dx * distance / length, az + dz * distance / length);
-			carry = std::fmod(carry + length, spacing);
+			// Preserve the distance from this segment's end to the next station.
+			// This matches Rust's `s - len`; `(carry + length) % spacing`
+			// shifts station placement whenever the last sample overshoots an end.
+			carry = distance - length;
 		}
 		if (!way->nodes.empty())
 			out.emplace_back(way->nodes.back().x, way->nodes.back().z);

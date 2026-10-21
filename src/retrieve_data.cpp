@@ -1,7 +1,7 @@
 #include "retrieve_data.h"
+#include "net.h"
 #include "args.h"
 #include "osm_tiles.h"
-#include "net.h"
 #include "telemetry.h"
 #include <algorithm>
 #include <cctype>
@@ -108,11 +108,7 @@ std::string fallback_reason_detail(const std::string &error)
 		if (close == std::string::npos)
 			break;
 		const auto tag = error.substr(open + 1, close - open - 1);
-		if (tag == "timeout" || tag == "dns" || tag == "tls" || tag == "reset" ||
-				tag == "connect" || tag == "body" || tag == "other" ||
-				(tag.size() == 8 && tag.rfind("http_", 0) == 0 &&
-						std::all_of(tag.begin() + 5, tag.end(),
-								[](unsigned char c) { return std::isdigit(c); }))) {
+		if (net::is_failure_kind(tag)) {
 			kind = tag;
 			break;
 		}

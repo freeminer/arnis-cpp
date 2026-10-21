@@ -5,6 +5,7 @@
 #include "../ground_generation.h"
 #include "mapped.h"
 #include <algorithm>
+#include <atomic>
 #include <charconv>
 #include <cmath>
 #include <fstream>
@@ -18,6 +19,7 @@
 #include <unordered_map>
 #include <unordered_set>
 #include <tuple>
+#include <thread>
 namespace arnis::trees
 {
 bool is_palm(const std::string &s)
@@ -376,6 +378,92 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	// Cache failed and successful model reads alike: manifests can reference
 	// the same missing or leafless asset from many communities.
 	std::unordered_map<std::string, std::optional<std::size_t>> asset_entries;
+	// Rust parses each pack's unique model files in parallel, then appends them in
+	// manifest order so seeded picks stay stable. Keep this bounded: schematic
+	// decoding can temporarily hold both compressed and expanded voxel data.
+	auto preload_communities = [&](const nlohmann::json &communities,
+									   const std::filesystem::path &manifest,
+									   const std::vector<std::string_view> &excluded) {
+		struct Job
+		{
+			std::string key;
+			std::filesystem::path path;
+			std::uint8_t width;
+		};
+		std::vector<Job> jobs;
+		std::unordered_set<std::string> queued;
+		for (const auto &community : communities) {
+			for (const auto &species :
+					community.value("species", nlohmann::json::array())) {
+				const auto name = species.value("name", std::string{});
+				if (name.empty())
+					continue;
+				const auto separator = name.find('_');
+				const auto genus = name.substr(
+						0, separator == std::string::npos ? name.size() : separator);
+				if ((exclude_palms && is_palm(name)) ||
+						std::any_of(excluded.begin(), excluded.end(), [&](auto value) {
+							return name == value || genus == value;
+						}))
+					continue;
+				for (const auto &[field, width] :
+						std::array<std::pair<const char *, std::uint8_t>, 3>{
+								{{"w1", 1}, {"w2", 2}, {"w3", 3}}}) {
+					const auto paths = species.find(field);
+					if (paths == species.end() || !paths->is_array())
+						continue;
+					for (const auto &relative : *paths) {
+						if (!relative.is_string())
+							continue;
+						auto path = manifest.parent_path() / relative.get<std::string>();
+						const auto key = std::filesystem::absolute(path)
+												 .lexically_normal()
+												 .string();
+						if (!asset_entries.contains(key) && queued.insert(key).second)
+							jobs.push_back({key, std::move(path), width});
+					}
+				}
+			}
+		}
+		if (jobs.empty())
+			return;
+
+		std::vector<std::optional<Schematic>> parsed(jobs.size());
+		std::atomic_size_t next{0};
+		auto worker = [&] {
+			for (;;) {
+				const auto index = next.fetch_add(1, std::memory_order_relaxed);
+				if (index >= jobs.size())
+					return;
+				try {
+					auto schematic = load_schem(jobs[index].path);
+					if (has_leaves(schematic))
+						parsed[index].emplace(std::move(schematic));
+				} catch (...) {
+					// A missing or invalid asset is cached as a miss below.
+				}
+			}
+		};
+		const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+		const auto worker_count =
+				std::min<std::size_t>(jobs.size(), std::min<std::size_t>(16, hardware));
+		std::vector<std::jthread> workers;
+		workers.reserve(worker_count > 0 ? worker_count - 1 : 0);
+		for (std::size_t i = 1; i < worker_count; ++i)
+			workers.emplace_back(worker);
+		worker();
+		workers.clear(); // jthread joins before results are consumed.
+		for (std::size_t i = 0; i < jobs.size(); ++i) {
+			std::optional<std::size_t> entry;
+			if (parsed[i]) {
+				auto schematic = std::make_shared<const Schematic>(std::move(*parsed[i]));
+				const auto size = schematic_size(*schematic);
+				data->entries.push_back({std::move(schematic), size, jobs[i].width});
+				entry = data->entries.size() - 1;
+			}
+			asset_entries.emplace(jobs[i].key, entry);
+		}
+	};
 	auto build_community = [&](const nlohmann::json &json,
 								   const std::filesystem::path &manifest,
 								   const std::string &pack_name,
@@ -501,6 +589,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		}
 		const auto manifest_realm = root.value("realm", std::string{});
 		const auto communities = root.value("communities", nlohmann::json::array());
+		preload_communities(communities, manifest, {});
 		const std::string fallback = root.value("default_community", "");
 		bool explicit_fallback = false;
 		for (const auto &json : communities) {
@@ -682,9 +771,12 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 								if (manifest_it->second) {
 									const auto manifest_path =
 											source.root() / pack_key / "region.json";
-									for (const auto &community_json :
+									const auto other_communities =
 											manifest_it->second->value("communities",
-													nlohmann::json::array()))
+													nlohmann::json::array());
+									preload_communities(
+											other_communities, manifest_path, excluded);
+									for (const auto &community_json : other_communities)
 										if (community_json.value("name", "") == name) {
 											auto community = build_community(
 													community_json, manifest_path,
@@ -1136,6 +1228,17 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 								 static_cast<std::size_t>(
 										 smooth_noise(sx, sz, 160) * conifers.size()))]);
 	};
+	auto choose_fitting_vanilla_mix = [&]() -> std::optional<std::size_t> {
+		if (!request.eco || data_->vanilla.empty())
+			return std::nullopt;
+		const auto pools = data_->vanilla_pools.find(request.eco->id);
+		if (pools == data_->vanilla_pools.end())
+			return std::nullopt;
+		const auto selected = choose_cached(
+				pools->second[palms_allowed ? 1 : 0], data_->vanilla, 0x3c0b22f);
+		return selected && community_fits(data_->vanilla, *selected) ? selected
+																	 : std::nullopt;
+	};
 
 	bool selected_from_mix = false;
 	if (request.eco) {
@@ -1151,7 +1254,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				selected_from_mix = true;
 			} else if (!mapped_selection && blend >= 67 && blend < 97 &&
 					   !data_->vanilla.empty()) {
-				if (const auto vanilla = choose_vanilla()) {
+				if (const auto vanilla = choose_vanilla();
+						vanilla && community_fits(data_->vanilla, *vanilla)) {
 					pack = &data_->vanilla;
 					ci = *vanilla;
 					selected_from_mix = true;
@@ -1162,13 +1266,14 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 										data_->realm, 0x3c0a11e)) {
 					ci = *selected;
 					selected_from_mix = true;
+					// A mix community without a model near this crown gives way to
+					// the fitting vanilla sprinkle before falling back to itself.
+					if (!community_fits(data_->realm, ci))
+						if (const auto vanilla = choose_fitting_vanilla_mix()) {
+							pack = &data_->vanilla;
+							ci = *vanilla;
+						}
 				}
-				if (!mapped_selection && !selected_from_mix && !data_->vanilla.empty())
-					if (const auto vanilla = choose_vanilla()) {
-						pack = &data_->vanilla;
-						ci = *vanilla;
-						selected_from_mix = true;
-					}
 			}
 		}
 	}
@@ -1180,12 +1285,19 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 			if (!pack->own_count)
 				return std::nullopt;
 			ci = land_cover::coord_hash(sx + 5, sz + 9) % pack->own_count;
+			if (!community_fits(*pack, ci))
+				ci = choose_community(*pack);
 		}
 	}
 	if (!mapped_selection && !selected_from_mix && pack == &data_->realm && blend >= 67 &&
 			blend < 97 && !data_->vanilla.empty()) {
-		pack = &data_->vanilla;
-		ci = choose_community(*pack);
+		const auto vanilla_community = choose_community(data_->vanilla);
+		// Rust only lets a vanilla sprinkle stand in when it has a model near the
+		// requested height. Otherwise retain the realm's locality-selected stand.
+		if (community_fits(data_->vanilla, vanilla_community)) {
+			pack = &data_->vanilla;
+			ci = vanilla_community;
+		}
 	}
 	const auto &community = pack->communities[ci];
 	if (!request.density_decided) {
@@ -1330,15 +1442,24 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				return std::any_of(species.begin(), species.end(), capped);
 			});
 	const auto eligible = [&](std::size_t i) { return !any_capped || capped(i); };
+	// If every model in the selected community is above the user's size cap,
+	// Rust still plants its smallest available model rather than leaving a hole.
+	int pick_height = wanted_height;
+	if (!any_capped) {
+		pick_height = std::numeric_limits<int>::max();
+		for (const auto &species : species_candidates)
+			for (const auto i : species)
+				pick_height = std::min(pick_height, data_->entries[i].schem->height);
+	}
 	const auto distance = [&](std::size_t i) {
-		return std::abs(data_->entries[i].schem->height - wanted_height);
+		return std::abs(data_->entries[i].schem->height - pick_height);
 	};
 	int best_distance = std::numeric_limits<int>::max();
 	for (const auto &species : species_candidates)
 		for (const auto i : species)
 			if (eligible(i))
 				best_distance = std::min(best_distance, distance(i));
-	const int nearest_limit = best_distance + height_slack(wanted_height);
+	const int nearest_limit = best_distance + height_slack(pick_height);
 	std::vector<std::vector<std::size_t>> usable_species;
 	std::size_t total = 0;
 	for (const auto &species : species_candidates) {

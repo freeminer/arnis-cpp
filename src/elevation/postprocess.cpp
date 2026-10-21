@@ -223,6 +223,84 @@ constexpr double LEVEL_RUN_M = 30.0;
 bool inside(int x, int y, std::size_t w, std::size_t h);
 double median(std::vector<double> &values);
 
+std::vector<double> blur_values(const std::vector<double> &values,
+		const std::vector<double> &kernel, int half, bool binary)
+{
+	const auto len = values.size();
+	std::vector<std::uint32_t> bad(len + 1, 0), ones, zeros;
+	for (std::size_t i = 0; i < len; ++i) {
+		bad[i + 1] = bad[i] + !std::isfinite(values[i]);
+		if (binary) {
+			if (ones.empty()) {
+				ones.assign(len + 1, 0);
+				zeros.assign(len + 1, 0);
+			}
+			ones[i + 1] = ones[i] + (values[i] == 1.0);
+			zeros[i + 1] = zeros[i] + (values[i] == 0.0);
+		}
+	}
+	double full_weight = 0.0;
+	for (const auto weight : kernel)
+		full_weight += weight;
+	const auto radius = static_cast<std::size_t>(half);
+	std::vector<double> out;
+	out.reserve(len);
+	std::size_t i = 0;
+	while (i < len) {
+		if (binary) {
+			const auto left = i > radius ? i - radius : 0;
+			const auto right = std::min(len, i + radius + 1);
+			const auto window = right - left;
+			if (ones[right] - ones[left] == window) {
+				out.push_back(1.0);
+				++i;
+				continue;
+			}
+			if (zeros[right] - zeros[left] == window) {
+				out.push_back(0.0);
+				++i;
+				continue;
+			}
+		}
+		constexpr std::size_t LANES = 8;
+		if (i >= radius && i + LANES + radius <= len &&
+				bad[i + LANES + radius] == bad[i - radius]) {
+			std::array<double, LANES> sums{};
+			for (std::size_t tap = 0; tap < kernel.size(); ++tap)
+				for (std::size_t lane = 0; lane < LANES; ++lane)
+					sums[lane] += values[i - radius + tap + lane] * kernel[tap];
+			for (const auto sum : sums)
+				out.push_back(sum / full_weight);
+			i += LANES;
+			continue;
+		}
+		if (i >= radius && i + radius < len && bad[i + radius + 1] == bad[i - radius]) {
+			double sum = 0.0;
+			for (std::size_t tap = 0; tap < kernel.size(); ++tap)
+				sum += values[i - radius + tap] * kernel[tap];
+			out.push_back(sum / full_weight);
+			++i;
+			continue;
+		}
+		double sum = 0.0, weight_sum = 0.0;
+		for (std::size_t tap = 0; tap < kernel.size(); ++tap) {
+			const auto index =
+					static_cast<std::int64_t>(i) + static_cast<std::int64_t>(tap) - half;
+			if (index < 0 || index >= static_cast<std::int64_t>(len))
+				continue;
+			const auto value = values[static_cast<std::size_t>(index)];
+			if (!std::isfinite(value))
+				continue;
+			sum += value * kernel[tap];
+			weight_sum += kernel[tap];
+		}
+		out.push_back(weight_sum > 0.0 ? sum / weight_sum
+									   : std::numeric_limits<double>::quiet_NaN());
+		++i;
+	}
+	return out;
+}
+
 bool get_bit(const std::vector<std::uint64_t> &mask, std::size_t i)
 {
 	return ((mask[i >> 6] >> (i & 63)) & 1u) != 0;
@@ -1492,39 +1570,10 @@ std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 	for (std::size_t y0 = 0; y0 < h; y0 += row_chunk) {
 		const auto y1 = std::min(h, y0 + row_chunk);
 		parallel_rows(y0, y1, [&](std::size_t y) {
-			std::vector<std::size_t> hits(w + 1, 0);
+			std::vector<double> values(w);
 			for (std::size_t x = 0; x < w; ++x)
-				hits[x + 1] = hits[x] + (cover[y][x] == target);
-			for (std::size_t x = 0; x < w; ++x) {
-				const auto left = x > static_cast<std::size_t>(radius)
-										  ? x - static_cast<std::size_t>(radius)
-										  : 0;
-				const auto right = std::min(w, x + static_cast<std::size_t>(radius) + 1);
-				const auto window = right - left;
-				const auto matching = hits[right] - hits[left];
-				if (matching == 0) {
-					horizontal[y][x] = 0.0;
-					continue;
-				}
-				if (matching == window) {
-					horizontal[y][x] = 1.0;
-					continue;
-				}
-				double sum = 0.0, weight_sum = 0.0;
-				for (int k = -radius; k <= radius; ++k) {
-					const auto nx = static_cast<std::int64_t>(x) + k;
-					if (nx < 0 || nx >= static_cast<std::int64_t>(w))
-						continue;
-					const double weight = kernel[static_cast<std::size_t>(k + radius)];
-					sum += (cover[y][static_cast<std::size_t>(nx)] == target ? 1.0
-																			 : 0.0) *
-						   weight;
-					weight_sum += weight;
-				}
-				horizontal[y][x] = weight_sum > 0.0
-										   ? sum / weight_sum
-										   : std::numeric_limits<double>::quiet_NaN();
-			}
+				values[x] = cover[y][x] == target ? 1.0 : 0.0;
+			horizontal[y] = blur_values(values, kernel, radius, true);
 		});
 		if (report)
 			report(0.5 * static_cast<double>(y1) / h);
@@ -1548,45 +1597,9 @@ std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 					columns[c][y] = horizontal[y][gx + c];
 			for (std::size_t c = 0; c < group_width; ++c) {
 				const auto x = gx + c;
-				const auto &column = columns[c];
-				std::vector<std::size_t> ones(h + 1, 0), zeros(h + 1, 0);
-				for (std::size_t y = 0; y < h; ++y) {
-					const double value = column[y];
-					ones[y + 1] = ones[y] + (value == 1.0);
-					zeros[y + 1] = zeros[y] + (value == 0.0);
-				}
-				for (std::size_t y = 0; y < h; ++y) {
-					const auto top = y > static_cast<std::size_t>(radius)
-											 ? y - static_cast<std::size_t>(radius)
-											 : 0;
-					const auto bottom =
-							std::min(h, y + static_cast<std::size_t>(radius) + 1);
-					const auto window = bottom - top;
-					if (ones[bottom] - ones[top] == window) {
-						output[y][x] = 1.0f;
-						continue;
-					}
-					if (zeros[bottom] - zeros[top] == window) {
-						output[y][x] = 0.0f;
-						continue;
-					}
-					double sum = 0.0, weight_sum = 0.0;
-					for (int k = -radius; k <= radius; ++k) {
-						const auto ny = static_cast<std::int64_t>(y) + k;
-						if (ny < 0 || ny >= static_cast<std::int64_t>(h))
-							continue;
-						const double value = column[static_cast<std::size_t>(ny)];
-						if (!std::isfinite(value))
-							continue;
-						const double weight =
-								kernel[static_cast<std::size_t>(k + radius)];
-						sum += value * weight;
-						weight_sum += weight;
-					}
-					output[y][x] = weight_sum > 0.0
-										   ? static_cast<float>(sum / weight_sum)
-										   : std::numeric_limits<float>::quiet_NaN();
-				}
+				const auto column = blur_values(columns[c], kernel, radius, true);
+				for (std::size_t y = 0; y < h; ++y)
+					output[y][x] = static_cast<float>(column[y]);
 			}
 		});
 		if (report)
@@ -1628,24 +1641,12 @@ HeightGrid gaussian_blur_grid_masked(const HeightGrid &heights, const MaskGrid &
 		const auto y1 = std::min(h, y0 + row_chunk);
 		parallel_rows(y0, y1, [&](std::size_t y) {
 			const auto len = std::min(w, std::min(heights[y].size(), masked[y].size()));
-			for (std::size_t x = 0; x < len; ++x) {
-				double sum = 0.0, weight_sum = 0.0;
-				for (int k = -radius; k <= radius; ++k) {
-					const auto sx = static_cast<std::int64_t>(x) + k;
-					if (sx < 0 || sx >= static_cast<std::int64_t>(len) ||
-							masked[y][static_cast<std::size_t>(sx)])
-						continue;
-					const double value = heights[y][static_cast<std::size_t>(sx)];
-					if (!std::isfinite(value))
-						continue;
-					const double weight = kernel[static_cast<std::size_t>(k + radius)];
-					sum += value * weight;
-					weight_sum += weight;
-				}
-				after_h[y][x] = weight_sum > 0.0
-										? sum / weight_sum
-										: std::numeric_limits<double>::quiet_NaN();
-			}
+			std::vector<double> values(len);
+			for (std::size_t x = 0; x < len; ++x)
+				values[x] = masked[y][x] ? std::numeric_limits<double>::quiet_NaN()
+										 : heights[y][x];
+			const auto blurred = blur_values(values, kernel, radius, false);
+			std::copy(blurred.begin(), blurred.end(), after_h[y].begin());
 		});
 		if (report)
 			report(0.5 * static_cast<double>(y1) / h);
@@ -1668,25 +1669,9 @@ HeightGrid gaussian_blur_grid_masked(const HeightGrid &heights, const MaskGrid &
 					columns[c][y] = after_h[y][gx + c];
 			for (std::size_t c = 0; c < group_width; ++c) {
 				const auto x = gx + c;
-				const auto &column = columns[c];
-				for (std::size_t y = 0; y < h; ++y) {
-					double sum = 0.0, weight_sum = 0.0;
-					for (int k = -radius; k <= radius; ++k) {
-						const auto sy = static_cast<std::int64_t>(y) + k;
-						if (sy < 0 || sy >= static_cast<std::int64_t>(h))
-							continue;
-						const double value = column[static_cast<std::size_t>(sy)];
-						if (!std::isfinite(value))
-							continue;
-						const double weight =
-								kernel[static_cast<std::size_t>(k + radius)];
-						sum += value * weight;
-						weight_sum += weight;
-					}
-					after_h[y][x] = weight_sum > 0.0
-											? sum / weight_sum
-											: std::numeric_limits<double>::quiet_NaN();
-				}
+				const auto blurred = blur_values(columns[c], kernel, radius, false);
+				for (std::size_t y = 0; y < h; ++y)
+					after_h[y][x] = blurred[y];
 			}
 		});
 		if (report)

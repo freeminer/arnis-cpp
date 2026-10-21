@@ -1669,6 +1669,8 @@ bool generate_world(WorldEditor &editor,
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	editor.set_generation_bounds(
+			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	// Rust filters aircraft-pavement buildings before deriving its footprint
 	// bitmap. The Freeminer host normally supplies an already-filtered bitmap,
 	// but direct library callers may pass one derived from the unfiltered input.
@@ -3282,6 +3284,10 @@ bool generate_world(WorldEditor &editor,
 	decltype(dispatch_rank){}.swap(dispatch_rank);
 	tile_fill_reader_state.reset();
 	expiring_fills = {};
+	// No element pass reads signage placement masks after this point. Drop the
+	// large carriageway bitmap before 3D models and finalization, as Rust does.
+	if (editor.signage_context)
+		editor.signage_context->release_placement_masks();
 	if (model_pipeline && !deferred_placements_active) {
 		model_pipeline->place(three_dmr_provider, wikidata_provider,
 				custom_model_provider, editor, args.scale);
@@ -3389,7 +3395,6 @@ bool generate_world(WorldEditor &editor,
 					  << '\n';
 	}
 	if (editor.signage_context) {
-		editor.signage_context->release_placement_masks();
 		std::cout << editor.signage_context->summary(args.debug) << '\n';
 	}
 	progress::emit_gui_progress_update(99.5, "Finalizing world...");

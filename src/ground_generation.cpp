@@ -772,8 +772,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 												editor.ground->level_exact(relative)),
 										cover_here);
 						}
-						const double water_blend =
-								has_cover ? editor.ground->water_blend(relative) : 0.0;
+						const bool blend_is_water =
+								has_cover &&
+								editor.ground->water_blend_is_water(relative);
 						const bool grid_water =
 								has_cover && editor.ground->water_distance(relative) > 0;
 						// Probe each column at its own terrain level. Using the outer
@@ -802,8 +803,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						// Follow Rust's smoothed ESA water mask while preserving every hard
 						// water cell. Interior water remains at terrain height when snapping
 						// its surface down to the local water level would leave it submerged.
-						const bool esa_water = grid_water || existing_water || osm_gap ||
-											   water_blend > .5;
+						const bool esa_water =
+								grid_water || existing_water || osm_gap || blend_is_water;
 						bool place_esa_water = false;
 						int water_y = 0;
 						if (!planetary && esa_water && !steep_override) {
@@ -891,7 +892,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							if ((snow.is_block() ||
 										(!snow.is_none() &&
 												terrain_surface::is_ice(surface))) &&
-									water_blend <= .5 && surface != WATER)
+									!blend_is_water && surface != WATER)
 								surface = SNOW_BLOCK;
 							natural_snow_surface = surface;
 							if (steep_override) {
@@ -978,7 +979,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							// Rust places snow before vegetation; the layer occupies the open
 							// space above ground and therefore suppresses plants on that column.
 							if (!place_esa_water && !planetary && editor.ground &&
-									water_blend <= .5 &&
+									!blend_is_water &&
 									!editor.check_for_block_type_absolute(
 											x, ground_y, z, WATER)) {
 								const auto surface_block =
