@@ -587,6 +587,14 @@ impl Block {
             496 => "note_block",
             497 => "pink_terracotta",
             498 => "lime_terracotta",
+            499..=502 => "vine",
+            503 => "netherrack",
+            504 => "fire",
+            505 => "cracked_deepslate_bricks",
+            506 => "cracked_deepslate_tiles",
+            507 => "cracked_polished_blackstone_bricks",
+            508 => "cracked_nether_bricks",
+            509 => "mossy_cobblestone_wall",
             _ => return None,
         })
         // Block ids are u16 handles; keep the name and property tables in sync
@@ -969,6 +977,13 @@ impl Block {
                 map.insert("age".to_string(), Value::String("3".to_string()));
                 map
             })),
+            // A vine on one wall, in the order of `VINES`.
+            499..=502 => Some(Value::Compound({
+                let face = ["north", "east", "south", "west"][usize::from(self.id - 499)];
+                let mut map = HashMap::new();
+                map.insert(face.to_string(), Value::String("true".to_string()));
+                map
+            })),
 
             _ => None,
         }
@@ -988,32 +1003,37 @@ pub fn create_stair_with_properties(
     facing: StairFacing,
     shape: StairShape,
 ) -> BlockWithProperties {
+    // Each thread keeps the shared compounds it has used: roofs ask for a
+    // stair per cell, and every thread queued on the one lock.
+    type Local = fnv::FnvHashMap<(u16, StairFacing, StairShape), Arc<Value>>;
+    thread_local! {
+        static LOCAL: std::cell::RefCell<Local> = std::cell::RefCell::default();
+    }
     let cache_key = (base_stair_block.id(), facing, shape);
-
-    {
-        let cache = STAIR_CACHE.lock().unwrap();
-        if let Some(cached_props) = cache.get(&cache_key) {
-            return BlockWithProperties::from_arc(base_stair_block, Some(cached_props.clone()));
-        }
+    if let Some(props) = LOCAL.with(|local| local.borrow().get(&cache_key).cloned()) {
+        return BlockWithProperties::from_arc(base_stair_block, Some(props));
     }
 
-    let mut map = HashMap::new();
-    map.insert(
-        "facing".to_string(),
-        Value::String(facing.as_str().to_string()),
-    );
-    if !matches!(shape, StairShape::Straight) {
-        map.insert(
-            "shape".to_string(),
-            Value::String(shape.as_str().to_string()),
-        );
-    }
-
-    let properties = Arc::new(Value::Compound(map));
-    {
-        let mut cache = STAIR_CACHE.lock().unwrap();
-        cache.insert(cache_key, properties.clone());
-    }
+    let properties = STAIR_CACHE
+        .lock()
+        .unwrap()
+        .entry(cache_key)
+        .or_insert_with(|| {
+            let mut map = HashMap::new();
+            map.insert(
+                "facing".to_string(),
+                Value::String(facing.as_str().to_string()),
+            );
+            if !matches!(shape, StairShape::Straight) {
+                map.insert(
+                    "shape".to_string(),
+                    Value::String(shape.as_str().to_string()),
+                );
+            }
+            Arc::new(Value::Compound(map))
+        })
+        .clone();
+    LOCAL.with(|local| local.borrow_mut().insert(cache_key, properties.clone()));
 
     BlockWithProperties::from_arc(base_stair_block, Some(properties))
 }
@@ -1673,6 +1693,20 @@ pub const LIGHT_GRAY_WOOL: Block = Block::new(158);
 pub const PINK_TERRACOTTA: Block = Block::new(497);
 /// Faded green painted render.
 pub const LIME_TERRACOTTA: Block = Block::new(498);
+pub const NETHERRACK: Block = Block::new(503);
+pub const FIRE: Block = Block::new(504);
+pub const CRACKED_DEEPSLATE_BRICKS: Block = Block::new(505);
+pub const CRACKED_DEEPSLATE_TILES: Block = Block::new(506);
+pub const CRACKED_POLISHED_BLACKSTONE_BRICKS: Block = Block::new(507);
+pub const CRACKED_NETHER_BRICKS: Block = Block::new(508);
+pub const MOSSY_COBBLESTONE_WALL: Block = Block::new(509);
+/// A vine clinging to the wall on its north, east, south or west side.
+pub const VINES: [Block; 4] = [
+    Block::new(499),
+    Block::new(500),
+    Block::new(501),
+    Block::new(502),
+];
 /// Snow layers by depth in eighths of a block, one to seven.
 pub const SNOW_LAYERS: [Block; 7] = [
     SNOW_LAYER,

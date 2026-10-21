@@ -130,14 +130,13 @@ impl PreviewAccumulator {
         let ph = ((z1 - self.min_z) as u32 / self.step - pz0 + 1) as usize;
         let mut local = vec![[0u16; 4]; pw * ph];
 
-        for (&(chunk_x, chunk_z), chunk) in &region.chunks {
+        for ((chunk_x, chunk_z), chunk) in region.chunks.iter() {
             let cbx = base_x + chunk_x * 16;
             let cbz = base_z + chunk_z * 16;
             if cbx + 15 < x0 || cbx > x1 || cbz + 15 < z0 || cbz > z1 {
                 continue;
             }
-            let mut sections: Vec<(i8, &SectionToModify)> =
-                chunk.sections.iter().map(|(y, s)| (*y, s)).collect();
+            let mut sections: Vec<(i8, &SectionToModify)> = chunk.sections.iter().collect();
             if sections.is_empty() {
                 continue;
             }
@@ -628,6 +627,11 @@ fn get_block_colors() -> FnvHashMap<&'static str, Rgb<u8>> {
         ("red_sandstone_wall", Rgb([186, 99, 29])),
         ("smooth_red_sandstone", Rgb([186, 99, 29])),
         ("netherrack", Rgb([111, 54, 53])),
+        ("fire", Rgb([228, 140, 40])),
+        ("cracked_deepslate_bricks", Rgb([64, 64, 65])),
+        ("cracked_deepslate_tiles", Rgb([52, 52, 52])),
+        ("cracked_polished_blackstone_bricks", Rgb([44, 37, 43])),
+        ("cracked_nether_bricks", Rgb([40, 20, 23])),
         ("nether_bricks", Rgb([44, 21, 26])),
         ("nether_brick_slab", Rgb([44, 21, 26])),
         ("nether_brick_stairs", Rgb([44, 21, 26])),

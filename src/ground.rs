@@ -1,4 +1,4 @@
-use crate::args::Args;
+use crate::args::{Args, GenerationMode};
 use crate::canopy::{self, CanopyData};
 use crate::celestial::CelestialBody;
 use crate::coordinate_system::{
@@ -60,6 +60,8 @@ pub struct Ground {
     /// Earth unless this is a Moon/Mars world, which take their own surface palette.
     body: CelestialBody,
     ecoregions: Option<Arc<EcoMap>>,
+    /// A winter run: every biome becomes its snowy counterpart.
+    winter: bool,
 }
 
 /// Layout of a run's ground grids. A projected run takes its size from the
@@ -71,8 +73,6 @@ pub struct GroundFrame {
     pub mercator: Option<WebMercatorProjection>,
     pub pad_blocks: usize,
     pub affine: AffinePolicy,
-    /// Where climate is read; `None` is the bbox centre.
-    pub climate_anchor: Option<(f64, f64)>,
 }
 
 impl GroundFrame {
@@ -82,7 +82,6 @@ impl GroundFrame {
             mercator: None,
             pad_blocks: 0,
             affine: AffinePolicy::Fit,
-            climate_anchor: None,
         }
     }
 
@@ -108,29 +107,13 @@ impl GroundFrame {
                     Some(affine) => AffinePolicy::Fixed(affine),
                     None => AffinePolicy::FitWithHeadroom,
                 },
-                climate_anchor: Some((run.origin_lat, run.origin_lon)),
             },
             None => Self {
                 world_dims: Some((world_w, world_h)),
                 mercator: Some(projection),
                 pad_blocks: 0,
                 affine: AffinePolicy::Fit,
-                climate_anchor: None,
             },
-        }
-    }
-
-    fn climate(&self, bbox: &LLBBox) -> crate::climate::Climate {
-        match self.climate_anchor {
-            Some((lat, lon)) => crate::climate::Climate::classify_at(lat, lon),
-            None => crate::climate::Climate::classify(bbox),
-        }
-    }
-
-    fn anchor_lat(&self, bbox: &LLBBox) -> f64 {
-        match self.climate_anchor {
-            Some((lat, _)) => lat,
-            None => (bbox.min().lat() + bbox.max().lat()) / 2.0,
         }
     }
 
@@ -280,6 +263,7 @@ impl Ground {
             climate: crate::climate::Climate::Temperate,
             body: CelestialBody::Earth,
             ecoregions: None,
+            winter: false,
         }
     }
 
@@ -332,9 +316,10 @@ impl Ground {
             world_height: world_h,
             rotation_mask: None,
             snow_threshold_y: i32::MAX,
-            climate: frame.climate(bbox),
+            climate: crate::climate::Climate::classify(bbox),
             body: CelestialBody::Earth,
             ecoregions: frame.ecoregions(bbox, (world_w, world_h)),
+            winter: false,
         }
     }
 
@@ -358,6 +343,31 @@ impl Ground {
             climate: crate::climate::Climate::Temperate,
             body: CelestialBody::Earth,
             ecoregions: None,
+            winter: false,
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn new_flat_canopy_test(
+        canopy: CanopyData,
+        world_width: usize,
+        world_height: usize,
+    ) -> Self {
+        Self {
+            elevation_enabled: false,
+            extended_ceiling: false,
+            ground_level: 0,
+            elevation_data: None,
+            land_cover: None,
+            canopy: Some(canopy),
+            world_width,
+            world_height,
+            rotation_mask: None,
+            snow_threshold_y: i32::MAX,
+            climate: crate::climate::Climate::Temperate,
+            body: CelestialBody::Earth,
+            ecoregions: None,
+            winter: false,
         }
     }
 
@@ -406,6 +416,7 @@ impl Ground {
             climate: crate::climate::Climate::Temperate,
             body: CelestialBody::Earth,
             ecoregions: None,
+            winter: false,
         }
     }
 
@@ -491,7 +502,7 @@ impl Ground {
                 peaks,
             ) {
                 Ok(mut elevation_data) => {
-                    let lat = frame.anchor_lat(&requested_bbox);
+                    let lat = (requested_bbox.min().lat() + requested_bbox.max().lat()) / 2.0;
                     // Must use the base the scaler actually settled on: snow_threshold_for
                     // inverts that exact affine, so a mismatched base misplaces every snow cap.
                     let base = elevation_data.ground_level;
@@ -534,12 +545,13 @@ impl Ground {
                         world_height: final_h,
                         rotation_mask: None,
                         snow_threshold_y,
-                        climate: frame.climate(&requested_bbox),
+                        climate: crate::climate::Climate::classify(&requested_bbox),
                         body,
                         ecoregions: body
                             .is_earth()
                             .then(|| frame.ecoregions(&requested_bbox, (final_w, final_h)))
                             .flatten(),
+                        winter: false,
                     }
                 }
                 Err(e) => {
@@ -568,12 +580,13 @@ impl Ground {
                         world_height: 0,
                         rotation_mask: None,
                         snow_threshold_y: i32::MAX,
-                        climate: frame.climate(&requested_bbox),
+                        climate: crate::climate::Climate::classify(&requested_bbox),
                         body,
                         ecoregions: body
                             .is_earth()
                             .then(|| frame.ecoregions(&requested_bbox, plan.final_dims))
                             .flatten(),
+                        winter: false,
                     }
                 }
             }
@@ -614,6 +627,16 @@ impl Ground {
         self.ecoregions = Some(Arc::new(map));
     }
 
+    /// Whether this is a winter run, whose biomes are all snowy.
+    #[inline(always)]
+    pub fn winter(&self) -> bool {
+        self.winter
+    }
+
+    pub fn set_winter(&mut self, winter: bool) {
+        self.winter = winter;
+    }
+
     /// Returns whether land cover data is available
     #[inline(always)]
     pub fn has_land_cover(&self) -> bool {
@@ -645,23 +668,31 @@ impl Ground {
     /// Share of a `span` square at `origin` that carries canopy, or `None` where
     /// nothing in it was measured. Unmeasured columns stay out of the average,
     /// so a cell with none at all hands the decision back to the land cover.
+    #[cfg(test)]
     pub fn canopy_fraction(&self, origin: XZPoint, span: i32) -> Option<f64> {
+        self.canopy_cell(origin, span).map(|(fraction, _)| fraction)
+    }
+
+    /// The canopy share of a `span` square at `origin` and its tallest crown in
+    /// metres, or `None` where nothing in it was measured.
+    pub fn canopy_cell(&self, origin: XZPoint, span: i32) -> Option<(f64, u8)> {
         self.canopy.as_ref()?;
         if span <= 0 {
             return None;
         }
-        let (mut measured, mut wooded) = (0u32, 0u32);
+        let (mut measured, mut wooded, mut top) = (0u32, 0u32, 0u8);
         for dz in 0..span {
             for dx in 0..span {
                 if let Some(h) = self.canopy_height_m(XZPoint::new(origin.x + dx, origin.z + dz)) {
                     measured += 1;
                     if h >= canopy::CANOPY_MIN_M {
                         wooded += 1;
+                        top = top.max(h);
                     }
                 }
             }
         }
-        (measured > 0).then(|| f64::from(wooded) / f64::from(measured))
+        (measured > 0).then(|| (f64::from(wooded) / f64::from(measured), top))
     }
 
     /// Force LC_WATER inside OSM water, sinking those cells onto that water's surface.
@@ -704,6 +735,30 @@ impl Ground {
             xzbbox,
             scale,
         );
+    }
+
+    /// Last land cover pass, once the OSM and bridge repairs have moved the water: returns
+    /// built-up land and fields to nature where the mode asks, then marks the beaches.
+    pub fn finish_land_cover(&mut self, mode: GenerationMode) {
+        if mode.natural_land_cover() {
+            self.naturalize_land_cover();
+        }
+        self.mark_beaches();
+    }
+
+    /// Returns built-up land and fields to natural cover, for terrain-only worlds.
+    fn naturalize_land_cover(&mut self) {
+        let climate = self.climate;
+        let Ground {
+            land_cover,
+            elevation_data,
+            ..
+        } = self;
+        let Some(lc) = land_cover.as_mut() else {
+            return;
+        };
+        let heights = elevation_data.as_mut().map(|d| d.heights.as_mut_slice());
+        crate::land_cover::naturalize::naturalize(lc, heights, climate);
     }
 
     /// Marks bare ground at the water's edge as beach. Run after every pass that moves water.
@@ -822,55 +877,18 @@ impl Ground {
         d == 0 || d >= 4
     }
 
-    /// Returns a continuous 0.0–1.0 value indicating how "watery" a block is,
-    /// using bilinear interpolation of the water classification grid.
-    ///
-    /// Nearest-neighbor grid lookups (`cover_class`) create rectangular water
-    /// edges when the grid is coarser than block resolution.  Bilinear
-    /// interpolation produces a smooth gradient across grid cell boundaries,
-    /// allowing noise-based thresholding to create organic shorelines.
+    /// Whether the Gaussian-smoothed water mask, sampled bilinearly, makes this block water.
+    /// Noise-free thresholding of the smooth field traces organic shorelines where
+    /// nearest-neighbour `cover_class` lookups would leave rectangular grid edges.
     #[inline(always)]
-    pub fn water_blend(&self, coord: XZPoint) -> f64 {
-        if let Some(ref lc) = self.land_cover {
-            let (world_w, world_h) = self.world_dims();
-            // Continuous grid coordinates (no rounding — that's the key difference
-            // from cover_class which uses .round())
-            let fx = (coord.x as f64 / (world_w - 1).max(1) as f64).clamp(0.0, 1.0)
-                * (lc.width - 1) as f64;
-            let fz = (coord.z as f64 / (world_h - 1).max(1) as f64).clamp(0.0, 1.0)
-                * (lc.height - 1) as f64;
-
-            let x0 = (fx.floor() as usize).min(lc.width - 1);
-            let x1 = (x0 + 1).min(lc.width - 1);
-            let z0 = (fz.floor() as usize).min(lc.height - 1);
-            let z1 = (z0 + 1).min(lc.height - 1);
-
-            let tx = fx - fx.floor();
-            let tz = fz - fz.floor();
-
-            // Sample pre-smoothed water-ness at the 4 surrounding grid cells.
-            // The grid was Gaussian-blurred from the binary LC_WATER mask so
-            // that even at integer block positions (1-to-1 grid-to-world
-            // mapping, where tx == tz == 0 below) the sampled value is
-            // continuous — the renderer's hard `> 0.5` threshold then traces
-            // a clean curved shoreline contour instead of the raw ESA 10 m
-            // rectangular grid edge.
-            // Widen f32 storage to f64 for the bilinear arithmetic. This
-            // doesn't recover the ~10⁻⁷ precision lost at storage, but it
-            // prevents extra rounding from accumulating in the four
-            // multiply-adds + the threshold comparison downstream.
-            let wb = lc.water_blend_grid();
-            let w00 = wb[z0][x0] as f64;
-            let w10 = wb[z0][x1] as f64;
-            let w01 = wb[z1][x0] as f64;
-            let w11 = wb[z1][x1] as f64;
-
-            // Bilinear interpolation
-            let top = w00 * (1.0 - tx) + w10 * tx;
-            let bottom = w01 * (1.0 - tx) + w11 * tx;
-            top * (1.0 - tz) + bottom * tz
-        } else {
-            0.0
+    pub fn water_blend_is_water(&self, coord: XZPoint) -> bool {
+        match self.land_cover {
+            Some(ref lc) => {
+                let (world_w, world_h) = self.world_dims();
+                lc.water_blend_mask(world_w, world_h)
+                    .contains(coord.x, coord.z)
+            }
+            None => false,
         }
     }
 
@@ -1180,7 +1198,8 @@ impl Ground {
     /// Computes the lazy water-blend mask now; all grid mutations must be done.
     pub fn warm_water_blend(&self) {
         if let Some(ref lc) = self.land_cover {
-            let _ = lc.water_blend_grid();
+            let (world_w, world_h) = self.world_dims();
+            let _ = lc.water_blend_mask(world_w, world_h);
         }
     }
 
@@ -1358,7 +1377,7 @@ pub fn generate_ground_data(
     let frame = GroundFrame::from_args(args, &bbox);
     if args.terrain() {
         println!("{} Fetching elevation...", "[3/7]".bold());
-        let ground = Ground::new_enabled(
+        let mut ground = Ground::new_enabled(
             &bbox,
             args.scale,
             args.height_multiplier,
@@ -1373,6 +1392,7 @@ pub fn generate_ground_data(
             &frame,
             peaks,
         );
+        ground.set_winter(args.winter);
         // The scaler may have sunk the base to reach the extended floor. The bedrock plane and
         // the out-of-bbox filler chunks both key off that base, so pin them to it now.
         let floor = area_floor_for(&ground, args);
@@ -1388,13 +1408,14 @@ pub fn generate_ground_data(
         return ground;
     }
     println!("{} Fetching land cover...", "[3/7]".bold());
-    let ground = Ground::new_flat_with_land_cover(
+    let mut ground = Ground::new_flat_with_land_cover(
         &bbox,
         args.scale,
         args.ground_level,
         args.canopy_height,
         &frame,
     );
+    ground.set_winter(args.winter);
     crate::world_editor::set_base_chunk_y(ground.base_level());
     crate::world_editor::set_terrain_floor_y(ground.base_level());
     crate::world_editor::set_base_chunk_block(filler_block_for(args.body));
@@ -1510,6 +1531,7 @@ mod tests {
             climate: crate::climate::Climate::Temperate,
             body: CelestialBody::Earth,
             ecoregions: None,
+            winter: false,
         }
     }
 
@@ -1550,10 +1572,7 @@ mod tests {
         let lc = LandCoverData {
             grid: vec![vec![LC_WATER, 10], vec![10, 10]],
             water_distance: vec![vec![1, 0], vec![0, 0]],
-            water_blend_cache: once_cell::sync::OnceCell::with_value(vec![
-                vec![1.0, 0.0],
-                vec![0.0, 0.0],
-            ]),
+            water_blend_cache: once_cell::sync::OnceCell::new(),
             width: 2,
             height: 2,
             cells_per_meter: 1.0,
@@ -1811,6 +1830,7 @@ pub(crate) mod test_support {
             climate: crate::climate::Climate::Temperate,
             body: CelestialBody::Earth,
             ecoregions: None,
+            winter: false,
         }
     }
 }
@@ -1826,7 +1846,6 @@ mod frame_tests {
             mercator: Some(WebMercatorProjection::new(48.1372, 11.5755, 1.0)),
             pad_blocks: pad,
             affine: AffinePolicy::Fit,
-            climate_anchor: Some((48.1372, 11.5755)),
         }
     }
 

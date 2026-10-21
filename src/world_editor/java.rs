@@ -183,7 +183,6 @@ impl<'a> WorldEditor<'a> {
             region_z,
             region_to_modify,
             &self.region_write_mode(),
-            self.climate_lat(),
             (self.ground_origin_x, self.ground_origin_z),
         )
     }
@@ -382,7 +381,6 @@ fn write_region_to_disk(
     region_z: i32,
     region_to_modify: &super::common::RegionToModify,
     mode: &RegionWriteMode,
-    climate_lat: Option<f64>,
     ground_origin: (i32, i32),
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     if let Some(preview) = preview {
@@ -403,7 +401,7 @@ fn write_region_to_disk(
 
     // World-center latitude drives temperature-based biome variants (taiga
     // vs forest vs jungle) at chunk-build time. Cheap to recompute.
-    let center_lat = climate_lat.unwrap_or((llbbox.min().lat() + llbbox.max().lat()) * 0.5);
+    let center_lat = (llbbox.min().lat() + llbbox.max().lat()) * 0.5;
 
     // Filler chunks all share one set of sections, so they share their light too. A void
     // world has none: what the area does not touch is left to the void generator.
@@ -567,7 +565,7 @@ fn live_lod_sections(
             let chunk_z = region_z * 32 + local_z;
             match region.get_chunk(local_x, local_z) {
                 Some(chunk) => {
-                    for &section_y in chunk.sections.keys() {
+                    for section_y in chunk.sections.keys() {
                         crate::voxy::mark_live(&mut live, chunk_x, section_y as i32, chunk_z);
                     }
                 }
@@ -590,7 +588,7 @@ fn region_content_span(region: &super::common::RegionToModify) -> (i32, i32) {
     let mut min_y = base_section_y.min(-4);
     let mut max_y = base_section_y;
     for chunk in region.chunks.values() {
-        for &section_y in chunk.sections.keys() {
+        for section_y in chunk.sections.keys() {
             min_y = min_y.min(section_y as i32);
             max_y = max_y.max(section_y as i32);
         }
@@ -614,7 +612,6 @@ pub(crate) struct RegionWriteCtx {
     preview: Option<std::sync::Arc<crate::map_renderer::PreviewAccumulator>>,
     voxy: Option<std::sync::Arc<crate::voxy::VoxyWriter>>,
     mode: RegionWriteMode,
-    climate_lat: Option<f64>,
     ground_origin: (i32, i32),
 }
 
@@ -629,7 +626,6 @@ impl RegionWriteCtx {
         preview: Option<std::sync::Arc<crate::map_renderer::PreviewAccumulator>>,
         voxy: Option<std::sync::Arc<crate::voxy::VoxyWriter>>,
         mode: RegionWriteMode,
-        climate_lat: Option<f64>,
         ground_origin: (i32, i32),
     ) -> Self {
         Self {
@@ -641,7 +637,6 @@ impl RegionWriteCtx {
             preview,
             voxy,
             mode,
-            climate_lat,
             ground_origin,
         }
     }
@@ -664,7 +659,6 @@ impl RegionWriteCtx {
             region_z,
             region_to_modify,
             &self.mode,
-            self.climate_lat,
             self.ground_origin,
         )
     }
@@ -2076,8 +2070,8 @@ mod merge_tests {
     ) -> RegionToModify {
         let mut region = RegionToModify::default();
         for &(cx, cz) in chunks {
-            let chunk = region.chunks.entry((cx, cz)).or_default();
-            let section = chunk.sections.entry(0).or_default();
+            let chunk = region.get_or_create_chunk(cx, cz);
+            let section = chunk.sections.get_or_default(0);
             section.storage.set(0, block);
         }
         region
@@ -2096,7 +2090,6 @@ mod merge_tests {
             0,
             region,
             &mode,
-            None,
             (0, 0),
         )
         .unwrap();

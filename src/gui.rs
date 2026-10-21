@@ -1379,8 +1379,9 @@ fn gui_start_generation(
     world_scale: f64,
     height_multiplier: f64,
     ground_level: i32,
-    terrain_enabled: bool,
-    skip_osm_objects: bool,
+    generation_mode: String,
+    winter_enabled: bool,
+    post_apocalyptic_enabled: bool,
     interior_enabled: bool,
     fillground_enabled: bool,
     caves_enabled: bool,
@@ -1567,46 +1568,12 @@ fn gui_start_generation(
                 _ => PathBuf::new(),
             };
 
-            // Check available disk space before starting generation (minimum 3GB required)
-            const MIN_DISK_SPACE_BYTES: u64 = 3 * 1024 * 1024 * 1024; // 3 GB
-            let check_path = match world_format {
+            // Where the world goes, for the disk space check once the run's options are final.
+            let disk_dir = match world_format {
                 WorldFormat::JavaAnvil => world_path.clone(),
                 WorldFormat::BedrockMcWorld => bedrock_output_dir.clone(),
                 WorldFormat::LuantiWorld => luanti_output_dir.clone(),
             };
-            // Probe the nearest existing ancestor: a missing or space-containing
-            // path otherwise confuses the Windows volume lookup, which then reports
-            // 0 bytes free. Only block on a confident positive reading; treat an
-            // error or a 0/undeterminable result as "can't tell" and proceed (#824).
-            let probe_path = {
-                let mut p = check_path.as_path();
-                loop {
-                    if p.exists() {
-                        break p.to_path_buf();
-                    }
-                    match p.parent() {
-                        Some(parent) => p = parent,
-                        // No existing ancestor (e.g. a bare relative path): probe
-                        // the current dir so the query always hits a real path.
-                        None => {
-                            break std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
-                        }
-                    }
-                }
-            };
-            match fs2::available_space(&probe_path) {
-                Ok(available) if available > 0 && available < MIN_DISK_SPACE_BYTES => {
-                    let error_msg = "Not enough disk space available.".to_string();
-                    eprintln!("{error_msg}");
-                    emit_gui_error(&error_msg);
-                    return Err(error_msg);
-                }
-                Ok(_) => {} // Sufficient, or 0/undeterminable: don't false-block
-                Err(e) => {
-                    // Log warning but don't block generation if we can't check space
-                    eprintln!("Warning: Could not check disk space: {e}");
-                }
-            }
 
             // Acquire session lock for Java worlds only
             // Session lock prevents Minecraft from having the world open during generation
@@ -1638,66 +1605,14 @@ fn gui_start_generation(
                 }
             };
 
-            // Determine output path and level name based on format
-            let (generation_path, level_name) = match world_format {
-                WorldFormat::JavaAnvil => {
-                    // Java: use the selected world path, add localized name if new
-                    let updated_path = if is_new_world {
-                        add_localized_world_name(world_path.clone(), &bbox, celestial_body)
-                    } else {
-                        world_path.clone()
-                    };
-                    (updated_path, None)
-                }
-                WorldFormat::BedrockMcWorld => {
-                    // Bedrock: generate .mcworld in the configured directory
-                    let (output_path, lvl_name) =
-                        crate::world_utils::build_bedrock_output(&bbox, bedrock_output_dir);
-                    progress::emit_world_name_update(&lvl_name);
-                    (output_path, Some(lvl_name))
-                }
-                WorldFormat::LuantiWorld => {
-                    let worlds_dir = luanti_output_dir.clone();
-                    let _ = std::fs::create_dir_all(&worlds_dir);
-                    let mut counter = 1;
-                    let world_name = loop {
-                        let candidate = format!("Arnis Luanti World {counter}");
-                        if !worlds_dir.join(&candidate).exists() {
-                            break candidate;
-                        }
-                        counter += 1;
-                    };
-                    let luanti_path = worlds_dir.join(&world_name);
-                    println!(
-                        "Creating Luanti world at: {}",
-                        luanti_path.display().to_string().bright_white().bold()
-                    );
-                    (luanti_path, Some(world_name))
-                }
-            };
-
-            // Create generation options. Spawn point and facade job are set below.
-            let mut generation_options = GenerationOptions {
-                path: generation_path.clone(),
-                format: world_format,
-                level_name,
-                spawn_point: None,
-                luanti_game,
-                ground_level,
-                facades: crate::mapillary::FacadeJob::default(),
-            };
-
             // Create an Args instance with the chosen bounding box
             // Note: path is used for Java-specific features like spawn point update
             let mut args: Args = Args {
                 bbox: Some(bbox),
                 file: None,
                 save_json_file: None,
-                path: Some(if world_format == WorldFormat::JavaAnvil {
-                    generation_path.clone()
-                } else {
-                    world_path.clone()
-                }),
+                // The localized name only goes into level.dat; the folder stays.
+                path: Some(world_path.clone()),
                 bedrock: world_format == WorldFormat::BedrockMcWorld,
                 luanti: world_format == WorldFormat::LuantiWorld,
                 downloader: "requests".to_string(),
@@ -1708,13 +1623,9 @@ fn gui_start_generation(
                 world_name: None,
                 one_world_run: None,
                 ground_level,
-                mode: if skip_osm_objects {
-                    crate::args::GenerationMode::TerrainOnly
-                } else if terrain_enabled {
-                    crate::args::GenerationMode::GeoTerrain
-                } else {
-                    crate::args::GenerationMode::GeoOnly
-                },
+                mode: crate::args::GenerationMode::from_name(&generation_mode),
+                post_apocalyptic: post_apocalyptic_enabled,
+                winter: winter_enabled,
                 legacy_terrain: false,
                 interior: interior_enabled,
                 fillground: fillground_enabled,
@@ -1838,6 +1749,75 @@ fn gui_start_generation(
             }
             let args = args;
 
+            // Same as run_cli: checked with the run's final scale and options, and a One
+            // World's own frame. A world this run made goes again with the cleanup guard.
+            if let Err(e) =
+                crate::world_utils::check_run_size(&args, &bbox, world_format, &disk_dir)
+            {
+                eprintln!("{}", e.detail);
+                if e.area {
+                    send_log(
+                        LogLevel::Warning,
+                        &format!(
+                            "area_too_large: {:.0} km² at scale {:.2}",
+                            bbox.area_km2(),
+                            args.scale
+                        ),
+                    );
+                }
+                emit_gui_error(e.short());
+                return Err(e.detail);
+            }
+
+            // Determine output path and level name based on format
+            let (generation_path, level_name) = match world_format {
+                WorldFormat::JavaAnvil => {
+                    // Java: use the selected world path, add localized name if new
+                    let updated_path = if is_new_world {
+                        add_localized_world_name(world_path.clone(), &bbox, celestial_body)
+                    } else {
+                        world_path.clone()
+                    };
+                    (updated_path, None)
+                }
+                WorldFormat::BedrockMcWorld => {
+                    // Bedrock: generate .mcworld in the configured directory
+                    let (output_path, lvl_name) =
+                        crate::world_utils::build_bedrock_output(&bbox, bedrock_output_dir);
+                    progress::emit_world_name_update(&lvl_name);
+                    (output_path, Some(lvl_name))
+                }
+                WorldFormat::LuantiWorld => {
+                    let worlds_dir = luanti_output_dir.clone();
+                    let _ = std::fs::create_dir_all(&worlds_dir);
+                    let mut counter = 1;
+                    let world_name = loop {
+                        let candidate = format!("Arnis Luanti World {counter}");
+                        if !worlds_dir.join(&candidate).exists() {
+                            break candidate;
+                        }
+                        counter += 1;
+                    };
+                    let luanti_path = worlds_dir.join(&world_name);
+                    println!(
+                        "Creating Luanti world at: {}",
+                        luanti_path.display().to_string().bright_white().bold()
+                    );
+                    (luanti_path, Some(world_name))
+                }
+            };
+
+            // Create generation options. Spawn point and facade job are set below.
+            let mut generation_options = GenerationOptions {
+                path: generation_path.clone(),
+                format: world_format,
+                level_name,
+                spawn_point: None,
+                luanti_game,
+                ground_level,
+                facades: crate::mapillary::FacadeJob::default(),
+            };
+
             // Calculate MC spawn coordinates from lat/lng if spawn point was provided
             // Otherwise, default to X=1, Z=1 (relative to xzbbox min coordinates).
             // An extended One World keeps its spawn unless a marker was placed.
@@ -1890,19 +1870,19 @@ fn gui_start_generation(
                 ground::world_top_y_for(&args),
             );
 
-            // Ask Args, not the frontend flag: below OBJECT_SKIP_SCALE objects are skipped
-            // regardless of the selected generation mode.
-            if args.skip_objects() {
-                // Generate ground data (terrain) for terrain-only mode
+            // Ask Args, not the frontend mode: below OBJECT_SKIP_SCALE, or off Earth, no OSM
+            // is loaded whatever mode was picked.
+            if args.skip_osm() {
+                // Ground data (terrain) only
                 let mut ground = ground::generate_ground_data(
                     &args,
                     bbox,
                     &crate::elevation::PeakSource::none(),
                 );
                 // Matches run_cli.
-                ground.mark_beaches();
+                ground.finish_land_cover(args.mode);
 
-                // Create empty parsed_elements and xzbbox for terrain-only mode
+                // Empty parsed_elements and xzbbox, as no OSM is loaded
                 let mut parsed_elements = Vec::new();
                 let (_coord_transformer, mut xzbbox) =
                     crate::projection::ProjectionSpec::from_args(&args)
@@ -1952,7 +1932,7 @@ fn gui_start_generation(
             let (peak_tx, peaks) = crate::elevation::PeakSource::channel();
             let (fetch_result, overture_data, ground) = std::thread::scope(|s| {
                 let overture_handle = s.spawn(|| {
-                    if args.overture {
+                    if args.overture && !args.skip_objects() {
                         overture::fetch_overture_buildings(
                             &bbox,
                             &crate::projection::ProjectionSpec::from_args(&args),
@@ -1966,6 +1946,7 @@ fn gui_start_generation(
                 let ground_handle = s.spawn(|| ground::generate_ground_data(&args, bbox, &peaks));
                 let fetch_result = retrieve_data::fetch_osm_data(
                     bbox,
+                    args.scale,
                     args.debug,
                     "requests",
                     None,
@@ -2027,17 +2008,12 @@ fn gui_start_generation(
                         parsed_elements.extend(unique_overture);
                     }
 
-                    parsed_elements.sort_by(|el1, el2| {
-                        let (el1_priority, el2_priority) =
-                            (osm_parser::get_priority(el1), osm_parser::get_priority(el2));
-                        match (
-                            el1.tags().contains_key("landuse"),
-                            el2.tags().contains_key("landuse"),
-                        ) {
-                            (true, false) => std::cmp::Ordering::Greater,
-                            (false, true) => std::cmp::Ordering::Less,
-                            _ => el1_priority.cmp(&el2_priority),
-                        }
+                    // Landuse last, then by priority; keyed once per element, not per comparison.
+                    parsed_elements.sort_by_cached_key(|el| {
+                        (
+                            el.tags().contains_key("landuse"),
+                            osm_parser::get_priority(el),
+                        )
                     });
 
                     let mut ground = ground;
@@ -2046,7 +2022,14 @@ fn gui_start_generation(
                     ground.apply_osm_water_override(&parsed_elements, &xzbbox);
                     ground.apply_osm_land_override(&parsed_elements, &xzbbox, args.scale);
                     ground.apply_bridge_land_cover_repair(&parsed_elements, &xzbbox, args.scale);
-                    ground.mark_beaches();
+                    ground.finish_land_cover(args.mode);
+
+                    // Matches run_cli: the overrides read roads as land, then the mode drops them.
+                    crate::mode_filter::retain_for_mode(&mut parsed_elements, args.mode);
+                    let outline_suppression = crate::mode_filter::outline_suppression_for_mode(
+                        outline_suppression,
+                        args.mode,
+                    );
 
                     // Transform map (parsed_elements). Operations are defined in a json file
                     map_transformation::transform_map(

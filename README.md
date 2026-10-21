@@ -58,7 +58,10 @@ GUI Build: ```cargo run --release```<br>
 | --- | --- |
 | `geo-terrain` (default) | Buildings, roads and other OSM objects on real elevation terrain |
 | `geo-only` | OSM objects on flat ground |
-| `terrain-only` | Real elevation terrain, no objects at all (skips the OpenStreetMap query and the Overture fetch entirely, so `--overture` has no effect) |
+| `terrain-only` | Real elevation terrain with OpenStreetMap water and nature, but no buildings, roads or other man-made objects (`--overture` has no effect). Built-up land and fields turn back into the natural cover around them, and bridges and piers into the water they cross |
+| `blueprint` | Roads, rails, water and nature on real elevation terrain, with every building drawn only as a light blue outline on the ground to build on. 3D models, props, interiors and facades are off |
+
+Two settings work with any mode and can be combined: `--winter` covers the ground, roofs and trees in snow, freezes rivers and lakes from their shores and makes every biome snowy, and `--post-apocalyptic` brings buildings partly down, breaks their walls and windows open, cracks the roads with grass growing through, piles rubble in the streets with the odd fire still burning in it, lets moss and vines climb the walls and puts every light out.
 
 `--one-world` generates into one persistent Java world that every later run extends; `--output-dir` is then the saves folder and `--world-name` picks the world in it:
 
@@ -99,6 +102,14 @@ Arnis has been recognized in various academic and press publications after gaini
 [XDA Developers: Hometown Minecraft Map: Arnis](https://www.xda-developers.com/hometown-minecraft-map-arnis/)
 
 Free to use press assets, including screenshots and logos, can be found [here](https://arnismc.com/presskit/).
+
+## :lock: Code Signing Policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+The Windows executable is built from this repository by the [release workflow](.github/workflows/release.yml) on GitHub-hosted runners and is only signed after a maintainer approves the signing request. All roles (committer, reviewer and approver) are held by [louis-&#8288;e](https://github.com/louis-e).
+
+Privacy policy: https://arnismc.com/privacypolicy.html
 
 ## :copyright: License Information
 Copyright (c) 2022-2026 Louis Erbkamm (louis-e)
