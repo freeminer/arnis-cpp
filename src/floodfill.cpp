@@ -1,18 +1,11 @@
-#include <iostream>
 #include <vector>
-#include <queue>
 #include <chrono>
 #include <algorithm>
-#include <array>
 #include <bit>
 #include <cstdint>
 #include <deque>
-#include <limits>
 #include <optional>
 #include <tuple>
-#include <boost/geometry.hpp>
-#include <boost/geometry/geometries/point.hpp>
-#include <boost/geometry/geometries/polygon.hpp>
 #include <cmath>
 
 #include "floodfill.h"
@@ -23,65 +16,9 @@ namespace arnis
 namespace floodfill
 {
 
-namespace bg = boost::geometry;
-
-// Type aliases for convenience
-using Point2D = bg::model::d2::point_xy<int>;
-using Point2D_Float = bg::model::d2::point_xy<double>;
-using Polygon = bg::model::polygon<Point2D_Float>;
-
 // Rust parity: floodfill.rs::scanline_fill_area.  The bitmap path is bounded
 // by its full bounding box, while this path is bounded by actual filled cells.
 constexpr std::int64_t MAX_SCANLINE_EDGE_TESTS = 200'000'000;
-
-/// A compact bitmap for visited-coordinate tracking during flood fill.
-///
-/// Uses 1 bit per coordinate instead of ~48 bytes per entry in a `HashSet`.
-/// For a 5000×5000 bounding box this is ~3 MB instead of ~1.2 GB.
-class FloodBitmap
-{
-private:
-	std::vector<uint8_t> bits;
-	int32_t min_x;
-	int32_t min_z;
-	size_t width;
-
-public:
-	FloodBitmap(int32_t min_x, int32_t max_x, int32_t min_z, int32_t max_z) :
-			min_x(min_x), min_z(min_z)
-	{
-		width = static_cast<size_t>(max_x - min_x + 1);
-		size_t height = static_cast<size_t>(max_z - min_z + 1);
-		size_t num_bytes = (width * height + 7) / 8; // Ceiling division
-		bits.resize(num_bytes, 0);
-	}
-
-	/// Mark (x, z) as visited. Returns `true` if it was NOT already visited
-	/// (i.e. this is the first visit).
-	bool insert(int32_t x, int32_t z)
-	{
-		size_t idx =
-				static_cast<size_t>(z - min_z) * width + static_cast<size_t>(x - min_x);
-		size_t byte = idx / 8;
-		size_t bit = idx % 8;
-		uint8_t mask = static_cast<uint8_t>(1U << bit);
-		if (bits[byte] & mask) {
-			return false; // already visited
-		} else {
-			bits[byte] |= mask;
-			return true;
-		}
-	}
-
-	bool contains(int32_t x, int32_t z) const
-	{
-		size_t idx =
-				static_cast<size_t>(z - min_z) * width + static_cast<size_t>(x - min_x);
-		size_t byte = idx / 8;
-		size_t bit = idx % 8;
-		return (bits[byte] >> bit) & 1U;
-	}
-};
 
 // Check if the current time exceeds the timeout duration
 inline bool timeout_exceeded(const std::chrono::steady_clock::time_point &start_time,
@@ -91,170 +28,6 @@ inline bool timeout_exceeded(const std::chrono::steady_clock::time_point &start_
 	// with Duration, so truncating to whole milliseconds here can let a fill run
 	// almost one extra millisecond past its configured limit.
 	return std::chrono::steady_clock::now() - start_time > timeout_duration;
-}
-
-// Converts polygon coordinates to Boost Polygon
-static Polygon create_polygon(const std::vector<std::pair<int, int>> &coords)
-{
-	Polygon poly;
-	for (const auto &c : coords) {
-		bg::append(poly.outer(), Point2D_Float(static_cast<double>(c.first),
-										 static_cast<double>(c.second)));
-	}
-	bg::correct(poly);
-	return poly;
-}
-
-/// Optimized flood fill for larger polygons with multi-seed detection for complex shapes like U-shapes
-[[maybe_unused]] static std::vector<std::pair<int, int>> optimized_flood_fill_area(
-		const std::vector<std::pair<int, int>> &polygon_coords,
-		const std::chrono::milliseconds *timeout, int32_t min_x, int32_t max_x,
-		int32_t min_z, int32_t max_z)
-{
-	auto start_time = std::chrono::steady_clock::now();
-
-	std::vector<std::pair<int, int>> filled_area;
-	FloodBitmap visited(min_x, max_x, min_z, max_z);
-
-	// Create polygon for containment testing
-	Polygon polygon = create_polygon(polygon_coords);
-
-	// Optimized step sizes: larger steps for efficiency, but still catch U-shapes
-	int32_t width = max_x - min_x + 1;
-	int32_t height = max_z - min_z + 1;
-	int32_t step_x = std::clamp(width / 6, 1, 8); // Balance between coverage and speed
-	int32_t step_z = std::clamp(height / 6, 1, 8);
-
-	// Pre-allocate queue with reasonable capacity to avoid reallocations
-	std::queue<std::pair<int, int>> queue;
-	queue = std::queue<std::pair<int, int>>(); // Clear any existing content
-
-	for (int32_t z = min_z; z <= max_z; z += step_z) {
-		for (int32_t x = min_x; x <= max_x; x += step_x) {
-			// Fast timeout check, only every few iterations
-			if (filled_area.size() % 100 == 0) {
-				if (timeout && timeout_exceeded(start_time, *timeout)) {
-					return filled_area;
-				}
-			}
-
-			// Skip if already visited or not inside polygon
-			if (visited.contains(x, z) ||
-					!bg::within(
-							Point2D_Float(static_cast<double>(x), static_cast<double>(z)),
-							polygon)) {
-				continue;
-			}
-
-			// Start flood fill from this seed point
-			while (!queue.empty())
-				queue.pop(); // Clear queue instead of creating new one
-			queue.emplace(x, z);
-			visited.insert(x, z);
-
-			while (!queue.empty()) {
-				auto [curr_x, curr_z] = queue.front();
-				queue.pop();
-
-				// Add current point to filled area
-				filled_area.emplace_back(curr_x, curr_z);
-
-				// Check all four directions with optimized bounds checking
-				const std::array<std::pair<int, int>, 4> neighbors = {
-						{{curr_x - 1, curr_z}, {curr_x + 1, curr_z}, {curr_x, curr_z - 1},
-								{curr_x, curr_z + 1}}};
-
-				for (const auto &[nx, nz] : neighbors) {
-					if (nx >= min_x && nx <= max_x && nz >= min_z && nz <= max_z &&
-							visited.insert(nx, nz)) {
-						// Only check polygon containment for unvisited points
-						if (bg::within(Point2D_Float(static_cast<double>(nx),
-											   static_cast<double>(nz)),
-									polygon)) {
-							queue.emplace(nx, nz);
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return filled_area;
-}
-
-/// Original flood fill algorithm with enhanced multi-seed detection for complex shapes
-[[maybe_unused]] static std::vector<std::pair<int, int>> original_flood_fill_area(
-		const std::vector<std::pair<int, int>> &polygon_coords,
-		const std::chrono::milliseconds *timeout, int32_t min_x, int32_t max_x,
-		int32_t min_z, int32_t max_z)
-{
-	auto start_time = std::chrono::steady_clock::now();
-	std::vector<std::pair<int, int>> filled_area;
-	FloodBitmap visited(min_x, max_x, min_z, max_z);
-
-	// Create polygon for containment testing
-	Polygon polygon = create_polygon(polygon_coords);
-
-	// Optimized step sizes for large polygons - coarser sampling for speed
-	int32_t width = max_x - min_x + 1;
-	int32_t height = max_z - min_z + 1;
-	int32_t step_x = std::clamp(width / 8, 1, 12); // Cap max step size for coverage
-	int32_t step_z = std::clamp(height / 8, 1, 12);
-
-	// Pre-allocate queue
-	std::queue<std::pair<int, int>> queue;
-	queue = std::queue<std::pair<int, int>>(); // Clear any existing content
-	filled_area.reserve(1000);				   // Reserve space to reduce reallocations
-
-	// Scan for multiple seed points to handle U-shapes and concave polygons
-	for (int32_t z = min_z; z <= max_z; z += step_z) {
-		for (int32_t x = min_x; x <= max_x; x += step_x) {
-			// Reduced timeout checking frequency for better performance
-			if (timeout && timeout_exceeded(start_time, *timeout)) {
-				return filled_area;
-			}
-
-			// Skip if already processed or not inside polygon
-			if (visited.contains(x, z) ||
-					!bg::within(
-							Point2D_Float(static_cast<double>(x), static_cast<double>(z)),
-							polygon)) {
-				continue;
-			}
-
-			// Start flood-fill from this seed point
-			while (!queue.empty())
-				queue.pop(); // Clear queue instead of creating new one
-			queue.emplace(x, z);
-			visited.insert(x, z);
-
-			while (!queue.empty()) {
-				auto [curr_x, curr_z] = queue.front();
-				queue.pop();
-
-				// Only check polygon containment once per point when adding to filled_area
-				if (bg::within(Point2D_Float(static_cast<double>(curr_x),
-									   static_cast<double>(curr_z)),
-							polygon)) {
-					filled_area.push_back({curr_x, curr_z});
-
-					// Check adjacent points with optimized iteration
-					const std::array<std::pair<int, int>, 4> neighbors = {
-							{{curr_x - 1, curr_z}, {curr_x + 1, curr_z},
-									{curr_x, curr_z - 1}, {curr_x, curr_z + 1}}};
-
-					for (const auto &[nx, nz] : neighbors) {
-						if (nx >= min_x && nx <= max_x && nz >= min_z && nz <= max_z &&
-								visited.insert(nx, nz)) {
-							queue.emplace(nx, nz);
-						}
-					}
-				}
-			}
-		}
-	}
-
-	return filled_area;
 }
 
 // Even-odd scanline fill for closed polygons. It leaves boundary cells to the
@@ -339,15 +112,15 @@ public:
 			min_x_(min_x), min_z_(min_z),
 			width_(static_cast<std::size_t>(static_cast<std::int64_t>(max_x) - min_x + 1))
 	{
-		const auto height = static_cast<std::size_t>(
-				static_cast<std::int64_t>(max_z) - min_z + 1);
+		const auto height =
+				static_cast<std::size_t>(static_cast<std::int64_t>(max_z) - min_z + 1);
 		bits_.resize((width_ * height + 63) / 64);
 	}
 
 	std::size_t index(int32_t x, int32_t z) const
 	{
 		return static_cast<std::size_t>(static_cast<std::int64_t>(z) - min_z_) * width_ +
-				static_cast<std::size_t>(static_cast<std::int64_t>(x) - min_x_);
+			   static_cast<std::size_t>(static_cast<std::int64_t>(x) - min_x_);
 	}
 
 	bool take(std::size_t i)
@@ -419,15 +192,13 @@ static std::optional<InsideBitmap> inside_mask(
 		if (az == bz)
 			continue;
 		const bool up = az < bz;
-		const auto [x0, z0, x1, z1] = up
-				? std::tuple{ax, az, bx, bz}
-				: std::tuple{bx, bz, ax, az};
-		edges.push_back({z0, z1, x0, std::int64_t(x1) - x0,
-				std::int64_t(z1) - z0, up ? 1 : -1});
+		const auto [x0, z0, x1, z1] =
+				up ? std::tuple{ax, az, bx, bz} : std::tuple{bx, bz, ax, az};
+		edges.push_back(
+				{z0, z1, x0, std::int64_t(x1) - x0, std::int64_t(z1) - z0, up ? 1 : -1});
 	}
-	std::sort(edges.begin(), edges.end(), [](const auto &a, const auto &b) {
-		return a.z0 < b.z0;
-	});
+	std::sort(edges.begin(), edges.end(),
+			[](const auto &a, const auto &b) { return a.z0 < b.z0; });
 	std::vector<ScanEdge> active;
 	active.reserve(edges.size());
 	std::size_t next_edge = 0;
@@ -444,7 +215,8 @@ static std::optional<InsideBitmap> inside_mask(
 		if (timeout && (zi - min_z) % 64 == 0 && timeout_exceeded(start, *timeout))
 			return std::nullopt;
 		active.erase(std::remove_if(active.begin(), active.end(),
-				[&](const auto &edge) { return edge.z1 <= z; }), active.end());
+							 [&](const auto &edge) { return edge.z1 <= z; }),
+				active.end());
 		while (next_edge < edges.size() && edges[next_edge].z0 == z)
 			active.push_back(edges[next_edge++]);
 		crossings.clear();
@@ -453,9 +225,8 @@ static std::optional<InsideBitmap> inside_mask(
 			const auto quotient = t >= 0 ? t / edge.dz : -((-t + edge.dz - 1) / edge.dz);
 			crossings.push_back({edge.x0 + quotient + 1, edge.winding, t % edge.dz == 0});
 		}
-		std::sort(crossings.begin(), crossings.end(), [](const auto &a, const auto &b) {
-			return a.first < b.first;
-		});
+		std::sort(crossings.begin(), crossings.end(),
+				[](const auto &a, const auto &b) { return a.first < b.first; });
 		int winding = 0;
 		for (std::size_t i = 1; i < crossings.size(); ++i) {
 			winding += crossings[i - 1].winding;
@@ -464,7 +235,8 @@ static std::optional<InsideBitmap> inside_mask(
 			const auto first = std::max<std::int64_t>(crossings[i - 1].first, min_x);
 			const auto last = std::min<std::int64_t>(crossings[i].first - 1, max_x);
 			if (last >= first)
-				mask.write_span(z, static_cast<int32_t>(first), static_cast<int32_t>(last), true);
+				mask.write_span(
+						z, static_cast<int32_t>(first), static_cast<int32_t>(last), true);
 		}
 		for (const auto &crossing : crossings)
 			if (crossing.on_cell)
@@ -490,7 +262,8 @@ static std::vector<std::pair<int, int>> seeded_inside_fill(
 	auto remaining = inside_mask(ring, min_x, max_x, min_z, max_z, timeout, start);
 	if (!remaining)
 		return {};
-	const auto row = static_cast<std::size_t>(static_cast<std::int64_t>(max_x) - min_x + 1);
+	const auto row =
+			static_cast<std::size_t>(static_cast<std::int64_t>(max_x) - min_x + 1);
 	const int step_x = std::clamp((max_x - min_x + 1) / step_divisor, 1, step_cap);
 	const int step_z = std::clamp((max_z - min_z + 1) / step_divisor, 1, step_cap);
 	std::vector<std::pair<int, int>> filled;

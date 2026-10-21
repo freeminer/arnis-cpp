@@ -409,6 +409,57 @@ vector<int> rail_bridge_profile(
 	return ys;
 }
 
+// BridgeStructureMap samples its profile on the smoothed OSM centerline. The
+// optional Advtrains renderer may insert additional connection samples; carry
+// the same physical profile onto that path instead of silently reverting to a
+// terrain-only ramp when the vector lengths differ.
+static vector<int> resample_rail_profile(const vector<pair<int, int>> &source_points,
+		const vector<int> &source_ys, const vector<pair<int, int>> &target_points)
+{
+	if (source_points.empty() || source_points.size() != source_ys.size() ||
+			target_points.empty())
+		return {};
+	if (source_points.size() == 1)
+		return vector<int>(target_points.size(), source_ys.front());
+
+	const auto distances = [](const vector<pair<int, int>> &points) {
+		vector<double> cumulative(points.size(), 0.0);
+		for (size_t i = 1; i < points.size(); ++i) {
+			const double dx = points[i].first - points[i - 1].first;
+			const double dz = points[i].second - points[i - 1].second;
+			cumulative[i] = cumulative[i - 1] + std::hypot(dx, dz);
+		}
+		return cumulative;
+	};
+	const auto source_distance = distances(source_points);
+	const auto target_distance = distances(target_points);
+	const double source_length = source_distance.back();
+	const double target_length = target_distance.back();
+	vector<int> result;
+	result.reserve(target_points.size());
+	for (const double distance : target_distance) {
+		const double wanted =
+				target_length > 0.0 ? distance * source_length / target_length : 0.0;
+		const auto upper =
+				std::lower_bound(source_distance.begin(), source_distance.end(), wanted);
+		if (upper == source_distance.begin()) {
+			result.push_back(source_ys.front());
+			continue;
+		}
+		if (upper == source_distance.end()) {
+			result.push_back(source_ys.back());
+			continue;
+		}
+		const size_t hi = static_cast<size_t>(upper - source_distance.begin());
+		const size_t lo = hi - 1;
+		const double span = source_distance[hi] - source_distance[lo];
+		const double t = span > 0.0 ? (wanted - source_distance[lo]) / span : 0.0;
+		result.push_back(static_cast<int>(
+				std::lround(source_ys[lo] + (source_ys[hi] - source_ys[lo]) * t)));
+	}
+	return result;
+}
+
 namespace
 {
 enum class RailDeckSideKind
@@ -976,6 +1027,9 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	if (way.nodes.size() < 2)
 		return;
 	const auto *plan = advtrains::get_plan(way);
+	const auto *rail_deck = bridge_structures.rail_deck(way.id);
+	if (!rail_deck)
+		return;
 
 	const bridge_styles::BridgeStyle style =
 			bridge_styles::resolve_bridge_style_with_outline(way, bridge_outlines);
@@ -986,8 +1040,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 
 	// Rust skips structural supports for track carried by a road deck and follows
 	// that deck's sampled profile exactly.
-	if (const auto *rail_deck = bridge_structures.rail_deck(way.id);
-			rail_deck && rail_deck->kind == bridges::RailDeckKind::Carried) {
+	if (rail_deck->kind == bridges::RailDeckKind::Carried) {
 		const auto carried_path = build_smoothed_centerline(way);
 		for (std::size_t i = 0; i < carried_path.size(); ++i) {
 			const auto [x, z] = carried_path[i];
@@ -1071,12 +1124,18 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		bridge_ys.push_back(
 				std::max(std::min(start_ramp_y, end_ramp_y), terrain_ys[tds]));
 	}
-	const auto *own_rail_deck = bridge_structures.rail_deck(way.id);
-	if (!plan && own_rail_deck && own_rail_deck->kind == bridges::RailDeckKind::Level &&
-			own_rail_deck->ys.size() == bridge_ys.size())
-		bridge_ys = own_rail_deck->ys;
+	const auto *own_rail_deck = rail_deck;
+	if (!plan && own_rail_deck->kind == bridges::RailDeckKind::Level) {
+		const auto profile_points = build_smoothed_centerline(way);
+		const auto profile =
+				resample_rail_profile(profile_points, own_rail_deck->ys, all_points);
+		if (profile.size() == bridge_ys.size())
+			for (std::size_t i = 0; i < bridge_ys.size(); ++i)
+				bridge_ys[i] = std::max(profile[i], terrain_ys[i]);
+	}
 	if (plan) {
-		bridge_ys = plan->heights;
+		if (plan->heights.size() == bridge_ys.size())
+			bridge_ys = plan->heights;
 	}
 
 	const Block foundation_block = bridge_styles::foundation_block(style);
@@ -1120,23 +1179,14 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		const float dzp = static_cast<float>(p_next.second - p_prev.second);
 		const float mag = std::max(std::sqrt(dxp * dxp + dzp * dzp), 1.0e-6f);
 		bridge_path.push_back({bx, y, bz, -dzp / mag, dxp / mag});
-
-		const std::size_t pillar_interval = bridge_styles::pillar_interval(style, 0);
-		const bool is_pillar =
-				pillar_interval > 0 && i % pillar_interval == pillar_interval / 2;
-		if (!cables_carry_deck && !bridge_surface.support_blocked(bx, bz, y))
-			bridge_styles::place_bridge_support_below_deck(editor, style, bx, y, bz,
-					terrain_ys[i], i, total, true, true, is_pillar);
 	}
 
 	// Rust lays a broad deck around level rail bridges, filling the ballast and
 	// gap between adjacent tracks and adding curbs only on exposed edges. Keep
 	// carried tracks on the road-bridge path above: that structure owns their deck.
-	const auto *rail_deck = bridge_structures.rail_deck(way.id);
-	const bool has_own_deck =
-			rail_deck && rail_deck->kind == bridges::RailDeckKind::Level;
+	const bool has_own_deck = rail_deck->kind == bridges::RailDeckKind::Level;
 	std::optional<std::array<bool, 2>> rail_open_sides;
-	if (has_own_deck && total == all_points.size()) {
+	if (has_own_deck) {
 		const auto layout =
 				rail_deck_layout(bridge_surface, way.id, all_points, bridge_ys);
 		const auto open_share = [&](std::size_t side) {

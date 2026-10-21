@@ -101,7 +101,6 @@ struct LandCoverData
 	struct WaterBlendCache
 	{
 		std::mutex mutex;
-		std::optional<std::vector<std::vector<float>>> grid;
 		std::optional<WaterBlendMask> mask;
 		std::size_t mask_width = 0, mask_height = 0;
 	};
@@ -114,11 +113,9 @@ struct LandCoverData
 	// geographic mapping through shoreline reconstruction.
 	GeographicBounds source_bounds{};
 
-	const std::vector<std::vector<float>> &water_blend_grid() const;
 	const WaterBlendMask &water_blend_mask(
 			std::size_t world_width, std::size_t world_height) const;
 	void invalidate_water_blend_grid();
-	void refresh_water_blend_grid();
 	void remap_rows_to_mercator(double lat_top, double lat_bottom);
 	void crop(std::size_t x0, std::size_t z0, std::size_t width, std::size_t height);
 };

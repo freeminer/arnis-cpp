@@ -2,10 +2,16 @@
 
 #include "../ground_generation.h"
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <limits>
+#include <string_view>
+#include <thread>
+#include <utility>
 #include <vector>
 
 namespace arnis::land_cover
@@ -19,6 +25,56 @@ constexpr double WARP_M = 40.0;
 constexpr double WARP_WAVELENGTH_M = 60.0;
 constexpr std::uint32_t SALT_WARP_X = 0x4E41'5458;
 constexpr std::uint32_t SALT_WARP_Z = 0x4E41'545A;
+
+template <typename Function>
+void parallel_rows(std::size_t row_count, Function &&function)
+{
+	if (row_count == 0)
+		return;
+	if (row_count < 32) {
+		for (std::size_t row = 0; row < row_count; ++row)
+			function(row);
+		return;
+	}
+	std::size_t worker_limit = 0;
+	if (const char *configured = std::getenv("RAYON_NUM_THREADS")) {
+		const std::string_view text(configured);
+		const auto [ptr, error] =
+				std::from_chars(text.data(), text.data() + text.size(), worker_limit);
+		if (error != std::errc{} || ptr != text.data() + text.size() || worker_limit == 0)
+			worker_limit = 0;
+	}
+	if (worker_limit == 0) {
+		const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+		worker_limit = std::max<std::size_t>(1, static_cast<std::size_t>(hardware * 0.9));
+	}
+	const auto workers = std::min(row_count, worker_limit);
+	if (workers == 1) {
+		for (std::size_t row = 0; row < row_count; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{0};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= row_count)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> threads;
+	threads.reserve(workers - 1);
+	for (std::size_t i = 1; i < workers; ++i)
+		try {
+			threads.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	worker();
+	for (auto &thread : threads)
+		thread.join();
+}
 
 bool is_wild(std::uint8_t c, biome::Climate climate)
 {
@@ -49,7 +105,7 @@ void dilate_square(std::vector<std::uint8_t> &cells, std::size_t w, std::size_t 
 		if (since <= radius)
 			cell |= 2;
 	};
-	for (std::size_t z = 0; z < h; ++z) {
+	parallel_rows(h, [&](std::size_t z) {
 		auto row = cells.begin() + z * w;
 		auto since = start;
 		for (std::size_t x = 0; x < w; ++x)
@@ -59,7 +115,7 @@ void dilate_square(std::vector<std::uint8_t> &cells, std::size_t w, std::size_t 
 			reach(row[x], since);
 		for (std::size_t x = 0; x < w; ++x)
 			row[x] >>= 1;
-	}
+	});
 	std::vector<std::size_t> since(w, start);
 	for (std::size_t z = 0; z < h; ++z)
 		for (std::size_t x = 0; x < w; ++x)
@@ -68,8 +124,11 @@ void dilate_square(std::vector<std::uint8_t> &cells, std::size_t w, std::size_t 
 	for (std::size_t z = h; z-- > 0;)
 		for (std::size_t x = 0; x < w; ++x)
 			reach(cells[z * w + x], since[x]);
-	for (std::size_t i = 0; i < w * h; ++i)
-		cells[i] >>= 1;
+	parallel_rows(h, [&](std::size_t z) {
+		const auto begin = z * w;
+		for (std::size_t x = 0; x < w; ++x)
+			cells[begin + x] >>= 1;
+	});
 }
 
 float min_level(float a, float b)
@@ -100,12 +159,15 @@ bool reclaim_water(LandCoverData &data, std::vector<std::vector<float>> *heights
 			1, static_cast<std::size_t>(std::max(
 					   0.0, std::round(WATER_SPAN_M * 0.5 * data.cells_per_meter))));
 	std::vector<std::uint8_t> mask(w * h);
-	for (std::size_t z = 0; z < h; ++z)
+	parallel_rows(h, [&](std::size_t z) {
 		for (std::size_t x = 0; x < w; ++x)
 			mask[z * w + x] = data.grid[z][x] == LC_WATER;
+	});
 	dilate_square(mask, w, h, radius, false);
-	for (auto &c : mask)
-		c ^= 1;
+	parallel_rows(h, [&](std::size_t z) {
+		for (std::size_t x = 0; x < w; ++x)
+			mask[z * w + x] ^= 1;
+	});
 	dilate_square(mask, w, h, radius, true);
 	auto closed = [&](std::size_t x, std::size_t z) {
 		return mask[z * w + x] == 0 && data.grid[z][x] == LC_BUILT_UP;
@@ -124,11 +186,12 @@ bool reclaim_water(LandCoverData &data, std::vector<std::vector<float>> *heights
 				fn(static_cast<std::size_t>(nx), static_cast<std::size_t>(nz));
 		}
 	};
-	const auto absent = std::numeric_limits<std::size_t>::max();
 	std::vector<float> reclaimed(w * h, std::numeric_limits<float>::quiet_NaN());
 	std::vector<std::uint8_t> seen(w * h, 0);
 	std::deque<std::size_t> queue;
-	for (std::size_t z = 0; z < h; ++z) {
+	std::vector<std::vector<std::pair<std::size_t, float>>> seeds(h);
+	parallel_rows(h, [&](std::size_t z) {
+		auto &row_seeds = seeds[z];
 		for (std::size_t x = 0; x < w; ++x) {
 			if (!closed(x, z))
 				continue;
@@ -148,7 +211,12 @@ bool reclaim_water(LandCoverData &data, std::vector<std::vector<float>> *heights
 			}
 			if (!reachable(level_at(x, z), level))
 				continue;
-			const auto i = z * w + x;
+			row_seeds.emplace_back(z * w + x, level);
+		}
+	});
+	// Keep the BFS seed order deterministic and mutate shared arrays only on this thread.
+	for (const auto &row_seeds : seeds) {
+		for (const auto &[i, level] : row_seeds) {
 			seen[i] = 1;
 			reclaimed[i] = level;
 			queue.push_back(i);
@@ -168,20 +236,24 @@ bool reclaim_water(LandCoverData &data, std::vector<std::vector<float>> *heights
 			}
 		});
 	}
-	bool changed = false;
-	for (std::size_t i = 0; i < w * h; ++i) {
-		if (!seen[i])
-			continue;
-		const auto x = i % w, z = i / w;
-		data.grid[z][x] = LC_WATER;
-		if (has_heights) {
-			auto &cell = (*heights)[z][x];
-			if (std::isfinite(reclaimed[i]) && std::isfinite(cell) && cell > reclaimed[i])
-				cell = reclaimed[i];
+	std::vector<std::uint8_t> changed_rows(h, 0);
+	parallel_rows(h, [&](std::size_t z) {
+		for (std::size_t x = 0; x < w; ++x) {
+			const auto i = z * w + x;
+			if (!seen[i])
+				continue;
+			data.grid[z][x] = LC_WATER;
+			if (has_heights) {
+				auto &cell = (*heights)[z][x];
+				if (std::isfinite(reclaimed[i]) && std::isfinite(cell) &&
+						cell > reclaimed[i])
+					cell = reclaimed[i];
+			}
+			changed_rows[z] = 1;
 		}
-		changed = true;
-	}
-	return changed;
+	});
+	return std::any_of(changed_rows.begin(), changed_rows.end(),
+			[](std::uint8_t changed) { return changed != 0; });
 }
 
 void chessboard_labels(std::vector<std::uint8_t> &label, std::vector<std::uint16_t> &dist,
@@ -251,7 +323,7 @@ void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
 	const double warp = WARP_M * cpm;
 	const auto wavelength = std::max(
 			1, static_cast<int>(std::max(0.0, std::round(WARP_WAVELENGTH_M * cpm))));
-	for (std::size_t z = 0; z < h; ++z) {
+	parallel_rows(h, [&](std::size_t z) {
 		for (std::size_t x = 0; x < w; ++x) {
 			auto &c = data.grid[z][x];
 			if (c != LC_BUILT_UP)
@@ -272,7 +344,7 @@ void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
 			const auto nearest = label[lz * lw + lx];
 			c = nearest ? nearest : fallback;
 		}
-	}
+	});
 }
 }
 

@@ -2314,6 +2314,7 @@ bool generate_world(WorldEditor &editor,
 	std::vector<std::vector<std::size_t>> element_assignments;
 	std::vector<std::pair<std::size_t, std::size_t>> element_tasks;
 	std::optional<TileFillReaders> tile_fill_reader_state;
+	std::mutex tile_fill_release_mutex;
 	FillExpirations expiring_fills;
 	if (tiled_element_dispatch) {
 		element_assignments =
@@ -2389,9 +2390,11 @@ bool generate_world(WorldEditor &editor,
 	};
 	auto release_tile_fills_for = [&](std::size_t tile_index) {
 		if (tile_fill_reader_state &&
-				tile_index < tile_fill_reader_state->tile_ids.size())
+				tile_index < tile_fill_reader_state->tile_ids.size()) {
+			std::lock_guard<std::mutex> lock(tile_fill_release_mutex);
 			release_tile_fills(tile_fill_reader_state->tile_ids[tile_index],
 					tile_fill_reader_state->remaining_readers, flood_fill_cache);
+		}
 	};
 
 	// All roads share the same immutable connectivity and marking index.
@@ -2934,6 +2937,10 @@ bool generate_world(WorldEditor &editor,
 						for (const auto element_index : element_assignments[tile_index])
 							process_element_with_context(tile_editor, tile_state,
 									element_index, element_index);
+						// Rust releases a tile's cached fills as soon as its element pass
+						// finishes, before ground work and before ordered merge can stall it.
+						// The shared reader counts need the helper's lock across workers.
+						release_tile_fills_for(tile_index);
 						if (!finish_ground_tile(
 									tile_editor, tile_state, tile_index, true))
 							throw std::runtime_error(
@@ -2951,10 +2958,6 @@ bool generate_world(WorldEditor &editor,
 				if (!workers[slot].valid())
 					throw std::runtime_error("missing Arnis tile worker result");
 				auto [tile_editor, tile_state] = workers[slot].get();
-				// A finished tile no longer needs its cached flood fills. Release
-				// readers before merging so out-of-order completed workers do not keep
-				// their inputs resident while waiting for deterministic merge order.
-				release_tile_fills_for(tile_index);
 				const auto &tile = element_tiles[tile_index];
 				if (!editor.merge_tile_worker(std::move(tile_editor), tile.min_x,
 							tile.min_z, tile.max_x - 1, tile.max_z - 1))
@@ -3300,17 +3303,18 @@ bool generate_world(WorldEditor &editor,
 	}
 
 	railways::advtrains::finish_network(editor);
+	// Rust styles each completed region before facade panels are finalized or
+	// flushed. Keep that ordering so generated panels remain visible over winter
+	// snow and post-apocalyptic block substitutions.
+	world_style::apply(editor, args, building_footprints);
+	if (apply_world_style)
+		editor.release_sealed_surface();
 	// Rust settles Mapillary photo candidates only after all generated blocks
 	// are final; the shared C++ editor has no disk-eviction region to flush.
 	mapillary::facades::finalize_displays(editor);
 	// Resolve preset facade candidates only after all neighbouring building
 	// blocks exist; party-wall panels are cropped from their finished rooflines.
 	building_facades::finalize(editor);
-	// Rust applies winter/ruins to the completed world, after structures and
-	// models have been placed but before the backend persists generated blocks.
-	world_style::apply(editor, args, building_footprints);
-	if (apply_world_style)
-		editor.release_sealed_surface();
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.

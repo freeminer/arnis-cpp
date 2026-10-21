@@ -231,11 +231,11 @@ std::size_t drop_doubled_summit_crosses(
 		if (!element.is_node() || !summit_cross_tagged(element.as_node().tags))
 			continue;
 		auto &node = std::get<ProcessedNode>(element);
-		const bool near = std::any_of(crosses.begin(), crosses.end(), [&](const auto &p) {
+		const bool near_ = std::any_of(crosses.begin(), crosses.end(), [&](const auto &p) {
 			return std::hypot(static_cast<double>(p.first) - node.x,
 						   static_cast<double>(p.second) - node.z) <= reach;
 		});
-		if (near && node.tags.erase("summit:cross") > 0)
+		if (near_ && node.tags.erase("summit:cross") > 0)
 			++dropped;
 	}
 	return dropped;

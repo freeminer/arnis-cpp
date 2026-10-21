@@ -74,7 +74,13 @@ Kind kind(WorldEditor &editor, const Block &block)
 	if (n == "air" || n == "cave_air" || n == "void_air" || n == "light" ||
 			n == "barrier" || n == "structure_void")
 		return Kind::Air;
-	if (n == "water" || n == "bubble_column")
+	// Rust classifies the canonical WATER block by id. Backends expose that
+	// same liquid under several node names, so recognize their semantic suffixes
+	// here instead of making winter styling depend on the selected game's alias.
+	if (n == "water" || n == "water_source" || n == "flowing_water" ||
+			n == "water_flowing" || n == "river_water_source" ||
+			n == "flowing_river_water" || n == "river_water_flowing" ||
+			n == "bubble_column")
 		return Kind::Water;
 	if (n == "snow" || n == "snow_block" || n == "powder_snow" || n == "ice" ||
 			n == "packed_ice" || n == "blue_ice")
@@ -200,8 +206,10 @@ void snowy_ground(WorldEditor &editor, const Column &c, int y)
 		swap_material(editor, c, y, *block, DIRT);
 }
 
-bool full_top(const Block &block)
+bool full_top(WorldEditor &editor, const Block &block, int x, int y, int z)
 {
+	if (editor.has_full_top_state(x, y, z))
+		return true;
 	const auto props = block.properties();
 	if (!props)
 		return false;
@@ -215,7 +223,13 @@ void swap_material(
 		WorldEditor &editor, const Column &c, int y, const Block &old, Block replacement)
 {
 	replacement.setParam2(old.getParam2());
-	put(editor, replacement, c.x, y, c.z);
+	// Rust's Column::swap keeps the generated block's actual per-cell state;
+	// fall back to the block definition's baked-in state when none was emitted.
+	if (const auto previous = editor.get_block_with_properties_absolute(c.x, y, c.z))
+		put(editor, BlockWithProperties{replacement, previous->property_values()}, c.x, y,
+				c.z);
+	else
+		put(editor, replacement, c.x, y, c.z);
 }
 
 Block weathered(WorldEditor &editor, const Block &b, std::uint64_t h)
@@ -420,33 +434,35 @@ void ruin_open_ground(WorldEditor &editor, const Column &c, int min_y, int max_y
 		rubble_or_fire(editor, c, top_y + 1, h >> 8, fires);
 		return;
 	}
-	if (editor.surface_is_sealed(c.x, c.z) && noise(c.x, c.z, 7, SALT_CRACK) < .32) {
-		Block ground;
-		switch (h % 10) {
-		case 0:
-		case 1:
-		case 2:
-		case 3:
-			ground = GRASS_BLOCK;
-			break;
-		case 4:
-		case 5:
-			ground = COARSE_DIRT;
-			break;
-		case 6:
-		case 7:
-			ground = GRAVEL;
-			break;
-		case 8:
-			ground = MOSS_BLOCK;
-			break;
-		default:
-			ground = COBBLESTONE;
-			break;
+	if (editor.surface_is_sealed(c.x, c.z)) {
+		if (noise(c.x, c.z, 7, SALT_CRACK) < .32) {
+			Block ground;
+			switch (h % 10) {
+			case 0:
+			case 1:
+			case 2:
+			case 3:
+				ground = GRASS_BLOCK;
+				break;
+			case 4:
+			case 5:
+				ground = COARSE_DIRT;
+				break;
+			case 6:
+			case 7:
+				ground = GRAVEL;
+				break;
+			case 8:
+				ground = MOSS_BLOCK;
+				break;
+			default:
+				ground = COBBLESTONE;
+				break;
+			}
+			swap_material(editor, c, top_y, block, ground);
+			if (ground.id() == GRASS_BLOCK.id() || ground.id() == MOSS_BLOCK.id())
+				grow(editor, c, top_y + 1, h >> 8, 70, max_y);
 		}
-		swap_material(editor, c, top_y, block, ground);
-		if (ground.id() == GRASS_BLOCK.id() || ground.id() == MOSS_BLOCK.id())
-			grow(editor, c, top_y + 1, h >> 8, 70, max_y);
 	} else if (block.id() == GRASS_BLOCK.id()) {
 		grow(editor, c, top_y + 1, h >> 8, 30, max_y);
 	}
@@ -523,7 +539,7 @@ void snow_over(WorldEditor &editor, const Column &c, int min_y, int max_y)
 	if (road && noise(c.x, c.z, 3, SALT_PLOW) < .92)
 		return;
 	if (k == Kind::Shaped) {
-		if (!full_top(block)) {
+		if (!full_top(editor, block, c.x, y, c.z)) {
 			if (noise(c.x, c.z, 10, SALT_ROOF) < WHITE_ROOF_SHARE) {
 				const auto full_name = editor.block_name(block).value_or("");
 				const auto n = short_name(full_name);

@@ -581,22 +581,6 @@ std::vector<std::vector<uint8_t>> compute_water_distance(
 	return dist;
 }
 
-void LandCoverData::refresh_water_blend_grid()
-{
-	(void)water_blend_grid();
-}
-
-const std::vector<std::vector<float>> &LandCoverData::water_blend_grid() const
-{
-	if (!water_blend_cache)
-		water_blend_cache = std::make_shared<WaterBlendCache>();
-	const auto cache = water_blend_cache;
-	std::lock_guard lock(cache->mutex);
-	if (!cache->grid)
-		cache->grid = compute_water_blend_smooth(grid, width, height, cells_per_meter);
-	return *cache->grid;
-}
-
 bool WaterBlendMask::contains(int x, int z) const
 {
 	if (width == 0 || height == 0 || words_per_row == 0)
@@ -628,7 +612,7 @@ const WaterBlendMask &LandCoverData::water_blend_mask(
 		if (width && height && mask.bits.size() && grid.size() >= height) {
 			const auto smooth =
 					compute_water_blend_smooth(grid, width, height, cells_per_meter);
-			for (std::size_t z = 0; z < world_height; ++z) {
+			parallel_rows(0, world_height, [&](std::size_t z) {
 				const double fz = std::clamp(double(z) / double(std::max<std::size_t>(
 																 1, world_height - 1)),
 										  0.0, 1.0) *
@@ -637,7 +621,7 @@ const WaterBlendMask &LandCoverData::water_blend_mask(
 				const auto z1 = std::min(z0 + 1, height - 1);
 				const double tz = fz - std::floor(fz);
 				if (smooth[z0].size() < width || smooth[z1].size() < width)
-					continue;
+					return;
 				for (std::size_t x = 0; x < world_width; ++x) {
 					const double fx = std::clamp(double(x) / double(std::max<std::size_t>(
 																	 1, world_width - 1)),
@@ -653,7 +637,7 @@ const WaterBlendMask &LandCoverData::water_blend_mask(
 						mask.bits[z * mask.words_per_row + (x >> 6)] |= std::uint64_t(1)
 																		<< (x & 63);
 				}
-			}
+			});
 		}
 		cache->mask = std::move(mask);
 		cache->mask_width = world_width;

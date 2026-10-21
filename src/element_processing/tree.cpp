@@ -538,8 +538,7 @@ void Tree::create_from_canopy(WorldEditor &editor, const Coord &pos,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	create_of_type(editor, pos, selected_tree_type(pos.x, pos.z), building_footprints,
-			bridge_surface, false, wanted_tree_height_m(editor, pos.x, pos.z), false,
-			true, true);
+			bridge_surface, false, std::nullopt, false, true, true);
 }
 
 void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
