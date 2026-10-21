@@ -62,9 +62,9 @@ struct CarriagewayClip
 {
 	std::vector<std::pair<int, int>> centreline;
 	int half_width{0};
-	std::vector<Block> surface;
+	const std::vector<Block> *surface = nullptr;
 
-	const std::vector<Block> &palette() const { return surface; }
+	const std::vector<Block> &palette() const { return *surface; }
 	bool contains(int x, int z) const;
 };
 

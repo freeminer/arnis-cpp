@@ -333,7 +333,6 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	data->scale = scale;
 	data->blocks_per_meter = blocks_per_meter;
 	data->ground_level = ground_level;
-	data->palms_default = !exclude_palms;
 	data->sizes = sizes;
 	std::unordered_map<std::string, std::size_t> asset_entries;
 	auto build_community = [&](const nlohmann::json &json,

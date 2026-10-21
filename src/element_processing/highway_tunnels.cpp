@@ -515,16 +515,19 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 			covered[i] = cover[i] - road[i] >= CEIL_OFFSET + 1;
 	}
 	const auto faces = portal_faces(pts, internal);
-	std::vector<Block> defaults =
-			(type == "path") ? std::vector<Block>{DIRT_PATH}
-			: (type == "footway" || type == "pedestrian" || type == "service" ||
-					  type == "steps")
-					? std::vector<Block>{GRAY_CONCRETE}
-					: std::vector<Block>{GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA};
-	auto palette = surfaces::get_blocks_for_surface_way(way, defaults);
-	if (way.tags.get("highway") == "cycleway")
-		if (const auto cycleway = surfaces::cycleway_palette(way))
-			palette = *cycleway;
+	static const std::vector<Block> path_default{DIRT_PATH};
+	static const std::vector<Block> pedestrian_default{GRAY_CONCRETE};
+	static const std::vector<Block> road_default{GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA};
+	const auto &defaults = type == "path" ? path_default
+						   : (type == "footway" || type == "pedestrian" ||
+									 type == "service" || type == "steps")
+								   ? pedestrian_default
+								   : road_default;
+	const auto *palette = way.tags.get("highway") == "cycleway"
+								  ? surfaces::cycleway_palette_view(way)
+								  : nullptr;
+	if (!palette)
+		palette = surfaces::get_blocks_for_surface_way_view(way, defaults);
 	for (size_t i = 0; i < pts.size(); ++i) {
 		auto [x, z] = pts[i];
 		const int ry = road[i], ty = terrain[i];
@@ -607,7 +610,7 @@ void carve_highway_tunnel_interior(
 			for (int dz = -c.half_width; dz <= c.half_width; ++dz)
 				if (!beyond_portal(c.faces, c.x + dx, c.z + dz))
 					editor.set_block_absolute(
-							surfaces::semirandom_surface(c.x + dx, c.z + dz, c.palette),
+							surfaces::semirandom_surface(c.x + dx, c.z + dz, *c.palette),
 							c.x + dx, c.road_y, c.z + dz, road_wl, std::nullopt);
 }
 }

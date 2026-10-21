@@ -46,6 +46,7 @@
 #include "../structures/starship.h"
 #include "../deterministic_rng.h"
 #include "../block_palette.h"
+#include "../data_processing.h"
 #include "../osm_parser.h"
 #include "../strict_parse.h"
 #include "way_segments.h"
@@ -3943,12 +3944,18 @@ int scaled_blocks(int value, double scale_factor)
 	return static_cast<int>(std::floor(static_cast<double>(value) * scale_factor));
 }
 
-int terrain_base_level(WorldEditor &editor, const ProcessedWay &element, int fallback)
+int terrain_base_level(WorldEditor &editor, const ProcessedWay &element, int fallback,
+		const std::vector<std::pair<int, int>> &footprint)
 {
 	std::optional<int> highest;
-	for (const auto &node : element.nodes)
-		if (const auto level = editor.terrain_level(node.x, node.z))
+	const auto include = [&](int x, int z) {
+		if (const auto level = editor.terrain_level(x, z))
 			highest = highest ? std::max(*highest, *level) : *level;
+	};
+	for (const auto &node : element.nodes)
+		include(node.x, node.z);
+	for (const auto &[x, z] : footprint)
+		include(x, z);
 	return highest.value_or(fallback);
 }
 
@@ -3981,9 +3988,11 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	}
 
 	int start_y_offset = min_level_offset;
-	if (terrain_enabled)
-		start_y_offset =
-				terrain_base_level(editor, element, args.ground_level) + min_level_offset;
+	if (terrain_enabled) {
+		const int terrain_base =
+				terrain_base_level(editor, element, args.ground_level, cached_floor_area);
+		start_y_offset = terrain_base + min_level_offset;
+	}
 
 	int roof_thickness = 5;
 	if (const auto height = parse_building_height_tag(element.tags)) {
@@ -6876,8 +6885,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 	int start_y_offset = 0;
 	if (terrain_enabled) {
-		start_y_offset = terrain_base_level(*editor, element, args.ground_level) +
-						 min_level_offset;
+		const int terrain_base = terrain_base_level(
+				*editor, element, args.ground_level, cached_floor_area);
+		start_y_offset = terrain_base + min_level_offset;
 	} else {
 		start_y_offset = min_level_offset;
 	}
@@ -7205,9 +7215,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					continue;
 				const std::size_t begin = i == 0 ? 0 : i - 1;
 				const std::size_t end = std::min(points.size(), i + 2);
-				for (std::size_t near = begin; near < end; ++near)
+				for (std::size_t near_ = begin; near_ < end; ++near_)
 					photo_shell.emplace(
-							std::get<0>(points[near]), std::get<2>(points[near]));
+							std::get<0>(points[near_]), std::get<2>(points[near_]));
 			}
 		}
 	}
@@ -9590,7 +9600,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								: GLOWSTONE;
 				const bool hidden_lights =
 						!interior_plan && condition != BuildingCondition::Abandoned &&
-						condition != BuildingCondition::Ruined && editor->format() != 2;
+						condition != BuildingCondition::Ruined &&
+						editor->get_generation_format() !=
+								static_cast<int>(WorldFormat::LuantiWorld);
 				if (!is_passage) {
 					editor->set_block_absolute(
 							floor_block, x, start_y_offset + abs_terrain_offset, z);

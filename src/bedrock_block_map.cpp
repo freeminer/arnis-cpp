@@ -901,7 +901,7 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 			const char *state_name;
 			const char *material;
 		};
-		static const std::array<StoneSlabFamily, 18> stone_slabs{{
+		static const std::array<StoneSlabFamily, 20> stone_slabs{{
 				{SMOOTH_STONE_SLAB, "stone_block_slab", "stone_slab_type",
 						"smooth_stone"},
 				{COBBLESTONE_SLAB, "stone_block_slab", "stone_slab_type", "cobblestone"},
@@ -931,6 +931,10 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 						"smooth_red_sandstone"},
 				{RED_NETHER_BRICK_SLAB, "stone_block_slab2", "stone_slab_type_2",
 						"red_nether_brick"},
+				{NETHER_BRICK_SLAB, "stone_block_slab", "stone_slab_type",
+						"nether_brick"},
+				{POLISHED_GRANITE_SLAB, "stone_block_slab3", "stone_slab_type_3",
+						"polished_granite"},
 		}};
 		for (const auto &family : stone_slabs) {
 			if (value.block != family.block)

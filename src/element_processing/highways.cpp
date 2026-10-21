@@ -62,10 +62,12 @@ std::optional<double> parse_width_tag_m(
 	return metres;
 }
 
-std::vector<crate::block_definitions::Block> default_road_mix()
+const std::vector<crate::block_definitions::Block> &default_road_mix()
 {
-	return {crate::block_definitions::GRAY_CONCRETE_POWDER,
+	static const std::vector<crate::block_definitions::Block> palette{
+			crate::block_definitions::GRAY_CONCRETE_POWDER,
 			crate::block_definitions::CYAN_TERRACOTTA};
+	return palette;
 }
 
 std::vector<crate::block_definitions::Block> road_protected_surfaces()
@@ -163,26 +165,38 @@ bool is_pedestrian_way_tags(const crate::tags_t &tags)
 	return tags.contains("footway") && footway != "no";
 }
 
-std::vector<crate::block_definitions::Block> surface_palette(
+const std::vector<crate::block_definitions::Block> *surface_palette_view(
 		const std::string &highway, const crate::tags_t &tags)
 {
 	if (highway == "cycleway")
-		if (const auto blocks = crate::surfaces::cycleway_palette(tags))
-			return *blocks;
+		if (const auto *blocks = crate::surfaces::cycleway_palette_view(tags))
+			return blocks;
 	const auto surface = tags.get("surface");
 	if (is_pedestrian_way_tags(tags) &&
-			(surface == "concrete" || surface == "paving_stones" || surface == "sett"))
-		return {crate::block_definitions::SMOOTH_STONE};
+			(surface == "concrete" || surface == "paving_stones" || surface == "sett")) {
+		static const std::vector<crate::block_definitions::Block> smooth_stone{
+				crate::block_definitions::SMOOTH_STONE};
+		return &smooth_stone;
+	}
 	if (const auto *blocks = crate::surfaces::get_blocks_for_surface(surface))
-		return *blocks;
+		return blocks;
 	if (highway == "footway" || highway == "pedestrian" || highway == "service" ||
-			highway == "steps")
-		return {crate::block_definitions::GRAY_CONCRETE};
-	if (highway == "path")
-		return {crate::block_definitions::DIRT_PATH};
-	if (highway == "escape")
-		return {crate::block_definitions::SAND};
-	return default_road_mix();
+			highway == "steps") {
+		static const std::vector<crate::block_definitions::Block> gray_concrete{
+				crate::block_definitions::GRAY_CONCRETE};
+		return &gray_concrete;
+	}
+	if (highway == "path") {
+		static const std::vector<crate::block_definitions::Block> dirt_path{
+				crate::block_definitions::DIRT_PATH};
+		return &dirt_path;
+	}
+	if (highway == "escape") {
+		static const std::vector<crate::block_definitions::Block> sand{
+				crate::block_definitions::SAND};
+		return &sand;
+	}
+	return &default_road_mix();
 }
 
 struct LaneLine
@@ -696,7 +710,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 											  : it_highway->second;
 	auto protected_surface_blocks = road_protected_surfaces();
 	if (highway_type == "cycleway" && element.is_way() &&
-			crate::surfaces::cycleway_palette(element.as_way())) {
+			crate::surfaces::cycleway_palette_view(element.as_way())) {
 		protected_surface_blocks = cycleway_protected_surfaces();
 	}
 	const std::optional<std::vector<crate::block_definitions::Block>> protected_surfaces{
@@ -835,9 +849,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				return;
 			}
 			const crate::osm_parser::ProcessedWay &way = element.as_way();
-			auto surface_blocks = crate::surfaces::get_blocks_for_surface_way(
-					way, std::vector<crate::block_definitions::Block>{
-								 crate::block_definitions::STONE});
+			static const std::vector<crate::block_definitions::Block> stone_surface{
+					crate::block_definitions::STONE};
+			const auto *surface_blocks =
+					crate::surfaces::get_blocks_for_surface_way_view(way, stone_surface);
 			crate::FloodFillResult filled_area;
 			if (flood_fill_cache) {
 				filled_area = flood_fill_cache->get_or_compute(way, args.timeout);
@@ -854,7 +869,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			}
 			for (const auto &p : *filled_area) {
 				const auto surface_block = crate::surfaces::semirandom_surface(
-						p.first, p.second, surface_blocks);
+						p.first, p.second, *surface_blocks);
 				editor.set_block(surface_block, p.first, 0, p.second,
 						std::optional<std::vector<Block>>(),
 						std::optional<std::vector<Block>>());
@@ -969,7 +984,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			layer_value == 0 && highway_type != "steps")
 		place_way_lamps(editor, way, block_range, road_mask);
 
-	auto block_types = surface_palette(highway_type, way.tags);
+	const auto &block_types = *surface_palette_view(highway_type, way.tags);
 	const bool pedestrian = is_pedestrian_way_tags(way.tags);
 	const auto crossing_paint =
 			pedestrian ? markings.crossing_way_paint(way.tags) : std::nullopt;
@@ -1382,7 +1397,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 																		ROAD_MARK_SOLID_WHITE_STRIPE_R90)
 											: crate::block_definitions::WHITE_CONCRETE;
 							const auto &zebra_hosts =
-									crossed_road ? crossed_road->surface : block_types;
+									crossed_road ? crossed_road->palette() : block_types;
 							if (surface_absolute) {
 								editor.set_block_absolute(zebra_block, set_x, surface_y,
 										set_z,
@@ -1402,7 +1417,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						} else {
 							const auto road_block = crate::surfaces::semirandom_surface(
 									set_x, set_z,
-									crossed_road ? crossed_road->surface : block_types);
+									crossed_road ? crossed_road->palette() : block_types);
 							if (surface_absolute) {
 								editor.set_block_absolute(road_block, set_x, surface_y,
 										set_z,

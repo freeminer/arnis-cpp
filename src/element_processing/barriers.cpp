@@ -25,6 +25,20 @@ const int BRIDGE_BARRIER_NEARBY_RADIUS = 2;
 
 namespace
 {
+int rust_round_i32(double value)
+{
+	// Rust's `f64::round() as i32` rounds ties away from zero, converts NaN to
+	// zero, and saturates infinities and out-of-range values. Keep malformed or
+	// extreme OSM measurements from invoking undefined C++ float-to-int casts.
+	if (std::isnan(value))
+		return 0;
+	if (value >= static_cast<double>(std::numeric_limits<int>::max()))
+		return std::numeric_limits<int>::max();
+	if (value <= static_cast<double>(std::numeric_limits<int>::min()))
+		return std::numeric_limits<int>::min();
+	return static_cast<int>(std::round(value));
+}
+
 std::optional<double> parse_min_height(const std::string &raw)
 {
 	std::string value = raw;
@@ -41,7 +55,7 @@ std::optional<double> parse_min_height(const std::string &raw)
 	try {
 		std::size_t used = 0;
 		const double height = std::stod(value, &used);
-		if (used != value.size() || !std::isfinite(height))
+		if (used != value.size())
 			return std::nullopt;
 		return height;
 	} catch (...) {
@@ -191,8 +205,10 @@ void generate_barriers(world_editor::WorldEditor &editor,
 	const double scale = editor.scale();
 	int lift = 0;
 	if (const auto it = element.tags().find("min_height"); it != element.tags().end()) {
-		if (const auto metres = parse_min_height(it->second))
-			lift = static_cast<int>(std::max(0.0, std::round(*metres * scale)));
+		if (const auto metres = parse_min_height(it->second)) {
+			const double rounded = std::round(*metres * scale);
+			lift = rust_round_i32(std::isnan(rounded) ? 0.0 : std::max(0.0, rounded));
+		}
 	}
 	const double height_scale = lift > 0 ? scale : 1.0;
 	int wall_height = barrier_height;
@@ -203,8 +219,13 @@ void generate_barriers(world_editor::WorldEditor &editor,
 			try {
 				std::size_t used = 0;
 				const double h = std::stod(hit->second, &used);
-				if (used == hit->second.size() && std::isfinite(h))
-					wall_height = static_cast<int>(std::lround(h * height_scale)) - lift;
+				if (used == hit->second.size()) {
+					const auto height =
+							static_cast<std::int64_t>(rust_round_i32(h * height_scale));
+					wall_height = static_cast<int>(std::clamp<std::int64_t>(height - lift,
+							std::numeric_limits<int>::min(),
+							std::numeric_limits<int>::max()));
+				}
 			} catch (...) {
 				wall_height = barrier_height;
 			}

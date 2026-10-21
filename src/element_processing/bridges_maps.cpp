@@ -1249,10 +1249,8 @@ BridgeStructureMap BridgeStructureMap::build(
 		if (flat_span && group_style == bridge_styles::BridgeStyle::Arch)
 			profile_clearance = std::max(profile_clearance, 8);
 		profile_level = std::max(profile_level, terrain_max + profile_clearance);
-		raised_top = std::max(raised_top, profile_level);
-		for (const float u : profile_free_ends)
-			profile_requirements.emplace_back(u, raised_top);
 		if (profile_clearance > 0) {
+			raised_top = std::max(raised_top, profile_level);
 			float min_u = std::numeric_limits<float>::max();
 			float max_u = std::numeric_limits<float>::lowest();
 			for (const auto &[idx, values] : path_axis) {
@@ -1267,7 +1265,8 @@ BridgeStructureMap BridgeStructureMap::build(
 					std::min(std::clamp(span * 0.35f, 15.0f, 50.0f), span / 2.0f);
 			bool placed_plateau = false;
 			for (const auto &[idx, values] : path_axis) {
-				(void)idx;
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
 				for (const float u : values) {
 					if (std::all_of(profile_anchors.begin(), profile_anchors.end(),
 								[&](float anchor) {
@@ -1281,6 +1280,8 @@ BridgeStructureMap BridgeStructureMap::build(
 			if (!placed_plateau)
 				profile_requirements.emplace_back((min_u + max_u) * 0.5f, profile_level);
 		}
+		for (const float u : profile_free_ends)
+			profile_requirements.emplace_back(u, raised_top);
 		const auto profile_hull = follows_axis
 										  ? upper_hull(std::move(profile_requirements))
 										  : std::vector<std::pair<float, float>>{};

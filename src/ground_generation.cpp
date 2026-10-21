@@ -16,6 +16,7 @@
 #include "biome.h"
 #include "ground_decoration.h"
 #include "surface.h"
+#include "progress.h"
 
 #include <algorithm>
 #include <array>
@@ -564,8 +565,26 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	// same smoothed ESA/OSM water classification.
 	if (editor.ground)
 		editor.ground->warm_water_blend();
-	if (show_progress)
+	const std::uint64_t total_blocks = static_cast<std::uint64_t>(max_x - min_x + 1) *
+									   static_cast<std::uint64_t>(max_z - min_z + 1);
+	std::uint64_t block_counter = 0;
+	double gui_progress = 70.0;
+	double last_emitted_progress = gui_progress;
+	const double progress_increment = 20.0 / static_cast<double>(total_blocks);
+	if (show_progress) {
 		std::cout << "[6/7] Generating ground...\n";
+		progress::emit_gui_progress_update(70.0, "Generating ground...");
+	}
+	const auto advance_progress = [&] {
+		++block_counter;
+		if (!show_progress)
+			return;
+		gui_progress += progress_increment;
+		if (std::abs(gui_progress - last_emitted_progress) > 0.25) {
+			progress::emit_gui_progress_update(gui_progress, "");
+			last_emitted_progress = gui_progress;
+		}
+	};
 	// Keep the three material tiers in sync with terrain_surface.rs: slopes are
 	// measured in eighths, with the rock tiers above 4, 6, and 8 respectively.
 	constexpr int slope_t27 = 4;
@@ -669,6 +688,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					// the expanded corners receive fabricated terrain and vegetation.
 					if (editor.ground && !editor.ground->inside_rotation_mask(x, z)) {
 						water_columns.forget(x, z);
+						advance_progress();
 						continue;
 					}
 					// Rust's geo-only mode deliberately bypasses elevation and uses the
@@ -1016,6 +1036,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					// This column may now contain water placed by the ground pass; do not
 					// let a neighbour reuse the pre-write answer.
 					water_columns.forget(x, z);
+					advance_progress();
 				}
 			}
 		}

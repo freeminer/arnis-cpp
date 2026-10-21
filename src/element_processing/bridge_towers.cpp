@@ -35,6 +35,37 @@ struct Part
 	int base_y = 0;
 };
 
+int rust_float_to_i32(double value)
+{
+	// Rust's float-to-i32 cast maps NaN to zero and saturates infinities and
+	// out-of-range values. Avoid implementation-defined/undefined C++ casts for
+	// malformed or extreme OSM dimensions.
+	if (std::isnan(value))
+		return 0;
+	if (value >= static_cast<double>(std::numeric_limits<int>::max()))
+		return std::numeric_limits<int>::max();
+	if (value <= static_cast<double>(std::numeric_limits<int>::min()))
+		return std::numeric_limits<int>::min();
+	return static_cast<int>(value);
+}
+
+int rust_round_i32(double value)
+{
+	return rust_float_to_i32(std::round(value));
+}
+
+int saturating_add_i32(int a, int b)
+{
+	return static_cast<int>(std::clamp<std::int64_t>(static_cast<std::int64_t>(a) + b,
+			std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+}
+
+int saturating_sub_i32(int a, int b)
+{
+	return static_cast<int>(std::clamp<std::int64_t>(static_cast<std::int64_t>(a) - b,
+			std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+}
+
 std::optional<double> metres(const tags_t &tags, const char *key)
 {
 	const auto it = tags.find(key);
@@ -315,7 +346,7 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 		}
 		return i;
 	};
-	const int gap = static_cast<int>(std::ceil(PART_GAP_M * scale));
+	const int gap = rust_float_to_i32(std::ceil(PART_GAP_M * scale));
 	for (std::size_t i = 0; i < supports.size(); ++i)
 		for (std::size_t j = i + 1; j < supports.size(); ++j)
 			if (bbox_gap(supports[i], supports[j]) <= gap) {
@@ -375,7 +406,7 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 				return;
 			const int width = part.max_x - part.min_x;
 			const int depth = part.max_z - part.min_z;
-			if (std::min(width, depth) < static_cast<int>(MIN_DECK_PART_M * scale) ||
+			if (std::min(width, depth) < rust_float_to_i32(MIN_DECK_PART_M * scale) ||
 					cx < part.min_x || cx > part.max_x || cz < part.min_z ||
 					cz > part.max_z)
 				return;
@@ -405,11 +436,13 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 		}
 		std::optional<int> deck_y;
 		if (deck_part && deck_part->height_m)
-			deck_y = deck_part->base_y +
-					 static_cast<int>(std::lround(*deck_part->height_m * scale)) - 1;
+			deck_y = saturating_sub_i32(
+					saturating_add_i32(deck_part->base_y,
+							rust_round_i32(*deck_part->height_m * scale)),
+					1);
 		result.towers.push_back({cx, cz,
-				tallest->base_y +
-						static_cast<int>(std::lround(*tallest->height_m * scale)),
+				saturating_add_i32(
+						tallest->base_y, rust_round_i32(*tallest->height_m * scale)),
 				deck_y, support_block(tallest->way->tags)});
 	}
 	return result;

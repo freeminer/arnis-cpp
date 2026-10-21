@@ -1,8 +1,10 @@
 #pragma once
 
 #include "../../../arnis_adapter.h"
+#include "../block_definitions.h"
 
 #include <unordered_map>
+#include <vector>
 
 namespace arnis::highways
 {
@@ -25,5 +27,11 @@ int highway_block_range(const std::string &highway_type,
 
 // Number of lanes used for road marking layout, including tagged overrides.
 int lane_marking_count(const std::string &highway_type, const crate::tags_t &tags);
+
+// Rust exposes the selected way palette as a static block slice. The returned
+// palette is backed by process-lifetime storage, so callers can retain this
+// view without copying a vector for every OSM way.
+const std::vector<crate::block_definitions::Block> *surface_palette_view(
+		const std::string &highway_type, const crate::tags_t &tags);
 
 } // namespace arnis::highways

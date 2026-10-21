@@ -61,18 +61,24 @@ const std::vector<Block> *get_blocks_for_surface(const std::string &surface_type
 std::vector<Block> get_blocks_for_surface_way(
 		const ProcessedWay &way, const std::vector<Block> &default_blocks)
 {
+	return *get_blocks_for_surface_way_view(way, default_blocks);
+}
+
+const std::vector<Block> *get_blocks_for_surface_way_view(
+		const ProcessedWay &way, const std::vector<Block> &default_blocks)
+{
 	auto it = way.tags.find("surface");
 	if (it != way.tags.end()) {
 		if (const auto *blocks = get_blocks_for_surface(it->second))
-			return *blocks;
+			return blocks;
 	}
-	return default_blocks;
+	return &default_blocks;
 }
 
-std::optional<std::vector<Block>> cycleway_palette(const tags_t &tags)
+const std::vector<Block> *cycleway_palette_view(const tags_t &tags)
 {
 	if (tags.get("cycleway") == "crossing" || tags.contains("crossing"))
-		return std::nullopt;
+		return nullptr;
 	const auto surface_colour = tags.find("surface:colour");
 	const auto colour = tags.find("colour");
 	const auto selected_colour = surface_colour != tags.end() ? surface_colour : colour;
@@ -101,7 +107,7 @@ std::optional<std::vector<Block>> cycleway_palette(const tags_t &tags)
 			}
 		}
 		if (!red)
-			return std::nullopt;
+			return nullptr;
 	}
 	const auto surface = tags.get("surface");
 	if (!surface.empty() && surface != "asphalt" && surface != "paved" &&
@@ -109,9 +115,22 @@ std::optional<std::vector<Block>> cycleway_palette(const tags_t &tags)
 			surface != "concrete:lanes" && surface != "cement" && surface != "chipseal" &&
 			surface != "bitmac" && surface != "paving_stones" && surface != "sett" &&
 			surface != "bricks" && surface != "brick")
-		return std::nullopt;
-	return std::vector<Block>{block_definitions::RED_TERRACOTTA,
+		return nullptr;
+	static const std::vector<Block> palette{block_definitions::RED_TERRACOTTA,
 			block_definitions::RED_TERRACOTTA, block_definitions::RED_CONCRETE};
+	return &palette;
+}
+
+const std::vector<Block> *cycleway_palette_view(const ProcessedWay &way)
+{
+	return cycleway_palette_view(way.tags);
+}
+
+std::optional<std::vector<Block>> cycleway_palette(const tags_t &tags)
+{
+	if (const auto *palette = cycleway_palette_view(tags))
+		return *palette;
+	return std::nullopt;
 }
 
 std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
