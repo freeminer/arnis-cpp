@@ -87,6 +87,13 @@ struct GeographicBounds
 	bool valid() const { return min_lat <= max_lat && min_lng <= max_lng; }
 };
 
+struct WaterBlendMask
+{
+	std::size_t width = 0, height = 0, words_per_row = 0;
+	std::vector<std::uint64_t> bits;
+	bool contains(int x, int z) const;
+};
+
 struct LandCoverData
 {
 	std::vector<std::vector<uint8_t>> grid;
@@ -95,6 +102,8 @@ struct LandCoverData
 	{
 		std::mutex mutex;
 		std::optional<std::vector<std::vector<float>>> grid;
+		std::optional<WaterBlendMask> mask;
+		std::size_t mask_width = 0, mask_height = 0;
 	};
 	mutable std::shared_ptr<WaterBlendCache> water_blend_cache =
 			std::make_shared<WaterBlendCache>();
@@ -106,6 +115,8 @@ struct LandCoverData
 	GeographicBounds source_bounds{};
 
 	const std::vector<std::vector<float>> &water_blend_grid() const;
+	const WaterBlendMask &water_blend_mask(
+			std::size_t world_width, std::size_t world_height) const;
 	void invalidate_water_blend_grid();
 	void refresh_water_blend_grid();
 	void remap_rows_to_mercator(double lat_top, double lat_bottom);

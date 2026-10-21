@@ -184,8 +184,18 @@ extern Block LIGHT_BLUE_TERRACOTTA;
 extern Block LIGHT_GRAY_CONCRETE;
 extern Block MOSS_BLOCK;
 extern Block MOSSY_COBBLESTONE;
+extern Block MOSSY_COBBLESTONE_WALL;
+// Rust's four directional vine ids are represented as one C++ block plus
+// BlockWithProperties facing states.
+extern Block VINE;
 extern Block MUD_BRICKS;
 extern Block NETHER_BRICK;
+extern Block NETHERRACK;
+extern Block FIRE;
+extern Block CRACKED_DEEPSLATE_BRICKS;
+extern Block CRACKED_DEEPSLATE_TILES;
+extern Block CRACKED_POLISHED_BLACKSTONE_BRICKS;
+extern Block CRACKED_NETHER_BRICKS;
 extern Block NETHER_BRICK_FENCE;
 extern Block NETHER_BRICK_WALL;
 extern Block NETHER_WART_BLOCK;

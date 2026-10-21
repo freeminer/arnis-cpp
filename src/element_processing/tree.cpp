@@ -27,6 +27,28 @@ static bool leaf_gap_at(std::uint64_t hash)
 	return hash % 100 < 4;
 }
 
+static std::optional<double> wanted_tree_height_m(WorldEditor &editor, int x, int z,
+		const trees::mapped::MappedTree *mapped = nullptr)
+{
+	if (mapped && mapped->height_m)
+		return mapped->height_m;
+	const int radius = std::max(1, static_cast<int>(std::lround(2.0 * editor.scale())));
+	const auto nearby = editor.canopy_top_m(x, z, radius);
+	if (!nearby)
+		return std::nullopt;
+	if (*nearby)
+		return **nearby;
+	const int wide_radius =
+			std::max(radius + 1, static_cast<int>(std::lround(8.0 * editor.scale())));
+	if (const auto wide = editor.canopy_top_m(x, z, wide_radius); wide && *wide)
+		return **wide;
+	if (mapped)
+		return editor.typical_mapped_tree_height_m().value_or(9.0);
+	const double roll =
+			double(land_cover::coord_hash(x ^ 0x9A3, z ^ 0x51F) % 1000) / 1000.0;
+	return 4.0 + 4.0 * roll;
+}
+
 // Additional leaves fill patterns for new tree types
 static const std::array<std::pair<Coord, Coord>, 5> DARK_OAK_LEAVES_FILL = {{
 		{{-1, 3, 0}, {-1, 6, 0}},
@@ -516,7 +538,8 @@ void Tree::create_from_canopy(WorldEditor &editor, const Coord &pos,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
 	create_of_type(editor, pos, selected_tree_type(pos.x, pos.z), building_footprints,
-			bridge_surface, false, std::nullopt, false, true, true);
+			bridge_surface, false, wanted_tree_height_m(editor, pos.x, pos.z), false,
+			true, true);
 }
 
 void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
@@ -540,11 +563,9 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 	if (mapped.genus)
 		request.genus = *mapped.genus;
 	request.conifer = mapped.conifer;
-	if (mapped.height_m)
-		request.want_size = trees::size_for_height(
-				static_cast<int>(std::lround(*mapped.height_m * editor.scale())));
-	else
-		request.want_size = editor.canopy_size_hint(pos.x, pos.z);
+	if (const auto height = wanted_tree_height_m(editor, pos.x, pos.z, &mapped))
+		request.want_height =
+				std::max(1, static_cast<int>(std::lround(*height * editor.scale())));
 	if (editor.ground)
 		request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
 	if (request.eco) {
@@ -569,7 +590,7 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 	}
 
 	create_of_type(editor, pos, mapped.kind, building_footprints, bridge_surface, true,
-			mapped.height_m, false, false, true);
+			wanted_tree_height_m(editor, pos.x, pos.z, &mapped), false, false, true);
 }
 
 std::vector<Block> Tree::get_building_wall_blocks()

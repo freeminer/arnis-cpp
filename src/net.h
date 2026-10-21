@@ -1,5 +1,6 @@
 #pragma once
 #include <cstddef>
+#include <string>
 namespace arnis::net
 {
 inline constexpr std::size_t MAX_CONCURRENT_REQUESTS = 16;
@@ -17,4 +18,6 @@ public:
 };
 RequestPermit request_permit();
 std::size_t in_flight_requests();
+// Coordinate-free category matching Rust's reqwest failure tags.
+std::string failure_kind(int transport_error, long http_status);
 }

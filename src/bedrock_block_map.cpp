@@ -49,6 +49,10 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return simple("dirt");
 	if (block == WATER)
 		return state("water", {{"liquid_depth", 0}});
+	if (FIRE.id() != AIR.id() && block == FIRE)
+		return state("fire", {{"age", 0}});
+	if (VINE.id() != AIR.id() && block == VINE)
+		return state("vine", {{"vine_direction_bits", 0}});
 	if (block == SUGAR_CANE)
 		return state("reeds", {{"age", 0}});
 	if (block == DEAD_BUSH)
@@ -834,6 +838,22 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 								   : 1;
 	};
 	const auto name = bedrock_name();
+	if ((VINE.id() != AIR.id() && value.block == VINE) || name == "vine") {
+		int bits = 0;
+		constexpr std::array<std::pair<const char *, int>, 4> faces{
+				{{"south", 1}, {"west", 2}, {"north", 4}, {"east", 8}}};
+		for (const auto &[face, bit] : faces)
+			if (is_true(face))
+				bits |= bit;
+		return state("vine", {{"vine_direction_bits", bits}});
+	}
+	if (has_suffix(name, "_fence_gate")) {
+		const int direction = facing_cardinal();
+		set("direction", direction);
+		set("open_bit", is_true("open"));
+		set("in_wall_bit", is_true("in_wall"));
+		return out;
+	}
 
 	if (value.block == block_definitions::CAVE_VINES ||
 			value.block == block_definitions::CAVE_VINES_UNLIT ||

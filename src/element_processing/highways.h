@@ -5,6 +5,17 @@
 
 #include <unordered_map>
 #include <vector>
+#include <optional>
+#include <string>
+
+namespace arnis
+{
+struct ProcessedWay;
+namespace world_editor
+{
+struct WorldEditor;
+}
+}
 
 namespace arnis::highways
 {
@@ -16,6 +27,14 @@ inline constexpr double HELIPAD_NODE_RADIUS_M = 8.0;
 // Default total lane count for a highway when OSM does not provide `lanes`.
 // Kept public within the generator module to match Rust's pre-scan API.
 int highway_default_lanes(const std::string &highway_type);
+std::optional<double> parse_width_tag_m(
+		const std::unordered_map<std::string, std::string> &tags);
+
+/// Shared highway classification used by surface masks, barriers and signage.
+bool is_carriageway(const std::string &highway_type);
+std::optional<std::string> surface_highway_type(const ProcessedWay &way);
+bool tunnel_renders_at_surface(
+		const ProcessedWay &way, const world_editor::WorldEditor *editor, double scale);
 
 // True when a node's OSM tags identify a traffic signal accepted by the
 // highway-node dispatcher.

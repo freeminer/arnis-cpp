@@ -2,6 +2,7 @@
 
 #include "../element_processing/tree.h"
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <tuple>
@@ -31,6 +32,9 @@ class MappedTrunks
 public:
 	static MappedTrunks collect(
 			const std::vector<ProcessedElement> &elements, double scale);
+	void measure_typical_height(
+			const std::function<std::optional<std::uint8_t>(int, int)> &canopy_height);
+	std::optional<double> typical_height_m() const { return typical_height_m_; }
 	bool under_crown(int x, int z) const;
 
 private:
@@ -45,5 +49,6 @@ private:
 	};
 	std::vector<Trunk> trunks_;
 	int radius_{1};
+	std::optional<double> typical_height_m_;
 };
 }

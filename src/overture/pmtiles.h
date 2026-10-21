@@ -1,9 +1,11 @@
 #pragma once
+#include "../coordinate_system/geographic/llbbox.h"
 #include <cstdint>
 #include <functional>
 #include <initializer_list>
 #include <map>
 #include <optional>
+#include <tuple>
 #include <unordered_map>
 #include <vector>
 namespace arnis::overture::pmtiles
@@ -72,6 +74,10 @@ std::optional<std::uint64_t> zxy_to_tile_id(
 		std::uint8_t zoom, std::uint32_t x, std::uint32_t y);
 std::pair<std::uint32_t, std::uint32_t> lonlat_to_tile(
 		double longitude, double latitude, std::uint8_t zoom);
+// Inclusive (min_x, max_x, min_y, max_y) tile coverage for a geographic bbox.
+std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t> tile_range(
+		const geographic::LLBBox &bbox, std::uint8_t zoom);
+std::uint64_t tile_count(const geographic::LLBBox &bbox, std::uint8_t zoom);
 double tile_x_to_longitude(std::uint8_t zoom, std::uint32_t tile_x, double fraction);
 double tile_y_to_latitude(std::uint8_t zoom, std::uint32_t tile_y, double fraction);
 std::optional<TileLocation> find_tile(const Header &,

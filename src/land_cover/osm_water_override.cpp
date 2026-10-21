@@ -45,97 +45,113 @@ WaterOverrideGuard build_water_override_guard(
 			});
 	if (!has_water_seed)
 		return out;
+	if (height > std::numeric_limits<std::size_t>::max() / width)
+		return out;
+	const auto cells = width * height;
 	out.width = width;
-	out.protected_mask.assign((width * height + 63) / 64, 0);
-	auto bit = [&](std::size_t i) {
-		return (out.protected_mask[i >> 6] >> (i & 63)) & 1U;
-	};
-	auto set = [&](std::size_t i) {
-		out.protected_mask[i >> 6] |= std::uint64_t(1) << (i & 63);
-	};
+	out.height = height;
+	out.protected_mask.assign(cells / 64 + (cells % 64 != 0), 0);
 	const std::size_t threshold = std::max<std::size_t>(
 			100, std::size_t(std::llround(4000.0 * std::max(0.0, cells_per_m2))));
-	std::vector<std::uint32_t> seeds, stack;
-	for (std::size_t z = 0; z < height; ++z)
-		for (std::size_t x = 0; x < width; ++x) {
-			const auto start = z * width + x;
-			if (grid[z][x] == LC_WATER || bit(start))
+	struct Run
+	{
+		std::size_t begin, end, id;
+	};
+	std::vector<std::vector<Run>> rows(height);
+	std::vector<std::size_t> parent;
+	for (std::size_t z = 0; z < height; ++z) {
+		for (std::size_t x = 0; x < width;) {
+			if (grid[z][x] == LC_WATER) {
+				++x;
 				continue;
-			stack = {std::uint32_t(start)};
-			set(start);
-			std::size_t count = 0, minx = x, maxx = x, minz = z, maxz = z;
-			while (!stack.empty()) {
-				auto cur = stack.back();
-				stack.pop_back();
-				auto cx = cur % width, cz = cur / width;
-				++count;
-				minx = std::min(minx, std::size_t(cx));
-				maxx = std::max(maxx, std::size_t(cx));
-				minz = std::min(minz, std::size_t(cz));
-				maxz = std::max(maxz, std::size_t(cz));
-				for (auto [dx, dz] : std::array<std::pair<int, int>, 4>{
-							 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-					int nx = int(cx) + dx, nz = int(cz) + dz;
-					if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height))
-						continue;
-					auto ni = std::size_t(nz) * width + nx;
-					if (grid[nz][nx] != LC_WATER && !bit(ni)) {
-						set(ni);
-						stack.push_back(ni);
-					}
-				}
 			}
-			const auto long_axis = std::max(maxx - minx + 1, maxz - minz + 1),
-					   short_axis = std::max<std::size_t>(
-							   1, std::min(maxx - minx + 1, maxz - minz + 1));
-			if (count >= threshold && double(long_axis) / short_axis <= 3.0)
-				seeds.push_back(start);
-		}
-	std::fill(out.protected_mask.begin(), out.protected_mask.end(), 0);
-	for (auto seed : seeds) {
-		if (bit(seed))
-			continue;
-		stack = {seed};
-		set(seed);
-		while (!stack.empty()) {
-			auto cur = stack.back();
-			stack.pop_back();
-			auto cx = cur % width, cz = cur / width;
-			for (auto [dx, dz] : std::array<std::pair<int, int>, 4>{
-						 {{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-				int nx = int(cx) + dx, nz = int(cz) + dz;
-				if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height))
-					continue;
-				auto ni = std::size_t(nz) * width + nx;
-				if (grid[nz][nx] != LC_WATER && !bit(ni)) {
-					set(ni);
-					stack.push_back(ni);
-				}
-			}
+			const auto begin = x;
+			while (x < width && grid[z][x] != LC_WATER)
+				++x;
+			const auto id = parent.size();
+			rows[z].push_back({begin, x, id});
+			parent.push_back(id);
 		}
 	}
-	if (width * height > 100U * 1024U * 1024U)
-		return out;
-	out.nearest_water_y.assign(
-			height, std::vector<float>(width, std::numeric_limits<float>::quiet_NaN()));
-	std::deque<std::pair<int, int>> q;
+	auto root = [&](std::size_t id) {
+		while (parent[id] != id) {
+			parent[id] = parent[parent[id]];
+			id = parent[id];
+		}
+		return id;
+	};
+	for (std::size_t z = 1; z < height; ++z) {
+		const auto &above = rows[z - 1];
+		const auto &here = rows[z];
+		std::size_t a = 0, b = 0;
+		while (a < above.size() && b < here.size()) {
+			const auto &ra = above[a];
+			const auto &rb = here[b];
+			if (ra.begin < rb.end && rb.begin < ra.end) {
+				const auto root_a = root(ra.id);
+				const auto root_b = root(rb.id);
+				if (root_a != root_b)
+					parent[std::max(root_a, root_b)] = std::min(root_a, root_b);
+			}
+			if (ra.end < rb.end)
+				++a;
+			else
+				++b;
+		}
+	}
+	struct Bounds
+	{
+		std::size_t min_x = std::numeric_limits<std::size_t>::max(),
+					min_z = std::numeric_limits<std::size_t>::max(), max_x = 0, max_z = 0,
+					count = 0;
+	};
+	std::vector<Bounds> components(parent.size());
+	for (std::size_t z = 0; z < height; ++z)
+		for (const auto &run : rows[z]) {
+			auto &component = components[root(run.id)];
+			component.count += run.end - run.begin;
+			component.min_x = std::min(component.min_x, run.begin);
+			component.max_x = std::max(component.max_x, run.end - 1);
+			component.min_z = std::min(component.min_z, z);
+			component.max_z = std::max(component.max_z, z);
+		}
+	for (std::size_t z = 0; z < height; ++z)
+		for (const auto &run : rows[z]) {
+			const auto &component = components[root(run.id)];
+			const auto box_width = component.max_x - component.min_x + 1;
+			const auto box_height = component.max_z - component.min_z + 1;
+			const auto long_axis = std::max(box_width, box_height);
+			const auto short_axis =
+					std::max<std::size_t>(1, std::min(box_width, box_height));
+			if (component.count < threshold || double(long_axis) / short_axis > 3.0)
+				continue;
+			for (auto x = run.begin; x < run.end; ++x) {
+				const auto index = z * width + x;
+				out.protected_mask[index >> 6] |= std::uint64_t(1) << (index & 63);
+			}
+		}
+	out.nearest_water_y.assign(cells, std::numeric_limits<float>::quiet_NaN());
+	std::deque<std::size_t> q;
 	for (std::size_t z = 0; z < height; ++z)
 		for (std::size_t x = 0; x < width; ++x)
 			if (grid[z][x] == LC_WATER && std::isfinite(heights[z][x])) {
-				out.nearest_water_y[z][x] = heights[z][x];
-				q.push_back({int(x), int(z)});
+				const auto i = z * width + x;
+				out.nearest_water_y[i] = heights[z][x];
+				q.push_back(i);
 			}
 	while (!q.empty()) {
-		auto [x, z] = q.front();
+		const auto i = q.front();
 		q.pop_front();
-		for (auto [dx, dz] :
-				std::array<std::pair<int, int>, 4>{{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}}) {
-			int nx = x + dx, nz = z + dz;
-			if (nx < 0 || nz < 0 || nx >= int(width) || nz >= int(height) ||
-					std::isfinite(out.nearest_water_y[nz][nx]))
+		const auto x = i % width;
+		const auto water_y = out.nearest_water_y[i];
+		const std::array<std::size_t, 4> neighbours = {x > 0 ? i - 1 : cells,
+				x + 1 < width ? i + 1 : cells, i >= width ? i - width : cells,
+				i < cells - width ? i + width : cells};
+		for (const auto next : neighbours) {
+			if (next == cells || std::isfinite(out.nearest_water_y[next]))
 				continue;
-			out.nearest_water_y[nz][nx] = out.nearest_water_y[z][x];
-			q.push_back({nx, nz});
+			out.nearest_water_y[next] = water_y;
+			q.push_back(next);
 		}
 	}
 	out.has_elevation = true;
@@ -149,9 +165,10 @@ bool WaterOverrideGuard::allows(const std::vector<std::vector<float>> &heights,
 		return true;
 	if ((protected_mask[(z * width + x) >> 6] >> ((z * width + x) & 63)) & 1U)
 		return false;
-	if (!has_elevation || z >= nearest_water_y.size() || x >= nearest_water_y[z].size())
+	const auto i = z * width + x;
+	if (!has_elevation || i >= nearest_water_y.size())
 		return true;
-	const float h = heights[z][x], water = nearest_water_y[z][x];
+	const float h = heights[z][x], water = nearest_water_y[i];
 	return !std::isfinite(h) || !std::isfinite(water) || h <= water + tolerance;
 }
 
@@ -385,11 +402,11 @@ void apply_osm_water_override(LandCoverData &data,
 			std::size_t sunk = 0;
 			for (std::size_t z = 0; z < data.height; ++z)
 				for (std::size_t x = 0; x < data.width; ++x) {
+					const auto index = z * guard.width + x;
 					if (data.grid[z][x] != LC_WATER || !std::isfinite(heights[z][x]) ||
-							z >= guard.nearest_water_y.size() ||
-							x >= guard.nearest_water_y[z].size())
+							index >= guard.nearest_water_y.size())
 						continue;
-					const float water_y = guard.nearest_water_y[z][x];
+					const float water_y = guard.nearest_water_y[index];
 					if (std::isfinite(water_y) && heights[z][x] > water_y &&
 							heights[z][x] <= water_y + 1.5f) {
 						heights[z][x] = water_y;

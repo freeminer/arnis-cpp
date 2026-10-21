@@ -1,6 +1,8 @@
 #include "net.h"
+#include <curl/curl.h>
 #include <condition_variable>
 #include <mutex>
+#include <string>
 namespace arnis::net
 {
 namespace
@@ -39,5 +41,24 @@ std::size_t in_flight_requests()
 {
 	std::lock_guard lock(mutex);
 	return in_flight;
+}
+std::string failure_kind(int transport_error, long http_status)
+{
+	if (http_status >= 100 && http_status <= 599)
+		return "http_" + std::to_string(http_status);
+	const auto code = static_cast<CURLcode>(transport_error);
+	if (code == CURLE_OPERATION_TIMEDOUT)
+		return "timeout";
+	if (code == CURLE_COULDNT_RESOLVE_HOST || code == CURLE_COULDNT_RESOLVE_PROXY)
+		return "dns";
+	if (code == CURLE_SSL_CONNECT_ERROR || code == CURLE_PEER_FAILED_VERIFICATION ||
+			code == CURLE_SSL_CERTPROBLEM || code == CURLE_SSL_CIPHER)
+		return "tls";
+	if (code == CURLE_RECV_ERROR || code == CURLE_SEND_ERROR ||
+			code == CURLE_GOT_NOTHING || code == CURLE_PARTIAL_FILE)
+		return "reset";
+	if (code == CURLE_COULDNT_CONNECT)
+		return "connect";
+	return "other";
 }
 }

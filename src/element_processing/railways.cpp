@@ -6,8 +6,11 @@
 #include <optional>
 #include <cmath>
 #include <algorithm>
+#include <array>
 #include <limits>
+#include <map>
 
+using std::array;
 using std::get;
 using std::nullopt;
 using std::optional;
@@ -23,6 +26,7 @@ using std::vector;
 #include "../strict_parse.h"
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
+#include "connected_blocks.h"
 #include "bridges.h"
 #include "advtrains.h"
 #undef stoi
@@ -41,6 +45,9 @@ const int RAIL_BRIDGE_DIP_THRESHOLD = 4;
 const std::size_t RAIL_BRIDGE_RAMP_MIN = 8;
 const std::size_t RAIL_BRIDGE_RAMP_MAX = 30;
 const float RAIL_BRIDGE_RAMP_FRACTION = 0.25f;
+const int RAIL_DECK_HALF_WIDTH = 2;
+const int RAIL_DECK_GAP_FILL = 4;
+constexpr int RAIL_ABUTMENT_MAX_HEIGHT = 3;
 const int WALL_RADIUS = 2;
 const int AIR_RADIUS = 1;
 const int INTERIOR_HEIGHT = 4;
@@ -361,6 +368,256 @@ vector<pair<int, int>> build_smoothed_centerline(const ProcessedWay &way)
 				out.emplace_back(x, z);
 	}
 	return out;
+}
+
+vector<int> rail_bridge_profile(
+		const vector<int> &terrain, int level, bool start_internal, bool end_internal)
+{
+	if (terrain.empty())
+		return {};
+	const std::size_t total = terrain.size();
+	const std::size_t last = total - 1;
+	std::size_t needed = 0;
+	if (!start_internal)
+		needed = std::max<std::size_t>(
+				needed, static_cast<std::size_t>(std::max(0, level - terrain.front())));
+	if (!end_internal)
+		needed = std::max<std::size_t>(
+				needed, static_cast<std::size_t>(std::max(0, level - terrain.back())));
+	++needed;
+	const auto raw = static_cast<std::size_t>(total * RAIL_BRIDGE_RAMP_FRACTION);
+	const auto ramp =
+			std::max(needed, std::clamp(raw, RAIL_BRIDGE_RAMP_MIN, RAIL_BRIDGE_RAMP_MAX));
+	const float denom = static_cast<float>(std::max<std::size_t>(1, ramp - 1));
+	vector<int> ys;
+	ys.reserve(total);
+	for (std::size_t i = 0; i < total; ++i) {
+		const float start_t = std::min(1.0f, static_cast<float>(i) / denom);
+		const float end_t = std::min(1.0f, static_cast<float>(last - i) / denom);
+		const int from_start =
+				start_internal
+						? level
+						: static_cast<int>(std::round(
+								  terrain.front() + (level - terrain.front()) * start_t));
+		const int from_end =
+				end_internal
+						? level
+						: static_cast<int>(std::round(
+								  terrain.back() + (level - terrain.back()) * end_t));
+		ys.push_back(std::max(std::min(from_start, from_end), terrain[i]));
+	}
+	return ys;
+}
+
+namespace
+{
+enum class RailDeckSideKind
+{
+	Open,
+	Joined,
+	Closed,
+};
+
+struct RailDeckSide
+{
+	RailDeckSideKind kind = RailDeckSideKind::Open;
+	float joined_reach = 0.0f;
+	float reach() const
+	{
+		return kind == RailDeckSideKind::Joined
+					   ? std::max(joined_reach, RAIL_DECK_HALF_WIDTH - 0.5f)
+					   : RAIL_DECK_HALF_WIDTH - 0.5f;
+	}
+	bool operator==(RailDeckSideKind other) const { return kind == other; }
+};
+
+constexpr int RAIL_DECK_MAX_STEP = 2;
+constexpr float RAIL_HEADING_REACH = 4.0f;
+
+RailDeckSide probe_rail_deck_side(const bridges::BridgeSurfaceMap &surface,
+		std::uint64_t way_id, pair<int, int> point, int y, pair<float, float> out)
+{
+	for (const auto &[cx, cz] : connected_blocks::cross_cells(point.first, point.second,
+				 out, 1, 2 * RAIL_DECK_HALF_WIDTH + 1 + RAIL_DECK_GAP_FILL)) {
+		const auto track = surface.rail_track_at(cx, cz);
+		if (!track || track->first == way_id)
+			continue;
+		const float distance =
+				(cx - point.first) * out.first + (cz - point.second) * out.second;
+		if (track->second == y)
+			return {RailDeckSideKind::Joined, distance - RAIL_DECK_HALF_WIDTH + 0.5f};
+		if (std::abs(track->second - y) <= RAIL_DECK_MAX_STEP)
+			return {RailDeckSideKind::Joined, distance / 2.0f + 0.25f};
+		break;
+	}
+	for (const auto &[cx, cz] : connected_blocks::cross_cells(point.first, point.second,
+				 out, RAIL_DECK_HALF_WIDTH, RAIL_DECK_HALF_WIDTH + 1))
+		if (surface.deck_near(cx, cz, y, 1))
+			return {RailDeckSideKind::Closed, 0.0f};
+	return {};
+}
+
+pair<float, float> centerline_perp(const vector<pair<int, int>> &points, size_t i)
+{
+	const auto &prev = points[i > static_cast<size_t>(RAIL_HEADING_REACH)
+									  ? i - static_cast<size_t>(RAIL_HEADING_REACH)
+									  : 0];
+	const auto &next = points[std::min(
+			points.size() - 1, i + static_cast<size_t>(RAIL_HEADING_REACH))];
+	const float dx = static_cast<float>(next.first - prev.first);
+	const float dz = static_cast<float>(next.second - prev.second);
+	const float length = std::max(std::hypot(dx, dz), 1.0e-6f);
+	return {-dz / length, dx / length};
+}
+
+struct RailDeckLayout
+{
+	vector<pair<float, float>> perps;
+	vector<array<RailDeckSide, 2>> sides;
+	vector<array<vector<pair<int, int>>, 2>> curbs;
+	vector<pair<pair<int, int>, size_t>> ballast;
+};
+
+RailDeckLayout rail_deck_layout(const bridges::BridgeSurfaceMap &surface,
+		std::uint64_t way_id, const vector<pair<int, int>> &points, const vector<int> &ys)
+{
+	RailDeckLayout layout;
+	if (points.empty())
+		return layout;
+	layout.perps.reserve(points.size());
+	layout.sides.reserve(points.size());
+	for (size_t i = 0; i < points.size(); ++i) {
+		const auto perp = centerline_perp(points, i);
+		layout.perps.push_back(perp);
+		layout.sides.push_back(
+				{probe_rail_deck_side(surface, way_id, points[i], ys[i], perp),
+						probe_rail_deck_side(surface, way_id, points[i], ys[i],
+								{-perp.first, -perp.second})});
+	}
+	array<optional<pair<int, int>>, 2> previous{};
+	for (size_t i = 0; i < points.size(); ++i) {
+		array<vector<pair<int, int>>, 2> row;
+		const auto [x, z] = points[i];
+		const auto [px, pz] = layout.perps[i];
+		const float edge_dist =
+				(RAIL_DECK_HALF_WIDTH - 1) * (std::abs(px) + std::abs(pz)) + 1.0f;
+		for (size_t side = 0; side < 2; ++side) {
+			if (!(layout.sides[i][side] == RailDeckSideKind::Open)) {
+				previous[side].reset();
+				continue;
+			}
+			const float sign = side == 0 ? 1.0f : -1.0f;
+			const pair<int, int> cell{
+					static_cast<int>(std::lround(x + px * sign * edge_dist)),
+					static_cast<int>(std::lround(z + pz * sign * edge_dist))};
+			row[side] = previous[side] && *previous[side] != cell
+								? connected_blocks::stair_steps(*previous[side], cell)
+								: vector<pair<int, int>>{cell};
+			previous[side] = cell;
+		}
+		layout.curbs.push_back(std::move(row));
+	}
+
+	// Assign each ballast/gap cell to its nearest centerline sample. The map also makes
+	// overlap resolution deterministic when two samples are equally close.
+	std::map<pair<int, int>, pair<int, size_t>> nearest;
+	for (size_t i = 0; i < points.size(); ++i) {
+		const int radius = static_cast<int>(std::ceil(
+				std::max(layout.sides[i][0].reach(), layout.sides[i][1].reach())));
+		const auto [x, z] = points[i];
+		for (int dx = -radius; dx <= radius; ++dx)
+			for (int dz = -radius; dz <= radius; ++dz) {
+				const int d2 = dx * dx + dz * dz;
+				if (!d2)
+					continue;
+				auto [it, inserted] = nearest.emplace(pair{x + dx, z + dz}, pair{d2, i});
+				if (!inserted && d2 < it->second.first)
+					it->second = {d2, i};
+			}
+	}
+	for (const auto &[cell, sample] : nearest) {
+		const size_t i = sample.second;
+		const auto [x, z] = points[i];
+		const auto [px, pz] = layout.perps[i];
+		const float dx = static_cast<float>(cell.first - x);
+		const float dz = static_cast<float>(cell.second - z);
+		const float across = dx * px + dz * pz;
+		const float along = dx * pz - dz * px;
+		if ((i == 0 || i + 1 == points.size()) && std::abs(along) >= 0.75f)
+			continue;
+		const size_t side = across < 0.0f ? 1 : 0;
+		if (std::abs(across) <= layout.sides[i][side].reach())
+			layout.ballast.emplace_back(cell, i);
+	}
+	return layout;
+}
+
+void place_bridge_catenary(WorldEditor &editor, const vector<pair<int, int>> &points,
+		const vector<int> &ys, const RailDeckLayout &layout)
+{
+	for (size_t i = 0; i < points.size(); ++i) {
+		const auto [x, z] = points[i];
+		const auto &before = points[i ? i - 1 : i];
+		const auto &after = points[std::min(i + 1, points.size() - 1)];
+		const int dx = after.first - before.first;
+		const int wire_y = ys[i] + CATENARY_WIRE_HEIGHT;
+		const Block wire = dx != 0 ? CHAIN_X : CHAIN_Z;
+		editor.set_block_absolute(wire, x, wire_y, z, nullopt, nullopt);
+		if (i % CATENARY_MAST_INTERVAL != 0)
+			continue;
+		const auto open = std::find_if(layout.sides[i].begin(), layout.sides[i].end(),
+				[](const RailDeckSide &side) { return side == RailDeckSideKind::Open; });
+		if (open == layout.sides[i].end())
+			continue;
+		const std::size_t side = static_cast<std::size_t>(open - layout.sides[i].begin());
+		const float sign = side == 0 ? 1.0f : -1.0f;
+		const auto [px, pz] = layout.perps[i];
+		const float ox = px * sign, oz = pz * sign;
+		const float edge_dist =
+				(RAIL_DECK_HALF_WIDTH - 1) * (std::abs(ox) + std::abs(oz)) + 1.0f;
+		const pair<int, int> mast{static_cast<int>(std::lround(x + ox * edge_dist)),
+				static_cast<int>(std::lround(z + oz * edge_dist))};
+		for (int y = ys[i] + 1; y <= wire_y; ++y)
+			connected_blocks::place_connected(
+					editor, COBBLESTONE_WALL, mast.first, y, mast.second);
+		const Block arm = std::abs(ox) >= std::abs(oz) ? CHAIN_X : CHAIN_Z;
+		vector<pair<int, int>> line;
+		for (const auto &[lx, ly, lz] :
+				bresenham_line(x, 0, z, mast.first, 0, mast.second)) {
+			(void)ly;
+			line.emplace_back(lx, lz);
+		}
+		line = connected_blocks::four_connected_line(line);
+		for (const auto &[ax, az] : line)
+			if (pair<int, int>{ax, az} != pair<int, int>{x, z} &&
+					pair<int, int>{ax, az} != mast)
+				editor.set_block_absolute(arm, ax, wire_y, az, nullopt, nullopt);
+	}
+}
+} // namespace
+
+vector<pair<pair<int, int>, int>> rail_deck_footprint(
+		const bridges::BridgeSurfaceMap &surface, const ProcessedWay &way,
+		const vector<int> &ys)
+{
+	auto points = build_smoothed_centerline(way);
+	points.resize(std::min(points.size(), ys.size()));
+	const auto count = points.size();
+	if (!count)
+		return {};
+	vector<int> heights(ys.begin(), ys.begin() + count);
+	const auto layout = rail_deck_layout(surface, way.id, points, heights);
+	vector<pair<pair<int, int>, int>> result;
+	result.reserve(count + layout.ballast.size() + count * 2);
+	for (size_t i = 0; i < count; ++i)
+		result.emplace_back(points[i], heights[i]);
+	for (size_t i = 0; i < count; ++i)
+		for (const auto &side : layout.curbs[i])
+			for (const auto &cell : side)
+				result.emplace_back(cell, heights[i]);
+	for (const auto &[cell, i] : layout.ballast)
+		result.emplace_back(cell, heights[i]);
+	return result;
 }
 
 #if 0 // Legacy implementation moved to advtrains.cpp.
@@ -814,24 +1071,25 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		bridge_ys.push_back(
 				std::max(std::min(start_ramp_y, end_ramp_y), terrain_ys[tds]));
 	}
+	const auto *own_rail_deck = bridge_structures.rail_deck(way.id);
+	if (!plan && own_rail_deck && own_rail_deck->kind == bridges::RailDeckKind::Level &&
+			own_rail_deck->ys.size() == bridge_ys.size())
+		bridge_ys = own_rail_deck->ys;
 	if (plan) {
 		bridge_ys = plan->heights;
-	} else if (ADVTRAINS_AVAILABLE) {
-		const auto *rail_deck = bridge_structures.rail_deck(way.id);
-		const int connected_deck_y =
-				rail_deck && rail_deck->kind == bridges::RailDeckKind::Level
-						? rail_deck->level_y
-						: *std::max_element(bridge_ys.begin(), bridge_ys.end());
-		std::fill(bridge_ys.begin(), bridge_ys.end(), connected_deck_y);
 	}
 
 	const Block foundation_block = bridge_styles::foundation_block(style);
 	vector<bridge_styles::BridgePathSample> bridge_path;
 	bridge_path.reserve(total);
 	const bool start_is_boundary =
-			!contains_endpoint(internal_endpoints, all_points.front());
+			own_rail_deck && own_rail_deck->kind == bridges::RailDeckKind::Level
+					? own_rail_deck->start_is_boundary
+					: !contains_endpoint(internal_endpoints, all_points.front());
 	const bool end_is_boundary =
-			!contains_endpoint(internal_endpoints, all_points.back());
+			own_rail_deck && own_rail_deck->kind == bridges::RailDeckKind::Level
+					? own_rail_deck->end_is_boundary
+					: !contains_endpoint(internal_endpoints, all_points.back());
 	const auto cable_pylons = bridge_styles::default_pylons(
 			style, total, start_is_boundary, end_is_boundary);
 	const bool cables_carry_deck = !cable_pylons.empty();
@@ -870,14 +1128,136 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 			bridge_styles::place_bridge_support_below_deck(editor, style, bx, y, bz,
 					terrain_ys[i], i, total, true, true, is_pillar);
 	}
-	bridge_styles::decorate_bridge_above_deck(editor, style, bridge_surface, bridge_path,
-			0, start_is_boundary, end_is_boundary);
+
+	// Rust lays a broad deck around level rail bridges, filling the ballast and
+	// gap between adjacent tracks and adding curbs only on exposed edges. Keep
+	// carried tracks on the road-bridge path above: that structure owns their deck.
+	const auto *rail_deck = bridge_structures.rail_deck(way.id);
+	const bool has_own_deck =
+			rail_deck && rail_deck->kind == bridges::RailDeckKind::Level;
+	std::optional<std::array<bool, 2>> rail_open_sides;
+	if (has_own_deck && total == all_points.size()) {
+		const auto layout =
+				rail_deck_layout(bridge_surface, way.id, all_points, bridge_ys);
+		const auto open_share = [&](std::size_t side) {
+			return static_cast<std::size_t>(std::count_if(
+					layout.sides.begin(), layout.sides.end(), [&](const auto &row) {
+						return row[side] == RailDeckSideKind::Open;
+					}));
+		};
+		rail_open_sides = std::array<bool, 2>{
+				open_share(0) * 2 >= total, open_share(1) * 2 >= total};
+		if (catenary_wanted(way))
+			place_bridge_catenary(editor, all_points, bridge_ys, layout);
+		const Block slab = bridge_styles::rail_foundation_block(style);
+		const Block ballast =
+				style == bridge_styles::BridgeStyle::Boardwalk ? OAK_PLANKS : GRAVEL;
+		const Block curb =
+				style == bridge_styles::BridgeStyle::Boardwalk ||
+								style == bridge_styles::BridgeStyle::Truss ||
+								style == bridge_styles::BridgeStyle::Covered ||
+								style == bridge_styles::BridgeStyle::Arch
+						? (style == bridge_styles::BridgeStyle::Boardwalk ? OAK_PLANKS
+																		  : STONE_BRICKS)
+						: STONE_BRICKS;
+		std::optional<Block> railing;
+		if (style == bridge_styles::BridgeStyle::Boardwalk)
+			railing = OAK_FENCE;
+		else if (style == bridge_styles::BridgeStyle::Arch)
+			railing = STONE_BRICK_WALL;
+		else if (style != bridge_styles::BridgeStyle::Truss &&
+				 style != bridge_styles::BridgeStyle::Covered)
+			railing = IRON_BARS;
+		auto other_track = [&](int x, int z, int y) {
+			const auto other = bridge_surface.rail_track_at(x, z);
+			return other && other->first != way.id && other->second >= y - 3 &&
+				   other->second <= y + 2;
+		};
+		const auto place_deck_column = [&](int x, int z, int y, const Block &top) {
+			if (other_track(x, z, y))
+				return;
+			editor.set_block_absolute(top, x, y, z, nullopt, nullopt);
+			editor.set_block_absolute(slab, x, y - 1, z, nullopt, nullopt);
+			const int ground = editor.get_ground_level(x, z);
+			if (y - ground <= RAIL_ABUTMENT_MAX_HEIGHT &&
+					!bridge_surface.support_blocked(x, z, y))
+				for (int fy = ground + 1; fy < y - 1; ++fy)
+					editor.set_block_absolute(slab, x, fy, z, nullopt, nullopt);
+		};
+		for (const auto &[cell, sample] : layout.ballast)
+			place_deck_column(cell.first, cell.second, bridge_ys[sample], ballast);
+		array<optional<pair<pair<int, int>, int>>, 2> previous_tops{};
+		for (std::size_t i = 0; i < total; ++i) {
+			const int y = bridge_ys[i];
+			for (std::size_t side = 0; side < 2; ++side) {
+				const auto &run = layout.curbs[i][side];
+				if (run.empty())
+					previous_tops[side].reset();
+				for (const auto &[cx, cz] : run) {
+					if (other_track(cx, cz, y))
+						continue;
+					place_deck_column(cx, cz, y, curb);
+					if (!railing || y - editor.get_ground_level(cx, cz) < 2) {
+						previous_tops[side].reset();
+						continue;
+					}
+					const int top = y + 1;
+					connected_blocks::place_connected(editor, *railing, cx, top, cz);
+					if (previous_tops[side]) {
+						const auto &prev = *previous_tops[side];
+						const auto [px, pz] = prev.first;
+						const bool adjacent = std::abs(px - cx) + std::abs(pz - cz) == 1;
+						if (adjacent && prev.second == top - 1)
+							connected_blocks::place_connected(
+									editor, *railing, px, top, pz);
+						else if (adjacent && prev.second == top + 1)
+							connected_blocks::place_connected(
+									editor, *railing, cx, prev.second, cz);
+					}
+					previous_tops[side] = std::pair{std::pair{cx, cz}, top};
+				}
+			}
+		}
+		const std::size_t pier_interval =
+				bridge_styles::pillar_interval(style, RAIL_DECK_HALF_WIDTH);
+		if (!cables_carry_deck && pier_interval > 0)
+			for (std::size_t i = pier_interval / 2; i < total; i += pier_interval) {
+				const auto [x, z] = all_points[i];
+				if (style == bridge_styles::BridgeStyle::Boardwalk) {
+					bridge_styles::place_pier_bent(editor, bridge_surface, style, x, z,
+							bridge_ys[i], layout.perps[i], RAIL_DECK_HALF_WIDTH);
+				} else {
+					for (const auto &[px, pz] :
+							connected_blocks::cross_cells(x, z, layout.perps[i], -1, 1))
+						if (!bridge_surface.support_blocked(px, pz, bridge_ys[i]))
+							bridge_styles::place_bridge_support_below_deck(editor, style,
+									px, bridge_ys[i], pz, terrain_ys[i], i, total, true,
+									px == x && pz == z, true);
+				}
+			}
+	}
+	if (rail_open_sides)
+		bridge_styles::decorate_rail_bridge_above_deck(editor, style, bridge_path,
+				RAIL_DECK_HALF_WIDTH - 1, *rail_open_sides, start_is_boundary,
+				end_is_boundary);
+	else
+		bridge_styles::decorate_bridge_above_deck(editor, style, bridge_surface,
+				bridge_path, 0, start_is_boundary, end_is_boundary);
 }
 
 void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element,
-		vector<pair<int, int>> &rail_tunnel_points)
+		vector<tuple<int, int, bool>> &rail_tunnel_points)
 {
 	const auto *plan = advtrains::get_plan(element);
+	std::size_t recorded = 0;
+	optional<pair<int, int>> last_recorded;
+	const auto record_point = [&](int x, int z) {
+		if (last_recorded == pair<int, int>{x, z})
+			return;
+		rail_tunnel_points.emplace_back(x, z, recorded % LIGHT_INTERVAL == 0);
+		++recorded;
+		last_recorded = pair<int, int>{x, z};
+	};
 	// Rust builds subway shells one OSM segment at a time. Keep that same
 	// previous/next context at shared nodes in the non-Advtrains path; the
 	// connected Advtrains centerline below intentionally uses its network path.
@@ -891,9 +1271,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 			for (std::size_t j = 0; j < smoothed_segment.size(); ++j) {
 				const auto [bx, unused_y, bz] = smoothed_segment[j];
 				(void)unused_y;
-				if (rail_tunnel_points.empty() ||
-						rail_tunnel_points.back() != pair<int, int>{bx, bz})
-					rail_tunnel_points.emplace_back(bx, bz);
+				record_point(bx, bz);
 
 				const int ground_y = editor.get_ground_level(bx, bz);
 				const pos_t ceil_y = ground_y - RAIL_TUNNEL_DEPTH;
@@ -952,9 +1330,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 	for (size_t j = 0; j < smoothed.size(); ++j) {
 		int bx = smoothed[j].first;
 		int bz = smoothed[j].second;
-		if (rail_tunnel_points.empty() ||
-				rail_tunnel_points.back() != pair<int, int>{bx, bz})
-			rail_tunnel_points.emplace_back(bx, bz);
+		record_point(bx, bz);
 
 		const int ground_y = editor.get_ground_level(bx, bz);
 		const pos_t floor_y = plan ? plan->heights[j]
@@ -1008,19 +1384,28 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 }
 
 void carve_rail_tunnel_interior(
-		WorldEditor &editor, const vector<pair<int, int>> &rail_tunnel_points)
+		WorldEditor &editor, const vector<tuple<int, int, bool>> &rail_tunnel_points)
 {
 	const std::optional<std::vector<Block>> carve_whitelist(std::vector<Block>{
 			STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, STONE});
 	std::vector<v3pos_t> floors;
+	std::unordered_map<std::uint64_t, bool> lantern_points;
+	lantern_points.reserve(rail_tunnel_points.size());
+	for (const auto &[x, z, lantern] : rail_tunnel_points) {
+		const auto key = (std::uint64_t(static_cast<std::uint32_t>(x)) << 32) |
+						 static_cast<std::uint32_t>(z);
+		lantern_points[key] = lantern_points[key] || lantern;
+	}
 	if (ADVTRAINS_AVAILABLE) {
 		floors = advtrains::tunnel_floors;
 	} else {
-		for (const auto &[x, z] : rail_tunnel_points)
+		for (const auto &[x, z, lantern] : rail_tunnel_points) {
+			(void)lantern;
 			floors.emplace_back(x,
 					editor.get_ground_level(x, z) - RAIL_TUNNEL_DEPTH - INTERIOR_HEIGHT -
 							1,
 					z);
+		}
 	}
 	std::unordered_set<std::uint64_t> carved_points;
 	carved_points.reserve(floors.size());
@@ -1031,7 +1416,8 @@ void carve_rail_tunnel_interior(
 		const auto key =
 				(std::uint64_t(static_cast<std::uint32_t>(bx)) << 32) | std::uint32_t(bz);
 		const bool first = carved_points.insert(key).second;
-		const bool lantern = idx % LIGHT_INTERVAL == 0;
+		const auto lantern_it = lantern_points.find(key);
+		const bool lantern = lantern_it != lantern_points.end() && lantern_it->second;
 		if (!first && !lantern)
 			continue;
 		if (floor_y <= world_editor::min_y())
@@ -1054,7 +1440,7 @@ void carve_rail_tunnel_interior(
 }
 
 void generate_railways(WorldEditor &editor, const ProcessedWay &element,
-		vector<pair<int, int>> &rail_tunnel_points,
+		vector<tuple<int, int, bool>> &rail_tunnel_points,
 		const RailBridgeInternalEndpoints &rail_bridge_internal_endpoints,
 		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
 		const CoordinateBitmap &road_mask, const CoordinateBitmap &building_footprints,
@@ -1099,7 +1485,7 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element)
 {
 	if (ADVTRAINS_AVAILABLE)
 		advtrains::prepare_network({ProcessedElement(element)}, editor);
-	vector<pair<int, int>> rail_tunnel_points;
+	vector<tuple<int, int, bool>> rail_tunnel_points;
 	RailBridgeInternalEndpoints internal_endpoints;
 	bridge_styles::BridgeOutlineIndex bridge_outlines;
 	CoordinateBitmap empty = CoordinateBitmap::new_empty();

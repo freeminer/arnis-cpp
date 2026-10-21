@@ -65,6 +65,8 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 		double scale, double rotation_degrees = 0.0,
 		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed =
 				{});
+std::vector<std::vector<std::pair<int, int>>> placement_regions(
+		const PrescanResult &, double scale);
 // Stamp one resolved landmark after ground generation.  Placement intentionally
 // uses the generic Sponge decoder rather than an exporter-specific writer.
 bool place(world_editor::WorldEditor &, const Placement &, double scale,

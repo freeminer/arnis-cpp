@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstddef>
+#include <array>
 #include <optional>
 #include <string>
 #include <unordered_map>
@@ -94,6 +95,9 @@ void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
 		bool start_is_boundary, bool end_is_boundary,
 		const std::vector<std::pair<int, int>> *pylon_points = nullptr,
 		const bridge_towers::CableSpan *cable_span = nullptr);
+void decorate_rail_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
+		const std::vector<BridgePathSample> &path, int block_range,
+		std::array<bool, 2> open, bool start_is_boundary, bool end_is_boundary);
 
 bool sweep_bridge_schematic(WorldEditor &editor, const bridges::BridgeSurfaceMap &surface,
 		const std::vector<BridgePathSample> &path, std::optional<std::size_t> module_idx,

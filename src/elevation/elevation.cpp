@@ -3,6 +3,7 @@
 #include "../coordinate_system/transformation.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <cmath>
@@ -124,7 +125,24 @@ static std::vector<double> blur_line(
 		nonfinite[i + 1] = nonfinite[i] + !std::isfinite(values[i]);
 	const double full_weight = std::accumulate(kernel.begin(), kernel.end(), 0.0);
 	std::vector<double> out(len);
-	for (std::size_t i = 0; i < len; ++i) {
+	constexpr std::size_t LANES = 8;
+	const auto r = static_cast<std::size_t>(radius);
+	std::size_t i = 0;
+	while (i < len) {
+		// Preserve each cell's tap order while keeping independent sums for
+		// adjacent outputs, giving the compiler several overlapping add chains.
+		if (i >= r && i + LANES + r <= len &&
+				nonfinite[i + LANES + r] == nonfinite[i - r]) {
+			std::array<double, LANES> sums{};
+			const auto window = i - r;
+			for (std::size_t k = 0; k < kernel.size(); ++k)
+				for (std::size_t lane = 0; lane < LANES; ++lane)
+					sums[lane] += values[window + k + lane] * kernel[k];
+			for (std::size_t lane = 0; lane < LANES; ++lane)
+				out[i + lane] = sums[lane] / full_weight;
+			i += LANES;
+			continue;
+		}
 		const auto left = i >= static_cast<std::size_t>(radius)
 								  ? i - static_cast<std::size_t>(radius)
 								  : len;
@@ -149,6 +167,7 @@ static std::vector<double> blur_line(
 			weight += w;
 		}
 		out[i] = weight > 0.0 ? sum / weight : std::numeric_limits<double>::quiet_NaN();
+		++i;
 	}
 	return out;
 }

@@ -597,6 +597,71 @@ const std::vector<std::vector<float>> &LandCoverData::water_blend_grid() const
 	return *cache->grid;
 }
 
+bool WaterBlendMask::contains(int x, int z) const
+{
+	if (width == 0 || height == 0 || words_per_row == 0)
+		return false;
+	const auto cx =
+			x <= 0 ? std::size_t(0) : std::min(static_cast<std::size_t>(x), width - 1);
+	const auto cz =
+			z <= 0 ? std::size_t(0) : std::min(static_cast<std::size_t>(z), height - 1);
+	const auto index = cz * words_per_row + (cx >> 6);
+	return index < bits.size() && ((bits[index] >> (cx & 63)) & 1U) != 0;
+}
+
+const WaterBlendMask &LandCoverData::water_blend_mask(
+		std::size_t world_width, std::size_t world_height) const
+{
+	if (!water_blend_cache)
+		water_blend_cache = std::make_shared<WaterBlendCache>();
+	const auto cache = water_blend_cache;
+	std::lock_guard lock(cache->mutex);
+	if (!cache->mask || cache->mask_width != world_width ||
+			cache->mask_height != world_height) {
+		WaterBlendMask mask;
+		mask.width = world_width;
+		mask.height = world_height;
+		mask.words_per_row = world_width / 64 + (world_width % 64 != 0);
+		if (mask.height && mask.words_per_row <=
+								   std::numeric_limits<std::size_t>::max() / mask.height)
+			mask.bits.assign(mask.words_per_row * mask.height, 0);
+		if (width && height && mask.bits.size() && grid.size() >= height) {
+			const auto smooth =
+					compute_water_blend_smooth(grid, width, height, cells_per_meter);
+			for (std::size_t z = 0; z < world_height; ++z) {
+				const double fz = std::clamp(double(z) / double(std::max<std::size_t>(
+																 1, world_height - 1)),
+										  0.0, 1.0) *
+								  double(height - 1);
+				const auto z0 = std::min<std::size_t>(std::floor(fz), height - 1);
+				const auto z1 = std::min(z0 + 1, height - 1);
+				const double tz = fz - std::floor(fz);
+				if (smooth[z0].size() < width || smooth[z1].size() < width)
+					continue;
+				for (std::size_t x = 0; x < world_width; ++x) {
+					const double fx = std::clamp(double(x) / double(std::max<std::size_t>(
+																	 1, world_width - 1)),
+											  0.0, 1.0) *
+									  double(width - 1);
+					const auto x0 = std::min<std::size_t>(std::floor(fx), width - 1);
+					const auto x1 = std::min(x0 + 1, width - 1);
+					const double tx = fx - std::floor(fx);
+					const double top = smooth[z0][x0] * (1.0 - tx) + smooth[z0][x1] * tx;
+					const double bottom =
+							smooth[z1][x0] * (1.0 - tx) + smooth[z1][x1] * tx;
+					if (top * (1.0 - tz) + bottom * tz > .5)
+						mask.bits[z * mask.words_per_row + (x >> 6)] |= std::uint64_t(1)
+																		<< (x & 63);
+				}
+			}
+		}
+		cache->mask = std::move(mask);
+		cache->mask_width = world_width;
+		cache->mask_height = world_height;
+	}
+	return *cache->mask;
+}
+
 void LandCoverData::invalidate_water_blend_grid()
 {
 	water_blend_cache = std::make_shared<WaterBlendCache>();

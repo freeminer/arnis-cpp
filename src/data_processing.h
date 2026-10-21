@@ -159,11 +159,11 @@ inline void apply_generation_options(WorldEditor &editor, const GenerationOption
 	editor.set_map_decals(is_java(o.format));
 }
 
-// Rust pipeline policy: region streaming is worthwhile only when enough tiles
-// exist to amortize flush-worker setup and memory bookkeeping.
+// Java region output streams to disk by default, matching Rust. Setting
+// ARNIS_STREAM_TO_DISK=0 disables it. The legacy sizing arguments are retained
+// for source compatibility; the decision no longer depends on area or free RAM.
 bool should_stream_to_disk(std::size_t tile_count, bool fillground = false);
-// Deterministic form of the Rust policy, exposed separately from OS memory
-// probing so callers can make the same decision from their own memory source.
+// Compatibility overload; available_mb is retained but does not affect policy.
 bool should_stream_to_disk(
 		std::size_t tile_count, std::uint64_t available_mb, bool fillground);
 bool should_use_parallel_tiles(std::size_t tile_count, bool java_format);

@@ -280,6 +280,23 @@ std::pair<std::uint32_t, std::uint32_t> lonlat_to_tile(
 			std::min<std::uint32_t>(static_cast<std::uint32_t>(y), max_tile)};
 }
 
+std::tuple<std::uint32_t, std::uint32_t, std::uint32_t, std::uint32_t> tile_range(
+		const geographic::LLBBox &bbox, std::uint8_t zoom)
+{
+	const auto northwest = lonlat_to_tile(bbox.min().lng(), bbox.max().lat(), zoom);
+	const auto southeast = lonlat_to_tile(bbox.max().lng(), bbox.min().lat(), zoom);
+	return {std::min(northwest.first, southeast.first),
+			std::max(northwest.first, southeast.first),
+			std::min(northwest.second, southeast.second),
+			std::max(northwest.second, southeast.second)};
+}
+
+std::uint64_t tile_count(const geographic::LLBBox &bbox, std::uint8_t zoom)
+{
+	const auto [min_x, max_x, min_y, max_y] = tile_range(bbox, zoom);
+	return (std::uint64_t(max_x) - min_x + 1) * (std::uint64_t(max_y) - min_y + 1);
+}
+
 double tile_x_to_longitude(std::uint8_t zoom, std::uint32_t tile_x, double fraction)
 {
 	return (double(tile_x) + fraction) / double(std::uint64_t{1} << zoom) * 360.0 - 180.0;

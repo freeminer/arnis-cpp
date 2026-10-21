@@ -1,4 +1,5 @@
 #pragma once
+#include <cstdint>
 #include <filesystem>
 #include <vector>
 #include <memory>
@@ -14,13 +15,16 @@ struct Schematic
 {
 	struct Voxel
 	{
-		int x = 0, y = 0, z = 0;
+		// Keep the resident tree-pack palette compact; Sponge dimensions are
+		// validated against this range before coordinates enter the cache.
+		std::int16_t x = 0, y = 0, z = 0;
 		Block block;
 	};
 
 	int width = 0, height = 0, length = 0;
 	std::vector<Voxel> voxels;
 	int min_log_vy = 0;
+	std::uint32_t leaf_columns = 0;
 };
 
 std::optional<Block> map_block(const std::string &name);

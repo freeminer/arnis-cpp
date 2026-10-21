@@ -252,6 +252,23 @@ std::vector<std::pair<int, int>> deferred_region_keys(
 	return keys;
 }
 
+std::vector<std::vector<std::pair<int, int>>> placement_regions(
+		const std::vector<Placement> &placements)
+{
+	std::vector<std::vector<std::pair<int, int>>> result;
+	result.reserve(placements.size());
+	for (const auto &placement : placements) {
+		std::vector<std::pair<int, int>> regions;
+		for (int rx = region_floor(placement.anchor_x - PLANE_REACH_BLOCKS);
+				rx <= region_floor(placement.anchor_x + PLANE_REACH_BLOCKS); ++rx)
+			for (int rz = region_floor(placement.anchor_z - PLANE_REACH_BLOCKS);
+					rz <= region_floor(placement.anchor_z + PLANE_REACH_BLOCKS); ++rz)
+				regions.emplace_back(rx, rz);
+		result.push_back(std::move(regions));
+	}
+	return result;
+}
+
 void cap_placements(std::vector<Placement> &placements)
 {
 	if (placements.size() > MAX_PLANES) {

@@ -12,12 +12,14 @@ enum class TreeSize
 	Giant
 };
 TreeSize size_for_height(int height);
+int size_cap_height(TreeSize size);
 TreeSize size_for_canopy_m(std::uint8_t metres);
 struct SizeFilter
 {
 	bool small = true, medium = true, big = true, tall = true, giant = true;
 	static SizeFilter up_to(TreeSize max);
 	bool allows(TreeSize size) const;
+	int max_height() const;
 };
 TreeSize smaller_enabled(TreeSize requested, const SizeFilter &filter);
 TreeSize tree_size_from_string(const std::string &name);

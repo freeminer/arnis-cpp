@@ -328,8 +328,8 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 	return {GRASS_BLOCK, DIRT};
 }
 
-std::pair<bool, bool> canopy_verdict(const Ground &ground, int x, int z, int origin_x,
-		int origin_z, int spacing, bool schematic_trees)
+std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int origin_x,
+		int origin_z, int spacing, bool schematic_trees, double scale)
 {
 	const auto floor_div = [spacing](int v) {
 		const int quotient = v / spacing;
@@ -337,14 +337,27 @@ std::pair<bool, bool> canopy_verdict(const Ground &ground, int x, int z, int ori
 	};
 	const int cell_x = floor_div(x) * spacing;
 	const int cell_z = floor_div(z) * spacing;
-	const auto fraction = ground.canopy_fraction(
+	if (!editor.ground)
+		return {false, false};
+	const auto cell = editor.ground->canopy_cell(
 			XZPoint{cell_x - origin_x, cell_z - origin_z}, spacing);
-	if (!fraction)
+	if (!cell)
 		return {false, false};
 	const auto [slot_x, slot_z] = trees::trunk_slot_s(x, z, spacing);
 	if (x != slot_x || z != slot_z)
 		return {true, false};
-	const double p = canopy::slot_probability(*fraction, spacing, schematic_trees);
+	const auto [fraction, top] = *cell;
+	const double p = !schematic_trees ? canopy::flat_slot_probability(fraction, spacing,
+												canopy::COLUMNS_PER_TREE_LEGACY)
+					 : scale < MICRO_TREE_MAX_SCALE
+							 ? canopy::flat_slot_probability(
+									   fraction, spacing, canopy::COLUMNS_PER_TREE_MICRO)
+							 : canopy::slot_probability(fraction, spacing,
+									   editor.tree_crown_columns
+											   ? editor.tree_crown_columns(std::max(
+														 1, static_cast<int>(std::lround(
+																	top * scale))))
+											   : 50.0);
 	const double roll =
 			double(land_cover::coord_hash(x ^ 0x434d, z ^ 0x484d) % 10000) / 10000.0;
 	return {true, roll < p};
@@ -377,8 +390,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	const bool canopy_available = editor.ground && editor.ground->has_canopy() &&
 								  editor.ground->has_land_cover();
 	const auto [canopy_covered, canopy_tree] =
-			canopy_available ? canopy_verdict(*editor.ground, x, z, origin_x, origin_z,
-									   tree_spacing, schematic_trees)
+			canopy_available ? canopy_verdict(editor, x, z, origin_x, origin_z,
+									   tree_spacing, schematic_trees, scale)
 							 : std::pair{false, false};
 	// Rust's canopy verdict is always gated at slope <= 4 and requires the
 	// same tree-supporting surface as land-cover trees; dryland cliff rules do
@@ -492,7 +505,10 @@ void clear_road_vegetation(WorldEditor &editor, int x, int y, int z)
 	const auto &stacked = ground_decoration::stacked_plant_parts();
 	const bool surface = editor.check_for_block_absolute(x, y, z, stray_surface);
 	const bool under_wood = editor.check_for_block_absolute(x, y + 2, z, wood);
-	if (!editor.check_for_block_absolute(x, y + 1, z, loose_plants) ||
+	// A mapped hedge on paving is a barrier, not stray vegetation. The Rust
+	// post-pass keeps these columns intact after the barrier processor registers them.
+	if (editor.is_hedge(x, z) ||
+			!editor.check_for_block_absolute(x, y + 1, z, loose_plants) ||
 			(!surface && !under_wood))
 		return;
 	editor.set_block_absolute(AIR, x, y + 1, z, loose_plants, std::nullopt);

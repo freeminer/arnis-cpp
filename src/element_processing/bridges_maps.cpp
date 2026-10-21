@@ -494,6 +494,27 @@ bool headings_parallel(const ProcessedWay &a, const ProcessedWay &b)
 		   std::abs(180.0f - diff) <= DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG;
 }
 
+bool rails_side_by_side(const ProcessedWay &a, const ProcessedWay &b)
+{
+	if (effective_layer(a) != effective_layer(b) || !headings_parallel(a, b))
+		return false;
+	const ProcessedWay *short_way = &a;
+	const ProcessedWay *long_way = &b;
+	if (way_length_blocks(a) > way_length_blocks(b))
+		std::swap(short_way, long_way);
+	const auto samples = coverage_samples(*short_way);
+	if (samples.empty())
+		return false;
+	const float reach = static_cast<float>(2 * railways::RAIL_DECK_HALF_WIDTH + 1 +
+										   railways::RAIL_DECK_GAP_FILL) +
+						0.5f;
+	const auto alongside =
+			std::count_if(samples.begin(), samples.end(), [&](const auto &p) {
+				return lateral_offset_to_way(p.first, p.second, *long_way) <= reach;
+			});
+	return alongside * 2 > static_cast<std::ptrdiff_t>(samples.size());
+}
+
 // Parallel bridge ways form one structure when their sampled footprints run
 // alongside each other. Across layers, require the actual deck edges to touch;
 // on the same layer, allow the wider tolerance used for split carriageways.
@@ -1642,7 +1663,6 @@ BridgeStructureMap BridgeStructureMap::build(
 					rail_uf.unite(group.front(), group[i]);
 			}
 		}
-
 		std::unordered_set<std::uint64_t> carried_ids;
 		for (const auto *way : rail_bridge_ways) {
 			const auto path = railways::build_smoothed_centerline(*way);
@@ -1683,6 +1703,29 @@ BridgeStructureMap BridgeStructureMap::build(
 						editor.get_ground_level(path[i].first, path[i].second)));
 			result.rail_decks_[way->id] = std::move(info);
 			carried_ids.insert(way->id);
+		}
+		// Nearby parallel tracks on the same layer share a rail deck even when
+		// their OSM ways do not meet at a common endpoint. Carried tracks keep
+		// the road deck profile and must not merge into a rail-only group.
+		std::vector<std::array<int, 4>> rail_bboxes;
+		rail_bboxes.reserve(rail_bridge_ways.size());
+		for (const auto *way : rail_bridge_ways)
+			rail_bboxes.push_back(way_bbox(*way));
+		const int side_by_side_margin =
+				static_cast<int>(std::ceil(2 * railways::RAIL_DECK_HALF_WIDTH + 1 +
+										   railways::RAIL_DECK_GAP_FILL + 0.5f));
+		for (std::size_t a = 0; a < rail_bridge_ways.size(); ++a) {
+			if (carried_ids.contains(rail_bridge_ways[a]->id))
+				continue;
+			for (std::size_t b = a + 1; b < rail_bridge_ways.size(); ++b) {
+				if (carried_ids.contains(rail_bridge_ways[b]->id) ||
+						rail_uf.find(a) == rail_uf.find(b) ||
+						!bboxes_touch(
+								rail_bboxes[a], rail_bboxes[b], side_by_side_margin) ||
+						!rails_side_by_side(*rail_bridge_ways[a], *rail_bridge_ways[b]))
+					continue;
+				rail_uf.unite(a, b);
+			}
 		}
 
 		std::unordered_map<std::size_t, std::vector<std::size_t>> rail_groups;
@@ -1748,10 +1791,28 @@ BridgeStructureMap BridgeStructureMap::build(
 							? terrain_max + clearance
 							: terrain_max;
 			for (const auto index : group) {
+				const auto &way = *rail_bridge_ways[index];
+				const auto path = railways::build_smoothed_centerline(way);
+				std::vector<int> terrain;
+				terrain.reserve(path.size());
+				for (const auto &[x, z] : path)
+					terrain.push_back(editor.get_ground_level(x, z));
+				const auto &start = way.nodes.front();
+				const auto &end = way.nodes.back();
+				const auto start_members = rail_endpoints.find({start.x, start.z});
+				const auto end_members = rail_endpoints.find({end.x, end.z});
+				const bool start_internal = start_members != rail_endpoints.end() &&
+											start_members->second.size() > 1;
+				const bool end_internal = end_members != rail_endpoints.end() &&
+										  end_members->second.size() > 1;
 				RailDeckInfo info;
 				info.kind = RailDeckKind::Level;
 				info.level_y = std::max(deck_y, floor_y);
-				result.rail_decks_[rail_bridge_ways[index]->id] = std::move(info);
+				info.start_is_boundary = !start_internal;
+				info.end_is_boundary = !end_internal;
+				info.ys = railways::rail_bridge_profile(
+						terrain, info.level_y, start_internal, end_internal);
+				result.rail_decks_[way.id] = std::move(info);
 			}
 		}
 	}
@@ -1841,8 +1902,8 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 			}
 		}
 	}
-	// Rail viaducts are narrower than road decks; Rust treats a 3x3 footprint
-	// around each planned level-deck centreline cell as sheltered surface.
+	// Rail viaducts are narrower than road decks. Preserve their centerline
+	// identity for joined-deck layout and their profile in the shelter map.
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
@@ -1850,15 +1911,34 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 		const auto *rail = structures.rail_deck(way.id);
 		if (!rail || rail->kind != RailDeckKind::Level)
 			continue;
-		for (const auto &[x, z] : railways::build_smoothed_centerline(way)) {
-			for (int dx = -1; dx <= 1; ++dx)
-				for (int dz = -1; dz <= 1; ++dz) {
-					const auto cell = std::pair{x + dx, z + dz};
-					auto [it, inserted] =
-							result.rail_deck_y_.try_emplace(cell, rail->level_y);
-					if (!inserted)
-						it->second = std::min(it->second, rail->level_y);
-				}
+		const auto path = railways::build_smoothed_centerline(way);
+		for (std::size_t i = 0; i < path.size(); ++i) {
+			const auto [x, z] = path[i];
+			const int y = rail->ys.empty() ? rail->level_y
+										   : rail->ys[std::min(i, rail->ys.size() - 1)];
+			result.rail_tracks_.try_emplace({x, z}, way.id, y);
+		}
+	}
+	// Use the exact deck layout (curbs and joined-track ballast included) for
+	// shelter detection and support collision checks, rather than approximating
+	// every rail bridge with a 3x3 patch around its centerline.
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto *rail = structures.rail_deck(way.id);
+		if (!rail || rail->kind != RailDeckKind::Level)
+			continue;
+		std::vector<int> heights = rail->ys;
+		if (heights.empty()) {
+			heights.assign(
+					railways::build_smoothed_centerline(way).size(), rail->level_y);
+		}
+		for (const auto &[cell, y] :
+				railways::rail_deck_footprint(result, way, heights)) {
+			auto [it, inserted] = result.rail_deck_y_.try_emplace(cell, y);
+			if (!inserted)
+				it->second = std::min(it->second, y);
 		}
 	}
 	// Mark at-grade roads/tracks below a raised deck, including the whole road
@@ -1948,6 +2028,15 @@ bool BridgeSurfaceMap::deck_near(int x, int z, int y, int tolerance) const
 	const auto low = deck_low_y_.find({x, z});
 	return high != deck_y_.end() && low != deck_low_y_.end() &&
 		   low->second <= y + tolerance && high->second >= y - tolerance;
+}
+
+std::optional<std::pair<std::uint64_t, int>> BridgeSurfaceMap::rail_track_at(
+		int x, int z) const
+{
+	const auto it = rail_tracks_.find({x, z});
+	return it == rail_tracks_.end()
+				   ? std::nullopt
+				   : std::optional<std::pair<std::uint64_t, int>>(it->second);
 }
 
 bool BridgeSurfaceMap::support_blocked(int x, int z, int deck_y) const

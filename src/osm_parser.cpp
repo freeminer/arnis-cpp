@@ -160,6 +160,9 @@ std::size_t get_priority(const ProcessedElement &element)
 	for (std::size_t i = 0; i < priority_order.size(); ++i)
 		if (element.tags().contains(priority_order[i]))
 			return i;
+	const auto man_made = element.tags().get("man_made");
+	if (man_made == "antenna" || man_made == "mast" || man_made == "chimney")
+		return priority_order.size() + 1;
 	return priority_order.size();
 }
 

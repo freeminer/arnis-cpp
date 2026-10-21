@@ -538,7 +538,7 @@ std::vector<std::vector<ProcessedNode>> collect_merged_rings(
 	merge_way_segments(rings);
 	std::vector<std::vector<ProcessedNode>> out;
 	for (auto &ring : rings) {
-		ring = clipping::clip_way_to_bbox(ring, xzbbox);
+		ring = clipping::clip_way_to_bbox_owned(std::move(ring), xzbbox);
 		if (ring.size() < 4)
 			continue;
 		close_ring_if_near(ring);

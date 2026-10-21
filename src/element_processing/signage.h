@@ -36,7 +36,10 @@ struct SignageContext
 	decals::SignRegion region{decals::SignRegion::Europe};
 	IntersectionIndex intersections;
 	double scale{1.0};
-	RoadMaskBitmap carriageway;
+	// Placement-only mask. Cleared after signage placement to release the large
+	// per-column bitmap before serialization; summary/report data stays resident.
+	mutable RoadMaskBitmap carriageway;
+	void release_placement_masks() const { carriageway = RoadMaskBitmap::new_empty(); }
 	void note(const char *kind, int x, int y, int z) const;
 	std::string summary(bool verbose) const;
 

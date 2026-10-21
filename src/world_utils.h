@@ -7,9 +7,40 @@
 #include <optional>
 #include <memory>
 #include "coordinate_system/geographic/llbbox.h"
-namespace arnis::world_utils
+namespace arnis
+{
+struct Args;
+enum class WorldFormat;
+namespace world_utils
 {
 inline constexpr std::int32_t DIMENSION_FOLDERS_DATA_VERSION = 4772;
+inline constexpr std::uint64_t DISK_HEADROOM_BYTES = 3ull * 1024 * 1024 * 1024;
+
+struct WorldSizeOptions
+{
+	bool interior = false;
+	bool bake_lighting = false;
+	bool voxy_lod = false;
+	bool caves = false;
+	bool fillground = false;
+	bool tall = false;
+	static WorldSizeOptions of(const Args &args);
+};
+
+struct RunSizeError
+{
+	bool area = false;
+	std::string detail;
+	const char *short_message() const;
+};
+
+std::uint64_t estimated_world_bytes(
+		double blocks_km2, WorldFormat format, const WorldSizeOptions &options);
+double blocks_km2(const Args &args, const geographic::LLBBox &bbox);
+bool check_disk_space(const std::filesystem::path &dir, std::uint64_t needed,
+		std::string *error = nullptr);
+bool check_run_size(const Args &args, const geographic::LLBBox &bbox, WorldFormat format,
+		const std::filesystem::path &dir, RunSizeError *error = nullptr);
 
 struct WorldLayout
 {
@@ -85,4 +116,5 @@ std::string unique_world_folder_name(
 std::string get_area_name_for_bedrock(const geographic::LLBBox &bbox);
 std::pair<std::filesystem::path, std::string> build_bedrock_output(
 		const geographic::LLBBox &bbox, const std::filesystem::path &output_dir);
+}
 }

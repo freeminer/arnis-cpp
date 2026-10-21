@@ -242,6 +242,77 @@ std::string redact_url_queries(const std::string &message)
 	return out;
 }
 
+std::string redact_paths(const std::string &message)
+{
+	const auto *bytes = reinterpret_cast<const unsigned char *>(message.data());
+	const auto size = message.size();
+	const auto path_starts_at = [&](std::size_t i) {
+		const auto prev = i ? bytes[i - 1] : 0;
+		const auto next = [&](std::size_t offset) -> unsigned char {
+			return i + offset < size ? bytes[i + offset] : 0;
+		};
+		const auto is_slash = [](unsigned char c) { return c == '/' || c == '\\'; };
+		const bool after_word = i && std::isalnum(prev);
+		constexpr std::string_view openers = "('\"=`:[,{<;|";
+		const bool opens =
+				!i || std::isspace(prev) || openers.find(prev) != std::string_view::npos;
+		const bool file_url = !after_word && message.compare(i, 6, "file:/") == 0;
+		const bool drive = i + 2 < size && std::isalpha(bytes[i]) && !after_word &&
+						   next(1) == ':' && is_slash(next(2));
+		const bool unix_path =
+				bytes[i] == '/' && next(1) && next(1) != '/' && !std::isspace(next(1));
+		const bool unc = bytes[i] == '\\' && next(1) == '\\';
+		const bool home = bytes[i] == '~' && is_slash(next(1));
+		return file_url || drive || (opens && (unix_path || unc || home));
+	};
+	const auto path_end = [&](std::size_t start) {
+		std::size_t line_end = start;
+		while (line_end < size && bytes[line_end] != '\n' && bytes[line_end] != '\r')
+			++line_end;
+		const auto breaks = [&](std::size_t at) {
+			return at >= size || std::isspace(bytes[at]) ||
+				   std::string_view(":,;)]}").find(bytes[at]) != std::string_view::npos;
+		};
+		const auto closes = [&](std::size_t at) {
+			return breaks(at + 1) ||
+				   (at + 2 < size &&
+						   std::string_view(".!?").find(bytes[at + 1]) !=
+								   std::string_view::npos &&
+						   breaks(at + 2));
+		};
+		const auto quote = start && std::string_view("'\"`").find(bytes[start - 1]) !=
+												   std::string_view::npos
+								   ? bytes[start - 1]
+								   : 0;
+		if (quote) {
+			for (std::size_t at = line_end; at-- > start + 1;)
+				if (bytes[at] == quote && closes(at))
+					return at;
+		} else {
+			for (std::size_t at = start + 1; at < line_end; ++at)
+				if (bytes[at] == ':' && (at + 1 >= size || std::isspace(bytes[at + 1])))
+					return at;
+		}
+		return line_end;
+	};
+
+	std::string out;
+	out.reserve(size);
+	std::size_t copied = 0;
+	for (std::size_t i = 0; i < size;) {
+		if (!path_starts_at(i)) {
+			++i;
+			continue;
+		}
+		out.append(message, copied, i - copied);
+		out += "<path>";
+		i = path_end(i);
+		copied = i;
+	}
+	out.append(message, copied, size - copied);
+	return out;
+}
+
 void send_log(LogLevel level, const std::string &message)
 {
 	if (!consent() || !release_build())
@@ -249,7 +320,7 @@ void send_log(LogLevel level, const std::string &message)
 	auto slot = SendSlot::acquire();
 	if (!slot.valid())
 		return;
-	auto redacted = redact_url_queries(message);
+	auto redacted = redact_paths(redact_url_queries(message));
 	truncate_characters(redacted, 1000);
 	try {
 		std::thread([slot = std::move(slot), level,
@@ -288,7 +359,7 @@ void send_crash_report(const std::string &message)
 {
 	if (!consent() || !release_build())
 		return;
-	auto redacted = redact_url_queries(message);
+	auto redacted = redact_paths(redact_url_queries(message));
 	truncate_characters(redacted, 500);
 	try {
 		(void)post_payload(

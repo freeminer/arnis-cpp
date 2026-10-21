@@ -24,7 +24,8 @@ enum class GenerationMode
 {
 	GeoTerrain,
 	GeoOnly,
-	TerrainOnly
+	TerrainOnly,
+	Blueprint
 };
 enum class GameMode
 {
@@ -112,12 +113,18 @@ constexpr bool generation_mode_skips_objects(GenerationMode mode)
 {
 	return mode == GenerationMode::TerrainOnly;
 }
+constexpr bool generation_mode_natural_land_cover(GenerationMode mode)
+{
+	return mode == GenerationMode::TerrainOnly || mode == GenerationMode::Blueprint;
+}
 inline GenerationMode generation_mode_from_string(const std::string &value)
 {
 	if (value == "geo-only")
 		return GenerationMode::GeoOnly;
 	if (value == "terrain-only")
 		return GenerationMode::TerrainOnly;
+	if (value == "blueprint")
+		return GenerationMode::Blueprint;
 	return GenerationMode::GeoTerrain;
 }
 inline const char *generation_mode_name(GenerationMode mode)
@@ -127,6 +134,8 @@ inline const char *generation_mode_name(GenerationMode mode)
 		return "geo-only";
 	case GenerationMode::TerrainOnly:
 		return "terrain-only";
+	case GenerationMode::Blueprint:
+		return "blueprint";
 	case GenerationMode::GeoTerrain:
 		return "geo-terrain";
 	}
@@ -234,6 +243,10 @@ struct Args
 	GenerationMode mode{GenerationMode::GeoTerrain};
 	bool terrain{true};
 	bool legacy_terrain{false};
+	// Optional final-world transformations introduced by Rust: environmental
+	// winter dressing and post-apocalyptic ruins/overgrowth.
+	bool winter{false};
+	bool post_apocalyptic{false};
 	// Largest schematic tree tier permitted by the Rust tree-pack selector.
 	trees::TreeSize max_tree_size{trees::TreeSize::Giant};
 	bool terrain_enabled() const { return mode != GenerationMode::GeoOnly; }
@@ -245,10 +258,13 @@ struct Args
 	{
 		return mode != GenerationMode::TerrainOnly && scale < OBJECT_SKIP_SCALE;
 	}
+	bool skip_osm() const { return scale < OBJECT_SKIP_SCALE || !is_earth(body); }
 	void apply_body_defaults()
 	{
 		if (is_earth(body))
 			return;
+		winter = false;
+		post_apocalyptic = false;
 		scale = celestial_world_scale(body);
 		mode = GenerationMode::TerrainOnly;
 		overture = false;
@@ -279,7 +295,16 @@ struct Args
 	// Keep the legacy boolean cache synchronized with the Rust generation mode.
 	// Library callers may still inspect `terrain` while the generator uses the
 	// richer mode enum directly.
-	void apply_mode_defaults() { terrain = generation_mode_terrain(mode); }
+	void apply_mode_defaults()
+	{
+		terrain = generation_mode_terrain(mode);
+		if (mode == GenerationMode::Blueprint) {
+			use_3d = false;
+			interior = false;
+			building_facades = false;
+			mapillary_facades = false;
+		}
+	}
 	bool mapillary_facades_wanted() const
 	{
 		return mapillary_facades_on() || mapillary_facades_dir.has_value();

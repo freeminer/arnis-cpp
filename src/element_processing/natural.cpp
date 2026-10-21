@@ -402,8 +402,11 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 				if (mapped.height_m)
 					mapped_height_m = *mapped.height_m;
 				if (mapped.height_m)
-					mapped_request.want_size = trees::size_for_height(static_cast<int>(
-							std::lround(*mapped.height_m * editor.scale())));
+					mapped_request.want_height = std::max(
+							1, static_cast<int>(
+									   std::lround(*mapped.height_m * editor.scale())));
+				else
+					mapped_request.want_height = editor.canopy_height_hint(x, z);
 				if (editor.ground)
 					mapped_request.eco =
 							editor.ground->ecoregion_at(editor.ground_point(x, z));
@@ -581,15 +584,10 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		for (const auto &p : filled_area) {
 			int x = p.first;
 			int z = p.second;
-			// These surface types never consume randomness for rejected cells:
-			// their decorations are guarded by check_for_block. Avoid processing
-			// the rest of a tile-sized polygon for each individual mapchunk.
-			if (!editor.pos_ok(x, z) &&
-					(natural_type == "grassland" || natural_type == "heath" ||
-							natural_type == "scrub" || natural_type == "tree_row" ||
-							natural_type == "wood" || natural_type == "sand" ||
-							natural_type == "beach" || natural_type == "dune" ||
-							natural_type == "glacier" || natural_type == "bare_rock"))
+			// A tile may process a polygon beyond both its writable map bounds and
+			// ownership rectangle. Those cells cannot affect this editor, while
+			// owned clip-margin cells must still pass through this loop.
+			if (!editor.pos_ok(x, z) && !editor.owns(x, z))
 				continue;
 			const bool sealed = editor.surface_is_sealed(x, z);
 			if (!sealed && !editor.check_for_block(x, 0, z, protected_fill_blocks)) {

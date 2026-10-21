@@ -1,7 +1,7 @@
 #include <string>
 #include <map>
 #include <optional>
-#include <string_view>
+#include <set>
 #include <tuple>
 #include <algorithm>
 #include <cmath>
@@ -13,6 +13,10 @@
 #include "../bresenham.h"
 #include "../strict_parse.h"
 #include "../structures/structures.h"
+#include "../mapillary/geometry.h"
+#include "../world_editor/floor_state.h"
+#include "connected_blocks.h"
+#include "waterfront.h"
 #include "../../../arnis_adapter.h"
 namespace arnis
 {
@@ -20,175 +24,438 @@ namespace arnis
 namespace man_made
 {
 
-std::optional<int> parse_int(const std::optional<std::string> &s)
+std::string lower_copy(std::string value);
+
+namespace
 {
-	if (!s.has_value())
+const std::vector<Block> CANOPY_BLOCKS = {OAK_LEAVES, BIRCH_LEAVES, SPRUCE_LEAVES,
+		DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES, MANGROVE_LEAVES,
+		AZALEA_LEAVES};
+
+std::optional<std::pair<int, int>> anchor(const ProcessedElement &element)
+{
+	if (const auto node = element.first_node(); element.is_node() && node)
+		return std::pair{node->x, node->z};
+	const auto &nodes = element.nodes_vec();
+	if (nodes.empty())
 		return std::nullopt;
-	return strict_parse::i32(*s);
+	const std::size_t count = nodes.size() > 2 && nodes.front().x == nodes.back().x &&
+											  nodes.front().z == nodes.back().z
+									  ? nodes.size() - 1
+									  : nodes.size();
+	long long x = 0, z = 0;
+	for (std::size_t i = 0; i < count; ++i) {
+		const auto &node = nodes[i];
+		x += node.x;
+		z += node.z;
+	}
+	return std::pair{static_cast<int>(x / static_cast<long long>(count)),
+			static_cast<int>(z / static_cast<long long>(count))};
 }
 
-void generate_pier(WorldEditor &editor, const ProcessedElement &element)
+std::optional<double> tag_metres(const ProcessedElement &element, const char *key)
 {
-	const std::vector<ProcessedNode> &nodes = element.nodes_vec();
-	if (nodes.size() < 2)
-		return;
+	const auto value = element.tag(key);
+	if (!value)
+		return std::nullopt;
+	const auto parsed = mapillary::geodesy::parse_length_m(*value);
+	return parsed && *parsed > 0.0 && *parsed < 1000.0 ? parsed : std::nullopt;
+}
 
-	int pier_width = 3;
-	{
-		std::optional<int> w = parse_int(element.tag("width"));
-		if (w.has_value())
-			pier_width = w.value();
+std::optional<int> roof_top(
+		WorldEditor &editor, const CoordinateBitmap *footprints, int x, int z)
+{
+	if (!footprints || !footprints->contains(x, z))
+		return std::nullopt;
+	const int ground = editor.get_ground_level(x, z);
+	return editor.highest_block_between(x, z, ground + 1, world_editor::world_max_y());
+}
+
+int feature_height(double metres, double scale, int ground, int base, int minimum)
+{
+	const int blocks = static_cast<int>(std::round(metres * scale));
+	const int roof_height = base - ground;
+	const int own_height =
+			roof_height > 0 && blocks > roof_height + 1 ? blocks - roof_height : blocks;
+	return std::clamp(own_height, minimum,
+			std::max(minimum, world_editor::world_max_y() - base - 1));
+}
+
+bool polygon_contains_cell_center(
+		int x, int z, const std::vector<std::pair<int, int>> &polygon)
+{
+	if (polygon.size() < 3)
+		return false;
+	const double px = static_cast<double>(x) + .5;
+	const double pz = static_cast<double>(z) + .5;
+	bool inside = false;
+	std::size_t j = polygon.size() - 1;
+	for (std::size_t i = 0; i < polygon.size(); ++i) {
+		const double xi = polygon[i].first, zi = polygon[i].second;
+		const double xj = polygon[j].first, zj = polygon[j].second;
+		if (((zi > pz) != (zj > pz)) && px < (xj - xi) * (pz - zi) / (zj - zi) + xi)
+			inside = !inside;
+		j = i;
 	}
+	return inside;
+}
 
-	int pier_height = 1;
-	int support_spacing = 4;
+void mast_head(WorldEditor &editor, int x, int z, int y, int reach, bool lighting)
+{
+	const Block &block = lighting ? SEA_LANTERN : WHITE_CONCRETE;
+	const int rows = lighting ? 1 : 2;
+	for (const auto &[dx, dz] : {std::pair{0, -reach}, std::pair{0, reach},
+				 std::pair{-reach, 0}, std::pair{reach, 0}})
+		for (int dy = 0; dy < rows; ++dy)
+			editor.set_block_absolute(
+					block, x + dx, y + dy, z + dz, CANOPY_BLOCKS, std::nullopt);
+}
 
-	for (std::size_t i = 0; i + 1 < nodes.size(); ++i) {
-		const ProcessedNode &start_node = nodes[i];
-		const ProcessedNode &end_node = nodes[i + 1];
-		std::vector<std::tuple<int, int, int>> line_points =
-				bresenham_line(start_node.x, 0, start_node.z, end_node.x, 0, end_node.z);
-		for (std::size_t index = 0; index < line_points.size(); ++index) {
-			int center_x = std::get<0>(line_points[index]);
-			int center_z = std::get<2>(line_points[index]);
+void mast_cabinet(WorldEditor &editor, int x, int z)
+{
+	for (int dz = -1; dz <= 0; ++dz)
+		for (int y = 1; y <= 2; ++y)
+			editor.set_block(
+					LIGHT_GRAY_CONCRETE, x + 3, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+}
 
-			int half_width = pier_width / 2;
-			for (int x = center_x - half_width; x <= center_x + half_width; ++x) {
-				for (int z = center_z - half_width; z <= center_z + half_width; ++z) {
-					editor.set_block(OAK_SLAB, x, pier_height, z,
-							std::optional<std::vector<Block>>(), std::nullopt);
-				}
-			}
+void lattice_ring(WorldEditor &editor, int x, int z, int y, const Block &corner)
+{
+	for (const auto &[dx, dz] :
+			{std::pair{-1, -1}, std::pair{1, -1}, std::pair{-1, 1}, std::pair{1, 1}})
+		editor.set_block_absolute(corner, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+	for (const auto &[dx, dz] :
+			{std::pair{0, -1}, std::pair{0, 1}, std::pair{-1, 0}, std::pair{1, 0}}) {
+		const auto bars =
+				connected_blocks::connected_iron_bars(dx != 0, dx != 0, dz != 0, dz != 0);
+		editor.set_block_with_properties_absolute(bars, x + dx, y, z + dz,
+				std::optional<std::vector<Block>>{CANOPY_BLOCKS}, std::nullopt);
+	}
+}
 
-			if ((index % support_spacing) == 0) {
-				int hw = pier_width / 2;
-				std::vector<std::pair<int, int>> support_positions = {
-						{center_x - hw, center_z}, {center_x + hw, center_z}};
-				for (const auto &p : support_positions) {
-					int pillar_x = p.first;
-					int pillar_z = p.second;
-					editor.set_block(OAK_LOG, pillar_x, 0, pillar_z,
-							std::optional<std::vector<Block>>(), std::nullopt);
-				}
-			}
+bool summit_cross_tagged(const tags_t &tags)
+{
+	const auto natural = tags.get("natural");
+	return (natural == "peak" || natural == "volcano" || natural == "hill") &&
+		   tags.get("summit:cross") == "yes" && tags.get("man_made") != "cross";
+}
+
+void place_cross(
+		WorldEditor &editor, const ProcessedNode &node, const Args &args, bool summit)
+{
+	const int ground = editor.get_ground_level(node.x, node.z);
+	const double metres =
+			tag_metres(ProcessedElement(node), "height").value_or(summit ? 5.0 : 6.0);
+	const int height =
+			std::min(40, feature_height(metres, args.scale, ground, ground, 3));
+	auto material = node.tags.get("material");
+	std::transform(material.begin(), material.end(), material.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	const bool metal = material == "metal" || material == "steel" || material == "iron" ||
+					   material == "aluminium";
+	const bool solid = height >= 10;
+	const Block &block = metal ? (solid ? IRON_BLOCK : IRON_BARS)
+						 : (material == "concrete" || material == "stone")
+								 ? WHITE_CONCRETE
+						 : solid ? DARK_OAK_PLANKS
+								 : DARK_OAK_FENCE;
+	int base = ground;
+	if (summit) {
+		editor.set_block_absolute(COBBLESTONE, node.x, base + 1, node.z);
+		for (const auto &[dx, dz] :
+				{std::pair{1, 0}, std::pair{-1, 0}, std::pair{0, 1}, std::pair{0, -1}})
+			editor.set_block_absolute(
+					COBBLESTONE_SLAB, node.x + dx, base + 1, node.z + dz);
+		++base;
+	}
+	const int arm_y = base + (height * 2 + 2) / 3;
+	const int half = std::max(1, height / 5);
+	auto put = [&](int x, int y, int z) {
+		if (connected_blocks::is_connectable(block))
+			connected_blocks::place_connected(editor, block, x, y, z);
+		else
+			editor.set_block_absolute(block, x, y, z);
+	};
+	for (int y = base + 1; y <= base + height; ++y)
+		put(node.x, y, node.z);
+	for (int k = -half; k <= half; ++k)
+		if (node.id % 2 == 0)
+			put(node.x + k, arm_y, node.z);
+		else
+			put(node.x, arm_y, node.z + k);
+}
+} // namespace
+
+bool is_summit_cross(const tags_t &tags)
+{
+	return summit_cross_tagged(tags);
+}
+
+std::vector<std::pair<int, int>> mapped_crane_points(
+		const std::vector<ProcessedElement> &elements)
+{
+	std::vector<std::pair<int, int>> points;
+	for (const auto &element : elements)
+		if (element.tag("man_made") == std::optional<std::string>("crane"))
+			if (const auto point = anchor(element))
+				points.push_back(*point);
+	return points;
+}
+
+std::size_t drop_doubled_summit_crosses(
+		std::vector<ProcessedElement> &elements, double scale)
+{
+	std::vector<std::pair<int, int>> crosses;
+	for (const auto &element : elements)
+		if (element.is_node() && element.as_node().tags.get("man_made") == "cross")
+			crosses.emplace_back(element.as_node().x, element.as_node().z);
+	if (crosses.empty())
+		return 0;
+	const double reach = std::max(1.0, 30.0 * scale);
+	std::size_t dropped = 0;
+	for (auto &element : elements) {
+		if (!element.is_node() || !summit_cross_tagged(element.as_node().tags))
+			continue;
+		auto &node = std::get<ProcessedNode>(element);
+		const bool near = std::any_of(crosses.begin(), crosses.end(), [&](const auto &p) {
+			return std::hypot(static_cast<double>(p.first) - node.x,
+						   static_cast<double>(p.second) - node.z) <= reach;
+		});
+		if (near && node.tags.erase("summit:cross") > 0)
+			++dropped;
+	}
+	return dropped;
+}
+
+void generate_summit_cross(
+		WorldEditor &editor, const ProcessedNode &node, const Args &args)
+{
+	place_cross(editor, node, args, true);
+}
+
+void generate_antenna(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, const CoordinateBitmap *footprints)
+{
+	const auto point = anchor(element);
+	if (!point)
+		return;
+	const auto [x, z] = *point;
+	const bool antenna = element.tag("man_made") == "antenna";
+	const bool lighting = element.tag("tower:type") == "lighting";
+	const int ground = editor.get_ground_level(x, z);
+	const auto roof = roof_top(editor, footprints, x, z);
+	const int base = roof.value_or(ground);
+	const double default_m = roof		? (antenna ? 3.0 : 6.0)
+							 : lighting ? 20.0
+							 : antenna	? 10.0
+										: 30.0;
+	const double metres = tag_metres(element, "height").value_or(default_m);
+	const int height = feature_height(metres, args.scale, ground, base, 2);
+	const int top = base + height;
+	const auto construction = element.tag("tower:construction");
+	const bool tube =
+			roof || height <= 12 ||
+			(construction &&
+					(*construction == "monopole" || *construction == "tube" ||
+							*construction == "tubular" || *construction == "guyed_tube" ||
+							*construction == "concrete"));
+	const bool banded = metres >= 100.0;
+	if (tube && (roof || height <= 12)) {
+		for (int y = base + 1; y < top; ++y)
+			editor.set_block_absolute(IRON_BARS, x, y, z, CANOPY_BLOCKS, std::nullopt);
+		editor.set_block_absolute(LIGHTNING_ROD, x, top, z, CANOPY_BLOCKS, std::nullopt);
+		if (height >= 6)
+			mast_head(editor, x, z, top - 2, 1, lighting);
+		return;
+	}
+	if (tube) {
+		const bool thick = height >= 60;
+		const std::vector<std::pair<int, int>> section =
+				thick ? std::vector<std::pair<int, int>>{{0, 0}, {1, 0}, {-1, 0}, {0, 1},
+								{0, -1}}
+					  : std::vector<std::pair<int, int>>{{0, 0}};
+		for (int y = base + 1; y < top - 2; ++y) {
+			const int band = (y - base - 1) * 7 / std::max(1, top - 2 - base);
+			const Block &block = banded ? (band % 2 == 0 ? RED_CONCRETE : WHITE_CONCRETE)
+										: LIGHT_GRAY_CONCRETE;
+			for (const auto &[dx, dz] : section)
+				editor.set_block_absolute(
+						block, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
 		}
-	}
-}
-
-void generate_antenna(WorldEditor &editor, const ProcessedElement &element)
-{
-	std::optional<ProcessedNode> maybe_node = element.first_node();
-	if (!maybe_node.has_value())
-		return;
-	ProcessedNode node = maybe_node.value();
-	int x = node.x;
-	int z = node.z;
-
-	int height = 20;
-	const auto height_tag = element.tag("height");
-	if (height_tag.has_value()) {
-		height = std::min(parse_int(height_tag).value_or(20), 40);
+		for (int y = top - 2; y < top; ++y)
+			editor.set_block_absolute(IRON_BARS, x, y, z, CANOPY_BLOCKS, std::nullopt);
+		editor.set_block_absolute(LIGHTNING_ROD, x, top, z, CANOPY_BLOCKS, std::nullopt);
+		mast_head(editor, x, z, top - 4, thick ? 2 : 1, lighting);
+		mast_cabinet(editor, x, z);
 	} else {
-		std::optional<std::string> tower_type = element.tag("tower:type");
-		if (tower_type.has_value()) {
-			if (tower_type.value() == "communication")
-				height = 20;
-			else if (tower_type.value() == "cellular")
-				height = 15;
-			else
-				height = 20;
+		const int lattice_top = top - 4;
+		for (int y = base + 1; y <= lattice_top; ++y) {
+			const int band = (y - base - 1) * 7 / std::max(1, lattice_top - base);
+			const Block &corner = banded ? (band % 2 == 0 ? RED_CONCRETE : WHITE_CONCRETE)
+										 : ANDESITE_WALL;
+			lattice_ring(editor, x, z, y, corner);
 		}
+		for (int y = lattice_top + 1; y < top; ++y)
+			editor.set_block_absolute(IRON_BARS, x, y, z, CANOPY_BLOCKS, std::nullopt);
+		editor.set_block_absolute(LIGHTNING_ROD, x, top, z, CANOPY_BLOCKS, std::nullopt);
+		mast_head(editor, x, z, lattice_top - 2, 2, lighting);
+		mast_cabinet(editor, x, z);
 	}
-
-	editor.set_block(
-			IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(), std::nullopt);
-	for (int y = 4; y < height; ++y) {
-		editor.set_block(
-				IRON_BARS, x, y, z, std::optional<std::vector<Block>>(), std::nullopt);
-	}
-
-	for (int y = 7; y < height; y += 7) {
-		editor.set_block(IRON_BLOCK, x, y, z,
-				std::optional<std::vector<Block>>(std::vector<Block>{IRON_BARS}),
-				std::nullopt);
-		std::vector<std::pair<int, int>> support_positions = {
-				{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-		for (const auto &d : support_positions) {
-			editor.set_block(IRON_BLOCK, x + d.first, y, z + d.second,
-					std::optional<std::vector<Block>>(), std::nullopt);
-		}
-	}
-
-	editor.fill_blocks(GRAY_CONCRETE, x - 1, 1, z - 1, x + 1, 2, z + 1);
 }
 
-void generate_chimney(WorldEditor &editor, const ProcessedElement &element)
+void generate_chimney(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, const CoordinateBitmap *footprints)
 {
-	std::optional<ProcessedNode> maybe_node = element.first_node();
-	if (!maybe_node.has_value())
+	const auto point = anchor(element);
+	if (!point)
 		return;
-	ProcessedNode node = maybe_node.value();
-	int x = node.x;
-	int z = node.z;
-	int height = 25;
-
-	for (int y = 0; y < height; ++y) {
-		for (int dx = -1; dx <= 1; ++dx) {
-			for (int dz = -1; dz <= 1; ++dz) {
-				if (dx == 0 && dz == 0)
-					continue;
-				editor.set_block(BRICK, x + dx, y, z + dz,
-						std::optional<std::vector<Block>>(), std::nullopt);
-			}
+	const auto [x, z] = *point;
+	const int ground = editor.get_ground_level(x, z);
+	const int base = roof_top(editor, footprints, x, z).value_or(ground);
+	const double metres =
+			tag_metres(element, "height").value_or(base > ground ? 2.0 : 40.0);
+	const int height = feature_height(metres, args.scale, ground, base, 2);
+	Block body = BRICK;
+	const auto material =
+			lower_copy(element.tag("building:material")
+							   .value_or(element.tag("material").value_or("")));
+	if (material == "concrete" || material == "reinforced_concrete" ||
+			material == "cement" || material == "metal" || material == "steel" ||
+			material == "iron" || metres >= 80.0)
+		body = LIGHT_GRAY_CONCRETE;
+	if (height <= 6) {
+		for (int y = base + 1; y <= base + height; ++y)
+			editor.set_block_absolute(body, x, y, z, CANOPY_BLOCKS, std::nullopt);
+		return;
+	}
+	const auto diameter = tag_metres(element, "diameter");
+	double radius = diameter ? *diameter * args.scale / 2.0
+							 : 1.0 + static_cast<double>(height) / 16.0;
+	if (element.nodes_vec().size() >= 3) {
+		int min_x = x, max_x = x, min_z = z, max_z = z;
+		for (const auto &node : element.nodes_vec()) {
+			min_x = std::min(min_x, node.x);
+			max_x = std::max(max_x, node.x);
+			min_z = std::min(min_z, node.z);
+			max_z = std::max(max_z, node.z);
 		}
+		radius = std::min(max_x - min_x, max_z - min_z) / 2.0 - .5;
+	}
+	const bool outlined = element.nodes_vec().size() >= 3;
+	std::set<std::pair<int, int>> outline_cells;
+	if (outlined) {
+		std::vector<std::pair<int, int>> polygon;
+		polygon.reserve(element.nodes_vec().size());
+		int min_x = std::numeric_limits<int>::max();
+		int max_x = std::numeric_limits<int>::min();
+		int min_z = std::numeric_limits<int>::max();
+		int max_z = std::numeric_limits<int>::min();
+		for (const auto &node : element.nodes_vec()) {
+			polygon.emplace_back(node.x, node.z);
+			min_x = std::min(min_x, node.x);
+			max_x = std::max(max_x, node.x);
+			min_z = std::min(min_z, node.z);
+			max_z = std::max(max_z, node.z);
+		}
+		for (int cx = min_x; cx <= max_x; ++cx)
+			for (int cz = min_z; cz <= max_z; ++cz)
+				if (polygon_contains_cell_center(cx, cz, polygon))
+					outline_cells.emplace(cx, cz);
+		if (outline_cells.empty())
+			outline_cells.emplace(x, z);
+	}
+	radius = std::clamp(radius, 1.0, 12.0);
+	const double top_radius = std::max(1.0, radius * .6);
+	const bool banded = metres >= 100.0 && body != BRICK;
+	const int band_height = std::max(1, height / 18);
+	const auto on_outline = [&](int cx, int cz) {
+		if (!outlined || outline_cells.empty())
+			return true;
+		for (const auto &[dx, dz] : {std::pair{0, 0}, std::pair{1, 0}, std::pair{-1, 0},
+					 std::pair{0, 1}, std::pair{0, -1}})
+			if (outline_cells.contains({cx + dx, cz + dz}))
+				return true;
+		return false;
+	};
+	for (int i = 0; i < height; ++i) {
+		const int y = base + 1 + i;
+		const double t = static_cast<double>(i) / height;
+		const double r = radius + (top_radius - radius) * t;
+		const int from_top = height - 1 - i;
+		const Block &layer =
+				from_top < 2 ? POLISHED_BLACKSTONE
+				: banded && from_top < 2 + 3 * band_height
+						? (((from_top - 2) / band_height) % 2 == 0 ? RED_CONCRETE
+																   : WHITE_CONCRETE)
+						: body;
+		const int reach = static_cast<int>(std::ceil(r + .5));
+		for (int dz = -reach; dz <= reach; ++dz)
+			for (int dx = -reach; dx <= reach; ++dx) {
+				const double d2 = static_cast<double>(dx * dx + dz * dz);
+				if (d2 <= (r + .5) * (r + .5) && d2 > (r - .5) * (r - .5) &&
+						on_outline(x + dx, z + dz))
+					editor.set_block_absolute(
+							layer, x + dx, y, z + dz, CANOPY_BLOCKS, std::nullopt);
+			}
 	}
 }
 
 void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 {
-	std::optional<ProcessedNode> maybe_node = element.first_node();
-	if (!maybe_node.has_value())
+	const auto point = anchor(element);
+	if (!point)
 		return;
-	ProcessedNode node = maybe_node.value();
-	int x = node.x;
-	int z = node.z;
-	if (EARTH_WELL.id() != STONE_BRICKS.id()) {
-		editor.set_block(EARTH_WELL, x, 1, z, std::nullopt, std::nullopt);
+	const auto [x, z] = *point;
+	const int base = editor.get_ground_level(x, z);
+	if (const auto pump = element.tag("pump"); pump && *pump != "no") {
+		for (int y = 1; y <= 2; ++y)
+			editor.set_block_absolute(BLACKSTONE_WALL, x, base + y, z);
+		editor.set_block_with_properties_absolute(
+				BlockWithProperties{LEVER,
+						{{"face", "floor"}, {"facing", "east"}, {"powered", "false"}}},
+				x, base + 3, z, std::nullopt, std::nullopt);
+		editor.set_block_with_properties_absolute(
+				BlockWithProperties{WATER_CAULDRON, {{"level", "2"}}}, x + 1, base + 1, z,
+				std::nullopt, std::nullopt);
 		return;
 	}
 
+	// Shaft of water inside a two-high cobblestone ring.
 	for (int dx = -1; dx <= 1; ++dx) {
 		for (int dz = -1; dz <= 1; ++dz) {
 			if (dx == 0 && dz == 0) {
-				editor.set_block(WATER, x, -1, z, std::optional<std::vector<Block>>(),
-						std::nullopt);
-				editor.set_block(WATER, x, 0, z, std::optional<std::vector<Block>>(),
-						std::nullopt);
+				for (int y = base - 2; y <= base; ++y)
+					editor.set_block_absolute(
+							WATER, x, y, z, std::nullopt, std::vector<Block>{});
 			} else {
-				editor.set_block(STONE_BRICKS, x + dx, 0, z + dz,
-						std::optional<std::vector<Block>>(), std::nullopt);
-				editor.set_block(STONE_BRICKS, x + dx, 1, z + dz,
-						std::optional<std::vector<Block>>(), std::nullopt);
+				editor.set_block_absolute(COBBLESTONE, x + dx, base, z + dz, std::nullopt,
+						std::vector<Block>{});
+				editor.set_block_absolute(COBBLESTONE, x + dx, base + 1, z + dz);
 			}
 		}
 	}
 
-	editor.fill_blocks(OAK_LOG, x - 2, 1, z, x - 2, 4, z,
-			std::optional<std::vector<Block>>(), std::nullopt);
-	editor.fill_blocks(OAK_LOG, x + 2, 1, z, x + 2, 4, z,
-			std::optional<std::vector<Block>>(), std::nullopt);
-
-	editor.set_block(
-			OAK_SLAB, x - 1, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
-	editor.set_block(
-			OAK_FENCE, x, 4, z, std::optional<std::vector<Block>>(), std::nullopt);
-	editor.set_block(
-			OAK_SLAB, x, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
-	editor.set_block(
-			OAK_SLAB, x + 1, 5, z, std::optional<std::vector<Block>>(), std::nullopt);
-
-	editor.set_block(
-			IRON_BLOCK, x, 3, z, std::optional<std::vector<Block>>(), std::nullopt);
+	for (const int dx : {-1, 1})
+		for (int y = base + 2; y <= base + 4; ++y)
+			editor.set_block_absolute(OAK_FENCE, x + dx, y, z);
+	editor.set_block_with_properties_absolute(
+			BlockWithProperties{SPRUCE_LOG, {{"axis", "x"}}}, x, base + 5, z,
+			std::nullopt, std::nullopt);
+	for (const int dx : {-2, -1, 1, 2})
+		editor.set_block_absolute(SPRUCE_PLANKS, x + dx, base + 5, z);
+	for (int dx = -2; dx <= 2; ++dx) {
+		for (const auto &[dz, facing] :
+				{std::pair{-1, StairFacing::South}, std::pair{1, StairFacing::North}})
+			editor.set_block_with_properties_absolute(
+					create_stair_with_properties(
+							SPRUCE_STAIRS, facing, StairShape::Straight),
+					x + dx, base + 5, z + dz, std::nullopt, std::nullopt);
+		editor.set_block_absolute(SPRUCE_SLAB, x + dx, base + 6, z);
+	}
+	for (int y = base + 3; y <= base + 4; ++y)
+		editor.set_block_with_properties_absolute(
+				BlockWithProperties{CHAIN_X, {{"axis", "y"}}}, x, y, z, std::nullopt,
+				std::nullopt);
 }
 
 void generate_manhole(WorldEditor &editor, const ProcessedElement &element)
@@ -501,8 +768,9 @@ bool is_tank_structure(const ProcessedWay &way)
 	return is_tank_value(man_made) || is_tank_value(building);
 }
 
-void generate_man_made(
-		WorldEditor &editor, const ProcessedElement &element, const Args &args)
+void generate_man_made(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, const FloodFillCache &flood_fill_cache,
+		const CoordinateBitmap &building_footprints)
 {
 	for (const char *key : {"layer", "level"}) {
 		if (const auto value = element.tag(key);
@@ -515,11 +783,13 @@ void generate_man_made(
 		return;
 	const std::string &t = man_made_type.value();
 	if (t == "pier") {
-		generate_pier(editor, element);
+		waterfront::generate_pier(editor, element, flood_fill_cache, args);
+	} else if (t == "breakwater" || t == "groyne") {
+		waterfront::generate_breakwater(editor, element, flood_fill_cache, args);
 	} else if (t == "antenna" || t == "mast") {
-		generate_antenna(editor, element);
+		generate_antenna(editor, element, args, &building_footprints);
 	} else if (t == "chimney") {
-		generate_chimney(editor, element);
+		generate_chimney(editor, element, args, &building_footprints);
 	} else if (t == "water_well") {
 		generate_water_well(editor, element);
 	} else if (t == "manhole") {
@@ -540,13 +810,17 @@ void generate_man_made(
 		} else if (auto node = element.first_node(); node.has_value()) {
 			structures::lighthouse::place(editor, node->x, node->z);
 		}
+	} else if (t == "crane") {
+		if (const auto point = anchor(element))
+			structures::crane::place_mapped(editor, point->first, point->second,
+					element.tags(), building_footprints);
 	} else {
 		// unknown type -> ignore
 	}
 }
 
-void generate_man_made_nodes(
-		WorldEditor &editor, const ProcessedNode &node, const Args &args)
+void generate_man_made_nodes(WorldEditor &editor, const ProcessedNode &node,
+		const Args &args, const CoordinateBitmap &building_footprints)
 {
 	auto it = node.tags.find("man_made");
 	if (it == node.tags.end())
@@ -558,9 +832,9 @@ void generate_man_made_nodes(
 
 	const std::string &t = it->second;
 	if (t == "antenna" || t == "mast") {
-		generate_antenna(editor, element);
+		generate_antenna(editor, element, args, &building_footprints);
 	} else if (t == "chimney") {
-		generate_chimney(editor, element);
+		generate_chimney(editor, element, args, &building_footprints);
 	} else if (t == "water_well") {
 		generate_water_well(editor, element);
 	} else if (t == "manhole") {
@@ -569,6 +843,15 @@ void generate_man_made_nodes(
 		generate_tank_structure(editor, element, args);
 	} else if (t == "lighthouse") {
 		structures::lighthouse::place(editor, node.x, node.z);
+	} else if (t == "dolphin") {
+		waterfront::generate_dolphin(editor, node);
+	} else if (t == "cross") {
+		const bool summit =
+				node.tags.get("summit:cross") == "yes" || node.tags.contains("natural");
+		place_cross(editor, node, args, summit);
+	} else if (t == "crane") {
+		structures::crane::place_mapped(
+				editor, node.x, node.z, node.tags, building_footprints);
 	} else {
 		// unknown -> ignore
 	}
@@ -577,7 +860,15 @@ void generate_man_made_nodes(
 void generate_man_made_nodes(WorldEditor &editor, const ProcessedNode &node)
 {
 	Args args;
-	generate_man_made_nodes(editor, node, args);
+	CoordinateBitmap no_footprints;
+	generate_man_made_nodes(editor, node, args, no_footprints);
+}
+
+void generate_man_made_nodes(
+		WorldEditor &editor, const ProcessedNode &node, const Args &args)
+{
+	CoordinateBitmap no_footprints;
+	generate_man_made_nodes(editor, node, args, no_footprints);
 }
 }
 }

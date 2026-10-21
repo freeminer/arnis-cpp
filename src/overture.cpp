@@ -5,6 +5,7 @@
 #include "overture/cache.h"
 #include "overture/pmtiles.h"
 #include "retrieve_data.h"
+#include "net.h"
 #include "../../http.h"
 
 #if defined(USE_ARROW) && USE_ARROW
@@ -204,16 +205,7 @@ TileFetchPool &tile_fetch_pool()
 
 bool overture_tiles_cover(const geographic::LLBBox &bbox)
 {
-	const auto [min_x, min_y] = pmtiles::lonlat_to_tile(
-			bbox.min().lng(), bbox.max().lat(), OVERTURE_TILE_ZOOM);
-	const auto [max_x, max_y] = pmtiles::lonlat_to_tile(
-			bbox.max().lng(), bbox.min().lat(), OVERTURE_TILE_ZOOM);
-	if (max_x < min_x || max_y < min_y)
-		return false;
-	const auto width = std::uint64_t(max_x) - min_x + 1;
-	const auto height = std::uint64_t(max_y) - min_y + 1;
-	return width <= OVERTURE_MAX_TILES && height <= OVERTURE_MAX_TILES &&
-		   width * height <= OVERTURE_MAX_TILES;
+	return pmtiles::tile_count(bbox, OVERTURE_TILE_ZOOM) <= OVERTURE_MAX_TILES;
 }
 
 size_t release_listing_write(void *data, size_t size, size_t count, void *opaque)
@@ -238,6 +230,7 @@ std::vector<std::string> discover_overture_releases()
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
 	long status = 0;
+	[[maybe_unused]] auto permit = net::request_permit();
 	const auto result = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
@@ -1213,6 +1206,7 @@ static BuildingTransportSource http_pmtiles_building_transport_source_impl(
 				if (attempt > 0)
 					std::this_thread::sleep_for(
 							std::chrono::milliseconds(500U << (attempt - 1)));
+				[[maybe_unused]] auto permit = net::request_permit();
 				bytes = http_get_range(url, offset, length);
 				if (bytes.size() == length)
 					break;
@@ -1289,6 +1283,7 @@ std::optional<std::string> http_get_bytes(const std::string &url)
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
 	long status = 0;
+	[[maybe_unused]] auto permit = net::request_permit();
 	const auto result = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
@@ -1303,7 +1298,8 @@ std::optional<std::uint64_t> parquet_file_size(
 	if (const auto cached = cache::read(cache_dir / "size")) {
 		const std::string value(cached->begin(), cached->end());
 		std::uint64_t size = 0;
-		const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(), size);
+		const auto [end, error] =
+				std::from_chars(value.data(), value.data() + value.size(), size);
 		if (error == std::errc{} && end == value.data() + value.size() && size >= 12)
 			return size;
 	}
@@ -1317,6 +1313,7 @@ std::optional<std::uint64_t> parquet_file_size(
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
 	long status = 0;
+	[[maybe_unused]] auto permit = net::request_permit();
 	const auto result = curl_easy_perform(curl);
 	curl_off_t length = -1;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
@@ -1326,20 +1323,20 @@ std::optional<std::uint64_t> parquet_file_size(
 		return std::nullopt;
 	const auto size = static_cast<std::uint64_t>(length);
 	const auto encoded = std::to_string(size);
-	cache::write_atomic(cache_dir / "size", std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
+	cache::write_atomic(cache_dir / "size",
+			std::vector<std::uint8_t>(encoded.begin(), encoded.end()));
 	return size;
 }
 
-std::optional<std::vector<std::uint8_t>> fetch_parquet_range(
-		const std::string &url, std::uint64_t start, std::uint64_t length,
-		const std::filesystem::path &cache_dir,
+std::optional<std::vector<std::uint8_t>> fetch_parquet_range(const std::string &url,
+		std::uint64_t start, std::uint64_t length, const std::filesystem::path &cache_dir,
 		unsigned attempts = OVERTURE_RANGE_ATTEMPTS)
 {
 	if (length == 0 || length > std::numeric_limits<std::size_t>::max() ||
 			start > std::numeric_limits<std::uint64_t>::max() - (length - 1))
 		return std::nullopt;
-	const auto cache_file = cache_dir /
-			(std::to_string(start) + "_" + std::to_string(length) + ".bin");
+	const auto cache_file =
+			cache_dir / (std::to_string(start) + "_" + std::to_string(length) + ".bin");
 	if (const auto bytes = cache::read(cache_file); bytes && bytes->size() == length)
 		return bytes;
 	std::string body;
@@ -1350,8 +1347,8 @@ std::optional<std::vector<std::uint8_t>> fetch_parquet_range(
 		if (!curl)
 			continue;
 		body.clear();
-		const auto range = std::to_string(start) + "-" +
-				std::to_string(start + length - 1);
+		const auto range =
+				std::to_string(start) + "-" + std::to_string(start + length - 1);
 		curl_easy_setopt(curl, CURLOPT_URL, url.c_str());
 		curl_easy_setopt(curl, CURLOPT_RANGE, range.c_str());
 		curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, binary_write);
@@ -1361,6 +1358,7 @@ std::optional<std::vector<std::uint8_t>> fetch_parquet_range(
 		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
 		long status = 0;
+		[[maybe_unused]] auto permit = net::request_permit();
 		const auto result = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 		curl_easy_cleanup(curl);
@@ -2005,8 +2003,7 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 				scan_overture_sources(*source_scalar, source_info);
 		}
 		buildings.push_back({*value_id, std::move(*ring), source_info.is_osm,
-				source_info.osm_ref,
-				number_at(height, row), number_at(min_height, row),
+				source_info.osm_ref, number_at(height, row), number_at(min_height, row),
 				integer_at(floors, row), string_at(subtype, row), string_at(clazz, row),
 				intern_roof_shape(string_at(roof_shape, row)),
 				intern_roof_material(string_at(roof_material, row)),
@@ -2083,7 +2080,7 @@ std::optional<ProcessedWay> overture_building_to_way(const OvertureBuilding &bui
 	XZBBox clipbox(clip_rectangle.min().x, clip_rectangle.min().z, clip_rectangle.max().x,
 			clip_rectangle.max().z);
 	const auto source_nodes = way.nodes;
-	way.nodes = clipping::clip_way_to_bbox(source_nodes, clipbox);
+	way.nodes = clipping::clip_way_to_bbox_owned(std::move(way.nodes), clipbox);
 	// The generic clipper emits projected nodes. Restore their geographic
 	// coordinates by interpolating along the source ring so host mapgens can
 	// reproject Overture geometry into their own world coordinate frame.

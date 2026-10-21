@@ -99,6 +99,15 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		return 1;
 	};
 	const auto id = block.block.id();
+	if (block_definitions::VINE.id() != AIR.id() &&
+			block.block == block_definitions::VINE) {
+		static constexpr std::pair<std::string_view, std::uint8_t> faces[] = {
+				{"north", 5}, {"east", 2}, {"south", 4}, {"west", 3}};
+		for (const auto &[face, param2] : faces)
+			if (property(face) == "true")
+				return {"mcl_core:vine", param2};
+		return {"mcl_core:vine", 5};
+	}
 	if (id >= 393 && id <= 396) {
 		static constexpr const char *names[] = {"mcl_amethyst:amethyst_cluster",
 				"mcl_amethyst:small_amethyst_bud", "mcl_amethyst:medium_amethyst_bud",
@@ -1169,8 +1178,14 @@ LuantiNode to_luanti_node(
 		return {"mcl_stairs:slab_nether_brick", 0};
 	case 493:
 		return {"mcl_stairs:slab_copper_oxidized_cut", 0};
-	case 494:
-		return {"mcl_fences:oak_fence_gate", 0};
+	case 494: {
+		const std::string_view gate_facing = facing ? facing : "north";
+		const std::uint8_t param2 = gate_facing == "east"	 ? 1
+									: gate_facing == "south" ? 2
+									: gate_facing == "west"	 ? 3
+															 : 0;
+		return {"mcl_fences:oak_fence_gate", param2};
+	}
 	case 495:
 		return {"mcl_sponges:sponge", 0};
 	case 496:
@@ -1179,6 +1194,27 @@ LuantiNode to_luanti_node(
 		return {"mcl_colorblocks:hardened_clay_pink", 0};
 	case 498:
 		return {"mcl_colorblocks:hardened_clay_lime", 0};
+	case 499:
+	case 500:
+	case 501:
+	case 502: {
+		static constexpr std::uint8_t wallmounted[] = {5, 2, 4, 3};
+		return {"mcl_core:vine", wallmounted[id - 499]};
+	}
+	case 503:
+		return {"mcl_nether:netherrack", 0};
+	case 504:
+		return {"mcl_fire:eternal_fire", 0};
+	case 505:
+		return {"mcl_deepslate:deepslate_bricks_cracked", 0};
+	case 506:
+		return {"mcl_deepslate:deepslate_tiles_cracked", 0};
+	case 507:
+		return {"mcl_blackstone:blackstone_brick_polished_cracked", 0};
+	case 508:
+		return {"mcl_nether:cracked_nether_brick", 0};
+	case 509:
+		return {"mcl_walls:mossycobble", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

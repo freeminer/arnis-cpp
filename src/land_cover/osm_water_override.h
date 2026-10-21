@@ -9,8 +9,8 @@ namespace arnis::land_cover
 struct WaterOverrideGuard
 {
 	std::vector<std::uint64_t> protected_mask;
-	std::vector<std::vector<float>> nearest_water_y;
-	std::size_t width{0};
+	std::vector<float> nearest_water_y;
+	std::size_t width{0}, height{0};
 	bool has_elevation{false};
 	bool allows(const std::vector<std::vector<float>> &heights, std::size_t x,
 			std::size_t z, float tolerance = 1.5f) const;

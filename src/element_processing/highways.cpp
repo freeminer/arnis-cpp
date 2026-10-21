@@ -145,13 +145,51 @@ void precompute_row_medians(const crate::world_editor::WorldEditor &editor,
 		std::array<int, 2 * MAX_BLOCK_RANGE + 1> &out)
 {
 	assert(block_range >= 0 && block_range <= MAX_BLOCK_RANGE);
-	for (int axial = -block_range; axial <= block_range; ++axial) {
+	std::array<int, 2 * MAX_BLOCK_RANGE + 3> raw{};
+	const int len = block_range * 2 + 1;
+	for (int i = 0; i < len + 2; ++i) {
+		const int axial = -block_range - 1 + i;
 		const int sample_x = dir_horizontal ? centerline_x + axial : centerline_x;
 		const int sample_z = dir_horizontal ? centerline_z : centerline_z + axial;
-		out[static_cast<std::size_t>(axial + block_range)] =
-				perpendicular_median_ground_y(editor, sample_x, sample_z, centerline_x,
-						centerline_z, block_range, dir_horizontal);
+		raw[static_cast<std::size_t>(i)] = perpendicular_median_raw(editor, sample_x,
+				sample_z, centerline_x, centerline_z, block_range, dir_horizontal);
 	}
+	for (int i = 0; i < len; ++i) {
+		std::array<int, 3> taps{raw[static_cast<std::size_t>(i)],
+				raw[static_cast<std::size_t>(i + 1)],
+				raw[static_cast<std::size_t>(i + 2)]};
+		std::sort(taps.begin(), taps.end());
+		out[static_cast<std::size_t>(i)] = taps[1];
+	}
+}
+
+bool is_carriageway(const std::string &type)
+{
+	return !type.empty() && type != "footway" && type != "path" && type != "steps" &&
+		   type != "pedestrian" && type != "cycleway" && type != "bridleway" &&
+		   type != "corridor" && type != "track" && type != "elevator" &&
+		   type != "platform";
+}
+
+std::optional<std::string> surface_highway_type(const ProcessedWay &way)
+{
+	const auto highway_type = way.tags.get("highway");
+	if (highway_type.empty() || highway_type == "street_lamp" ||
+			highway_type == "crossing" || highway_type == "bus_stop" ||
+			way.tags.get("area") == "yes" || way.tags.get("indoor") == "yes" ||
+			way.tags.get("aeroway") == "jet_bridge")
+		return std::nullopt;
+	if (const auto level = crate::strict_parse::i32(way.tags.get("level"));
+			level && *level < 0)
+		return std::nullopt;
+	return highway_type;
+}
+
+bool tunnel_renders_at_surface(
+		const ProcessedWay &way, const world_editor::WorldEditor *editor, double scale)
+{
+	return !renders_as_highway_tunnel(way) ||
+		   (editor && !tunnel_bore_fits(*editor, way, scale));
 }
 
 bool is_pedestrian_way_tags(const crate::tags_t &tags)
@@ -980,8 +1018,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const auto tunnel_approach = (is_bridge_member || is_bridge_ramp)
 										 ? std::nullopt
 										 : tunnel_portals.approach(way.id);
-	if (way.tags.get("lit") == "yes" && !is_bridge_member && !is_bridge_ramp &&
-			layer_value == 0 && highway_type != "steps")
+	if (way.tags.get("lit") == "yes" && args.mode != GenerationMode::Blueprint &&
+			!is_bridge_member && !is_bridge_ramp && layer_value == 0 &&
+			highway_type != "steps")
 		place_way_lamps(editor, way, block_range, road_mask);
 
 	const auto &block_types = *surface_palette_view(highway_type, way.tags);
@@ -2020,25 +2059,11 @@ crate::CoordinateBitmap collect_road_surface_coords(
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		auto it_highway = way.tags.find("highway");
-		if (it_highway == way.tags.end())
-			continue;
-		const auto &highway_type = it_highway->second;
-		if (renders_as_highway_tunnel(way) && tunnel_bore_fits(editor, way, scale))
-			continue;
-		if (highway_type == "street_lamp" || highway_type == "crossing" ||
-				highway_type == "bus_stop")
-			continue;
-		if (way.tags.get("area") == "yes" || way.tags.get("indoor") == "yes")
-			continue;
-		if (way.tags.get("aeroway") == "jet_bridge")
-			continue;
-		if (const auto it_level = way.tags.find("level");
-				it_level != way.tags.end() &&
-				crate::strict_parse::i32(it_level->second).value_or(0) < 0)
+		const auto highway_type = surface_highway_type(way);
+		if (!highway_type || !tunnel_renders_at_surface(way, &editor, scale))
 			continue;
 
-		const int block_range = highway_block_range(highway_type, way.tags, scale);
+		const int block_range = highway_block_range(*highway_type, way.tags, scale);
 		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
 			const auto &prev = way.nodes[i - 1];
 			const auto &cur = way.nodes[i];
@@ -2067,21 +2092,12 @@ crate::CoordinateBitmap collect_carriageway_coords(
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		const auto highway = way.tags.get("highway");
-		if (highway.empty() || highway == "footway" || highway == "path" ||
-				highway == "steps" || highway == "pedestrian" || highway == "cycleway" ||
-				highway == "bridleway" || highway == "corridor" || highway == "track" ||
-				highway == "elevator" || highway == "platform" ||
-				highway == "street_lamp" || highway == "crossing" ||
-				highway == "bus_stop" || way.tags.get("area") == "yes" ||
-				way.tags.get("indoor") == "yes" ||
-				way.tags.get("aeroway") == "jet_bridge" || renders_as_highway_tunnel(way))
-			continue;
-		if (const auto level = crate::strict_parse::i32(way.tags.get("level"));
-				level && *level < 0)
+		const auto highway = surface_highway_type(way);
+		if (!highway || !is_carriageway(*highway) ||
+				!tunnel_renders_at_surface(way, nullptr, scale))
 			continue;
 
-		const int block_range = highway_block_range(highway, way.tags, scale);
+		const int block_range = highway_block_range(*highway, way.tags, scale);
 		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
 			const auto &prev = way.nodes[i - 1];
 			const auto &cur = way.nodes[i];

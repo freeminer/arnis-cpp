@@ -51,7 +51,7 @@ public:
 // older RegionLibrary remains as a lightweight name-only compatibility API.
 struct SlotRequest
 {
-	std::optional<TreeSize> want_size;
+	std::optional<int> want_height;
 	bool density_decided = false;
 	// Rust's selector receives these context hints from the mapped-tree and
 	// ground passes.  Keep them in the C++ request even when a caller has no
@@ -68,7 +68,7 @@ struct MappedRequest
 	Habitat habitat = Habitat::Lowland;
 	std::optional<std::string> genus;
 	std::optional<bool> conifer;
-	std::optional<TreeSize> want_size;
+	std::optional<int> want_height;
 	std::optional<ecoregion::Ecoregion> eco;
 	bool beach = false;
 };
@@ -103,6 +103,8 @@ public:
 	bool empty() const;
 	std::size_t entry_count() const;
 	int base_spacing() const;
+	int slot_spacing(bool density_decided) const;
+	double crown_columns(int height) const;
 	void report() const;
 	std::optional<SlotSelection> pick_slot(
 			int x, int z, Habitat, int elevation_y, SlotRequest request = {}) const;

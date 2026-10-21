@@ -15,6 +15,7 @@
 #include "surfaces.h"
 #include "signage.h"
 #include "road_mask_search.h"
+#include "street_furniture.h"
 #include "../strict_parse.h"
 
 namespace arnis
@@ -399,44 +400,11 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 	}
 
 	if (amenity_type == "bicycle_parking") {
-		Block ground_block = OAK_PLANKS;
-		if (auto it = element.tags().find("surface"); it != element.tags().end())
-			if (const auto *blocks = surfaces::get_blocks_for_surface(it->second);
-					blocks && !blocks->empty())
-				ground_block = blocks->front();
-		const crate::block_definitions::Block roof_block =
-				crate::block_definitions::STONE_BLOCK_SLAB;
-
-		std::vector<std::pair<int, int>> polygon_coords;
-		for (const crate::osm_parser::ProcessedNode &n : element.nodes())
-			polygon_coords.emplace_back(n.x, n.z);
-		if (polygon_coords.empty())
+		if (element.is_node())
 			return;
-
-		std::vector<std::pair<int, int>> floor_area =
-				*flood_fill_cache.get_or_compute_element(element, args.timeout);
-		if (floor_area.empty())
-			return;
-
-		for (const auto &p : floor_area) {
-			editor.set_block(
-					ground_block, p.first, 0, p.second, std::nullopt, std::nullopt);
-		}
-
-		for (const crate::osm_parser::ProcessedNode &node : element.nodes()) {
-			int x = node.x;
-			int z = node.z;
-			editor.set_block(ground_block, x, 0, z, std::nullopt, std::nullopt);
-			for (int y = 1; y <= 4; ++y)
-				editor.set_block(crate::block_definitions::OAK_FENCE, x, y, z,
-						std::nullopt, std::nullopt);
-			editor.set_block(roof_block, x, 5, z, std::nullopt, std::nullopt);
-		}
-
-		for (const auto &p : floor_area) {
-			editor.set_block(
-					roof_block, p.first, 5, p.second, std::nullopt, std::nullopt);
-		}
+		const auto floor_area =
+				flood_fill_cache.get_or_compute_element(element, args.timeout);
+		street_furniture::generate_bicycle_parking_area(editor, element, *floor_area);
 		return;
 	}
 
@@ -487,6 +455,10 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 	}
 
 	if (amenity_type == "shelter") {
+		if (element.is_node()) {
+			street_furniture::generate_shelter_node(editor, element.as_node(), road_mask);
+			return;
+		}
 		const crate::block_definitions::Block roof_block =
 				crate::block_definitions::STONE_BRICK_SLAB;
 		std::vector<std::pair<int, int>> polygon_coords;

@@ -6,6 +6,7 @@
 #include <chrono>
 #include <optional>
 #include <mutex>
+#include <unordered_map>
 #include <utility>
 
 #include "mapgen/earth/arnis_adapter.h"
@@ -128,17 +129,26 @@ private:
 	{
 		mutable std::mutex mutex;
 		FloodFillResult result;
-		explicit CachedFill(FloodFillResult value) : result(std::move(value)) {}
+		std::vector<std::pair<int32_t, int32_t>> ring;
+		bool released{false};
+		explicit CachedFill(std::vector<std::pair<int32_t, int32_t>> points) :
+				ring(std::move(points))
+		{
+		}
 	};
 
-	/// Cached results: element_id -> filled coordinates
+	/// Registered rings and their lazily materialized fills, keyed by element ID.
 	mutable std::unordered_map<uint64_t, std::shared_ptr<CachedFill>> way_cache;
 	mutable std::mutex way_cache_mutex;
 	bool retain_entries_{false};
+	std::optional<std::chrono::milliseconds> timeout_;
 	std::shared_ptr<CachedFill> find_cached_fill(uint64_t way_id) const;
+	FloodFillResult transient_fill(uint64_t way_id) const;
 
 	/// Determines if a way element needs flood fill based on its tags.
 	static bool way_needs_flood_fill(const ProcessedWay &way);
+	static bool fill_goes_unread(const ProcessedWay &way);
+	static bool is_waterfront(const std::unordered_map<std::string, std::string> &tags);
 
 	/// Computes the centroid of a set of coordinates.
 	static std::optional<std::pair<int32_t, int32_t>> compute_centroid(
@@ -155,7 +165,7 @@ public:
 	FloodFillCache(FloodFillCache &&other) noexcept;
 	FloodFillCache &operator=(FloodFillCache &&other) noexcept;
 
-	/// Pre-computes flood fills for all elements that need them.
+	/// Registers rings whose handlers need fills; coordinate fills are built on first read.
 	static FloodFillCache precompute(const std::vector<ProcessedElement> &elements,
 			const std::optional<std::chrono::milliseconds> &timeout);
 

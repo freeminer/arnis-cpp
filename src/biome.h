@@ -32,6 +32,7 @@ std::optional<std::string> ecoregion_biome(std::uint8_t land_cover, Climate clim
 		const std::optional<ecoregion::Ecoregion> &eco);
 std::optional<std::string> mountain_biome(std::uint8_t land_cover, Climate climate,
 		std::uint8_t water_distance, double above_m, int slope);
+std::string winter_biome(const std::string &name);
 // The exporter-independent form of Rust's 1.18+ chunk biome palette.  The
 // 16 horizontal values repeat through the four vertical biome cells.
 struct BiomeSample

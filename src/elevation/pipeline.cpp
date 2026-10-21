@@ -120,6 +120,9 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 			scale * height_multiplier, ground_level, min_ground_level,
 			disable_height_limit, extended_max_y, policy, top_reserve,
 			[&](std::string_view message) { report(progress, -1.0, message); });
+	// The metre grid is no longer needed. Release it before allocating the f32
+	// output so large runs do not keep raw, scaled-f64, and output grids at once.
+	std::vector<std::vector<double>>().swap(raw.heights);
 	ProcessedElevationData out;
 	out.height = minecraft_heights.size();
 	out.width = out.height ? minecraft_heights.front().size() : 0;

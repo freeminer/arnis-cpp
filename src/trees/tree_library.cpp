@@ -1,6 +1,7 @@
 #include "tree_library.h"
 #include <algorithm>
 #include <cctype>
+#include <limits>
 namespace arnis::trees
 {
 TreeSize size_for_height(int h)
@@ -10,6 +11,22 @@ TreeSize size_for_height(int h)
 		   : h <= 20 ? TreeSize::Big
 		   : h <= 28 ? TreeSize::Tall
 					 : TreeSize::Giant;
+}
+int size_cap_height(TreeSize size)
+{
+	switch (size) {
+	case TreeSize::Small:
+		return 6;
+	case TreeSize::Medium:
+		return 12;
+	case TreeSize::Big:
+		return 20;
+	case TreeSize::Tall:
+		return 28;
+	case TreeSize::Giant:
+		return std::numeric_limits<int>::max();
+	}
+	return std::numeric_limits<int>::max();
 }
 TreeSize size_for_canopy_m(std::uint8_t m)
 {
@@ -32,6 +49,20 @@ bool SizeFilter::allows(TreeSize s) const
 		   : s == TreeSize::Big	   ? big
 		   : s == TreeSize::Tall   ? tall
 								   : giant;
+}
+int SizeFilter::max_height() const
+{
+	if (giant)
+		return std::numeric_limits<int>::max();
+	if (tall)
+		return size_cap_height(TreeSize::Tall);
+	if (big)
+		return size_cap_height(TreeSize::Big);
+	if (medium)
+		return size_cap_height(TreeSize::Medium);
+	if (small)
+		return size_cap_height(TreeSize::Small);
+	return 0;
 }
 TreeSize smaller_enabled(TreeSize requested, const SizeFilter &f)
 {

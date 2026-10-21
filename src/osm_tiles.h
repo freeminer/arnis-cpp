@@ -68,9 +68,17 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles);
 std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		const geographic::LLBBox &bbox, const std::string &base_url,
 		std::string *error = nullptr);
+// Scale-aware Rust counterpart; low-scale worlds may request more source area,
+// subject to the absolute archive cap.
+std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
+		const geographic::LLBBox &bbox, const std::string &base_url, double scale,
+		std::string *error = nullptr);
 // Quiet spelling used by the optional facade fetch path; tile fetch is silent in C++.
 std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles_quietly(
 		const geographic::LLBBox &bbox, const std::string &base_url,
 		std::string *error = nullptr);
+// Reject archive requests that exceed the scale-aware area or tile-count cap.
+bool check_size(
+		const geographic::LLBBox &bbox, double scale, std::string *error = nullptr);
 
 } // namespace arnis::osm_tiles

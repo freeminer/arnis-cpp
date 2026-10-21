@@ -12,6 +12,7 @@
 #include <bit>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <unordered_map>
 namespace arnis::trees
 {
@@ -55,15 +56,24 @@ void finalize_tree_schematic(Schematic &schematic)
 	if (!schematic.voxels.empty()) {
 		int min_y = schematic.voxels.front().y;
 		for (const auto &voxel : schematic.voxels)
-			min_y = std::min(min_y, voxel.y);
+			min_y = std::min(min_y, static_cast<int>(voxel.y));
 		if (min_y != 0)
 			for (auto &voxel : schematic.voxels)
 				voxel.y -= min_y;
+		schematic.height = 0;
+		std::set<std::pair<int, int>> leaf_columns;
+		for (const auto &voxel : schematic.voxels) {
+			schematic.height = std::max(schematic.height, voxel.y + 1);
+			if (is_leaf_block(voxel.block))
+				leaf_columns.emplace(voxel.x, voxel.z);
+		}
+		schematic.leaf_columns = static_cast<std::uint32_t>(leaf_columns.size());
 	}
 	schematic.min_log_vy = schematic.height;
 	for (const auto &voxel : schematic.voxels)
 		if (is_log_block(voxel.block))
-			schematic.min_log_vy = std::min(schematic.min_log_vy, voxel.y);
+			schematic.min_log_vy =
+					std::min(schematic.min_log_vy, static_cast<int>(voxel.y));
 	if (schematic.min_log_vy == schematic.height)
 		schematic.min_log_vy = 0;
 }
@@ -140,13 +150,27 @@ Schematic load_schem(const std::filesystem::path &file)
 Schematic load_schem(const std::vector<std::uint8_t> &gzip_bytes)
 {
 	Schematic schematic;
+	bool unsupported_coordinate = false;
 	structures::SchemDecodeOptions options;
 	options.include_entities = false;
 	options.block_mapper = map_block;
-	options.voxel_sink = [&schematic](int x, int y, int z, Block block) {
-		schematic.voxels.push_back({x, y, z, block});
+	options.voxel_sink = [&schematic, &unsupported_coordinate](
+								 int x, int y, int z, Block block) {
+		constexpr int coordinate_max = std::numeric_limits<std::int16_t>::max();
+		if (x < 0 || y < 0 || z < 0 || x > coordinate_max || y > coordinate_max ||
+				z > coordinate_max) {
+			unsupported_coordinate = true;
+			return;
+		}
+		schematic.voxels.push_back({static_cast<std::int16_t>(x),
+				static_cast<std::int16_t>(y), static_cast<std::int16_t>(z), block});
 	};
 	const auto document = structures::decode_sponge_schem(gzip_bytes, options);
+	constexpr int dimension_max = std::numeric_limits<std::int16_t>::max();
+	if (unsupported_coordinate || document.width <= 0 || document.height <= 0 ||
+			document.length <= 0 || document.width > dimension_max ||
+			document.height > dimension_max || document.length > dimension_max)
+		return {};
 	schematic.width = document.width;
 	schematic.height = document.height;
 	schematic.length = document.length;
@@ -185,16 +209,33 @@ Schematic tree_only(const structures::SchemDocument &in)
 	// Retain only the data Rust's tree schematic needs; general schematic
 	// offsets and block entities are irrelevant after tree decoding.
 	Schematic out;
+	constexpr int dimension_max = std::numeric_limits<std::int16_t>::max();
+	if (in.width <= 0 || in.height <= 0 || in.length <= 0 || in.width > dimension_max ||
+			in.height > dimension_max || in.length > dimension_max)
+		return out;
 	out.width = in.width;
 	out.height = in.height;
 	out.length = in.length;
+	bool unsupported_coordinate = false;
+	const auto append = [&](int x, int y, int z, Block block) {
+		constexpr int coordinate_max = std::numeric_limits<std::int16_t>::max();
+		if (x < 0 || y < 0 || z < 0 || x > coordinate_max || y > coordinate_max ||
+				z > coordinate_max) {
+			unsupported_coordinate = true;
+			return;
+		}
+		out.voxels.push_back({static_cast<std::int16_t>(x), static_cast<std::int16_t>(y),
+				static_cast<std::int16_t>(z), block});
+	};
 	for (const auto &v : in.voxels) {
 		if (v.block.empty()) {
 			if (v.resolved_block != Block{})
-				out.voxels.push_back({v.x, v.y, v.z, v.resolved_block});
+				append(v.x, v.y, v.z, v.resolved_block);
 		} else if (const auto block = map_block(v.block))
-			out.voxels.push_back({v.x, v.y, v.z, *block});
+			append(v.x, v.y, v.z, *block);
 	}
+	if (unsupported_coordinate)
+		return {};
 	// Sponge schematics frequently carry an air pad below the root. Rust removes
 	// it at load time so every tree has a stable y=0 floor independent of the
 	// editor/exporter that produced the asset.

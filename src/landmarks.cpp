@@ -1,6 +1,7 @@
 #include "landmarks.h"
 #include "assets_root.h"
 #include "../../arnis_adapter.h"
+#include "models_3d/pipeline.h"
 #include "structures/schem_decoder.h"
 #include "world_editor/floor_state.h"
 
@@ -358,6 +359,24 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements,
 			std::unique(result.deferred_regions.begin(), result.deferred_regions.end()),
 			result.deferred_regions.end());
 	return result;
+}
+
+std::vector<std::vector<std::pair<int, int>>> placement_regions(
+		const PrescanResult &result, double scale)
+{
+	std::vector<std::vector<std::pair<int, int>>> regions;
+	regions.reserve(result.placements.size());
+	for (const auto &placement : result.placements) {
+		if (!placement.landmark || !std::isfinite(scale) || scale <= 0.0) {
+			regions.emplace_back();
+			continue;
+		}
+		const auto radius =
+				static_cast<int>(std::ceil(placement.landmark->reach_m * scale));
+		regions.push_back(models_3d::region_keys_around(
+				placement.world_x, placement.world_z, radius));
+	}
+	return regions;
 }
 
 bool place(WorldEditor &editor, const Placement &placement, double scale,

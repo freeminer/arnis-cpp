@@ -1,10 +1,13 @@
 #include "retrieve_data.h"
 #include "args.h"
 #include "osm_tiles.h"
+#include "net.h"
+#include "telemetry.h"
 #include <algorithm>
 #include <cctype>
 #include <curl/curl.h>
 #include <fstream>
+#include <iostream>
 #include <nlohmann/json.hpp>
 #include <sstream>
 #include <stdexcept>
@@ -89,10 +92,42 @@ const char *fallback_reason(const std::string &error)
 			{"range request to", "network"}, {"could not be read", "network"},
 			{"not an Arnis tile payload", "tile_decode"},
 			{"truncated tile", "tile_decode"}, {"implausible", "tile_decode"}};
-	for (const auto &[needle, bucket] : buckets)
+	for (const auto &[needle, candidate] : buckets)
 		if (error.find(needle) != std::string::npos)
-			return bucket;
+			return candidate;
 	return "other";
+}
+
+std::string fallback_reason_detail(const std::string &error)
+{
+	const std::string bucket = fallback_reason(error);
+	std::string kind;
+	for (std::size_t open = error.find('['); open != std::string::npos;
+			open = error.find('[', open + 1)) {
+		const auto close = error.find(']', open + 1);
+		if (close == std::string::npos)
+			break;
+		const auto tag = error.substr(open + 1, close - open - 1);
+		if (tag == "timeout" || tag == "dns" || tag == "tls" || tag == "reset" ||
+				tag == "connect" || tag == "body" || tag == "other" ||
+				(tag.size() == 8 && tag.rfind("http_", 0) == 0 &&
+						std::all_of(tag.begin() + 5, tag.end(),
+								[](unsigned char c) { return std::isdigit(c); }))) {
+			kind = tag;
+			break;
+		}
+	}
+	if (kind.empty()) {
+		const auto marker = error.find("HTTP ");
+		if (marker != std::string::npos && marker + 8 <= error.size()) {
+			const auto digits = error.substr(marker + 5, 3);
+			if (std::all_of(digits.begin(), digits.end(),
+						[](unsigned char c) { return std::isdigit(c); }) &&
+					digits[0] >= '1' && digits[0] <= '5')
+				kind = "http_" + digits;
+		}
+	}
+	return kind.empty() ? bucket : bucket + "/" + kind;
 }
 
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &bbox,
@@ -149,15 +184,30 @@ std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &bbox,
 	return std::nullopt;
 }
 
-std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
+namespace
+{
+std::optional<FetchResult> fetch_osm_data_impl(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, bool use_tile_archive,
-		const std::string &tiles_url, std::uint64_t seed, bool probe, std::string *error)
+		const std::string &tiles_url, double scale, std::uint64_t seed, bool probe,
+		std::string *error)
 {
 	std::string archive_error;
 	if (use_tile_archive && !tiles_url.empty()) {
-		if (auto document =
-						osm_tiles::fetch_data_from_tiles(bbox, tiles_url, &archive_error))
+		if (!osm_tiles::check_size(bbox, scale, &archive_error)) {
+			std::cerr << "Error! " << archive_error << ".\n";
+			if (error)
+				*error = AREA_TOO_LARGE;
+			return std::nullopt;
+		}
+		if (auto document = osm_tiles::fetch_data_from_tiles(
+					bbox, tiles_url, scale, &archive_error))
 			return FetchResult{std::move(*document), tiles_url};
+		if (!archive_error.empty()) {
+			std::cerr << "Warning: Tile archive unavailable (" << archive_error
+					  << "); falling back to Overpass.\n";
+			telemetry::send_log(telemetry::LogLevel::Warning,
+					"tile_archive_fallback: " + fallback_reason_detail(archive_error));
+		}
 	}
 	std::string overpass_error;
 	auto result = fetch_overpass(bbox, fetcher, seed, probe, &overpass_error);
@@ -170,13 +220,22 @@ std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
 	}
 	return result;
 }
+} // namespace
+
+std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
+		const OverpassFetcher &fetcher, bool use_tile_archive,
+		const std::string &tiles_url, std::uint64_t seed, bool probe, std::string *error)
+{
+	return fetch_osm_data_impl(
+			bbox, fetcher, use_tile_archive, tiles_url, 1.0, seed, probe, error);
+}
 
 std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, const arnis::Args &args, std::uint64_t seed,
 		bool probe, std::string *error)
 {
-	return fetch_osm_data(
-			bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url, seed, probe, error);
+	return fetch_osm_data_impl(bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url,
+			args.scale, seed, probe, error);
 }
 
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body)
@@ -217,6 +276,7 @@ std::optional<std::string> fetch_area_name(double lat, double lon)
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	long status = 0;
+	[[maybe_unused]] auto permit = net::request_permit();
 	const auto result = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);

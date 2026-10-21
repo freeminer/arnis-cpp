@@ -15,6 +15,7 @@
 #include <unordered_set>
 #include <iterator>
 #include <string_view>
+#include <utility>
 
 namespace arnis
 {
@@ -24,6 +25,7 @@ FloodFillCache::FloodFillCache(FloodFillCache &&other) noexcept
 	std::lock_guard<std::mutex> lock(other.way_cache_mutex);
 	way_cache = std::move(other.way_cache);
 	retain_entries_ = other.retain_entries_;
+	timeout_ = other.timeout_;
 }
 
 FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
@@ -33,6 +35,7 @@ FloodFillCache &FloodFillCache::operator=(FloodFillCache &&other) noexcept
 	std::scoped_lock lock(way_cache_mutex, other.way_cache_mutex);
 	way_cache = std::move(other.way_cache);
 	retain_entries_ = other.retain_entries_;
+	timeout_ = other.timeout_;
 	return *this;
 }
 
@@ -80,7 +83,11 @@ bool relation_fills_members(const ProcessedRelation &relation)
 	if (const auto landuse = tags.find("landuse"); landuse != tags.end())
 		return landuse->second != "residential" && landuse->second != "commercial";
 	const auto leisure = tags.find("leisure");
-	return leisure != tags.end() && leisure->second == "park";
+	const auto man_made = tags.find("man_made");
+	return (leisure != tags.end() && leisure->second == "park") ||
+		   (man_made != tags.end() &&
+				   (man_made->second == "pier" || man_made->second == "breakwater" ||
+						   man_made->second == "groyne"));
 }
 
 template <typename Tags>
@@ -118,7 +125,7 @@ void for_relation_ring_cells(const ProcessedRelation &relation, ProcessedMemberR
 	merge_way_segments(rings);
 
 	for (auto &ring : rings) {
-		ring = clipping::clip_way_to_bbox(ring, xzbbox);
+		ring = clipping::clip_way_to_bbox_owned(std::move(ring), xzbbox);
 		if (ring.size() < 4)
 			continue;
 		// Segment matching tolerates nearby endpoints, but the rasterizer needs
@@ -291,17 +298,14 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 			"meadow", "greenfield", "village_green", "forest", "orchard", "allotments",
 			"plant_nursery"};
 
-	std::vector<FloodFillResult> managed;
-	std::vector<FloodFillResult> paving;
-	std::vector<FloodFillResult> planted;
-	// Snapshot each shared fill independently; unrelated ways need not wait for
-	// a full-world bitmap pass performed by another reader.
+	std::vector<uint64_t> managed_ids;
+	std::vector<std::pair<uint64_t, bool>> sealed_ids;
+	std::vector<uint64_t> planted_ids;
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		const auto fill = get_cached(way.id);
-		if (!fill)
+		if (!contains(way.id))
 			continue;
 		const auto leisure = way.tags.find("leisure");
 		const auto amenity = way.tags.find("amenity");
@@ -319,7 +323,7 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 			const bool yields =
 					highway_area || amenity_paving ||
 					(leisure != way.tags.end() && leisure->second == "schoolyard");
-			(yields ? paving : managed).push_back(fill);
+			sealed_ids.emplace_back(way.id, yields);
 		} else {
 			bool is_planted = false;
 			if (!way.tags.contains("building") && !way.tags.contains("building:part") &&
@@ -337,54 +341,65 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 				}
 			}
 			if (is_planted)
-				planted.push_back(fill);
+				planted_ids.push_back(way.id);
 		}
 	}
-
-	// Avoid cloning the full-world road bitmap when fills are empty or only
-	// overlap roads, just as Rust does before constructing its second mask.
-	const auto contributes = [&roads](const auto &fills) {
-		return std::any_of(fills.begin(), fills.end(), [&roads](const auto &fill) {
-			return std::any_of(fill->begin(), fill->end(), [&roads](const auto &coord) {
-				return roads.is_unset_in_bounds(coord.first, coord.second);
-			});
-		});
-	};
-	if (!contributes(managed) && !contributes(paving))
-		return std::nullopt;
-
-	auto mask = roads;
-	std::size_t largest_paving = 0;
-	for (const auto &fill : paving)
-		largest_paving = std::max(largest_paving, fill->size());
 	struct Layer
 	{
 		std::size_t size;
 		bool paved;
-		const FloodFillResult *fill;
+		uint64_t id;
 	};
 	std::vector<Layer> layers;
-	layers.reserve(paving.size() + planted.size());
-	for (const auto &fill : paving)
-		layers.push_back({fill->size(), true, &fill});
-	for (const auto &fill : planted)
-		if (fill->size() < largest_paving)
-			layers.push_back({fill->size(), false, &fill});
+	layers.reserve(sealed_ids.size() + planted_ids.size());
+	std::size_t largest_paving = 0;
+	bool contributes_off_roads = false;
+	for (const auto &[id, yields] : sealed_ids) {
+		const auto fill = transient_fill(id);
+		if (!fill || fill->empty())
+			continue;
+		contributes_off_roads |=
+				std::any_of(fill->begin(), fill->end(), [&roads](const auto &coord) {
+					return roads.is_unset_in_bounds(coord.first, coord.second);
+				});
+		if (yields) {
+			largest_paving = std::max(largest_paving, fill->size());
+			layers.push_back({fill->size(), true, id});
+		} else {
+			managed_ids.push_back(id);
+		}
+	}
+	if (!contributes_off_roads)
+		return std::nullopt;
+	if (largest_paving > 0)
+		for (const auto id : planted_ids) {
+			const auto fill = transient_fill(id);
+			if (fill && fill->size() < largest_paving)
+				layers.push_back({fill->size(), false, id});
+		}
 	std::sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
 		if (a.size != b.size)
 			return a.size > b.size;
-		return a.paved < b.paved;
+		return a.paved > b.paved;
 	});
-	for (const auto &layer : layers)
-		for (const auto &[x, z] : **layer.fill) {
+	auto mask = roads;
+	for (const auto &layer : layers) {
+		const auto fill = transient_fill(layer.id);
+		if (!fill)
+			continue;
+		for (const auto &[x, z] : *fill) {
 			if (layer.paved)
 				mask.set(x, z);
 			else if (!roads.contains(x, z))
 				mask.clear(x, z);
 		}
-	for (const auto &fill : managed)
-		for (const auto &[x, z] : *fill)
-			mask.set(x, z);
+	}
+	for (const auto id : managed_ids) {
+		const auto fill = transient_fill(id);
+		if (fill)
+			for (const auto &[x, z] : *fill)
+				mask.set(x, z);
+	}
 	return mask;
 }
 
@@ -510,9 +525,48 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 						   it_power->second == "generator" &&
 						   it_source != way.tags.end() && it_source->second == "solar";
 
-	return has_building || has_building_part || has_landuse || has_leisure ||
-		   has_amenity || natural_not_tree || (has_highway && area_yes) || tomb_pyramid ||
-		   solar_generator;
+	const bool waterfront = is_waterfront(way.tags);
+	const bool needed = has_building || has_building_part || has_landuse || has_leisure ||
+						has_amenity || natural_not_tree || (has_highway && area_yes) ||
+						tomb_pyramid || waterfront || solar_generator;
+	return needed && !fill_goes_unread(way);
+}
+
+bool FloodFillCache::is_waterfront(
+		const std::unordered_map<std::string, std::string> &tags)
+{
+	const auto it = tags.find("man_made");
+	return it != tags.end() &&
+		   (it->second == "pier" || it->second == "breakwater" || it->second == "groyne");
+}
+
+bool FloodFillCache::fill_goes_unread(const ProcessedWay &way)
+{
+	const auto &tags = way.tags;
+	if (tags.contains("building") || tags.contains("building:part") ||
+			tags.contains("highway") || tags.contains("power") || is_waterfront(tags))
+		return false;
+	static const std::unordered_set<std::string> sealed_leisure = {"pitch", "track",
+			"playground", "recreation_ground", "schoolyard", "ice_rink", "water_park",
+			"slipway", "outdoor_seating", "bathing_place", "fitness_station"};
+	static const std::unordered_set<std::string> sealed_amenity = {"parking",
+			"parking_space", "bicycle_parking", "motorcycle_parking", "fuel",
+			"charging_station", "car_wash", "taxi", "marketplace"};
+	const auto amenity = tags.find("amenity");
+	const auto leisure = tags.find("leisure");
+	const auto landuse = tags.find("landuse");
+	if ((amenity != tags.end() && sealed_amenity.contains(amenity->second)) ||
+			(leisure != tags.end() && sealed_leisure.contains(leisure->second)))
+		return false;
+	if (landuse != tags.end())
+		return landuse->second == "residential" || landuse->second == "commercial";
+	const auto natural = tags.find("natural");
+	if (natural != tags.end() &&
+			!(amenity != tags.end() && amenity->second == "fountain"))
+		return false;
+	return amenity != tags.end() && amenity->second != "bicycle_parking" &&
+		   amenity->second != "shelter" && amenity->second != "fountain" &&
+		   amenity->second != "parking";
 }
 
 std::optional<std::pair<int32_t, int32_t>> FloodFillCache::compute_centroid(
@@ -563,55 +617,21 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		const auto &relation = el.as_relation();
 		if (!relation_fills_members(relation))
 			continue;
+		const bool include_holes = is_waterfront(relation.tags);
 		for (const auto &member : relation.members)
-			if (member.role == ProcessedMemberRole::Outer &&
+			if ((member.role == ProcessedMemberRole::Outer ||
+						(include_holes && member.role == ProcessedMemberRole::Inner)) &&
 					seen.insert(member.way->id).second)
 				ways_needing_fill.push_back(member.way.get());
 	}
-
-	// Compute fills concurrently, as Rayon does in Rust.  Keep the number of
-	// in-flight jobs bounded so a large extract cannot create one native thread
-	// per OSM way.
 	FloodFillCache cache;
-	std::size_t workers = configured_workers.load(std::memory_order_relaxed);
-	if (workers == 0) {
-		// Rust configures Rayon once at startup with a 90% CPU cap. The C++ API
-		// can also be used without that executable startup path, so establish the
-		// same default on the first precompute. Concurrent callers race only to
-		// publish the same value; an explicit prior configuration remains intact.
-		const auto fallback = thread_count_for_fraction(.9);
-		std::size_t expected = 0;
-		configured_workers.compare_exchange_strong(
-				expected, fallback, std::memory_order_relaxed);
-		workers = configured_workers.load(std::memory_order_relaxed);
-	}
-	for (std::size_t base = 0; base < ways_needing_fill.size(); base += workers) {
-		const std::size_t end = std::min(base + workers, ways_needing_fill.size());
-		std::vector<std::future<
-				std::pair<uint64_t, std::vector<std::pair<int32_t, int32_t>>>>>
-				jobs;
-		jobs.reserve(end - base);
-		for (std::size_t i = base; i < end; ++i) {
-			const ProcessedWay *way = ways_needing_fill[i];
-			jobs.push_back(std::async(std::launch::async, [way, timeout] {
-				std::vector<std::pair<int32_t, int32_t>> polygon_coords;
-				polygon_coords.reserve(way->nodes.size());
-				for (const auto &n : way->nodes)
-					polygon_coords.emplace_back(n.x, n.z);
-				return std::make_pair(way->id, flood_fill_area(polygon_coords, timeout));
-			}));
-		}
-		for (auto &job : jobs) {
-			auto result = job.get();
-			FloodFillResult fill =
-					result.second.empty()
-							? empty_flood_fill_result()
-							: std::make_shared<
-									  const std::vector<std::pair<int32_t, int32_t>>>(
-									  std::move(result.second));
-			cache.way_cache.emplace(
-					result.first, std::make_shared<CachedFill>(std::move(fill)));
-		}
+	cache.timeout_ = timeout;
+	for (const auto *way : ways_needing_fill) {
+		std::vector<std::pair<int32_t, int32_t>> ring;
+		ring.reserve(way->nodes.size());
+		for (const auto &node : way->nodes)
+			ring.emplace_back(node.x, node.z);
+		cache.way_cache.emplace(way->id, std::make_shared<CachedFill>(std::move(ring)));
 	}
 
 	return cache;
@@ -646,7 +666,34 @@ FloodFillCache::get_cached(uint64_t way_id) const
 	if (!entry)
 		return nullptr;
 	std::lock_guard<std::mutex> lock(entry->mutex);
+	if (entry->released)
+		return nullptr;
+	if (!entry->result) {
+		auto filled = flood_fill_area(entry->ring, timeout_);
+		entry->result = filled.empty()
+								? empty_flood_fill_result()
+								: std::make_shared<
+										  const std::vector<std::pair<int32_t, int32_t>>>(
+										  std::move(filled));
+	}
 	return entry->result;
+}
+
+FloodFillResult FloodFillCache::transient_fill(uint64_t way_id) const
+{
+	auto entry = find_cached_fill(way_id);
+	if (!entry)
+		return nullptr;
+	{
+		std::lock_guard<std::mutex> lock(entry->mutex);
+		if (entry->result)
+			return entry->result;
+	}
+	auto filled = flood_fill_area(entry->ring, timeout_);
+	if (filled.empty())
+		return empty_flood_fill_result();
+	return std::make_shared<const std::vector<std::pair<int32_t, int32_t>>>(
+			std::move(filled));
 }
 
 std::shared_ptr<FloodFillCache::CachedFill> FloodFillCache::find_cached_fill(
@@ -670,6 +717,7 @@ void FloodFillCache::release(uint64_t way_id) const
 	if (auto entry = find_cached_fill(way_id)) {
 		std::lock_guard<std::mutex> lock(entry->mutex);
 		entry->result.reset();
+		entry->released = true;
 	}
 }
 
@@ -719,7 +767,7 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 
 			if ((it_building != way.tags.end() || it_building_part != way.tags.end()) &&
 					!is_underground_building(way.tags)) {
-				if (auto cached = get_cached(way.id)) {
+				if (auto cached = transient_fill(way.id)) {
 					for (const auto &coord : *cached)
 						footprints.set(coord.first, coord.second);
 				}
@@ -743,7 +791,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 			auto it_building_part = way.tags.find("building:part");
 
 			if (it_building != way.tags.end() || it_building_part != way.tags.end()) {
-				if (auto fill = get_cached(way.id)) {
+				if (auto fill = transient_fill(way.id)) {
 					auto centroid = compute_centroid(*fill);
 					if (centroid.has_value()) {
 						centroids.push_back(centroid.value());
@@ -766,7 +814,7 @@ std::vector<std::pair<int32_t, int32_t>> FloodFillCache::collect_building_centro
 				std::vector<std::pair<int32_t, int32_t>> all_coords;
 				for (const auto &member : rel.members) {
 					if (member.role == ProcessedMemberRole::Outer) {
-						if (auto fill = get_cached(member.way->id)) {
+						if (auto fill = transient_fill(member.way->id)) {
 							all_coords.insert(
 									all_coords.end(), fill->begin(), fill->end());
 						}

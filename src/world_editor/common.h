@@ -729,11 +729,17 @@ struct SectionToModify
 			return std::nullopt;
 		return block;
 	}
+	void clear_properties_at(std::size_t index)
+	{
+		// Empty maps are common for terrain sections; avoid hashing on every write.
+		if (!properties.empty())
+			properties.erase(index);
+	}
 	void set_block(int x, int y, int z, Block b)
 	{
 		const auto index = section_index(x, y, z);
 		storage.set(index, b);
-		properties.erase(index);
+		clear_properties_at(index);
 	}
 	void set_block_with_properties(int x, int y, int z, const BlockWithProperties &bwp)
 	{
@@ -742,7 +748,7 @@ struct SectionToModify
 		if (bwp.properties && !bwp.properties->empty())
 			properties[index] = bwp.properties;
 		else
-			properties.erase(index);
+			clear_properties_at(index);
 	}
 	Block get_block_at_index(std::size_t i) const { return storage.get(i); }
 	void set_block_with_properties_at_index(std::size_t i, Block b,
@@ -754,7 +760,7 @@ struct SectionToModify
 		if (state && !state->empty())
 			properties[i] = std::move(state);
 		else
-			properties.erase(i);
+			clear_properties_at(i);
 	}
 	void compact()
 	{
@@ -803,7 +809,7 @@ struct SectionToModify
 	{
 		if (i < SECTION_VOLUME) {
 			storage.set(i, b);
-			properties.erase(i);
+			clear_properties_at(i);
 		}
 	}
 	std::size_t replace(Block from, Block to)
@@ -812,7 +818,7 @@ struct SectionToModify
 		for (std::size_t i = 0; i < SECTION_VOLUME; ++i)
 			if (storage.get(i).id() == from.id()) {
 				storage.set(i, to);
-				properties.erase(i);
+				clear_properties_at(i);
 				++n;
 			}
 		return n;
@@ -824,7 +830,7 @@ struct SectionToModify
 			auto b = storage.get(i);
 			if (predicate(b)) {
 				storage.set(i, to);
-				properties.erase(i);
+				clear_properties_at(i);
 				++n;
 			}
 		}
@@ -1130,6 +1136,36 @@ struct WorldToModify
 		get_or_create_region(cx >> 5, cz >> 5)
 				.get_or_create_chunk(cx & 31, cz & 31)
 				.set_block_with_properties(x & 15, y, z & 15, bwp);
+	}
+	template <typename Replace>
+	void set_block_with_properties_if(
+			int x, int y, int z, const BlockWithProperties &bwp, Replace &&replace)
+	{
+		if (y <= world_editor::world_max_y()) {
+			y = std::max(y, world_editor::min_y());
+			const int chunk_x = x >> 4, chunk_z = z >> 4;
+			const auto region_it =
+					regions.find(RegionToModify::key(chunk_x >> 5, chunk_z >> 5));
+			if (region_it != regions.end()) {
+				const auto chunk_it = region_it->second.chunks.find(
+						RegionToModify::key(chunk_x & 31, chunk_z & 31));
+				if (chunk_it != region_it->second.chunks.end()) {
+					auto section_it = chunk_it->second.sections.find(y >> 4);
+					if (section_it != chunk_it->second.sections.end()) {
+						const auto index = section_index(x & 15, y & 15, z & 15);
+						const Block existing = section_it->second.storage.get(index);
+						if (existing.id() == block_definitions::AIR.id() ||
+								std::invoke(std::forward<Replace>(replace), existing))
+							section_it->second.set_block_with_properties(
+									x & 15, y & 15, z & 15, bwp);
+						return;
+					}
+				}
+			}
+		}
+		// Missing sections read as air, which always accepts the write. This also
+		// preserves the storage API's behavior for positions above the ceiling.
+		set_block_with_properties(x, y, z, bwp);
 	}
 	bool set_with_props_if_absent(int x, int y, int z, const BlockWithProperties &bwp)
 	{

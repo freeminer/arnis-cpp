@@ -6,6 +6,7 @@
 #include <cmath>
 #include <algorithm>
 #include <limits>
+#include <utility>
 namespace arnis::biome
 {
 std::optional<std::string> ecoregion_biome(
@@ -252,10 +253,39 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 						ground->slope(local));
 			if (!selected)
 				selected = ecoregion_biome(lc, climate, eco);
-			names[std::size_t(zi * 4 + xi)] = selected.value_or(
+			auto name = selected.value_or(
 					biome_for_class(lc, climate, center_latitude, water_distance));
+			if (ground->winter())
+				name = winter_biome(name);
+			names[std::size_t(zi * 4 + xi)] = std::move(name);
 		}
 	return names;
+}
+
+std::string winter_biome(const std::string &name)
+{
+	if (name == "minecraft:river")
+		return "minecraft:frozen_river";
+	if (name == "minecraft:beach" || name == "minecraft:stony_shore")
+		return "minecraft:snowy_beach";
+	if (name == "minecraft:ocean" || name == "minecraft:lukewarm_ocean" ||
+			name == "minecraft:warm_ocean")
+		return "minecraft:cold_ocean";
+	if (name == "minecraft:deep_ocean" || name == "minecraft:deep_lukewarm_ocean")
+		return "minecraft:deep_cold_ocean";
+	if (name == "minecraft:forest" || name == "minecraft:taiga" ||
+			name == "minecraft:birch_forest" || name == "minecraft:dark_forest" ||
+			name == "minecraft:jungle" || name == "minecraft:sparse_jungle" ||
+			name == "minecraft:mangrove_swamp" || name == "minecraft:swamp")
+		return "minecraft:snowy_taiga";
+	if (name == "minecraft:meadow" || name == "minecraft:stony_peaks")
+		return "minecraft:snowy_slopes";
+	if (name.find("snowy") != std::string::npos ||
+			name.find("frozen") != std::string::npos ||
+			name.find("cold") != std::string::npos || name.ends_with("_peaks") ||
+			name == "minecraft:grove" || name == "minecraft:ice_spikes")
+		return name;
+	return "minecraft:snowy_plains";
 }
 
 ChunkBiomeData build_chunk_biomes_for_ground(int chunk_x, int chunk_z,

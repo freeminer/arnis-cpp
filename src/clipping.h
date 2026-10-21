@@ -12,6 +12,8 @@ bool is_invented_node_id(std::uint64_t id);
 // acquire an artificial flood-fillable ring.
 std::vector<ProcessedNode> clip_way_to_bbox(
 		const std::vector<ProcessedNode> &, const XZBBox &);
+std::vector<ProcessedNode> clip_way_to_bbox_owned(
+		std::vector<ProcessedNode>, const XZBBox &);
 std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 		const std::vector<ProcessedNode> &, const XZBBox &);
 }

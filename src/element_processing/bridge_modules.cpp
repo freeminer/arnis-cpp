@@ -103,7 +103,9 @@ static const std::vector<BridgeModule> &modules_for_root(
 			}
 			if (pillars) {
 				for (int l = 0; l < length; ++l) {
-					std::unordered_map<int, BridgeModuleSlice> lowest;
+					// Keep the same deterministic width order as Rust's BTreeMap: when
+					// diagonal support feet overlap, their emission order is observable.
+					std::map<int, BridgeModuleSlice> lowest;
 					for (const auto &voxel : module.slices[l]) {
 						const Block &b = voxel.block.block;
 						if (!is_pillar_material(b))

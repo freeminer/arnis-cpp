@@ -14,12 +14,24 @@
 
 #include <memory>
 
+namespace arnis::bridges
+{
+class BridgeSurfaceMap;
+}
+
 namespace arnis::railways
 {
 extern const int RAIL_BRIDGE_FLAT_CLEARANCE;
 extern const int RAIL_BRIDGE_DIP_THRESHOLD;
+extern const int RAIL_DECK_HALF_WIDTH;
+extern const int RAIL_DECK_GAP_FILL;
 bool renders_as_rail_bridge(const ProcessedWay &way);
 std::vector<std::pair<int, int>> build_smoothed_centerline(const ProcessedWay &way);
+std::vector<int> rail_bridge_profile(const std::vector<int> &terrain, int level,
+		bool start_internal, bool end_internal);
+std::vector<std::pair<std::pair<int, int>, int>> rail_deck_footprint(
+		const bridges::BridgeSurfaceMap &surface, const ProcessedWay &way,
+		const std::vector<int> &ys);
 }
 
 namespace arnis::bridges
@@ -36,6 +48,8 @@ struct RailDeckInfo
 	RailDeckKind kind = RailDeckKind::Level;
 	int level_y = 0;
 	std::vector<int> ys;
+	bool start_is_boundary = true;
+	bool end_is_boundary = true;
 };
 
 struct BridgeMemberInfo
@@ -93,6 +107,8 @@ public:
 	std::optional<int> deck_y_at(int x, int z) const;
 	std::optional<int> nearby_deck_y(int x, int z, int radius) const;
 	bool deck_near(int x, int z, int y, int tolerance) const;
+	std::optional<std::pair<std::uint64_t, int>> rail_track_at(int x, int z) const;
+	bool is_empty() const { return deck_y_.empty() && rail_deck_y_.empty(); }
 	bool support_blocked(int x, int z, int deck_y) const;
 	std::optional<int> supported_top(
 			const WorldEditor &editor, int x, int z, int radius) const;
@@ -114,6 +130,8 @@ private:
 	std::unordered_map<std::pair<int, int>, int, PairHash> deck_y_;
 	std::unordered_map<std::pair<int, int>, int, PairHash> deck_low_y_;
 	std::unordered_map<std::pair<int, int>, int, PairHash> rail_deck_y_;
+	std::unordered_map<std::pair<int, int>, std::pair<std::uint64_t, int>, PairHash>
+			rail_tracks_;
 	std::unordered_set<std::pair<int, int>, PairHash> grade_crossings_;
 };
 

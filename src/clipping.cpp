@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <utility>
 namespace arnis::clipping
 {
 namespace
@@ -140,19 +141,23 @@ std::vector<ProcessedNode> clip_way_to_bbox(
 		auto clipped = clip_polygon(std::move(polygon), box);
 		if (clipped.size() < 3)
 			return {};
-		std::map<std::pair<int, int>, std::uint64_t> original_ids;
+		std::map<std::pair<int, int>, const ProcessedNode *> original_nodes;
 		for (const auto &node : nodes)
-			original_ids.emplace(std::pair{node.x, node.z}, node.id);
+			original_nodes.emplace(std::pair{node.x, node.z}, &node);
 		std::vector<ProcessedNode> out;
 		out.reserve(clipped.size() + 1);
 		for (std::size_t i = 0; i < clipped.size(); ++i) {
 			const int x = int(std::lround(clipped[i].x));
 			const int z = int(std::lround(clipped[i].z));
-			const auto original = original_ids.find({x, z});
-			if (original != original_ids.end())
-				out.push_back({original->second, {}, x, z});
-			else
+			const auto original = original_nodes.find({x, z});
+			if (original != original_nodes.end()) {
+				auto retained = *original->second;
+				retained.x = x;
+				retained.z = z;
+				out.push_back(std::move(retained));
+			} else {
 				out.push_back(synthetic(nodes.front().id, i, clipped[i]));
+			}
 		}
 		if (out.size() >= 2 && out.front().x == out.back().x &&
 				out.front().z == out.back().z)
@@ -191,6 +196,17 @@ std::vector<ProcessedNode> clip_way_to_bbox(
 	}
 	return out;
 }
+
+std::vector<ProcessedNode> clip_way_to_bbox_owned(
+		std::vector<ProcessedNode> nodes, const XZBBox &box)
+{
+	if (std::all_of(nodes.begin(), nodes.end(), [&](const auto &node) {
+			return inside_box({double(node.x), double(node.z)}, box);
+		}))
+		return nodes;
+	return clip_way_to_bbox(nodes, box);
+}
+
 std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 		const std::vector<ProcessedNode> &ring, const XZBBox &box)
 {
@@ -226,7 +242,8 @@ std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 	std::vector<ProcessedNode> out;
 	out.reserve(p.size() + 1);
 	for (std::size_t i = 0; i < p.size(); ++i)
-		out.push_back(synthetic(ring.front().id, i, p[i]));
+		out.push_back({1'000'000'000ULL + i, {}, int(std::lround(p[i].x)),
+				int(std::lround(p[i].z))});
 	out.push_back(out.front());
 	return out;
 }

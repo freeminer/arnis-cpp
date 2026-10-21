@@ -42,6 +42,8 @@ std::vector<OverpassEndpoint> overpass_request_plan(
 bool remark_means_truncated(const std::string &remark);
 // Coarse, coordinate-free bucket for tile/archive fallback diagnostics.
 const char *fallback_reason(const std::string &error);
+std::string fallback_reason_detail(const std::string &error);
+inline constexpr const char *AREA_TOO_LARGE = "Area too large, try a smaller one.";
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &,
 		const OverpassFetcher &, std::uint64_t seed = 0,
 		bool probe_official_first = false, std::string *error = nullptr);

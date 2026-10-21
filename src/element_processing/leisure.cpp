@@ -165,8 +165,11 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 			}
 			if (leisure_type == "pitch") {
 				const auto &vegetation = ground_decoration::loose_plant_blocks();
-				for (const auto &[x, z] : filled_area)
+				for (const auto &[x, z] : filled_area) {
+					if (editor.is_hedge(x, z))
+						continue;
 					editor.set_block(AIR, x, 1, z, vegetation, std::nullopt);
+				}
 				sport_pitches::draw_pitch_markings(
 						editor, element, filled_area, block_type);
 			}

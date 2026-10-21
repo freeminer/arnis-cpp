@@ -1,13 +1,20 @@
 #include "world_utils.h"
+#include "args.h"
+#include "data_processing.h"
 #include "retrieve_data.h"
+#include "projection/projection_spec.h"
+#include "osm_tiles.h"
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <cmath>
 #include <cstring>
 #include <cstdlib>
 #include <fstream>
 #include <iterator>
 #include <limits>
+#include <iomanip>
+#include <sstream>
 #include <system_error>
 #include <array>
 #include <mutex>
@@ -25,6 +32,119 @@
 #endif
 namespace arnis::world_utils
 {
+WorldSizeOptions WorldSizeOptions::of(const Args &args)
+{
+	return {args.interior, args.bake_lighting, args.voxy_lod, args.caves, args.fillground,
+			args.disable_height_limit};
+}
+
+const char *RunSizeError::short_message() const
+{
+	return area ? "Area too large, try a smaller one."
+				: "Not enough disk space available.";
+}
+
+std::uint64_t estimated_world_bytes(
+		double area_km2, WorldFormat format, const WorldSizeOptions &o)
+{
+	double per_km2 = 17.0;
+	if (o.interior)
+		per_km2 += 10.0;
+	if (o.bake_lighting)
+		per_km2 += 10.0;
+	if (o.voxy_lod)
+		per_km2 += 20.0;
+	if (o.caves)
+		per_km2 += o.tall ? 35.0 : 12.0;
+	else if (o.fillground)
+		per_km2 += o.tall ? 15.0 : 2.0;
+	if (format != WorldFormat::JavaAnvil)
+		per_km2 *= 0.8;
+	const double mib = (std::max(0.0, area_km2) * per_km2 + 8.0) * 1024.0 * 1024.0;
+	if (!std::isfinite(mib) || mib >= static_cast<double>(UINT64_MAX))
+		return UINT64_MAX;
+	return static_cast<std::uint64_t>(mib);
+}
+
+double blocks_km2(const Args &args, const geographic::LLBBox &bbox)
+{
+	try {
+		const auto [transformer, rect] =
+				projection::ProjectionSpec::from_args(args).transformer(bbox);
+		(void)transformer;
+		const auto min = rect.min();
+		const auto max = rect.max();
+		const double width = static_cast<double>(std::int64_t(max.x) - min.x + 1);
+		const double height = static_cast<double>(std::int64_t(max.z) - min.z + 1);
+		return width * height / 1'000'000.0;
+	} catch (...) {
+		return bbox.area_km2() * args.scale * args.scale;
+	}
+}
+
+bool check_disk_space(
+		const std::filesystem::path &dir, std::uint64_t needed, std::string *error)
+{
+	std::filesystem::path probe = dir;
+	std::error_code ec;
+	while (!probe.empty() && !std::filesystem::exists(probe, ec)) {
+		ec.clear();
+		const auto parent = probe.parent_path();
+		if (parent == probe)
+			break;
+		probe = parent;
+	}
+	if (probe.empty())
+		probe = std::filesystem::current_path(ec);
+	if (ec)
+		return true;
+	ec.clear();
+	const auto space = std::filesystem::space(probe, ec);
+	if (ec || space.available == 0)
+		return true;
+	const auto required = needed > UINT64_MAX - DISK_HEADROOM_BYTES
+								  ? UINT64_MAX
+								  : needed + DISK_HEADROOM_BYTES;
+	if (space.available >= required)
+		return true;
+	constexpr double GIB = 1024.0 * 1024.0 * 1024.0;
+	if (error) {
+		std::ostringstream message;
+		message << std::fixed << std::setprecision(1)
+				<< "Not enough disk space: this world needs about " << needed / GIB
+				<< " GB and " << DISK_HEADROOM_BYTES / GIB
+				<< " GB should stay free, but only " << space.available / GIB
+				<< " GB are free.";
+		*error = message.str();
+	}
+	return false;
+}
+
+bool check_run_size(const Args &args, const geographic::LLBBox &bbox, WorldFormat format,
+		const std::filesystem::path &dir, RunSizeError *error)
+{
+	const auto fail = [&](bool area, std::string detail) {
+		if (error)
+			*error = {area, std::move(detail)};
+		return false;
+	};
+	if (args.mapillary_probe)
+		return true;
+	if (!args.skip_osm() && !args.file && !args.no_tile_archive &&
+			!args.osm_tiles_url.empty()) {
+		std::string detail;
+		if (!osm_tiles::check_size(bbox, args.scale, &detail))
+			return fail(true,
+					"The area is too large: " + detail + ". Select a smaller area.");
+	}
+	const auto needed = estimated_world_bytes(
+			blocks_km2(args, bbox), format, WorldSizeOptions::of(args));
+	std::string detail;
+	if (!check_disk_space(dir, needed, &detail))
+		return fail(false, std::move(detail));
+	return true;
+}
+
 namespace
 {
 struct HeldSessionLock

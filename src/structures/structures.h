@@ -110,6 +110,8 @@ namespace crane
 {
 void maybe_place_crane(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells);
+void place_mapped(WorldEditor &, int x, int z, const tags_t &tags,
+		const CoordinateBitmap &building_footprints);
 }
 
 namespace excavator

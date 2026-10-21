@@ -78,6 +78,8 @@ Placement make_placement(std::uint64_t representative_id, PlaneKind kind, int an
 		int anchor_z, double yaw_degrees, double pitch_degrees, int elevation_blocks);
 std::vector<std::pair<int, int>> deferred_region_keys(
 		const std::vector<Placement> &placements);
+std::vector<std::vector<std::pair<int, int>>> placement_regions(
+		const std::vector<Placement> &placements);
 void cap_placements(std::vector<Placement> &placements);
 void sort_placements(std::vector<Placement> &placements);
 bool placement_separated(

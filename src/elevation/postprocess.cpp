@@ -6,6 +6,7 @@
 #include <algorithm>
 #include <array>
 #include <atomic>
+#include <bit>
 #include <charconv>
 #include <cmath>
 #include <cstdlib>
@@ -93,72 +94,102 @@ void repair_terrain_anomalies(std::vector<std::vector<double>> &h, double meters
 	const std::size_t H = h.size(), W = h[0].size();
 	const double abs_threshold = std::max(6.0, 0.25 * meters_per_cell);
 	const int passes = meters_per_cell > 4.0 ? 2 : 10;
-	std::vector<std::vector<double>> snapshot = h;
+	constexpr std::size_t RADIUS = 2;
+	const std::size_t words = W / 64 + (W % 64 != 0);
+	std::vector<std::uint64_t> candidates;
 	std::size_t total_repaired = 0;
 	int passes_ran = 0;
 	for (int pass = 0; pass < passes; ++pass) {
-		if (pass > 0)
-			parallel_rows(0, H, [&](std::size_t y) {
-				std::copy(h[y].begin(), h[y].end(), snapshot[y].begin());
-			});
-		std::atomic_size_t changed{0};
-		parallel_rows(2, H - 2, [&](std::size_t y) {
-			thread_local std::vector<double> neighbors;
-			thread_local std::vector<double> abs_devs;
-			neighbors.reserve(24);
-			abs_devs.reserve(24);
-			std::size_t row_changed = 0;
-			for (std::size_t x = 2; x < W - 2; ++x) {
-				const double c = snapshot[y][x];
-				if (!std::isfinite(c))
-					continue;
-				neighbors.clear();
-				double lo = std::numeric_limits<double>::infinity();
-				double hi = -std::numeric_limits<double>::infinity();
-				for (int dy = -2; dy <= 2; ++dy) {
-					for (int dx = -2; dx <= 2; ++dx) {
-						if (dx == 0 && dy == 0)
-							continue;
-						const double value = snapshot[static_cast<std::size_t>(
-								static_cast<int>(y) +
-								dy)][static_cast<std::size_t>(static_cast<int>(x) + dx)];
-						if (!std::isfinite(value))
-							continue;
-						neighbors.push_back(value);
-						lo = std::min(lo, value);
-						hi = std::max(hi, value);
+		std::vector<std::vector<std::tuple<std::size_t, std::size_t, double>>>
+				row_repairs(H);
+		auto judge = [&](std::size_t y, std::size_t x, std::vector<double> &neighbors,
+							 std::vector<double> &abs_devs) -> std::optional<double> {
+			// All workers inspect the same unchanged grid; repairs are committed only
+			// after the parallel pass, so a full per-pass snapshot is unnecessary.
+			const double c = h[y][x];
+			if (!std::isfinite(c))
+				return std::nullopt;
+			neighbors.clear();
+			double lo = std::numeric_limits<double>::infinity();
+			double hi = -std::numeric_limits<double>::infinity();
+			for (int dy = -2; dy <= 2; ++dy)
+				for (int dx = -2; dx <= 2; ++dx) {
+					if (dx == 0 && dy == 0)
+						continue;
+					const double value =
+							h[static_cast<std::size_t>(static_cast<int>(y) + dy)]
+							 [static_cast<std::size_t>(static_cast<int>(x) + dx)];
+					if (!std::isfinite(value))
+						continue;
+					neighbors.push_back(value);
+					lo = std::min(lo, value);
+					hi = std::max(hi, value);
+				}
+			if (neighbors.size() < 8 ||
+					(c - lo <= abs_threshold && hi - c <= abs_threshold))
+				return std::nullopt;
+			const auto mid = neighbors.begin() + neighbors.size() / 2;
+			std::nth_element(neighbors.begin(), mid, neighbors.end());
+			const double median = *mid;
+			abs_devs.clear();
+			for (const double value : neighbors)
+				abs_devs.push_back(std::abs(value - median));
+			const auto mad_mid = abs_devs.begin() + abs_devs.size() / 2;
+			std::nth_element(abs_devs.begin(), mad_mid, abs_devs.end());
+			const double mad = *mad_mid;
+			if (std::abs(c - median) > abs_threshold &&
+					std::abs(c - median) > 3.0 * std::max(1.0, mad))
+				return median;
+			return std::nullopt;
+		};
+		parallel_rows(
+				pass == 0 ? RADIUS : 0, pass == 0 ? H - RADIUS : H, [&](std::size_t y) {
+					thread_local std::vector<double> neighbors;
+					thread_local std::vector<double> abs_devs;
+					neighbors.reserve(24);
+					abs_devs.reserve(24);
+					auto &found = row_repairs[y];
+					auto inspect = [&](std::size_t x) {
+						if (x >= RADIUS && x < W - RADIUS)
+							if (const auto median = judge(y, x, neighbors, abs_devs))
+								found.emplace_back(y, x, *median);
+					};
+					if (pass == 0) {
+						for (std::size_t x = RADIUS; x < W - RADIUS; ++x)
+							inspect(x);
+					} else {
+						for (std::size_t word_index = 0; word_index < words;
+								++word_index) {
+							auto bits = candidates[y * words + word_index];
+							while (bits) {
+								const auto bit =
+										static_cast<unsigned>(std::countr_zero(bits));
+								bits &= bits - 1;
+								inspect(word_index * 64 + bit);
+							}
+						}
 					}
-				}
-				if (neighbors.size() < 8)
-					continue;
-				// The median lies inside the neighbor range, so a center close to both
-				// extrema cannot exceed the absolute threshold. Skip both nth_element
-				// operations for the common smooth-terrain case.
-				if (c - lo <= abs_threshold && hi - c <= abs_threshold)
-					continue;
-				const auto mid = neighbors.begin() + neighbors.size() / 2;
-				std::nth_element(neighbors.begin(), mid, neighbors.end());
-				const double median = *mid;
-				abs_devs.clear();
-				for (const double value : neighbors)
-					abs_devs.push_back(std::abs(value - median));
-				const auto mad_mid = abs_devs.begin() + abs_devs.size() / 2;
-				std::nth_element(abs_devs.begin(), mad_mid, abs_devs.end());
-				const double mad = *mad_mid;
-				if (std::abs(c - median) > abs_threshold &&
-						std::abs(c - median) > 3.0 * std::max(1.0, mad)) {
-					h[y][x] = median;
-					++row_changed;
-				}
-			}
-			if (row_changed)
-				changed.fetch_add(row_changed, std::memory_order_relaxed);
-		});
-		const auto repaired = changed.load(std::memory_order_relaxed);
-		if (repaired == 0)
+				});
+		std::vector<std::tuple<std::size_t, std::size_t, double>> repairs;
+		for (auto &row : row_repairs)
+			repairs.insert(repairs.end(), row.begin(), row.end());
+		if (repairs.empty())
 			break;
-		total_repaired += repaired;
+		for (const auto &[y, x, median] : repairs)
+			h[y][x] = median;
+		total_repaired += repairs.size();
 		passes_ran = pass + 1;
+		if (passes_ran == passes)
+			break;
+		candidates.assign(words * H, 0);
+		for (const auto &[y, x, median] : repairs) {
+			(void)median;
+			for (std::size_t ny = std::max(RADIUS, y > RADIUS ? y - RADIUS : 0);
+					ny < std::min(H - RADIUS, y + RADIUS + 1); ++ny)
+				for (std::size_t nx = std::max(RADIUS, x > RADIUS ? x - RADIUS : 0);
+						nx < std::min(W - RADIUS, x + RADIUS + 1); ++nx)
+					candidates[ny * words + (nx >> 6)] |= std::uint64_t(1) << (nx & 63);
+		}
 	}
 	if (total_repaired > 0)
 		std::clog << "Repaired " << total_repaired << " terrain anomalies in "
@@ -190,7 +221,7 @@ constexpr double FALL_REACH_M = 128.0;
 constexpr double LEVEL_RUN_M = 30.0;
 
 bool inside(int x, int y, std::size_t w, std::size_t h);
-double median(std::vector<double> values);
+double median(std::vector<double> &values);
 
 bool get_bit(const std::vector<std::uint64_t> &mask, std::size_t i)
 {
@@ -457,7 +488,7 @@ std::optional<double> local_water_median(const HeightGrid &heights,
 		}
 	if (samples.size() < min_samples)
 		return std::nullopt;
-	return median(std::move(samples));
+	return median(samples);
 }
 
 std::optional<double> local_reach_median(const HeightGrid &heights,
@@ -495,7 +526,7 @@ std::optional<double> local_reach_median(const HeightGrid &heights,
 	values.reserve(samples.size());
 	for (const auto &v : samples)
 		values.push_back(v.first);
-	return median(std::move(values));
+	return median(values);
 }
 
 struct Reach
@@ -621,7 +652,7 @@ OtherLevels split_off_other_levels(const std::vector<Cell> &body, double level,
 							}))
 					slopes.push_back(*slope);
 			}
-			steep = !slopes.empty() && median(std::move(slopes)) > MIN_STEEP_WATER_SLOPE;
+			steep = !slopes.empty() && median(slopes) > MIN_STEEP_WATER_SLOPE;
 		}
 		if (steep)
 			out.shadow.insert(out.shadow.end(), part.begin(), part.end());
@@ -737,7 +768,7 @@ bool falls_away(const OtherWaterSteps &steps, const Walk &walk, std::size_t w,
 		   double(end_steps - start->second) >= 0.5 * walk.run;
 }
 
-double median(std::vector<double> values)
+double median(std::vector<double> &values)
 {
 	if (values.empty())
 		return std::numeric_limits<double>::quiet_NaN();
@@ -746,7 +777,7 @@ double median(std::vector<double> values)
 	return *mid;
 }
 
-double interquartile_range(std::vector<double> values)
+double interquartile_range(std::vector<double> &values)
 {
 	if (values.size() < 4)
 		return 0.0;
@@ -1037,7 +1068,7 @@ std::size_t drop_water_on_steep_terrain(
 			for (const auto &[x, y] : component)
 				if (const auto slope = cell_slope(x, y))
 					slopes.push_back(*slope);
-			if (slopes.empty() || median(std::move(slopes)) <= MIN_STEEP_WATER_SLOPE)
+			if (slopes.empty() || median(slopes) <= MIN_STEEP_WATER_SLOPE)
 				continue;
 			for (const auto &[x, y] : component)
 				set_bit(in_component, y * w + x);
@@ -1292,7 +1323,7 @@ MaskGrid level_water_surfaces(
 					reach_values.reserve(reach.cells.size());
 					for (const auto &[x, y] : reach.cells)
 						reach_values.push_back(heights[y][x]);
-					const double reach_median = median(std::move(reach_values));
+					const double reach_median = median(reach_values);
 					auto [cells, walls] =
 							flowing_surfaces(reach.cells, marks, reach_median, true);
 					flowing_components.push_back(std::move(cells));

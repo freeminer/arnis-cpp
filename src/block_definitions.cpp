@@ -288,12 +288,20 @@ BlockWithProperties create_stair_with_properties(
 		const Block &base_stair_block, StairFacing facing, StairShape shape)
 {
 	auto cache_key = std::make_tuple(base_stair_block.id(), facing, shape);
+	// Roofs may ask for the same stair on every cell. Keep each worker's hot
+	// keys locally so they don't all serialize on the shared cache mutex.
+	static thread_local std::unordered_map<std::tuple<content_t, StairFacing, StairShape>,
+			BlockWithProperties, StairKeyHash>
+			local_cache;
+	if (const auto it = local_cache.find(cache_key); it != local_cache.end())
+		return it->second;
 
-	// Check cache first
+	// Share the immutable property object between workers on a cold local hit.
 	{
 		std::lock_guard<std::mutex> lock(STAIR_CACHE_MUTEX);
 		auto it = STAIR_CACHE.find(cache_key);
 		if (it != STAIR_CACHE.end()) {
+			local_cache.emplace(cache_key, it->second);
 			return it->second;
 		}
 	}
@@ -303,11 +311,14 @@ BlockWithProperties create_stair_with_properties(
 		properties.emplace("shape", StairShape_as_str(shape));
 	BlockWithProperties block_with_props(base_stair_block, std::move(properties));
 
-	// Cache the result
+	// Another worker may have filled this key while we built the properties.
 	{
 		std::lock_guard<std::mutex> lock(STAIR_CACHE_MUTEX);
-		STAIR_CACHE.emplace(cache_key, block_with_props);
+		auto [it, inserted] = STAIR_CACHE.emplace(cache_key, block_with_props);
+		(void)inserted;
+		block_with_props = it->second;
 	}
+	local_cache.emplace(cache_key, block_with_props);
 
 	return block_with_props;
 }

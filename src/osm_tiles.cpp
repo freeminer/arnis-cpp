@@ -1,5 +1,6 @@
 #include "osm_tiles.h"
 #include "cache_root.h"
+#include "net.h"
 #include "overture/pmtiles.h"
 #include "retrieve_data.h"
 #include "world_utils.h"
@@ -7,6 +8,7 @@
 #include <algorithm>
 #include <array>
 #include <chrono>
+#include <cmath>
 #include <curl/curl.h>
 #include <fstream>
 #include <future>
@@ -23,6 +25,42 @@
 
 namespace arnis::osm_tiles
 {
+namespace
+{
+constexpr double ARCHIVE_AREA_KM2_AT_SCALE_1 = 25'000.0;
+constexpr double ARCHIVE_MAX_AREA_KM2 = 100'000.0;
+constexpr std::uint64_t ARCHIVE_MAX_TILES = 65'536;
+
+bool set_size_error(std::string *error, std::string message)
+{
+	if (error)
+		*error = std::move(message);
+	return false;
+}
+} // namespace
+
+bool check_size(const geographic::LLBBox &bbox, double scale, std::string *error)
+{
+	if (!std::isfinite(scale) || scale <= 0.0)
+		return set_size_error(error, "world scale must be finite and positive");
+	const double maximum_area =
+			std::min(ARCHIVE_AREA_KM2_AT_SCALE_1 / (scale * scale), ARCHIVE_MAX_AREA_KM2);
+	const double area = bbox.area_km2();
+	if (area > maximum_area) {
+		return set_size_error(error,
+				"that area needs " + std::to_string(std::llround(area)) +
+						" km², past the " + std::to_string(std::llround(maximum_area)) +
+						" km² the archive serves at this world scale");
+	}
+	const std::uint64_t count = overture::pmtiles::tile_count(bbox, ZOOM);
+	if (count > ARCHIVE_MAX_TILES) {
+		return set_size_error(error, "that area needs " + std::to_string(count) +
+											 " tiles, past the " +
+											 std::to_string(ARCHIVE_MAX_TILES) + " cap");
+	}
+	return true;
+}
+
 namespace
 {
 constexpr std::int64_t EDGE_MARGIN_E7 = 10'000;
@@ -247,13 +285,16 @@ std::optional<std::vector<std::uint8_t>> http_range(const std::string &url,
 	curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+	[[maybe_unused]] auto permit = net::request_permit();
 	const auto rc = curl_easy_perform(curl);
 	long status = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
 	if (rc != CURLE_OK || (status != 206 && !(offset == 0 && status == 200))) {
 		if (error)
-			*error = "range request failed";
+			*error = "range request to " + url + " failed [" +
+					 net::failure_kind(rc, rc == CURLE_OK ? status : 0) + "]";
 		return std::nullopt;
 	}
 	if (status == 206 && body.size() != length) {
@@ -706,17 +747,26 @@ osm_parser::RawOsmDocument assemble(const std::vector<DecodedTile> &tiles)
 std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles_quietly(
 		const geographic::LLBBox &bbox, const std::string &base_url, std::string *error)
 {
-	return fetch_data_from_tiles(bbox, base_url, error);
+	return fetch_data_from_tiles(bbox, base_url, 1.0, error);
 }
 
 std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		const geographic::LLBBox &bbox, const std::string &base_url, std::string *error)
+{
+	return fetch_data_from_tiles(bbox, base_url, 1.0, error);
+}
+
+std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
+		const geographic::LLBBox &bbox, const std::string &base_url, double scale,
+		std::string *error)
 {
 	if (base_url.empty()) {
 		if (error)
 			*error = "tile archive URL is empty";
 		return std::nullopt;
 	}
+	if (!check_size(bbox, scale, error))
+		return std::nullopt;
 	auto root = base_url;
 	while (!root.empty() && root.back() == '/')
 		root.pop_back();
@@ -759,13 +809,20 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		curl_easy_setopt(curl, CURLOPT_ACCEPT_ENCODING, "");
 		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
+		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
+		[[maybe_unused]] auto permit = net::request_permit();
 		const auto manifest_rc = curl_easy_perform(curl);
 		long manifest_status = 0;
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &manifest_status);
 		curl_easy_cleanup(curl);
 		if (manifest_rc != CURLE_OK || manifest_status < 200 || manifest_status >= 300) {
 			if (error)
-				*error = "tile archive index unreachable";
+				*error = "tile archive index unreachable [" +
+						 net::failure_kind(manifest_rc,
+								 manifest_rc == CURLE_OK ? manifest_status : 0) +
+						 "]: " +
+						 (manifest_rc == CURLE_OK ? "HTTP status failure"
+												  : curl_easy_strerror(manifest_rc));
 			return std::nullopt;
 		}
 		fetched_manifest = true;
@@ -817,18 +874,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			std::filesystem::remove_all(path, remove_error);
 		}
 	}
-	const auto a =
-			overture::pmtiles::lonlat_to_tile(bbox.min().lng(), bbox.max().lat(), ZOOM);
-	const auto b =
-			overture::pmtiles::lonlat_to_tile(bbox.max().lng(), bbox.min().lat(), ZOOM);
-	const auto xs = std::min(a.first, b.first), xe = std::max(a.first, b.first);
-	const auto ys = std::min(a.second, b.second), ye = std::max(a.second, b.second);
-	const auto needed = (std::uint64_t(xe) - xs + 1) * (std::uint64_t(ye) - ys + 1);
-	if (needed > 4096) {
-		if (error)
-			*error = "that area needs too many tiles";
-		return std::nullopt;
-	}
+	const auto [xs, xe, ys, ye] = overture::pmtiles::tile_range(bbox, ZOOM);
 	std::vector<std::pair<std::uint32_t, std::uint32_t>> wanted;
 	for (auto x = xs; x <= xe; ++x)
 		for (auto y = ys; y <= ye; ++y)
@@ -934,7 +980,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			pending.reserve(end - begin);
 			for (std::size_t i = begin; i < end; ++i) {
 				const auto [x, y] = wanted[i];
-				pending.push_back(std::async(std::launch::async, [&, x=x, y=y] {
+				pending.push_back(std::async(std::launch::async, [&, x = x, y = y] {
 					TileResult result;
 					const auto read = overture::pmtiles::read_tile_checked(
 							archive->header, archive->root_directory, ZOOM, x, y, range);

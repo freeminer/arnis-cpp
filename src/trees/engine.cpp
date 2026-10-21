@@ -5,6 +5,7 @@
 #include "mapped.h"
 #include "schematic.h"
 #include "../ecoregion.h"
+#include "../ground_decoration.h"
 #include "../land_cover/land_cover.h"
 #include <array>
 #include <algorithm>
@@ -68,8 +69,15 @@ bool place_selected_schematic(world_editor::WorldEditor &editor,
 				 Tree::get_structural_blocks(), Tree::get_functional_blocks()})
 		blacklist.insert(blacklist.end(), blocks.begin(), blocks.end());
 	blacklist.push_back(block_definitions::WATER);
-	return place_schematic_tree(editor, *schem, sx, sz, std::min(center, fpmin + 2),
-			selected.rotation, blacklist, building_footprints, offset);
+	const int base_y = std::min(center, fpmin + 2);
+	const auto &wood = ground_decoration::wood_blocks();
+	for (int y = base_y; y <= base_y + 2; ++y)
+		if (editor.check_for_block_absolute(sx, y, sz, wood))
+			return false;
+	if (!editor.claim_tree_slot(sx, sz))
+		return false;
+	return place_schematic_tree(editor, *schem, sx, sz, base_y, selected.rotation,
+			blacklist, building_footprints, offset);
 }
 }
 std::uint64_t tree_seed(int x, int z)

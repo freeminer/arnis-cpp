@@ -17,6 +17,7 @@ namespace
 {
 constexpr double ROW_SPACING_M = 8.0;
 constexpr double CROWN_RADIUS_M = 5.0;
+constexpr std::size_t TYPICAL_MIN_SEEN = 10;
 int div_euclid(int value, int divisor)
 {
 	const int quotient = value / divisor;
@@ -180,13 +181,16 @@ std::optional<std::string> parse_genus(
 }
 bool is_conifer_genus(const std::string &g)
 {
-	static const char *names[] = {"Abies", "Agathis", "Araucaria", "Callitris",
-			"Calocedrus", "Cedrus", "Cephalotaxus", "Chamaecyparis", "Cryptomeria",
-			"Cunninghamia", "Cupressocyparis", "Cupressus", "Glyptostrobus", "Juniperus",
-			"Keteleeria", "Larix", "Metasequoia", "Picea", "Pinus", "Platycladus",
-			"Podocarpus", "Pseudolarix", "Pseudotsuga", "Sciadopitys", "Sequoia",
-			"Sequoiadendron", "Taxodium", "Taxus", "Tetraclinis", "Thuja", "Thujopsis",
-			"Torreya", "Tsuga", "Wollemia", "Xanthocyparis"};
+	static const char *names[] = {"Abies", "Agathis", "Araucaria", "Athrotaxis",
+			"Callitris", "Callitropsis", "Calocedrus", "Cedrus", "Cephalotaxus",
+			"Chamaecyparis", "Cryptomeria", "Cunninghamia", "Cupressocyparis",
+			"Cupressus", "Dacrycarpus", "Dacrydium", "Fitzroya", "Glyptostrobus",
+			"Juniperus", "Keteleeria", "Larix", "Libocedrus", "Metasequoia",
+			"Phyllocladus", "Picea", "Pilgerodendron", "Pinus", "Platycladus",
+			"Podocarpus", "Prumnopitys", "Pseudolarix", "Pseudotsuga", "Saxegothaea",
+			"Saxegothea", "Sciadopitys", "Sequoia", "Sequoiadendron", "Taxodium", "Taxus",
+			"Tetraclinis", "Thuja", "Thujopsis", "Torreya", "Tsuga", "Wollemia",
+			"Xanthocyparis"};
 	return std::find_if(std::begin(names), std::end(names),
 				   [&](const char *n) { return g == n; }) != std::end(names);
 }
@@ -307,6 +311,21 @@ MappedTrunks MappedTrunks::collect(
 	std::sort(result.trunks_.begin(), result.trunks_.end());
 	result.trunks_.shrink_to_fit();
 	return result;
+}
+
+void MappedTrunks::measure_typical_height(
+		const std::function<std::optional<std::uint8_t>(int, int)> &canopy_height)
+{
+	std::vector<std::uint8_t> seen;
+	seen.reserve(trunks_.size());
+	for (const auto &trunk : trunks_)
+		if (const auto height = canopy_height(trunk.x, trunk.z))
+			seen.push_back(*height);
+	if (seen.size() < TYPICAL_MIN_SEEN)
+		return;
+	auto middle = seen.begin() + static_cast<std::ptrdiff_t>(seen.size() / 2);
+	std::nth_element(seen.begin(), middle, seen.end());
+	typical_height_m_ = *middle;
 }
 
 bool MappedTrunks::under_crown(int x, int z) const

@@ -75,6 +75,7 @@ public:
 	}
 	void retain_fetchable_wikidata(const std::function<bool(const std::string &)> &);
 	std::vector<std::pair<int, int>> deferred_regions(double scale) const;
+	std::vector<std::vector<std::pair<int, int>>> placement_regions(double scale) const;
 	ModelDiscovery discovery(double scale) const;
 	// Execute the selected providers in the same deterministic order as the
 	// Rust Models3dPipeline::place path. Runway aircraft are owned by
@@ -82,6 +83,10 @@ public:
 	ModelPlacementStats place(three_dmr::Client &three_dmr_provider,
 			ModelProvider &wikidata_provider, ModelProvider &custom_provider,
 			world_editor::WorldEditor &, double blocks_per_meter) const;
+	ModelPlacementStats place_selected(three_dmr::Client &three_dmr_provider,
+			ModelProvider &wikidata_provider, ModelProvider &custom_provider,
+			world_editor::WorldEditor &, double blocks_per_meter,
+			const std::vector<std::size_t> &indices) const;
 };
 // Shared terrain anchoring and streamed-region retention helpers from
 // models_3d/mod.rs.  These are useful to custom hosts independently of any

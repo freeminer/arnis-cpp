@@ -118,6 +118,27 @@ std::vector<std::pair<int, int>> Models3dPipeline::deferred_regions(double scale
 	return out;
 }
 
+std::vector<std::vector<std::pair<int, int>>> Models3dPipeline::placement_regions(
+		double scale) const
+{
+	std::vector<std::vector<std::pair<int, int>>> out;
+	out.reserve(three_dmr_.placements.size() + wikidata_.placements.size() +
+				stadium_.placements.size());
+	for (const auto &placement : three_dmr_.placements) {
+		three_dmr::PrescanResult one;
+		one.placements.push_back(placement);
+		out.push_back(three_dmr::deferred_regions(one, scale));
+	}
+	for (const auto &placement : wikidata_.placements) {
+		wikidata::PrescanResult one;
+		one.placements.push_back(placement);
+		out.push_back(wikidata::deferred_regions(one, scale));
+	}
+	for (const auto &placement : stadium_.placements)
+		out.push_back(custom::stadium::deferred_regions({placement}, scale));
+	return out;
+}
+
 ModelDiscovery Models3dPipeline::discovery(double scale) const
 {
 	ModelDiscovery out;
@@ -217,6 +238,38 @@ ModelPlacementStats Models3dPipeline::place(three_dmr::Client &three_dmr_provide
 	stats.add(place_wikidata_prescan(
 			wikidata_provider, editor, wikidata_, blocks_per_meter));
 	stats.add(place_custom_models(*this, custom_provider, editor, blocks_per_meter));
+	return stats;
+}
+
+ModelPlacementStats Models3dPipeline::place_selected(
+		three_dmr::Client &three_dmr_provider, ModelProvider &wikidata_provider,
+		ModelProvider &custom_provider, world_editor::WorldEditor &editor,
+		double blocks_per_meter, const std::vector<std::size_t> &indices) const
+{
+	ModelPlacementStats stats;
+	const auto three_dmr_end = three_dmr_.placements.size();
+	const auto wikidata_end = three_dmr_end + wikidata_.placements.size();
+	three_dmr::PrescanResult selected_three_dmr;
+	wikidata::PrescanResult selected_wikidata;
+	std::vector<custom::stadium::Placement> selected_stadiums;
+	for (const auto index : indices) {
+		if (index < three_dmr_end)
+			selected_three_dmr.placements.push_back(three_dmr_.placements[index]);
+		else if (index < wikidata_end)
+			selected_wikidata.placements.push_back(
+					wikidata_.placements[index - three_dmr_end]);
+		else {
+			const auto stadium_index = index - wikidata_end;
+			if (stadium_index < stadium_.placements.size())
+				selected_stadiums.push_back(stadium_.placements[stadium_index]);
+		}
+	}
+	stats.add(place_three_dmr_prescan(
+			three_dmr_provider, editor, selected_three_dmr, blocks_per_meter));
+	stats.add(place_wikidata_prescan(
+			wikidata_provider, editor, selected_wikidata, blocks_per_meter));
+	stats.add(place_stadium_prescan(
+			custom_provider, editor, selected_stadiums, blocks_per_meter));
 	return stats;
 }
 

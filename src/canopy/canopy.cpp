@@ -21,9 +21,6 @@ namespace arnis::canopy
 namespace
 {
 constexpr double MERCATOR_WORLD = 20037508.342789244;
-constexpr double COLUMNS_PER_TREE = 52.0;
-constexpr double COLUMNS_PER_TREE_LEGACY = 25.0;
-constexpr double SLOT_P_MAX = 0.85;
 constexpr std::size_t ROW_BLOCK = 128;
 constexpr std::uint64_t FETCH_BATCH_BYTES = 16ULL << 20;
 constexpr auto ROW_CACHE_MAX_AGE = std::chrono::hours(24 * 30);
@@ -35,7 +32,8 @@ constexpr auto FAILURE_WARNING_RETRY = std::chrono::minutes(5);
 struct DecodedRows
 {
 	using Row = std::shared_ptr<const std::vector<std::uint8_t>>;
-	struct Entry {
+	struct Entry
+	{
 		Row row;
 		std::list<std::string>::iterator position;
 	};
@@ -211,13 +209,17 @@ std::tuple<std::size_t, std::size_t, double, std::uint8_t> CanopyData::stats() c
 	return {covered, canopy, canopy ? double(sum) / canopy : 0.0, maximum};
 }
 
-double slot_probability(double fraction, int spacing, bool schematic_pack)
+double flat_slot_probability(double fraction, int spacing, double crown_columns)
 {
-	const auto per_tree = schematic_pack ? COLUMNS_PER_TREE : COLUMNS_PER_TREE_LEGACY;
-	// Rust computes spacing * spacing, so a negative spacing still contributes
-	// its squared area. Convert before multiplying to avoid signed overflow here.
 	const double area = static_cast<double>(spacing) * spacing;
-	return std::clamp(fraction * area / per_tree, 0.0, SLOT_P_MAX);
+	return std::clamp(fraction * area / std::max(1.0, crown_columns), 0.0, SLOT_P_MAX);
+}
+
+double slot_probability(double fraction, int spacing, double crown_columns)
+{
+	const double area = static_cast<double>(spacing) * spacing;
+	const double cover = -std::log1p(-std::clamp(fraction, 0.0, FRACTION_MAX));
+	return std::clamp(cover * area / std::max(1.0, crown_columns), 0.0, SLOT_P_MAX);
 }
 
 std::pair<int, int> tile_xy(double lat, double lon)
@@ -613,8 +615,9 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 			tile_window(xt, yt, min_lat, min_lon, max_lat, max_lon, width, height);
 	if (win.columns.empty() || win.rows.empty())
 		return false;
-	const auto row_prefix = std::filesystem::absolute(cache_dir(base))
-							   .lexically_normal().string() + "/" + quadkey_of(xt, yt) + "/";
+	const auto row_prefix =
+			std::filesystem::absolute(cache_dir(base)).lexically_normal().string() + "/" +
+			quadkey_of(xt, yt) + "/";
 	// A complete hit avoids index reads, compressed row reads and decompression.
 	bool complete = true;
 	for (std::size_t i = 0; i < win.rows.size(); ++i) {

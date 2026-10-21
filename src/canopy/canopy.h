@@ -15,6 +15,10 @@ namespace arnis::canopy
 
 inline constexpr std::uint8_t CANOPY_NODATA = 255;
 inline constexpr std::uint8_t CANOPY_MIN_M = 3;
+inline constexpr double COLUMNS_PER_TREE_LEGACY = 25.0;
+inline constexpr double COLUMNS_PER_TREE_MICRO = 52.0;
+inline constexpr double SLOT_P_MAX = 0.85;
+inline constexpr double FRACTION_MAX = 0.95;
 inline constexpr unsigned TILE_ZOOM = 9;
 inline constexpr std::size_t TILE_PX = 65536;
 
@@ -60,7 +64,8 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 std::size_t clear_canopy_cache(const std::filesystem::path &base = {});
 bool canopy_cache_fresh(const std::filesystem::path &, std::chrono::seconds max_age);
 
-double slot_probability(double canopy_fraction, int spacing, bool schematic_pack);
+double flat_slot_probability(double canopy_fraction, int spacing, double crown_columns);
+double slot_probability(double canopy_fraction, int spacing, double crown_columns);
 std::pair<int, int> tile_xy(double lat, double lon);
 std::string quadkey_of(int xt, int yt);
 double merc_x(double lon);

@@ -833,16 +833,16 @@ void place_pier_bent(WorldEditor &editor, const bridges::BridgeSurfaceMap &surfa
 	}
 }
 
-void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
-		const bridges::BridgeSurfaceMap &surface,
-		const std::vector<BridgePathSample> &path, int block_range,
+namespace
+{
+void decorate_with_sides(WorldEditor &editor, BridgeStyle style,
+		const std::vector<BridgePathSample> &path, int block_range, OpenSides sides,
 		bool start_is_boundary, bool end_is_boundary,
 		const std::vector<std::pair<int, int>> *pylon_points,
 		const bridge_towers::CableSpan *cable_span)
 {
 	if (path.size() < 4)
 		return;
-	const OpenSides sides = open_sides(surface, path, block_range);
 	if (cable_span) {
 		const auto open_edges = [&](std::size_t i) {
 			std::vector<std::pair<std::size_t, std::pair<int, int>>> result;
@@ -897,5 +897,26 @@ void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
 	default:
 		break;
 	}
+}
+} // namespace
+
+void decorate_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
+		const bridges::BridgeSurfaceMap &surface,
+		const std::vector<BridgePathSample> &path, int block_range,
+		bool start_is_boundary, bool end_is_boundary,
+		const std::vector<std::pair<int, int>> *pylon_points,
+		const bridge_towers::CableSpan *cable_span)
+{
+	decorate_with_sides(editor, style, path, block_range,
+			open_sides(surface, path, block_range), start_is_boundary, end_is_boundary,
+			pylon_points, cable_span);
+}
+
+void decorate_rail_bridge_above_deck(WorldEditor &editor, BridgeStyle style,
+		const std::vector<BridgePathSample> &path, int block_range,
+		std::array<bool, 2> open, bool start_is_boundary, bool end_is_boundary)
+{
+	decorate_with_sides(editor, style, path, block_range, {open[0], open[1]},
+			start_is_boundary, end_is_boundary, nullptr, nullptr);
 }
 }

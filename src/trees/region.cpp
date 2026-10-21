@@ -14,6 +14,7 @@
 #include <array>
 #include <memory>
 #include <map>
+#include <limits>
 #include <unordered_map>
 #include <unordered_set>
 #include <tuple>
@@ -30,10 +31,11 @@ bool is_palm(const std::string &s)
 		if (c >= 'A' && c <= 'Z')
 			c = char(c + ('a' - 'A'));
 	static constexpr const char *genera[] = {"acrocomia", "archontophoenix", "areca",
-			"astrocarym", "attalea", "beccariophoenix", "bismarckia", "borassus",
-			"calyptronoma", "ceroxylon", "cocos", "cyrtostachys", "elaeis", "euterpe",
-			"hyphaene", "jubaea", "livistona", "mauritia", "nypa", "phoenix", "raphia",
-			"rhopalostylis", "roystonea", "sabal", "serenoa", "socratea", "washingtonia"};
+			"astrocarym", "astrocaryum", "attalea", "bactris", "beccariophoenix",
+			"bismarckia", "borassus", "calyptronoma", "ceroxylon", "cocos",
+			"cyrtostachys", "elaeis", "euterpe", "hyphaene", "jubaea", "leopoldinia",
+			"livistona", "mauritia", "nypa", "phoenix", "raphia", "rhopalostylis",
+			"roystonea", "sabal", "serenoa", "socratea", "washingtonia"};
 	for (const auto *p : genera)
 		if (genus == p)
 			return true;
@@ -229,10 +231,32 @@ double smooth_noise(int x, int z, int scale)
 {
 	return ground_generation::value_noise_01(x, z, scale);
 }
+int height_tolerance(int want)
+{
+	return std::max(2, static_cast<int>(std::lround(want * .15)));
+}
+int height_slack(int want)
+{
+	return std::max(1, static_cast<int>(std::lround(want * .08)));
+}
+double default_height_m(int x, int z)
+{
+	static constexpr std::array<std::tuple<std::uint64_t, double, double>, 5> bands = {
+			{{150, 4., 7.}, {500, 7., 12.}, {830, 12., 18.}, {965, 18., 25.},
+					{1000, 25., 32.}}};
+	const auto roll = land_cover::coord_hash(x + 101, z + 233) % 1000;
+	const double t =
+			double(land_cover::coord_hash(x ^ 0x2C61, z ^ 0x5E0B) % 1000) / 1000.;
+	for (const auto &[limit, low, high] : bands)
+		if (roll < limit)
+			return low + (high - low) * t;
+	return 7. + 5. * t;
+}
 }
 
 struct RegionSelector::Data
 {
+	static constexpr std::size_t CROWN_TABLE_MAX = 64;
 	enum class Niche : std::uint8_t
 	{
 		Any,
@@ -280,6 +304,7 @@ struct RegionSelector::Data
 		bool empty() const { return communities.empty(); }
 	};
 	std::vector<Entry> entries;
+	std::vector<double> crowns;
 	std::string realm_name;
 	std::size_t total_realm = 0;
 	std::size_t total_vanilla = 0;
@@ -302,26 +327,40 @@ struct RegionSelector::Data
 	{
 		return sizes.allows(s) && (s != TreeSize::Giant || scale >= 1.0);
 	}
-	TreeSize roll_size(int x, int z) const
+	int capped_height(int wanted) const
 	{
-		const auto r = land_cover::coord_hash(x + 101, z + 233) % 1000;
-		if (scale < .3)
-			return r < 650 ? TreeSize::Small : r < 985 ? TreeSize::Medium : TreeSize::Big;
-		if (scale < .7)
-			return r < 380	 ? TreeSize::Small
-				   : r < 820 ? TreeSize::Medium
-				   : r < 985 ? TreeSize::Big
-							 : TreeSize::Tall;
+		int cap = sizes.max_height();
 		if (scale < 1.)
-			return r < 260	 ? TreeSize::Small
-				   : r < 700 ? TreeSize::Medium
-				   : r < 930 ? TreeSize::Big
-							 : TreeSize::Tall;
-		return r < 200	 ? TreeSize::Small
-			   : r < 600 ? TreeSize::Medium
-			   : r < 880 ? TreeSize::Big
-			   : r < 975 ? TreeSize::Tall
-						 : TreeSize::Giant;
+			cap = std::min(cap, size_cap_height(TreeSize::Tall));
+		return std::clamp(wanted, 1, std::max(1, cap));
+	}
+	void build_crowns()
+	{
+		std::vector<double> sum(CROWN_TABLE_MAX + 1, 0.0);
+		std::vector<std::uint32_t> count(CROWN_TABLE_MAX + 1, 0);
+		for (const auto &entry : entries) {
+			const auto height =
+					std::clamp(entry.schem->height, 1, static_cast<int>(CROWN_TABLE_MAX));
+			sum[height] += entry.schem->leaf_columns;
+			++count[height];
+		}
+		crowns.resize(CROWN_TABLE_MAX + 1, 50.0);
+		for (std::size_t h = 0; h <= CROWN_TABLE_MAX; ++h) {
+			for (std::size_t width = 0; width <= CROWN_TABLE_MAX; ++width) {
+				const auto lo = std::max<std::size_t>(1, h > width ? h - width : 0);
+				const auto hi = std::min(CROWN_TABLE_MAX, h + width);
+				std::uint32_t n = 0;
+				double total = 0.0;
+				for (std::size_t i = lo; i <= hi; ++i) {
+					n += count[i];
+					total += sum[i];
+				}
+				if (n >= 3 || (lo == 1 && hi == CROWN_TABLE_MAX)) {
+					crowns[h] = n ? total / n : 50.0;
+					break;
+				}
+			}
+		}
 	}
 };
 
@@ -334,7 +373,9 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	data->blocks_per_meter = blocks_per_meter;
 	data->ground_level = ground_level;
 	data->sizes = sizes;
-	std::unordered_map<std::string, std::size_t> asset_entries;
+	// Cache failed and successful model reads alike: manifests can reference
+	// the same missing or leafless asset from many communities.
+	std::unordered_map<std::string, std::optional<std::size_t>> asset_entries;
 	auto build_community = [&](const nlohmann::json &json,
 								   const std::filesystem::path &manifest,
 								   const std::string &pack_name,
@@ -366,21 +407,23 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 						try {
 							const auto asset_key = std::filesystem::absolute(path)
 														   .lexically_normal()
-														   .string() +
-												   "|" + std::to_string(width);
+														   .string();
 							if (const auto it = asset_entries.find(asset_key);
 									it != asset_entries.end()) {
-								variants.push_back(it->second);
+								if (it->second)
+									variants.push_back(*it->second);
 								continue;
 							}
+							auto [asset_it, inserted] =
+									asset_entries.emplace(asset_key, std::nullopt);
+							(void)inserted;
 							auto schem = load_schem_shared(path);
 							if (has_leaves(*schem)) {
 								const auto size = schematic_size(*schem);
 								data->entries.push_back(
 										{std::move(schem), size, std::uint8_t(width)});
 								variants.push_back(data->entries.size() - 1);
-								asset_entries.emplace(
-										asset_key, data->entries.size() - 1);
+								asset_it->second = data->entries.size() - 1;
 							}
 						} catch (...) {
 						}
@@ -866,6 +909,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		data->vanilla_pools[id][0] = build_pools(sprinkle, data->vanilla, false);
 		data->vanilla_pools[id][1] = build_pools(sprinkle, data->vanilla, true);
 	}
+	data->build_crowns();
 	return RegionSelector{std::move(data)};
 }
 std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
@@ -946,6 +990,21 @@ int RegionSelector::base_spacing() const
 {
 	return !data_ ? 5 : data_->scale < .3 ? 7 : data_->scale < .7 ? 6 : 5;
 }
+int RegionSelector::slot_spacing(bool density_decided) const
+{
+	if (!data_)
+		return 5;
+	const bool micro = data_->scale < .35;
+	return density_decided && !micro && data_->scale < .7 ? 4 : base_spacing();
+}
+double RegionSelector::crown_columns(int height) const
+{
+	if (!data_ || data_->crowns.empty())
+		return 50.0;
+	const auto capped = data_->capped_height(height);
+	const auto index = std::min<std::size_t>(capped, data_->crowns.size() - 1);
+	return std::max(4.0, data_->crowns[index]);
+}
 const Schematic *RegionSelector::schematic(std::size_t index) const
 {
 	return data_ && index < data_->entries.size() ? data_->entries[index].schem.get()
@@ -957,12 +1016,14 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 {
 	if (empty())
 		return std::nullopt;
-	const int spacing = base_spacing();
+	const int spacing = slot_spacing(request.density_decided);
 	auto [sx, sz] = trunk_slot_s(x, z, spacing);
 	if (mapped_selection) {
 		sx = x;
 		sz = z;
 	}
+	const int wanted_height = data_->capped_height(request.want_height.value_or(
+			static_cast<int>(std::lround(default_height_m(sx, sz) * data_->scale))));
 	// Invert the vertical affine, including terrain compression, as in region.rs.
 	const double per_metre =
 			data_->blocks_per_meter > 0.0 ? data_->blocks_per_meter : data_->scale;
@@ -1011,26 +1072,53 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 
 	// Pools are prepared when the region library loads, matching Rust's O(1)
 	// pool resolution and avoiding per-slot temporary allocations.
+	auto community_fits = [&](const Data::Pack &source, std::size_t index) {
+		if (index >= source.communities.size())
+			return false;
+		const auto &candidate = source.communities[index];
+		for (std::size_t si = 0; si < candidate.species.size(); ++si) {
+			if (si < candidate.species_palm.size() && candidate.species_palm[si] &&
+					!palms_allowed)
+				continue;
+			for (const auto entry : candidate.species[si])
+				if (data_->allowed(data_->entries[entry].size) &&
+						std::abs(data_->entries[entry].schem->height - wanted_height) <=
+								height_tolerance(wanted_height))
+					return true;
+		}
+		return false;
+	};
 	auto choose_cached = [&, sx = sx, sz = sz](const Data::Pools &pools,
+								 const Data::Pack &source,
 								 std::uint32_t salt) -> std::optional<std::size_t> {
 		const std::size_t place = montane ? 1 : want_wet ? 2 : 0;
 		const std::size_t tag = want_conifer ? 1 : want_broadleaf ? 2 : 0;
 		const auto &pool = pools[place][tag];
-		unsigned total = 0;
-		for (const auto &choice : pool)
-			total += choice.weight;
-		if (!total)
-			return std::nullopt;
 		const auto h = land_cover::coord_hash(sx ^ static_cast<int>(salt), sz ^ 0x5a17);
 		const double roll = h % 5 == 0 ? double((h >> 8) % 10000) / 10000.
 									   : ground_generation::patch_noise(sx, sz, 48, salt);
-		unsigned selected = std::min(total - 1, static_cast<unsigned>(roll * total));
-		for (const auto &choice : pool) {
-			if (selected < choice.weight)
-				return choice.community;
-			selected -= choice.weight;
-		}
-		return pool.back().community;
+		auto select = [&](const auto &choices) -> std::optional<std::size_t> {
+			unsigned total = 0;
+			for (const auto &choice : choices)
+				total += choice.weight;
+			if (!total)
+				return std::nullopt;
+			unsigned selected = std::min(total - 1, static_cast<unsigned>(roll * total));
+			for (const auto &choice : choices) {
+				if (selected < choice.weight)
+					return choice.community;
+				selected -= choice.weight;
+			}
+			return choices.back().community;
+		};
+		const auto first = select(pool);
+		if (!first || community_fits(source, *first))
+			return first;
+		std::vector<Data::WeightedCommunity> fitting;
+		for (const auto &choice : pool)
+			if (community_fits(source, choice.community))
+				fitting.push_back(choice);
+		return select(fitting).value_or(*first);
 	};
 	auto choose_vanilla = [&, sx = sx, sz = sz]() -> std::optional<std::size_t> {
 		if (!request.eco || data_->vanilla.empty())
@@ -1038,7 +1126,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		const auto pools = data_->vanilla_pools.find(request.eco->id);
 		if (pools != data_->vanilla_pools.end())
 			if (const auto selected = choose_cached(
-						pools->second[palms_allowed ? 1 : 0], 0x3c0b22f))
+						pools->second[palms_allowed ? 1 : 0], data_->vanilla, 0x3c0b22f))
 				return selected;
 		const auto &conifers = data_->vanilla.by_habitat[habitat_index(Habitat::Conifer)];
 		return conifers.empty()
@@ -1069,8 +1157,9 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					selected_from_mix = true;
 				}
 			} else {
-				if (const auto selected = choose_cached(
-							mix->second[palms_allowed ? 1 : 0], 0x3c0a11e)) {
+				if (const auto selected =
+								choose_cached(mix->second[palms_allowed ? 1 : 0],
+										data_->realm, 0x3c0a11e)) {
 					ci = *selected;
 					selected_from_mix = true;
 				}
@@ -1230,32 +1319,32 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		species_candidates = community.species;
 	if (species_candidates.empty())
 		return std::nullopt;
-	// Rust chooses a species in proportion to its usable schematic count, then
-	// applies width and preferred size within that species. Flattening the pack
-	// first skews the species mix and the width fallback.
-	std::optional<TreeSize> requested_tier;
-	if (request.want_size) {
-		for (const auto &species : species_candidates)
-			for (const auto i : species)
-				if (data_->allowed(data_->entries[i].size) &&
-						data_->entries[i].size <= *request.want_size &&
-						(!requested_tier || data_->entries[i].size > *requested_tier))
-					requested_tier = data_->entries[i].size;
-		if (!requested_tier)
-			for (const auto &species : species_candidates)
-				for (const auto i : species)
-					if (data_->allowed(data_->entries[i].size) &&
-							(!requested_tier || data_->entries[i].size < *requested_tier))
-						requested_tier = data_->entries[i].size;
-	}
+	// Match Rust's canopy-height selection: first honor the enabled size cap,
+	// then choose among models nearest the requested height. Species remain
+	// weighted by the number of matching models, not flattened across the pack.
+	const auto capped = [&](std::size_t i) {
+		return data_->allowed(data_->entries[i].size);
+	};
+	const bool any_capped = std::any_of(species_candidates.begin(),
+			species_candidates.end(), [&](const auto &species) {
+				return std::any_of(species.begin(), species.end(), capped);
+			});
+	const auto eligible = [&](std::size_t i) { return !any_capped || capped(i); };
+	const auto distance = [&](std::size_t i) {
+		return std::abs(data_->entries[i].schem->height - wanted_height);
+	};
+	int best_distance = std::numeric_limits<int>::max();
+	for (const auto &species : species_candidates)
+		for (const auto i : species)
+			if (eligible(i))
+				best_distance = std::min(best_distance, distance(i));
+	const int nearest_limit = best_distance + height_slack(wanted_height);
 	std::vector<std::vector<std::size_t>> usable_species;
 	std::size_t total = 0;
 	for (const auto &species : species_candidates) {
 		std::vector<std::size_t> usable;
 		for (const auto i : species)
-			if (data_->allowed(data_->entries[i].size) &&
-					(!request.want_size || !requested_tier ||
-							data_->entries[i].size == *requested_tier))
+			if (eligible(i) && distance(i) <= nearest_limit)
 				usable.push_back(i);
 		total += usable.size();
 		usable_species.push_back(std::move(usable));
@@ -1300,15 +1389,6 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				width.push_back(i);
 	if (width.empty())
 		width = selected_species;
-	if (!request.want_size) {
-		const auto target = data_->roll_size(sx, sz);
-		std::vector<std::size_t> size_matches;
-		for (const auto i : width)
-			if (data_->entries[i].size == target)
-				size_matches.push_back(i);
-		if (!size_matches.empty())
-			width = std::move(size_matches);
-	}
 	const auto index = width[land_cover::coord_hash(sx + 313, sz + 727) % width.size()];
 	return SlotSelection{sx, sz, index,
 			unsigned(land_cover::coord_hash(sx ^ 0x5bd1, sz ^ 0x9e37) % 4)};
@@ -1324,7 +1404,7 @@ std::optional<SlotSelection> RegionSelector::pick_mapped(
 		int x, int z, Habitat hint, int elevation, const MappedRequest &mapped) const
 {
 	SlotRequest request;
-	request.want_size = mapped.want_size;
+	request.want_height = mapped.want_height;
 	request.eco = mapped.eco;
 	request.beach = mapped.beach;
 	request.tagged = mapped.conifer.has_value();
