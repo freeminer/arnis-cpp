@@ -201,8 +201,6 @@ void lean_to(WorldEditor &editor, int x, int z, int base, bool along_x,
 void generate_bicycle_parking_area(WorldEditor &editor, const ProcessedElement &element,
 		const std::vector<std::pair<int32_t, int32_t>> &area)
 {
-	if (area.empty())
-		return;
 	if (const auto surface = tag(element.tags(), "surface"); !surface.empty()) {
 		if (const auto *blocks = surfaces::get_blocks_for_surface(surface);
 				blocks && !blocks->empty())

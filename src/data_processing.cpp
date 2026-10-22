@@ -15,7 +15,9 @@
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <map>
 #include <numeric>
+#include <set>
 #include <utility>
 #include <cstdlib>
 #include <fstream>
@@ -2449,6 +2451,10 @@ bool generate_world(WorldEditor &editor,
 	const std::size_t landmark_unit_begin = plane_unit_begin + plane_unit_count;
 	DeferredPlacements deferred_placements;
 	const bool deferred_placements_active = eviction_active && regional_ground_passes;
+	std::set<std::pair<int, int>> styled_regions;
+	std::vector<std::pair<int, int>> tile_regions;
+	std::set<std::pair<int, int>> real_regions;
+	std::map<std::pair<int, int>, std::size_t> remaining_region_tiles;
 	if (deferred_placements_active) {
 		std::vector<std::vector<std::pair<int, int>>> unit_regions;
 		if (model_pipeline) {
@@ -2465,20 +2471,33 @@ bool generate_world(WorldEditor &editor,
 		unit_regions.insert(unit_regions.end(),
 				std::make_move_iterator(landmark_regions.begin()),
 				std::make_move_iterator(landmark_regions.end()));
-		std::vector<std::pair<int, int>> world_regions;
-		world_regions.reserve(element_tiles.size());
-		for (const auto &tile : element_tiles)
-			world_regions.emplace_back(
-					tiles::region_floor(tile.min_x), tiles::region_floor(tile.min_z));
-		std::sort(world_regions.begin(), world_regions.end());
-		world_regions.erase(std::unique(world_regions.begin(), world_regions.end()),
-				world_regions.end());
+		tile_regions.reserve(element_tiles.size());
+		for (const auto &tile : element_tiles) {
+			const auto region = std::pair{
+					tiles::region_floor(tile.min_x), tiles::region_floor(tile.min_z)};
+			tile_regions.push_back(region);
+			real_regions.insert(region);
+		}
+		// A region is not final when only its own tile has merged: neighboring
+		// tile tasks can write into it through element/model halos. Track every
+		// in-world tile that may contribute to each 3x3 region neighborhood, as
+		// Rust's streaming coordinator does before releasing or styling regions.
+		for (const auto &source : tile_regions)
+			for (int dz = -1; dz <= 1; ++dz)
+				for (int dx = -1; dx <= 1; ++dx) {
+					const auto target = std::pair{source.first + dx, source.second + dz};
+					if (real_regions.contains(target))
+						++remaining_region_tiles[target];
+				}
 		deferred_placements = DeferredPlacements(
-				std::move(unit_regions), [&world_regions](const auto region) {
-					return std::binary_search(
-							world_regions.begin(), world_regions.end(), region);
+				std::move(unit_regions), [&real_regions](const auto region) {
+					return real_regions.contains(region);
 				});
 	}
+	std::set<std::pair<int, int>> deferred_write_regions;
+	if (deferred_placements_active)
+		for (const auto &region : deferred_placements.regions())
+			deferred_write_regions.insert(region);
 	auto execute_deferred_placements = [&](const std::vector<std::size_t> &units) {
 		if (units.empty())
 			return;
@@ -2507,15 +2526,61 @@ bool generate_world(WorldEditor &editor,
 				landmarks::place(editor, landmark_plan.placements[index], args.scale,
 						args.rotation);
 	};
+	auto style_region_if_ready = [&](const std::pair<int, int> &region) {
+		const auto remaining = remaining_region_tiles.find(region);
+		if (!deferred_placements_active || remaining == remaining_region_tiles.end() ||
+				remaining->second != 0 || deferred_placements.holds(region) ||
+				!styled_regions.insert(region).second)
+			return;
+		editor.clear_strict_bounds();
+		world_style::apply_region(
+				editor, args, building_footprints, region.first, region.second);
+		if ((args.winter || args.post_apocalyptic) &&
+				!deferred_write_regions.contains(region))
+			editor.release_road_surface_overrides(region.first, region.second);
+	};
 	auto complete_deferred_tile = [&](const TileBounds &tile) {
 		if (!deferred_placements_active)
 			return true;
 		if (!editor.flush_deferred_tile_merges())
 			return false;
-		const auto waves = deferred_placements.complete(
-				{tiles::region_floor(tile.min_x), tiles::region_floor(tile.min_z)});
-		for (const auto &wave : waves)
-			execute_deferred_placements(wave);
+		// Deferred placements and regional styling intentionally escape the
+		// just-merged tile's element bounds; the next tile reinstates its bounds.
+		editor.clear_strict_bounds();
+		const auto completed_region = std::pair{
+				tiles::region_floor(tile.min_x), tiles::region_floor(tile.min_z)};
+		std::vector<std::pair<int, int>> newly_ready;
+		std::vector<std::pair<int, int>> flushable_regions;
+		for (int dz = -1; dz <= 1; ++dz)
+			for (int dx = -1; dx <= 1; ++dx) {
+				const auto region = std::pair{
+						completed_region.first + dx, completed_region.second + dz};
+				auto remaining = remaining_region_tiles.find(region);
+				if (remaining == remaining_region_tiles.end() || remaining->second == 0)
+					continue;
+				if (--remaining->second == 0) {
+					flushable_regions.push_back(region);
+					newly_ready.push_back(region);
+				}
+			}
+		// Release every newly-complete region before styling any of them. A model
+		// spanning two regions may become placeable on this tile and still write
+		// back into another region that reached zero in the same completion step.
+		for (const auto &region : flushable_regions) {
+			const auto waves = deferred_placements.complete(region);
+			for (const auto &wave : waves) {
+				for (const auto unit : wave) {
+					const auto &regions = deferred_placements.regions_of(unit);
+					newly_ready.insert(newly_ready.end(), regions.begin(), regions.end());
+				}
+				execute_deferred_placements(wave);
+			}
+		}
+		std::sort(newly_ready.begin(), newly_ready.end());
+		newly_ready.erase(
+				std::unique(newly_ready.begin(), newly_ready.end()), newly_ready.end());
+		for (const auto &region : newly_ready)
+			style_region_if_ready(region);
 		return true;
 	};
 	const bool parallel_tile_workers =
@@ -3346,7 +3411,10 @@ bool generate_world(WorldEditor &editor,
 	// Rust styles each completed region before facade panels are finalized or
 	// flushed. Keep that ordering so generated panels remain visible over winter
 	// snow and post-apocalyptic block substitutions.
-	world_style::apply(editor, args, building_footprints);
+	if (deferred_placements_active)
+		world_style::apply_remaining(editor, args, building_footprints, styled_regions);
+	else
+		world_style::apply(editor, args, building_footprints);
 	if (apply_world_style)
 		editor.release_sealed_surface();
 	// The final style pass is the last consumer of road elevations. Rust drops

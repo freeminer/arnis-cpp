@@ -4112,18 +4112,12 @@ int scaled_blocks(int value, double scale_factor)
 	return static_cast<int>(std::floor(static_cast<double>(value) * scale_factor));
 }
 
-int terrain_base_level(WorldEditor &editor, const ProcessedWay &element, int fallback,
-		const std::vector<std::pair<int, int>> &footprint)
+int terrain_base_level(WorldEditor &editor, const ProcessedWay &element, int fallback)
 {
 	std::optional<int> highest;
-	const auto include = [&](int x, int z) {
-		if (const auto level = editor.terrain_level(x, z))
-			highest = highest ? std::max(*highest, *level) : *level;
-	};
 	for (const auto &node : element.nodes)
-		include(node.x, node.z);
-	for (const auto &[x, z] : footprint)
-		include(x, z);
+		if (const auto level = editor.terrain_level(node.x, node.z))
+			highest = highest ? std::max(*highest, *level) : *level;
 	return highest.value_or(fallback);
 }
 
@@ -4157,8 +4151,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 
 	int start_y_offset = min_level_offset;
 	if (terrain_enabled) {
-		const int terrain_base =
-				terrain_base_level(editor, element, args.ground_level, cached_floor_area);
+		const int terrain_base = terrain_base_level(editor, element, args.ground_level);
 		start_y_offset = terrain_base + min_level_offset;
 	}
 
@@ -7046,8 +7039,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 	int start_y_offset = 0;
 	if (terrain_enabled) {
-		const int terrain_base = terrain_base_level(
-				*editor, element, args.ground_level, cached_floor_area);
+		const int terrain_base = terrain_base_level(*editor, element, args.ground_level);
 		start_y_offset = terrain_base + min_level_offset;
 	} else {
 		start_y_offset = min_level_offset;
@@ -7268,7 +7260,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	Block floor_block = STONE;
 	Block window_block = GLASS;
-	std::unordered_set<std::pair<int, int>, PairHash> processed_points;
 	int floor_cycle = floor_cycle_for(building_type, element.tags);
 	const int grammar_anchor = min_level_offset == 0 ? 2 : 0;
 	auto [building_height, is_tall_building] =
@@ -9754,7 +9745,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		for (const auto &p : floor_area) {
 			int x = p.first;
 			int z = p.second;
-			if (processed_points.insert(p).second) {
+			{
 				const bool is_passage = passage_at(effective_passages, x, z);
 				const Block ceiling_light_block =
 						condition == BuildingCondition::Abandoned ||

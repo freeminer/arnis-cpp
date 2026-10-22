@@ -40,7 +40,7 @@ std::optional<std::pair<int, int>> anchor(const ProcessedElement &element)
 	if (nodes.empty())
 		return std::nullopt;
 	const std::size_t count = nodes.size() > 2 && nodes.front().x == nodes.back().x &&
-												  nodes.front().z == nodes.back().z
+											  nodes.front().z == nodes.back().z
 									  ? nodes.size() - 1
 									  : nodes.size();
 	long long x = 0, z = 0;
@@ -231,10 +231,11 @@ std::size_t drop_doubled_summit_crosses(
 		if (!element.is_node() || !summit_cross_tagged(element.as_node().tags))
 			continue;
 		auto &node = std::get<ProcessedNode>(element);
-		const bool near_ = std::any_of(crosses.begin(), crosses.end(), [&](const auto &p) {
-			return std::hypot(static_cast<double>(p.first) - node.x,
-						   static_cast<double>(p.second) - node.z) <= reach;
-		});
+		const bool near_ =
+				std::any_of(crosses.begin(), crosses.end(), [&](const auto &p) {
+					return std::hypot(static_cast<double>(p.first) - node.x,
+								   static_cast<double>(p.second) - node.z) <= reach;
+				});
 		if (near_ && node.tags.erase("summit:cross") > 0)
 			++dropped;
 	}
@@ -375,8 +376,6 @@ void generate_chimney(WorldEditor &editor, const ProcessedElement &element,
 			for (int cz = min_z; cz <= max_z; ++cz)
 				if (polygon_contains_cell_center(cx, cz, polygon))
 					outline_cells.emplace(cx, cz);
-		if (outline_cells.empty())
-			outline_cells.emplace(x, z);
 	}
 	radius = std::clamp(radius, 1.0, 12.0);
 	const double top_radius = std::max(1.0, radius * .6);
@@ -472,12 +471,6 @@ void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 				std::nullopt);
 }
 
-void generate_manhole(WorldEditor &editor, const ProcessedElement &element)
-{
-	if (const auto node = element.first_node())
-		editor.set_block(EARTH_GRATING, node->x, 0, node->z, std::nullopt, std::nullopt);
-}
-
 struct PairHash
 {
 	std::size_t operator()(const std::pair<int, int> &p) const noexcept
@@ -542,9 +535,6 @@ struct TankFootprint
 				if (point_in_polygon(x, z, nodes))
 					footprint.cells.insert({x, z});
 			}
-		}
-		if (footprint.cells.empty()) {
-			footprint.cells.insert({footprint.center_x, footprint.center_z});
 		}
 		return footprint;
 	}
@@ -806,8 +796,6 @@ void generate_man_made(WorldEditor &editor, const ProcessedElement &element,
 		generate_chimney(editor, element, args, &building_footprints);
 	} else if (t == "water_well") {
 		generate_water_well(editor, element);
-	} else if (t == "manhole") {
-		generate_manhole(editor, element);
 	} else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
 		generate_tank_structure(editor, element, args);
 	} else if (t == "lighthouse") {
@@ -851,8 +839,6 @@ void generate_man_made_nodes(WorldEditor &editor, const ProcessedNode &node,
 		generate_chimney(editor, element, args, &building_footprints);
 	} else if (t == "water_well") {
 		generate_water_well(editor, element);
-	} else if (t == "manhole") {
-		generate_manhole(editor, element);
 	} else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
 		generate_tank_structure(editor, element, args);
 	} else if (t == "lighthouse") {

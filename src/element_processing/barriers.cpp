@@ -793,9 +793,10 @@ std::vector<std::vector<BarrierPost>> lay_out_barrier(const BarrierTrace &trace,
 				const auto c2 = std::pair{previous.x, spot.z};
 				const auto corner =
 						cost(c1.first, c1.second) <= cost(c2.first, c2.second) ? c1 : c2;
-				if (cost(corner.first, corner.second) == 0)
-					run.push_back({corner.first, corner.second,
-							previous.gate ? previous.gate : gate});
+				// Preserve the wall's corner even when both candidates are costly;
+				// cost selects the clearer side, rather than deleting the corner.
+				run.push_back({corner.first, corner.second,
+						previous.gate ? previous.gate : gate});
 			}
 		}
 		run.push_back({spot.x, spot.z, gate});
@@ -806,7 +807,8 @@ std::vector<std::vector<BarrierPost>> lay_out_barrier(const BarrierTrace &trace,
 		orient_barrier_gates(r);
 		if (spaced) {
 			std::vector<BarrierPost> every_other;
-			for (std::size_t i = 0; i < r.size(); i += 2)
+			// Match Rust's retain counter: increment first, then keep odd indexes.
+			for (std::size_t i = 1; i < r.size(); i += 2)
 				every_other.push_back(r[i]);
 			r = std::move(every_other);
 		}

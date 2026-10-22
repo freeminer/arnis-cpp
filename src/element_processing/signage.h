@@ -16,6 +16,9 @@
 #include <unordered_set>
 namespace arnis::signage
 {
+bool place_native_sign_panel(world_editor::WorldEditor &editor, int x, int y, int z,
+		std::int8_t facing, const decals::DecalKey &key, bool require_hosts);
+
 struct StreetNameBlade
 {
 	std::string name;

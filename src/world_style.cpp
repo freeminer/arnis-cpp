@@ -650,6 +650,34 @@ void style_chunk(WorldEditor &editor, int bx, int bz, int min_x, int min_z, int 
 		for (const auto &c : columns)
 			snow_over(editor, c, min_y, max_y);
 }
+
+int region_floor(int coordinate)
+{
+	int region = coordinate / 512;
+	if (coordinate % 512 < 0)
+		--region;
+	return region;
+}
+
+void apply_chunks(WorldEditor &editor, const Args &args,
+		const BuildingFootprintBitmap &building_footprints, int min_x, int min_z,
+		int max_x, int max_z, const std::set<std::pair<int, int>> *skip_regions)
+{
+	const auto [min_y, max_y] = editor.writable_y_bounds();
+	if (min_x > max_x || min_z > max_z || min_y > max_y)
+		return;
+	const int first_cx = min_x >> 4, last_cx = max_x >> 4;
+	const int first_cz = min_z >> 4, last_cz = max_z >> 4;
+	for (int cz = first_cz; cz <= last_cz; ++cz)
+		for (int cx = first_cx; cx <= last_cx; ++cx) {
+			const int bx = cx << 4, bz = cz << 4;
+			if (skip_regions &&
+					skip_regions->contains({region_floor(bx), region_floor(bz)}))
+				continue;
+			style_chunk(editor, bx, bz, min_x, min_z, max_x, max_z, min_y, max_y, args,
+					building_footprints);
+		}
+}
 }
 
 void apply(WorldEditor &editor, const Args &args,
@@ -659,14 +687,38 @@ void apply(WorldEditor &editor, const Args &args,
 		return;
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
-	const auto [min_y, max_y] = editor.writable_y_bounds();
-	if (min_x > max_x || min_z > max_z || min_y > max_y)
+	apply_chunks(editor, args, building_footprints, min_x, min_z, max_x, max_z, nullptr);
+}
+
+void apply_region(WorldEditor &editor, const Args &args,
+		const BuildingFootprintBitmap &building_footprints, int region_x, int region_z)
+{
+	if ((!args.winter && !args.post_apocalyptic) || !editor.mg)
 		return;
-	const int first_cx = min_x >> 4, last_cx = max_x >> 4;
-	const int first_cz = min_z >> 4, last_cz = max_z >> 4;
-	for (int cz = first_cz; cz <= last_cz; ++cz)
-		for (int cx = first_cx; cx <= last_cx; ++cx)
-			style_chunk(editor, cx << 4, cz << 4, min_x, min_z, max_x, max_z, min_y,
-					max_y, args, building_footprints);
+	const auto [world_min_x, world_min_z] = editor.get_min_coords();
+	const auto [world_max_x, world_max_z] = editor.get_max_coords();
+	const std::int64_t region_min_x = std::int64_t(region_x) * 512;
+	const std::int64_t region_min_z = std::int64_t(region_z) * 512;
+	const auto min_x =
+			static_cast<int>(std::max<std::int64_t>(world_min_x, region_min_x));
+	const auto min_z =
+			static_cast<int>(std::max<std::int64_t>(world_min_z, region_min_z));
+	const auto max_x =
+			static_cast<int>(std::min<std::int64_t>(world_max_x, region_min_x + 511));
+	const auto max_z =
+			static_cast<int>(std::min<std::int64_t>(world_max_z, region_min_z + 511));
+	apply_chunks(editor, args, building_footprints, min_x, min_z, max_x, max_z, nullptr);
+}
+
+void apply_remaining(WorldEditor &editor, const Args &args,
+		const BuildingFootprintBitmap &building_footprints,
+		const std::set<std::pair<int, int>> &already_styled)
+{
+	if ((!args.winter && !args.post_apocalyptic) || !editor.mg)
+		return;
+	auto [min_x, min_z] = editor.get_min_coords();
+	auto [max_x, max_z] = editor.get_max_coords();
+	apply_chunks(editor, args, building_footprints, min_x, min_z, max_x, max_z,
+			&already_styled);
 }
 }

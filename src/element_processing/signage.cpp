@@ -1,5 +1,6 @@
 #include "signage.h"
 #include "../block_definitions.h"
+#include "../fm_native_signs.h"
 #include "../decals/font.h"
 #include "../decals/pictograms.h"
 #include "../bresenham.h"
@@ -232,8 +233,85 @@ std::optional<NativeSign> native_street_sign(
 					region == decals::SignRegion::Germanic ||
 					region == decals::SignRegion::UkIreland;
 	const bool us = region == decals::SignRegion::NorthAmerica;
-	if (STREETS_AVAILABLE && (eu || us) &&
-			std::holds_alternative<decals::TrafficKey>(key)) {
+	// Check each registered node independently; a missing unrelated sign must not
+	// disable the rest of a mod's catalogue.
+	const char *candidate = nullptr;
+	if (const auto *traffic = std::get_if<decals::TrafficKey>(&key)) {
+		switch (traffic->sign) {
+		case decals::TrafficSign::PriorityRoad:
+			if (eu)
+				candidate = "streets:sign_eu_majorroad_center";
+			break;
+		case decals::TrafficSign::NoParking:
+			candidate = eu	 ? "streets:sign_eu_noparking_center"
+						: us ? "streets:sign_us_noparkingboth_center"
+							 : nullptr;
+			break;
+		case decals::TrafficSign::DeadEnd:
+			candidate = eu	 ? "streets:sign_eu_deadendstreet_center"
+						: us ? "streets:sign_us_deadend_center"
+							 : nullptr;
+			break;
+		case decals::TrafficSign::OneWay:
+			candidate = eu	 ? "streets:sign_eu_onewayright_center"
+						: us ? "streets:sign_us_onewayright_center"
+							 : nullptr;
+			break;
+		case decals::TrafficSign::Bicycle:
+			candidate = eu	 ? "streets:sign_eu_cyclepath_center"
+						: us ? "streets:sign_us_bikelane_center"
+							 : nullptr;
+			break;
+		case decals::TrafficSign::Motorway:
+			if (eu)
+				candidate = "streets:sign_eu_highway_center";
+			break;
+		case decals::TrafficSign::MotorwayEnd:
+			if (eu)
+				candidate = "streets:sign_eu_highwayend_center";
+			break;
+		default:
+			break;
+		}
+	} else if (const auto *icon = std::get_if<decals::PictogramKey>(&key)) {
+		if (icon->name == "parking")
+			candidate = "streets:sign_eu_parkingsite_center";
+		else if (icon->name == "information")
+			candidate = "streets:sign_eu_info_center";
+		else if (eu && icon->name == "bus_stop")
+			candidate = "streets:sign_eu_busstation_center";
+	} else if (const auto *speed = std::get_if<decals::SpeedLimitKey>(&key)) {
+		if (us && speed->mph && speed->value == 50)
+			candidate = "streets:sign_us_speedlimit50_center";
+	} else if (const auto *label = std::get_if<decals::TextKey>(&key)) {
+		const auto length = utf8_char_count(label->text);
+		if (label->text.find('\n') == std::string::npos) {
+			if (label->style.kind == decals::TextStyleKind::StreetName && length <= 40) {
+				block = native_sign_node("street_signs:sign_basic_top_only");
+				if (block.id() != CONTENT_AIR)
+					return NativeSign{block, label->text, true};
+			}
+			if (length <= 15 &&
+					(label->style.kind == decals::TextStyleKind::HouseNumber ||
+							label->style.kind == decals::TextStyleKind::Plaque)) {
+				block = native_sign_node("default:sign_wall_steel");
+				if (block.id() == CONTENT_AIR)
+					block = native_sign_node("default:sign_wall_wood");
+			} else if (length <= 50) {
+				block = native_sign_node("street_signs:sign_highway_small_green");
+			} else if (length <= 80) {
+				block = native_sign_node("street_signs:sign_highway_large_green");
+			}
+			if (block.id() != CONTENT_AIR)
+				return NativeSign{block, label->text, false};
+		}
+	}
+	if (candidate) {
+		block = native_sign_node(candidate);
+		if (block.id() != CONTENT_AIR)
+			return NativeSign{block, {}, true};
+	}
+	if ((eu || us) && std::holds_alternative<decals::TrafficKey>(key)) {
 		const auto sign = std::get<decals::TrafficKey>(key).sign;
 		switch (sign) {
 		case decals::TrafficSign::Stop:
@@ -257,7 +335,7 @@ std::optional<NativeSign> native_street_sign(
 		if (block.id() != CONTENT_AIR)
 			return NativeSign{block, {}, true};
 	}
-	if (STREETS_AVAILABLE && eu && std::holds_alternative<decals::SpeedLimitKey>(key)) {
+	if (eu && std::holds_alternative<decals::SpeedLimitKey>(key)) {
 		const auto &speed = std::get<decals::SpeedLimitKey>(key);
 		if (!speed.mph) {
 			constexpr std::array<std::uint16_t, 6> values{{10, 30, 50, 70, 100, 120}};
@@ -271,8 +349,6 @@ std::optional<NativeSign> native_street_sign(
 		}
 	}
 
-	if (!STREET_SIGNS_AVAILABLE)
-		return std::nullopt;
 	block = AIR;
 	if (std::holds_alternative<decals::TrafficKey>(key)) {
 		switch (std::get<decals::TrafficKey>(key).sign) {
@@ -408,6 +484,25 @@ void place_roadside_sign(world_editor::WorldEditor &editor, const char *kind,
 }
 
 } // anonymous namespace
+
+bool place_native_sign_panel(world_editor::WorldEditor &editor, int x, int y, int z,
+		std::int8_t facing, const decals::DecalKey &key, bool require_hosts)
+{
+	if (facing < 2 || facing > 5)
+		return false;
+	const auto region = editor.signage_context ? editor.signage_context->region
+											   : decals::SignRegion::Europe;
+	const auto native = native_street_sign(key, region);
+	if (!native || (require_hosts && editor.cell_open_at(x, y, z)))
+		return false;
+	const auto [fx, fy, fz] =
+			world_editor::WorldEditor::decal_frame_cell(x, y, z, facing);
+	if (!editor.owns(fx, fz) || fy - editor.get_ground_level(fx, fz) < 1 ||
+			editor.cell_has_frame(fx, fy, fz) || !editor.cell_open_at(fx, fy, fz))
+		return false;
+	return editor.place_sign_node(native->block, fx, fy, fz,
+			native->facedir ? streets_facedir(facing) : facing, native->text);
+}
 
 IntersectionIndex build_intersection_index(
 		const std::vector<ProcessedElement> &elements, double scale)

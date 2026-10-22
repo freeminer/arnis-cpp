@@ -404,7 +404,8 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 			return;
 		const auto floor_area =
 				flood_fill_cache.get_or_compute_element(element, args.timeout);
-		street_furniture::generate_bicycle_parking_area(editor, element, *floor_area);
+		if (!floor_area->empty())
+			street_furniture::generate_bicycle_parking_area(editor, element, *floor_area);
 		return;
 	}
 
