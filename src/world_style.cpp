@@ -10,7 +10,9 @@
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
+#include <mutex>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 namespace arnis::world_style
@@ -65,7 +67,7 @@ Block named(
 	return fallback;
 }
 
-Kind kind(WorldEditor &editor, const Block &block)
+Kind kind_uncached(WorldEditor &editor, const Block &block)
 {
 	const auto full = editor.block_name(block);
 	if (!full)
@@ -127,22 +129,75 @@ Kind kind(WorldEditor &editor, const Block &block)
 	return Kind::Solid;
 }
 
+struct BlockCacheKey
+{
+	const void *definitions;
+	std::uint16_t id;
+	bool operator==(const BlockCacheKey &) const = default;
+};
+
+struct BlockCacheKeyHash
+{
+	std::size_t operator()(const BlockCacheKey &key) const noexcept
+	{
+		const auto pointer = std::hash<const void *>{}(key.definitions);
+		return pointer ^ (std::hash<std::uint16_t>{}(key.id) + 0x9e3779b9u +
+								 (pointer << 6) + (pointer >> 2));
+	}
+};
+
+const void *definitions_key(const WorldEditor &editor)
+{
+	return editor.mg && editor.mg->m_emerge ? editor.mg->m_emerge->ndef : nullptr;
+}
+
+Kind kind(WorldEditor &editor, const Block &block)
+{
+	const auto *definitions = definitions_key(editor);
+	if (!definitions)
+		return kind_uncached(editor, block);
+	static std::mutex mutex;
+	static std::unordered_map<BlockCacheKey, Kind, BlockCacheKeyHash> cache;
+	const BlockCacheKey key{definitions, block.id()};
+	{
+		std::lock_guard<std::mutex> lock(mutex);
+		if (const auto it = cache.find(key); it != cache.end())
+			return it->second;
+	}
+	const auto value = kind_uncached(editor, block);
+	std::lock_guard<std::mutex> lock(mutex);
+	return cache.emplace(key, value).first->second;
+}
+
 bool flammable(WorldEditor &editor, const Block &block)
 {
+	const auto *definitions = definitions_key(editor);
+	static std::mutex mutex;
+	static std::unordered_map<BlockCacheKey, bool, BlockCacheKeyHash> cache;
+	const BlockCacheKey key{definitions, block.id()};
+	if (definitions) {
+		std::lock_guard<std::mutex> lock(mutex);
+		if (const auto it = cache.find(key); it != cache.end())
+			return it->second;
+	}
 	const auto full = editor.block_name(block);
-	if (!full)
-		return false;
-	const auto n = short_name(*full);
-	if (kind(editor, block) == Kind::Plant || kind(editor, block) == Kind::TallPlant ||
-			kind(editor, block) == Kind::Leaves)
-		return true;
+	const auto n = full ? short_name(*full) : std::string_view{};
+	bool result = kind(editor, block) == Kind::Plant ||
+				  kind(editor, block) == Kind::TallPlant ||
+				  kind(editor, block) == Kind::Leaves;
 	static constexpr std::array<std::string_view, 27> parts = {"oak", "spruce", "birch",
 			"jungle", "acacia", "mangrove", "cherry", "bamboo", "planks", "log", "wood",
 			"wool", "carpet", "vine", "hay", "bookshelf", "barrel", "scaffolding",
 			"lectern", "composter", "beehive", "bee_nest", "target", "tnt", "coal_block",
 			"moss", "azalea"};
-	return std::any_of(parts.begin(), parts.end(),
-			[&](auto part) { return n.find(part) != std::string_view::npos; });
+	result = result || std::any_of(parts.begin(), parts.end(), [&](auto part) {
+		return n.find(part) != std::string_view::npos;
+	});
+	if (definitions) {
+		std::lock_guard<std::mutex> lock(mutex);
+		return cache.emplace(key, result).first->second;
+	}
+	return result;
 }
 
 double noise(int x, int z, int scale, std::uint32_t salt)
@@ -171,12 +226,19 @@ void swap_material(WorldEditor &, const Column &, int, const Block &, Block);
 std::optional<std::pair<int, Block>> top(
 		WorldEditor &editor, const Column &c, int min_y, int max_y)
 {
-	const auto y = editor.highest_block_between(c.x, c.z, min_y, max_y);
-	if (!y)
-		return std::nullopt;
-	const auto b = editor.get_block_absolute(c.x, *y, c.z);
-	return b ? std::optional<std::pair<int, Block>>{std::pair<int, Block>{*y, *b}}
-			 : std::nullopt;
+	int search_max = max_y;
+	while (search_max >= min_y) {
+		const auto y = editor.highest_block_between(c.x, c.z, min_y, search_max);
+		if (!y)
+			return std::nullopt;
+		if (const auto block = editor.get_block_absolute(c.x, *y, c.z);
+				block && kind(editor, *block) != Kind::Air)
+			return std::pair<int, Block>{*y, *block};
+		if (*y <= min_y)
+			break;
+		search_max = *y - 1;
+	}
+	return std::nullopt;
 }
 
 std::uint64_t col_hash(const Column &c, int y)
@@ -198,12 +260,12 @@ void snowy_ground(WorldEditor &editor, const Column &c, int y)
 	if (!block)
 		return;
 	if (block->id() == GRASS_BLOCK.id())
-		swap_material(editor, c, y, *block, SNOWY_GRASS_BLOCK);
+		put(editor, SNOWY_GRASS_BLOCK, c.x, y, c.z);
 	else if (block->id() == PODZOL.id())
-		swap_material(editor, c, y, *block, SNOWY_PODZOL);
+		put(editor, SNOWY_PODZOL, c.x, y, c.z);
 	else if (block->id() == FARMLAND.id() || block->id() == DIRT_PATH.id() ||
 			 block->id() == MUD.id())
-		swap_material(editor, c, y, *block, DIRT);
+		put(editor, DIRT, c.x, y, c.z);
 }
 
 bool full_top(WorldEditor &editor, const Block &block, int x, int y, int z)
@@ -234,36 +296,34 @@ void swap_material(
 
 Block weathered(WorldEditor &editor, const Block &b, std::uint64_t h)
 {
-	const auto full_name = editor.block_name(b).value_or("");
-	const auto n = short_name(full_name);
 	const auto roll = h % 100;
-	if (n == "stone_bricks" && roll < 30)
+	if (b == STONE_BRICKS && roll < 30)
 		return named(editor, {"cracked_stone_bricks"}, b);
-	if (n == "stone_bricks" && roll < 55)
+	if (b == STONE_BRICKS && roll < 55)
 		return named(editor, {"mossy_stone_bricks"}, MOSSY_STONE_BRICKS);
-	if (n.ends_with("stone_brick_stairs") && roll < 35)
+	if (b == STONE_BRICK_STAIRS && roll < 35)
 		return named(editor, {"mossy_stone_brick_stairs"}, b);
-	if (n.ends_with("stone_brick_slab") && roll < 35)
+	if (b == STONE_BRICK_SLAB && roll < 35)
 		return named(editor, {"mossy_stone_brick_slab"}, b);
-	if (n.ends_with("stone_brick_wall") && roll < 35)
+	if (b == STONE_BRICK_WALL && roll < 35)
 		return named(editor, {"mossy_stone_brick_wall"}, b);
-	if (n == "cobblestone" && roll < 40)
+	if (b == COBBLESTONE && roll < 40)
 		return named(editor, {"mossy_cobblestone"}, MOSSY_COBBLESTONE);
-	if (n.ends_with("cobblestone_stairs") && roll < 35)
+	if (b == COBBLESTONE_STAIRS && roll < 35)
 		return named(editor, {"mossy_cobblestone_stairs"}, b);
-	if (n.ends_with("cobblestone_slab") && roll < 35)
+	if (b == COBBLESTONE_SLAB && roll < 35)
 		return named(editor, {"mossy_cobblestone_slab"}, b);
-	if (n.ends_with("cobblestone_wall") && roll < 35)
+	if (b == COBBLESTONE_WALL && roll < 35)
 		return named(editor, {"mossy_cobblestone_wall"}, MOSSY_COBBLESTONE_WALL);
-	if (n == "deepslate_bricks" && roll < 40)
+	if (b == DEEPSLATE_BRICKS && roll < 40)
 		return named(editor, {"cracked_deepslate_bricks"}, b);
-	if (n == "deepslate_tiles" && roll < 40)
+	if (b == DEEPSLATE_TILES && roll < 40)
 		return named(editor, {"cracked_deepslate_tiles"}, b);
-	if (n == "polished_blackstone_bricks" && roll < 40)
+	if (b == POLISHED_BLACKSTONE_BRICKS && roll < 40)
 		return named(editor, {"cracked_polished_blackstone_bricks"}, b);
-	if (n == "nether_bricks" && roll < 40)
+	if (b == NETHER_BRICK && roll < 40)
 		return named(editor, {"cracked_nether_bricks"}, b);
-	if ((n == "stone" || n == "smooth_stone" || n == "polished_andesite") && roll < 18)
+	if ((b == STONE || b == SMOOTH_STONE || b == POLISHED_ANDESITE) && roll < 18)
 		return roll < 12 ? COBBLESTONE : MOSSY_COBBLESTONE;
 	return b;
 }
@@ -360,11 +420,11 @@ void ruin_building(WorldEditor &editor, const Column &c, int min_y, int max_y,
 		if (hole || k == Kind::Light || (k == Kind::Glass && roll >= 4 && roll < 85)) {
 			put(editor, AIR, c.x, y, c.z);
 		} else if (k == Kind::Glass && roll < 4) {
-			swap_material(editor, c, y, *block, COBWEB);
+			put(editor, COBWEB, c.x, y, c.z);
 		} else if (k == Kind::Solid && y - c.ground <= MOSS_REACH &&
 				   noise(c.x + y, c.z - y, 5, SALT_MOSS) <
 						   .22 * (1.0 - double(y - c.ground - 1) / MOSS_REACH)) {
-			swap_material(editor, c, y, *block, MOSS_BLOCK);
+			put(editor, MOSS_BLOCK, c.x, y, c.z);
 		} else {
 			const auto variant = weathered(editor, *block, h);
 			if (variant.id() != block->id())
@@ -459,7 +519,7 @@ void ruin_open_ground(WorldEditor &editor, const Column &c, int min_y, int max_y
 				ground = COBBLESTONE;
 				break;
 			}
-			swap_material(editor, c, top_y, block, ground);
+			put(editor, ground, c.x, top_y, c.z);
 			if (ground.id() == GRASS_BLOCK.id() || ground.id() == MOSS_BLOCK.id())
 				grow(editor, c, top_y + 1, h >> 8, 70, max_y);
 		}
@@ -513,7 +573,7 @@ void snow_over(WorldEditor &editor, const Column &c, int min_y, int max_y)
 		const int reach = 5 + int(noise(c.x, c.z, 16, SALT_ICE) * 10.0);
 		const auto d = editor.water_distance(c.x, c.z);
 		if (!editor.is_lc_water(c.x, c.z) || (d != 0 && d <= reach))
-			swap_material(editor, c, y, block, named(editor, {"ice"}, ICE));
+			put(editor, named(editor, {"ice"}, ICE), c.x, y, c.z);
 		return;
 	}
 	if (k == Kind::Plant || k == Kind::TallPlant) {

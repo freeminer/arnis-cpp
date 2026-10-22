@@ -6,16 +6,76 @@
 #include "../clipping.h"
 
 #include <algorithm>
+#include <atomic>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <cstdlib>
 #include <deque>
 #include <iostream>
 #include <limits>
+#include <numeric>
+#include <string_view>
+#include <thread>
 #include <utility>
 #include <vector>
 
 namespace arnis::land_cover
 {
+namespace
+{
+// Split the independent row scans just as the Rust Rayon pass does. Each worker
+// owns one row vector; run ids are assigned afterward in row order so component
+// merging and the resulting protected mask remain deterministic.
+template <typename Function>
+void parallel_rows(std::size_t row_count, Function &&function)
+{
+	if (row_count < 32) {
+		for (std::size_t row = 0; row < row_count; ++row)
+			function(row);
+		return;
+	}
+	std::size_t worker_limit = 0;
+	if (const char *configured = std::getenv("RAYON_NUM_THREADS")) {
+		const std::string_view text(configured);
+		const auto [ptr, error] =
+				std::from_chars(text.data(), text.data() + text.size(), worker_limit);
+		if (error != std::errc{} || ptr != text.data() + text.size() || worker_limit == 0)
+			worker_limit = 0;
+	}
+	if (worker_limit == 0) {
+		const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+		worker_limit = std::max<std::size_t>(1, hardware * 9 / 10);
+	}
+	const auto workers = std::min(row_count, worker_limit);
+	if (workers == 1) {
+		for (std::size_t row = 0; row < row_count; ++row)
+			function(row);
+		return;
+	}
+	std::atomic_size_t next{0};
+	auto worker = [&] {
+		for (;;) {
+			const auto row = next.fetch_add(1, std::memory_order_relaxed);
+			if (row >= row_count)
+				return;
+			function(row);
+		}
+	};
+	std::vector<std::thread> threads;
+	threads.reserve(workers - 1);
+	for (std::size_t i = 1; i < workers; ++i)
+		try {
+			threads.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	worker();
+	for (auto &thread : threads)
+		thread.join();
+}
+} // namespace
+
 WaterOverrideGuard build_water_override_guard(
 		const std::vector<std::vector<uint8_t>> &grid,
 		const std::vector<std::vector<float>> &heights, double cells_per_m2)
@@ -55,11 +115,10 @@ WaterOverrideGuard build_water_override_guard(
 			100, std::size_t(std::llround(4000.0 * std::max(0.0, cells_per_m2))));
 	struct Run
 	{
-		std::size_t begin, end, id;
+		std::size_t begin, end, id = 0;
 	};
 	std::vector<std::vector<Run>> rows(height);
-	std::vector<std::size_t> parent;
-	for (std::size_t z = 0; z < height; ++z) {
+	parallel_rows(height, [&](std::size_t z) {
 		for (std::size_t x = 0; x < width;) {
 			if (grid[z][x] == LC_WATER) {
 				++x;
@@ -68,11 +127,17 @@ WaterOverrideGuard build_water_override_guard(
 			const auto begin = x;
 			while (x < width && grid[z][x] != LC_WATER)
 				++x;
-			const auto id = parent.size();
-			rows[z].push_back({begin, x, id});
-			parent.push_back(id);
+			rows[z].push_back({begin, x});
 		}
-	}
+	});
+	std::vector<std::size_t> first_run(height + 1, 0);
+	for (std::size_t z = 0; z < height; ++z)
+		first_run[z + 1] = first_run[z] + rows[z].size();
+	std::vector<std::size_t> parent(first_run.back());
+	for (std::size_t z = 0; z < height; ++z)
+		for (std::size_t i = 0; i < rows[z].size(); ++i)
+			rows[z][i].id = first_run[z] + i;
+	std::iota(parent.begin(), parent.end(), 0);
 	auto root = [&](std::size_t id) {
 		while (parent[id] != id) {
 			parent[id] = parent[parent[id]];

@@ -3,6 +3,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -15,7 +16,11 @@ namespace arnis
 // placements retain their original order.
 class DeferredPlacements
 {
+public:
 	using Region = std::pair<int, int>;
+	using WorldPredicate = std::function<bool(Region)>;
+
+private:
 	struct RegionHash
 	{
 		std::size_t operator()(const Region &r) const noexcept
@@ -40,6 +45,8 @@ public:
 	DeferredPlacements() = default;
 	DeferredPlacements(std::vector<std::vector<Region>> placements,
 			const std::vector<Region> &world_regions);
+	DeferredPlacements(
+			std::vector<std::vector<Region>> placements, WorldPredicate is_world_region);
 	bool holds(Region region) const;
 	std::vector<Region> regions() const;
 	const std::vector<Region> &regions_of(std::size_t unit) const;

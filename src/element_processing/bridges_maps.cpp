@@ -1268,7 +1268,7 @@ BridgeStructureMap BridgeStructureMap::build(
 							   total_length >= SHORT_BRIDGE_LENGTH_BLOCKS;
 		int profile_clearance = flat_span ? max_layer * LAYER_HEIGHT_STEP : 0;
 		if (flat_span && group_style == bridge_styles::BridgeStyle::Arch)
-			profile_clearance = std::max(profile_clearance, 8);
+			profile_clearance = std::max(profile_clearance, bridges::ARCH_MIN_CLEARANCE);
 		profile_level = std::max(profile_level, terrain_max + profile_clearance);
 		if (profile_clearance > 0) {
 			raised_top = std::max(raised_top, profile_level);
@@ -1785,7 +1785,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			int clearance = railways::RAIL_BRIDGE_FLAT_CLEARANCE +
 							std::max(0, layer - 1) * LAYER_HEIGHT_STEP;
 			if (arch)
-				clearance = std::max(clearance, 8);
+				clearance = std::max(clearance, ARCH_MIN_CLEARANCE);
 			const int deck_y =
 					terrain_max - terrain_min < railways::RAIL_BRIDGE_DIP_THRESHOLD
 							? terrain_max + clearance

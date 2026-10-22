@@ -28,10 +28,6 @@ int size_cap_height(TreeSize size)
 	}
 	return std::numeric_limits<int>::max();
 }
-TreeSize size_for_canopy_m(std::uint8_t m)
-{
-	return size_for_height(m);
-}
 SizeFilter SizeFilter::up_to(TreeSize m)
 {
 	SizeFilter f;

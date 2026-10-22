@@ -16,6 +16,8 @@
 
 namespace arnis::bridges
 {
+inline constexpr int ARCH_MIN_CLEARANCE = 8;
+
 class BridgeSurfaceMap;
 }
 

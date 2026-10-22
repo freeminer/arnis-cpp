@@ -6,12 +6,31 @@
 #include "schem_decoder.h"
 #include <algorithm>
 #include <cmath>
+#include <cctype>
 #include <limits>
+#include <string_view>
 
 namespace arnis::structures::crane
 {
 namespace
 {
+bool site_has_mapped_crane(
+		const WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
+{
+	if (!editor.mapped_cranes || cells.empty())
+		return false;
+	const auto [min_x, max_x] = std::minmax_element(cells.begin(), cells.end(),
+			[](const auto &a, const auto &b) { return a.first < b.first; });
+	const auto [min_z, max_z] = std::minmax_element(cells.begin(), cells.end(),
+			[](const auto &a, const auto &b) { return a.second < b.second; });
+	return std::any_of(editor.mapped_cranes->begin(), editor.mapped_cranes->end(),
+			[&](const auto &point) {
+				return point.first >= min_x->first && point.first <= max_x->first &&
+					   point.second >= min_z->second && point.second <= max_z->second &&
+					   std::find(cells.begin(), cells.end(), point) != cells.end();
+			});
+}
+
 std::shared_ptr<const StructureSchematic> crane_schematic(WorldEditor &editor)
 {
 	const auto root = editor.get_schematic_asset_root().empty()
@@ -86,12 +105,7 @@ void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int
 				return distance(a) < distance(b);
 			});
 	const auto [x, z] = *it;
-	if (editor.mapped_cranes &&
-			std::any_of(editor.mapped_cranes->begin(), editor.mapped_cranes->end(),
-					[&](const auto &point) {
-						return std::find(cells.begin(), cells.end(), point) !=
-							   cells.end();
-					}))
+	if (site_has_mapped_crane(editor, cells))
 		return;
 	const auto h = land_cover::coord_hash(x, z);
 	if (editor.is_lc_water(x, z) || h % 100 >= 60)
@@ -142,7 +156,14 @@ void place_mapped(WorldEditor &editor, int x, int z, const tags_t &tags,
 	if (!best_water) {
 		const auto direction = tags.find("direction");
 		if (direction != tags.end()) {
-			if (const auto degrees = strict_parse::f64(direction->second))
+			std::string_view bearing = direction->second;
+			while (!bearing.empty() &&
+					std::isspace(static_cast<unsigned char>(bearing.front())))
+				bearing.remove_prefix(1);
+			while (!bearing.empty() &&
+					std::isspace(static_cast<unsigned char>(bearing.back())))
+				bearing.remove_suffix(1);
+			if (const auto degrees = strict_parse::f64(bearing))
 				rotation = quarter_for_bearing(*schematic, *degrees);
 			else
 				rotation = static_cast<unsigned>(land_cover::coord_hash(x, z) & 3);

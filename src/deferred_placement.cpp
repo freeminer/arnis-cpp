@@ -6,14 +6,28 @@
 
 namespace arnis
 {
+namespace
+{
+DeferredPlacements::WorldPredicate world_region_filter(
+		std::vector<DeferredPlacements::Region> regions)
+{
+	std::sort(regions.begin(), regions.end());
+	regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
+	return [regions = std::move(regions)](DeferredPlacements::Region region) {
+		return std::binary_search(regions.begin(), regions.end(), region);
+	};
+}
+} // namespace
 
 DeferredPlacements::DeferredPlacements(std::vector<std::vector<Region>> placements,
-		const std::vector<Region> &world_regions) : regions_(std::move(placements))
+		const std::vector<Region> &world_regions) :
+		DeferredPlacements(std::move(placements), world_region_filter(world_regions))
 {
-	std::vector<Region> sorted_world = world_regions;
-	std::sort(sorted_world.begin(), sorted_world.end());
-	sorted_world.erase(
-			std::unique(sorted_world.begin(), sorted_world.end()), sorted_world.end());
+}
+
+DeferredPlacements::DeferredPlacements(std::vector<std::vector<Region>> placements,
+		WorldPredicate is_world_region) : regions_(std::move(placements))
+{
 	waiting_.resize(regions_.size());
 	placed_.resize(regions_.size(), false);
 	for (std::size_t unit = 0; unit < regions_.size(); ++unit) {
@@ -21,10 +35,7 @@ DeferredPlacements::DeferredPlacements(std::vector<std::vector<Region>> placemen
 		std::sort(regions.begin(), regions.end());
 		regions.erase(std::unique(regions.begin(), regions.end()), regions.end());
 		regions.erase(std::remove_if(regions.begin(), regions.end(),
-							  [&](Region r) {
-								  return !std::binary_search(
-										  sorted_world.begin(), sorted_world.end(), r);
-							  }),
+							  [&](Region r) { return !is_world_region(r); }),
 				regions.end());
 		waiting_[unit] = regions.size();
 		for (const auto &region : regions)

@@ -13,7 +13,6 @@ enum class TreeSize
 };
 TreeSize size_for_height(int height);
 int size_cap_height(TreeSize size);
-TreeSize size_for_canopy_m(std::uint8_t metres);
 struct SizeFilter
 {
 	bool small = true, medium = true, big = true, tall = true, giant = true;

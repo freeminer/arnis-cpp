@@ -566,6 +566,10 @@ struct BarrierStyle
 BarrierStyle barrier_style(const tags_t &tags)
 {
 	BarrierStyle style;
+	if (!tags.contains("barrier")) {
+		style.height = 0;
+		return style;
+	}
 	const auto type = tags.get("barrier");
 	auto set = [&](const Block &block, int height) {
 		style.material = block;

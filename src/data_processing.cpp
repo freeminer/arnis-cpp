@@ -36,6 +36,7 @@
 #elif defined(__APPLE__)
 #include <mach/mach.h>
 #include <mach/mach_host.h>
+#include <sys/sysctl.h>
 #endif
 
 #include "../../arnis_adapter.h"
@@ -510,6 +511,25 @@ std::optional<std::string> decal_texture(
 	return "[png:" + base64_encode(png);
 }
 
+#if defined(__APPLE__)
+std::optional<std::uint64_t> macos_available_memory_mb()
+{
+	std::uint32_t level = 0;
+	size_t level_size = sizeof(level);
+	if (sysctlbyname("kern.memorystatus_level", &level, &level_size, nullptr, 0) != 0 ||
+			level_size != sizeof(level) || level == 0 || level > 100)
+		return std::nullopt;
+
+	std::uint64_t total = 0;
+	size_t total_size = sizeof(total);
+	if (sysctlbyname("hw.memsize", &total, &total_size, nullptr, 0) != 0 ||
+			total_size != sizeof(total))
+		return std::nullopt;
+
+	return (total / 100 * level) / (1024 * 1024);
+}
+#endif
+
 std::uint64_t available_memory_mb()
 {
 #if defined(_WIN32)
@@ -517,6 +537,11 @@ std::uint64_t available_memory_mb()
 	memory.dwLength = sizeof(memory);
 	return GlobalMemoryStatusEx(&memory) ? memory.ullAvailPhys / (1024 * 1024) : 0;
 #elif defined(__APPLE__)
+	// Match Rust's kernel memory-pressure estimate. Mach's free/inactive counts
+	// omit compressed pages, which can otherwise make the scheduler believe a
+	// busy but healthy system has only a few hundred MB available.
+	if (const auto available = macos_available_memory_mb())
+		return *available;
 	vm_statistics64_data_t statistics{};
 	mach_msg_type_number_t count = HOST_VM_INFO64_COUNT;
 	vm_size_t page_size = 0;
@@ -1154,8 +1179,8 @@ std::shared_ptr<mapillary::FacadeJob> start_mapillary_facade_job(
 			std::all_of(geo.begin(), geo.end(),
 					[](double value) { return std::isfinite(value); }) &&
 			geo[1] > geo[0] && geo[3] > geo[2];
-	if (!geographic_bounds_valid || !args.mapillary_pipeline_on() ||
-			args.skip_objects() || args.mapillary_probe)
+	if (!geographic_bounds_valid || !args.mapillary_pipeline_on() || args.skip_osm() ||
+			args.mapillary_probe)
 		return {};
 
 	const mapillary::BBox bbox{geo[0], geo[2], geo[1], geo[3]};
@@ -1337,19 +1362,15 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way,
 
 namespace railways
 {
-using RailBridgeInternalEndpoints = std::vector<std::pair<int, int>>;
 void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &way);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		std::vector<std::tuple<int, int, bool>> &rail_tunnel_points,
-		const RailBridgeInternalEndpoints &rail_bridge_internal_endpoints,
 		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
 		const CoordinateBitmap &road_mask, const CoordinateBitmap &building_footprints,
 		const CoordinateBitmap &rail_mask,
 		const bridges::BridgeStructureMap &bridge_structures,
 		const bridges::BridgeSurfaceMap &bridge_surface);
-RailBridgeInternalEndpoints collect_rail_bridge_internal_endpoints(
-		const std::vector<ProcessedElement> &elements);
 CoordinateBitmap collect_at_grade_rail_mask(
 		const std::vector<ProcessedElement> &elements, const XZBBox &xzbbox);
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
@@ -1435,13 +1456,28 @@ bool generate_world(WorldEditor &editor,
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
+	// Rust's Args::skip_osm() boundary replaces the parsed OSM payload with an
+	// empty OsmData value. Enforce that here too, since library callers may pass
+	// prepared elements, footprints, or facade work independently of the parser.
+	static const std::vector<ProcessedElement> no_osm_elements;
+	const bool skip_osm = args.skip_osm();
+	const auto &generation_input = skip_osm ? no_osm_elements : input_elements;
+	static const BuildingFootprintBitmap no_building_footprints;
+	const auto &generation_footprints =
+			skip_osm ? no_building_footprints : input_building_footprints;
+	const PreparedBuildingData *generation_prepared_buildings =
+			skip_osm ? nullptr : prepared_buildings;
+	if (skip_osm && facade_job) {
+		facade_job->cancel();
+		facade_job = nullptr;
+	}
 	// Rust removes buildings covered by aircraft pavement before any pass that
 	// derives building-dependent state (facade projection, tree masks, indices).
 	// Keep one filtered view for the rest of this generation call.
 	std::vector<ProcessedElement> aircraft_filtered_elements;
 	std::size_t dropped_aircraft_buildings = drop_buildings_on_aircraft_pavement(
-			input_elements, aircraft_filtered_elements, args.scale);
-	const std::vector<ProcessedElement> *elements_source = &input_elements;
+			generation_input, aircraft_filtered_elements, args.scale);
+	const std::vector<ProcessedElement> *elements_source = &generation_input;
 	if (dropped_aircraft_buildings > 0) {
 		std::cout << "  Skipped " << dropped_aircraft_buildings
 				  << " building(s) on runways, taxiways and aprons\n";
@@ -1586,7 +1622,7 @@ bool generate_world(WorldEditor &editor,
 	mapillary::facades::clear();
 	// Rust treats an explicit off toggle as authoritative even when an export
 	// directory was also supplied (the GUI can set both independently).
-	if (args.mapillary_facades != std::optional<bool>(false) &&
+	if (!skip_osm && args.mapillary_facades != std::optional<bool>(false) &&
 			args.mapillary_facades_dir) {
 		std::string facade_error;
 		if (auto export_data = mapillary::facades::load_export(
@@ -1682,7 +1718,7 @@ bool generate_world(WorldEditor &editor,
 				flood_fill_cache.collect_building_footprints(elements, xzbbox));
 	const BuildingFootprintBitmap &building_footprints =
 			filtered_building_footprints ? *filtered_building_footprints
-										 : input_building_footprints;
+										 : generation_footprints;
 	// Persist the elevation mapping before terrain or structures are written so
 	// a later failed generation cannot leave chunks using an unrecorded mapping.
 	if (args.one_world_run && editor.ground) {
@@ -2261,8 +2297,6 @@ bool generate_world(WorldEditor &editor,
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
 	railways::advtrains::prepare_network(elements, editor);
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
-	auto rail_bridge_internal_endpoints =
-			railways::collect_rail_bridge_internal_endpoints(elements);
 	// Centreline bitmap prevents catenary masts from being stamped into a
 	// neighbouring parallel track, matching the Rust railway pass.
 	auto rail_mask = railways::collect_at_grade_rail_mask(elements, xzbbox);
@@ -2272,11 +2306,12 @@ bool generate_world(WorldEditor &editor,
 	// projected-space approximation here loses split relation rings and can
 	// render duplicate building outlines.
 	std::optional<PreparedBuildingData> computed_buildings;
-	if (!prepared_buildings || dropped_aircraft_buildings > 0)
+	if (!generation_prepared_buildings || dropped_aircraft_buildings > 0)
 		computed_buildings = prepare_building_data(elements);
 	const PreparedBuildingData &building_data =
-			prepared_buildings && dropped_aircraft_buildings == 0 ? *prepared_buildings
-																  : *computed_buildings;
+			generation_prepared_buildings && dropped_aircraft_buildings == 0
+					? *generation_prepared_buildings
+					: *computed_buildings;
 	const auto outline_suppression = mode_filter::outline_suppression_for_mode(
 			building_data.outline_suppression, args.mode);
 	std::unordered_set<std::uint64_t> suppressed_building_outlines;
@@ -2435,7 +2470,14 @@ bool generate_world(WorldEditor &editor,
 		for (const auto &tile : element_tiles)
 			world_regions.emplace_back(
 					tiles::region_floor(tile.min_x), tiles::region_floor(tile.min_z));
-		deferred_placements = DeferredPlacements(std::move(unit_regions), world_regions);
+		std::sort(world_regions.begin(), world_regions.end());
+		world_regions.erase(std::unique(world_regions.begin(), world_regions.end()),
+				world_regions.end());
+		deferred_placements = DeferredPlacements(
+				std::move(unit_regions), [&world_regions](const auto region) {
+					return std::binary_search(
+							world_regions.begin(), world_regions.end(), region);
+				});
 	}
 	auto execute_deferred_placements = [&](const std::vector<std::size_t> &units) {
 		if (units.empty())
@@ -2777,9 +2819,8 @@ bool generate_world(WorldEditor &editor,
 				}
 			} else if (way.tags.contains("railway")) {
 				railways::generate_railways(editor, way, state.rail_tunnel_points,
-						rail_bridge_internal_endpoints, bridge_outlines, road_mask,
-						building_footprints, rail_mask, bridge_structures,
-						bridge_surface);
+						bridge_outlines, road_mask, building_footprints, rail_mask,
+						bridge_structures, bridge_surface);
 			} else if (way.tags.contains("roller_coaster")) {
 				railways::generate_roller_coaster(editor, way);
 			} else if (way.tags.contains("aeroway") ||
@@ -3270,7 +3311,6 @@ bool generate_world(WorldEditor &editor,
 	still_surfaces = {};
 	decltype(tunnel_internal_endpoints){}.swap(tunnel_internal_endpoints);
 	tunnel_portals = {};
-	decltype(rail_bridge_internal_endpoints){}.swap(rail_bridge_internal_endpoints);
 	bridge_outlines = {};
 	bridge_structures = {};
 	bridge_surface = {};
@@ -3309,6 +3349,10 @@ bool generate_world(WorldEditor &editor,
 	world_style::apply(editor, args, building_footprints);
 	if (apply_world_style)
 		editor.release_sealed_surface();
+	// The final style pass is the last consumer of road elevations. Rust drops
+	// them per region after styling; this non-streaming editor releases the
+	// equivalent generation-only index at the same lifetime edge.
+	editor.release_road_surface_overrides();
 	// Rust settles Mapillary photo candidates only after all generated blocks
 	// are final; the shared C++ editor has no disk-eviction region to flush.
 	mapillary::facades::finalize_displays(editor);

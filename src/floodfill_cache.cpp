@@ -12,6 +12,8 @@
 #include <cmath>
 #include <stdexcept>
 #include <cstdlib>
+#include <exception>
+#include <semaphore>
 #include <unordered_set>
 #include <iterator>
 #include <string_view>
@@ -43,6 +45,81 @@ namespace
 {
 
 std::atomic_size_t configured_workers{0};
+
+constexpr std::size_t PREPASS_BATCH_CELLS = std::size_t{1} << 22;
+constexpr std::ptrdiff_t MAX_PREPASS_WORKER_SLOTS = 256;
+
+std::counting_semaphore<MAX_PREPASS_WORKER_SLOTS> &prepass_worker_slots()
+{
+	static std::counting_semaphore<MAX_PREPASS_WORKER_SLOTS> slots([] {
+		const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+		return static_cast<std::ptrdiff_t>(
+				std::min(hardware - 1, static_cast<unsigned>(MAX_PREPASS_WORKER_SLOTS)));
+	}());
+	return slots;
+}
+
+template <typename Function>
+void parallel_for_indices(std::size_t count, Function function)
+{
+	if (count == 0)
+		return;
+	const auto configured = configured_workers.load(std::memory_order_relaxed);
+	const auto workers = std::min(
+			count, configured != 0 ? configured
+								   : std::max(1u, std::thread::hardware_concurrency()));
+	if (workers <= 1) {
+		for (std::size_t i = 0; i < count; ++i)
+			function(i);
+		return;
+	}
+
+	std::atomic_size_t next{0};
+	std::mutex error_mutex;
+	std::exception_ptr error;
+	auto &worker_slots = prepass_worker_slots();
+	std::size_t acquired_slots = 0;
+	while (acquired_slots + 1 < workers && worker_slots.try_acquire())
+		++acquired_slots;
+	auto work = [&] {
+		while (true) {
+			const auto i = next.fetch_add(1, std::memory_order_relaxed);
+			if (i >= count)
+				return;
+			try {
+				function(i);
+			} catch (...) {
+				{
+					std::lock_guard lock(error_mutex);
+					if (!error)
+						error = std::current_exception();
+				}
+				return;
+			}
+		}
+	};
+	std::vector<std::thread> threads;
+	std::size_t launched = 0;
+	try {
+		for (; launched < acquired_slots; ++launched)
+			threads.emplace_back([&] {
+				work();
+				worker_slots.release();
+			});
+	} catch (...) {
+		for (std::size_t i = launched; i < acquired_slots; ++i)
+			worker_slots.release();
+		work();
+		for (auto &thread : threads)
+			thread.join();
+		throw;
+	}
+	work();
+	for (auto &thread : threads)
+		thread.join();
+	if (error)
+		std::rethrow_exception(error);
+}
 
 std::size_t thread_count_for_fraction(double cpu_fraction)
 {
@@ -298,7 +375,6 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 			"meadow", "greenfield", "village_green", "forest", "orchard", "allotments",
 			"plant_nursery"};
 
-	std::vector<uint64_t> managed_ids;
 	std::vector<std::pair<uint64_t, bool>> sealed_ids;
 	std::vector<uint64_t> planted_ids;
 	for (const auto &element : elements) {
@@ -350,56 +426,84 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		bool paved;
 		uint64_t id;
 	};
-	std::vector<Layer> layers;
-	layers.reserve(sealed_ids.size() + planted_ids.size());
-	std::size_t largest_paving = 0;
-	bool contributes_off_roads = false;
-	for (const auto &[id, yields] : sealed_ids) {
-		const auto fill = transient_fill(id);
+	std::vector<std::optional<std::size_t>> sealed_lens(sealed_ids.size());
+	std::vector<uint8_t> sealed_off_roads(sealed_ids.size(), 0);
+	parallel_for_indices(sealed_ids.size(), [&](std::size_t i) {
+		const auto fill = transient_fill(sealed_ids[i].first);
 		if (!fill || fill->empty())
-			continue;
-		contributes_off_roads |=
+			return;
+		sealed_lens[i] = fill->size();
+		sealed_off_roads[i] =
 				std::any_of(fill->begin(), fill->end(), [&roads](const auto &coord) {
 					return roads.is_unset_in_bounds(coord.first, coord.second);
 				});
+	});
+	if (std::none_of(sealed_off_roads.begin(), sealed_off_roads.end(),
+				[](uint8_t value) { return value != 0; }))
+		return std::nullopt;
+
+	std::vector<Layer> layers;
+	layers.reserve(sealed_ids.size() + planted_ids.size());
+	std::vector<Layer> managed;
+	managed.reserve(sealed_ids.size());
+	std::size_t largest_paving = 0;
+	for (std::size_t i = 0; i < sealed_ids.size(); ++i) {
+		if (!sealed_lens[i])
+			continue;
+		const auto [id, yields] = sealed_ids[i];
 		if (yields) {
-			largest_paving = std::max(largest_paving, fill->size());
-			layers.push_back({fill->size(), true, id});
+			largest_paving = std::max(largest_paving, *sealed_lens[i]);
+			layers.push_back({*sealed_lens[i], true, id});
 		} else {
-			managed_ids.push_back(id);
+			managed.push_back({*sealed_lens[i], true, id});
 		}
 	}
-	if (!contributes_off_roads)
-		return std::nullopt;
-	if (largest_paving > 0)
-		for (const auto id : planted_ids) {
-			const auto fill = transient_fill(id);
-			if (fill && fill->size() < largest_paving)
-				layers.push_back({fill->size(), false, id});
+	if (largest_paving > 0) {
+		std::vector<std::optional<std::size_t>> planted_lens(planted_ids.size());
+		parallel_for_indices(planted_ids.size(), [&](std::size_t i) {
+			if (const auto fill = transient_fill(planted_ids[i]))
+				planted_lens[i] = fill->size();
+		});
+		for (std::size_t i = 0; i < planted_ids.size(); ++i) {
+			if (planted_lens[i] && *planted_lens[i] < largest_paving)
+				layers.push_back({*planted_lens[i], false, planted_ids[i]});
 		}
+	}
 	std::sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
 		if (a.size != b.size)
 			return a.size > b.size;
 		// Apply planted layers first at equal size, so paving takes precedence.
 		return a.paved < b.paved;
 	});
+	layers.insert(layers.end(), managed.begin(), managed.end());
 	auto mask = roads;
-	for (const auto &layer : layers) {
-		const auto fill = transient_fill(layer.id);
-		if (!fill)
-			continue;
-		for (const auto &[x, z] : *fill) {
-			if (layer.paved)
-				mask.set(x, z);
-			else if (!roads.contains(x, z))
-				mask.clear(x, z);
+	for (std::size_t begin = 0; begin < layers.size();) {
+		std::size_t end = begin;
+		std::size_t cells = 0;
+		while (end < layers.size()) {
+			const auto size = layers[end].size;
+			if (end > begin && size > PREPASS_BATCH_CELLS - cells)
+				break;
+			cells += size;
+			++end;
+			if (cells >= PREPASS_BATCH_CELLS)
+				break;
 		}
-	}
-	for (const auto id : managed_ids) {
-		const auto fill = transient_fill(id);
-		if (fill)
-			for (const auto &[x, z] : *fill)
-				mask.set(x, z);
+		std::vector<FloodFillResult> fills(end - begin);
+		parallel_for_indices(fills.size(),
+				[&](std::size_t i) { fills[i] = transient_fill(layers[begin + i].id); });
+		for (std::size_t i = 0; i < fills.size(); ++i) {
+			if (!fills[i])
+				continue;
+			const auto &layer = layers[begin + i];
+			for (const auto &[x, z] : *fills[i]) {
+				if (layer.paved)
+					mask.set(x, z);
+				else if (!roads.contains(x, z))
+					mask.clear(x, z);
+			}
+		}
+		begin = end;
 	}
 	return mask;
 }

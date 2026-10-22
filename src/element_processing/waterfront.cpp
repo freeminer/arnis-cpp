@@ -27,6 +27,9 @@ constexpr double PILE_SPACING_M = 4.0;
 constexpr int PIER_LAND_END_REACH = 3;
 constexpr std::size_t LANTERN_EVERY = 3;
 constexpr double MOORING_POST_MAX_WIDTH = 4.0;
+constexpr double BREAKWATER_WIDTH_M = 5.0;
+constexpr double GROYNE_WIDTH_M = 3.0;
+constexpr int BREAKWATER_MAX_HEIGHT = 6;
 
 struct CellHash
 {
@@ -456,7 +459,9 @@ void generate_breakwater(world_editor::WorldEditor &editor,
 	const auto type = tag(element.tags(), "man_made");
 	const bool groyne = type == "groyne";
 	const bool wood = tag(element.tags(), "material") == "wood";
-	const double default_width = wood ? 1.0 : groyne ? 3.0 : 5.0;
+	const double default_width = wood	  ? 1.0
+								 : groyne ? GROYNE_WIDTH_M
+										  : BREAKWATER_WIDTH_M;
 	const auto cells = footprint(element, cache, args, default_width);
 	if (cells.empty())
 		return;
@@ -468,8 +473,8 @@ void generate_breakwater(world_editor::WorldEditor &editor,
 		if (const auto h = tag(element.tags(), "height")) {
 			const auto metres = mapillary::geodesy::parse_length_m(*h);
 			if (metres)
-				rise = std::clamp(
-						static_cast<int>(std::round(*metres * args.scale)), 1, 6);
+				rise = std::clamp(static_cast<int>(std::round(*metres * args.scale)), 1,
+						BREAKWATER_MAX_HEIGHT);
 			else
 				rise = groyne ? 1 : 2;
 		} else {
@@ -478,7 +483,11 @@ void generate_breakwater(world_editor::WorldEditor &editor,
 	}
 	for (const auto &cell : cells) {
 		const int ground = editor.get_ground_level(cell.x, cell.z);
-		const int uneven = rise > 0 && (cell.x + cell.z) % 3 == 0 ? 1 : 0;
+		// Rust uses rem_euclid here. Keep the same stagger west/north of the
+		// origin too; C++'s signed remainder is negative for negative coordinates.
+		const auto coordinate_sum = static_cast<std::int64_t>(cell.x) + cell.z;
+		const bool staggered = ((coordinate_sum % 3) + 3) % 3 == 0;
+		const int uneven = rise > 0 && staggered ? 1 : 0;
 		if (wood) {
 			drive_pile(editor, cell.x, cell.z, base + rise + uneven,
 					block_definitions::SPRUCE_LOG);

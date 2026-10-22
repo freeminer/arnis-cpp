@@ -7,11 +7,12 @@
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <chrono>
 #include <cmath>
 #include <curl/curl.h>
+#include <exception>
 #include <fstream>
-#include <future>
 #include <iomanip>
 #include <iostream>
 #include <limits>
@@ -19,6 +20,7 @@
 #include <nlohmann/json.hpp>
 #include <set>
 #include <sstream>
+#include <thread>
 #include <unordered_map>
 #include <unordered_set>
 #include <zstd.h>
@@ -70,7 +72,49 @@ constexpr std::uint64_t SPILL_LAT = (std::uint64_t{1} << 31) - 1;
 constexpr std::uint64_t RELATION_TILE_BASE = ((std::uint64_t{1} << 40) - 1) / 3;
 constexpr std::uint64_t MAX_RECORD_BYTES = 16 * 1024 * 1024;
 constexpr std::size_t MAX_TILE_BYTES = 256 * 1024 * 1024;
-constexpr std::size_t TILE_FETCH_BATCH = 8;
+// Match Rust's Rayon batch size while keeping worker/thread and concurrent request
+// counts bounded. Results are written and consumed in source order for deterministic merges.
+constexpr std::size_t TILE_FETCH_BATCH = 512;
+constexpr std::size_t TILE_FETCH_WORKERS = 16;
+
+template <typename Result, typename Function>
+std::vector<Result> parallel_batch_ordered(std::size_t count, Function &&function)
+{
+	std::vector<Result> results(count);
+	std::vector<std::exception_ptr> failures(count);
+	std::atomic_size_t next{0};
+	const auto hardware = std::max(1u, std::thread::hardware_concurrency());
+	const auto worker_count =
+			std::min(count, std::min<std::size_t>(TILE_FETCH_WORKERS, hardware));
+	auto worker = [&] {
+		for (;;) {
+			const auto index = next.fetch_add(1, std::memory_order_relaxed);
+			if (index >= count)
+				return;
+			try {
+				results[index] = function(index);
+			} catch (...) {
+				failures[index] = std::current_exception();
+			}
+		}
+	};
+	std::vector<std::thread> workers;
+	workers.reserve(worker_count > 0 ? worker_count - 1 : 0);
+	for (std::size_t i = 1; i < worker_count; ++i) {
+		try {
+			workers.emplace_back(worker);
+		} catch (...) {
+			break;
+		}
+	}
+	worker();
+	for (auto &thread : workers)
+		thread.join();
+	for (const auto &failure : failures)
+		if (failure)
+			std::rethrow_exception(failure);
+	return results;
+}
 
 bool building_tags(const tags_t &tags)
 {
@@ -976,46 +1020,43 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		};
 		for (std::size_t begin = 0; begin < wanted.size(); begin += TILE_FETCH_BATCH) {
 			const auto end = std::min(wanted.size(), begin + TILE_FETCH_BATCH);
-			std::vector<std::future<TileResult>> pending;
-			pending.reserve(end - begin);
-			for (std::size_t i = begin; i < end; ++i) {
-				const auto [x, y] = wanted[i];
-				pending.push_back(std::async(std::launch::async, [&, x = x, y = y] {
-					TileResult result;
-					const auto read = overture::pmtiles::read_tile_checked(
-							archive->header, archive->root_directory, ZOOM, x, y, range);
-					if (read.status == overture::pmtiles::TileReadStatus::Missing)
+			auto results = parallel_batch_ordered<TileResult>(
+					end - begin, [&](std::size_t offset) {
+						const auto [x, y] = wanted[begin + offset];
+						TileResult result;
+						const auto read =
+								overture::pmtiles::read_tile_checked(archive->header,
+										archive->root_directory, ZOOM, x, y, range);
+						if (read.status == overture::pmtiles::TileReadStatus::Missing)
+							return result;
+						if (read.status != overture::pmtiles::TileReadStatus::Found) {
+							result.error = "could not read tile " + std::to_string(ZOOM) +
+										   "/" + std::to_string(x) + "/" +
+										   std::to_string(y) + " from " + file;
+							return result;
+						}
+						if (read.bytes.empty())
+							return result;
+						std::string tile_error;
+						auto plain = zstd_decode(read.bytes, &tile_error);
+						if (!plain) {
+							result.error = "tile " + std::to_string(ZOOM) + "/" +
+										   std::to_string(x) + "/" + std::to_string(y) +
+										   " is not readable: " + tile_error;
+							return result;
+						}
+						result.aot2 =
+								plain->size() >= 4 &&
+								std::equal(plain->begin(), plain->begin() + 4, "AOT2");
+						result.valid = decode(*plain, result.tile, &tile_error);
+						if (!result.valid)
+							result.error = "tile " + std::to_string(ZOOM) + "/" +
+										   std::to_string(x) + "/" + std::to_string(y) +
+										   " is invalid: " + tile_error;
 						return result;
-					if (read.status != overture::pmtiles::TileReadStatus::Found) {
-						result.error = "could not read tile " + std::to_string(ZOOM) +
-									   "/" + std::to_string(x) + "/" + std::to_string(y) +
-									   " from " + file;
-						return result;
-					}
-					if (read.bytes.empty())
-						return result;
-					std::string tile_error;
-					auto plain = zstd_decode(read.bytes, &tile_error);
-					if (!plain) {
-						result.error = "tile " + std::to_string(ZOOM) + "/" +
-									   std::to_string(x) + "/" + std::to_string(y) +
-									   " is not readable: " + tile_error;
-						return result;
-					}
-					result.aot2 = plain->size() >= 4 &&
-								  std::equal(plain->begin(), plain->begin() + 4, "AOT2");
-					result.valid = decode(*plain, result.tile, &tile_error);
-					if (!result.valid)
-						result.error = "tile " + std::to_string(ZOOM) + "/" +
-									   std::to_string(x) + "/" + std::to_string(y) +
-									   " is invalid: " + tile_error;
-					return result;
-				}));
-			}
-			// std::async results are consumed in source order, preserving Rust's
-			// indexed parallel-iterator ordering and deterministic first-seen IDs.
-			for (auto &future : pending) {
-				auto result = future.get();
+					});
+			// Preserve Rust's indexed parallel-iterator ordering and deterministic first-seen IDs.
+			for (auto &result : results) {
 				if (!result.error.empty()) {
 					if (error)
 						*error = std::move(result.error);
@@ -1104,42 +1145,38 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 				std::optional<DecodedTile> tile;
 				std::string error;
 			};
-			std::vector<std::future<RelationResult>> pending;
-			pending.reserve(end - begin);
-			for (std::size_t i = begin; i < end; ++i) {
-				const auto relation_id = locations[i].first;
-				const auto tile_location = locations[i].second;
-				pending.push_back(std::async(std::launch::async, [&, relation_id,
-																		 tile_location] {
-					RelationResult result;
-					const auto record = overture::pmtiles::read_tile_payload_checked(
-							archive.archive.header, tile_location, archive.read_range);
-					if (record.status != overture::pmtiles::TileReadStatus::Found) {
-						result.error =
-								"could not read relation " + std::to_string(relation_id);
+			auto results = parallel_batch_ordered<RelationResult>(
+					end - begin, [&](std::size_t offset) {
+						const auto [relation_id, tile_location] =
+								locations[begin + offset];
+						RelationResult result;
+						const auto record = overture::pmtiles::read_tile_payload_checked(
+								archive.archive.header, tile_location,
+								archive.read_range);
+						if (record.status != overture::pmtiles::TileReadStatus::Found) {
+							result.error = "could not read relation " +
+										   std::to_string(relation_id);
+							return result;
+						}
+						if (record.bytes.empty())
+							return result;
+						std::string record_error;
+						const auto plain = zstd_decode(record.bytes, &record_error);
+						if (!plain) {
+							result.error = "relation " + std::to_string(relation_id) +
+										   " is not readable: " + record_error;
+							return result;
+						}
+						DecodedTile whole_relation;
+						if (!decode(*plain, whole_relation, &record_error)) {
+							result.error = "relation " + std::to_string(relation_id) +
+										   " is invalid: " + record_error;
+							return result;
+						}
+						result.tile = std::move(whole_relation);
 						return result;
-					}
-					if (record.bytes.empty())
-						return result;
-					std::string record_error;
-					const auto plain = zstd_decode(record.bytes, &record_error);
-					if (!plain) {
-						result.error = "relation " + std::to_string(relation_id) +
-									   " is not readable: " + record_error;
-						return result;
-					}
-					DecodedTile whole_relation;
-					if (!decode(*plain, whole_relation, &record_error)) {
-						result.error = "relation " + std::to_string(relation_id) +
-									   " is invalid: " + record_error;
-						return result;
-					}
-					result.tile = std::move(whole_relation);
-					return result;
-				}));
-			}
-			for (auto &future : pending) {
-				auto result = future.get();
+					});
+			for (auto &result : results) {
 				if (!result.error.empty()) {
 					note_skipped_relation(std::move(result.error));
 					continue;

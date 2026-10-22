@@ -161,7 +161,7 @@ float arch_local_t(std::size_t tds, std::size_t total)
 	return static_cast<float>(tds - start) / static_cast<float>(span - 1);
 }
 
-void place_pillar(
+void place_pillar_impl(
 		WorldEditor &editor, int x, int deck_y, int z, Block body, bool with_base)
 {
 	const int ground_y = editor.get_ground_level(x, z);
@@ -614,6 +614,25 @@ void decorate_covered(WorldEditor &editor, const std::vector<BridgePathSample> &
 	}
 }
 
+}
+
+void place_pillar(
+		WorldEditor &editor, int x, int deck_y, int z, Block body, bool with_base)
+{
+	place_pillar_impl(editor, x, deck_y, z, body, with_base);
+}
+
+void place_arch_below_deck(WorldEditor &editor, int set_x, int cell_y, int set_z,
+		int centerline_ground_y, std::size_t tds, std::size_t total, bool use_absolute_y,
+		bool is_centerline)
+{
+	place_arch_spandrel_cell(editor, set_x, cell_y, set_z, centerline_ground_y, tds,
+			total, use_absolute_y);
+	if (!is_centerline)
+		return;
+	const auto [start, span] = arch_segment(tds, total);
+	if (tds == start || tds + 1 == start + span)
+		place_pillar_impl(editor, set_x, cell_y, set_z, STONE_BRICKS, true);
 }
 
 std::vector<std::size_t> default_pylons(BridgeStyle style, std::size_t total,

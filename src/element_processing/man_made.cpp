@@ -40,7 +40,7 @@ std::optional<std::pair<int, int>> anchor(const ProcessedElement &element)
 	if (nodes.empty())
 		return std::nullopt;
 	const std::size_t count = nodes.size() > 2 && nodes.front().x == nodes.back().x &&
-											  nodes.front().z == nodes.back().z
+												  nodes.front().z == nodes.back().z
 									  ? nodes.size() - 1
 									  : nodes.size();
 	long long x = 0, z = 0;

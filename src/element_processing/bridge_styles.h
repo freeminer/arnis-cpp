@@ -85,6 +85,11 @@ void place_bridge_support_below_deck(WorldEditor &editor, BridgeStyle style, int
 		int cell_y, int set_z, int centerline_ground_y, std::size_t tds,
 		std::size_t total, bool use_absolute_y, bool is_centerline,
 		bool is_pillar_position);
+void place_arch_below_deck(WorldEditor &editor, int set_x, int cell_y, int set_z,
+		int centerline_ground_y, std::size_t tds, std::size_t total, bool use_absolute_y,
+		bool is_centerline);
+void place_pillar(
+		WorldEditor &editor, int x, int deck_y, int z, Block body, bool with_base);
 void place_pier_bent(WorldEditor &editor, const bridges::BridgeSurfaceMap &surface,
 		BridgeStyle style, int x, int z, int deck_y, std::pair<float, float> perp,
 		int half_width);

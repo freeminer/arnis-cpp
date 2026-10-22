@@ -274,9 +274,6 @@ void fill_nan_values(std::vector<std::vector<double>> &heights)
 	// bias when a large no-data area is filled from its perimeter.
 	std::vector<std::vector<double>> snapshot = heights;
 	for (;;) {
-		parallel_rows(0, height, [&](std::size_t z) {
-			std::copy(heights[z].begin(), heights[z].end(), snapshot[z].begin());
-		});
 		std::atomic_bool changed{false};
 		parallel_rows(0, height, [&](std::size_t z) {
 			bool row_changed = false;
@@ -313,6 +310,11 @@ void fill_nan_values(std::vector<std::vector<double>> &heights)
 		});
 		if (!changed.load(std::memory_order_relaxed))
 			break;
+		// Refresh only when another pass is needed, as in Rust. In particular,
+		// do not copy the entire grid again before the terminal no-change pass.
+		parallel_rows(0, height, [&](std::size_t z) {
+			std::copy(heights[z].begin(), heights[z].end(), snapshot[z].begin());
+		});
 	}
 }
 
