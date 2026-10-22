@@ -1471,7 +1471,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	if (!any_capped) {
 		pick_height = std::numeric_limits<int>::max();
 		for (const auto &species : species_candidates)
-			for (const auto i : species)
+			for (const auto &i : species)
 				pick_height = std::min(pick_height, data_->entries[i].schem->height);
 	}
 	const auto distance = [&](std::size_t i) {

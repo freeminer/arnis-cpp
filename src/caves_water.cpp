@@ -143,7 +143,7 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 	if (by_column.size() < 4)
 		return;
 	for (const auto &[column, py] : by_column) {
-		const auto [px, pz] = column;
+		const auto &[px, pz] = column;
 		if (planned_solid(editor, world, floor_y, carved, water, is_cave, px, py - 1, pz))
 			water.insert(pack_cave_pos(px, py, pz));
 	}
@@ -165,12 +165,12 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 		return !editor.block_exists_absolute(x, y, z) && !cave_air.contains(p);
 	};
 	std::vector<std::int64_t> candidates;
-	for (const auto p : cave_air) {
+	for (const auto& p : cave_air) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (!region.contains(x, z) || y >= lava_level)
 			continue;
-		const bool exposed = std::any_of(neighbours.begin(), neighbours.end(),
-				[&, x = x, y = y, z = z](const auto &offset) {
+		const bool exposed = std::any_of(
+				neighbours.begin(), neighbours.end(), [&](const auto &offset) {
 					return is_open(x + offset[0], y + offset[1], z + offset[2]);
 				});
 		if (!exposed)
@@ -181,7 +181,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 	});
 	std::unordered_set<std::int64_t> supported;
 	supported.reserve(candidates.size());
-	for (const auto p : candidates) {
+	for (const auto& p : candidates) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (editor.block_exists_absolute(x, y - 1, z) ||
 				supported.contains(pack_cave_pos(x, y - 1, z)))
@@ -192,8 +192,8 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 			STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE, DIORITE, ANDESITE};
 	for (const auto p : supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		const bool touches_water = std::any_of(neighbours.begin(), neighbours.end(),
-				[&, x = x, y = y, z = z](const auto &offset) {
+		const bool touches_water = std::any_of(
+				neighbours.begin(), neighbours.end(), [&](const auto &offset) {
 					return water_cells.contains(
 							pack_cave_pos(x + offset[0], y + offset[1], z + offset[2]));
 				});
@@ -207,7 +207,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 		if (basin_fluid)
 			basin_fluid->insert(p);
 	}
-	for (const auto p : supported) {
+	for (const auto& p : supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		for (const auto &offset : neighbours) {
 			const int nx = x + offset[0], ny = y + offset[1], nz = z + offset[2];
@@ -332,7 +332,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 							}
 						if (cells.size() >= 40 && std::none_of(cells.begin(), cells.end(),
 														  [&](const auto &p) {
-															  const auto [x, y, z] = p;
+															  const auto &[x, y, z] = p;
 															  return dry_cave(x, y, z);
 														  })) {
 							int y_lo = std::numeric_limits<int>::max();
@@ -430,7 +430,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		}
 	}
 	if (cave_air_out)
-		for (const auto p : carved_cells) {
+		for (const auto& p : carved_cells) {
 			const auto [x, y, z] = unpack_cave_pos(p);
 			if (region.contains(x, z))
 				cave_air_out->insert(p);

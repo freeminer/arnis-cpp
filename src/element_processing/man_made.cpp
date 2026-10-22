@@ -254,7 +254,7 @@ void generate_antenna(WorldEditor &editor, const ProcessedElement &element,
 	const auto point = anchor(element);
 	if (!point)
 		return;
-	const auto [x, z] = *point;
+	const auto &[x, z] = *point;
 	const bool antenna = element.tag("man_made") == "antenna";
 	const bool lighting = element.tag("tower:type") == "lighting";
 	const int ground = editor.get_ground_level(x, z);
@@ -324,7 +324,7 @@ void generate_chimney(WorldEditor &editor, const ProcessedElement &element,
 	const auto point = anchor(element);
 	if (!point)
 		return;
-	const auto [x, z] = *point;
+	const auto &[x, z] = *point;
 	const int ground = editor.get_ground_level(x, z);
 	const int base = roof_top(editor, footprints, x, z).value_or(ground);
 	const double metres =
@@ -418,7 +418,7 @@ void generate_water_well(WorldEditor &editor, const ProcessedElement &element)
 	const auto point = anchor(element);
 	if (!point)
 		return;
-	const auto [x, z] = *point;
+	const auto &[x, z] = *point;
 	const int base = editor.get_ground_level(x, z);
 	if (const auto pump = element.tag("pump"); pump && *pump != "no") {
 		for (int y = 1; y <= 2; ++y)

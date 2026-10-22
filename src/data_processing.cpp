@@ -350,8 +350,8 @@ bool aircraft_area_contains(
 {
 	bool inside = false;
 	for (std::size_t i = 1; i < ring.size(); ++i) {
-		const auto [x1i, z1i] = ring[i - 1];
-		const auto [x2i, z2i] = ring[i];
+		const auto &[x1i, z1i] = ring[i - 1];
+		const auto &[x2i, z2i] = ring[i];
 		const double x1 = x1i, z1 = z1i, x2 = x2i, z2 = z2i;
 		if ((z1 > z) != (z2 > z) && x < x1 + (z - z1) * (x2 - x1) / (z2 - z1))
 			inside = !inside;

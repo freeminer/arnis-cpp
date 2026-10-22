@@ -602,7 +602,7 @@ void despeckle_and_prune(world_editor::WorldEditor &editor, const CaveRect &regi
 	}
 	const int vanilla_zero = floor_y + 64;
 	const std::vector<Block> air_only{AIR};
-	for (const auto p : refill) {
+	for (const auto &p : refill) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		editor.set_block_absolute(
 				y < vanilla_zero ? DEEPSLATE : STONE, x, y, z, air_only, std::nullopt);

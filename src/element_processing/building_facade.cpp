@@ -174,7 +174,7 @@ FacadePlan compute_facade_plan(const ProcessedWay &element,
 		std::size_t hits = 0;
 		std::optional<int> road_dist;
 		for (const auto &sample : samples) {
-			const auto [x, z] = points[std::min(sample, points.size() - 1)];
+			const auto &[x, z] = points[std::min(sample, points.size() - 1)];
 			for (int distance = 1; distance <= setback(scale); ++distance) {
 				const int px = x + normal.first * distance;
 				const int pz = z + normal.second * distance;

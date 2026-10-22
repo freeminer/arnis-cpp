@@ -137,7 +137,7 @@ struct LandmarkModel
 	{
 		if (!schematic || x < min_x || x > max_x || z < min_z || z > max_z)
 			return {nullptr, 0};
-		const auto [start, count] = columns[slot(x, z)];
+		const auto &[start, count] = columns[slot(x, z)];
 		if (!count)
 			return {nullptr, 0};
 		return {voxel_order.data() + start, static_cast<std::size_t>(count)};

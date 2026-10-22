@@ -345,7 +345,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 				const auto [max_x, max_z] = editor.get_max_coords();
 				Direction selected{0, 1, 3}; // Rust's south-facing fallback.
 				for (const auto &direction : directions) {
-					const auto [dx, dz, facing] = direction;
+					const auto &[dx, dz, facing] = direction;
 					const int target_x = first_node->x + dx;
 					const int target_z = first_node->z + dz;
 					if (target_x >= min_x && target_x <= max_x && target_z >= min_z &&
@@ -354,7 +354,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 						break;
 					}
 				}
-				const auto [dx, dz, facing] = selected;
+				const auto &[dx, dz, facing] = selected;
 				const int target_x = first_node->x + dx;
 				const int target_z = first_node->z + dz;
 				const int target_y = barrel_y;

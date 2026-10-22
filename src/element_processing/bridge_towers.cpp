@@ -146,8 +146,8 @@ float CableSpan::u(int x, int z) const
 std::optional<float> CableSpan::cable_y(float position) const
 {
 	for (std::size_t i = 0; i + 1 < points.size(); ++i) {
-		const auto [u0, y0] = points[i];
-		const auto [u1, y1] = points[i + 1];
+		const auto &[u0, y0] = points[i];
+		const auto &[u1, y1] = points[i + 1];
 		// Rust's inclusive range test rejects NaN. Written this way, ordered
 		// comparisons in C++ would both be false and produce a NaN cable height.
 		if (!(position >= u0 && position <= u1))
@@ -205,8 +205,8 @@ std::optional<CableSpan> make_cable_span(float origin_x, float origin_z, float d
 			return std::nullopt;
 	span.sags.assign(span.points.size() - 1, 0.0f);
 	for (std::size_t i = 1; i + 2 < span.points.size(); ++i) {
-		const auto [u0, y0] = span.points[i];
-		const auto [u1, y1] = span.points[i + 1];
+		const auto &[u0, y0] = span.points[i];
+		const auto &[u1, y1] = span.points[i + 1];
 		const float low =
 				static_cast<float>(deck_at((u0 + u1) * 0.5f)) + CABLE_LOW_ABOVE_DECK;
 		span.sags[i] = std::max(0.0f, (y0 + y1) * 0.5f - low);

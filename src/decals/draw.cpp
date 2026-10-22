@@ -117,8 +117,8 @@ void Canvas::polygon(
 		std::vector<float> xs;
 		const float scan = y + .5f;
 		for (std::size_t i = 0; i < points.size(); ++i) {
-			const auto [x0, y0] = points[i];
-			const auto [x1, y1] = points[(i + 1) % points.size()];
+			const auto &[x0, y0] = points[i];
+			const auto &[x1, y1] = points[(i + 1) % points.size()];
 			if ((y0 <= scan && y1 > scan) || (y1 <= scan && y0 > scan))
 				xs.push_back(x0 + (scan - y0) * (x1 - x0) / (y1 - y0));
 		}

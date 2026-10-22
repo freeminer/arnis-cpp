@@ -1212,12 +1212,12 @@ BridgeStructureMap BridgeStructureMap::build(
 			const auto &terrain = path_terrain[idx];
 			const int layer = effective_layer(*bridge_ways[idx]);
 			for (std::size_t i = 0; i < path.size(); ++i) {
-				const auto [x, z] = path[i];
+				const auto &[x, z] = path[i];
 				const int ground = terrain[i];
 				profile_requirements.emplace_back(us[i], ground);
 				int need = ground;
-				const auto [px, pz] = path[i == 0 ? 0 : i - 1];
-				const auto [nx, nz] = path[std::min(i + 1, path.size() - 1)];
+				const auto &[px, pz] = path[i == 0 ? 0 : i - 1];
+				const auto &[nx, nz] = path[std::min(i + 1, path.size() - 1)];
 				const float heading_x = static_cast<float>(nx - px);
 				const float heading_z = static_cast<float>(nz - pz);
 				if (const auto *nearby = obstacles.at(x, z)) {
@@ -1749,7 +1749,7 @@ BridgeStructureMap BridgeStructureMap::build(
 					own_nodes.insert({node.x, node.z});
 				const auto path = railways::build_smoothed_centerline(way);
 				for (std::size_t p = 0; p < path.size(); ++p) {
-					const auto [x, z] = path[p];
+					const auto &[x, z] = path[p];
 					const int ground = editor.get_ground_level(x, z);
 					terrain_min = std::min(terrain_min, ground);
 					terrain_max = std::max(terrain_max, ground);
@@ -1759,8 +1759,8 @@ BridgeStructureMap BridgeStructureMap::build(
 						floor_y = std::max(
 								floor_y, lower->second.first + STACKED_DECK_HEADROOM);
 					if (const auto *nearby = rail_obstacles.at(x, z)) {
-						const auto [px, pz] = path[p == 0 ? p : p - 1];
-						const auto [nx, nz] = path[std::min(p + 1, path.size() - 1)];
+						const auto &[px, pz] = path[p == 0 ? p : p - 1];
+						const auto &[nx, nz] = path[std::min(p + 1, path.size() - 1)];
 						const float hx = static_cast<float>(nx - px);
 						const float hz = static_cast<float>(nz - pz);
 						for (const auto segment_index : *nearby) {
@@ -1913,7 +1913,7 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 			continue;
 		const auto path = railways::build_smoothed_centerline(way);
 		for (std::size_t i = 0; i < path.size(); ++i) {
-			const auto [x, z] = path[i];
+			const auto &[x, z] = path[i];
 			const int y = rail->ys.empty() ? rail->level_y
 										   : rail->ys[std::min(i, rail->ys.size() - 1)];
 			result.rail_tracks_.try_emplace({x, z}, way.id, y);

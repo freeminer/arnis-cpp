@@ -1126,7 +1126,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		while (!queue.empty()) {
 			const auto a = queue.front();
 			queue.pop_front();
-			const auto [oa, sa] = *phases[a];
+			const auto &[oa, sa] = *phases[a];
 			for (const auto &[ta, b, tb] : adjacent[a]) {
 				if (phases[b])
 					continue;

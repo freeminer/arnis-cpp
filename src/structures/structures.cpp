@@ -695,7 +695,7 @@ void scatter_playgrounds(
 	std::vector<std::pair<int, int>> placed;
 	for (std::uint32_t t = 0; placed.size() < target && t < target * 8; ++t) {
 		const auto h = coord_hash(static_cast<int>(t) + 1, static_cast<int>(n));
-		const auto [ax, az] = cells[h % n];
+		const auto &[ax, az] = cells[h % n];
 		if (editor.is_lc_water(ax, az))
 			continue;
 		const bool too_close =

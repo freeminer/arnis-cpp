@@ -450,7 +450,7 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 	for (std::size_t i = 0; i < sealed_ids.size(); ++i) {
 		if (!sealed_lens[i])
 			continue;
-		const auto [id, yields] = sealed_ids[i];
+		const auto &[id, yields] = sealed_ids[i];
 		if (yields) {
 			largest_paving = std::max(largest_paving, *sealed_lens[i]);
 			layers.push_back({*sealed_lens[i], true, id});

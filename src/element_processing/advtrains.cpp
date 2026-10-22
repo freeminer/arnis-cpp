@@ -29,7 +29,7 @@ int closest_direction(int dx, int dz)
 	int best = 0;
 	double best_dot = -std::numeric_limits<double>::infinity();
 	for (int direction = 0; direction < 16; ++direction) {
-		const auto [vx, vz] = DIR_VECTORS[direction];
+		const auto &[vx, vz] = DIR_VECTORS[direction];
 		const double dot =
 				(dx * vx + dz * vz) /
 				(length * std::hypot(static_cast<double>(vx), static_cast<double>(vz)));

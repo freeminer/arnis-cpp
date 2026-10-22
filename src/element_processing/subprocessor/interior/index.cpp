@@ -45,13 +45,13 @@ struct Outline
 		result.min_z = result.max_z = result.ring.front().second;
 		std::int64_t twice_area = 0;
 		for (std::size_t i = 0; i < result.ring.size(); ++i) {
-			const auto [x, z] = result.ring[i];
+			const auto &[x, z] = result.ring[i];
 			result.min_x = std::min(result.min_x, x);
 			result.max_x = std::max(result.max_x, x);
 			result.min_z = std::min(result.min_z, z);
 			result.max_z = std::max(result.max_z, z);
 			if (i + 1 < result.ring.size()) {
-				const auto [nx, nz] = result.ring[i + 1];
+				const auto &[nx, nz] = result.ring[i + 1];
 				twice_area += static_cast<std::int64_t>(x) * nz -
 							  static_cast<std::int64_t>(nx) * z;
 			}
@@ -118,8 +118,8 @@ bool point_in_ring(int x, int z, const std::vector<std::pair<int, int>> &ring)
 	bool inside = false;
 	std::size_t j = ring.size() - 1;
 	for (std::size_t i = 0; i < ring.size(); ++i) {
-		const auto [xi, zi] = ring[i];
-		const auto [xj, zj] = ring[j];
+		const auto &[xi, zi] = ring[i];
+		const auto &[xj, zj] = ring[j];
 		if ((zi > z) != (zj > z) &&
 				x < ((static_cast<double>(xj) - xi) * (static_cast<double>(z) - zi) /
 							(static_cast<double>(zj) - zi)) +
@@ -209,7 +209,7 @@ struct Grid
 		indices.erase(std::unique(indices.begin(), indices.end()), indices.end());
 		std::vector<const Outline *> result;
 		result.reserve(indices.size());
-		for (const auto i : indices)
+		for (const auto &i : indices)
 			result.push_back(&outlines[i]);
 		return result;
 	}
@@ -220,7 +220,7 @@ struct Grid
 		std::vector<const Outline *> result;
 		const auto it = buckets.find({bx, bz});
 		if (it != buckets.end())
-			for (const auto i : it->second)
+			for (const auto &i : it->second)
 				if (outlines[i].contains(x, z))
 					result.push_back(&outlines[i]);
 		return result;
@@ -269,8 +269,8 @@ bool covers(const std::vector<std::pair<int, int>> &ring, int x, int z)
 	if (point_in_ring(x, z, ring))
 		return true;
 	for (std::size_t i = 1; i < ring.size(); ++i) {
-		const auto [ax, az] = ring[i - 1];
-		const auto [bx, bz] = ring[i];
+		const auto &[ax, az] = ring[i - 1];
+		const auto &[bx, bz] = ring[i];
 		const double dx = bx - ax, dz = bz - az;
 		const double length2 = dx * dx + dz * dz;
 		const double t =

@@ -24,8 +24,8 @@ double interpolate(const std::pair<double, double> *points, std::size_t count, d
 	if (x <= points[0].first)
 		return points[0].second;
 	for (std::size_t i = 1; i < count; ++i) {
-		const auto [x0, y0] = points[i - 1];
-		const auto [x1, y1] = points[i];
+		const auto &[x0, y0] = points[i - 1];
+		const auto &[x1, y1] = points[i];
 		if (x <= x1)
 			return y0 + (x - x0) / (x1 - x0) * (y1 - y0);
 	}

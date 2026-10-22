@@ -422,11 +422,9 @@ void furnish_shop(WorldEditor &editor, const interior_uses::Unit &unit,
 		const auto key = zone_key(x, z);
 		if (!open_geometry.contains(key))
 			continue;
-		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-					[&, x = x, z = z](const auto &d) {
-						return !open_geometry.contains(
-								zone_key(x + d.first, z + d.second));
-					})) {
+		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
+				return !open_geometry.contains(zone_key(x + d.first, z + d.second));
+			})) {
 			depth_at.emplace(key, 1);
 			depth_queue.emplace_back(x, z);
 		}
@@ -1017,11 +1015,10 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 	for (const auto &[x, z] : cells) {
 		if (structural.contains(key(x, z)) || editor.get_block_absolute(x, base_y, z))
 			continue;
-		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-					[&, x = x, z = z](const auto &d) {
-						return !zone.contains(key(x + d.first, z + d.second)) ||
-							   structural.contains(key(x + d.first, z + d.second));
-					})) {
+		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
+				return !zone.contains(key(x + d.first, z + d.second)) ||
+					   structural.contains(key(x + d.first, z + d.second));
+			})) {
 			distance.emplace(key(x, z), 1);
 			queue.emplace_back(x, z);
 		}
@@ -1067,8 +1064,8 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto cell = key(x, z);
 			if (!kitchen_cells.contains(cell))
 				continue;
-			if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-						[&, x = x, z = z](const auto &d) {
+			if (std::any_of(
+						INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
 							return !kitchen_cells.contains(
 									key(x + d.first, z + d.second));
 						})) {
@@ -1170,8 +1167,8 @@ void furnish_eatery(WorldEditor &editor, const interior_uses::Unit &unit,
 		for (const auto &[x, z] : cells) {
 			if (local(x, z).second <= service_v || !free(x, z))
 				continue;
-			if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-						[&, x = x, z = z](const auto &d) {
+			if (std::any_of(
+						INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
 							return !zone.contains(key(x + d.first, z + d.second));
 						}))
 				put(x, z, 1, BARREL);
@@ -1402,7 +1399,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 		std::deque<std::pair<int, int>> queue;
 		for (const auto &[x, z] : cells) {
 			if (walkable(x, z) && std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-										  [&, x = x, z = z](const auto &d) {
+										  [&](const auto &d) {
 											  return !walkable(x + d.first, z + d.second);
 										  })) {
 				distances.emplace(key(x, z), 1);
@@ -1542,7 +1539,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 				put(x, z, dy, goods[(h >> (8 * (dy - 1))) % goods.size()]);
 		}
 		for (const auto &[cell, inward] : wall_cells()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const auto h = interior_mix(x, z, seed ^ 0x9AULL);
 			if (local(x, z).second >= 4 && h % 3 == 0) {
 				put(x, z, 1, BARREL);
@@ -1571,7 +1568,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 				put_with(x, z, 1, stall_fence);
 		}
 		for (const auto &[cell, inward] : wall_cells()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const int v = local(x, z).second;
 			const auto h = interior_mix(x, z, seed);
 			if (v == depth - 1) {
@@ -1585,7 +1582,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 			(void)inward;
 		}
 		for (const auto &[cell, inward] : wall_cells()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			if (interior_mix(x, z, seed ^ 0xBAULL) % 17 == 0) {
 				std::vector<std::tuple<std::string, int, int>> items;
 				for (const auto &item : buildings_loot::themed_chest_loot(
@@ -1632,7 +1629,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 			}
 		}
 		for (const auto &[cell, inward] : wall_cells()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const auto h = interior_mix(x, z, seed ^ 0xFAULL);
 			if (local(x, z).second < 2 || h % 2 == 0)
 				continue;
@@ -1726,7 +1723,7 @@ void furnish_hall(WorldEditor &editor, const interior_uses::Unit &unit,
 	}
 	if (kind == interior_uses::UseKind::Gym) {
 		for (const auto &[cell, inward] : wall_cells()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			if (inward == std::pair{-n.first, -n.second}) {
 				mount_with(x, z, 2, inward,
 						BlockWithProperties{LIGHT_GRAY_STAINED_GLASS,
@@ -2328,11 +2325,10 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 	for (const auto &[x, z] : cells) {
 		if (structural.contains(key(x, z)) || editor.get_block_absolute(x, base_y, z))
 			continue;
-		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-					[&, x = x, z = z](const auto &d) {
-						return !zone.contains(key(x + d.first, z + d.second)) ||
-							   structural.contains(key(x + d.first, z + d.second));
-					})) {
+		if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(), [&](const auto &d) {
+				return !zone.contains(key(x + d.first, z + d.second)) ||
+					   structural.contains(key(x + d.first, z + d.second));
+			})) {
 			depth_at.emplace(key(x, z), 1);
 			queue.emplace_back(x, z);
 		}
@@ -2410,7 +2406,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			seat(x, z, {-n.first, -n.second});
 		}
 		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const int v = local(x, z).second;
 			if (v >= 1 && v < row - 1 && inward != n) {
 				seat(x, z, inward);
@@ -2426,7 +2422,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				}
 			}
 		}
-		const auto [px, pz] = world(0, 1);
+		const auto &[px, pz] = world(0, 1);
 		const auto plant_hash = interior_mix(px, pz, seed);
 		const std::array<Block, 4> plants = {
 				AZALEA, FLOWERING_AZALEA, POTTED_RED_TULIP, POTTED_BLUE_ORCHID};
@@ -2435,7 +2431,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 	}
 	if (kind == interior_uses::UseKind::Workshop) {
 		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			if (local(x, z).second < 2)
 				continue;
 			const auto h = interior_mix(x, z, seed ^ 0x3077ULL);
@@ -2657,7 +2653,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			}
 		}
 		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			if (!in_school_hall(x, z) && local(x, z).second == depth - 1 &&
 					interior_mix(x, z, seed) % 2 == 0)
 				shelf(x, z, 1, inward, seed);
@@ -2674,7 +2670,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			put(x, z, 1, wood.planks);
 		}
 		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const auto h = interior_mix(x, z, seed);
 			if (shelf(x, z, 1, inward, h) && headroom >= 3 &&
 					!window_behind(x, z, inward))
@@ -2685,7 +2681,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			const auto depth_it = depth_at.find(key(x, z));
 			if (depth_it == depth_at.end() || depth_it->second < 3 || !free(x, z))
 				continue;
-			const auto [u, v] = local(x, z);
+			const auto &[u, v] = local(x, z);
 			if (v < stacks_from) {
 				if (v >= 3 && floor_mod(u - entry_u, 4) == 2 && v % 3 == 0) {
 					std::vector<std::pair<std::pair<int, int>, std::pair<int, int>>>
@@ -2734,7 +2730,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				seat(cell.first, cell.second, facing);
 		}
 		for (const auto &[cell, inward] : walls()) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const auto h = interior_mix(x, z, seed);
 			const int v = local(x, z).second;
 			if (v > depth / 2 && h % 3 == 0) {
@@ -2800,7 +2796,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			const std::pair<int, int> bench_side =
 					along_x ? std::pair{0, 1} : std::pair{1, 0};
 			for (const auto &[cell, inward] : walls()) {
-				const auto [x, z] = cell;
+				const auto &[x, z] = cell;
 				if (hall.contains(key(x, z)) && inward == bench_side &&
 						interior_mix(x, z, seed) % 5 == 0)
 					seat(x, z, inward);
@@ -2808,7 +2804,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		}
 		if (hall_span.first < 0) {
 			for (const auto &[cell, inward] : walls()) {
-				const auto [x, z] = cell;
+				const auto &[x, z] = cell;
 				const int v = local(x, z).second;
 				const bool side_wall =
 						inward != n && inward != std::pair{-n.first, -n.second};
@@ -3173,7 +3169,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 							put(x, z, 1, QUARTZ_BLOCK);
 					}
 					for (const auto &[cell, inward] : walls()) {
-						const auto [x, z] = cell;
+						const auto &[x, z] = cell;
 						if (local(x, z).second < wall_v &&
 								std::abs(local(x, z).first - entry_u) > 3 &&
 								interior_mix(x, z, seed) % 3 != 0)
@@ -3241,7 +3237,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				put(x, z, 1, QUARTZ_BLOCK);
 			}
 			for (const auto &[cell, inward] : walls()) {
-				const auto [x, z] = cell;
+				const auto &[x, z] = cell;
 				const auto [u, v] = local(x, z);
 				if (v >= 1 && std::abs(u - entry_u) > 3 &&
 						interior_mix(x, z, seed) % 3 != 0)
@@ -3250,7 +3246,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 			if (!clinic_layout) {
 				bool bed_placed = false;
 				for (const auto &[cell, inward] : walls()) {
-					const auto [x, z] = cell;
+					const auto &[x, z] = cell;
 					const int bx = x + inward.first, bz = z + inward.second;
 					if (!bed_placed)
 						bed_placed = bed(bx, bz, {-inward.first, -inward.second});
@@ -3276,7 +3272,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					put(x, z, 2, exhibits[(h >> 8) % exhibits.size()]);
 			}
 			for (const auto &[cell, inward] : walls()) {
-				const auto [x, z] = cell;
+				const auto &[x, z] = cell;
 				const auto h = interior_mix(x, z, seed ^ 0x3EULL);
 				if (local(x, z).second >= 2 && h % 3 == 0 && put(x, z, 1, SMOOTH_QUARTZ))
 					put(x, z, 2, exhibits[(h >> 8) % exhibits.size()]);
@@ -3290,7 +3286,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 		}
 		if (kind == interior_uses::UseKind::Station) {
 			for (const auto &[cell, inward] : walls()) {
-				const auto [x, z] = cell;
+				const auto &[x, z] = cell;
 				const int v = local(x, z).second;
 				if (inward == std::pair{-t.first, -t.second} && v >= 2 && v <= 6) {
 					put(x, z, 1, POLISHED_ANDESITE);
@@ -3509,7 +3505,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				}
 			}
 			for (const auto &[cell, inward] : walls()) {
-				const auto [x, z] = cell;
+				const auto &[x, z] = cell;
 				if (local(x, z).second > office_wall_v)
 					continue;
 				const auto h = interior_mix(x, z, seed);
@@ -3605,7 +3601,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 							}
 							(void)u;
 						}
-						const auto [dx, dz] = *door_cell;
+						const auto &[dx, dz] = *door_cell;
 						const auto door_key = key(dx, dz);
 						structural.insert(door_key);
 						planned.insert(door_key);
@@ -3658,7 +3654,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 							editor.get_block_absolute(x, base_y, z))
 						continue;
 					if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-								[&, x = x, z = z](const auto &d) {
+								[&](const auto &d) {
 									return !lobby_zone.contains(
 												   key(x + d.first, z + d.second)) ||
 										   structural.contains(
@@ -3701,7 +3697,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 					}
 				}
 				for (const auto &[cell, inward] : walls()) {
-					const auto [x, z] = cell;
+					const auto &[x, z] = cell;
 					if (!lobby_zone.contains(key(x, z)))
 						continue;
 					if (interior_mix(x, z, seed) % 7 == 0)
@@ -3850,7 +3846,7 @@ void furnish_civic(WorldEditor &editor, const interior_uses::Unit &unit,
 				}
 				bool desk_placed = false;
 				for (const auto &[cell, inward] : room_walls) {
-					const auto [x, z] = cell;
+					const auto &[x, z] = cell;
 					const int v = room_local(x, z).second;
 					if (v == 0)
 						continue;
@@ -4622,8 +4618,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 							   std::abs(static_cast<std::int64_t>(b) -
 										static_cast<std::int64_t>(middle));
 					});
-					for (const auto i : order) {
-						const auto [x, z] = border[i];
+					for (const auto &i : order) {
+						const auto &[x, z] = border[i];
 						for (const auto &direction : INTERIOR_DIRS) {
 							const int lx = x - direction.first, lz = z - direction.second;
 							const int hx = x + direction.first, hz = z + direction.second;
@@ -4689,7 +4685,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						connectivity_starts.push_back(entry.cell);
 			}
 			if (shaft && (floor_index > 0 || entries.empty())) {
-				const auto [x, z] = shaft->first;
+				const auto &[x, z] = shaft->first;
 				const auto key = interior_cell_key(x, z);
 				if (zone_of.contains(key) && kept_cells.contains(key))
 					connectivity_starts.emplace_back(x, z);
@@ -4787,7 +4783,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						floor_y + abs_terrain_offset + 1, shaft->first.second);
 		if (floor_index == 0) {
 			for (const auto &entry : entries) {
-				const auto [x, z] = entry.cell;
+				const auto &[x, z] = entry.cell;
 				for (const auto &[cx, cz] :
 						{entry.cell, std::pair{x + entry.inward.first,
 											 z + entry.inward.second}}) {
@@ -5151,7 +5147,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						if (!depth_open(x, z))
 							continue;
 						if (std::any_of(INTERIOR_DIRS.begin(), INTERIOR_DIRS.end(),
-									[&, x = x, z = z](const auto &d) {
+									[&](const auto &d) {
 										const auto neighbour = interior_cell_key(
 												x + d.first, z + d.second);
 										return !zone_set.contains(neighbour) ||
@@ -5583,7 +5579,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						(void)label;
 						const auto &[distance, wall, across] = opening;
 						(void)distance;
-						const auto [x, z] = wall;
+						const auto &[x, z] = wall;
 						wall_positions.erase(std::remove(wall_positions.begin(),
 													 wall_positions.end(), wall),
 								wall_positions.end());
@@ -5724,7 +5720,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				}
 			}
 			if (shaft_open && shaft && floor_index + 1 < floor_levels.size()) {
-				const auto [cell, inward] = *shaft;
+				const auto &[cell, inward] = *shaft;
 				const BlockWithProperties ladder{LADDER,
 						{{"facing", ladder_facing(inward)}, {"waterlogged", "false"}}};
 				const int ladder_bottom = floor_y + abs_terrain_offset + 1;

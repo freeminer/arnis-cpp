@@ -354,8 +354,8 @@ Snow snow_cover(double d, double slope, const std::function<double()> &convexity
 	else
 		for (std::size_t i = 1; i < slope_terms.size(); ++i)
 			if (slope <= slope_terms[i].first) {
-				const auto [x0, y0] = slope_terms[i - 1];
-				const auto [x1, y1] = slope_terms[i];
+				const auto &[x0, y0] = slope_terms[i - 1];
+				const auto &[x1, y1] = slope_terms[i];
 				const double t = (slope - x0) / (x1 - x0);
 				st = y0 + t * (y1 - y0);
 				break;

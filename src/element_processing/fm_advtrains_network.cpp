@@ -42,7 +42,7 @@ void finish_network(WorldEditor &editor)
 	for (auto id : generated)
 		if (const auto it = plans.find(id); it != plans.end())
 			for (std::size_t i = 0; i < it->second.line.size(); ++i) {
-				const auto [x, z] = it->second.line[i];
+				const auto &[x, z] = it->second.line[i];
 				track_cells.emplace(x, it->second.heights[i], z);
 				track_cells.emplace(x, it->second.heights[i] + 1, z);
 			}
@@ -52,7 +52,7 @@ void finish_network(WorldEditor &editor)
 			continue;
 		const auto &plan = it->second;
 		for (std::size_t i = 0; i < plan.line.size(); ++i) {
-			const auto [x, z] = plan.line[i];
+			const auto &[x, z] = plan.line[i];
 			const pos_t y = plan.heights[i];
 			editor.set_block_absolute(GRAVEL, x, y, z, std::nullopt, replace_all);
 			editor.set_block_absolute(
@@ -75,7 +75,7 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 	{
 		std::size_t operator()(const State &state) const noexcept
 		{
-			const auto [x, z, heading] = state;
+			const auto &[x, z, heading] = state;
 			auto hash = std::hash<pos_t>{}(x);
 			hash ^= std::hash<pos_t>{}(z) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
 			return hash ^
@@ -109,13 +109,13 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 			queue.pop();
 			if (cost != visits.at(state).cost)
 				continue;
-			const auto [x, z, heading] = state;
+			const auto &[x, z, heading] = state;
 			if (XZ{x, z} == to && heading == arrival) {
 				std::vector<XZ> result;
 				std::set<XZ> seen;
 				State cursor = state;
 				for (;;) {
-					const auto [cx, cz, cd] = cursor;
+					const auto &[cx, cz, cd] = cursor;
 					if (!seen.emplace(cx, cz).second)
 						return {};
 					result.emplace_back(cx, cz);
@@ -130,7 +130,7 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 				if (state == start && turn != 0)
 					continue;
 				const int direction = (heading + turn + 16) % 16;
-				const auto [dx, dz] = DIR_VECTORS[direction];
+				const auto &[dx, dz] = DIR_VECTORS[direction];
 				const XZ next{x + dx, z + dz};
 				if (next == from || (next == to && direction != arrival))
 					continue;

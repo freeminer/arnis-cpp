@@ -506,8 +506,8 @@ RailDeckLayout rail_deck_layout(const bridges::BridgeSurfaceMap &surface,
 	array<optional<pair<int, int>>, 2> previous{};
 	for (size_t i = 0; i < points.size(); ++i) {
 		array<vector<pair<int, int>>, 2> row;
-		const auto [x, z] = points[i];
-		const auto [px, pz] = layout.perps[i];
+		const auto &[x, z] = points[i];
+		const auto &[px, pz] = layout.perps[i];
 		const float edge_dist =
 				(RAIL_DECK_HALF_WIDTH - 1) * (std::abs(px) + std::abs(pz)) + 1.0f;
 		for (size_t side = 0; side < 2; ++side) {
@@ -533,7 +533,7 @@ RailDeckLayout rail_deck_layout(const bridges::BridgeSurfaceMap &surface,
 	for (size_t i = 0; i < points.size(); ++i) {
 		const int radius = static_cast<int>(std::ceil(
 				std::max(layout.sides[i][0].reach(), layout.sides[i][1].reach())));
-		const auto [x, z] = points[i];
+		const auto &[x, z] = points[i];
 		for (int dx = -radius; dx <= radius; ++dx)
 			for (int dz = -radius; dz <= radius; ++dz) {
 				const int d2 = dx * dx + dz * dz;
@@ -546,8 +546,8 @@ RailDeckLayout rail_deck_layout(const bridges::BridgeSurfaceMap &surface,
 	}
 	for (const auto &[cell, sample] : nearest) {
 		const size_t i = sample.second;
-		const auto [x, z] = points[i];
-		const auto [px, pz] = layout.perps[i];
+		const auto &[x, z] = points[i];
+		const auto &[px, pz] = layout.perps[i];
 		const float dx = static_cast<float>(cell.first - x);
 		const float dz = static_cast<float>(cell.second - z);
 		const float across = dx * px + dz * pz;
@@ -565,7 +565,7 @@ void place_bridge_catenary(WorldEditor &editor, const vector<pair<int, int>> &po
 		const vector<int> &ys, const RailDeckLayout &layout)
 {
 	for (size_t i = 0; i < points.size(); ++i) {
-		const auto [x, z] = points[i];
+		const auto &[x, z] = points[i];
 		const auto &before = points[i ? i - 1 : i];
 		const auto &after = points[std::min(i + 1, points.size() - 1)];
 		const int dx = after.first - before.first;
@@ -580,7 +580,7 @@ void place_bridge_catenary(WorldEditor &editor, const vector<pair<int, int>> &po
 			continue;
 		const std::size_t side = static_cast<std::size_t>(open - layout.sides[i].begin());
 		const float sign = side == 0 ? 1.0f : -1.0f;
-		const auto [px, pz] = layout.perps[i];
+		const auto &[px, pz] = layout.perps[i];
 		const float ox = px * sign, oz = pz * sign;
 		const float edge_dist =
 				(RAIL_DECK_HALF_WIDTH - 1) * (std::abs(ox) + std::abs(oz)) + 1.0f;
@@ -656,7 +656,7 @@ int closest_adv_direction(int dx, int dz)
 	int best = 0;
 	double best_dot = -std::numeric_limits<double>::infinity();
 	for (int direction = 0; direction < 16; ++direction) {
-		const auto [vx, vz] = ADV_DIR_VECTORS[direction];
+		const auto &[vx, vz] = ADV_DIR_VECTORS[direction];
 		const double dot = (dx * vx + dz * vz) /
 				(length * std::hypot(static_cast<double>(vx), static_cast<double>(vz)));
 		if (dot > best_dot) {
@@ -706,7 +706,7 @@ vector<pair<int, int>> build_advtrains_centerline(const ProcessedWay &way)
 				const int turn = circular_delta(*heading, desired);
 				chosen = (*heading + (turn > 0 ? 1 : turn < 0 ? -1 : 0) + 16) % 16;
 			}
-			const auto [vx, vz] = ADV_DIR_VECTORS[chosen];
+			const auto &[vx, vz] = ADV_DIR_VECTORS[chosen];
 			current = {current.first + vx, current.second + vz};
 			if (out.back() != current)
 				out.push_back(current);
@@ -822,7 +822,7 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 	if (points.size() < 2)
 		return;
 	for (size_t i = 0; i < points.size(); ++i) {
-		const auto [cx, cz] = points[i];
+		const auto &[cx, cz] = points[i];
 		const auto [tx, tz] = i + 1 < points.size()
 									  ? pair<int, int>{points[i + 1].first - cx,
 												points[i + 1].second - cz}
@@ -874,7 +874,7 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 			const auto smoothed = smooth_diagonal_rails(points);
 			const std::size_t skip_first = i > 1 ? 1 : 0;
 			for (std::size_t j = skip_first; j < smoothed.size(); ++j) {
-				const auto [bx, unused_y, bz] = smoothed[j];
+				const auto &[bx, unused_y, bz] = smoothed[j];
 				(void)unused_y;
 				const int current_ground = editor.get_ground_level(bx, bz);
 				const int prev_ground =
@@ -921,7 +921,7 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 								: vector<int>{};
 	std::size_t tds = 0;
 	for (size_t j = 0; j < centerline.size(); ++j) {
-		const auto [bx, bz] = centerline[j];
+		const auto &[bx, bz] = centerline[j];
 
 		const int prev_ground = j > 0 ? editor.get_ground_level(centerline[j - 1].first,
 												centerline[j - 1].second)
@@ -955,10 +955,10 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element)
 				: ADVTRAINS_AVAILABLE
 						? advtrains_slope_rail(centerline, adv_heights, j)
 								  .value_or(advtrains::connected_rail(centerline, j, true)
-													.value_or(determine_rail_with_slope(
-															{bx, bz}, prev_opt, next_opt,
-															prev_ground, current_ground,
-															next_ground)))
+												  .value_or(determine_rail_with_slope(
+														  {bx, bz}, prev_opt, next_opt,
+														  prev_ground, current_ground,
+														  next_ground)))
 						: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
 								  prev_ground, current_ground, next_ground);
 		if (ADVTRAINS_AVAILABLE)
@@ -1000,7 +1000,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	if (rail_deck->kind == bridges::RailDeckKind::Carried) {
 		const auto carried_path = build_smoothed_centerline(way);
 		for (std::size_t i = 0; i < carried_path.size(); ++i) {
-			const auto [x, z] = carried_path[i];
+			const auto &[x, z] = carried_path[i];
 			const int y = rail_deck->ys.empty()
 								  ? editor.get_ground_level(x, z)
 								  : rail_deck->ys[std::min(i, rail_deck->ys.size() - 1)];
@@ -1113,7 +1113,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	const bool start_is_boundary = own_rail_deck->start_is_boundary;
 	const bool end_is_boundary = own_rail_deck->end_is_boundary;
 	for (std::size_t i = 0; i < total; ++i) {
-		const auto [bx, bz] = all_points[i];
+		const auto &[bx, bz] = all_points[i];
 		const int y = bridge_ys[i];
 		optional<pair<int, int>> prev_xz =
 				i > 0 ? optional<pair<int, int>>(all_points[i - 1]) : nullopt;
@@ -1223,7 +1223,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 					connected_blocks::place_connected(editor, *railing, cx, top, cz);
 					if (previous_tops[side]) {
 						const auto &prev = *previous_tops[side];
-						const auto [px, pz] = prev.first;
+						const auto &[px, pz] = prev.first;
 						const bool adjacent = std::abs(px - cx) + std::abs(pz - cz) == 1;
 						if (adjacent && prev.second == top - 1)
 							connected_blocks::place_connected(
@@ -1255,10 +1255,10 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 									 : style;
 		if (support == bridge_styles::BridgeStyle::Arch) {
 			for (const auto &[cell, i] : support_cells) {
-				const auto [cx, cz] = cell;
+				const auto &[cx, cz] = cell;
 				if (bridge_surface.support_blocked(cx, cz, bridge_ys[i]))
 					continue;
-				const auto [bx, bz] = all_points[i];
+				const auto &[bx, bz] = all_points[i];
 				bridge_styles::place_arch_below_deck(editor, cx, bridge_ys[i], cz,
 						editor.get_ground_level(bx, bz), i, total, true,
 						cx == bx && cz == bz);
@@ -1271,7 +1271,7 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 				bridge_styles::pillar_interval(support, RAIL_DECK_HALF_WIDTH);
 		if (!cables_carry_deck && pier_interval > 0)
 			for (std::size_t i = 0; i < total; ++i) {
-				const auto [x, z] = all_points[i];
+				const auto &[x, z] = all_points[i];
 				const auto perp = layout.perps[i];
 				const bool along_x = std::abs(perp.second) >= std::abs(perp.first);
 				const auto axis = [along_x](const std::pair<int, int> &point) {

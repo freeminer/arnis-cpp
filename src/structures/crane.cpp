@@ -104,7 +104,7 @@ void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int
 				};
 				return distance(a) < distance(b);
 			});
-	const auto [x, z] = *it;
+	const auto &[x, z] = *it;
 	if (site_has_mapped_crane(editor, cells))
 		return;
 	const auto h = land_cover::coord_hash(x, z);

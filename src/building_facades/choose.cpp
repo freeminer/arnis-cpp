@@ -93,7 +93,7 @@ std::pair<std::vector<std::size_t>, Fallback> candidates(
 {
 	std::vector<std::size_t> out;
 	const auto append = [&](buildings::BuildingCategory wanted) {
-		for (const auto i : set.in_category(wanted))
+		for (const auto &i : set.in_category(wanted))
 			if (std::find(out.begin(), out.end(), i) == out.end())
 				out.push_back(i);
 	};

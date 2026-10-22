@@ -346,7 +346,7 @@ std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int orig
 	const auto [slot_x, slot_z] = trees::trunk_slot_s(x, z, spacing);
 	if (x != slot_x || z != slot_z)
 		return {true, false};
-	const auto [fraction, top] = *cell;
+	const auto &[fraction, top] = *cell;
 	const double p = !schematic_trees ? canopy::flat_slot_probability(fraction, spacing,
 												canopy::COLUMNS_PER_TREE_LEGACY)
 					 : scale < MICRO_TREE_MAX_SCALE

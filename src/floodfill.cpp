@@ -53,8 +53,8 @@ static std::vector<std::pair<int, int>> scanline_fill_area(
 		const double zf = static_cast<double>(z);
 		crossings.clear();
 		for (std::size_t i = 1; i < polygon_coords.size(); ++i) {
-			const auto [ix0, iz0] = polygon_coords[i - 1];
-			const auto [ix1, iz1] = polygon_coords[i];
+			const auto &[ix0, iz0] = polygon_coords[i - 1];
+			const auto &[ix1, iz1] = polygon_coords[i];
 			const double x0 = static_cast<double>(ix0), z0 = static_cast<double>(iz0);
 			const double x1 = static_cast<double>(ix1), z1 = static_cast<double>(iz1);
 			// Half-open in z: a vertex on the row contributes once, not twice.

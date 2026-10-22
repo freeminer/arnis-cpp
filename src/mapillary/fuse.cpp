@@ -78,7 +78,7 @@ FusedTexture fuse(const std::string &wall_key, const std::vector<ViewTexture> &v
 	std::vector<std::vector<double>> weights;
 	matched.reserve(kept.size());
 	weights.reserve(kept.size());
-	for (const auto i : kept) {
+	for (const auto &i : kept) {
 		if (i == best) {
 			matched.push_back(aligned.images[i]);
 		} else {

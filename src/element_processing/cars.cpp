@@ -60,8 +60,8 @@ struct Path
 		const auto it = std::lower_bound(at.begin(), at.end(), distance);
 		const auto k = std::clamp<std::size_t>(
 				static_cast<std::size_t>(it - at.begin()), 1, points.size() - 1);
-		const auto [ax, az] = points[k - 1];
-		const auto [bx, bz] = points[k];
+		const auto &[ax, az] = points[k - 1];
+		const auto &[bx, bz] = points[k];
 		const double span = at[k] - at[k - 1];
 		const double t = span > 0.0 ? (distance - at[k - 1]) / span : 0.0;
 		return {ax + (bx - ax) * t, az + (bz - az) * t};
@@ -270,8 +270,8 @@ Path make_path(std::vector<std::pair<double, double>> points)
 	path.at.reserve(path.points.size());
 	path.at.push_back(0.0);
 	for (std::size_t i = 1; i < path.points.size(); ++i) {
-		const auto [ax, az] = path.points[i - 1];
-		const auto [bx, bz] = path.points[i];
+		const auto &[ax, az] = path.points[i - 1];
+		const auto &[bx, bz] = path.points[i];
 		path.at.push_back(path.at.back() + std::hypot(bx - ax, bz - az));
 	}
 	return path;
@@ -691,7 +691,7 @@ void tidy(Segment &segment)
 			segment.arcs.push_back(s);
 			continue;
 		}
-		const auto [a, b, d] = *corner;
+		const auto &[a, b, d] = *corner;
 		const std::pair from{p.x - a.first * d, p.z - a.second * d};
 		const std::pair to{p.x + b.first * d, p.z + b.second * d};
 		std::pair<double, double> c1, c2;
@@ -1012,7 +1012,7 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 		std::vector<std::size_t> next;
 		bool through_short = false;
 		std::vector<std::pair<std::size_t, unsigned>> todo;
-		for (const auto j : ways_on[i])
+		for (const auto &j : ways_on[i])
 			todo.emplace_back(j, 0);
 		while (!todo.empty()) {
 			const auto [j, depth] = todo.back();
@@ -1021,7 +1021,7 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 				continue;
 			if (short_lane[j] && depth < 3 && !ways_on[j].empty()) {
 				through_short = true;
-				for (const auto k : ways_on[j])
+				for (const auto &k : ways_on[j])
 					if (k != i && (!lane.reverse || k != *lane.reverse))
 						todo.emplace_back(k, depth + 1);
 			} else if (std::find(next.begin(), next.end(), j) == next.end()) {
@@ -1030,7 +1030,7 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 		}
 		std::vector<std::pair<std::size_t, std::optional<std::pair<std::size_t, double>>>>
 				entries;
-		for (const auto j : next)
+		for (const auto &j : next)
 			entries.emplace_back(j, entry(segments[i].points, segments[j].points));
 		std::vector<std::pair<std::size_t, std::size_t>> forward;
 		for (const auto &[j, e] : entries)

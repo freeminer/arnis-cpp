@@ -509,7 +509,7 @@ void keep_anchored_walls(std::vector<std::uint64_t> &mask, const CoverGrid &cove
 	for (std::size_t i = 0; i < cells.size(); ++i) {
 		if (!walls[i])
 			continue;
-		const auto [x, y] = cells[i];
+		const auto &[x, y] = cells[i];
 		bool on_land = false;
 		for (const auto &[dx, dy] : std::array<std::pair<int, int>, 8>{{{-1, -1}, {0, -1},
 					 {1, -1}, {-1, 0}, {1, 0}, {-1, 1}, {0, 1}, {1, 1}}}) {
@@ -540,7 +540,7 @@ void keep_anchored_walls(std::vector<std::uint64_t> &mask, const CoverGrid &cove
 			}
 	}
 	for (std::size_t i = 0; i < cells.size(); ++i) {
-		const auto [x, y] = cells[i];
+		const auto &[x, y] = cells[i];
 		if (walls[i] && !reached.contains(static_cast<std::uint32_t>(
 								y * cover.front().size() + x))) {
 			walls[i] = false;
@@ -580,7 +580,7 @@ bool under_level_water(const HeightGrid &heights, const CoverGrid &cover,
 		}
 		if (!best)
 			return false;
-		const auto [_, nx, ny, len] = *best;
+		const auto &[_, nx, ny, len] = *best;
 		const auto idx = ny * w + nx;
 		if (bank_dist[idx] == 0)
 			return false;
@@ -1283,7 +1283,7 @@ MaskGrid level_water_surfaces(
 			from_body = steps_from_other_water(cells, members, cover, fall_reach);
 		std::vector<std::uint8_t> falls(cells.size());
 		const auto calculate_falls = [&](std::size_t i) {
-			const auto [x, y] = cells[i];
+			const auto &[x, y] = cells[i];
 			const auto walk = walk_from_bank(*bank_dist, members, w, x, y, wall_step);
 			falls[i] = on_channel_wall(heights, walk, x, y, meters_per_cell) &&
 					   (!from_body || !falls_away(*from_body, walk, w, x, y));
@@ -1294,7 +1294,7 @@ MaskGrid level_water_surfaces(
 			for (std::size_t i = 0; i < cells.size(); ++i)
 				calculate_falls(i);
 		for (std::size_t i = 0; i < cells.size(); ++i) {
-			const auto [x, y] = cells[i];
+			const auto &[x, y] = cells[i];
 			if (falls[i])
 				set_bit(walls_mask, y * w + x);
 		}
@@ -1302,7 +1302,7 @@ MaskGrid level_water_surfaces(
 		const auto classify_walls = [&](std::size_t i) {
 			if (!falls[i])
 				return;
-			const auto [x, y] = cells[i];
+			const auto &[x, y] = cells[i];
 			wall_flags[i] = !under_level_water(
 					heights, cover, *bank_dist, walls_mask, x, y, level_run);
 		};
@@ -1313,7 +1313,7 @@ MaskGrid level_water_surfaces(
 				classify_walls(i);
 		for (std::size_t i = 0; i < cells.size(); ++i) {
 			if (falls[i] && !wall_flags[i]) {
-				const auto [x, y] = cells[i];
+				const auto &[x, y] = cells[i];
 				clear_bit(walls_mask, y * w + x);
 			}
 		}
@@ -1325,7 +1325,7 @@ MaskGrid level_water_surfaces(
 		for (std::size_t i = 0; i < cells.size(); ++i) {
 			if (!walls[i])
 				continue;
-			const auto [x, y] = cells[i];
+			const auto &[x, y] = cells[i];
 			clear_bit(members, y * w + x);
 			++wall_count;
 		}
@@ -1334,7 +1334,7 @@ MaskGrid level_water_surfaces(
 		const auto sample_surface = [&](std::size_t i) {
 			if (walls[i])
 				return;
-			const auto [x, y] = cells[i];
+			const auto &[x, y] = cells[i];
 			if (!std::isfinite(heights[y][x]))
 				return;
 			const auto local = reach ? local_reach_median(heights, members, cover, x, y,

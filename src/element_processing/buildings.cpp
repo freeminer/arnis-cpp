@@ -303,8 +303,8 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 	const std::size_t count = points.size();
 	double area2 = 0.0, centroid_x = 0.0, centroid_z = 0.0;
 	for (std::size_t i = 0; i < count; ++i) {
-		const auto [ax, az] = points[i];
-		const auto [bx, bz] = points[(i + 1) % count];
+		const auto &[ax, az] = points[i];
+		const auto &[bx, bz] = points[(i + 1) % count];
 		const double cross = ax * bz - bx * az;
 		area2 += cross;
 		centroid_x += (ax + bx) * cross;
@@ -316,8 +316,8 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 	centroid_z /= 3.0 * area2;
 	bool inside = false;
 	for (std::size_t i = 0, j = count - 1; i < count; j = i++) {
-		const auto [ax, az] = points[i];
-		const auto [bx, bz] = points[j];
+		const auto &[ax, az] = points[i];
+		const auto &[bx, bz] = points[j];
 		if ((az > centroid_z) != (bz > centroid_z)) {
 			const double crossing = ax + (centroid_z - az) * (bx - ax) / (bz - az);
 			if (crossing > centroid_x)
@@ -335,8 +335,8 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 	};
 	const auto edge_ranges = [&](std::size_t i) {
 		using BucketRange = std::optional<std::pair<std::size_t, std::size_t>>;
-		const auto [ax, az] = points[i];
-		const auto [bx, bz] = points[(i + 1) % count];
+		const auto &[ax, az] = points[i];
+		const auto &[bx, bz] = points[(i + 1) % count];
 		const double a0 = std::atan2(az - centroid_z, ax - centroid_x);
 		const double a1 = std::atan2(bz - centroid_z, bx - centroid_x);
 		const double lo = std::min(a0, a1), hi = std::max(a0, a1);
@@ -390,8 +390,8 @@ std::optional<std::vector<double>> footprint_radial_fractions(
 		for (std::size_t edge = bucket_start[bucket]; edge < bucket_start[bucket + 1];
 				edge++) {
 			const std::size_t i = bucket_edges[edge];
-			const auto [ax, az] = points[i];
-			const auto [bx, bz] = points[(i + 1) % count];
+			const auto &[ax, az] = points[i];
+			const auto &[bx, bz] = points[(i + 1) % count];
 			const double ex = bx - ax, ez = bz - az;
 			const double denom = ux * ez - uz * ex;
 			if (std::abs(denom) < 1e-12)
@@ -440,7 +440,7 @@ std::vector<std::array<int, 4>> axis_runs(const std::vector<std::pair<int, int>>
 	std::iota(order.begin(), order.end(), 0);
 	for (const bool along_x : {true, false}) {
 		auto key = [&](std::size_t i) {
-			const auto [x, z] = area[i];
+			const auto &[x, z] = area[i];
 			return along_x ? std::pair{z, x} : std::pair{x, z};
 		};
 		std::sort(order.begin(), order.end(),
@@ -2831,18 +2831,14 @@ RoofHeightMap hip_edge_distances(const std::vector<std::pair<int32_t, int32_t>> 
 	std::deque<std::pair<int32_t, int32_t>> queue;
 	const auto inside = [&](int32_t x, int32_t z) { return footprint.contains({x, z}); };
 	for (const auto &[x, z] : area) {
-		const bool edge = std::any_of(sides.begin(), sides.end(),
-								  [&, x = x, z = z](const auto &d) {
-									  return !inside(x + d.first, z + d.second);
-								  }) ||
-						  std::any_of(quarters.begin(), quarters.end(),
-								  [&, x = x, z = z](const auto &d) {
-									  return !inside(x + d.first, z + d.second) &&
-											 !inside(x + 2 * d.first, z + d.second) &&
-											 !inside(x + d.first, z + 2 * d.second) &&
-											 inside(x + 2 * d.first, z) &&
-											 inside(x, z + 2 * d.second);
-								  });
+		const bool edge = std::any_of(sides.begin(), sides.end(), [&](const auto &d) {
+			return !inside(x + d.first, z + d.second);
+		}) || std::any_of(quarters.begin(), quarters.end(), [&](const auto &d) {
+			return !inside(x + d.first, z + d.second) &&
+				   !inside(x + 2 * d.first, z + d.second) &&
+				   !inside(x + d.first, z + 2 * d.second) && inside(x + 2 * d.first, z) &&
+				   inside(x, z + 2 * d.second);
+		});
 		if (edge) {
 			distances[{x, z}] = 0;
 			queue.emplace_back(x, z);
@@ -2852,7 +2848,7 @@ RoofHeightMap hip_edge_distances(const std::vector<std::pair<int32_t, int32_t>> 
 		const auto [x, z] = queue.front();
 		queue.pop_front();
 		const int distance = distances.at({x, z});
-		const auto visit = [&, x = x, z = z](const auto &offsets) {
+		const auto visit = [&](const auto &offsets) {
 			for (const auto &[dx, dz] : offsets) {
 				const std::pair<int32_t, int32_t> next{x + dx, z + dz};
 				if (inside(next.first, next.second) && !distances.contains(next)) {
@@ -2877,12 +2873,11 @@ RoofCellSet capped_flat_tops(const HeightMap &levels)
 			{{0, -1}, {-1, 0}, {1, 0}, {0, 1}}};
 	RoofCellSet flat;
 	for (const auto &[cell, height] : levels) {
-		const auto [x, z] = cell;
-		if (std::all_of(neighbors.begin(), neighbors.end(),
-					[&, x = x, z = z, height = height](const auto &delta) {
-						const auto it = levels.find({x + delta.first, z + delta.second});
-						return it != levels.end() && it->second == height;
-					}))
+		const auto &[x, z] = cell;
+		if (std::all_of(neighbors.begin(), neighbors.end(), [&](const auto &delta) {
+				const auto it = levels.find({x + delta.first, z + delta.second});
+				return it != levels.end() && it->second == height;
+			}))
 			flat.insert(cell);
 	}
 	RoofCellSet seen, decks;
@@ -2893,7 +2888,7 @@ RoofCellSet capped_flat_tops(const HeightMap &levels)
 			continue;
 		std::vector<std::pair<int, int>> patch{start};
 		for (std::size_t i = 0; i < patch.size(); ++i) {
-			const auto [x, z] = patch[i];
+			const auto &[x, z] = patch[i];
 			for (const auto &[dx, dz] : sides) {
 				const std::pair<int, int> next{x + dx, z + dz};
 				if (flat.contains(next) && seen.insert(next).second)
@@ -3063,8 +3058,8 @@ std::optional<RoofWingFrame> roof_wings(const std::vector<ProcessedNode> &nodes,
 
 	double sum_c = 0.0, sum_s = 0.0;
 	for (std::size_t i = 0; i < ring.size(); ++i) {
-		const auto [ax, az] = ring[i];
-		const auto [bx, bz] = ring[(i + 1) % ring.size()];
+		const auto &[ax, az] = ring[i];
+		const auto &[bx, bz] = ring[(i + 1) % ring.size()];
 		const double dx = bx - ax, dz = bz - az, len = std::hypot(dx, dz);
 		if (len < 3.0)
 			continue;
@@ -3077,7 +3072,7 @@ std::optional<RoofWingFrame> roof_wings(const std::vector<ProcessedNode> &nodes,
 		angle = 0.0;
 	const double c = std::cos(angle), s = std::sin(angle);
 	for (auto &point : ring) {
-		const auto [x, z] = point;
+		const auto &[x, z] = point;
 		point = {x * c + z * s, -x * s + z * c};
 	}
 	std::vector<std::vector<std::pair<double, double>>> rings{ring};
@@ -3114,8 +3109,8 @@ std::optional<RoofWingFrame> roof_wings(const std::vector<ProcessedNode> &nodes,
 	const double skew = std::tan(15.0 * std::numbers::pi / 180.0);
 	for (const auto &r : rings)
 		for (std::size_t i = 0; i < r.size(); ++i) {
-			const auto [ax, az] = r[i];
-			const auto [bx, bz] = r[(i + 1) % r.size()];
+			const auto &[ax, az] = r[i];
+			const auto &[bx, bz] = r[(i + 1) % r.size()];
 			const double du = bx - ax, dv = bz - az, len = std::hypot(du, dv);
 			if (len < 0.5)
 				continue;
@@ -3455,7 +3450,7 @@ void place_roof_dormer_windows(WorldEditor &editor,
 	std::unordered_set<Cell, pair_hash> local_footprint(
 			floor_area.begin(), floor_area.end());
 	const auto &footprint = footprint_override ? *footprint_override : local_footprint;
-	const auto [px, pz] = parallel_to_ridge;
+	const auto &[px, pz] = parallel_to_ridge;
 	const Cell perp_unit = px != 0 ? Cell{0, 1} : Cell{1, 0};
 	auto scan = [&](int32_t x, int32_t z, int dx, int dz) {
 		int distance = 0;
@@ -3510,14 +3505,14 @@ void place_roof_dormer_windows(WorldEditor &editor,
 	std::sort(candidates.begin(), candidates.end());
 	auto rng = element_rng(style_seed ^ 0x000D04E4DEC0ULL);
 	std::vector<std::tuple<int32_t, int32_t, int32_t>> chosen;
-	const auto along = [px = px](int x, int z) { return px != 0 ? x : z; };
+	const auto along = [&](int x, int z) { return px != 0 ? x : z; };
 	const auto on_axis = [&](int u) {
 		return !style.window_phase || (u + *style.window_phase) % 6 == 1 ||
 			   ((u + *style.window_phase) % 6 + 6) % 6 == 1;
 	};
 	std::array<std::vector<decltype(candidates)::value_type>, 2> sides;
 	for (const auto &candidate : candidates) {
-		const auto [x, z, h, side] = candidate;
+		const auto &[x, z, h, side] = candidate;
 		if (on_axis(along(x, z)))
 			sides[side > 0 ? 1 : 0].push_back(candidate);
 	}
@@ -3573,10 +3568,10 @@ void place_roof_dormer_windows(WorldEditor &editor,
 					[&](const auto &candidate) { return parity(candidate) != keep; });
 		}
 		for (const auto &candidate : row_candidates) {
-			const auto [x, z, h, side] = candidate;
+			const auto &[x, z, h, side] = candidate;
 			(void)side;
-			const bool too_close = std::any_of(chosen.begin(), chosen.end(),
-					[&, x = x, z = z, px = px, pz = pz](const auto &other) {
+			const bool too_close =
+					std::any_of(chosen.begin(), chosen.end(), [&](const auto &other) {
 						return std::abs((std::get<0>(other) - x) * px +
 										(std::get<1>(other) - z) * pz) < 4;
 					});
@@ -4123,7 +4118,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
 		min_level_offset = static_cast<int>(parse_tag_meters(it->second) * scale_factor);
 	} else if (auto it = element.tags.find("building:min_level");
-			   it != element.tags.end()) {
+			it != element.tags.end()) {
 		if (auto level = parse_i32_tag(element.tags, "building:min_level");
 				level && *level > 0)
 			min_level_offset = scaled_blocks(*level * floor_cycle + 2, scale_factor);
@@ -5390,14 +5385,14 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 	for (const auto &[x, z] : area) {
 		std::uint8_t falling_sides = 0;
 		for (std::size_t i = 0; i < sides.size(); ++i) {
-			const auto [dx, dz] = sides[i];
+			const auto &[dx, dz] = sides[i];
 			if (!footprint.contains({x + dx, z + dz}))
 				falling_sides |= std::uint8_t(1U << i);
 		}
 		for (std::size_t i = 0; i < sides.size(); ++i) {
 			if ((falling_sides & (1U << i)) == 0)
 				continue;
-			const auto [dx, dz] = sides[i];
+			const auto &[dx, dz] = sides[i];
 			const Cell near_{x + dx, z + dz};
 			const Cell far_{x + 2 * dx, z + 2 * dz};
 			if (!open(near_))
@@ -5409,10 +5404,10 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 		constexpr std::array<std::pair<std::size_t, std::size_t>, 4> corner_sides{
 				{{0, 2}, {1, 2}, {0, 3}, {1, 3}}};
 		for (std::size_t q = 0; q < corner_sides.size(); ++q) {
-			const auto [sx, sz] = corner_sides[q];
+			const auto &[sx, sz] = corner_sides[q];
 			if ((falling_sides & (1U << sx)) == 0 || (falling_sides & (1U << sz)) == 0)
 				continue;
-			const auto [dx, dz] = quarters[q];
+			const auto &[dx, dz] = quarters[q];
 			if (!open({x + dx, z}) || !open({x, z + dz}) || !open({x + dx, z + dz}))
 				continue;
 			inner_corners.try_emplace({x + dx, z + dz}, q);
@@ -5420,7 +5415,7 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 				continue;
 			if (open({x + 2 * dx, z + 2 * dz}))
 				outer_corners.try_emplace({x + 2 * dx, z + 2 * dz}, q);
-			const auto [ix, iz] = corner_sides[q];
+			const auto &[ix, iz] = corner_sides[q];
 			if (open({x + 2 * dx, z + dz}))
 				arms[{x + 2 * dx, z + dz}] |= std::uint8_t(1U << ix);
 			if (open({x + dx, z + 2 * dz}))
@@ -5430,9 +5425,9 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 	auto eave_stair = [&](std::uint8_t bits) {
 		std::array<bool, 4> high{};
 		for (std::size_t q = 0; q < quarters.size(); ++q) {
-			const auto [sx, sz] = quarters[q];
+			const auto &[sx, sz] = quarters[q];
 			for (std::size_t i = 0; i < sides.size(); ++i) {
-				const auto [dx, dz] = sides[i];
+				const auto &[dx, dz] = sides[i];
 				if ((bits & (1U << i)) != 0 &&
 						((dx != 0 && sx == -dx) || (dz != 0 && sz == -dz))) {
 					high[q] = true;
@@ -5447,8 +5442,8 @@ void place_hipped_eave_overhang(WorldEditor &editor,
 					continue;
 				high = {};
 				for (std::size_t q = 0; q < quarters.size(); ++q) {
-					const auto [sx, sz] = quarters[q];
-					const auto [dx, dz] = sides[i];
+					const auto &[sx, sz] = quarters[q];
+					const auto &[dx, dz] = sides[i];
 					high[q] = (dx != 0 && sx == -dx) || (dz != 0 && sz == -dz);
 				}
 				stair = roof_stair_for_high_quarters(high);
@@ -5627,11 +5622,11 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	cell_data.reserve(area.size() * 2);
 	roof_heights.reserve(area.size() * 2);
 	for (std::size_t area_i = 0; area_i < area.size(); ++area_i) {
-		const auto [x, z] = area[area_i];
-		const auto [sm_x, sp_x, sm_z, sp_z] = runs[area_i];
+		const auto &[x, z] = area[area_i];
+		const auto &[sm_x, sp_x, sm_z, sp_z] = runs[area_i];
 		int dm_x = sm_x, dp_x = sp_x, dm_z = sm_z, dp_z = sp_z;
 		if (tent) {
-			const auto [u, v] = tent->uv(x, z);
+			const auto &[u, v] = tent->uv(x, z);
 			dm_x = int(std::floor(std::max(0.0, u - tent->u_min)));
 			dp_x = int(std::floor(std::max(0.0, tent->u_max - u)));
 			dm_z = int(std::floor(std::max(0.0, v - tent->v_min)));
@@ -5899,7 +5894,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	if (smooth && !wings && slab_pitch) {
 		auto smoothed = roof_levels;
 		for (const auto &[cell, level] : roof_levels) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			const auto before = roof_levels.find({x - along.first, z - along.second});
 			const auto after = roof_levels.find({x + along.first, z + along.second});
 			if (before != roof_levels.end() && after != roof_levels.end()) {
@@ -5914,7 +5909,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	} else if (smooth && !wings) {
 		auto smoothed = roof_heights;
 		for (const auto &[cell, height] : roof_heights) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			auto before = roof_heights.find({x - along.first, z - along.second});
 			auto after = roof_heights.find({x + along.first, z + along.second});
 			if (before != roof_heights.end() && after != roof_heights.end()) {
@@ -6027,11 +6022,11 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 				!footprint.contains({x - 1, z}) || !footprint.contains({x + 1, z}) ||
 				!footprint.contains({x, z - 1}) || !footprint.contains({x, z + 1});
 		const std::vector<Block> *replacements = edge ? &replace_any : nullptr;
-		auto put_full = [&, x = x, z = z](const Block &block, int y) {
+		auto put_full = [&](const Block &block, int y) {
 			editor.set_block_absolute(
 					block, x, y + abs_terrain_offset, z, nullptr, replacements);
 		};
-		auto put_state = [&, x = x, z = z](const BlockWithProperties &block, int y) {
+		auto put_state = [&](const BlockWithProperties &block, int y) {
 			editor.set_block_with_properties_absolute(
 					block, x, y + abs_terrain_offset, z, nullptr, replacements);
 		};
@@ -6046,7 +6041,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 			continue;
 		}
 		const int roof_level = slab_pitch ? roof_levels.at({x, z}) : 2 * height + 1;
-		const auto level_at = [&, x = x, z = z](int nx, int nz) -> std::optional<int> {
+		const auto level_at = [&](int nx, int nz) -> std::optional<int> {
 			if (const auto stored = stored_level_at(nx, nz))
 				return stored;
 			// Continue the roof plane beyond a gable end, but not beyond an eave.
@@ -6069,7 +6064,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 		std::array<bool, 4> high{};
 		const int cap_floor = slab_pitch ? roof_level - 1 : roof_level;
 		for (std::size_t i = 0; i < cap_quarters.size(); ++i) {
-			const auto [dx, dz] = cap_quarters[i];
+			const auto &[dx, dz] = cap_quarters[i];
 			const auto not_lower = [&](int nx, int nz) {
 				const auto level = level_at(nx, nz);
 				return level && *level >= cap_floor;
@@ -6142,7 +6137,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 	if (!half_hipped) {
 		std::vector<Block> only_air{AIR};
 		for (const auto &[cell_pos, cap] : rake_caps) {
-			const auto [x, z] = cell_pos;
+			const auto &[x, z] = cell_pos;
 			const auto &cell = cell_data.at(cell_pos);
 			std::pair<int, int> ridge_step =
 					ridge_runs_along_x ? std::pair{1, 0} : std::pair{0, 1};
@@ -6158,7 +6153,7 @@ void generate_gabled_roof_profile(WorldEditor &editor,
 			for (std::size_t end = 0; end < ends.size(); ++end) {
 				if (along_distances[end] != 0)
 					continue;
-				const auto [dx, dz] = ends[end];
+				const auto &[dx, dz] = ends[end];
 				const std::pair<int, int> outside{x + dx, z + dz};
 				if (footprint.contains(outside) ||
 						(eave_blocked && eave_blocked->contains(outside)))
@@ -6347,7 +6342,7 @@ void generate_corner_downpipes(WorldEditor &editor, const ProcessedWay &element,
 	for (std::size_t k = 0; k < 2; ++k) {
 		const auto &[point, diagonal] =
 				corners[(start + k * corners.size() / 2) % corners.size()];
-		const auto [x, z] = point;
+		const auto &[x, z] = point;
 		if ((passages && passages->contains(x, z)) || facade.is_party(x, z) ||
 				(preset_shell && preset_shell->contains({x, z})) ||
 				(photo_shell && photo_shell->contains({x, z})) ||
@@ -6381,7 +6376,7 @@ void generate_chimney(WorldEditor &editor, const RoofHeightMap &surface, int roo
 	std::vector<std::pair<Cell, int>> tops;
 	tops.reserve(surface.size());
 	for (const auto &[cell, y] : surface) {
-		const auto [x, z] = cell;
+		const auto &[x, z] = cell;
 		bool margin = true;
 		for (int d = -2; d <= 2 && margin; ++d)
 			margin = surface.contains({x + d, z}) && surface.contains({x, z + d});
@@ -6651,7 +6646,7 @@ void generate_facade_cornice_details(WorldEditor &editor, const ProcessedWay &el
 				i < facade.segments.size() && facade.segments[i]
 						? facade.segments[i]->normal
 						: std::pair{(dz > 0) - (dz < 0), (dx < 0) - (dx > 0)};
-		const auto [nx, nz] = normal;
+		const auto &[nx, nz] = normal;
 		if (nx == 0 && nz == 0)
 			continue;
 		const auto points = bresenham_line(a.x, top, a.z, b.x, top, b.z);
@@ -6748,8 +6743,8 @@ std::optional<int> generate_inset_tiers(WorldEditor &editor,
 		placed = true;
 		for (const auto &[x, z] : tier_cells) {
 			const std::pair<int, int> offsets[] = {{1, 0}, {-1, 0}, {0, 1}, {0, -1}};
-			const bool wall = std::any_of(std::begin(offsets), std::end(offsets),
-					[&, x = x, z = z](const auto &offset) {
+			const bool wall = std::any_of(
+					std::begin(offsets), std::end(offsets), [&](const auto &offset) {
 						const auto it =
 								distances.find({x + offset.first, z + offset.second});
 						return it == distances.end() || it->second < tier.inset;
@@ -7596,7 +7591,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																  : DARK_PRISMARINE};
 	const Block shop_frame =
 			shop_frame_options[element_rng(group_seed ^ 0x5409F2A300000003ULL)
-									   .uniform(4)];
+							.uniform(4)];
 	const Block awning_options[] = {WARPED_TRAPDOOR, SPRUCE_TRAPDOOR, DARK_OAK_TRAPDOOR,
 			JUNGLE_TRAPDOOR, ACACIA_TRAPDOOR};
 	auto awning_rng = element_rng(group_seed ^ 0x0A3B11B60000000BULL);
@@ -8874,12 +8869,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								static const std::array<Block, 4> trapdoor_options{
 										OAK_TRAPDOOR, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR,
 										BIRCH_TRAPDOOR};
-								const Block trapdoor = trapdoor_options
-										[element_rng(element.id)
-														.uniform(static_cast<
-																std::uint32_t>(
-																trapdoor_options
-																		.size()))];
+								const Block trapdoor = trapdoor_options[element_rng(
+										element.id)
+												.uniform(static_cast<std::uint32_t>(
+														trapdoor_options.size()))];
 								const auto balcony_floor = cached_prop_block(
 										SMOOTH_STONE_SLAB, {{"type", "top"}});
 								const auto front_fence = open_trapdoor(
@@ -9147,8 +9140,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						const bool covers =
 								draw == 0 ||
 								(draw == 1 &&
-										(wc.width >= 3			? (wc.k == 0 ||
-																  wc.k == wc.width - 1)
+										(wc.width >= 3 ? (wc.k == 0 ||
+																 wc.k == wc.width - 1)
 												: wc.width == 2 ? wc.k == 0
 																: top_row)) ||
 								(draw == 2 && top_row);
@@ -9724,7 +9717,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				}
 				if (!best)
 					continue;
-				const auto [rank, distance, x, z, segment_index] = *best;
+				const auto &[rank, distance, x, z, segment_index] = *best;
 				(void)rank;
 				(void)distance;
 				const auto &segment = *facade_plan.segments[segment_index];
@@ -10804,7 +10797,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 								  pair_hash> &surface,
 							  Block roof_block, int base_y) {
 		for (const auto &[cell, top] : surface) {
-			const auto [x, z] = cell;
+			const auto &[x, z] = cell;
 			int lowest_neighbour = std::numeric_limits<int>::max();
 			for (const auto &[nx, nz] :
 					{std::pair{x - 1, z}, {x + 1, z}, {x, z - 1}, {x, z + 1}}) {
@@ -11196,7 +11189,7 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 		std::unordered_set<std::pair<int32_t, int32_t>, PairHash> footprint(
 				floor_area.begin(), floor_area.end());
 		for (const auto &[cell, roof_height] : roof_heights) {
-			const auto [rx, rz] = cell;
+			const auto &[rx, rz] = cell;
 			for (const int sign : {-1, 1}) {
 				const bool at_end = !mapped_slope_bearing && is_wider_than_long
 											? (sign < 0 ? rx == min_x : rx == max_x)
@@ -11318,8 +11311,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			const bool ridge_runs_along_x = width >= length;
 			int max_dist = 0;
 			for (std::size_t area_i = 0; area_i < floor_area.size(); ++area_i) {
-				const auto [x, z] = floor_area[area_i];
-				const auto [dm_x, dp_x, dm_z, dp_z] = runs[area_i];
+				const auto &[x, z] = floor_area[area_i];
+				const auto &[dm_x, dp_x, dm_z, dp_z] = runs[area_i];
 				// Rust treats cells absent from the distance field as eaves. Keep
 				// malformed/disconnected raster footprints from throwing here too.
 				const auto edge_it = edge_distances.find({x, z});
@@ -11438,12 +11431,12 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					};
 					std::array<bool, 4> high{};
 					for (std::size_t i = 0; i < roof_quarters.size(); ++i) {
-						const auto [dx, dz] = roof_quarters[i];
+						const auto &[dx, dz] = roof_quarters[i];
 						high[i] = not_lower(x + dx, z) && not_lower(x, z + dz) &&
 								  not_lower(x + dx, z + dz);
 					}
-					const bool steep_drop = std::any_of(roof_sides.begin(),
-							roof_sides.end(), [&, x = x, z = z](const auto &d) {
+					const bool steep_drop = std::any_of(
+							roof_sides.begin(), roof_sides.end(), [&](const auto &d) {
 								const auto neighbor =
 										roof_level_grid.get(x + d.first, z + d.second);
 								return neighbor && level - *neighbor > 4;
@@ -11455,8 +11448,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					if (steep_drop) {
 						cap = BlockWithProperties::simple(cell_roof_block);
 					} else if (all_high) {
-						const bool stepped = std::any_of(roof_sides.begin(),
-								roof_sides.end(), [&, x = x, z = z](const auto &d) {
+						const bool stepped = std::any_of(
+								roof_sides.begin(), roof_sides.end(), [&](const auto &d) {
 									const auto neighbor = roof_level_grid.get(
 											x + d.first, z + d.second);
 									return neighbor && *neighbor < level;

@@ -115,7 +115,7 @@ void add_arms(std::unordered_map<std::uint64_t, SignalNode> &nodes,
 		for (const auto &[direction_vector, inbound] : candidates) {
 			if (!direction_vector)
 				continue;
-			const auto [dx, dz] = *direction_vector;
+			const auto &[dx, dz] = *direction_vector;
 			auto same = std::find_if(entry->second.arms.begin(), entry->second.arms.end(),
 					[&, dx = dx, dz = dz](
 							const Arm &arm) { return arm.dx * dx + arm.dz * dz > .9; });
@@ -539,7 +539,7 @@ bool SignalIndex::place_node(world_editor::WorldEditor &editor, const ProcessedN
 			}
 			const auto cells = connected_blocks::four_connected_line(points);
 			for (const auto &[x, z] : cells) {
-				const auto joins = [&, x = x, z = z](int dx, int dz) {
+				const auto joins = [&](int dx, int dz) {
 					return std::find(cells.begin(), cells.end(),
 								   std::pair{x + dx, z + dz}) != cells.end();
 				};

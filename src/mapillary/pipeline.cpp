@@ -268,7 +268,7 @@ std::pair<std::optional<imgops::Rgb>, double> building_colour(
 		for (const auto &sample : samples)
 			total += sample.weight;
 		double cumulative = 0.0;
-		for (const auto i : order) {
+		for (const auto &i : order) {
 			cumulative += samples[i].weight;
 			if (cumulative >= .5 * total) {
 				med[channel] = samples[i].lab[channel];

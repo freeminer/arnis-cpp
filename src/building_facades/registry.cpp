@@ -225,7 +225,7 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		std::vector<int> hidden(run.cells.size(), 0);
 		if (run.party) {
 			for (std::size_t i = 0; i < run.cells.size(); ++i) {
-				const auto [x, z] = run.cells[i];
+				const auto &[x, z] = run.cells[i];
 				for (int y = run.base_y + run.height - 1; y >= run.base_y; --y) {
 					bool occupied = false;
 					for (int distance = 1; distance <= 2; ++distance)

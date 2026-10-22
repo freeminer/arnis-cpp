@@ -252,7 +252,7 @@ void place_water_tank(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> c
 			   (!inside(dx + 1, dz, r) || !inside(dx - 1, dz, r) ||
 					   !inside(dx, dz + 1, r) || !inside(dx, dz - 1, r));
 	};
-	const auto [cx, cz] = centre;
+	const auto &[cx, cz] = centre;
 	const int y1 = deck.surface_y + 1;
 	std::vector<std::pair<int, int>> legs = {
 			{radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}};
@@ -303,7 +303,7 @@ void place_water_tank(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> c
 void place_condenser(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> origin,
 		int width, int depth, Block body, bool tall, bool grille)
 {
-	const auto [x0, z0] = origin;
+	const auto &[x0, z0] = origin;
 	const int y1 = deck.surface_y + 1;
 	const int body_height = tall ? 2 : 1;
 	const auto trapdoor = prop_block(
@@ -323,7 +323,7 @@ void place_condenser(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> or
 void place_small_unit(
 		WorldEditor &editor, RoofDeck &deck, std::pair<int, int> cell, ChaCha8Rng &rng)
 {
-	const auto [x, z] = cell;
+	const auto &[x, z] = cell;
 	const int y = deck.surface_y + 1;
 	static constexpr const char *facings[] = {"north", "south", "east", "west"};
 	const char *facing = facings[rng.uniform(4)];
@@ -360,7 +360,7 @@ void place_small_unit(
 void place_vent(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> cell,
 		bool pipes_only, ChaCha8Rng &rng)
 {
-	const auto [x, z] = cell;
+	const auto &[x, z] = cell;
 	const int y = deck.surface_y + 1;
 	switch (rng.uniform(pipes_only ? 3 : 6)) {
 	case 0: {
@@ -394,7 +394,7 @@ void place_vent(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> cell,
 void place_skylight(WorldEditor &editor, RoofDeck &deck, std::pair<int, int> origin,
 		int width, int depth)
 {
-	const auto [x0, z0] = origin;
+	const auto &[x0, z0] = origin;
 	const auto curb = bottom_slab(SMOOTH_STONE_SLAB);
 	for (int z = z0; z < z0 + depth; ++z)
 		for (int x = x0; x < x0 + width; ++x)
@@ -440,7 +440,7 @@ bool place_penthouse(
 				break;
 			}
 		if (open) {
-			const auto [ox, oz] = *open;
+			const auto &[ox, oz] = *open;
 			const int u = ox != 0 ? z : x;
 			const int residue = ((u % 6) + 6) % 6;
 			const bool louvre = residue >= 2 && residue <= 4;

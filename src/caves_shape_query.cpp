@@ -49,7 +49,7 @@ bool CaveShapeQuery::is_cave(int x, int y, int z) const
 	if (const auto it = carvers_by_chunk_.find(
 				{CaveRect::floor_div(x, 16), CaveRect::floor_div(z, 16)});
 			it != carvers_by_chunk_.end())
-		for (const auto i : it->second)
+		for (const auto& i : it->second)
 			if (ellipsoids_[i].contains(x, y, z))
 				return true;
 	return noise_carves(x, y, z);

@@ -1169,7 +1169,7 @@ void generate_node_facade_signage(world_editor::WorldEditor &editor,
 		const int row = editor.get_absolute_y(node.x, 0, node.z) + 3;
 		if (const auto wall = nearest_wall_from_inside(
 					editor, node.x, node.z, row, footprints, road_mask)) {
-			const auto [hx, hz, facing] = *wall;
+			const auto &[hx, hz, facing] = *wall;
 			if (const auto number = house_number(tags, ctx.level);
 					number && ctx.has(*number)) {
 				const int number_y = editor.get_absolute_y(hx, 0, hz) + 2;
@@ -1221,7 +1221,7 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 			const int ground = editor.get_absolute_y(node.x, 0, node.z);
 			if (const auto wall = nearest_wall_from_inside(
 						editor, node.x, node.z, ground + 3, footprints, road_mask)) {
-				const auto [x, z, facing] = *wall;
+				const auto &[x, z, facing] = *wall;
 				const int row = editor.get_absolute_y(x, 0, z) + 3;
 				for (int dy = 0; dy < 2; ++dy)
 					if (place_name_sign(editor, x, row + dy, z, facing, *name)) {
@@ -1450,7 +1450,7 @@ static void place_street_name_post(world_editor::WorldEditor &editor,
 	}
 	if (!position)
 		return;
-	const auto [x, z] = *position;
+	const auto &[x, z] = *position;
 	const int ground = editor.get_absolute_y(x, 0, z);
 	// street_signs:sign_basic is the native two-up intersection post described by
 	// the mod itself. Use it for the common two-street case and retain the decal
