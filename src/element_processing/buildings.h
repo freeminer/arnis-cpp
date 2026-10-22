@@ -17,6 +17,10 @@ class InteriorUseIndex;
 namespace buildings
 {
 
+// Shared underground predicate used by building generation and blueprint
+// outlines, matching Rust's is_underground_building helper.
+bool is_underground_building(const tags_t &tags);
+
 enum class BuildingCondition
 {
 	Normal,

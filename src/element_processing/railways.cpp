@@ -1020,6 +1020,15 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 		}
 		return;
 	}
+	// Rust bounds its own-deck layout by both the sampled centerline and the
+	// deck profile. Keep the same bound here: profiles may be shortened by the
+	// bridge pre-scan (for example where adjacent track segments were merged).
+	if (rail_deck->ys.empty())
+		return;
+	if (all_points.size() > rail_deck->ys.size())
+		all_points.resize(rail_deck->ys.size());
+	if (all_points.empty())
+		return;
 
 	vector<int> terrain_ys;
 	terrain_ys.reserve(all_points.size());
@@ -1268,7 +1277,11 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 				const auto axis = [along_x](const std::pair<int, int> &point) {
 					return along_x ? point.first : point.second;
 				};
-				if (axis(all_points[i]) % static_cast<int>(pier_interval) != 0 ||
+				const int axis_coordinate = axis(all_points[i]);
+				const int interval = static_cast<int>(pier_interval);
+				const int grid_remainder =
+						((axis_coordinate % interval) + interval) % interval;
+				if (grid_remainder != 0 ||
 						(i > 0 && axis(all_points[i - 1]) == axis(all_points[i])))
 					continue;
 				if (support == bridge_styles::BridgeStyle::Boardwalk) {

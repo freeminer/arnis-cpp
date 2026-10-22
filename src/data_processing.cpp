@@ -2079,7 +2079,7 @@ bool generate_world(WorldEditor &editor,
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
 			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
 	const auto &road_mask = *road_mask_owner;
-	const auto barrier_clearance =
+	auto barrier_clearance =
 			barriers::RoadClearance::build(elements, editor, args.scale, road_mask_owner);
 	// Share the road bitmap when no additional paved area contributes cells.
 	// The scope guard releases the generation mask on every exit path.
@@ -2194,7 +2194,8 @@ bool generate_world(WorldEditor &editor,
 									? tile_editor.ground->ecoregion_at(
 											  tile_editor.ground_point(slot_x, slot_z))
 									: std::nullopt;
-					request.want_height = tile_editor.canopy_height_hint(slot_x, slot_z);
+					request.want_height =
+							Tree::wanted_height_blocks(tile_editor, slot_x, slot_z);
 					if (request.eco) {
 						const int beach_radius = std::clamp(
 								static_cast<int>(std::lround(12.0 * tile_editor.scale())),
@@ -2498,6 +2499,9 @@ bool generate_world(WorldEditor &editor,
 	if (deferred_placements_active)
 		for (const auto &region : deferred_placements.regions())
 			deferred_write_regions.insert(region);
+	// Winter and ruins styling reads road elevations after tiles merge. Preserve
+	// those overrides for every style region, not only regions with deferred models.
+	const bool keep_roads_for_style = args.winter || args.post_apocalyptic;
 	auto execute_deferred_placements = [&](const std::vector<std::size_t> &units) {
 		if (units.empty())
 			return;
@@ -2617,7 +2621,9 @@ bool generate_world(WorldEditor &editor,
 		}
 		if (&tile_editor != &editor &&
 				!editor.merge_tile_worker(std::move(tile_editor), tile.min_x, tile.min_z,
-						tile.max_x - 1, tile.max_z - 1)) {
+						tile.max_x - 1, tile.max_z - 1,
+						eviction_active && !keep_roads_for_style ? &deferred_write_regions
+																 : nullptr)) {
 			editor.report_generation_error("failed to collect tile worker result");
 			return false;
 		}
@@ -3066,7 +3072,10 @@ bool generate_world(WorldEditor &editor,
 				auto [tile_editor, tile_state] = workers[slot].get();
 				const auto &tile = element_tiles[tile_index];
 				if (!editor.merge_tile_worker(std::move(tile_editor), tile.min_x,
-							tile.min_z, tile.max_x - 1, tile.max_z - 1))
+							tile.min_z, tile.max_x - 1, tile.max_z - 1,
+							eviction_active && !keep_roads_for_style
+									? &deferred_write_regions
+									: nullptr))
 					throw std::runtime_error("failed to merge Arnis tile worker");
 				collect_tile_dispatch_state(tile_state);
 				if (deferred_placements_active) {
@@ -3364,6 +3373,11 @@ bool generate_world(WorldEditor &editor,
 	editor.tree_crown_columns = {};
 	editor.mapped_trunks.reset();
 	shared_selector.reset();
+	// The barrier index shares the road bitmap. Release it first, then drop the
+	// road mask and the building-interior index, whose last consumers were the
+	// completed element/tile passes above.
+	barrier_clearance = {};
+	interior_use_index.reset();
 	road_mask_owner.reset();
 	editor.traffic_signal_index.reset();
 	editor.car_network.reset();

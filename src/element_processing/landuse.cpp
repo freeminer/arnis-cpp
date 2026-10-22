@@ -196,7 +196,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 		// Flood-fill results cover the source area. Skip cells only when they are
 		// outside both this editor's write bounds and its ownership rectangle;
 		// owned clip-margin cells still advance the deterministic material stream.
-		if (!editor.pos_ok(x, z) && !editor.owns(x, z)) {
+		if (!editor.in_bounds(x, z) && !editor.owns(x, z)) {
 			if (landuse_tag == "industrial" || landuse_tag == "quarry")
 				(void)rng.uniform(100);
 			continue;

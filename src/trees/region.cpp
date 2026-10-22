@@ -1244,6 +1244,23 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	if (request.eco) {
 		const auto mix = data_->eco_pools.find(request.eco->id);
 		if (mix != data_->eco_pools.end()) {
+			auto choose_mix_community = [&]() {
+				const auto selected = choose_cached(
+						mix->second[palms_allowed ? 1 : 0], data_->realm, 0x3c0a11e);
+				if (!selected)
+					return false;
+				pack = &data_->realm;
+				ci = *selected;
+				selected_from_mix = true;
+				// Rust lets a mix community without a model near this crown give way
+				// to the fitting vanilla sprinkle before retaining the mix selection.
+				if (!community_fits(data_->realm, ci))
+					if (const auto vanilla = choose_fitting_vanilla_mix()) {
+						pack = &data_->vanilla;
+						ci = *vanilla;
+					}
+				return true;
+			};
 			const auto beach = data_->eco_beach_community.find(request.eco->id);
 			const bool choose_beach_palms =
 					request.beach && palms_allowed && !want_wet && !want_conifer &&
@@ -1259,20 +1276,26 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 					pack = &data_->vanilla;
 					ci = *vanilla;
 					selected_from_mix = true;
-				}
-			} else {
-				if (const auto selected =
-								choose_cached(mix->second[palms_allowed ? 1 : 0],
-										data_->realm, 0x3c0a11e)) {
-					ci = *selected;
-					selected_from_mix = true;
-					// A mix community without a model near this crown gives way to
-					// the fitting vanilla sprinkle before falling back to itself.
-					if (!community_fits(data_->realm, ci))
-						if (const auto vanilla = choose_fitting_vanilla_mix()) {
+				} else {
+					const bool selected_mix = choose_mix_community();
+					// Rust retains the vanilla sprinkle as its final fallback even
+					// when no mix community has a model at this height.
+					if (!selected_mix)
+						if (const auto vanilla = choose_vanilla()) {
 							pack = &data_->vanilla;
 							ci = *vanilla;
+							selected_from_mix = true;
 						}
+				}
+			} else {
+				if (!choose_mix_community()) {
+					// `pick_from_mix(...).or_else(pick_vanilla(...))` in Rust keeps
+					// the biome's vanilla stand when this mix has no usable pool.
+					if (const auto vanilla = choose_vanilla()) {
+						pack = &data_->vanilla;
+						ci = *vanilla;
+						selected_from_mix = true;
+					}
 				}
 			}
 		}

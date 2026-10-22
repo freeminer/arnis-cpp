@@ -49,6 +49,14 @@ static std::optional<double> wanted_tree_height_m(WorldEditor &editor, int x, in
 	return 4.0 + 4.0 * roll;
 }
 
+std::optional<int> Tree::wanted_height_blocks(WorldEditor &editor, int x, int z)
+{
+	const auto height_m = wanted_tree_height_m(editor, x, z);
+	if (!height_m)
+		return std::nullopt;
+	return std::max(1, static_cast<int>(std::lround(*height_m * editor.scale())));
+}
+
 // Additional leaves fill patterns for new tree types
 static const std::array<std::pair<Coord, Coord>, 5> DARK_OAK_LEAVES_FILL = {{
 		{{-1, 3, 0}, {-1, 6, 0}},

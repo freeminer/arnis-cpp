@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -64,6 +65,18 @@ int saturating_sub_i32(int a, int b)
 {
 	return static_cast<int>(std::clamp<std::int64_t>(static_cast<std::int64_t>(a) - b,
 			std::numeric_limits<int>::min(), std::numeric_limits<int>::max()));
+}
+
+int rust_total_cmp(double a, double b)
+{
+	const auto key = [](double value) {
+		const auto bits = std::bit_cast<std::uint64_t>(value);
+		return (bits & (std::uint64_t{1} << 63)) ? ~bits
+												 : bits ^ (std::uint64_t{1} << 63);
+	};
+	const auto a_key = key(a);
+	const auto b_key = key(b);
+	return a_key < b_key ? -1 : a_key > b_key ? 1 : 0;
 }
 
 std::optional<double> metres(const tags_t &tags, const char *key)
@@ -375,12 +388,13 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 			box.min_z = std::min(box.min_z, part.min_z);
 			box.max_x = std::max(box.max_x, part.max_x);
 			box.max_z = std::max(box.max_z, part.max_z);
-			if (part.height_m && (!tallest || !tallest->height_m ||
-										 *part.height_m >= *tallest->height_m))
+			if (part.height_m &&
+					(!tallest || !tallest->height_m ||
+							rust_total_cmp(*part.height_m, *tallest->height_m) >= 0))
 				tallest = &part;
 		}
 		const auto [cx, cz] = centre(box);
-		if (!tallest || !tallest->height_m || *tallest->height_m < MIN_TOWER_M) {
+		if (!tallest || !tallest->height_m || !(*tallest->height_m >= MIN_TOWER_M)) {
 			result.minor.emplace_back(cx, cz);
 			continue;
 		}
@@ -401,7 +415,7 @@ MappedSupports collect(const std::vector<ProcessedElement> &elements,
 		};
 		std::optional<Part> deck_part;
 		const auto consider_deck = [&, cx = cx, cz = cz](const Part &part) {
-			if (part.min_height_m < 2.0 || !part.height_m ||
+			if (!(part.min_height_m >= 2.0) || !part.height_m ||
 					*part.height_m > 0.6 * *tallest->height_m)
 				return;
 			const int width = part.max_x - part.min_x;

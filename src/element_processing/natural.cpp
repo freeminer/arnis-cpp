@@ -587,7 +587,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			// A tile may process a polygon beyond both its writable map bounds and
 			// ownership rectangle. Those cells cannot affect this editor, while
 			// owned clip-margin cells must still pass through this loop.
-			if (!editor.pos_ok(x, z) && !editor.owns(x, z))
+			if (!editor.in_bounds(x, z) && !editor.owns(x, z))
 				continue;
 			const bool sealed = editor.surface_is_sealed(x, z);
 			if (!sealed && !editor.check_for_block(x, 0, z, protected_fill_blocks)) {

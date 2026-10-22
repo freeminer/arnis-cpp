@@ -274,16 +274,15 @@ int rust_round_i32(double value)
 std::optional<double> parse_min_height(const std::string &raw)
 {
 	std::string value = raw;
-	const auto last = value.find_last_not_of(" \t\r\n");
-	if (last == std::string::npos)
-		return std::nullopt;
-	value.erase(last + 1);
+	// Match Rust's `trim_end_matches('m').trim()`: remove unit suffixes before
+	// whitespace trimming, so trailing whitespace does not make the suffix count.
 	while (!value.empty() && value.back() == 'm')
 		value.pop_back();
 	const auto first = value.find_first_not_of(" \t\r\n");
 	if (first == std::string::npos)
 		return std::nullopt;
-	value.erase(0, first);
+	const auto last = value.find_last_not_of(" \t\r\n");
+	value = value.substr(first, last - first + 1);
 	try {
 		std::size_t used = 0;
 		const double height = std::stod(value, &used);
@@ -807,8 +806,10 @@ std::vector<std::vector<BarrierPost>> lay_out_barrier(const BarrierTrace &trace,
 		orient_barrier_gates(r);
 		if (spaced) {
 			std::vector<BarrierPost> every_other;
-			// Match Rust's retain counter: increment first, then keep odd indexes.
-			for (std::size_t i = 1; i < r.size(); i += 2)
+			every_other.reserve((r.size() + 1) / 2);
+			// Rust's retain counter starts at zero, increments before testing, and
+			// therefore keeps source indices 0, 2, 4, ... .
+			for (std::size_t i = 0; i < r.size(); i += 2)
 				every_other.push_back(r[i]);
 			r = std::move(every_other);
 		}

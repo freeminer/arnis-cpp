@@ -513,23 +513,6 @@ bool has_tag_value(const tags_t &tags, const std::string &key, const std::string
 	return it != tags.end() && it->second == value;
 }
 
-bool should_skip_underground_tags(const tags_t &tags)
-{
-	if (has_tag_value(tags, "location", "underground") ||
-			has_tag_value(tags, "location", "subway"))
-		return true;
-	if (has_tag_value(tags, "location", "surface") ||
-			has_tag_value(tags, "location", "overground") ||
-			has_tag_value(tags, "location", "roof"))
-		return false;
-	if (auto layer = parse_i32_tag(tags, "layer"); layer.has_value() && *layer < 0)
-		return true;
-	if (auto level = parse_i32_tag(tags, "level"); level.has_value() && *level < 0)
-		return true;
-	return tags.contains("building:levels:underground") &&
-		   !tags.contains("building:levels");
-}
-
 std::vector<std::pair<int, int>> way_polygon_coords(const ProcessedWay &way)
 {
 	std::vector<std::pair<int, int>> polygon_coords;
@@ -6918,6 +6901,24 @@ Block wall_block_for_colour_tag(RGBTuple rgb, ChaCha8Rng &rng)
 }
 } // namespace
 
+bool is_underground_building(const tags_t &tags)
+{
+	// Match Rust: explicit above-ground location overrides negative layer/level.
+	if (has_tag_value(tags, "location", "underground") ||
+			has_tag_value(tags, "location", "subway"))
+		return true;
+	if (has_tag_value(tags, "location", "surface") ||
+			has_tag_value(tags, "location", "overground") ||
+			has_tag_value(tags, "location", "roof"))
+		return false;
+	if (auto layer = parse_i32_tag(tags, "layer"); layer && *layer < 0)
+		return true;
+	if (auto level = parse_i32_tag(tags, "level"); level && *level < 0)
+		return true;
+	return tags.contains("building:levels:underground") &&
+		   !tags.contains("building:levels");
+}
+
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
@@ -6935,7 +6936,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	// while relation groups must retain their shared seed for all style choices.
 	const auto visual_seed = group_seed;
 	const auto clean_visual_seed = group_seed;
-	if (should_skip_underground_tags(element.tags)) {
+	if (is_underground_building(element.tags)) {
 		return std::nullopt;
 	}
 
@@ -12136,7 +12137,7 @@ void generate_building_from_relation(WorldEditor &editor,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
 				*group_members)
 {
-	if (should_skip_underground_tags(relation.tags)) {
+	if (is_underground_building(relation.tags)) {
 		return;
 	}
 	for (const auto &member : relation.members)
@@ -12190,7 +12191,7 @@ void generate_building_from_relation(WorldEditor &editor,
 std::vector<ProcessedWay> facade_outer_rings(
 		const ProcessedRelation &relation, const XZBBox &xzbbox)
 {
-	if (should_skip_underground_tags(relation.tags))
+	if (is_underground_building(relation.tags))
 		return {};
 
 	// Match Rust relation_outer_rings(): only type=building relations treat

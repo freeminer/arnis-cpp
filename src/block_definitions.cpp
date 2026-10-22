@@ -9,6 +9,7 @@
 
 #include "colors.h"
 #include "block_palette.h"
+#include "block_definitions.h"
 
 #include "../../arnis_adapter.h"
 namespace arnis
@@ -20,6 +21,12 @@ BlockWithProperties::Properties default_block_properties(const Block &block)
 	const auto one = [](const char *key, const char *value) {
 		return Properties{{key, value}};
 	};
+	// Rust represents the four vine faces as pseudo-blocks 499..502. The C++
+	// adapter uses one host VINE block plus a face property; its default is the
+	// first Rust variant (north), not a vine with no attached face.
+	if (block_definitions::VINE.id() != block_definitions::AIR.id() &&
+			block == block_definitions::VINE)
+		return one("north", "true");
 	switch (block.id()) {
 	case 3:
 	case 49:
@@ -295,26 +302,19 @@ BlockWithProperties create_stair_with_properties(
 			local_cache;
 	if (const auto it = local_cache.find(cache_key); it != local_cache.end())
 		return it->second;
-
-	// Share the immutable property object between workers on a cold local hit.
-	{
-		std::lock_guard<std::mutex> lock(STAIR_CACHE_MUTEX);
-		auto it = STAIR_CACHE.find(cache_key);
-		if (it != STAIR_CACHE.end()) {
-			local_cache.emplace(cache_key, it->second);
-			return it->second;
-		}
-	}
 	BlockWithProperties::Properties properties;
 	properties.emplace("facing", StairFacing_as_str(facing));
 	if (shape != StairShape::Straight)
 		properties.emplace("shape", StairShape_as_str(shape));
-	BlockWithProperties block_with_props(base_stair_block, std::move(properties));
 
-	// Another worker may have filled this key while we built the properties.
+	// Resolve cold worker-local keys with one shared-cache lock. The map state
+	// is immutable and shared; try_emplace leaves the existing state untouched
+	// if another worker populated the key while this worker built its value.
+	BlockWithProperties block_with_props;
 	{
 		std::lock_guard<std::mutex> lock(STAIR_CACHE_MUTEX);
-		auto [it, inserted] = STAIR_CACHE.emplace(cache_key, block_with_props);
+		auto [it, inserted] = STAIR_CACHE.try_emplace(
+				cache_key, base_stair_block, std::move(properties));
 		(void)inserted;
 		block_with_props = it->second;
 	}

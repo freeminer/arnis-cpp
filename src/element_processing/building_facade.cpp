@@ -189,7 +189,11 @@ FacadePlan compute_facade_plan(const ProcessedWay &element,
 			}
 		}
 		const int len = std::max(std::abs(b.x - a.x), std::abs(b.z - a.z));
-		const bool party = !points.empty() && double(party_count) / points.size() >= 0.5;
+		const float party_fraction = points.empty()
+											 ? 0.0f
+											 : static_cast<float>(party_count) /
+													   static_cast<float>(points.size());
+		const bool party = party_fraction >= 0.5f;
 		const bool street = road_dist && hits >= (len < 6 ? 1 : (samples.size() + 1) / 2);
 		plan.segments.push_back(SegmentFacade{party	   ? FacadeClass::Party
 											  : street ? FacadeClass::Street

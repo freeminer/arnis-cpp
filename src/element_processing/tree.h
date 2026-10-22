@@ -177,6 +177,7 @@ struct Tree
 			const trees::mapped::MappedTree &mapped,
 			const BuildingFootprintBitmap *building_footprints = nullptr,
 			const bridges::BridgeSurfaceMap *bridge_surface = nullptr);
+	static std::optional<int> wanted_height_blocks(WorldEditor &editor, int x, int z);
 
 	static void create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_type,
 			const BuildingFootprintBitmap *building_footprints = nullptr,

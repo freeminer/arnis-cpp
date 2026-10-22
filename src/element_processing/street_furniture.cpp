@@ -165,7 +165,7 @@ void pavilion(WorldEditor &editor, int x, int z, int base)
 	editor.set_block_absolute(SPRUCE_SLAB, x, base + 6, z);
 }
 
-void picnic_table(WorldEditor &editor, int x, int z, int base, bool along_x)
+void picnic_table_impl(WorldEditor &editor, int x, int z, int base, bool along_x)
 {
 	for (int a = -1; a <= 1; ++a)
 		for (int side = -1; side <= 1; ++side) {
@@ -197,6 +197,11 @@ void lean_to(WorldEditor &editor, int x, int z, int base, bool along_x,
 		}
 }
 } // namespace
+
+void picnic_table(WorldEditor &editor, int x, int z, int base, bool along_x)
+{
+	picnic_table_impl(editor, x, z, base, along_x);
+}
 
 void generate_bicycle_parking_area(WorldEditor &editor, const ProcessedElement &element,
 		const std::vector<std::pair<int32_t, int32_t>> &area)

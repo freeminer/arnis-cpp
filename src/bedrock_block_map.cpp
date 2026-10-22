@@ -52,7 +52,9 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (FIRE.id() != AIR.id() && block == FIRE)
 		return state("fire", {{"age", 0}});
 	if (VINE.id() != AIR.id() && block == VINE)
-		return state("vine", {{"vine_direction_bits", 0}});
+		// The C++ shared VINE block represents Rust's first directional vine
+		// variant, whose default face is north (Bedrock bit 4).
+		return state("vine", {{"vine_direction_bits", 4}});
 	if (block == SUGAR_CANE)
 		return state("reeds", {{"age", 0}});
 	if (block == DEAD_BUSH)
@@ -342,8 +344,12 @@ BedrockBlock to_bedrock_block(const Block &block)
 	if (block == NETHERITE_BLOCK)
 		return simple("netherite_block");
 	if (block == CHISELLED_BOOKSHELF_NORTH || block == CHISELLED_BOOKSHELF_EAST ||
-			block == CHISELLED_BOOKSHELF_SOUTH || block == CHISELLED_BOOKSHELF_WEST)
-		return state("chiseled_bookshelf", {{"facing_direction", 2}});
+			block == CHISELLED_BOOKSHELF_SOUTH || block == CHISELLED_BOOKSHELF_WEST) {
+		// The plain-block path has no per-placement properties, so use Rust's
+		// default north-facing state. Explicit facings are handled below by the
+		// property-aware converter.
+		return state("chiseled_bookshelf", {{"direction", 2}, {"books_stored", 0}});
+	}
 	if (block == COARSE_DIRT)
 		return state("dirt", {{"dirt_type", std::string("coarse")}});
 	if (block == PODZOL)

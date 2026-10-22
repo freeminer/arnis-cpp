@@ -301,6 +301,53 @@ std::vector<double> blur_values(const std::vector<double> &values,
 	return out;
 }
 
+struct ColumnBlurGroup
+{
+	std::size_t first;
+	std::size_t width;
+	// Row-major values for `width` consecutive columns.
+	std::vector<double> values;
+};
+
+// Blur a band of adjacent columns while gathering them row-major. Keeping the
+// grouped result row-major makes the destination writes contiguous too.
+std::vector<ColumnBlurGroup> blur_column_chunk(
+		const std::vector<std::vector<double>> &src, std::size_t x0, std::size_t x1,
+		const std::vector<double> &kernel, int half, bool binary)
+{
+	constexpr std::size_t GROUP = 8;
+	const auto count = (x1 - x0 + GROUP - 1) / GROUP;
+	std::vector<ColumnBlurGroup> groups(count);
+	parallel_rows(0, count, [&](std::size_t group) {
+		const auto gx = x0 + group * GROUP;
+		const auto gw = std::min(GROUP, x1 - gx);
+		std::vector<std::vector<double>> columns(gw, std::vector<double>(src.size()));
+		for (std::size_t y = 0; y < src.size(); ++y)
+			for (std::size_t c = 0; c < gw; ++c)
+				columns[c][y] = src[y][gx + c];
+
+		std::vector<double> row_major(src.size() * gw);
+		for (std::size_t c = 0; c < gw; ++c) {
+			const auto blurred = blur_values(columns[c], kernel, half, binary);
+			for (std::size_t y = 0; y < src.size(); ++y)
+				row_major[y * gw + c] = blurred[y];
+		}
+		groups[group] = {gx, gw, std::move(row_major)};
+	});
+	return groups;
+}
+
+template <typename T, typename Convert>
+void store_column_chunk(std::vector<std::vector<T>> &dst,
+		const std::vector<ColumnBlurGroup> &groups, Convert &&convert)
+{
+	parallel_rows(0, dst.size(), [&](std::size_t y) {
+		for (const auto &group : groups)
+			for (std::size_t c = 0; c < group.width; ++c)
+				dst[y][group.first + c] = convert(group.values[y * group.width + c]);
+	});
+}
+
 bool get_bit(const std::vector<std::uint64_t> &mask, std::size_t i)
 {
 	return ((mask[i >> 6] >> (i & 63)) & 1u) != 0;
@@ -1581,27 +1628,14 @@ std::vector<std::vector<float>> blur_cover_mask_to_float(const CoverGrid &cover,
 
 	std::vector<std::vector<float>> output(h, std::vector<float>(w));
 	const auto col_chunk = (w + BLUR_CHUNKS - 1) / BLUR_CHUNKS;
-	// Gather a few adjacent columns together. The horizontal grid is row-major;
-	// reading eight columns per row avoids the cache-miss-heavy one-column
-	// stride while retaining the same independent vertical convolutions.
-	constexpr std::size_t COLUMN_GROUP = 8;
+	// Match the Rust row-major grouped-column pass: each vertical convolution
+	// keeps its original tap order, while gathering and storing use contiguous
+	// runs across the row-major grid.
 	for (std::size_t x0 = 0; x0 < w; x0 += col_chunk) {
 		const auto x1 = std::min(w, x0 + col_chunk);
-		const auto groups = (x1 - x0 + COLUMN_GROUP - 1) / COLUMN_GROUP;
-		parallel_rows(0, groups, [&](std::size_t group) {
-			const auto gx = x0 + group * COLUMN_GROUP;
-			const auto group_width = std::min(COLUMN_GROUP, x1 - gx);
-			std::vector<std::vector<double>> columns(group_width, std::vector<double>(h));
-			for (std::size_t y = 0; y < h; ++y)
-				for (std::size_t c = 0; c < group_width; ++c)
-					columns[c][y] = horizontal[y][gx + c];
-			for (std::size_t c = 0; c < group_width; ++c) {
-				const auto x = gx + c;
-				const auto column = blur_values(columns[c], kernel, radius, true);
-				for (std::size_t y = 0; y < h; ++y)
-					output[y][x] = static_cast<float>(column[y]);
-			}
-		});
+		const auto groups = blur_column_chunk(horizontal, x0, x1, kernel, radius, true);
+		store_column_chunk(
+				output, groups, [](double value) { return static_cast<float>(value); });
 		if (report)
 			report(0.5 + 0.5 * static_cast<double>(x1) / w);
 	}
@@ -1652,28 +1686,13 @@ HeightGrid gaussian_blur_grid_masked(const HeightGrid &heights, const MaskGrid &
 			report(0.5 * static_cast<double>(y1) / h);
 	}
 
-	// Gather a small group of row-major columns before writing them back. Every
-	// group reads and writes disjoint columns, so it can run in parallel without
-	// a second full-sized vertical-output grid.
+	// Gather and compute row-major column groups, then write each row in
+	// contiguous spans without allocating a second full-sized output grid.
 	const auto col_chunk = std::max<std::size_t>(1, (w + BLUR_CHUNKS - 1) / BLUR_CHUNKS);
-	constexpr std::size_t COLUMN_GROUP = 8;
 	for (std::size_t x0 = 0; x0 < w; x0 += col_chunk) {
 		const auto x1 = std::min(w, x0 + col_chunk);
-		const auto groups = (x1 - x0 + COLUMN_GROUP - 1) / COLUMN_GROUP;
-		parallel_rows(0, groups, [&](std::size_t group) {
-			const auto gx = x0 + group * COLUMN_GROUP;
-			const auto group_width = std::min(COLUMN_GROUP, x1 - gx);
-			std::vector<std::vector<double>> columns(group_width, std::vector<double>(h));
-			for (std::size_t y = 0; y < h; ++y)
-				for (std::size_t c = 0; c < group_width; ++c)
-					columns[c][y] = after_h[y][gx + c];
-			for (std::size_t c = 0; c < group_width; ++c) {
-				const auto x = gx + c;
-				const auto blurred = blur_values(columns[c], kernel, radius, false);
-				for (std::size_t y = 0; y < h; ++y)
-					after_h[y][x] = blurred[y];
-			}
-		});
+		const auto groups = blur_column_chunk(after_h, x0, x1, kernel, radius, false);
+		store_column_chunk(after_h, groups, [](double value) { return value; });
 		if (report)
 			report(0.5 + 0.5 * static_cast<double>(x1) / w);
 	}

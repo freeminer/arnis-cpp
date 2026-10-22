@@ -799,18 +799,25 @@ void generate_man_made(WorldEditor &editor, const ProcessedElement &element,
 	} else if (t == "water_tower" || t == "silo" || t == "storage_tank") {
 		generate_tank_structure(editor, element, args);
 	} else if (t == "lighthouse") {
-		if (element.is_way() && !element.as_way().nodes.empty()) {
-			long long sx = 0;
-			long long sz = 0;
-			for (const auto &node : element.as_way().nodes) {
-				sx += node.x;
-				sz += node.z;
+		if (element.is_way()) {
+			const auto &nodes = element.as_way().nodes;
+			// Rust's lighthouse way handler averages the complete node list,
+			// including a repeated closing node on a footprint ring.
+			const std::size_t count = nodes.size();
+			if (count == 0)
+				return;
+			std::int64_t sx = 0;
+			std::int64_t sz = 0;
+			for (std::size_t i = 0; i < count; ++i) {
+				sx += nodes[i].x;
+				sz += nodes[i].z;
 			}
-			const auto n = static_cast<long long>(element.as_way().nodes.size());
+			const auto n = static_cast<std::int64_t>(count);
 			structures::lighthouse::place(
 					editor, static_cast<int>(sx / n), static_cast<int>(sz / n));
-		} else if (auto node = element.first_node(); node.has_value()) {
-			structures::lighthouse::place(editor, node->x, node->z);
+		} else if (element.is_node()) {
+			const auto &node = element.as_node();
+			structures::lighthouse::place(editor, node.x, node.z);
 		}
 	} else if (t == "crane") {
 		if (const auto point = anchor(element))

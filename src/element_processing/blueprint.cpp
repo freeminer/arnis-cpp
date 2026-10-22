@@ -2,28 +2,12 @@
 
 #include "../block_definitions.h"
 #include "../bresenham.h"
-#include "../strict_parse.h"
+#include "buildings.h"
 
 namespace arnis::blueprint
 {
 namespace
 {
-bool underground_building(const tags_t &tags)
-{
-	if (const auto location = tags.get("location"); !location.empty()) {
-		if (location == "underground" || location == "subway")
-			return true;
-		if (location == "surface" || location == "overground" || location == "roof")
-			return false;
-	}
-	for (const char *key : {"layer", "level"})
-		if (const auto value = tags.get(key);
-				!value.empty() && strict_parse::i32_or_zero(value) < 0)
-			return true;
-	return tags.contains("building:levels:underground") &&
-		   !tags.contains("building:levels");
-}
-
 void draw_ring(WorldEditor &editor, const std::vector<ProcessedNode> &nodes)
 {
 	for (std::size_t i = 1; i < nodes.size(); ++i)
@@ -36,13 +20,13 @@ void draw_ring(WorldEditor &editor, const std::vector<ProcessedNode> &nodes)
 
 void generate_outline(WorldEditor &editor, const ProcessedWay &way)
 {
-	if (!underground_building(way.tags))
+	if (!buildings::is_underground_building(way.tags))
 		draw_ring(editor, way.nodes);
 }
 
 void generate_relation_outline(WorldEditor &editor, const ProcessedRelation &relation)
 {
-	if (underground_building(relation.tags))
+	if (buildings::is_underground_building(relation.tags))
 		return;
 	for (const auto &member : relation.members)
 		if (member.role != ProcessedMemberRole::Part && member.way)
