@@ -295,13 +295,17 @@ bool is_support(const tags_t &tags)
 
 Block support_block(const tags_t &tags)
 {
-	for (const auto *key : {"building:colour", "colour"})
-		if (const auto it = tags.find(key); it != tags.end())
-			if (const auto rgb = color_text_to_rgb_tuple(it->second))
-				return block_palette::paint_block_for_color(*rgb);
-	std::string material = tags.get("building:material");
-	if (material.empty())
-		material = tags.get("material");
+	const auto building_colour = tags.find("building:colour");
+	const auto colour =
+			building_colour != tags.end() ? building_colour : tags.find("colour");
+	if (colour != tags.end())
+		if (const auto rgb = color_text_to_rgb_tuple(colour->second))
+			return block_palette::paint_block_for_color(*rgb);
+	const auto building_material = tags.find("building:material");
+	const auto material_it =
+			building_material != tags.end() ? building_material : tags.find("material");
+	std::string material =
+			material_it == tags.end() ? std::string{} : material_it->second;
 	std::transform(material.begin(), material.end(), material.begin(),
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	if (material == "steel" || material == "metal" || material == "iron")

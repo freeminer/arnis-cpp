@@ -2267,8 +2267,9 @@ std::optional<Block> get_roof_block_for_material_cpp(
 		return choose_block({GLASS, WHITE_STAINED_GLASS, LIGHT_GRAY_STAINED_GLASS}, rng);
 	if (normalized == "tile" || normalized == "tiles" || normalized == "rooftile" ||
 			normalized == "rooftiles" || normalized == "ceramic" ||
-			normalized == "ceramictiles" || normalized == "claytile" ||
-			normalized == "claytiles" || normalized == "terracotta")
+			normalized == "ceramictiles" || normalized == "cementtile" ||
+			normalized == "claytile" || normalized == "claytiles" ||
+			normalized == "terracotta")
 		return choose_block({RED_TERRACOTTA, BRICK, BRICK, TERRACOTTA}, rng);
 	if (normalized == "slate" || normalized == "slates")
 		return choose_block({COBBLED_DEEPSLATE, DEEPSLATE_TILES}, rng);
@@ -7234,6 +7235,17 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	building_facade::PointSet current_footprint(
 			cached_floor_area.begin(), cached_floor_area.end());
+	// Rust derives the open-glass backing mask from the rasterized wall ring.
+	// Keep the same boundary exclusion here so a backing panel never lands in
+	// an opposite wall or a courtyard that happens to overlap the floor fill.
+	building_facade::PointSet wall_ring_cells;
+	for (std::size_t i = 1; i < element.nodes.size(); ++i) {
+		for (const auto &[x, unused_y, z] : bresenham_line(element.nodes[i - 1].x, 0,
+					 element.nodes[i - 1].z, element.nodes[i].x, 0, element.nodes[i].z)) {
+			(void)unused_y;
+			wall_ring_cells.emplace(x, z);
+		}
+	}
 	building_facade::FacadePlan facade_plan = building_facade::FacadePlan::empty();
 	building_facade::PointSet sibling_cells;
 	static const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
@@ -8962,16 +8974,37 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						editor->set_block_absolute(
 								chosen, bx, h + abs_terrain_offset, bz);
 					}
-					// Rust backs an empty glass shell with a panel and a darker
-					// floor-line spandrel. Without this, the glass towers render as
-					// transparent cages and expose the empty interior at every level.
+					// Rust backs an empty glass shell inside the open floor area,
+					// excluding the rasterized wall ring. For a recessed pane, the
+					// backing belongs one cell farther in than for a flush pane.
+					const int door_top = facade_plan.is_door(bx, bz)
+												 ? ground_top
+												 : std::numeric_limits<int>::min();
+					const int backing_from =
+							(glazed_ground_floor && facade_plan.is_street(bx, bz))
+									? std::max(door_top, lobby_top)
+									: door_top;
+					if (glazed_ground_floor && facade_plan.is_street(bx, bz) &&
+							!party_wall && !is_passage && !is_flat_column(bx, bz) &&
+							door_top == std::numeric_limits<int>::min() &&
+							outward != std::pair<int, int>{0, 0} && h <= lobby_top &&
+							shop_display_glass != GLASS && chosen == shop_display_glass) {
+						const int backdrop_x = bx - 3 * outward.first;
+						const int backdrop_z = bz - 3 * outward.second;
+						if (current_footprint.contains({backdrop_x, backdrop_z}) &&
+								!wall_ring_cells.contains({backdrop_x, backdrop_z}))
+							editor->set_block_absolute(GRAY_CONCRETE, backdrop_x,
+									h + abs_terrain_offset, backdrop_z);
+					}
 					if (glass_shell_backing && !party_wall && !is_passage &&
-							!facade_plan.is_door(bx, bz) &&
+							!is_flat_column(bx, bz) && h > backing_from &&
 							outward != std::pair<int, int>{0, 0} &&
 							is_glass_wall_block(chosen)) {
-						const int backing_x = bx - outward.first;
-						const int backing_z = bz - outward.second;
-						if (current_footprint.contains({backing_x, backing_z})) {
+						const int backing_distance = recessed_window ? 2 : 1;
+						const int backing_x = bx - backing_distance * outward.first;
+						const int backing_z = bz - backing_distance * outward.second;
+						if (current_footprint.contains({backing_x, backing_z}) &&
+								!wall_ring_cells.contains({backing_x, backing_z})) {
 							const GlassBacking backing = glass_backing_for(chosen);
 							const int storey = floor_div(
 									h - start_y_offset - grammar_anchor, floor_cycle);
