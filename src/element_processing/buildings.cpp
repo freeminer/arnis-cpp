@@ -7041,13 +7041,16 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const auto group_hint = osm_parser::style_hint_from_seed(packed_group_seed);
 	const bool housing_group = element.tags.contains("building:part") &&
 							   osm_parser::residential_group_from_seed(packed_group_seed);
-	const auto group_seed = osm_parser::seed_without_hint(packed_group_seed);
-	// Rust seeds procedural choices from the group seed directly. Do not use a
-	// tag-packed visual seed here: the category resolver reads the tags itself,
-	// while relation groups must retain their shared seed for all style choices.
+	// Rust removes a group's inherited year and housing marker from procedural
+	// seeds, but keeps its facade-style hint. That packed hint is part of the
+	// stable shared seed for every style choice made by the building and its parts.
+	const auto seed_without_year =
+			packed_group_seed == element.id
+					? packed_group_seed
+					: osm_parser::seed_without_year(packed_group_seed);
+	const auto group_seed = osm_parser::seed_without_residential_mark(seed_without_year);
 	const auto visual_seed = group_seed;
 	const auto category_seed = osm_parser::seed_with_hint(group_seed, group_hint);
-	const auto clean_visual_seed = group_seed;
 	if (is_underground_building(element.tags)) {
 		return std::nullopt;
 	}
@@ -7667,11 +7670,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								 window_archetype != WindowArchetype::Piers &&
 								 window_archetype != WindowArchetype::Strips &&
 								 window_archetype != WindowArchetype::DecoPiers;
-	const auto window_frame = has_windows && condition == BuildingCondition::Normal &&
-											  !is_tall_building && frame_archetype
-									  ? pick_window_frame(category, era, detail,
-												wall_block, clean_visual_seed)
-									  : std::nullopt;
+	const auto window_frame =
+			has_windows && condition == BuildingCondition::Normal && !is_tall_building &&
+							frame_archetype
+					? pick_window_frame(category, era, detail, wall_block, group_seed)
+					: std::nullopt;
 	static const std::array<Block, 4> shutter_options{
 			OAK_TRAPDOOR_OPEN_NORTH, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR, BIRCH_TRAPDOOR};
 	auto residential_detail_rng = element_rng(element.id);
@@ -7798,9 +7801,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					(category == BuildingCategory::Hotel &&
 							element_rng(group_seed ^ 0xF10A401E00000003ULL)
 									.random_bool(.2)));
-	const BalconyBand balcony_band = pick_balcony_band(category, era,
-			building_style::building_region(wall_region), building_height, floor_cycle,
-			facade_plan.has_any_street, clean_visual_seed);
+	const BalconyBand balcony_band =
+			pick_balcony_band(category, era, building_style::building_region(wall_region),
+					building_height, floor_cycle, facade_plan.has_any_street, group_seed);
 	const Block base_course_block = base_course_for_wall(wall_block);
 	const bool has_base_course =
 			min_level_offset == 0 && has_windows &&
@@ -8321,47 +8324,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				}
 				return true;
 			});
-	const bool interior_allowed =
-			args.interior && cached_floor_area.size() >= 24 &&
-			std::find(INTERIOR_EXCLUSIONS.begin(), INTERIOR_EXCLUSIONS.end(),
-					std::string_view(building_type)) == INTERIOR_EXCLUSIONS.end() &&
-			condition != BuildingCondition::Construction &&
-			condition != BuildingCondition::Ruined;
-	std::vector<int> floor_levels;
-	std::optional<interior_uses::InteriorPlan> interior_plan;
-	bool open_hall = false;
-	if (std::get<2>(corner_addup) != 0) {
-		floor_levels.push_back(start_y_offset);
-		if (building_height > floor_cycle + 2) {
-			const int num_upper_floors = std::max(1, building_height / floor_cycle);
-			for (int floor = 1; floor < num_upper_floors; ++floor)
-				floor_levels.push_back(
-						start_y_offset + grammar_anchor + floor * floor_cycle);
-		}
-		static const std::vector<interior_uses::Tenant> no_interior_tenants;
-		const auto &interior_tenants = interior_index
-											   ? interior_index->tenants(element.id)
-											   : no_interior_tenants;
-		const auto interior_area =
-				interior_index ? interior_index->area(element.id) : std::nullopt;
-		if (interior_allowed) {
-			const interior_uses::PlanInputs plan_inputs{element.tags, building_type,
-					floor_levels.size(), min_level, min_level_offset > 0,
-					cached_floor_area.size(), {(min_x + max_x) / 2, (min_z + max_z) / 2},
-					interior_tenants, interior_area};
-			interior_plan = interior_uses::plan_interior(plan_inputs);
-		}
-		open_hall = interior_plan && interior_plan->open_hall;
-	}
 	const bool thin_ring_footprint = cached_footprint_size <= THIN_RING_MAX_CELLS;
 	const bool allow_preset_utility_door = !mapped_entrance && !thin_ring_footprint &&
 										   condition != BuildingCondition::Construction &&
 										   condition != BuildingCondition::Ruined &&
 										   condition != BuildingCondition::Abandoned;
-	const bool preset_utility_door =
-			allow_preset_utility_door &&
-			(category == BuildingCategory::Garage || category == BuildingCategory::Shed ||
-					category == BuildingCategory::Greenhouse);
 	// Rust plans mapped entrances before drawing the facade so window bays,
 	// sills, shutters, and other details leave both the door and its threshold
 	// clear. C++ renders doors later in this monolithic pass, so reserve the
@@ -8650,6 +8617,18 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					category == BuildingCategory::GlassCornerSkyscraper ||
 					category == BuildingCategory::GridSkyscraper ||
 					category == BuildingCategory::ModernSkyscraper);
+	// Match BuildingConfig::display_glass: an empty/recessed shop or lobby
+	// reads as a tinted display rather than a clear hole into the shell.
+	const Block shop_display_glass =
+			(!args.interior &&
+					(has_windows || (category != BuildingCategory::Greenhouse &&
+											(glass_hall_shell || glass_shell_backing))))
+					? (window_block == BLACK_STAINED_GLASS ? BLACK_STAINED_GLASS
+														   : GRAY_STAINED_GLASS)
+					: GLASS;
+	const bool finned_curtain = !args.interior &&
+								condition == BuildingCondition::Normal &&
+								category != BuildingCategory::Greenhouse && curtain_wall;
 	const auto shop_tag = element.tags.get("shop");
 	const bool department_store = shop_tag == "department_store" || shop_tag == "mall" ||
 								  building_type == "retail" ||
@@ -8786,6 +8765,12 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					const int window_col = bay_slot.is_window() ? bay_slot.k : 1000;
 					const int ground_top =
 							start_y_offset + grammar_anchor - 1 + floor_cycle;
+					const int lobby_top =
+							has_lobby_base && is_tall_building &&
+											building_height >= 15 * floor_cycle &&
+											finned_curtain
+									? ground_top + floor_cycle
+									: ground_top;
 					const FloorRole role =
 							h <= ground_top ? FloorRole::Ground
 							: h > start_y_offset + building_height - floor_cycle
@@ -8907,7 +8892,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 										 ? window_block
 										 : wall_block;
 					} else if (glazed_ground_floor && facade_plan.is_street(bx, bz) &&
-							   !party_wall && h <= ground_top) {
+							   !party_wall && h <= lobby_top) {
 						const int pos = static_cast<int>(point_index);
 						const bool end_pier = pos < shop_bays.lead ||
 											  pos >= shop_bays.len - shop_bays.lead;
@@ -8916,10 +8901,12 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 																		base_course_rows
 											 ? base_course_block
 											 : wall_block;
-						} else if (h == ground_top || !shop_slot.is_window()) {
+						} else if (h == lobby_top || !shop_slot.is_window()) {
 							chosen = shop_frame;
+						} else if (storefront && h == start_y_offset + 1) {
+							chosen = has_base_course ? base_course_block : shop_frame;
 						} else {
-							chosen = GLASS;
+							chosen = shop_display_glass;
 						}
 					}
 					// Rust's glass-corner skyscraper preset puts a solid pier at
@@ -9997,7 +9984,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					interior_tenants, interior_area};
 			interior_plan = interior_uses::plan_interior(plan_inputs);
 		}
-		const bool open_hall = interior_plan && interior_plan->open_hall;
+		const bool open_hall =
+				(interior_plan && interior_plan->open_hall) || glass_hall_shell;
 		// Rust gives each unit in a shared ground-floor tenancy its own street
 		// entrance when the existing mapped/synthetic doors leave it unserved.
 		// Keep the entrance selection tied to the same planned unit anchors and
@@ -10198,7 +10186,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					start_y_offset, building_height, abs_terrain_offset, wall_block,
 					*interior_plan, is_abandoned_building, interior_passages,
 					interior_entries, {{min_x, min_z}, {max_x, max_z}}, interior_claims,
-					args.scale, floor_block, clean_visual_seed};
+					args.scale, floor_block, group_seed};
 			generate_building_interior(*editor, interior_request);
 		}
 	}
@@ -11242,8 +11230,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		}
 		generate_rooftop_systems(*editor, element, roof_area, category, condition,
 				generated_roof_type, start_y_offset, building_height, abs_terrain_offset,
-				floor_cycle, wall_block, detail, era, clean_visual_seed,
-				covered_by_sibling, args.scale, green_roof);
+				floor_cycle, wall_block, detail, era, group_seed, covered_by_sibling,
+				args.scale, green_roof);
 	}
 	if (roof_generated && category == BuildingCategory::Hospital &&
 			generated_roof_type == RoofType::Flat)

@@ -74,6 +74,10 @@ inline std::optional<std::int32_t> year_from_seed(std::uint64_t seed)
 	const auto packed = static_cast<std::int32_t>((seed & YEAR_MASK) >> YEAR_SHIFT);
 	return packed > 0 ? std::optional<std::int32_t>(YEAR_BASE + packed) : std::nullopt;
 }
+inline std::uint64_t seed_without_year(std::uint64_t seed)
+{
+	return seed & ~YEAR_MASK;
+}
 std::optional<std::int32_t> building_start_year(const tags_t &tags);
 std::optional<std::int32_t> building_year_for_parts(const tags_t &tags);
 bool is_housing_type(const tags_t &tags);
