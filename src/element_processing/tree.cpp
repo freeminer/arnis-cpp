@@ -10,6 +10,11 @@
 namespace arnis
 {
 
+int crown_probe_blocks(double scale)
+{
+	return std::max(1, static_cast<int>(std::lround(2.0 * scale)));
+}
+
 // Rust's leaf_gap_at/leaf_hash helpers: keep canopy gaps deterministic and
 // independent of the tree generation traversal order.
 static std::uint64_t leaf_hash(int x, int y, int z)

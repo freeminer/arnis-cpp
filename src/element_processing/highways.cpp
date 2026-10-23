@@ -406,6 +406,19 @@ void place_way_lamps(crate::world_editor::WorldEditor &editor,
 		const crate::osm_parser::ProcessedWay &way, int block_range,
 		const crate::RoadMaskBitmap &road_mask)
 {
+	const auto place_street_lamp = [&editor](int x, int z) {
+		const int base = editor.get_absolute_y(x, 0, z);
+		editor.set_block_absolute(crate::block_definitions::SMOOTH_STONE, x, base + 1, z);
+		for (int dy = 2; dy <= 4; ++dy)
+			editor.set_block_absolute(
+					crate::block_definitions::STONE_BRICK_WALL, x, base + dy, z);
+		editor.set_block_with_properties_absolute(
+				BlockWithProperties{crate::block_definitions::REDSTONE_LAMP,
+						BlockWithProperties::Properties{{"lit", "true"}}},
+				x, base + 5, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				crate::block_definitions::IRON_TRAPDOOR, x, base + 6, z);
+	};
 	constexpr std::size_t interval = 25;
 	std::size_t tds = 0;
 	int side = 1;
@@ -413,11 +426,12 @@ void place_way_lamps(crate::world_editor::WorldEditor &editor,
 		const auto &a = way.nodes[i - 1];
 		const auto &b = way.nodes[i];
 		const int dx = b.x - a.x, dz = b.z - a.z;
-		const float length = std::sqrt(static_cast<float>(dx * dx + dz * dz));
-		if (length == 0.0f)
+		const double length =
+				std::hypot(static_cast<double>(dx), static_cast<double>(dz));
+		if (length == 0.0)
 			continue;
-		const int px = static_cast<int>(std::round(-dz / length));
-		const int pz = static_cast<int>(std::round(dx / length));
+		const int px = static_cast<int>(std::round(-static_cast<double>(dz) / length));
+		const int pz = static_cast<int>(std::round(static_cast<double>(dx) / length));
 		for (const auto &[x, y, z] :
 				crate::bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
 			(void)y;
@@ -427,13 +441,7 @@ void place_way_lamps(crate::world_editor::WorldEditor &editor,
 					const int lz = z + pz * (block_range + 2) * candidate_side;
 					if (road_mask.contains(lx, lz) || editor.is_lc_water(lx, lz))
 						continue;
-					editor.set_block(crate::block_definitions::COBBLESTONE_WALL, lx, 1,
-							lz, std::nullopt, std::nullopt);
-					for (int dy = 2; dy <= 4; ++dy)
-						editor.set_block(crate::block_definitions::STREETS_POLE, lx, dy,
-								lz, std::nullopt, std::nullopt);
-					editor.set_block(crate::block_definitions::EARTH_STREET_LAMP, lx, 5,
-							lz, std::nullopt, std::nullopt);
+					place_street_lamp(lx, lz);
 					side = -side;
 					break;
 				}

@@ -32,6 +32,8 @@ struct MappedTree;
 // it in both tree placement and ground vegetation selection.
 inline constexpr double MICRO_TREE_MAX_SCALE = 0.35;
 
+int crown_probe_blocks(double scale);
+
 struct Coord
 {
 	int x;

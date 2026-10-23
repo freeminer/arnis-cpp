@@ -1684,8 +1684,7 @@ bool generate_world(WorldEditor &editor,
 	// preserving deterministic results for streamed tiles.
 	auto mapped_trunks = trees::mapped::MappedTrunks::collect(elements, args.scale);
 	if (editor.ground && editor.ground->has_canopy()) {
-		const int crown_radius =
-				std::max(1, static_cast<int>(std::lround(2.0 * args.scale)));
+		const int crown_radius = crown_probe_blocks(args.scale);
 		mapped_trunks.measure_typical_height(
 				[&editor, crown_radius](int x, int z) -> std::optional<std::uint8_t> {
 					std::optional<std::uint8_t> top;
@@ -3408,8 +3407,10 @@ bool generate_world(WorldEditor &editor,
 	expiring_fills = {};
 	// No element pass reads signage placement masks after this point. Drop the
 	// large carriageway bitmap before 3D models and finalization, as Rust does.
-	if (editor.signage_context)
-		editor.signage_context->release_placement_masks();
+	auto signage_context = editor.take_signage_context();
+	if (signage_context)
+		signage_context->release_placement_masks();
+	editor.set_signage_context(std::move(signage_context));
 	if (model_pipeline && !deferred_placements_active) {
 		model_pipeline->place(three_dmr_provider, wikidata_provider,
 				custom_model_provider, editor, args.scale);
