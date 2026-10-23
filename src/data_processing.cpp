@@ -1659,24 +1659,21 @@ bool generate_world(WorldEditor &editor,
 	// Preserve the full priority-ordered element set for the Rust-equivalent
 	// OSM water/land/bridge ground passes. Mode filtering affects object
 	// placement, but Rust applies those ground overrides before filtering.
-	std::vector<ProcessedElement> ordered_source_elements;
-	const std::vector<ProcessedElement> *land_cover_elements = &source_elements;
-	if (!elements_prepared) {
-		ordered_source_elements = source_elements;
-		sort_elements_by_priority(ordered_source_elements);
-		land_cover_elements = &ordered_source_elements;
-	}
-	std::vector<ProcessedElement> mode_filtered_elements = *land_cover_elements;
-	mode_filter::retain_for_mode(mode_filtered_elements, args.mode);
-	// A footpath mapped directly along a pier is represented by the pier deck;
-	// remove the duplicate ground-level path before indices and tile assignments
-	// are built, matching Rust's generation prepass.
+	std::vector<ProcessedElement> ordered_source_elements = source_elements;
+	// Rust drops pier paths and duplicate mapped summit crosses before it
+	// derives ground overrides, mode-specific objects, footprints, or indexes.
+	// Apply both prepasses to the shared ordered input so every later view agrees.
 	const auto dropped_pier_paths = waterfront::drop_paths_on_piers(
-			mode_filtered_elements, args.scale, flood_fill_cache, args.timeout);
+			ordered_source_elements, args.scale, flood_fill_cache, args.timeout);
 	if (dropped_pier_paths > 0)
 		std::cout << "  Replaced " << dropped_pier_paths
 				  << " footpath(s) with mapped pier decks\n";
-	man_made::drop_doubled_summit_crosses(mode_filtered_elements, args.scale);
+	man_made::drop_doubled_summit_crosses(ordered_source_elements, args.scale);
+	if (!elements_prepared)
+		sort_elements_by_priority(ordered_source_elements);
+	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;
+	std::vector<ProcessedElement> mode_filtered_elements = land_cover_elements;
+	mode_filter::retain_for_mode(mode_filtered_elements, args.mode);
 	// Prepared host input already has Rust priority ordering; direct callers now
 	// retain that ordering through the full and mode-filtered views above.
 	const auto &elements = mode_filtered_elements;
@@ -2054,12 +2051,12 @@ bool generate_world(WorldEditor &editor,
 		// These are elevation-mutating passes in Rust. Run them through Ground so
 		// water snapping and bridge repair update the authoritative DEM, rather
 		// than a rounded land-cover-sized sample that is discarded afterwards.
-		editor.ground->apply_osm_water_override(*land_cover_elements, xzbbox);
-		editor.ground->apply_osm_land_override(*land_cover_elements, xzbbox, args.scale);
+		editor.ground->apply_osm_water_override(land_cover_elements, xzbbox);
+		editor.ground->apply_osm_land_override(land_cover_elements, xzbbox, args.scale);
 		if (args.debug)
 			editor.ground->save_land_cover_debug_image("landcover_debug_post_osm_water");
 		editor.ground->apply_bridge_land_cover_repair(
-				*land_cover_elements, xzbbox, args.scale);
+				land_cover_elements, xzbbox, args.scale);
 		editor.ground->finish_land_cover(args.mode);
 		// Rust applies OSM water/land and bridge repairs before area_floor_for;
 		// these can lower cells in an extended One World, so refresh the global

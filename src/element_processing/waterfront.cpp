@@ -21,6 +21,7 @@ namespace
 {
 using Cell = std::pair<int, int>;
 constexpr double PIER_WIDTH_M = 3.0;
+constexpr double PATH_ON_PIER_SHARE = 0.75;
 constexpr int PIER_MAX_RISE = 3;
 constexpr int PIER_RAILING_RISE = 3;
 constexpr double PILE_SPACING_M = 4.0;
@@ -520,7 +521,7 @@ std::size_t drop_paths_on_piers(std::vector<ProcessedElement> &elements, double 
 			continue;
 		if (element.is_way() && !is_area(element.as_way())) {
 			const auto cells = line_footprint(
-					element.as_way(), parsed_width(element.tags(), 3.0, scale));
+					element.as_way(), parsed_width(element.tags(), PIER_WIDTH_M, scale));
 			for (const auto &cell : cells)
 				deck.insert({cell.x, cell.z});
 		} else if (element.is_way() || element.is_relation()) {
@@ -550,7 +551,7 @@ std::size_t drop_paths_on_piers(std::vector<ProcessedElement> &elements, double 
 				++total;
 				on_deck += deck.contains({x, z});
 			}
-		return total > 0 && static_cast<double>(on_deck) >= total * 0.75;
+		return total > 0 && static_cast<double>(on_deck) >= total * PATH_ON_PIER_SHARE;
 	});
 	const auto removed = static_cast<std::size_t>(std::distance(it, elements.end()));
 	elements.erase(it, elements.end());

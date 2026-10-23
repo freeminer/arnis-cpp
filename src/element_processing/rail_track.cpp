@@ -298,8 +298,6 @@ RailJoins RailJoins::build(
 		for (const std::size_t k : {std::size_t{0}, last}) {
 			const auto &others = at_node.at(tracks[t].way->nodes[k].id);
 			const auto n = tracks[t].cells.size();
-			if (n < 2)
-				continue;
 			const auto reach = std::min(HEADING_CELLS, n - 1);
 			const auto at = k == 0 ? tracks[t].cells.front() : tracks[t].cells.back();
 			const auto back =
