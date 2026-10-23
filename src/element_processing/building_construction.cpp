@@ -37,6 +37,12 @@ enum class Cladding
 	Curtain,
 };
 
+int euclidean_mod(int value, int divisor)
+{
+	const int remainder = value % divisor;
+	return remainder < 0 ? remainder + divisor : remainder;
+}
+
 Cladding cladding(const ProcessedWay &way)
 {
 	const std::string future = way.tags.contains("construction")
@@ -264,13 +270,14 @@ void generate(WorldEditor &editor, const ProcessedWay &way,
 				if (open(x, z, y))
 					continue;
 				const int along = x + z, row = y - slab_y(k - 1);
+				const int along_mod_3 = euclidean_mod(along, 3);
 				if (kind == Cladding::Curtain) {
 					editor.set_block_absolute(
-							along % 3 == 0 ? GRAY_CONCRETE : LIGHT_BLUE_STAINED_GLASS, x,
-							y, z);
+							along_mod_3 == 0 ? GRAY_CONCRETE : LIGHT_BLUE_STAINED_GLASS,
+							x, y, z);
 				} else {
 					const bool window =
-							along % 3 != 0 && row >= 2 && row < progress.storey;
+							along_mod_3 != 0 && row >= 2 && row < progress.storey;
 					if (window)
 						continue;
 					editor.set_block_absolute(

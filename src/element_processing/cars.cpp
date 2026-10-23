@@ -979,7 +979,8 @@ std::optional<std::pair<std::size_t, double>> entry(
 					double room) -> std::optional<std::pair<std::size_t, double>> {
 		const double dx = to[e].x - end.x, dz = to[e].z - end.z;
 		const double length = std::hypot(dx, dz);
-		const auto leg = length >= room ? unit(dx, dz) : std::nullopt;
+		const auto leg =
+				length >= room && length <= CROSSING_REACH ? unit(dx, dz) : std::nullopt;
 		if (!leg)
 			return std::nullopt;
 		const double onto = turn(*heading, *leg);
@@ -1027,14 +1028,47 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 													 heading->second * first_out->second,
 								-1.0, 1.0)) *
 						180.0 / std::numbers::pi;
+	std::optional<std::pair<std::size_t, double>> keep;
+	std::optional<std::uint8_t> held_stop;
+	Waypoint start = a;
+	auto start_heading = *heading;
+	if (turn > 150.0) {
+		const auto &b = to.front();
+		const double gap =
+				std::abs((b.x - a.x) * -heading->second + (b.z - a.z) * heading->first);
+		const double first = segment.arcs.empty() ? 0.0 : segment.arcs.front();
+		const double last = segment.arcs.empty() ? 0.0 : segment.arcs.back();
+		const double shift = std::clamp(turn_round_reach(gap, turn_radius) - 1.0, 0.0,
+				std::max(last - first - 0.5, 0.0));
+		const double at = last - shift;
+		auto arc_it = std::lower_bound(segment.arcs.begin(), segment.arcs.end(), at);
+		std::size_t k = static_cast<std::size_t>(arc_it - segment.arcs.begin());
+		k = std::clamp<std::size_t>(k, 1, segment.points.size() - 1);
+		const auto &p = segment.points[k - 1];
+		const auto &q = segment.points[k];
+		const double span = segment.arcs[k] - segment.arcs[k - 1];
+		const double t = span > 0.0
+								 ? std::clamp((at - segment.arcs[k - 1]) / span, 0.0, 1.0)
+								 : 1.0;
+		start = {p.x + (q.x - p.x) * t, p.y + (q.y - p.y) * t, p.z + (q.z - p.z) * t,
+				std::nullopt, q.cap};
+		if (const auto h = unit(q.x - p.x, q.z - p.z))
+			start_heading = *h;
+		keep = std::pair{k, at};
+		for (std::size_t n = k; n < segment.points.size(); ++n)
+			if (segment.points[n].stop) {
+				held_stop = segment.points[n].stop;
+				break;
+			}
+	}
 	Waypoint meet;
 	std::pair<double, double> out;
 	bool onto_meet = false;
 	if (turn > 150.0) {
 		const auto &b = to.front();
 		const double back = std::clamp(
-				(b.x - a.x) * first_out->first + (b.z - a.z) * first_out->second, 0.0,
-				12.0);
+				(b.x - start.x) * first_out->first + (b.z - start.z) * first_out->second,
+				0.0, 30.0);
 		meet = {b.x - first_out->first * back, b.y, b.z - first_out->second * back,
 				std::nullopt, std::nullopt};
 		out = *first_out;
@@ -1042,7 +1076,7 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 	} else {
 		std::size_t k = to.size() - 1;
 		for (std::size_t candidate = 0; candidate < to.size(); ++candidate) {
-			const double dx = to[candidate].x - a.x, dz = to[candidate].z - a.z;
+			const double dx = to[candidate].x - start.x, dz = to[candidate].z - start.z;
 			const auto direction = along(candidate);
 			if (std::hypot(dx, dz) >= 3.0 && direction &&
 					dx * direction->first + dz * direction->second > 0.0) {
@@ -1056,24 +1090,28 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 		meet = to[k];
 		out = *direction;
 	}
-	const double reach =
-			std::clamp(std::hypot(meet.x - a.x, meet.z - a.z) * 2.0 / 3.0, 1.0, 5.0);
 	const auto raw_cap = speed_at(std::max(70.0 - 0.6 * turn, U_TURN_KMH));
 	const std::optional<std::int32_t> cap =
 			raw_cap < segment.speed ? std::optional<std::int32_t>(raw_cap) : std::nullopt;
 	std::vector<std::tuple<double, double, double>> points;
 	if (turn > 150.0) {
-		points = turn_round({a.x, a.z}, *heading, {meet.x, meet.z}, turn_radius);
+		points = turn_round(
+				{start.x, start.z}, start_heading, {meet.x, meet.z}, turn_radius);
 	} else {
-		points = curve({a.x, a.z},
-				{a.x + heading->first * reach, a.z + heading->second * reach},
+		const double reach = std::clamp(
+				std::hypot(meet.x - start.x, meet.z - start.z) * 2.0 / 3.0, 1.0, 5.0);
+		points = curve({start.x, start.z},
+				{start.x + start_heading.first * reach,
+						start.z + start_heading.second * reach},
 				{meet.x - out.first * reach, meet.z - out.second * reach},
 				{meet.x, meet.z});
 	}
 	if (onto_meet)
 		points.emplace_back(meet.x, meet.z, 1.0);
-	double arc = segment.arcs.empty() ? 0.0 : segment.arcs.back();
-	std::pair<double, double> previous{a.x, a.z};
+	if (keep)
+		points.insert(points.begin(), {start.x, start.z, 0.0});
+	double arc = keep ? keep->second : (segment.arcs.empty() ? 0.0 : segment.arcs.back());
+	std::pair<double, double> previous{start.x, start.z};
 	std::vector<std::pair<Waypoint, double>> added;
 	for (const auto &[x, z, t] : points) {
 		if (!world.contains(static_cast<std::int32_t>(std::floor(x)),
@@ -1081,11 +1119,17 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 			return false;
 		arc += std::hypot(x - previous.first, z - previous.second);
 		previous = {x, z};
-		added.push_back({{std::round(x * 10.0) / 10.0, a.y + (meet.y - a.y) * t,
+		added.push_back({{std::round(x * 10.0) / 10.0, start.y + (meet.y - start.y) * t,
 								 std::round(z * 10.0) / 10.0, std::nullopt, cap},
 				arc});
 	}
+	if (!added.empty())
+		added.front().first.stop = held_stop;
 	auto &result = segments[i];
+	if (keep) {
+		result.points.resize(keep->first);
+		result.arcs.resize(keep->first);
+	}
 	for (const auto &[point, distance] : added) {
 		result.points.push_back(point);
 		result.arcs.push_back(distance);
