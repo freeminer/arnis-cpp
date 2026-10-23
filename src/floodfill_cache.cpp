@@ -427,19 +427,22 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		uint64_t id;
 	};
 	std::vector<std::optional<std::size_t>> sealed_lens(sealed_ids.size());
-	std::vector<uint8_t> sealed_off_roads(sealed_ids.size(), 0);
+	std::atomic_bool off_roads{false};
 	parallel_for_indices(sealed_ids.size(), [&](std::size_t i) {
 		const auto fill = transient_fill(sealed_ids[i].first);
 		if (!fill || fill->empty())
 			return;
 		sealed_lens[i] = fill->size();
-		sealed_off_roads[i] =
+		// Once one sealed area contributes a cell outside the road mask, the
+		// remaining fills need only report their sizes for layer ordering. Match
+		// Rust's atomic early-out so large footprints do not all get rescanned.
+		if (!off_roads.load(std::memory_order_relaxed) &&
 				std::any_of(fill->begin(), fill->end(), [&roads](const auto &coord) {
 					return roads.is_unset_in_bounds(coord.first, coord.second);
-				});
+				}))
+			off_roads.store(true, std::memory_order_relaxed);
 	});
-	if (std::none_of(sealed_off_roads.begin(), sealed_off_roads.end(),
-				[](uint8_t value) { return value != 0; }))
+	if (!off_roads.load(std::memory_order_relaxed))
 		return std::nullopt;
 
 	std::vector<Layer> layers;

@@ -2500,7 +2500,7 @@ bool generate_world(WorldEditor &editor,
 			deferred_write_regions.insert(region);
 	// Winter and ruins styling reads road elevations after tiles merge. Preserve
 	// those overrides for every style region, not only regions with deferred models.
-	const bool keep_roads_for_style = args.winter || args.post_apocalyptic;
+	const bool keep_roads_for_style = world_style::is_active(args);
 	auto execute_deferred_placements = [&](const std::vector<std::size_t> &units) {
 		if (units.empty())
 			return;
@@ -2538,8 +2538,7 @@ bool generate_world(WorldEditor &editor,
 		editor.clear_strict_bounds();
 		world_style::apply_region(
 				editor, args, building_footprints, region.first, region.second);
-		if ((args.winter || args.post_apocalyptic) &&
-				!deferred_write_regions.contains(region))
+		if (world_style::is_active(args) && !deferred_write_regions.contains(region))
 			editor.release_road_surface_overrides(region.first, region.second);
 	};
 	auto complete_deferred_tile = [&](const TileBounds &tile) {
@@ -3347,7 +3346,7 @@ bool generate_world(WorldEditor &editor,
 	// Keep the surface mask alive when the post-generation style pass needs to
 	// distinguish roads/paving from natural ground; otherwise release it before
 	// model placement, as Rust does after the ground/ore/water passes.
-	const bool apply_world_style = args.winter || args.post_apocalyptic;
+	const bool apply_world_style = world_style::is_active(args);
 	if (!apply_world_style)
 		editor.release_sealed_surface();
 	// Tunnel interiors must be reopened after underground fill, but before

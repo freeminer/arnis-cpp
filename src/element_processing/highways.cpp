@@ -165,7 +165,7 @@ void precompute_row_medians(const crate::world_editor::WorldEditor &editor,
 
 bool is_carriageway(const std::string &type)
 {
-	return !type.empty() && type != "footway" && type != "path" && type != "steps" &&
+	return type != "footway" && type != "path" && type != "steps" &&
 		   type != "pedestrian" && type != "cycleway" && type != "bridleway" &&
 		   type != "corridor" && type != "track" && type != "elevator" &&
 		   type != "platform";
@@ -173,11 +173,12 @@ bool is_carriageway(const std::string &type)
 
 std::optional<std::string> surface_highway_type(const ProcessedWay &way)
 {
+	if (!way.tags.contains("highway"))
+		return std::nullopt;
 	const auto highway_type = way.tags.get("highway");
-	if (highway_type.empty() || highway_type == "street_lamp" ||
-			highway_type == "crossing" || highway_type == "bus_stop" ||
-			way.tags.get("area") == "yes" || way.tags.get("indoor") == "yes" ||
-			way.tags.get("aeroway") == "jet_bridge")
+	if (highway_type == "street_lamp" || highway_type == "crossing" ||
+			highway_type == "bus_stop" || way.tags.get("area") == "yes" ||
+			way.tags.get("indoor") == "yes" || way.tags.get("aeroway") == "jet_bridge")
 		return std::nullopt;
 	if (const auto level = crate::strict_parse::i32(way.tags.get("level"));
 			level && *level < 0)

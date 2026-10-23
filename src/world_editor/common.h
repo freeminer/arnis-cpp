@@ -737,7 +737,7 @@ inline std::array<int, 3> index_coords(std::size_t i)
 }
 inline int section_world_y(int sy, int local_y)
 {
-	return (sy << 4) + (local_y & 15);
+	return sy * 16 + (local_y & 15);
 }
 
 struct Section
@@ -1736,8 +1736,7 @@ struct WorldToModify
 			return;
 		for (int z = 0; z < 16; ++z)
 			for (int x = 0; x < 16; ++x)
-				fill_column(
-						(chunk_x << 4) + x, (chunk_z << 4) + z, min_y, max_y, b, false);
+				fill_column(chunk_x * 16 + x, chunk_z * 16 + z, min_y, max_y, b, false);
 	}
 	void fill_box(int min_x, int min_y, int min_z, int max_x, int max_y, int max_z,
 			Block b, bool skip_existing = false)
@@ -1853,7 +1852,7 @@ struct WorldToModify
 		auto all = region_keys();
 		std::vector<std::pair<int, int>> out;
 		for (auto [rx, rz] : all) {
-			int x0 = rx << 9, z0 = rz << 9;
+			int x0 = rx * 512, z0 = rz * 512;
 			if (x0 + 511 >= min_x && x0 <= max_x && z0 + 511 >= min_z && z0 <= max_z)
 				out.emplace_back(rx, rz);
 		}
@@ -1862,7 +1861,7 @@ struct WorldToModify
 	bool intersects_region(
 			int rx, int rz, int min_x, int min_z, int max_x, int max_z) const
 	{
-		int x0 = rx << 9, z0 = rz << 9;
+		int x0 = rx * 512, z0 = rz * 512;
 		return x0 + 511 >= min_x && x0 <= max_x && z0 + 511 >= min_z && z0 <= max_z;
 	}
 	bool occupied_at(int x, int y, int z) const
@@ -1877,7 +1876,7 @@ struct WorldToModify
 			int rx = key_x(rk.first), rz = key_z(rk.first);
 			for (const auto &ck : rk.second.chunks) {
 				int kx = key_x(ck.first), kz = key_z(ck.first);
-				out.emplace_back((rx << 5) + kx, (rz << 5) + kz,
+				out.emplace_back(rx * 32 + kx, rz * 32 + kz,
 						static_cast<int>(ck.second.sections.size()));
 			}
 		}
@@ -1889,7 +1888,7 @@ struct WorldToModify
 	{
 		for (auto it = other.regions.begin(); it != other.regions.end();) {
 			int rx = key_x(it->first), rz = key_z(it->first);
-			int x0 = rx << 9, z0 = rz << 9;
+			int x0 = rx * 512, z0 = rz * 512;
 			bool hit =
 					x0 + 511 >= min_x && x0 <= max_x && z0 + 511 >= min_z && z0 <= max_z;
 			if (hit) {
@@ -2072,7 +2071,7 @@ struct WorldToModify
 		for (auto &r : regions) {
 			int rx = key_x(r.first), rz = key_z(r.first);
 			for (auto &c : r.second.chunks) {
-				int cx = (rx << 5) + key_x(c.first), cz = (rz << 5) + key_z(c.first);
+				int cx = rx * 32 + key_x(c.first), cz = rz * 32 + key_z(c.first);
 				for (auto &s : c.second.sections)
 					fn(cx, cz, s.first, s.second);
 			}
@@ -2086,9 +2085,9 @@ struct WorldToModify
 			if (!intersects_region(rx, rz, min_x, min_z, max_x, max_z))
 				continue;
 			for (auto &c : r.second.chunks) {
-				int cx = (rx << 5) + key_x(c.first), cz = (rz << 5) + key_z(c.first);
-				if ((cx << 4) + 15 < min_x || (cx << 4) > max_x ||
-						(cz << 4) + 15 < min_z || (cz << 4) > max_z)
+				int cx = rx * 32 + key_x(c.first), cz = rz * 32 + key_z(c.first);
+				if (cx * 16 + 15 < min_x || cx * 16 > max_x || cz * 16 + 15 < min_z ||
+						cz * 16 > max_z)
 					continue;
 				for (auto &s : c.second.sections)
 					fn(cx, cz, s.first, s.second);
@@ -2462,9 +2461,9 @@ struct WorldToModify
 			int min_y_value = world_editor::min_y(),
 			int max_y = world_editor::world_max_y()) const
 	{
-		return {cx << 4, min_y_value, cz << 4, (cx << 4) + 15,
+		return {cx * 16, min_y_value, cz * 16, cx * 16 + 15,
 				std::clamp(max_y, world_editor::min_y(), world_editor::world_max_y()),
-				(cz << 4) + 15};
+				cz * 16 + 15};
 	}
 	void transform_blocks(const std::function<Block(Block)> &fn)
 	{
@@ -2553,7 +2552,7 @@ struct WorldToModify
 			int rx = key_x(rk.first), rz = key_z(rk.first);
 			for (const auto &ck : rk.second.chunks) {
 				int lx = key_x(ck.first), lz = key_z(ck.first);
-				int bx = ((rx << 5) + lx) << 4, bz = ((rz << 5) + lz) << 4;
+				int bx = rx * 512 + lx * 16, bz = rz * 512 + lz * 16;
 				for (const auto &sk : ck.second.sections) {
 					auto vals = sk.second.storage.materialize();
 					for (int y = 0; y < 16; ++y)
@@ -2561,7 +2560,7 @@ struct WorldToModify
 							for (int x = 0; x < 16; ++x) {
 								Block b = vals[(y << 8) | (z << 4) | x];
 								if (b.id() != block_definitions::AIR.id())
-									fn(bx + x, (sk.first << 4) + y, bz + z, b);
+									fn(bx + x, sk.first * 16 + y, bz + z, b);
 							}
 				}
 			}
@@ -2585,6 +2584,8 @@ struct WorldToModify
 	{
 		for (auto &rk : other.regions) {
 			int rx = key_x(rk.first), rz = key_z(rk.first);
+			// Do not left-shift signed negative coordinates: unlike Rust's integer
+			// shifts, that is undefined in C++ and breaks tiles west/north of zero.
 			const int region_min_x = rx * 512, region_min_z = rz * 512;
 			const int region_max_x = region_min_x + 511;
 			const int region_max_z = region_min_z + 511;
@@ -2595,7 +2596,8 @@ struct WorldToModify
 										region_max_z < min_z || region_min_z > max_z;
 			for (auto &ck : rk.second.chunks) {
 				int lx = key_x(ck.first), lz = key_z(ck.first);
-				int base_x = ((rx << 5) + lx) << 4, base_z = ((rz << 5) + lz) << 4;
+				int base_x = region_min_x + lx * 16;
+				int base_z = region_min_z + lz * 16;
 				auto &destination_region = get_or_create_region(rx, rz);
 				const bool chunk_authoritative =
 						region_authoritative ||
@@ -2641,7 +2643,7 @@ struct WorldToModify
 								if (b.id() == block_definitions::AIR.id())
 									continue;
 								int wx = base_x + lx2, wz = base_z + lz2,
-									wy = (sy << 4) + ly;
+									wy = sy * 16 + ly;
 								bool auth = wx >= min_x && wx <= max_x && wz >= min_z &&
 											wz <= max_z;
 								const auto bwp =

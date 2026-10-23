@@ -17,6 +17,11 @@
 
 namespace arnis::world_style
 {
+bool is_active(const Args &args)
+{
+	return args.winter || args.post_apocalyptic;
+}
+
 namespace
 {
 constexpr std::uint32_t SALT_COLLAPSE = 0x5255'494E, SALT_JAG = 0x4A41'4747,
@@ -683,7 +688,7 @@ void apply_chunks(WorldEditor &editor, const Args &args,
 void apply(WorldEditor &editor, const Args &args,
 		const BuildingFootprintBitmap &building_footprints)
 {
-	if ((!args.winter && !args.post_apocalyptic) || !editor.mg)
+	if (!is_active(args) || !editor.mg)
 		return;
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
@@ -693,7 +698,7 @@ void apply(WorldEditor &editor, const Args &args,
 void apply_region(WorldEditor &editor, const Args &args,
 		const BuildingFootprintBitmap &building_footprints, int region_x, int region_z)
 {
-	if ((!args.winter && !args.post_apocalyptic) || !editor.mg)
+	if (!is_active(args) || !editor.mg)
 		return;
 	const auto [world_min_x, world_min_z] = editor.get_min_coords();
 	const auto [world_max_x, world_max_z] = editor.get_max_coords();
@@ -714,7 +719,7 @@ void apply_remaining(WorldEditor &editor, const Args &args,
 		const BuildingFootprintBitmap &building_footprints,
 		const std::set<std::pair<int, int>> &already_styled)
 {
-	if ((!args.winter && !args.post_apocalyptic) || !editor.mg)
+	if (!is_active(args) || !editor.mg)
 		return;
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();

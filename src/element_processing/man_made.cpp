@@ -336,7 +336,7 @@ void generate_chimney(WorldEditor &editor, const ProcessedElement &element,
 							   .value_or(element.tag("material").value_or("")));
 	if (material == "concrete" || material == "reinforced_concrete" ||
 			material == "cement" || material == "metal" || material == "steel" ||
-			material == "iron" || metres >= 80.0)
+			material == "iron" || (material != "brick" && metres >= 80.0))
 		body = LIGHT_GRAY_CONCRETE;
 	if (height <= 6) {
 		for (int y = base + 1; y <= base + height; ++y)

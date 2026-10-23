@@ -152,6 +152,7 @@ static std::vector<double> blur_line(
 			for (std::size_t k = 0; k < kernel.size(); ++k)
 				sum += values[left + k] * kernel[k];
 			out[i] = sum / full_weight;
+			++i;
 			continue;
 		}
 		double sum = 0.0, weight = 0.0;

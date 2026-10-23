@@ -8,6 +8,10 @@
 
 namespace arnis::world_style
 {
+// Mirrors Rust's WorldStyle::is_active(): styling needs road surfaces retained
+// until the final region pass whenever either optional world style is enabled.
+bool is_active(const Args &args);
+
 // Apply optional final-world weathering after all structure/model placement and
 // before the backend commits generated blocks.
 void apply(WorldEditor &editor, const Args &args,
