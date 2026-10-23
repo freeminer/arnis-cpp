@@ -14,6 +14,7 @@
 #include <optional>
 #include <set>
 #include <unordered_map>
+#include <deque>
 namespace arnis::trees
 {
 namespace
@@ -48,6 +49,53 @@ bool is_leaf_block(Block block)
 			DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES, MANGROVE_LEAVES,
 			AZALEA_LEAVES};
 	return std::find(leaves.begin(), leaves.end(), block) != leaves.end();
+}
+
+void drop_stray_leaves(Schematic &schematic)
+{
+	if (schematic.voxels.empty())
+		return;
+	const auto key = [](int x, int y, int z) {
+		return (std::uint64_t(static_cast<std::uint32_t>(y)) << 32) |
+			   (std::uint64_t(static_cast<std::uint16_t>(z)) << 16) |
+			   static_cast<std::uint16_t>(x);
+	};
+	std::unordered_map<std::uint64_t, std::size_t> grid;
+	grid.reserve(schematic.voxels.size());
+	std::vector<bool> linked(schematic.voxels.size(), false);
+	std::deque<std::size_t> todo;
+	for (std::size_t i = 0; i < schematic.voxels.size(); ++i) {
+		const auto &v = schematic.voxels[i];
+		grid.emplace(key(v.x, v.y, v.z), i);
+		if (is_log_block(v.block)) {
+			linked[i] = true;
+			todo.push_back(i);
+		}
+	}
+	if (todo.empty())
+		return;
+	while (!todo.empty()) {
+		const auto &v = schematic.voxels[todo.front()];
+		const int x = v.x, y = v.y, z = v.z;
+		todo.pop_front();
+		for (int ny = std::max(0, y - 2); ny <= std::min(schematic.height - 1, y + 2);
+				++ny)
+			for (int nz = std::max(0, z - 2); nz <= std::min(schematic.length - 1, z + 2);
+					++nz)
+				for (int nx = std::max(0, x - 2);
+						nx <= std::min(schematic.width - 1, x + 2); ++nx) {
+					const auto found = grid.find(key(nx, ny, nz));
+					if (found == grid.end() || linked[found->second])
+						continue;
+					linked[found->second] = true;
+					todo.push_back(found->second);
+				}
+	}
+	std::size_t i = 0;
+	schematic.voxels.erase(
+			std::remove_if(schematic.voxels.begin(), schematic.voxels.end(),
+					[&](const auto &) { return !linked[i++]; }),
+			schematic.voxels.end());
 }
 
 void finalize_tree_schematic(Schematic &schematic)
@@ -174,6 +222,7 @@ Schematic load_schem(const std::vector<std::uint8_t> &gzip_bytes)
 	schematic.width = document.width;
 	schematic.height = document.height;
 	schematic.length = document.length;
+	drop_stray_leaves(schematic);
 	finalize_tree_schematic(schematic);
 	return schematic;
 }
@@ -236,6 +285,7 @@ Schematic tree_only(const structures::SchemDocument &in)
 	}
 	if (unsupported_coordinate)
 		return {};
+	drop_stray_leaves(out);
 	// Sponge schematics frequently carry an air pad below the root. Rust removes
 	// it at load time so every tree has a stable y=0 floor independent of the
 	// editor/exporter that produced the asset.

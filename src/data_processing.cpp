@@ -58,6 +58,7 @@
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"
 #include "element_processing/cars.h"
+#include "element_processing/rail_track.h"
 #include "element_processing/buildings.h"
 #include "element_processing/blueprint.h"
 #include "element_processing/waterfront.h"
@@ -691,8 +692,7 @@ std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
 		record_last_use(id, index);
 		const auto group = part_groups.find(id);
 		const auto seed = group == part_groups.end() ? id : group->second;
-		for (const auto key : {osm_parser::seed_without_hint(seed),
-					 osm_parser::seed_without_hint(id)}) {
+		for (const auto key : {osm_parser::group_key(seed), osm_parser::group_key(id)}) {
 			if (const auto members = group_members.find(key);
 					members != group_members.end())
 				for (const auto sibling_id : members->second)
@@ -734,8 +734,8 @@ TileFillReaders compute_tile_fill_readers(
 			ids.push_back(id);
 			const auto group = part_groups.find(id);
 			const auto seed = group == part_groups.end() ? id : group->second;
-			for (const auto key : {osm_parser::seed_without_hint(seed),
-						 osm_parser::seed_without_hint(id)})
+			for (const auto key :
+					{osm_parser::group_key(seed), osm_parser::group_key(id)})
 				if (const auto members = group_members.find(key);
 						members != group_members.end())
 					ids.insert(ids.end(), members->second.begin(), members->second.end());
@@ -1367,18 +1367,19 @@ namespace railways
 void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &way);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element,
-		std::vector<std::tuple<int, int, bool>> &rail_tunnel_points,
+		std::vector<std::tuple<int, int, int, bool>> &rail_tunnel_points,
 		const bridge_styles::BridgeOutlineIndex &bridge_outlines,
 		const CoordinateBitmap &road_mask, const CoordinateBitmap &building_footprints,
 		const CoordinateBitmap &rail_mask,
 		const bridges::BridgeStructureMap &bridge_structures,
-		const bridges::BridgeSurfaceMap &bridge_surface);
+		const bridges::BridgeSurfaceMap &bridge_surface,
+		const railways::RailJoins &rail_joins);
 CoordinateBitmap collect_at_grade_rail_mask(
 		const std::vector<ProcessedElement> &elements, const XZBBox &xzbbox);
 void add_tunnel_footprint(const std::vector<ProcessedElement> &elements,
 		const XZBBox &xzbbox, CoordinateBitmap &footprint);
-void carve_rail_tunnel_interior(WorldEditor &editor,
-		const std::vector<std::tuple<int, int, bool>> &rail_tunnel_points);
+std::vector<highways::TunnelLight> carve_rail_tunnel_interior(WorldEditor &editor,
+		const std::vector<std::tuple<int, int, int, bool>> &rail_tunnel_points);
 }
 
 namespace tourisms
@@ -2287,7 +2288,7 @@ bool generate_world(WorldEditor &editor,
 		dispatch_rank[dispatch_order[rank]] = rank;
 	struct ElementDispatchState
 	{
-		std::vector<std::tuple<int, int, bool>> rail_tunnel_points;
+		std::vector<std::tuple<int, int, int, bool>> rail_tunnel_points;
 		std::vector<highways::HighwayTunnelCell> highway_tunnel_cells;
 	};
 	ElementDispatchState dispatch_state;
@@ -2297,6 +2298,7 @@ bool generate_world(WorldEditor &editor,
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
+	const auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
 	railways::advtrains::prepare_network(elements, editor);
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	// Centreline bitmap prevents catenary masts from being stamped into a
@@ -2323,10 +2325,10 @@ bool generate_world(WorldEditor &editor,
 			suppressed_building_outlines.insert(id);
 	const auto &suppressed_relations = building_data.suppressed_relations;
 	std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> building_group_members;
-	// Rust groups siblings by the seed without packed facade hints.
+	// Match Rust's grouping key, which clears packed facade, year and housing metadata.
 	building_group_members.clear();
 	for (const auto &[way_id, seed] : building_part_groups)
-		building_group_members[osm_parser::seed_without_hint(seed)].push_back(way_id);
+		building_group_members[osm_parser::group_key(seed)].push_back(way_id);
 	for (auto it = building_group_members.begin(); it != building_group_members.end();) {
 		if (it->second.size() < 2)
 			it = building_group_members.erase(it);
@@ -2732,18 +2734,24 @@ bool generate_world(WorldEditor &editor,
 		}
 		water_depth::carve_lc_water_region(editor, big_water_field, road_mask,
 				tunnel_footprint, min_x, max_x, min_z, max_z, &bridge_surface);
+		highways::drop_lamps_in_water(editor);
 		// Rust's eviction path cannot run these passes after regions have been
 		// released. Match it by reopening tunnel interiors after the tile's ground,
 		// ore and water writes, then sealing any newly exposed cave fluids before
 		// this tile is merged. The editor's strict bounds keep the global tunnel
 		// indexes from writing outside the tile being finalized.
 		if (regional_ground_passes && eviction_active) {
+			std::vector<highways::TunnelLight> tunnel_lights;
 			if (!tile_state.rail_tunnel_points.empty())
-				railways::carve_rail_tunnel_interior(
+				tunnel_lights = railways::carve_rail_tunnel_interior(
 						editor, tile_state.rail_tunnel_points);
-			if (!tile_state.highway_tunnel_cells.empty())
-				highways::carve_highway_tunnel_interior(
+			if (!tile_state.highway_tunnel_cells.empty()) {
+				auto road_lights = highways::carve_highway_tunnel_interior(
 						editor, tile_state.highway_tunnel_cells);
+				tunnel_lights.insert(
+						tunnel_lights.end(), road_lights.begin(), road_lights.end());
+			}
+			highways::hang_tunnel_lights(editor, tunnel_lights);
 			if (args.caves)
 				caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
 						world_editor::terrain_floor_y());
@@ -2820,17 +2828,27 @@ bool generate_world(WorldEditor &editor,
 					   way.tags.contains("building:part")) {
 				if (suppressed_building_outlines.find(way.id) ==
 						suppressed_building_outlines.end()) {
+					std::optional<ProcessedWay> facade_way;
+					const ProcessedWay *render_way = &way;
+					if (const auto inherited =
+									building_data.inherited_facade_tags.find(way.id);
+							inherited != building_data.inherited_facade_tags.end()) {
+						facade_way = way;
+						for (const auto &[key, value] : inherited->second)
+							facade_way->tags.try_emplace(key, value);
+						render_way = &*facade_way;
+					}
 					auto group = building_part_groups.find(way.id);
-					auto anchor = buildings::generate_buildings(&editor, way, args,
-							std::optional<int>{}, flood_fill_cache, building_passages,
-							nullptr,
+					auto anchor = buildings::generate_buildings(&editor, *render_way,
+							args, std::optional<int>{}, flood_fill_cache,
+							building_passages, nullptr,
 							group == building_part_groups.end()
 									? std::nullopt
 									: std::optional<std::uint64_t>(group->second),
 							&road_mask, &building_footprints, &building_group_members,
 							interior_use_index ? &*interior_use_index : nullptr);
 					if (editor.signage_enabled())
-						signage::generate_building_signage(editor, way, anchor);
+						signage::generate_building_signage(editor, *render_way, anchor);
 				}
 			} else if (structures::jetbridge::claims(way)) {
 				structures::jetbridge::generate_jet_bridge(
@@ -2889,7 +2907,7 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.contains("railway")) {
 				railways::generate_railways(editor, way, state.rail_tunnel_points,
 						bridge_outlines, road_mask, building_footprints, rail_mask,
-						bridge_structures, bridge_surface);
+						bridge_structures, bridge_surface, rail_joins);
 			} else if (way.tags.contains("roller_coaster")) {
 				railways::generate_roller_coaster(editor, way);
 			} else if (way.tags.contains("aeroway") ||
@@ -3343,6 +3361,8 @@ bool generate_world(WorldEditor &editor,
 	if (!regional_ground_passes)
 		water_depth::carve_lc_water_pass(
 				editor, big_water_field, road_mask, tunnel_footprint, &bridge_surface);
+	if (!regional_ground_passes)
+		highways::drop_lamps_in_water(editor);
 	// Keep the surface mask alive when the post-generation style pass needs to
 	// distinguish roads/paving from natural ground; otherwise release it before
 	// model placement, as Rust does after the ground/ore/water passes.
@@ -3351,13 +3371,19 @@ bool generate_world(WorldEditor &editor,
 		editor.release_sealed_surface();
 	// Tunnel interiors must be reopened after underground fill, but before
 	// models: a late carve can cut holes into an already placed landmark.
-	if (!(regional_ground_passes && eviction_active) &&
-			!dispatch_state.rail_tunnel_points.empty())
-		railways::carve_rail_tunnel_interior(editor, dispatch_state.rail_tunnel_points);
-	if (!(regional_ground_passes && eviction_active) &&
-			!dispatch_state.highway_tunnel_cells.empty())
-		highways::carve_highway_tunnel_interior(
-				editor, dispatch_state.highway_tunnel_cells);
+	if (!(regional_ground_passes && eviction_active)) {
+		std::vector<highways::TunnelLight> tunnel_lights;
+		if (!dispatch_state.rail_tunnel_points.empty())
+			tunnel_lights = railways::carve_rail_tunnel_interior(
+					editor, dispatch_state.rail_tunnel_points);
+		if (!dispatch_state.highway_tunnel_cells.empty()) {
+			auto road_lights = highways::carve_highway_tunnel_interior(
+					editor, dispatch_state.highway_tunnel_cells);
+			tunnel_lights.insert(
+					tunnel_lights.end(), road_lights.begin(), road_lights.end());
+		}
+		highways::hang_tunnel_lights(editor, tunnel_lights);
+	}
 	if (args.caves && !(regional_ground_passes && eviction_active))
 		caves::seal_floating_fluid_region(editor,
 				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},

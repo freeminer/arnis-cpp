@@ -41,6 +41,9 @@ struct Segment
 	std::vector<Turn> next;
 	bool into_junction{};
 	bool turns_back{};
+	// A short dead-end lane is retained in the network for connectivity but does
+	// not carry cars when another way out of the junction exists.
+	bool stub{};
 	std::int32_t speed{};
 	double density{};
 };

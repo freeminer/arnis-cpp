@@ -28,6 +28,61 @@ std::string norm_style(std::string v)
 	return out;
 }
 
+std::optional<std::int32_t> first_year(std::string_view value)
+{
+	for (std::size_t i = 0; i + 4 <= value.size(); ++i) {
+		bool digits = true;
+		for (std::size_t j = 0; j < 4; ++j)
+			digits &= std::isdigit(static_cast<unsigned char>(value[i + j]));
+		if (digits) {
+			try {
+				return std::stoi(std::string(value.substr(i, 4)));
+			} catch (...) {
+				return std::nullopt;
+			}
+		}
+	}
+	return std::nullopt;
+}
+
+std::string first_architecture(const tags_t &tags)
+{
+	std::string value = tags.get("building:architecture");
+	if (value.empty())
+		value = tags.get("architecture");
+	if (const auto semi = value.find(';'); semi != std::string::npos)
+		value.resize(semi);
+	return norm_style(std::move(value));
+}
+
+bool is_listed(const tags_t &tags)
+{
+	auto positive = [&](const char *key) {
+		const auto value = tags.get(key);
+		return !value.empty() && norm_style(value) != "no";
+	};
+	return positive("historic") || positive("heritage") || tags.contains("ref:nrhp") ||
+		   positive("listed_status");
+}
+
+bool is_place_of_worship(const tags_t &tags)
+{
+	if (tags.get("amenity") == "place_of_worship")
+		return true;
+	const auto building = tags.get("building");
+	return building == "church" || building == "cathedral" || building == "chapel" ||
+		   building == "basilica" || building == "mosque" || building == "synagogue" ||
+		   building == "temple" || building == "shrine" || building == "monastery";
+}
+
+bool housing_type_impl(const tags_t &tags)
+{
+	const auto type = tags.get("building");
+	return type == "residential" || type == "apartments" || type == "house" ||
+		   type == "detached" || type == "semidetached_house" || type == "terrace" ||
+		   type == "dormitory" || type == "bungalow" || type == "villa";
+}
+
 std::string decode_xml(std::string value)
 {
 	const std::pair<const char *, const char *> entities[] = {{"&amp;", "&"},
@@ -185,17 +240,14 @@ StyleHint building_style_hint(const tags_t &tags)
 	if (material == "glass" || material == "mirror" ||
 			norm_style(tags.get("roof:material")) == "glass")
 		return StyleHint::Glass;
-	auto present_and_not_no = [&](const char *key) {
-		auto it = tags.find(key);
-		if (it == tags.end())
-			return false;
-		const auto &value = it->second;
-		return value.size() != 2 ||
-			   std::tolower(static_cast<unsigned char>(value[0])) != 'n' ||
-			   std::tolower(static_cast<unsigned char>(value[1])) != 'o';
-	};
-	if (present_and_not_no("historic") || present_and_not_no("heritage") ||
-			tags.contains("ref:nrhp") || present_and_not_no("listed_status"))
+	const auto arch = first_architecture(tags);
+	const auto year = building_start_year(tags);
+	const bool modern_arch = arch == "modern" || arch == "contemporary" ||
+							 arch == "modernism" || arch == "functionalism" ||
+							 arch == "newobjectivity" || arch == "postmodern" ||
+							 arch == "bauhaus";
+	if (is_listed(tags) &&
+			!(modern_arch || (year && *year >= 1945 && !is_place_of_worship(tags))))
 		return StyleHint::Masonry;
 	auto matches = [](std::string_view value,
 						   std::initializer_list<std::string_view> choices) {
@@ -210,8 +262,6 @@ StyleHint building_style_hint(const tags_t &tags)
 				{"brick", "brickmonolith", "plaster", "rendered", "rendering", "stone",
 						"tiling"}))
 		return StyleHint::Masonry;
-	const auto arch = norm_style(
-			std::string(first_value({"building:architecture", "architecture"})));
 	if (matches(arch,
 				{"artdeco", "artnouveau", "gothic", "neogothic", "gothicrevival",
 						"neoclassicism", "neoclassical", "classicism", "classicalrevival",
@@ -222,26 +272,115 @@ StyleHint building_style_hint(const tags_t &tags)
 						"wilhelminianstyle", "queenanne", "brutalist", "constructivism",
 						"stalinistneoclassicism"}))
 		return StyleHint::Masonry;
-	if (matches(arch, {"modern", "contemporary", "modernism", "functionalism",
-							  "newobjectivity", "postmodern", "bauhaus"}))
+	if (modern_arch)
 		return StyleHint::Contemporary;
-	for (const char *key : {"start_date", "construction_date", "year_of_construction"}) {
-		const auto value = tags.get(key);
-		for (std::size_t i = 0; i + 3 < value.size(); ++i) {
-			if (std::isdigit(static_cast<unsigned char>(value[i])) &&
-					std::isdigit(static_cast<unsigned char>(value[i + 1])) &&
-					std::isdigit(static_cast<unsigned char>(value[i + 2])) &&
-					std::isdigit(static_cast<unsigned char>(value[i + 3]))) {
-				if (std::stoi(value.substr(i, 4)) < 1945)
-					return StyleHint::Masonry;
-				break;
-			}
-		}
-	}
+	if (year && *year < 1945)
+		return StyleHint::Masonry;
 	if (matches(material, {"concrete", "reinforcedconcrete", "concretereinforced",
 								  "concretemasonryunit"}))
 		return StyleHint::Contemporary;
 	return StyleHint::None;
+}
+
+std::optional<std::int32_t> building_start_year(const tags_t &tags)
+{
+	for (const char *key : {"start_date", "construction_date", "year_of_construction"})
+		if (const auto year = first_year(tags.get(key)))
+			return year;
+	return std::nullopt;
+}
+
+bool is_housing_type(const tags_t &tags)
+{
+	return housing_type_impl(tags);
+}
+
+std::optional<std::int32_t> building_year_for_parts(const tags_t &tags)
+{
+	const auto year = building_start_year(tags);
+	if (!year)
+		return std::nullopt;
+	const auto era = building_arch_era_dated(tags, year);
+	return (*year < 1945 || era == ArchEra::PostWarPanel || era == ArchEra::Contemporary)
+				   ? year
+				   : std::nullopt;
+}
+
+std::uint64_t seed_with_metadata(std::uint64_t seed, StyleHint hint,
+		std::optional<std::int32_t> year, bool residential)
+{
+	const auto raw_year = year ? std::clamp(*year - YEAR_BASE, 1, 255) : 0;
+	seed = seed_without_hint(seed);
+	seed |= static_cast<std::uint64_t>(hint) << STYLE_HINT_SHIFT;
+	seed |= static_cast<std::uint64_t>(raw_year) << YEAR_SHIFT;
+	if (residential)
+		seed |= RESIDENTIAL_GROUP_BIT;
+	return seed;
+}
+
+ArchEra era_for_year(std::int32_t year)
+{
+	return year < 1945	 ? ArchEra::TraditionalPreWar
+		   : year < 1980 ? ArchEra::PostWarPanel
+						 : ArchEra::Contemporary;
+}
+
+bool is_art_deco(const tags_t &tags)
+{
+	return first_architecture(tags) == "artdeco";
+}
+
+ArchEra building_arch_era_dated(const tags_t &tags, std::optional<std::int32_t> year)
+{
+	const auto arch = first_architecture(tags);
+	const auto matches = [&](std::initializer_list<std::string_view> values) {
+		return std::find(values.begin(), values.end(), arch) != values.end();
+	};
+	if (matches({"artdeco", "artnouveau", "gothic", "neogothic", "gothicrevival",
+				"neoclassicism", "neoclassical", "classicism", "classicalrevival",
+				"greekrevival", "baroque", "neobaroque", "rococo", "barocco",
+				"historicism", "eclectic", "renaissance", "neorenaissance", "romanesque",
+				"neoromanesque", "romanesquerevival", "victorian", "georgian", "federal",
+				"italianate", "beauxarts", "wilhelminianstyle", "queenanne"}))
+		return ArchEra::HistoricOrnate;
+	if (matches({"brutalist", "constructivism", "stalinistneoclassicism"}))
+		return ArchEra::PostWarPanel;
+	if (matches({"modern", "contemporary", "modernism", "functionalism", "newobjectivity",
+				"postmodern", "bauhaus"}))
+		return year ? era_for_year(*year) : ArchEra::Contemporary;
+	if (is_listed(tags)) {
+		if (year && *year >= 1945 && !is_place_of_worship(tags))
+			return era_for_year(*year);
+		return ArchEra::HistoricOrnate;
+	}
+	if (year)
+		return era_for_year(*year);
+	const auto material =
+			norm_style(tags.get("building:material").empty()
+							   ? (tags.get("building:facade:material").empty()
+												 ? tags.get("facade:material")
+												 : tags.get("building:facade:material"))
+							   : tags.get("building:material"));
+	if (material == "panel" || material == "panels" || material == "prefab" ||
+			material == "prefabricated" || material == "panelhouse")
+		return ArchEra::PostWarPanel;
+	if (material == "brick" || material == "bricks" || material == "redbrick" ||
+			material == "silicatebrick" || material == "stone" ||
+			material == "naturalstone" || material == "sandstone" ||
+			material == "limestone" || material == "masonry" || material == "granite" ||
+			material == "marble" || material == "terracotta" || material == "adobe" ||
+			material == "stucco" || material == "pebbledash")
+		return ArchEra::TraditionalPreWar;
+	if (material == "concrete" || material == "reinforcedconcrete" ||
+			material == "concretereinforced" || material == "concretemasonryunit" ||
+			material == "glass" || material == "mirror")
+		return ArchEra::Contemporary;
+	const auto cladding = norm_style(tags.get("building:cladding"));
+	if (cladding == "brick" || cladding == "brickmonolith" || cladding == "plaster" ||
+			cladding == "rendered" || cladding == "rendering" || cladding == "stone" ||
+			cladding == "tiling")
+		return ArchEra::TraditionalPreWar;
+	return ArchEra::Unknown;
 }
 
 ArchEra arch_era_from_hint(StyleHint hint)

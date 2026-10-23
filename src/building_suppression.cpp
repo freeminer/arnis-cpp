@@ -1,10 +1,12 @@
 #include "building_suppression.h"
 
 #include "data_processing.h"
+#include "element_processing/buildings.h"
 #include "osm_parser.h"
 #include "strict_parse.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
@@ -153,13 +155,18 @@ struct RelationFootprint
 {
 	std::uint64_t id;
 	std::vector<std::vector<GeoPoint>> rings;
+	std::vector<std::vector<GeoPoint>> holes;
 	double area;
 	double center_lat;
 	double center_lon;
+	std::uint64_t seed = 0;
+	bool ground = true;
+	std::optional<std::uint64_t> way;
 };
 
 std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relation,
-		const std::unordered_map<std::uint64_t, const ProcessedWay *> &source_ways)
+		const std::unordered_map<std::uint64_t, const ProcessedWay *> &source_ways,
+		bool inner = false)
 {
 	std::unordered_map<std::uint64_t, GeoPoint> node_coordinates;
 	std::vector<std::vector<std::uint64_t>> open;
@@ -187,18 +194,19 @@ std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relat
 	};
 	if (!relation.source_members.empty()) {
 		// Rust evaluates suppression from the original OSM records, before relation
-		// members are clipped for rendering. The parser also normalizes roleless
-		// building members to Outer, but this pass intentionally accepts only
-		// explicit outer/outline roles.
+		// members are clipped for rendering. Keep outer/outline and inner rings
+		// separate so courtyard parts do not get attributed to the enclosing block.
 		for (const auto &member : relation.source_members) {
 			const auto role = normalized_role(member.role);
-			if (member.type != "way" || (role != "outer" && role != "outline"))
+			if (member.type != "way" ||
+					(inner ? role != "inner" : (role != "outer" && role != "outline")))
 				continue;
 			add_segment(member.id);
 		}
 	} else {
 		for (const auto &member : relation.members)
-			if (member.role == ProcessedMemberRole::Outer) {
+			if (member.role ==
+					(inner ? ProcessedMemberRole::Inner : ProcessedMemberRole::Outer)) {
 				const auto refs = way_refs(*member.way);
 				if (refs.size() >= 2) {
 					for (const auto &node : member.way->nodes)
@@ -285,7 +293,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	}
 
 	// Building relation members are prepared in geographic space. The relation
-	// owns a stable seed; style hint bits do not affect sibling variant rolls.
+	// owns a stable seed; packed facade/year/housing metadata do not change it.
 	std::unordered_set<std::uint64_t> relation_ways;
 	for (const auto *relation : building_relations) {
 		if (!relation->source_members.empty()) {
@@ -334,6 +342,26 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 						: member.role == ProcessedMemberRole::Inner ? "inner"
 																	: "outer"});
 		const auto &source_refs = refs.empty() ? fallback_refs : refs;
+		auto relation_year = osm_parser::building_year_for_parts(relation->tags);
+		bool housing = osm_parser::is_housing_type(relation->tags);
+		if (!relation_year || !housing) {
+			for (const auto &member : source_refs) {
+				if ((normalized_role(member.role) != "outer" &&
+							normalized_role(member.role) != "outline") ||
+						member.type != "way")
+					continue;
+				const auto way = ways.find(member.id);
+				if (way == ways.end())
+					continue;
+				if (!relation_year)
+					relation_year =
+							osm_parser::building_year_for_parts(way->second->tags);
+				if (!housing)
+					housing = osm_parser::is_housing_type(way->second->tags);
+				if (relation_year && housing)
+					break;
+			}
+		}
 		for (const auto &member : source_refs) {
 			if (normalized_role(member.role) != "part" ||
 					(member.type != "way" && member.type != "relation"))
@@ -343,8 +371,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 				has_relation_part = true;
 				continue;
 			}
-			out.part_groups[member.id] =
-					osm_parser::seed_with_hint(RELATION_SEED_BIT | relation->id, hint);
+			out.part_groups[member.id] = osm_parser::seed_with_metadata(
+					RELATION_SEED_BIT | relation->id, hint, relation_year, housing);
 			const auto way = ways.find(member.id);
 			if (way != ways.end() && covers_ground(way->second->tags))
 				part_area += ring_area(geo_ring(*way->second));
@@ -443,15 +471,21 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			if (hint == osm_parser::StyleHint::None)
 				hint = osm_parser::building_style_hint(part->tags);
 			out.part_groups[part->id] =
-					osm_parser::seed_with_hint(outlines[*best].way->id, hint);
+					osm_parser::seed_with_metadata(outlines[*best].way->id, hint,
+							osm_parser::building_year_for_parts(outlines[*best].way->tags)
+									? osm_parser::building_year_for_parts(
+											  outlines[*best].way->tags)
+									: osm_parser::building_year_for_parts(part->tags),
+							osm_parser::is_housing_type(outlines[*best].way->tags));
 		}
 	}
 	for (std::size_t i = 0; i < outlines.size(); ++i)
 		if (covered[i] / outlines[i].area >= MIN_PART_COVERAGE)
 			out.outline_suppression.emplace("way", outlines[i].way->id);
 
-	// Relations whose outer boundaries are split over member ways need stitched
-	// geographic rings before area and containment can be measured accurately.
+	// Relations whose boundaries are split over member ways need stitched rings. Also
+	// include closed building:part ways: Rust's spatial pass treats both sources alike,
+	// excludes courtyard holes, and assigns a way to its smallest containing outline.
 	std::vector<RelationFootprint> relation_outlines, relation_parts;
 	for (const auto &element : elements) {
 		if (!element.is_relation())
@@ -461,10 +495,12 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		if (type != "multipolygon" && type != "building")
 			continue;
 		const bool part = is_building_part(relation.tags);
-		if ((!part && !relation.tags.contains("building")) ||
-				(part && !covers_ground(relation.tags)))
+		const bool outline = !part && relation.tags.contains("building");
+		if (!part && !outline)
 			continue;
 		auto rings = relation_rings(relation, ways);
+		auto holes = outline ? relation_rings(relation, ways, true)
+							 : std::vector<std::vector<GeoPoint>>{};
 		double area = 0, lat_sum = 0, lon_sum = 0;
 		std::size_t count = 0;
 		for (const auto &ring : rings) {
@@ -477,10 +513,40 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		}
 		if (area <= 0 || count == 0)
 			continue;
-		RelationFootprint footprint{relation.id, std::move(rings), area,
+		RelationFootprint footprint{relation.id, std::move(rings), std::move(holes), area,
 				lat_sum / static_cast<double>(count),
-				lon_sum / static_cast<double>(count)};
-		(part ? relation_parts : relation_outlines).push_back(std::move(footprint));
+				lon_sum / static_cast<double>(count),
+				outline ? osm_parser::seed_with_metadata(RELATION_SEED_BIT | relation.id,
+								  osm_parser::building_style_hint(relation.tags),
+								  osm_parser::building_year_for_parts(relation.tags),
+								  osm_parser::is_housing_type(relation.tags))
+						: 0,
+				covers_ground(relation.tags), std::nullopt};
+		(outline ? relation_outlines : relation_parts).push_back(std::move(footprint));
+	}
+	for (const auto *way : ordered_ways) {
+		if (!is_building_part(way->tags) || buildings::is_underground_building(way->tags))
+			continue;
+		const auto &refs = way->source_node_refs;
+		const bool closed =
+				refs.empty() ? way->nodes.size() >= 4 &&
+									   way->nodes.front().id == way->nodes.back().id
+							 : refs.size() >= 4 && refs.front() == refs.back();
+		if (!closed)
+			continue;
+		auto ring = geo_ring(*way);
+		const double area = ring_area(ring);
+		if (area <= 0 || ring.empty())
+			continue;
+		double lat = 0, lon = 0;
+		for (const auto &point : ring) {
+			lat += point.lat;
+			lon += point.lon;
+		}
+		lat /= ring.size();
+		lon /= ring.size();
+		relation_parts.push_back({way->id, {std::move(ring)}, {}, area, lat, lon, 0,
+				covers_ground(way->tags), way->id});
 	}
 	std::map<GridCell, std::vector<std::size_t>> relation_grid;
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i) {
@@ -511,16 +577,106 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 				relation_grid.find(grid_cell(part.center_lat, part.center_lon));
 		if (candidates == relation_grid.end())
 			continue;
-		for (const auto i : candidates->second)
-			if (std::any_of(relation_outlines[i].rings.begin(),
-						relation_outlines[i].rings.end(), [&](const auto &ring) {
+		std::optional<std::size_t> best;
+		for (const auto i : candidates->second) {
+			const auto &outline = relation_outlines[i];
+			if (!std::any_of(outline.rings.begin(), outline.rings.end(),
+						[&](const auto &ring) {
 							return point_in_ring(part.center_lat, part.center_lon, ring);
 						}))
+				continue;
+			if (part.way && std::any_of(outline.holes.begin(), outline.holes.end(),
+									[&](const auto &ring) {
+										return point_in_ring(
+												part.center_lat, part.center_lon, ring);
+									}))
+				continue;
+			if (part.ground)
 				relation_coverage[i] += part.area;
+			if (!best || std::pair{outline.area, outline.id} <
+								 std::pair{relation_outlines[*best].area,
+										 relation_outlines[*best].id})
+				best = i;
+		}
+		if (part.way && best)
+			out.part_groups.try_emplace(*part.way, relation_outlines[*best].seed);
 	}
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i)
 		if (relation_coverage[i] / relation_outlines[i].area >= MIN_PART_COVERAGE)
 			out.suppressed_relations.insert(relation_outlines[i].id);
+
+	// A material/color mapped on a masonry outline is the building-wide facade;
+	// untagged building:parts inherit it, while explicit part palettes still win.
+	static constexpr std::array<const char *, 5> facade_keys{"building:material",
+			"building:facade:material", "facade:material", "building:colour", "colour"};
+	const auto normalized = [](std::string value) {
+		std::string result;
+		for (unsigned char c : value)
+			if (!std::isspace(c) && c != '_' && c != '-')
+				result.push_back(static_cast<char>(std::tolower(c)));
+		return result;
+	};
+	const auto masonry = [&](const tags_t &tags) {
+		std::string material = tags.get("building:material");
+		if (material.empty())
+			material = tags.get("building:facade:material");
+		const auto value = normalized(std::move(material));
+		return value == "brick" || value == "bricks" || value == "stone" ||
+			   value == "naturalstone" || value == "limestone" || value == "sandstone" ||
+			   value == "marble" || value == "granite" || value == "plaster" ||
+			   value == "stucco" || value == "render" || value == "concrete";
+	};
+	const auto facade_of = [&](const tags_t &tags) {
+		tags_t result;
+		for (const auto *key : facade_keys)
+			if (const auto found = tags.find(key); found != tags.end())
+				result.emplace(found->first, found->second);
+		return result;
+	};
+	std::unordered_set<std::uint64_t> groups;
+	for (const auto &[_, seed] : out.part_groups)
+		groups.insert(osm_parser::group_key(seed));
+	std::unordered_map<std::uint64_t, tags_t> facade_by_group;
+	std::unordered_map<std::uint64_t, std::uint64_t> relation_outline_group;
+	for (const auto *relation : building_relations) {
+		const auto key = RELATION_SEED_BIT | relation->id;
+		if (!groups.contains(key))
+			continue;
+		if (masonry(relation->tags)) {
+			facade_by_group.emplace(key, facade_of(relation->tags));
+			continue;
+		}
+		if (!relation->source_members.empty()) {
+			for (const auto &member : relation->source_members)
+				if (member.type == "way" && (normalized(member.role) == "outline" ||
+													normalized(member.role) == "outer"))
+					relation_outline_group.emplace(member.id, key);
+		} else {
+			for (const auto &member : relation->members)
+				if (member.role == ProcessedMemberRole::Outer)
+					relation_outline_group.emplace(member.way->id, key);
+		}
+	}
+	for (const auto *way : ordered_ways) {
+		if (!masonry(way->tags))
+			continue;
+		if (groups.contains(way->id))
+			facade_by_group.insert_or_assign(way->id, facade_of(way->tags));
+		else if (const auto relation = relation_outline_group.find(way->id);
+				 relation != relation_outline_group.end())
+			facade_by_group.try_emplace(relation->second, facade_of(way->tags));
+	}
+	for (const auto *way : ordered_ways) {
+		const auto group = out.part_groups.find(way->id);
+		if (group == out.part_groups.end())
+			continue;
+		const auto facade = facade_by_group.find(osm_parser::group_key(group->second));
+		if (facade == facade_by_group.end() ||
+				std::any_of(std::begin(facade_keys), std::end(facade_keys),
+						[&](const char *key) { return way->tags.contains(key); }))
+			continue;
+		out.inherited_facade_tags.emplace(way->id, facade->second);
+	}
 
 	return out;
 }

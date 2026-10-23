@@ -40,6 +40,7 @@ namespace highways
 {
 
 constexpr int MAX_BLOCK_RANGE = 8;
+constexpr int LAYERED_LAMP_DECK_REACH = 3;
 
 std::optional<double> parse_width_tag_m(
 		const std::unordered_map<std::string, std::string> &tags)
@@ -393,14 +394,20 @@ int node_feature_base_y(const crate::world_editor::WorldEditor &editor,
 		const std::unordered_map<std::string, std::string> &tags, int x, int z,
 		int bridge_radius = 0)
 {
-	int layer = 0;
+	bool layered = false;
 	if (tags.find("indoor") == tags.end() || tags.at("indoor") != "yes") {
 		if (const auto it = tags.find("layer"); it != tags.end()) {
-			layer = std::max(0, crate::strict_parse::i32(it->second).value_or(0));
+			layered = crate::strict_parse::i32(it->second).value_or(0) > 0;
 		}
 	}
-	return bridge_surface.nearby_deck_y(x, z, bridge_radius)
-			.value_or(editor.get_ground_level(x, z) + layer * 6);
+	if (layered) {
+		if (const auto deck = bridge_surface.nearest_deck_cell(
+					x, z, std::max(1, bridge_radius)))
+			return deck->second;
+	} else if (const auto deck = bridge_surface.nearby_deck_y(x, z, bridge_radius)) {
+		return *deck;
+	}
+	return editor.get_absolute_y(x, 0, z);
 }
 
 void place_way_lamps(crate::world_editor::WorldEditor &editor,
@@ -409,6 +416,7 @@ void place_way_lamps(crate::world_editor::WorldEditor &editor,
 {
 	const auto place_street_lamp = [&editor](int x, int z) {
 		const int base = editor.get_absolute_y(x, 0, z);
+		editor.register_lamp(x, z);
 		editor.set_block_absolute(crate::block_definitions::SMOOTH_STONE, x, base + 1, z);
 		for (int dy = 2; dy <= 4; ++dy)
 			editor.set_block_absolute(
@@ -449,6 +457,36 @@ void place_way_lamps(crate::world_editor::WorldEditor &editor,
 			}
 			++tds;
 		}
+	}
+}
+
+void drop_lamps_in_water(crate::world_editor::WorldEditor &editor)
+{
+	using namespace crate::block_definitions;
+	const std::vector<Block> parts{
+			SMOOTH_STONE, STONE_BRICK_WALL, REDSTONE_LAMP, IRON_TRAPDOOR};
+	for (const auto &[x, z] : editor.take_lamps()) {
+		const auto is = [&](int y, std::initializer_list<Block> blocks) {
+			return editor.check_for_block_absolute(x, y, z,
+					std::optional<std::vector<Block>>{std::vector<Block>(blocks)},
+					std::nullopt);
+		};
+		const int ground = editor.get_ground_level(x, z);
+		std::optional<int> head;
+		for (int y = ground + 2; y <= ground + 12; ++y)
+			if (is(y, {REDSTONE_LAMP}) && is(y - 1, {STONE_BRICK_WALL})) {
+				head = y;
+				break;
+			}
+		if (!head)
+			continue;
+		int foot = *head - 1;
+		while (foot > *head - 4 && is(foot - 1, {STONE_BRICK_WALL, SMOOTH_STONE}))
+			--foot;
+		if (!is(foot - 1, {WATER}))
+			continue;
+		for (int y = foot; y <= *head + 1; ++y)
+			editor.set_block_absolute(AIR, x, y, z, parts, std::nullopt);
 	}
 }
 
@@ -767,6 +805,19 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		if (element.is_node()) {
 			int x = element.as_node().x;
 			int z = element.as_node().z;
+			const auto &tags = element.tags();
+			const auto indoor = tags.find("indoor");
+			const auto layer = tags.find("layer");
+			const bool layered = (indoor == tags.end() || indoor->second != "yes") &&
+								 layer != tags.end() &&
+								 crate::strict_parse::i32(layer->second).value_or(0) > 0;
+			if (layered) {
+				if (const auto deck = bridge_surface.nearest_deck_cell(
+							x, z, LAYERED_LAMP_DECK_REACH)) {
+					x = deck->first.first;
+					z = deck->first.second;
+				}
+			}
 			const int base =
 					node_feature_base_y(editor, bridge_surface, element.tags(), x, z);
 			editor.set_block_absolute(crate::block_definitions::COBBLESTONE_WALL, x,

@@ -225,7 +225,7 @@ void sweep_module(world_editor::WorldEditor *editor,
 		const auto &slice = module.slices[i % module.length];
 		for (const auto &voxel : slice) {
 			const bool open = voxel.w > 0 ? open_left : open_right;
-			if (!open && voxel.dy > 0 && std::abs(voxel.w) * 2 >= module.half_width)
+			if (!open && voxel.dy > 0)
 				continue;
 			if (!open && voxel.dy == 0 && is_railing_part(voxel.source_name))
 				continue;

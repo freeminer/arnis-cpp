@@ -576,7 +576,7 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 	return true;
 }
 
-void carve_highway_tunnel_interior(
+std::vector<TunnelLight> carve_highway_tunnel_interior(
 		WorldEditor &editor, const std::vector<HighwayTunnelCell> &cells)
 {
 	const std::vector<Block> carve{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS,
@@ -602,8 +602,6 @@ void carve_highway_tunnel_interior(
 					for (int y = c.road_y + 1; y <= top; ++y)
 						editor.set_block_absolute(AIR, x, y, z, carve, std::nullopt);
 				}
-		if (c.light)
-			editor.set_block_absolute(SEA_LANTERN, c.x, c.road_y + CEIL_OFFSET - 1, c.z);
 	}
 	for (const auto &c : cells)
 		for (int dx = -c.half_width; dx <= c.half_width; ++dx)
@@ -612,5 +610,27 @@ void carve_highway_tunnel_interior(
 					editor.set_block_absolute(
 							surfaces::semirandom_surface(c.x + dx, c.z + dz, *c.palette),
 							c.x + dx, c.road_y, c.z + dz, road_wl, std::nullopt);
+	std::vector<TunnelLight> lights;
+	for (const auto &c : cells)
+		if (c.light)
+			lights.push_back({c.x, c.z, c.road_y + 3, c.road_y + CEIL_OFFSET + 2});
+	return lights;
+}
+
+void hang_tunnel_lights(WorldEditor &editor, const std::vector<TunnelLight> &lights)
+{
+	const std::optional<std::vector<Block>> lantern{std::vector<Block>{SEA_LANTERN}};
+	for (const auto &light : lights) {
+		if (!editor.owns(light.x, light.z))
+			continue;
+		std::optional<int> roof;
+		for (int y = light.lo; y <= light.hi; ++y)
+			if (editor.block_exists_absolute(light.x, y, light.z)) {
+				roof = y;
+				break;
+			}
+		if (roof && !editor.check_for_block_absolute(light.x, *roof, light.z, lantern))
+			editor.set_block_absolute(SEA_LANTERN, light.x, *roof - 1, light.z);
+	}
 }
 }

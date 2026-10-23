@@ -83,6 +83,13 @@ unsigned quarter_for_bearing(const StructureSchematic &schem, double degrees)
 
 void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
+	static const CoordinateBitmap empty_footprints;
+	maybe_place_crane(editor, cells, empty_footprints);
+}
+
+void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells,
+		const CoordinateBitmap &building_footprints)
+{
 	if (!editor.place_schematics() || cells.size() < 1500)
 		return;
 	auto schematic = crane_schematic(editor);
@@ -108,7 +115,7 @@ void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int
 	if (site_has_mapped_crane(editor, cells))
 		return;
 	const auto h = land_cover::coord_hash(x, z);
-	if (editor.is_lc_water(x, z) || h % 100 >= 60)
+	if (editor.is_lc_water(x, z) || building_footprints.contains(x, z) || h % 100 >= 60)
 		return;
 	place_structure(editor, *schematic, x, editor.get_absolute_y(x, 1, z), z,
 			(unsigned)((h >> 8) & 3));
@@ -172,5 +179,26 @@ void place_mapped(WorldEditor &editor, int x, int z, const tags_t &tags,
 		}
 	}
 	place_structure(editor, *schematic, x, editor.get_absolute_y(x, 1, z), z, rotation);
+}
+
+std::optional<std::pair<int, int>> mapped_crane_on(
+		const WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
+{
+	if (!editor.mapped_cranes || cells.empty())
+		return std::nullopt;
+	for (const auto &point : *editor.mapped_cranes)
+		if (std::find(cells.begin(), cells.end(), point) != cells.end())
+			return point;
+	return std::nullopt;
+}
+
+void place_on_site(WorldEditor &editor, int x, int z, int base_y, std::uint64_t seed)
+{
+	if (!editor.place_schematics() || editor.is_lc_water(x, z))
+		return;
+	const auto schematic = crane_schematic(editor);
+	if (!schematic)
+		return;
+	place_structure(editor, *schematic, x, base_y, z, static_cast<unsigned>(seed & 3));
 }
 }

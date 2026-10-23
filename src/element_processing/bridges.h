@@ -107,6 +107,8 @@ public:
 			const BridgeStructureMap &structures, double scale);
 
 	std::optional<int> deck_y_at(int x, int z) const;
+	std::optional<std::pair<std::pair<int, int>, int>> nearest_deck_cell(
+			int x, int z, int radius) const;
 	std::optional<int> nearby_deck_y(int x, int z, int radius) const;
 	bool deck_near(int x, int z, int y, int tolerance) const;
 	std::optional<std::pair<std::uint64_t, int>> rail_track_at(int x, int z) const;

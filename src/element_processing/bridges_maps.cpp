@@ -16,6 +16,7 @@
 #include "../strict_parse.h"
 #include "bridge_modules.h"
 #include "highways.h"
+#include "rail_track.h"
 
 namespace arnis::railways
 {
@@ -1810,8 +1811,10 @@ BridgeStructureMap BridgeStructureMap::build(
 				info.level_y = std::max(deck_y, floor_y);
 				info.start_is_boundary = !start_internal;
 				info.end_is_boundary = !end_internal;
-				info.ys = railways::rail_bridge_profile(
-						terrain, info.level_y, start_internal, end_internal);
+				info.ys = railways::fit_rail_deck(path, terrain,
+						railways::rail_bridge_profile(
+								terrain, info.level_y, start_internal, end_internal),
+						{start_internal, end_internal});
 				result.rail_decks_[way.id] = std::move(info);
 			}
 		}
@@ -2001,6 +2004,24 @@ std::optional<int> BridgeSurfaceMap::deck_y_at(int x, int z) const
 {
 	const auto it = deck_y_.find({x, z});
 	return it == deck_y_.end() ? std::nullopt : std::optional<int>(it->second);
+}
+
+std::optional<std::pair<std::pair<int, int>, int>> BridgeSurfaceMap::nearest_deck_cell(
+		int x, int z, int radius) const
+{
+	std::optional<std::tuple<int, std::pair<int, int>, int>> best;
+	for (int dx = -radius; dx <= radius; ++dx) {
+		for (int dz = -radius; dz <= radius; ++dz) {
+			const std::pair<int, int> cell{x + dx, z + dz};
+			const int distance = dx * dx + dz * dz;
+			if (const auto it = deck_y_.find(cell);
+					it != deck_y_.end() && (!best || distance < std::get<0>(*best)))
+				best = std::tuple{distance, cell, it->second};
+		}
+	}
+	if (!best)
+		return std::nullopt;
+	return std::pair{std::get<1>(*best), std::get<2>(*best)};
 }
 
 std::optional<int> BridgeSurfaceMap::nearby_deck_y(int x, int z, int radius) const

@@ -17,6 +17,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace arnis::highways::cars
 {
@@ -29,11 +30,15 @@ constexpr double JUNCTION_KMH = 25.0;
 constexpr double LANE_END_KMH = 32.0;
 constexpr double LANE_END_REACH = 10.0;
 constexpr double U_TURN_KMH = 12.0;
+constexpr double U_TURN_RADIUS_M = 3.0;
+constexpr double STUB_M = 25.0;
+constexpr double SCRAP_M = 100.0;
+constexpr double EDGE_REACH = 3.0;
+constexpr double MIN_LEG = 2.0;
 constexpr double ENTRY_TURN_DEG = 135.0;
 constexpr double SHARP_DEG = 100.0;
 constexpr double SHORT_LANE = 3.0;
 constexpr double CROSSING_REACH = 40.0;
-constexpr double HAIRPIN_SWING = 3.0;
 constexpr double LIMIT_SHARE = 0.92;
 constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> CAR_COLOURS{
 		{{"minecraft:white_concrete", 24}, {"minecraft:black_concrete", 20},
@@ -110,6 +115,13 @@ struct Mark
 	double distance{};
 	std::optional<std::uint8_t> stop;
 	std::optional<std::int32_t> cap;
+};
+
+struct Reach
+{
+	double stub;
+	double scrap;
+	double turn_round;
 };
 
 std::int32_t step_speed(double kmh, double scale)
@@ -290,9 +302,26 @@ std::vector<std::pair<double, double>> lane_line(
 	};
 	std::vector<std::pair<double, double>> result;
 	result.reserve(centre.size());
+	const auto far = [&](std::size_t a, std::size_t b) {
+		return std::hypot(centre[b].first - centre[a].first,
+					   centre[b].second - centre[a].second) >= MIN_LEG;
+	};
 	for (std::size_t k = 0; k < centre.size(); ++k) {
-		const auto into = k > 0 ? direction(k - 1, k) : std::nullopt;
-		const auto out = k + 1 < centre.size() ? direction(k, k + 1) : std::nullopt;
+		std::optional<std::pair<double, double>> into, out;
+		for (std::size_t j = k; j > 0 && !into; --j)
+			if (far(j - 1, k))
+				into = direction(j - 1, k);
+		for (std::size_t j = k + 1; j < centre.size() && !out; ++j)
+			if (far(k, j))
+				out = direction(k, j);
+		const auto near = [&]() -> std::optional<std::pair<double, double>> {
+			if (k > 0)
+				if (auto d = direction(k - 1, k))
+					return d;
+			if (k + 1 < centre.size())
+				return direction(k, k + 1);
+			return std::nullopt;
+		};
 		std::pair<double, double> d{1.0, 0.0};
 		if (into && out)
 			d = unit(into->first + out->first, into->second + out->second).value_or(*out);
@@ -300,6 +329,8 @@ std::vector<std::pair<double, double>> lane_line(
 			d = *into;
 		else if (out)
 			d = *out;
+		else if (const auto fallback = near())
+			d = *fallback;
 		const std::pair<double, double> side =
 				left ? std::pair{d.second, -d.first} : std::pair{-d.second, d.first};
 		result.emplace_back(centre[k].first + side.first * offset,
@@ -319,10 +350,11 @@ std::optional<std::int32_t> lower(
 		std::optional<std::int32_t> a, std::optional<std::int32_t> b);
 void refine(double a, double b, const std::function<double(double)> &y_at, unsigned depth,
 		std::vector<Mark> &out);
-void tidy(Segment &segment);
+void tidy(Segment &segment, double radius);
 void pace(Segment &segment);
 void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
-		const ::XZBBox &world, const std::function<std::int32_t(double)> &speed_at);
+		const ::XZBBox &world, const std::function<std::int32_t(double)> &speed_at,
+		Reach reach);
 std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale);
 
 } // namespace
@@ -531,9 +563,11 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		segments.push_back(std::move(segment));
 	}
 
+	const double vehicle_size = std::clamp(scale, 0.4, 3.0);
 	for (auto &segment : segments)
-		tidy(segment);
-	link(segments, lanes, world, [scale](double kmh) { return step_speed(kmh, scale); });
+		tidy(segment, U_TURN_RADIUS_M * vehicle_size);
+	link(segments, lanes, world, [scale](double kmh) { return step_speed(kmh, scale); },
+			{STUB_M * scale, SCRAP_M * scale, U_TURN_RADIUS_M * vehicle_size});
 	for (auto &segment : segments)
 		pace(segment);
 	CarNetwork result;
@@ -631,7 +665,75 @@ std::vector<std::tuple<double, double, double>> curve(std::pair<double, double> 
 	return out;
 }
 
-void tidy(Segment &segment)
+std::tuple<double, double, double> turn_round_shape(double gap, double radius)
+{
+	const double r = std::max(radius, gap / 2.0);
+	const double swing = r - gap / 2.0;
+	const double run = swing > 0.25 ? std::max(3.0 * swing, 1.5) : 0.0;
+	return {r, swing, run};
+}
+
+double turn_round_reach(double gap, double radius)
+{
+	const auto [r, swing, run] = turn_round_shape(gap, radius);
+	(void)swing;
+	return run + r;
+}
+
+std::vector<std::tuple<double, double, double>> turn_round(std::pair<double, double> a,
+		std::pair<double, double> h, std::pair<double, double> meet, double radius)
+{
+	const double across =
+			(meet.first - a.first) * -h.second + (meet.second - a.second) * h.first;
+	const std::pair<double, double> n =
+			across >= 0.0 ? std::pair{-h.second, h.first} : std::pair{h.second, -h.first};
+	const double gap = std::abs(across);
+	const auto [r, swing, run] = turn_round_shape(gap, radius);
+	const auto at = [&](double along, double side) {
+		return std::pair{a.first + h.first * along + n.first * side,
+				a.second + h.second * along + n.second * side};
+	};
+	const auto bend = [](auto from, auto c1, auto c2, auto to) {
+		return curve(from, c1, c2, to);
+	};
+	std::vector<std::pair<double, double>> path{a};
+	if (run > 0.0) {
+		auto first = bend(a, at(run / 2.0, 0.0), at(run / 2.0, -swing), at(run, -swing));
+		for (const auto &[x, z, _] : first)
+			path.emplace_back(x, z);
+	}
+	for (int k = 0; k <= 8; ++k) {
+		const double t = std::numbers::pi * k / 8.0;
+		path.push_back(at(run + r * std::sin(t), gap / 2.0 - r * std::cos(t)));
+	}
+	if (run > 0.0) {
+		auto last = bend(at(run, gap + swing), at(run / 2.0, gap + swing),
+				at(run / 2.0, gap), at(0.0, gap));
+		for (const auto &[x, z, _] : last)
+			path.emplace_back(x, z);
+	}
+	path.push_back(meet);
+	path.erase(std::unique(path.begin(), path.end(),
+					   [](const auto &p, const auto &q) {
+						   return std::hypot(p.first - q.first, p.second - q.second) <
+								  0.5;
+					   }),
+			path.end());
+	double total = 0.0;
+	for (std::size_t k = 1; k < path.size(); ++k)
+		total += std::hypot(
+				path[k].first - path[k - 1].first, path[k].second - path[k - 1].second);
+	double along = 0.0;
+	std::vector<std::tuple<double, double, double>> result;
+	for (std::size_t k = 1; k + 1 < path.size(); ++k) {
+		along += std::hypot(
+				path[k].first - path[k - 1].first, path[k].second - path[k - 1].second);
+		result.emplace_back(path[k].first, path[k].second, along / std::max(total, 1e-9));
+	}
+	return result;
+}
+
+void tidy(Segment &segment, double radius)
 {
 	const auto dir = [](const Waypoint &p, const Waypoint &q) {
 		return unit(q.x - p.x, q.z - p.z);
@@ -680,8 +782,14 @@ void tidy(Segment &segment)
 			const auto a = dir(old[k - 1], p);
 			const auto b = dir(p, old[k + 1]);
 			if (a && b) {
-				const double d = std::min(
+				double d = std::min(
 						0.45 * std::min(gap(old[k - 1], p), gap(p, old[k + 1])), 3.0);
+				const bool hairpin = turn(k) > 150.0;
+				if (hairpin) {
+					const double legs = std::min(gap(old[k - 1], p), gap(p, old[k + 1]));
+					d = std::max(d,
+							std::min(0.45 * legs, turn_round_reach(0.0, radius) - 1.0));
+				}
 				if (turn(k) > 40.0 && d >= 0.5)
 					corner = std::tuple{*a, *b, d};
 			}
@@ -694,25 +802,24 @@ void tidy(Segment &segment)
 		const auto &[a, b, d] = *corner;
 		const std::pair from{p.x - a.first * d, p.z - a.second * d};
 		const std::pair to{p.x + b.first * d, p.z + b.second * d};
-		std::pair<double, double> c1, c2;
-		if (turn(k) <= 150.0) {
-			const double r = d * 2.0 / 3.0;
-			c1 = {from.first + a.first * r, from.second + a.second * r};
-			c2 = {to.first - b.first * r, to.second - b.second * r};
-		} else {
-			const double ab = a.first * b.first + a.second * b.second;
-			const auto n = unit(a.first * ab - b.first, a.second * ab - b.second)
-								   .value_or(std::pair{-a.second, a.first});
-			const std::pair tip{p.x + a.first * d, p.z + a.second * d};
-			c1 = {tip.first + n.first * HAIRPIN_SWING,
-					tip.second + n.second * HAIRPIN_SWING};
-			c2 = {tip.first - n.first * HAIRPIN_SWING,
-					tip.second - n.second * HAIRPIN_SWING};
-		}
+		const bool hairpin = turn(k) > 150.0;
 		std::vector<std::tuple<double, double, double>> points{
 				{from.first, from.second, 0.0}};
-		auto mid = curve(from, c1, c2, to);
-		points.insert(points.end(), mid.begin(), mid.end());
+		if (!hairpin) {
+			const double r = d * 2.0 / 3.0;
+			const std::pair c1{from.first + a.first * r, from.second + a.second * r};
+			const std::pair c2{to.first - b.first * r, to.second - b.second * r};
+			auto mid = curve(from, c1, c2, to);
+			points.insert(points.end(), mid.begin(), mid.end());
+		} else {
+			const double across = std::abs((to.first - from.first) * -a.second +
+										   (to.second - from.second) * a.first);
+			double r = radius;
+			while (r > 0.5 && turn_round_reach(across, r) > d + 1.0)
+				r -= 0.25;
+			auto around = turn_round(from, a, to, r);
+			points.insert(points.end(), around.begin(), around.end());
+		}
 		points.emplace_back(to.first, to.second, 1.0);
 		for (const auto &[x, z, t] : points) {
 			segment.points.push_back({std::round(x * 10.0) / 10.0, p.y,
@@ -892,7 +999,8 @@ std::optional<std::pair<std::size_t, double>> entry(
 }
 
 bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
-		const ::XZBBox &world, const std::function<std::int32_t(double)> &speed_at)
+		const ::XZBBox &world, double turn_radius,
+		const std::function<std::int32_t(double)> &speed_at)
 {
 	if (i >= segments.size() || j >= segments.size())
 		return false;
@@ -953,9 +1061,15 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 	const auto raw_cap = speed_at(std::max(70.0 - 0.6 * turn, U_TURN_KMH));
 	const std::optional<std::int32_t> cap =
 			raw_cap < segment.speed ? std::optional<std::int32_t>(raw_cap) : std::nullopt;
-	auto points = curve({a.x, a.z},
-			{a.x + heading->first * reach, a.z + heading->second * reach},
-			{meet.x - out.first * reach, meet.z - out.second * reach}, {meet.x, meet.z});
+	std::vector<std::tuple<double, double, double>> points;
+	if (turn > 150.0) {
+		points = turn_round({a.x, a.z}, *heading, {meet.x, meet.z}, turn_radius);
+	} else {
+		points = curve({a.x, a.z},
+				{a.x + heading->first * reach, a.z + heading->second * reach},
+				{meet.x - out.first * reach, meet.z - out.second * reach},
+				{meet.x, meet.z});
+	}
 	if (onto_meet)
 		points.emplace_back(meet.x, meet.z, 1.0);
 	double arc = segment.arcs.empty() ? 0.0 : segment.arcs.back();
@@ -980,7 +1094,8 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 }
 
 void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
-		const ::XZBBox &world, const std::function<std::int32_t(double)> &speed_at)
+		const ::XZBBox &world, const std::function<std::int32_t(double)> &speed_at,
+		Reach reach)
 {
 	std::unordered_map<std::uint64_t, std::vector<std::size_t>> starting;
 	for (std::size_t i = 0; i < lanes.size() && i < segments.size(); ++i)
@@ -1000,6 +1115,11 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 				*lane.reverse < segments.size() && usable(segments[*lane.reverse]))
 			ways_on[i].push_back(*lane.reverse);
 	}
+	const auto lane_length = [](const Segment &segment) {
+		return segment.arcs.empty() ? 0.0 : segment.arcs.back() - segment.arcs.front();
+	};
+	for (auto &segment : segments)
+		segment.stub = segment.turns_back && lane_length(segment) < reach.stub;
 	std::vector<bool> short_lane(segments.size());
 	for (std::size_t i = 0; i < segments.size(); ++i) {
 		const auto &arcs = segments[i].arcs;
@@ -1028,6 +1148,13 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 				next.push_back(j);
 			}
 		}
+		if (std::any_of(next.begin(), next.end(),
+					[&](auto j) { return j < segments.size() && !segments[j].stub; }))
+			next.erase(std::remove_if(next.begin(), next.end(),
+							   [&](auto j) {
+								   return j < segments.size() && segments[j].stub;
+							   }),
+					next.end());
 		std::vector<std::pair<std::size_t, std::optional<std::pair<std::size_t, double>>>>
 				entries;
 		for (const auto &j : next)
@@ -1040,15 +1167,48 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 		if (entries.size() == 1 &&
 				(!entries[0].second || entries[0].second->second > SHARP_DEG)) {
 			const auto j = entries[0].first;
-			if (bend_into(segments, i, j, world, speed_at)) {
+			if (bend_into(segments, i, j, world, reach.turn_round, speed_at)) {
 				const auto e = entry(segments[i].points, segments[j].points);
 				turns.emplace_back(j, e ? e->first : 0);
 			} else {
 				turns = forward;
 			}
 		} else if (forward.empty()) {
-			for (const auto &[j, e] : entries)
-				turns.emplace_back(j, 0);
+			// If every exit is too sharp to enter, curve onto the gentlest rather
+			// than making the vehicle turn in place at the junction.
+			std::optional<std::size_t> gentlest;
+			double gentlest_angle = std::numeric_limits<double>::infinity();
+			const auto heading = [](const std::vector<Waypoint> &points) {
+				for (std::size_t k = points.size(); k > 1; --k)
+					if (const auto d = unit(points[k - 1].x - points[k - 2].x,
+								points[k - 1].z - points[k - 2].z))
+						return d;
+				return std::optional<std::pair<double, double>>{};
+			};
+			const auto incoming = heading(segments[i].points);
+			for (const auto j : next) {
+				if (j >= segments.size())
+					continue;
+				const auto outgoing = heading(segments[j].points);
+				if (!incoming || !outgoing)
+					continue;
+				const double angle =
+						std::acos(std::clamp(incoming->first * outgoing->first +
+													 incoming->second * outgoing->second,
+								-1.0, 1.0));
+				if (angle < gentlest_angle) {
+					gentlest = j;
+					gentlest_angle = angle;
+				}
+			}
+			if (gentlest && bend_into(segments, i, *gentlest, world, reach.turn_round,
+									speed_at)) {
+				const auto e = entry(segments[i].points, segments[*gentlest].points);
+				turns.emplace_back(*gentlest, e ? e->first : 0);
+			} else {
+				for (const auto &[j, e] : entries)
+					turns.emplace_back(j, 0);
+			}
 		} else {
 			turns = forward;
 		}
@@ -1064,6 +1224,48 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 			segments[i].next.push_back({j, e, crossing});
 		}
 	}
+
+	// Drop disconnected, tiny road systems unless they reach the area edge and
+	// therefore continue into roads outside the generated footprint.
+	std::vector<std::size_t> root(segments.size());
+	for (std::size_t i = 0; i < root.size(); ++i)
+		root[i] = i;
+	const auto find_root = [&](std::size_t k, auto &&self) -> std::size_t {
+		if (root[k] != k)
+			root[k] = self(root[k], self);
+		return root[k];
+	};
+	for (std::size_t i = 0; i < segments.size(); ++i)
+		for (const auto &turn : segments[i].next)
+			if (turn.lane < segments.size()) {
+				const auto a = find_root(i, find_root);
+				const auto b = find_root(turn.lane, find_root);
+				root[a] = b;
+			}
+	std::unordered_map<std::size_t, double> network_length;
+	std::unordered_set<std::size_t> open_networks;
+	const auto near_edge = [](double value, int lo, int hi) {
+		return value < static_cast<double>(lo) + EDGE_REACH ||
+			   value > static_cast<double>(hi + 1) - EDGE_REACH;
+	};
+	for (std::size_t i = 0; i < segments.size(); ++i) {
+		const auto network = find_root(i, find_root);
+		network_length[network] += lane_length(segments[i]);
+		if (segments[i].points.empty())
+			continue;
+		const auto at_edge = [&](const Waypoint &p) {
+			return near_edge(p.x, world.min_x(), world.max_x()) ||
+				   near_edge(p.z, world.min_z(), world.max_z());
+		};
+		if (at_edge(segments[i].points.front()) || at_edge(segments[i].points.back()))
+			open_networks.insert(network);
+	}
+	for (std::size_t i = 0; i < segments.size(); ++i) {
+		const auto network = find_root(i, find_root);
+		if (!open_networks.contains(network) &&
+				network_length[network] < 2.0 * reach.scrap)
+			segments[i].next.clear();
+	}
 }
 
 std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
@@ -1075,7 +1277,7 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 	};
 	double wanted = 0.0;
 	for (const auto &segment : segments)
-		if (segment.points.size() >= 2)
+		if (segment.points.size() >= 2 && !segment.stub && !segment.next.empty())
 			wanted += length(segment) / scale * segment.density;
 	const double thin = wanted > MAX_CARS ? static_cast<double>(MAX_CARS) / wanted : 1.0;
 	std::vector<Car> cars;
@@ -1083,7 +1285,7 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 	double owed = 0.5;
 	for (std::size_t i = 0; i < segments.size(); ++i) {
 		const auto &segment = segments[i];
-		if (segment.points.size() < 2 || segment.next.empty())
+		if (segment.points.size() < 2 || segment.stub || segment.next.empty())
 			continue;
 		const double len = length(segment);
 		owed += len / scale * segment.density * thin;

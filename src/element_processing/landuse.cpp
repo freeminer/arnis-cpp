@@ -511,7 +511,7 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	}
 
 	if (landuse_tag == "construction") {
-		structures::crane::maybe_place_crane(editor, floor_area);
+		structures::crane::maybe_place_crane(editor, floor_area, building_footprints);
 		structures::excavator::scatter_excavators(editor, floor_area);
 		construction_site::furnish(editor, element, floor_area, building_footprints);
 	}

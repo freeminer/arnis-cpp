@@ -30,6 +30,14 @@ struct HighwayTunnelCell
 	std::vector<PortalFace> faces;
 };
 
+struct TunnelLight
+{
+	int x = 0;
+	int z = 0;
+	int lo = 0;
+	int hi = 0;
+};
+
 struct TunnelPointHash
 {
 	size_t operator()(const std::pair<int, int> &p) const noexcept
@@ -83,6 +91,7 @@ CoordinateBitmap collect_tunnel_footprint(const std::vector<ProcessedElement> &e
 bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 		const Args &args, const TunnelInternalEndpoints &internal,
 		const TunnelPortalMap &portals, std::vector<HighwayTunnelCell> &cells);
-void carve_highway_tunnel_interior(
+std::vector<TunnelLight> carve_highway_tunnel_interior(
 		WorldEditor &editor, const std::vector<HighwayTunnelCell> &cells);
+void hang_tunnel_lights(WorldEditor &editor, const std::vector<TunnelLight> &lights);
 }

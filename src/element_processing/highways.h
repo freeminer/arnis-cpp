@@ -40,6 +40,9 @@ bool tunnel_renders_at_surface(
 // highway-node dispatcher.
 bool is_signal(const tags_t &tags);
 
+/// Remove street lamps whose plinths were swallowed by the later water pass.
+void drop_lamps_in_water(world_editor::WorldEditor &editor);
+
 // Effective half-width of a paved way, including lane and explicit width tags.
 int highway_block_range(const std::string &highway_type,
 		const std::unordered_map<std::string, std::string> &tags, double scale);

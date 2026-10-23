@@ -369,7 +369,7 @@ building_facade::PointSet collect(world_editor::WorldEditor &editor,
 			}
 			PendingRun pending_run;
 			pending_run.way_id = way_id;
-			pending_run.group = osm_parser::seed_without_hint(group_seed);
+			pending_run.group = osm_parser::group_key(group_seed);
 			pending_run.entry = choice->entry;
 			pending_run.choice = *choice;
 			pending_run.cells.assign(cells.begin() + first, cells.begin() + open_end);
@@ -391,7 +391,7 @@ building_facade::PointSet collect(world_editor::WorldEditor &editor,
 	// only the first visit records image work for finalization.
 	if (!first)
 		return shell;
-	const auto group_id = osm_parser::seed_without_hint(group_seed);
+	const auto group_id = osm_parser::group_key(group_seed);
 	const double wall_height_m =
 			static_cast<double>(building_height) / std::max(0.001, scale);
 	{

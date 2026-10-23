@@ -48,6 +48,9 @@ struct PreparedBuildingData
 {
 	OutlineSuppression outline_suppression;
 	PartGroups part_groups;
+	// Masonry facade tags mapped on an outline/relation are inherited by
+	// untagged building parts in the same prepared group, as in Rust parsing.
+	std::unordered_map<std::uint64_t, tags_t> inherited_facade_tags;
 	std::unordered_set<std::uint64_t> suppressed_relations;
 };
 

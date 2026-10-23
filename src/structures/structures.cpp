@@ -734,25 +734,6 @@ void place(WorldEditor &editor, int x, int z)
 }
 }
 
-namespace crane
-{
-void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
-{
-	if (!editor.place_schematics())
-		return;
-	if (cells.size() < 1500)
-		return;
-	const auto [ax, az] = nearest_cell_to_centroid(cells);
-	if (editor.is_lc_water(ax, az))
-		return;
-	const auto h = coord_hash(ax, az);
-	if (h % 100 >= 60)
-		return;
-	place_named_schem(
-			editor, "crane", ax, editor.get_absolute_y(ax, 1, az), az, (h >> 8) & 3);
-}
-}
-
 namespace excavator
 {
 void scatter_excavators(
