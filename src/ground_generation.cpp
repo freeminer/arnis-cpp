@@ -726,8 +726,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							terrain_enabled && slope > 4 && (slope > 6 || !mapped_sand);
 					const auto relative = editor.ground_point(x, z);
 					const bool planetary = !is_earth(body);
-					const bool has_cover = !planetary && editor.ground &&
-										   editor.ground->has_land_cover();
+					const bool has_cover =
+							editor.ground && editor.ground->has_land_cover();
 					const std::uint8_t cover_here =
 							has_cover ? editor.ground->cover_class(relative) : 0;
 					bool did_underfill = false;
@@ -807,7 +807,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								grid_water || existing_water || osm_gap || blend_is_water;
 						bool place_esa_water = false;
 						int water_y = 0;
-						if (!planetary && esa_water && !steep_override) {
+						// Match Rust: body-specific terrain palettes do not suppress
+						// mapped/neighbor water reconstruction on Moon or Mars.
+						if (esa_water && !steep_override) {
 							water_y = editor.get_water_level(x, z);
 							if (ground_y <= water_y) {
 								place_esa_water = true;
@@ -1007,7 +1009,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								}
 							}
 
-							if (!place_esa_water && !planetary && has_cover &&
+							if (!place_esa_water && has_cover &&
 									!editor.check_for_block_type_absolute(
 											x, ground_y, z, WATER))
 								maybe_place_vegetation(editor, x, ground_y, z,

@@ -89,9 +89,9 @@ struct Plan
 		if (edge(x, z)) {
 			const bool corner = (!inside(x + 1, z) || !inside(x - 1, z)) &&
 								(!inside(x, z + 1) || !inside(x, z - 1));
-			return corner || (gx + gz) % span == 0;
+			return corner || euclidean_mod(gx + gz, span) == 0;
 		}
-		if (gx % span || gz % span)
+		if (euclidean_mod(gx, span) || euclidean_mod(gz, span))
 			return false;
 		for (int dz = -1; dz <= 1; ++dz)
 			for (int dx = -1; dx <= 1; ++dx)
@@ -218,7 +218,8 @@ void generate(WorldEditor &editor, const ProcessedWay &way,
 					editor.set_block_absolute(IRON_BARS, x, y, z);
 			} else if (x * dx + z * dz <= formed && !in_core(x, z)) {
 				editor.set_block_absolute(SPRUCE_PLANKS, x, top + progress.storey, z);
-				if ((x - plan.min_x) % 3 == 0 && (z - plan.min_z) % 3 == 0)
+				if (euclidean_mod(x - plan.min_x, 3) == 0 &&
+						euclidean_mod(z - plan.min_z, 3) == 0)
 					for (int y = top + 1; y < top + progress.storey; ++y)
 						editor.set_block_absolute(SPRUCE_FENCE, x, y, z);
 			}

@@ -912,13 +912,21 @@ void generate_barriers(world_editor::WorldEditor &editor, const ProcessedElement
 	const auto runs =
 			lay_out_barrier(trace, std::move(spots), style.spaced, joined, cost);
 	const bool floating = lift > 0;
+	// Rust measures every disconnected piece of one mapped floating barrier from
+	// the same lowest footing.  Computing this per run makes a single OSM way
+	// jump vertically wherever road/building clearance split its line.
+	std::optional<int> floating_base;
+	if (floating) {
+		for (const auto &run : runs)
+			for (const auto &post : run) {
+				const int y = editor.get_absolute_y(post.x, 0, post.z);
+				floating_base = floating_base ? std::min(*floating_base, y) : y;
+			}
+	}
 	for (const auto &run : runs) {
 		std::vector<std::optional<int>> bases;
 		if (floating) {
-			int lowest = std::numeric_limits<int>::max();
-			for (const auto &post : run)
-				lowest = std::min(lowest, editor.get_absolute_y(post.x, 0, post.z));
-			bases.assign(run.size(), lowest);
+			bases.assign(run.size(), floating_base);
 		} else {
 			std::vector<std::pair<int, int>> cells;
 			for (const auto &post : run)
