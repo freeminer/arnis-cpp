@@ -27,6 +27,7 @@
 #include "args.h"
 #include "../data_processing.h"
 #include "../strict_parse.h"
+#include "relation_area.h"
 namespace arnis
 {
 
@@ -332,86 +333,22 @@ struct RingGroupEdges
 	std::vector<ScanlineEdge> inners;
 };
 
-static bool mostly_inside_ring(
-		const std::vector<XZPoint> &ring, const std::vector<XZPoint> &around)
-{
-	if (ring.size() < 3 || around.size() < 3)
-		return false;
-	int rx0 = ring.front().x, rx1 = rx0, rz0 = ring.front().z, rz1 = rz0;
-	int ax0 = around.front().x, ax1 = ax0, az0 = around.front().z, az1 = az0;
-	for (const auto &p : ring) {
-		rx0 = std::min(rx0, p.x);
-		rx1 = std::max(rx1, p.x);
-		rz0 = std::min(rz0, p.z);
-		rz1 = std::max(rz1, p.z);
-	}
-	for (const auto &p : around) {
-		ax0 = std::min(ax0, p.x);
-		ax1 = std::max(ax1, p.x);
-		az0 = std::min(az0, p.z);
-		az1 = std::max(az1, p.z);
-	}
-	if (std::int64_t(rx0) < std::int64_t(ax0) - 1 ||
-			std::int64_t(rz0) < std::int64_t(az0) - 1 ||
-			std::int64_t(rx1) > std::int64_t(ax1) + 1 ||
-			std::int64_t(rz1) > std::int64_t(az1) + 1)
-		return false;
-	std::size_t inside = 0, outside = 0;
-	for (const auto &p : ring) {
-		bool hit = false, edge = false;
-		for (std::size_t i = 0, j = around.size() - 1; i < around.size(); j = i++) {
-			const auto &a = around[j];
-			const auto &b = around[i];
-			const std::int64_t cross =
-					(std::int64_t(b.x) - a.x) * (std::int64_t(p.z) - a.z) -
-					(std::int64_t(b.z) - a.z) * (std::int64_t(p.x) - a.x);
-			if (cross == 0 && p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
-					p.z >= std::min(a.z, b.z) && p.z <= std::max(a.z, b.z)) {
-				edge = true;
-				break;
-			}
-			if ((a.z > p.z) != (b.z > p.z) &&
-					static_cast<double>(p.x) < (double(b.x) - a.x) * (double(p.z) - a.z) /
-															   (double(b.z) - a.z) +
-													   a.x)
-				hit = !hit;
-		}
-		if (!edge) {
-			if (hit)
-				++inside;
-			else
-				++outside;
-		}
-	}
-	return inside > outside;
-}
-
 static std::vector<RingGroupEdges> make_ring_groups(
 		const std::vector<std::vector<XZPoint>> &outers,
 		const std::vector<std::vector<XZPoint>> &inners)
 {
+	const auto assignments = element_processing::hole_groups(outers, inners);
 	std::vector<RingGroupEdges> groups;
-	std::vector<std::vector<std::size_t>> cuts;
-	for (const auto &outer : outers) {
-		std::vector<std::size_t> cutting;
-		for (std::size_t i = 0; i < inners.size(); ++i)
-			if (!mostly_inside_ring(outer, inners[i]))
-				cutting.push_back(i);
-		auto found = std::find(cuts.begin(), cuts.end(), cutting);
-		std::size_t group;
-		if (found == cuts.end()) {
-			group = groups.size();
-			cuts.push_back(cutting);
-			groups.emplace_back();
-			for (const auto i : cutting) {
-				auto edges = collect_ring_edges(inners[i]);
-				groups.back().inners.insert(
-						groups.back().inners.end(), edges.begin(), edges.end());
-			}
-		} else {
-			group = static_cast<std::size_t>(found - cuts.begin());
+	groups.reserve(assignments.size());
+	for (const auto &[outer_indices, inner_indices] : assignments) {
+		RingGroupEdges group;
+		for (const auto index : outer_indices)
+			group.outers.push_back(collect_ring_edges(outers[index]));
+		for (const auto index : inner_indices) {
+			auto edges = collect_ring_edges(inners[index]);
+			group.inners.insert(group.inners.end(), edges.begin(), edges.end());
 		}
-		groups[group].outers.push_back(collect_ring_edges(outer));
+		groups.push_back(std::move(group));
 	}
 	return groups;
 }

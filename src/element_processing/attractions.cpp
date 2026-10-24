@@ -3,11 +3,11 @@
 #include "../block_definitions.h"
 #include "connected_blocks.h"
 #include "../mapillary/geometry.h"
+#include "../unicode_text.h"
 #include "structure_kit.h"
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
@@ -27,80 +27,13 @@ const Block RAINBOW[] = {RED_CONCRETE, ORANGE_CONCRETE, YELLOW_CONCRETE, LIME_CO
 
 std::string lower_name(std::string_view input)
 {
-	std::string result;
-	result.reserve(input.size());
-	for (std::size_t i = 0; i < input.size();) {
-		const auto first = static_cast<unsigned char>(input[i]);
-		if (first < 0x80) {
-			result.push_back(static_cast<char>(std::tolower(first)));
-			++i;
-			continue;
-		}
-		if ((first & 0xe0) == 0xc0 && i + 1 < input.size()) {
-			const auto second = static_cast<unsigned char>(input[i + 1]);
-			if ((second & 0xc0) == 0x80) {
-				unsigned int codepoint = ((first & 0x1f) << 6) | (second & 0x3f);
-				// Unicode's Latin-1 uppercase range maps by +0x20, except multiplication sign.
-				if (codepoint >= 0x00c0 && codepoint <= 0x00de && codepoint != 0x00d7)
-					codepoint += 0x20;
-				result.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
-				result.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-				i += 2;
-				continue;
-			}
-		}
-		result.push_back(input[i++]);
-	}
-	return result;
-}
-
-std::pair<std::uint32_t, std::size_t> utf8_codepoint_at(
-		std::string_view text, std::size_t offset)
-{
-	const auto first = static_cast<unsigned char>(text[offset]);
-	if (first < 0x80)
-		return {first, 1};
-	const std::size_t length = (first & 0xe0) == 0xc0	? 2
-							   : (first & 0xf0) == 0xe0 ? 3
-							   : (first & 0xf8) == 0xf0 ? 4
-														: 1;
-	if (length == 1 || offset + length > text.size())
-		return {first, 1};
-	std::uint32_t codepoint = first & ((1u << (7 - length)) - 1);
-	for (std::size_t i = 1; i < length; ++i) {
-		const auto byte = static_cast<unsigned char>(text[offset + i]);
-		if ((byte & 0xc0) != 0x80)
-			return {first, 1};
-		codepoint = (codepoint << 6) | (byte & 0x3f);
-	}
-	return {codepoint, length};
-}
-
-bool unicode_separator(std::uint32_t codepoint)
-{
-	// These Unicode punctuation and separator blocks are common in mapped names
-	// (notably en/em dashes). Treat each decoded codepoint as one word boundary;
-	// testing UTF-8 bytes individually incorrectly considered them letters.
-	return codepoint == 0x00a0 || codepoint == 0x1680 ||
-		   (codepoint >= 0x2000 && codepoint <= 0x206f) ||
-		   (codepoint >= 0x2e00 && codepoint <= 0x2e7f) ||
-		   (codepoint >= 0x3000 && codepoint <= 0x303f) ||
-		   (codepoint >= 0x2600 && codepoint <= 0x27bf) ||
-		   (codepoint >= 0x1f000 && codepoint <= 0x1faff) ||
-		   (codepoint >= 0xfe10 && codepoint <= 0xfe1f) ||
-		   (codepoint >= 0xfe30 && codepoint <= 0xfe4f) ||
-		   (codepoint >= 0xff01 && codepoint <= 0xff0f) ||
-		   (codepoint >= 0xff1a && codepoint <= 0xff20) ||
-		   (codepoint >= 0xff3b && codepoint <= 0xff40) ||
-		   (codepoint >= 0xff5b && codepoint <= 0xff65);
+	return unicode_text::lowercase(input);
 }
 
 bool unicode_word_char(std::string_view text, std::size_t offset)
 {
-	const auto [codepoint, length] = utf8_codepoint_at(text, offset);
-	if (codepoint < 0x80)
-		return std::isalnum(static_cast<unsigned char>(codepoint));
-	return !unicode_separator(codepoint) && offset + length <= text.size();
+	const auto [codepoint, _] = unicode_text::codepoint_at(text, offset);
+	return unicode_text::is_alphanumeric(codepoint);
 }
 
 enum class Ride

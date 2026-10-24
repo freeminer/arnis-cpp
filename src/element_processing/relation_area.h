@@ -6,6 +6,7 @@
 #include <array>
 #include <cstdint>
 #include <limits>
+#include <span>
 #include <utility>
 #include <vector>
 
@@ -80,13 +81,12 @@ using RingGroup = std::pair<std::vector<std::size_t>, std::vector<std::size_t>>;
 
 // Assign each inner ring only to the outer ring(s) it cuts. This preserves islands
 // nested inside holes instead of subtracting a lake's hole from the island itself.
+template <typename OuterRing, typename InnerRing>
 inline std::vector<RingGroup> hole_groups(
-		const std::vector<std::vector<ProcessedNode>> &outers,
-		const std::vector<std::vector<ProcessedNode>> &inners)
+		const std::vector<OuterRing> &outers, const std::vector<InnerRing> &inners)
 {
 	using Bounds = std::array<std::int32_t, 4>; // min x, min z, max x, max z
-	const auto bounds =
-			[](const std::vector<ProcessedNode> &ring) -> std::optional<Bounds> {
+	const auto bounds = [](const auto &ring) -> std::optional<Bounds> {
 		if (ring.empty())
 			return std::nullopt;
 		Bounds out{ring.front().x, ring.front().z, ring.front().x, ring.front().z};
@@ -98,10 +98,8 @@ inline std::vector<RingGroup> hole_groups(
 		}
 		return out;
 	};
-	const auto mostly_inside = [&](const std::vector<ProcessedNode> &ring,
-									   const Bounds &ring_bounds,
-									   const std::vector<ProcessedNode> &around,
-									   const Bounds &around_bounds) {
+	const auto mostly_inside = [&](const auto &ring, const Bounds &ring_bounds,
+									   const auto &around, const Bounds &around_bounds) {
 		if (around.size() < 3 ||
 				std::int64_t(ring_bounds[0]) < std::int64_t(around_bounds[0]) - 1 ||
 				std::int64_t(ring_bounds[1]) < std::int64_t(around_bounds[1]) - 1 ||
@@ -151,10 +149,7 @@ inline std::vector<RingGroup> hole_groups(
 		std::vector<std::size_t> cutting;
 		for (std::size_t i = 0; i < inners.size(); ++i) {
 			const auto &inner_bound = inner_bounds[i];
-			if (!outer_bounds || !inner_bound || (*inner_bound)[0] > (*outer_bounds)[2] ||
-					(*inner_bound)[2] < (*outer_bounds)[0] ||
-					(*inner_bound)[1] > (*outer_bounds)[3] ||
-					(*inner_bound)[3] < (*outer_bounds)[1] ||
+			if (!outer_bounds || !inner_bound ||
 					!mostly_inside(outers[o], *outer_bounds, inners[i], *inner_bound))
 				cutting.push_back(i);
 		}
@@ -168,9 +163,9 @@ inline std::vector<RingGroup> hole_groups(
 	return groups;
 }
 
+template <typename OuterRing, typename InnerRing>
 inline std::vector<std::vector<std::size_t>> holes_by_outer(
-		const std::vector<std::vector<ProcessedNode>> &outers,
-		const std::vector<std::vector<ProcessedNode>> &inners)
+		const std::vector<OuterRing> &outers, const std::vector<InnerRing> &inners)
 {
 	std::vector<std::vector<std::size_t>> result(outers.size());
 	for (auto &group : hole_groups(outers, inners))

@@ -6,6 +6,7 @@
 #include "bresenham.h"
 #include "strict_parse.h"
 #include <algorithm>
+#include <span>
 #include <atomic>
 #include <charconv>
 #include <thread>
@@ -225,19 +226,23 @@ std::optional<Holes> FloodFillCache::holes_in(const ProcessedWay &outer,
 		oz0 = std::min(oz0, node.z);
 		oz1 = std::max(oz1, node.z);
 	}
-	std::vector<std::vector<ProcessedNode>> inner_rings;
+	// Keep borrowed node rings as Rust does instead of copying all member
+	// coordinates just to classify which inner rings cut this outer.
+	std::vector<std::span<const ProcessedNode>> inner_rings;
 	std::vector<const ProcessedWay *> inner_ways;
 	for (const auto &entry : inners.rings) {
 		if (entry.min_x > ox1 || entry.max_x < ox0 || entry.min_z > oz1 ||
 				entry.max_z < oz0)
 			continue;
-		inner_rings.push_back(entry.way->nodes);
+		inner_rings.emplace_back(entry.way->nodes);
 		inner_ways.push_back(entry.way);
 	}
 	if (inner_rings.empty())
 		return std::nullopt;
 	const auto groups = element_processing::holes_by_outer(
-			std::vector<std::vector<ProcessedNode>>{outer.nodes}, inner_rings);
+			std::vector<std::span<const ProcessedNode>>{
+					std::span<const ProcessedNode>(outer.nodes)},
+			inner_rings);
 	if (groups.empty() || groups.front().empty())
 		return std::nullopt;
 	int32_t x0 = ox1, z0 = oz1, x1 = ox0, z1 = oz0;

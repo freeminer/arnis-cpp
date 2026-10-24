@@ -3,15 +3,14 @@
 #include "../block_definitions.h"
 #include "../mapillary/geometry.h"
 #include "../structures/structures.h"
+#include "../unicode_text.h"
 #include "road_mask_search.h"
 #include "structure_kit.h"
 
 #include "../../../arnis_world_editor.h"
 
 #include <algorithm>
-#include <array>
 #include <cmath>
-#include <cctype>
 #include <cstdint>
 #include <limits>
 #include <string>
@@ -72,53 +71,6 @@ bool inside(const std::vector<std::pair<double, double>> &ring, double x, double
 			hit = !hit;
 	}
 	return hit;
-}
-
-std::pair<std::uint32_t, std::size_t> utf8_codepoint_at(
-		std::string_view text, std::size_t offset)
-{
-	const auto first = static_cast<unsigned char>(text[offset]);
-	if (first < 0x80)
-		return {first, 1};
-	const std::size_t length = (first & 0xe0) == 0xc0	? 2
-							   : (first & 0xf0) == 0xe0 ? 3
-							   : (first & 0xf8) == 0xf0 ? 4
-														: 1;
-	if (length == 1 || offset + length > text.size())
-		return {first, 1};
-	std::uint32_t codepoint = first & ((1u << (7 - length)) - 1);
-	for (std::size_t i = 1; i < length; ++i) {
-		const auto byte = static_cast<unsigned char>(text[offset + i]);
-		if ((byte & 0xc0) != 0x80)
-			return {first, 1};
-		codepoint = (codepoint << 6) | (byte & 0x3f);
-	}
-	return {codepoint, length};
-}
-
-bool unicode_separator(std::uint32_t codepoint)
-{
-	// Rust splits on Unicode punctuation and symbols while retaining letters and
-	// numbers. These common blocks include registered/copyright marks, typographic
-	// quotes and dashes, CJK punctuation, and emoji used as brand suffixes.
-	const bool latin1_symbol =
-			codepoint >= 0x00a1 && codepoint <= 0x00bf && codepoint != 0x00aa &&
-			codepoint != 0x00b2 && codepoint != 0x00b3 && codepoint != 0x00b5 &&
-			codepoint != 0x00b9 && codepoint != 0x00ba && codepoint != 0x00bc &&
-			codepoint != 0x00bd && codepoint != 0x00be;
-	return codepoint == 0x00a0 || codepoint == 0x00ad || latin1_symbol ||
-		   codepoint == 0x2122 || (codepoint >= 0x2000 && codepoint <= 0x206f) ||
-		   (codepoint >= 0x20a0 && codepoint <= 0x20cf) ||
-		   (codepoint >= 0x2e00 && codepoint <= 0x2e7f) ||
-		   (codepoint >= 0x3000 && codepoint <= 0x303f) ||
-		   (codepoint >= 0x2600 && codepoint <= 0x27bf) ||
-		   (codepoint >= 0x1f000 && codepoint <= 0x1faff) ||
-		   (codepoint >= 0xfe10 && codepoint <= 0xfe1f) ||
-		   (codepoint >= 0xfe30 && codepoint <= 0xfe4f) ||
-		   (codepoint >= 0xff01 && codepoint <= 0xff0f) ||
-		   (codepoint >= 0xff1a && codepoint <= 0xff20) ||
-		   (codepoint >= 0xff3b && codepoint <= 0xff40) ||
-		   (codepoint >= 0xff5b && codepoint <= 0xff65);
 }
 
 Livery livery_for(const tags_t &tags, std::uint64_t seed)
@@ -193,37 +145,30 @@ Livery livery_for(const tags_t &tags, std::uint64_t seed)
 		auto it = tags.find(key);
 		if (it == tags.end())
 			continue;
-		std::string value = it->second;
+		std::string value = unicode_text::lowercase(it->second);
 		for (std::size_t pos = 0;
 				(pos = value.find("\xE2\x80\x99", pos)) != std::string::npos;) {
 			value.replace(pos, 3, "'");
 			++pos;
 		}
-		std::transform(value.begin(), value.end(), value.begin(),
-				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 		// Rust tokenizes brand names and values on any non-alphanumeric character
 		// except apostrophes. Matching token sequences rather than literal phrases
 		// keeps brands such as "Circle   K" and "Indian/Oil" recognizable too.
 		const auto tokens = [](std::string_view text) {
 			std::vector<std::string_view> result;
 			for (std::size_t i = 0; i < text.size();) {
-				const auto [first, first_length] = utf8_codepoint_at(text, i);
+				const auto [first, first_length] = unicode_text::codepoint_at(text, i);
 				const bool first_is_word =
-						first < 0x80 ? (std::isalnum(static_cast<unsigned char>(first)) ||
-											   first == '\'')
-									 : !unicode_separator(first);
+						unicode_text::is_alphanumeric(first) || first == '\'';
 				if (!first_is_word) {
 					i += first_length;
 					continue;
 				}
 				const auto begin = i;
 				while (i < text.size()) {
-					const auto [codepoint, length] = utf8_codepoint_at(text, i);
+					const auto [codepoint, length] = unicode_text::codepoint_at(text, i);
 					const bool is_word =
-							codepoint < 0x80 ? (std::isalnum(static_cast<unsigned char>(
-														codepoint)) ||
-													   codepoint == '\'')
-											 : !unicode_separator(codepoint);
+							unicode_text::is_alphanumeric(codepoint) || codepoint == '\'';
 					if (!is_word)
 						break;
 					i += length;
@@ -512,6 +457,8 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 										});
 							}),
 			out.sites.end());
+	if (out.sites.empty())
+		return out;
 	const double node_reach = 40.0 * scale;
 	std::vector<std::array<double, 4>> site_bounds;
 	site_bounds.reserve(out.sites.size());

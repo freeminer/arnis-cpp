@@ -238,11 +238,12 @@ std::vector<Support> supports_for(
 			const bool crowded =
 					to_previous <
 					(previous.role == Support::Role::Station ? terminal_clearance : 8.0);
+			// Rust checks the section's final support here, not only the next
+			// vertex, so pylons anywhere inside the terminal mouth are dropped.
+			const auto &end = supports.back();
 			const bool near_station =
-					i + 1 < supports.size() &&
-					supports[i + 1].role == Support::Role::Station &&
-					std::hypot(support.x - supports[i + 1].x,
-							support.z - supports[i + 1].z) < terminal_clearance;
+					i + 1 < supports.size() && end.role == Support::Role::Station &&
+					std::hypot(support.x - end.x, support.z - end.z) < terminal_clearance;
 			if (crowded || near_station)
 				continue;
 		}
@@ -823,8 +824,6 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 	}
 	for (const auto &cell : frame.cells(-half_a, half_a, -half_b, half_b)) {
 		const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
-		if (footprints.contains(x, z) || road_mask.contains(x, z))
-			continue;
 		const double a = cell[2], b = cell[3];
 		const bool edge_a = std::abs(a) > half_a - 1.0;
 		const bool edge_b = std::abs(b) > half_b - 1.0;
@@ -870,15 +869,11 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 		for (const double a : {-half_a + 0.5, -half_a / 3.0, half_a / 3.0, half_a - 0.5})
 			for (const double b : {-half_b + 0.5, half_b - 0.5}) {
 				const auto [x, z] = frame.cell(a, b);
-				if (footprints.contains(x, z) || road_mask.contains(x, z))
-					continue;
 				for (int y = floor + 1; y < rope - 1; ++y)
 					editor.set_block_absolute(GRAY_CONCRETE, x, y, z);
 			}
 		for (int b = -static_cast<int>(half_b); b <= static_cast<int>(half_b); ++b) {
 			const auto [x, z] = frame.cell(-half_a + 0.5, b);
-			if (footprints.contains(x, z) || road_mask.contains(x, z))
-				continue;
 			for (int y = floor + 1; y < rope - 1; ++y)
 				editor.set_block_absolute(LIGHT_GRAY_STAINED_GLASS, x, y, z);
 		}
@@ -920,7 +915,7 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 		for (const double b : {-half_b - 1.0, half_b + 1.0})
 			for (double a = -half_a; a <= half_a - 3.0; a += 1.0) {
 				const auto [x, z] = frame.cell(a, b);
-				if (!road_mask.contains(x, z) && !footprints.contains(x, z))
+				if (!road_mask.contains(x, z))
 					connected_blocks::place_connected(editor, IRON_BARS, x, floor + 1, z);
 			}
 		const double booth_b = -(half_b + 3.5);
@@ -1034,10 +1029,10 @@ void draw_lift_terminal(WorldEditor &editor, const ProcessedWay &way,
 			const double hut_a = -(radius + 4.0);
 			for (const auto &cell : frame.cells(hut_a - 1.5, hut_a + 1.5, -2.5, 2.5)) {
 				const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
-				if (footprints.contains(x, z) || road_mask.contains(x, z))
-					continue;
-				editor.register_road_surface_y(x, z, floor);
-				editor.set_block_absolute(POLISHED_ANDESITE, x, floor, z);
+				if (!footprints.contains(x, z) && !road_mask.contains(x, z)) {
+					editor.register_road_surface_y(x, z, floor);
+					editor.set_block_absolute(POLISHED_ANDESITE, x, floor, z);
+				}
 				const double a = cell[2], b = cell[3];
 				const bool wall = std::abs(a - hut_a) > 0.8 || std::abs(b) > 1.8;
 				if (wall) {
