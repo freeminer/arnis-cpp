@@ -32,7 +32,7 @@ static bool is_pillar_material(const Block &block)
 		   block.id() == STONE.id() || block.id() == STONE_BRICKS.id() ||
 		   block.id() == ANDESITE.id() || block.id() == ANDESITE_WALL.id() ||
 		   block.id() == COBBLESTONE.id() || block.id() == SMOOTH_STONE.id() ||
-		   block.id() == structures::resolve_schem_block("minecraft:sandstone_wall").id();
+		   block.id() == SANDSTONE_WALL.id();
 }
 
 static bool is_street_block(const Block &block)

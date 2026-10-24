@@ -81,6 +81,7 @@ inline std::uint64_t seed_without_year(std::uint64_t seed)
 std::optional<std::int32_t> building_start_year(const tags_t &tags);
 std::optional<std::int32_t> building_year_for_parts(const tags_t &tags);
 bool is_housing_type(const tags_t &tags);
+bool part_covers_ground(const tags_t &tags);
 std::uint64_t seed_with_metadata(std::uint64_t seed, StyleHint hint,
 		std::optional<std::int32_t> year, bool residential);
 StyleHint building_style_hint(const tags_t &tags);

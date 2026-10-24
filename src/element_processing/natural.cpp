@@ -693,17 +693,17 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 						rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0;
 				const int random_choice = static_cast<int>(rng.uniform(30));
 				if (spawn_tree) {
-					// Select a random tree type from the approved list
-					if (!trees_ok_to_generate.empty()) {
-						TreeType tree_type = trees_ok_to_generate[rng.uniform(
-								static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
-						Tree::create_of_type(editor, {x, 1, z}, tree_type,
-								&building_footprints, &bridge_surface, false,
-								std::nullopt, leaf_type_tagged);
-					} else {
-						Tree::create(
-								editor, {x, 1, z}, &building_footprints, &bridge_surface);
-					}
+					// Match Rust's explicit oak fallback when no regional tree types
+					// are available; the generic selector can choose a different species.
+					const TreeType tree_type =
+							trees_ok_to_generate.empty()
+									? TreeType::Oak
+									: trees_ok_to_generate[rng.uniform(
+											  static_cast<std::uint32_t>(
+													  trees_ok_to_generate.size()))];
+					Tree::create_of_type(editor, {x, 1, z}, tree_type,
+							&building_footprints, &bridge_surface, false, std::nullopt,
+							leaf_type_tagged);
 				} else if (random_choice == 1) {
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Forest);

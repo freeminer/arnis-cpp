@@ -575,6 +575,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const int max_z = std::min(iter_max_z, xzbbox.max_z());
 	if (min_x > max_x || min_z > max_z)
 		return;
+	// Rust binds every tile editor's land-cover frame to the shared world bbox.
+	// Keep this entry point self-contained as it is also called directly by
+	// library users and must not inherit a stale host editor origin.
+	editor.set_ground_origin(xzbbox.min_x(), xzbbox.min_z());
 	// Rust's water_blend accessor materializes its cached shoreline field on
 	// demand. C++ normally warms it during data_processing, but this generator
 	// is also a public standalone entry point, so ensure direct callers see the

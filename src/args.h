@@ -291,6 +291,7 @@ struct Args
 		// requested celestial body.
 		traffic_lights = false;
 		moving_cars = false;
+		moving_vehicles = false;
 		// Body defaults replace the requested generation mode, so refresh the
 		// compatibility cache after that normalization as well.
 		apply_mode_defaults();
@@ -380,7 +381,11 @@ struct Args
 	SignageLevel signage{SignageLevel::Basic};
 	// Java backend extras mirrored from Rust. Entity generation is opt-in.
 	bool traffic_lights{false};
+	// Rust's current option name covers both road vehicles and rail services.
+	// Keep moving_cars as a source-compatible alias for existing C++ callers.
+	bool moving_vehicles{false};
 	bool moving_cars{false};
+	bool moving_vehicles_enabled() const { return moving_vehicles || moving_cars; }
 
 	// Enable filling ground (optional)
 	bool fillground{false};
@@ -421,9 +426,9 @@ struct Args
 			return "world time must be between 0 and 23999";
 		if (bedrock && luanti)
 			return "Bedrock and Luanti output cannot both be enabled";
-		if ((bedrock || luanti) && (traffic_lights || moving_cars))
+		if ((bedrock || luanti) && (traffic_lights || moving_vehicles_enabled()))
 			return "traffic lights and moving cars require Java Edition output";
-		if (one_world_run && (traffic_lights || moving_cars))
+		if (one_world_run && (traffic_lights || moving_vehicles_enabled()))
 			return "traffic lights and moving cars are not available with One World yet";
 		if (spawn_lat.has_value() != spawn_lng.has_value())
 			return "Both --spawn-lat and --spawn-lng must be provided together.";

@@ -58,6 +58,7 @@
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"
 #include "element_processing/cars.h"
+#include "element_processing/trains.h"
 #include "element_processing/rail_track.h"
 #include "element_processing/buildings.h"
 #include "element_processing/blueprint.h"
@@ -1490,6 +1491,21 @@ bool generate_world(WorldEditor &editor,
 	// generation without a job still starts with fresh attribution.
 	if (!facade_job)
 		mapillary::credits::reset();
+	// The facade output/cache path is allowed to be new. Create it before the
+	// side-effect-free Args validator checks the supplied directory, otherwise
+	// validation rejects the path before the existing setup can create it.
+	if (args.building_facades && args.building_facades_dir) {
+		std::error_code create_error;
+		std::filesystem::create_directories(*args.building_facades_dir, create_error);
+		if (create_error) {
+			const auto message = "cannot create building facade directory: " +
+								 *args.building_facades_dir + ": " +
+								 create_error.message();
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
 	if (const auto validation_error = args.validation_error()) {
 		editor.report_generation_error("options rejected: " + *validation_error);
 		std::cerr << "Arnis generation options rejected: " << *validation_error << '\n';
@@ -1578,18 +1594,6 @@ bool generate_world(WorldEditor &editor,
 	editor.set_first_decal_map_id(first_decal_map_id);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
-	if (args.building_facades && args.building_facades_dir) {
-		std::error_code create_error;
-		std::filesystem::create_directories(*args.building_facades_dir, create_error);
-		if (create_error) {
-			const auto message = "cannot create building facade directory: " +
-								 *args.building_facades_dir + ": " +
-								 create_error.message();
-			editor.report_generation_error(message);
-			std::cerr << "Arnis generation error: " << message << '\n';
-			return false;
-		}
-	}
 	std::optional<std::filesystem::path> facade_directory =
 			args.building_facades_dir
 					? std::optional<std::filesystem::path>(*args.building_facades_dir)
@@ -1635,6 +1639,12 @@ bool generate_world(WorldEditor &editor,
 	if (facade_job && (args.mapillary_facades == std::optional<bool>(false) ||
 							  args.mapillary_facades_dir))
 		facade_job->cancel();
+	// Rust creates each WorldEditor with the area's XZ origin. C++ receives an
+	// editor from its host, so establish the same frame here instead of relying
+	// on the host to have called set_ground_origin(). Land-cover sampling,
+	// including the bounded water pass, uses coordinates relative to this origin.
+	const auto [ground_origin_x, ground_origin_z] = editor.get_min_coords();
+	editor.set_ground_origin(ground_origin_x, ground_origin_z);
 	editor.reserve_ground_level_cache();
 	world_editor::set_world_bounds(extended_min_y_for(args), world_top_y_for(args));
 	if (editor.ground) {
@@ -1671,6 +1681,15 @@ bool generate_world(WorldEditor &editor,
 	man_made::drop_doubled_summit_crosses(ordered_source_elements, args.scale);
 	if (!elements_prepared)
 		sort_elements_by_priority(ordered_source_elements);
+	// Prepare Rust-equivalent building suppression and part groups before any pass
+	// builds masks, footprints, or indexes from OSM tags.
+	std::optional<PreparedBuildingData> computed_buildings;
+	if (!generation_prepared_buildings || dropped_aircraft_buildings > 0)
+		computed_buildings = prepare_building_data(ordered_source_elements);
+	const PreparedBuildingData &building_data =
+			generation_prepared_buildings && dropped_aircraft_buildings == 0
+					? *generation_prepared_buildings
+					: *computed_buildings;
 	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;
 	std::vector<ProcessedElement> mode_filtered_elements = land_cover_elements;
 	mode_filter::retain_for_mode(mode_filtered_elements, args.mode);
@@ -2261,7 +2280,7 @@ bool generate_world(WorldEditor &editor,
 	} else {
 		editor.traffic_signal_index.reset();
 	}
-	if (args.moving_cars && java_world) {
+	if (args.moving_vehicles_enabled() && java_world) {
 		auto surface_y = [&](int x, int z) {
 			if (const auto deck = bridge_surface.nearby_deck_y(x, z, 0))
 				return *deck;
@@ -2275,6 +2294,27 @@ bool generate_world(WorldEditor &editor,
 						surface_y));
 	} else {
 		editor.car_network.reset();
+	}
+	// Rust builds the backend-neutral train timetable before tile dispatch and
+	// shares it with the editor so the library's consumer can animate or render
+	// the scheduled rail services.
+	if (args.moving_vehicles_enabled() && java_world) {
+		auto network = trains::TrainRouteNetwork::build(elements, args.scale, xzbbox);
+		if (!network.is_empty())
+			editor.train_network =
+					std::make_shared<const trains::TrainRouteNetwork>(std::move(network));
+		else
+			editor.train_network.reset();
+		if (editor.train_network)
+			editor.enable_rail_height_collection();
+		else {
+			editor.rail_heights.reset();
+			editor.rail_heights_mutex.reset();
+		}
+	} else {
+		editor.train_network.reset();
+		editor.rail_heights.reset();
+		editor.rail_heights_mutex.reset();
 	}
 	// Rust reorders only ground-fill elements here, after applying OSM ground
 	// overrides and building the shared indexes. Keep the cached element vector
@@ -2306,13 +2346,6 @@ bool generate_world(WorldEditor &editor,
 	// geographic suppression/grouping pass as Rust. Reconstructing a reduced
 	// projected-space approximation here loses split relation rings and can
 	// render duplicate building outlines.
-	std::optional<PreparedBuildingData> computed_buildings;
-	if (!generation_prepared_buildings || dropped_aircraft_buildings > 0)
-		computed_buildings = prepare_building_data(elements);
-	const PreparedBuildingData &building_data =
-			generation_prepared_buildings && dropped_aircraft_buildings == 0
-					? *generation_prepared_buildings
-					: *computed_buildings;
 	const auto outline_suppression = mode_filter::outline_suppression_for_mode(
 			building_data.outline_suppression, args.mode);
 	std::unordered_set<std::uint64_t> suppressed_building_outlines;
@@ -2815,8 +2848,10 @@ bool generate_world(WorldEditor &editor,
 						flood_fill_cache, args.timeout);
 
 			if (way.tags.get("man_made") == std::optional<std::string>("pier")) {
-				man_made::generate_man_made(
-						editor, element, args, flood_fill_cache, building_footprints);
+				// Rust dispatches piers directly to the waterfront pass before the
+				// generic man_made layer/level filtering and before building handling.
+				// Keep that ordering here as piers may also carry building/path tags.
+				waterfront::generate_pier(editor, element, flood_fill_cache, args);
 			} else if (args.mode == GenerationMode::Blueprint &&
 					   (way.tags.contains("building") ||
 							   way.tags.contains("building:part"))) {

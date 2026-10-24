@@ -238,7 +238,7 @@ double coach_length_m(Coach coach)
 	return 0.0;
 }
 
-std::pair<std::vector<Coach>, Livery> compose(
+std::pair<std::vector<Coach>, Livery> compose_impl(
 		TrainKind kind, std::uint64_t seed, bool short_train, std::size_t departure_index)
 {
 	const auto &palette = liveries(kind);
@@ -536,9 +536,11 @@ std::vector<Step> extend(const std::vector<Piece> &pieces,
 			const auto turn = angle_deg(incoming, *heading);
 			if (turn > MAX_DEFLECT_DEG)
 				continue;
-			if (!best || turn < std::get<2>(*best) - 1e-9 ||
-					(std::abs(turn - std::get<2>(*best)) <= 1e-9 &&
-							candidate.piece < std::get<0>(*best)))
+			// Rust orders bends with f64::total_cmp, then the piece index. Keep
+			// that exact ordering: an epsilon can incorrectly prefer a slightly
+			// worse route merely because it has a lower index.
+			if (!best || turn < std::get<2>(*best) ||
+					(turn == std::get<2>(*best) && candidate.piece < std::get<0>(*best)))
 				best = {candidate.piece, candidate.forward, turn};
 		}
 		if (!best)
@@ -1376,6 +1378,12 @@ std::optional<Service> service_for(
 }
 
 } // namespace
+
+std::pair<std::vector<Coach>, Livery> compose(
+		TrainKind kind, std::uint64_t seed, bool short_train, std::size_t departure_index)
+{
+	return compose_impl(kind, seed, short_train, departure_index);
+}
 
 double Route::length() const
 {

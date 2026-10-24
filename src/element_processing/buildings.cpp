@@ -260,6 +260,100 @@ bool is_glass_wall_block(const Block &block)
 		   block == PURPLE_STAINED_GLASS || block == RED_STAINED_GLASS;
 }
 
+Block glass_for_colour(const RGBTuple &rgb)
+{
+	const auto lab = oklab_components(rgb);
+	const float chroma = std::hypot(lab[1], lab[2]);
+	const float hue = std::fmod(
+			std::atan2(lab[2], lab[1]) * 180.0f / static_cast<float>(std::numbers::pi) +
+					360.0f,
+			360.0f);
+	const bool warm = !(hue >= 100.0f && hue < 300.0f);
+	if (warm && lab[0] >= .75f)
+		return LIGHT_GRAY_STAINED_GLASS;
+	if (chroma >= .08f) {
+		if (warm)
+			return BROWN_STAINED_GLASS;
+		if (hue < 230.0f || chroma < .18f)
+			return CYAN_STAINED_GLASS;
+		if (lab[0] < .7f)
+			return BLUE_STAINED_GLASS;
+		return LIGHT_BLUE_STAINED_GLASS;
+	}
+	if (warm && chroma >= .05f)
+		return BROWN_STAINED_GLASS;
+	if (lab[0] < .53f)
+		return BLACK_STAINED_GLASS;
+	if (!warm && chroma >= .02f && lab[0] < .78f)
+		return CYAN_STAINED_GLASS;
+	return lab[0] < .72f ? GRAY_STAINED_GLASS : LIGHT_GRAY_STAINED_GLASS;
+}
+
+std::pair<Block, Block> glass_palette(const ProcessedWay &element,
+		BuildingCategory category, Block wall_block, Block window_block)
+{
+	bool has_material = false;
+	bool glass_tagged = false;
+	for (const char *key :
+			{"building:material", "building:facade:material", "facade:material"}) {
+		const auto it = element.tags.find(key);
+		if (it == element.tags.end())
+			continue;
+		std::string material = it->second;
+		std::transform(material.begin(), material.end(), material.begin(),
+				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		const auto first = material.find_first_not_of(" \t\r\n");
+		const auto last = material.find_last_not_of(" \t\r\n");
+		material = first == std::string::npos ? ""
+											  : material.substr(first, last - first + 1);
+		has_material = true;
+		glass_tagged = glass_tagged || material == "glass" || material == "mirror";
+	}
+	const bool other_material = has_material && !glass_tagged;
+	std::optional<RGBTuple> colour;
+	auto colour_it = element.tags.find("building:colour");
+	if (colour_it == element.tags.end())
+		colour_it = element.tags.find("colour");
+	if (colour_it != element.tags.end())
+		colour = color_text_to_rgb_tuple(colour_it->second);
+	const auto colour_glass =
+			colour ? std::optional<Block>(glass_for_colour(*colour)) : std::nullopt;
+	const auto tint = glass_tagged ? colour_glass : std::nullopt;
+	bool stone_colour = false;
+	if (colour) {
+		const auto lab = oklab_components(*colour);
+		const float hue = std::fmod(std::atan2(lab[2], lab[1]) * 180.0f /
+													static_cast<float>(std::numbers::pi) +
+											360.0f,
+				360.0f);
+		stone_colour =
+				(!(hue >= 100.0f && hue < 300.0f) && std::hypot(lab[1], lab[2]) >= .03f);
+	}
+	if (other_material)
+		return {wall_block, window_block};
+	if (category == BuildingCategory::GlassySkyscraper ||
+			category == BuildingCategory::GlassCornerSkyscraper) {
+		const auto wall =
+				colour_glass && (glass_tagged || !stone_colour)
+						? *colour_glass
+						: (is_glass_wall_block(wall_block) ? wall_block
+														   : GRAY_STAINED_GLASS);
+		return {wall, window_block};
+	}
+	if (category == BuildingCategory::GridSkyscraper) {
+		const auto glass =
+				tint ? tint
+					 : (is_glass_wall_block(wall_block) ? std::optional<Block>(wall_block)
+														: std::nullopt);
+		if (glass)
+			return {*glass, *glass};
+		return {wall_block, window_block};
+	}
+	if (is_glass_wall_block(wall_block))
+		return {tint.value_or(wall_block), window_block};
+	return {wall_block, window_block};
+}
+
 struct GlassBacking
 {
 	Block panel;
@@ -658,70 +752,17 @@ ArchEra building_arch_era(const tags_t &tags)
 			tags, osm_parser::building_start_year(tags)));
 }
 
-BuildingCategory building_category(const ProcessedWay &element, bool tall, int height,
-		double scale, std::uint64_t seed)
+BuildingCategory category_for_building_type(const ProcessedWay &element)
 {
-	if (element.tags.get("man_made") == "tower")
-		return BuildingCategory::Tower;
-	if (tall) {
-		const std::uint64_t clean_seed = osm_parser::seed_without_hint(seed);
-		auto hint = osm_parser::style_hint_from_seed(seed);
-		if (hint == osm_parser::StyleHint::None)
-			hint = osm_parser::building_style_hint(element.tags);
-		switch (hint) {
-		case osm_parser::StyleHint::Glass:
-			switch ((clean_seed ^ 0x6C07A55EULL) * 2654435761ULL % 3) {
-			case 0:
-				return BuildingCategory::GlassySkyscraper;
-			case 1:
-				return BuildingCategory::GridSkyscraper;
-			default:
-				return BuildingCategory::GlassCornerSkyscraper;
-			}
-		case osm_parser::StyleHint::Masonry:
-			return BuildingCategory::MasonrySkyscraper;
-		case osm_parser::StyleHint::Contemporary:
-			return BuildingCategory::ContemporarySkyscraper;
-		case osm_parser::StyleHint::None:
-			break;
-		}
-		bool skyscraper = false;
-		if (element.nodes.size() >= 3) {
-			int min_x = INT_MAX, max_x = INT_MIN, min_z = INT_MAX, max_z = INT_MIN;
-			for (const auto &node : element.nodes) {
-				min_x = std::min(min_x, node.x);
-				max_x = std::max(max_x, node.x);
-				min_z = std::min(min_z, node.z);
-				max_z = std::max(max_z, node.z);
-			}
-			const int longest_side = std::max(1, std::max(max_x - min_x, max_z - min_z));
-			skyscraper = height >= int(120 * scale) &&
-						 double(height) / double(longest_side) >= 2.0;
-		}
-		if (skyscraper) {
-			const auto variant = (clean_seed * 2654435761ULL) % 100;
-			if (variant < 18)
-				return BuildingCategory::GlassySkyscraper;
-			if (variant < 30)
-				return BuildingCategory::GlassCornerSkyscraper;
-			if (variant < 45)
-				return BuildingCategory::GridSkyscraper;
-			if (variant < 70)
-				return BuildingCategory::ContemporarySkyscraper;
-			if (variant < 85)
-				return BuildingCategory::ModernSkyscraper;
-		}
-		return BuildingCategory::TallBuilding;
-	}
 	const auto type = element.tags.contains("building")
 							  ? element.tags.get("building")
-							  : element.tags.get("building:part");
+							  : (element.tags.contains("building:part")
+												? element.tags.get("building:part")
+												: "yes");
 	if (type == "religious" || type == "church" || type == "cathedral" ||
 			type == "chapel" || type == "mosque" || type == "synagogue" ||
-			type == "temple" || element.tags.get("amenity") == "place_of_worship")
+			type == "temple")
 		return BuildingCategory::Religious;
-	if (element.tags.contains("historic"))
-		return BuildingCategory::Historic;
 	if (type == "house" || type == "detached" || type == "semidetached_house" ||
 			type == "terrace" || type == "bungalow" || type == "villa" ||
 			type == "cabin" || type == "hut")
@@ -760,6 +801,112 @@ BuildingCategory building_category(const ProcessedWay &element, bool tall, int h
 	if (type == "greenhouse" || type == "glasshouse")
 		return BuildingCategory::Greenhouse;
 	return BuildingCategory::Default;
+}
+
+building_style::BuildingRegion building_region_at(const WorldEditor &editor)
+{
+	const auto [latitude, longitude] = editor.geo_anchor();
+	return building_style::building_region(
+			building_style::material_region_at(latitude, longitude));
+}
+
+BuildingCategory building_category(const ProcessedWay &element, bool tall, int height,
+		double scale, std::uint64_t seed, building_style::BuildingRegion region)
+{
+	if (element.tags.get("man_made") == "tower")
+		return BuildingCategory::Tower;
+	if (tall) {
+		const std::uint64_t clean_seed = osm_parser::seed_without_hint(seed);
+		auto hint = osm_parser::style_hint_from_seed(seed);
+		if (hint == osm_parser::StyleHint::None)
+			hint = osm_parser::building_style_hint(element.tags);
+		switch (hint) {
+		case osm_parser::StyleHint::Glass:
+			switch ((clean_seed ^ 0x6C07A55EULL) * 2654435761ULL % 3) {
+			case 0:
+				return BuildingCategory::GlassySkyscraper;
+			case 1:
+				return BuildingCategory::GridSkyscraper;
+			default:
+				return BuildingCategory::GlassCornerSkyscraper;
+			}
+		case osm_parser::StyleHint::Masonry:
+		case osm_parser::StyleHint::Contemporary:
+		case osm_parser::StyleHint::None:
+			break;
+		}
+		// European mid-rise blocks keep the facade of their mapped building type.
+		// Raised parts and genuinely tower-proportioned buildings remain towers.
+		if (region == building_style::BuildingRegion::Europe &&
+				osm_parser::part_covers_ground(element.tags)) {
+			int levels = static_cast<int>(
+					(height - GROUND_FLOOR_BONUS) / std::max(1.0, 4.0 * scale));
+			if (const auto mapped = parse_numeric_tag(element.tags, "building:levels"))
+				levels = static_cast<int>(std::lround(*mapped));
+			bool tower_proportions = levels > 14 || height > 50.0 * scale;
+			if (!tower_proportions && height >= 40.0 * scale &&
+					element.nodes.size() >= 3) {
+				int min_x = INT_MAX, max_x = INT_MIN, min_z = INT_MAX, max_z = INT_MIN;
+				for (const auto &node : element.nodes) {
+					min_x = std::min(min_x, node.x);
+					max_x = std::max(max_x, node.x);
+					min_z = std::min(min_z, node.z);
+					max_z = std::max(max_z, node.z);
+				}
+				const int longest_side =
+						std::max(1, std::max(max_x - min_x, max_z - min_z));
+				tower_proportions = height >= 1.5 * longest_side;
+			}
+			const auto typed = category_for_building_type(element);
+			const bool keeps_facade = typed == BuildingCategory::Residential ||
+									  typed == BuildingCategory::Commercial ||
+									  typed == BuildingCategory::Office ||
+									  typed == BuildingCategory::Hotel ||
+									  typed == BuildingCategory::School ||
+									  typed == BuildingCategory::Hospital ||
+									  typed == BuildingCategory::Default;
+			if (!tower_proportions && keeps_facade)
+				return typed;
+		}
+		if (hint == osm_parser::StyleHint::Masonry)
+			return BuildingCategory::MasonrySkyscraper;
+		if (hint == osm_parser::StyleHint::Contemporary)
+			return BuildingCategory::ContemporarySkyscraper;
+		bool skyscraper = false;
+		if (element.nodes.size() >= 3) {
+			int min_x = INT_MAX, max_x = INT_MIN, min_z = INT_MAX, max_z = INT_MIN;
+			for (const auto &node : element.nodes) {
+				min_x = std::min(min_x, node.x);
+				max_x = std::max(max_x, node.x);
+				min_z = std::min(min_z, node.z);
+				max_z = std::max(max_z, node.z);
+			}
+			const int longest_side = std::max(1, std::max(max_x - min_x, max_z - min_z));
+			skyscraper = height >= int(120 * scale) &&
+						 double(height) / double(longest_side) >= 2.0;
+		}
+		if (skyscraper) {
+			const auto variant = (clean_seed * 2654435761ULL) % 100;
+			if (variant < 18)
+				return BuildingCategory::GlassySkyscraper;
+			if (variant < 30)
+				return BuildingCategory::GlassCornerSkyscraper;
+			if (variant < 45)
+				return BuildingCategory::GridSkyscraper;
+			if (variant < 70)
+				return BuildingCategory::ContemporarySkyscraper;
+			if (variant < 85)
+				return BuildingCategory::ModernSkyscraper;
+		}
+		return BuildingCategory::TallBuilding;
+	}
+	const auto typed = category_for_building_type(element);
+	if (typed == BuildingCategory::Religious ||
+			element.tags.get("amenity") == "place_of_worship")
+		return BuildingCategory::Religious;
+	if (element.tags.contains("historic"))
+		return BuildingCategory::Historic;
+	return typed;
 }
 
 Block rust_pitched_roof_block(BuildingCategory category, ArchEra era, RoofType roof_type,
@@ -4215,7 +4362,7 @@ int terrain_base_level(WorldEditor &editor, const ProcessedWay &element, int fal
 
 void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &element,
 		const std::vector<std::pair<int, int>> &cached_floor_area, const Args &args,
-		std::uint64_t seed)
+		std::uint64_t seed, bool housing_group)
 {
 	const double scale_factor = args.scale;
 	const bool terrain_enabled = args.terrain_enabled();
@@ -4226,7 +4373,7 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 					: (element.tags.contains("building:part")
 									  ? element.tags.get("building:part")
 									  : "roof");
-	const int floor_cycle = floor_cycle_for(building_type, element.tags);
+	const int floor_cycle = floor_cycle_for(building_type, element.tags, housing_group);
 
 	int min_level_offset = 0;
 	if (auto it = element.tags.find("min_height"); it != element.tags.end()) {
@@ -7004,6 +7151,184 @@ Block wall_block_for_colour_tag(RGBTuple rgb, ChaCha8Rng &rng)
 	}
 	return best;
 }
+
+constexpr std::uint8_t FACADE_BRICKWORK = 1;
+constexpr std::uint8_t FACADE_STONEWORK = 2;
+constexpr std::uint8_t FACADE_RENDERED = 4;
+constexpr std::uint8_t FACADE_CONCRETE = 8;
+
+struct FacadeTone
+{
+	Block block;
+	RGBTuple colour;
+	std::uint8_t families;
+};
+
+const std::array<FacadeTone, 32> &facade_tones()
+{
+	static const std::array<FacadeTone, 32> tones{{
+			{BRICK, {151, 98, 83}, FACADE_BRICKWORK},
+			{RED_TERRACOTTA, {143, 61, 47},
+					FACADE_BRICKWORK | FACADE_RENDERED | FACADE_CONCRETE},
+			{TERRACOTTA, {152, 94, 68},
+					FACADE_BRICKWORK | FACADE_STONEWORK | FACADE_RENDERED},
+			{POLISHED_GRANITE, {154, 107, 89}, FACADE_BRICKWORK | FACADE_STONEWORK},
+			{MUD_BRICKS, {137, 104, 79}, FACADE_BRICKWORK},
+			{LIGHT_GRAY_TERRACOTTA, {135, 107, 98}, FACADE_BRICKWORK | FACADE_RENDERED},
+			{BROWN_TERRACOTTA, {77, 51, 36}, FACADE_BRICKWORK | FACADE_RENDERED},
+			{NETHER_BRICK, {44, 22, 26}, FACADE_BRICKWORK},
+			{DEEPSLATE_BRICKS, {71, 71, 71}, FACADE_BRICKWORK | FACADE_STONEWORK},
+			{STONE_BRICKS, {122, 122, 122}, FACADE_BRICKWORK | FACADE_STONEWORK},
+			{QUARTZ_BRICKS, {235, 229, 222}, FACADE_BRICKWORK},
+			{SANDSTONE, {216, 203, 156}, FACADE_BRICKWORK | FACADE_STONEWORK},
+			{SMOOTH_SANDSTONE, {224, 214, 170},
+					FACADE_BRICKWORK | FACADE_STONEWORK | FACADE_RENDERED |
+							FACADE_CONCRETE},
+			{WHITE_TERRACOTTA, {210, 178, 161},
+					FACADE_BRICKWORK | FACADE_STONEWORK | FACADE_RENDERED |
+							FACADE_CONCRETE},
+			{MUSHROOM_STEM, {203, 196, 185},
+					FACADE_BRICKWORK | FACADE_STONEWORK | FACADE_RENDERED |
+							FACADE_CONCRETE},
+			{SMOOTH_STONE, {159, 159, 159},
+					FACADE_BRICKWORK | FACADE_STONEWORK | FACADE_RENDERED |
+							FACADE_CONCRETE},
+			{POLISHED_ANDESITE, {132, 135, 134}, FACADE_STONEWORK | FACADE_CONCRETE},
+			{TUFF, {108, 109, 102}, FACADE_STONEWORK},
+			{POLISHED_DEEPSLATE, {72, 73, 73}, FACADE_STONEWORK},
+			{CALCITE, {223, 224, 220},
+					FACADE_STONEWORK | FACADE_RENDERED | FACADE_CONCRETE},
+			{POLISHED_DIORITE, {193, 193, 195}, FACADE_STONEWORK},
+			{QUARTZ_BLOCK, {236, 230, 223}, FACADE_STONEWORK | FACADE_RENDERED},
+			{END_STONE_BRICKS, {218, 224, 162}, FACADE_STONEWORK | FACADE_RENDERED},
+			{WHITE_CONCRETE, {207, 213, 214}, FACADE_RENDERED | FACADE_CONCRETE},
+			{LIGHT_GRAY_CONCRETE_POWDER, {154, 154, 148},
+					FACADE_RENDERED | FACADE_CONCRETE},
+			{LIGHT_GRAY_CONCRETE, {125, 125, 115}, FACADE_RENDERED | FACADE_CONCRETE},
+			{GRAY_CONCRETE, {55, 58, 62}, FACADE_RENDERED | FACADE_CONCRETE},
+			{YELLOW_TERRACOTTA, {186, 133, 35}, FACADE_RENDERED},
+			{ORANGE_TERRACOTTA, {162, 84, 38}, FACADE_RENDERED},
+			{CYAN_TERRACOTTA, {87, 91, 91}, FACADE_RENDERED | FACADE_CONCRETE},
+			{LIGHT_BLUE_TERRACOTTA, {113, 109, 138}, FACADE_RENDERED},
+			{BLACKSTONE, {42, 36, 41}, FACADE_STONEWORK},
+	}};
+	return tones;
+}
+
+bool facade_tone_keeps_hue(
+		const std::array<float, 3> &target, const std::array<float, 3> &candidate)
+{
+	const float target_chroma = std::hypot(target[1], target[2]);
+	if (target_chroma < .03f)
+		return true;
+	const float chroma = std::hypot(candidate[1], candidate[2]);
+	if (chroma < .015f)
+		return false;
+	const float cosine = (target[1] * candidate[1] + target[2] * candidate[2]) /
+						 (target_chroma * chroma);
+	return cosine >= .927f;
+}
+
+std::optional<Block> facade_tone_for_colour(
+		const RGBTuple &rgb, std::uint8_t family, ChaCha8Rng &rng)
+{
+	constexpr float max_distance = .03f;
+	using Candidate = std::pair<float, Block>;
+	const Candidate empty{std::numeric_limits<float>::max(), Block{}};
+	std::array<Candidate, 3> any{empty, empty, empty};
+	std::array<Candidate, 3> same_hue{empty, empty, empty};
+	const auto target = oklab_components(rgb);
+	const auto insert = [](std::array<Candidate, 3> &best, float distance, Block block) {
+		for (std::size_t i = 0; i < best.size(); ++i) {
+			if (distance >= best[i].first)
+				continue;
+			for (std::size_t j = best.size() - 1; j > i; --j)
+				best[j] = best[j - 1];
+			best[i] = {distance, block};
+			break;
+		}
+	};
+	for (const auto &tone : facade_tones()) {
+		if ((tone.families & family) == 0)
+			continue;
+		const auto lab = oklab_components(tone.colour);
+		const float dl = .5f * (target[0] - lab[0]);
+		const float da = target[1] - lab[1];
+		const float db = target[2] - lab[2];
+		const float distance = dl * dl + da * da + db * db;
+		insert(any, distance, tone.block);
+		if (facade_tone_keeps_hue(target, lab))
+			insert(same_hue, distance, tone.block);
+	}
+	if (any[0].first > max_distance)
+		return std::nullopt;
+	const auto &best = same_hue[0].first <= 4.0f * any[0].first ? same_hue : any;
+	const float cutoff = std::max(best[0].first, 1.0e-6f) * 1.25f;
+	std::size_t near = 0;
+	while (near < best.size() && best[near].first <= cutoff)
+		++near;
+	return best[rng.uniform(static_cast<std::uint32_t>(near))].second;
+}
+
+std::optional<std::uint8_t> facade_family_for_material(const std::string &material)
+{
+	const auto normalized = normalized_material(material);
+	if (normalized == "brick" || normalized == "bricks" || normalized == "redbrick" ||
+			normalized == "clinker")
+		return FACADE_BRICKWORK;
+	if (normalized == "stone" || normalized == "naturalstone" ||
+			normalized == "limestone" || normalized == "sandstone" ||
+			normalized == "marble" || normalized == "granite")
+		return FACADE_STONEWORK;
+	if (normalized == "plaster" || normalized == "stucco" || normalized == "render" ||
+			normalized == "rendering" || normalized == "limerender" ||
+			normalized == "plastered")
+		return FACADE_RENDERED;
+	if (normalized == "concrete" || normalized == "reinforcedconcrete" ||
+			normalized == "cement" || normalized == "concreteblock" ||
+			normalized == "concreteblocks" || normalized == "panel" ||
+			normalized == "panels" || normalized == "prefab" ||
+			normalized == "prefabricated")
+		return FACADE_CONCRETE;
+	return std::nullopt;
+}
+
+std::optional<Block> facade_tone_for_material(
+		const std::string &material, const tags_t &tags, ChaCha8Rng &rng)
+{
+	auto colour = tags.find("building:colour");
+	if (colour == tags.end())
+		colour = tags.find("colour");
+	if (colour == tags.end())
+		return std::nullopt;
+	const auto rgb = color_text_to_rgb_tuple(colour->second);
+	if (!rgb)
+		return std::nullopt;
+	const auto family = facade_family_for_material(material);
+	if (!family)
+		return std::nullopt;
+	if (const auto tone = facade_tone_for_colour(*rgb, *family, rng))
+		return tone;
+	return wall_block_for_colour_tag(*rgb, rng);
+}
+
+std::optional<std::uint8_t> tower_facade_family(
+		BuildingCategory category, const tags_t &tags)
+{
+	if (category != BuildingCategory::TallBuilding &&
+			category != BuildingCategory::MasonrySkyscraper &&
+			category != BuildingCategory::ContemporarySkyscraper &&
+			category != BuildingCategory::ModernSkyscraper &&
+			category != BuildingCategory::GridSkyscraper &&
+			category != BuildingCategory::GlassCornerSkyscraper)
+		return std::nullopt;
+	const auto era = static_cast<ArchEra>(osm_parser::building_arch_era_dated(
+			tags, osm_parser::building_start_year(tags)));
+	const bool masonry = category == BuildingCategory::MasonrySkyscraper ||
+						 era == ArchEra::HistoricOrnate ||
+						 era == ArchEra::TraditionalPreWar;
+	return masonry ? FACADE_STONEWORK | FACADE_BRICKWORK : FACADE_CONCRETE;
+}
 } // namespace
 
 bool is_underground_building(const tags_t &tags)
@@ -7176,7 +7501,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 	if (element.tags.get("building:part") == "roof") {
 		generate_roof_only_structure(
-				*editor, element, cached_floor_area, args, visual_seed);
+				*editor, element, cached_floor_area, args, visual_seed, housing_group);
 		return std::nullopt;
 	}
 	if (bridge_towers::is_support(element.tags)) {
@@ -7220,7 +7545,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 	if (building_tag == "roof") {
 		generate_roof_only_structure(
-				*editor, element, cached_floor_area, args, visual_seed);
+				*editor, element, cached_floor_area, args, visual_seed, housing_group);
 		return std::nullopt;
 	}
 	if (building_tag == "bridge" && !element.tags.contains("min_height") &&
@@ -7359,6 +7684,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	auto rng = element_rng(visual_seed);
 
 	Block wall_block = STONE;
+	BuildingCategory category = BuildingCategory::Default;
 	const auto resolve_tagged_wall = [&]() -> std::optional<Block> {
 		auto it_hist = element.tags.find("historic");
 		if (it_hist != element.tags.end() && it_hist->second == "castle")
@@ -7371,6 +7697,9 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			it_material = element.tags.find("facade:material");
 		if (it_material != element.tags.end() &&
 				!painted_metal(it_material->second, element.tags)) {
+			if (const auto block = facade_tone_for_material(
+						it_material->second, element.tags, rng))
+				return block;
 			if (auto block = get_wall_block_for_material_cpp(it_material->second, rng))
 				return block;
 		}
@@ -7379,8 +7708,12 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		if (it_color == element.tags.end())
 			it_color = element.tags.find("colour");
 		if (it_color != element.tags.end())
-			if (const auto rgb = color_text_to_rgb_tuple(it_color->second))
+			if (const auto rgb = color_text_to_rgb_tuple(it_color->second)) {
+				if (const auto family = tower_facade_family(category, element.tags))
+					if (const auto block = facade_tone_for_colour(*rgb, *family, rng))
+						return block;
 				return wall_block_for_colour_tag(*rgb, rng);
+			}
 
 		return std::nullopt;
 	};
@@ -7409,8 +7742,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	const int style_building_height = building_height;
 	// Rust classifies from the tagged/inferred full height, then applies
 	// construction/ruin reductions to the realized shell.
-	const BuildingCategory category = building_category(element, is_tall_building,
-			style_building_height, scale_factor, category_seed);
+	category = building_category(element, is_tall_building, style_building_height,
+			scale_factor, category_seed, building_region_at(*editor));
 	const auto start_year = osm_parser::building_start_year(element.tags).has_value()
 									? osm_parser::building_start_year(element.tags)
 									: outline_year;
@@ -8290,6 +8623,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		window_block = masonry_window_glass(wall_block, group_seed);
 		use_accent_lines = false;
 	}
+	std::tie(wall_block, window_block) =
+			glass_palette(element, category, wall_block, window_block);
 	// Rust applies Mapillary's colour after the procedural choices, keeping this
 	// building-level override from shifting the shared style RNG draw sequence.
 	if (const auto facade_color = mapillary::facades::building_color(element.id)) {
@@ -10439,7 +10774,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						parse_numeric_tag(element.tags, "building:levels");
 				const bool tall_european_block =
 						dominant_region == building_style::BuildingRegion::Europe &&
-						mapped_levels && *mapped_levels > 7.0;
+						((mapped_levels && *mapped_levels > 7.0) ||
+								building_height > 26.0 * args.scale);
 				if (tall_european_block)
 					regional_roof_handled = true;
 				// Rust leaves unknown-era detached houses to the general roof
@@ -11354,7 +11690,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 			style_context
 					? style_context->category
 					: building_category(element, building_height >= 30.0 * scale_factor,
-							  building_height, scale_factor, style_seed);
+							  building_height, scale_factor, style_seed,
+							  building_region_at(editor));
 	const std::string building_type = element.tags.contains("building")
 											  ? element.tags.get("building")
 											  : element.tags.get("building:part");
@@ -11394,7 +11731,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 				style_context ? style_context->category
 							  : building_category(element,
 										building_height >= 30.0 * scale_factor,
-										building_height, scale_factor, style_seed);
+										building_height, scale_factor, style_seed,
+										building_style::building_region(materials));
 		std::uint64_t district = style_context ? style_context->district : 0;
 		if (!style_context) {
 			int min_x = std::numeric_limits<int>::max();
@@ -11491,7 +11829,8 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 					style_context ? style_context->category
 								  : building_category(element,
 											building_height >= 30.0 * scale_factor,
-											building_height, scale_factor, style_seed);
+											building_height, scale_factor, style_seed,
+											building_style::building_region(materials));
 			auto era =
 					style_context ? style_context->era : building_arch_era(element.tags);
 			if (!style_context && era == ArchEra::Unknown &&

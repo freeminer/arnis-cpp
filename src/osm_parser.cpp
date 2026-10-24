@@ -13,6 +13,7 @@
 #include <cctype>
 #include <functional>
 #include <nlohmann/json.hpp>
+#include "strict_parse.h"
 
 namespace arnis::osm_parser
 {
@@ -47,9 +48,12 @@ std::optional<std::int32_t> first_year(std::string_view value)
 
 std::string first_architecture(const tags_t &tags)
 {
-	std::string value = tags.get("building:architecture");
-	if (value.empty())
+	std::string value;
+	if (const auto it = tags.find("building:architecture"); it != tags.end()) {
+		value = it->second;
+	} else {
 		value = tags.get("architecture");
+	}
 	if (const auto semi = value.find(';'); semi != std::string::npos)
 		value.resize(semi);
 	return norm_style(std::move(value));
@@ -58,8 +62,13 @@ std::string first_architecture(const tags_t &tags)
 bool is_listed(const tags_t &tags)
 {
 	auto positive = [&](const char *key) {
-		const auto value = tags.get(key);
-		return !value.empty() && norm_style(value) != "no";
+		const auto it = tags.find(key);
+		if (it == tags.end())
+			return false;
+		const auto &value = it->second;
+		return !(value.size() == 2 &&
+				 std::tolower(static_cast<unsigned char>(value[0])) == 'n' &&
+				 std::tolower(static_cast<unsigned char>(value[1])) == 'o');
 	};
 	return positive("historic") || positive("heritage") || tags.contains("ref:nrhp") ||
 		   positive("listed_status");
@@ -85,6 +94,24 @@ bool housing_type_impl(const tags_t &tags)
 
 std::string decode_xml(std::string value)
 {
+	// Match quick-xml's XML 1.0 attribute normalization: literal tabs and line
+	// breaks in an attribute become spaces before entity references are decoded.
+	// Numeric references such as "&#10;" are consequently preserved as the
+	// referenced character, just as Rust's normalized_value() does.
+	std::string normalized;
+	normalized.reserve(value.size());
+	for (std::size_t i = 0; i < value.size(); ++i) {
+		if (value[i] == '\r') {
+			if (i + 1 < value.size() && value[i + 1] == '\n')
+				++i;
+			normalized.push_back(' ');
+		} else if (value[i] == '\n' || value[i] == '\t') {
+			normalized.push_back(' ');
+		} else {
+			normalized.push_back(value[i]);
+		}
+	}
+	value = std::move(normalized);
 	const std::pair<const char *, const char *> entities[] = {{"&amp;", "&"},
 			{"&quot;", "\""}, {"&apos;", "'"}, {"&lt;", "<"}, {"&gt;", ">"}};
 	for (const auto &[from, to] : entities) {
@@ -293,6 +320,34 @@ std::optional<std::int32_t> building_start_year(const tags_t &tags)
 bool is_housing_type(const tags_t &tags)
 {
 	return housing_type_impl(tags);
+}
+
+bool part_covers_ground(const tags_t &tags)
+{
+	const auto leading_number = [](std::string_view text) -> std::optional<double> {
+		const auto first = text.find_first_not_of(" \t\r\n\f\v");
+		if (first == std::string_view::npos)
+			return std::nullopt;
+		text.remove_prefix(first);
+		std::size_t end = 0;
+		bool dot = false;
+		for (; end < text.size(); ++end) {
+			const char c = text[end];
+			if ((c >= '0' && c <= '9') || ((c == '+' || c == '-') && end == 0))
+				continue;
+			if (c == '.' && !dot) {
+				dot = true;
+				continue;
+			}
+			break;
+		}
+		return strict_parse::f64(text.substr(0, end));
+	};
+	for (const char *key : {"min_height", "building:min_level"})
+		if (const auto it = tags.find(key); it != tags.end())
+			if (const auto value = leading_number(it->second); value && *value > 0.0)
+				return false;
+	return true;
 }
 
 std::optional<std::int32_t> building_year_for_parts(const tags_t &tags)

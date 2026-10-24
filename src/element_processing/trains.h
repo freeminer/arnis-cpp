@@ -6,6 +6,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <string>
+#include <utility>
 #include <vector>
 
 namespace arnis::trains
@@ -83,6 +84,11 @@ struct Livery
 	std::uint8_t seed{};
 };
 
+/// Compose the carriage consist and per-departure livery for a service.
+/// departure_index selects a stable livery variant for repeated departures.
+std::pair<std::vector<Coach>, Livery> compose(TrainKind kind, std::uint64_t seed,
+		bool short_train, std::size_t departure_index = 0);
+
 struct TrainDeparture
 {
 	std::size_t phase{};
@@ -141,3 +147,14 @@ private:
 };
 
 } // namespace arnis::trains
+
+// The backend-neutral carriage geometry API is available with the route model.
+#include "fm_train_bodies.h"
+
+namespace arnis::train_bodies
+{
+/// Compose a consist and deterministic livery for a departure. Rust returns a
+/// livery-producing closure; the C++ library takes its departure index here.
+std::pair<std::vector<trains::Coach>, trains::Livery> compose(
+		Kind kind, std::uint64_t seed, bool short_train, std::size_t departure_index = 0);
+} // namespace arnis::train_bodies

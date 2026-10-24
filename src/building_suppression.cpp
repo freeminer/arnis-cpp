@@ -288,8 +288,9 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			if (inserted)
 				ordered_ways.push_back(it->second);
 		} else if (element.is_relation() &&
-				   tag_is(element.as_relation().tags, "type", "building"))
+				   tag_is(element.as_relation().tags, "type", "building")) {
 			building_relations.push_back(&element.as_relation());
+		}
 	}
 
 	// Building relation members are prepared in geographic space. The relation
@@ -482,7 +483,6 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	for (std::size_t i = 0; i < outlines.size(); ++i)
 		if (covered[i] / outlines[i].area >= MIN_PART_COVERAGE)
 			out.outline_suppression.emplace("way", outlines[i].way->id);
-
 	// Relations whose boundaries are split over member ways need stitched rings. Also
 	// include closed building:part ways: Rust's spatial pass treats both sources alike,
 	// excludes courtyard holes, and assigns a way to its smallest containing outline.
@@ -604,7 +604,6 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i)
 		if (relation_coverage[i] / relation_outlines[i].area >= MIN_PART_COVERAGE)
 			out.suppressed_relations.insert(relation_outlines[i].id);
-
 	// A material/color mapped on a masonry outline is the building-wide facade;
 	// untagged building:parts inherit it, while explicit part palettes still win.
 	static constexpr std::array<const char *, 5> facade_keys{"building:material",

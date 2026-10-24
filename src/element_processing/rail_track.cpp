@@ -248,8 +248,10 @@ std::optional<TrackLevel> track_level(const ProcessedWay &way)
 	if (way.nodes.size() < 2 || !types.contains(railway) || way.tags.get("area") == "yes")
 		return std::nullopt;
 	const bool indoor = way.tags.get("indoor") == "yes";
-	const auto bridge = way.tags.get("bridge");
-	const bool on_bridge = !indoor && !bridge.empty() && bridge != "no";
+	// Match railways::is_rail_bridge: a present bridge tag (even an empty value)
+	// marks a surface crossing unless this is explicitly indoor or bridge=no.
+	const bool on_bridge =
+			!indoor && way.tags.contains("bridge") && way.tags.get("bridge") != "no";
 	const auto tunnel = way.tags.get("tunnel");
 	const bool underground = tunnel == "yes" ||
 							 ((railway == "subway" || way.tags.get("subway") == "yes") &&

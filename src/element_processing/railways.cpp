@@ -55,6 +55,14 @@ const int AIR_RADIUS = 1;
 const int INTERIOR_HEIGHT = 4;
 const std::size_t LIGHT_INTERVAL = 8;
 
+static const optional<vector<Block>> &rail_clear_variants()
+{
+	static const optional<vector<Block>> variants{vector<Block>{OAK_LEAVES, BIRCH_LEAVES,
+			SPRUCE_LEAVES, DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES,
+			MANGROVE_LEAVES, AZALEA_LEAVES, FLOWERING_AZALEA_LEAVES}};
+	return variants;
+}
+
 const std::unordered_set<std::string> &rail_track_types()
 {
 	static const std::unordered_set<std::string> types{"rail", "light_rail", "subway",
@@ -902,13 +910,17 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 											return rail.id() == block->id();
 										});
 			};
-			if (rail_at(g + 1)) {
+			if (const auto road = editor.road_surface_y(x, z)) {
+				if (rail_at(*road + 1))
+					held.push_back({Held::Fixed, *road});
+				else if (rail_at(*road))
+					held.push_back({Held::Fixed, *road - 1});
+				else
+					held.push_back({Held::Road, *road});
+			} else if (rail_at(g + 1)) {
 				held.push_back({Held::Fixed, g});
 			} else if (rail_at(g)) {
 				held.push_back({Held::Fixed, g - 1});
-			} else if (const auto terrain = editor.terrain_level(x, z);
-					   terrain && *terrain != g) {
-				held.push_back({Held::Road, g});
 			} else if (editor.get_block_absolute(x, g, z)) {
 				held.push_back({Held::Fixed, g});
 			} else {
@@ -989,6 +1001,7 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 				if (lays)
 					editor.set_block_absolute(rail, x, held[i].y, z, nullopt,
 							std::optional<std::vector<Block>>{std::vector<Block>{}});
+				editor.register_rail(element.id, x, z, held[i].y);
 				continue;
 			}
 			if (held[i].kind == Held::Free) {
@@ -1008,6 +1021,7 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 								JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES,
 								MANGROVE_LEAVES, AZALEA_LEAVES, FLOWERING_AZALEA_LEAVES}},
 						nullopt);
+			editor.register_rail(element.id, x, z, beds[i] + 1);
 			if (sleepers++ % 4 == 0)
 				editor.set_block_absolute(OAK_LOG, x, beds[i], z, nullopt, nullopt);
 		}
@@ -1062,10 +1076,12 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 															next_ground)))
 						: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
 								  prev_ground, current_ground, next_ground);
-		if (ADVTRAINS_AVAILABLE)
+		if (ADVTRAINS_AVAILABLE) {
 			editor.set_block_absolute(rail_block, bx, rail_y + 1, bz, nullopt, nullopt);
-		else
+			editor.register_rail(element.id, bx, bz, rail_y + 1);
+		} else {
 			editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
+		}
 
 		if ((tds % 4) == 0) {
 			if (ADVTRAINS_AVAILABLE)
@@ -1145,7 +1161,9 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 			if (!((i == 0 && ends[0].shared && !ends[0].owns) ||
 						(i + 1 == carried_path.size() && ends[1].shared &&
 								!ends[1].owns)))
-				editor.set_block_absolute(rail_block, x, y + 1, z, nullopt, nullopt);
+				editor.set_block_absolute(
+						rail_block, x, y + 1, z, rail_clear_variants(), nullopt);
+			editor.register_rail(way.id, x, z, y + 1);
 		}
 		return;
 	}
@@ -1267,7 +1285,9 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 				(i % 4) == 0 ? OAK_LOG : GRAVEL, bx, y, bz, nullopt, nullopt);
 		if (!((i == 0 && ends[0].shared && !ends[0].owns) ||
 					(i + 1 == total && ends[1].shared && !ends[1].owns)))
-			editor.set_block_absolute(rail_block, bx, y + 1, bz, nullopt, nullopt);
+			editor.set_block_absolute(
+					rail_block, bx, y + 1, bz, rail_clear_variants(), nullopt);
+		editor.register_rail(way.id, bx, bz, y + 1);
 
 		const pair<int, int> p_prev = prev_xz.value_or(pair<int, int>{bx, bz});
 		const pair<int, int> p_next = next_xz.value_or(pair<int, int>{bx, bz});
@@ -1540,6 +1560,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 			if (lays)
 				editor.set_block_absolute(rail, x, floors[i] + 1, z,
 						std::optional<std::vector<Block>>{*replace}, nullopt);
+			editor.register_rail(element.id, x, z, floors[i] + 1);
 		}
 		return;
 	}
@@ -1616,6 +1637,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 						std::optional<std::vector<Block>>(
 								{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
 						std::nullopt);
+				editor.register_rail(element.id, bx, bz, floor_y + 1);
 			}
 		}
 		return;
@@ -1673,6 +1695,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				std::optional<std::vector<Block>>(
 						{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
 				std::optional<std::vector<Block>>());
+		editor.register_rail(element.id, bx, bz, floor_y + 1);
 	}
 }
 
@@ -1740,6 +1763,13 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		const bridges::BridgeStructureMap &bridge_structures,
 		const bridges::BridgeSurfaceMap &bridge_surface, const RailJoins &rail_joins)
 {
+	// Match Rust's track_level gate before interpreting bridge/tunnel tags. Without
+	// this, non-track railway features (for example platforms or signals carrying
+	// bridge=yes) could fall through into at-grade or bridge track generation.
+	const auto level = track_level(element);
+	if (!level)
+		return;
+
 	auto it = element.tags.find("railway");
 	if (it == element.tags.end())
 		return;
@@ -1748,9 +1778,8 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 	if (ADVTRAINS_AVAILABLE && rail_track_types().contains(railway_type) &&
 			element.tags.get("area") != "yes")
 		advtrains::mark_generated(element);
-	if (wants_rail_tunnel(element)) {
-		if (renders_as_rail_tunnel(element))
-			generate_rail_tunnel_shell(editor, element, rail_tunnel_points, rail_joins);
+	if (*level == TrackLevel::Tunnel) {
+		generate_rail_tunnel_shell(editor, element, rail_tunnel_points, rail_joins);
 		return;
 	}
 

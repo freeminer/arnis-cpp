@@ -364,8 +364,8 @@ bool fast_road(const std::string &highway, const crate::tags_t &tags)
 		return true;
 	const auto speed = tags.get("maxspeed");
 	std::size_t digits = 0;
-	while (digits < speed.size() &&
-			std::isdigit(static_cast<unsigned char>(speed[digits])))
+	while (digits < speed.size() && static_cast<unsigned char>(speed[digits]) >= '0' &&
+			static_cast<unsigned char>(speed[digits]) <= '9')
 		++digits;
 	if (digits) {
 		try {

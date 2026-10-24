@@ -23,6 +23,14 @@ namespace arnis::highways::cars
 {
 namespace
 {
+// Keep whole-number targets off the macro parser's integer-coordinate path,
+// which would move the runtime target to the centre of the adjacent block.
+double macro_coord(double value)
+{
+	const double rounded = std::round(value * 100.0) / 100.0;
+	return rounded == std::trunc(rounded) ? rounded + 0.01 : rounded;
+}
+
 constexpr double MAX_SPAN = 24.0;
 constexpr std::size_t MAX_CARS = 1500;
 constexpr double STOP_BACK = 1.5;
@@ -1387,8 +1395,9 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 		const int speed = segment.speed * car.pace / 1000;
 		const nlohmann::json rotation = {yaw, 0.0f};
 		nlohmann::json data = {{"s", static_cast<std::int32_t>(car.segment)},
-				{"i", static_cast<std::int32_t>(car.target)}, {"x", target.x},
-				{"y", target.y}, {"z", target.z}, {"v", speed},
+				{"i", static_cast<std::int32_t>(car.target)},
+				{"x", macro_coord(target.x)}, {"y", target.y},
+				{"z", macro_coord(target.z)}, {"v", speed},
 				{"c", target.cap ? std::min(*target.cap, speed) : speed}, {"p", car.pace},
 				{"w", 0}, {"q", 0}, {"b", 0}};
 		if (target.stop)
