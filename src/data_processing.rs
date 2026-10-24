@@ -60,16 +60,6 @@ fn ring_area(nodes: &[ProcessedNode]) -> f64 {
     (twice_area / 2.0).abs()
 }
 
-/// Whether a `landuse` value paints ground at all.
-/// `generate_landuse` bails on these before placing anything, and they are typically the largest
-/// polygons around, so including them would push every real area behind unrelated elements.
-fn landuse_paints_ground(tags: &HashMap<String, String>) -> bool {
-    !matches!(
-        tags.get("landuse").map(String::as_str),
-        Some("residential") | Some("commercial")
-    )
-}
-
 /// Footprint of a ground-filling way, or `None` if it does not reach a ground-fill handler.
 /// Mirrors the landuse/natural/leisure/place arms of `process_element`; keep both in sync.
 fn way_ground_fill_area(way: &ProcessedWay) -> Option<f64> {
@@ -97,38 +87,25 @@ fn way_ground_fill_area(way: &ProcessedWay) -> Option<f64> {
 }
 
 /// Footprint of a ground-filling relation, or `None` if it does not reach a ground-fill handler.
-/// Mirrors the relation arms of `process_element`; keep both in sync.
+/// Water relations render through water_areas, and piers are decks, not ground.
 fn relation_ground_fill_area(rel: &ProcessedRelation) -> Option<f64> {
     let tags = &rel.tags;
-    if tags.contains_key("building")
-        || tags.contains_key("building:part")
-        || tags.get("type").map(String::as_str) == Some("building")
-    {
-        return None;
+    match RelationArea::of(tags) {
+        Some(RelationArea::Natural | RelationArea::Park) => {}
+        Some(RelationArea::Landuse) if landuse_paints_ground(tags) => {}
+        _ => return None,
     }
-    // Water relations render through water_areas, not the ground-fill handlers.
-    if tags.contains_key("water")
-        || tags
-            .get("natural")
-            .map(|v| v == "water" || v == "bay")
-            .unwrap_or(false)
-    {
-        return None;
-    }
-    let fills_ground = tags.contains_key("natural")
-        || (tags.contains_key("landuse") && landuse_paints_ground(tags))
-        || tags.get("leisure").map(String::as_str) == Some("park");
-    if !fills_ground {
-        return None;
-    }
-    // Outer members are each rendered individually, so the footprint is their sum.
-    Some(
+    // Outer members are each rendered individually, less the holes their inner rings cut.
+    let sum = |role: ProcessedMemberRole| -> f64 {
         rel.members
             .iter()
-            .filter(|m| m.role == ProcessedMemberRole::Outer)
+            .filter(|m| m.role == role)
             .map(|m| ring_area(&m.way.nodes))
-            .sum(),
-    )
+            .sum()
+    };
+    let outer = sum(ProcessedMemberRole::Outer);
+    let net = outer - sum(ProcessedMemberRole::Inner);
+    Some(if net > 0.0 { net } else { outer })
 }
 
 /// Footprint of a ground-filling element, or `None` if it is not one.
@@ -322,6 +299,41 @@ fn process_element(
             // A pier also tagged as a building or a path is still a deck on piles.
             if way.tags.get("man_made").map(String::as_str) == Some("pier") {
                 waterfront::generate_pier(editor, element, flood_fill_cache, args);
+            } else if attractions::claims(&way.tags)
+                && args.mode != GenerationMode::Blueprint
+                && attractions::generate_ride(
+                    editor,
+                    element,
+                    flood_fill_cache,
+                    building_footprints,
+                    road_mask,
+                    args.scale,
+                    args.timeout.as_ref(),
+                )
+            {
+                // Drawn; an outline the ride declines falls through to the branches below.
+            } else if args.mode != GenerationMode::Blueprint
+                && fuel_stations::is_station_canopy(editor, way)
+                && fuel_stations::generate_canopy(
+                    editor,
+                    way,
+                    flood_fill_cache,
+                    road_mask,
+                    args.scale,
+                    args.timeout.as_ref(),
+                )
+            {
+                if way.tags.get("amenity").map(String::as_str) == Some("fuel") {
+                    fuel_stations::generate_station(
+                        editor,
+                        element,
+                        flood_fill_cache,
+                        building_footprints,
+                        road_mask,
+                        args.scale,
+                        args.timeout.as_ref(),
+                    );
+                }
             } else if args.mode == GenerationMode::Blueprint
                 && (way.tags.contains_key("building") || way.tags.contains_key("building:part"))
             {
@@ -342,6 +354,19 @@ fn process_element(
                 if signage {
                     signage::generate_building_signage(editor, way, anchor);
                 }
+                if way.tags.get("amenity").map(String::as_str) == Some("fuel") {
+                    fuel_stations::generate_station(
+                        editor,
+                        element,
+                        flood_fill_cache,
+                        building_footprints,
+                        road_mask,
+                        args.scale,
+                        args.timeout.as_ref(),
+                    );
+                }
+            } else if aerialways::is_lift(&way.tags) {
+                aerialways::generate_aerialway(editor, way, building_footprints, road_mask);
             } else if crate::structures::jetbridge::claims(way) {
                 // Ahead of the highway branch, or the corridor tag paints asphalt on the apron.
                 crate::structures::jetbridge::generate_jet_bridge(editor, way, building_footprints);
@@ -364,6 +389,16 @@ fn process_element(
                 if signage {
                     signage::generate_highway_way_signage(editor, way, building_footprints);
                 }
+            } else if way.tags.get("amenity").map(String::as_str) == Some("fuel") {
+                fuel_stations::generate_station(
+                    editor,
+                    element,
+                    flood_fill_cache,
+                    building_footprints,
+                    road_mask,
+                    args.scale,
+                    args.timeout.as_ref(),
+                );
             } else if way.tags.contains_key("landuse") {
                 landuse::generate_landuse(
                     editor,
@@ -482,8 +517,28 @@ fn process_element(
                     building_footprints,
                     bridge_surface,
                 );
+            } else if attractions::claims(&node.tags) {
+                attractions::generate_ride(
+                    editor,
+                    element,
+                    flood_fill_cache,
+                    building_footprints,
+                    road_mask,
+                    args.scale,
+                    args.timeout.as_ref(),
+                );
             } else if man_made::is_summit_cross(&node.tags) {
                 man_made::generate_cross(editor, node, args, true);
+            } else if node.tags.get("amenity").map(String::as_str) == Some("fuel") {
+                fuel_stations::generate_station(
+                    editor,
+                    element,
+                    flood_fill_cache,
+                    building_footprints,
+                    road_mask,
+                    args.scale,
+                    args.timeout.as_ref(),
+                );
             } else if node.tags.contains_key("amenity") {
                 amenities::generate_amenities(editor, element, args, flood_fill_cache, road_mask);
             } else if node.tags.contains_key("barrier") {
@@ -520,13 +575,11 @@ fn process_element(
                 advertising::generate_advertising(editor, node, road_mask);
             }
         }
-        ProcessedElement::Relation(rel) => {
-            let is_building_relation = rel.tags.contains_key("building")
-                || rel.tags.contains_key("building:part")
-                || rel.tags.get("type").map(|t| t.as_str()) == Some("building");
-            if is_building_relation && args.mode == GenerationMode::Blueprint {
+        ProcessedElement::Relation(rel) => match RelationArea::of(&rel.tags) {
+            Some(RelationArea::Building) if args.mode == GenerationMode::Blueprint => {
                 blueprint::generate_relation_outline(editor, rel);
-            } else if is_building_relation {
+            }
+            Some(RelationArea::Building) => {
                 let ctx = BuildingContext {
                     flood_fill_cache,
                     building_passages,
@@ -536,13 +589,8 @@ fn process_element(
                     interior_uses,
                 };
                 buildings::generate_building_from_relation(editor, rel, args, &ctx, xzbbox);
-            } else if rel.tags.contains_key("water")
-                || rel
-                    .tags
-                    .get("natural")
-                    .map(|val| val == "water" || val == "bay")
-                    .unwrap_or(false)
-            {
+            }
+            Some(RelationArea::Water) => {
                 water_areas::generate_water_areas_from_relation(
                     editor,
                     rel,
@@ -553,7 +601,8 @@ fn process_element(
                     bridge_surface,
                     still_surfaces,
                 );
-            } else if rel.tags.contains_key("natural") {
+            }
+            Some(RelationArea::Natural) => {
                 natural::generate_natural_from_relation(
                     editor,
                     rel,
@@ -562,7 +611,8 @@ fn process_element(
                     building_footprints,
                     bridge_surface,
                 );
-            } else if rel.tags.contains_key("landuse") {
+            }
+            Some(RelationArea::Landuse) => {
                 landuse::generate_landuse_from_relation(
                     editor,
                     rel,
@@ -572,7 +622,8 @@ fn process_element(
                     road_mask,
                     bridge_surface,
                 );
-            } else if rel.tags.get("leisure").map(String::as_str) == Some("park") {
+            }
+            Some(RelationArea::Park) => {
                 leisure::generate_leisure_from_relation(
                     editor,
                     rel,
@@ -581,7 +632,8 @@ fn process_element(
                     building_footprints,
                     bridge_surface,
                 );
-            } else if rel.tags.contains_key("man_made") {
+            }
+            Some(RelationArea::ManMade) => {
                 man_made::generate_man_made(
                     editor,
                     element,
@@ -590,7 +642,8 @@ fn process_element(
                     building_footprints,
                 );
             }
-        }
+            None => {}
+        },
     }
 }
 
@@ -1046,6 +1099,10 @@ pub fn generate_world_with_options(
     // Indexed up front, so a construction site skips its own crane whichever renders first.
     let mapped_cranes = Arc::new(man_made::mapped_crane_points(&elements));
     editor.set_mapped_cranes(Arc::clone(&mapped_cranes));
+    let clear_corridors = Arc::new(aerialways::clear_corridors(&elements, &xzbbox));
+    editor.set_clear_corridors(Arc::clone(&clear_corridors));
+    let fuel_index = Arc::new(fuel_stations::FuelIndex::build(&elements, args.scale));
+    editor.set_fuel_index(Arc::clone(&fuel_index));
 
     let traffic_signals =
         (extras.traffic_lights && world_format == WorldFormat::JavaAnvil).then(|| {
@@ -1412,6 +1469,8 @@ pub fn generate_world_with_options(
             tile_editor.set_sealed_surface(Arc::clone(&sealed_surface));
             tile_editor.set_mapped_trunks(Arc::clone(&mapped_trunks));
             tile_editor.set_mapped_cranes(Arc::clone(&mapped_cranes));
+            tile_editor.set_clear_corridors(Arc::clone(&clear_corridors));
+            tile_editor.set_fuel_index(Arc::clone(&fuel_index));
             if let Some(ctx) = &signage_ctx {
                 tile_editor.set_signage(Arc::clone(ctx));
             }
@@ -2646,6 +2705,21 @@ mod tests {
             way(1, 100, &[("landuse", "forest")]),
             relation(2, 10, &[("landuse", "meadow")]),
         ];
+        sort_ground_fill_areas(&mut elements);
+        assert_eq!(ids(&elements), vec![2, 1]);
+    }
+
+    #[test]
+    fn a_ring_relation_sorts_by_the_land_between_its_rings() {
+        // A railway corridor round a park covers a thin ring, not the whole park.
+        let mut ring = relation(2, 100, &[("landuse", "railway")]);
+        if let ProcessedElement::Relation(rel) = &mut ring {
+            rel.members.push(ProcessedMember {
+                role: ProcessedMemberRole::Inner,
+                way: Arc::new(square(3000, 95, &[])),
+            });
+        }
+        let mut elements = vec![way(1, 40, &[("landuse", "grass")]), ring];
         sort_ground_fill_areas(&mut elements);
         assert_eq!(ids(&elements), vec![2, 1]);
     }
