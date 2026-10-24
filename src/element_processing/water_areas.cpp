@@ -892,46 +892,34 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 			clipped_inners.push_back(std::move(*clipped));
 	inners = std::move(clipped_inners);
 
-	// Filter: Keep only loops that are already closed OR can be closed within 1 block
-	outers.erase(std::remove_if(outers.begin(), outers.end(),
-						 [](const std::vector<ProcessedNode> &loop_nodes) {
-							 if (loop_nodes.size() < 3) {
-								 return true;
-							 }
-							 const ProcessedNode &first = loop_nodes.front();
-							 const ProcessedNode &last = loop_nodes.back();
-							 if (first.id == last.id) {
-								 return false; // Already closed by ID
-							 }
-							 int32_t dx = std::abs(first.x - last.x);
-							 int32_t dz = std::abs(first.z - last.z);
-							 return !(dx <= 1 &&
-									  dz <= 1); // Remove if not closable within 1 block
-						 }),
-			outers.end());
-
-	// Now close the remaining loops that are within 1 block tolerance
-	for (auto &loop_nodes : outers) {
-		if (loop_nodes.size() >= 2) {
-			const ProcessedNode &first = loop_nodes.front();
-			const ProcessedNode &last = loop_nodes.back();
-			if (first.id != last.id) {
-				// Endpoints are close (within tolerance), close the loop
-				loop_nodes.push_back(first);
-			}
-		}
-	}
-
-	// If no valid outer loops remain, skip the relation
-	if (outers.empty()) {
-		return;
-	}
-
-	// Verify again after filtering and closing
+	// Rust only repairs the set when the initial closure check fails. Keep valid
+	// rings byte-for-byte unchanged; otherwise discard disconnected loops and
+	// close the remaining endpoints within the one-block tolerance.
 	if (!verify_closed_rings(outers)) {
-		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
-				  << std::endl;
-		return;
+		outers.erase(std::remove_if(outers.begin(), outers.end(),
+							 [](const std::vector<ProcessedNode> &loop_nodes) {
+								 if (loop_nodes.size() < 3)
+									 return true;
+								 const ProcessedNode &first = loop_nodes.front();
+								 const ProcessedNode &last = loop_nodes.back();
+								 if (first.id == last.id)
+									 return false;
+								 const int32_t dx = std::abs(first.x - last.x);
+								 const int32_t dz = std::abs(first.z - last.z);
+								 return !(dx <= 1 && dz <= 1);
+							 }),
+				outers.end());
+
+		for (auto &loop_nodes : outers) {
+			if (loop_nodes.size() >= 2 && loop_nodes.front().id != loop_nodes.back().id)
+				loop_nodes.push_back(loop_nodes.front());
+		}
+
+		if (outers.empty() || !verify_closed_rings(outers)) {
+			std::cout << "Skipping relation " << element.id << " due to invalid polygon"
+					  << std::endl;
+			return;
+		}
 	}
 
 	merge_loopy_loops(inners);
@@ -1006,21 +994,23 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 			merge_loopy_loops(inners);
 			clip_rings(outers);
 			clip_rings(inners);
-			auto invalid_outer = [](const auto &ring) {
-				if (ring.size() < 3)
-					return true;
-				const auto &first = ring.front();
-				const auto &last = ring.back();
-				return first.id != last.id &&
-					   (std::abs(first.x - last.x) > 1 || std::abs(first.z - last.z) > 1);
-			};
-			outers.erase(std::remove_if(outers.begin(), outers.end(), invalid_outer),
-					outers.end());
-			for (auto &ring : outers)
-				if (!ring.empty() && ring.front().id != ring.back().id)
-					ring.push_back(ring.front());
-			if (outers.empty() || !verify_closed_rings(outers))
-				continue;
+			if (!verify_closed_rings(outers)) {
+				auto invalid_outer = [](const auto &ring) {
+					if (ring.size() < 3)
+						return true;
+					const auto &first = ring.front();
+					const auto &last = ring.back();
+					return first.id != last.id && (std::abs(first.x - last.x) > 1 ||
+														  std::abs(first.z - last.z) > 1);
+				};
+				outers.erase(std::remove_if(outers.begin(), outers.end(), invalid_outer),
+						outers.end());
+				for (auto &ring : outers)
+					if (!ring.empty() && ring.front().id != ring.back().id)
+						ring.push_back(ring.front());
+				if (outers.empty() || !verify_closed_rings(outers))
+					continue;
+			}
 			merge_loopy_loops(inners);
 			discard_broken_inner_rings(inners);
 			kind = "relation";
