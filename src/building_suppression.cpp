@@ -618,24 +618,26 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		if (ring.size() >= 4)
 			ride_outlines.emplace_back(way->id, std::move(ring));
 	}
-	for (const auto *way : ordered_ways) {
-		if (!is_building_part(way->tags) || attractions::claims(way->tags))
-			continue;
-		const auto ring = geo_ring(*way);
-		if (ring.empty())
-			continue;
-		double latitude = 0.0, longitude = 0.0;
-		for (const auto &point : ring) {
-			latitude += point.lat;
-			longitude += point.lon;
-		}
-		latitude /= static_cast<double>(ring.size());
-		longitude /= static_cast<double>(ring.size());
-		for (const auto &[_, outline] : ride_outlines)
-			if (point_in_ring(latitude, longitude, outline)) {
-				out.outline_suppression.emplace("way", way->id);
-				break;
+	if (!ride_outlines.empty()) {
+		for (const auto *way : ordered_ways) {
+			if (!is_building_part(way->tags) || attractions::claims(way->tags))
+				continue;
+			const auto ring = geo_ring(*way);
+			if (ring.empty())
+				continue;
+			double latitude = 0.0, longitude = 0.0;
+			for (const auto &point : ring) {
+				latitude += point.lat;
+				longitude += point.lon;
 			}
+			latitude /= static_cast<double>(ring.size());
+			longitude /= static_cast<double>(ring.size());
+			for (const auto &[_, outline] : ride_outlines)
+				if (point_in_ring(latitude, longitude, outline)) {
+					out.outline_suppression.emplace("way", way->id);
+					break;
+				}
+		}
 	}
 
 	// A material/color mapped on a masonry outline is the building-wide facade;

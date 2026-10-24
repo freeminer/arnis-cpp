@@ -9,6 +9,7 @@
 #include <array>
 #include <cctype>
 #include <cmath>
+#include <cstdint>
 #include <initializer_list>
 #include <iterator>
 #include <string>
@@ -53,6 +54,55 @@ std::string lower_name(std::string_view input)
 	return result;
 }
 
+std::pair<std::uint32_t, std::size_t> utf8_codepoint_at(
+		std::string_view text, std::size_t offset)
+{
+	const auto first = static_cast<unsigned char>(text[offset]);
+	if (first < 0x80)
+		return {first, 1};
+	const std::size_t length = (first & 0xe0) == 0xc0	? 2
+							   : (first & 0xf0) == 0xe0 ? 3
+							   : (first & 0xf8) == 0xf0 ? 4
+														: 1;
+	if (length == 1 || offset + length > text.size())
+		return {first, 1};
+	std::uint32_t codepoint = first & ((1u << (7 - length)) - 1);
+	for (std::size_t i = 1; i < length; ++i) {
+		const auto byte = static_cast<unsigned char>(text[offset + i]);
+		if ((byte & 0xc0) != 0x80)
+			return {first, 1};
+		codepoint = (codepoint << 6) | (byte & 0x3f);
+	}
+	return {codepoint, length};
+}
+
+bool unicode_separator(std::uint32_t codepoint)
+{
+	// These Unicode punctuation and separator blocks are common in mapped names
+	// (notably en/em dashes). Treat each decoded codepoint as one word boundary;
+	// testing UTF-8 bytes individually incorrectly considered them letters.
+	return codepoint == 0x00a0 || codepoint == 0x1680 ||
+		   (codepoint >= 0x2000 && codepoint <= 0x206f) ||
+		   (codepoint >= 0x2e00 && codepoint <= 0x2e7f) ||
+		   (codepoint >= 0x3000 && codepoint <= 0x303f) ||
+		   (codepoint >= 0x2600 && codepoint <= 0x27bf) ||
+		   (codepoint >= 0x1f000 && codepoint <= 0x1faff) ||
+		   (codepoint >= 0xfe10 && codepoint <= 0xfe1f) ||
+		   (codepoint >= 0xfe30 && codepoint <= 0xfe4f) ||
+		   (codepoint >= 0xff01 && codepoint <= 0xff0f) ||
+		   (codepoint >= 0xff1a && codepoint <= 0xff20) ||
+		   (codepoint >= 0xff3b && codepoint <= 0xff40) ||
+		   (codepoint >= 0xff5b && codepoint <= 0xff65);
+}
+
+bool unicode_word_char(std::string_view text, std::size_t offset)
+{
+	const auto [codepoint, length] = utf8_codepoint_at(text, offset);
+	if (codepoint < 0x80)
+		return std::isalnum(static_cast<unsigned char>(codepoint));
+	return !unicode_separator(codepoint) && offset + length <= text.size();
+}
+
 enum class Ride
 {
 	Carousel,
@@ -93,18 +143,18 @@ std::optional<Ride> hint(std::string name)
 	if (has({"schiffschaukel", "pirat", "viking", "galeone", "swinging ship"}))
 		return Ride::Ship;
 	const auto has_word = [&](const char *word) {
-		const auto word_char = [](unsigned char c) {
-			// Rust's char::is_alphanumeric keeps Unicode letters attached to a token;
-			// treating UTF-8 bytes as word characters avoids false ASCII boundaries.
-			return c >= 0x80 || std::isalnum(c);
-		};
 		for (std::size_t at = name.find(word); at != std::string::npos;
 				at = name.find(word, at + 1)) {
-			const bool left =
-					at == 0 || !word_char(static_cast<unsigned char>(name[at - 1]));
+			std::size_t previous = at;
+			if (previous > 0) {
+				--previous;
+				while (previous > 0 &&
+						(static_cast<unsigned char>(name[previous]) & 0xc0) == 0x80)
+					--previous;
+			}
+			const bool left = at == 0 || !unicode_word_char(name, previous);
 			const auto end = at + std::char_traits<char>::length(word);
-			const bool right = end == name.size() ||
-							   !word_char(static_cast<unsigned char>(name[end]));
+			const bool right = end == name.size() || !unicode_word_char(name, end);
 			if (left && right)
 				return true;
 		}
@@ -207,6 +257,11 @@ Site make_site(const ProcessedElement &e, const FloodFillCache &fills,
 		const std::optional<std::chrono::milliseconds> &timeout)
 {
 	Site s;
+	if (e.is_node()) {
+		s.x = e.as_node().x + 0.5;
+		s.z = e.as_node().z + 0.5;
+		return s;
+	}
 	const auto &nodes = e.nodes();
 	if (nodes.empty())
 		return s;
@@ -895,7 +950,7 @@ bool generate_ride(WorldEditor &editor, const ProcessedElement &e,
 	if (!ride)
 		return false;
 	Site s = make_site(e, fills, timeout);
-	if (e.nodes().empty())
+	if (!e.is_node() && e.nodes().empty())
 		return false;
 	int r = int(std::round((s.length + s.width) * 0.25));
 	if (r <= 0)

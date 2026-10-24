@@ -99,13 +99,14 @@ inline std::vector<RingGroup> hole_groups(
 		return out;
 	};
 	const auto mostly_inside = [&](const std::vector<ProcessedNode> &ring,
-									   const std::vector<ProcessedNode> &around) {
-		const auto rb = bounds(ring), ab = bounds(around);
-		if (!rb || !ab || around.size() < 3 ||
-				std::int64_t((*rb)[0]) < std::int64_t((*ab)[0]) - 1 ||
-				std::int64_t((*rb)[1]) < std::int64_t((*ab)[1]) - 1 ||
-				std::int64_t((*rb)[2]) > std::int64_t((*ab)[2]) + 1 ||
-				std::int64_t((*rb)[3]) > std::int64_t((*ab)[3]) + 1)
+									   const Bounds &ring_bounds,
+									   const std::vector<ProcessedNode> &around,
+									   const Bounds &around_bounds) {
+		if (around.size() < 3 ||
+				std::int64_t(ring_bounds[0]) < std::int64_t(around_bounds[0]) - 1 ||
+				std::int64_t(ring_bounds[1]) < std::int64_t(around_bounds[1]) - 1 ||
+				std::int64_t(ring_bounds[2]) > std::int64_t(around_bounds[2]) + 1 ||
+				std::int64_t(ring_bounds[3]) > std::int64_t(around_bounds[3]) + 1)
 			return false;
 		std::size_t inside = 0, outside = 0;
 		for (const auto &p : ring) {
@@ -140,14 +141,21 @@ inline std::vector<RingGroup> hole_groups(
 		}
 		return inside > outside;
 	};
+	std::vector<std::optional<Bounds>> inner_bounds;
+	inner_bounds.reserve(inners.size());
+	for (const auto &inner : inners)
+		inner_bounds.push_back(bounds(inner));
 	std::vector<RingGroup> groups;
 	for (std::size_t o = 0; o < outers.size(); ++o) {
+		const auto outer_bounds = bounds(outers[o]);
 		std::vector<std::size_t> cutting;
 		for (std::size_t i = 0; i < inners.size(); ++i) {
-			const auto ob = bounds(outers[o]), ib = bounds(inners[i]);
-			if (!ob || !ib || (*ib)[0] > (*ob)[2] || (*ib)[2] < (*ob)[0] ||
-					(*ib)[1] > (*ob)[3] || (*ib)[3] < (*ob)[1] ||
-					!mostly_inside(outers[o], inners[i]))
+			const auto &inner_bound = inner_bounds[i];
+			if (!outer_bounds || !inner_bound || (*inner_bound)[0] > (*outer_bounds)[2] ||
+					(*inner_bound)[2] < (*outer_bounds)[0] ||
+					(*inner_bound)[1] > (*outer_bounds)[3] ||
+					(*inner_bound)[3] < (*outer_bounds)[1] ||
+					!mostly_inside(outers[o], *outer_bounds, inners[i], *inner_bound))
 				cutting.push_back(i);
 		}
 		auto found = std::find_if(groups.begin(), groups.end(),
