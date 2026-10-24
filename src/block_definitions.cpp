@@ -130,6 +130,8 @@ BlockWithProperties::Properties default_block_properties(const Block &block)
 		return one("facing", "west");
 	case 362:
 		return one("axis", "z");
+	case 510:
+		return one("axis", "y");
 	case 471:
 	case 472:
 		return one("snowy", "true");

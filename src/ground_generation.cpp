@@ -434,10 +434,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	} else if (cover == land_cover::LC_CROPLAND) {
 		const bool farmland =
 				editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND);
-		if (farmland && x % 9 == 0 && z % 9 == 0 && editor.water_source_is_enclosed(x, z))
-			editor.set_block_absolute(
-					WATER, x, ground_y, z, farmland_ground(), std::nullopt);
-		else if (farmland && rng.uniform(76) == 0) {
+		if (farmland && rng.uniform(76) == 0) {
 			if (rng.uniform(10) < 4)
 				place_decoration(HAY_BALE, ground_y + 1);
 		} else if (farmland) {

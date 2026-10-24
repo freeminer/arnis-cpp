@@ -6,6 +6,7 @@
 
 // Project headers
 #include "../args.h"
+#include "../floodfill_cache.h"
 #include "block_definitions.h"
 #include "bresenham.h"
 #include "tree.h"
@@ -25,11 +26,10 @@ namespace arnis
 
 namespace leisure
 {
-
-void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Args &args,
-		FloodFillCache const &flood_fill_cache,
+static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &element,
+		const Args &args, FloodFillCache const &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
-		const bridges::BridgeSurfaceMap &bridge_surface)
+		const bridges::BridgeSurfaceMap &bridge_surface, const Holes *holes)
 {
 	auto leisure_it = element.tags.find(std::string("leisure"));
 	if (leisure_it != element.tags.end()) {
@@ -88,6 +88,8 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				for (const std::tuple<int, int, int> &t : bresenham_points) {
 					int bx = std::get<0>(t);
 					int bz = std::get<2>(t);
+					if (edge_in_hole(holes, bx, bz))
+						continue;
 					editor.set_block(block_type, bx, 0, bz,
 							std::optional<std::vector<Block>>({GRASS_BLOCK, STONE_BRICKS,
 									SMOOTH_STONE, LIGHT_GRAY_CONCRETE, COBBLESTONE,
@@ -116,6 +118,8 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 			for (const std::pair<int, int> &p : filled_area) {
 				int x = p.first;
 				int z = p.second;
+				if (in_hole(holes, x, z))
+					continue;
 				// Cached polygons cover the entire source tile, not just this chunk.
 				// Let the editor reject out-of-bounds writes, but avoid terrain reads
 				// for cells this editor cannot own.
@@ -160,21 +164,34 @@ void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Ar
 				}
 			}
 
-			if (leisure_type == "playground" || leisure_type == "recreation_ground") {
-				structures::playground::scatter_playgrounds(editor, filled_area);
-			}
-			if (leisure_type == "pitch") {
-				const auto &vegetation = ground_decoration::loose_plant_blocks();
-				for (const auto &[x, z] : filled_area) {
-					if (editor.is_hedge(x, z))
-						continue;
-					editor.set_block(AIR, x, 1, z, vegetation, std::nullopt);
+			if (leisure_type == "playground" || leisure_type == "recreation_ground" ||
+					leisure_type == "pitch") {
+				const auto area_without_holes = without_holes(filled_area, holes);
+				if (leisure_type == "playground" || leisure_type == "recreation_ground")
+					structures::playground::scatter_playgrounds(
+							editor, area_without_holes);
+				if (leisure_type == "pitch") {
+					const auto &vegetation = ground_decoration::loose_plant_blocks();
+					for (const auto &[x, z] : area_without_holes) {
+						if (editor.is_hedge(x, z))
+							continue;
+						editor.set_block(AIR, x, 1, z, vegetation, std::nullopt);
+					}
+					sport_pitches::draw_pitch_markings(
+							editor, element, area_without_holes, block_type);
 				}
-				sport_pitches::draw_pitch_markings(
-						editor, element, filled_area, block_type);
 			}
 		}
 	}
+}
+
+void generate_leisure(WorldEditor &editor, const ProcessedWay &element, const Args &args,
+		FloodFillCache const &flood_fill_cache,
+		BuildingFootprintBitmap const &building_footprints,
+		const bridges::BridgeSurfaceMap &bridge_surface)
+{
+	generate_leisure_area(editor, element, args, flood_fill_cache, building_footprints,
+			bridge_surface, nullptr);
 }
 
 void generate_leisure_from_relation(WorldEditor &editor, const ProcessedRelation &rel,
@@ -188,20 +205,22 @@ void generate_leisure_from_relation(WorldEditor &editor, const ProcessedRelation
 		// We intentionally do not combine all outer nodes into one mega-way,
 		// because that creates a nonsensical polygon spanning the whole relation
 		// extent, misses the flood fill cache, and can cause multi-GB allocations.
-		for (const ProcessedMember &member : rel.members) {
-			if (member.role == ProcessedMemberRole::Outer) {
-				// Use relation tags so the member inherits the relation's leisure=* type
-				ProcessedWay way_with_rel_tags;
-				way_with_rel_tags.id = member.way->id;
-				way_with_rel_tags.nodes = member.way->nodes;
-				way_with_rel_tags.tags = rel.tags;
-				generate_leisure(editor, way_with_rel_tags, args, flood_fill_cache,
-						building_footprints, bridge_surface);
-			}
+		InnerRings inners(rel);
+		for (const auto &member : rel.members) {
+			if (member.role != ProcessedMemberRole::Outer || !member.way)
+				continue;
+			const auto holes =
+					flood_fill_cache.holes_in(*member.way, inners, args.timeout_ref());
+			// Inherit the relation's leisure type for each independently cached ring.
+			ProcessedWay way_with_rel_tags;
+			way_with_rel_tags.id = member.way->id;
+			way_with_rel_tags.nodes = member.way->nodes;
+			way_with_rel_tags.tags = rel.tags;
+			generate_leisure_area(editor, way_with_rel_tags, args, flood_fill_cache,
+					building_footprints, bridge_surface, holes ? &*holes : nullptr);
 		}
 	}
 }
-
 }
 
 }

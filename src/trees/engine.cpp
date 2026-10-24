@@ -166,7 +166,7 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 	const auto blocked = [&](int sx, int sz) {
 		// Mapped OSM trees are explicitly allowed on paving in Rust. Mapped crown
 		// masks suppress nearby procedural vegetation, not the mapped trunk itself.
-		return editor.is_lc_water(sx, sz) ||
+		return editor.is_lc_water(sx, sz) || editor.in_clear_corridor(sx, sz) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,

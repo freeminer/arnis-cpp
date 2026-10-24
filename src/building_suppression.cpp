@@ -1,6 +1,7 @@
 #include "building_suppression.h"
 
 #include "data_processing.h"
+#include "element_processing/attractions.h"
 #include "element_processing/buildings.h"
 #include "osm_parser.h"
 #include "strict_parse.h"
@@ -604,6 +605,39 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i)
 		if (relation_coverage[i] / relation_outlines[i].area >= MIN_PART_COVERAGE)
 			out.suppressed_relations.insert(relation_outlines[i].id);
+
+	// Rust's osm_parser::suppress_ride_parts runs before ways are clipped into
+	// chunk views. Keep that ownership here in the shared prepared data so every
+	// chunk sees the same complete attraction and building-part geometry.
+	std::vector<std::pair<std::uint64_t, std::vector<GeoPoint>>> ride_outlines;
+	for (const auto *way : ordered_ways) {
+		if (!attractions::replaces_parts(way->tags))
+			continue;
+		out.outline_suppression.erase({"way", way->id});
+		auto ring = geo_ring(*way);
+		if (ring.size() >= 4)
+			ride_outlines.emplace_back(way->id, std::move(ring));
+	}
+	for (const auto *way : ordered_ways) {
+		if (!is_building_part(way->tags) || attractions::claims(way->tags))
+			continue;
+		const auto ring = geo_ring(*way);
+		if (ring.empty())
+			continue;
+		double latitude = 0.0, longitude = 0.0;
+		for (const auto &point : ring) {
+			latitude += point.lat;
+			longitude += point.lon;
+		}
+		latitude /= static_cast<double>(ring.size());
+		longitude /= static_cast<double>(ring.size());
+		for (const auto &[_, outline] : ride_outlines)
+			if (point_in_ring(latitude, longitude, outline)) {
+				out.outline_suppression.emplace("way", way->id);
+				break;
+			}
+	}
+
 	// A material/color mapped on a masonry outline is the building-wide facade;
 	// untagged building:parts inherit it, while explicit part palettes still win.
 	static constexpr std::array<const char *, 5> facade_keys{"building:material",

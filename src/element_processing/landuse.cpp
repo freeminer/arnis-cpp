@@ -23,6 +23,7 @@
 #include "../ground_generation.h"
 #include "../climate.h"
 #include "../land_cover/land_cover.h"
+#include "relation_area.h"
 
 #include "../../../arnis_adapter.h"
 #include "../../../arnis_ground.h"
@@ -69,10 +70,11 @@ std::optional<Block> military_ground(
 }
 } // namespace
 
-void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args const &args,
-		FloodFillCache const &flood_fill_cache,
+static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &element,
+		Args const &args, FloodFillCache const &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
-		const RoadMaskBitmap &road_mask, const bridges::BridgeSurfaceMap &bridge_surface)
+		const RoadMaskBitmap &road_mask, const bridges::BridgeSurfaceMap &bridge_surface,
+		const Holes *holes)
 {
 	const std::string binding = std::string();
 	const std::string landuse_tag = [&]() -> std::string {
@@ -137,8 +139,8 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	auto rng = element_rng(element.id);
 
 	// Get the area of the landuse element using cache
-	std::vector<std::pair<int, int>> floor_area =
-			*flood_fill_cache.get_or_compute(element, args.timeout_ref());
+	const auto fill = flood_fill_cache.get_or_compute(element, args.timeout_ref());
+	const auto &floor_area = *fill;
 
 	// Trees ok to generate based on leaf_type
 	std::vector<TreeType> trees_ok_to_generate;
@@ -193,6 +195,8 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	for (auto const &coord : floor_area) {
 		int x = coord.first;
 		int z = coord.second;
+		if (in_hole(holes, x, z))
+			continue;
 		// Flood-fill results cover the source area. Skip cells only when they are
 		// outside both this editor's write bounds and its ownership rectangle;
 		// owned clip-margin cells still advance the deterministic material stream.
@@ -248,8 +252,11 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 						std::optional<std::vector<Block>>(),
 						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
 		} else if (landuse_tag == "railway") {
-			editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(),
-					std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
+			// Ballast sits on the existing ground but must not overwrite roads or water.
+			if (!is_protected)
+				editor.set_block(actual_block, x, 0, z,
+						std::optional<std::vector<Block>>(),
+						std::optional<std::vector<Block>>{std::vector<Block>{SPONGE}});
 		} else if (!is_protected) {
 			editor.set_block(actual_block, x, 0, z, std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>());
@@ -419,38 +426,28 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 		} else if (landuse_tag == "farmland") {
 			if (!editor.check_for_block(x, 0, z,
 						std::optional<std::vector<Block>>{std::vector<Block>{WATER}})) {
-				if (x % 9 == 0 && z % 9 == 0 && editor.water_source_is_enclosed(x, z)) {
-					editor.set_block(WATER, x, 0, z,
-							std::optional<std::vector<Block>>{
-									std::vector<Block>{FARMLAND}},
-							std::optional<std::vector<Block>>());
-				} else {
-					int r = static_cast<int>(rng.uniform(76));
-					if (r == 0) {
-						int special_choice = 1 + static_cast<int>(rng.uniform(10));
-						if (special_choice <= 4) {
-							editor.set_block(HAY_BALE, x, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>{
-											std::vector<Block>{SPONGE}});
-						} else {
-							bush::place(editor, x, z, bush::Kind::Low);
-						}
+				int r = static_cast<int>(rng.uniform(76));
+				if (r == 0) {
+					int special_choice = 1 + static_cast<int>(rng.uniform(10));
+					if (special_choice <= 4) {
+						editor.set_block(HAY_BALE, x, 1, z,
+								std::optional<std::vector<Block>>(),
+								std::optional<std::vector<Block>>{
+										std::vector<Block>{SPONGE}});
 					} else {
-						if (editor.check_for_block(x, 0, z,
-									std::optional<std::vector<Block>>{
-											std::vector<Block>{FARMLAND}})) {
-							int crop_choice = static_cast<int>(rng.uniform(3));
-							Block crop = WHEAT;
-							if (crop_choice == 1)
-								crop = CARROTS;
-							else if (crop_choice == 2)
-								crop = POTATOES;
-							editor.set_block(crop, x, 1, z,
-									std::optional<std::vector<Block>>(),
-									std::optional<std::vector<Block>>());
-						}
+						bush::place(editor, x, z, bush::Kind::Low);
 					}
+				} else if (editor.check_for_block(x, 0, z,
+								   std::optional<std::vector<Block>>{
+										   std::vector<Block>{FARMLAND}})) {
+					int crop_choice = static_cast<int>(rng.uniform(3));
+					Block crop = WHEAT;
+					if (crop_choice == 1)
+						crop = CARROTS;
+					else if (crop_choice == 2)
+						crop = POTATOES;
+					editor.set_block(crop, x, 1, z, std::optional<std::vector<Block>>(),
+							std::optional<std::vector<Block>>());
 				}
 			}
 		} else if (landuse_tag == "quarry") {
@@ -511,14 +508,27 @@ void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args con
 	}
 
 	if (landuse_tag == "construction") {
-		structures::crane::maybe_place_crane(editor, floor_area, building_footprints);
-		structures::excavator::scatter_excavators(editor, floor_area);
-		construction_site::furnish(editor, element, floor_area, building_footprints);
+		const auto area_without_holes = without_holes(floor_area, holes);
+		structures::crane::maybe_place_crane(
+				editor, area_without_holes, building_footprints);
+		structures::excavator::scatter_excavators(editor, area_without_holes);
+		construction_site::furnish(
+				editor, element, area_without_holes, building_footprints);
 	}
 
 	if (landuse_tag == "farmland") {
-		structures::tractor::maybe_place_tractor(editor, floor_area);
+		const auto area_without_holes = without_holes(floor_area, holes);
+		structures::tractor::maybe_place_tractor(editor, area_without_holes);
 	}
+}
+
+void generate_landuse(WorldEditor &editor, ProcessedWay const &element, Args const &args,
+		FloodFillCache const &flood_fill_cache,
+		BuildingFootprintBitmap const &building_footprints,
+		const RoadMaskBitmap &road_mask, const bridges::BridgeSurfaceMap &bridge_surface)
+{
+	generate_landuse_area(editor, element, args, flood_fill_cache, building_footprints,
+			road_mask, bridge_surface, nullptr);
 }
 
 void generate_landuse_from_relation(WorldEditor &editor, ProcessedRelation const &rel,
@@ -526,19 +536,23 @@ void generate_landuse_from_relation(WorldEditor &editor, ProcessedRelation const
 		BuildingFootprintBitmap const &building_footprints,
 		const RoadMaskBitmap &road_mask, const bridges::BridgeSurfaceMap &bridge_surface)
 {
-	if (rel.tags.find(std::string("landuse")) != rel.tags.end()) {
+	if (rel.tags.contains("landuse") &&
+			element_processing::landuse_paints_ground(rel.tags)) {
 		// Process each outer member way individually using cached flood fill.
 		// We intentionally do not combine all outer nodes into one mega-way,
 		// because that creates a nonsensical polygon spanning the whole relation
 		// extent, misses the flood fill cache, and can cause multi-GB allocations.
-		for (auto const &member : rel.members) {
-			if (member.role == ProcessedMemberRole::Outer) {
-				// Use relation tags so the member inherits the relation's landuse=* type
-				ProcessedWay way_with_rel_tags{
-						member.way->id, member.way->nodes, rel.tags};
-				generate_landuse(editor, way_with_rel_tags, args, flood_fill_cache,
-						building_footprints, road_mask, bridge_surface);
-			}
+		InnerRings inners(rel);
+		for (const auto &member : rel.members) {
+			if (member.role != ProcessedMemberRole::Outer || !member.way)
+				continue;
+			const auto holes =
+					flood_fill_cache.holes_in(*member.way, inners, args.timeout_ref());
+			// Use relation tags so the member inherits the relation's landuse=* type.
+			ProcessedWay way_with_rel_tags{member.way->id, member.way->nodes, rel.tags};
+			generate_landuse_area(editor, way_with_rel_tags, args, flood_fill_cache,
+					building_footprints, road_mask, bridge_surface,
+					holes ? &*holes : nullptr);
 		}
 	}
 }

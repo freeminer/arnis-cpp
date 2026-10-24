@@ -559,6 +559,8 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 		const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
+	if (editor.in_clear_corridor(pos.x, pos.z))
+		return;
 	// Keep the mapped-tree selector request in one place, matching Rust's
 	// create_mapped path. Explicit OSM placement is allowed on paving, but the
 	// region selector still rejects water, footprints and bridge decks.
@@ -773,6 +775,8 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 		std::optional<double> mapped_height_m, bool from_tags, bool use_region_pack,
 		bool density_decided)
 {
+	if (editor.in_clear_corridor(pos.x, pos.z))
+		return;
 	// Tile halos may discover the same tree as their owner. Rust assigns tree
 	// placement to the tile containing the trunk so edge columns are generated once.
 	if (!editor.owns(pos.x, pos.z))

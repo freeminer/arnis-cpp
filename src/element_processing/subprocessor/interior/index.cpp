@@ -3,6 +3,7 @@
 #include "../../buildings.h"
 #include "../../way_segments.h"
 #include "../../../strict_parse.h"
+#include "../../relation_area.h"
 
 #include <algorithm>
 #include <cmath>
@@ -356,14 +357,42 @@ InteriorUseIndex InteriorUseIndex::build(
 		Use use;
 	};
 	std::unordered_map<std::uint64_t, AreaChoice> best_area;
-	auto add_area = [&](const std::vector<Outline> &areas, Use use) {
-		for (const auto &area : areas)
+	auto add_area = [&](const std::vector<Outline> &areas,
+							const std::vector<Outline> &holes, Use use) {
+		auto to_nodes = [](const std::vector<Outline> &outlines) {
+			std::vector<std::vector<ProcessedNode>> result;
+			result.reserve(outlines.size());
+			for (const auto &outline : outlines) {
+				std::vector<ProcessedNode> ring;
+				ring.reserve(outline.ring.size());
+				for (const auto &[x, z] : outline.ring) {
+					ProcessedNode node{};
+					node.x = x;
+					node.z = z;
+					ring.push_back(std::move(node));
+				}
+				result.push_back(std::move(ring));
+			}
+			return result;
+		};
+		const auto outer_nodes = to_nodes(areas);
+		const auto inner_nodes = to_nodes(holes);
+		const auto groups = element_processing::hole_groups(outer_nodes, inner_nodes);
+		for (std::size_t r = 0; r < areas.size(); ++r) {
+			const auto &area = areas[r];
 			for (const auto *o :
 					grid.within(area.min_x, area.min_z, area.max_x, area.max_z)) {
 				const auto [cx, cz] = o->center();
-				if (std::none_of(areas.begin(), areas.end(),
-							[&, cx = cx, cz = cz](
-									const auto &r) { return r.contains(cx, cz); }))
+				if (!area.contains(cx, cz))
+					continue;
+				const auto group =
+						std::find_if(groups.begin(), groups.end(), [&](const auto &g) {
+							return std::find(g.first.begin(), g.first.end(), r) !=
+								   g.first.end();
+						});
+				if (group != groups.end() &&
+						std::any_of(group->second.begin(), group->second.end(),
+								[&](const auto h) { return holes[h].contains(cx, cz); }))
 					continue;
 				const AreaChoice candidate{area_rank(use), -area.area, use};
 				auto it = best_area.find(o->id);
@@ -372,6 +401,7 @@ InteriorUseIndex InteriorUseIndex::build(
 								std::pair(it->second.rank, it->second.neg_area))
 					best_area[o->id] = candidate;
 			}
+		}
 	};
 	for (const auto &element : elements) {
 		if (element.is_node()) {
@@ -405,7 +435,7 @@ InteriorUseIndex InteriorUseIndex::build(
 				}
 			}
 			if (const auto use = use_from_area(way.tags))
-				add_area(std::vector<Outline>{std::move(*outline)}, *use);
+				add_area(std::vector<Outline>{std::move(*outline)}, {}, *use);
 		} else {
 			const auto &relation = element.as_relation();
 			if (is_building(relation.tags))
@@ -413,16 +443,23 @@ InteriorUseIndex InteriorUseIndex::build(
 			const auto use = use_from_area(relation.tags);
 			if (!use)
 				continue;
-			std::vector<std::vector<ProcessedNode>> rings;
+			std::vector<std::vector<ProcessedNode>> rings, inner_rings;
 			for (const auto &member : relation.members)
-				if (member.role == ProcessedMemberRole::Outer)
+				if (member.role == ProcessedMemberRole::Outer && member.way)
 					rings.push_back(member.way->nodes);
+				else if (member.role == ProcessedMemberRole::Inner && member.way)
+					inner_rings.push_back(member.way->nodes);
 			arnis::merge_way_segments(rings);
+			arnis::merge_way_segments(inner_rings);
 			std::vector<Outline> outlines;
+			std::vector<Outline> holes;
 			for (const auto &ring : rings)
 				if (auto outline = Outline::make(relation.id, ring, relation.tags))
 					outlines.push_back(std::move(*outline));
-			add_area(outlines, *use);
+			for (const auto &ring : inner_rings)
+				if (auto outline = Outline::make(relation.id, ring, relation.tags))
+					holes.push_back(std::move(*outline));
+			add_area(outlines, holes, *use);
 		}
 	}
 	for (const auto &[id, choice] : best_area)

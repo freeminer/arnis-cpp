@@ -2,6 +2,7 @@
 
 #include "../element_processing/waterways.h"
 #include "../element_processing/way_segments.h"
+#include "../element_processing/relation_area.h"
 #include "../bresenham.h"
 #include "../clipping.h"
 
@@ -427,15 +428,32 @@ void apply_osm_water_override(LandCoverData &data,
 			merge_way_segments(outer_nodes);
 			merge_way_segments(inner_nodes);
 			std::vector<std::vector<std::pair<int, int>>> outer, inner;
+			std::vector<std::vector<ProcessedNode>> outer_group_rings, inner_group_rings;
 			for (const auto &ring : outer_nodes)
 				if (closed_ring(ring))
-					if (auto clipped = clipping::clip_water_ring_to_bbox(ring, bbox))
+					if (auto clipped = clipping::clip_water_ring_to_bbox(ring, bbox)) {
 						outer.push_back(to_world_ring(*clipped));
+						outer_group_rings.push_back(*clipped);
+					}
 			for (const auto &ring : inner_nodes)
 				if (closed_ring(ring))
-					if (auto clipped = clipping::clip_water_ring_to_bbox(ring, bbox))
+					if (auto clipped = clipping::clip_water_ring_to_bbox(ring, bbox)) {
 						inner.push_back(to_world_ring(*clipped));
-			changed += fill_rings(outer, inner);
+						inner_group_rings.push_back(*clipped);
+					}
+			for (const auto &[outer_indices, inner_indices] :
+					element_processing::hole_groups(
+							outer_group_rings, inner_group_rings)) {
+				std::vector<std::vector<std::pair<int, int>>> grouped_outer,
+						grouped_inner;
+				grouped_outer.reserve(outer_indices.size());
+				grouped_inner.reserve(inner_indices.size());
+				for (const auto index : outer_indices)
+					grouped_outer.push_back(outer[index]);
+				for (const auto index : inner_indices)
+					grouped_inner.push_back(inner[index]);
+				changed += fill_rings(grouped_outer, grouped_inner);
+			}
 			continue;
 		}
 		if (!e.is_way() || e.as_way().nodes.size() < 2)

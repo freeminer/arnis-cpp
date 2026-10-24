@@ -244,17 +244,6 @@ static std::vector<ScanlineEdge> collect_ring_edges(const std::vector<XZPoint> &
 	return edges;
 }
 
-static std::vector<ScanlineEdge> collect_all_ring_edges(
-		const std::vector<std::vector<XZPoint>> &rings)
-{
-	std::vector<ScanlineEdge> edges;
-	for (const auto &ring : rings) {
-		auto ring_edges = collect_ring_edges(ring);
-		edges.insert(edges.end(), ring_edges.begin(), ring_edges.end());
-	}
-	return edges;
-}
-
 static std::vector<std::pair<int, int>> compute_scanline_spans(
 		const std::vector<ScanlineEdge> &edges, double z, int min_x, int max_x)
 {
@@ -337,31 +326,126 @@ static bool spans_contain(const std::vector<std::pair<int, int>> &spans, int x)
 	return it != spans.end() && x >= it->first;
 }
 
+struct RingGroupEdges
+{
+	std::vector<std::vector<ScanlineEdge>> outers;
+	std::vector<ScanlineEdge> inners;
+};
+
+static bool mostly_inside_ring(
+		const std::vector<XZPoint> &ring, const std::vector<XZPoint> &around)
+{
+	if (ring.size() < 3 || around.size() < 3)
+		return false;
+	int rx0 = ring.front().x, rx1 = rx0, rz0 = ring.front().z, rz1 = rz0;
+	int ax0 = around.front().x, ax1 = ax0, az0 = around.front().z, az1 = az0;
+	for (const auto &p : ring) {
+		rx0 = std::min(rx0, p.x);
+		rx1 = std::max(rx1, p.x);
+		rz0 = std::min(rz0, p.z);
+		rz1 = std::max(rz1, p.z);
+	}
+	for (const auto &p : around) {
+		ax0 = std::min(ax0, p.x);
+		ax1 = std::max(ax1, p.x);
+		az0 = std::min(az0, p.z);
+		az1 = std::max(az1, p.z);
+	}
+	if (std::int64_t(rx0) < std::int64_t(ax0) - 1 ||
+			std::int64_t(rz0) < std::int64_t(az0) - 1 ||
+			std::int64_t(rx1) > std::int64_t(ax1) + 1 ||
+			std::int64_t(rz1) > std::int64_t(az1) + 1)
+		return false;
+	std::size_t inside = 0, outside = 0;
+	for (const auto &p : ring) {
+		bool hit = false, edge = false;
+		for (std::size_t i = 0, j = around.size() - 1; i < around.size(); j = i++) {
+			const auto &a = around[j];
+			const auto &b = around[i];
+			const std::int64_t cross =
+					(std::int64_t(b.x) - a.x) * (std::int64_t(p.z) - a.z) -
+					(std::int64_t(b.z) - a.z) * (std::int64_t(p.x) - a.x);
+			if (cross == 0 && p.x >= std::min(a.x, b.x) && p.x <= std::max(a.x, b.x) &&
+					p.z >= std::min(a.z, b.z) && p.z <= std::max(a.z, b.z)) {
+				edge = true;
+				break;
+			}
+			if ((a.z > p.z) != (b.z > p.z) &&
+					static_cast<double>(p.x) < (double(b.x) - a.x) * (double(p.z) - a.z) /
+															   (double(b.z) - a.z) +
+													   a.x)
+				hit = !hit;
+		}
+		if (!edge) {
+			if (hit)
+				++inside;
+			else
+				++outside;
+		}
+	}
+	return inside > outside;
+}
+
+static std::vector<RingGroupEdges> make_ring_groups(
+		const std::vector<std::vector<XZPoint>> &outers,
+		const std::vector<std::vector<XZPoint>> &inners)
+{
+	std::vector<RingGroupEdges> groups;
+	std::vector<std::vector<std::size_t>> cuts;
+	for (const auto &outer : outers) {
+		std::vector<std::size_t> cutting;
+		for (std::size_t i = 0; i < inners.size(); ++i)
+			if (!mostly_inside_ring(outer, inners[i]))
+				cutting.push_back(i);
+		auto found = std::find(cuts.begin(), cuts.end(), cutting);
+		std::size_t group;
+		if (found == cuts.end()) {
+			group = groups.size();
+			cuts.push_back(cutting);
+			groups.emplace_back();
+			for (const auto i : cutting) {
+				auto edges = collect_ring_edges(inners[i]);
+				groups.back().inners.insert(
+						groups.back().inners.end(), edges.begin(), edges.end());
+			}
+		} else {
+			group = static_cast<std::size_t>(found - cuts.begin());
+		}
+		groups[group].outers.push_back(collect_ring_edges(outer));
+	}
+	return groups;
+}
+
+static std::vector<std::pair<int, int>> spans_for_groups(
+		const std::vector<RingGroupEdges> &groups, double z, int min_x, int max_x)
+{
+	std::vector<std::pair<int, int>> result;
+	for (const auto &group : groups) {
+		std::vector<std::pair<int, int>> spans;
+		for (const auto &edges : group.outers)
+			spans = union_spans(spans, compute_scanline_spans(edges, z, min_x, max_x));
+		if (!group.inners.empty())
+			spans = subtract_spans(
+					spans, compute_scanline_spans(group.inners, z, min_x, max_x));
+		result = union_spans(result, spans);
+	}
+	return result;
+}
+
 struct SpanRows
 {
 	std::vector<std::vector<std::pair<int, int>>> rows;
 	int z0{};
 
-	SpanRows(const std::vector<std::vector<ScanlineEdge>> &outer_groups,
-			const std::vector<ScanlineEdge> &inner_edges, int first_z, int last_z,
+	SpanRows(const std::vector<RingGroupEdges> &groups, int first_z, int last_z,
 			int min_x, int max_x) : z0(first_z)
 	{
 		if (last_z < first_z)
 			return;
 		rows.reserve(static_cast<std::size_t>(std::int64_t(last_z) - first_z + 1));
 		for (int z = first_z;; ++z) {
-			std::vector<std::pair<int, int>> outer_spans;
-			for (const auto &edges : outer_groups)
-				outer_spans = union_spans(
-						outer_spans, compute_scanline_spans(edges, static_cast<double>(z),
-											 min_x, max_x));
-			if (!outer_spans.empty() && !inner_edges.empty()) {
-				auto inner_spans = compute_scanline_spans(
-						inner_edges, static_cast<double>(z), min_x, max_x);
-				if (!inner_spans.empty())
-					outer_spans = subtract_spans(outer_spans, inner_spans);
-			}
-			rows.push_back(std::move(outer_spans));
+			rows.push_back(
+					spans_for_groups(groups, static_cast<double>(z), min_x, max_x));
 			if (z == last_z)
 				break;
 		}
@@ -400,11 +484,7 @@ static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
 			1, static_cast<int>(std::ceil(
 					   std::sqrt(static_cast<double>(width * height) / max_samples))));
 
-	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
-	outer_edge_groups.reserve(outers.size());
-	for (const auto &outer : outers)
-		outer_edge_groups.push_back(collect_ring_edges(outer));
-	const auto inner_edges = collect_all_ring_edges(inners);
+	const auto groups = make_ring_groups(outers, inners);
 	std::size_t total = 0;
 	std::vector<int> levels;
 	auto lattice_start = [stride](int coordinate) {
@@ -414,17 +494,9 @@ static std::optional<int> resolve_still_surface(const Ground *ground, int min_x,
 	// Rust anchors the vertical sampling lattice at this polygon's minimum Z;
 	// only X is aligned to the world grid when each row is sampled.
 	for (int z = min_z; z <= max_z; z += stride) {
-		std::vector<std::pair<int, int>> outer_spans;
-		for (const auto &edges : outer_edge_groups)
-			outer_spans = union_spans(outer_spans,
-					compute_scanline_spans(edges, static_cast<double>(z), min_x, max_x));
-		if (outer_spans.empty())
+		auto spans = spans_for_groups(groups, static_cast<double>(z), min_x, max_x);
+		if (spans.empty())
 			continue;
-		auto spans = outer_spans;
-		if (!inner_edges.empty())
-			spans = subtract_spans(
-					outer_spans, compute_scanline_spans(inner_edges,
-										 static_cast<double>(z), min_x, max_x));
 		for (const auto &[start, end] : spans) {
 			int x = lattice_start(start);
 			for (; x <= end; x += stride) {
@@ -459,14 +531,10 @@ static void scanline_fill_water(int min_x, int min_z, int max_x, int max_z,
 		const RoadMaskBitmap *tunnel_footprint,
 		const bridges::BridgeSurfaceMap &bridge_surface, std::optional<int> still_surface)
 {
-	std::vector<std::vector<ScanlineEdge>> outer_edge_groups;
-	outer_edge_groups.reserve(outers.size());
-	for (const auto &outer : outers)
-		outer_edge_groups.push_back(collect_ring_edges(outer));
-	auto inner_edges = collect_all_ring_edges(inners);
+	const auto groups = make_ring_groups(outers, inners);
 	constexpr int interior_margin = 4;
-	const SpanRows spans(outer_edge_groups, inner_edges, min_z - interior_margin,
-			max_z + interior_margin, min_x - interior_margin, max_x + interior_margin);
+	const SpanRows spans(groups, min_z - interior_margin, max_z + interior_margin,
+			min_x - interior_margin, max_x + interior_margin);
 	auto filled_at = [&](int x, int z) { return spans.contains(x, z); };
 	auto climbs_to_water = [&](int x, int z) {
 		constexpr int max_climb = 48;
@@ -661,6 +729,25 @@ static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &r
 	return valid;
 }
 
+static void discard_broken_inner_rings(std::vector<std::vector<ProcessedNode>> &rings)
+{
+	rings.erase(std::remove_if(rings.begin(), rings.end(),
+						[](const auto &ring) {
+							if (ring.size() < 3)
+								return true;
+							const auto &first = ring.front();
+							const auto &last = ring.back();
+							return first.id != last.id &&
+								   (std::abs(first.x - last.x) > 1 ||
+										   std::abs(first.z - last.z) > 1);
+						}),
+			rings.end());
+	for (auto &ring : rings)
+		if (!ring.empty() &&
+				(ring.front().x != ring.back().x || ring.front().z != ring.back().z))
+			ring.push_back(ring.front());
+}
+
 static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
 {
 	std::vector<bool> removed(loops.size(), false);
@@ -848,11 +935,8 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 	}
 
 	merge_loopy_loops(inners);
-	if (!verify_closed_rings(inners)) {
-		std::cout << "Skipping relation " << element.id << " due to invalid polygon"
-				  << std::endl;
-		return;
-	}
+	// A malformed inner ring should lose only its own island/hole, not the entire lake.
+	discard_broken_inner_rings(inners);
 
 	generate_water_areas(editor, outers, inners, bwf, road_mask, tunnel_footprint,
 			bridge_surface, precomputed_surface);
@@ -938,8 +1022,7 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 			if (outers.empty() || !verify_closed_rings(outers))
 				continue;
 			merge_loopy_loops(inners);
-			if (!verify_closed_rings(inners))
-				continue;
+			discard_broken_inner_rings(inners);
 			kind = "relation";
 			id = relation.id;
 		} else {

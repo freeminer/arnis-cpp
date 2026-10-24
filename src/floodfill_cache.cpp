@@ -2,6 +2,8 @@
 #include "floodfill.h"
 #include "clipping.h"
 #include "element_processing/way_segments.h"
+#include "element_processing/relation_area.h"
+#include "bresenham.h"
 #include "strict_parse.h"
 #include <algorithm>
 #include <atomic>
@@ -47,6 +49,7 @@ namespace
 std::atomic_size_t configured_workers{0};
 
 constexpr std::size_t PREPASS_BATCH_CELLS = std::size_t{1} << 22;
+constexpr std::size_t PREPASS_BATCH = 512;
 constexpr std::ptrdiff_t MAX_PREPASS_WORKER_SLOTS = 256;
 
 std::counting_semaphore<MAX_PREPASS_WORKER_SLOTS> &prepass_worker_slots()
@@ -146,26 +149,134 @@ FloodFillResult empty_flood_fill_result()
 
 bool relation_fills_members(const ProcessedRelation &relation)
 {
-	const auto &tags = relation.tags;
-	const auto type = tags.find("type");
-	const auto natural = tags.find("natural");
-	if (tags.contains("building") || tags.contains("building:part") ||
-			(type != tags.end() && type->second == "building") ||
-			tags.contains("water") ||
-			(natural != tags.end() &&
-					(natural->second == "water" || natural->second == "bay")))
-		return false;
-	if (natural != tags.end())
-		return true;
-	if (const auto landuse = tags.find("landuse"); landuse != tags.end())
-		return landuse->second != "residential" && landuse->second != "commercial";
-	const auto leisure = tags.find("leisure");
-	const auto man_made = tags.find("man_made");
-	return (leisure != tags.end() && leisure->second == "park") ||
-		   (man_made != tags.end() &&
-				   (man_made->second == "pier" || man_made->second == "breakwater" ||
-						   man_made->second == "groyne"));
+	const auto area = element_processing::relation_area(relation.tags);
+	return area && element_processing::relation_area_fills_members(*area, relation.tags);
 }
+
+} // namespace
+
+InnerRings::InnerRings(const ProcessedRelation &relation)
+{
+	for (const auto &member : relation.members) {
+		if (member.role != ProcessedMemberRole::Inner || !member.way ||
+				member.way->nodes.empty())
+			continue;
+		Entry entry{member.way.get(), member.way->nodes.front().x,
+				member.way->nodes.front().z, member.way->nodes.front().x,
+				member.way->nodes.front().z};
+		for (const auto &node : member.way->nodes) {
+			entry.min_x = std::min(entry.min_x, node.x);
+			entry.min_z = std::min(entry.min_z, node.z);
+			entry.max_x = std::max(entry.max_x, node.x);
+			entry.max_z = std::max(entry.max_z, node.z);
+		}
+		rings.push_back(entry);
+	}
+}
+
+bool in_hole(const Holes *holes, int32_t x, int32_t z)
+{
+	return holes && holes->contains(x, z);
+}
+
+bool edge_in_hole(const Holes *holes, int32_t x, int32_t z)
+{
+	return holes && holes->covers(x, z);
+}
+
+std::vector<std::pair<int32_t, int32_t>> without_holes(
+		const std::vector<std::pair<int32_t, int32_t>> &cells, const Holes *holes)
+{
+	if (!holes)
+		return cells;
+	std::vector<std::pair<int32_t, int32_t>> result;
+	result.reserve(cells.size());
+	for (const auto &point : cells)
+		if (!holes->contains(point.first, point.second))
+			result.push_back(point);
+	return result;
+}
+
+FloodFillResult without_holes(const FloodFillResult &cells, const Holes *holes)
+{
+	if (!cells)
+		return empty_flood_fill_result();
+	if (!holes)
+		return cells;
+	auto result = std::make_shared<std::vector<std::pair<int32_t, int32_t>>>();
+	result->reserve(cells->size());
+	for (const auto &point : *cells)
+		if (!holes->contains(point.first, point.second))
+			result->push_back(point);
+	return result;
+}
+
+std::optional<Holes> FloodFillCache::holes_in(const ProcessedWay &outer,
+		const InnerRings &inners,
+		const std::optional<std::chrono::milliseconds> &timeout) const
+{
+	if (outer.nodes.empty() || inners.rings.empty())
+		return std::nullopt;
+	int32_t ox0 = outer.nodes.front().x, ox1 = ox0;
+	int32_t oz0 = outer.nodes.front().z, oz1 = oz0;
+	for (const auto &node : outer.nodes) {
+		ox0 = std::min(ox0, node.x);
+		ox1 = std::max(ox1, node.x);
+		oz0 = std::min(oz0, node.z);
+		oz1 = std::max(oz1, node.z);
+	}
+	std::vector<std::vector<ProcessedNode>> inner_rings;
+	std::vector<const ProcessedWay *> inner_ways;
+	for (const auto &entry : inners.rings) {
+		if (entry.min_x > ox1 || entry.max_x < ox0 || entry.min_z > oz1 ||
+				entry.max_z < oz0)
+			continue;
+		inner_rings.push_back(entry.way->nodes);
+		inner_ways.push_back(entry.way);
+	}
+	if (inner_rings.empty())
+		return std::nullopt;
+	const auto groups = element_processing::holes_by_outer(
+			std::vector<std::vector<ProcessedNode>>{outer.nodes}, inner_rings);
+	if (groups.empty() || groups.front().empty())
+		return std::nullopt;
+	int32_t x0 = ox1, z0 = oz1, x1 = ox0, z1 = oz0;
+	for (const auto index : groups.front()) {
+		const auto &entry = inner_ways[index]->nodes;
+		for (const auto &node : entry) {
+			x0 = std::min(x0, node.x);
+			z0 = std::min(z0, node.z);
+			x1 = std::max(x1, node.x);
+			z1 = std::max(z1, node.z);
+		}
+	}
+	x0 = std::max(x0, ox0);
+	z0 = std::max(z0, oz0);
+	x1 = std::min(x1, ox1);
+	z1 = std::min(z1, oz1);
+	if (x1 < x0 || z1 < z0)
+		return std::nullopt;
+	XZBBox bounds(x0, z0, x1, z1);
+	Holes holes{CoordinateBitmap(bounds), CoordinateBitmap(bounds)};
+	for (const auto index : groups.front()) {
+		const auto *inner = inner_ways[index];
+		for (const auto &[x, z] : *get_or_compute(*inner, timeout))
+			holes.cells.set(x, z);
+		for (std::size_t i = 1; i < inner->nodes.size(); ++i)
+			for (const auto &[x, y, z] :
+					bresenham_line(inner->nodes[i - 1].x, 0, inner->nodes[i - 1].z,
+							inner->nodes[i].x, 0, inner->nodes[i].z)) {
+				(void)y;
+				holes.edges.set(x, z);
+			}
+	}
+	if (holes.cells.is_empty() && holes.edges.is_empty())
+		return std::nullopt;
+	return holes;
+}
+
+namespace
+{
 
 template <typename Tags>
 bool is_underground_building(const Tags &tags)
@@ -725,10 +836,9 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		const auto &relation = el.as_relation();
 		if (!relation_fills_members(relation))
 			continue;
-		const bool include_holes = is_waterfront(relation.tags);
 		for (const auto &member : relation.members)
 			if ((member.role == ProcessedMemberRole::Outer ||
-						(include_holes && member.role == ProcessedMemberRole::Inner)) &&
+						member.role == ProcessedMemberRole::Inner) &&
 					seen.insert(member.way->id).second)
 				ways_needing_fill.push_back(member.way.get());
 	}
@@ -860,27 +970,92 @@ BuildingFootprintBitmap FloodFillCache::collect_building_footprints(
 					(it_type != rel.tags.end() && it_type->second == "building");
 			if (!is_building || is_underground_building(rel.tags))
 				continue;
-			for_relation_ring_cells(rel, ProcessedMemberRole::Outer, xzbbox,
-					[&footprints](int32_t x, int32_t z) { footprints.set(x, z); });
-			for_relation_ring_cells(rel, ProcessedMemberRole::Inner, xzbbox,
-					[&footprints](int32_t x, int32_t z) { footprints.clear(x, z); });
-		}
-	}
-
-	for (const auto &element : elements) {
-		if (element.is_way()) {
-			const ProcessedWay &way = element.as_way();
-			auto it_building = way.tags.find("building");
-			auto it_building_part = way.tags.find("building:part");
-
-			if ((it_building != way.tags.end() || it_building_part != way.tags.end()) &&
-					!is_underground_building(way.tags)) {
-				if (auto cached = transient_fill(way.id)) {
-					for (const auto &coord : *cached)
-						footprints.set(coord.first, coord.second);
+			const auto collect_rings = [&](ProcessedMemberRole role) {
+				std::vector<std::vector<ProcessedNode>> rings;
+				for (const auto &member : rel.members)
+					if (member.role == role && member.way)
+						rings.push_back(member.way->nodes);
+				merge_way_segments(rings);
+				std::vector<std::vector<ProcessedNode>> clipped;
+				for (auto &ring : rings) {
+					ring = clipping::clip_way_to_bbox_owned(std::move(ring), xzbbox);
+					if (ring.size() < 4)
+						continue;
+					if (ring.front().x != ring.back().x ||
+							ring.front().z != ring.back().z) {
+						if (std::abs(static_cast<int64_t>(ring.front().x) -
+									 ring.back().x) > 1 ||
+								std::abs(static_cast<int64_t>(ring.front().z) -
+										 ring.back().z) > 1)
+							continue;
+						ring.push_back(ring.front());
+					}
+					clipped.push_back(std::move(ring));
+				}
+				return clipped;
+			};
+			const auto outers = collect_rings(ProcessedMemberRole::Outer);
+			const auto courtyards = collect_rings(ProcessedMemberRole::Inner);
+			for (const auto &group :
+					element_processing::hole_groups(outers, courtyards)) {
+				int32_t hole_min_x = xzbbox.max_x(), hole_min_z = xzbbox.max_z();
+				int32_t hole_max_x = xzbbox.min_x(), hole_max_z = xzbbox.min_z();
+				for (const auto i : group.second)
+					for (const auto &node : courtyards[i]) {
+						hole_min_x = std::min(hole_min_x, node.x);
+						hole_min_z = std::min(hole_min_z, node.z);
+						hole_max_x = std::max(hole_max_x, node.x);
+						hole_max_z = std::max(hole_max_z, node.z);
+					}
+				std::optional<CoordinateBitmap> courtyard;
+				if (!group.second.empty() && hole_min_x <= hole_max_x &&
+						hole_min_z <= hole_max_z)
+					courtyard.emplace(
+							XZBBox(hole_min_x, hole_min_z, hole_max_x, hole_max_z));
+				for (const auto i : group.second) {
+					std::vector<std::pair<int32_t, int32_t>> coords;
+					coords.reserve(courtyards[i].size());
+					for (const auto &node : courtyards[i])
+						coords.emplace_back(node.x, node.z);
+					for (const auto &[x, z] : flood_fill_area(coords, nullptr))
+						if (courtyard)
+							courtyard->set(x, z);
+				}
+				for (const auto i : group.first) {
+					std::vector<std::pair<int32_t, int32_t>> coords;
+					coords.reserve(outers[i].size());
+					for (const auto &node : outers[i])
+						coords.emplace_back(node.x, node.z);
+					for (const auto &[x, z] : flood_fill_area(coords, nullptr))
+						if (!courtyard || !courtyard->contains(x, z))
+							footprints.set(x, z);
 				}
 			}
 		}
+	}
+
+	std::vector<uint64_t> building_ids;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const ProcessedWay &way = element.as_way();
+		if ((way.tags.contains("building") || way.tags.contains("building:part")) &&
+				!is_underground_building(way.tags))
+			building_ids.push_back(way.id);
+	}
+	// Match the Rust prepass: compute bounded batches in parallel, then update the
+	// bitmap serially. This avoids retaining every fill at once and keeps bitmap
+	// writes race-free.
+	for (std::size_t begin = 0; begin < building_ids.size(); begin += PREPASS_BATCH) {
+		const std::size_t count = std::min(PREPASS_BATCH, building_ids.size() - begin);
+		std::vector<FloodFillResult> fills(count);
+		parallel_for_indices(count, [&](std::size_t i) {
+			fills[i] = transient_fill(building_ids[begin + i]);
+		});
+		for (const auto &fill : fills)
+			if (fill)
+				for (const auto &[x, z] : *fill)
+					footprints.set(x, z);
 	}
 
 	return footprints;

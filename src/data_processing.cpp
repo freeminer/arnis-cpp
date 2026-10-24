@@ -48,6 +48,10 @@
 #include "cache_root.h"
 #include "building_suppression.h"
 #include "element_processing/historic.h"
+#include "element_processing/relation_area.h"
+#include "element_processing/aerialways.h"
+#include "element_processing/attractions.h"
+#include "element_processing/fuel_stations.h"
 #include "element_processing/power.h"
 #include "element_processing/emergency.h"
 #include "element_processing/advertising.h"
@@ -880,19 +884,23 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 	} else if (element.is_relation()) {
 		const auto &rel = element.as_relation();
 		const auto &tags = rel.tags;
-		if (tags.contains("building") || tags.contains("building:part") ||
-				tag_is(tags, "type", "building") || tags.contains("water") ||
-				tag_is(tags, "natural", "water") || tag_is(tags, "natural", "bay"))
+		const auto area_kind = element_processing::relation_area(tags);
+		const bool draws_ground =
+				area_kind == element_processing::RelationArea::Natural ||
+				area_kind == element_processing::RelationArea::Park ||
+				(area_kind == element_processing::RelationArea::Landuse &&
+						element_processing::landuse_paints_ground(tags));
+		if (!draws_ground)
 			return std::nullopt;
-		const bool fills = tags.contains("natural") ||
-						   (tags.contains("landuse") && landuse_paints_ground(tags)) ||
-						   tag_is(tags, "leisure", "park");
-		if (!fills)
-			return std::nullopt;
+		double outer_area = 0.0;
+		double inner_area = 0.0;
 		for (const auto &member : rel.members) {
 			if (member.role == ProcessedMemberRole::Outer)
-				area += ring_area(member.way->nodes);
+				outer_area += ring_area(member.way->nodes);
+			else if (member.role == ProcessedMemberRole::Inner)
+				inner_area += ring_area(member.way->nodes);
 		}
+		area = outer_area > inner_area ? outer_area - inner_area : outer_area;
 	} else {
 		return std::nullopt;
 	}
@@ -2095,6 +2103,11 @@ bool generate_world(WorldEditor &editor,
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
 			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
 	const auto &road_mask = *road_mask_owner;
+	const auto clear_corridors = std::make_shared<const CoordinateBitmap>(
+			aerialways::clear_corridors(elements, xzbbox));
+	editor.set_clear_corridors(clear_corridors);
+	editor.set_fuel_index(std::make_shared<const fuel_stations::FuelIndex>(
+			fuel_stations::FuelIndex::build(elements, args.scale)));
 	auto barrier_clearance =
 			barriers::RoadClearance::build(elements, editor, args.scale, road_mask_owner);
 	// Share the road bitmap when no additional paved area contributes cells.
@@ -2346,7 +2359,7 @@ bool generate_world(WorldEditor &editor,
 	// geographic suppression/grouping pass as Rust. Reconstructing a reduced
 	// projected-space approximation here loses split relation rings and can
 	// render duplicate building outlines.
-	const auto outline_suppression = mode_filter::outline_suppression_for_mode(
+	auto outline_suppression = mode_filter::outline_suppression_for_mode(
 			building_data.outline_suppression, args.mode);
 	std::unordered_set<std::uint64_t> suppressed_building_outlines;
 	auto building_part_groups = building_data.part_groups;
@@ -2852,6 +2865,18 @@ bool generate_world(WorldEditor &editor,
 				// generic man_made layer/level filtering and before building handling.
 				// Keep that ordering here as piers may also carry building/path tags.
 				waterfront::generate_pier(editor, element, flood_fill_cache, args);
+			} else if (args.mode != GenerationMode::Blueprint &&
+					   attractions::claims(way.tags) &&
+					   attractions::generate_ride(editor, element, flood_fill_cache,
+							   building_footprints, road_mask, args.scale,
+							   args.timeout)) {
+			} else if (args.mode != GenerationMode::Blueprint &&
+					   fuel_stations::is_station_canopy(editor, way) &&
+					   fuel_stations::generate_canopy(editor, way, flood_fill_cache,
+							   road_mask, args.scale, args.timeout)) {
+				if (way.tags.get("amenity") == std::optional<std::string>("fuel"))
+					fuel_stations::generate_station(editor, element, flood_fill_cache,
+							building_footprints, road_mask, args.scale, args.timeout);
 			} else if (args.mode == GenerationMode::Blueprint &&
 					   (way.tags.contains("building") ||
 							   way.tags.contains("building:part"))) {
@@ -2881,7 +2906,13 @@ bool generate_world(WorldEditor &editor,
 							interior_use_index ? &*interior_use_index : nullptr);
 					if (editor.signage_enabled())
 						signage::generate_building_signage(editor, *render_way, anchor);
+					if (way.tags.get("amenity") == std::optional<std::string>("fuel"))
+						fuel_stations::generate_station(editor, element, flood_fill_cache,
+								building_footprints, road_mask, args.scale, args.timeout);
 				}
+			} else if (aerialways::is_lift(way.tags)) {
+				aerialways::generate_aerialway(
+						editor, way, building_footprints, road_mask);
 			} else if (structures::jetbridge::claims(way)) {
 				structures::jetbridge::generate_jet_bridge(
 						editor, way, building_footprints);
@@ -2903,6 +2934,9 @@ bool generate_world(WorldEditor &editor,
 				if (editor.signage_enabled())
 					signage::generate_highway_way_signage(
 							editor, way, building_footprints);
+			} else if (way.tags.get("amenity") == std::optional<std::string>("fuel")) {
+				fuel_stations::generate_station(editor, element, flood_fill_cache,
+						building_footprints, road_mask, args.scale, args.timeout);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
@@ -2912,6 +2946,9 @@ bool generate_world(WorldEditor &editor,
 				natural::generate_natural(editor, element, args, flood_fill_cache,
 						building_footprints, bridge_surface);
 			} else if (way.tags.contains("amenity")) {
+				if (way.tags.get("amenity") == std::optional<std::string>("fuel"))
+					fuel_stations::generate_station(editor, element, flood_fill_cache,
+							building_footprints, road_mask, args.scale, args.timeout);
 				amenities::generate_amenities(
 						editor, element, args, flood_fill_cache, road_mask);
 				if (editor.signage_enabled() && way.tags.get("amenity") == "parking")
@@ -2982,8 +3019,14 @@ bool generate_world(WorldEditor &editor,
 							   std::optional<std::string>(std::string("tree"))) {
 				natural::generate_natural(editor, element, args, flood_fill_cache,
 						building_footprints, bridge_surface);
+			} else if (attractions::claims(node.tags)) {
+				attractions::generate_ride(editor, element, flood_fill_cache,
+						building_footprints, road_mask, args.scale, args.timeout);
 			} else if (man_made::is_summit_cross(node.tags)) {
 				man_made::generate_summit_cross(editor, node, args);
+			} else if (node.tags.get("amenity") == std::optional<std::string>("fuel")) {
+				fuel_stations::generate_station(editor, element, flood_fill_cache,
+						building_footprints, road_mask, args.scale, args.timeout);
 			} else if (node.tags.contains("amenity")) {
 				amenities::generate_amenities(
 						editor, element, args, flood_fill_cache, road_mask);
@@ -3020,42 +3063,50 @@ bool generate_world(WorldEditor &editor,
 				release_task_fills(task_index);
 				return;
 			}
-			const bool is_building_relation =
-					rel.tags.contains("building") || rel.tags.contains("building:part") ||
-					(rel.tags.get("type") ==
-							std::optional<std::string>(std::string("building")));
-			if (is_building_relation && args.mode == GenerationMode::Blueprint) {
-				blueprint::generate_relation_outline(editor, rel);
-			} else if (is_building_relation) {
-				buildings::generate_building_from_relation(editor, rel, args,
-						flood_fill_cache, clip_bbox, building_passages,
-						interior_use_index ? &*interior_use_index : nullptr, &road_mask,
-						&building_footprints, &building_group_members);
-			} else if (rel.tags.contains("water") ||
-					   rel.tags.get("natural") ==
-							   std::optional<std::string>(std::string("water")) ||
-					   rel.tags.get("natural") ==
-							   std::optional<std::string>(std::string("bay"))) {
-				std::optional<int> surface_level;
-				if (still_surfaces.has("relation", rel.id))
-					surface_level = still_surfaces.get("relation", rel.id);
-				water_areas::generate_water_areas_from_relation(editor, rel, clip_bbox,
-						big_water_field, road_mask,
-						tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
-						bridge_surface, surface_level);
-			} else if (rel.tags.contains("natural")) {
-				natural::generate_natural_from_relation(editor, rel, args,
-						flood_fill_cache, building_footprints, bridge_surface);
-			} else if (rel.tags.contains("landuse")) {
-				landuse::generate_landuse_from_relation(editor, rel, args,
-						flood_fill_cache, building_footprints, road_mask, bridge_surface);
-			} else if (rel.tags.get("leisure") ==
-					   std::optional<std::string>(std::string("park"))) {
-				leisure::generate_leisure_from_relation(editor, rel, args,
-						flood_fill_cache, building_footprints, bridge_surface);
-			} else if (rel.tags.contains("man_made")) {
-				man_made::generate_man_made(editor, ProcessedElement(rel), args,
-						flood_fill_cache, building_footprints);
+			// Use the same ordered relation classification as Rust's process_element,
+			// rather than maintaining a second chain of tag predicates here. This keeps
+			// overlapping tags (for example building + natural) on one deterministic arm.
+			if (const auto area_kind = element_processing::relation_area(rel.tags)) {
+				switch (*area_kind) {
+				case element_processing::RelationArea::Building:
+					if (args.mode == GenerationMode::Blueprint) {
+						blueprint::generate_relation_outline(editor, rel);
+					} else {
+						buildings::generate_building_from_relation(editor, rel, args,
+								flood_fill_cache, clip_bbox, building_passages,
+								interior_use_index ? &*interior_use_index : nullptr,
+								&road_mask, &building_footprints,
+								&building_group_members);
+					}
+					break;
+				case element_processing::RelationArea::Water: {
+					std::optional<int> surface_level;
+					if (still_surfaces.has("relation", rel.id))
+						surface_level = still_surfaces.get("relation", rel.id);
+					water_areas::generate_water_areas_from_relation(editor, rel,
+							clip_bbox, big_water_field, road_mask,
+							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
+							bridge_surface, surface_level);
+					break;
+				}
+				case element_processing::RelationArea::Natural:
+					natural::generate_natural_from_relation(editor, rel, args,
+							flood_fill_cache, building_footprints, bridge_surface);
+					break;
+				case element_processing::RelationArea::Landuse:
+					landuse::generate_landuse_from_relation(editor, rel, args,
+							flood_fill_cache, building_footprints, road_mask,
+							bridge_surface);
+					break;
+				case element_processing::RelationArea::Park:
+					leisure::generate_leisure_from_relation(editor, rel, args,
+							flood_fill_cache, building_footprints, bridge_surface);
+					break;
+				case element_processing::RelationArea::ManMade:
+					man_made::generate_man_made(editor, ProcessedElement(rel), args,
+							flood_fill_cache, building_footprints);
+					break;
+				}
 			}
 		}
 		// Run after processing: relation processors may consume fills for their ways.

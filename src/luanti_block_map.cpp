@@ -99,6 +99,18 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		return 1;
 	};
 	const auto id = block.block.id();
+	if (id == 210 || id == 362 || id == 510) {
+		const auto axis = property("axis");
+		const auto effective_axis = axis.empty()
+											? (id == 210		  ? std::string_view("x")
+													  : id == 362 ? std::string_view("z")
+																  : std::string_view("y"))
+											: axis;
+		return {"mcl_lanterns:chain",
+				static_cast<std::uint8_t>(effective_axis == "x"	  ? 12
+										  : effective_axis == "z" ? 4
+																  : 0)};
+	}
 	if (block_definitions::VINE.id() != AIR.id() &&
 			block.block == block_definitions::VINE) {
 		static constexpr std::pair<std::string_view, std::uint8_t> faces[] = {
@@ -669,7 +681,7 @@ LuantiNode to_luanti_node(
 		return {"mcl_redstone_torch:redstoneblock", 0};
 	case 210:
 	case 362:
-		return {"mcl_lanterns:chain", 0};
+		return {"mcl_lanterns:chain", static_cast<std::uint8_t>(id == 210 ? 12 : 4)};
 	case 211:
 		return trapdoor("mcl_doors:trapdoor_warped", "mcl_doors:trapdoor_warped_open");
 	case 212:
@@ -1215,6 +1227,18 @@ LuantiNode to_luanti_node(
 		return {"mcl_nether:cracked_nether_brick", 0};
 	case 509:
 		return {"mcl_walls:mossycobble", 0};
+	case 510:
+		return {"mcl_lanterns:chain", 0};
+	case 511:
+		return {"mcl_colorblocks:concrete_pink", 0};
+	case 512:
+		return {"mcl_core:glass_orange", 0};
+	case 513:
+		return {"mcl_core:glass_yellow", 0};
+	case 514:
+		return {"mcl_core:glass_red", 0};
+	case 515:
+		return {"mcl_core:glass_lime", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

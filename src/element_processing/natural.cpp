@@ -1,6 +1,7 @@
 #include <vector>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 #include <optional>
 #include <random>
 #include <tuple>
@@ -15,6 +16,7 @@
 #include "bush.h"
 #include "bridges.h"
 #include "../floodfill.h"
+#include "../floodfill_cache.h"
 #include "../ground_generation.h"
 #include "../biome.h"
 #include "../land_cover/land_cover.h"
@@ -196,10 +198,10 @@ bool near_beach(const WorldEditor &editor, int x, int z)
 
 // Generate natural area for single element
 //static
-void generate_natural(WorldEditor &editor, const ProcessedElement &element,
+static void generate_natural_area(WorldEditor &editor, const ProcessedElement &element,
 		const Args &args, FloodFillCache const &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
-		const bridges::BridgeSurfaceMap &bridge_surface)
+		const bridges::BridgeSurfaceMap &bridge_surface, const Holes *holes)
 {
 	const auto &tags = element.tags();
 	auto it_nat = tags.find("natural");
@@ -504,7 +506,7 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			for (const auto &t : bres) {
 				int bx = std::get<0>(t);
 				int bz = std::get<2>(t);
-				if (!editor.surface_is_sealed(bx, bz) &&
+				if (!edge_in_hole(holes, bx, bz) && !editor.surface_is_sealed(bx, bz) &&
 						!editor.check_for_block(bx, 0, bz, protected_surface_blocks)) {
 					Block block = rock_variation ? vary_rock_block(block_type, bx, bz)
 												 : block_type;
@@ -584,6 +586,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 		for (const auto &p : filled_area) {
 			int x = p.first;
 			int z = p.second;
+			if (in_hole(holes, x, z))
+				continue;
 			// A tile may process a polygon beyond both its writable map bounds and
 			// ownership rectangle. Those cells cannot affect this editor, while
 			// owned clip-margin cells must still pass through this loop.
@@ -988,7 +992,8 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 			}
 			CoordinateBitmap area{XZBBox(min_x, min_z, max_x, max_z)};
 			for (const auto &[x, z] : filled_area)
-				area.set(x, z);
+				if (!in_hole(holes, x, z))
+					area.set(x, z);
 			for (const auto &[px, pz] : wetland_puddles)
 				for (int dx = -2; dx <= 2; ++dx)
 					for (int dz = -2; dz <= 2; ++dz) {
@@ -1029,6 +1034,15 @@ void generate_natural(WorldEditor &editor, const ProcessedElement &element,
 	}
 }
 
+void generate_natural(WorldEditor &editor, const ProcessedElement &element,
+		const Args &args, FloodFillCache const &flood_fill_cache,
+		BuildingFootprintBitmap const &building_footprints,
+		const bridges::BridgeSurfaceMap &bridge_surface)
+{
+	generate_natural_area(editor, element, args, flood_fill_cache, building_footprints,
+			bridge_surface, nullptr);
+}
+
 // Generate natural from relation
 //static
 void generate_natural_from_relation(WorldEditor &editor, const ProcessedRelation &rel,
@@ -1039,14 +1053,17 @@ void generate_natural_from_relation(WorldEditor &editor, const ProcessedRelation
 	if (rel.tags.find("natural") == rel.tags.end())
 		return;
 
+	InnerRings inners(rel);
 	for (const auto &member : rel.members) {
-		if (member.role == ProcessedMemberRole::Outer) {
-			ProcessedWay inherited = *member.way;
-			inherited.tags = rel.tags;
-			ProcessedElement elem = ProcessedElement::FromWay(inherited);
-			generate_natural(editor, elem, args, flood_fill_cache, building_footprints,
-					bridge_surface);
-		}
+		if (member.role != ProcessedMemberRole::Outer || !member.way)
+			continue;
+		const auto holes =
+				flood_fill_cache.holes_in(*member.way, inners, args.timeout_ref());
+		ProcessedWay inherited = *member.way;
+		inherited.tags = rel.tags;
+		ProcessedElement elem = ProcessedElement::FromWay(inherited);
+		generate_natural_area(editor, elem, args, flood_fill_cache, building_footprints,
+				bridge_surface, holes ? &*holes : nullptr);
 	}
 }
 

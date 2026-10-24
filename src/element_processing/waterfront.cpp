@@ -5,6 +5,8 @@
 #include "../mapillary/geometry.h"
 #include "../world_editor/floor_state.h"
 #include "connected_blocks.h"
+#include "relation_area.h"
+#include "way_segments.h"
 
 #include <algorithm>
 #include <array>
@@ -147,12 +149,42 @@ std::unordered_set<Cell, CellHash> area_cells(
 	if (element.is_way()) {
 		add_way(element.as_way(), false);
 	} else if (element.is_relation()) {
-		for (const auto &member : element.as_relation().members)
-			if (member.role == ProcessedMemberRole::Outer && member.way)
-				add_way(*member.way, false);
-		for (const auto &member : element.as_relation().members)
-			if (member.role == ProcessedMemberRole::Inner && member.way)
-				add_way(*member.way, true);
+		std::vector<const ProcessedWay *> outers, inners;
+		std::vector<std::vector<ProcessedNode>> outer_rings, inner_rings;
+		for (const auto &member : element.as_relation().members) {
+			if (!member.way)
+				continue;
+			if (member.role == ProcessedMemberRole::Outer) {
+				outers.push_back(member.way.get());
+				outer_rings.push_back(member.way->nodes);
+			} else if (member.role == ProcessedMemberRole::Inner) {
+				inners.push_back(member.way.get());
+				inner_rings.push_back(member.way->nodes);
+			}
+		}
+		for (const auto &[members, cutting] :
+				element_processing::hole_groups(outer_rings, inner_rings)) {
+			std::unordered_set<Cell, CellHash> group_cells;
+			for (const auto outer : members) {
+				const auto fill = cache.get_or_compute(*outers[outer], args.timeout);
+				for (const auto &p : *fill)
+					group_cells.insert({p.first, p.second});
+				if (!fill->empty())
+					for (std::size_t i = 1; i < outers[outer]->nodes.size(); ++i)
+						for (const auto &[x, y, z] :
+								bresenham_line(outers[outer]->nodes[i - 1].x, 0,
+										outers[outer]->nodes[i - 1].z,
+										outers[outer]->nodes[i].x, 0,
+										outers[outer]->nodes[i].z)) {
+							(void)y;
+							group_cells.insert({x, z});
+						}
+			}
+			for (const auto inner : cutting)
+				for (const auto &p : *cache.get_or_compute(*inners[inner], args.timeout))
+					group_cells.erase({p.first, p.second});
+			result.insert(group_cells.begin(), group_cells.end());
+		}
 	}
 	return result;
 }

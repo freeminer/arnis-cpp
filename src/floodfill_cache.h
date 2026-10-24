@@ -113,6 +113,43 @@ using RoadMaskBitmap = CoordinateBitmap;
 using SealedSurfaceBitmap = CoordinateBitmap;
 using FloodFillResult = std::shared_ptr<const std::vector<std::pair<int32_t, int32_t>>>;
 
+/// Relation inner rings and their projected bounds, reused for each outer member.
+class InnerRings
+{
+public:
+	struct Entry
+	{
+		const ProcessedWay *way{};
+		int32_t min_x{}, min_z{}, max_x{}, max_z{};
+	};
+	std::vector<Entry> rings;
+	explicit InnerRings(const ProcessedRelation &relation);
+};
+
+/// Fill cells of inner rings and their outlines. A hole's outline is retained
+/// for surface fill but prevents the outer ring edge from crossing it.
+class Holes
+{
+public:
+	CoordinateBitmap cells;
+	CoordinateBitmap edges;
+	Holes(CoordinateBitmap cells_, CoordinateBitmap edges_) :
+			cells(std::move(cells_)), edges(std::move(edges_))
+	{
+	}
+	bool contains(int32_t x, int32_t z) const { return cells.contains(x, z); }
+	bool covers(int32_t x, int32_t z) const
+	{
+		return cells.contains(x, z) || edges.contains(x, z);
+	}
+};
+
+bool in_hole(const Holes *holes, int32_t x, int32_t z);
+bool edge_in_hole(const Holes *holes, int32_t x, int32_t z);
+std::vector<std::pair<int32_t, int32_t>> without_holes(
+		const std::vector<std::pair<int32_t, int32_t>> &cells, const Holes *holes);
+FloodFillResult without_holes(const FloodFillResult &cells, const Holes *holes);
+
 // A closed ring whose bounding box exceeds the bitmap-fill cap.  Consumers
 // distinguish this deliberate refusal from an open way or a thin ring with no
 // interior, so they do not paint an orphan outline around untouched ground.
@@ -184,6 +221,8 @@ public:
 
 	/// Gets cached flood fill result for a way, or computes it if not cached.
 	FloodFillResult get_or_compute(const ProcessedWay &way,
+			const std::optional<std::chrono::milliseconds> &timeout) const;
+	std::optional<Holes> holes_in(const ProcessedWay &outer, const InnerRings &inners,
 			const std::optional<std::chrono::milliseconds> &timeout) const;
 
 	/// Gets cached flood fill result for a ProcessedElement (Way only).
