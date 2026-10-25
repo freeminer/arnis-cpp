@@ -551,6 +551,11 @@ std::size_t drop_paths_on_piers(std::vector<ProcessedElement> &elements, double 
 	for (const auto &element : elements) {
 		if (tag(element.tags(), "man_made") != "pier")
 			continue;
+		// Rust ignores malformed/degenerate pier ways before deciding whether
+		// they are areas. Keep a one-node way from becoming a filled deck just
+		// because it also carries area=yes.
+		if (element.is_way() && element.nodes().size() < 2)
+			continue;
 		if (element.is_way() && !is_area(element.as_way())) {
 			const auto cells = line_footprint(
 					element.as_way(), parsed_width(element.tags(), PIER_WIDTH_M, scale));

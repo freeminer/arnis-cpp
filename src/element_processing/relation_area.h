@@ -84,24 +84,34 @@ namespace detail
 {
 using RingBounds = std::array<std::int32_t, 4>; // min x, min z, max x, max z
 
-template <typename Ring>
-inline std::optional<RingBounds> ring_bounds(const Ring &ring)
+template <typename Ring, typename XZ>
+inline std::optional<RingBounds> ring_bounds(const Ring &ring, const XZ &xz)
 {
 	if (ring.empty())
 		return std::nullopt;
-	RingBounds out{ring.front().x, ring.front().z, ring.front().x, ring.front().z};
+	const auto [first_x, first_z] = xz(ring.front());
+	RingBounds out{first_x, first_z, first_x, first_z};
 	for (const auto &point : ring) {
-		out[0] = std::min(out[0], point.x);
-		out[1] = std::min(out[1], point.z);
-		out[2] = std::max(out[2], point.x);
-		out[3] = std::max(out[3], point.z);
+		const auto [x, z] = xz(point);
+		out[0] = std::min(out[0], x);
+		out[1] = std::min(out[1], z);
+		out[2] = std::max(out[2], x);
+		out[3] = std::max(out[3], z);
 	}
 	return out;
 }
 
-template <typename Ring, typename Around>
+template <typename Ring>
+inline std::optional<RingBounds> ring_bounds(const Ring &ring)
+{
+	return ring_bounds(ring, [](const auto &point) {
+		return std::pair<std::int32_t, std::int32_t>{point.x, point.z};
+	});
+}
+
+template <typename Ring, typename Around, typename XZ>
 inline bool vertices_inside(const Ring &ring, const RingBounds &ring_bounds,
-		const Around &around, const RingBounds &around_bounds)
+		const Around &around, const RingBounds &around_bounds, const XZ &xz)
 {
 	if (around.size() < 3 ||
 			std::int64_t(ring_bounds[0]) < std::int64_t(around_bounds[0]) - 1 ||
@@ -111,26 +121,29 @@ inline bool vertices_inside(const Ring &ring, const RingBounds &ring_bounds,
 		return false;
 	std::size_t inside = 0, outside = 0;
 	for (const auto &point : ring) {
+		const auto [point_x, point_z] = xz(point);
 		bool hit = false;
 		bool on_edge = false;
 		for (std::size_t i = 0, j = around.size() - 1; i < around.size(); j = i++) {
 			const auto &a = around[j];
 			const auto &b = around[i];
+			const auto [ax, az] = xz(a);
+			const auto [bx, bz] = xz(b);
 			// Widen before subtraction as well as multiplication. World coordinates
 			// may exceed the safe range for a 32-bit cross product.
 			const std::int64_t cross =
-					(std::int64_t(b.x) - a.x) * (std::int64_t(point.z) - a.z) -
-					(std::int64_t(b.z) - a.z) * (std::int64_t(point.x) - a.x);
-			if (cross == 0 && point.x >= std::min(a.x, b.x) &&
-					point.x <= std::max(a.x, b.x) && point.z >= std::min(a.z, b.z) &&
-					point.z <= std::max(a.z, b.z)) {
+					(std::int64_t(bx) - ax) * (std::int64_t(point_z) - az) -
+					(std::int64_t(bz) - az) * (std::int64_t(point_x) - ax);
+			if (cross == 0 && point_x >= std::min(ax, bx) &&
+					point_x <= std::max(ax, bx) && point_z >= std::min(az, bz) &&
+					point_z <= std::max(az, bz)) {
 				on_edge = true;
 				break;
 			}
-			if ((a.z > point.z) != (b.z > point.z) &&
-					double(point.x) < (double(b.x) - a.x) * (double(point.z) - a.z) /
-													  (double(b.z) - a.z) +
-											  a.x)
+			if ((az > point_z) != (bz > point_z) &&
+					double(point_x) < (double(bx) - ax) * (double(point_z) - az) /
+													  (double(bz) - az) +
+											  ax)
 				hit = !hit;
 		}
 		if (!on_edge) {
@@ -142,15 +155,33 @@ inline bool vertices_inside(const Ring &ring, const RingBounds &ring_bounds,
 	}
 	return inside > outside;
 }
+
+template <typename Ring, typename Around>
+inline bool vertices_inside(const Ring &ring, const RingBounds &ring_bounds,
+		const Around &around, const RingBounds &around_bounds)
+{
+	return vertices_inside(
+			ring, ring_bounds, around, around_bounds, [](const auto &point) {
+				return std::pair<std::int32_t, std::int32_t>{point.x, point.z};
+			});
+}
 } // namespace detail
 
-template <typename Ring>
-inline bool mostly_inside(const Ring &ring, const Ring &around)
+template <typename Ring, typename Around, typename XZ>
+inline bool mostly_inside(const Ring &ring, const Around &around, const XZ &xz)
 {
-	const auto ring_bounds = detail::ring_bounds(ring);
-	const auto around_bounds = detail::ring_bounds(around);
+	const auto ring_bounds = detail::ring_bounds(ring, xz);
+	const auto around_bounds = detail::ring_bounds(around, xz);
 	return ring_bounds && around_bounds &&
-		   detail::vertices_inside(ring, *ring_bounds, around, *around_bounds);
+		   detail::vertices_inside(ring, *ring_bounds, around, *around_bounds, xz);
+}
+
+template <typename Ring, typename Around>
+inline bool mostly_inside(const Ring &ring, const Around &around)
+{
+	return mostly_inside(ring, around, [](const auto &point) {
+		return std::pair<std::int32_t, std::int32_t>{point.x, point.z};
+	});
 }
 
 // Assign each inner ring only to the outer ring(s) it cuts. This preserves islands

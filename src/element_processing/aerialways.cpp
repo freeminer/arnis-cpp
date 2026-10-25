@@ -429,6 +429,19 @@ int occupancy(const tags_t &tags, int fallback)
 				   : fallback;
 }
 
+bool chair_detachable(const tags_t &tags, int seats)
+{
+	if (const auto it = tags.find("aerialway:detachable"); it != tags.end()) {
+		if (it->second == "yes")
+			return true;
+		if (it->second == "no")
+			return false;
+	}
+	const bool bubble =
+			tags.contains("aerialway:bubble") && tags.at("aerialway:bubble") == "yes";
+	return seats >= 4 || bubble;
+}
+
 double rope_gauge(Kind kind, const tags_t &tags)
 {
 	const int seats =
@@ -468,13 +481,7 @@ double terminal_mouth(Kind kind, const tags_t &tags)
 	if (kind == Kind::RopeTow)
 		return 0.0;
 	if (kind == Kind::Chair) {
-		const int seats = occupancy(tags, 4);
-		const bool bubble =
-				tags.contains("aerialway:bubble") && tags.at("aerialway:bubble") == "yes";
-		const bool detachable = tags.contains("aerialway:detachable")
-										? tags.at("aerialway:detachable") == "yes"
-										: seats >= 4 || bubble;
-		if (detachable)
+		if (chair_detachable(tags, occupancy(tags, 4)))
 			return 8.0;
 	}
 	return rope_gauge(kind, tags) / 2.0;
@@ -652,9 +659,7 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 			way.tags, kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8));
 	const bool bubble = way.tags.contains("aerialway:bubble") &&
 						way.tags.at("aerialway:bubble") == "yes";
-	const bool detachable = way.tags.contains("aerialway:detachable")
-									? way.tags.at("aerialway:detachable") == "yes"
-									: seats >= 4 || bubble;
+	const bool detachable = chair_detachable(way.tags, seats);
 	const double gap = kind == Kind::CableCar ? 0.0
 					   : kind == Kind::Chair  ? (detachable ? 36.0 : 18.0)
 					   : kind == Kind::Mixed
@@ -976,11 +981,7 @@ void draw_lift_terminal(WorldEditor &editor, const ProcessedWay &way,
 	const int rope = static_cast<int>(std::floor(support.rope_y));
 	const int seats = occupancy(
 			way.tags, kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8));
-	const bool detachable =
-			way.tags.contains("aerialway:detachable")
-					? way.tags.at("aerialway:detachable") == "yes"
-					: seats >= 4 || (way.tags.contains("aerialway:bubble") &&
-											way.tags.at("aerialway:bubble") == "yes");
+	const bool detachable = chair_detachable(way.tags, seats);
 	const bool enclosed = kind == Kind::CableCar || kind == Kind::Gondola ||
 						  kind == Kind::Mixed || (kind == Kind::Chair && detachable);
 	if (enclosed) {
@@ -1315,15 +1316,11 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 	}
 	auto supports = supports_for(way, editor, *kind);
 	if (*kind == Kind::ZipLine && supports.size() >= 2) {
-		if (supports.front().ground < supports.back().ground)
-			std::reverse(supports.begin(), supports.end());
+		// Direction was chosen once for the whole source way before station
+		// splitting, matching Rust. Do not reverse individual sections here.
 		supports.back().rope_y = supports.back().ground + 2.5;
 	}
-	double run_length = 0.0;
-	for (std::size_t i = 1; i < supports.size(); ++i)
-		run_length += std::hypot(
-				supports[i].x - supports[i - 1].x, supports[i].z - supports[i - 1].z);
-	if (supports.size() < 2 || run_length < 12.0)
+	if (supports.size() < 2)
 		return;
 	std::vector<structure_kit::Point3> anchors;
 	anchors.reserve(supports.size());
@@ -1395,11 +1392,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 	const int rail_count = rail_gauge > 0.0 ? 2 : 1;
 	const int seats = occupancy(
 			way.tags, *kind == Kind::CableCar ? 80 : (*kind == Kind::Chair ? 4 : 8));
-	const bool detachable =
-			way.tags.contains("aerialway:detachable")
-					? way.tags.at("aerialway:detachable") == "yes"
-					: seats >= 4 || (way.tags.contains("aerialway:bubble") &&
-											way.tags.at("aerialway:bubble") == "yes");
+	const bool detachable = chair_detachable(way.tags, seats);
 	const bool enclosed_terminal = *kind == Kind::CableCar || *kind == Kind::Gondola ||
 								   *kind == Kind::Mixed ||
 								   (*kind == Kind::Chair && detachable);
@@ -1542,28 +1535,33 @@ void generate_aerialway(WorldEditor &editor, const ProcessedWay &way,
 	}
 	if (points.size() < 2)
 		return;
-	const std::size_t last_point = points.size() - 1;
-	std::vector<double> along(points.size(), 0.0);
+	const auto point_distance = [](const Point &a, const Point &b) {
+		return std::hypot(a.x - b.x, a.z - b.z);
+	};
+	double total_length = 0.0;
 	for (std::size_t i = 1; i < points.size(); ++i)
-		along[i] = along[i - 1] + std::hypot(points[i].x - points[i - 1].x,
-										  points[i].z - points[i - 1].z);
-	if (along.back() < 12.0)
+		total_length += point_distance(points[i - 1], points[i]);
+	if (total_length < 12.0)
 		return;
 	if (*kind == Kind::ZipLine &&
 			ground_at(editor, points.front().x, points.front().z) <
 					ground_at(editor, points.back().x, points.back().z)) {
 		std::reverse(points.begin(), points.end());
-		std::reverse(along.begin(), along.end());
-		const double total = along.front();
-		for (double &distance : along)
-			distance = total - distance;
 	}
 
+	// Rust makes each sufficiently distant mapped mid-station the shared end
+	// point of two independent lift sections. That gives each side its own rope
+	// solution, carrier phase and station terminal rather than carrying one
+	// continuous simulation through the station.
+	const std::size_t last_point = points.size() - 1;
+	std::vector<double> along(points.size(), 0.0);
+	for (std::size_t i = 1; i < points.size(); ++i)
+		along[i] = along[i - 1] + point_distance(points[i - 1], points[i]);
 	std::size_t start = 0, section = 0;
-	for (std::size_t i = 1; i < points.size(); ++i) {
-		const bool mid_station = points[i].hint == Hint::Station &&
+	for (std::size_t i = 1; i <= last_point; ++i) {
+		const bool mid_station = i != last_point && points[i].hint == Hint::Station &&
 								 along[i] - along[start] >= 40.0 &&
-								 along.back() - along[i] >= 40.0;
+								 along[last_point] - along[i] >= 40.0;
 		if (i != last_point && !mid_station)
 			continue;
 		ProcessedWay segment = way;
