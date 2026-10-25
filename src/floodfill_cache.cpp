@@ -53,6 +53,8 @@ constexpr std::size_t PREPASS_BATCH_CELLS = std::size_t{1} << 22;
 constexpr std::size_t PREPASS_BATCH = 512;
 constexpr std::ptrdiff_t MAX_PREPASS_WORKER_SLOTS = 256;
 
+std::size_t thread_count_for_fraction(double cpu_fraction);
+
 std::counting_semaphore<MAX_PREPASS_WORKER_SLOTS> &prepass_worker_slots()
 {
 	static std::counting_semaphore<MAX_PREPASS_WORKER_SLOTS> slots([] {
@@ -68,6 +70,12 @@ void parallel_for_indices(std::size_t count, Function function)
 {
 	if (count == 0)
 		return;
+	// Rust configures Rayon during CLI/GUI startup. This library-side worker
+	// pool has no shared executable startup, so apply the same default when its
+	// first parallel pass runs, unless the host explicitly configured it first.
+	std::size_t expected_workers = 0;
+	configured_workers.compare_exchange_strong(
+			expected_workers, thread_count_for_fraction(0.9), std::memory_order_relaxed);
 	const auto configured = configured_workers.load(std::memory_order_relaxed);
 	const auto workers = std::min(
 			count, configured != 0 ? configured
@@ -136,7 +144,10 @@ std::size_t thread_count_for_fraction(double cpu_fraction)
 			return requested;
 	}
 	cpu_fraction = std::clamp(cpu_fraction, 0.1, 1.0);
-	const auto available = std::max(1u, std::thread::hardware_concurrency());
+	const auto detected = std::thread::hardware_concurrency();
+	// Match Rust's available_parallelism fallback when the host cannot report
+	// its CPU count instead of silently reducing the pool to one worker.
+	const auto available = detected == 0 ? 4u : detected;
 	return std::max<std::size_t>(
 			1, static_cast<std::size_t>(static_cast<double>(available) * cpu_fraction));
 }
