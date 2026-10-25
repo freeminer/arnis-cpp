@@ -508,9 +508,6 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 		if (way.nodes.empty() ||
 				(!way.tags.contains("building") && !way.tags.contains("building:part")))
 			continue;
-		const bool roof = is_roof(way.tags);
-		if (roof && other_roof_use(way.tags))
-			continue;
 		double x = 0, z = 0;
 		for (const auto &n : way.nodes) {
 			x += n.x + 0.5;
@@ -519,6 +516,11 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 		x /= way.nodes.size();
 		z /= way.nodes.size();
 		if (x < bounds_min_x || x > bounds_max_x || z < bounds_min_z || z > bounds_max_z)
+			continue;
+		// Match Rust's cheap spatial rejection before reading secondary roof tags;
+		// most building ways in large areas are nowhere near a fuel site.
+		const bool roof = is_roof(way.tags);
+		if (roof && other_roof_use(way.tags))
 			continue;
 		std::optional<std::pair<std::size_t, double>> best;
 		for (std::size_t i = 0; i < out.sites.size(); ++i) {

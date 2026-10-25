@@ -2,12 +2,15 @@
 #include "types.h"
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cctype>
 #include <cmath>
 #include <cstdlib>
+#include <cstdint>
 #include <iterator>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <vector>
 namespace arnis::mapillary
@@ -62,6 +65,90 @@ namespace geodesy
 {
 inline constexpr double wgs84_a = 6378137.0;
 inline constexpr double wgs84_e2 = 6.69437999014e-3;
+
+inline bool decode_utf8(const std::string &text, std::size_t offset,
+		std::uint32_t &codepoint, std::size_t &length)
+{
+	const auto first = static_cast<unsigned char>(text[offset]);
+	if (first < 0x80) {
+		codepoint = first;
+		length = 1;
+		return true;
+	}
+	if ((first & 0xe0) == 0xc0)
+		length = 2;
+	else if ((first & 0xf0) == 0xe0)
+		length = 3;
+	else if ((first & 0xf8) == 0xf0)
+		length = 4;
+	else
+		return false;
+	if (offset + length > text.size())
+		return false;
+	codepoint = first & (length == 2 ? 0x1f : length == 3 ? 0x0f : 0x07);
+	for (std::size_t i = 1; i < length; ++i) {
+		const auto continuation = static_cast<unsigned char>(text[offset + i]);
+		if ((continuation & 0xc0) != 0x80)
+			return false;
+		codepoint = (codepoint << 6) | (continuation & 0x3f);
+	}
+	if ((length == 2 && codepoint < 0x80) || (length == 3 && codepoint < 0x800) ||
+			(length == 4 && codepoint < 0x10000) ||
+			(codepoint >= 0xd800 && codepoint <= 0xdfff) || codepoint > 0x10ffff)
+		return false;
+	return true;
+}
+
+inline bool is_rust_whitespace(std::uint32_t cp)
+{
+	return (cp >= 0x09 && cp <= 0x0d) || cp == 0x20 || cp == 0x85 || cp == 0xa0 ||
+		   cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 ||
+		   cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000;
+}
+
+inline std::pair<std::size_t, std::size_t> trim_rust_whitespace(const std::string &text)
+{
+	std::size_t begin = 0;
+	while (begin < text.size()) {
+		std::uint32_t cp{};
+		std::size_t length{};
+		if (!decode_utf8(text, begin, cp, length) || !is_rust_whitespace(cp))
+			break;
+		begin += length;
+	}
+	std::size_t end = text.size();
+	while (end > begin) {
+		std::size_t start = end - 1;
+		while (start > begin && (static_cast<unsigned char>(text[start]) & 0xc0) == 0x80)
+			--start;
+		std::uint32_t cp{};
+		std::size_t length{};
+		if (!decode_utf8(text, start, cp, length) || start + length != end ||
+				!is_rust_whitespace(cp))
+			break;
+		end = start;
+	}
+	return {begin, end};
+}
+
+inline std::optional<double> parse_rust_float(
+		std::string text, bool decimal_comma = false)
+{
+	if (decimal_comma)
+		std::replace(text.begin(), text.end(), ',', '.');
+	std::string_view value = text;
+	if (value.starts_with('+'))
+		value.remove_prefix(1);
+	if (value.empty())
+		return std::nullopt;
+	double parsed{};
+	const auto [end, error] = std::from_chars(value.data(), value.data() + value.size(),
+			parsed, std::chars_format::general);
+	if (error != std::errc{} || end != value.data() + value.size())
+		return std::nullopt;
+	return parsed;
+}
+
 inline std::array<double, 3> lla_to_ecef(
 		double longitude, double latitude, double altitude)
 {
@@ -126,29 +213,27 @@ inline std::array<double, 3> topocentric_to_run(const std::array<double, 3> &poi
 }
 inline std::optional<double> parse_length_m(const std::string &text)
 {
-	std::size_t begin = 0, end = text.size();
-	while (begin < end && std::isspace(static_cast<unsigned char>(text[begin])))
-		++begin;
-	while (end > begin && std::isspace(static_cast<unsigned char>(text[end - 1])))
-		--end;
+	const auto [begin, end] = trim_rust_whitespace(text);
 	std::size_t split = begin;
-	while (split < end && (std::isdigit(static_cast<unsigned char>(text[split])) ||
-								  text[split] == '.' || text[split] == ',' ||
-								  text[split] == '+' || text[split] == '-'))
+	while (split < end &&
+			((text[split] >= '0' && text[split] <= '9') || text[split] == '.' ||
+					text[split] == ',' || text[split] == '+' || text[split] == '-'))
 		++split;
-	std::string number = text.substr(begin, split - begin);
-	std::replace(number.begin(), number.end(), ',', '.');
-	if (number.empty() || std::count(number.begin(), number.end(), '.') > 1)
+	auto parsed_number = parse_rust_float(text.substr(begin, split - begin), true);
+	if (!parsed_number ||
+			std::count(text.begin() + begin, text.begin() + split, '.') +
+							std::count(text.begin() + begin, text.begin() + split, ',') >
+					1)
 		return {};
-	char *tail = nullptr;
-	double value = std::strtod(number.c_str(), &tail);
-	if (!tail || *tail)
-		return {};
-	std::string unit = text.substr(split, end - split);
-	while (!unit.empty() && std::isspace(static_cast<unsigned char>(unit.front())))
-		unit.erase(unit.begin());
-	for (char &c : unit)
-		c = char(std::tolower(static_cast<unsigned char>(c)));
+	const double value = *parsed_number;
+	auto [unit_begin, unit_end] = trim_rust_whitespace(text.substr(split, end - split));
+	std::string unit = text.substr(split + unit_begin, unit_end - unit_begin);
+	for (char &c : unit) {
+		if (!((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || c == '\''))
+			return {};
+		if (c >= 'A' && c <= 'Z')
+			c = static_cast<char>(c + ('a' - 'A'));
+	}
 	if (unit.empty() || unit == "m" || unit == "meter" || unit == "meters" ||
 			unit == "metre" || unit == "metres")
 		return value;
@@ -499,36 +584,29 @@ inline std::tuple<std::optional<double>, HeightSource, double> height_from_tags(
 	}
 	if (!height) {
 		if (const auto it = tags.find("building:levels"); it != tags.end()) {
-			try {
-				std::string levels_text = it->second;
-				std::replace(levels_text.begin(), levels_text.end(), ',', '.');
-				double levels = std::stod(levels_text);
-				if (levels >= 1.0 && levels < 150.0) {
-					double roof = 0.0;
-					if (const auto r = tags.find("roof:levels"); r != tags.end()) {
-						std::string roof_text = r->second;
-						std::replace(roof_text.begin(), roof_text.end(), ',', '.');
-						roof = std::max(0.0, std::stod(roof_text));
-					}
-					height = (levels + roof) * metres_per_level;
-					source = HeightSource::Levels;
-				}
-			} catch (...) {
+			if (const auto levels = geodesy::parse_rust_float(it->second, true);
+					levels && *levels >= 1.0 && *levels < 150.0) {
+				double roof = 0.0;
+				if (const auto r = tags.find("roof:levels"); r != tags.end())
+					if (const auto parsed = geodesy::parse_rust_float(r->second, true))
+						roof = std::max(0.0, *parsed);
+				height = (*levels + roof) * metres_per_level;
+				source = HeightSource::Levels;
 			}
 		}
 	}
 	double min_height = 0.0;
-	if (const auto it = tags.find("min_height"); it != tags.end()) {
-		if (const auto parsed = geodesy::parse_length_m(it->second);
-				parsed && *parsed >= 0.0)
-			min_height = *parsed;
+	const auto min_height_tag = tags.find("min_height");
+	const auto parsed_min_height =
+			min_height_tag == tags.end()
+					? std::nullopt
+					: geodesy::parse_length_m(min_height_tag->second);
+	if (parsed_min_height) {
+		if (*parsed_min_height >= 0.0)
+			min_height = *parsed_min_height;
 	} else if (const auto it = tags.find("building:min_level"); it != tags.end()) {
-		try {
-			std::string level_text = it->second;
-			std::replace(level_text.begin(), level_text.end(), ',', '.');
-			min_height = std::max(0.0, std::stod(level_text) * metres_per_level);
-		} catch (...) {
-		}
+		if (const auto level = geodesy::parse_rust_float(it->second))
+			min_height = std::max(0.0, *level * metres_per_level);
 	}
 	return std::make_tuple(height, source, min_height);
 }

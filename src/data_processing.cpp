@@ -57,6 +57,7 @@
 #include "element_processing/advertising.h"
 #include "element_processing/bridges.h"
 #include "element_processing/barriers.h"
+#include "element_processing/way_segments.h"
 #include "element_processing/highways.h"
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
@@ -677,7 +678,7 @@ void release_finished_fills(
 {
 	if (const auto found = expiring_at.find(index); found != expiring_at.end())
 		for (const auto way_id : found->second)
-			cache.release(way_id);
+			cache.remove_way(way_id);
 }
 
 std::unordered_map<std::uint64_t, std::size_t> compute_last_fill_use(
@@ -789,45 +790,6 @@ bool is_closed_ring(const std::vector<ProcessedNode> &nodes)
 {
 	return nodes.size() >= 4 && nodes.front().x == nodes.back().x &&
 		   nodes.front().z == nodes.back().z;
-}
-
-bool same_point(const ProcessedNode &a, const ProcessedNode &b)
-{
-	return a.x == b.x && a.z == b.z;
-}
-
-void stitch_way_segments(std::vector<std::vector<ProcessedNode>> &rings)
-{
-	bool changed = true;
-	while (changed) {
-		changed = false;
-		for (std::size_t i = 0; i < rings.size() && !changed; ++i) {
-			if (rings[i].empty() || is_closed_ring(rings[i]))
-				continue;
-			for (std::size_t j = i + 1; j < rings.size(); ++j) {
-				if (rings[j].empty() || is_closed_ring(rings[j]))
-					continue;
-				if (same_point(rings[i].back(), rings[j].front())) {
-					rings[i].insert(rings[i].end(), rings[j].begin() + 1, rings[j].end());
-				} else if (same_point(rings[i].front(), rings[j].back())) {
-					rings[j].insert(rings[j].end(), rings[i].begin() + 1, rings[i].end());
-					rings[i] = std::move(rings[j]);
-				} else if (same_point(rings[i].front(), rings[j].front())) {
-					std::reverse(rings[j].begin(), rings[j].end());
-					rings[j].insert(rings[j].end(), rings[i].begin() + 1, rings[i].end());
-					rings[i] = std::move(rings[j]);
-				} else if (same_point(rings[i].back(), rings[j].back())) {
-					std::reverse(rings[j].begin(), rings[j].end());
-					rings[i].insert(rings[i].end(), rings[j].begin() + 1, rings[j].end());
-				} else {
-					continue;
-				}
-				rings.erase(rings.begin() + static_cast<std::ptrdiff_t>(j));
-				changed = true;
-				break;
-			}
-		}
-	}
 }
 
 bool tag_is(const tags_t &tags, const std::string &key, const std::string &value)
@@ -1134,12 +1096,18 @@ land_cover::LandCoverData build_osm_water_land_cover(
 				else if (member.role == ProcessedMemberRole::Outer)
 					outers.push_back(member.way->nodes);
 			}
-			stitch_way_segments(outers);
-			stitch_way_segments(inners);
-			for (const auto &outer : outers) {
-				auto clipped = clipping::clip_water_ring_to_bbox(outer, xzbbox);
-				if (clipped)
-					mark_polygon(lc, xzbbox, *clipped, inners);
+			merge_way_segments(outers);
+			merge_way_segments(inners);
+			for (const auto &[members, cutting] :
+					element_processing::hole_groups(outers, inners)) {
+				std::vector<std::vector<ProcessedNode>> group_inners;
+				group_inners.reserve(cutting.size());
+				for (const auto index : cutting)
+					group_inners.push_back(inners[index]);
+				for (const auto index : members)
+					if (auto clipped = clipping::clip_water_ring_to_bbox(
+								outers[index], xzbbox))
+						mark_polygon(lc, xzbbox, *clipped, group_inners);
 			}
 		}
 	}

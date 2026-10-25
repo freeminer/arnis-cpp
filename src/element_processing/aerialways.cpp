@@ -1150,11 +1150,12 @@ void draw_zipline_terminal(
 	} else {
 		for (int y = ground + 1; y <= rope; ++y)
 			editor.set_block_absolute(SPRUCE_LOG, cx, y, cz);
-		const auto [sx, sz] =
-				structure_kit::axis_of(support.x - neighbor.x, support.z - neighbor.z);
-		for (const int side : {-1, 1})
-			editor.set_block_absolute(HAY_BALE, cx + sx * 2 + side * -sz, ground + 1,
-					cz + sz * 2 + side * sx);
+		// Rust marks the landing around the inward-facing end of the line, not
+		// just two points on the far side of the post.
+		for (const auto &[dx, dz] : std::array<std::pair<int, int>, 6>{
+					 {{1, 0}, {-1, 0}, {0, 1}, {0, -1}, {1, 1}, {-1, -1}}})
+			editor.set_block_absolute(
+					HAY_BALE, cx + dx + ax * 2, ground + 1, cz + dz + az * 2);
 	}
 }
 

@@ -254,6 +254,12 @@ double default_height_m(int x, int z)
 			return low + (high - low) * t;
 	return 7. + 5. * t;
 }
+int default_height_blocks(int x, int z, double scale)
+{
+	// Match RegionSelector::default_height: even at very small map scales, a
+	// requested schematic height is at least one block.
+	return std::max(1, static_cast<int>(std::lround(default_height_m(x, z) * scale)));
+}
 }
 
 struct RegionSelector::Data
@@ -662,6 +668,10 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 				if (star != std::string_view::npos && colon != std::string_view::npos &&
 						colon < star) {
 					auto weight_text = body.substr(star + 1);
+					// Rust's u32::from_str accepts a leading '+', while
+					// std::from_chars deliberately does not. Preserve that grammar.
+					if (weight_text.starts_with('+'))
+						weight_text.remove_prefix(1);
 					std::uint32_t weight = 0;
 					const auto [weight_end, weight_error] =
 							std::from_chars(weight_text.data(),
@@ -1124,8 +1134,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		sx = x;
 		sz = z;
 	}
-	const int wanted_height = data_->capped_height(request.want_height.value_or(
-			static_cast<int>(std::lround(default_height_m(sx, sz) * data_->scale))));
+	const int wanted_height = data_->capped_height(
+			request.want_height.value_or(default_height_blocks(sx, sz, data_->scale)));
 	// Invert the vertical affine, including terrain compression, as in region.rs.
 	const double per_metre =
 			data_->blocks_per_meter > 0.0 ? data_->blocks_per_meter : data_->scale;

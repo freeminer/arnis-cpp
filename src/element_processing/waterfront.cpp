@@ -505,11 +505,15 @@ void generate_breakwater(world_editor::WorldEditor &editor,
 	if (tag(element.tags(), "submerged") != "yes") {
 		if (const auto h = tag(element.tags(), "height")) {
 			const auto metres = mapillary::geodesy::parse_length_m(*h);
-			if (metres)
-				rise = std::clamp(static_cast<int>(std::round(*metres * args.scale)), 1,
-						BREAKWATER_MAX_HEIGHT);
-			else
+			if (metres) {
+				// Rust's float-to-i32 cast saturates before clamp. Clamp in floating
+				// point first so large but valid height tags cannot overflow the C++ cast.
+				const double scaled = std::round(*metres * args.scale);
+				rise = static_cast<int>(std::clamp(
+						scaled, 1.0, static_cast<double>(BREAKWATER_MAX_HEIGHT)));
+			} else {
 				rise = groyne ? 1 : 2;
+			}
 		} else {
 			rise = groyne ? 1 : 2;
 		}

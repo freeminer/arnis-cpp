@@ -282,25 +282,36 @@ inline std::vector<WallSegment> wall_segments(
 inline double building_height_m(const std::map<std::string, std::string> &tags)
 {
 	if (const auto it = tags.find("height"); it != tags.end()) {
-		std::string value = it->second;
-		while (!value.empty() &&
-				(std::isalpha(static_cast<unsigned char>(value.back())) ||
-						std::isspace(static_cast<unsigned char>(value.back()))))
-			value.pop_back();
-		try {
-			const double height = std::stod(value);
-			if (height > 1.0 && height < 400.0)
-				return height;
-		} catch (...) {
+		const auto [begin, end] = geodesy::trim_rust_whitespace(it->second);
+		std::size_t numeric_end = end;
+		while (numeric_end > begin) {
+			std::size_t start = numeric_end - 1;
+			while (start > begin &&
+					(static_cast<unsigned char>(it->second[start]) & 0xC0) == 0x80)
+				--start;
+			std::uint32_t cp{};
+			std::size_t length{};
+			if (!geodesy::decode_utf8(it->second, start, cp, length) ||
+					start + length != numeric_end)
+				break;
+			if (geodesy::is_rust_whitespace(cp) || (cp >= 'A' && cp <= 'Z') ||
+					(cp >= 'a' && cp <= 'z')) {
+				numeric_end = start;
+				continue;
+			}
+			break;
 		}
+		if (const auto height = geodesy::parse_rust_float(
+					it->second.substr(begin, numeric_end - begin));
+				height && *height > 1.0 && *height < 400.0)
+			return *height;
 	}
 	if (const auto it = tags.find("building:levels"); it != tags.end()) {
-		try {
-			const double levels = std::stod(it->second);
-			if (levels >= 1.0 && levels < 150.0)
-				return levels * 3.0;
-		} catch (...) {
-		}
+		const auto [begin, end] = geodesy::trim_rust_whitespace(it->second);
+		if (const auto levels =
+						geodesy::parse_rust_float(it->second.substr(begin, end - begin));
+				levels && *levels >= 1.0 && *levels < 150.0)
+			return *levels * 3.0;
 	}
 	return 9.0;
 }

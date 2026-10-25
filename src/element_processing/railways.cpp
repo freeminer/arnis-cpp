@@ -910,17 +910,13 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 											return rail.id() == block->id();
 										});
 			};
-			if (const auto road = editor.road_surface_y(x, z)) {
+			if (const auto road = editor.surface_override(x, z)) {
 				if (rail_at(*road + 1))
 					held.push_back({Held::Fixed, *road});
 				else if (rail_at(*road))
 					held.push_back({Held::Fixed, *road - 1});
 				else
 					held.push_back({Held::Road, *road});
-			} else if (rail_at(g + 1)) {
-				held.push_back({Held::Fixed, g});
-			} else if (rail_at(g)) {
-				held.push_back({Held::Fixed, g - 1});
 			} else if (editor.get_block_absolute(x, g, z)) {
 				held.push_back({Held::Fixed, g});
 			} else {
