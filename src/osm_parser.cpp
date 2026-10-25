@@ -2,16 +2,13 @@
 
 #include <algorithm>
 #include <initializer_list>
-#include <regex>
 #include <iostream>
-#include <sstream>
 #include <stdexcept>
 #include <string_view>
 #include <unordered_map>
 #include <unordered_set>
-#include <cstring>
 #include <cctype>
-#include <functional>
+#include <charconv>
 #include <nlohmann/json.hpp>
 #include "strict_parse.h"
 
@@ -112,96 +109,276 @@ std::string decode_xml(std::string value)
 		}
 	}
 	value = std::move(normalized);
-	const std::pair<const char *, const char *> entities[] = {{"&amp;", "&"},
-			{"&quot;", "\""}, {"&apos;", "'"}, {"&lt;", "<"}, {"&gt;", ">"}};
-	for (const auto &[from, to] : entities) {
-		std::size_t pos = 0;
-		while ((pos = value.find(from, pos)) != std::string::npos) {
-			value.replace(pos, std::strlen(from), to);
-			pos += std::strlen(to);
+	auto append_codepoint = [](std::string &out, unsigned long codepoint) {
+		if (codepoint <= 0x7f)
+			out.push_back(static_cast<char>(codepoint));
+		else if (codepoint <= 0x7ff) {
+			out.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
+			out.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+		} else if (codepoint <= 0xffff) {
+			out.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
+			out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+			out.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
+		} else {
+			out.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
+			out.push_back(static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
+			out.push_back(static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
+			out.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
 		}
-	}
-	// OSM exports commonly encode non-ASCII tag values as numeric XML
-	// entities.  Rust's XML reader decodes both decimal and hexadecimal forms;
-	// preserve that behavior before the parser stores tags.
-	for (std::size_t pos = 0; (pos = value.find("&#", pos)) != std::string::npos;) {
-		const auto end = value.find(';', pos + 2);
+	};
+	std::string decoded;
+	decoded.reserve(value.size());
+	for (std::size_t pos = 0; pos < value.size();) {
+		if (value[pos] != '&') {
+			decoded.push_back(value[pos++]);
+			continue;
+		}
+		const auto end = value.find(';', pos + 1);
 		if (end == std::string::npos)
-			break;
-		const auto token = value.substr(pos + 2, end - pos - 2);
-		try {
-			const int base =
-					token.size() > 1 && (token[0] == 'x' || token[0] == 'X') ? 16 : 10;
-			const auto digits = base == 16 ? token.substr(1) : token;
-			const auto codepoint = std::stoul(digits, nullptr, base);
-			if (codepoint <= 0x10ffff && !(codepoint >= 0xd800 && codepoint <= 0xdfff)) {
-				std::string encoded;
-				if (codepoint <= 0x7f)
-					encoded.push_back(static_cast<char>(codepoint));
-				else if (codepoint <= 0x7ff) {
-					encoded.push_back(static_cast<char>(0xc0 | (codepoint >> 6)));
-					encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-				} else if (codepoint <= 0xffff) {
-					encoded.push_back(static_cast<char>(0xe0 | (codepoint >> 12)));
-					encoded.push_back(
-							static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
-					encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-				} else {
-					encoded.push_back(static_cast<char>(0xf0 | (codepoint >> 18)));
-					encoded.push_back(
-							static_cast<char>(0x80 | ((codepoint >> 12) & 0x3f)));
-					encoded.push_back(
-							static_cast<char>(0x80 | ((codepoint >> 6) & 0x3f)));
-					encoded.push_back(static_cast<char>(0x80 | (codepoint & 0x3f)));
-				}
-				value.replace(pos, end - pos + 1, encoded);
-				pos += encoded.size();
-				continue;
-			}
-		} catch (...) {
+			throw std::runtime_error("unterminated XML entity reference");
+		const auto entity = std::string_view(value).substr(pos + 1, end - pos - 1);
+		if (entity == "amp")
+			decoded.push_back('&');
+		else if (entity == "quot")
+			decoded.push_back('"');
+		else if (entity == "apos")
+			decoded.push_back('\'');
+		else if (entity == "lt")
+			decoded.push_back('<');
+		else if (entity == "gt")
+			decoded.push_back('>');
+		else if (!entity.empty() && entity.front() == '#') {
+			const bool hexadecimal =
+					entity.size() > 2 && (entity[1] == 'x' || entity[1] == 'X');
+			const auto digits = entity.substr(hexadecimal ? 2 : 1);
+			unsigned long codepoint = 0;
+			const auto [tail, error] = std::from_chars(digits.data(),
+					digits.data() + digits.size(), codepoint, hexadecimal ? 16 : 10);
+			const bool valid_xml_character =
+					codepoint == 0x9 || codepoint == 0xa || codepoint == 0xd ||
+					(codepoint >= 0x20 && codepoint <= 0xd7ff) ||
+					(codepoint >= 0xe000 && codepoint <= 0xfffd) ||
+					(codepoint >= 0x10000 && codepoint <= 0x10ffff);
+			if (digits.empty() || error != std::errc{} ||
+					tail != digits.data() + digits.size() || !valid_xml_character)
+				throw std::runtime_error("invalid numeric XML entity");
+			append_codepoint(decoded, codepoint);
+		} else {
+			throw std::runtime_error("unknown XML entity: &" + std::string(entity) + ";");
 		}
 		pos = end + 1;
 	}
-	return value;
+	return decoded;
 }
 
-std::unordered_map<std::string, std::string> attrs(const std::string &text)
+struct XmlEvent
 {
-	std::unordered_map<std::string, std::string> out;
-	// XML permits either quote delimiter.  OSM normally emits double quotes,
-	// but Rust's XML reader accepts both and hand-written extracts often use
-	// single quotes.
-	static const std::regex double_attr(
-			R"ATTR(([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*"([^"]*)")ATTR");
-	static const std::regex single_attr(
-			R"ATTR(([A-Za-z_:][A-Za-z0-9_.:-]*)\s*=\s*'([^']*)')ATTR");
-	for (const auto &attr_re : {std::cref(double_attr), std::cref(single_attr)})
-		for (std::sregex_iterator it(text.begin(), text.end(), attr_re.get()), end;
-				it != end; ++it)
-			out[(*it)[1].str()] = decode_xml((*it)[2].str());
-	return out;
+	std::string name;
+	std::unordered_map<std::string, std::string> attributes;
+	bool closing{};
+	bool empty{};
+};
+
+bool xml_space(char c)
+{
+	return c == ' ' || c == '\t' || c == '\r' || c == '\n';
 }
 
-std::uint64_t integer(
-		const std::unordered_map<std::string, std::string> &a, const char *key)
+void skip_xml_until(std::istream &input, std::string_view terminator)
 {
-	auto it = a.find(key);
-	if (it == a.end())
-		throw std::runtime_error(std::string("OSM element missing ") + key);
-	return std::stoull(it->second);
-}
-
-void read_tags(const std::string &body, tags_t &tags)
-{
-	static const std::regex tag_re(R"(<tag\b([^>]*)/?>)");
-	for (std::sregex_iterator it(body.begin(), body.end(), tag_re), end; it != end;
-			++it) {
-		auto a = attrs((*it)[1].str());
-		auto k = a.find("k");
-		auto v = a.find("v");
-		if (k != a.end() && v != a.end())
-			tags[k->second] = v->second;
+	std::size_t matched = 0;
+	char c{};
+	while (input.get(c)) {
+		if (c == terminator[matched]) {
+			if (++matched == terminator.size())
+				return;
+		} else {
+			matched = c == terminator.front() ? 1 : 0;
+		}
 	}
+	throw std::runtime_error("unterminated XML markup");
+}
+
+std::string trim_xml_space(std::string value)
+{
+	const auto first = value.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		return {};
+	const auto last = value.find_last_not_of(" \t\r\n");
+	return value.substr(first, last - first + 1);
+}
+
+std::string required_xml_attribute(const XmlEvent &event, const char *name)
+{
+	const auto it = event.attributes.find(name);
+	if (it == event.attributes.end())
+		throw std::runtime_error(std::string("OSM XML element missing ") + name);
+	return it->second;
+}
+
+std::uint64_t xml_u64(const XmlEvent &event, const char *name)
+{
+	const auto value = trim_xml_space(required_xml_attribute(event, name));
+	std::uint64_t parsed{};
+	const auto [tail, error] =
+			std::from_chars(value.data(), value.data() + value.size(), parsed);
+	if (value.empty() || error != std::errc{} || tail != value.data() + value.size())
+		throw std::runtime_error(
+				std::string("invalid OSM XML integer attribute: ") + name);
+	return parsed;
+}
+
+double xml_f64(const XmlEvent &event, const char *name)
+{
+	const auto value = trim_xml_space(required_xml_attribute(event, name));
+	const auto parsed = strict_parse::f64(value);
+	if (!parsed)
+		throw std::runtime_error(
+				std::string("invalid OSM XML number attribute: ") + name);
+	return *parsed;
+}
+
+std::optional<XmlEvent> next_xml_event(std::istream &input)
+{
+	char c{};
+	for (;;) {
+		while (input.get(c) && c != '<') {
+		}
+		if (!input) {
+			if (input.bad())
+				throw std::runtime_error("failed while reading OSM XML");
+			return std::nullopt;
+		}
+		if (!input.get(c))
+			throw std::runtime_error("truncated XML markup");
+		if (c == '?') {
+			skip_xml_until(input, "?>");
+			continue;
+		}
+		if (c != '!')
+			break;
+		char first{}, second{};
+		if (!input.get(first) || !input.get(second))
+			throw std::runtime_error("truncated XML declaration");
+		if (first == '-' && second == '-') {
+			skip_xml_until(input, "-->");
+		} else if (first == '[' && second == 'C') {
+			for (const char expected : std::string_view("DATA[")) {
+				if (!input.get(c) || c != expected)
+					throw std::runtime_error("malformed CDATA section");
+			}
+			skip_xml_until(input, "]]>");
+		} else {
+			// Skip a doctype or declaration while respecting quotes and an internal
+			// subset, so a `>` inside either cannot expose fake OSM elements.
+			int subset_depth = 0;
+			char declaration_quote = 0;
+			for (;;) {
+				if (!input.get(c))
+					throw std::runtime_error("unterminated XML declaration");
+				if (declaration_quote) {
+					if (c == declaration_quote)
+						declaration_quote = 0;
+				} else if (c == '\'' || c == '"') {
+					declaration_quote = c;
+				} else if (c == '[') {
+					++subset_depth;
+				} else if (c == ']' && subset_depth > 0) {
+					--subset_depth;
+				} else if (c == '>' && subset_depth == 0) {
+					break;
+				}
+			}
+		}
+	}
+
+	XmlEvent event;
+	if (c == '/') {
+		event.closing = true;
+		if (!input.get(c))
+			throw std::runtime_error("truncated XML closing tag");
+	}
+	std::string raw;
+	char quote = 0;
+	for (;;) {
+		if (c == '\'' || c == '"') {
+			if (!quote)
+				quote = c;
+			else if (quote == c)
+				quote = 0;
+		}
+		if (c == '>' && !quote)
+			break;
+		raw.push_back(c);
+		if (!input.get(c))
+			throw std::runtime_error("unterminated XML tag");
+	}
+	if (quote)
+		throw std::runtime_error("unterminated XML attribute");
+	std::size_t pos = 0;
+	while (pos < raw.size() && xml_space(raw[pos]))
+		++pos;
+	const auto name_start = pos;
+	while (pos < raw.size() && !xml_space(raw[pos]) && raw[pos] != '/')
+		++pos;
+	if (name_start == pos)
+		throw std::runtime_error("empty XML element name");
+	event.name = raw.substr(name_start, pos - name_start);
+	if (event.closing) {
+		while (pos < raw.size() && xml_space(raw[pos]))
+			++pos;
+		if (pos != raw.size())
+			throw std::runtime_error("invalid XML closing tag");
+		return event;
+	}
+	while (pos < raw.size()) {
+		while (pos < raw.size() && xml_space(raw[pos]))
+			++pos;
+		if (pos == raw.size())
+			break;
+		if (raw[pos] == '/') {
+			++pos;
+			while (pos < raw.size() && xml_space(raw[pos]))
+				++pos;
+			if (pos != raw.size())
+				throw std::runtime_error("invalid self-closing XML tag");
+			event.empty = true;
+			break;
+		}
+		const auto key_start = pos;
+		while (pos < raw.size() && !xml_space(raw[pos]) && raw[pos] != '=')
+			++pos;
+		if (key_start == pos)
+			throw std::runtime_error("invalid XML attribute name");
+		const auto key = raw.substr(key_start, pos - key_start);
+		while (pos < raw.size() && xml_space(raw[pos]))
+			++pos;
+		if (pos == raw.size() || raw[pos++] != '=')
+			throw std::runtime_error("XML attribute missing '='");
+		while (pos < raw.size() && xml_space(raw[pos]))
+			++pos;
+		if (pos == raw.size() || (raw[pos] != '\'' && raw[pos] != '"'))
+			throw std::runtime_error("XML attribute value must be quoted");
+		const char delimiter = raw[pos++];
+		const auto value_start = pos;
+		while (pos < raw.size() && raw[pos] != delimiter)
+			++pos;
+		if (pos == raw.size())
+			throw std::runtime_error("unterminated XML attribute value");
+		auto value = decode_xml(raw.substr(value_start, pos - value_start));
+		++pos;
+		if (!event.attributes.emplace(key, std::move(value)).second)
+			throw std::runtime_error("duplicate XML attribute: " + key);
+	}
+	return event;
+}
+
+void set_xml_tag(tags_t &tags, const XmlEvent &event)
+{
+	const auto key = event.attributes.find("k");
+	const auto value = event.attributes.find("v");
+	if (key != event.attributes.end() && value != event.attributes.end())
+		tags[key->second] = value->second;
 }
 
 void filter_tags_impl(tags_t &tags)
@@ -476,28 +653,35 @@ RawOsmDocument::Completeness analyze_completeness(const RawOsmDocument &document
 
 std::optional<std::array<double, 4>> resolve_bbox(const RawOsmDocument &document)
 {
+	auto valid_bbox = [](const std::array<double, 4> &b) {
+		return std::all_of(b.begin(), b.end(),
+					   [](double value) { return std::isfinite(value); }) &&
+			   b[0] >= -90.0 && b[2] <= 90.0 && b[1] >= -180.0 && b[3] <= 180.0 &&
+			   b[0] < b[2] && b[1] < b[3];
+	};
 	if (document.bounds) {
 		const auto &b = *document.bounds;
-		if (std::all_of(b.begin(), b.end(),
-					[](double value) { return std::isfinite(value); }) &&
-				b[0] <= b[2] && b[1] <= b[3])
+		if (valid_bbox(b))
 			return document.bounds;
 	}
 	if (document.nodes.empty())
 		return std::nullopt;
 	std::optional<std::array<double, 4>> result;
 	for (const auto &node : document.nodes) {
-		if (!std::isfinite(node.lat) || !std::isfinite(node.lon))
+		if (!node.lat || !node.lon || !std::isfinite(*node.lat) ||
+				!std::isfinite(*node.lon))
 			continue;
 		if (!result) {
-			result = std::array<double, 4>{node.lat, node.lon, node.lat, node.lon};
+			result = std::array<double, 4>{*node.lat, *node.lon, *node.lat, *node.lon};
 			continue;
 		}
-		(*result)[0] = std::min((*result)[0], node.lat);
-		(*result)[1] = std::min((*result)[1], node.lon);
-		(*result)[2] = std::max((*result)[2], node.lat);
-		(*result)[3] = std::max((*result)[3], node.lon);
+		(*result)[0] = std::min((*result)[0], *node.lat);
+		(*result)[1] = std::min((*result)[1], *node.lon);
+		(*result)[2] = std::max((*result)[2], *node.lat);
+		(*result)[3] = std::max((*result)[3], *node.lon);
 	}
+	if (!result || !valid_bbox(*result))
+		return std::nullopt;
 	return result;
 }
 
@@ -517,83 +701,104 @@ void report_incomplete_source(const RawOsmDocument::Completeness &completeness)
 
 RawOsmDocument parse_osm_xml(std::istream &input)
 {
-	std::ostringstream buffer;
-	buffer << input.rdbuf();
-	std::string xml = buffer.str();
-	// Do not let tag-like text inside XML comments become OSM elements.  The
-	// Rust XML reader discards comments before exposing start/end events.
-	for (std::size_t begin = 0; (begin = xml.find("<!--", begin)) != std::string::npos;) {
-		const auto end = xml.find("-->", begin + 4);
-		if (end == std::string::npos) {
-			xml.erase(begin);
-			break;
-		}
-		xml.erase(begin, end + 3 - begin);
-	}
 	RawOsmDocument document;
-
-	static const std::regex bounds_re(R"(<bounds\b([^>]*)/?>)");
-	std::smatch match;
-	if (std::regex_search(xml, match, bounds_re)) {
-		auto a = attrs(match[1].str());
-		if (a.contains("minlat") && a.contains("minlon") && a.contains("maxlat") &&
-				a.contains("maxlon"))
-			document.bounds =
-					std::array<double, 4>{std::stod(a["minlat"]), std::stod(a["minlon"]),
-							std::stod(a["maxlat"]), std::stod(a["maxlon"])};
-	}
-
-	static const std::regex node_re(
-			R"(<node\b([^>]*?)(?:/>|>([\s\S]*?)</node>))", std::regex::icase);
-	for (std::sregex_iterator it(xml.begin(), xml.end(), node_re), end; it != end; ++it) {
-		auto a = attrs((*it)[1].str());
-		RawNode node;
-		node.id = integer(a, "id");
-		node.lat = std::stod(a.at("lat"));
-		node.lon = std::stod(a.at("lon"));
-		if ((*it).size() > 2)
-			read_tags((*it)[2].str(), node.tags);
-		filter_tags_impl(node.tags);
-		document.nodes.push_back(std::move(node));
-	}
-
-	static const std::regex way_re(
-			R"(<way\b([^>]*?)(?:/>|>([\s\S]*?)</way>))", std::regex::icase);
-	static const std::regex nd_re(R"(<nd\b([^>]*)/?>)");
-	for (std::sregex_iterator it(xml.begin(), xml.end(), way_re), end; it != end; ++it) {
-		auto a = attrs((*it)[1].str());
-		RawWay way;
-		way.id = integer(a, "id");
-		const std::string body = (*it).size() > 2 ? (*it)[2].str() : std::string{};
-		for (std::sregex_iterator ni(body.begin(), body.end(), nd_re), ne; ni != ne; ++ni)
-			way.node_refs.push_back(integer(attrs((*ni)[1].str()), "ref"));
-		read_tags(body, way.tags);
-		filter_tags_impl(way.tags);
-		document.ways.push_back(std::move(way));
-	}
-
-	static const std::regex relation_re(
-			R"(<relation\b([^>]*?)(?:/>|>([\s\S]*?)</relation>))", std::regex::icase);
-	static const std::regex member_re(R"(<member\b([^>]*)/?>)");
-	for (std::sregex_iterator it(xml.begin(), xml.end(), relation_re), end; it != end;
-			++it) {
-		auto a = attrs((*it)[1].str());
-		RawRelation relation;
-		relation.id = integer(a, "id");
-		const std::string body = (*it).size() > 2 ? (*it)[2].str() : std::string{};
-		for (std::sregex_iterator mi(body.begin(), body.end(), member_re), me; mi != me;
-				++mi) {
-			auto m = attrs((*mi)[1].str());
-			RawRelationMember member;
-			member.type = m.contains("type") ? m["type"] : "";
-			member.ref = m.contains("ref") ? std::stoull(m["ref"]) : 0;
-			member.role = m.contains("role") ? m["role"] : "";
-			relation.members.push_back(std::move(member));
+	std::optional<RawNode> node;
+	std::optional<RawWay> way;
+	std::optional<RawRelation> relation;
+	auto finish_current = [&]() {
+		if (node) {
+			filter_tags_impl(node->tags);
+			document.nodes.push_back(std::move(*node));
+			node.reset();
+		} else if (way) {
+			filter_tags_impl(way->tags);
+			document.ways.push_back(std::move(*way));
+			way.reset();
+		} else if (relation) {
+			filter_tags_impl(relation->tags);
+			document.relations.push_back(std::move(*relation));
+			relation.reset();
 		}
-		read_tags(body, relation.tags);
-		filter_tags_impl(relation.tags);
-		document.relations.push_back(std::move(relation));
+	};
+	while (const auto event = next_xml_event(input)) {
+		if (event->closing) {
+			if (event->name == "node" || event->name == "way" ||
+					event->name == "relation")
+				finish_current();
+			continue;
+		}
+		if (event->name == "bounds") {
+			const auto minlat = event->attributes.find("minlat");
+			const auto minlon = event->attributes.find("minlon");
+			const auto maxlat = event->attributes.find("maxlat");
+			const auto maxlon = event->attributes.find("maxlon");
+			if (minlat != event->attributes.end() && minlon != event->attributes.end() &&
+					maxlat != event->attributes.end() &&
+					maxlon != event->attributes.end()) {
+				auto parse_bound = [](const std::string &value) {
+					const auto parsed = strict_parse::f64(trim_xml_space(value));
+					if (!parsed)
+						throw std::runtime_error("invalid OSM XML bounds coordinate");
+					return *parsed;
+				};
+				const std::array<double, 4> bounds{parse_bound(minlat->second),
+						parse_bound(minlon->second), parse_bound(maxlat->second),
+						parse_bound(maxlon->second)};
+				if (!std::all_of(bounds.begin(), bounds.end(),
+							[](double value) { return std::isfinite(value); }) ||
+						bounds[0] < -90.0 || bounds[2] > 90.0 || bounds[1] < -180.0 ||
+						bounds[3] > 180.0 || bounds[0] >= bounds[2] ||
+						bounds[1] >= bounds[3])
+					throw std::runtime_error("invalid OSM XML bounds");
+				document.bounds = bounds;
+			}
+		} else if (event->name == "node") {
+			if (node || way || relation)
+				throw std::runtime_error("nested OSM element in XML input");
+			node.emplace();
+			node->id = xml_u64(*event, "id");
+			if (event->attributes.contains("lat"))
+				node->lat = xml_f64(*event, "lat");
+			if (event->attributes.contains("lon"))
+				node->lon = xml_f64(*event, "lon");
+		} else if (event->name == "way") {
+			if (node || way || relation)
+				throw std::runtime_error("nested OSM element in XML input");
+			way.emplace();
+			way->id = xml_u64(*event, "id");
+		} else if (event->name == "relation") {
+			if (node || way || relation)
+				throw std::runtime_error("nested OSM element in XML input");
+			relation.emplace();
+			relation->id = xml_u64(*event, "id");
+		} else if (event->name == "tag") {
+			if (node)
+				set_xml_tag(node->tags, *event);
+			else if (way)
+				set_xml_tag(way->tags, *event);
+			else if (relation)
+				set_xml_tag(relation->tags, *event);
+		} else if (event->name == "nd" && way) {
+			if (event->attributes.contains("ref"))
+				way->node_refs.push_back(xml_u64(*event, "ref"));
+		} else if (event->name == "member" && relation) {
+			RawRelationMember member;
+			if (const auto it = event->attributes.find("type");
+					it != event->attributes.end())
+				member.type = it->second;
+			if (event->attributes.contains("ref"))
+				member.ref = xml_u64(*event, "ref");
+			if (const auto it = event->attributes.find("role");
+					it != event->attributes.end())
+				member.role = it->second;
+			relation->members.push_back(std::move(member));
+		}
+		if (event->empty && (event->name == "node" || event->name == "way" ||
+									event->name == "relation"))
+			finish_current();
 	}
+	if (node || way || relation)
+		throw std::runtime_error("unterminated OSM XML element");
 	document.completeness = analyze_completeness(document);
 	if (!document.bounds)
 		document.bounds = resolve_bbox(document);
@@ -637,13 +842,15 @@ RawOsmDocument parse_overpass_json(std::istream &input)
 		const auto type = element["type"].get<std::string>();
 		const auto id = element["id"].get<std::uint64_t>();
 		if (type == "node") {
-			if (!element.contains("lat") || !element.contains("lon") ||
-					!element["lat"].is_number() || !element["lon"].is_number())
-				continue;
 			auto node_tags = parse_tags(element);
 			filter_tags_impl(node_tags);
-			document.nodes.push_back({id, element["lat"].get<double>(),
-					element["lon"].get<double>(), std::move(node_tags)});
+			const auto lat = element.contains("lat") && element["lat"].is_number()
+									 ? std::optional<double>(element["lat"].get<double>())
+									 : std::nullopt;
+			const auto lon = element.contains("lon") && element["lon"].is_number()
+									 ? std::optional<double>(element["lon"].get<double>())
+									 : std::nullopt;
+			document.nodes.push_back({id, lat, lon, std::move(node_tags)});
 		} else if (type == "way") {
 			RawWay way;
 			way.id = id;

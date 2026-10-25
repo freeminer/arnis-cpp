@@ -87,7 +87,8 @@ nlohmann::json buildings_as_overpass_json(
 	std::unordered_map<std::uint64_t, std::pair<double, double>> coordinates;
 	coordinates.reserve(document.nodes.size());
 	for (const auto &node : document.nodes)
-		coordinates.emplace(node.id, std::pair{node.lat, node.lon});
+		if (node.lat && node.lon)
+			coordinates.emplace(node.id, std::pair{*node.lat, *node.lon});
 	std::unordered_map<std::uint64_t, const osm_parser::RawWay *> ways_by_id;
 	ways_by_id.reserve(document.ways.size());
 	for (const auto &way : document.ways)
@@ -144,9 +145,14 @@ nlohmann::json buildings_as_overpass_json(
 
 	nlohmann::json elements = nlohmann::json::array();
 	for (const auto &node : document.nodes)
-		if (selected_nodes.contains(node.id))
-			elements.push_back({{"type", "node"}, {"id", node.id}, {"lat", node.lat},
-					{"lon", node.lon}});
+		if (selected_nodes.contains(node.id)) {
+			nlohmann::json value{{"type", "node"}, {"id", node.id}};
+			if (node.lat)
+				value["lat"] = *node.lat;
+			if (node.lon)
+				value["lon"] = *node.lon;
+			elements.push_back(std::move(value));
+		}
 	for (auto &way : way_json)
 		elements.push_back(std::move(way));
 	for (const auto *relation : selected_relations) {

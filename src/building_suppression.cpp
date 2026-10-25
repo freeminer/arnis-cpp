@@ -611,17 +611,21 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	// chunk sees the same complete attraction and building-part geometry.
 	std::vector<std::pair<std::uint64_t, std::vector<GeoPoint>>> ride_outlines;
 	for (const auto *way : ordered_ways) {
-		if (!attractions::replaces_parts(way->tags))
-			continue;
-		out.outline_suppression.erase({"way", way->id});
-		auto ring = geo_ring(*way);
-		if (ring.size() >= 4)
-			ride_outlines.emplace_back(way->id, std::move(ring));
+		if (attractions::replaces_parts(way->tags)) {
+			out.outline_suppression.erase({"way", way->id});
+			auto ring = geo_ring(*way);
+			if (ring.size() >= 4)
+				ride_outlines.emplace_back(way->id, std::move(ring));
+		}
 	}
+	// Match Rust's early return: most areas have no rides, so avoid a second scan
+	// and a temporary list of every building part in those areas.
 	if (!ride_outlines.empty()) {
-		for (const auto *way : ordered_ways) {
-			if (!is_building_part(way->tags) || attractions::claims(way->tags))
-				continue;
+		std::vector<const ProcessedWay *> ride_parts;
+		for (const auto *way : ordered_ways)
+			if (is_building_part(way->tags) && !attractions::claims(way->tags))
+				ride_parts.push_back(way);
+		for (const auto *way : ride_parts) {
 			const auto ring = geo_ring(*way);
 			if (ring.empty())
 				continue;

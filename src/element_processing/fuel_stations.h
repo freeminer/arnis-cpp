@@ -24,6 +24,9 @@ struct Livery
 	}
 };
 
+/// Resolve a station's brand colors from its tags, or choose a seeded fallback.
+Livery livery_for(const tags_t &tags, std::uint64_t seed);
+
 struct Site
 {
 	std::uint64_t id{};

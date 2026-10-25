@@ -508,17 +508,19 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 	}
 
 	if (landuse_tag == "construction") {
-		const auto area_without_holes = without_holes(floor_area, holes);
+		// Preserve the cache's shared fill when there are no holes, as Rust's
+		// Arc-based without_holes does; copy only for the filtered case.
+		const auto area_without_holes = without_holes(fill, holes);
 		structures::crane::maybe_place_crane(
-				editor, area_without_holes, building_footprints);
-		structures::excavator::scatter_excavators(editor, area_without_holes);
+				editor, *area_without_holes, building_footprints);
+		structures::excavator::scatter_excavators(editor, *area_without_holes);
 		construction_site::furnish(
-				editor, element, area_without_holes, building_footprints);
+				editor, element, *area_without_holes, building_footprints);
 	}
 
 	if (landuse_tag == "farmland") {
-		const auto area_without_holes = without_holes(floor_area, holes);
-		structures::tractor::maybe_place_tractor(editor, area_without_holes);
+		const auto area_without_holes = without_holes(fill, holes);
+		structures::tractor::maybe_place_tractor(editor, *area_without_holes);
 	}
 }
 
@@ -580,11 +582,10 @@ void generate_place(WorldEditor &editor, ProcessedWay const &element, Args const
 	}
 
 	// Get the area using flood fill cache
-	std::vector<std::pair<int, int>> floor_area =
-			*flood_fill_cache.get_or_compute(element, args.timeout_ref());
+	const auto floor_area = flood_fill_cache.get_or_compute(element, args.timeout_ref());
 
 	// Place ground blocks
-	for (auto const &coord : floor_area) {
+	for (auto const &coord : *floor_area) {
 		int x = coord.first;
 		int z = coord.second;
 		editor.set_block(block_type, x, 0, z, std::optional<std::vector<Block>>(),

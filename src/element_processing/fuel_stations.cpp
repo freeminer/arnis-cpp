@@ -73,7 +73,7 @@ bool inside(const std::vector<std::pair<double, double>> &ring, double x, double
 	return hit;
 }
 
-Livery livery_for(const tags_t &tags, std::uint64_t seed)
+Livery livery_for_impl(const tags_t &tags, std::uint64_t seed)
 {
 	Block white = WHITE_CONCRETE, red = RED_CONCRETE, blue = BLUE_CONCRETE,
 		  yellow = YELLOW_CONCRETE, green = GREEN_CONCRETE, orange = ORANGE_CONCRETE;
@@ -189,9 +189,8 @@ Livery livery_for(const tags_t &tags, std::uint64_t seed)
 					auto word = value_words[first + i];
 					if (word == brand_words[i])
 						continue;
-					if (brand_words[i] == "casey" && word.size() > 2 &&
-							word.substr(word.size() - 2) == "'s" &&
-							word.substr(0, word.size() - 2) == "casey")
+					if (word.size() > 2 && word.substr(word.size() - 2) == "'s" &&
+							word.substr(0, word.size() - 2) == brand_words[i])
 						continue;
 					match = false;
 					break;
@@ -418,6 +417,11 @@ int ground_at(WorldEditor &editor, int x, int z)
 
 } // namespace
 
+Livery livery_for(const tags_t &tags, std::uint64_t seed)
+{
+	return livery_for_impl(tags, seed);
+}
+
 FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double scale)
 {
 	FuelIndex out;
@@ -582,13 +586,12 @@ bool generate_canopy(WorldEditor &editor, const ProcessedWay &way,
 		auto parsed = mapillary::geodesy::parse_length_m(it->second);
 		return parsed && *parsed > 0.0 && *parsed < 30.0 ? parsed : std::nullopt;
 	};
+	const auto min_height = height_tag("min_height");
 	const int min_roof = std::clamp(
-			static_cast<int>(
-					std::lround(height_tag("min_height").value_or(5.0 / scale) * scale)),
-			4, 9);
+			min_height ? static_cast<int>(std::lround(*min_height * scale)) : 5, 4, 9);
+	const auto height = height_tag("height");
 	const int max_roof = std::clamp(
-			static_cast<int>(std::lround(
-					height_tag("height").value_or((min_roof + 2.0) / scale) * scale)),
+			height ? static_cast<int>(std::lround(*height * scale)) : min_roof + 2,
 			min_roof + 1, min_roof + 3);
 	std::vector<std::pair<int, int>> cells(filled->begin(), filled->end());
 	draw_canopy(editor, cells, *site, base, min_roof, max_roof, roads, way.id);

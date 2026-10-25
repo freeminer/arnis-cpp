@@ -247,8 +247,9 @@ std::vector<PeakHint> peaks_in(const osm_parser::RawOsmDocument &data)
 {
 	std::vector<PeakHint> result;
 	for (const auto &node : data.nodes)
-		if (auto peak = peak_from_tags(node.lat, node.lon, node.tags))
-			result.push_back(*peak);
+		if (node.lat && node.lon)
+			if (auto peak = peak_from_tags(*node.lat, *node.lon, node.tags))
+				result.push_back(*peak);
 	return result;
 }
 
@@ -268,9 +269,10 @@ std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data)
 {
 	std::vector<TallModel> result;
 	for (const auto &node : data.nodes)
-		if (auto h = model_height(node.tags);
-				h && std::isfinite(node.lat) && std::isfinite(node.lon))
-			result.push_back({node.lat, node.lon, *h});
+		if (node.lat && node.lon)
+			if (auto h = model_height(node.tags);
+					h && std::isfinite(*node.lat) && std::isfinite(*node.lon))
+				result.push_back({*node.lat, *node.lon, *h});
 
 	std::unordered_map<std::uint64_t, std::pair<double, double>> coordinates;
 	std::unordered_set<std::uint64_t> wanted;
@@ -279,8 +281,8 @@ std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data)
 			wanted.insert(way.node_refs.begin(), way.node_refs.end());
 	if (!wanted.empty())
 		for (const auto &node : data.nodes)
-			if (wanted.contains(node.id))
-				coordinates.emplace(node.id, std::pair{node.lat, node.lon});
+			if (wanted.contains(node.id) && node.lat && node.lon)
+				coordinates.emplace(node.id, std::pair{*node.lat, *node.lon});
 
 	for (const auto &way : data.ways) {
 		const auto h = model_height(way.tags);

@@ -189,9 +189,10 @@ std::vector<Support> supports_for(
 				tag->second != "station")
 			continue;
 		Support::Role role = edge ? Support::Role::Edge : Support::Role::Pylon;
-		// The Rust planner treats each real way endpoint as a terminal. Interior
-		// vertices become pylons unless explicitly marked aerialway=station.
-		if (!edge && (endpoint || (tag != node.tags.end() && tag->second == "station")))
+		// Rust splits qualifying mid-stations into section endpoints before
+		// planning supports. A station too close to an end to split remains an
+		// interior pylon; only actual section endpoints are terminals here.
+		if (!edge && endpoint)
 			role = Support::Role::Station;
 		const double x = node.x + 0.5, z = node.z + 0.5;
 		if (!points.empty() &&
@@ -202,17 +203,6 @@ std::vector<Support> supports_for(
 	}
 	if (points.size() < 2)
 		return {};
-	std::vector<double> along(points.size(), 0.0);
-	for (std::size_t i = 1; i < points.size(); ++i)
-		along[i] = along[i - 1] + std::hypot(points[i].x - points[i - 1].x,
-										  points[i].z - points[i - 1].z);
-	std::size_t section_start = 0;
-	for (std::size_t i = 1; i + 1 < points.size(); ++i) {
-		if (points[i].role != Support::Role::Station)
-			continue;
-		if (along[i] - along[section_start] >= 40.0 && along.back() - along[i] >= 40.0)
-			section_start = i;
-	}
 	std::vector<Support> supports;
 	supports.reserve(points.size() + 8);
 	for (const auto &point : points) {
@@ -250,37 +240,25 @@ std::vector<Support> supports_for(
 		spaced.push_back(support);
 	}
 	supports = std::move(spaced);
-	// Rust plans each station-to-station section independently. If that section
-	// contains only its endpoints, add its regular supports even when another
-	// section elsewhere on the same way has a mapped pylon or mid-station.
-	if (spec.spacing > 0.0 && supports.size() >= 2) {
+	// Rust inserts regular pylons only when the filtered way has exactly two
+	// supports; mapped pylons or stations anywhere on it suppress this fallback.
+	if (spec.spacing > 0.0 && supports.size() == 2) {
+		const Support &a = supports.front();
+		const Support &b = supports.back();
+		const double length = std::hypot(b.x - a.x, b.z - a.z);
+		const int count = static_cast<int>(std::round(length / spec.spacing));
 		std::vector<Support> planned;
-		planned.reserve(supports.size() + 8);
-		std::size_t section_start = 0;
-		planned.push_back(supports.front());
-		for (std::size_t end = 1; end < supports.size(); ++end) {
-			const bool section_end = end + 1 == supports.size() ||
-									 (supports[end].role == Support::Role::Station &&
-											 end + 1 < supports.size());
-			if (!section_end)
-				continue;
-			if (end == section_start + 1) {
-				const Support &a = supports[section_start];
-				const Support &b = supports[end];
-				const double length = std::hypot(b.x - a.x, b.z - a.z);
-				const int count = static_cast<int>(std::round(length / spec.spacing));
-				for (int k = 1; k < count; ++k) {
-					const double t = static_cast<double>(k) / count;
-					const double x = a.x + (b.x - a.x) * t;
-					const double z = a.z + (b.z - a.z) * t;
-					const double ground = ground_at(editor, x, z);
-					planned.push_back({x, z, ground, ground + spec.pylon_rope,
-							Support::Role::Pylon, true});
-				}
-			}
-			planned.push_back(supports[end]);
-			section_start = end;
+		planned.reserve(static_cast<std::size_t>(std::max(0, count)) + 1);
+		planned.push_back(a);
+		for (int k = 1; k < count; ++k) {
+			const double t = static_cast<double>(k) / count;
+			const double x = a.x + (b.x - a.x) * t;
+			const double z = a.z + (b.z - a.z) * t;
+			const double ground = ground_at(editor, x, z);
+			planned.push_back(
+					{x, z, ground, ground + spec.pylon_rope, Support::Role::Pylon, true});
 		}
+		planned.push_back(b);
 		supports = std::move(planned);
 	}
 	const double gauge_half = rope_gauge(kind, way.tags) * 0.5;
@@ -485,6 +463,10 @@ double terminal_mouth(Kind kind, const tags_t &tags)
 		return 8.0;
 	if (kind == Kind::Gondola || kind == Kind::Mixed)
 		return 9.0;
+	// Rust models rope-tow terminals as Terminal::Post, whose mouth is zero;
+	// unlike open terminals, they do not extend the rope into a terminal hall.
+	if (kind == Kind::RopeTow)
+		return 0.0;
 	if (kind == Kind::Chair) {
 		const int seats = occupancy(tags, 4);
 		const bool bubble =
@@ -830,8 +812,12 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 		const bool wall = edge_a || edge_b;
 		const bool entry = a > half_a - 1.0 && std::abs(b) < radius + 3.0;
 		if (tram) {
-			if (wall && !entry) {
+			if (wall) {
 				for (int y = floor + 1; y <= roof; ++y) {
+					// Rust's hall keeps the passenger opening clear below the rope,
+					// but closes its upper part so the front wall supports the roof.
+					if (entry && y <= rope + 1)
+						continue;
 					const Block block = y == floor + 1
 												? LIGHT_GRAY_CONCRETE
 												: ((y - floor) % 5 == 3 || y == rope

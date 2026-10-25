@@ -27,6 +27,16 @@ BlockWithProperties::Properties default_block_properties(const Block &block)
 	if (block_definitions::VINE.id() != block_definitions::AIR.id() &&
 			block == block_definitions::VINE)
 		return one("north", "true");
+	// Freeminer's host node IDs collapse the three Rust chain pseudo-blocks to
+	// one node. Preserve their axis in param2 so the shared C++ Block values
+	// remain distinguishable after adapter initialization.
+	if (block.id() == block_definitions::CHAIN_Y.id()) {
+		if (block.param2 == 12)
+			return one("axis", "x");
+		if (block.param2 == 4)
+			return one("axis", "z");
+		return one("axis", "y");
+	}
 	switch (block.id()) {
 	case 3:
 	case 49:

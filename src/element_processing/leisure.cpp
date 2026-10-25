@@ -166,19 +166,21 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 
 			if (leisure_type == "playground" || leisure_type == "recreation_ground" ||
 					leisure_type == "pitch") {
-				const auto area_without_holes = without_holes(filled_area, holes);
+				// Match Rust's Arc-backed fill: keep the cached allocation when there
+				// are no holes, and only materialize a filtered list when needed.
+				const auto area_without_holes = without_holes(fill_result, holes);
 				if (leisure_type == "playground" || leisure_type == "recreation_ground")
 					structures::playground::scatter_playgrounds(
-							editor, area_without_holes);
+							editor, *area_without_holes);
 				if (leisure_type == "pitch") {
 					const auto &vegetation = ground_decoration::loose_plant_blocks();
-					for (const auto &[x, z] : area_without_holes) {
+					for (const auto &[x, z] : *area_without_holes) {
 						if (editor.is_hedge(x, z))
 							continue;
 						editor.set_block(AIR, x, 1, z, vegetation, std::nullopt);
 					}
 					sport_pitches::draw_pitch_markings(
-							editor, element, area_without_holes, block_type);
+							editor, element, *area_without_holes, block_type);
 				}
 			}
 		}

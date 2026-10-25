@@ -198,10 +198,9 @@ void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Ar
 	}
 
 	// Get the footprint via flood fill
-	std::vector<std::pair<int, int>> footprint =
-			*flood_fill_cache.get_or_compute(element, args.timeout);
+	const auto footprint = flood_fill_cache.get_or_compute(element, args.timeout);
 
-	if (footprint.empty()) {
+	if (footprint->empty()) {
 		return;
 	}
 
@@ -211,7 +210,7 @@ void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Ar
 	int base_y = args.ground_level;
 	if (args.terrain_enabled()) {
 		int min_ground_level = args.ground_level;
-		for (const auto &p : footprint) {
+		for (const auto &p : *footprint) {
 			int ground_level = editor.get_ground_level(p.first, p.second);
 			if (ground_level < min_ground_level) {
 				min_ground_level = ground_level;
@@ -221,12 +220,12 @@ void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Ar
 	}
 
 	// Bounding box of the footprint
-	int min_x = footprint[0].first;
-	int max_x = footprint[0].first;
-	int min_z = footprint[0].second;
-	int max_z = footprint[0].second;
+	int min_x = (*footprint)[0].first;
+	int max_x = (*footprint)[0].first;
+	int min_z = (*footprint)[0].second;
+	int max_z = (*footprint)[0].second;
 
-	for (const auto &p : footprint) {
+	for (const auto &p : *footprint) {
 		if (p.first < min_x)
 			min_x = p.first;
 		if (p.first > max_x)
@@ -264,7 +263,7 @@ void generate_pyramid(WorldEditor &editor, const ProcessedWay &element, const Ar
 		int y = base_y + 1 + layer;
 		bool placed = false;
 
-		for (const auto &p : footprint) {
+		for (const auto &p : *footprint) {
 			int px = p.first;
 			int pz = p.second;
 			double dx = std::abs(px - center_x);

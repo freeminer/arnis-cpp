@@ -10,6 +10,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <utility>
 
 #include "celestial.h"
 #include "projection/web_mercator.h"
@@ -290,6 +291,8 @@ struct Args
 		// defaults even when a library caller enabled these before adapting the
 		// requested celestial body.
 		traffic_lights = false;
+		body_gravity = false;
+		discoveries = false;
 		moving_cars = false;
 		moving_vehicles = false;
 		// Body defaults replace the requested generation mode, so refresh the
@@ -381,6 +384,12 @@ struct Args
 	SignageLevel signage{SignageLevel::Basic};
 	// Java backend extras mirrored from Rust. Entity generation is opt-in.
 	bool traffic_lights{false};
+	// Optional Java data-pack extras. The library API carries the same requested
+	// configuration as Rust; a backend may consume these when writing a world.
+	bool body_gravity{false};
+	bool discoveries{false};
+	bool pause_menu{false};
+	bool zombie_outbreak{false};
 	// Rust's current option name covers both road vehicles and rail services.
 	// Keep moving_cars as a source-compatible alias for existing C++ callers.
 	bool moving_vehicles{false};
@@ -426,10 +435,27 @@ struct Args
 			return "world time must be between 0 and 23999";
 		if (bedrock && luanti)
 			return "Bedrock and Luanti output cannot both be enabled";
-		if ((bedrock || luanti) && (traffic_lights || moving_vehicles_enabled()))
-			return "traffic lights and moving cars require Java Edition output";
-		if (one_world_run && (traffic_lights || moving_vehicles_enabled()))
-			return "traffic lights and moving cars are not available with One World yet";
+		const std::pair<bool, const char *> java_pack_extras[]{
+				{pause_menu, "--pause-menu"},
+				{discoveries, "--discoveries"},
+				{traffic_lights, "--traffic-lights"},
+				{zombie_outbreak, "--zombie-outbreak"},
+				{body_gravity, "--body-gravity"},
+				{moving_vehicles_enabled(), "--moving-vehicles"},
+		};
+		if (bedrock || luanti) {
+			for (const auto &[enabled, flag] : java_pack_extras)
+				if (enabled)
+					return std::string(flag) +
+						   " runs from a Java Edition data pack and is not available for Bedrock or Luanti worlds.";
+		}
+		if (one_world_run) {
+			for (const auto &[enabled, flag] : java_pack_extras)
+				if (enabled)
+					return std::string(flag) + " is not available with --one-world yet.";
+		}
+		if (body_gravity && is_earth(body))
+			return "--body-gravity only applies to --body moon or --body mars.";
 		if (spawn_lat.has_value() != spawn_lng.has_value())
 			return "Both --spawn-lat and --spawn-lng must be provided together.";
 		if (spawn_lat && spawn_lng &&

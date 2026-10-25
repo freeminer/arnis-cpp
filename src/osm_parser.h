@@ -103,8 +103,9 @@ bool is_art_deco(const tags_t &tags);
 struct RawNode
 {
 	std::uint64_t id = 0;
-	double lat = 0.0;
-	double lon = 0.0;
+	// Rust keeps these optional; incomplete OSM node records must not become (0, 0).
+	std::optional<double> lat;
+	std::optional<double> lon;
 	tags_t tags;
 };
 

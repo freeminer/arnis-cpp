@@ -98,6 +98,19 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 			return 5;
 		return 1;
 	};
+	// The C++ Freeminer adapter maps all Rust chain pseudo-blocks to the same
+	// host content ID. Their orientation survives in param2 instead of ID.
+	if (block.block.id() == CHAIN_Y.id()) {
+		const auto axis = property("axis");
+		const auto effective_axis =
+				axis.empty() ? (block.block.param2 == 12		 ? std::string_view("x")
+									   : block.block.param2 == 4 ? std::string_view("z")
+																 : std::string_view("y"))
+							 : axis;
+		return {"mcl_lanterns:chain", effective_axis == "x"	  ? std::uint8_t{12}
+									  : effective_axis == "z" ? std::uint8_t{4}
+															  : std::uint8_t{0}};
+	}
 	const auto id = block.block.id();
 	if (id == 210 || id == 362 || id == 510) {
 		const auto axis = property("axis");

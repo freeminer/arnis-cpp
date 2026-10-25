@@ -465,8 +465,8 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 		std::vector<std::pair<int, int>> polygon_coords;
 		for (const crate::osm_parser::ProcessedNode &n : element.nodes())
 			polygon_coords.emplace_back(n.x, n.z);
-		std::vector<std::pair<int, int>> roof_area =
-				*flood_fill_cache.get_or_compute_element(element, args.timeout);
+		const auto roof_area =
+				flood_fill_cache.get_or_compute_element(element, args.timeout);
 
 		for (const crate::osm_parser::ProcessedNode &node : element.nodes()) {
 			int x = node.x;
@@ -477,7 +477,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 			editor.set_block(roof_block, x, 5, z, std::nullopt, std::nullopt);
 		}
 
-		for (const auto &p : roof_area) {
+		for (const auto &p : *roof_area) {
 			editor.set_block(
 					roof_block, p.first, 5, p.second, std::nullopt, std::nullopt);
 		}

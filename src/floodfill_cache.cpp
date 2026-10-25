@@ -355,9 +355,13 @@ bool is_oversized_ring(const ProcessedWay &way)
 		min_z = std::min(min_z, node.z);
 		max_z = std::max(max_z, node.z);
 	}
-	const int64_t area = (static_cast<int64_t>(max_x) - min_x + 1) *
-						 (static_cast<int64_t>(max_z) - min_z + 1);
-	return area > floodfill::MAX_FLOOD_FILL_AREA;
+	const uint64_t width = static_cast<uint64_t>(static_cast<int64_t>(max_x) - min_x) + 1;
+	const uint64_t height =
+			static_cast<uint64_t>(static_cast<int64_t>(max_z) - min_z) + 1;
+	const auto cap = static_cast<uint64_t>(floodfill::MAX_FLOOD_FILL_AREA);
+	// Compare before multiplying: the full signed-32 coordinate span is 2^32,
+	// and a width*height product can exceed the signed-64 range.
+	return height != 0 && width > cap / height;
 }
 
 CoordinateBitmap::CoordinateBitmap(const XZBBox &xzbbox)
