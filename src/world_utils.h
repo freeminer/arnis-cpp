@@ -2,6 +2,7 @@
 #include <filesystem>
 #include <cstdint>
 #include <string>
+#include <string_view>
 #include <utility>
 #include <vector>
 #include <optional>
@@ -98,6 +99,12 @@ void remove_untouched_template_region(const std::filesystem::path &world);
 bool apply_java_world_settings(const std::filesystem::path &world, int game_type,
 		std::int64_t world_time, bool void_world, std::int32_t base_y, std::int32_t min_y,
 		std::string *error = nullptr);
+// Install the bundled dimension override required for worlds generated beyond
+// vanilla's build-height limits, then enable the pack in level.dat.
+bool install_tall_datapack(
+		const std::filesystem::path &world, std::string *error = nullptr);
+bool enable_datapack_in_level_dat(const std::filesystem::path &world,
+		std::string_view pack_dir_name, std::string *error = nullptr);
 bool touch_last_played(const std::filesystem::path &world, std::string *error = nullptr);
 // Remove Anvil chunks whose embedded xPos/zPos do not match their region slot.
 // Used once when upgrading legacy One World manifests.

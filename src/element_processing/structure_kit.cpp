@@ -242,13 +242,8 @@ void beam(WorldEditor &editor, Point3 p, Point3 q, double thickness,
 		return;
 	}
 	for (const auto &[cell, axis] : line_cells(p, q)) {
-		if (axis == 1 && block == CHAIN_X) {
-			editor.set_block_with_properties_absolute(with_prop(vertical, "axis", "y"),
-					cell[0], cell[1], cell[2], std::nullopt, std::nullopt);
-		} else {
-			editor.set_block_absolute(beam_block(axis, block, vertical), cell[0], cell[1],
-					cell[2], std::nullopt, std::nullopt);
-		}
+		editor.set_block_absolute(beam_block(axis, block, vertical), cell[0], cell[1],
+				cell[2], std::nullopt, std::nullopt);
 	}
 }
 

@@ -513,10 +513,11 @@ void draw_carousel(WorldEditor &e, const Site &s, const OwnCells &own,
 			const int z = int(std::floor(s.z + ring * std::sin(a)));
 			const auto tangent = structure_kit::axis_of(-std::sin(a), std::cos(a));
 			const int nx = x + tangent.first, nz = z + tangent.second;
-			if (used.contains(cell_key(x, z)) || used.contains(cell_key(nx, nz)))
+			// Preserve Rust's short-circuit insertion order: the body cell is
+			// claimed before checking the head cell, even when that head collides.
+			if (!used.insert(cell_key(x, z)).second ||
+					!used.insert(cell_key(nx, nz)).second)
 				continue;
-			used.insert(cell_key(x, z));
-			used.insert(cell_key(nx, nz));
 			const int rise = (h + ri) % 2;
 			const int roof = std::min(apex,
 					eave + int(std::lround((r - distance_to(s.x, s.z, x, z)) * .55)));
@@ -785,7 +786,9 @@ void draw_bumper_cars(WorldEditor &e, const Site &s, const OwnCells &own,
 	for (std::size_t i = 0; placed < wanted && i < inner.size() * 2; ++i) {
 		const auto pick = inner[structure_kit::mix(seed, i) % inner.size()];
 		const auto dir = [&]() -> std::pair<int, int> {
-			switch (structure_kit::mix(seed, 1000 + i) % 4) {
+			// Rust advances the placement counter after selecting `pick`, then uses
+			// that incremented value for the direction roll.
+			switch (structure_kit::mix(seed, 1001 + i) % 4) {
 			case 0:
 				return {1, 0};
 			case 1:

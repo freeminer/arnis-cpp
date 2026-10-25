@@ -653,6 +653,265 @@ public:
 	const auto &player_uuid() const { return player_uuid_; }
 };
 
+// Append a file/<name> entry without decoding and re-serializing unrelated
+// level.dat fields. The NBT bytes are walked in place and only the target list
+// (or its missing compound path) is changed.
+class DatapackPatcher
+{
+	std::vector<std::uint8_t> &bytes_;
+	std::string entry_;
+	std::size_t pos_{0};
+	bool changed_{false};
+	std::string error_;
+
+	bool read_u8(std::uint8_t &value)
+	{
+		if (pos_ >= bytes_.size())
+			return false;
+		value = bytes_[pos_++];
+		return true;
+	}
+
+	bool read_u16(std::uint16_t &value)
+	{
+		if (bytes_.size() - pos_ < 2)
+			return false;
+		value = (std::uint16_t(bytes_[pos_]) << 8) | bytes_[pos_ + 1];
+		pos_ += 2;
+		return true;
+	}
+
+	bool read_i32(std::int32_t &value)
+	{
+		if (bytes_.size() - pos_ < 4)
+			return false;
+		const auto raw = (std::uint32_t(bytes_[pos_]) << 24) |
+						 (std::uint32_t(bytes_[pos_ + 1]) << 16) |
+						 (std::uint32_t(bytes_[pos_ + 2]) << 8) | bytes_[pos_ + 3];
+		pos_ += 4;
+		value = static_cast<std::int32_t>(raw);
+		return true;
+	}
+
+	void write_i32(std::size_t offset, std::int32_t value)
+	{
+		const auto raw = static_cast<std::uint32_t>(value);
+		bytes_[offset] = std::uint8_t(raw >> 24);
+		bytes_[offset + 1] = std::uint8_t(raw >> 16);
+		bytes_[offset + 2] = std::uint8_t(raw >> 8);
+		bytes_[offset + 3] = std::uint8_t(raw);
+	}
+
+	bool read_name(std::string &name)
+	{
+		std::uint16_t length = 0;
+		if (!read_u16(length) || length > bytes_.size() - pos_)
+			return false;
+		name.assign(reinterpret_cast<const char *>(bytes_.data() + pos_), length);
+		pos_ += length;
+		return true;
+	}
+
+	bool skip(std::uint8_t type) { return skip_nbt_payload(bytes_, pos_, type, 0); }
+
+	static void append_u16(std::vector<std::uint8_t> &out, std::uint16_t value)
+	{
+		out.push_back(std::uint8_t(value >> 8));
+		out.push_back(std::uint8_t(value));
+	}
+
+	static void append_i32(std::vector<std::uint8_t> &out, std::int32_t value)
+	{
+		const auto raw = static_cast<std::uint32_t>(value);
+		out.push_back(std::uint8_t(raw >> 24));
+		out.push_back(std::uint8_t(raw >> 16));
+		out.push_back(std::uint8_t(raw >> 8));
+		out.push_back(std::uint8_t(raw));
+	}
+
+	static bool append_named(
+			std::vector<std::uint8_t> &out, std::uint8_t type, std::string_view name)
+	{
+		if (name.size() > std::numeric_limits<std::uint16_t>::max())
+			return false;
+		out.push_back(type);
+		append_u16(out, static_cast<std::uint16_t>(name.size()));
+		out.insert(out.end(), name.begin(), name.end());
+		return true;
+	}
+
+	bool append_entry(std::vector<std::uint8_t> &out) const
+	{
+		if (entry_.size() > std::numeric_limits<std::uint16_t>::max())
+			return false;
+		append_u16(out, static_cast<std::uint16_t>(entry_.size()));
+		out.insert(out.end(), entry_.begin(), entry_.end());
+		return true;
+	}
+
+	void insert_before_end(std::size_t offset, const std::vector<std::uint8_t> &addition)
+	{
+		bytes_.insert(bytes_.begin() + offset, addition.begin(), addition.end());
+		changed_ = !addition.empty();
+	}
+
+	std::vector<std::uint8_t> enabled_list() const
+	{
+		std::vector<std::uint8_t> out;
+		if (!append_named(out, 9, "Enabled"))
+			return {};
+		out.push_back(8); // TAG_String list
+		append_i32(out, 1);
+		if (!append_entry(out))
+			return {};
+		return out;
+	}
+
+	std::vector<std::uint8_t> datapacks_compound() const
+	{
+		std::vector<std::uint8_t> out;
+		if (!append_named(out, 10, "DataPacks"))
+			return {};
+		auto enabled = enabled_list();
+		if (enabled.empty())
+			return {};
+		out.insert(out.end(), enabled.begin(), enabled.end());
+		out.push_back(0);
+		return out;
+	}
+
+	std::vector<std::uint8_t> missing_enabled() const { return enabled_list(); }
+
+	bool compound_data()
+	{
+		for (;;) {
+			const auto type_offset = pos_;
+			std::uint8_t type = 0;
+			if (!read_u8(type))
+				return false;
+			if (type == 0) {
+				auto addition = datapacks_compound();
+				if (addition.empty())
+					return false;
+				insert_before_end(type_offset, addition);
+				return true;
+			}
+			std::string name;
+			if (!read_name(name))
+				return false;
+			if (name == "DataPacks") {
+				if (type != 10) {
+					error_ = "level.dat Data.DataPacks is not a compound";
+					return false;
+				}
+				return compound_datapacks();
+			}
+			if (!skip(type))
+				return false;
+		}
+	}
+
+	bool compound_datapacks()
+	{
+		for (;;) {
+			const auto type_offset = pos_;
+			std::uint8_t type = 0;
+			if (!read_u8(type))
+				return false;
+			if (type == 0) {
+				auto addition = missing_enabled();
+				if (addition.empty())
+					return false;
+				insert_before_end(type_offset, addition);
+				return true;
+			}
+			std::string name;
+			if (!read_name(name))
+				return false;
+			if (name == "Enabled") {
+				if (type != 9) {
+					error_ = "level.dat Data.DataPacks.Enabled is not a list";
+					return false;
+				}
+				return append_to_enabled_list();
+			}
+			if (!skip(type))
+				return false;
+		}
+	}
+
+	bool append_to_enabled_list()
+	{
+		std::uint8_t item_type = 0;
+		std::int32_t count = 0;
+		if (!read_u8(item_type) || !read_i32(count) || count < 0 ||
+				(item_type != 8 && !(item_type == 0 && count == 0))) {
+			error_ = "level.dat Data.DataPacks.Enabled is not a string list";
+			return false;
+		}
+		const auto item_type_offset = pos_ - 5;
+		const auto count_offset = pos_ - 4;
+		if (item_type == 0) {
+			// Empty NBT lists may use TAG_End as their element type. Rust's
+			// serializer changes that to TAG_String when the first entry is added.
+			bytes_[item_type_offset] = 8;
+			changed_ = true;
+		}
+		for (std::int32_t i = 0; i < count; ++i) {
+			std::uint16_t length = 0;
+			if (!read_u16(length) || length > bytes_.size() - pos_)
+				return false;
+			const std::string_view value(
+					reinterpret_cast<const char *>(bytes_.data() + pos_), length);
+			if (value == entry_)
+				return true;
+			pos_ += length;
+		}
+		if (count == std::numeric_limits<std::int32_t>::max())
+			return false;
+		std::vector<std::uint8_t> addition;
+		if (!append_entry(addition))
+			return false;
+		write_i32(count_offset, count + 1);
+		bytes_.insert(bytes_.begin() + pos_, addition.begin(), addition.end());
+		changed_ = true;
+		return true;
+	}
+
+public:
+	DatapackPatcher(std::vector<std::uint8_t> &bytes, std::string_view pack_name) :
+			bytes_(bytes), entry_("file/" + std::string(pack_name))
+	{
+	}
+
+	bool patch()
+	{
+		std::uint8_t type = 0;
+		std::string root_name;
+		if (!read_u8(type) || type != 10 || !read_name(root_name))
+			return false;
+		for (;;) {
+			if (!read_u8(type) || type == 0)
+				return false;
+			std::string name;
+			if (!read_name(name))
+				return false;
+			if (name == "Data") {
+				if (type != 10) {
+					error_ = "level.dat Data is not a compound";
+					return false;
+				}
+				return compound_data();
+			}
+			if (!skip(type))
+				return false;
+		}
+	}
+
+	bool changed() const { return changed_; }
+	const std::string &error() const { return error_; }
+};
+
 std::optional<std::filesystem::path> player_path(
 		const std::filesystem::path &world, const std::array<std::uint32_t, 4> &uuid)
 {
@@ -689,6 +948,37 @@ bool patch_gzip_file(const std::filesystem::path &path, std::int32_t x, std::int
 	return compressed && replace_file_atomically(path, *compressed);
 }
 } // namespace
+
+bool enable_datapack_in_level_dat(const std::filesystem::path &world,
+		std::string_view pack_dir_name, std::string *error)
+{
+	auto fail = [&](std::string message) {
+		if (error)
+			*error = std::move(message);
+		return false;
+	};
+	if (error)
+		error->clear();
+	const auto level_path = world / "level.dat";
+	if (!std::filesystem::is_regular_file(level_path))
+		return fail("level.dat not found at " + level_path.string());
+	if (pack_dir_name.empty() ||
+			pack_dir_name.find_first_of("/\\") != std::string_view::npos)
+		return fail("invalid datapack directory name");
+	auto nbt = read_gzip_nbt(level_path);
+	if (!nbt)
+		return fail("failed to read or decompress " + level_path.string());
+	DatapackPatcher patcher(*nbt, pack_dir_name);
+	if (!patcher.patch())
+		return fail(patcher.error().empty() ? "failed to patch datapack list in level.dat"
+											: patcher.error());
+	if (!patcher.changed())
+		return true;
+	auto compressed = gzip_nbt(*nbt);
+	if (!compressed || !replace_file_atomically(level_path, *compressed))
+		return fail("failed to write updated " + level_path.string());
+	return true;
+}
 
 std::optional<std::size_t> drop_misplaced_chunks(
 		const std::filesystem::path &world, std::string *error)

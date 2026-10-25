@@ -1,5 +1,6 @@
 #include "world_utils.h"
 #include "args.h"
+#include "assets_root.h"
 #include "data_processing.h"
 #include "retrieve_data.h"
 #include "projection/projection_spec.h"
@@ -748,6 +749,43 @@ std::filesystem::path WorldLayout::maps_dir(const std::filesystem::path &world) 
 {
 	return kind == Kind::Dimensions ? world / "data" / "minecraft" / "maps"
 									: world / "data";
+}
+
+bool install_tall_datapack(const std::filesystem::path &world, std::string *error)
+{
+	if (error)
+		error->clear();
+	const auto root = world / "datapacks" / "arnis_tall";
+	const std::array<std::pair<std::filesystem::path, std::filesystem::path>, 4> files{{
+			{"minecraft/datapack_tall/pack.mcmeta", "pack.mcmeta"},
+			{"minecraft/datapack_tall/data/minecraft/dimension_type/overworld.json",
+					"data/minecraft/dimension_type/overworld.json"},
+			{"minecraft/datapack_tall/overlay_attributes/data/minecraft/dimension_type/overworld.json",
+					"overlay_attributes/data/minecraft/dimension_type/overworld.json"},
+			{"minecraft/datapack_tall/overlay_2601/data/minecraft/dimension_type/overworld.json",
+					"overlay_2601/data/minecraft/dimension_type/overworld.json"},
+	}};
+	for (const auto &[asset_name, pack_name] : files) {
+		const auto source = assets::path(asset_name);
+		std::ifstream input(source, std::ios::binary);
+		if (!input) {
+			if (error)
+				*error = "failed to read bundled datapack file " + source.string();
+			return false;
+		}
+		const std::vector<std::uint8_t> contents((std::istreambuf_iterator<char>(input)),
+				std::istreambuf_iterator<char>());
+		const auto destination = root / pack_name;
+		std::error_code ec;
+		std::filesystem::create_directories(destination.parent_path(), ec);
+		if (ec || !replace_file_atomically(destination, contents)) {
+			if (error)
+				*error = "failed to write datapack file " + destination.string() +
+						 (ec ? ": " + ec.message() : std::string{});
+			return false;
+		}
+	}
+	return enable_datapack_in_level_dat(world, "arnis_tall", error);
 }
 
 static std::filesystem::path home()

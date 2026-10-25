@@ -938,7 +938,7 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 			structure_kit::beam(editor, {p.first, rope + 0.5, p.second},
 					{q.first, rope + 0.5, q.second}, 0.09, "minecraft:gray_concrete",
 					static_cast<std::int64_t>(section_id * 7919 + (side > 0.0 ? 1 : 2)),
-					CHAIN_X, CHAIN_X);
+					CHAIN_X, CHAIN_Y);
 		}
 	}
 	place_lift_name(editor, way, frame, half_a - 0.5, tram ? half_b - 0.5 : -half_b + 0.5,
@@ -1390,37 +1390,47 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 	const RopeSpec line_spec = rope_spec(*kind);
 	const double rail_gauge = rope_gauge(*kind, way.tags);
 	const int rail_count = rail_gauge > 0.0 ? 2 : 1;
+	// Rust advances one wrapping seed in side/span/chord order, including the
+	// housing bullwheel chords below.
+	std::uint64_t rope_seed = section_id * 1'000'003ULL;
 	const int seats = occupancy(
 			way.tags, *kind == Kind::CableCar ? 80 : (*kind == Kind::Chair ? 4 : 8));
 	const bool detachable = chair_detachable(way.tags, seats);
 	const bool enclosed_terminal = *kind == Kind::CableCar || *kind == Kind::Gondola ||
 								   *kind == Kind::Mixed ||
 								   (*kind == Kind::Chair && detachable);
-	for (std::size_t i = 1; i < supports.size(); ++i) {
-		const auto &a = supports[i - 1];
-		const auto &b = supports[i];
-		const double len = std::hypot(b.x - a.x, b.z - a.z);
-		const double ux = (b.x - a.x) / std::max(len, 1e-6);
-		const double uz = (b.z - a.z) / std::max(len, 1e-6);
-		const double rx = -uz, rz = ux;
-		for (int rail = 0; rail < rail_count; ++rail) {
-			const double side = rail_count == 1 ? 0.0 : (rail == 0 ? -1.0 : 1.0);
-			const auto endpoint = [&](const Support &support, bool at_start) {
-				double x = support.x + rx * rail_gauge * 0.5 * side;
-				double z = support.z + rz * rail_gauge * 0.5 * side;
-				if (support.role == Support::Role::Station && rail_gauge > 0.0 &&
-						enclosed_terminal) {
-					const double mouth =
-							*kind == Kind::CableCar || *kind == Kind::Chair ? 8.0 : 9.0;
-					x += (at_start ? ux : -ux) * mouth;
-					z += (at_start ? uz : -uz) * mouth;
-				} else if (support.role == Support::Role::Pylon) {
-					x = std::floor(x) + 0.5;
-					z = std::floor(z) + 0.5;
-				}
-				return structure_kit::Point3{x, support.rope_y, z};
-			};
-			const auto p0 = endpoint(a, true), p1 = endpoint(b, false);
+	// Rust computes one tangent at each support from its neighbouring supports,
+	// then shares that anchor between the spans on either side. Offsetting each
+	// span by its own heading leaves a gap (or kink) at every mapped bend.
+	auto support_anchor = [&](std::size_t index, double side) {
+		const auto previous = index == 0 ? 0 : index - 1;
+		const auto next = std::min(index + 1, supports.size() - 1);
+		double dx = supports[next].x - supports[previous].x;
+		double dz = supports[next].z - supports[previous].z;
+		const double length = std::max(1e-6, std::hypot(dx, dz));
+		dx /= length;
+		dz /= length;
+		const double rx = -dz, rz = dx;
+		const auto &support = supports[index];
+		const double lateral = rail_gauge * 0.5 * side;
+		double x = support.x + rx * lateral;
+		double z = support.z + rz * lateral;
+		if (support.role == Support::Role::Pylon) {
+			x = std::floor(x) + 0.5;
+			z = std::floor(z) + 0.5;
+		} else if (support.role == Support::Role::Station && enclosed_terminal) {
+			const double inward = index == 0 ? 1.0 : -1.0;
+			const double mouth = terminal_mouth(*kind, way.tags);
+			x += dx * inward * mouth;
+			z += dz * inward * mouth;
+		}
+		return structure_kit::Point3{x, support.rope_y, z};
+	};
+	for (int rail = 0; rail < rail_count; ++rail) {
+		const double side = rail_count == 1 ? 0.0 : (rail == 0 ? 1.0 : -1.0);
+		for (std::size_t i = 1; i < supports.size(); ++i) {
+			const auto p0 = support_anchor(i - 1, side);
+			const auto p1 = support_anchor(i, side);
 			const double rail_len = std::hypot(p1[0] - p0[0], p1[2] - p0[2]);
 			const int rail_chords =
 					std::max(1, static_cast<int>(std::ceil(rail_len / 12.0)));
@@ -1439,9 +1449,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 								static_cast<int>(std::floor(to[2]))))
 					continue;
 				structure_kit::beam(editor, from, to, 0.09, "minecraft:gray_concrete",
-						static_cast<std::int64_t>(
-								section_id + i * 1000 + chord * 2 + rail),
-						CHAIN_X, CHAIN_X);
+						static_cast<std::int64_t>(++rope_seed), CHAIN_X, CHAIN_Y);
 			}
 		}
 	}
@@ -1452,9 +1460,20 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 					building_footprints.contains(static_cast<int>(std::floor(station.x)),
 							static_cast<int>(std::floor(station.z))))
 				continue;
-			const auto &neighbor = supports[station_index == 0 ? 1 : station_index - 1];
-			const auto frame = structure_kit::Frame::from_heading(
-					station.x, station.z, neighbor.x - station.x, neighbor.z - station.z);
+			const auto previous = station_index == 0 ? 0 : station_index - 1;
+			const auto next = std::min(station_index + 1, supports.size() - 1);
+			double dx = supports[next].x - supports[previous].x;
+			double dz = supports[next].z - supports[previous].z;
+			const double heading_length = std::max(1e-6, std::hypot(dx, dz));
+			dx /= heading_length;
+			dz /= heading_length;
+			const double right_x = -dz, right_z = dx;
+			const double inward = station_index == 0 ? 1.0 : -1.0;
+			auto frame = structure_kit::Frame::from_heading(
+					station.x, station.z, dx * inward, dz * inward);
+			const auto [frame_right_x, frame_right_z] = frame.v();
+			if (frame_right_x * right_x + frame_right_z * right_z < 0.0)
+				frame = frame.flipped();
 			const double half_length =
 					*kind == Kind::CableCar || *kind == Kind::Chair ? 8.0 : 9.0;
 			const double radius = rail_gauge / 2.0;
@@ -1473,10 +1492,8 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 				const auto q = frame.world(path[k].first, path[k].second);
 				structure_kit::beam(editor, {p.first, station.rope_y, p.second},
 						{q.first, station.rope_y, q.second}, 0.09,
-						"minecraft:gray_concrete",
-						static_cast<std::int64_t>(
-								section_id + 0xB011 + station_index * 32 + k),
-						CHAIN_X, CHAIN_X);
+						"minecraft:gray_concrete", static_cast<std::int64_t>(++rope_seed),
+						CHAIN_X, CHAIN_Y);
 			}
 		}
 	}

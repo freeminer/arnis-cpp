@@ -184,6 +184,16 @@ inline bool mostly_inside(const Ring &ring, const Around &around)
 	});
 }
 
+// Public concrete overload for parser and test callers. Keeping this explicit
+// avoids relying on template lookup through aggregate/header include order.
+inline bool mostly_inside(
+		const std::vector<ProcessedNode> &ring, const std::vector<ProcessedNode> &around)
+{
+	return mostly_inside(ring, around, [](const ProcessedNode &point) {
+		return std::pair<std::int32_t, std::int32_t>{point.x, point.z};
+	});
+}
+
 // Assign each inner ring only to the outer ring(s) it cuts. This preserves islands
 // nested inside holes instead of subtracting a lake's hole from the island itself.
 template <typename OuterRing, typename InnerRing>

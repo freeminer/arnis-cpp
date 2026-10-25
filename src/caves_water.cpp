@@ -55,20 +55,17 @@ bool host(const world_editor::WorldEditor &e, int x, int y, int z)
 	return e.check_for_block_absolute(x, y, z, host_blocks());
 }
 
-bool planned_solid(const world_editor::WorldEditor &editor, const CaveRect &world,
-		int floor_y, const std::unordered_set<std::int64_t> &carved,
-		const std::unordered_set<std::int64_t> &water,
-		const std::function<bool(int, int, int)> &is_cave, int x, int y, int z)
+bool planned_solid(const CaveShapeQuery &shape,
+		const std::unordered_set<std::int64_t> &carved,
+		const std::unordered_set<std::int64_t> &water, int x, int y, int z)
 {
 	const auto p = pack_cave_pos(x, y, z);
 	if (water.contains(p))
 		return true;
-	return world.contains(x, z) && y >= floor_y &&
-		   y <= editor.get_ground_level(x, z) - CAVE_TOP_GATE && !is_cave(x, y, z) &&
-		   !carved.contains(p);
+	return shape.solid(x, y, z) && !carved.contains(p);
 }
 
-void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int floor_y,
+void walk_river(const CaveShapeQuery &shape, const CaveRect &world, int floor_y,
 		std::unordered_set<std::int64_t> &carved, std::unordered_set<std::int64_t> &water,
 		const std::function<bool(int, int, int)> &is_cave, std::int64_t seed, double x,
 		double y, double z, double start_yaw, int steps, int splits_left)
@@ -100,7 +97,7 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 		// whole cross-section to that plane. Re-sampling each neighboring column
 		// lets the channel climb or pinch on a slope, diverging from the planned
 		// cross-section and making the stream irregular across tile boundaries.
-		const int ptop = editor.get_ground_level(cx, cz) - CAVE_TOP_GATE;
+		const int ptop = shape.surface_y(cx, cz) - CAVE_TOP_GATE;
 		const bool contact_here = is_cave(cx, cy, cz);
 		const bool contact_below = is_cave(cx, cy - 1, cz) || is_cave(cx, cy - 2, cz);
 		if (contact_here && !(descended || contact_below))
@@ -134,8 +131,8 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 				const double fork_yaw = i == 0 ? yaw - spread : yaw + spread;
 				const int child_splits = i == 0 ? splits_left - 1 : 0;
 				const auto fork_seed = r.next_long();
-				walk_river(editor, world, floor_y, carved, water, is_cave, fork_seed, x,
-						y, z, fork_yaw, remaining, child_splits);
+				walk_river(shape, world, floor_y, carved, water, is_cave, fork_seed, x, y,
+						z, fork_yaw, remaining, child_splits);
 			}
 			break;
 		}
@@ -144,7 +141,7 @@ void walk_river(world_editor::WorldEditor &editor, const CaveRect &world, int fl
 		return;
 	for (const auto &[column, py] : by_column) {
 		const auto &[px, pz] = column;
-		if (planned_solid(editor, world, floor_y, carved, water, is_cave, px, py - 1, pz))
+		if (planned_solid(shape, carved, water, px, py - 1, pz))
 			water.insert(pack_cave_pos(px, py, pz));
 	}
 }
@@ -165,7 +162,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 		return !editor.block_exists_absolute(x, y, z) && !cave_air.contains(p);
 	};
 	std::vector<std::int64_t> candidates;
-	for (const auto& p : cave_air) {
+	for (const auto &p : cave_air) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (!region.contains(x, z) || y >= lava_level)
 			continue;
@@ -181,7 +178,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 	});
 	std::unordered_set<std::int64_t> supported;
 	supported.reserve(candidates.size());
-	for (const auto& p : candidates) {
+	for (const auto &p : candidates) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		if (editor.block_exists_absolute(x, y - 1, z) ||
 				supported.contains(pack_cave_pos(x, y - 1, z)))
@@ -207,7 +204,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 		if (basin_fluid)
 			basin_fluid->insert(p);
 	}
-	for (const auto& p : supported) {
+	for (const auto &p : supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		for (const auto &offset : neighbours) {
 			const int nx = x + offset[0], ny = y + offset[1], nz = z + offset[2];
@@ -262,7 +259,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 				const int gx = cx * 16 + pool_rng.next_int(16);
 				const int gz = cz * 16 + pool_rng.next_int(16);
 				if (world_bounds.contains(gx, gz)) {
-					const int top = editor.get_ground_level(gx, gz) - CAVE_TOP_GATE;
+					const int top = cave_shape.surface_y(gx, gz) - CAVE_TOP_GATE;
 					const int lo = floor_y + 16;
 					const int hi = std::min(top - 10, floor_y + 94);
 					if (hi > lo) {
@@ -310,7 +307,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 								if (!world_bounds.contains(px, pz))
 									continue;
 								const int ptop =
-										editor.get_ground_level(px, pz) - CAVE_TOP_GATE;
+										cave_shape.surface_y(px, pz) - CAVE_TOP_GATE;
 								for (int dy = -ri_v; dy <= ri_v; ++dy) {
 									const int py = gy + dy;
 									if (py > ptop)
@@ -353,9 +350,8 @@ void generate_water_features(world_editor::WorldEditor &editor,
 										return std::get<1>(a) < std::get<1>(b);
 									});
 							for (const auto &[x, y, z] : fill)
-								if (planned_solid(editor, world_bounds, floor_y,
-											carved_cells, water_cells, dry_cave, x, y - 1,
-											z))
+								if (planned_solid(cave_shape, carved_cells, water_cells,
+											x, y - 1, z))
 									water_cells.insert(pack_cave_pos(x, y, z));
 						}
 					}
@@ -371,7 +367,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 			if (!world_bounds.contains(ox, oz))
 				continue;
 			const int lo = floor_y + 44;
-			const int hi = std::min(editor.get_ground_level(ox, oz) - 14, floor_y + 102);
+			const int hi = std::min(cave_shape.surface_y(ox, oz) - 14, floor_y + 102);
 			if (hi <= lo)
 				continue;
 			const int oy = lo + river_rng.next_int(hi - lo + 1);
@@ -379,16 +375,15 @@ void generate_water_features(world_editor::WorldEditor &editor,
 				continue;
 			const double yaw = double(river_rng.next_float()) * 2.0 * M_PI;
 			const int steps = 26 + river_rng.next_int(27);
-			walk_river(editor, world_bounds, floor_y, carved_cells, water_cells, dry_cave,
-					river_rng.next_long(), ox, oy, oz, yaw, steps, 2);
+			walk_river(cave_shape, world_bounds, floor_y, carved_cells, water_cells,
+					dry_cave, river_rng.next_long(), ox, oy, oz, yaw, steps, 2);
 		}
 
 	// A later river can undercut a source placed by an earlier branch or pool.
 	std::vector<std::int64_t> unsupported;
 	for (const auto p : water_cells) {
 		const auto [x, y, z] = unpack_cave_pos(p);
-		if (!planned_solid(editor, world_bounds, floor_y, carved_cells, water_cells,
-					dry_cave, x, y - 1, z))
+		if (!planned_solid(cave_shape, carved_cells, water_cells, x, y - 1, z))
 			unsupported.push_back(p);
 	}
 	for (const auto p : unsupported)
@@ -430,7 +425,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		}
 	}
 	if (cave_air_out)
-		for (const auto& p : carved_cells) {
+		for (const auto &p : carved_cells) {
 			const auto [x, y, z] = unpack_cave_pos(p);
 			if (region.contains(x, z))
 				cave_air_out->insert(p);

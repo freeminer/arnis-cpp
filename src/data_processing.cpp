@@ -1659,7 +1659,7 @@ bool generate_world(WorldEditor &editor,
 		editor.ground->set_celestial_body(args.body);
 		editor.ground->set_winter(args.winter);
 		editor.ground->set_extended_ceiling(
-				args.disable_height_limit &&
+				editor.ground->elevation_enabled && args.disable_height_limit &&
 				extended_max_y_for(args) > world_editor::DEFAULT_MAX_Y);
 	}
 	int area_floor = area_floor_for(editor.ground, args);
@@ -3632,6 +3632,19 @@ bool generate_world(WorldEditor &editor,
 					world_editor::min_y(), &error))
 			std::cerr << "Warning: Failed to apply Java world settings: " << error
 					  << '\n';
+	}
+	// Rust installs this pack whenever extended Java heights are selected. The
+	// generated sections are otherwise outside the vanilla dimension's bounds
+	// and are discarded or inaccessible when Minecraft opens the world.
+	if (java_world && args.disable_height_limit && !extending_world &&
+			!java_world_path.empty()) {
+		std::string error;
+		if (!world_utils::install_tall_datapack(java_world_path, &error)) {
+			const auto message = "failed to install tall-world datapack: " + error;
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
 	}
 	if (editor.signage_context) {
 		std::cout << editor.signage_context->summary(args.debug) << '\n';

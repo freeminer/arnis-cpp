@@ -40,16 +40,31 @@ CaveShapeQuery::CaveShapeQuery(const world_editor::WorldEditor &editor,
 			for (int cz = z0; cz <= z1; ++cz)
 				carvers_by_chunk_[{cx, cz}].push_back(i);
 	}
+	const auto surface_width = static_cast<std::size_t>(ext_.max_z - ext_.min_z + 1);
+	surface_.reserve(
+			static_cast<std::size_t>(ext_.max_x - ext_.min_x + 1) * surface_width);
+	for (int x = ext_.min_x; x <= ext_.max_x; ++x)
+		for (int z = ext_.min_z; z <= ext_.max_z; ++z)
+			surface_.push_back(editor_.get_ground_level(x, z));
+}
+
+int CaveShapeQuery::surface_y(int x, int z) const
+{
+	if (!ext_.contains(x, z))
+		return floor_y_;
+	const auto height = static_cast<std::size_t>(ext_.max_z - ext_.min_z + 1);
+	return surface_[static_cast<std::size_t>(x - ext_.min_x) * height +
+					static_cast<std::size_t>(z - ext_.min_z)];
 }
 
 bool CaveShapeQuery::is_cave(int x, int y, int z) const
 {
-	if (!ext_.contains(x, z) || y <= floor_y_ || y > editor_.get_ground_level(x, z) - 6)
+	if (!ext_.contains(x, z) || y <= floor_y_ || y > surface_y(x, z) - 6)
 		return false;
 	if (const auto it = carvers_by_chunk_.find(
 				{CaveRect::floor_div(x, 16), CaveRect::floor_div(z, 16)});
 			it != carvers_by_chunk_.end())
-		for (const auto& i : it->second)
+		for (const auto &i : it->second)
 			if (ellipsoids_[i].contains(x, y, z))
 				return true;
 	return noise_carves(x, y, z);
@@ -59,8 +74,8 @@ bool CaveShapeQuery::solid(int x, int y, int z) const
 {
 	// The roof gate limits where the cave predicate may carve, not the terrain
 	// envelope that supports planned water/features. Rust CaveShape::surf keeps
-	// the sealed cap above `top()` solid, so use the actual surface here too.
-	return ext_.contains(x, z) && y >= floor_y_ && y <= editor_.get_ground_level(x, z) &&
+	// the sealed cap above `top()` solid, so use the pre-carve surface snapshot here too.
+	return ext_.contains(x, z) && y >= floor_y_ && y <= surface_y(x, z) &&
 		   !is_cave(x, y, z);
 }
 

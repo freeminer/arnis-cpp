@@ -572,28 +572,28 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 					pos.x, 0, pos.z, std::optional<std::vector<Block>>({WATER})))
 		return;
 
-	trees::MappedRequest request;
-	request.habitat = trees::habitat_for_tree_type(mapped.kind);
-	if (mapped.genus)
-		request.genus = *mapped.genus;
-	request.conifer = mapped.conifer;
-	if (const auto height = wanted_tree_height_m(editor, pos.x, pos.z, &mapped))
-		request.want_height =
-				std::max(1, static_cast<int>(std::lround(*height * editor.scale())));
-	if (editor.ground)
-		request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
-	if (request.eco) {
-		const int radius =
-				std::clamp(static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
-		for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
-					 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
-			if (editor.ground->cover_class(editor.ground_point(pos.x + dx, pos.z + dz)) ==
-					land_cover::LC_BEACH) {
-				request.beach = true;
-				break;
-			}
-	}
 	if (editor.scale() >= MICRO_TREE_MAX_SCALE) {
+		trees::MappedRequest request;
+		request.habitat = trees::habitat_for_tree_type(mapped.kind);
+		if (mapped.genus)
+			request.genus = *mapped.genus;
+		request.conifer = mapped.conifer;
+		if (const auto height = wanted_tree_height_m(editor, pos.x, pos.z, &mapped))
+			request.want_height =
+					std::max(1, static_cast<int>(std::lround(*height * editor.scale())));
+		if (editor.ground)
+			request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
+		if (request.eco) {
+			const int radius = std::clamp(
+					static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
+			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
+						 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
+				if (editor.ground->cover_class(editor.ground_point(
+							pos.x + dx, pos.z + dz)) == land_cover::LC_BEACH) {
+					request.beach = true;
+					break;
+				}
+		}
 		const auto placed = editor.place_mapped_regional_tree(
 				pos.x, editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request);
 		// Rust returns after consulting an active tree pack even if no mapped
@@ -604,7 +604,7 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 	}
 
 	create_of_type(editor, pos, mapped.kind, building_footprints, bridge_surface, true,
-			wanted_tree_height_m(editor, pos.x, pos.z, &mapped), false, false, true);
+			mapped.height_m, false, false, true);
 }
 
 std::vector<Block> Tree::get_building_wall_blocks()

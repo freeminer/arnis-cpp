@@ -446,7 +446,15 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 		}
 		out.sites.push_back(std::move(site));
 	}
-	const auto areas = out.sites;
+	// Only area sites participate in de-duplicating nearby station nodes. Keep
+	// this temporary proportional to mapped station footprints, as in Rust,
+	// rather than cloning every node site as well.
+	std::vector<Site> areas;
+	areas.reserve(std::count_if(out.sites.begin(), out.sites.end(),
+			[&](const Site &site) { return !site.ring.empty(); }));
+	for (const auto &site : out.sites)
+		if (!site.ring.empty())
+			areas.push_back(site);
 	const double merge = 30.0 * scale;
 	out.sites.erase(std::remove_if(out.sites.begin(), out.sites.end(),
 							[&](const Site &s) {

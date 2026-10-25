@@ -347,17 +347,18 @@ std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int orig
 	if (x != slot_x || z != slot_z)
 		return {true, false};
 	const auto &[fraction, top] = *cell;
-	const double p = !schematic_trees ? canopy::flat_slot_probability(fraction, spacing,
-												canopy::COLUMNS_PER_TREE_LEGACY)
-					 : scale < MICRO_TREE_MAX_SCALE
-							 ? canopy::flat_slot_probability(
-									   fraction, spacing, canopy::COLUMNS_PER_TREE_MICRO)
-							 : canopy::slot_probability(fraction, spacing,
-									   editor.tree_crown_columns
-											   ? editor.tree_crown_columns(std::max(
-														 1, static_cast<int>(std::lround(
-																	top * scale))))
-											   : 50.0);
+	const double p =
+			!schematic_trees ? canopy::flat_slot_probability(
+									   fraction, spacing, canopy::COLUMNS_PER_TREE_LEGACY)
+			: scale < MICRO_TREE_MAX_SCALE
+					? canopy::flat_slot_probability(
+							  fraction, spacing, canopy::COLUMNS_PER_TREE_MICRO)
+			: editor.tree_crown_columns
+					? canopy::slot_probability(fraction, spacing,
+							  editor.tree_crown_columns(std::max(
+									  1, static_cast<int>(std::lround(top * scale)))))
+					: canopy::flat_slot_probability(
+							  fraction, spacing, canopy::COLUMNS_PER_TREE_LEGACY);
 	const double roll =
 			double(land_cover::coord_hash(x ^ 0x434d, z ^ 0x484d) % 10000) / 10000.0;
 	return {true, roll < p};

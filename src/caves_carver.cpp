@@ -430,7 +430,7 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 			const int gy =
 					floor_y + 10 + static_cast<int>(decor_hash(cx, 3, cz, seed) % 36);
 			if (!world_bounds.contains(gx, gz) ||
-					gy + radius + 2 >= editor.get_ground_level(gx, gz) ||
+					gy + radius + 2 >= cave_shape.surface_y(gx, gz) ||
 					!water_plan.solid(cave_shape, gx, gy, gz))
 				continue;
 			centers.emplace_back(gx, gy, gz);

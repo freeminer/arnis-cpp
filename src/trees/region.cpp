@@ -334,7 +334,10 @@ struct RegionSelector::Data
 		int cap = sizes.max_height();
 		if (scale < 1.)
 			cap = std::min(cap, size_cap_height(TreeSize::Tall));
-		return std::clamp(wanted, 1, std::max(1, cap));
+		// Rust caps only the upper end here. In particular, do not silently
+		// normalize an explicit non-positive requested height; selection and
+		// fallback behavior should see the same value as RegionSelector::capped_height.
+		return std::min(wanted, cap);
 	}
 	void build_crowns()
 	{
@@ -659,8 +662,6 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 				if (star != std::string_view::npos && colon != std::string_view::npos &&
 						colon < star) {
 					auto weight_text = body.substr(star + 1);
-					if (weight_text.starts_with('+'))
-						weight_text.remove_prefix(1);
 					std::uint32_t weight = 0;
 					const auto [weight_end, weight_error] =
 							std::from_chars(weight_text.data(),
@@ -774,20 +775,29 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 									const auto other_communities =
 											manifest_it->second->value("communities",
 													nlohmann::json::array());
-									preload_communities(
-											other_communities, manifest_path, excluded);
-									for (const auto &community_json : other_communities)
-										if (community_json.value("name", "") == name) {
-											auto community = build_community(
-													community_json, manifest_path,
-													pack_key, excluded);
-											if (community) {
-												resolved = data->realm.communities.size();
-												data->realm.communities.push_back(
-														std::move(*community));
-											}
-											break;
+									const auto community_it =
+											std::find_if(other_communities.begin(),
+													other_communities.end(),
+													[&](const auto &community) {
+														return community.value("name",
+																	   "") == name;
+													});
+									if (community_it != other_communities.end()) {
+										// Rust preloads only the referenced community. Loading every
+										// community from this pack changes crown statistics (unused
+										// models are counted) and needlessly retains their schematics.
+										auto selected_community = nlohmann::json::array();
+										selected_community.push_back(*community_it);
+										preload_communities(selected_community,
+												manifest_path, excluded);
+										auto community = build_community(*community_it,
+												manifest_path, pack_key, excluded);
+										if (community) {
+											resolved = data->realm.communities.size();
+											data->realm.communities.push_back(
+													std::move(*community));
 										}
+									}
 								}
 							}
 							resolved_mixes.emplace(mix_key, resolved);

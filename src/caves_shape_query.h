@@ -21,6 +21,7 @@ public:
 			const CaveEllipsoids &ellipsoids);
 	bool is_cave(int x, int y, int z) const;
 	bool solid(int x, int y, int z) const;
+	int surface_y(int x, int z) const;
 
 private:
 	double density_at(int x, int y, int z) const;
@@ -28,6 +29,7 @@ private:
 
 	const world_editor::WorldEditor &editor_;
 	CaveRect ext_;
+	std::vector<int> surface_;
 	int floor_y_;
 	CaveGen gen_;
 	const CaveEllipsoids &ellipsoids_;

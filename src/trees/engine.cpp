@@ -123,9 +123,10 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 		SlotRequest request, const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface, bool allow_on_paved)
 {
-	const auto blocked = [&](int sx, int sz) {
+	const auto blocked = [&](int sx, int sz, bool selected_slot) {
 		return (!allow_on_paved && editor.surface_is_sealed(sx, sz)) ||
-			   editor.is_lc_water(sx, sz) ||
+			   (selected_slot && editor.is_lc_water(sx, sz)) ||
+			   editor.in_clear_corridor(sx, sz) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,
@@ -144,7 +145,7 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 	};
 	// Match Rust's tile ownership rule: halo requests are ignored, but if the
 	// deterministic schematic slot crosses an ownership seam, plant at the request.
-	if (!editor.owns(x, z) || blocked(x, z))
+	if (!editor.owns(x, z) || blocked(x, z, false))
 		return false;
 	auto selected = selector.pick_slot(x, z, habitat, elevation_y, request);
 	if (!selected)
@@ -153,7 +154,7 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 		selected->x = x;
 		selected->z = z;
 	}
-	if (blocked(selected->x, selected->z))
+	if (blocked(selected->x, selected->z, true))
 		return false;
 	return place_selected_schematic(editor, selector,
 			elevation_y - editor.get_ground_level(x, z), *selected, building_footprints);
@@ -163,16 +164,17 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 		const MappedRequest &request, const BuildingFootprintBitmap *building_footprints,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
-	const auto blocked = [&](int sx, int sz) {
+	const auto blocked = [&](int sx, int sz, bool selected_slot) {
 		// Mapped OSM trees are explicitly allowed on paving in Rust. Mapped crown
 		// masks suppress nearby procedural vegetation, not the mapped trunk itself.
-		return editor.is_lc_water(sx, sz) || editor.in_clear_corridor(sx, sz) ||
+		return (selected_slot && editor.is_lc_water(sx, sz)) ||
+			   editor.in_clear_corridor(sx, sz) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,
 					   std::optional<std::vector<Block>>({block_definitions::WATER}));
 	};
-	if (!editor.owns(x, z) || blocked(x, z))
+	if (!editor.owns(x, z) || blocked(x, z, false))
 		return false;
 	auto selected = selector.pick_mapped(x, z, request.habitat, elevation_y, request);
 	if (!selected)
@@ -183,7 +185,7 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 		selected->x = x;
 		selected->z = z;
 	}
-	if (blocked(selected->x, selected->z))
+	if (blocked(selected->x, selected->z, true))
 		return false;
 	return place_selected_schematic(
 			editor, selector, y_offset, *selected, building_footprints);
