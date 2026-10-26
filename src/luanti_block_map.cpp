@@ -1252,6 +1252,14 @@ LuantiNode to_luanti_node(
 		return {"mcl_core:glass_red", 0};
 	case 515:
 		return {"mcl_core:glass_lime", 0};
+	case 516:
+		return {"mcl_core:sandstonecarved", 0};
+	case 517:
+		return {"mcl_core:sandstonesmooth", 0};
+	case 518:
+		return {"mcl_raw_ores:raw_gold_block", 0};
+	case 519:
+		return {"mcl_core:lapisblock", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

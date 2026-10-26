@@ -1,12 +1,17 @@
 #pragma once
 #include "block_definitions.h"
 #include <map>
+#include <optional>
 #include <string>
 #include <variant>
 #include <functional>
 #include <type_traits>
 namespace arnis
 {
+// Bedrock block-state version used by the current Java-to-Bedrock palette.
+inline constexpr int BEDROCK_BLOCK_STATE_VERSION =
+		(1 << 24) | (21 << 16) | (60 << 8) | 33;
+
 using BedrockStateValue = std::variant<std::string, bool, int>;
 struct BedrockBlock
 {
@@ -39,4 +44,10 @@ BedrockBlock to_bedrock_block(const Block &block);
 // It translates orientation, half/shape, growth, and stateful natural-block
 // properties rather than silently dropping the Java state map.
 BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &block);
+// A potted Java block stores its plant separately in Bedrock's flower-pot block
+// entity. Returns the Bedrock block representing that plant, when applicable.
+std::optional<BedrockBlock> potted_plant(const Block &block);
+// Whether the Java block occupies a water cell, either by its explicit state or
+// because it is intrinsically waterlogged (seagrass, kelp, coral, etc.).
+bool is_waterlogged(const BlockWithProperties &block);
 }

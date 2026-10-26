@@ -862,10 +862,14 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 		const RailJoins &rail_joins, const bridges::BridgeStructureMap &bridge_structures)
 {
+	// fm: Native rails must follow their routed plan in the initial pass too.
+	if (advtrains::available()) {
+		advtrains::place_at_grade(editor, element);
+		return;
+	}
 	const auto joined_ends = rail_joins.ends(element.id);
-	// Keep the terrain-aware Rust rail profile for every backend. Advtrains only
-	// changes the rail node representation; using its separate height planner here
-	// made the same OSM track choose different grades and ignore road/deck pins.
+	// Keep the terrain-aware Rust rail profile for the cart backend.
+	// ===
 	const auto cells = build_smoothed_centerline(element);
 	if (cells.empty())
 		return;
@@ -990,12 +994,9 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 	const auto vanilla_rails = rail_shapes(cells, beds, before, after);
 	for (std::size_t i = 0; i < cells.size(); ++i) {
 		const auto [x, z] = cells[i];
-		const auto rail =
-				ADVTRAINS_AVAILABLE
-						? advtrains_slope_rail(cells, beds, i)
-								  .value_or(advtrains::connected_rail(cells, i, true)
-													.value_or(vanilla_rails[i]))
-						: vanilla_rails[i];
+		// fm: The native backend returned above; never mix rail families per cell.
+		const auto rail = vanilla_rails[i];
+		// ===
 		const bool lays =
 				!(i == 0 && joined_ends[0].shared && !joined_ends[0].owns) &&
 				!(i + 1 == cells.size() && joined_ends[1].shared && !joined_ends[1].owns);
@@ -1061,12 +1062,17 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	// Rust skips structural supports for track carried by a road deck and follows
 	// that deck's sampled profile exactly.
 	if (rail_deck->kind == bridges::RailDeckKind::Carried) {
-		const auto carried_path = build_smoothed_centerline(way);
+		// fm: Road-carried native tracks also use the routed cells and heights.
+		const auto carried_path = plan ? plan->line : build_smoothed_centerline(way);
+		// ===
 		for (std::size_t i = 0; i < carried_path.size(); ++i) {
 			const auto &[x, z] = carried_path[i];
-			const int y = rail_deck->ys.empty()
+			// fm: The native plan owns the rail profile, including bridge joins.
+			const int y = plan ? plan->heights[i]
+						  : rail_deck->ys.empty()
 								  ? editor.get_ground_level(x, z)
 								  : rail_deck->ys[std::min(i, rail_deck->ys.size() - 1)];
+			// ===
 			const auto before = i == 0 ? beyond_state(ends[0], y) : std::nullopt;
 			const auto after = i + 1 == carried_path.size() ? beyond_state(ends[1], y)
 															: std::nullopt;
@@ -1085,8 +1091,11 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 			const int next_y = i + 1 < rail_deck->ys.size() ? rail_deck->ys[i + 1]
 							   : after						? after->second
 															: y;
-			const Block rail_block =
-					determine_rail_with_slope({x, z}, prev, next, prev_y, y, next_y);
+			// fm: Keep native connection shapes instead of cart fallback rails.
+			const Block rail_block = plan ? plan->rails[i]
+										  : determine_rail_with_slope({x, z}, prev, next,
+													prev_y, y, next_y);
+			// ===
 			editor.set_block_absolute(GRAVEL, x, y, z, nullopt, nullopt);
 			if (!((i == 0 && ends[0].shared && !ends[0].owns) ||
 						(i + 1 == carried_path.size() && ends[1].shared &&
@@ -1102,8 +1111,10 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 	// bridge pre-scan (for example where adjacent track segments were merged).
 	if (rail_deck->ys.empty())
 		return;
-	if (all_points.size() > rail_deck->ys.size())
+	// fm: The cart deck profile can have fewer samples than the native route.
+	if (!plan && all_points.size() > rail_deck->ys.size())
 		all_points.resize(rail_deck->ys.size());
+	// ===
 	if (all_points.empty())
 		return;
 
@@ -1705,9 +1716,11 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 		return;
 
 	const string &railway_type = it->second;
+	// fm: Track completion belongs to the editor, including parallel workers.
 	if (ADVTRAINS_AVAILABLE && rail_track_types().contains(railway_type) &&
 			element.tags.get("area") != "yes")
-		advtrains::mark_generated(element);
+		advtrains::mark_generated(element, editor);
+	// ===
 	if (*level == TrackLevel::Tunnel) {
 		generate_rail_tunnel_shell(editor, element, rail_tunnel_points, rail_joins);
 		return;
@@ -1727,7 +1740,9 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 	} else {
 		generate_at_grade_rail(editor, element, rail_joins, bridge_structures);
 		if (catenary_wanted(element)) {
-			const auto points = build_smoothed_centerline(element);
+			// fm: Follow the selected backend's track, including native rerouting.
+			const auto points = build_connected_centerline(element);
+			// ===
 			if (points.size() >= 2)
 				generate_catenary(
 						editor, points, road_mask, building_footprints, rail_mask);

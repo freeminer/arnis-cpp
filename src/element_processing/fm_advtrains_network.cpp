@@ -1,4 +1,5 @@
 #include "advtrains.h"
+#include "../fm_native_trains.h"
 
 #include <algorithm>
 #include <bit>
@@ -17,23 +18,53 @@
 namespace arnis::railways::advtrains
 {
 using namespace block_definitions;
-thread_local std::map<std::uint64_t, RailPlan> plans;
-thread_local std::set<std::uint64_t> generated;
+thread_local std::shared_ptr<const RailNetwork> active_network;
 thread_local std::vector<v3pos_t> tunnel_floors;
 
 const RailPlan *get_plan(const ProcessedWay &way)
 {
+	if (!active_network)
+		return nullptr;
+	const auto &plans = active_network->plans;
 	const auto it = plans.find(way.id);
 	return it == plans.end() ? nullptr : &it->second;
 }
 
-void mark_generated(const ProcessedWay &way)
+void mark_generated(const ProcessedWay &way, WorldEditor &editor)
 {
-	generated.insert(way.id);
+	editor.native_generated_rails.insert(way.id);
+}
+
+void use_network(WorldEditor &editor)
+{
+	active_network = editor.native_rail_network;
+}
+
+void place_at_grade(WorldEditor &editor, const ProcessedWay &way)
+{
+	const auto *plan = get_plan(way);
+	if (!plan)
+		return;
+	// Do not stamp the Rust cart raster beneath the routed native track. Their
+	// occupied cells differ for shallow diagonals and curves; finalizing the
+	// native rails cannot remove cart rails left outside the native centerline.
+	for (std::size_t i = 0; i < plan->line.size(); ++i) {
+		const auto &[x, z] = plan->line[i];
+		const pos_t y = plan->heights[i];
+		editor.register_road_surface_y(x, z, y);
+		editor.set_block_absolute(GRAVEL, x, y, z, std::nullopt, std::nullopt);
+		editor.set_block_absolute(
+				plan->rails[i], x, y + 1, z, std::nullopt, std::nullopt);
+		editor.register_rail(way.id, x, z, y + 1);
+	}
 }
 
 void finish_network(WorldEditor &editor)
 {
+	if (!active_network)
+		return;
+	const auto &plans = active_network->plans;
+	const auto &generated = editor.native_generated_rails;
 	// The Arnis editor normally keeps the first feature written at a cell.
 	// Reserve railway formation and clearance after scenery/terrain/tunnels so
 	// trees, poles, and adjacent tunnel shells cannot interrupt a planned track.
@@ -61,6 +92,24 @@ void finish_network(WorldEditor &editor)
 				if (!track_cells.contains({x, y + dy, z}))
 					editor.set_block_absolute(
 							AIR, x, y + dy, z, std::nullopt, replace_all);
+		}
+	}
+	// Native objects must be created by Lua on the server thread, after rails
+	// have reached the map. Place markers only after ALL clearance writes.
+	if (!available() || native_train_marker == AIR)
+		return;
+	for (auto id : generated) {
+		const auto it = plans.find(id);
+		if (it == plans.end())
+			continue;
+		const auto &plan = it->second;
+		for (std::size_t i = 0; i < plan.line.size(); ++i) {
+			const auto &[x, z] = plan.line[i];
+			const pos_t y = plan.heights[i] + 2;
+			if (editor.owns(x, z) && native_train_candidate(x, y, z) &&
+					!track_cells.contains({x, y, z}))
+				editor.set_block_absolute(
+						native_train_marker, x, y, z, std::nullopt, replace_all);
 		}
 	}
 }
@@ -286,13 +335,25 @@ bool assign_ports(Anchor &anchor, const std::vector<Anchor> &anchors,
 }
 } // namespace
 
-void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor &editor)
+std::shared_ptr<const RailNetwork> prepare_network(
+		const std::vector<ProcessedElement> &elements, WorldEditor &editor)
 {
-	plans.clear();
-	generated.clear();
+	editor.native_generated_rails.clear();
 	tunnel_floors.clear();
+	active_network =
+			available() ? (editor.native_rail_network ? editor.native_rail_network
+													  : build_network(elements, editor))
+						: nullptr;
+	return active_network;
+}
+
+std::shared_ptr<const RailNetwork> build_network(
+		const std::vector<ProcessedElement> &elements, WorldEditor &editor)
+{
+	auto network = std::make_shared<RailNetwork>();
+	auto &plans = network->plans;
 	if (!available())
-		return;
+		return network;
 	std::map<std::uint64_t, const ProcessedWay *> ways;
 	std::map<AnchorKey, std::set<std::uint64_t>> users;
 	for (const auto &element : elements)
@@ -304,7 +365,7 @@ void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor 
 		}
 	std::map<AnchorKey, std::size_t> anchor_ids;
 	if (ways.empty())
-		return;
+		return network;
 	std::vector<Anchor> anchors;
 	std::map<std::uint64_t, std::vector<std::size_t>> way_anchors;
 	for (const auto &[id, way] : ways) {
@@ -459,6 +520,7 @@ void prepare_network(const std::vector<ProcessedElement> &elements, WorldEditor 
 			}
 		}
 	}
+	return network;
 }
 
 std::vector<XZ> build_centerline(const ProcessedWay &way)

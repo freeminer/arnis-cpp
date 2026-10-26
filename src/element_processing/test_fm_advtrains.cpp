@@ -1,11 +1,13 @@
 #include "config.h"
 #if BUILD_UNITTESTS
 #include "advtrains.h"
+#include "../clipping.h"
 #include "unittest/test.h"
 
 #include <map>
 #include <random>
 #include <set>
+#include <future>
 
 namespace
 {
@@ -113,6 +115,8 @@ public:
 		TEST(testProfiles);
 		TEST(testRoutes);
 		TEST(testNetwork);
+		TEST(testChunkSeamsKeepSourceTopology);
+		TEST(testParallelWorkersKeepNativeNetworkAndCompletion);
 	}
 	void testProfiles()
 	{
@@ -168,6 +172,79 @@ public:
 		}
 		UASSERT(!at::two_connection_rail(0, 4));
 	}
+	void testChunkSeamsKeepSourceTopology()
+	{
+		TrackDefinitions definitions;
+		WorldEditor source_editor;
+		const auto trunk = way(10, {{1, {}, 0, -120}, {2, {}, 0, 0}, {3, {}, 48, 160}});
+		const std::vector<ProcessedElement> source{
+				trunk, way(20, {{2, {}, 0, 0}, {4, {}, -48, 160}})};
+		const auto shared = at::build_network(source, source_editor);
+		const auto &expected = shared->plans.at(trunk.id);
+		definitions.check(expected);
+		// Adjacent chunk halos clip different endpoints and can omit a turnout
+		// branch. Rebuilding from either view must never replace the source plan.
+		for (bool reverse : {false, true}) {
+			for (int n = 0; n < 2; ++n) {
+				const int chunk = reverse ? 1 - n : n;
+				const XZBBox context(-80, chunk ? 32 : -160, 80, chunk ? 192 : 95);
+				auto clipped = trunk;
+				clipped.nodes = clipping::clip_way_to_bbox(trunk.nodes, context);
+				UASSERT(!clipped.nodes.empty());
+				UASSERT(clipped.nodes.front().z != trunk.nodes.front().z ||
+						clipped.nodes.back().z != trunk.nodes.back().z);
+				WorldEditor editor;
+				editor.native_rail_network = shared;
+				// Chunk-local terrain and previously written roads must not change
+				// an already resolved route's grade at the shared seam.
+				for (const auto &[x, z] : expected.line)
+					editor.register_road_surface_y(x, z, 100 + chunk);
+				auto worker = editor.make_tile_worker();
+				UASSERT(worker.native_rail_network == shared);
+				at::prepare_network({ProcessedElement(clipped)}, worker);
+				const auto *plan = at::get_plan(clipped);
+				UASSERT(plan == &expected);
+				definitions.check(*plan);
+				// The branch is outside this local input but its turnout survives.
+				UASSERT(at::get_plan(source[1].as_way()) == &shared->plans.at(20));
+				WorldEditor detached;
+				at::prepare_network({}, detached);
+				UASSERT(!at::get_plan(trunk));
+			}
+		}
+	}
+
+	void testParallelWorkersKeepNativeNetworkAndCompletion()
+	{
+		TrackDefinitions definitions;
+		WorldEditor editor;
+		const auto rail = way(42, {{1, {}, 0, 0}, {2, {}, 32, 96}});
+		editor.native_rail_network =
+				at::prepare_network({ProcessedElement(rail)}, editor);
+		const auto *expected = at::get_plan(rail);
+		UASSERT(expected && !expected->line.empty());
+		std::vector<std::future<WorldEditor>> jobs;
+		for (int i = 0; i < 2; ++i) {
+			auto worker = editor.make_tile_worker();
+			jobs.push_back(std::async(std::launch::async,
+					[worker = std::move(worker), rail, expected]() mutable {
+						// Mirrors begin_generation_tile on a new async thread.
+						at::use_network(worker);
+						if (at::get_plan(rail) == expected)
+							at::mark_generated(rail, worker);
+						return std::move(worker);
+					}));
+		}
+		for (auto &job : jobs) {
+			auto worker = job.get();
+			UASSERT(worker.native_generated_rails.contains(rail.id));
+			UASSERT(editor.merge_tile_worker(std::move(worker), 0, 0, 32, 96));
+		}
+		UASSERT(editor.native_generated_rails == std::set<std::uint64_t>{rail.id});
+		UASSERT(at::get_plan(rail) == expected);
+		definitions.check(*expected);
+	}
+
 	void testNetwork()
 	{
 		TrackDefinitions definitions;

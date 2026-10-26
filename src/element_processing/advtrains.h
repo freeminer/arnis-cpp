@@ -3,6 +3,8 @@
 #include <cstddef>
 #include <array>
 #include <functional>
+#include <map>
+#include <memory>
 #include <optional>
 #include <utility>
 #include <vector>
@@ -27,8 +29,20 @@ struct RailPlan
 	std::vector<int> heights;
 	std::vector<Block> rails;
 };
+// fm: Immutable extract-wide routing shared by adjacent mapchunks.
+struct RailNetwork
+{
+	std::map<std::uint64_t, RailPlan> plans;
+};
+std::shared_ptr<const RailNetwork> build_network(
+		const std::vector<ProcessedElement> &elements, world_editor::WorldEditor &editor);
+void use_network(world_editor::WorldEditor &editor);
+// ===
 const RailPlan *get_plan(const ProcessedWay &way);
-void mark_generated(const ProcessedWay &way);
+// fm: Native tracks use the same routed layout in every placement pass.
+void mark_generated(const ProcessedWay &way, world_editor::WorldEditor &editor);
+void place_at_grade(world_editor::WorldEditor &editor, const ProcessedWay &way);
+// ===
 void finish_network(world_editor::WorldEditor &editor);
 void fit_profile(const std::vector<XZ> &line, std::vector<int> &heights,
 		const std::vector<bool> &flat);
@@ -37,7 +51,7 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 extern thread_local std::vector<v3pos_t> tunnel_floors;
 
 bool available();
-void prepare_network(
+std::shared_ptr<const RailNetwork> prepare_network(
 		const std::vector<ProcessedElement> &elements, world_editor::WorldEditor &editor);
 std::vector<std::pair<int, int>> build_centerline(const ProcessedWay &way);
 std::optional<Block> connected_rail(const std::vector<std::pair<int, int>> &line,

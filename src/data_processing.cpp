@@ -1,10 +1,12 @@
 #include "data_processing.h"
+#include "fm_arnis_bench.h"
 #include "element_processing/fm_highway_connectivity.h"
 #include "fm_ecoregion_cache.h"
 #include "element_processing/signage.h"
 #include "element_processing/advtrains.h"
 #include "world_style.h"
 #include <sys/types.h>
+#include <atomic>
 #include <unordered_set>
 #include <array>
 #include <algorithm>
@@ -1437,6 +1439,7 @@ bool generate_world(WorldEditor &editor,
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
+	Bench bench(args.benchmark);
 	// Rust's Args::skip_osm() boundary replaces the parsed OSM payload with an
 	// empty OsmData value. Enforce that here too, since library callers may pass
 	// prepared elements, footprints, or facade work independently of the parser.
@@ -2318,7 +2321,9 @@ bool generate_world(WorldEditor &editor,
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
 	const auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
-	railways::advtrains::prepare_network(elements, editor);
+	// fm: Share the resolved network with tile workers, including standalone callers.
+	editor.native_rail_network = railways::advtrains::prepare_network(elements, editor);
+	// ===
 	railways::add_tunnel_footprint(elements, xzbbox, tunnel_footprint);
 	// Centreline bitmap prevents catenary masts from being stamped into a
 	// neighbouring parallel track, matching the Rust railway pass.
@@ -2557,6 +2562,7 @@ bool generate_world(WorldEditor &editor,
 	};
 	water_steps::Borders water_borders;
 	std::mutex water_borders_mutex;
+	std::atomic<std::int64_t> water_steps_elapsed_ns{0};
 	auto complete_deferred_tile = [&](const TileBounds &tile) {
 		if (!deferred_placements_active)
 			return true;
@@ -2579,10 +2585,16 @@ bool generate_world(WorldEditor &editor,
 				if (--remaining->second == 0) {
 					if (!args.winter) {
 						std::lock_guard<std::mutex> lock(water_borders_mutex);
+						const auto water_steps_start = Bench::Clock::now();
 						water_steps::shape_region(editor, water_borders, region,
 								args.caves, [&](water_steps::Borders::Region r) {
 									return real_regions.contains(r);
 								});
+						water_steps_elapsed_ns.fetch_add(
+								std::chrono::duration_cast<std::chrono::nanoseconds>(
+										Bench::Clock::now() - water_steps_start)
+										.count(),
+								std::memory_order_relaxed);
 					}
 					flushable_regions.push_back(region);
 					newly_ready.push_back(region);
@@ -2621,6 +2633,9 @@ bool generate_world(WorldEditor &editor,
 	if (regional_ground_passes)
 		editor.set_defer_tile_merges(true);
 	auto begin_generation_tile = [&](WorldEditor &tile_editor, std::size_t tile_index) {
+		// fm: Async tile threads must bind the same immutable native rail network.
+		railways::advtrains::use_network(tile_editor);
+		// ===
 		const auto &tile = element_tiles[tile_index];
 		const int min_x = std::max(tile.min_x, xzbbox.min_x());
 		const int max_x = std::min(tile.max_x - 1, xzbbox.max_x());
@@ -3457,8 +3472,16 @@ bool generate_world(WorldEditor &editor,
 				world_editor::terrain_floor_y());
 	// Match Rust's final terrain-water pass: cave fluids have settled, but
 	// deferred models and world styling have not yet changed the surface.
-	if (!args.winter && !deferred_placements_active)
+	if (deferred_placements_active && args.benchmark)
+		bench.report("water_steps", std::chrono::nanoseconds(water_steps_elapsed_ns.load(
+											std::memory_order_relaxed)));
+	if (java_world && !args.winter && !deferred_placements_active) {
+		const auto water_steps_start = Bench::Clock::now();
 		water_steps::shape_world(editor, args.caves);
+		const auto elapsed = Bench::Clock::now() - water_steps_start;
+		bench.report("water_steps", elapsed);
+		bench.exclude(elapsed);
+	}
 	// Rust drops the generation-only indexes and masks before model placement.
 	// Keep the same lifetime boundary here: these can scale with the full area,
 	// but every consumer (including regional tree placement and tunnel carving)

@@ -1127,4 +1127,39 @@ BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &value)
 	}
 	return out;
 }
+
+std::optional<BedrockBlock> potted_plant(const Block &block)
+{
+	using namespace block_definitions;
+	if (block == FLOWER_POT)
+		return simple("poppy");
+	if (block == POTTED_RED_TULIP)
+		return simple("red_tulip");
+	if (block == POTTED_DANDELION)
+		return simple("dandelion");
+	if (block == POTTED_BLUE_ORCHID)
+		return simple("blue_orchid");
+	return std::nullopt;
+}
+
+bool is_waterlogged(const BlockWithProperties &value)
+{
+	const auto defaults = value.block.properties();
+	const BlockProperties empty;
+	const auto &properties = value.properties ? value.property_values()
+							 : defaults		  ? *defaults
+											  : empty;
+	if (const auto it = properties.find("waterlogged"); it != properties.end())
+		return it->second == "true";
+
+	using namespace block_definitions;
+	const auto &block = value.block;
+	return block == KELP || block == KELP_PLANT || block == SEAGRASS ||
+		   block == TALL_SEAGRASS_BOTTOM || block == TALL_SEAGRASS_TOP ||
+		   block == SEA_PICKLE || block == TUBE_CORAL || block == BRAIN_CORAL ||
+		   block == BUBBLE_CORAL || block == FIRE_CORAL || block == HORN_CORAL ||
+		   block == TUBE_CORAL_FAN || block == BRAIN_CORAL_FAN ||
+		   block == BUBBLE_CORAL_FAN || block == FIRE_CORAL_FAN ||
+		   block == HORN_CORAL_FAN;
+}
 }

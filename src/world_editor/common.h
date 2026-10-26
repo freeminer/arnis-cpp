@@ -24,6 +24,11 @@
 namespace arnis::world_editor
 {
 // Forward declarations
+// fm: This header is also included directly by storage unit tests.
+struct GenerationBounds;
+class BlockStorage;
+inline std::size_t non_air_count(const BlockStorage &storage);
+// ===
 GenerationBounds clipped_tile_bounds(
 		const GenerationBounds &b, int tile_x, int tile_z, int tile_size);
 GenerationBounds halo_tile_bounds(
@@ -567,6 +572,26 @@ public:
 			return Block(static_cast<content_t>(direct_[i]));
 		}
 		return Block{};
+	}
+	// A section palette may retain a block after its final cell was changed.
+	// This deliberately answers whether the block could occur, not whether it
+	// currently occurs in a cell; callers can use it to skip expensive scans.
+	bool may_contain(Block block) const
+	{
+		const auto id = block.id();
+		switch (mode_) {
+		case Mode::Uniform:
+			return uniform_block_.id() == id;
+		case Mode::Dense:
+			return id <= UINT8_MAX &&
+				   std::find(dense_.begin(), dense_.end(),
+						   static_cast<std::uint8_t>(id)) != dense_.end();
+		case Mode::Paletted:
+			return std::find(palette_.begin(), palette_.end(), id) != palette_.end();
+		case Mode::Direct:
+			return std::find(direct_.begin(), direct_.end(), id) != direct_.end();
+		}
+		return false;
 	}
 	void set(std::size_t i, Block b)
 	{
@@ -2763,7 +2788,10 @@ inline RegionUpdatePlan build_region_update_plan(const std::vector<TilePlan> &ol
 		const std::vector<TilePlan> &new_plan, int tile_size)
 {
 	RegionUpdatePlan p;
-	p.tiles = changed_tile_plan(old_plan, new_plan);
+	// fm: The changed plan contains TilePlan records; updates keep coordinate keys.
+	for (const auto &tile : changed_tile_plan(old_plan, new_plan))
+		p.tiles.emplace_back(tile.x, tile.z);
+	// ===
 	for (auto t : removed_tiles(old_plan, new_plan))
 		if (std::find_if(p.tiles.begin(), p.tiles.end(),
 					[&](auto x) { return x == t; }) == p.tiles.end())
@@ -3200,7 +3228,9 @@ inline RegionCommitStats commit_generation_protected(WorldToModify &world,
 		}
 		if (!victim)
 			break;
-		auto it = world.regions.find(WorldToModify::key(victim->first, victim->second));
+		// fm: Region keys use the same encoder as WorldToModify::get_or_create_region.
+		auto it = world.regions.find(RegionToModify::key(victim->first, victim->second));
+		// ===
 		if (it == world.regions.end())
 			break;
 		flush(victim->first, victim->second, it->second);
@@ -3235,7 +3265,9 @@ inline RegionCommitStats commit_generation_centered_protected(WorldToModify &wor
 		}
 		if (!victim)
 			break;
-		auto it = world.regions.find(WorldToModify::key(victim->first, victim->second));
+		// fm: Region keys use the same encoder as WorldToModify::get_or_create_region.
+		auto it = world.regions.find(RegionToModify::key(victim->first, victim->second));
+		// ===
 		if (it == world.regions.end())
 			break;
 		flush(victim->first, victim->second, it->second);
