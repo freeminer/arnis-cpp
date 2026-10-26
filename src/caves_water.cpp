@@ -390,9 +390,7 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		water_cells.erase(p);
 
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
-	// Match Rust WaterPlan::apply's canonical packed-key write order. The cave
-	// edits may overlap later decoration and fluid updates, so hash iteration
-	// must not decide which write wins.
+	// Match Rust WaterPlan::apply's canonical packed-key order for world edits.
 	std::vector<std::int64_t> ordered_carved(carved_cells.begin(), carved_cells.end());
 	std::sort(ordered_carved.begin(), ordered_carved.end());
 	for (const auto p : ordered_carved) {

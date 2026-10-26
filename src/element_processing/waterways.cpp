@@ -149,14 +149,6 @@ void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &e
 
 	int channel_width = waterway_width(it->second, element.tags);
 
-	auto layer_it = element.tags.find("layer");
-	if (layer_it != element.tags.end()) {
-		const std::string &layer_val = layer_it->second;
-		if (layer_val == "-1" || layer_val == "-2" || layer_val == "-3") {
-			return;
-		}
-	}
-
 	for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
 		auto prev_node = element.nodes[i].xz();
 		auto current_node = element.nodes[i + 1].xz();

@@ -4361,9 +4361,8 @@ int terrain_base_level(WorldEditor &editor, const ProcessedWay &element,
 	};
 	for (const auto &node : element.nodes)
 		include(node.x, node.z);
-	// Rust includes the sampled floor footprint as well as outline vertices.
-	// A peak inside a large building must raise the whole shell rather than
-	// leaving its interior buried below terrain.
+	// Include sampled interior cells too: a terrain peak inside a large
+	// building must raise the shell rather than leave it buried.
 	for (const auto &[x, z] : footprint)
 		include(x, z);
 	return highest.value_or(fallback);

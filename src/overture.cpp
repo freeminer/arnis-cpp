@@ -555,7 +555,7 @@ bool source_is_osm(const std::optional<std::string> &geometry_source,
 	if (!sources)
 		return false;
 	const auto document = nlohmann::json::parse(*sources, nullptr, false);
-	if (document.is_discarded())
+	if (document.is_discarded() || !document.is_array())
 		return false;
 	struct SourceEntry
 	{
@@ -563,31 +563,19 @@ bool source_is_osm(const std::optional<std::string> &geometry_source,
 		std::string dataset;
 	};
 	std::vector<SourceEntry> entries;
-	std::function<void(const nlohmann::json &)> collect =
-			[&](const nlohmann::json &value) {
-				if (value.is_array()) {
-					for (const auto &entry : value)
-						collect(entry);
-				} else if (value.is_object()) {
-					SourceEntry entry;
-					bool has_dataset = false;
-					const auto dataset = value.find("dataset");
-					if (dataset != value.end() && dataset->is_string()) {
-						entry.dataset = dataset->get<std::string>();
-						has_dataset = true;
-					}
-					const auto property = value.find("property");
-					if (property != value.end() && property->is_string())
-						entry.covers_geometry =
+	for (const auto &value : document) {
+		if (!value.is_object())
+			continue;
+		const auto dataset = value.find("dataset");
+		if (dataset == value.end() || !dataset->is_string())
+			continue;
+		SourceEntry entry;
+		entry.dataset = dataset->get<std::string>();
+		const auto property = value.find("property");
+		entry.covers_geometry = property == value.end() || !property->is_string() ||
 								property->get_ref<const std::string &>().empty();
-					if (has_dataset)
-						entries.push_back(std::move(entry));
-					for (auto it = value.begin(); it != value.end(); ++it)
-						if (it.key() != "dataset" && it.key() != "property")
-							collect(it.value());
-				}
-			};
-	collect(document);
+		entries.push_back(std::move(entry));
+	}
 	const auto selected = std::find_if(entries.begin(), entries.end(),
 			[](const SourceEntry &entry) { return entry.covers_geometry; });
 	if (selected != entries.end())
@@ -1480,6 +1468,16 @@ void scan_overture_sources(
 		const auto dataset_index = type->GetFieldIndex("dataset");
 		const auto property_index = type->GetFieldIndex("property");
 		const auto record_index = type->GetFieldIndex("record_id");
+		// Rust walks nested fields before recording the enclosing source entry.
+		// Preserve that order: when two geometry entries have equal precedence,
+		// the first nested entry remains authoritative.
+		for (std::size_t index = 0; index < structure->value.size(); ++index) {
+			if (static_cast<int>(index) == dataset_index ||
+					static_cast<int>(index) == property_index ||
+					static_cast<int>(index) == record_index)
+				continue;
+			scan_overture_sources(structure->value[index], out);
+		}
 		if (dataset_index >= 0 &&
 				static_cast<std::size_t>(dataset_index) < structure->value.size()) {
 			const auto dataset = scalar_text(structure->value[dataset_index]);
@@ -1509,13 +1507,6 @@ void scan_overture_sources(
 					}
 				}
 			}
-		}
-		for (std::size_t index = 0; index < structure->value.size(); ++index) {
-			if (static_cast<int>(index) == dataset_index ||
-					static_cast<int>(index) == property_index ||
-					static_cast<int>(index) == record_index)
-				continue;
-			scan_overture_sources(structure->value[index], out);
 		}
 		return;
 	}

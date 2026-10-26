@@ -8,6 +8,7 @@
 #include <algorithm>
 #include <atomic>
 #include <cctype>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 #include <cstdlib>
@@ -796,16 +797,80 @@ static std::filesystem::path home()
 		return h;
 	return ".";
 }
+
+namespace
+{
+std::string unique_path_suffix()
+{
+	static std::atomic<std::uint64_t> counter{0};
+	const auto ticks = std::chrono::steady_clock::now().time_since_epoch().count();
+#if defined(_WIN32)
+	const auto pid = static_cast<std::uint64_t>(GetCurrentProcessId());
+#else
+	const auto pid = static_cast<std::uint64_t>(getpid());
+#endif
+	std::ostringstream suffix;
+	suffix << std::hex << pid << '-' << ticks << '-'
+		   << counter.fetch_add(1, std::memory_order_relaxed);
+	return suffix.str();
+}
+
+std::filesystem::path user_directory(const char *xdg_env, const char *name)
+{
+	if (const char *configured = std::getenv(xdg_env); configured && *configured)
+		return configured;
+	std::filesystem::path config_home;
+	if (const char *configured_home = std::getenv("XDG_CONFIG_HOME");
+			configured_home && *configured_home)
+		config_home = configured_home;
+	else
+		config_home = home() / ".config";
+	std::ifstream config(config_home / "user-dirs.dirs");
+	const std::string key = std::string(xdg_env) + "=";
+	std::string line;
+	while (std::getline(config, line)) {
+		const auto first = line.find_first_not_of(" \t");
+		if (first == std::string::npos || line.compare(first, key.size(), key) != 0)
+			continue;
+		std::string value = line.substr(first + key.size());
+		if (value.size() >= 2 && value.front() == '"' && value.back() == '"')
+			value = value.substr(1, value.size() - 2);
+		const auto home_token = value.find("$HOME");
+		if (home_token != std::string::npos)
+			value.replace(home_token, 5, home().string());
+		return value;
+	}
+	return home() / name;
+}
+
+bool is_writable_directory(const std::filesystem::path &dir)
+{
+	std::error_code ec;
+	if (!std::filesystem::is_directory(dir, ec) || ec)
+		return false;
+	const auto probe = dir / (".arnis-write-test-" + unique_path_suffix());
+	if (!std::filesystem::create_directory(probe, ec) || ec)
+		return false;
+	std::filesystem::remove(probe, ec);
+	return true;
+}
+} // namespace
+
+std::filesystem::path default_bedrock_output_directory()
+{
+	return user_directory("XDG_DESKTOP_DIR", "Desktop");
+}
+
 std::filesystem::path get_bedrock_output_directory()
 {
-	std::filesystem::path p;
-	if (const char *desktop = std::getenv("XDG_DESKTOP_DIR"))
-		p = desktop;
-	else
-		p = home() / "Desktop";
-	// Rust's directory resolver returns the preferred Desktop path even on a
-	// first run; the caller creates the output directory when exporting.
-	return p;
+	const std::array<std::filesystem::path, 4> candidates = {
+			user_directory("XDG_DESKTOP_DIR", "Desktop"),
+			user_directory("XDG_DOCUMENTS_DIR", "Documents"),
+			user_directory("XDG_DOWNLOAD_DIR", "Downloads"), home()};
+	for (const auto &candidate : candidates)
+		if (is_writable_directory(candidate))
+			return candidate;
+	return ".";
 }
 std::filesystem::path get_luanti_worlds_directory()
 {

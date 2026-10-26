@@ -654,8 +654,8 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	const std::optional<std::vector<Block>> water_options{std::vector<Block>{WATER}};
 	std::unordered_set<std::int64_t> empty_air;
 	const auto &air_cells = cave_air ? *cave_air : empty_air;
-	// The checked-out Rust merge sorts shared packed keys before overlapping
-	// decorations so the result does not depend on hash-table traversal order.
+	// Match Rust's canonical packed-key write order where overlapping
+	// decorations can otherwise depend on hash-table traversal order.
 	std::vector<std::int64_t> ordered_air(air_cells.begin(), air_cells.end());
 	std::sort(ordered_air.begin(), ordered_air.end());
 	for (const auto p : ordered_air) {
@@ -948,6 +948,7 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				TUBE_CORAL, BRAIN_CORAL, FIRE_CORAL, HORN_CORAL, BUBBLE_CORAL};
 		const Block dead_beds[] = {DEAD_TUBE_CORAL_BLOCK, DEAD_BRAIN_CORAL_BLOCK,
 				DEAD_FIRE_CORAL_BLOCK, DEAD_HORN_CORAL_BLOCK, DEAD_BUBBLE_CORAL_BLOCK};
+		// Coral beds and growth can overlap vertically within a water column.
 		std::vector<std::int64_t> ordered_water(water_cells->begin(), water_cells->end());
 		std::sort(ordered_water.begin(), ordered_water.end());
 		for (const auto packed : ordered_water) {

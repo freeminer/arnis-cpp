@@ -3,6 +3,7 @@
 #include <map>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <variant>
 #include <functional>
 #include <type_traits>
@@ -40,14 +41,22 @@ struct BedrockBlockHash
 	}
 };
 BedrockBlock to_bedrock_block(const Block &block);
+// Generic counterpart to Rust's name-based mapper. Existing block-specific mappings
+// remain authoritative; canonical_name is used for blocks not present in that table.
+BedrockBlock to_bedrock_block(const Block &block, std::string_view canonical_name);
 // Property-aware Java-to-Bedrock conversion used by schematic/world writers.
 // It translates orientation, half/shape, growth, and stateful natural-block
 // properties rather than silently dropping the Java state map.
 BedrockBlock to_bedrock_block_with_properties(const BlockWithProperties &block);
+BedrockBlock to_bedrock_block_with_properties(
+		const BlockWithProperties &block, std::string_view canonical_name);
 // A potted Java block stores its plant separately in Bedrock's flower-pot block
 // entity. Returns the Bedrock block representing that plant, when applicable.
 std::optional<BedrockBlock> potted_plant(const Block &block);
+std::optional<BedrockBlock> potted_plant(
+		const Block &block, std::string_view canonical_name);
 // Whether the Java block occupies a water cell, either by its explicit state or
 // because it is intrinsically waterlogged (seagrass, kelp, coral, etc.).
 bool is_waterlogged(const BlockWithProperties &block);
+bool is_waterlogged(const BlockWithProperties &block, std::string_view canonical_name);
 }

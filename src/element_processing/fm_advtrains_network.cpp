@@ -1,5 +1,6 @@
 #include "advtrains.h"
 #include "../fm_native_trains.h"
+#include "rail_track.h"
 
 #include <algorithm>
 #include <bit>
@@ -287,6 +288,30 @@ struct Anchor
 	XZ position;
 	std::map<std::size_t, int> ports;
 };
+
+std::optional<XZ> continuation_cell(
+		const std::vector<Anchor> &anchors, std::size_t at, std::size_t toward)
+{
+	const auto &ports = anchors[at].ports;
+	const auto heading = ports.find(toward);
+	if (heading == ports.end())
+		return std::nullopt;
+	const int opposite = (heading->second + 8) % 16;
+	int best_turn = 3; // Rust's rail-join limit is 60 degrees (less than 3 sectors).
+	std::optional<std::size_t> best;
+	for (const auto &[candidate, direction] : ports) {
+		if (candidate == toward)
+			continue;
+		const int delta = std::abs(direction - opposite);
+		const int turn = std::min(delta, 16 - delta);
+		if (turn < best_turn || (turn == best_turn && (!best || candidate < *best))) {
+			best_turn = turn;
+			best = candidate;
+		}
+	}
+	return best ? std::optional(anchors[*best].position) : std::nullopt;
+}
+
 struct Segment
 {
 	std::size_t a, b;
@@ -418,10 +443,24 @@ std::shared_ptr<const RailNetwork> build_network(
 	std::map<SegmentKey, Segment> segments;
 	std::size_t failed_routes = 0;
 	std::uint64_t example_failed_way = 0;
+	// A crossover can connect a bridge track to its surface approach without
+	// carrying either endpoint's layer tag itself. It must avoid rails from
+	// BOTH connected layers, rather than cutting through an elevated mainline.
+	// Ordinary flyovers keep separate reservations and can still cross in XZ.
+	std::map<std::uint64_t, std::set<std::string>> reservation_levels;
+	for (const auto &[id, way] : ways) {
+		auto &levels = reservation_levels[id];
+		levels.insert(level(*way));
+		if (way->tags.get("service") == "crossover")
+			for (const auto &node : way->nodes)
+				for (auto adjacent : users.at(anchor_key(node, *way)))
+					levels.insert(level(*ways.at(adjacent)));
+	}
 	std::map<std::string, std::set<XZ>> occupied;
 	for (const auto &[id, ids] : way_anchors)
 		for (auto a : ids)
-			occupied[level(*ways.at(id))].insert(anchors[a].position);
+			for (const auto &plane : reservation_levels.at(id))
+				occupied[plane].insert(anchors[a].position);
 	for (const auto &[id, ids] : way_anchors) {
 		const auto &way = *ways.at(id);
 		for (std::size_t i = 1; i < ids.size(); ++i) {
@@ -433,10 +472,16 @@ std::shared_ptr<const RailNetwork> build_network(
 			if (inserted && !invalid.contains(a) && !invalid.contains(b)) {
 				segment.line = route(anchors[a].position, anchors[b].position,
 						anchors[a].ports.at(b), (anchors[b].ports.at(a) + 8) % 16,
-						[&](const XZ &p) { return occupied[segment.level].contains(p); });
-				for (const auto &p : segment.line)
-					occupied[segment.level].insert(p);
+						[&](const XZ &p) {
+							for (const auto &plane : reservation_levels.at(id))
+								if (occupied[plane].contains(p))
+									return true;
+							return false;
+						});
 			}
+			for (const auto &plane : reservation_levels.at(id))
+				for (const auto &p : segment.line)
+					occupied[plane].insert(p);
 			if (segment.line.empty()) {
 				// Shared segments are already cached, including failed routes.
 				if (inserted) {
@@ -446,14 +491,44 @@ std::shared_ptr<const RailNetwork> build_network(
 				continue;
 			}
 			std::vector<int> seed;
-			for (const auto &[x, z] : segment.line)
-				seed.push_back(editor.get_ground_level(x, z) +
-							   (underground(way) ? level_offset(way) : 0));
+			std::vector<int> ground;
+			std::vector<std::optional<int>> road_surfaces;
+			seed.reserve(segment.line.size());
+			ground.reserve(segment.line.size());
+			road_surfaces.reserve(segment.line.size());
+			for (const auto &[x, z] : segment.line) {
+				ground.push_back(editor.get_ground_level(x, z));
+				road_surfaces.push_back(editor.surface_override(x, z));
+				seed.push_back(
+						ground.back() + (underground(way) ? level_offset(way) : 0));
+			}
 			if (bridge(way)) {
 				const auto [lo, hi] = std::minmax_element(seed.begin(), seed.end());
 				const int deck =
 						*hi + (*hi - *lo < 4 ? level_offset(way) : level_offset(way) - 8);
 				std::fill(seed.begin(), seed.end(), deck);
+			} else if (!underground(way)) {
+				// Seed native slope fitting from the Rust at-grade profile instead of
+				// the raw ground samples. Native nodes still constrain the final ramp
+				// shape below, while the target heights honor straight-cell climbs,
+				// road surfaces, and the same per-cell terrain cost as Rust.
+				const auto straight = ::arnis::railways::straight_cells(segment.line,
+						continuation_cell(anchors, segment.a, segment.b),
+						continuation_cell(anchors, segment.b, segment.a));
+				seed = ::arnis::railways::rail_profile(
+						straight,
+						[&](std::size_t i) {
+							if (road_surfaces[i])
+								return std::pair{
+										*road_surfaces[i] - 1, *road_surfaces[i] + 1};
+							return std::pair{ground[i] - 10, ground[i] + 10};
+						},
+						[&](std::size_t i, int y) {
+							if (road_surfaces[i])
+								return 4.0 * std::abs(y - *road_surfaces[i]);
+							return static_cast<double>(std::abs(y - ground[i]));
+						},
+						2.5);
 			}
 			if (segment.heights.empty())
 				segment.heights = std::move(seed);

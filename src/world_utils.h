@@ -116,6 +116,7 @@ std::optional<std::size_t> drop_misplaced_chunks(
 		const std::filesystem::path &world, std::string *error = nullptr);
 bool replace_file_atomically(
 		const std::filesystem::path &, const std::vector<std::uint8_t> &);
+std::filesystem::path default_bedrock_output_directory();
 std::filesystem::path get_bedrock_output_directory();
 std::filesystem::path get_luanti_worlds_directory();
 std::string sanitize_for_filename(const std::string &name);

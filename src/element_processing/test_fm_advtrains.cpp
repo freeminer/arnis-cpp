@@ -2,6 +2,7 @@
 #if BUILD_UNITTESTS
 #include "advtrains.h"
 #include "../clipping.h"
+#include "rail_track.h"
 #include "unittest/test.h"
 
 #include <map>
@@ -113,10 +114,14 @@ public:
 	void runTests(IGameDef *) override
 	{
 		TEST(testProfiles);
+		TEST(testRustAtGradeProfileParity);
+		TEST(testRustRailJoinSelectionParity);
 		TEST(testRoutes);
 		TEST(testNetwork);
 		TEST(testChunkSeamsKeepSourceTopology);
 		TEST(testParallelWorkersKeepNativeNetworkAndCompletion);
+		TEST(testCrossoverAvoidsBothConnectedLayers);
+		TEST(testFlyoverKeepsItsSeparateLayer);
 	}
 	void testProfiles()
 	{
@@ -150,6 +155,56 @@ public:
 				UASSERT(before == plan.heights);
 			}
 		}
+	}
+	void testRustAtGradeProfileParity()
+	{
+		// A one-block terrain dip is cheaper to fill than to put a step in the
+		// track, matching rail_track.rs::a_one_block_dip_is_filled_rather_than_stepped_into.
+		std::vector<int> ground(20, 5);
+		ground[10] = 4;
+		const std::vector<bool> straight(ground.size(), true);
+		const auto beds = railways::rail_profile(
+				straight,
+				[&](std::size_t i) { return std::pair{ground[i] - 10, ground[i] + 10}; },
+				[&](std::size_t i, int y) {
+					return static_cast<double>(std::abs(y - ground[i]));
+				},
+				2.5);
+		UASSERT(beds == std::vector<int>(ground.size(), 5));
+
+		// A straight segment can climb at an endpoint only when the joined way
+		// continues through it. A horizontal-to-diagonal join closes that ramp.
+		const std::vector<std::pair<int, int>> corner{{0, 0}, {1, 0}};
+		const auto open_ends = railways::straight_cells(corner);
+		const auto joined_corner =
+				railways::straight_cells(corner, std::pair{-1, 0}, std::pair{1, 1});
+		UASSERT(open_ends[1]);
+		UASSERT(!joined_corner[1]);
+	}
+	void testRustRailJoinSelectionParity()
+	{
+		const auto surface = [](const ProcessedWay &) {
+			return std::optional<railways::TrackLevel>(railways::TrackLevel::Surface);
+		};
+		const std::vector<ProcessedElement> branch{
+				ProcessedElement(way(1, {{1, {}, 0, 0}, {2, {}, 20, 0}})),
+				ProcessedElement(way(2, {{2, {}, 20, 0}, {3, {}, 40, 0}})),
+				ProcessedElement(way(3, {{2, {}, 20, 0}, {4, {}, 40, 10}}))};
+		const auto joins = railways::RailJoins::build(branch, surface);
+		UASSERT(joins.ends(1)[1].owns);
+		UASSERT(joins.ends(2)[0].owns);
+		UASSERT(!joins.ends(3)[0].owns);
+		UASSERT(!joins.ends(1)[1].beyond.empty());
+		UASSERT(joins.ends(1)[1].beyond.front() == std::pair(21, 0));
+
+		// A way passing through a node owns the shared rail cell, even when a
+		// spur terminates on that interior node.
+		const std::vector<ProcessedElement> through{
+				ProcessedElement(way(4, {{1, {}, 0, 0}, {2, {}, 20, 0}, {3, {}, 40, 0}})),
+				ProcessedElement(way(5, {{2, {}, 20, 0}, {5, {}, 40, 8}}))};
+		const auto through_joins = railways::RailJoins::build(through, surface);
+		UASSERT(!through_joins.ends(5)[0].owns);
+		UASSERT(through_joins.ends(5)[0].shared);
 	}
 	void testRoutes()
 	{
@@ -243,6 +298,71 @@ public:
 		UASSERT(editor.native_generated_rails == std::set<std::uint64_t>{rail.id});
 		UASSERT(at::get_plan(rail) == expected);
 		definitions.check(*expected);
+	}
+
+	void testCrossoverAvoidsBothConnectedLayers()
+	{
+		TrackDefinitions definitions;
+		WorldEditor editor;
+		// Port Washington Branch, ny2: the untagged crossover joins a bridge
+		// and a surface approach. Previously it overwrote a mainline rail cell.
+		std::vector<ProcessedElement> elements{
+				way(49175623,
+						{{3263868996, {}, 12924, -3444}, {13571301748, {}, 12886, -3457},
+								{13571301749, {}, 12878, -3460},
+								{3263868992, {}, 12855, -3468}},
+						{{"railway", "rail"}, {"bridge", "yes"}, {"layer", "1"}}),
+				way(49175625,
+						{{3263868992, {}, 12855, -3468}, {2819593657, {}, 12834, -3476},
+								{13571558876, {}, 12711, -3517},
+								{3263868982, {}, 12678, -3529},
+								{3263868980, {}, 12485, -3587}}),
+				way(319903734,
+						{{3263868989, {}, 12857, -3472}, {3263868995, {}, 12926, -3448}},
+						{{"railway", "rail"}, {"bridge", "yes"}, {"layer", "1"}}),
+				way(319903754,
+						{{3263868979, {}, 12487, -3591}, {3263868981, {}, 12680, -3533},
+								{13571558877, {}, 12713, -3522},
+								{13571301750, {}, 12740, -3512},
+								{3263868984, {}, 12836, -3480},
+								{3263868989, {}, 12857, -3472}}),
+				way(1479433697,
+						{{13571301749, {}, 12878, -3460},
+								{13571301750, {}, 12740, -3512}},
+						{{"railway", "rail"}, {"service", "crossover"}})};
+		const auto network = at::build_network(elements, editor);
+		std::map<std::tuple<pos_t, pos_t, pos_t>, Block> cells;
+		for (const auto &[id, plan] : network->plans) {
+			definitions.check(plan);
+			for (std::size_t i = 0; i < plan.line.size(); ++i) {
+				const auto &[x, z] = plan.line[i];
+				const auto [it, inserted] = cells.emplace(
+						std::tuple<pos_t, pos_t, pos_t>{x, plan.heights[i], z},
+						plan.rails[i]);
+				UASSERT(inserted || it->second == plan.rails[i]);
+			}
+		}
+		UASSERT(network->plans.size() == elements.size());
+	}
+
+	void testFlyoverKeepsItsSeparateLayer()
+	{
+		TrackDefinitions definitions;
+		WorldEditor editor;
+		const auto network = at::build_network(
+				{way(1, {{1, {}, 0, -30}, {2, {}, 0, 30}},
+						 {{"railway", "rail"}, {"bridge", "yes"}, {"layer", "1"}}),
+						way(2, {{3, {}, -30, 0}, {4, {}, 30, 0}})},
+				editor);
+		std::vector<int> crossing_heights;
+		for (const auto &[id, plan] : network->plans) {
+			definitions.check(plan);
+			for (std::size_t i = 0; i < plan.line.size(); ++i)
+				if (plan.line[i] == at::XZ{0, 0})
+					crossing_heights.push_back(plan.heights[i]);
+		}
+		UASSERT(crossing_heights.size() == 2);
+		UASSERT(std::abs(crossing_heights[0] - crossing_heights[1]) >= 4);
 	}
 
 	void testNetwork()
