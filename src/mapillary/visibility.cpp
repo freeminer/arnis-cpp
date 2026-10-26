@@ -944,8 +944,10 @@ std::vector<ViewCandidate> select_views(std::vector<ViewCandidate> &candidates,
 				passing.end());
 	}
 	std::stable_sort(passing.begin(), passing.end(), [&](std::size_t a, std::size_t b) {
-		if (candidates[a].score != candidates[b].score)
-			return candidates[a].score > candidates[b].score;
+		if (candidates[a].score > candidates[b].score)
+			return true;
+		if (candidates[a].score < candidates[b].score)
+			return false;
 		return candidates[a].pano_id < candidates[b].pano_id;
 	});
 	if (passing.empty())

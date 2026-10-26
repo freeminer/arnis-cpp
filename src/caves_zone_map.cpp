@@ -101,7 +101,7 @@ std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 	const auto height64 = std::max<std::uint64_t>(1, (span_z + step - 1) / step);
 	if (width64 > std::numeric_limits<std::uint32_t>::max() ||
 			height64 > std::numeric_limits<std::uint32_t>::max() ||
-			width64 * height64 > max_pixels)
+			height64 > max_pixels / width64)
 		return fail("cave zone map raster exceeds the supported image size");
 	const auto width = static_cast<std::uint32_t>(width64);
 	const auto height = static_cast<std::uint32_t>(height64);

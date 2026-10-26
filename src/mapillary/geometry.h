@@ -326,13 +326,20 @@ inline bool ring_segments_cross(const std::array<double, 2> &a1,
 		const std::array<double, 2> &a2, const std::array<double, 2> &b1,
 		const std::array<double, 2> &b2)
 {
-	constexpr double epsilon = 1e-9;
-	const double ab = ring_orientation(a1, a2, b1);
-	const double ac = ring_orientation(a1, a2, b2);
-	const double cd = ring_orientation(b1, b2, a1);
-	const double ce = ring_orientation(b1, b2, a2);
-	return ((ab > epsilon && ac < -epsilon) || (ab < -epsilon && ac > epsilon)) &&
-		   ((cd > epsilon && ce < -epsilon) || (cd < -epsilon && ce > epsilon));
+	const double d1 = ring_orientation(b1, b2, a1);
+	const double d2 = ring_orientation(b1, b2, a2);
+	const double d3 = ring_orientation(a1, a2, b1);
+	const double d4 = ring_orientation(a1, a2, b2);
+	if (((d1 > 0.0) != (d2 > 0.0)) && ((d3 > 0.0) != (d4 > 0.0)) && d1 != 0.0 &&
+			d2 != 0.0 && d3 != 0.0 && d4 != 0.0)
+		return true;
+	const auto on_segment = [](const auto &p, const auto &q, const auto &r) {
+		return ring_orientation(p, q, r) == 0.0 && r[0] >= std::min(p[0], q[0]) &&
+			   r[0] <= std::max(p[0], q[0]) && r[1] >= std::min(p[1], q[1]) &&
+			   r[1] <= std::max(p[1], q[1]);
+	};
+	return on_segment(b1, b2, a1) || on_segment(b1, b2, a2) || on_segment(a1, a2, b1) ||
+		   on_segment(a1, a2, b2);
 }
 
 // Self-intersection test for a simple polygon. Adjacent edges are excluded;
@@ -353,6 +360,53 @@ inline bool ring_is_simple(const std::vector<std::array<double, 2>> &ring)
 	}
 	return true;
 }
+
+namespace detail
+{
+inline bool point_on_segment(const std::array<double, 2> &point,
+		const std::array<double, 2> &a, const std::array<double, 2> &b)
+{
+	return ring_orientation(a, b, point) == 0.0 && point[0] >= std::min(a[0], b[0]) &&
+		   point[0] <= std::max(a[0], b[0]) && point[1] >= std::min(a[1], b[1]) &&
+		   point[1] <= std::max(a[1], b[1]);
+}
+
+inline bool point_in_or_on_ring(const std::array<double, 2> &point,
+		const std::vector<std::array<double, 2>> &ring)
+{
+	if (ring.size() < 3)
+		return false;
+	bool inside = false;
+	for (std::size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+		const auto &a = ring[i], &b = ring[j];
+		if (point_on_segment(point, a, b))
+			return true;
+		if ((a[1] > point[1]) != (b[1] > point[1]) &&
+				point[0] < (b[0] - a[0]) * (point[1] - a[1]) / (b[1] - a[1]) + a[0])
+			inside = !inside;
+	}
+	return inside;
+}
+
+inline bool rings_intersect(const std::vector<std::array<double, 2>> &a,
+		const std::vector<std::array<double, 2>> &b)
+{
+	if (a.size() < 3 || b.size() < 3)
+		return false;
+	for (const auto &point : a)
+		if (point_in_or_on_ring(point, b))
+			return true;
+	for (const auto &point : b)
+		if (point_in_or_on_ring(point, a))
+			return true;
+	for (std::size_t i = 0; i < a.size(); ++i)
+		for (std::size_t j = 0; j < b.size(); ++j)
+			if (ring_segments_cross(
+						a[i], a[(i + 1) % a.size()], b[j], b[(j + 1) % b.size()]))
+				return true;
+	return false;
+}
+} // namespace detail
 
 inline std::array<double, 2> ring_centroid(const std::vector<std::array<double, 2>> &ring)
 {
@@ -538,31 +592,16 @@ inline std::vector<Wall> walls_from_buildings(const std::vector<Building> &build
 		const Params &params, const Frame &frame,
 		const std::optional<BBox> &bbox = std::nullopt)
 {
-	std::array<double, 2> lower{}, upper{};
+	std::vector<std::array<double, 2>> placeable;
 	const bool restrict = bbox.has_value();
 	if (restrict) {
 		const auto polygon = bbox_polygon_xy(*bbox, frame, WALL_MARGIN_M);
-		lower = polygon[0];
-		upper = polygon[2];
+		placeable.assign(polygon.begin(), polygon.end());
 	}
 	std::vector<Wall> result;
 	for (const auto &building : buildings) {
-		if (restrict) {
-			if (building.ring.empty())
-				continue;
-			auto min_x = building.ring.front()[0], max_x = min_x;
-			auto min_y = building.ring.front()[1], max_y = min_y;
-			for (const auto &point : building.ring) {
-				min_x = std::min(min_x, point[0]);
-				max_x = std::max(max_x, point[0]);
-				min_y = std::min(min_y, point[1]);
-				max_y = std::max(max_y, point[1]);
-			}
-			const bool intersects = max_x >= lower[0] && min_x <= upper[0] &&
-									max_y >= lower[1] && min_y <= upper[1];
-			if (!intersects)
-				continue;
-		}
+		if (restrict && !detail::rings_intersect(building.ring, placeable))
+			continue;
 		auto walls = walls_from_building(building, params);
 		result.insert(result.end(), std::make_move_iterator(walls.begin()),
 				std::make_move_iterator(walls.end()));

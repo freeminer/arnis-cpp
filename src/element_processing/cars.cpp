@@ -1,5 +1,6 @@
 #include "cars.h"
 
+#include "../datapack/mod.h"
 #include "highways.h"
 #include "road_markings.h"
 #include "traffic_lights.h"
@@ -11,9 +12,11 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <iomanip>
 #include <iterator>
 #include <limits>
 #include <numbers>
+#include <sstream>
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
@@ -23,14 +26,6 @@ namespace arnis::highways::cars
 {
 namespace
 {
-// Keep whole-number targets off the macro parser's integer-coordinate path,
-// which would move the runtime target to the centre of the adjacent block.
-double macro_coord(double value)
-{
-	const double rounded = std::round(value * 100.0) / 100.0;
-	return rounded == std::trunc(rounded) ? rounded + 0.01 : rounded;
-}
-
 constexpr double MAX_SPAN = 24.0;
 constexpr std::size_t MAX_CARS = 1500;
 constexpr double STOP_BACK = 1.5;
@@ -1377,6 +1372,201 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 }
 } // namespace
 
+std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions() const
+{
+	std::vector<std::pair<std::string, std::string>> out;
+	std::ostringstream storage;
+	storage << "scoreboard players set #accel arnis "
+			<< std::max(1, static_cast<int>(std::lround(2.5 * .01 * scale_ * 1000.0)))
+			<< "\ndata modify storage arnis:cars seg set value []\n";
+	const auto colour_list = [](const auto &colours) {
+		std::string result;
+		for (const auto &[colour, weight] : colours) {
+			for (std::uint32_t i = 0; i < (weight + 3) / 4; ++i) {
+				if (!result.empty())
+					result += ',';
+				result += '\"' + std::string(colour) + '\"';
+			}
+		}
+		return result;
+	};
+	storage << "data modify storage arnis:cars colours set value {car:["
+			<< colour_list(CAR_COLOURS) << "],van:[" << colour_list(VAN_COLOURS) << "]}\n"
+			<< std::fixed;
+	for (const auto &segment : segments_) {
+		storage << "data modify storage arnis:cars seg append value {p:[";
+		for (std::size_t i = 0; i < segment.points.size(); ++i) {
+			const auto &point = segment.points[i];
+			if (i)
+				storage << ',';
+			storage << "{x:" << std::setprecision(2)
+					<< ::arnis::datapack::macro_coord(point.x)
+					<< "d,y:" << std::setprecision(1) << point.y
+					<< "d,z:" << std::setprecision(2)
+					<< ::arnis::datapack::macro_coord(point.z);
+			if (point.stop)
+				storage << ",g:" << static_cast<unsigned>(*point.stop) << 'b';
+			if (point.cap)
+				storage << ",m:" << *point.cap;
+			storage << '}';
+		}
+		storage << "],n:[";
+		for (std::size_t i = 0; i < segment.next.size(); ++i) {
+			const auto &turn = segment.next[i];
+			if (i)
+				storage << ',';
+			storage << "{s:" << turn.lane << ",i:" << turn.entry;
+			if (turn.crossing)
+				storage << ",j:1b";
+			storage << '}';
+		}
+		storage << "],v:" << segment.speed;
+		if (segment.points.size() < 2 || segment.stub || segment.next.empty())
+			storage << ",o:1b";
+		storage << "}\n";
+	}
+	out.emplace_back("data/arnis/function/cars/network.mcfunction", storage.str());
+
+	const auto distance = [this](double metres) {
+		std::ostringstream value;
+		value << std::fixed << std::setprecision(2) << metres * size_;
+		return value.str();
+	};
+	std::ostringstream dispatch;
+	dispatch
+			<< "# Direction selects which nearby cars count as traffic ahead.\n"
+			<< "execute store result score #h arnis.car run data get entity @s Rotation[0]\n"
+			<< "scoreboard players add #h arnis.car 202\n"
+			<< "scoreboard players operation #h arnis.car /= #45 arnis\n"
+			<< "scoreboard players operation #h arnis.car %= #8 arnis\n";
+	for (int heading = 0; heading < 8; ++heading) {
+		dispatch << "execute if score #h arnis.car matches " << heading
+				 << " run function arnis:cars/look/h" << heading << '\n';
+		const double centre = heading * 45.0 - 180.0;
+		const auto wrap = [](double angle) {
+			return std::fmod(angle + 540.0, 360.0) - 180.0;
+		};
+		std::ostringstream range;
+		range << std::fixed << std::setprecision(1) << wrap(centre - 67.5) << ".."
+			  << wrap(centre + 67.5);
+		const auto ahead = [&](double at, double radius) {
+			std::ostringstream line;
+			line << "execute rotated as @s positioned ^ ^ ^" << distance(at)
+				 << " if entity @e[type=marker,tag=arnis.car,distance=.."
+				 << distance(radius) << ",y_rotation=" << range.str() << ']';
+			return line.str();
+		};
+		std::ostringstream look;
+		look << "# Detect cars on the forward lane cone.\n"
+			 << ahead(3.0, 1.7)
+			 << " run return run scoreboard players set #ahead arnis.car 3\n"
+			 << ahead(6.0, 1.7)
+			 << " run return run scoreboard players set #ahead arnis.car 3\n"
+			 << ahead(10.0, 2.0) << " run scoreboard players set #ahead arnis.car 2\n"
+			 << ahead(14.5, 2.5) << " run scoreboard players set #ahead arnis.car 1\n";
+		out.emplace_back("data/arnis/function/cars/look/h" + std::to_string(heading) +
+								 ".mcfunction",
+				look.str());
+	}
+	out.emplace_back("data/arnis/function/cars/look.mcfunction", dispatch.str());
+	std::ostringstream clear;
+	clear << "# Yield at junctions, while allowing a deadlock to unwind.\n"
+		  << "scoreboard players set #yield arnis.car 0\n"
+		  << "execute if score #jam arnis.car matches 1 run scoreboard players set #yield arnis.car 1\n"
+		  << "execute if score #t arnis.car matches 1.. rotated as @s positioned ^ ^ ^"
+		  << distance(3.0)
+		  << " if entity @e[type=marker,tag=arnis.car,tag=!arnis.car.held,distance=.."
+		  << distance(1.7) << "] run scoreboard players set #yield arnis.car 1\n"
+		  << "execute if score #yield arnis.car matches 0 run scoreboard players set #w arnis.car 0\n"
+		  << "execute if score #yield arnis.car matches 1 run scoreboard players add #w arnis.car 1\n"
+		  << "scoreboard players operation #lim arnis.car = #id arnis.car\n"
+		  << "scoreboard players operation #lim arnis.car %= #32 arnis\n"
+		  << "scoreboard players add #lim arnis.car 30\n"
+		  << "execute if score #yield arnis.car matches 1 if score #w arnis.car <= #lim arnis.car run scoreboard players set #t arnis.car 0\n"
+		  << "execute rotated as @s positioned ^ ^ ^" << distance(3.0)
+		  << " if entity @a[gamemode=!spectator,distance=.." << distance(2.0)
+		  << "] run scoreboard players set #t arnis.car 0\n"
+		  << "execute rotated as @s positioned ^ ^ ^" << distance(6.0)
+		  << " if entity @a[gamemode=!spectator,distance=.." << distance(2.0)
+		  << "] run scoreboard players set #t arnis.car 0\n";
+	out.emplace_back("data/arnis/function/cars/clear.mcfunction", clear.str());
+	std::ostringstream ease;
+	ease << "# Brake smoothly at a red signal.\n"
+		 << "$execute if entity @s[x=$(x),y=$(y),z=$(z),distance=.." << distance(16.0)
+		 << "] run scoreboard players operation #t arnis.car < #q50 arnis.car\n"
+		 << "$execute if entity @s[x=$(x),y=$(y),z=$(z),distance=.." << distance(6.0)
+		 << "] run scoreboard players operation #t arnis.car < #q25 arnis.car\n"
+		 << "$execute if entity @s[x=$(x),y=$(y),z=$(z),distance=..0.05] run scoreboard players set #t arnis.car 0\n";
+	out.emplace_back("data/arnis/function/cars/ease.mcfunction", ease.str());
+
+	const float size = static_cast<float>(size_);
+	for (const auto &[kind, name] : std::array<std::pair<VehicleKind, const char *>, 3>{
+				 {{VehicleKind::Sedan, "sedan"}, {VehicleKind::Hatchback, "hatchback"},
+						 {VehicleKind::Van, "van"}}}) {
+		for (const auto &[prefix, bare] : std::array<std::pair<const char *, bool>, 2>{
+					 {{"", false}, {"ov121/", true}}}) {
+			std::ostringstream body;
+			body << std::fixed << std::setprecision(3);
+			for (const auto &part : body_parts(kind, "$(colour)")) {
+				const auto block =
+						bare ? "\"" + part.block + "\"" : "{Name:\"" + part.block + "\"}";
+				const auto vector = [size](const std::array<float, 3> &v) {
+					std::ostringstream value;
+					value << std::fixed << std::setprecision(3) << '[' << v[0] * size
+						  << "f," << v[1] * size << "f," << v[2] * size << "f]";
+					return value.str();
+				};
+				const char *tags = "\"arnis.car.part\"";
+				const char *glow = "";
+				if (part.light == Light::Head)
+					glow = ",brightness:{sky:15,block:15}";
+				else if (part.light == Light::Tail) {
+					tags = "\"arnis.car.part\",\"arnis.car.tail\"";
+					glow = ",brightness:{sky:7,block:7}";
+				}
+				body << "$summon block_display $(x) $(y) $(z) {Tags:[" << tags
+					 << "],teleport_duration:2,block_state:" << block
+					 << ",transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],translation:"
+					 << vector(part.corner) << ",scale:" << vector(part.size) << '}'
+					 << glow << "}\n";
+			}
+			out.emplace_back(std::string(prefix) + "data/arnis/function/cars/body/" +
+									 name + ".mcfunction",
+					body.str());
+		}
+	}
+	return out;
+}
+
+std::string CarNetwork::storage_function() const
+{
+	const auto functions = datapack_functions();
+	const auto found =
+			std::find_if(functions.begin(), functions.end(), [](const auto &entry) {
+				return entry.first == "data/arnis/function/cars/network.mcfunction";
+			});
+	return found == functions.end() ? std::string{} : found->second;
+}
+
+std::vector<std::pair<std::string, std::string>> CarNetwork::look_functions() const
+{
+	std::vector<std::pair<std::string, std::string>> result;
+	for (auto &entry : datapack_functions())
+		if (entry.first == "data/arnis/function/cars/look.mcfunction" ||
+				entry.first.starts_with("data/arnis/function/cars/look/"))
+			result.push_back(std::move(entry));
+	return result;
+}
+
+std::vector<std::pair<std::string, std::string>> CarNetwork::body_functions() const
+{
+	std::vector<std::pair<std::string, std::string>> result;
+	for (auto &entry : datapack_functions())
+		if (entry.first.starts_with("data/arnis/function/cars/body/"))
+			result.push_back(std::move(entry));
+	return result;
+}
+
 void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way) const
 {
 	for (const auto car_index : cars_for_way(way)) {
@@ -1396,8 +1586,8 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 		const nlohmann::json rotation = {yaw, 0.0f};
 		nlohmann::json data = {{"s", static_cast<std::int32_t>(car.segment)},
 				{"i", static_cast<std::int32_t>(car.target)},
-				{"x", macro_coord(target.x)}, {"y", target.y},
-				{"z", macro_coord(target.z)}, {"v", speed},
+				{"x", ::arnis::datapack::macro_coord(target.x)}, {"y", target.y},
+				{"z", ::arnis::datapack::macro_coord(target.z)}, {"v", speed},
 				{"c", target.cap ? std::min(*target.cap, speed) : speed}, {"p", car.pace},
 				{"w", 0}, {"q", 0}, {"b", 0}};
 		if (target.stop)

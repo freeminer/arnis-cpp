@@ -44,6 +44,7 @@
 #include "../../arnis_adapter.h"
 #include "../../arnis_ground.h"
 #include "assets_root.h"
+#include "retrieve_data.h"
 #include "bresenham.h"
 #include "cache_root.h"
 #include "building_suppression.h"
@@ -62,6 +63,7 @@
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"
+#include "datapack/extras.h"
 #include "element_processing/cars.h"
 #include "element_processing/trains.h"
 #include "element_processing/rail_track.h"
@@ -75,6 +77,7 @@
 #include "mapillary/atlas.h"
 #include "mapillary/credits.h"
 #include "mapillary/facades.h"
+#include "mapillary/displays.h"
 #include "mode_filter.h"
 #include "mapillary/pipeline.h"
 #include "mapillary/fetch.h"
@@ -3529,6 +3532,14 @@ bool generate_world(WorldEditor &editor,
 		std::cerr << "Arnis generation failed while finalizing backend persistence\n";
 		return false;
 	}
+	if (java_world && !java_world_path.empty()) {
+		std::string error;
+		if (!mapillary::displays::write_world_resource_pack(editor, java_world_path,
+					args.pause_menu && !args.one_world_run, &error))
+			std::cerr << "Warning: Failed to write facade resource pack: " << error
+					  << '\n';
+		mapillary::facades::clear();
+	}
 	if (args.one_world_run) {
 		const auto &run = *args.one_world_run;
 		// Rust moves the Java spawn only when an extension includes an explicit
@@ -3609,6 +3620,70 @@ bool generate_world(WorldEditor &editor,
 		std::string error;
 		if (!world_utils::install_tall_datapack(java_world_path, &error)) {
 			const auto message = "failed to install tall-world datapack: " + error;
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
+	if (java_world && !args.one_world_run && !java_world_path.empty()) {
+		const auto red_amber_region =
+				decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
+						(geo_bounds[2] + geo_bounds[3]) * .5);
+		const bool red_amber = red_amber_region == decals::SignRegion::Germanic ||
+							   red_amber_region == decals::SignRegion::UkIreland;
+		std::vector<datapack::discoveries::Place> extra_places;
+		std::optional<std::string> settlement;
+		if (args.discoveries || args.pause_menu || args.zombie_outbreak) {
+			const auto discovery_bbox = cartesian::XZBBox::rect_from_min_max(
+					xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+			auto collected = datapack::discoveries::collect(elements, discovery_bbox);
+			extra_places = std::move(collected.first);
+			settlement = std::move(collected.second);
+		}
+		std::string area = std::string(celestial_body_display_name(args.body));
+		if (is_earth(args.body)) {
+			area.clear();
+			if (const auto name = world_utils::level_name(java_world_path)) {
+				if (const auto separator = name->find(": ");
+						separator != std::string::npos) {
+					area = name->substr(separator + 2);
+					const auto first = area.find_first_not_of(" \t\r\n");
+					if (first == std::string::npos) {
+						area.clear();
+					} else {
+						const auto last = area.find_last_not_of(" \t\r\n");
+						area = area.substr(first, last - first + 1);
+					}
+				}
+			}
+			if (area.empty()) {
+				const double latitude = (geo_bounds[0] + geo_bounds[1]) * .5;
+				const double longitude = (geo_bounds[2] + geo_bounds[3]) * .5;
+				area = retrieve_data::fetch_area_name(latitude, longitude)
+							   .value_or(settlement.value_or("this area"));
+			}
+		}
+		std::string error;
+		std::optional<datapack::SpawnDestination> extra_spawn;
+		auto spawn_xz = spawn_point;
+		if (!spawn_xz)
+			spawn_xz = world_utils::level_spawn_xz(java_world_path);
+		if (spawn_xz) {
+			const auto point = editor.ground_point(spawn_xz->first, spawn_xz->second);
+			const std::optional<int> spawn_ground_y =
+					editor.ground ? std::optional<int>(editor.ground->level(point))
+								  : std::optional<int>(args.ground_level);
+			extra_spawn = datapack::SpawnDestination{
+					spawn_xz->first, spawn_xz->second, spawn_ground_y};
+		}
+		if (!datapack::install_runtime_extras(
+					java_world_path, args, area, red_amber, editor.car_network.get(),
+					editor.train_network.get(),
+					[&editor](std::uint64_t way, int x, int z) {
+						return editor.rail_height(way, x, z);
+					},
+					extra_places, extra_spawn, &error)) {
+			const auto message = "failed to install gameplay datapack: " + error;
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';
 			return false;

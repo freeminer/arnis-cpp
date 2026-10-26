@@ -11,28 +11,18 @@
 
 namespace arnis::structure_kit
 {
+extern const std::array<ConcreteColour, 16> CONCRETE = {
+		{{WHITE_CONCRETE, {207, 213, 214}}, {ORANGE_CONCRETE, {224, 97, 0}},
+				{MAGENTA_CONCRETE, {169, 48, 159}}, {LIGHT_BLUE_CONCRETE, {35, 137, 198}},
+				{YELLOW_CONCRETE, {241, 175, 21}}, {LIME_CONCRETE, {94, 168, 24}},
+				{PINK_CONCRETE, {213, 101, 142}}, {GRAY_CONCRETE, {54, 57, 61}},
+				{LIGHT_GRAY_CONCRETE, {125, 125, 115}}, {CYAN_CONCRETE, {21, 119, 136}},
+				{PURPLE_CONCRETE, {100, 31, 156}}, {BLUE_CONCRETE, {44, 46, 143}},
+				{BROWN_CONCRETE, {96, 59, 31}}, {GREEN_CONCRETE, {73, 91, 36}},
+				{RED_CONCRETE, {142, 32, 32}}, {BLACK_CONCRETE, {8, 10, 15}}}};
+
 namespace
 {
-using Colour = std::pair<Block, std::array<std::uint8_t, 3>>;
-const Colour concrete[] = {
-		{WHITE_CONCRETE, {207, 213, 214}},
-		{ORANGE_CONCRETE, {224, 97, 0}},
-		{MAGENTA_CONCRETE, {169, 48, 159}},
-		{LIGHT_BLUE_CONCRETE, {35, 137, 198}},
-		{YELLOW_CONCRETE, {241, 175, 21}},
-		{LIME_CONCRETE, {94, 168, 24}},
-		{PINK_CONCRETE, {213, 101, 142}},
-		{GRAY_CONCRETE, {54, 57, 61}},
-		{LIGHT_GRAY_CONCRETE, {125, 125, 115}},
-		{CYAN_CONCRETE, {21, 119, 136}},
-		{PURPLE_CONCRETE, {100, 31, 156}},
-		{BLUE_CONCRETE, {44, 46, 143}},
-		{BROWN_CONCRETE, {96, 59, 31}},
-		{GREEN_CONCRETE, {73, 91, 36}},
-		{RED_CONCRETE, {142, 32, 32}},
-		{BLACK_CONCRETE, {8, 10, 15}},
-};
-
 std::array<double, 3> rotate(const std::array<double, 4> &q, const Point3 &v)
 {
 	const auto [x, y, z, w] = q;
@@ -52,11 +42,16 @@ Block beam_block(std::uint8_t axis, Block block, Block vertical)
 }
 } // namespace
 
-Frame Frame::from_heading(double x, double z, double dx, double dz)
+Frame Frame::new_frame(double x, double z, double dx, double dz)
 {
 	const double length = std::hypot(dx, dz);
 	return {x, z, length > 1e-9 ? dx / length : 1.0, length > 1e-9 ? dz / length : 0.0,
 			1.0};
+}
+
+Frame Frame::from_heading(double x, double z, double dx, double dz)
+{
+	return new_frame(x, z, dx, dz);
 }
 
 Frame Frame::flipped() const
@@ -90,8 +85,7 @@ std::pair<int, int> Frame::cell(double a, double b) const
 	return {static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z))};
 }
 
-std::vector<std::array<double, 4>> Frame::cells(
-		double a0, double a1, double b0, double b1) const
+std::vector<FrameCell> Frame::cells(double a0, double a1, double b0, double b1) const
 {
 	const std::array<std::pair<double, double>, 4> corners{
 			world(a0, b0), world(a0, b1), world(a1, b0), world(a1, b1)};
@@ -107,12 +101,12 @@ std::vector<std::array<double, 4>> Frame::cells(
 	const int x1 = static_cast<int>(std::ceil(max_x)) + 1;
 	const int z0 = static_cast<int>(std::floor(min_z)) - 1;
 	const int z1 = static_cast<int>(std::ceil(max_z)) + 1;
-	std::vector<std::array<double, 4>> out;
+	std::vector<FrameCell> out;
 	for (int x = x0; x <= x1; ++x)
 		for (int z = z0; z <= z1; ++z) {
 			const auto [a, b] = local(x + 0.5, z + 0.5);
 			if (a >= a0 && a <= a1 && b >= b0 && b <= b1)
-				out.push_back({static_cast<double>(x), static_cast<double>(z), a, b});
+				out.push_back({x, z, a, b});
 		}
 	return out;
 }
@@ -174,7 +168,7 @@ std::optional<Block> concrete_for_colour(const std::string &text)
 	const double tc = std::hypot(ta, tb);
 	double best = std::numeric_limits<double>::infinity();
 	Block selected = WHITE_CONCRETE;
-	for (const auto &[block, colour] : concrete) {
+	for (const auto &[block, colour] : CONCRETE) {
 		const auto [l, a, b] = rgb_to_oklab(colour[0], colour[1], colour[2]);
 		const double c = std::hypot(a, b), dl = 0.25 * (tl - l);
 		double d;

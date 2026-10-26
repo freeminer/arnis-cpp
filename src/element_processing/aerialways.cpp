@@ -177,6 +177,7 @@ std::vector<Support> supports_for(
 	{
 		double x, z;
 		Support::Role role;
+		bool skip;
 	};
 	std::vector<Point> points;
 	const RopeSpec spec = rope_spec(kind);
@@ -184,10 +185,9 @@ std::vector<Support> supports_for(
 		const auto &node = way.nodes[i];
 		const bool endpoint = i == 0 || i + 1 == way.nodes.size();
 		const auto tag = node.tags.find("aerialway");
+		const bool skip = !endpoint && tag != node.tags.end() && tag->second != "pylon" &&
+						  tag->second != "station";
 		const bool edge = endpoint && clipping::is_invented_node_id(node.id);
-		if (!endpoint && tag != node.tags.end() && tag->second != "pylon" &&
-				tag->second != "station")
-			continue;
 		Support::Role role = edge ? Support::Role::Edge : Support::Role::Pylon;
 		// Rust splits qualifying mid-stations into section endpoints before
 		// planning supports. A station too close to an end to split remains an
@@ -199,13 +199,15 @@ std::vector<Support> supports_for(
 				std::hypot(points.back().x - x, points.back().z - z) < 1.0 &&
 				i + 1 != way.nodes.size())
 			continue;
-		points.push_back({x, z, role});
+		points.push_back({x, z, role, skip});
 	}
 	if (points.size() < 2)
 		return {};
 	std::vector<Support> supports;
 	supports.reserve(points.size() + 8);
 	for (const auto &point : points) {
+		if (point.skip)
+			continue;
 		const double ground = ground_at(editor, point.x, point.z);
 		const double height = point.role == Support::Role::Station ? spec.station_rope
 							  : point.role == Support::Role::Pylon ? spec.pylon_rope
@@ -803,15 +805,15 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 	const double apron = tram ? 1.0 : 1.5;
 	for (const auto &cell : frame.cells(
 				 -half_a - apron, half_a + apron, -half_b - apron, half_b + apron)) {
-		const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
+		const int x = cell.x, z = cell.z;
 		if (footprints.contains(x, z) || road_mask.contains(x, z))
 			continue;
 		editor.register_road_surface_y(x, z, floor);
 		editor.set_block_absolute(POLISHED_ANDESITE, x, floor, z);
 	}
 	for (const auto &cell : frame.cells(-half_a, half_a, -half_b, half_b)) {
-		const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
-		const double a = cell[2], b = cell[3];
+		const int x = cell.x, z = cell.z;
+		const double a = cell.a, b = cell.b;
 		const bool edge_a = std::abs(a) > half_a - 1.0;
 		const bool edge_b = std::abs(b) > half_b - 1.0;
 		const bool wall = edge_a || edge_b;
@@ -913,10 +915,10 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 		const double booth_a0 = half_a - 4.0, booth_a1 = half_a - 1.0;
 		for (const auto &cell :
 				frame.cells(booth_a0, booth_a1, booth_b - 1.5, booth_b + 1.5)) {
-			const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
+			const int x = cell.x, z = cell.z;
 			if (road_mask.contains(x, z) || footprints.contains(x, z))
 				continue;
-			const double a = cell[2], b = cell[3];
+			const double a = cell.a, b = cell.b;
 			const bool wall = std::abs(a - booth_a0) < 0.8 ||
 							  std::abs(a - booth_a1) < 0.8 || std::abs(b - booth_b) > 0.8;
 			editor.register_road_surface_y(x, z, floor);
@@ -1015,12 +1017,12 @@ void draw_lift_terminal(WorldEditor &editor, const ProcessedWay &way,
 		if (bottom) {
 			const double hut_a = -(radius + 4.0);
 			for (const auto &cell : frame.cells(hut_a - 1.5, hut_a + 1.5, -2.5, 2.5)) {
-				const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
+				const int x = cell.x, z = cell.z;
 				if (!footprints.contains(x, z) && !road_mask.contains(x, z)) {
 					editor.register_road_surface_y(x, z, floor);
 					editor.set_block_absolute(POLISHED_ANDESITE, x, floor, z);
 				}
-				const double a = cell[2], b = cell[3];
+				const double a = cell.a, b = cell.b;
 				const bool wall = std::abs(a - hut_a) > 0.8 || std::abs(b) > 1.8;
 				if (wall) {
 					editor.set_block_absolute(WHITE_CONCRETE, x, floor + 1, z);
@@ -1038,8 +1040,7 @@ void draw_lift_terminal(WorldEditor &editor, const ProcessedWay &way,
 						deck_x, deck_z, frame.ux, frame.uz);
 				for (const auto &cell : deck.cells(
 							 -(radius + 5.0) / 2.0, (radius + 5.0) / 2.0, -1.5, 1.5)) {
-					const int x = static_cast<int>(cell[0]),
-							  z = static_cast<int>(cell[1]);
+					const int x = cell.x, z = cell.z;
 					if (footprints.contains(x, z) || road_mask.contains(x, z))
 						continue;
 					editor.register_road_surface_y(x, z, floor);

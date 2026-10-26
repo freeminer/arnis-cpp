@@ -31,4 +31,6 @@ struct Part
 double length_m(const trains::Coach &coach);
 std::vector<Part> parts(const trains::Coach &coach, const trains::Livery &livery);
 std::string key(const trains::Coach &coach, const trains::Livery &livery);
+/// Emit the macro body that summons a carriage's block displays at its centre.
+std::string summon_function(const std::vector<Part> &parts, double size, bool bare);
 } // namespace arnis::train_bodies

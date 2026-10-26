@@ -5,6 +5,8 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <functional>
+#include <optional>
 #include <string>
 #include <utility>
 #include <vector>
@@ -139,6 +141,9 @@ public:
 	double size() const { return size_; }
 	std::size_t train_count() const;
 	bool is_empty() const { return services_.empty(); }
+	std::vector<std::pair<std::string, std::string>> datapack_functions(
+			const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
+			const;
 
 private:
 	std::vector<Route> routes_;

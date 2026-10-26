@@ -1,5 +1,6 @@
 #include "trains.h"
 
+#include "../datapack/mod.h"
 #include "../clipping.h"
 #include "../strict_parse.h"
 
@@ -8,10 +9,12 @@
 #include <cmath>
 #include <deque>
 #include <functional>
+#include <iomanip>
 #include <limits>
 #include <map>
 #include <numbers>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -1433,6 +1436,181 @@ std::size_t TrainRouteNetwork::train_count() const
 	for (const auto &service : services_)
 		total += service.trains.size();
 	return total;
+}
+
+std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_functions(
+		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y) const
+{
+	std::vector<std::pair<std::string, std::string>> out;
+	std::ostringstream network;
+	network << "data modify storage arnis:trains tmp set value []\n";
+	std::ostringstream all;
+	std::map<std::string, std::vector<train_bodies::Part>> bodies;
+	std::size_t carriage = 0;
+	for (std::size_t route_index = 0; route_index < services_.size(); ++route_index) {
+		const auto &service = services_[route_index];
+		if (service.route >= routes_.size())
+			continue;
+		const auto &route = routes_[service.route];
+		const std::size_t n = route.points.size();
+		if (n == 0 || route.ways.size() < n)
+			continue;
+		std::vector<std::optional<double>> raw(n);
+		for (std::size_t i = 0; i < n; ++i) {
+			const auto bx = static_cast<int>(std::floor(route.points[i].x));
+			const auto bz = static_cast<int>(std::floor(route.points[i].z));
+			std::optional<std::pair<int, int>> best;
+			for (int dx = -1; dx <= 1; ++dx)
+				for (int dz = -1; dz <= 1; ++dz)
+					if (const auto y = rail_y(route.ways[i], bx + dx, bz + dz)) {
+						const int distance = dx * dx + dz * dz;
+						if (!best || distance < best->first)
+							best = std::pair{distance, *y};
+					}
+			if (best)
+				raw[i] = best->second;
+		}
+		const auto known = static_cast<std::size_t>(std::count_if(
+				raw.begin(), raw.end(), [](const auto &v) { return v.has_value(); }));
+		if (known * 2 < n)
+			continue;
+		auto filled = raw;
+		std::optional<double> previous;
+		for (auto &height : filled) {
+			if (height)
+				previous = height;
+			else
+				height = previous;
+		}
+		std::optional<double> next;
+		for (std::size_t i = n; i-- > 0;) {
+			if (raw[i])
+				next = raw[i];
+			else if (!filled[i])
+				filled[i] = next;
+		}
+		std::vector<double> heights(n);
+		for (std::size_t i = 0; i < n; ++i)
+			heights[i] = filled[i].value_or(0.0);
+		const auto unsmoothed_heights = heights;
+		const bool looped = route.shape == Shape::Loop;
+		for (std::size_t i = 0; i < n; ++i) {
+			double sum = 0.0;
+			int count = 0;
+			for (int d = -3; d <= 3; ++d) {
+				const auto j = static_cast<std::int64_t>(i) + d;
+				if (looped) {
+					const auto wrapped = static_cast<std::size_t>(
+							(j % static_cast<std::int64_t>(n) +
+									static_cast<std::int64_t>(n)) %
+							static_cast<std::int64_t>(n));
+					sum += unsmoothed_heights[wrapped];
+					++count;
+				} else if (j >= 0 && j < static_cast<std::int64_t>(n)) {
+					sum += unsmoothed_heights[static_cast<std::size_t>(j)];
+					++count;
+				}
+			}
+			heights[i] = sum / count;
+		}
+
+		const std::size_t r = route_index;
+		network << "data modify storage arnis:trains r" << r << " set value []\n";
+		for (std::size_t start = 0; start < n; start += 400) {
+			const auto end = std::min(n, start + 400);
+			network << "data modify storage arnis:trains tmp set value [";
+			for (std::size_t i = start; i < end; ++i) {
+				if (i != start)
+					network << ',';
+				const auto &a = route.points[route.shape == Shape::Loop
+													 ? i
+													 : (i + 1 < n ? i : i - (i > 0))];
+				const auto &b = route.points[route.shape == Shape::Loop
+													 ? (i + 1) % n
+													 : (i + 1 < n ? i + 1 : i)];
+				const double heading =
+						std::atan2(-(b.x - a.x), b.z - a.z) * 180.0 / std::numbers::pi;
+				network << "{x:" << std::fixed << std::setprecision(2)
+						<< ::arnis::datapack::macro_coord(route.points[i].x)
+						<< "d,y:" << std::setprecision(3) << heights[i] + 0.0625
+						<< "d,z:" << std::setprecision(2)
+						<< ::arnis::datapack::macro_coord(route.points[i].z)
+						<< "d,h:" << std::setprecision(1) << heading << "f}";
+			}
+			network << "]\ndata modify storage arnis:trains r" << r
+					<< " append from storage arnis:trains tmp[]\n";
+		}
+		network << "data modify storage arnis:trains s" << r << " set value [I;";
+		for (std::size_t i = 0; i < service.timetable.size(); ++i) {
+			if (i)
+				network << ',';
+			network << service.timetable[i];
+		}
+		network << "]\n";
+		const auto length_mm =
+				static_cast<std::int64_t>(std::llround(route.length() * 1000.0));
+		const auto visible = route.shape == Shape::Loop ? length_mm - 1 : length_mm;
+		const auto period =
+				route.shape == Shape::Loop
+						? length_mm
+						: (route.shape == Shape::Through ? service.period : 0);
+		const double middle =
+				service.offsets.empty() ? 0.0 : service.offsets.back() / 2.0;
+		for (std::size_t train_index = 0; train_index < service.trains.size();
+				++train_index) {
+			const auto &departure = service.trains[train_index];
+			const auto name = std::to_string(r) + "_" + std::to_string(train_index);
+			std::ostringstream text;
+			text << "# Train " << train_index << " on route " << r
+				 << ": position from its timetable.\n"
+				 << "scoreboard players operation #i arnis.train = #now arnis.train\n"
+				 << "scoreboard players add #i arnis.train " << departure.phase << '\n'
+				 << "scoreboard players set #T arnis.train " << service.timetable.size()
+				 << '\n'
+				 << "scoreboard players operation #i arnis.train %= #T arnis.train\n"
+				 << "data modify storage arnis:trains a set value {r:" << r << "}\n"
+				 << "execute store result storage arnis:trains a.i int 1 run scoreboard players get #i arnis.train\n"
+				 << "function arnis:trains/when with storage arnis:trains a\n"
+				 << "scoreboard players set #L arnis.train " << visible << '\n'
+				 << "scoreboard players set #P arnis.train " << period << '\n'
+				 << "scoreboard players operation #sk arnis.train = #s arnis.train\n"
+				 << "scoreboard players remove #sk arnis.train "
+				 << static_cast<std::int64_t>(std::llround(middle * 1000.0)) << '\n'
+				 << "function arnis:trains/near\n"
+				 << "execute unless score #go arnis.train matches 1 run return 0\n";
+			for (std::size_t i = 0; i < service.coaches.size(); ++i) {
+				const auto &coach = service.coaches[i];
+				const auto &livery = departure.livery;
+				const auto body_key = train_bodies::key(coach, livery);
+				bodies.try_emplace(body_key, train_bodies::parts(coach, livery));
+				const double offset =
+						i < service.offsets.size() ? service.offsets[i] : 0.0;
+				text << "scoreboard players operation #sk arnis.train = #s arnis.train\n"
+					 << "scoreboard players remove #sk arnis.train "
+					 << static_cast<std::int64_t>(std::llround(offset * 1000.0)) << '\n'
+					 << "data modify storage arnis:trains c set value {r:" << r
+					 << ",c:" << carriage + i << ",b:\"" << body_key << "\"}\n"
+					 << "function arnis:trains/car\n";
+			}
+			carriage += service.coaches.size();
+			all << "function arnis:trains/t/" << name << '\n';
+			out.emplace_back(
+					"data/arnis/function/trains/t/" + name + ".mcfunction", text.str());
+		}
+	}
+	network << "data remove storage arnis:trains tmp\n";
+	out.emplace_back("data/arnis/function/trains/network.mcfunction", network.str());
+	out.emplace_back("data/arnis/function/trains/all.mcfunction", all.str());
+	for (const auto &[key, parts] : bodies) {
+		for (const bool bare : {false, true}) {
+			const auto body = train_bodies::summon_function(parts, size_, bare);
+			const std::string prefix = bare ? "ov121/" : "";
+			out.emplace_back(
+					prefix + "data/arnis/function/trains/body/" + key + ".mcfunction",
+					body);
+		}
+	}
+	return out;
 }
 
 } // namespace arnis::trains

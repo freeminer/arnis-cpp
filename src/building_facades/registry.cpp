@@ -33,6 +33,7 @@ struct PendingRun
 {
 	std::uint64_t way_id = 0;
 	std::uint64_t group = 0;
+	std::uint32_t wall = 0;
 	std::size_t entry = 0;
 	Choice choice;
 	std::vector<std::pair<int, int>> cells;
@@ -261,22 +262,43 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 				++stretches;
 				for (std::size_t piece = begin; piece < end; piece += piece_cells) {
 					const std::size_t last = std::min(end, piece + piece_cells);
-					const double x0 = (positions[piece] - step * 0.5 - left) /
-									  std::max(0.001, scale);
-					const double x1 = (positions[last - 1] + step * 0.5 - left) /
-									  std::max(0.001, scale);
-					const double y0 =
-							static_cast<double>(rows_hidden) / std::max(0.001, scale);
-					const double y1 = height;
-					const auto panel = gather_region(fit, *image->second, x0, x1, y0, y1);
-					if (!panel)
+					const auto normal = mapillary::displays::outward_normal(
+							run.dir, run.normal.first, run.normal.second);
+					if (!normal)
 						continue;
-					const auto &[x, z] = run.cells[piece];
-					placed += submit_panel(editor, x + run.normal.first,
-							run.base_y + rows_hidden, z + run.normal.second,
-							world_editor::WorldEditor::facing_for_normal(
-									run.normal.first, run.normal.second),
-							*panel);
+					const auto cells = std::vector<std::pair<int, int>>(
+							run.cells.begin() + piece, run.cells.begin() + last);
+					for (const auto &display_piece :
+							mapillary::displays::pieces(cells, *normal, step,
+									run.base_y + rows_hidden, run.height - rows_hidden)) {
+						const auto p0 =
+								piece + static_cast<std::size_t>(display_piece.p0);
+						const auto p1 =
+								piece + static_cast<std::size_t>(display_piece.p1);
+						const double x0 = (positions[p0] - step * 0.5 - left) /
+										  std::max(0.001, scale);
+						const double x1 = (positions[p1 - 1] + step * 0.5 - left) /
+										  std::max(0.001, scale);
+						const double y0 =
+								static_cast<double>(rows_hidden + display_piece.b0) /
+								std::max(0.001, scale);
+						const double y1 =
+								static_cast<double>(rows_hidden + display_piece.b1) /
+								std::max(0.001, scale);
+						auto panel = gather_region(fit, *image->second, x0, x1, y0, y1);
+						if (!panel)
+							continue;
+						const std::string name =
+								"b" + std::to_string(run.way_id) + "_" +
+								std::to_string(run.wall) + "_" + std::to_string(p0) +
+								"_" + std::to_string(rows_hidden + display_piece.b0);
+						const auto facing = mapillary::displays::facing_index(*normal);
+						if (mapillary::displays::place_item_display(editor, name,
+									display_piece.quad, facing, std::move(panel->pixels),
+									panel->width, panel->height)) {
+							++placed;
+						}
+					}
 				}
 			}
 			begin = end;
@@ -370,6 +392,7 @@ building_facade::PointSet collect(world_editor::WorldEditor &editor,
 			PendingRun pending_run;
 			pending_run.way_id = way_id;
 			pending_run.group = osm_parser::group_key(group_seed);
+			pending_run.wall = static_cast<std::uint32_t>(i);
 			pending_run.entry = choice->entry;
 			pending_run.choice = *choice;
 			pending_run.cells.assign(cells.begin() + first, cells.begin() + open_end);

@@ -1,6 +1,8 @@
 #include "discoveries.h"
 #include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 
+#include <nlohmann/json.hpp>
+
 #include <algorithm>
 #include <array>
 #include <cctype>
@@ -383,6 +385,173 @@ const char *title(Category category)
 		return "Civic";
 	}
 	return "";
+}
+
+std::vector<std::pair<std::string, std::string>> advancement_files(
+		const std::string &area, const std::vector<Place> &places)
+{
+	using json = nlohmann::json;
+	enum class Schema
+	{
+		Legacy,
+		Namespaced,
+		Typed
+	};
+	const auto category_key = [](Category category) -> const char * {
+		switch (category) {
+		case Category::Landmark:
+			return "landmarks";
+		case Category::Culture:
+			return "culture";
+		case Category::Viewpoint:
+			return "viewpoints";
+		case Category::Nature:
+			return "nature";
+		case Category::Faith:
+			return "faith";
+		case Category::Transport:
+			return "transport";
+		case Category::Bridge:
+			return "bridges";
+		case Category::Sport:
+			return "sport";
+		case Category::Civic:
+			return "civic";
+		}
+		return "landmarks";
+	};
+	const auto category_icon = [](Category category) -> const char * {
+		switch (category) {
+		case Category::Landmark:
+			return "minecraft:chiseled_stone_bricks";
+		case Category::Culture:
+			return "minecraft:painting";
+		case Category::Viewpoint:
+			return "minecraft:spyglass";
+		case Category::Nature:
+			return "minecraft:oak_sapling";
+		case Category::Faith:
+			return "minecraft:bell";
+		case Category::Transport:
+			return "minecraft:minecart";
+		case Category::Bridge:
+			return "minecraft:stone_bricks";
+		case Category::Sport:
+			return "minecraft:target";
+		case Category::Civic:
+			return "minecraft:book";
+		}
+		return "minecraft:filled_map";
+	};
+	const auto criterion = [](const Place &place, Schema schema) {
+		const json location = {{"dimension", "minecraft:overworld"},
+				{"position",
+						{{"x", {{"min", place.min.first}, {"max", place.max.first + 1}}},
+								{"z", {{"min", place.min.second},
+											  {"max", place.max.second + 1}}}}}};
+		json player;
+		if (schema == Schema::Legacy) {
+			player = json::array({{{"condition", "minecraft:entity_properties"},
+					{"entity", "this"}, {"predicate", {{"location", location}}}}});
+		} else if (schema == Schema::Namespaced) {
+			player = json::array(
+					{{{"condition", "minecraft:entity_properties"}, {"entity", "this"},
+							{"predicate", {{"minecraft:location", location}}}}});
+		} else {
+			player = {{"type", "minecraft:entity_properties"}, {"entity", "this"},
+					{"predicate", {{"minecraft:location", location}}}};
+		}
+		return json{
+				{"trigger", "minecraft:location"}, {"conditions", {{"player", player}}}};
+	};
+	const auto root = [&](bool modern_background) {
+		return json{
+				{"display",
+						{{"icon", {{"id", "minecraft:filled_map"}}}, {"title", area},
+								{"description",
+										std::to_string(places.size()) +
+												" places to discover, from OpenStreetMap"},
+								{"background",
+										modern_background
+												? "minecraft:block/stone_bricks"
+												: "minecraft:textures/block/stone_bricks.png"},
+								{"show_toast", false}, {"announce_to_chat", false}}},
+				{"criteria", {{"joined", {{"trigger", "minecraft:tick"}}}}}};
+	};
+	constexpr const char *dir = "main";
+	const std::string base =
+			"data/arnis/advancement/discoveries/" + std::string(dir) + "/";
+	std::vector<std::pair<std::string, std::string>> out;
+	const auto put = [&](std::string path, const json &value) {
+		out.emplace_back(std::move(path), value.dump(2) + "\n");
+	};
+	put(base + "root.json", root(false));
+	put("ov71/" + base + "root.json", root(true));
+	const std::array<std::pair<const char *, Schema>, 3> schemas{{{"", Schema::Legacy},
+			{"ov107/", Schema::Namespaced}, {"ov121/", Schema::Typed}}};
+	const std::array<Category, 9> all_categories{{Category::Landmark, Category::Culture,
+			Category::Viewpoint, Category::Nature, Category::Faith, Category::Transport,
+			Category::Bridge, Category::Sport, Category::Civic}};
+	for (const auto &[prefix, schema] : schemas) {
+		for (const auto category : all_categories) {
+			const auto key = category_key(category);
+			std::vector<std::size_t> members;
+			for (std::size_t i = 0; i < places.size(); ++i)
+				if (places[i].category == category)
+					members.push_back(i);
+			if (members.empty())
+				continue;
+			json criteria = json::object();
+			json any = json::array();
+			for (const auto i : members) {
+				const auto id = "p" + std::to_string(i);
+				criteria[id] = criterion(places[i], schema);
+				any.push_back(id);
+			}
+			put(std::string(prefix) + base + key + ".json",
+					{{"parent", "arnis:discoveries/main/root"},
+							{"display", {{"icon", {{"id", category_icon(category)}}},
+												{"title", title(category)},
+												{"description",
+														std::to_string(members.size()) +
+																" to find"},
+												{"show_toast", false},
+												{"announce_to_chat", false}}},
+							{"criteria", criteria},
+							{"requirements", json::array({any})}});
+			for (const auto i : members) {
+				const auto &place = places[i];
+				json display = {{"icon", {{"id", category_icon(category)}}},
+						{"title", place.name}, {"description", place.label},
+						{"frame", place.notable ? "goal" : "task"}};
+				put(std::string(prefix) + base + key + "/" + std::to_string(i) + ".json",
+						{{"parent", "arnis:discoveries/main/" + std::string(key)},
+								{"display", std::move(display)},
+								{"criteria", {{"visit", criterion(place, schema)}}},
+								{"rewards", {{"experience", place.notable ? 25 : 10}}}});
+			}
+		}
+		json criteria = json::object();
+		json requirements = json::array();
+		for (std::size_t i = 0; i < places.size(); ++i) {
+			const auto id = "p" + std::to_string(i);
+			criteria[id] = criterion(places[i], schema);
+			requirements.push_back(json::array({id}));
+		}
+		put(std::string(prefix) + base + "explorer.json",
+				{{"parent", "arnis:discoveries/main/root"},
+						{"display",
+								{{"icon", {{"id", "minecraft:compass"}}},
+										{"title", "Know " + area + " by Heart"},
+										{"description",
+												"Discover all " +
+														std::to_string(places.size()) +
+														" places"},
+										{"frame", "challenge"}}},
+						{"criteria", criteria}, {"requirements", requirements},
+						{"rewards", {{"experience", 250}}}});
+	}
+	return out;
 }
 
 void Place::settle(const std::function<bool(int, int)> &open,

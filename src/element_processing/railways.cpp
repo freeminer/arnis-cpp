@@ -772,12 +772,6 @@ optional<Block> connected_advtrains_rail(
 // Advtrains' slope nodes join elevations differing by exactly one node.  Keep
 // the generated rail formation within that constraint instead of flattening a
 // whole OSM way at its highest terrain sample.
-vector<int> advtrains_height_profile(
-		WorldEditor &editor, const vector<pair<int, int>> &line)
-{
-	return advtrains::height_profile(editor, line);
-}
-
 optional<Block> advtrains_slope_rail(
 		const vector<pair<int, int>> &line, const vector<int> &heights, std::size_t index)
 {
@@ -868,224 +862,164 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 		const RailJoins &rail_joins, const bridges::BridgeStructureMap &bridge_structures)
 {
-	const auto *plan = advtrains::get_plan(element);
 	const auto joined_ends = rail_joins.ends(element.id);
-	// Keep the Rust at-grade placement order and endpoint orientation when the
-	// optional Advtrains network is unavailable. Rust renders each OSM segment
-	// separately, skips its duplicated first point after the first segment, and
-	// carries sleeper spacing across the joins. A merged centerline changes the
-	// previous/next pair at shared OSM nodes, which can turn a straight join into
-	// a curve (or vice versa).
-	if (!ADVTRAINS_AVAILABLE) {
-		const auto cells = build_connected_centerline(element);
-		if (cells.size() < 2)
-			return;
-		std::vector<int> ground;
-		ground.reserve(cells.size());
-		for (const auto &[x, z] : cells)
-			ground.push_back(editor.get_ground_level(x, z));
-		struct Held
+	// Keep the terrain-aware Rust rail profile for every backend. Advtrains only
+	// changes the rail node representation; using its separate height planner here
+	// made the same OSM track choose different grades and ignore road/deck pins.
+	const auto cells = build_smoothed_centerline(element);
+	if (cells.empty())
+		return;
+	std::vector<int> ground;
+	ground.reserve(cells.size());
+	for (const auto &[x, z] : cells)
+		ground.push_back(editor.get_ground_level(x, z));
+	struct Held
+	{
+		enum Kind
 		{
-			enum Kind
-			{
-				Free,
-				Road,
-				Fixed
-			} kind = Free;
-			int y = 0;
+			Free,
+			Road,
+			Fixed
+		} kind = Free;
+		int y = 0;
+	};
+	static const std::vector<Block> rail_blocks{RAIL, RAIL_NORTH_SOUTH, RAIL_EAST_WEST,
+			RAIL_ASCENDING_EAST, RAIL_ASCENDING_WEST, RAIL_ASCENDING_NORTH,
+			RAIL_ASCENDING_SOUTH, RAIL_NORTH_EAST, RAIL_NORTH_WEST, RAIL_SOUTH_EAST,
+			RAIL_SOUTH_WEST};
+	std::vector<Held> held;
+	held.reserve(cells.size());
+	for (std::size_t i = 0; i < cells.size(); ++i) {
+		const auto [x, z] = cells[i];
+		const int g = ground[i];
+		const auto rail_at = [&](int y) {
+			const auto block = editor.get_block_absolute(x, y, z);
+			return block &&
+				   std::any_of(rail_blocks.begin(), rail_blocks.end(),
+						   [&](const auto &rail) { return rail.id() == block->id(); });
 		};
-		static const std::vector<Block> rail_blocks{RAIL, RAIL_NORTH_SOUTH,
-				RAIL_EAST_WEST, RAIL_ASCENDING_EAST, RAIL_ASCENDING_WEST,
-				RAIL_ASCENDING_NORTH, RAIL_ASCENDING_SOUTH, RAIL_NORTH_EAST,
-				RAIL_NORTH_WEST, RAIL_SOUTH_EAST, RAIL_SOUTH_WEST};
-		std::vector<Held> held;
-		held.reserve(cells.size());
-		for (std::size_t i = 0; i < cells.size(); ++i) {
-			const auto [x, z] = cells[i];
-			const int g = ground[i];
-			const auto rail_at = [&](int y) {
-				const auto block = editor.get_block_absolute(x, y, z);
-				return block && std::any_of(rail_blocks.begin(), rail_blocks.end(),
-										[&](const auto &rail) {
-											return rail.id() == block->id();
-										});
-			};
-			if (const auto road = editor.surface_override(x, z)) {
-				if (rail_at(*road + 1))
-					held.push_back({Held::Fixed, *road});
-				else if (rail_at(*road))
-					held.push_back({Held::Fixed, *road - 1});
-				else
-					held.push_back({Held::Road, *road});
-			} else if (editor.get_block_absolute(x, g, z)) {
-				held.push_back({Held::Fixed, g});
-			} else {
-				held.push_back({Held::Free, 0});
-			}
-		}
-		std::vector<std::optional<int>> pins(cells.size());
-		for (std::size_t e = 0; e < 2; ++e) {
-			const auto &end = joined_ends[e];
-			if (!end.shared)
-				continue;
-			const std::size_t at = e == 0 ? 0 : cells.size() - 1;
-			int level = ground[at];
-			if (end.into) {
-				const auto &[other_id, cell, direction] = *end.into;
-				if (const auto *deck = bridge_structures.rail_deck(other_id)) {
-					const auto index = static_cast<std::ptrdiff_t>(cell) + direction;
-					if (index >= 0 && static_cast<std::size_t>(index) < deck->ys.size())
-						level = deck->ys[static_cast<std::size_t>(index)];
-				}
-			}
-			const std::size_t adjacent =
-					e == 0 ? std::min<std::size_t>(1, cells.size() - 1)
-						   : cells.size() - 2;
-			if (!pins[at])
-				pins[at] = level;
-			if (!pins[adjacent])
-				pins[adjacent] = level;
-		}
-		const auto straight = straight_cells(cells,
-				joined_ends[0].beyond.empty()
-						? std::nullopt
-						: std::optional(joined_ends[0].beyond.front()),
-				joined_ends[1].beyond.empty()
-						? std::nullopt
-						: std::optional(joined_ends[1].beyond.front()));
-		const auto beds = rail_profile(
-				straight,
-				[&](std::size_t i) {
-					switch (held[i].kind) {
-					case Held::Fixed:
-						return std::pair{held[i].y, held[i].y};
-					case Held::Road:
-						return std::pair{held[i].y - 1, held[i].y + 1};
-					case Held::Free:
-						if (pins[i])
-							return std::pair{*pins[i], *pins[i]};
-						return std::pair{ground[i] - 10, ground[i] + 10};
-					}
-					return std::pair{ground[i], ground[i]};
-				},
-				[&](std::size_t i, int y) {
-					return held[i].kind == Held::Road
-								   ? 4.0 * std::abs(y - held[i].y)
-								   : static_cast<double>(std::abs(y - ground[i]));
-				},
-				2.5);
-		const auto before =
-				joined_ends[0].beyond.empty()
-						? std::nullopt
-						: std::optional(std::tuple{joined_ends[0].beyond.front(),
-								  pins.front().value_or(beds.front())});
-		const auto after =
-				joined_ends[1].beyond.empty()
-						? std::nullopt
-						: std::optional(std::tuple{joined_ends[1].beyond.front(),
-								  pins.back().value_or(beds.back())});
-		const auto rails = rail_shapes(cells, beds, before, after);
-		std::size_t sleepers = 0;
-		for (std::size_t i = 0; i < cells.size(); ++i) {
-			const auto [x, z] = cells[i];
-			const auto rail = rails[i];
-			const bool lays =
-					!(i == 0 && joined_ends[0].shared && !joined_ends[0].owns) &&
-					!(i + 1 == cells.size() && joined_ends[1].shared &&
-							!joined_ends[1].owns);
-			if (held[i].kind == Held::Road && beds[i] < held[i].y) {
-				if (lays)
-					editor.set_block_absolute(rail, x, held[i].y, z, nullopt,
-							std::optional<std::vector<Block>>{std::vector<Block>{}});
-				editor.register_rail(element.id, x, z, held[i].y);
-				continue;
-			}
-			if (held[i].kind == Held::Free) {
-				editor.register_road_surface_y(x, z, beds[i]);
-				editor.set_block_absolute(GRAVEL, x, beds[i], z, nullopt, nullopt);
-			} else if (held[i].kind == Held::Road && beds[i] > held[i].y) {
-				const auto surface =
-						editor.get_block_absolute(x, held[i].y, z).value_or(GRAVEL);
-				editor.set_block_absolute(surface, x, beds[i], z, nullopt, nullopt);
-			} else {
-				editor.set_block_absolute(GRAVEL, x, beds[i], z, nullopt, nullopt);
-			}
-			if (lays)
-				editor.set_block_absolute(rail, x, beds[i] + 1, z,
-						std::optional<std::vector<Block>>{std::vector<Block>{OAK_LEAVES,
-								BIRCH_LEAVES, SPRUCE_LEAVES, DARK_OAK_LEAVES,
-								JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES,
-								MANGROVE_LEAVES, AZALEA_LEAVES, FLOWERING_AZALEA_LEAVES}},
-						nullopt);
-			editor.register_rail(element.id, x, z, beds[i] + 1);
-			if (sleepers++ % 4 == 0)
-				editor.set_block_absolute(OAK_LOG, x, beds[i], z, nullopt, nullopt);
-		}
-		return;
-	}
-	const auto centerline = build_connected_centerline(element);
-	if (centerline.empty())
-		return;
-	const vector<int> adv_heights =
-			ADVTRAINS_AVAILABLE ? (plan ? plan->heights
-										: advtrains_height_profile(editor, centerline))
-								: vector<int>{};
-	std::size_t tds = 0;
-	for (size_t j = 0; j < centerline.size(); ++j) {
-		const auto &[bx, bz] = centerline[j];
-
-		const int prev_ground = j > 0 ? editor.get_ground_level(centerline[j - 1].first,
-												centerline[j - 1].second)
-									  : editor.get_ground_level(bx, bz);
-		const int next_ground = j + 1 < centerline.size()
-										? editor.get_ground_level(centerline[j + 1].first,
-												  centerline[j + 1].second)
-										: editor.get_ground_level(bx, bz);
-		const int current_ground = editor.get_ground_level(bx, bz);
-		const int rail_y = ADVTRAINS_AVAILABLE ? adv_heights[j] : current_ground;
-
-		if (ADVTRAINS_AVAILABLE) {
-			for (int fill_y = current_ground; fill_y <= rail_y; ++fill_y)
-				editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
-		} else {
-			if (prev_ground < current_ground)
-				for (int fill_y = prev_ground; fill_y < current_ground; ++fill_y)
-					editor.set_block_absolute(GRAVEL, bx, fill_y, bz, nullopt, nullopt);
-			editor.set_block(GRAVEL, bx, 0, bz, nullopt, nullopt);
-		}
-
-		optional<pair<int, int>> prev_opt = nullopt;
-		optional<pair<int, int>> next_opt = nullopt;
-		if (j > 0)
-			prev_opt = centerline[j - 1];
-		if (j + 1 < centerline.size())
-			next_opt = centerline[j + 1];
-
-		const Block rail_block =
-				plan ? plan->rails[j]
-				: ADVTRAINS_AVAILABLE
-						? advtrains_slope_rail(centerline, adv_heights, j)
-								  .value_or(advtrains::connected_rail(centerline, j, true)
-													.value_or(determine_rail_with_slope(
-															{bx, bz}, prev_opt, next_opt,
-															prev_ground, current_ground,
-															next_ground)))
-						: determine_rail_with_slope({bx, bz}, prev_opt, next_opt,
-								  prev_ground, current_ground, next_ground);
-		if (ADVTRAINS_AVAILABLE) {
-			editor.set_block_absolute(rail_block, bx, rail_y + 1, bz, nullopt, nullopt);
-			editor.register_rail(element.id, bx, bz, rail_y + 1);
-		} else {
-			editor.set_block(rail_block, bx, 1, bz, nullopt, nullopt);
-		}
-
-		if ((tds % 4) == 0) {
-			if (ADVTRAINS_AVAILABLE)
-				editor.set_block_absolute(OAK_LOG, bx, rail_y, bz, nullopt, nullopt);
+		if (const auto road = editor.surface_override(x, z)) {
+			if (rail_at(*road + 1))
+				held.push_back({Held::Fixed, *road});
+			else if (rail_at(*road))
+				held.push_back({Held::Fixed, *road - 1});
 			else
-				editor.set_block(OAK_LOG, bx, 0, bz, nullopt, nullopt);
+				held.push_back({Held::Road, *road});
+		} else if (editor.get_block_absolute(x, g, z)) {
+			held.push_back({Held::Fixed, g});
+		} else {
+			held.push_back({Held::Free, 0});
 		}
-		++tds;
+	}
+	std::vector<std::optional<int>> pins(cells.size());
+	const auto deck_y = [&](std::uint64_t way,
+								std::ptrdiff_t cell) -> std::optional<int> {
+		const auto *deck = bridge_structures.rail_deck(way);
+		if (!deck || deck->ys.empty())
+			return std::nullopt;
+		if (cell < 0)
+			return deck->kind == bridges::RailDeckKind::Carried
+						   ? std::optional(deck->ys.back())
+						   : std::nullopt;
+		const auto index = static_cast<std::size_t>(cell);
+		if (index < deck->ys.size())
+			return deck->ys[index];
+		if (deck->kind == bridges::RailDeckKind::Carried)
+			return deck->ys.back();
+		return std::nullopt;
+	};
+	for (std::size_t e = 0; e < 2; ++e) {
+		const auto &end = joined_ends[e];
+		if (!end.shared)
+			continue;
+		const std::size_t at = e == 0 ? 0 : cells.size() - 1;
+		int level = ground[at];
+		if (end.into) {
+			const auto &[other_id, cell, direction] = *end.into;
+			if (const auto y = deck_y(
+						other_id, static_cast<std::ptrdiff_t>(cell) + direction))
+				level = *y;
+		}
+		const std::size_t adjacent = e == 0 ? std::min<std::size_t>(1, cells.size() - 1)
+											: (cells.size() > 1 ? cells.size() - 2 : 0);
+		if (!pins[at])
+			pins[at] = level;
+		if (!pins[adjacent])
+			pins[adjacent] = level;
+	}
+	const auto straight = straight_cells(cells,
+			joined_ends[0].beyond.empty() ? std::nullopt
+										  : std::optional(joined_ends[0].beyond.front()),
+			joined_ends[1].beyond.empty() ? std::nullopt
+										  : std::optional(joined_ends[1].beyond.front()));
+	const auto beds = rail_profile(
+			straight,
+			[&](std::size_t i) {
+				switch (held[i].kind) {
+				case Held::Fixed:
+					return std::pair{held[i].y, held[i].y};
+				case Held::Road:
+					return std::pair{held[i].y - 1, held[i].y + 1};
+				case Held::Free:
+					if (pins[i])
+						return std::pair{*pins[i], *pins[i]};
+					return std::pair{ground[i] - 10, ground[i] + 10};
+				}
+				return std::pair{ground[i], ground[i]};
+			},
+			[&](std::size_t i, int y) {
+				return held[i].kind == Held::Road
+							   ? 4.0 * std::abs(y - held[i].y)
+							   : static_cast<double>(std::abs(y - ground[i]));
+			},
+			2.5);
+	const auto beyond = [&](const TrackEnd &end, int own) {
+		if (end.beyond.empty())
+			return std::optional<std::tuple<std::pair<int, int>, int>>{};
+		int y = own;
+		if (end.into) {
+			const auto &[way, cell, direction] = *end.into;
+			if (const auto deck_height =
+							deck_y(way, static_cast<std::ptrdiff_t>(cell) + direction))
+				y = *deck_height;
+		}
+		return std::optional(std::tuple{end.beyond.front(), y});
+	};
+	const auto before = beyond(joined_ends[0], beds.front());
+	const auto after = beyond(joined_ends[1], beds.back());
+	const auto vanilla_rails = rail_shapes(cells, beds, before, after);
+	for (std::size_t i = 0; i < cells.size(); ++i) {
+		const auto [x, z] = cells[i];
+		const auto rail =
+				ADVTRAINS_AVAILABLE
+						? advtrains_slope_rail(cells, beds, i)
+								  .value_or(advtrains::connected_rail(cells, i, true)
+													.value_or(vanilla_rails[i]))
+						: vanilla_rails[i];
+		const bool lays =
+				!(i == 0 && joined_ends[0].shared && !joined_ends[0].owns) &&
+				!(i + 1 == cells.size() && joined_ends[1].shared && !joined_ends[1].owns);
+		if (held[i].kind == Held::Road && beds[i] < held[i].y) {
+			if (lays)
+				editor.set_block_absolute(rail, x, held[i].y, z, nullopt,
+						std::optional<std::vector<Block>>{std::vector<Block>{}});
+			editor.register_rail(element.id, x, z, held[i].y);
+			continue;
+		}
+		if (held[i].kind == Held::Free) {
+			editor.register_road_surface_y(x, z, beds[i]);
+			editor.set_block_absolute(GRAVEL, x, beds[i], z, nullopt, nullopt);
+		} else if (held[i].kind == Held::Road && beds[i] > held[i].y) {
+			const auto surface =
+					editor.get_block_absolute(x, held[i].y, z).value_or(GRAVEL);
+			editor.set_block_absolute(surface, x, beds[i], z, nullopt, nullopt);
+		} else {
+			editor.set_block_absolute(GRAVEL, x, beds[i], z, nullopt, nullopt);
+		}
+		if (lays)
+			editor.set_block_absolute(
+					rail, x, beds[i] + 1, z, rail_clear_variants(), nullopt);
+		editor.register_rail(element.id, x, z, beds[i] + 1);
 	}
 }
 
@@ -1792,9 +1726,12 @@ void generate_railways(WorldEditor &editor, const ProcessedWay &element,
 				bridge_surface, rail_joins);
 	} else {
 		generate_at_grade_rail(editor, element, rail_joins, bridge_structures);
-		if (catenary_wanted(element))
-			generate_catenary(editor, build_connected_centerline(element), road_mask,
-					building_footprints, rail_mask);
+		if (catenary_wanted(element)) {
+			const auto points = build_smoothed_centerline(element);
+			if (points.size() >= 2)
+				generate_catenary(
+						editor, points, road_mask, building_footprints, rail_mask);
+		}
 	}
 }
 

@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
@@ -283,8 +284,10 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 	static const Block cabin_colours[] = {RED_CONCRETE, ORANGE_CONCRETE, YELLOW_CONCRETE,
 			LIME_CONCRETE, LIGHT_BLUE_CONCRETE, BLUE_CONCRETE, PURPLE_CONCRETE,
 			PINK_CONCRETE};
-	std::int64_t seed = static_cast<std::int64_t>(
-			structure_kit::mix(element.id(), 0x52'49'44'45ULL) * 31);
+	// Rust keeps this seed as signed bits and increments it per beam. Do the
+	// arithmetic in unsigned space so the wraparound is defined in C++ too.
+	std::uint64_t beam_seed =
+			structure_kit::mix(element.id(), 0x52'49'44'45ULL) * std::uint64_t{31};
 	for (std::size_t k = 0; k < count; ++k) {
 		const double t = TAU * (k + 0.25) / count;
 		const double a = radius * std::cos(t), gondola_y = hub_y + radius * std::sin(t);
@@ -292,7 +295,8 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 			const auto [x0, z0] = frame.world(0.0, side);
 			const auto [x1, z1] = frame.world(a, side);
 			structure_kit::beam(editor, {x0, hub_y + 0.5, z0}, {x1, gondola_y + 0.5, z1},
-					0.18, "minecraft:white_concrete", ++seed, IRON_BARS, IRON_BARS);
+					0.18, "minecraft:white_concrete",
+					std::bit_cast<std::int64_t>(++beam_seed), IRON_BARS, IRON_BARS);
 		}
 		for (int b = -static_cast<int>(half_gap); b <= static_cast<int>(half_gap); ++b) {
 			const auto [x, y, z] = at(a, b, gondola_y);
@@ -306,9 +310,9 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 		const auto cells = frame.cells(a - cabin_half - 0.5, a + cabin_half + 0.5,
 				-cabin_half - 0.5, cabin_half + 0.5);
 		for (const auto &cell : cells) {
-			const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
-			const bool edge_a = std::abs(cell[2] - a) > cabin_half - 0.5;
-			const bool edge_b = std::abs(cell[3]) > cabin_half - 0.5;
+			const int x = cell.x, z = cell.z;
+			const bool edge_a = std::abs(cell.a - a) > cabin_half - 0.5;
+			const bool edge_b = std::abs(cell.b) > cabin_half - 0.5;
 			editor.set_block_absolute(colour, x, roof - 1, z);
 			editor.set_block_absolute(WHITE_CONCRETE, x, floor_y, z);
 			if (!(edge_a || edge_b))
@@ -324,8 +328,7 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 	for (const auto &cell : frame.cells(-1.6, 1.6, -half_gap - 1.5, half_gap + 1.5))
 		for (int y = static_cast<int>(std::floor(hub_y - 1.5));
 				y <= static_cast<int>(std::floor(hub_y + 1.5)); ++y)
-			editor.set_block_absolute(LIGHT_GRAY_CONCRETE, static_cast<int>(cell[0]), y,
-					static_cast<int>(cell[1]));
+			editor.set_block_absolute(LIGHT_GRAY_CONCRETE, cell.x, y, cell.z);
 	for (const double side : {-(half_gap + 1.0), half_gap + 1.0})
 		for (const double direction : {-1.0, 1.0}) {
 			const double foot = radius * 0.62;
@@ -343,8 +346,7 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 			}
 		}
 	for (const auto &cell : frame.cells(-2.5, 2.5, -half_gap - 1.5, half_gap + 1.5))
-		editor.set_block_absolute(SMOOTH_STONE_SLAB, static_cast<int>(cell[0]), floor + 1,
-				static_cast<int>(cell[1]));
+		editor.set_block_absolute(SMOOTH_STONE_SLAB, cell.x, floor + 1, cell.z);
 }
 
 void draw_drop_tower(WorldEditor &editor, const Site &site, const OwnCells &own,
@@ -670,13 +672,13 @@ void draw_pirate_ship(WorldEditor &e, const Site &s, const OwnCells &own,
 	const auto f = structure_kit::Frame::from_heading(s.x, s.z, s.ux, s.uz);
 	Cells pad;
 	for (const auto &c : f.cells(-hl - 2, hl + 2, -hw - 4, hw + 4))
-		pad.emplace_back(int(c[0]), int(c[1]));
+		pad.emplace_back(c.x, c.z);
 	const int floor = level_ride(e, pad, own, fp, roads, POLISHED_ANDESITE);
 	const int keel = floor + 2;
 	const double pivot = keel + len * .6 + 2;
 	for (const auto &c : f.cells(-hl, hl, -hw - .5, hw + .5)) {
-		const int x = int(c[0]), z = int(c[1]);
-		const double a = c[2], b = c[3], u = std::min(std::abs(a) / hl, 1.0);
+		const int x = c.x, z = c.z;
+		const double a = c.a, b = c.b, u = std::min(std::abs(a) / hl, 1.0);
 		const int lift = int(std::lround(u * u * u * 4));
 		const int bottom = keel + lift + (std::abs(b) > hw - 1 ? 1 : 0);
 		const int gunwale = keel + 3 + lift;
@@ -703,7 +705,7 @@ void draw_pirate_ship(WorldEditor &e, const Site &s, const OwnCells &own,
 		e.set_block_absolute(SPRUCE_LOG, mx, y, mz);
 	for (const auto &c : f.cells(.5, 3.5, -.5, .5))
 		for (int y = keel + 6; y < keel + 9; ++y)
-			e.set_block_absolute(BLACK_WOOL, int(c[0]), y, int(c[1]));
+			e.set_block_absolute(BLACK_WOOL, c.x, y, c.z);
 	const double frame_b = hw + 2, foot = len * .45;
 	for (double side : {-frame_b, frame_b}) {
 		for (double dir : {-1.0, 1.0}) {
@@ -726,9 +728,9 @@ void draw_pirate_ship(WorldEditor &e, const Site &s, const OwnCells &own,
 		}
 	}
 	for (const auto &c : f.cells(-.5, .5, -frame_b - .5, frame_b + .5))
-		e.set_block_absolute(GRAY_CONCRETE, int(c[0]), int(std::floor(pivot)), int(c[1]));
+		e.set_block_absolute(GRAY_CONCRETE, c.x, int(std::floor(pivot)), c.z);
 	for (const auto &c : f.cells(-3, 3, hw + .5, hw + 1.5))
-		e.set_block_absolute(SMOOTH_STONE_SLAB, int(c[0]), floor + 1, int(c[1]));
+		e.set_block_absolute(SMOOTH_STONE_SLAB, c.x, floor + 1, c.z);
 	(void)seed;
 }
 
@@ -740,7 +742,7 @@ void draw_bumper_cars(WorldEditor &e, const Site &s, const OwnCells &own,
 	if (cells.size() < 30) {
 		const auto f = structure_kit::Frame::from_heading(s.x, s.z, s.ux, s.uz);
 		for (const auto &c : f.cells(-8, 8, -5, 5))
-			cells.emplace_back(int(c[0]), int(c[1]));
+			cells.emplace_back(c.x, c.z);
 	}
 	std::unordered_set<std::uint64_t> set;
 	for (const auto &[x, z] : cells)
@@ -939,7 +941,7 @@ bool generate_ride(WorldEditor &editor, const ProcessedElement &e,
 		Cells pad;
 		for (const auto &cell :
 				frame.cells(-diameter * .31 - 2, diameter * .31 + 2, -gap - 3, gap + 3))
-			pad.emplace_back(int(cell[0]), int(cell[1]));
+			pad.emplace_back(cell.x, cell.z);
 		floor = level_ride(editor, pad, own, footprints, roads, POLISHED_ANDESITE);
 		const auto *wheel_colour = tag(e.tags(), "colour");
 		if (!wheel_colour)

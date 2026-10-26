@@ -159,6 +159,75 @@ FloodFillResult empty_flood_fill_result()
 	return empty;
 }
 
+const std::unordered_set<std::string> &sealed_leisure_values()
+{
+	static const std::unordered_set<std::string> values = {"pitch", "track", "playground",
+			"recreation_ground", "schoolyard", "ice_rink", "water_park", "slipway",
+			"outdoor_seating", "bathing_place", "fitness_station"};
+	return values;
+}
+
+const std::unordered_set<std::string> &sealed_amenity_values()
+{
+	static const std::unordered_set<std::string> values = {"parking", "parking_space",
+			"bicycle_parking", "motorcycle_parking", "fuel", "charging_station",
+			"car_wash", "taxi", "marketplace"};
+	return values;
+}
+
+const std::unordered_set<std::string> &planted_landuse_values()
+{
+	static const std::unordered_set<std::string> values = {"grass", "flowerbed", "meadow",
+			"greenfield", "village_green", "forest", "orchard", "allotments",
+			"plant_nursery"};
+	return values;
+}
+
+bool is_sealed_surface_way(const ProcessedWay &way)
+{
+	const auto leisure = way.tags.find("leisure");
+	if (leisure != way.tags.end() && sealed_leisure_values().contains(leisure->second))
+		return true;
+	const auto amenity = way.tags.find("amenity");
+	if (amenity != way.tags.end() && sealed_amenity_values().contains(amenity->second))
+		return true;
+	const auto area = way.tags.find("area");
+	return way.tags.contains("highway") && area != way.tags.end() &&
+		   area->second == "yes";
+}
+
+bool paving_yields_to_nested_areas(const ProcessedWay &way)
+{
+	const auto area = way.tags.find("area");
+	if (way.tags.contains("highway") && area != way.tags.end() && area->second == "yes")
+		return true;
+	const auto amenity = way.tags.find("amenity");
+	const auto leisure = way.tags.find("leisure");
+	return (amenity != way.tags.end() &&
+				   sealed_amenity_values().contains(amenity->second)) ||
+		   (leisure != way.tags.end() && leisure->second == "schoolyard");
+}
+
+bool is_planted_way(const ProcessedWay &way)
+{
+	const auto &tags = way.tags;
+	if (tags.contains("building") || tags.contains("building:part") ||
+			tags.contains("highway"))
+		return false;
+	const auto landuse = tags.find("landuse");
+	if (landuse != tags.end())
+		return planted_landuse_values().contains(landuse->second);
+	const auto natural = tags.find("natural");
+	if (natural != tags.end()) {
+		const auto amenity = tags.find("amenity");
+		return natural->second != "tree" && natural->second != "tree_row" &&
+			   !(amenity != tags.end() && amenity->second == "fountain");
+	}
+	const auto leisure = tags.find("leisure");
+	return tags.find("amenity") == tags.end() && leisure != tags.end() &&
+		   (leisure->second == "park" || leisure->second == "garden");
+}
+
 bool relation_fills_members(const ProcessedRelation &relation)
 {
 	const auto area = element_processing::relation_area(relation.tags);
@@ -496,16 +565,6 @@ bool WorldEditor::nested_area_owns(int x, int z) const
 std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		const std::vector<ProcessedElement> &elements, const RoadMaskBitmap &roads) const
 {
-	static const std::unordered_set<std::string> sealed_leisure = {"pitch", "track",
-			"playground", "recreation_ground", "schoolyard", "ice_rink", "water_park",
-			"slipway", "outdoor_seating", "bathing_place", "fitness_station"};
-	static const std::unordered_set<std::string> sealed_amenity = {"parking",
-			"parking_space", "bicycle_parking", "motorcycle_parking", "fuel",
-			"charging_station", "car_wash", "taxi", "marketplace"};
-	static const std::unordered_set<std::string> planted_landuse = {"grass", "flowerbed",
-			"meadow", "greenfield", "village_green", "forest", "orchard", "allotments",
-			"plant_nursery"};
-
 	std::vector<std::pair<uint64_t, bool>> sealed_ids;
 	std::vector<uint64_t> planted_ids;
 	for (const auto &element : elements) {
@@ -514,42 +573,10 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		const auto &way = element.as_way();
 		if (!contains(way.id))
 			continue;
-		const auto leisure = way.tags.find("leisure");
-		const auto amenity = way.tags.find("amenity");
-		const auto landuse = way.tags.find("landuse");
-		const auto natural = way.tags.find("natural");
-		const auto highway = way.tags.find("highway");
-		const auto area = way.tags.find("area");
-		const bool leisure_paving =
-				leisure != way.tags.end() && sealed_leisure.contains(leisure->second);
-		const bool amenity_paving =
-				amenity != way.tags.end() && sealed_amenity.contains(amenity->second);
-		const bool highway_area = highway != way.tags.end() && area != way.tags.end() &&
-								  area->second == "yes";
-		if (leisure_paving || amenity_paving || highway_area) {
-			const bool yields =
-					highway_area || amenity_paving ||
-					(leisure != way.tags.end() && leisure->second == "schoolyard");
-			sealed_ids.emplace_back(way.id, yields);
-		} else {
-			bool is_planted = false;
-			if (!way.tags.contains("building") && !way.tags.contains("building:part") &&
-					highway == way.tags.end()) {
-				if (landuse != way.tags.end()) {
-					is_planted = planted_landuse.contains(landuse->second);
-				} else if (natural != way.tags.end()) {
-					is_planted =
-							natural->second != "tree" && natural->second != "tree_row" &&
-							!(amenity != way.tags.end() && amenity->second == "fountain");
-				} else {
-					is_planted =
-							amenity == way.tags.end() && leisure != way.tags.end() &&
-							(leisure->second == "park" || leisure->second == "garden");
-				}
-			}
-			if (is_planted)
-				planted_ids.push_back(way.id);
-		}
+		if (is_sealed_surface_way(way))
+			sealed_ids.emplace_back(way.id, paving_yields_to_nested_areas(way));
+		else if (is_planted_way(way))
+			planted_ids.push_back(way.id);
 	}
 	struct Layer
 	{
@@ -603,7 +630,10 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 				layers.push_back({*planted_lens[i], false, planted_ids[i]});
 		}
 	}
-	std::sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
+	// Rust's slice::sort_by is stable. Preserve source order for equal-sized
+	// same-kind areas: among overlapping planted areas, the later nested layer
+	// must continue to win just as it does in the Rust pre-pass.
+	std::stable_sort(layers.begin(), layers.end(), [](const Layer &a, const Layer &b) {
 		if (a.size != b.size)
 			return a.size > b.size;
 		// Apply planted layers first at equal size, so paving takes precedence.
@@ -648,7 +678,9 @@ std::pair<size_t, size_t> CoordinateBitmap::count_in_range(int32_t min_x_range,
 	size_t urban_count = 0;
 	size_t total_count = 0;
 
-	for (int32_t z = min_z_range; z <= max_z_range; ++z) {
+	// Widen the iterator so an inclusive range ending at INT32_MAX terminates
+	// without overflowing the signed coordinate type, matching Rust's range.
+	for (int64_t z = min_z_range; z <= static_cast<int64_t>(max_z_range); ++z) {
 		// Calculate local z coordinate
 		int64_t local_z = static_cast<int64_t>(z) - static_cast<int64_t>(min_z_);
 		if (local_z < 0 || local_z >= static_cast<int64_t>(height_)) {
@@ -785,18 +817,10 @@ bool FloodFillCache::fill_goes_unread(const ProcessedWay &way)
 	if (tags.contains("building") || tags.contains("building:part") ||
 			tags.contains("highway") || tags.contains("power") || is_waterfront(tags))
 		return false;
-	static const std::unordered_set<std::string> sealed_leisure = {"pitch", "track",
-			"playground", "recreation_ground", "schoolyard", "ice_rink", "water_park",
-			"slipway", "outdoor_seating", "bathing_place", "fitness_station"};
-	static const std::unordered_set<std::string> sealed_amenity = {"parking",
-			"parking_space", "bicycle_parking", "motorcycle_parking", "fuel",
-			"charging_station", "car_wash", "taxi", "marketplace"};
-	const auto amenity = tags.find("amenity");
-	const auto leisure = tags.find("leisure");
-	const auto landuse = tags.find("landuse");
-	if ((amenity != tags.end() && sealed_amenity.contains(amenity->second)) ||
-			(leisure != tags.end() && sealed_leisure.contains(leisure->second)))
+	if (is_sealed_surface_way(way))
 		return false;
+	const auto amenity = tags.find("amenity");
+	const auto landuse = tags.find("landuse");
 	if (landuse != tags.end())
 		return landuse->second == "residential" || landuse->second == "commercial";
 	const auto natural = tags.find("natural");
@@ -857,8 +881,9 @@ FloodFillCache FloodFillCache::precompute(const std::vector<ProcessedElement> &e
 		if (!relation_fills_members(relation))
 			continue;
 		for (const auto &member : relation.members)
-			if ((member.role == ProcessedMemberRole::Outer ||
-						member.role == ProcessedMemberRole::Inner) &&
+			if (member.way &&
+					(member.role == ProcessedMemberRole::Outer ||
+							member.role == ProcessedMemberRole::Inner) &&
 					seen.insert(member.way->id).second)
 				ways_needing_fill.push_back(member.way.get());
 	}

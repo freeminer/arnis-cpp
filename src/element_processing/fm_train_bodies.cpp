@@ -5,7 +5,9 @@
 #include <algorithm>
 #include <cmath>
 #include <cstdint>
+#include <iomanip>
 #include <optional>
+#include <sstream>
 #include <utility>
 #include <string_view>
 
@@ -470,5 +472,31 @@ std::string key(const trains::Coach &coach, const trains::Livery &livery)
 			coach.kind != CoachKind::Boxcar)
 		base += "_" + livery.name;
 	return base;
+}
+
+std::string summon_function(const std::vector<Part> &parts, double size, bool bare)
+{
+	const float scale = static_cast<float>(size);
+	const auto vector = [scale](const std::array<float, 3> &value) {
+		std::ostringstream out;
+		out << std::fixed << std::setprecision(3) << '[' << value[0] * scale << "f,"
+			<< value[1] * scale << "f," << value[2] * scale << "f]";
+		return out.str();
+	};
+	std::ostringstream out;
+	for (const auto &part : parts) {
+		const float half = part.tilt / 2.0f;
+		const std::string block =
+				bare ? "\"" + part.block + "\"" : "{Name:\"" + part.block + "\"}";
+		out << "$summon block_display ~ ~ ~ {Tags:[\"arnis.tp\",\"arnis.tc$(c)\"],Rotation:[$(h)f,0f],teleport_duration:2,view_range:3f,block_state:"
+			<< block << ",transformation:{left_rotation:[" << std::fixed
+			<< std::setprecision(4) << std::sin(half) << "f,0f,0f," << std::cos(half)
+			<< "f],right_rotation:[0f,0f,0f,1f],translation:" << vector(part.corner)
+			<< ",scale:" << vector(part.size) << '}';
+		if (part.glow)
+			out << ",brightness:{sky:15,block:15}";
+		out << "}\n";
+	}
+	return out.str();
 }
 } // namespace arnis::train_bodies

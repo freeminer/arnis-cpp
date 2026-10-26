@@ -6,6 +6,7 @@
 #include <optional>
 #include <string>
 #include <functional>
+#include <filesystem>
 #include <unordered_set>
 namespace arnis::world_editor
 {
@@ -74,6 +75,11 @@ std::vector<Piece> pieces(const std::vector<std::pair<int, int>> &cells,
 bool place_item_display(arnis::world_editor::WorldEditor &, const std::string &name,
 		const Quad &, std::int8_t facing, std::vector<std::uint8_t> &&pixels,
 		std::uint32_t pixel_width, std::uint32_t pixel_height);
+// Persist the textures/models referenced by accepted Java item-display facades.
+// A menu-only world still writes the Arnis banner resource pack.
+bool write_world_resource_pack(arnis::world_editor::WorldEditor &,
+		const std::filesystem::path &world, bool include_banner,
+		std::string *error = nullptr);
 class Registry
 {
 	bool enabled_ = false;

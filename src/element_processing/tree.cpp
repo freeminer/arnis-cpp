@@ -379,7 +379,7 @@ Tree Tree::get_tree_variant(TreeType kind, std::uint32_t variant_idx)
 			set_shape(10, OAK_TALL_SLIM_FILL, {11, 10, 9, 8, 7}, {10, 9, 8}, {}, .40f);
 			break;
 		case 2:
-			set_shape(6, OAK_BUSHY_FILL, {7, 6, 5, 4, 3}, {6, 5, 4}, {5, 4}, .20f);
+			set_shape(6, OAK_BUSHY_FILL, {7, 6, 5, 4, 3}, {6, 5, 4, 3}, {5, 4}, .20f);
 			break;
 		case 3:
 			set_shape(5, OAK_COMPACT_FILL, {5, 4, 3, 2}, {4, 3}, {}, 0.0f);

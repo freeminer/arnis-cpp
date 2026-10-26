@@ -298,6 +298,10 @@ struct RegionSelector::Data
 		unsigned density = 20;
 		std::vector<std::vector<std::size_t>> species;
 		std::vector<std::string> species_names;
+		// Keep the source's explicit per-species genus, matching Rust Community.
+		// It is currently derived from the species key at load time, but retaining
+		// it avoids re-parsing names in mix exclusion and mapped-genus selection.
+		std::vector<std::string> species_genera;
 		std::vector<bool> species_conifer;
 		std::vector<bool> species_palm;
 	};
@@ -531,6 +535,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 						name.substr(0, sep == std::string::npos ? name.size() : sep);
 				species.push_back(std::move(variants));
 				community.species_names.push_back(name);
+				community.species_genera.push_back(genus);
 				community.species_conifer.push_back(mapped::is_conifer_genus(genus));
 				community.species_palm.push_back(is_palm(name));
 			}
@@ -721,6 +726,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 								Data::Community filtered = data->realm.communities[ci];
 								filtered.species.clear();
 								filtered.species_names.clear();
+								filtered.species_genera.clear();
 								filtered.species_conifer.clear();
 								filtered.species_palm.clear();
 								for (std::size_t si = 0;
@@ -728,10 +734,8 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 										++si) {
 									const auto &species =
 											data->realm.communities[ci].species_names[si];
-									const auto sep = species.find('_');
-									const auto genus = species.substr(
-											0, sep == std::string::npos ? species.size()
-																		: sep);
+									const auto &genus = data->realm.communities[ci]
+																.species_genera[si];
 									const bool omit = std::any_of(excluded.begin(),
 											excluded.end(), [&](auto ex) {
 												return species == ex || genus == ex;
@@ -740,6 +744,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 										filtered.species.push_back(
 												data->realm.communities[ci].species[si]);
 										filtered.species_names.push_back(species);
+										filtered.species_genera.push_back(genus);
 										filtered.species_conifer.push_back(
 												data->realm.communities[ci]
 														.species_conifer[si]);
@@ -850,12 +855,14 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			const auto &community = data->realm.communities[community_id];
 			for (std::size_t si = 0; si < community.species.size(); ++si) {
 				if (si >= community.species_names.size() ||
+						si >= community.species_genera.size() ||
 						si >= community.species_palm.size() ||
 						!community.species_palm[si] ||
 						!included.insert(community.species_names[si]).second)
 					continue;
 				grove.species.push_back(community.species[si]);
 				grove.species_names.push_back(community.species_names[si]);
+				grove.species_genera.push_back(community.species_genera[si]);
 				grove.species_conifer.push_back(community.species_conifer[si]);
 				grove.species_palm.push_back(true);
 			}
@@ -989,12 +996,15 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			Data::Community variant = base;
 			variant.species.clear();
 			variant.species_names.clear();
+			variant.species_genera.clear();
 			variant.species_conifer.clear();
 			variant.species_palm.clear();
 			for (const auto si : keep) {
 				variant.species.push_back(base.species[si]);
 				if (si < base.species_names.size())
 					variant.species_names.push_back(base.species_names[si]);
+				if (si < base.species_genera.size())
+					variant.species_genera.push_back(base.species_genera[si]);
 				variant.species_conifer.push_back(base.species_conifer[si]);
 				if (si < base.species_palm.size())
 					variant.species_palm.push_back(base.species_palm[si]);
@@ -1114,7 +1124,8 @@ double RegionSelector::crown_columns(int height) const
 	if (!data_ || data_->crowns.empty())
 		return 50.0;
 	const auto capped = data_->capped_height(height);
-	const auto index = std::min<std::size_t>(capped, data_->crowns.size() - 1);
+	const auto index = std::min<std::size_t>(
+			static_cast<std::size_t>(std::max(capped, 1)), data_->crowns.size() - 1);
 	return std::max(4.0, data_->crowns[index]);
 }
 const Schematic *RegionSelector::schematic(std::size_t index) const
@@ -1356,10 +1367,7 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	SpeciesPool all_species;
 	SpeciesPool typed_species;
 	SpeciesPool mapped_species;
-	auto same_genus = [&](const std::string &species) {
-		const auto sep = species.find('_');
-		const auto genus =
-				species.substr(0, sep == std::string::npos ? species.size() : sep);
+	auto same_genus = [&](const std::string &genus) {
 		if (genus.size() != request.genus->size())
 			return false;
 		const auto ascii_lower = [](unsigned char c) {
@@ -1377,9 +1385,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		if (palm && !palms_allowed)
 			continue;
 		all_species.push_back(community.species[si]);
-		if (request.genus && !mapped_selection && si < community.species_names.size()) {
-			const auto &species = community.species_names[si];
-			if (same_genus(species))
+		if (request.genus && !mapped_selection && si < community.species_genera.size()) {
+			if (same_genus(community.species_genera[si]))
 				mapped_species.push_back(community.species[si]);
 		}
 		// Procedural trees without an ecoregion mix use the selected habitat
@@ -1411,8 +1418,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				return;
 			const auto &candidate = data_->realm.communities[ci];
 			for (std::size_t si = 0; si < candidate.species.size(); ++si)
-				if (si < candidate.species_names.size() &&
-						same_genus(candidate.species_names[si]))
+				if (si < candidate.species_genera.size() &&
+						same_genus(candidate.species_genera[si]))
 					mapped_species.push_back(candidate.species[si]);
 		};
 		if (request.eco) {
@@ -1424,7 +1431,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		auto scan_pack = [&](const Data::Pack &candidate) {
 			for (const auto &c : candidate.communities)
 				for (std::size_t si = 0; si < c.species.size(); ++si)
-					if (si < c.species_names.size() && same_genus(c.species_names[si]) &&
+					if (si < c.species_genera.size() &&
+							same_genus(c.species_genera[si]) &&
 							(mapped_selection || palms_allowed ||
 									si >= c.species_palm.size() || !c.species_palm[si]))
 						mapped_species.push_back(c.species[si]);

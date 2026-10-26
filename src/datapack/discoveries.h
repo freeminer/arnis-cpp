@@ -41,6 +41,11 @@ struct Place
 			const std::function<int(int, int)> &ground_y);
 };
 
+// Produce the advancement root and per-place/category tree for the three
+// vanilla predicate schemas used by successive Java data versions.
+std::vector<std::pair<std::string, std::string>> advancement_files(
+		const std::string &area, const std::vector<Place> &places);
+
 // Named places intersecting the world bounds, sorted by importance, and the
 // highest-ranked named settlement available as a fallback area name.
 std::pair<std::vector<Place>, std::optional<std::string>> collect(

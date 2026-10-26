@@ -13,17 +13,28 @@
 namespace arnis::structure_kit
 {
 
+/// A grid cell selected by the oriented local-frame rasterizer, with its centre
+/// expressed in the frame's local coordinates.
+struct FrameCell
+{
+	int x{}, z{};
+	double a{}, b{};
+};
+
+using ConcreteColour = std::pair<Block, std::array<std::uint8_t, 3>>;
+extern const std::array<ConcreteColour, 16> CONCRETE;
+
 struct Frame
 {
 	double ox{}, oz{}, ux{1.0}, uz{}, side{1.0};
+	static Frame new_frame(double ox, double oz, double dx, double dz);
 	static Frame from_heading(double ox, double oz, double dx, double dz);
 	Frame flipped() const;
 	std::pair<double, double> v() const;
 	std::pair<double, double> world(double a, double b) const;
 	std::pair<double, double> local(double x, double z) const;
 	std::pair<int, int> cell(double a, double b) const;
-	std::vector<std::array<double, 4>> cells(
-			double a0, double a1, double b0, double b1) const;
+	std::vector<FrameCell> cells(double a0, double a1, double b0, double b1) const;
 };
 
 std::pair<int, int> axis_of(double dx, double dz);

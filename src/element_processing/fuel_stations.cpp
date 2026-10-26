@@ -364,7 +364,7 @@ void draw_kiosk(WorldEditor &editor, const Site &site, const structure_kit::Fram
 	const double b0 = canopy_half_width + 3.0, b1 = canopy_half_width + 9.0;
 	const auto cells = canopy.cells(-4.5, 4.5, b0, b1);
 	for (const auto &cell : cells) {
-		const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
+		const int x = cell.x, z = cell.z;
 		if (footprints.contains(x, z) || roads.contains(x, z) ||
 				(!area.empty() && !area.contains(cell_key(x, z))))
 			return;
@@ -372,8 +372,7 @@ void draw_kiosk(WorldEditor &editor, const Site &site, const structure_kit::Fram
 	std::vector<int> heights;
 	heights.reserve(cells.size());
 	for (const auto &cell : cells)
-		heights.push_back(
-				ground_at(editor, static_cast<int>(cell[0]), static_cast<int>(cell[1])));
+		heights.push_back(ground_at(editor, cell.x, cell.z));
 	if (heights.empty())
 		return;
 	std::sort(heights.begin(), heights.end());
@@ -381,8 +380,8 @@ void draw_kiosk(WorldEditor &editor, const Site &site, const structure_kit::Fram
 	const auto side = canopy.v();
 	const auto front = structure_kit::axis_of(-side.first, -side.second);
 	for (const auto &cell : cells) {
-		const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
-		const double a = cell[2], b = cell[3];
+		const int x = cell.x, z = cell.z;
+		const double a = cell.a, b = cell.b;
 		editor.register_road_surface_y(x, z, base);
 		editor.set_block_absolute(LIGHT_GRAY_CONCRETE, x, base, z);
 		const bool wall = std::abs(a) > 4.0 || b - b0 < 1.0 || b1 - b < 1.0;
@@ -656,7 +655,7 @@ void generate_station(WorldEditor &editor, const ProcessedElement &element,
 			bool blocked = false;
 			std::size_t on_road = 0;
 			for (const auto &cell : framed_cells) {
-				const int x = static_cast<int>(cell[0]), z = static_cast<int>(cell[1]);
+				const int x = cell.x, z = cell.z;
 				cells.emplace_back(x, z);
 				if (footprints.contains(x, z) ||
 						(!area.empty() && !area.contains(cell_key(x, z))))

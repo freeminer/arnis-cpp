@@ -524,6 +524,23 @@ void remove_untouched_template_region(const std::filesystem::path &world)
 		std::filesystem::remove(region_path, ec);
 }
 
+std::optional<std::string> level_name(const std::filesystem::path &world)
+{
+	std::vector<std::uint8_t> bytes;
+	if (!read_gzip(world / "level.dat", bytes, nullptr))
+		return std::nullopt;
+	Tag root;
+	if (!NbtReader(bytes).root(root))
+		return std::nullopt;
+	Tag *data = field(root, "Data");
+	if (!data || data->type != 10)
+		return std::nullopt;
+	const Tag *name = field(*data, "LevelName");
+	if (!name || name->type != 8)
+		return std::nullopt;
+	return name->text;
+}
+
 bool touch_last_played(const std::filesystem::path &world, std::string *error)
 {
 	if (error)
@@ -577,6 +594,28 @@ bool apply_java_world_settings(const std::filesystem::path &world, int game_type
 					set_void_generator(root);
 				else
 					raise_flat_generator(root, base_y, min_y);
+				return true;
+			},
+			error);
+}
+
+bool start_in_survival(const std::filesystem::path &world, std::string *error)
+{
+	if (error)
+		error->clear();
+	return edit_level_dat(
+			world,
+			[](Tag &root, std::string *why) {
+				Tag *data = field(root, "Data");
+				if (!data || data->type != 10) {
+					if (why)
+						*why = "level.dat missing Data compound";
+					return false;
+				}
+				set_field(*data, int_tag("GameType", 0));
+				set_field(*data, byte_tag("Difficulty", 2));
+				if (Tag *player = field(*data, "Player"); player && player->type == 10)
+					set_field(*player, int_tag("playerGameType", 0));
 				return true;
 			},
 			error);

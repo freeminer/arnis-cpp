@@ -82,6 +82,8 @@ private:
 bool world_is_locked(const std::filesystem::path &world);
 
 std::optional<std::int32_t> level_data_version(const std::filesystem::path &world);
+// Read Data.LevelName from Java level.dat; absent or invalid NBT returns no value.
+std::optional<std::string> level_name(const std::filesystem::path &world);
 // Read the world spawn X/Z from legacy SpawnX/SpawnZ or the modern spawn.pos
 // int array in level.dat; return no value for absent or invalid NBT.
 std::optional<std::pair<std::int32_t, std::int32_t>> level_spawn_xz(
@@ -99,6 +101,8 @@ void remove_untouched_template_region(const std::filesystem::path &world);
 bool apply_java_world_settings(const std::filesystem::path &world, int game_type,
 		std::int64_t world_time, bool void_world, std::int32_t base_y, std::int32_t min_y,
 		std::string *error = nullptr);
+// Configure an outbreak world so its zombies survive and the game starts on Normal.
+bool start_in_survival(const std::filesystem::path &world, std::string *error = nullptr);
 // Install the bundled dimension override required for worlds generated beyond
 // vanilla's build-height limits, then enable the pack in level.dat.
 bool install_tall_datapack(

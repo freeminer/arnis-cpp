@@ -65,6 +65,13 @@ bool point_in_ring(const std::array<double, 2> &point,
 	return inside;
 }
 
+bool polygon_intersects_target(const std::vector<std::array<double, 2>> &outer,
+		const std::array<std::array<double, 2>, 4> &target)
+{
+	const std::vector<std::array<double, 2>> target_ring(target.begin(), target.end());
+	return detail::rings_intersect(outer, target_ring);
+}
+
 std::vector<std::vector<std::array<double, 2>>> holes_for_outer(
 		const std::vector<std::vector<std::array<double, 2>>> &holes,
 		const std::vector<std::array<double, 2>> &outer)
@@ -94,17 +101,7 @@ std::optional<Building> make_building(const std::string &key, std::int64_t id,
 						}),
 			holes.end());
 	const auto [height, source, min_height] = height_from_tags(tags, params);
-	bool is_target = !target.has_value();
-	if (target) {
-		const auto &lo = (*target)[0];
-		const auto &hi = (*target)[2];
-		for (const auto &point : ring)
-			if (point[0] >= lo[0] && point[0] <= hi[0] && point[1] >= lo[1] &&
-					point[1] <= hi[1]) {
-				is_target = true;
-				break;
-			}
-	}
+	const bool is_target = !target || polygon_intersects_target(ring, *target);
 	return Building{key, id, kind, std::move(ring), std::move(holes), std::move(ids),
 			std::move(tags), height, source, min_height, is_target, {}};
 }
@@ -130,8 +127,8 @@ std::vector<Building> parse_overpass(const std::string &json, const Frame &frame
 			if (type == "node" && element.contains("lon") && element.contains("lat"))
 				nodes[id] = {element["lon"].get<double>(), element["lat"].get<double>()};
 			else if (type == "way") {
-				ways[id] = &element;
-				way_order.push_back(id);
+				if (ways.emplace(id, &element).second)
+					way_order.push_back(id);
 			} else if (type == "relation")
 				relations.push_back(&element);
 		}
@@ -155,7 +152,10 @@ std::vector<Building> parse_overpass(const std::string &json, const Frame &frame
 						continue;
 					const auto ids = node_list(*way->second);
 					const auto role = member.value("role", "outer");
-					(role == "inner" ? inner : outer).push_back(ids);
+					if (role == "outer" || role.empty())
+						outer.push_back(ids);
+					else
+						inner.push_back(ids);
 					members.push_back(id);
 					relation_members.insert(id);
 				}

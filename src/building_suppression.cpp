@@ -609,38 +609,48 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 	// Rust's osm_parser::suppress_ride_parts runs before ways are clipped into
 	// chunk views. Keep that ownership here in the shared prepared data so every
 	// chunk sees the same complete attraction and building-part geometry.
-	std::vector<std::pair<std::uint64_t, std::vector<GeoPoint>>> ride_outlines;
+	std::vector<const ProcessedWay *> ride_ways;
 	for (const auto *way : ordered_ways) {
 		if (attractions::replaces_parts(way->tags)) {
 			out.outline_suppression.erase({"way", way->id});
-			auto ring = geo_ring(*way);
-			if (ring.size() >= 4)
-				ride_outlines.emplace_back(way->id, std::move(ring));
+			ride_ways.push_back(way);
 		}
 	}
 	// Match Rust's early return: most areas have no rides, so avoid a second scan
 	// and a temporary list of every building part in those areas.
-	if (!ride_outlines.empty()) {
+	if (!ride_ways.empty()) {
 		std::vector<const ProcessedWay *> ride_parts;
 		for (const auto *way : ordered_ways)
 			if (is_building_part(way->tags) && !attractions::claims(way->tags))
 				ride_parts.push_back(way);
-		for (const auto *way : ride_parts) {
-			const auto ring = geo_ring(*way);
-			if (ring.empty())
-				continue;
-			double latitude = 0.0, longitude = 0.0;
-			for (const auto &point : ring) {
-				latitude += point.lat;
-				longitude += point.lon;
+		// Rust returns when the area has no candidate parts, before copying any
+		// ride rings into geographic outlines. Keep that cheap path for areas with
+		// attractions but no buildings.
+		if (!ride_parts.empty()) {
+			std::vector<std::vector<GeoPoint>> ride_outlines;
+			ride_outlines.reserve(ride_ways.size());
+			for (const auto *way : ride_ways) {
+				auto ring = geo_ring(*way);
+				if (ring.size() >= 4)
+					ride_outlines.push_back(std::move(ring));
 			}
-			latitude /= static_cast<double>(ring.size());
-			longitude /= static_cast<double>(ring.size());
-			for (const auto &[_, outline] : ride_outlines)
-				if (point_in_ring(latitude, longitude, outline)) {
-					out.outline_suppression.emplace("way", way->id);
-					break;
+			for (const auto *way : ride_parts) {
+				const auto ring = geo_ring(*way);
+				if (ring.empty())
+					continue;
+				double latitude = 0.0, longitude = 0.0;
+				for (const auto &point : ring) {
+					latitude += point.lat;
+					longitude += point.lon;
 				}
+				latitude /= static_cast<double>(ring.size());
+				longitude /= static_cast<double>(ring.size());
+				for (const auto &outline : ride_outlines)
+					if (point_in_ring(latitude, longitude, outline)) {
+						out.outline_suppression.emplace("way", way->id);
+						break;
+					}
+			}
 		}
 	}
 

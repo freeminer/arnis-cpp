@@ -10,6 +10,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace arnis::world_editor
@@ -80,6 +81,12 @@ public:
 	const std::vector<std::size_t> &cars_for_way(std::uint64_t way) const;
 	double size() const { return size_; }
 	double scale() const { return scale_; }
+	// Rust exposes these backend-neutral datapack payloads separately; retain
+	// those entry points for library consumers while keeping the combined writer.
+	std::string storage_function() const;
+	std::vector<std::pair<std::string, std::string>> look_functions() const;
+	std::vector<std::pair<std::string, std::string>> body_functions() const;
+	std::vector<std::pair<std::string, std::string>> datapack_functions() const;
 
 private:
 	std::vector<Segment> segments_;
