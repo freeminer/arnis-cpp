@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -12,6 +13,10 @@ class ProcessedElement;
 namespace arnis::world_editor
 {
 struct WorldEditor;
+}
+namespace arnis::structures
+{
+struct PalettizedSchematic;
 }
 
 namespace arnis::landmarks
@@ -33,6 +38,7 @@ struct Landmark
 	int ground_overlap;
 	double suppress_half_x, suppress_half_z;
 	int reach_m;
+	std::shared_ptr<const structures::PalettizedSchematic> (*built_model)() = nullptr;
 };
 
 // Projection is owned by the map host.  Supplying resolved world anchors

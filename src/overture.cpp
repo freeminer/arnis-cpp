@@ -550,10 +550,49 @@ std::optional<double> attribute_number(
 bool source_is_osm(const std::optional<std::string> &geometry_source,
 		const std::optional<std::string> &sources)
 {
-	const bool primary_source_is_osm =
-			geometry_source && ascii_iequals(*geometry_source, "openstreetmap");
-	return primary_source_is_osm ||
-		   (sources && sources->find("OpenStreetMap") != std::string::npos);
+	if (geometry_source)
+		return ascii_iequals(*geometry_source, "openstreetmap");
+	if (!sources)
+		return false;
+	const auto document = nlohmann::json::parse(*sources, nullptr, false);
+	if (document.is_discarded())
+		return false;
+	struct SourceEntry
+	{
+		bool covers_geometry = true;
+		std::string dataset;
+	};
+	std::vector<SourceEntry> entries;
+	std::function<void(const nlohmann::json &)> collect =
+			[&](const nlohmann::json &value) {
+				if (value.is_array()) {
+					for (const auto &entry : value)
+						collect(entry);
+				} else if (value.is_object()) {
+					SourceEntry entry;
+					bool has_dataset = false;
+					const auto dataset = value.find("dataset");
+					if (dataset != value.end() && dataset->is_string()) {
+						entry.dataset = dataset->get<std::string>();
+						has_dataset = true;
+					}
+					const auto property = value.find("property");
+					if (property != value.end() && property->is_string())
+						entry.covers_geometry =
+								property->get_ref<const std::string &>().empty();
+					if (has_dataset)
+						entries.push_back(std::move(entry));
+					for (auto it = value.begin(); it != value.end(); ++it)
+						if (it.key() != "dataset" && it.key() != "property")
+							collect(it.value());
+				}
+			};
+	collect(document);
+	const auto selected = std::find_if(entries.begin(), entries.end(),
+			[](const SourceEntry &entry) { return entry.covers_geometry; });
+	if (selected != entries.end())
+		return ascii_iequals(selected->dataset, "openstreetmap");
+	return !entries.empty() && ascii_iequals(entries.front().dataset, "openstreetmap");
 }
 
 std::optional<OvertureOsmRef> parse_osm_reference(const std::string &sources)
@@ -1413,6 +1452,8 @@ std::shared_ptr<arrow::Scalar> struct_value(
 struct OvertureSourceInfo
 {
 	bool is_osm = false;
+	bool fallback_text_contains_osm = false;
+	int geometry_source_rank = -1;
 	std::optional<OvertureOsmRef> osm_ref;
 };
 
@@ -1426,32 +1467,56 @@ void scan_overture_sources(
 	if (value->type->id() == arrow::Type::STRING ||
 			value->type->id() == arrow::Type::LARGE_STRING) {
 		const auto text = scalar_text(value);
+		// Rust's nested Parquet reader falls back to inspecting a string only when
+		// no structured dataset entry could be recovered. Keep that compatibility
+		// fallback here, but do not apply it to malformed PMTiles JSON.
 		if (text && text->find("OpenStreetMap") != std::string::npos)
-			out.is_osm = true;
+			out.fallback_text_contains_osm = true;
 		return;
 	}
 	if (value->type->id() == arrow::Type::STRUCT) {
 		const auto structure = std::static_pointer_cast<arrow::StructScalar>(value);
 		const auto type = std::static_pointer_cast<arrow::StructType>(value->type);
 		const auto dataset_index = type->GetFieldIndex("dataset");
+		const auto property_index = type->GetFieldIndex("property");
 		const auto record_index = type->GetFieldIndex("record_id");
-		if (dataset_index >= 0 && record_index >= 0 &&
-				static_cast<std::size_t>(dataset_index) < structure->value.size() &&
-				static_cast<std::size_t>(record_index) < structure->value.size()) {
+		if (dataset_index >= 0 &&
+				static_cast<std::size_t>(dataset_index) < structure->value.size()) {
 			const auto dataset = scalar_text(structure->value[dataset_index]);
-			const auto record_id = scalar_text(structure->value[record_index]);
-			if (dataset && ascii_iequals(*dataset, "OpenStreetMap")) {
-				out.is_osm = true;
-				if (!out.osm_ref && record_id) {
-					const auto encoded = nlohmann::json{{"dataset", *dataset},
-							{"record_id",
-									*record_id}}.dump();
-					out.osm_ref = parse_overture_osm_reference(encoded);
+			bool covers_geometry = true;
+			if (property_index >= 0 &&
+					static_cast<std::size_t>(property_index) < structure->value.size()) {
+				const auto property = scalar_text(structure->value[property_index]);
+				if (property)
+					covers_geometry = property->empty();
+			}
+			if (dataset) {
+				const int rank = covers_geometry ? 1 : 0;
+				if (rank > out.geometry_source_rank) {
+					out.geometry_source_rank = rank;
+					out.is_osm = ascii_iequals(*dataset, "OpenStreetMap");
+					out.osm_ref.reset();
+					if (out.is_osm && record_index >= 0 &&
+							static_cast<std::size_t>(record_index) <
+									structure->value.size()) {
+						if (const auto record_id =
+										scalar_text(structure->value[record_index])) {
+							const auto encoded = nlohmann::json{{"dataset", *dataset},
+									{"record_id",
+											*record_id}}.dump();
+							out.osm_ref = parse_overture_osm_reference(encoded);
+						}
+					}
 				}
 			}
 		}
-		for (const auto &child : structure->value)
-			scan_overture_sources(child, out);
+		for (std::size_t index = 0; index < structure->value.size(); ++index) {
+			if (static_cast<int>(index) == dataset_index ||
+					static_cast<int>(index) == property_index ||
+					static_cast<int>(index) == record_index)
+				continue;
+			scan_overture_sources(structure->value[index], out);
+		}
 		return;
 	}
 	if (value->type->id() == arrow::Type::LIST ||
@@ -1814,6 +1879,8 @@ std::optional<std::vector<OvertureBuilding>> read_remote_parquet_partition(
 				if (source_scalar.ok())
 					scan_overture_sources(*source_scalar, source_info);
 			}
+			if (source_info.geometry_source_rank < 0)
+				source_info.is_osm = source_info.fallback_text_contains_osm;
 			OvertureBuilding building;
 			building.id = *id;
 			building.exterior_ring = std::move(*ring);
@@ -2002,6 +2069,8 @@ std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::pa
 			if (source_scalar.ok())
 				scan_overture_sources(*source_scalar, source_info);
 		}
+		if (source_info.geometry_source_rank < 0)
+			source_info.is_osm = source_info.fallback_text_contains_osm;
 		buildings.push_back({*value_id, std::move(*ring), source_info.is_osm,
 				source_info.osm_ref, number_at(height, row), number_at(min_height, row),
 				integer_at(floors, row), string_at(subtype, row), string_at(clazz, row),

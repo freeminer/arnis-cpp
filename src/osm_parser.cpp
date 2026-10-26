@@ -408,6 +408,20 @@ void filter_tags_impl(tags_t &tags)
 		else
 			++it;
 	}
+	const auto highway = tags.get("highway");
+	if (highway == "proposed" || highway == "razed") {
+		tags.erase("highway");
+		if (!tags.contains("railway")) {
+			tags.erase("bridge");
+			tags.erase("tunnel");
+			tags.erase("layer");
+		}
+	}
+	static const std::unordered_set<std::string> landforms{"peninsula", "isthmus", "cape",
+			"valley", "plateau", "massif", "mountain_range", "gorge", "landform", "plain",
+			"arete", "couloir", "coastline"};
+	if (landforms.contains(tags.get("natural")))
+		tags.erase("natural");
 }
 
 } // namespace

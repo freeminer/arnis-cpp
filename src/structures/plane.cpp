@@ -16,6 +16,7 @@
 #include <optional>
 #include <string>
 #include <unordered_map>
+#include <unordered_set>
 
 namespace arnis::structures::plane
 {
@@ -79,7 +80,11 @@ bool extract_aeroway_segment(const ProcessedElement &element, Segment &out)
 		return false;
 	const auto &way = element.as_way();
 	const auto aeroway = way.tags.get("aeroway");
+	const auto surface = way.tags.get("surface");
+	static const std::unordered_set<std::string> non_airliner_surfaces{
+			"grass", "dirt", "ground", "earth", "soil", "sand", "mud", "clay"};
 	if (aeroway.empty() || (aeroway != "runway" && aeroway != "taxiway") ||
+			non_airliner_surfaces.contains(surface) ||
 			way.tags.get("area") == std::optional<std::string>("yes") ||
 			way.nodes.size() < 2 || way.nodes.front().id == way.nodes.back().id)
 		return false;

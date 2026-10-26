@@ -3,6 +3,7 @@
 #include "../../arnis_adapter.h"
 #include "models_3d/pipeline.h"
 #include "structures/schem_decoder.h"
+#include "structures/elizabeth_tower.h"
 #include "world_editor/floor_state.h"
 
 #include <algorithm>
@@ -91,6 +92,13 @@ std::pair<double, double> rotate(double x, double z, double degrees)
 std::filesystem::path asset_path(const Landmark &landmark)
 {
 	return assets::path(landmark.schematic_path);
+}
+
+std::shared_ptr<const structures::PalettizedSchematic> elizabeth_tower_model()
+{
+	static const auto model = std::make_shared<const structures::PalettizedSchematic>(
+			structures::elizabeth_tower::build());
+	return model;
 }
 
 int median_base_y(WorldEditor &editor, const Placement &placement, double scale,
@@ -282,6 +290,9 @@ const std::vector<Landmark> &catalogue()
 			{"Olympiaturm", "Q599148", {{"way", 164084344}},
 					"assets/structures/landmarks/olympiaturm_munich.schem", 48.1744095,
 					11.5537401, 11.5, 13.5, 0, 0, {}, 0, 22., 22., 30},
+			{"Elizabeth Tower", "Q41225", {{"way", 123557148}}, nullptr, 51.5007012,
+					-0.1245730, 8.5, 8.5, 0, 0, {}, 0, 8.0, 8.0, 13,
+					&elizabeth_tower_model},
 	};
 	return entries;
 }
@@ -386,10 +397,15 @@ bool place(WorldEditor &editor, const Placement &placement, double scale,
 			!std::isfinite(rotation_degrees) || !editor.place_schematics())
 		return false;
 	std::shared_ptr<const structures::PalettizedSchematic> schematic;
-	try {
-		schematic = structures::load_palettized_cached(asset_path(*placement.landmark));
-	} catch (...) {
-		return false;
+	if (placement.landmark->built_model) {
+		schematic = placement.landmark->built_model();
+	} else {
+		try {
+			schematic =
+					structures::load_palettized_cached(asset_path(*placement.landmark));
+		} catch (...) {
+			return false;
+		}
 	}
 	if (!schematic)
 		return false;

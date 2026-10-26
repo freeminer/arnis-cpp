@@ -176,6 +176,53 @@ bool signalled_crossing(const tags_t &tags)
 		   tags.get("crossing:signals") == "yes";
 }
 
+bool is_crossing_way(const tags_t &tags)
+{
+	return tags.get("highway") == "footway" && tags.get("footway") == "crossing";
+}
+
+bool describes_crossing(const ProcessedNode &node)
+{
+	const auto highway = node.tags.get("highway");
+	return highway == "crossing" ||
+		   (highway == "traffic_signals" && node.tags.contains("crossing"));
+}
+
+// Outer nullopt means no crossing tag; an engaged empty optional means
+// explicitly unmarked; an engaged paint is a marked crossing.
+std::optional<std::optional<CrossingPaint>> tagged_crossing_paint(
+		const tags_t &tags, bool signal_lines)
+{
+	const auto unmarked = [] {
+		return std::optional<std::optional<CrossingPaint>>(std::in_place, std::nullopt);
+	};
+	const auto painted = [](CrossingPaint paint) {
+		return std::optional<std::optional<CrossingPaint>>(
+				std::in_place, std::move(paint));
+	};
+	const auto crossing = tags.get("crossing");
+	if (crossing == "no" || crossing == "unmarked" || crossing == "informal" ||
+			crossing == "impossible")
+		return unmarked();
+	const auto markings = tags.get("crossing:markings");
+	if (markings == "no" || markings == "surface")
+		return unmarked();
+	if (markings == "lines" || markings == "lines:paired")
+		return painted({CrossingPaint::Kind::Lines, false});
+	if (markings == "dashes" || markings == "dots" || markings == "dashes:paired")
+		return painted({CrossingPaint::Kind::Lines, true});
+	if (tags.contains("crossing:markings"))
+		return painted({CrossingPaint::Kind::Zebra, false});
+	if (tags.get("crossing_ref") == "zebra" || crossing == "zebra")
+		return painted({CrossingPaint::Kind::Zebra, false});
+	if (signalled_crossing(tags))
+		return painted(signal_lines ? CrossingPaint{CrossingPaint::Kind::Lines, true}
+									: CrossingPaint{CrossingPaint::Kind::Zebra, false});
+	if (tags.contains("crossing"))
+		return painted({CrossingPaint::Kind::Zebra, false});
+	return std::nullopt;
+}
+
 std::optional<CrossingPaint> crossing_paint(
 		const tags_t &tags, std::optional<CrossingPaint> untagged, bool signal_lines)
 {
@@ -438,9 +485,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 		if (way.nodes.size() < 2 || !renders_on_surface(way.tags))
 			continue;
 		if (!is_road_class(highway)) {
-			if (crossing_paint(way.tags, CrossingPaint{CrossingPaint::Kind::Zebra, false},
-						result.signal_crossing_lines) &&
-					highway == "footway" && way.tags.get("footway") == "crossing")
+			if (is_crossing_way(way.tags))
 				crossing_ways.push_back(&way);
 			continue;
 		}
@@ -452,6 +497,22 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 				arnis::highways::lane_marking_count(highway, way.tags) >= 2, range,
 				std::move(surface), node_path_index(way)});
 	}
+	// A crossing way can share its crossing markings with a highway=node. Only
+	// road nodes are authoritative; a tag on an unrelated footpath node does not
+	// change whether the crossing itself is painted.
+	std::unordered_set<std::uint64_t> crossing_nodes_for_roads;
+	for (const auto *crossing : crossing_ways)
+		for (const auto &node : crossing->nodes)
+			crossing_nodes_for_roads.insert(node.id);
+	for (const auto &road : roads)
+		for (const auto &node : road.way->nodes)
+			if (crossing_nodes_for_roads.contains(node.id))
+				result.crossing_road_nodes_.insert(node.id);
+	crossing_ways.erase(std::remove_if(crossing_ways.begin(), crossing_ways.end(),
+								[&](const ProcessedWay *way) {
+									return !result.crossing_way_paint(*way).has_value();
+								}),
+			crossing_ways.end());
 	// Rust indexes only node IDs referenced at least twice across road and
 	// crossing ways. For closed ways, count the closing node once, then retain
 	// both path positions below when the ID is shared.
@@ -511,9 +572,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 	// Find the carriageway footprints intersected by each painted crossing way.
 	// The clip bounds both its surface replacement and the break in lane paint.
 	for (const auto *crossing : crossing_ways) {
-		const auto paint = crossing_paint(crossing->tags,
-				CrossingPaint{CrossingPaint::Kind::Zebra, false},
-				result.signal_crossing_lines);
+		const auto paint = result.crossing_way_paint(*crossing);
 		if (!paint)
 			continue;
 		const int crossing_half =
@@ -1187,11 +1246,30 @@ const CarriagewayClip *RoadMarkingIndex::carriageway_at(
 }
 
 std::optional<CrossingPaint> RoadMarkingIndex::crossing_way_paint(
-		const tags_t &tags) const
+		const ProcessedWay &way) const
 {
-	if (tags.get("highway") != "footway" || tags.get("footway") != "crossing")
+	if (!is_crossing_way(way.tags))
 		return std::nullopt;
-	return crossing_paint(tags, CrossingPaint{CrossingPaint::Kind::Zebra, false},
-			signal_crossing_lines);
+	if (const auto tagged = tagged_crossing_paint(way.tags, signal_crossing_lines))
+		return *tagged;
+	bool unmarked = false;
+	bool silent = false;
+	for (const auto &node : way.nodes) {
+		if (!crossing_road_nodes_.contains(node.id))
+			continue;
+		const auto tagged = describes_crossing(node) ? tagged_crossing_paint(node.tags,
+															   signal_crossing_lines)
+													 : std::nullopt;
+		if (tagged) {
+			if (*tagged)
+				return **tagged;
+			unmarked = true;
+		} else {
+			silent = true;
+		}
+	}
+	if (silent || !unmarked)
+		return CrossingPaint{CrossingPaint::Kind::Zebra, false};
+	return std::nullopt;
 }
 } // namespace arnis::road_markings

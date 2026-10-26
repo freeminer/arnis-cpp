@@ -1271,6 +1271,8 @@ Block resolve_schem_block(const std::string &name)
 		return SANDSTONE;
 	if (n == "smooth_sandstone")
 		return SMOOTH_SANDSTONE;
+	if (n == "chiseled_sandstone")
+		return CHISELED_SANDSTONE;
 	if (n == "glass")
 		return GLASS;
 	if (n == "iron_block")

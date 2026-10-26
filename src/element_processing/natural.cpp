@@ -208,6 +208,13 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 	if (it_nat == tags.end())
 		return;
 	const std::string natural_type = it_nat->second;
+	// These values describe regional landforms, not surface cover; Rust filters
+	// them during OSM tag processing and must not texture them as terrain here.
+	static const std::unordered_set<std::string> landforms{"peninsula", "isthmus", "cape",
+			"valley", "plateau", "massif", "mountain_range", "gorge", "landform", "plain",
+			"arete", "couloir", "coastline"};
+	if (landforms.contains(natural_type))
+		return;
 	// Rust maps tree_row ways at a fixed 8 m spacing (including both ends),
 	// rather than scattering trees from the entire filled polygon.  Handle the
 	// mapped row before the generic natural-area decoration pass.
@@ -446,7 +453,8 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 	} else if (natural_type == "water" || natural_type == "reef" ||
 			   natural_type == "bay") {
 		block_type = WATER;
-	} else if (natural_type == "bare_rock") {
+	} else if (natural_type == "bare_rock" || natural_type == "rock" ||
+			   natural_type == "stone") {
 		block_type = STONE;
 	} else if (natural_type == "blockfield") {
 		block_type = COBBLESTONE;
@@ -454,8 +462,6 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 		block_type = PACKED_ICE;
 	} else if (natural_type == "mud" || natural_type == "wetland") {
 		block_type = MUD;
-	} else if (natural_type == "mountain_range") {
-		block_type = COBBLESTONE;
 	} else if (natural_type == "saddle" || natural_type == "ridge") {
 		block_type = STONE;
 	} else if (natural_type == "shrubbery" || natural_type == "tundra" ||
@@ -467,8 +473,7 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 		block_type = GRASS_BLOCK;
 	}
 	const bool rock_variation = natural_type == "blockfield" || natural_type == "cliff" ||
-								natural_type == "saddle" || natural_type == "ridge" ||
-								natural_type == "mountain_range";
+								natural_type == "saddle" || natural_type == "ridge";
 
 	const std::optional<std::vector<Block>> protected_surface_blocks(std::vector<Block>{
 			BLACK_CONCRETE,
@@ -610,7 +615,8 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 			} else if (natural_type == "glacier") {
 				editor.set_block(PACKED_ICE, x, 0, z, std::nullopt, std::nullopt);
 				editor.set_block(STONE, x, -1, z, std::nullopt, std::nullopt);
-			} else if (natural_type == "bare_rock") {
+			} else if (natural_type == "bare_rock" || natural_type == "rock" ||
+					   natural_type == "stone") {
 				const uint64_t h = coord_hash(x, z) % 12;
 				Block rock = STONE;
 				if (h <= 4)
@@ -782,77 +788,6 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 						place_grass_or_tall(editor, rng, x, z);
 				} else {
 					place_grass_or_tall(editor, rng, x, z);
-				}
-			} else if (natural_type == "mountain_range") {
-				// Create block clusters instead of random placement
-				int cluster_chance = static_cast<int>(rng.uniform(1000));
-
-				if (cluster_chance < 50) {
-					// 5% chance to start a new cluster
-					int cb = static_cast<int>(rng.uniform(7));
-					Block cluster_block = DIRT;
-					if (cb == 0)
-						cluster_block = DIRT;
-					else if (cb == 1)
-						cluster_block = STONE;
-					else if (cb == 2)
-						cluster_block = GRAVEL;
-					else if (cb == 3)
-						cluster_block = GRANITE;
-					else if (cb == 4)
-						cluster_block = DIORITE;
-					else if (cb == 5)
-						cluster_block = ANDESITE;
-					else
-						cluster_block = GRASS_BLOCK;
-
-					// Generate cluster size (5-10 blocks radius)
-					int cluster_size = 5 + static_cast<int>(rng.uniform(6));
-
-					// Create cluster around current position
-					for (int dx = -cluster_size; dx <= cluster_size; ++dx) {
-						for (int dz = -cluster_size; dz <= cluster_size; ++dz) {
-							int cluster_x = x + dx;
-							int cluster_z = z + dz;
-
-							// Use distance to create more natural cluster shape
-							float distance = std::sqrt(float(dx * dx + dz * dz));
-							if (distance <= static_cast<float>(cluster_size)) {
-								// Probability decreases with distance from center
-								float place_prob =
-										1.0f -
-										(distance / static_cast<float>(cluster_size));
-								if (rng.random_f32() < place_prob) {
-									editor.set_block(cluster_block, cluster_x, 0,
-											cluster_z, std::nullopt, std::nullopt);
-
-									// Add vegetation on grass blocks
-									if (cluster_block == GRASS_BLOCK) {
-										int vegetation_chance =
-												static_cast<int>(rng.uniform(100));
-										if (vegetation_chance == 0 &&
-												editor.land_cover_backs_trees(
-														cluster_x, cluster_z)) {
-											// 1% chance for rare trees
-											Tree::create(editor,
-													{cluster_x, 1, cluster_z},
-													&building_footprints,
-													&bridge_surface);
-										} else if (vegetation_chance < 15) {
-											// 15% chance for grass
-											editor.set_block(GRASS, cluster_x, 1,
-													cluster_z, std::nullopt,
-													std::nullopt);
-										} else if (vegetation_chance < 25) {
-											// 10% chance for oak leaves
-											bush::place(editor, cluster_x, cluster_z,
-													bush::Kind::Low);
-										}
-									}
-								}
-							}
-						}
-					}
 				}
 			} else if (natural_type == "saddle") {
 				// Saddle areas - lowest point between peaks, mix of stone and grass

@@ -208,6 +208,12 @@ bool is_pedestrian_way_tags(const crate::tags_t &tags)
 const std::vector<crate::block_definitions::Block> *surface_palette_view(
 		const std::string &highway, const crate::tags_t &tags)
 {
+	if (highway == "construction") {
+		static const std::vector<crate::block_definitions::Block> construction_bed{
+				crate::block_definitions::COARSE_DIRT, crate::block_definitions::GRAVEL,
+				crate::block_definitions::DIRT};
+		return &construction_bed;
+	}
 	if (highway == "cycleway")
 		if (const auto *blocks = crate::surfaces::cycleway_palette_view(tags))
 			return blocks;
@@ -257,6 +263,8 @@ int highway_default_lanes(const std::string &highway)
 
 int lane_marking_count(const std::string &highway, const crate::tags_t &tags)
 {
+	if (highway == "construction")
+		return 1;
 	const auto marked = tags.get("lane_markings");
 	if (marked == "no")
 		return 1;
@@ -663,6 +671,12 @@ std::vector<std::pair<int, int>> stair_fill_cells(
 int highway_block_range(const std::string &highway_type,
 		const std::unordered_map<std::string, std::string> &tags, double scale)
 {
+	if (highway_type == "construction") {
+		const auto construction = tags.find("construction");
+		if (construction != tags.end() && !construction->second.empty() &&
+				construction->second != "construction")
+			return highway_block_range(construction->second, tags, scale);
+	}
 	int block_range = 2;
 	bool scales_with_lanes = true;
 	if (highway_type == "footway" || highway_type == "pedestrian" ||
@@ -1080,13 +1094,13 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 										 : tunnel_portals.approach(way.id);
 	if (way.tags.get("lit") == "yes" && args.mode != GenerationMode::Blueprint &&
 			!is_bridge_member && !is_bridge_ramp && layer_value == 0 &&
-			highway_type != "steps")
+			highway_type != "steps" && highway_type != "construction")
 		place_way_lamps(editor, way, block_range, road_mask);
 
 	const auto &block_types = *surface_palette_view(highway_type, way.tags);
 	const bool pedestrian = is_pedestrian_way_tags(way.tags);
 	const auto crossing_paint =
-			pedestrian ? markings.crossing_way_paint(way.tags) : std::nullopt;
+			pedestrian ? markings.crossing_way_paint(way) : std::nullopt;
 	const bool marked_crossing =
 			crossing_paint &&
 			crossing_paint->kind == crate::road_markings::CrossingPaint::Kind::Zebra;
@@ -1934,25 +1948,93 @@ void generate_siding(crate::world_editor::WorldEditor &editor,
 	generate_siding(editor, element, empty_bridge_surface);
 }
 
-void generate_aeroway(crate::world_editor::WorldEditor &editor,
-		const crate::osm_parser::ProcessedWay &way, const crate::args::Args &args)
+void generate_aeroway_impl(crate::world_editor::WorldEditor &editor,
+		const crate::osm_parser::ProcessedWay &way, const crate::args::Args &args,
+		const crate::FloodFillCache *fill_cache)
 {
 	const bool runway = way.tags.get("aeroway") == "runway";
 	const bool taxiway = way.tags.get("aeroway") == "taxiway";
-	const bool stand_line = way.tags.get("aeroway") == "parking_position";
+	const auto aeroway = way.tags.get("aeroway");
+	const bool stopway = aeroway == "stopway";
+	const bool stand_line = aeroway == "parking_position" || aeroway == "taxilane";
+	const bool closed = way.nodes.size() >= 4 &&
+						way.nodes.front().x == way.nodes.back().x &&
+						way.nodes.front().z == way.nodes.back().z;
+	const auto area_kind = way.tags.get("area:aeroway");
+	const auto ordinary_area_kind =
+			aeroway == "apron" || (way.tags.get("area") == "yes" && (runway || taxiway));
+	const bool runway_area =
+			closed &&
+			(area_kind == "runway" || area_kind == "stopway" || area_kind == "blastpad" ||
+					area_kind == "blast_pad" ||
+					(area_kind.empty() && ordinary_area_kind && (runway || stopway)));
+	const bool apron_area =
+			closed &&
+			(area_kind == "taxiway" || area_kind == "apron" ||
+					area_kind == "parking_position" ||
+					(area_kind.empty() && ordinary_area_kind && !runway && !stopway));
+	if (runway_area || apron_area) {
+		std::optional<Block> unpaved;
+		const auto surface = way.tags.get("surface");
+		static const std::unordered_set<std::string> unpaved_surfaces{"grass", "dirt",
+				"ground", "earth", "soil", "unpaved", "gravel", "fine_gravel",
+				"compacted", "sand", "clay", "mud"};
+		if (unpaved_surfaces.contains(surface))
+			if (const auto *palette = crate::surfaces::get_blocks_for_surface(surface);
+					palette && !palette->empty())
+				unpaved = palette->front();
+		const Block block = unpaved.value_or(
+				runway_area ? crate::block_definitions::GRAY_CONCRETE
+							: crate::block_definitions::LIGHT_GRAY_CONCRETE);
+		std::vector<std::pair<int, int>> outline;
+		std::vector<std::pair<int, int>> uncached_cells;
+		if (!fill_cache) {
+			outline.reserve(way.nodes.size());
+			for (const auto &node : way.nodes)
+				outline.emplace_back(node.x, node.z);
+			uncached_cells = crate::floodfill::flood_fill_area(outline);
+		}
+		const auto cached_cells = fill_cache
+										  ? fill_cache->get_or_compute(way, args.timeout)
+										  : FloodFillResult{};
+		const auto &cells = fill_cache ? *cached_cells : uncached_cells;
+		const std::vector<Block> runway_overwrites{
+				crate::block_definitions::LIGHT_GRAY_CONCRETE,
+				crate::block_definitions::YELLOW_CONCRETE};
+		const std::optional<std::vector<Block>> over =
+				block == crate::block_definitions::GRAY_CONCRETE
+						? std::optional<std::vector<Block>>(runway_overwrites)
+						: std::nullopt;
+		for (const auto &[x, z] : cells)
+			if (!editor.nested_area_owns(x, z))
+				editor.set_block(block, x, 0, z, over, std::nullopt);
+		return;
+	}
+	if (!(runway || taxiway || stand_line || stopway))
+		return;
+	std::optional<Block> unpaved;
+	const auto surface = way.tags.get("surface");
+	static const std::unordered_set<std::string> unpaved_surfaces{"grass", "dirt",
+			"ground", "earth", "soil", "unpaved", "gravel", "fine_gravel", "compacted",
+			"sand", "clay", "mud"};
+	if (unpaved_surfaces.contains(surface))
+		if (const auto *palette = crate::surfaces::get_blocks_for_surface(surface);
+				palette && !palette->empty())
+			unpaved = palette->front();
 	double half_width_m = stand_line ? 2.5 : 12.0;
 	if (!stand_line)
 		if (const auto metres = parse_width_tag_m(way.tags))
 			half_width_m = std::clamp(*metres * 0.5, 6.0, 40.0);
 	const int half_width =
 			std::max(1, static_cast<int>(std::round(half_width_m * args.scale)));
-	const auto base = runway ? crate::block_definitions::GRAY_CONCRETE
-							 : crate::block_definitions::LIGHT_GRAY_CONCRETE;
+	const auto base = unpaved.value_or(
+			runway || stopway ? crate::block_definitions::GRAY_CONCRETE
+							  : crate::block_definitions::LIGHT_GRAY_CONCRETE);
 	const std::vector<crate::block_definitions::Block> runway_overwrites = {
 			crate::block_definitions::LIGHT_GRAY_CONCRETE,
 			crate::block_definitions::YELLOW_CONCRETE};
 	std::optional<std::vector<crate::block_definitions::Block>> base_over;
-	if (runway)
+	if (runway && !unpaved)
 		base_over = runway_overwrites;
 	struct AerowayPoint
 	{
@@ -1982,6 +2064,8 @@ void generate_aeroway(crate::world_editor::WorldEditor &editor,
 			for (int dz = -half_width; dz <= half_width; ++dz)
 				editor.set_block(
 						base, point.x + dx, 0, point.z + dz, base_over, std::nullopt);
+	if (stopway || unpaved)
+		return;
 	const std::vector<crate::block_definitions::Block> over_base = {base};
 	for (const auto &point : points) {
 		const int x = point.x, z = point.z;
@@ -2061,6 +2145,61 @@ void paint_helipad_disc(WorldEditor &editor, int cx, int cz, const Args &args,
 }
 } // namespace
 
+void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args)
+{
+	generate_aeroway_impl(editor, way, args, nullptr);
+}
+
+std::optional<AerowayAreaKind> aeroway_area_kind(const ProcessedWay &way)
+{
+	const auto aeroway = way.tags.get("aeroway");
+	const bool runway = aeroway == "runway";
+	const bool taxiway = aeroway == "taxiway";
+	const bool stopway = aeroway == "stopway";
+	const bool closed = way.nodes.size() >= 4 &&
+						way.nodes.front().x == way.nodes.back().x &&
+						way.nodes.front().z == way.nodes.back().z;
+	if (!closed)
+		return std::nullopt;
+	const auto area_kind = way.tags.get("area:aeroway");
+	const bool ordinary_area_kind =
+			aeroway == "apron" || (way.tags.get("area") == "yes" && (runway || taxiway));
+	const bool runway_area =
+			area_kind == "runway" || area_kind == "stopway" || area_kind == "blastpad" ||
+			area_kind == "blast_pad" ||
+			(area_kind.empty() && ordinary_area_kind && (runway || stopway));
+	const bool apron_area =
+			area_kind == "taxiway" || area_kind == "apron" ||
+			area_kind == "parking_position" ||
+			(area_kind.empty() && ordinary_area_kind && !runway && !stopway);
+	if (runway_area)
+		return AerowayAreaKind::Runway;
+	if (apron_area)
+		return AerowayAreaKind::Apron;
+	return std::nullopt;
+}
+
+bool is_aeroway_area(const ProcessedWay &way)
+{
+	return aeroway_area_kind(way).has_value();
+}
+
+std::optional<crate::block_definitions::Block> aeroway_area_block(const ProcessedWay &way)
+{
+	const auto kind = aeroway_area_kind(way);
+	if (!kind)
+		return std::nullopt;
+	const auto surface = way.tags.get("surface");
+	static const std::unordered_set<std::string> unpaved_surfaces{"grass", "dirt",
+			"ground", "earth", "soil", "unpaved", "gravel", "fine_gravel", "compacted",
+			"sand", "clay", "mud"};
+	if (unpaved_surfaces.contains(surface))
+		return std::nullopt;
+	return *kind == AerowayAreaKind::Runway
+				   ? crate::block_definitions::GRAY_CONCRETE
+				   : crate::block_definitions::LIGHT_GRAY_CONCRETE;
+}
+
 void generate_helipad_node(WorldEditor &editor, const ProcessedNode &node,
 		const Args &args, const CoordinateBitmap &building_footprints)
 {
@@ -2071,7 +2210,7 @@ void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &
 		const CoordinateBitmap &building_footprints)
 {
 	if (way.tags.get("aeroway") != "helipad") {
-		generate_aeroway(editor, way, args);
+		generate_aeroway_impl(editor, way, args, nullptr);
 		return;
 	}
 	std::vector<std::pair<int, int>> outline;
@@ -2107,6 +2246,16 @@ void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &
 		cz = nearest->second;
 	}
 	paint_helipad(editor, cells, cx, cz, building_footprints);
+}
+
+void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args,
+		const CoordinateBitmap &building_footprints, const FloodFillCache &fill_cache)
+{
+	if (way.tags.get("aeroway") == "helipad") {
+		generate_aeroway(editor, way, args, building_footprints);
+		return;
+	}
+	generate_aeroway_impl(editor, way, args, &fill_cache);
 }
 
 crate::CoordinateBitmap collect_road_surface_coords(

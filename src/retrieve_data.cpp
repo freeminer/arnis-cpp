@@ -23,6 +23,55 @@ size_t area_name_write(void *contents, size_t size, size_t count, void *user)
 	out->append(static_cast<const char *>(contents), size * count);
 	return size * count;
 }
+
+nlohmann::json json_tags(const tags_t &tags)
+{
+	nlohmann::json result = nlohmann::json::object();
+	for (const auto &[key, value] : tags)
+		result[key] = value;
+	return result;
+}
+
+nlohmann::json document_json(const osm_parser::RawOsmDocument &document)
+{
+	nlohmann::json root;
+	root["elements"] = nlohmann::json::array();
+	for (const auto &node : document.nodes) {
+		nlohmann::json element{{"type", "node"}, {"id", node.id}};
+		if (node.lat)
+			element["lat"] = *node.lat;
+		if (node.lon)
+			element["lon"] = *node.lon;
+		if (!node.tags.empty())
+			element["tags"] = json_tags(node.tags);
+		root["elements"].push_back(std::move(element));
+	}
+	for (const auto &way : document.ways) {
+		nlohmann::json element{{"type", "way"}, {"id", way.id}, {"nodes", way.node_refs}};
+		if (!way.tags.empty())
+			element["tags"] = json_tags(way.tags);
+		root["elements"].push_back(std::move(element));
+	}
+	for (const auto &relation : document.relations) {
+		nlohmann::json members = nlohmann::json::array();
+		for (const auto &member : relation.members)
+			members.push_back(
+					{{"type", member.type}, {"ref", member.ref}, {"role", member.role}});
+		nlohmann::json element{{"type", "relation"}, {"id", relation.id},
+				{"members", std::move(members)}};
+		if (!relation.tags.empty())
+			element["tags"] = json_tags(relation.tags);
+		root["elements"].push_back(std::move(element));
+	}
+	if (document.remark)
+		root["remark"] = *document.remark;
+	if (document.bounds) {
+		const auto &b = *document.bounds;
+		root["bounds"] = {
+				{"minlat", b[0]}, {"minlon", b[1]}, {"maxlat", b[2]}, {"maxlon", b[3]}};
+	}
+	return root;
+}
 }
 std::string url_host(const std::string &url)
 {
@@ -49,18 +98,45 @@ osm_parser::RawOsmDocument load_osm_file(const std::filesystem::path &path)
 								 : osm_parser::parse_overpass_json(input);
 }
 
+void save_osm_json(osm_parser::RawOsmDocument &document,
+		const geographic::LLBBox &requested_bbox, const std::filesystem::path &path)
+{
+	document.bounds =
+			std::array<double, 4>{requested_bbox.min().lat(), requested_bbox.min().lng(),
+					requested_bbox.max().lat(), requested_bbox.max().lng()};
+	std::ofstream output(path, std::ios::binary | std::ios::trunc);
+	if (!output)
+		throw std::runtime_error("Cannot create OSM JSON output " + path.string());
+	output << document_json(document).dump();
+	output.flush();
+	if (!output)
+		throw std::runtime_error("Cannot write OSM JSON output " + path.string());
+	std::cout << "OSM data saved to: " << path.string() << '\n';
+}
+
 std::string overpass_query(const geographic::LLBBox &bbox)
 {
 	std::ostringstream out;
 	out << "[out:json][timeout:360][bbox:" << bbox.min().lat() << ',' << bbox.min().lng()
 		<< ',' << bbox.max().lat() << ',' << bbox.max().lng() << "];\n(\n"
-		<< "nwr[\"building\"];nwr[\"building:part\"];relation[\"type\"=\"building\"];nwr[\"highway\"];nwr[\"landuse\"][\"landuse\"!=\"salt_pond\"];"
-		<< "nwr[\"natural\"][\"natural\"!=\"coastline\"][\"natural\"!=\"bay\"][\"natural\"!=\"strait\"];nwr[\"leisure\"];"
-		<< "nwr[\"water\"][\"water\"!=\"bay\"][\"water\"!=\"ocean\"][\"water\"!=\"sea\"][\"tidal\"!=\"yes\"];nwr[\"waterway\"][\"waterway\"!=\"tidal_channel\"];"
-		<< "nwr[\"amenity\"];nwr[\"tourism\"];nwr[\"bridge\"];nwr[\"railway\"];nwr[\"roller_coaster\"];nwr[\"aerialway\"];nwr[\"attraction\"];nwr[\"barrier\"];nwr[\"entrance\"];nwr[\"door\"];"
-		<< "nwr[\"power\"];nwr[\"historic\"];nwr[\"emergency\"];nwr[\"advertising\"];nwr[\"man_made\"];nwr[\"aeroway\"];nwr[\"3dmr\"];"
-		<< "nwr[\"shop\"];nwr[\"office\"];way[\"place\"][\"place\"!~\"^(ocean|sea|bay|strait|sound|fjord)$\"];way;\n)->.relsinbbox;\n"
-		<< "(way(r.relsinbbox);)->.waysinbbox;(node(w.waysinbbox);node(w.relsinbbox);)->.nodesinbbox;.relsinbbox out body;.waysinbbox out body;.nodesinbbox out skel qt;";
+		<< "nwr[\"building\"];nwr[\"building:part\"];relation[\"type\"=\"building\"];"
+		<< "nwr[\"highway\"];nwr[\"landuse\"];nwr[\"natural\"];nwr[\"leisure\"];"
+		<< "nwr[\"water\"];nwr[\"waterway\"];nwr[\"amenity\"];nwr[\"tourism\"];"
+		<< "nwr[\"bridge\"];nwr[\"railway\"];nwr[\"roller_coaster\"];nwr[\"aerialway\"];"
+		<< "nwr[\"attraction\"];nwr[\"barrier\"];nwr[\"entrance\"];nwr[\"door\"];"
+		<< "nwr[\"power\"];nwr[\"historic\"];nwr[\"emergency\"];nwr[\"advertising\"];"
+		<< "nwr[\"man_made\"];nwr[\"aeroway\"];nwr[\"3dmr\"];nwr[\"shop\"];nwr[\"office\"];"
+		<< "way[~\".\"~\".\"];\n)->.candidates;\n"
+		<< "(nwr.candidates[\"landuse\"=\"salt_pond\"];"
+		<< "nwr.candidates[\"natural\"~\"^(coastline|bay|strait)$\"];"
+		<< "nwr.candidates[\"water\"~\"^(bay|ocean|sea)$\"];"
+		<< "nwr.candidates[\"tidal\"=\"yes\"];"
+		<< "nwr.candidates[\"waterway\"=\"tidal_channel\"];"
+		<< "nwr.candidates[\"place\"~\"^(ocean|sea|bay|strait|sound|fjord)$\"];"
+		<< ")->.excluded;\n(.candidates; - .excluded;)->.wanted;\n"
+		<< "(way(r.wanted);)->.members;\n"
+		<< "(node(w.members);node(w.wanted);)->.waynodes;\n"
+		<< ".wanted out body;.members out body;.waynodes out skel qt;";
 	return out.str();
 }
 
@@ -185,7 +261,7 @@ namespace
 std::optional<FetchResult> fetch_osm_data_impl(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, bool use_tile_archive,
 		const std::string &tiles_url, double scale, std::uint64_t seed, bool probe,
-		std::string *error)
+		std::string *error, const std::optional<std::string> &save_file = std::nullopt)
 {
 	std::string archive_error;
 	if (use_tile_archive && !tiles_url.empty()) {
@@ -196,8 +272,11 @@ std::optional<FetchResult> fetch_osm_data_impl(const geographic::LLBBox &bbox,
 			return std::nullopt;
 		}
 		if (auto document = osm_tiles::fetch_data_from_tiles(
-					bbox, tiles_url, scale, &archive_error))
+					bbox, tiles_url, scale, &archive_error)) {
+			if (save_file)
+				save_osm_json(*document, bbox, *save_file);
 			return FetchResult{std::move(*document), tiles_url};
+		}
 		if (!archive_error.empty()) {
 			std::cerr << "Warning: Tile archive unavailable (" << archive_error
 					  << "); falling back to Overpass.\n";
@@ -207,6 +286,8 @@ std::optional<FetchResult> fetch_osm_data_impl(const geographic::LLBBox &bbox,
 	}
 	std::string overpass_error;
 	auto result = fetch_overpass(bbox, fetcher, seed, probe, &overpass_error);
+	if (result && save_file)
+		save_osm_json(result->document, bbox, *save_file);
 	if (!result && error) {
 		if (!archive_error.empty())
 			*error = "Tile archive unavailable (" + archive_error +
@@ -231,7 +312,7 @@ std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
 		bool probe, std::string *error)
 {
 	return fetch_osm_data_impl(bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url,
-			args.scale, seed, probe, error);
+			args.scale, seed, probe, error, args.save_json_file);
 }
 
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body)

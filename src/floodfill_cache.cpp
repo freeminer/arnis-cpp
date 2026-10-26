@@ -3,6 +3,7 @@
 #include "clipping.h"
 #include "element_processing/way_segments.h"
 #include "element_processing/relation_area.h"
+#include "element_processing/highways.h"
 #include "bresenham.h"
 #include "strict_parse.h"
 #include <algorithm>
@@ -192,14 +193,17 @@ bool is_sealed_surface_way(const ProcessedWay &way)
 	if (amenity != way.tags.end() && sealed_amenity_values().contains(amenity->second))
 		return true;
 	const auto area = way.tags.find("area");
-	return way.tags.contains("highway") && area != way.tags.end() &&
-		   area->second == "yes";
+	return (way.tags.contains("highway") && area != way.tags.end() &&
+				   area->second == "yes") ||
+		   highways::aeroway_area_block(way).has_value();
 }
 
 bool paving_yields_to_nested_areas(const ProcessedWay &way)
 {
 	const auto area = way.tags.find("area");
-	if (way.tags.contains("highway") && area != way.tags.end() && area->second == "yes")
+	if ((way.tags.contains("highway") && area != way.tags.end() &&
+				area->second == "yes") ||
+			highways::aeroway_area_block(way).has_value())
 		return true;
 	const auto amenity = way.tags.find("amenity");
 	const auto leisure = way.tags.find("leisure");
@@ -799,7 +803,8 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 	const bool waterfront = is_waterfront(way.tags);
 	const bool needed = has_building || has_building_part || has_landuse || has_leisure ||
 						has_amenity || natural_not_tree || (has_highway && area_yes) ||
-						tomb_pyramid || waterfront || solar_generator;
+						highways::is_aeroway_area(way) || tomb_pyramid || waterfront ||
+						solar_generator;
 	return needed && !fill_goes_unread(way);
 }
 
@@ -822,7 +827,7 @@ bool FloodFillCache::fill_goes_unread(const ProcessedWay &way)
 	const auto amenity = tags.find("amenity");
 	const auto landuse = tags.find("landuse");
 	if (landuse != tags.end())
-		return landuse->second == "residential" || landuse->second == "commercial";
+		return !element_processing::landuse_paints_ground(tags);
 	const auto natural = tags.find("natural");
 	if (natural != tags.end() &&
 			!(amenity != tags.end() && amenity->second == "fountain"))

@@ -941,6 +941,15 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 	DecodedTile decoded;
 	std::unordered_set<std::uint64_t> seen_nodes, seen_ways, seen_relations;
 	std::size_t tiles_read = 0;
+	std::uint64_t bytes_read = 0;
+	std::vector<std::string> built_dates;
+	auto display_built_date = [](const std::string &built) {
+		if (built.size() == 8 && std::all_of(built.begin(), built.end(),
+										 [](unsigned char c) { return std::isdigit(c); }))
+			return built.substr(0, 4) + "-" + built.substr(4, 2) + "-" +
+				   built.substr(6, 2);
+		return built;
+	};
 	auto absorb = [&](DecodedTile &&tile) {
 		for (auto &node : tile.nodes)
 			if (seen_nodes.insert(node.id).second)
@@ -1011,9 +1020,11 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 			return std::nullopt;
 		}
 		OpenArchive archive_state{*archive, range, {}, false};
+		const auto tiles_before_archive = tiles_read;
 		struct TileResult
 		{
 			DecodedTile tile;
+			std::size_t bytes = 0;
 			bool valid = false;
 			bool aot2 = false;
 			std::string error;
@@ -1037,6 +1048,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 						}
 						if (read.bytes.empty())
 							return result;
+						result.bytes = read.bytes.size();
 						std::string tile_error;
 						auto plain = zstd_decode(read.bytes, &tile_error);
 						if (!plain) {
@@ -1065,11 +1077,22 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 				if (!result.valid)
 					continue;
 				++tiles_read;
+				bytes_read += result.bytes;
 				archive_state.aot2 |= result.aot2;
 				for (const auto &relation : result.tile.relations)
 					archive_state.relation_ids.insert(relation.id);
 				absorb(std::move(result.tile));
 			}
+		}
+		if (tiles_read > tiles_before_archive) {
+			auto built = entry.value("built", std::string{});
+			if (built.empty())
+				built = "undated";
+			else
+				built = display_built_date(built);
+			if (std::find(built_dates.begin(), built_dates.end(), built) ==
+					built_dates.end())
+				built_dates.push_back(std::move(built));
 		}
 		opened.push_back(std::move(archive_state));
 	}
@@ -1206,6 +1229,14 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		std::cerr << "Warning: " << skipped_relations << " relations left partial ("
 				  << first_skipped_relation << ")\n";
 	const auto selected = select_for_bbox(decoded, bbox);
+	std::cout << "Read " << tiles_read << " tiles (" << std::fixed << std::setprecision(1)
+			  << (static_cast<double>(bytes_read) / 1e6) << " MB) from the archive";
+	if (!built_dates.empty()) {
+		std::cout << ", built ";
+		for (std::size_t i = 0; i < built_dates.size(); ++i)
+			std::cout << (i ? ", " : "") << built_dates[i];
+	}
+	std::cout << '\n';
 	return assemble(selected);
 }
 } // namespace arnis::osm_tiles

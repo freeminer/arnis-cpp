@@ -28,7 +28,8 @@ inline bool landuse_paints_ground(const tags_t &tags)
 {
 	const auto it = tags.find("landuse");
 	return it == tags.end() ||
-		   (it->second != "residential" && it->second != "commercial");
+		   (it->second != "residential" && it->second != "commercial" &&
+				   it->second != "education" && it->second != "religious");
 }
 
 inline std::optional<RelationArea> relation_area(const tags_t &tags)

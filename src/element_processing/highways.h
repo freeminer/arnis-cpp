@@ -11,6 +11,9 @@
 namespace arnis
 {
 struct ProcessedWay;
+class FloodFillCache;
+class CoordinateBitmap;
+struct Args;
 namespace world_editor
 {
 struct WorldEditor;
@@ -40,8 +43,24 @@ bool tunnel_renders_at_surface(
 // highway-node dispatcher.
 bool is_signal(const tags_t &tags);
 
+// Closed aeroway polygons handled by the aeroway renderer and flood-fill cache.
+enum class AerowayAreaKind
+{
+	Runway,
+	Apron,
+};
+std::optional<AerowayAreaKind> aeroway_area_kind(const ProcessedWay &way);
+bool is_aeroway_area(const ProcessedWay &way);
+// Paved airport areas which take part in sealed-surface precedence.
+std::optional<crate::block_definitions::Block> aeroway_area_block(
+		const ProcessedWay &way);
+
 /// Remove street lamps whose plinths were swallowed by the later water pass.
 void drop_lamps_in_water(world_editor::WorldEditor &editor);
+
+void generate_aeroway(world_editor::WorldEditor &editor, const ProcessedWay &way,
+		const Args &args, const CoordinateBitmap &building_footprints,
+		const FloodFillCache &fill_cache);
 
 // Effective half-width of a paved way, including lane and explicit width tags.
 int highway_block_range(const std::string &highway_type,

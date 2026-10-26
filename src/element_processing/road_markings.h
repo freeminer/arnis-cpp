@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 #include <vector>
 
@@ -78,12 +79,13 @@ public:
 	static RoadMarkingIndex build(const std::vector<ProcessedElement> &elements,
 			double scale, decals::SignRegion region);
 	const WayMarks *way(std::uint64_t id) const;
-	std::optional<CrossingPaint> crossing_way_paint(const tags_t &tags) const;
+	std::optional<CrossingPaint> crossing_way_paint(const ProcessedWay &way) const;
 	const std::vector<CarriagewayClip> *crossing_clips(std::uint64_t id) const;
 	const CarriagewayClip *carriageway_at(std::uint64_t id, int x, int z) const;
 
 private:
 	std::unordered_map<std::uint64_t, WayMarks> ways_;
 	std::unordered_map<std::uint64_t, std::vector<CarriagewayClip>> crossings_;
+	std::unordered_set<std::uint64_t> crossing_road_nodes_;
 };
 } // namespace arnis::road_markings

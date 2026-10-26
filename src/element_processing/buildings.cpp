@@ -4392,7 +4392,8 @@ void generate_roof_only_structure(WorldEditor &editor, const ProcessedWay &eleme
 		if (auto level = parse_i32_tag(element.tags, "building:min_level");
 				level && *level > 0)
 			min_level_offset = scaled_blocks(*level * floor_cycle + 2, scale_factor);
-	} else if (auto it = element.tags.find("layer"); it != element.tags.end()) {
+	} else if (auto it = element.tags.find("layer");
+			   it != element.tags.end() && element.tags.get("building:part") == "roof") {
 		if (auto layer = parse_i32_tag(element.tags, "layer"); layer && *layer > 0)
 			min_level_offset = scaled_blocks(*layer * floor_cycle, scale_factor);
 	}

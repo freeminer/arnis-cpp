@@ -36,6 +36,9 @@ using OverpassFetcher = std::function<std::optional<std::string>(
 std::string url_host(const std::string &url);
 bool is_osm_xml_path(const std::filesystem::path &path);
 osm_parser::RawOsmDocument load_osm_file(const std::filesystem::path &path);
+// Persist the normalized Overpass-shaped document for reuse via load_osm_file.
+void save_osm_json(osm_parser::RawOsmDocument &document,
+		const geographic::LLBBox &requested_bbox, const std::filesystem::path &path);
 std::string overpass_query(const geographic::LLBBox &bbox);
 std::vector<OverpassEndpoint> overpass_request_plan(
 		std::uint64_t seed = 0, bool probe_official_first = false);

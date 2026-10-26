@@ -95,6 +95,7 @@
 #include "caves_water.h"
 #include "trees/region.h"
 #include "water_depth.h"
+#include "water_steps.h"
 #include "world_editor/floor_state.h"
 #include "progress.h"
 #include "clipping.h"
@@ -379,11 +380,8 @@ std::size_t drop_buildings_on_aircraft_pavement(
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
-		const bool closed = way.nodes.size() >= 4 &&
-							way.nodes.front().x == way.nodes.back().x &&
-							way.nodes.front().z == way.nodes.back().z;
 		const auto aeroway = way.tags.get("aeroway");
-		const auto area_kind = way.tags.get("area:aeroway");
+		const auto area_kind = highways::aeroway_area_kind(way);
 		auto ring = [&] {
 			std::vector<std::pair<int, int>> points;
 			points.reserve(way.nodes.size());
@@ -391,19 +389,15 @@ std::size_t drop_buildings_on_aircraft_pavement(
 				points.emplace_back(node.x, node.z);
 			return points;
 		};
-		if (area_kind == std::optional<std::string>("runway") && closed) {
+		if (area_kind == highways::AerowayAreaKind::Runway) {
 			runway_areas.push_back(ring());
-		} else if (area_kind == std::optional<std::string>("taxiway") && closed) {
+		} else if (area_kind == highways::AerowayAreaKind::Apron) {
 			aprons.push_back(ring());
-		} else if (aeroway == std::optional<std::string>("runway") && closed &&
-				   way.tags.get("area") == std::optional<std::string>("yes")) {
-			runway_areas.push_back(ring());
-		} else if (aeroway == std::optional<std::string>("runway")) {
+		} else if (aeroway == std::optional<std::string>("runway") ||
+				   aeroway == std::optional<std::string>("stopway")) {
 			append_aircraft_strip_segments(runways, way, scale);
 		} else if (aeroway == std::optional<std::string>("taxiway")) {
 			append_aircraft_strip_segments(taxiways, way, scale);
-		} else if (aeroway == std::optional<std::string>("apron") && closed) {
-			aprons.push_back(ring());
 		}
 	}
 	if (runways.empty() && taxiways.empty() && runway_areas.empty() && aprons.empty())
@@ -816,9 +810,7 @@ double ring_area(const std::vector<ProcessedNode> &nodes)
 
 bool landuse_paints_ground(const tags_t &tags)
 {
-	const auto it = tags.find("landuse");
-	return it == tags.end() ||
-		   (it->second != "residential" && it->second != "commercial");
+	return element_processing::landuse_paints_ground(tags);
 }
 
 std::optional<double> ground_fill_area(const ProcessedElement &element)
@@ -1138,8 +1130,11 @@ void sort_elements_by_priority(std::vector<ProcessedElement> &elements)
 	// features; the remaining elements follow osm_parser::get_priority().
 	std::stable_sort(elements.begin(), elements.end(),
 			[](const ProcessedElement &a, const ProcessedElement &b) {
-				const bool a_landuse = a.tags().contains("landuse");
-				const bool b_landuse = b.tags().contains("landuse");
+				constexpr std::size_t PRIORITY_COUNT = 6;
+				const bool a_landuse = osm_parser::get_priority(a) >= PRIORITY_COUNT &&
+									   a.tags().contains("landuse");
+				const bool b_landuse = osm_parser::get_priority(b) >= PRIORITY_COUNT &&
+									   b.tags().contains("landuse");
 				if (a_landuse != b_landuse)
 					return !a_landuse;
 				return osm_parser::get_priority(a) < osm_parser::get_priority(b);
@@ -1259,6 +1254,9 @@ void generate_highways(WorldEditor &editor, const ProcessedElement &element,
 void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args);
 void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args,
 		const CoordinateBitmap &building_footprints);
+void generate_aeroway(WorldEditor &editor, const ProcessedWay &way, const Args &args,
+		const CoordinateBitmap &building_footprints,
+		const FloodFillCache &flood_fill_cache);
 void generate_helipad_node(WorldEditor &editor, const ProcessedNode &node,
 		const Args &args, const CoordinateBitmap &building_footprints);
 void generate_siding(WorldEditor &editor, const ProcessedWay &way);
@@ -2557,6 +2555,8 @@ bool generate_world(WorldEditor &editor,
 		if (world_style::is_active(args) && !deferred_write_regions.contains(region))
 			editor.release_road_surface_overrides(region.first, region.second);
 	};
+	water_steps::Borders water_borders;
+	std::mutex water_borders_mutex;
 	auto complete_deferred_tile = [&](const TileBounds &tile) {
 		if (!deferred_placements_active)
 			return true;
@@ -2577,6 +2577,13 @@ bool generate_world(WorldEditor &editor,
 				if (remaining == remaining_region_tiles.end() || remaining->second == 0)
 					continue;
 				if (--remaining->second == 0) {
+					if (!args.winter) {
+						std::lock_guard<std::mutex> lock(water_borders_mutex);
+						water_steps::shape_region(editor, water_borders, region,
+								args.caves, [&](water_steps::Borders::Region r) {
+									return real_regions.contains(r);
+								});
+					}
 					flushable_regions.push_back(region);
 					newly_ready.push_back(region);
 				}
@@ -2770,6 +2777,11 @@ bool generate_world(WorldEditor &editor,
 				caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
 						world_editor::terrain_floor_y());
 		}
+		if (deferred_placements_active && !args.winter) {
+			std::lock_guard<std::mutex> lock(water_borders_mutex);
+			water_steps::collect_region_candidates(
+					editor, water_borders, min_x, max_x, min_z, max_z);
+		}
 		const bool merged = return_worker_result
 									? tile_editor.merge_tile(tile.min_x, tile.min_z,
 											  tile.max_x - 1, tile.max_z - 1)
@@ -2952,7 +2964,8 @@ bool generate_world(WorldEditor &editor,
 				railways::generate_roller_coaster(editor, way);
 			} else if (way.tags.contains("aeroway") ||
 					   way.tags.contains("area:aeroway")) {
-				highways::generate_aeroway(editor, way, args, building_footprints);
+				highways::generate_aeroway(
+						editor, way, args, building_footprints, flood_fill_cache);
 			} else if (way.tags.get("service") ==
 					   std::optional<std::string>(std::string("siding"))) {
 				highways::generate_siding(editor, way, bridge_surface);
@@ -3442,6 +3455,10 @@ bool generate_world(WorldEditor &editor,
 		caves::seal_floating_fluid_region(editor,
 				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
 				world_editor::terrain_floor_y());
+	// Match Rust's final terrain-water pass: cave fluids have settled, but
+	// deferred models and world styling have not yet changed the surface.
+	if (!args.winter && !deferred_placements_active)
+		water_steps::shape_world(editor, args.caves);
 	// Rust drops the generation-only indexes and masks before model placement.
 	// Keep the same lifetime boundary here: these can scale with the full area,
 	// but every consumer (including regional tree placement and tunnel carving)

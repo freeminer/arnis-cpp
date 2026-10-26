@@ -76,6 +76,8 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 		const RoadMaskBitmap &road_mask, const bridges::BridgeSurfaceMap &bridge_surface,
 		const Holes *holes)
 {
+	if (!element_processing::landuse_paints_ground(element.tags))
+		return;
 	const std::string binding = std::string();
 	const std::string landuse_tag = [&]() -> std::string {
 		auto it = element.tags.find(std::string("landuse"));
