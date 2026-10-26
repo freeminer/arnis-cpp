@@ -15,6 +15,7 @@ mod luanti;
 mod style;
 
 pub mod bedrock;
+mod bedrock_entities;
 
 pub(crate) use common::WorldToModify;
 #[cfg(test)]
@@ -2425,6 +2426,21 @@ impl<'a> WorldEditor<'a> {
         self.world.get_block(x, absolute_y, z).is_some()
     }
 
+    /// Drops a region from memory as streaming does once it is written.
+    #[cfg(test)]
+    pub(crate) fn evict_region(&mut self, rx: i32, rz: i32) {
+        self.world.regions.remove(&(rx, rz));
+        self.flushed_regions.insert((rx, rz));
+    }
+
+    /// The chunk at chunk coordinates (cx, cz), if anything was written to it.
+    #[inline]
+    pub(crate) fn chunk(&self, cx: i32, cz: i32) -> Option<&common::ChunkToModify> {
+        self.world
+            .get_region(cx >> 5, cz >> 5)?
+            .get_chunk(cx & 31, cz & 31)
+    }
+
     /// Highest non-AIR block in `min_y..=max_y` at (x, z), or None when the column is clear.
     #[inline]
     pub fn highest_block_between(&self, x: i32, z: i32, min_y: i32, max_y: i32) -> Option<i32> {
@@ -2591,7 +2607,8 @@ impl<'a> WorldEditor<'a> {
         emit_gui_progress_update(90.0, "Saving Bedrock world...");
 
         if let Err(error) = self.save_bedrock_internal() {
-            let user_msg = format!("Failed to save Bedrock world: {error}");
+            // The GUI shows this again and cuts it at 35 characters, so the cause leads.
+            let user_msg = format!("Bedrock save: {} ({error})", error.reason());
             eprintln!("{user_msg}");
             #[cfg(feature = "gui")]
             emit_gui_error(&user_msg);
@@ -2622,6 +2639,7 @@ impl<'a> WorldEditor<'a> {
             self.world_time,
             self.start_with_map,
         )
+        .with_ground_origin((self.ground_origin_x, self.ground_origin_z))
         .write_world(&self.world, self.xzbbox, &self.llbbox)
     }
 

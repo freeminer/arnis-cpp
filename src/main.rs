@@ -65,6 +65,7 @@ mod trees;
 mod version_check;
 mod voxy;
 mod water_depth;
+mod water_steps;
 mod world_editor;
 mod world_utils;
 
@@ -292,7 +293,7 @@ fn run_cli() {
             // Report where a derived bbox came from (an explicit --bbox is echoed by the parse step).
             if args.bbox.is_none() {
                 let source = if file_bounds.is_some() {
-                    "file <bounds> element"
+                    "the bounds in the file"
                 } else {
                     "node coordinate extent"
                 };
@@ -640,9 +641,7 @@ fn run_cli() {
         println!("  No additional buildings from Overture Maps for this area");
     }
 
-    parsed_elements.sort_by_cached_key(|element: &osm_parser::ProcessedElement| {
-        osm_parser::get_priority(element)
-    });
+    osm_parser::sort_by_priority(&mut parsed_elements);
     bench.mark("sort_priority");
 
     // OSM water override first, then bridge repair handles remaining bridge-shadow cells.
