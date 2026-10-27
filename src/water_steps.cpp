@@ -38,10 +38,10 @@ bool wet_block(const BlockWithProperties &block)
 {
 	using namespace block_definitions;
 	const auto id = block.block.id();
-	const std::array<Block, 18> water_contents{WATER, SEAGRASS, TALL_SEAGRASS_BOTTOM,
+	const std::array<Block, 17> water_contents{WATER, SEAGRASS, TALL_SEAGRASS_BOTTOM,
 			TALL_SEAGRASS_TOP, KELP, KELP_PLANT, SEA_PICKLE, TUBE_CORAL, BRAIN_CORAL,
 			BUBBLE_CORAL, FIRE_CORAL, HORN_CORAL, TUBE_CORAL_FAN, BRAIN_CORAL_FAN,
-			BUBBLE_CORAL_FAN, FIRE_CORAL_FAN, HORN_CORAL_FAN, WATER};
+			BUBBLE_CORAL_FAN, FIRE_CORAL_FAN, HORN_CORAL_FAN};
 	if (std::any_of(water_contents.begin(), water_contents.end(),
 				[&](const Block &candidate) { return candidate.id() == id; }))
 		return true;
@@ -391,8 +391,11 @@ void shape_world(world_editor::WorldEditor &editor, bool caves)
 	}
 
 	std::vector<Write> writes;
-	for (int rz = min_z >> 9; rz <= (max_z >> 9); ++rz) {
-		for (int rx = min_x >> 9; rx <= (max_x >> 9); ++rx) {
+	// Rust's signed right shift maps negative coordinates to the region below
+	// zero; use the shared floor-division helper so this stays explicit and
+	// consistent with the streamed-region path on every supported compiler.
+	for (int rz = region_floor(min_z); rz <= region_floor(max_z); ++rz) {
+		for (int rx = region_floor(min_x); rx <= region_floor(max_x); ++rx) {
 			const int x0 = std::max(min_x, rx * REGION - MARGIN);
 			const int z0 = std::max(min_z, rz * REGION - MARGIN);
 			const int x1 = std::min(max_x, rx * REGION + REGION - 1 + MARGIN);
