@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../arnis_adapter.h"
+#include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 
 #include <array>
 #include <cstdint>
@@ -54,7 +55,7 @@ public:
 	static RailJoins build(
 			const std::vector<ProcessedElement> &elements, const LevelFn &level);
 	std::array<TrackEnd, 2> ends(std::uint64_t way) const;
-	void meet_at_edge_of(std::array<int, 4> bounds) { area_bounds_ = bounds; }
+	void meet_at_edge_of(cartesian::XZBBox area) { area_ = std::move(area); }
 	std::vector<std::array<std::size_t, 2>> edge_crossings(
 			const std::vector<std::pair<int, int>> &cells) const;
 
@@ -62,7 +63,7 @@ private:
 	std::unordered_map<std::uint64_t, std::array<TrackEnd, 2>> ends_;
 	// The One World area whose independently generated neighbors must share
 	// track levels across its boundary.
-	std::optional<std::array<int, 4>> area_bounds_;
+	std::optional<cartesian::XZBBox> area_;
 };
 
 } // namespace arnis::railways

@@ -163,6 +163,7 @@ struct RelationFootprint
 	std::uint64_t seed = 0;
 	bool ground = true;
 	std::optional<std::uint64_t> way;
+	bool listed_part = false;
 };
 
 std::vector<std::vector<GeoPoint>> relation_rings(const ProcessedRelation &relation,
@@ -307,6 +308,14 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 				relation_ways.insert(member.way->id);
 		}
 	}
+	// The membership pass owns part relations explicitly listed by a
+	// type=building relation. Do not let the spatial fallback reclassify one
+	// from a different enclosing outline (notably a residential outline).
+	std::unordered_set<std::uint64_t> listed_relation_parts;
+	for (const auto *relation : building_relations)
+		for (const auto &member : relation->source_members)
+			if (member.type == "relation" && normalized_role(member.role) == "part")
+				listed_relation_parts.insert(member.id);
 	for (const auto *relation : building_relations) {
 		const auto hint = [&] {
 			auto value = osm_parser::building_style_hint(relation->tags);
@@ -524,7 +533,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 								  osm_parser::building_year_for_parts(relation.tags),
 								  osm_parser::is_housing_type(relation.tags))
 						: 0,
-				covers_ground(relation.tags), std::nullopt};
+				covers_ground(relation.tags), std::nullopt,
+				part && listed_relation_parts.contains(relation.id)};
 		(outline ? relation_outlines : relation_parts).push_back(std::move(footprint));
 	}
 	for (const auto *way : ordered_ways) {
@@ -605,7 +615,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			const auto &outline = relation_outlines[*best];
 			if (part.way) {
 				out.part_groups.try_emplace(*part.way, outline.seed);
-			} else if (osm_parser::residential_group_from_seed(outline.seed)) {
+			} else if (!part.listed_part &&
+					   osm_parser::residential_group_from_seed(outline.seed)) {
 				// Rust's spatial relation-part pass carries residential context for
 				// the relation itself; unlike a part way it cannot use PartGroups.
 				out.housing_relation_parts.insert(part.id);

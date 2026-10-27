@@ -410,16 +410,19 @@ std::vector<std::array<std::size_t, 2>> RailJoins::edge_crossings(
 		const std::vector<std::pair<int, int>> &cells) const
 {
 	std::vector<std::array<std::size_t, 2>> crossings;
-	if (!area_bounds_ || cells.size() < 2)
+	if (!area_ || cells.size() < 2)
 		return crossings;
-	const auto &[min_x, min_z, max_x, max_z] = *area_bounds_;
 	const auto inside = [&](const std::pair<int, int> &cell) {
-		return cell.first >= min_x && cell.first <= max_x && cell.second >= min_z &&
-			   cell.second <= max_z;
+		return area_->contains(cartesian::XZPoint{cell.first, cell.second});
 	};
-	for (std::size_t i = 1; i < cells.size(); ++i)
-		if (inside(cells[i - 1]) != inside(cells[i]))
+	for (std::size_t i = 1; i < cells.size(); ++i) {
+		const bool previous_inside = inside(cells[i - 1]);
+		const bool current_inside = inside(cells[i]);
+		if (previous_inside && !current_inside)
 			crossings.push_back({i - 1, i});
+		else if (!previous_inside && current_inside)
+			crossings.push_back({i, i - 1});
+	}
 	return crossings;
 }
 

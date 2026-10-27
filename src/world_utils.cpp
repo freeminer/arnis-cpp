@@ -161,6 +161,14 @@ bool check_disk_for_extended_height(const Args &args, const geographic::LLBBox &
 	return check_disk_space(dir, needed, error);
 }
 
+bool has_tall_datapack(const std::filesystem::path &world)
+{
+	std::error_code ec;
+	const bool present = std::filesystem::is_regular_file(
+			world / "datapacks" / std::string(TALL_DATAPACK_NAME) / "pack.mcmeta", ec);
+	return !ec && present;
+}
+
 namespace
 {
 struct HeldSessionLock
@@ -770,7 +778,7 @@ bool install_tall_datapack(const std::filesystem::path &world, std::string *erro
 {
 	if (error)
 		error->clear();
-	const auto root = world / "datapacks" / "arnis_tall";
+	const auto root = world / "datapacks" / std::string(TALL_DATAPACK_NAME);
 	const std::array<std::pair<std::filesystem::path, std::filesystem::path>, 4> files{{
 			{"minecraft/datapack_tall/pack.mcmeta", "pack.mcmeta"},
 			{"minecraft/datapack_tall/data/minecraft/dimension_type/overworld.json",
@@ -800,7 +808,7 @@ bool install_tall_datapack(const std::filesystem::path &world, std::string *erro
 			return false;
 		}
 	}
-	return enable_datapack_in_level_dat(world, "arnis_tall", error);
+	return enable_datapack_in_level_dat(world, TALL_DATAPACK_NAME, error);
 }
 
 static std::filesystem::path home()
@@ -940,82 +948,134 @@ bool replace_file_atomically(
 	}
 	return true;
 }
+namespace
+{
+struct Utf8Scalar
+{
+	std::uint32_t value;
+	std::size_t length;
+};
+
+Utf8Scalar next_utf8_scalar(std::string_view text, std::size_t offset)
+{
+	const auto lead = static_cast<unsigned char>(text[offset]);
+	if (lead < 0x80)
+		return {lead, 1};
+	const std::size_t length = lead >= 0xf0 ? 4 : lead >= 0xe0 ? 3 : lead >= 0xc2 ? 2 : 1;
+	if (length == 1 || offset + length > text.size())
+		return {lead, 1};
+	std::uint32_t value = lead & (length == 2 ? 0x1f : length == 3 ? 0x0f : 0x07);
+	for (std::size_t i = 1; i < length; ++i) {
+		const auto byte = static_cast<unsigned char>(text[offset + i]);
+		if ((byte & 0xc0) != 0x80)
+			return {lead, 1};
+		value = (value << 6) | (byte & 0x3f);
+	}
+	const std::uint32_t minimum = length == 2 ? 0x80 : length == 3 ? 0x800 : 0x10000;
+	if (value < minimum || value > 0x10ffff || (value >= 0xd800 && value <= 0xdfff))
+		return {lead, 1};
+	return {value, length};
+}
+
+bool is_unicode_control(std::uint32_t value)
+{
+	return value <= 0x1f || (value >= 0x7f && value <= 0x9f);
+}
+
+bool is_unicode_whitespace(std::uint32_t value)
+{
+	return (value >= 0x09 && value <= 0x0d) || value == 0x20 || value == 0x85 ||
+		   value == 0xa0 || value == 0x1680 || (value >= 0x2000 && value <= 0x200a) ||
+		   value == 0x2028 || value == 0x2029 || value == 0x202f || value == 0x205f ||
+		   value == 0x3000;
+}
+
+std::string sanitize_chars_and_trim(
+		const std::string &name, std::size_t max_bytes, std::size_t max_chars)
+{
+	static constexpr char invalid[] = "<>:\"/\\|?*";
+	std::string capped;
+	capped.reserve(std::min(name.size(), max_bytes));
+	std::size_t chars = 0;
+	for (std::size_t i = 0; i < name.size() && chars < max_chars;) {
+		const auto scalar = next_utf8_scalar(name, i);
+		capped.append(name, i, scalar.length);
+		i += scalar.length;
+		++chars;
+	}
+
+	std::string sanitized;
+	sanitized.reserve(capped.size());
+	for (std::size_t i = 0; i < capped.size();) {
+		const auto scalar = next_utf8_scalar(capped, i);
+		const bool invalid_ascii = scalar.value < 0x80 &&
+								   std::strchr(invalid, static_cast<int>(scalar.value));
+		if (is_unicode_control(scalar.value) || invalid_ascii)
+			sanitized.push_back('_');
+		else
+			sanitized.append(capped, i, scalar.length);
+		i += scalar.length;
+	}
+
+	std::size_t first = 0;
+	while (first < sanitized.size()) {
+		const auto scalar = next_utf8_scalar(sanitized, first);
+		if (!is_unicode_whitespace(scalar.value))
+			break;
+		first += scalar.length;
+	}
+	std::size_t last = sanitized.size();
+	while (last > first) {
+		std::size_t start = last - 1;
+		while (start > first &&
+				(static_cast<unsigned char>(sanitized[start]) & 0xc0) == 0x80)
+			--start;
+		const auto scalar = next_utf8_scalar(sanitized, start);
+		if (!is_unicode_whitespace(scalar.value) && scalar.value != '.')
+			break;
+		last = start;
+	}
+	sanitized = sanitized.substr(first, last - first);
+
+	if (sanitized.size() > max_bytes) {
+		std::size_t cutoff = 0;
+		for (std::size_t i = 0; i < sanitized.size();) {
+			const auto scalar = next_utf8_scalar(sanitized, i);
+			if (i >= max_bytes)
+				break;
+			cutoff = i + scalar.length;
+			i += scalar.length;
+		}
+		sanitized.resize(cutoff);
+		while (!sanitized.empty()) {
+			std::size_t start = sanitized.size() - 1;
+			while (start > 0 &&
+					(static_cast<unsigned char>(sanitized[start]) & 0xc0) == 0x80)
+				--start;
+			const auto scalar = next_utf8_scalar(sanitized, start);
+			if (!is_unicode_whitespace(scalar.value) && scalar.value != '.')
+				break;
+			sanitized.resize(start);
+		}
+	}
+	return sanitized;
+}
+} // namespace
+
 std::string sanitize_for_filename(const std::string &name)
 {
-	constexpr std::size_t max_bytes = 64;
-	static constexpr char invalid[] = "<>:\"/\\|?*";
-	std::string out;
-	out.reserve(std::min(name.size(), max_bytes));
-	for (const unsigned char c : name)
-		out.push_back(c < 32 || std::strchr(invalid, c) ? '_' : char(c));
-	const auto trim = [](std::string &value) {
-		std::size_t first = 0;
-		while (first < value.size() &&
-				std::isspace(static_cast<unsigned char>(value[first])))
-			++first;
-		std::size_t last = value.size();
-		while (last > first &&
-				(std::isspace(static_cast<unsigned char>(value[last - 1])) ||
-						value[last - 1] == '.'))
-			--last;
-		value = value.substr(first, last - first);
-	};
-	trim(out);
-	if (out.size() > max_bytes) {
-		out.resize(max_bytes);
-		// Do not leave a partial UTF-8 sequence after the byte cap. This mirrors
-		// Rust's char-boundary truncation and keeps generated world paths valid.
-		while (!out.empty() && (static_cast<unsigned char>(out.back()) & 0xc0) == 0x80)
-			out.pop_back();
-		if (!out.empty() && static_cast<unsigned char>(out.back()) >= 0xc0) {
-			const auto lead = static_cast<unsigned char>(out.back());
-			const std::size_t width = (lead & 0xe0) == 0xc0	  ? 2
-									  : (lead & 0xf0) == 0xe0 ? 3
-									  : (lead & 0xf8) == 0xf0 ? 4
-															  : 1;
-			if (out.size() - 1 + width > max_bytes)
-				out.pop_back();
-		}
-		trim(out);
-	}
-	return out.empty() ? "Unknown Location" : out;
+	constexpr std::size_t max_filename_bytes = 64;
+	const auto safe = sanitize_chars_and_trim(
+			name, max_filename_bytes, std::numeric_limits<std::size_t>::max());
+	return safe.empty() ? "Unknown Location" : safe;
 }
 
 std::string world_folder_name(const std::string &raw)
 {
-	// Rust caps custom names by characters (not bytes), then applies the same
-	// filesystem-safe filtering used for export filenames.  Preserve UTF-8
-	// boundaries while enforcing the 48-character UI limit.
-	std::string capped;
-	std::size_t chars = 0;
-	for (std::size_t i = 0; i < raw.size() && chars < 48;) {
-		const auto c = static_cast<unsigned char>(raw[i]);
-		std::size_t width = c < 0x80 ? 1 : (c < 0xe0 ? 2 : (c < 0xf0 ? 3 : 4));
-		if (i + width > raw.size())
-			width = 1;
-		capped.append(raw, i, width);
-		i += width;
-		++chars;
-	}
-	static constexpr char invalid[] = "<>:\"/\\|?*";
-	std::string sanitized;
-	sanitized.reserve(capped.size());
-	for (const unsigned char c : capped)
-		sanitized.push_back(c < 32 || std::strchr(invalid, c) ? '_' : char(c));
-	const auto trim = [](std::string &value) {
-		std::size_t first = 0;
-		while (first < value.size() &&
-				std::isspace(static_cast<unsigned char>(value[first])))
-			++first;
-		std::size_t last = value.size();
-		while (last > first &&
-				(std::isspace(static_cast<unsigned char>(value[last - 1])) ||
-						value[last - 1] == '.'))
-			--last;
-		value = value.substr(first, last - first);
-	};
-	trim(sanitized);
-	return sanitized;
+	constexpr std::size_t max_custom_world_name_bytes =
+			MAX_CUSTOM_WORLD_NAME_CHARS * 4 + 5;
+	return sanitize_chars_and_trim(
+			raw, max_custom_world_name_bytes, MAX_CUSTOM_WORLD_NAME_CHARS);
 }
 
 std::string unique_world_folder_name(

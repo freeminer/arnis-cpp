@@ -107,6 +107,19 @@ inline bool validate_scale(double scale)
 	return valid_scale(scale);
 }
 
+// C++ counterpart of args.rs::validate_height_multiplier. Keep this available
+// to library callers that validate options before starting a generation pass.
+inline std::optional<std::string> validate_height_multiplier(double multiplier)
+{
+	if (!std::isfinite(multiplier) || multiplier < MIN_HEIGHT_MULTIPLIER ||
+			multiplier > MAX_HEIGHT_MULTIPLIER)
+		return "Terrain height multiplier must be between " +
+			   std::to_string(MIN_HEIGHT_MULTIPLIER) + " and " +
+			   std::to_string(MAX_HEIGHT_MULTIPLIER) + " (got " +
+			   std::to_string(multiplier) + ").";
+	return std::nullopt;
+}
+
 constexpr bool generation_mode_terrain(GenerationMode mode)
 {
 	return mode != GenerationMode::GeoOnly;
@@ -443,11 +456,12 @@ struct Args
 	{
 		// Planetary scales intentionally sit below the Earth object scale
 		// minimum; Rust validates scale only for geographic Earth worlds.
-		if ((is_earth(body) && !valid_scale(scale)) ||
-				height_multiplier < MIN_HEIGHT_MULTIPLIER ||
-				height_multiplier > MAX_HEIGHT_MULTIPLIER ||
-				!std::isfinite(height_multiplier) || timeout_ref().count() < 0)
+		if (is_earth(body) && !valid_scale(scale))
 			return "invalid scale, height multiplier, or timeout";
+		if (const auto error = validate_height_multiplier(height_multiplier))
+			return error;
+		if (timeout_ref().count() < 0)
+			return "timeout must not be negative";
 		if (world_time < 0 || world_time >= 24000)
 			return "world time must be between 0 and 23999";
 		if (vanilla_height && disable_height_limit)

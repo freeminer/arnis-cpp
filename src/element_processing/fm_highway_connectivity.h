@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+#include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 namespace arnis
 {
 class ProcessedElement;
@@ -26,7 +27,7 @@ struct HighwayConnectivity
 	// Packed/sorted coordinates which occur in more than one distinct way.
 	std::vector<std::uint64_t> shared;
 	// One World bounds; profile pins here keep adjacent generation areas aligned.
-	std::optional<std::array<int, 4>> area_bounds;
+	std::optional<cartesian::XZBBox> area;
 
 	bool empty() const { return ends.empty(); }
 	bool is_shared(int x, int z) const noexcept
@@ -34,9 +35,9 @@ struct HighwayConnectivity
 		const auto packed = (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
 		return std::binary_search(shared.begin(), shared.end(), packed);
 	}
+	void meet_at_edge_of(cartesian::XZBBox bounds) { area = std::move(bounds); }
 };
 HighwayConnectivity build_highway_connectivity_map(
-		const std::vector<ProcessedElement> &elements,
-		std::optional<std::array<int, 4>> area_bounds = std::nullopt);
+		const std::vector<ProcessedElement> &elements);
 }
 }

@@ -988,7 +988,8 @@ static BedrockBlock convert_block_with_properties(
 	}
 	if (name == "hopper") {
 		set("facing_direction", facing_direction("down"));
-		set("toggle_bit", string_prop("enabled", "true") != "false");
+		// Bedrock's toggle_bit means locked/powered; Java's enabled flag is the inverse.
+		set("toggle_bit", string_prop("enabled", "true") != "true");
 		return out;
 	}
 	if (name == "lightning_rod") {

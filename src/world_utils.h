@@ -1,4 +1,5 @@
 #pragma once
+#include <cstddef>
 #include <filesystem>
 #include <cstdint>
 #include <string>
@@ -17,6 +18,8 @@ namespace world_utils
 {
 inline constexpr std::int32_t DIMENSION_FOLDERS_DATA_VERSION = 4772;
 inline constexpr std::uint64_t DISK_HEADROOM_BYTES = 3ull * 1024 * 1024 * 1024;
+inline constexpr std::size_t MAX_CUSTOM_WORLD_NAME_CHARS = 48;
+inline constexpr std::string_view TALL_DATAPACK_NAME = "arnis_tall";
 
 struct WorldSizeOptions
 {
@@ -107,6 +110,8 @@ bool apply_java_world_settings(const std::filesystem::path &world, int game_type
 		std::string *error = nullptr);
 // Configure an outbreak world so its zombies survive and the game starts on Normal.
 bool start_in_survival(const std::filesystem::path &world, std::string *error = nullptr);
+// Whether the world already contains the bundled extended-height datapack.
+bool has_tall_datapack(const std::filesystem::path &world);
 // Install the bundled dimension override required for worlds generated beyond
 // vanilla's build-height limits, then enable the pack in level.dat.
 bool install_tall_datapack(

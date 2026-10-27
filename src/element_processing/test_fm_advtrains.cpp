@@ -116,6 +116,7 @@ public:
 		TEST(testProfiles);
 		TEST(testRustAtGradeProfileParity);
 		TEST(testRustRailJoinSelectionParity);
+		TEST(testRustAreaEdgeCrossingOrder);
 		TEST(testRoutes);
 		TEST(testNetwork);
 		TEST(testChunkSeamsKeepSourceTopology);
@@ -205,6 +206,19 @@ public:
 		const auto through_joins = railways::RailJoins::build(through, surface);
 		UASSERT(!through_joins.ends(5)[0].owns);
 		UASSERT(through_joins.ends(5)[0].shared);
+	}
+	void testRustAreaEdgeCrossingOrder()
+	{
+		railways::RailJoins joins;
+		const std::vector<std::pair<int, int>> cells{{-1, 5}, {0, 5}, {10, 5}, {11, 5}};
+		UASSERT(joins.edge_crossings(cells).empty());
+		joins.meet_at_edge_of(cartesian::XZBBox::rect_from_min_max(0, 0, 10, 10));
+		const auto crossings = joins.edge_crossings(cells);
+		UASSERT(crossings.size() == 2);
+		// Rust's contract is [inside, outside], including when the path enters
+		// the area from outside rather than leaving it.
+		UASSERT((crossings[0] == std::array<std::size_t, 2>{1, 0}));
+		UASSERT((crossings[1] == std::array<std::size_t, 2>{2, 3}));
 	}
 	void testRoutes()
 	{

@@ -2175,13 +2175,10 @@ bool generate_world(WorldEditor &editor,
 		still_surfaces =
 				water_areas::prescan_still_surfaces(elements, editor.ground, xzbbox);
 	progress::emit_gui_progress_update(19.5, "Processing data...");
-	const auto one_world_bounds =
-			args.one_world_run
-					? std::optional<std::array<int, 4>>(std::array<int, 4>{xzbbox.min_x(),
-							  xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()})
-					: std::nullopt;
-	auto highway_connectivity =
-			highways::build_highway_connectivity_map(elements, one_world_bounds);
+	auto highway_connectivity = highways::build_highway_connectivity_map(elements);
+	if (args.one_world_run)
+		highway_connectivity.meet_at_edge_of(cartesian::XZBBox::rect_from_min_max(
+				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()));
 	auto bridge_outlines = bridge_styles::BridgeOutlineIndex::build(elements);
 	auto bridge_structures = bridges::BridgeStructureMap::build(
 			elements, editor, highway_connectivity, bridge_outlines, args.scale);
@@ -2361,7 +2358,8 @@ bool generate_world(WorldEditor &editor,
 	if (args.one_world_run) {
 		const auto [min_x, min_z] = editor.get_min_coords();
 		const auto [max_x, max_z] = editor.get_max_coords();
-		rail_joins.meet_at_edge_of({min_x, min_z, max_x, max_z});
+		rail_joins.meet_at_edge_of(
+				cartesian::XZBBox::rect_from_min_max(min_x, min_z, max_x, max_z));
 	}
 	// fm: Share the resolved network with tile workers, including standalone callers.
 	editor.native_rail_network = railways::advtrains::prepare_network(elements, editor);

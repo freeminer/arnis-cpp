@@ -234,11 +234,10 @@ std::vector<int> road_profile(const crate::world_editor::WorldEditor &editor,
 	for (std::size_t i = 0; i < way.nodes.size(); ++i)
 		if (auto y = pin_at(way.nodes[i].x, way.nodes[i].z))
 			pins[node_cells[i]] = *y;
-	if (connectivity.area_bounds) {
-		const auto &bounds = *connectivity.area_bounds;
+	if (connectivity.area) {
 		auto inside = [&](std::size_t i) {
-			return cells[i].first >= bounds[0] && cells[i].first <= bounds[2] &&
-				   cells[i].second >= bounds[1] && cells[i].second <= bounds[3];
+			return connectivity.area->contains(
+					crate::cartesian::XZPoint{cells[i].first, cells[i].second});
 		};
 		for (std::size_t i = 1; i < n; ++i) {
 			if (inside(i - 1) == inside(i))
@@ -657,11 +656,9 @@ void drop_lamps_in_water(crate::world_editor::WorldEditor &editor)
 }
 
 HighwayConnectivity build_highway_connectivity_map(
-		const std::vector<crate::osm_parser::ProcessedElement> &elements,
-		std::optional<std::array<int, 4>> area_bounds)
+		const std::vector<crate::osm_parser::ProcessedElement> &elements)
 {
 	HighwayConnectivity connectivity;
-	connectivity.area_bounds = area_bounds;
 	std::vector<std::uint64_t> points;
 	std::vector<std::uint64_t> own;
 	for (const auto &element : elements) {
@@ -2049,14 +2046,13 @@ void generate_highways(crate::world_editor::WorldEditor &editor,
 		const TunnelPortalMap &tunnel_portals,
 		const crate::CoordinateBitmap *tunnel_footprint)
 {
-	std::optional<std::array<int, 4>> one_world_bounds;
+	auto highway_connectivity = build_highway_connectivity_map(all_elements);
 	if (args.one_world_run) {
 		const auto [min_x, min_z] = editor.get_min_coords();
 		const auto [max_x, max_z] = editor.get_max_coords();
-		one_world_bounds = std::array<int, 4>{min_x, min_z, max_x, max_z};
+		highway_connectivity.meet_at_edge_of(
+				crate::cartesian::XZBBox::rect_from_min_max(min_x, min_z, max_x, max_z));
 	}
-	auto highway_connectivity =
-			build_highway_connectivity_map(all_elements, one_world_bounds);
 	const auto geo = editor.geographic_bounds();
 	const auto regional_markings = crate::road_markings::RoadMarkingIndex::build(
 			all_elements, args.scale,
