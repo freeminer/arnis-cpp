@@ -2851,9 +2851,11 @@ bool generate_world(WorldEditor &editor,
 	std::size_t next_ground_tile = 0;
 	std::optional<WorldEditor> active_tile_worker;
 	ElementDispatchState active_tile_dispatch_state;
-	auto collect_tile_dispatch_state = [&](const ElementDispatchState &state) {
-		dispatch_state.rail_tunnel_points.insert(dispatch_state.rail_tunnel_points.end(),
-				state.rail_tunnel_points.begin(), state.rail_tunnel_points.end());
+	auto collect_tile_dispatch_state = [&](const ElementDispatchState &state,
+											   const TileBounds &tile) {
+		for (const auto &point : state.rail_tunnel_points)
+			if (tile.contains(std::get<0>(point), std::get<1>(point)))
+				dispatch_state.rail_tunnel_points.push_back(point);
 		dispatch_state.highway_tunnel_cells.insert(
 				dispatch_state.highway_tunnel_cells.end(),
 				state.highway_tunnel_cells.begin(), state.highway_tunnel_cells.end());
@@ -3217,7 +3219,7 @@ bool generate_world(WorldEditor &editor,
 									? &deferred_write_regions
 									: nullptr))
 					throw std::runtime_error("failed to merge Arnis tile worker");
-				collect_tile_dispatch_state(tile_state);
+				collect_tile_dispatch_state(tile_state, tile);
 				if (deferred_placements_active) {
 					deferred_tiles_in_batch = 0;
 					if (!complete_deferred_tile(tile))
@@ -3282,7 +3284,8 @@ bool generate_world(WorldEditor &editor,
 						return false;
 					}
 					if (active_tile_worker)
-						collect_tile_dispatch_state(active_tile_dispatch_state);
+						collect_tile_dispatch_state(
+								active_tile_dispatch_state, element_tiles[active_tile]);
 					active_tile_worker.reset();
 					next_ground_tile = active_tile + 1;
 				}
@@ -3396,7 +3399,8 @@ bool generate_world(WorldEditor &editor,
 				return false;
 			}
 			if (active_tile_worker)
-				collect_tile_dispatch_state(active_tile_dispatch_state);
+				collect_tile_dispatch_state(
+						active_tile_dispatch_state, element_tiles[active_tile]);
 			active_tile_worker.reset();
 			next_ground_tile = active_tile + 1;
 		}

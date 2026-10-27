@@ -20,6 +20,7 @@ std::mutex usage_mutex;
 std::unordered_map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> used_textures;
 std::uint64_t used_area = 0;
 std::uint64_t rejected = 0;
+bool saturated = false;
 
 std::uint64_t texture_key(const std::vector<std::uint8_t> &pixels, std::uint32_t width,
 		std::uint32_t height)
@@ -73,6 +74,7 @@ void reset_texture_usage()
 	used_textures.clear();
 	used_area = 0;
 	rejected = 0;
+	saturated = false;
 }
 
 bool reserve_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,
@@ -88,13 +90,26 @@ bool reserve_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t widt
 		++found->second.first;
 		return true;
 	}
+	// Match Rust's one-way admission cutoff: once the atlas cannot take the
+	// next unique panel, do not make later smaller panels produce scattered gaps.
+	if (saturated) {
+		++rejected;
+		return false;
+	}
 	if (area > budget || used_area > budget - area) {
+		saturated = true;
 		++rejected;
 		return false;
 	}
 	used_textures.emplace(hash, std::pair<std::uint64_t, std::uint64_t>{1, area});
 	used_area += area;
 	return true;
+}
+
+bool admission_closed()
+{
+	std::lock_guard lock(usage_mutex);
+	return saturated;
 }
 
 void release_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,

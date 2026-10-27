@@ -5,6 +5,7 @@
 #include "../element_processing/buildings.h"
 #include "credits.h"
 #include "displays.h"
+#include "atlas.h"
 #include "../../arnis_adapter.h"
 #include "../../arnis_world_editor.h"
 #include "../floodfill_cache.h"
@@ -1046,7 +1047,10 @@ std::size_t finalize_displays(arnis::world_editor::WorldEditor &editor)
 				editor.has_entity_sink() &&
 				displays::place_item_display(editor, panel.name, panel.quad, panel.facing,
 						std::move(pixels), sprite.side_w, sprite.side_h);
-		if (!accepted)
+		// Once the item atlas fills, Rust leaves later walls bare instead of
+		// replacing their blocks with fallback panels. Preserve the fallback only
+		// when item displays are unavailable or the entity itself was refused.
+		if (!accepted && (!editor.has_entity_sink() || !atlas::admission_closed()))
 			accepted = editor.place_facade_panel(
 					static_cast<int>(std::llround(panel.quad.cx)),
 					static_cast<int>(std::llround(panel.quad.cy)),

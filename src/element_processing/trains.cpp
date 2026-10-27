@@ -33,6 +33,8 @@ constexpr double STOP_REACH_M = 6.0;
 constexpr double STATION_REACH_M = 90.0;
 constexpr double STOP_MERGE_M = 80.0;
 constexpr double STEPS_PER_S = 10.0;
+// Stay inside the datapack's carriage-following and cleanup reach at large scales.
+constexpr double MAX_STEP = 7.9;
 constexpr double LAYOVER_S = 25.0;
 constexpr std::size_t MAX_TRAINS = 160;
 constexpr std::size_t MAX_CARRIAGES = 1400;
@@ -46,7 +48,7 @@ constexpr double CREEP = 0.03;
 
 double step_speed(double kmh, double scale)
 {
-	return kmh / 3.6 / STEPS_PER_S * scale;
+	return std::min(kmh / 3.6 / STEPS_PER_S * scale, MAX_STEP);
 }
 
 struct Piece

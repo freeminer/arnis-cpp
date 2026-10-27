@@ -6,6 +6,7 @@
 #include <array>
 #include <cmath>
 #include <cstdint>
+#include <string>
 #include <string_view>
 #include <utility>
 #include <vector>
@@ -17,6 +18,153 @@ namespace
 using font::Font;
 using font::FontSize;
 using font::TextLayout;
+
+struct Character
+{
+	std::string bytes;
+	char32_t value{};
+};
+
+std::vector<Character> characters(std::string_view text)
+{
+	std::vector<Character> result;
+	for (std::size_t i = 0; i < text.size();) {
+		const auto first = static_cast<unsigned char>(text[i]);
+		std::size_t length = 1;
+		char32_t value = first;
+		if ((first & 0xE0) == 0xC0 && i + 1 < text.size()) {
+			length = 2;
+			value = first & 0x1F;
+		} else if ((first & 0xF0) == 0xE0 && i + 2 < text.size()) {
+			length = 3;
+			value = first & 0x0F;
+		} else if ((first & 0xF8) == 0xF0 && i + 3 < text.size()) {
+			length = 4;
+			value = first & 0x07;
+		}
+		for (std::size_t j = 1; j < length; ++j)
+			value = (value << 6) | (static_cast<unsigned char>(text[i + j]) & 0x3F);
+		result.push_back({std::string(text.substr(i, length)), value});
+		i += length;
+	}
+	return result;
+}
+
+bool whitespace(char32_t c)
+{
+	return (c >= 0x09 && c <= 0x0D) || c == 0x20 || c == 0x85 || c == 0xA0 ||
+		   c == 0x1680 || (c >= 0x2000 && c <= 0x200A) || c == 0x2028 || c == 0x2029 ||
+		   c == 0x202F || c == 0x205F || c == 0x3000;
+}
+
+std::string join(const std::vector<Character> &chars, std::size_t begin, std::size_t end)
+{
+	std::string result;
+	for (std::size_t i = begin; i < end; ++i)
+		result += chars[i].bytes;
+	return result;
+}
+
+std::optional<TextLayout> fit_truncated_two_lines(
+		const std::string &text, int max_width, int max_height, FontSize largest)
+{
+	auto chars = characters(text);
+	while (!chars.empty() && whitespace(chars.front().value))
+		chars.erase(chars.begin());
+	while (!chars.empty() && whitespace(chars.back().value))
+		chars.pop_back();
+	if (chars.size() < 2)
+		return std::nullopt;
+
+	constexpr std::array<FontSize, 5> sizes = {
+			FontSize::S64, FontSize::S44, FontSize::S28, FontSize::S18, FontSize::S12};
+	for (const auto size : sizes) {
+		if (static_cast<int>(size) > static_cast<int>(largest))
+			continue;
+		const auto &font = Font::get(size);
+		if (font.line_height() * 2 > max_height)
+			continue;
+
+		std::size_t first_end = 0;
+		for (std::size_t end = 1; end < chars.size(); ++end) {
+			if (font.width(join(chars, 0, end), 1) > max_width)
+				break;
+			first_end = end;
+		}
+		if (first_end == 0)
+			continue;
+
+		std::string line1;
+		std::size_t rest_start = 0;
+		std::size_t break_at = 0;
+		for (std::size_t i = first_end + 1; i-- > 1;) {
+			if (whitespace(chars[i].value) || chars[i - 1].value == U'-' ||
+					chars[i - 1].value == U'/') {
+				break_at = i;
+				break;
+			}
+		}
+		if (break_at) {
+			line1 = join(chars, 0, break_at);
+			while (!line1.empty()) {
+				const auto tail = characters(line1);
+				if (tail.empty() || !whitespace(tail.back().value))
+					break;
+				line1.resize(line1.size() - tail.back().bytes.size());
+			}
+			rest_start = break_at;
+		} else {
+			std::size_t word_end = chars.size();
+			for (std::size_t i = first_end; i < chars.size(); ++i) {
+				if (whitespace(chars[i].value) || chars[i].value == U'-' ||
+						chars[i].value == U'/') {
+					word_end = i;
+					break;
+				}
+			}
+			const auto last_cut =
+					std::min(first_end, word_end > 3 ? word_end - 3 : std::size_t{0});
+			if (last_cut < 3)
+				continue;
+			std::size_t cut = 0;
+			for (std::size_t i = last_cut + 1; i-- > 3;) {
+				if (font.width(join(chars, 0, i) + "-", 1) <= max_width) {
+					cut = i;
+					break;
+				}
+			}
+			if (!cut)
+				continue;
+			line1 = join(chars, 0, cut) + "-";
+			rest_start = cut;
+		}
+		while (rest_start < chars.size() && whitespace(chars[rest_start].value))
+			++rest_start;
+		if (rest_start >= chars.size())
+			continue;
+
+		const auto remainder = join(chars, rest_start, chars.size());
+		if (font.width(remainder, 1) <= max_width)
+			return TextLayout{size, 1, {line1, remainder}};
+
+		std::size_t second_end = rest_start;
+		for (std::size_t end = rest_start + 1; end <= chars.size(); ++end) {
+			std::size_t trimmed_end = end;
+			while (trimmed_end > rest_start && whitespace(chars[trimmed_end - 1].value))
+				--trimmed_end;
+			const auto candidate = join(chars, rest_start, trimmed_end) + "…";
+			if (font.width(candidate, 1) > max_width)
+				break;
+			second_end = end;
+		}
+		if (second_end == rest_start)
+			continue;
+		while (second_end > rest_start && whitespace(chars[second_end - 1].value))
+			--second_end;
+		return TextLayout{size, 1, {line1, join(chars, rest_start, second_end) + "…"}};
+	}
+	return std::nullopt;
+}
 
 constexpr std::array<std::pair<std::string_view, std::string_view>, 34> abbreviations = {{
 		{"straße", "str."},
@@ -68,10 +216,19 @@ std::optional<TextLayout> fit_or_abbreviate(const std::string &text, int max_wid
 {
 	if (auto layout = font::fit_text(text, max_width, max_height, largest, wrap))
 		return layout;
-	if (auto shortened = abbreviate(text))
+	const auto shortened = abbreviate(text);
+	if (shortened)
 		if (auto layout =
 						font::fit_text(*shortened, max_width, max_height, largest, wrap))
 			return layout;
+	if (wrap) {
+		if (shortened)
+			if (auto layout = fit_truncated_two_lines(
+						*shortened, max_width, max_height, largest))
+				return layout;
+		if (auto layout = fit_truncated_two_lines(text, max_width, max_height, largest))
+			return layout;
+	}
 
 	// Truncate on UTF-8 character boundaries and retain a visible label even when
 	// abbreviations cannot fit the plate.
@@ -408,7 +565,7 @@ void text_sign(Canvas &canvas, TextStyle style, const std::string &text)
 	case TextStyleKind::StopName:
 		canvas.rounded_rect(4, 46, width - 8, 36, 3, WHITE);
 		canvas.stroke_rounded_rect(4, 46, width - 8, 36, 3, 2, DARK_GRAY);
-		if (auto layout = fit_or_abbreviate(text, width - 20, 28, FontSize::S28, false))
+		if (auto layout = fit_or_abbreviate(text, width - 6, 32, FontSize::S28, true))
 			layout->draw_centered(canvas, center_x, 64, BLACK);
 		break;
 	case TextStyleKind::Plaque:

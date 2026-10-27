@@ -28,6 +28,7 @@ namespace
 {
 constexpr double MAX_SPAN = 24.0;
 constexpr std::size_t MAX_CARS = 1500;
+constexpr std::size_t LANES_PER_LINE = 256;
 constexpr double STOP_BACK = 1.5;
 constexpr double JUNCTION_KMH = 25.0;
 constexpr double LANE_END_KMH = 32.0;
@@ -191,7 +192,8 @@ std::optional<double> parse_maxspeed(const std::string &raw)
 double limit_kmh(const std::string &highway, const tags_t &tags)
 {
 	if (const auto it = tags.find("maxspeed"); it != tags.end())
-		if (const auto posted = parse_maxspeed(it->second))
+		if (const auto posted = parse_maxspeed(it->second);
+				posted && *posted >= 1.0 && *posted <= 300.0)
 			return *posted;
 	if (highway == "motorway")
 		return 110.0;
@@ -1393,38 +1395,47 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	storage << "data modify storage arnis:cars colours set value {car:["
 			<< colour_list(CAR_COLOURS) << "],van:[" << colour_list(VAN_COLOURS) << "]}\n"
 			<< std::fixed;
-	for (const auto &segment : segments_) {
-		storage << "data modify storage arnis:cars seg append value {p:[";
-		for (std::size_t i = 0; i < segment.points.size(); ++i) {
-			const auto &point = segment.points[i];
-			if (i)
+	for (std::size_t begin = 0; begin < segments_.size(); begin += LANES_PER_LINE) {
+		const auto end = std::min(segments_.size(), begin + LANES_PER_LINE);
+		storage << "data modify storage arnis:cars batch set value [";
+		for (std::size_t index = begin; index < end; ++index) {
+			const auto &segment = segments_[index];
+			if (index != begin)
 				storage << ',';
-			storage << "{x:" << std::setprecision(2)
-					<< ::arnis::datapack::macro_coord(point.x)
-					<< "d,y:" << std::setprecision(1) << point.y
-					<< "d,z:" << std::setprecision(2)
-					<< ::arnis::datapack::macro_coord(point.z);
-			if (point.stop)
-				storage << ",g:" << static_cast<unsigned>(*point.stop) << 'b';
-			if (point.cap)
-				storage << ",m:" << *point.cap;
+			storage << "{p:[";
+			for (std::size_t i = 0; i < segment.points.size(); ++i) {
+				const auto &point = segment.points[i];
+				if (i)
+					storage << ',';
+				storage << "{x:" << std::setprecision(2)
+						<< ::arnis::datapack::macro_coord(point.x)
+						<< "d,y:" << std::setprecision(1) << point.y
+						<< "d,z:" << std::setprecision(2)
+						<< ::arnis::datapack::macro_coord(point.z);
+				if (point.stop)
+					storage << ",g:" << static_cast<unsigned>(*point.stop) << 'b';
+				if (point.cap)
+					storage << ",m:" << *point.cap;
+				storage << '}';
+			}
+			storage << "],n:[";
+			for (std::size_t i = 0; i < segment.next.size(); ++i) {
+				const auto &turn = segment.next[i];
+				if (i)
+					storage << ',';
+				storage << "{s:" << turn.lane << ",i:" << turn.entry;
+				if (turn.crossing)
+					storage << ",j:1b";
+				storage << '}';
+			}
+			storage << "],v:" << segment.speed;
+			if (segment.points.size() < 2 || segment.stub || segment.next.empty())
+				storage << ",o:1b";
 			storage << '}';
 		}
-		storage << "],n:[";
-		for (std::size_t i = 0; i < segment.next.size(); ++i) {
-			const auto &turn = segment.next[i];
-			if (i)
-				storage << ',';
-			storage << "{s:" << turn.lane << ",i:" << turn.entry;
-			if (turn.crossing)
-				storage << ",j:1b";
-			storage << '}';
-		}
-		storage << "],v:" << segment.speed;
-		if (segment.points.size() < 2 || segment.stub || segment.next.empty())
-			storage << ",o:1b";
-		storage << "}\n";
+		storage << "]\ndata modify storage arnis:cars seg append from storage arnis:cars batch[]\n";
 	}
+	storage << "data remove storage arnis:cars batch\n";
 	out.emplace_back("data/arnis/function/cars/network.mcfunction", storage.str());
 
 	const auto distance = [this](double metres) {

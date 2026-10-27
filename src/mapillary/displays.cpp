@@ -670,14 +670,15 @@ bool Registry::collect_to_editor(arnis::world_editor::WorldEditor &editor,
 				const auto y = static_cast<int>(std::llround(quad.cy));
 				const auto z = static_cast<int>(std::llround(quad.cz));
 				const auto facing = facing_index(normal);
-				if (editor.has_entity_sink() &&
-						editor.add_item_display(quad.cx, quad.cy, quad.cz,
-								name_seed(name), display_nbt(name, quad))) {
-					editor.record_facade_panel(x, y, z, facing, std::move(panel.pixels),
-							panel.pixel_width, panel.pixel_height, name);
-					return true;
+				auto pixels = panel.pixels;
+				if (editor.has_entity_sink()) {
+					if (place_item_display(editor, name, quad, facing, std::move(pixels),
+								panel.pixel_width, panel.pixel_height))
+						return true;
+					if (atlas::admission_closed())
+						return false;
 				}
-				return editor.place_facade_panel(x, y, z, facing, std::move(panel.pixels),
+				return editor.place_facade_panel(x, y, z, facing, std::move(pixels),
 						panel.pixel_width, panel.pixel_height);
 			});
 }

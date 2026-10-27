@@ -27,6 +27,8 @@ namespace arnis::models_3d
 {
 namespace
 {
+constexpr int TREE_SWEEP_REACH = 10;
+
 struct ModelOverride
 {
 	std::uint64_t id;
@@ -118,6 +120,10 @@ void clear_trees_under_model(
 		}
 	}
 	constexpr int tree_sweep_height = 64;
+	const auto within_model_reach = [min_x, max_x, min_z, max_z](int x, int z) {
+		return x >= min_x - TREE_SWEEP_REACH && x <= max_x + TREE_SWEEP_REACH &&
+			   z >= min_z - TREE_SWEEP_REACH && z <= max_z + TREE_SWEEP_REACH;
+	};
 	for (int z = 0; z < static_cast<int>(height); ++z)
 		for (int x = 0; x < static_cast<int>(width); ++x) {
 			if (inside[static_cast<std::size_t>(z) * width + x] == 2)
@@ -126,7 +132,7 @@ void clear_trees_under_model(
 			const int ground = editor.get_ground_level(wx, wz);
 			for (int y = ground; y <= std::min(ground + tree_sweep_height, top); ++y)
 				if (water_depth::is_tree_block(editor.block_name_absolute(wx, y, wz)))
-					water_depth::clear_tree(editor, wx, y, wz);
+					water_depth::clear_tree_within(editor, wx, y, wz, within_model_reach);
 		}
 }
 

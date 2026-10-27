@@ -109,7 +109,29 @@ std::optional<Ride> hint(std::string name)
 		return Ride::Teacups;
 	if (has({"carousel", "carrousel", "karussell", "merry", "galopper", "manège"}))
 		return Ride::Carousel;
-	if (has({"tower", "turm", "tårn", "torre", "tour "}))
+	const auto has_tower_compound = [&] {
+		for (std::size_t at = name.find("turm"); at != std::string::npos;
+				at = name.find("turm", at + 1)) {
+			const auto end = at + 4;
+			if (end < name.size() && unicode_word_char(name, end))
+				continue;
+			std::size_t start = at;
+			while (start > 0) {
+				std::size_t previous = start - 1;
+				while (previous > 0 &&
+						(static_cast<unsigned char>(name[previous]) & 0xc0) == 0x80)
+					--previous;
+				if (!unicode_word_char(name, previous))
+					break;
+				start = previous;
+			}
+			if (std::string_view(name).substr(start, end - start).ends_with("sturm"))
+				continue;
+			return true;
+		}
+		return false;
+	};
+	if (has({"tower", "tårn", "la tour "}) || has_word("torre") || has_tower_compound())
 		return Ride::Tower;
 	return std::nullopt;
 }
@@ -901,6 +923,13 @@ bool generate_ride(WorldEditor &editor, const ProcessedElement &e,
 	OwnCells own;
 	for (auto [x, z] : s.cells)
 		own.insert(cell_key(x, z));
+	const auto centre = std::pair{
+			static_cast<int>(std::floor(s.x)), static_cast<int>(std::floor(s.z))};
+	const bool is_building =
+			e.tags().contains("building") || e.tags().contains("building:part");
+	if (footprints.contains(centre.first, centre.second) &&
+			!(is_building && own.contains(cell_key(centre.first, centre.second))))
+		return false;
 	const auto [main, accent] =
 			ride_colours(e.tags(), structure_kit::mix(e.id(), 0x52'49'44'45ULL));
 	const auto seed = structure_kit::mix(e.id(), 0x52'49'44'45ULL);

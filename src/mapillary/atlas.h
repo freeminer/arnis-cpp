@@ -29,6 +29,8 @@ std::uint64_t atlas_budget_for(std::uint32_t side);
 void reset_texture_usage();
 bool reserve_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,
 		std::uint32_t height);
+// True once a unique texture failed admission; later facade panels stay bare.
+bool admission_closed();
 void release_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,
 		std::uint32_t height);
 std::uint64_t rejected_textures();

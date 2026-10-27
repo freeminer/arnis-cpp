@@ -331,6 +331,10 @@ std::optional<std::string> surface_highway_type(const ProcessedWay &way)
 	if (!way.tags.contains("highway"))
 		return std::nullopt;
 	const auto highway_type = way.tags.get("highway");
+	// Piers may be tagged as footways, but their surface is a deck over water,
+	// not a road surface that should suppress the water pass below it.
+	if (way.tags.get("man_made") == "pier")
+		return std::nullopt;
 	if (highway_type == "street_lamp" || highway_type == "crossing" ||
 			highway_type == "bus_stop" || way.tags.get("area") == "yes" ||
 			way.tags.get("indoor") == "yes" || way.tags.get("aeroway") == "jet_bridge")
