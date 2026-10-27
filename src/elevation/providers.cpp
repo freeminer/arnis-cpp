@@ -1,4 +1,5 @@
 #include "providers.h"
+#include "tile_math.h"
 #include "../net.h"
 #include "../../../http.h"
 #include "stb_image.h"
@@ -482,6 +483,7 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 			tiles.emplace(packed, std::move(*decoded[i]));
 		}
 	const double n = std::ldexp(1.0, static_cast<int>(zoom));
+	const unsigned smooth_below = tile_math::smooth_below(bbox, zoom, width, height, 256);
 	parallel_rows(0, height, [&](std::size_t gy) {
 		const double lat = bbox.max_lat - double(gy) /
 												  std::max<std::size_t>(1, height - 1) *
@@ -498,22 +500,21 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 					std::clamp(std::floor(fx / 256.0), 0.0, n - 1.0));
 			const auto tile_y = static_cast<unsigned>(
 					std::clamp(std::floor(fy / 256.0), 0.0, n - 1.0));
-			const double px = fx - tile_x * 256.0, py = fy - tile_y * 256.0;
-			const int x0 = static_cast<int>(std::floor(px));
-			const int y0 = static_cast<int>(std::floor(py));
-			const double dx = px - x0, dy = py - y0;
-			const auto v00 = sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0, y0);
-			const auto v10 =
-					sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0 + 1, y0);
-			const auto v01 =
-					sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0, y0 + 1);
-			const auto v11 =
-					sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x0 + 1, y0 + 1);
-			if (v00 && v10 && v01 && v11) {
-				const double top = *v00 + (*v10 - *v00) * dx;
-				const double bottom = *v01 + (*v11 - *v01) * dx;
-				grid[gy][gx] = top + (bottom - top) * dy;
-			}
+			const std::uint64_t base_key =
+					(std::uint64_t(zoom) << 58) | (std::uint64_t(tile_x) << 29) | tile_y;
+			// Match Rust: a sample is owned by its containing tile. Neighbour
+			// tiles supply edge taps only; they must not make a missing base tile
+			// look like valid coverage.
+			if (!tiles.contains(base_key))
+				continue;
+			const double px = tile_math::in_tile(fx, tile_x * 256.0, 256);
+			const double py = tile_math::in_tile(fy, tile_y * 256.0, 256);
+			grid[gy][gx] = tile_math::sample_pixels(
+					px, py, zoom < smooth_below, [&](int x, int y) {
+						const auto value =
+								sample_aws_tile_pixel(tiles, zoom, tile_x, tile_y, x, y);
+						return value.value_or(nodata);
+					});
 		}
 	});
 	return grid;

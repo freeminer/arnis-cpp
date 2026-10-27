@@ -339,13 +339,13 @@ std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int orig
 	const int cell_z = floor_div(z) * spacing;
 	if (!editor.ground)
 		return {false, false};
-	const auto cell = editor.ground->canopy_cell(
-			XZPoint{cell_x - origin_x, cell_z - origin_z}, spacing);
-	if (!cell)
-		return {false, false};
+	const XZPoint canopy_origin{cell_x - origin_x, cell_z - origin_z};
 	const auto [slot_x, slot_z] = trees::trunk_slot_s(x, z, spacing);
 	if (x != slot_x || z != slot_z)
-		return {true, false};
+		return {editor.ground->canopy_measured(canopy_origin, spacing), false};
+	const auto cell = editor.ground->canopy_cell(canopy_origin, spacing);
+	if (!cell)
+		return {false, false};
 	const auto &[fraction, top] = *cell;
 	const double p =
 			!schematic_trees ? canopy::flat_slot_probability(

@@ -139,6 +139,12 @@ std::vector<int> rail_profile(const std::vector<bool> &straight,
 		starts.push_back(back.size());
 		const auto base = starts.back();
 		back.resize(base + width * 2, std::numeric_limits<std::uint32_t>::max());
+		double far_floor = std::numeric_limits<double>::infinity();
+		if (i > 0) {
+			const auto nearest = std::min_element(prev.begin(), prev.end());
+			if (nearest != prev.end())
+				far_floor = *nearest + 2.0 * BROKEN;
+		}
 		for (std::size_t bi = 0; bi < width; ++bi) {
 			const int b = lo + static_cast<int>(bi);
 			const double own = cost(i, b);
@@ -146,29 +152,46 @@ std::vector<int> rail_profile(const std::vector<bool> &straight,
 				cur[bi * 2] = own;
 				continue;
 			}
-			for (std::size_t s = 0; s < prev.size(); ++s) {
-				if (!std::isfinite(prev[s]))
-					continue;
-				const int a = lows[i - 1] + static_cast<int>(s / 2);
-				const bool climbing_back = s % 2 == 1;
-				const int d = b - a;
-				double extra = 0.0;
-				bool low = false;
-				if (d == 1 && straight[i - 1] && !climbing_back)
-					extra = step_cost;
-				else if (d == -1 && straight[i]) {
-					extra = step_cost;
-					low = true;
-				} else if (d != 0) {
-					extra = d == 1 || d == -1 ? BROKEN : BROKEN * std::abs(d);
-					low = d == -1;
+			const auto relax_states = [&](std::size_t begin, std::size_t end) {
+				for (std::size_t s = begin; s < end; ++s) {
+					if (!std::isfinite(prev[s]))
+						continue;
+					const int a = lows[i - 1] + static_cast<int>(s / 2);
+					const bool climbing_back = s % 2 == 1;
+					const int d = b - a;
+					double extra = 0.0;
+					bool low = false;
+					if (d == 1 && straight[i - 1] && !climbing_back)
+						extra = step_cost;
+					else if (d == -1 && straight[i]) {
+						extra = step_cost;
+						low = true;
+					} else if (d != 0) {
+						extra = d == 1 || d == -1 ? BROKEN : BROKEN * std::abs(d);
+						low = d == -1;
+					}
+					const auto slot = bi * 2 + static_cast<std::size_t>(low);
+					const double total = prev[s] + extra + own;
+					if (total < cur[slot]) {
+						cur[slot] = total;
+						back[base + slot] = static_cast<std::uint32_t>(s);
+					}
 				}
-				const auto slot = bi * 2 + static_cast<std::size_t>(low);
-				const double total = prev[s] + extra + own;
-				if (total < cur[slot]) {
-					cur[slot] = total;
-					back[base + slot] = static_cast<std::uint32_t>(s);
-				}
+			};
+			// Most profiles only need adjacent height states. Farther jumps cost at least
+			// two BROKEN transitions, so rescan the full row only if that can still win.
+			const int previous_low = lows[i - 1];
+			const auto nearby_begin = static_cast<std::size_t>(std::clamp(
+					2 * (b - 1 - previous_low), 0, static_cast<int>(prev.size())));
+			const auto nearby_end = static_cast<std::size_t>(std::clamp(
+					2 * (b + 2 - previous_low), 0, static_cast<int>(prev.size())));
+			relax_states(nearby_begin, nearby_end);
+			if (cur[bi * 2] >= far_floor + own) {
+				cur[bi * 2] = std::numeric_limits<double>::infinity();
+				cur[bi * 2 + 1] = std::numeric_limits<double>::infinity();
+				back[base + bi * 2] = std::numeric_limits<std::uint32_t>::max();
+				back[base + bi * 2 + 1] = std::numeric_limits<std::uint32_t>::max();
+				relax_states(0, prev.size());
 			}
 		}
 		lows.push_back(lo);
@@ -381,6 +404,23 @@ std::array<TrackEnd, 2> RailJoins::ends(std::uint64_t way) const
 {
 	const auto it = ends_.find(way);
 	return it == ends_.end() ? std::array<TrackEnd, 2>{} : it->second;
+}
+
+std::vector<std::array<std::size_t, 2>> RailJoins::edge_crossings(
+		const std::vector<std::pair<int, int>> &cells) const
+{
+	std::vector<std::array<std::size_t, 2>> crossings;
+	if (!area_bounds_ || cells.size() < 2)
+		return crossings;
+	const auto &[min_x, min_z, max_x, max_z] = *area_bounds_;
+	const auto inside = [&](const std::pair<int, int> &cell) {
+		return cell.first >= min_x && cell.first <= max_x && cell.second >= min_z &&
+			   cell.second <= max_z;
+	};
+	for (std::size_t i = 1; i < cells.size(); ++i)
+		if (inside(cells[i - 1]) != inside(cells[i]))
+			crossings.push_back({i - 1, i});
+	return crossings;
 }
 
 } // namespace arnis::railways

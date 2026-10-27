@@ -33,7 +33,7 @@ struct Site
 	double x{}, z{};
 	std::vector<std::pair<double, double>> ring;
 	Livery livery{};
-	bool has_canopy{}, has_shop{};
+	bool has_canopy{}, has_shop{}, building{};
 };
 
 class FuelIndex

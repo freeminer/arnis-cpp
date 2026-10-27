@@ -2,17 +2,26 @@
 #include "bridge_towers.h"
 
 #include <algorithm>
+#include <array>
 #include <cctype>
 #include <cmath>
 #include <cstdint>
+#include <deque>
+#include <functional>
 #include <string>
 #include <limits>
+#include <numbers>
+#include <optional>
+#include <queue>
 #include <string_view>
+#include <tuple>
+#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
 
 #include "../bresenham.h"
+#include "../clipping.h"
 #include "../strict_parse.h"
 #include "bridge_modules.h"
 #include "highways.h"
@@ -46,6 +55,256 @@ constexpr int STACKED_DECK_HEADROOM = 6;
 constexpr int LOWER_DECK_GAP = STACKED_DECK_HEADROOM - 1;
 constexpr int DECK_STRUCTURE_DEPTH = 2;
 constexpr int OBSTACLE_GRID_CELL = 64;
+constexpr float EDGE_MAX_FAN = 2.0f * std::numbers::pi_v<float> / 3.0f;
+constexpr float EDGE_ROAD_MARGIN = std::numbers::pi_v<float> / 4.0f;
+
+struct RoadOut
+{
+	std::pair<float, float> dir;
+	bool at_grade = true;
+	bool vehicular = true;
+};
+
+using DeckCell = std::pair<std::size_t, std::size_t>;
+
+struct DeckCellHash
+{
+	std::size_t operator()(const DeckCell &cell) const noexcept
+	{
+		const auto a = std::hash<std::size_t>{}(cell.first);
+		const auto b = std::hash<std::size_t>{}(cell.second);
+		return a ^ (b + 0x9e3779b9u + (a << 6) + (a >> 2));
+	}
+};
+
+struct DeckHold
+{
+	std::size_t member = 0;
+	std::size_t cell = 0;
+	int y = 0;
+};
+
+struct DeckCoordHash
+{
+	std::size_t operator()(const std::pair<int, int> &p) const noexcept
+	{
+		return std::hash<long long>()((static_cast<long long>(p.first) << 32) ^
+					static_cast<unsigned long long>(p.second));
+	}
+};
+
+void settle_deck(std::vector<std::vector<int>> &ys,
+		const std::vector<std::vector<std::pair<int, int>>> &cells,
+		const std::vector<std::vector<int>> &needs, const std::vector<bool> &live,
+		const std::vector<DeckHold> &input_holds)
+{
+	std::vector<std::size_t> lengths;
+	lengths.reserve(ys.size());
+	for (const auto &profile : ys)
+		lengths.push_back(profile.size());
+	std::unordered_map<std::pair<int, int>, std::vector<DeckCell>, DeckCoordHash> at;
+	for (std::size_t m = 0; m < cells.size(); ++m) {
+		if (!live[m])
+			continue;
+		for (std::size_t i = 0; i < std::min(cells[m].size(), lengths[m]); ++i)
+			at[cells[m][i]].emplace_back(m, i);
+	}
+	const auto neighbours = [&](DeckCell cell) {
+		std::vector<std::pair<DeckCell, int>> out;
+		if (const auto it = at.find(cells[cell.first][cell.second]); it != at.end())
+			for (const auto &other : it->second)
+				if (other != cell)
+					out.emplace_back(other, 0);
+		if (cell.second > 0)
+			out.push_back({{cell.first, cell.second - 1}, 1});
+		if (cell.second + 1 < lengths[cell.first])
+			out.push_back({{cell.first, cell.second + 1}, 1});
+		return out;
+	};
+	struct Around
+	{
+		std::unordered_map<DeckCell, int, DeckCellHash> distance;
+		std::unordered_map<DeckCell, DeckCell, DeckCellHash> previous;
+	};
+	const auto around = [&](DeckCell from, int reach) {
+		Around result;
+		std::deque<DeckCell> queue{from};
+		result.distance.emplace(from, 0);
+		while (!queue.empty()) {
+			const auto cell = queue.front();
+			queue.pop_front();
+			const int distance = result.distance.at(cell);
+			for (const auto &[next, weight] : neighbours(cell)) {
+				const int candidate = distance + weight;
+				const auto old = result.distance.find(next);
+				if (candidate > reach ||
+						(old != result.distance.end() && old->second <= candidate))
+					continue;
+				result.distance[next] = candidate;
+				result.previous[next] = cell;
+				if (weight == 0)
+					queue.push_front(next);
+				else
+					queue.push_back(next);
+			}
+		}
+		return result;
+	};
+	std::unordered_map<std::pair<int, int>, DeckHold, DeckCoordHash> hold_at;
+	for (const auto &hold : input_holds) {
+		if (hold.member >= cells.size() || hold.cell >= cells[hold.member].size())
+			continue;
+		const auto spot = cells[hold.member][hold.cell];
+		auto [it, inserted] = hold_at.try_emplace(spot, hold);
+		if (!inserted && hold.y < it->second.y)
+			it->second = hold;
+	}
+	std::vector<DeckHold> holds;
+	for (const auto &[spot, hold] : hold_at) {
+		(void)spot;
+		holds.push_back(hold);
+	}
+	std::sort(holds.begin(), holds.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.member, a.cell) < std::tie(b.member, b.cell);
+	});
+	const auto ease_length = [&](std::size_t member) {
+		return static_cast<int>(
+				std::clamp(static_cast<float>(lengths[member]) * 0.35f, 15.0f, 50.0f));
+	};
+	std::vector<Around> reached;
+	reached.reserve(holds.size());
+	for (const auto &hold : holds)
+		reached.push_back(around({hold.member, hold.cell}, 2 * ease_length(hold.member)));
+	const auto profile = ys;
+	for (std::size_t k = 0; k < holds.size(); ++k) {
+		const auto &hold = holds[k];
+		if (std::abs(profile[hold.member][hold.cell] - hold.y) <= 1) {
+			ys[hold.member][hold.cell] = hold.y;
+			continue;
+		}
+		const bool down = profile[hold.member][hold.cell] > hold.y;
+		const auto &distance = reached[k].distance;
+		int next_hold_distance = std::numeric_limits<int>::max();
+		for (std::size_t other = 0; other < holds.size(); ++other) {
+			if (other == k)
+				continue;
+			if (const auto it = distance.find({holds[other].member, holds[other].cell});
+					it != distance.end() && it->second > 3)
+				next_hold_distance = std::min(next_hold_distance, it->second);
+		}
+		const int len =
+				std::max(1, std::min(ease_length(hold.member),
+									next_hold_distance == std::numeric_limits<int>::max()
+											? ease_length(hold.member)
+											: next_hold_distance / 2));
+		int far = 0;
+		for (const auto &[cell, d] : distance)
+			if (d <= len)
+				far = std::max(far, d);
+		if (far <= 0)
+			continue;
+		std::optional<int> rim;
+		for (const auto &[cell, d] : distance) {
+			if (d != far)
+				continue;
+			const int y = profile[cell.first][cell.second];
+			rim = rim ? (down ? std::max(*rim, y) : std::min(*rim, y)) : y;
+		}
+		const int level = rim.value_or(hold.y);
+		for (const auto &[cell, d] : distance) {
+			if (d > far)
+				continue;
+			const float t = static_cast<float>(d) / static_cast<float>(far);
+			const int ramp = static_cast<int>(std::lround(hold.y + (level - hold.y) * t));
+			auto &y = ys[cell.first][cell.second];
+			y = down ? std::min(y, ramp) : std::max(y, ramp);
+		}
+	}
+	for (std::size_t k = 0; k < holds.size(); ++k) {
+		const auto &a = holds[k];
+		const auto &around_a = reached[k];
+		for (std::size_t j = k + 1; j < holds.size(); ++j) {
+			const auto &b = holds[j];
+			const DeckCell b_cell{b.member, b.cell};
+			const auto span_it = around_a.distance.find(b_cell);
+			if (span_it == around_a.distance.end() || span_it->second < 2)
+				continue;
+			const int span = span_it->second;
+			std::vector<DeckCell> path{b_cell};
+			while (true) {
+				const auto it = around_a.previous.find(path.back());
+				if (it == around_a.previous.end())
+					break;
+				path.push_back(it->second);
+			}
+			const auto line_y = [&](DeckCell cell) {
+				const int d = around_a.distance.at(cell);
+				return static_cast<float>(a.y) +
+					   (b.y - a.y) * static_cast<float>(d) / static_cast<float>(span);
+			};
+			const bool clear = std::all_of(path.begin(), path.end(), [&](DeckCell cell) {
+				return static_cast<float>(needs[cell.first][cell.second]) <=
+					   line_y(cell) + 1.0f;
+			});
+			if (!clear)
+				continue;
+			for (const auto cell : path) {
+				const int y = std::max(static_cast<int>(std::lround(line_y(cell))),
+						needs[cell.first][cell.second]);
+				ys[cell.first][cell.second] = std::min(ys[cell.first][cell.second], y);
+			}
+		}
+	}
+	std::vector<std::vector<int>> cap(ys.size());
+	using HeapEntry = std::tuple<int, std::size_t, std::size_t>;
+	std::priority_queue<HeapEntry, std::vector<HeapEntry>, std::greater<>> lower_heap;
+	for (std::size_t m = 0; m < ys.size(); ++m)
+		cap[m].assign(ys[m].size(), std::numeric_limits<int>::max());
+	for (const auto &hold : holds) {
+		if (hold.member >= cap.size() || hold.cell >= cap[hold.member].size())
+			continue;
+		cap[hold.member][hold.cell] = hold.y;
+		lower_heap.emplace(hold.y, hold.member, hold.cell);
+	}
+	while (!lower_heap.empty()) {
+		const auto [y, m, i] = lower_heap.top();
+		lower_heap.pop();
+		if (y > cap[m][i])
+			continue;
+		for (const auto &[next, weight] : neighbours({m, i})) {
+			if (y + weight >= cap[next.first][next.second])
+				continue;
+			cap[next.first][next.second] = y + weight;
+			lower_heap.emplace(y + weight, next.first, next.second);
+		}
+	}
+	std::vector<std::vector<int>> lift(ys.size());
+	std::priority_queue<HeapEntry> upper_heap;
+	for (std::size_t m = 0; m < ys.size(); ++m) {
+		lift[m].resize(ys[m].size());
+		if (!live[m])
+			continue;
+		for (std::size_t i = 0; i < ys[m].size(); ++i) {
+			lift[m][i] = std::min(ys[m][i], cap[m][i]);
+			upper_heap.emplace(lift[m][i], m, i);
+		}
+	}
+	while (!upper_heap.empty()) {
+		const auto [y, m, i] = upper_heap.top();
+		upper_heap.pop();
+		if (y < lift[m][i])
+			continue;
+		for (const auto &[next, weight] : neighbours({m, i})) {
+			if (y - weight <= lift[next.first][next.second])
+				continue;
+			lift[next.first][next.second] = y - weight;
+			upper_heap.emplace(y - weight, next.first, next.second);
+		}
+	}
+	for (std::size_t m = 0; m < ys.size(); ++m)
+		if (live[m])
+			ys[m] = std::move(lift[m]);
+}
 
 struct XZPairHash
 {
@@ -326,6 +585,79 @@ bool is_non_vehicular_bridge_highway(const ProcessedWay &way)
 		   highway == "cycleway" || highway == "bridleway" || highway == "steps";
 }
 
+bool meets_a_deck(const ProcessedWay &way)
+{
+	const auto highway = way.tags.get("highway");
+	const auto tunnel = way.tags.get("tunnel");
+	const auto indoor = way.tags.get("indoor");
+	const bool excluded = highway == "steps" || highway == "elevator" ||
+						  highway == "corridor" || highway == "platform" ||
+						  highway == "construction" || highway == "proposed" ||
+						  highway == "abandoned" || highway == "razed";
+	return !excluded && (tunnel.empty() || tunnel == "no") &&
+		   (indoor.empty() || indoor == "no");
+}
+
+std::vector<std::pair<float, float>> leaving_dirs(
+		const std::vector<ProcessedNode> &nodes, std::size_t k)
+{
+	std::vector<std::pair<float, float>> result;
+	if (k >= nodes.size())
+		return result;
+	const auto first_clear = [&](int direction) {
+		std::optional<std::pair<float, float>> last;
+		for (auto i = static_cast<std::int64_t>(k) + direction;
+				i >= 0 && i < static_cast<std::int64_t>(nodes.size()); i += direction) {
+			const float dx = static_cast<float>(nodes[i].x - nodes[k].x);
+			const float dz = static_cast<float>(nodes[i].z - nodes[k].z);
+			const float length = std::hypot(dx, dz);
+			if (length <= 0.0f)
+				continue;
+			last = std::pair{dx / length, dz / length};
+			if (length >= 3.0f)
+				break;
+		}
+		return last;
+	};
+	const auto forward = first_clear(1);
+	const auto backward = first_clear(-1);
+	if (forward)
+		result.push_back(*forward);
+	if (backward)
+		result.push_back(*backward);
+	return result;
+}
+
+bool leaves_outside(const std::vector<std::pair<float, float>> &decks,
+		const std::vector<std::pair<float, float>> &roads)
+{
+	if (decks.empty())
+		return false;
+	constexpr float tau = 2.0f * std::numbers::pi_v<float>;
+	std::vector<float> angles;
+	angles.reserve(decks.size());
+	for (const auto &[x, z] : decks)
+		angles.push_back(std::atan2(z, x));
+	std::sort(angles.begin(), angles.end());
+	float from = angles.front();
+	float gap = -1.0f;
+	for (std::size_t i = 0; i < angles.size(); ++i) {
+		const float next = i + 1 < angles.size() ? angles[i + 1] : angles.front() + tau;
+		if (next - angles[i] > gap) {
+			from = angles[i];
+			gap = next - angles[i];
+		}
+	}
+	if (tau - gap > EDGE_MAX_FAN)
+		return false;
+	return std::any_of(roads.begin(), roads.end(), [&](const auto &road) {
+		float offset = std::fmod(std::atan2(road.second, road.first) - from, tau);
+		if (offset < 0.0f)
+			offset += tau;
+		return offset >= EDGE_ROAD_MARGIN && offset <= gap - EDGE_ROAD_MARGIN;
+	});
+}
+
 std::vector<std::pair<float, float>> coverage_samples(const ProcessedWay &way)
 {
 	if (way.nodes.size() < 2) {
@@ -598,6 +930,27 @@ bridge_styles::BridgeStyle majority_style(const std::vector<std::size_t> &group_
 	}
 	return best;
 }
+
+constexpr float RAMP_RUN_PER_BLOCK = 8.0f;
+
+std::vector<int> ramp_profile(
+		const std::vector<int> &ground, int deck_y, bool bridge_side_at_start)
+{
+	if (ground.empty())
+		return {};
+	const int foot = bridge_side_at_start ? ground.back() : ground.front();
+	const float last = static_cast<float>(std::max<std::size_t>(1, ground.size() - 1));
+	const float fall = std::max((deck_y - foot) / last, 1.0f / RAMP_RUN_PER_BLOCK);
+	std::vector<int> ys;
+	ys.reserve(ground.size());
+	for (std::size_t i = 0; i < ground.size(); ++i) {
+		const auto from_deck = bridge_side_at_start ? i : ground.size() - 1 - i;
+		const int grade = static_cast<int>(
+				std::round(deck_y - fall * static_cast<float>(from_deck)));
+		ys.push_back(std::max(grade, ground[i]));
+	}
+	return ys;
+}
 }
 
 bool is_bridge_way(const ProcessedWay &way)
@@ -633,15 +986,9 @@ int BridgeMemberInfo::y_at(
 	return deck_y;
 }
 
-int BridgeRampInfo::y_at(std::size_t tds, std::size_t total_bresenham) const
+int BridgeRampInfo::y_at(std::size_t tds) const
 {
-	if (total_bresenham == 0)
-		return deck_y;
-	const float denom = static_cast<float>(std::max<std::size_t>(1, total_bresenham - 1));
-	const int start_y = bridge_side_at_start ? deck_y : ground_y;
-	const int end_y = bridge_side_at_start ? ground_y : deck_y;
-	const float t = std::min(1.0f, static_cast<float>(tds) / denom);
-	return static_cast<int>(std::round(start_y + (end_y - start_y) * t));
+	return ys.empty() ? 0 : ys[std::min(tds, ys.size() - 1)];
 }
 
 BridgeStructureMap BridgeStructureMap::build(
@@ -654,6 +1001,15 @@ BridgeStructureMap BridgeStructureMap::build(
 
 BridgeStructureMap BridgeStructureMap::build(
 		const std::vector<ProcessedElement> &elements, const WorldEditor &editor,
+		const bridge_styles::BridgeOutlineIndex &outlines, double scale)
+{
+	const auto connectivity = highways::build_highway_connectivity_map(elements);
+	return build(elements, editor, connectivity, outlines, scale);
+}
+
+BridgeStructureMap BridgeStructureMap::build(
+		const std::vector<ProcessedElement> &elements, const WorldEditor &editor,
+		const highways::HighwayConnectivity &connectivity,
 		const bridge_styles::BridgeOutlineIndex &outlines, double scale)
 {
 	BridgeStructureMap result;
@@ -808,6 +1164,21 @@ BridgeStructureMap BridgeStructureMap::build(
 		if (end.x != start.x || end.z != start.z)
 			node_to_other_highways[{end.x, end.z}].push_back(i);
 	}
+	std::unordered_map<std::pair<int, int>, std::vector<RoadOut>, XZPairHash> roads_out;
+	for (const auto *way : other_highway_ways) {
+		if (!meets_a_deck(*way))
+			continue;
+		const bool at_grade = !is_ramp_candidate(*way);
+		const bool vehicular = !is_non_vehicular_bridge_highway(*way);
+		for (std::size_t k = 0; k < way->nodes.size(); ++k) {
+			const auto &node = way->nodes[k];
+			const std::pair<int, int> xz{node.x, node.z};
+			if (!node_to_bridge_indices.contains(xz))
+				continue;
+			for (const auto &dir : leaving_dirs(way->nodes, k))
+				roads_out[xz].push_back({dir, at_grade, vehicular});
+		}
+	}
 	int bounds_min_x = std::numeric_limits<int>::max();
 	int bounds_min_z = std::numeric_limits<int>::max();
 	int bounds_max_x = std::numeric_limits<int>::lowest();
@@ -834,6 +1205,7 @@ BridgeStructureMap BridgeStructureMap::build(
 		const auto group_style = majority_style(group_indices, bridge_ways, outlines);
 		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> endpoint_counts;
 		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> node_members;
+		std::unordered_set<std::pair<int, int>, XZPairHash> cut_ends;
 		for (const auto &idx : group_indices) {
 			const auto &way = *bridge_ways[idx];
 			const auto &s = way.nodes.front();
@@ -841,529 +1213,613 @@ BridgeStructureMap BridgeStructureMap::build(
 			++endpoint_counts[{s.x, s.z}];
 			if (e.x != s.x || e.z != s.z)
 				++endpoint_counts[{e.x, e.z}];
+			if (clipping::is_invented_node_id(s.id))
+				cut_ends.emplace(s.x, s.z);
+			if (clipping::is_invented_node_id(e.id))
+				cut_ends.emplace(e.x, e.z);
 			std::unordered_set<std::pair<int, int>, XZPairHash> seen_nodes;
 			for (const auto &node : way.nodes)
 				seen_nodes.emplace(node.x, node.z);
 			for (const auto &xz : seen_nodes)
 				++node_members[xz];
 		}
-
-		int max_layer = 0;
-		for (const auto &idx : group_indices) {
-			const auto &way = *bridge_ways[idx];
-			const auto it = way.tags.find("layer");
-			if (it == way.tags.end())
-				continue;
-			if (const auto layer = strict_parse::i32(it->second))
-				max_layer = std::max(max_layer, std::max(0, *layer));
-		}
-
-		std::unordered_map<std::size_t, std::vector<std::pair<int, int>>> paths;
-		std::unordered_map<std::size_t, std::vector<int>> path_terrain;
-		int terrain_min = std::numeric_limits<int>::max();
-		int terrain_max = std::numeric_limits<int>::lowest();
-		for (const auto &idx : group_indices) {
-			auto &path = paths[idx];
-			path = way_cells(*bridge_ways[idx]);
-			auto &terrain = path_terrain[idx];
-			terrain.reserve(path.size());
-			for (const auto &[x, z] : path) {
-				const int y = editor.get_ground_level(x, z);
-				terrain.push_back(y);
-				terrain_min = std::min(terrain_min, y);
-				terrain_max = std::max(terrain_max, y);
-			}
-		}
-		if (terrain_min == std::numeric_limits<int>::max())
-			continue;
-		const int dip = terrain_max - terrain_min;
-		std::size_t total_length = 0;
-		for (const auto &idx : group_indices)
-			total_length += way_length_blocks(*bridge_ways[idx]);
-		const auto &asset_root = editor.get_schematic_asset_root();
-		const auto member_range = [&](std::size_t idx) {
-			return highway_block_range(*bridge_ways[idx], scale);
+		const auto is_boundary = [&](const std::pair<int, int> &xz) {
+			const auto it = node_members.find(xz);
+			return it == node_members.end() || it->second <= 1;
 		};
-		const bool group_has_vehicular_member = std::any_of(
-				group_indices.begin(), group_indices.end(), [&](std::size_t idx) {
-					return !is_non_vehicular_bridge_highway(*bridge_ways[idx]);
-				});
-		const bool structure_has_module =
-				group_style == bridge_styles::BridgeStyle::Beam &&
-				group_has_vehicular_member &&
-				std::any_of(
-						group_indices.begin(), group_indices.end(), [&](std::size_t idx) {
-							return bridge_modules::pick_module_index(
-									member_range(idx), total_length, asset_root)
-									.has_value();
-						});
-
-		// A wide modular deck replaces fully contained parallel members. Keep the
-		// decision in the structure map so rendering, support placement, and the
-		// prescanned bridge surface all agree on which way owns the deck.
-		std::unordered_set<std::uint64_t> covered_ids;
-		std::unordered_set<std::uint64_t> widened_ids;
-		if (structure_has_module && group_indices.size() > 1) {
-			auto order = group_indices;
-			std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
-				return member_range(a) != member_range(b)
-							   ? member_range(a) > member_range(b)
-					   : way_length_blocks(*bridge_ways[a]) !=
-									   way_length_blocks(*bridge_ways[b])
-							   ? way_length_blocks(*bridge_ways[a]) >
-										 way_length_blocks(*bridge_ways[b])
-							   : bridge_ways[a]->id < bridge_ways[b]->id;
-			});
-			for (const auto idx : order) {
-				const auto &way = *bridge_ways[idx];
-				for (const auto wider_idx : order) {
-					const auto &wider = *bridge_ways[wider_idx];
-					if (wider.id == way.id || covered_ids.contains(wider.id))
-						continue;
-					const int wider_range = member_range(wider_idx);
-					const int range = member_range(idx);
-					const auto wider_length = way_length_blocks(wider);
-					const auto length = way_length_blocks(way);
-					const bool is_wider =
-							wider_range > range ||
-							(wider_range == range && (wider_length > length ||
-															 (wider_length == length &&
-																	 wider.id < way.id)));
-					if (!is_wider || length > wider_length + 30 ||
-							!headings_parallel(way, wider))
-						continue;
-					const auto module_idx = bridge_modules::pick_module_index(
-							wider_range, total_length, asset_root);
-					const int deck_half = module_idx ? bridge_modules::module_half_width(
-															   *module_idx, asset_root)
-													 : 0;
-					float threshold = static_cast<float>(std::max(0, deck_half - 2));
-					if (wider_range == range)
-						threshold =
-								std::min(threshold, DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS);
-					const auto samples = coverage_samples(way);
-					const bool covered =
-							!samples.empty() &&
-							std::all_of(samples.begin(), samples.end(),
-									[&](const auto &point) {
-										return lateral_offset_to_way(point.first,
-													   point.second, wider) <= threshold;
-									});
-					if (!covered)
-						continue;
-					covered_ids.insert(way.id);
-					if (wider_range == range)
-						widened_ids.insert(wider.id);
-				}
-			}
-		}
-		int deck_y = terrain_max;
-
-		// Derive a shared longitudinal deck profile for the whole bridge group.
-		// A single max-endpoint height makes long bridges float over ridges and
-		// bury into terrain; the upper hull preserves terrain clearance while
-		// keeping the profile continuous across connected members.
-		std::unordered_map<std::size_t, std::vector<float>> path_axis;
-		std::vector<std::pair<int, int>> profile_ends;
+		std::unordered_set<std::pair<int, int>, XZPairHash> fork_landings;
+		std::unordered_set<std::pair<int, int>, XZPairHash> fork_raised;
 		for (const auto idx : group_indices) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
 			const auto &way = *bridge_ways[idx];
-			const auto &path = paths[idx];
-			if (path.empty())
-				continue;
-			profile_ends.emplace_back(way.nodes.front().x, way.nodes.front().z);
-			profile_ends.emplace_back(way.nodes.back().x, way.nodes.back().z);
-			path_axis[idx].reserve(path.size());
-		}
-		std::pair<int, int> axis_start{0, 0};
-		std::pair<int, int> axis_end{0, 0};
-		std::int64_t axis_distance_squared = 0;
-		for (std::size_t a = 0; a < profile_ends.size(); ++a) {
-			for (std::size_t b = a + 1; b < profile_ends.size(); ++b) {
-				const std::int64_t distance = dist2(profile_ends[b], profile_ends[a]);
-				if (distance > axis_distance_squared) {
-					axis_distance_squared = distance;
-					axis_start = profile_ends[a];
-					axis_end = profile_ends[b];
-				}
-			}
-		}
-		const float axis_length = std::sqrt(static_cast<float>(axis_distance_squared));
-		const float axis_dx =
-				axis_length > 0.0f
-						? static_cast<float>(axis_end.first - axis_start.first) /
-								  axis_length
-						: 0.0f;
-		const float axis_dz =
-				axis_length > 0.0f
-						? static_cast<float>(axis_end.second - axis_start.second) /
-								  axis_length
-						: 0.0f;
-		bool follows_axis = axis_length >= 1.0f;
-		for (auto &[idx, path] : paths) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			auto &us = path_axis[idx];
-			us.reserve(path.size());
-			for (const auto &[x, z] : path)
-				us.push_back((x - axis_start.first) * axis_dx +
-							 (z - axis_start.second) * axis_dz);
-			follows_axis = follows_axis && is_monotonic(us, 2.0f);
-		}
-		std::unordered_set<std::uint64_t> cable_carriers;
-		std::vector<std::pair<int, int>> cable_pylons;
-		std::vector<std::pair<int, int>> mapped_cable_pylons;
-		if (group_style == bridge_styles::BridgeStyle::Suspension ||
-				group_style == bridge_styles::BridgeStyle::CableStayed) {
-			if (group_style == bridge_styles::BridgeStyle::Suspension && follows_axis) {
-				int group_half_width = 0;
-				for (const auto index : group_indices)
-					group_half_width = std::max(group_half_width,
-							highway_block_range(*bridge_ways[index], scale));
-				const auto reach =
-						static_cast<std::int64_t>(group_half_width + TOWER_PASS_MARGIN);
-				const auto reach_squared = reach * reach;
-				for (const auto &tower : mapped_supports.towers) {
-					const bool close = std::any_of(group_indices.begin(),
-							group_indices.end(), [&](std::size_t index) {
-								return std::any_of(paths[index].begin(),
-										paths[index].end(), [&](const auto &point) {
-											return dist2(point, {tower.x, tower.z}) <=
-												   reach_squared;
-										});
-							});
-					if (close) {
-						cable_pylons.emplace_back(tower.x, tower.z);
-						mapped_cable_pylons.emplace_back(tower.x, tower.z);
+			for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
+				const std::pair<int, int> xz{node->x, node->z};
+				const auto roads_it = roads_out.find(xz);
+				if (is_boundary(xz) || roads_it == roads_out.end())
+					continue;
+				std::vector<std::pair<float, float>> deck_dirs;
+				bool vehicular_deck = false;
+				for (const auto member_idx : group_indices) {
+					const auto &member = *bridge_ways[member_idx];
+					for (std::size_t k = 0; k < member.nodes.size(); ++k) {
+						if (member.nodes[k].x != xz.first ||
+								member.nodes[k].z != xz.second)
+							continue;
+						const auto dirs = leaving_dirs(member.nodes, k);
+						deck_dirs.insert(deck_dirs.end(), dirs.begin(), dirs.end());
+						vehicular_deck = vehicular_deck ||
+										 !is_non_vehicular_bridge_highway(member);
 					}
 				}
-				if (mapped_cable_pylons.size() < 2) {
-					cable_pylons.clear();
-					mapped_cable_pylons.clear();
+				const auto leaves = [&](bool at_grade) {
+					std::vector<std::pair<float, float>> road_dirs;
+					for (const auto &road : roads_it->second)
+						if (road.at_grade == at_grade &&
+								(road.vehicular || !vehicular_deck))
+							road_dirs.push_back(road.dir);
+					return leaves_outside(deck_dirs, road_dirs);
+				};
+				if (leaves(true))
+					fork_landings.insert(xz);
+				if (leaves(false))
+					fork_raised.insert(xz);
+			}
+			const auto is_edge = [&](const std::pair<int, int> &xz) {
+				return is_boundary(xz) || fork_landings.contains(xz) ||
+					   fork_raised.contains(xz);
+			};
+
+			int max_layer = 0;
+			for (const auto &idx : group_indices) {
+				const auto &way = *bridge_ways[idx];
+				const auto it = way.tags.find("layer");
+				if (it == way.tags.end())
+					continue;
+				if (const auto layer = strict_parse::i32(it->second))
+					max_layer = std::max(max_layer, std::max(0, *layer));
+			}
+
+			std::unordered_map<std::size_t, std::vector<std::pair<int, int>>> paths;
+			std::unordered_map<std::size_t, std::vector<int>> path_terrain;
+			int terrain_min = std::numeric_limits<int>::max();
+			int terrain_max = std::numeric_limits<int>::lowest();
+			for (const auto &idx : group_indices) {
+				auto &path = paths[idx];
+				path = way_cells(*bridge_ways[idx]);
+				auto &terrain = path_terrain[idx];
+				terrain.reserve(path.size());
+				for (const auto &[x, z] : path) {
+					const int y = editor.get_ground_level(x, z);
+					terrain.push_back(y);
+					terrain_min = std::min(terrain_min, y);
+					terrain_max = std::max(terrain_max, y);
 				}
 			}
-			bool approach_of_mapped_tower = false;
-			if (cable_pylons.empty() && !mapped_tower_bridge_names.empty() &&
-					!mapped_supports.towers.empty()) {
-				bool has_mapped_tower_name = false;
-				for (const auto idx : group_indices) {
+			if (terrain_min == std::numeric_limits<int>::max())
+				continue;
+			int dip = terrain_max - terrain_min;
+			std::size_t total_length = 0;
+			for (const auto &idx : group_indices)
+				total_length += way_length_blocks(*bridge_ways[idx]);
+			const auto &asset_root = editor.get_schematic_asset_root();
+			const auto member_range = [&](std::size_t idx) {
+				return highway_block_range(*bridge_ways[idx], scale);
+			};
+			const bool group_has_vehicular_member = std::any_of(
+					group_indices.begin(), group_indices.end(), [&](std::size_t idx) {
+						return !is_non_vehicular_bridge_highway(*bridge_ways[idx]);
+					});
+			const bool structure_has_module =
+					group_style == bridge_styles::BridgeStyle::Beam &&
+					group_has_vehicular_member &&
+					std::any_of(group_indices.begin(), group_indices.end(),
+							[&](std::size_t idx) {
+								return bridge_modules::pick_module_index(
+										member_range(idx), total_length, asset_root)
+										.has_value();
+							});
+
+			// A wide modular deck replaces fully contained parallel members. Keep the
+			// decision in the structure map so rendering, support placement, and the
+			// prescanned bridge surface all agree on which way owns the deck.
+			std::unordered_set<std::uint64_t> covered_ids;
+			std::unordered_set<std::uint64_t> widened_ids;
+			std::unordered_map<std::size_t, std::size_t> cover_of;
+			if (structure_has_module && group_indices.size() > 1) {
+				auto order = group_indices;
+				std::sort(order.begin(), order.end(), [&](std::size_t a, std::size_t b) {
+					return member_range(a) != member_range(b)
+								   ? member_range(a) > member_range(b)
+						   : way_length_blocks(*bridge_ways[a]) !=
+										   way_length_blocks(*bridge_ways[b])
+								   ? way_length_blocks(*bridge_ways[a]) >
+											 way_length_blocks(*bridge_ways[b])
+								   : bridge_ways[a]->id < bridge_ways[b]->id;
+				});
+				for (const auto idx : order) {
 					const auto &way = *bridge_ways[idx];
-					for (const char *key : {"bridge:name", "name"}) {
-						const auto name = way.tags.get(key);
-						if (!name.empty() && mapped_tower_bridge_names.contains(name)) {
-							has_mapped_tower_name = true;
-							break;
-						}
-					}
-					if (has_mapped_tower_name)
-						break;
-				}
-				if (has_mapped_tower_name) {
-					const auto reach = static_cast<std::int64_t>(
-							MAPPED_TOWER_APPROACH_REACH_M * scale);
-					const auto reach_squared = reach * reach;
-					approach_of_mapped_tower = std::any_of(group_indices.begin(),
-							group_indices.end(), [&](std::size_t idx) {
-								return std::any_of(paths[idx].begin(), paths[idx].end(),
-										[&](const auto &cell) {
-											return std::any_of(
-													mapped_supports.towers.begin(),
-													mapped_supports.towers.end(),
-													[&](const auto &tower) {
-														return dist2(cell,
-																	   {tower.x,
-																			   tower.z}) <=
-															   reach_squared;
-													});
+					for (const auto wider_idx : order) {
+						const auto &wider = *bridge_ways[wider_idx];
+						if (wider.id == way.id || covered_ids.contains(wider.id))
+							continue;
+						const int wider_range = member_range(wider_idx);
+						const int range = member_range(idx);
+						const auto wider_length = way_length_blocks(wider);
+						const auto length = way_length_blocks(way);
+						const bool is_wider =
+								wider_range > range ||
+								(wider_range == range &&
+										(wider_length > length ||
+												(wider_length == length &&
+														wider.id < way.id)));
+						if (!is_wider || length > wider_length + 30 ||
+								!headings_parallel(way, wider))
+							continue;
+						const auto module_idx = bridge_modules::pick_module_index(
+								wider_range, total_length, asset_root);
+						const int deck_half = module_idx
+													  ? bridge_modules::module_half_width(
+																*module_idx, asset_root)
+													  : 0;
+						float threshold = static_cast<float>(std::max(0, deck_half - 2));
+						if (wider_range == range)
+							threshold = std::min(
+									threshold, DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS);
+						const auto samples = coverage_samples(way);
+						const bool covered =
+								!samples.empty() &&
+								std::all_of(samples.begin(), samples.end(),
+										[&](const auto &point) {
+											return lateral_offset_to_way(point.first,
+														   point.second,
+														   wider) <= threshold;
 										});
-							});
+						if (!covered)
+							continue;
+						covered_ids.insert(way.id);
+						cover_of.try_emplace(idx, wider_idx);
+						if (wider_range == range)
+							widened_ids.insert(wider.id);
+					}
 				}
 			}
-			std::optional<std::size_t> main_idx;
+			int deck_y = terrain_max;
+
+			// Derive a shared longitudinal deck profile for the whole bridge group.
+			// A single max-endpoint height makes long bridges float over ridges and
+			// bury into terrain; the upper hull preserves terrain clearance while
+			// keeping the profile continuous across connected members.
+			std::unordered_map<std::size_t, std::vector<float>> path_axis;
+			std::vector<std::pair<int, int>> profile_ends;
 			for (const auto idx : group_indices) {
 				if (covered_ids.contains(bridge_ways[idx]->id))
 					continue;
-				if (!main_idx ||
-						way_length_blocks(*bridge_ways[idx]) >
-								way_length_blocks(*bridge_ways[*main_idx]) ||
-						(way_length_blocks(*bridge_ways[idx]) ==
-										way_length_blocks(*bridge_ways[*main_idx]) &&
-								bridge_ways[idx]->id < bridge_ways[*main_idx]->id))
-					main_idx = idx;
-			}
-			if (main_idx && cable_pylons.empty() && !approach_of_mapped_tower) {
-				const auto &main_path = paths[*main_idx];
-				for (const auto point : bridge_styles::default_pylons(
-							 group_style, main_path.size(), true, true))
-					if (point < main_path.size())
-						cable_pylons.push_back(main_path[point]);
-			}
-			if (main_idx && !cable_pylons.empty()) {
-				const auto &main_way = *bridge_ways[*main_idx];
-				const auto main_length = way_length_blocks(main_way);
-				for (const auto idx : group_indices) {
-					const auto &way = *bridge_ways[idx];
-					if (idx == *main_idx ||
-							(!covered_ids.contains(way.id) &&
-									way_length_blocks(way) * 10 >= main_length * 6 &&
-									bridge_styles::resolve_bridge_style_with_outline(
-											way, outlines) == group_style &&
-									headings_parallel(way, main_way)))
-						cable_carriers.insert(way.id);
-				}
-			}
-		}
-
-		std::vector<std::pair<float, float>> profile_requirements;
-		std::vector<float> profile_anchors;
-		std::vector<std::pair<float, int>> profile_anchor_levels;
-		std::vector<float> profile_free_ends;
-		std::unordered_set<std::pair<int, int>, XZPairHash> profile_nonterrain_ends;
-		if (group_style == bridge_styles::BridgeStyle::Suspension &&
-				mapped_cable_pylons.size() >= 2) {
-			for (const auto &tower : mapped_supports.towers) {
-				if (!tower.deck_y ||
-						std::find(mapped_cable_pylons.begin(), mapped_cable_pylons.end(),
-								std::pair{tower.x, tower.z}) == mapped_cable_pylons.end())
+				const auto &way = *bridge_ways[idx];
+				const auto &path = paths[idx];
+				if (path.empty())
 					continue;
-				const float u = (tower.x - axis_start.first) * axis_dx +
-								(tower.z - axis_start.second) * axis_dz;
-				profile_requirements.emplace_back(u, static_cast<float>(*tower.deck_y));
+				profile_ends.emplace_back(way.nodes.front().x, way.nodes.front().z);
+				profile_ends.emplace_back(way.nodes.back().x, way.nodes.back().z);
+				path_axis[idx].reserve(path.size());
 			}
-		}
-		std::unordered_set<std::pair<int, int>, XZPairHash> group_nodes;
-		for (const auto idx : group_indices) {
-			for (const auto &node : bridge_ways[idx]->nodes)
-				group_nodes.emplace(node.x, node.z);
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			const auto &us = path_axis[idx];
-			const auto collect_endpoint = [&](const ProcessedNode &node, float u) {
-				const std::pair<int, int> xz{node.x, node.z};
-				const auto count = node_members.find(xz);
-				const bool boundary = count == node_members.end() || count->second <= 1;
-				bool joins_other_bridge = false;
-				if (const auto members = node_to_bridge_indices.find(xz);
-						members != node_to_bridge_indices.end()) {
-					joins_other_bridge = std::any_of(members->second.begin(),
-							members->second.end(), [&](std::size_t other) {
-								return std::find(group_indices.begin(),
-											   group_indices.end(),
-											   other) == group_indices.end();
-							});
-				}
-				if (joins_other_bridge) {
-					profile_nonterrain_ends.insert(xz);
-					if (const auto joint = resolved_joints.find(xz);
-							joint != resolved_joints.end()) {
-						profile_anchors.push_back(u);
-						profile_anchor_levels.emplace_back(u, joint->second);
-					} else {
-						profile_free_ends.push_back(u);
+			std::pair<int, int> axis_start{0, 0};
+			std::pair<int, int> axis_end{0, 0};
+			std::int64_t axis_distance_squared = 0;
+			for (std::size_t a = 0; a < profile_ends.size(); ++a) {
+				for (std::size_t b = a + 1; b < profile_ends.size(); ++b) {
+					const std::int64_t distance = dist2(profile_ends[b], profile_ends[a]);
+					if (distance > axis_distance_squared) {
+						axis_distance_squared = distance;
+						axis_start = profile_ends[a];
+						axis_end = profile_ends[b];
 					}
-					return;
 				}
-				bool has_external_ramp = false;
-				if (boundary) {
-					const auto candidates = node_to_other_highways.find(xz);
-					if (candidates != node_to_other_highways.end()) {
-						for (const auto candidate_idx : candidates->second) {
-							const auto &candidate = *other_highway_ways[candidate_idx];
-							if (!is_ramp_candidate(candidate) ||
-									claimed_ramp_ways.contains(candidate.id))
-								continue;
-							const bool at_start = candidate.nodes.front().x == node.x &&
-												  candidate.nodes.front().z == node.z;
-							const auto &far_ = at_start ? candidate.nodes.back()
-														: candidate.nodes.front();
-							if (!node_members.contains({far_.x, far_.z})) {
-								has_external_ramp = true;
+			}
+			const float axis_length =
+					std::sqrt(static_cast<float>(axis_distance_squared));
+			const float axis_dx =
+					axis_length > 0.0f
+							? static_cast<float>(axis_end.first - axis_start.first) /
+									  axis_length
+							: 0.0f;
+			const float axis_dz =
+					axis_length > 0.0f
+							? static_cast<float>(axis_end.second - axis_start.second) /
+									  axis_length
+							: 0.0f;
+			bool follows_axis = axis_length >= 1.0f;
+			for (auto &[idx, path] : paths) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				auto &us = path_axis[idx];
+				us.reserve(path.size());
+				for (const auto &[x, z] : path)
+					us.push_back((x - axis_start.first) * axis_dx +
+								 (z - axis_start.second) * axis_dz);
+				follows_axis = follows_axis && is_monotonic(us, 2.0f);
+			}
+			std::unordered_set<std::uint64_t> cable_carriers;
+			std::vector<std::pair<int, int>> cable_pylons;
+			std::vector<std::pair<int, int>> mapped_cable_pylons;
+			if (group_style == bridge_styles::BridgeStyle::Suspension ||
+					group_style == bridge_styles::BridgeStyle::CableStayed) {
+				if (group_style == bridge_styles::BridgeStyle::Suspension &&
+						follows_axis) {
+					int group_half_width = 0;
+					for (const auto index : group_indices)
+						group_half_width = std::max(group_half_width,
+								highway_block_range(*bridge_ways[index], scale));
+					const auto reach = static_cast<std::int64_t>(
+							group_half_width + TOWER_PASS_MARGIN);
+					const auto reach_squared = reach * reach;
+					for (const auto &tower : mapped_supports.towers) {
+						const bool close = std::any_of(group_indices.begin(),
+								group_indices.end(), [&](std::size_t index) {
+									return std::any_of(paths[index].begin(),
+											paths[index].end(), [&](const auto &point) {
+												return dist2(point, {tower.x, tower.z}) <=
+													   reach_squared;
+											});
+								});
+						if (close) {
+							cable_pylons.emplace_back(tower.x, tower.z);
+							mapped_cable_pylons.emplace_back(tower.x, tower.z);
+						}
+					}
+					if (mapped_cable_pylons.size() < 2) {
+						cable_pylons.clear();
+						mapped_cable_pylons.clear();
+					}
+				}
+				bool approach_of_mapped_tower = false;
+				if (cable_pylons.empty() && !mapped_tower_bridge_names.empty() &&
+						!mapped_supports.towers.empty()) {
+					bool has_mapped_tower_name = false;
+					for (const auto idx : group_indices) {
+						const auto &way = *bridge_ways[idx];
+						for (const char *key : {"bridge:name", "name"}) {
+							const auto name = way.tags.get(key);
+							if (!name.empty() &&
+									mapped_tower_bridge_names.contains(name)) {
+								has_mapped_tower_name = true;
 								break;
 							}
 						}
+						if (has_mapped_tower_name)
+							break;
+					}
+					if (has_mapped_tower_name) {
+						const auto reach = static_cast<std::int64_t>(
+								MAPPED_TOWER_APPROACH_REACH_M * scale);
+						const auto reach_squared = reach * reach;
+						approach_of_mapped_tower = std::any_of(group_indices.begin(),
+								group_indices.end(), [&](std::size_t idx) {
+									return std::any_of(paths[idx].begin(),
+											paths[idx].end(), [&](const auto &cell) {
+												return std::any_of(
+														mapped_supports.towers.begin(),
+														mapped_supports.towers.end(),
+														[&](const auto &tower) {
+															return dist2(cell,
+																		   {tower.x,
+																				   tower.z}) <=
+																   reach_squared;
+														});
+											});
+								});
 					}
 				}
-				if (boundary && !has_external_ramp) {
-					profile_anchors.push_back(u);
-					profile_anchor_levels.emplace_back(
-							u, editor.get_ground_level(node.x, node.z));
-				} else if (boundary && has_external_ramp) {
-					profile_nonterrain_ends.insert(xz);
-					profile_free_ends.push_back(u);
+				std::optional<std::size_t> main_idx;
+				for (const auto idx : group_indices) {
+					if (covered_ids.contains(bridge_ways[idx]->id))
+						continue;
+					if (!main_idx ||
+							way_length_blocks(*bridge_ways[idx]) >
+									way_length_blocks(*bridge_ways[*main_idx]) ||
+							(way_length_blocks(*bridge_ways[idx]) ==
+											way_length_blocks(*bridge_ways[*main_idx]) &&
+									bridge_ways[idx]->id < bridge_ways[*main_idx]->id))
+						main_idx = idx;
 				}
+				if (main_idx && cable_pylons.empty() && !approach_of_mapped_tower) {
+					const auto &main_path = paths[*main_idx];
+					for (const auto point : bridge_styles::default_pylons(
+								 group_style, main_path.size(), true, true))
+						if (point < main_path.size())
+							cable_pylons.push_back(main_path[point]);
+				}
+				if (main_idx && !cable_pylons.empty()) {
+					const auto &main_way = *bridge_ways[*main_idx];
+					const auto main_length = way_length_blocks(main_way);
+					for (const auto idx : group_indices) {
+						const auto &way = *bridge_ways[idx];
+						if (idx == *main_idx ||
+								(!covered_ids.contains(way.id) &&
+										way_length_blocks(way) * 10 >= main_length * 6 &&
+										bridge_styles::resolve_bridge_style_with_outline(
+												way, outlines) == group_style &&
+										headings_parallel(way, main_way)))
+							cable_carriers.insert(way.id);
+					}
+				}
+			}
+
+			std::vector<std::pair<float, float>> profile_requirements;
+			std::vector<float> profile_anchors;
+			std::vector<std::pair<float, int>> profile_anchor_levels;
+			std::vector<float> profile_free_ends;
+			std::vector<std::pair<std::size_t, std::size_t>> profile_free_end_cells;
+			std::unordered_set<std::pair<int, int>, XZPairHash> profile_nonterrain_ends;
+			if (group_style == bridge_styles::BridgeStyle::Suspension &&
+					mapped_cable_pylons.size() >= 2) {
+				for (const auto &tower : mapped_supports.towers) {
+					if (!tower.deck_y || std::find(mapped_cable_pylons.begin(),
+												 mapped_cable_pylons.end(),
+												 std::pair{tower.x, tower.z}) ==
+												 mapped_cable_pylons.end())
+						continue;
+					const float u = (tower.x - axis_start.first) * axis_dx +
+									(tower.z - axis_start.second) * axis_dz;
+					profile_requirements.emplace_back(
+							u, static_cast<float>(*tower.deck_y));
+				}
+			}
+			std::unordered_set<std::pair<int, int>, XZPairHash> group_nodes;
+			for (const auto idx : group_indices) {
+				for (const auto &node : bridge_ways[idx]->nodes)
+					group_nodes.emplace(node.x, node.z);
+			}
+			std::unordered_set<std::pair<int, int>, XZPairHash> covered_boundaries;
+			for (const auto idx : group_indices) {
+				if (!covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				const auto &way = *bridge_ways[idx];
+				for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
+					const std::pair<int, int> xz{node->x, node->z};
+					if (is_boundary(xz))
+						covered_boundaries.insert(xz);
+				}
+			}
+			struct PendingRamp
+			{
+				const ProcessedWay *way = nullptr;
+				bool bridge_side_at_start = false;
+				std::pair<int, int> endpoint{};
+				std::vector<int> ground;
+				int cap = std::numeric_limits<int>::max();
 			};
-			collect_endpoint(bridge_ways[idx]->nodes.front(), us.front());
-			collect_endpoint(bridge_ways[idx]->nodes.back(), us.back());
-		}
-		auto reachable = [&](float u) {
-			float limit = std::numeric_limits<float>::infinity();
-			for (const auto &[anchor_u, anchor_y] : profile_anchor_levels)
-				limit = std::min(limit, anchor_y + std::abs(u - anchor_u));
-			return limit;
-		};
-		int profile_level = terrain_max;
-		int raised_top = terrain_max;
-		std::unordered_map<std::size_t, bool> connected_obstacles;
-		for (const auto idx : group_indices) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			const auto &path = paths[idx];
-			const auto &us = path_axis[idx];
-			const auto &terrain = path_terrain[idx];
-			const int layer = effective_layer(*bridge_ways[idx]);
-			for (std::size_t i = 0; i < path.size(); ++i) {
-				const auto &[x, z] = path[i];
-				const int ground = terrain[i];
-				profile_requirements.emplace_back(us[i], ground);
-				int need = ground;
-				const auto &[px, pz] = path[i == 0 ? 0 : i - 1];
-				const auto &[nx, nz] = path[std::min(i + 1, path.size() - 1)];
-				const float heading_x = static_cast<float>(nx - px);
-				const float heading_z = static_cast<float>(nz - pz);
-				if (const auto *nearby = obstacles.at(x, z)) {
-					for (const auto segment_index : *nearby) {
-						const auto &segment = obstacles.segments[segment_index];
-						if (point_segment_distance(static_cast<float>(x),
-									static_cast<float>(z), segment) > segment.reach ||
-								!crosses_segment(heading_x, heading_z, segment))
+			std::vector<PendingRamp> pending_ramps;
+			std::unordered_set<std::pair<int, int>, XZPairHash> external_ramp_ends;
+			for (const auto idx : group_indices) {
+				const auto &way = *bridge_ways[idx];
+				for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
+					const std::pair<int, int> xz{node->x, node->z};
+					if (!is_edge(xz) || covered_boundaries.contains(xz))
+						continue;
+					const auto other = node_to_other_highways.find(xz);
+					if (other == node_to_other_highways.end())
+						continue;
+					for (const auto candidate_idx : other->second) {
+						const auto &candidate = *other_highway_ways[candidate_idx];
+						if (!is_ramp_candidate(candidate) ||
+								claimed_ramp_ways.contains(candidate.id))
 							continue;
-						const auto [touch_it, inserted] =
-								connected_obstacles.try_emplace(segment.way, false);
-						if (inserted) {
-							const auto *other = obstacles.ways[segment.way];
-							touch_it->second = std::any_of(other->nodes.begin(),
-									other->nodes.end(), [&](const auto &node) {
-										return group_nodes.contains({node.x, node.z});
-									});
-						}
-						if (!touch_it->second)
-							need = std::max(need, ground + segment.headroom);
+						const bool at_start = candidate.nodes.front().x == xz.first &&
+											  candidate.nodes.front().z == xz.second;
+						const auto &far = at_start ? candidate.nodes.back()
+												   : candidate.nodes.front();
+						if (node_members.contains({far.x, far.z}))
+							continue;
+						const auto highway = candidate.tags.get("highway");
+						auto ground = highways::road_profile(editor, candidate,
+								highways::highway_block_range(
+										highway, candidate.tags, scale),
+								connectivity, [&](int x, int z) -> std::optional<int> {
+									if (!connectivity.is_shared(x, z))
+										return std::nullopt;
+									return highways::junction_level(editor, x, z);
+								});
+						if (ground.empty())
+							continue;
+						const int foot = at_start ? ground.back() : ground.front();
+						const int cap = foot + static_cast<int>(ground.size()) - 1;
+						pending_ramps.push_back(
+								{&candidate, at_start, xz, std::move(ground), cap});
+						claimed_ramp_ways.insert(candidate.id);
+						external_ramp_ends.insert(xz);
 					}
 				}
-				if (const auto lower = resolved_decks.find({x, z});
-						lower != resolved_decks.end() && lower->second.second < layer)
-					need = std::max(need, lower->second.first + STACKED_DECK_HEADROOM);
-				if (need > ground) {
-					profile_level = std::max(profile_level, need);
-					const float capped = std::max(static_cast<float>(ground),
-							std::min(static_cast<float>(need), reachable(us[i])));
-					profile_requirements.emplace_back(us[i], capped);
-					raised_top =
-							std::max(raised_top, static_cast<int>(std::lround(capped)));
-				}
 			}
-		}
-		const bool has_boundary_endpoint = std::any_of(
-				group_indices.begin(), group_indices.end(), [&](std::size_t idx) {
-					const auto &way = *bridge_ways[idx];
-					for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
-						const auto count = node_members.find({node->x, node->z});
-						if (count == node_members.end() || count->second <= 1)
-							return true;
-					}
-					return false;
-				});
-		const bool flat_span = has_boundary_endpoint &&
-							   dip < FLAT_TERRAIN_DIP_THRESHOLD &&
-							   total_length >= SHORT_BRIDGE_LENGTH_BLOCKS;
-		int profile_clearance = flat_span ? max_layer * LAYER_HEIGHT_STEP : 0;
-		if (flat_span && group_style == bridge_styles::BridgeStyle::Arch)
-			profile_clearance = std::max(profile_clearance, bridges::ARCH_MIN_CLEARANCE);
-		profile_level = std::max(profile_level, terrain_max + profile_clearance);
-		if (profile_clearance > 0) {
-			raised_top = std::max(raised_top, profile_level);
-			float min_u = std::numeric_limits<float>::max();
-			float max_u = std::numeric_limits<float>::lowest();
-			for (const auto &[idx, values] : path_axis) {
-				(void)idx;
-				for (const float u : values) {
-					min_u = std::min(min_u, u);
-					max_u = std::max(max_u, u);
-				}
-			}
-			const float span = std::max(0.0f, max_u - min_u);
-			const float ramp =
-					std::min(std::clamp(span * 0.35f, 15.0f, 50.0f), span / 2.0f);
-			bool placed_plateau = false;
-			for (const auto &[idx, values] : path_axis) {
+			const auto joins_external_bridge = [&](const std::pair<int, int> &xz) {
+				const auto members = node_to_bridge_indices.find(xz);
+				return members != node_to_bridge_indices.end() &&
+						std::any_of(members->second.begin(), members->second.end(),
+								[&](std::size_t member) {
+									return std::find(group_indices.begin(),
+											group_indices.end(), member) ==
+											group_indices.end();
+								});
+			};
+			const auto anchors_end = [&](const std::pair<int, int> &xz) {
+				return (is_boundary(xz) || fork_landings.contains(xz)) &&
+						!cut_ends.contains(xz) && !covered_boundaries.contains(xz) &&
+						!external_ramp_ends.contains(xz) && !joins_external_bridge(xz);
+			};
+			// At-grade roads that meet a landing share one junction height with the
+			// bridge. Apply it before deriving the bridge's longitudinal profile,
+			// matching the Rust terrain/anchor pass.
+			for (const auto idx : group_indices) {
 				if (covered_ids.contains(bridge_ways[idx]->id))
 					continue;
-				for (const float u : values) {
-					if (std::all_of(profile_anchors.begin(), profile_anchors.end(),
-								[&](float anchor) {
-									return std::abs(u - anchor) >= ramp;
-								})) {
-						profile_requirements.emplace_back(u, profile_level);
-						placed_plateau = true;
+				auto &terrain = path_terrain[idx];
+				if (terrain.empty())
+					continue;
+				const auto &way = *bridge_ways[idx];
+				const std::array<std::pair<std::pair<int, int>, std::size_t>, 2> ends{{
+						{{way.nodes.front().x, way.nodes.front().z}, 0},
+						{{way.nodes.back().x, way.nodes.back().z}, terrain.size() - 1}}};
+				for (const auto &[xz, cell] : ends) {
+					if (cell < terrain.size() && anchors_end(xz) &&
+							connectivity.is_shared(xz.first, xz.second))
+						terrain[cell] = highways::junction_level(editor, xz.first, xz.second);
+				}
+			}
+			terrain_min = std::numeric_limits<int>::max();
+			terrain_max = std::numeric_limits<int>::lowest();
+			for (const auto &[idx, terrain] : path_terrain) {
+				(void)idx;
+				for (const int y : terrain) {
+					terrain_min = std::min(terrain_min, y);
+					terrain_max = std::max(terrain_max, y);
+				}
+			}
+			dip = terrain_max - terrain_min;
+			deck_y = terrain_max;
+			for (const auto idx : group_indices) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				const auto &us = path_axis[idx];
+				const auto collect_endpoint = [&](const ProcessedNode &node, float u,
+												std::size_t cell) {
+					const std::pair<int, int> xz{node.x, node.z};
+					const auto count = node_members.find(xz);
+					const bool boundary =
+							count == node_members.end() || count->second <= 1;
+					bool joins_other_bridge = false;
+					if (const auto members = node_to_bridge_indices.find(xz);
+							members != node_to_bridge_indices.end()) {
+						joins_other_bridge = std::any_of(members->second.begin(),
+								members->second.end(), [&](std::size_t other) {
+									return std::find(group_indices.begin(),
+												   group_indices.end(),
+												   other) == group_indices.end();
+								});
 					}
-				}
-			}
-			if (!placed_plateau)
-				profile_requirements.emplace_back((min_u + max_u) * 0.5f, profile_level);
-		}
-		for (const float u : profile_free_ends)
-			profile_requirements.emplace_back(u, raised_top);
-		const auto profile_hull = follows_axis
-										  ? upper_hull(std::move(profile_requirements))
-										  : std::vector<std::pair<float, float>>{};
-		std::shared_ptr<const bridge_towers::CableSpan> mapped_cable_span;
-		if (group_style == bridge_styles::BridgeStyle::Suspension && follows_axis &&
-				mapped_cable_pylons.size() >= 2) {
-			std::vector<const bridge_towers::MappedTower *> towers;
-			for (const auto &tower : mapped_supports.towers) {
-				if (std::find(mapped_cable_pylons.begin(), mapped_cable_pylons.end(),
-							std::pair{tower.x, tower.z}) != mapped_cable_pylons.end())
-					towers.push_back(&tower);
-			}
-			std::sort(towers.begin(), towers.end(), [&](const auto *a, const auto *b) {
-				const float ua = (a->x - axis_start.first) * axis_dx +
-								 (a->z - axis_start.second) * axis_dz;
-				const float ub = (b->x - axis_start.first) * axis_dx +
-								 (b->z - axis_start.second) * axis_dz;
-				return ua < ub;
-			});
-			if (towers.size() >= 2) {
-				std::vector<std::pair<float, int>> saddles;
-				saddles.reserve(towers.size());
-				for (const auto *tower : towers) {
-					const float u = (tower->x - axis_start.first) * axis_dx +
-									(tower->z - axis_start.second) * axis_dz;
-					saddles.emplace_back(
-							u, tower->top_y - bridge_towers::SADDLE_BELOW_TOP);
-				}
-				const float main_length = (saddles.back().first - saddles.front().first) /
-										  static_cast<float>(saddles.size() - 1);
-				const std::int64_t pier_reach = static_cast<std::int64_t>(
-						bridge_towers::SIDE_PIER_REACH_M * scale);
-				const std::int64_t pier_reach_squared = pier_reach * pier_reach;
-				const auto near_path = [&](int x, int z) {
-					for (const auto idx : group_indices)
-						for (const auto &point : paths[idx]) {
-							if (dist2(point, {x, z}) <= pier_reach_squared)
-								return true;
+					if (joins_other_bridge) {
+						profile_nonterrain_ends.insert(xz);
+						if (const auto joint = resolved_joints.find(xz);
+								joint != resolved_joints.end()) {
+							profile_anchors.push_back(u);
+							profile_anchor_levels.emplace_back(u, joint->second);
+							profile_requirements.emplace_back(
+									u, static_cast<float>(joint->second));
+						} else {
+							profile_free_ends.push_back(u);
+							profile_free_end_cells.emplace_back(idx, cell);
 						}
-					return false;
-				};
-				std::vector<float> pier_us;
-				for (const auto &[x, z] : mapped_supports.minor)
-					if (near_path(x, z))
-						pier_us.push_back((x - axis_start.first) * axis_dx +
-										  (z - axis_start.second) * axis_dz);
-				const auto side_end = [&](float tower_u, float direction) {
-					std::optional<float> nearest;
-					for (const float u : pier_us) {
-						const float distance = (u - tower_u) * direction;
-						if (distance < 0.15f * main_length ||
-								distance > 0.6f * main_length)
-							continue;
-						if (!nearest || distance < *nearest)
-							nearest = distance;
+						return;
 					}
-					return tower_u +
-						   direction * nearest.value_or(bridge_towers::DEFAULT_SIDE_SPAN *
-														main_length);
+					// A clipped bridge endpoint is only the edge of this generation area,
+					// not a real landing on the terrain. Keep it as a free deck end so
+					// the longitudinal profile carries on across the seam.
+					if (cut_ends.contains(xz)) {
+						profile_nonterrain_ends.insert(xz);
+						profile_free_ends.push_back(u);
+						profile_free_end_cells.emplace_back(idx, cell);
+						return;
+					}
+					const bool has_external_ramp = external_ramp_ends.contains(xz);
+					if (boundary && !has_external_ramp) {
+						profile_anchors.push_back(u);
+						const auto terrain = path_terrain.find(idx);
+						int y = editor.get_ground_level(node.x, node.z);
+						if (terrain != path_terrain.end() &&
+								cell < terrain->second.size())
+							y = terrain->second[cell];
+						profile_anchor_levels.emplace_back(u, y);
+					} else if (boundary && has_external_ramp) {
+						profile_nonterrain_ends.insert(xz);
+						profile_free_ends.push_back(u);
+						profile_free_end_cells.emplace_back(idx, cell);
+					}
 				};
+				collect_endpoint(bridge_ways[idx]->nodes.front(), us.front(), 0);
+				collect_endpoint(
+						bridge_ways[idx]->nodes.back(), us.back(), us.size() - 1);
+			}
+			auto reachable = [&](float u) {
+				float limit = std::numeric_limits<float>::infinity();
+				for (const auto &[anchor_u, anchor_y] : profile_anchor_levels)
+					limit = std::min(limit, anchor_y + std::abs(u - anchor_u));
+				return limit;
+			};
+			int profile_level = terrain_max;
+			int raised_top = terrain_max;
+			for (const auto &[anchor_u, anchor_y] : profile_anchor_levels) {
+				(void)anchor_u;
+				raised_top = std::max(raised_top, anchor_y);
+			}
+			std::unordered_map<std::size_t, std::vector<int>> path_needs;
+			std::unordered_map<std::size_t, bool> connected_obstacles;
+			for (const auto idx : group_indices) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				const auto &path = paths[idx];
+				const auto &us = path_axis[idx];
+				const auto &terrain = path_terrain[idx];
+				auto &needs = path_needs[idx];
+				needs = terrain;
+				const int layer = effective_layer(*bridge_ways[idx]);
+				for (std::size_t i = 0; i < path.size(); ++i) {
+					const auto &[x, z] = path[i];
+					const int ground = terrain[i];
+					profile_requirements.emplace_back(us[i], ground);
+					int need = ground;
+					const auto &[px, pz] = path[i == 0 ? 0 : i - 1];
+					const auto &[nx, nz] = path[std::min(i + 1, path.size() - 1)];
+					const float heading_x = static_cast<float>(nx - px);
+					const float heading_z = static_cast<float>(nz - pz);
+					if (const auto *nearby = obstacles.at(x, z)) {
+						for (const auto segment_index : *nearby) {
+							const auto &segment = obstacles.segments[segment_index];
+							if (point_segment_distance(static_cast<float>(x),
+										static_cast<float>(z), segment) > segment.reach ||
+									!crosses_segment(heading_x, heading_z, segment))
+								continue;
+							const auto [touch_it, inserted] =
+									connected_obstacles.try_emplace(segment.way, false);
+							if (inserted) {
+								const auto *other = obstacles.ways[segment.way];
+								touch_it->second = std::any_of(other->nodes.begin(),
+										other->nodes.end(), [&](const auto &node) {
+											return group_nodes.contains({node.x, node.z});
+										});
+							}
+							if (!touch_it->second)
+								need = std::max(need, ground + segment.headroom);
+						}
+					}
+					if (const auto lower = resolved_decks.find({x, z});
+							lower != resolved_decks.end() && lower->second.second < layer)
+						need = std::max(
+								need, lower->second.first + STACKED_DECK_HEADROOM);
+					if (need > ground) {
+						profile_level = std::max(profile_level, need);
+						const float capped = std::max(static_cast<float>(ground),
+								std::min(static_cast<float>(need), reachable(us[i])));
+						profile_requirements.emplace_back(us[i], capped);
+						needs[i] =
+								std::max(needs[i], static_cast<int>(std::lround(capped)));
+						raised_top = std::max(
+								raised_top, static_cast<int>(std::lround(capped)));
+					}
+				}
+			}
+			const bool has_boundary_endpoint = std::any_of(
+					group_indices.begin(), group_indices.end(), [&](std::size_t idx) {
+						const auto &way = *bridge_ways[idx];
+						return is_edge({way.nodes.front().x, way.nodes.front().z}) ||
+							   is_edge({way.nodes.back().x, way.nodes.back().z});
+					});
+			const bool flat_span = has_boundary_endpoint &&
+								   dip < FLAT_TERRAIN_DIP_THRESHOLD &&
+								   total_length >= SHORT_BRIDGE_LENGTH_BLOCKS;
+			int profile_clearance = flat_span ? max_layer * LAYER_HEIGHT_STEP : 0;
+			if (flat_span && group_style == bridge_styles::BridgeStyle::Arch)
+				profile_clearance =
+						std::max(profile_clearance, bridges::ARCH_MIN_CLEARANCE);
+			profile_level = std::max(profile_level, terrain_max + profile_clearance);
+			if (profile_clearance > 0) {
+				raised_top = std::max(raised_top, profile_level);
 				float min_u = std::numeric_limits<float>::max();
 				float max_u = std::numeric_limits<float>::lowest();
 				for (const auto &[idx, values] : path_axis) {
@@ -1373,253 +1829,473 @@ BridgeStructureMap BridgeStructureMap::build(
 						max_u = std::max(max_u, u);
 					}
 				}
-				const std::pair<float, float> anchors{
-						std::max(side_end(saddles.front().first, -1.0f), min_u),
-						std::min(side_end(saddles.back().first, 1.0f), max_u)};
-				const auto deck_at = [&](float u) {
-					return static_cast<int>(std::lround(hull_at(profile_hull, u)));
-				};
-				if (auto span = bridge_towers::make_cable_span(axis_start.first,
-							axis_start.second, axis_dx, axis_dz, saddles, anchors,
-							deck_at, towers.front()->paint, scale))
-					mapped_cable_span = std::make_shared<const bridge_towers::CableSpan>(
-							std::move(*span));
-			}
-			if (mapped_cable_span) {
-				cable_carriers.clear();
-				for (const auto idx : group_indices) {
+				const float span = std::max(0.0f, max_u - min_u);
+				const float ramp =
+						std::min(std::clamp(span * 0.35f, 15.0f, 50.0f), span / 2.0f);
+				bool placed_plateau = false;
+				for (const auto &[idx, values] : path_axis) {
 					if (covered_ids.contains(bridge_ways[idx]->id))
 						continue;
-					if (std::any_of(paths[idx].begin(), paths[idx].end(),
-								[&](const auto &point) {
-									return mapped_cable_span->suspends(
-											point.first, point.second);
-								}))
-						cable_carriers.insert(bridge_ways[idx]->id);
+					for (std::size_t i = 0; i < values.size(); ++i) {
+						const float u = values[i];
+						if (std::all_of(profile_anchors.begin(), profile_anchors.end(),
+									[&](float anchor) {
+										return std::abs(u - anchor) >= ramp;
+									})) {
+							profile_requirements.emplace_back(u, profile_level);
+							path_needs[idx][i] =
+									std::max(path_needs[idx][i], profile_level);
+							placed_plateau = true;
+						}
+					}
 				}
+				if (!placed_plateau)
+					profile_requirements.emplace_back(
+							(min_u + max_u) * 0.5f, profile_level);
 			}
-		}
-		deck_y = profile_level;
-		std::unordered_map<std::size_t, std::vector<int>> member_profiles;
-		for (const auto &[idx, path] : paths) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			auto &ys = member_profiles[idx];
-			const auto &us = path_axis[idx];
-			const auto &terrain = path_terrain[idx];
-			ys.reserve(path.size());
-			for (std::size_t i = 0; i < path.size(); ++i) {
-				const int y = follows_axis ? static_cast<int>(std::lround(
-													 hull_at(profile_hull, us[i])))
-										   : profile_level;
-				ys.push_back(std::max(y, terrain[i]));
+			for (const float u : profile_free_ends)
+				profile_requirements.emplace_back(u, raised_top);
+			for (const auto &[idx, cell] : profile_free_end_cells) {
+				if (const auto needs = path_needs.find(idx);
+						needs != path_needs.end() && cell < needs->second.size())
+					needs->second[cell] = std::max(needs->second[cell], raised_top);
 			}
-		}
-		// Match Rust's per-member endpoint ramps: bridge profiles meet terrain
-		// gradually at exposed ends, while joints and tagged ramp connections keep
-		// their independently resolved deck height.
-		for (const auto idx : group_indices) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			auto profile = member_profiles.find(idx);
-			if (profile == member_profiles.end())
-				continue;
-			auto &ys = profile->second;
-			const auto &terrain = path_terrain[idx];
-			const std::size_t total = ys.size();
-			if (total < 2)
-				continue;
-			const auto &way = *bridge_ways[idx];
-			const std::pair<int, int> start{way.nodes.front().x, way.nodes.front().z};
-			const std::pair<int, int> end{way.nodes.back().x, way.nodes.back().z};
-			const auto boundary = [&](const auto &xz) {
-				const auto it = endpoint_counts.find(xz);
-				const auto members = node_members.find(xz);
-				return it != endpoint_counts.end() && it->second == 1 &&
-					   (members == node_members.end() || members->second <= 1) &&
-					   !profile_nonterrain_ends.contains(xz);
-			};
-			const int ground_start = terrain.front();
-			const int ground_end = terrain.back();
-			const bool ramp_start = boundary(start) && ys.front() > ground_start + 1;
-			const bool ramp_end = boundary(end) && ys.back() > ground_end + 1;
-			if (!ramp_start && !ramp_end) {
-				for (std::size_t i = 0; i < total; ++i)
-					ys[i] = std::max(ys[i], terrain[i]);
-				continue;
-			}
-			const std::size_t cap = ramp_start && ramp_end
-											? std::max<std::size_t>(total / 2, 1)
-											: total - 1;
-			const std::size_t ramp_len = std::clamp<std::size_t>(
-					static_cast<std::size_t>(
-							std::clamp(static_cast<float>(total) * 0.35f, 15.0f, 50.0f)),
-					1, cap);
-			if (ramp_start) {
-				const int top = ys[ramp_len];
-				for (std::size_t k = 0; k < ramp_len; ++k) {
-					const float t = static_cast<float>(k) / ramp_len;
-					const int ramp_y = static_cast<int>(
-							std::lround(ground_start + (top - ground_start) * t));
-					ys[k] = std::min(ys[k], ramp_y);
+			const auto profile_hull =
+					follows_axis ? upper_hull(std::move(profile_requirements))
+								 : std::vector<std::pair<float, float>>{};
+			std::shared_ptr<const bridge_towers::CableSpan> mapped_cable_span;
+			if (group_style == bridge_styles::BridgeStyle::Suspension && follows_axis &&
+					mapped_cable_pylons.size() >= 2) {
+				std::vector<const bridge_towers::MappedTower *> towers;
+				for (const auto &tower : mapped_supports.towers) {
+					if (std::find(mapped_cable_pylons.begin(), mapped_cable_pylons.end(),
+								std::pair{tower.x, tower.z}) != mapped_cable_pylons.end())
+						towers.push_back(&tower);
 				}
-			}
-			if (ramp_end) {
-				const int top = ys[total - 1 - ramp_len];
-				for (std::size_t k = 0; k < ramp_len; ++k) {
-					const float t = static_cast<float>(k) / ramp_len;
-					const int ramp_y = static_cast<int>(
-							std::lround(ground_end + (top - ground_end) * t));
-					ys[total - 1 - k] = std::min(ys[total - 1 - k], ramp_y);
+				std::sort(
+						towers.begin(), towers.end(), [&](const auto *a, const auto *b) {
+							const float ua = (a->x - axis_start.first) * axis_dx +
+											 (a->z - axis_start.second) * axis_dz;
+							const float ub = (b->x - axis_start.first) * axis_dx +
+											 (b->z - axis_start.second) * axis_dz;
+							return ua < ub;
+						});
+				if (towers.size() >= 2) {
+					std::vector<std::pair<float, int>> saddles;
+					saddles.reserve(towers.size());
+					for (const auto *tower : towers) {
+						const float u = (tower->x - axis_start.first) * axis_dx +
+										(tower->z - axis_start.second) * axis_dz;
+						saddles.emplace_back(
+								u, tower->top_y - bridge_towers::SADDLE_BELOW_TOP);
+					}
+					const float main_length =
+							(saddles.back().first - saddles.front().first) /
+							static_cast<float>(saddles.size() - 1);
+					const std::int64_t pier_reach = static_cast<std::int64_t>(
+							bridge_towers::SIDE_PIER_REACH_M * scale);
+					const std::int64_t pier_reach_squared = pier_reach * pier_reach;
+					const auto near_path = [&](int x, int z) {
+						for (const auto idx : group_indices)
+							for (const auto &point : paths[idx]) {
+								if (dist2(point, {x, z}) <= pier_reach_squared)
+									return true;
+							}
+						return false;
+					};
+					std::vector<float> pier_us;
+					for (const auto &[x, z] : mapped_supports.minor)
+						if (near_path(x, z))
+							pier_us.push_back((x - axis_start.first) * axis_dx +
+											  (z - axis_start.second) * axis_dz);
+					const auto side_end = [&](float tower_u, float direction) {
+						std::optional<float> nearest;
+						for (const float u : pier_us) {
+							const float distance = (u - tower_u) * direction;
+							if (distance < 0.15f * main_length ||
+									distance > 0.6f * main_length)
+								continue;
+							if (!nearest || distance < *nearest)
+								nearest = distance;
+						}
+						return tower_u +
+							   direction *
+									   nearest.value_or(bridge_towers::DEFAULT_SIDE_SPAN *
+														main_length);
+					};
+					float min_u = std::numeric_limits<float>::max();
+					float max_u = std::numeric_limits<float>::lowest();
+					for (const auto &[idx, values] : path_axis) {
+						(void)idx;
+						for (const float u : values) {
+							min_u = std::min(min_u, u);
+							max_u = std::max(max_u, u);
+						}
+					}
+					const std::pair<float, float> anchors{
+							std::max(side_end(saddles.front().first, -1.0f), min_u),
+							std::min(side_end(saddles.back().first, 1.0f), max_u)};
+					const auto deck_at = [&](float u) {
+						return static_cast<int>(std::lround(hull_at(profile_hull, u)));
+					};
+					if (auto span = bridge_towers::make_cable_span(axis_start.first,
+								axis_start.second, axis_dx, axis_dz, saddles, anchors,
+								deck_at, towers.front()->paint, scale))
+						mapped_cable_span =
+								std::make_shared<const bridge_towers::CableSpan>(
+										std::move(*span));
 				}
-			}
-			for (std::size_t i = 0; i < total; ++i)
-				ys[i] = std::max(ys[i], terrain[i]);
-		}
-		for (const auto idx : group_indices) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			const auto profile = member_profiles.find(idx);
-			if (profile == member_profiles.end() || profile->second.empty())
-				continue;
-			const auto &way = *bridge_ways[idx];
-			for (std::size_t endpoint = 0; endpoint < 2; ++endpoint) {
-				const auto &node = endpoint == 0 ? way.nodes.front() : way.nodes.back();
-				const std::pair<int, int> xz{node.x, node.z};
-				const auto count = endpoint_counts.find(xz);
-				if (count == endpoint_counts.end() || count->second != 1)
-					continue;
-				const int y =
-						endpoint == 0 ? profile->second.front() : profile->second.back();
-				auto [joint, inserted] = resolved_joints.try_emplace(xz, y);
-				if (!inserted)
-					joint->second = std::max(joint->second, y);
-			}
-		}
-		for (const auto idx : group_indices) {
-			if (covered_ids.contains(bridge_ways[idx]->id))
-				continue;
-			const auto profile = member_profiles.find(idx);
-			if (profile == member_profiles.end())
-				continue;
-			const auto &path = paths[idx];
-			const int layer = effective_layer(*bridge_ways[idx]);
-			const bool member_has_module =
-					structure_has_module &&
-					!is_non_vehicular_bridge_highway(*bridge_ways[idx]);
-			int half_width = highway_block_range(*bridge_ways[idx], scale);
-			if (member_has_module) {
-				const int width = member_range(idx) +
-								  (widened_ids.contains(bridge_ways[idx]->id) ? 1 : 0);
-				if (const auto module_idx = bridge_modules::pick_module_index(
-							width, total_length, asset_root))
-					half_width =
-							bridge_modules::module_half_width(*module_idx, asset_root);
-			}
-			for (std::size_t i = 0; i < path.size(); ++i) {
-				const int y = profile->second[i];
-				for (int dx = -half_width; dx <= half_width; ++dx) {
-					for (int dz = -half_width; dz <= half_width; ++dz) {
-						const auto key =
-								std::pair{path[i].first + dx, path[i].second + dz};
-						auto [it, inserted] = resolved_decks.try_emplace(key, y, layer);
-						if (!inserted && y > it->second.first)
-							it->second = {y, layer};
+				if (mapped_cable_span) {
+					cable_carriers.clear();
+					for (const auto idx : group_indices) {
+						if (covered_ids.contains(bridge_ways[idx]->id))
+							continue;
+						if (std::any_of(paths[idx].begin(), paths[idx].end(),
+									[&](const auto &point) {
+										return mapped_cable_span->suspends(
+												point.first, point.second);
+									}))
+							cable_carriers.insert(bridge_ways[idx]->id);
 					}
 				}
 			}
-		}
-
-		std::unordered_map<std::pair<int, int>, bool, XZPairHash>
-				boundary_with_external_ramp;
-		for (const auto &entry : endpoint_counts) {
-			const auto xz = entry.first;
-			const auto member_count = node_members.find(xz);
-			if (member_count != node_members.end() && member_count->second > 1)
-				continue;
-			const auto other_it = node_to_other_highways.find(xz);
-			if (other_it == node_to_other_highways.end()) {
-				boundary_with_external_ramp[xz] = false;
-				continue;
+			deck_y = profile_level;
+			std::unordered_map<std::size_t, std::vector<int>> member_profiles;
+			for (const auto &[idx, path] : paths) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				auto &ys = member_profiles[idx];
+				const auto &us = path_axis[idx];
+				const auto &terrain = path_terrain[idx];
+				ys.reserve(path.size());
+				for (std::size_t i = 0; i < path.size(); ++i) {
+					const int y = follows_axis ? static_cast<int>(std::lround(
+														 hull_at(profile_hull, us[i])))
+											   : profile_level;
+					ys.push_back(std::max(y, terrain[i]));
+				}
+			}
+			// Match Rust's per-member endpoint ramps: bridge profiles meet terrain
+			// gradually at exposed ends, while joints and tagged ramp connections keep
+			// their independently resolved deck height.
+			for (const auto idx : group_indices) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				auto profile = member_profiles.find(idx);
+				if (profile == member_profiles.end())
+					continue;
+				auto &ys = profile->second;
+				const auto &terrain = path_terrain[idx];
+				const std::size_t total = ys.size();
+				if (total < 2)
+					continue;
+				const auto &way = *bridge_ways[idx];
+				const std::pair<int, int> start{way.nodes.front().x, way.nodes.front().z};
+				const std::pair<int, int> end{way.nodes.back().x, way.nodes.back().z};
+				const auto boundary = [&](const auto &xz) {
+					const auto it = endpoint_counts.find(xz);
+					const bool natural_boundary = it != endpoint_counts.end() &&
+												  it->second == 1 && is_boundary(xz);
+					const bool landing = fork_landings.contains(xz);
+					const bool raised_only = fork_raised.contains(xz) && !landing;
+					return (natural_boundary || landing) && !raised_only &&
+						   !profile_nonterrain_ends.contains(xz);
+				};
+				const int ground_start = terrain.front();
+				const int ground_end = terrain.back();
+				const bool ramp_start = boundary(start) && ys.front() > ground_start + 1;
+				const bool ramp_end = boundary(end) && ys.back() > ground_end + 1;
+				if (!ramp_start && !ramp_end) {
+					for (std::size_t i = 0; i < total; ++i)
+						ys[i] = std::max(ys[i], terrain[i]);
+					continue;
+				}
+				const std::size_t cap = ramp_start && ramp_end
+												? std::max<std::size_t>(total / 2, 1)
+												: total - 1;
+				const std::size_t ramp_len = std::clamp<std::size_t>(
+						static_cast<std::size_t>(std::clamp(
+								static_cast<float>(total) * 0.35f, 15.0f, 50.0f)),
+						1, cap);
+				if (ramp_start) {
+					const int top = ys[ramp_len];
+					for (std::size_t k = 0; k < ramp_len; ++k) {
+						const float t = static_cast<float>(k) / ramp_len;
+						const int ramp_y = static_cast<int>(
+								std::lround(ground_start + (top - ground_start) * t));
+						ys[k] = std::min(ys[k], ramp_y);
+					}
+				}
+				if (ramp_end) {
+					const int top = ys[total - 1 - ramp_len];
+					for (std::size_t k = 0; k < ramp_len; ++k) {
+						const float t = static_cast<float>(k) / ramp_len;
+						const int ramp_y = static_cast<int>(
+								std::lround(ground_end + (top - ground_end) * t));
+						ys[total - 1 - k] = std::min(ys[total - 1 - k], ramp_y);
+					}
+				}
+				for (std::size_t i = 0; i < total; ++i)
+					ys[i] = std::max(ys[i], terrain[i]);
+			}
+			// Ease shared bridge profiles to their ground/joint holds, and propagate
+			// grade limits across coincident members of the same deck.
+			std::vector<std::vector<std::pair<int, int>>> deck_cells;
+			std::vector<std::vector<int>> deck_profiles, deck_needs;
+			std::vector<bool> deck_live;
+			std::vector<DeckHold> deck_holds;
+			deck_cells.reserve(group_indices.size());
+			deck_profiles.reserve(group_indices.size());
+			deck_needs.reserve(group_indices.size());
+			deck_live.reserve(group_indices.size());
+			for (std::size_t m = 0; m < group_indices.size(); ++m) {
+				const auto idx = group_indices[m];
+				const auto &path = paths[idx];
+				const auto &terrain = path_terrain[idx];
+				deck_cells.push_back(path);
+				deck_live.push_back(!covered_ids.contains(bridge_ways[idx]->id));
+				const auto profile = member_profiles.find(idx);
+				deck_profiles.push_back(profile == member_profiles.end()
+												? std::vector<int>{}
+												: profile->second);
+				const auto needs = path_needs.find(idx);
+				deck_needs.push_back(needs == path_needs.end() ? terrain : needs->second);
+				if (!deck_live.back() || deck_profiles.back().empty())
+					continue;
+				const auto &way = *bridge_ways[idx];
+				for (const auto [xz, cell] : {std::pair{std::pair{way.nodes.front().x,
+																way.nodes.front().z},
+													  std::size_t{0}},
+							 std::pair{std::pair{way.nodes.back().x, way.nodes.back().z},
+									 deck_profiles.back().size() - 1}}) {
+					const auto endpoint = endpoint_counts.find(xz);
+					const bool natural_boundary = endpoint != endpoint_counts.end() &&
+												  endpoint->second == 1 &&
+												  is_boundary(xz);
+					const bool landing = fork_landings.contains(xz);
+					const bool raised_only = fork_raised.contains(xz) && !landing;
+					const bool anchor = (natural_boundary || landing) && !raised_only &&
+										!cut_ends.contains(xz) &&
+										!profile_nonterrain_ends.contains(xz);
+					if (anchor) {
+						int y = terrain[cell];
+						if (connectivity.is_shared(xz.first, xz.second))
+							y = highways::junction_level(editor, xz.first, xz.second);
+						deck_needs.back()[cell] = y;
+						deck_holds.push_back({m, cell, y});
+					} else if (const auto joint = resolved_joints.find(xz);
+							   joint != resolved_joints.end()) {
+						deck_needs.back()[cell] =
+								std::max(deck_needs.back()[cell], joint->second);
+						deck_holds.push_back({m, cell, joint->second});
+					}
+				}
+			}
+			// A covered carriageway that meets an at-grade road still needs to
+			// bring its owning deck down to the shared junction height. Otherwise
+			// the visible deck can bridge across a road fork while the covered
+			// member is suppressed from rendering.
+			for (const auto idx : group_indices) {
+				if (!covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				const auto &way = *bridge_ways[idx];
+				if (is_non_vehicular_bridge_highway(way))
+					continue;
+				const auto owner = cover_of.find(idx);
+				if (owner == cover_of.end())
+					continue;
+				const auto owner_slot = std::find(
+						group_indices.begin(), group_indices.end(), owner->second);
+				if (owner_slot == group_indices.end())
+					continue;
+				const auto m = static_cast<std::size_t>(owner_slot - group_indices.begin());
+				if (deck_profiles[m].empty())
+					continue;
+				for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
+					const std::pair<int, int> xz{node->x, node->z};
+					const auto roads = roads_out.find(xz);
+					const bool on_grade = roads != roads_out.end() &&
+							std::any_of(roads->second.begin(), roads->second.end(),
+									[&](const RoadOut &road) {
+										return road.at_grade && road.vehicular;
+									}) &&
+							std::all_of(roads->second.begin(), roads->second.end(),
+									[&](const RoadOut &road) { return road.at_grade; });
+					if (!on_grade ||
+							!(is_boundary(xz) || fork_landings.contains(xz)) ||
+							external_ramp_ends.contains(xz) || joins_external_bridge(xz))
+						continue;
+					std::size_t nearest = 0;
+					for (std::size_t i = 1; i < deck_cells[m].size(); ++i)
+						if (dist2(deck_cells[m][i], xz) <
+								dist2(deck_cells[m][nearest], xz))
+							nearest = i;
+					const bool already_held = std::any_of(deck_holds.begin(),
+							deck_holds.end(), [&](const DeckHold &hold) {
+								return hold.member == m && hold.cell == nearest;
+							});
+					if (already_held)
+						continue;
+					const int y = highways::junction_level(editor, xz.first, xz.second);
+					deck_needs[m][nearest] = y;
+					deck_holds.push_back({m, nearest, y});
+				}
+			}
+			for (const auto &ramp : pending_ramps) {
+				if (resolved_joints.contains(ramp.endpoint))
+					continue;
+				for (std::size_t m = 0; m < group_indices.size(); ++m) {
+					const auto idx = group_indices[m];
+					if (!deck_live[m] || deck_profiles[m].empty())
+						continue;
+					const auto &way = *bridge_ways[idx];
+					std::optional<std::size_t> cell;
+					if (way.nodes.front().x == ramp.endpoint.first &&
+							way.nodes.front().z == ramp.endpoint.second)
+						cell = 0;
+					else if (way.nodes.back().x == ramp.endpoint.first &&
+							 way.nodes.back().z == ramp.endpoint.second)
+						cell = deck_profiles[m].size() - 1;
+					if (!cell)
+						continue;
+					const int hold = std::min(deck_profiles[m][*cell], ramp.cap);
+					deck_needs[m][*cell] = hold;
+					deck_holds.push_back({m, *cell, hold});
+					break;
+				}
+			}
+			for (const auto &hold : deck_holds)
+				if (hold.member < deck_needs.size() &&
+						hold.cell < deck_needs[hold.member].size())
+					deck_needs[hold.member][hold.cell] = hold.y;
+			settle_deck(deck_profiles, deck_cells, deck_needs, deck_live, deck_holds);
+			for (std::size_t m = 0; m < group_indices.size(); ++m) {
+				if (!deck_live[m])
+					continue;
+				const auto &terrain = path_terrain[group_indices[m]];
+				for (std::size_t i = 0; i < deck_profiles[m].size(); ++i)
+					deck_profiles[m][i] = std::max(deck_profiles[m][i], terrain[i]);
+				member_profiles[group_indices[m]] = std::move(deck_profiles[m]);
+			}
+			for (const auto idx : group_indices) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				const auto profile = member_profiles.find(idx);
+				if (profile == member_profiles.end() || profile->second.empty())
+					continue;
+				const auto &way = *bridge_ways[idx];
+				for (std::size_t endpoint = 0; endpoint < 2; ++endpoint) {
+					const auto &node =
+							endpoint == 0 ? way.nodes.front() : way.nodes.back();
+					const std::pair<int, int> xz{node.x, node.z};
+					const auto count = endpoint_counts.find(xz);
+					if (count == endpoint_counts.end() || count->second != 1)
+						continue;
+					const int y = endpoint == 0 ? profile->second.front()
+												: profile->second.back();
+					auto [joint, inserted] = resolved_joints.try_emplace(xz, y);
+					if (!inserted)
+						joint->second = std::max(joint->second, y);
+				}
+			}
+			for (const auto idx : group_indices) {
+				if (covered_ids.contains(bridge_ways[idx]->id))
+					continue;
+				const auto profile = member_profiles.find(idx);
+				if (profile == member_profiles.end())
+					continue;
+				const auto &path = paths[idx];
+				const int layer = effective_layer(*bridge_ways[idx]);
+				const bool member_has_module =
+						structure_has_module &&
+						!is_non_vehicular_bridge_highway(*bridge_ways[idx]);
+				int half_width = highway_block_range(*bridge_ways[idx], scale);
+				if (member_has_module) {
+					const int width =
+							member_range(idx) +
+							(widened_ids.contains(bridge_ways[idx]->id) ? 1 : 0);
+					if (const auto module_idx = bridge_modules::pick_module_index(
+								width, total_length, asset_root))
+						half_width = bridge_modules::module_half_width(
+								*module_idx, asset_root);
+				}
+				for (std::size_t i = 0; i < path.size(); ++i) {
+					const int y = profile->second[i];
+					for (int dx = -half_width; dx <= half_width; ++dx) {
+						for (int dz = -half_width; dz <= half_width; ++dz) {
+							const auto key =
+									std::pair{path[i].first + dx, path[i].second + dz};
+							auto [it, inserted] =
+									resolved_decks.try_emplace(key, y, layer);
+							if (!inserted && y > it->second.first)
+								it->second = {y, layer};
+						}
+					}
+				}
 			}
 
-			bool found_ramp = false;
-			for (const auto &oi : other_it->second) {
-				const auto &candidate = *other_highway_ways[oi];
-				if (!is_ramp_candidate(candidate))
-					continue;
-				if (claimed_ramp_ways.contains(candidate.id))
-					continue;
-				const bool bridge_side_at_start = candidate.nodes.front().x == xz.first &&
-												  candidate.nodes.front().z == xz.second;
-				const auto &far_node = bridge_side_at_start ? candidate.nodes.back()
-															: candidate.nodes.front();
-				if (node_members.contains({far_node.x, far_node.z}))
-					continue;
-
-				BridgeRampInfo info;
-				info.bridge_side_at_start = bridge_side_at_start;
-				info.deck_y = deck_y;
+			std::unordered_map<std::pair<int, int>, bool, XZPairHash>
+					boundary_with_external_ramp;
+			for (const auto &entry : endpoint_counts)
+				boundary_with_external_ramp[entry.first] =
+						external_ramp_ends.contains(entry.first);
+			for (const auto &ramp : pending_ramps) {
+				int ramp_deck_y = deck_y;
 				for (const auto idx : group_indices) {
 					const auto *member = bridge_ways[idx];
 					const auto profile = member_profiles.find(idx);
 					if (profile == member_profiles.end() || profile->second.empty())
 						continue;
-					if (member->nodes.front().x == xz.first &&
-							member->nodes.front().z == xz.second) {
-						info.deck_y = profile->second.front();
+					if (member->nodes.front().x == ramp.endpoint.first &&
+							member->nodes.front().z == ramp.endpoint.second) {
+						ramp_deck_y = profile->second.front();
 						break;
 					}
-					if (member->nodes.back().x == xz.first &&
-							member->nodes.back().z == xz.second) {
-						info.deck_y = profile->second.back();
+					if (member->nodes.back().x == ramp.endpoint.first &&
+							member->nodes.back().z == ramp.endpoint.second) {
+						ramp_deck_y = profile->second.back();
 						break;
 					}
 				}
-				info.ground_y = editor.get_ground_level(far_node.x, far_node.z);
-				result.ramps_.emplace(candidate.id, info);
-				claimed_ramp_ways.insert(candidate.id);
-				found_ramp = true;
+				BridgeRampInfo info;
+				info.ys =
+						ramp_profile(ramp.ground, ramp_deck_y, ramp.bridge_side_at_start);
+				result.ramps_.emplace(ramp.way->id, std::move(info));
 			}
-			boundary_with_external_ramp[xz] = found_ramp;
-		}
 
-		for (const auto &idx : group_indices) {
-			const auto &way = *bridge_ways[idx];
-			const auto &s = way.nodes.front();
-			const auto &e = way.nodes.back();
-			BridgeMemberInfo info;
-			info.deck_y = deck_y;
-			info.style = group_style;
-			const auto start_members = node_members.find({s.x, s.z});
-			const auto end_members = node_members.find({e.x, e.z});
-			info.start_is_group_boundary =
-					start_members == node_members.end() || start_members->second <= 1;
-			info.end_is_group_boundary =
-					end_members == node_members.end() || end_members->second <= 1;
-			info.start_internal_ramp = decide_internal_ramp({s.x, s.z}, deck_y,
-					node_members, boundary_with_external_ramp, editor);
-			info.end_internal_ramp = decide_internal_ramp({e.x, e.z}, deck_y,
-					node_members, boundary_with_external_ramp, editor);
-			info.covered_by_wider = covered_ids.contains(way.id);
-			if (cable_carriers.contains(way.id))
-				info.cable_pylons = cable_pylons;
-			if (cable_carriers.contains(way.id))
-				info.cable_span = mapped_cable_span;
-			if (const auto profile = member_profiles.find(idx);
-					profile != member_profiles.end())
-				info.ys = profile->second;
-			if (structure_has_module && !info.covered_by_wider &&
-					!is_non_vehicular_bridge_highway(way)) {
-				const int width =
-						member_range(idx) + (widened_ids.contains(way.id) ? 1 : 0);
-				info.module_idx = bridge_modules::pick_module_index(
-						width, total_length, asset_root);
-				if (info.module_idx)
-					info.module_half_width = bridge_modules::module_half_width(
-							*info.module_idx, asset_root);
+			for (const auto &idx : group_indices) {
+				const auto &way = *bridge_ways[idx];
+				const auto &s = way.nodes.front();
+				const auto &e = way.nodes.back();
+				BridgeMemberInfo info;
+				info.deck_y = deck_y;
+				info.style = group_style;
+				info.start_is_group_boundary = is_edge({s.x, s.z});
+				info.end_is_group_boundary = is_edge({e.x, e.z});
+				info.start_internal_ramp = decide_internal_ramp({s.x, s.z}, deck_y,
+						node_members, boundary_with_external_ramp, editor);
+				info.end_internal_ramp = decide_internal_ramp({e.x, e.z}, deck_y,
+						node_members, boundary_with_external_ramp, editor);
+				info.covered_by_wider = covered_ids.contains(way.id);
+				if (cable_carriers.contains(way.id))
+					info.cable_pylons = cable_pylons;
+				if (cable_carriers.contains(way.id))
+					info.cable_span = mapped_cable_span;
+				if (const auto profile = member_profiles.find(idx);
+						profile != member_profiles.end())
+					info.ys = profile->second;
+				if (structure_has_module && !info.covered_by_wider &&
+						!is_non_vehicular_bridge_highway(way)) {
+					const int width =
+							member_range(idx) + (widened_ids.contains(way.id) ? 1 : 0);
+					info.module_idx = bridge_modules::pick_module_index(
+							width, total_length, asset_root);
+					if (info.module_idx)
+						info.module_half_width = bridge_modules::module_half_width(
+								*info.module_idx, asset_root);
+				}
+				result.members_.emplace(way.id, info);
 			}
-			result.members_.emplace(way.id, info);
 		}
 	}
 
@@ -1885,7 +2561,7 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 				const int z = std::get<2>(p);
 				const int cell_y =
 						info ? info->y_at(tds, total_bresenham, internal_ramp_length)
-							 : ramp->y_at(tds, total_bresenham);
+							 : ramp->y_at(tds);
 				for (int dx = -block_range; dx <= block_range; ++dx) {
 					for (int dz = -block_range; dz <= block_range; ++dz) {
 						const std::pair<int, int> cell{x + dx, z + dz};

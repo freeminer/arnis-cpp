@@ -10,6 +10,7 @@
 #include <cctype>
 #include <cstddef>
 #include <cstdint>
+#include <functional>
 #include <limits>
 #include <string_view>
 #include <unordered_set>
@@ -117,6 +118,150 @@ double terrain_exact(const crate::world_editor::WorldEditor &editor, int x, int 
 			height && std::isfinite(*height))
 		return *height;
 	return static_cast<double>(editor.get_ground_level(x, z));
+}
+
+constexpr int ROAD_STEP_COST = 5;
+constexpr int ROAD_PROFILE_REACH = 2;
+constexpr std::size_t ROAD_PROFILE_LEVELS = 2 * ROAD_PROFILE_REACH + 2;
+constexpr std::size_t ROAD_HEADING_CELLS = 4;
+constexpr int JUNCTION_RADIUS = 3;
+constexpr std::array<double, 13> ROAD_SMOOTHING{0.0022, 0.0088, 0.0270, 0.0648, 0.1210,
+		0.1760, 0.1995, 0.1760, 0.1210, 0.0648, 0.0270, 0.0088, 0.0022};
+
+std::vector<int> level_profile(
+		const std::vector<double> &smooth, const std::vector<std::optional<int>> &pins)
+{
+	const auto n = smooth.size();
+	if (n == 0)
+		return {};
+	auto low = [&](std::size_t i) {
+		return pins[i].value_or(
+				static_cast<int>(std::floor(smooth[i])) - ROAD_PROFILE_REACH);
+	};
+	auto span = [&](std::size_t i) {
+		return pins[i] ? std::size_t(1) : ROAD_PROFILE_LEVELS;
+	};
+	auto own = [&](std::size_t i, int y) {
+		const double delta = y - smooth[i];
+		return delta * delta;
+	};
+	std::array<double, ROAD_PROFILE_LEVELS> cost;
+	cost.fill(std::numeric_limits<double>::infinity());
+	for (std::size_t k = 0; k < span(0); ++k)
+		cost[k] = own(0, low(0) + static_cast<int>(k));
+	std::vector<std::uint8_t> back(n * ROAD_PROFILE_LEVELS, 0);
+	for (std::size_t i = 1; i < n; ++i) {
+		const int previous_low = low(i - 1), current_low = low(i);
+		std::array<double, ROAD_PROFILE_LEVELS> next;
+		next.fill(std::numeric_limits<double>::infinity());
+		for (std::size_t k = 0; k < span(i); ++k) {
+			const int y = current_low + static_cast<int>(k);
+			double best = std::numeric_limits<double>::infinity();
+			std::uint8_t best_j = 0;
+			for (std::size_t j = 0; j < span(i - 1); ++j) {
+				const double candidate =
+						cost[j] +
+						ROAD_STEP_COST * std::abs(y - previous_low - static_cast<int>(j));
+				if (candidate < best) {
+					best = candidate;
+					best_j = static_cast<std::uint8_t>(j);
+				}
+			}
+			next[k] = best + own(i, y);
+			back[i * ROAD_PROFILE_LEVELS + k] = best_j;
+		}
+		cost = next;
+	}
+	std::size_t k = 0;
+	for (std::size_t candidate = 1; candidate < span(n - 1); ++candidate)
+		if (cost[candidate] < cost[k])
+			k = candidate;
+	std::vector<int> result(n);
+	for (std::size_t i = n; i-- > 0;) {
+		result[i] = low(i) + static_cast<int>(k);
+		k = back[i * ROAD_PROFILE_LEVELS + k];
+	}
+	return result;
+}
+
+std::vector<int> road_profile(const crate::world_editor::WorldEditor &editor,
+		const crate::osm_parser::ProcessedWay &way, int block_range,
+		const HighwayConnectivity &connectivity,
+		const std::function<std::optional<int>(int, int)> &pin_at)
+{
+	if (way.nodes.empty())
+		return {};
+	std::vector<std::pair<int, int>> cells{{way.nodes.front().x, way.nodes.front().z}};
+	std::vector<std::size_t> node_cells{0};
+	for (std::size_t segment = 1; segment < way.nodes.size(); ++segment) {
+		const auto &from = way.nodes[segment - 1];
+		const auto &to = way.nodes[segment];
+		const auto path =
+				crate::bresenham::bresenham_line(from.x, 0, from.z, to.x, 0, to.z);
+		for (std::size_t i = 1; i < path.size(); ++i)
+			cells.emplace_back(std::get<0>(path[i]), std::get<2>(path[i]));
+		node_cells.push_back(cells.size() - 1);
+	}
+	const auto n = cells.size();
+	const double width = 2.0 * block_range + 1.0;
+	std::vector<double> across(n);
+	for (std::size_t i = 0; i < n; ++i) {
+		const auto a = cells[i - std::min(i, ROAD_HEADING_CELLS)];
+		const auto b = cells[std::min(n - 1, i + ROAD_HEADING_CELLS)];
+		const double tx = b.first - a.first, tz = b.second - a.second;
+		const double length = std::hypot(tx, tz);
+		const double px = length > 0.0 ? -tz / length : 0.0;
+		const double pz = length > 0.0 ? tx / length : 0.0;
+		double sum = 0.0;
+		for (int k = -block_range; k <= block_range; ++k) {
+			const auto x = static_cast<int>(std::llround(cells[i].first + px * k));
+			const auto z = static_cast<int>(std::llround(cells[i].second + pz * k));
+			sum += terrain_exact(editor, x, z);
+		}
+		across[i] = sum / width;
+	}
+	std::vector<double> smooth(n);
+	const auto half = ROAD_SMOOTHING.size() / 2;
+	for (std::size_t i = 0; i < n; ++i)
+		for (std::size_t k = 0; k < ROAD_SMOOTHING.size(); ++k) {
+			const auto sample = std::clamp<std::ptrdiff_t>(
+					static_cast<std::ptrdiff_t>(i) + static_cast<std::ptrdiff_t>(k) -
+							static_cast<std::ptrdiff_t>(half),
+					0, static_cast<std::ptrdiff_t>(n - 1));
+			smooth[i] += ROAD_SMOOTHING[k] * across[static_cast<std::size_t>(sample)];
+		}
+	std::vector<std::optional<int>> pins(n);
+	for (std::size_t i = 0; i < way.nodes.size(); ++i)
+		if (auto y = pin_at(way.nodes[i].x, way.nodes[i].z))
+			pins[node_cells[i]] = *y;
+	if (connectivity.area_bounds) {
+		const auto &bounds = *connectivity.area_bounds;
+		auto inside = [&](std::size_t i) {
+			return cells[i].first >= bounds[0] && cells[i].first <= bounds[2] &&
+				   cells[i].second >= bounds[1] && cells[i].second <= bounds[3];
+		};
+		for (std::size_t i = 1; i < n; ++i) {
+			if (inside(i - 1) == inside(i))
+				continue;
+			const auto lower = cells[i - 1] < cells[i] ? i - 1 : i;
+			const int y = static_cast<int>(std::lround(smooth[lower]));
+			if (!pins[i - 1])
+				pins[i - 1] = y;
+			if (!pins[i])
+				pins[i] = y;
+		}
+	}
+	return level_profile(smooth, pins);
+}
+
+int junction_level(const crate::world_editor::WorldEditor &editor, int x, int z)
+{
+	double sum = 0.0;
+	for (int dz = -JUNCTION_RADIUS; dz <= JUNCTION_RADIUS; ++dz)
+		for (int dx = -JUNCTION_RADIUS; dx <= JUNCTION_RADIUS; ++dx)
+			sum += terrain_exact(editor, x + dx, z + dz);
+	const double side = 2 * JUNCTION_RADIUS + 1;
+	return static_cast<int>(std::lround(sum / (side * side)));
 }
 
 double perpendicular_median_raw(const crate::world_editor::WorldEditor &editor, int set_x,
@@ -507,11 +652,14 @@ void drop_lamps_in_water(crate::world_editor::WorldEditor &editor)
 	}
 }
 
-std::unordered_map<std::pair<int, int>, std::vector<int>, PairHash>
-build_highway_connectivity_map(
-		const std::vector<crate::osm_parser::ProcessedElement> &elements)
+HighwayConnectivity build_highway_connectivity_map(
+		const std::vector<crate::osm_parser::ProcessedElement> &elements,
+		std::optional<std::array<int, 4>> area_bounds)
 {
-	std::unordered_map<std::pair<int, int>, std::vector<int>, PairHash> connectivity_map;
+	HighwayConnectivity connectivity;
+	connectivity.area_bounds = area_bounds;
+	std::vector<std::uint64_t> points;
+	std::vector<std::uint64_t> own;
 	for (const auto &element : elements) {
 		if (element.is_way()) {
 			const crate::osm_parser::ProcessedWay &way = element.as_way();
@@ -531,13 +679,28 @@ build_highway_connectivity_map(
 					const crate::osm_parser::ProcessedNode &end_node = way.nodes.back();
 					std::pair<int, int> start_coord = {start_node.x, start_node.z};
 					std::pair<int, int> end_coord = {end_node.x, end_node.z};
-					connectivity_map[start_coord].push_back(layer_value);
-					connectivity_map[end_coord].push_back(layer_value);
+					connectivity.ends[start_coord].push_back(layer_value);
+					connectivity.ends[end_coord].push_back(layer_value);
 				}
+				own.clear();
+				own.reserve(way.nodes.size());
+				for (const auto &node : way.nodes)
+					own.push_back((std::uint64_t(std::uint32_t(node.x)) << 32) |
+								  std::uint32_t(node.z));
+				std::sort(own.begin(), own.end());
+				own.erase(std::unique(own.begin(), own.end()), own.end());
+				points.insert(points.end(), own.begin(), own.end());
 			}
 		}
 	}
-	return connectivity_map;
+	std::sort(points.begin(), points.end());
+	for (std::size_t i = 1; i < points.size(); ++i)
+		if (points[i - 1] == points[i])
+			connectivity.shared.push_back(points[i]);
+	connectivity.shared.erase(
+			std::unique(connectivity.shared.begin(), connectivity.shared.end()),
+			connectivity.shared.end());
+	return connectivity;
 }
 
 void add_highway_support_pillar(crate::world_editor::WorldEditor &editor, int x,
@@ -598,16 +761,14 @@ void add_highway_support_pillar_absolute(crate::world_editor::WorldEditor &edito
 }
 
 bool should_add_slope_at_node(const crate::osm_parser::ProcessedNode &node,
-		int current_layer,
-		const std::unordered_map<std::pair<int, int>, std::vector<int>, PairHash>
-				&highway_connectivity)
+		int current_layer, const HighwayConnectivity &highway_connectivity)
 {
 	std::pair<int, int> node_coord = {node.x, node.z};
 	if (highway_connectivity.empty()) {
 		return current_layer != 0;
 	}
-	auto it = highway_connectivity.find(node_coord);
-	if (it != highway_connectivity.end()) {
+	auto it = highway_connectivity.ends.find(node_coord);
+	if (it != highway_connectivity.ends.end()) {
 		const std::vector<int> &connected_layers = it->second;
 		std::size_t same_layer_count = 0;
 		for (int layer : connected_layers) {
@@ -731,46 +892,27 @@ int highway_block_range(const std::string &highway_type,
 	return block_range;
 }
 
-int calculate_point_elevation(std::size_t segment_index, std::size_t point_index,
-		std::size_t segment_length, std::size_t total_segments, int base_elevation,
-		bool needs_start_slope, bool needs_end_slope, std::size_t slope_length)
+int calculate_point_elevation(std::size_t distance, std::size_t total_distance,
+		int base_elevation, bool needs_start_slope, bool needs_end_slope,
+		std::size_t slope_length)
 {
-	if (!needs_start_slope && !needs_end_slope) {
-		return base_elevation;
-	}
-	std::size_t total_distance_from_start = segment_index * segment_length + point_index;
-	std::size_t total_way_length = total_segments * segment_length;
-	if (total_way_length == 0 || slope_length == 0) {
-		return base_elevation;
-	}
-	if (needs_start_slope && total_distance_from_start <= slope_length) {
-		float slope_progress = static_cast<float>(total_distance_from_start) /
-							   static_cast<float>(slope_length);
-		int elevation_offset =
-				static_cast<int>(static_cast<float>(base_elevation) * slope_progress);
-		return elevation_offset;
-	}
-	if (needs_end_slope &&
-			total_distance_from_start >= (total_way_length > slope_length
-														 ? total_way_length - slope_length
-														 : 0)) {
-		std::size_t distance_from_end =
-				(total_way_length > total_distance_from_start)
-						? (total_way_length - total_distance_from_start)
-						: 0;
-		float slope_progress =
-				static_cast<float>(distance_from_end) / static_cast<float>(slope_length);
-		int elevation_offset =
-				static_cast<int>(static_cast<float>(base_elevation) * slope_progress);
-		return elevation_offset;
-	}
-	return base_elevation;
+	const auto ramp = [&](std::size_t d) {
+		return std::min(static_cast<float>(d) / static_cast<float>(std::max<std::size_t>(
+														1, slope_length)),
+				1.0f);
+	};
+	float share = 1.0f;
+	if (needs_start_slope)
+		share = std::min(share, ramp(distance));
+	if (needs_end_slope)
+		share = std::min(
+				share, ramp(total_distance > distance ? total_distance - distance : 0));
+	return static_cast<int>(std::round(static_cast<float>(base_elevation) * share));
 }
 
 void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		const crate::osm_parser::ProcessedElement &element, const crate::args::Args &args,
-		const std::unordered_map<std::pair<int, int>, std::vector<int>, PairHash>
-				&highway_connectivity,
+		const HighwayConnectivity &highway_connectivity,
 		const crate::FloodFillCache *flood_fill_cache,
 		const std::optional<std::chrono::duration<double>> &floodfill_timeout,
 		const crate::RoadMaskBitmap &road_mask,
@@ -1132,28 +1274,6 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const auto bridge_asset_root = editor.get_schematic_asset_root();
 	const bool bridge_module_selected =
 			bridge_member && bridge_member->module_idx.has_value();
-	std::vector<int> tunnel_approach_terrain;
-	if (tunnel_approach) {
-		tunnel_approach_terrain.resize(total_bresenham_length);
-		std::size_t cumulative = 0;
-		for (std::size_t segment = 1; segment < way.nodes.size(); ++segment) {
-			const auto &from = way.nodes[segment - 1];
-			const auto &to = way.nodes[segment];
-			const auto points =
-					crate::bresenham::bresenham_line(from.x, 0, from.z, to.x, 0, to.z);
-			for (std::size_t i = 0; i < points.size(); ++i) {
-				const auto &[x, unused_y, z] = points[i];
-				(void)unused_y;
-				const std::size_t slot = cumulative + i;
-				if (slot >= tunnel_approach_terrain.size())
-					continue;
-				const auto terrain = editor.terrain_level(x, z);
-				tunnel_approach_terrain[slot] =
-						terrain ? *terrain : editor.get_ground_level(x, z);
-			}
-			cumulative += points.size() > 0 ? points.size() - 1 : 0;
-		}
-	}
 	const std::size_t raw_bridge_ramp_length = static_cast<std::size_t>(
 			std::clamp(static_cast<float>(total_bresenham_length) * 0.35f, 15.0f, 50.0f));
 	const std::size_t bridge_internal_ramp_length =
@@ -1181,10 +1301,25 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 
 	std::size_t slope_length = static_cast<std::size_t>(
 			std::clamp(static_cast<double>(total_way_length) * 0.35, 15.0, 50.0));
+	std::vector<int> own_profile;
+	if (!is_bridge_member && !is_bridge_ramp)
+		own_profile = road_profile(editor, way, block_range, highway_connectivity,
+				[&](int x, int z) -> std::optional<int> {
+					if (!highway_connectivity.is_shared(x, z))
+						return std::nullopt;
+					if (tunnel_portals.is_open_end({x, z})) {
+						const auto terrain = editor.terrain_level(x, z);
+						return terrain.value_or(editor.get_ground_level(x, z));
+					}
+					double sum = 0.0;
+					for (int dz = -3; dz <= 3; ++dz)
+						for (int dx = -3; dx <= 3; ++dx)
+							sum += terrain_exact(editor, x + dx, z + dz);
+					return static_cast<int>(std::lround(sum / 49.0));
+				});
 
 	std::optional<std::pair<int, int>> previous_node;
 	std::size_t segment_index = 0;
-	std::size_t total_segments = (way.nodes.size() > 0) ? (way.nodes.size() - 1) : 0;
 	std::size_t cumulative_distance_from_start = 0;
 	std::optional<int> previous_bridge_y;
 	std::optional<std::pair<int, int>> previous_rail_left;
@@ -1224,7 +1359,6 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					!is_bridge_member && !is_bridge_ramp && block_range >= 1;
 			std::vector<std::tuple<int, int, int>> bresenham_points =
 					crate::bresenham::bresenham_line(x1, 0, z1, x2, 0, z2);
-			std::size_t segment_length = bresenham_points.size();
 			const float run =
 					static_cast<float>(std::max(std::abs(x2 - x1), std::abs(z2 - z1)));
 			const float ex = run > 0.0f ? static_cast<float>(x2 - x1) / run : 0.0f;
@@ -1273,39 +1407,57 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 				// Calculate Y elevation for this point
 				// Bridge structures drive absolute Y for full bridge groups and their ramps.
 				int current_y;
+				int elevation_offset = 0;
 				bool use_absolute_y = false;
 				if (bridge_member) {
 					current_y = bridge_member->y_at(
 							tds, total_bresenham_length, bridge_internal_ramp_length);
 					use_absolute_y = true;
 				} else if (bridge_ramp) {
-					current_y = bridge_ramp->y_at(tds, total_bresenham_length);
+					current_y = bridge_ramp->y_at(tds);
 					use_absolute_y = true;
 				} else {
-					// Regular road or overpass: use terrain-relative calculation with ramps
-					current_y = calculate_point_elevation(segment_index, point_index,
-							segment_length, total_segments, effective_elevation,
-							effective_start_slope, effective_end_slope, slope_length);
-					use_absolute_y = false;
+					// Rust's longitudinal profile is absolute terrain; layer ramps are an
+					// offset applied after the profile has been levelled.
+					elevation_offset = calculate_point_elevation(tds,
+							total_bresenham_length > 0 ? total_bresenham_length - 1 : 0,
+							effective_elevation, effective_start_slope,
+							effective_end_slope, slope_length);
+					current_y =
+							own_profile.empty()
+									? elevation_offset
+									: own_profile[std::min(tds, own_profile.size() - 1)] +
+											  elevation_offset;
+					use_absolute_y = !own_profile.empty();
 				}
-				const int tunnel_approach_offset =
-						(!use_absolute_y && tunnel_approach)
-								? tunnel_approach->offset(static_cast<int>(tds))
-								: 0;
-				current_y += tunnel_approach_offset;
 				auto approach_at = [&](int dx, int dz) -> std::optional<int> {
-					if (!tunnel_approach || tunnel_approach_terrain.empty())
+					if (!tunnel_approach || own_profile.empty())
 						return std::nullopt;
-					const auto last =
-							static_cast<int>(tunnel_approach_terrain.size() - 1);
+					const auto last = static_cast<int>(own_profile.size() - 1);
 					const int path_index = std::clamp(
 							static_cast<int>(tds) + along_offset(dx, dz), 0, last);
 					const int drop = tunnel_approach->offset(path_index);
 					if (drop < 0)
-						return tunnel_approach_terrain[static_cast<std::size_t>(
-									   path_index)] +
-							   drop;
+						return own_profile[static_cast<std::size_t>(path_index)] + drop;
 					return std::nullopt;
+				};
+				auto profile_y_at = [&](int sample_x, int sample_z) {
+					if (own_profile.empty())
+						return current_y;
+					const auto last = static_cast<int>(own_profile.size() - 1);
+					const int path_index =
+							std::clamp(static_cast<int>(tds) +
+											   along_offset(sample_x - x, sample_z - z),
+									0, last);
+					const int own = own_profile[static_cast<std::size_t>(path_index)] +
+									elevation_offset;
+					if (elevation_offset == 0)
+						if (const auto existing =
+										editor.surface_override(sample_x, sample_z);
+								existing &&
+								(!is_bridge_ramp || std::abs(*existing - own) <= 1))
+							return *existing;
+					return own;
 				};
 				if (auto deck_y = bridge_surface.deck_y_at(x, z)) {
 					current_y = *deck_y;
@@ -1358,6 +1510,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 					precompute_row_medians(editor, x, z, block_range, dir_horizontal,
 							flattened_ground_profile);
 				auto flattened_ground_y_at = [&](int sample_x, int sample_z) {
+					if (flatten_width && use_absolute_y)
+						return profile_y_at(sample_x, sample_z);
 					const int offset = dir_horizontal ? sample_x - x : sample_z - z;
 					if (has_flattened_ground_profile && offset >= -block_range &&
 							offset <= block_range)
@@ -1384,11 +1538,15 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						const auto line_approach = approach_at(lx - x, lz - z);
 						const int line_y =
 								line_approach ? *line_approach
-								: absolute	  ? (use_absolute_y ? current_y
-																: flattened_ground_y_at(
-																		  lx, lz) +
-																		  current_y)
-											  : current_y;
+								: absolute
+										? (use_absolute_y ? (flatten_width ? profile_y_at(
+																					 lx,
+																					 lz)
+																		   : current_y)
+														  : flattened_ground_y_at(
+																	lx, lz) +
+																	current_y)
+										: current_y;
 						if (absolute)
 							editor.set_block_absolute(line_block, lx, line_y, lz,
 									line_road->palette(), std::nullopt);
@@ -1407,12 +1565,15 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						const int surface_y =
 								approach_y ? *approach_y
 								: surface_absolute
-										? (use_absolute_y ? current_y
+										? (use_absolute_y ? (flatten_width ? profile_y_at(
+																					 set_x,
+																					 set_z)
+																		   : current_y)
 														  : flattened_ground_y_at(
 																	set_x, set_z) +
 																	current_y)
 										: current_y;
-						if (flatten_width && current_y - tunnel_approach_offset == 0 &&
+						if (flatten_width && elevation_offset == 0 &&
 								!(approach_y && tunnel_footprint &&
 										tunnel_footprint->contains(set_x, set_z)))
 							editor.register_road_surface_y(set_x, set_z, surface_y);
@@ -1884,7 +2045,14 @@ void generate_highways(crate::world_editor::WorldEditor &editor,
 		const TunnelPortalMap &tunnel_portals,
 		const crate::CoordinateBitmap *tunnel_footprint)
 {
-	auto highway_connectivity = build_highway_connectivity_map(all_elements);
+	std::optional<std::array<int, 4>> one_world_bounds;
+	if (args.one_world_run) {
+		const auto [min_x, min_z] = editor.get_min_coords();
+		const auto [max_x, max_z] = editor.get_max_coords();
+		one_world_bounds = std::array<int, 4>{min_x, min_z, max_x, max_z};
+	}
+	auto highway_connectivity =
+			build_highway_connectivity_map(all_elements, one_world_bounds);
 	const auto geo = editor.geographic_bounds();
 	const auto regional_markings = crate::road_markings::RoadMarkingIndex::build(
 			all_elements, args.scale,

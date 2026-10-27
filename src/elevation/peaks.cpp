@@ -1,14 +1,19 @@
 #include "peaks.h"
 
 #include "../coordinate_system/geographic/llbbox.h"
+#include "../building_suppression.h"
+#include "../data_processing.h"
 #include "../element_processing/buildings.h"
 #include "../models_3d/wikidata/wikidata_index.h"
+#include "../mapillary/geometry.h"
 #include "../osm_parser.h"
 #include "../overture.h"
 #include "../strict_parse.h"
+#include "postprocess.h"
 
 #include <algorithm>
 #include <cmath>
+#include <iterator>
 #include <limits>
 #include <numbers>
 #include <optional>
@@ -200,11 +205,28 @@ bool PeakSender::send(TerrainHints hints)
 	}
 }
 
+bool PeakSender::send_overture(TerrainHints hints)
+{
+	if (!overture_promise_)
+		return false;
+	try {
+		overture_promise_->set_value(std::move(hints));
+		overture_promise_.reset();
+		return true;
+	} catch (const std::future_error &) {
+		overture_promise_.reset();
+		return false;
+	}
+}
+
 PeakChannel PeakSource::channel()
 {
 	auto promise = std::make_shared<std::promise<TerrainHints>>();
 	auto future = promise->get_future().share();
-	return {PeakSender(std::move(promise)), PeakSource(std::move(future))};
+	auto overture_promise = std::make_shared<std::promise<TerrainHints>>();
+	auto overture_future = overture_promise->get_future().share();
+	return {PeakSender(std::move(promise), std::move(overture_promise)),
+			PeakSource(std::move(future), std::move(overture_future))};
 }
 
 PeakSource PeakSource::none()
@@ -212,7 +234,10 @@ PeakSource PeakSource::none()
 	std::promise<TerrainHints> promise;
 	auto future = promise.get_future().share();
 	promise.set_value({});
-	return PeakSource(std::move(future));
+	std::promise<TerrainHints> overture_promise;
+	auto overture_future = overture_promise.get_future().share();
+	overture_promise.set_value({});
+	return PeakSource(std::move(future), std::move(overture_future));
 }
 
 TerrainHints PeakSource::take() const
@@ -226,7 +251,30 @@ TerrainHints PeakSource::take() const
 		future = future_;
 	}
 	try {
-		return future.get();
+		auto hints = future.get();
+		{
+			std::lock_guard lock(take_mutex_);
+			overture_allowed_ = hints.overture_follows;
+			overture_taken_ = !overture_allowed_;
+		}
+		return hints;
+	} catch (const std::future_error &) {
+		return {};
+	}
+}
+
+std::vector<TallModel> PeakSource::take_overture() const
+{
+	std::shared_future<TerrainHints> future;
+	{
+		std::lock_guard lock(take_mutex_);
+		if (!overture_allowed_ || overture_taken_ || !overture_future_.valid())
+			return {};
+		overture_taken_ = true;
+		future = overture_future_;
+	}
+	try {
+		return future.get().tall_structures;
 	} catch (const std::future_error &) {
 		return {};
 	}
@@ -308,11 +356,7 @@ std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data)
 
 bool is_building_feature(const tags_t &tags)
 {
-	const auto building = tags.find("building");
-	if (building != tags.end() && !building->second.empty() && building->second != "no")
-		return true;
-	const auto part = tags.find("building:part");
-	return part != tags.end() && !part->second.empty() && part->second != "no";
+	return tags.contains("building") || tags.contains("building:part");
 }
 
 std::pair<double, double> footprint_extent_m(
@@ -340,7 +384,7 @@ std::pair<double, double> footprint_extent_m(
 			(max_lat - min_lat) * meters_per_degree};
 }
 
-std::optional<double> mast_height_m(const tags_t &tags)
+std::optional<double> mast_height_m(const tags_t &tags, bool on_roof)
 {
 	const auto kind = tags.find("man_made");
 	if (kind == tags.end())
@@ -348,19 +392,102 @@ std::optional<double> mast_height_m(const tags_t &tags)
 	const bool lighting = tags.get("tower:type") == "lighting";
 	double fallback = 0.0;
 	if (kind->second == "chimney")
-		fallback = 40.0;
+		fallback = on_roof ? 2.0 : 40.0;
 	else if (kind->second == "antenna")
-		fallback = lighting ? 20.0 : 10.0;
+		fallback = on_roof ? 3.0 : lighting ? 20.0 : 10.0;
 	else if (kind->second == "mast")
-		fallback = lighting ? 20.0 : 30.0;
+		fallback = on_roof ? 6.0 : lighting ? 20.0 : 30.0;
 	else
 		return std::nullopt;
 	if (const auto height = tags.find("height"); height != tags.end()) {
-		auto parsed = parse_model_height(height->second);
-		if (parsed && *parsed < 1000.0)
+		auto parsed = mapillary::geodesy::parse_length_m(height->second);
+		if (parsed && *parsed > 0.0 && *parsed < 1000.0)
 			return parsed;
 	}
 	return fallback;
+}
+
+double top_over_roof_m(double metres, double roof_m, double scale)
+{
+	const double blocks = std::round(metres * scale);
+	const double roof = std::round(roof_m * scale);
+	return roof > 0.0 && blocks > roof + 1.0 ? metres : roof_m + metres;
+}
+
+using GeoRing = std::vector<std::pair<double, double>>;
+
+bool point_in_ring(double lat, double lon, const GeoRing &ring)
+{
+	if (ring.size() < 3)
+		return false;
+	bool inside = false;
+	std::size_t j = ring.size() - 1;
+	for (std::size_t i = 0; i < ring.size(); ++i) {
+		const auto &[yi, xi] = ring[i];
+		const auto &[yj, xj] = ring[j];
+		if ((yi > lat) != (yj > lat) && lon < (xj - xi) * (lat - yi) / (yj - yi) + xi)
+			inside = !inside;
+		j = i;
+	}
+	return inside;
+}
+
+std::vector<GeoRing> stitch_geo_rings(std::vector<std::vector<std::uint64_t>> segments,
+		const std::unordered_map<std::uint64_t, std::pair<double, double>> &coordinates)
+{
+	std::vector<std::vector<std::uint64_t>> open;
+	open.reserve(segments.size());
+	for (auto &segment : segments)
+		if (segment.size() >= 2)
+			open.push_back(std::move(segment));
+	std::vector<GeoRing> rings;
+	while (!open.empty()) {
+		auto ring = std::move(open.back());
+		open.pop_back();
+		while (ring.size() >= 2) {
+			const auto head = ring.front(), tail = ring.back();
+			if (ring.size() >= 4 && head == tail)
+				break;
+			const auto found =
+					std::find_if(open.begin(), open.end(), [&](const auto &segment) {
+						return !segment.empty() &&
+							   (segment.front() == tail || segment.back() == tail ||
+									   segment.front() == head || segment.back() == head);
+					});
+			if (found == open.end())
+				break;
+			auto segment = std::move(*found);
+			if (found != std::prev(open.end()))
+				*found = std::move(open.back());
+			open.pop_back();
+			const auto first = segment.front(), last = segment.back();
+			if (first == tail) {
+				ring.insert(ring.end(), std::next(segment.begin()), segment.end());
+			} else if (last == tail) {
+				std::reverse(segment.begin(), segment.end());
+				ring.insert(ring.end(), std::next(segment.begin()), segment.end());
+			} else if (last == head) {
+				segment.pop_back();
+				segment.insert(segment.end(), ring.begin(), ring.end());
+				ring = std::move(segment);
+			} else {
+				std::reverse(segment.begin(), segment.end());
+				segment.pop_back();
+				segment.insert(segment.end(), ring.begin(), ring.end());
+				ring = std::move(segment);
+			}
+		}
+		if (ring.size() < 4 || ring.front() != ring.back())
+			continue;
+		GeoRing points;
+		points.reserve(ring.size());
+		for (const auto id : ring)
+			if (const auto it = coordinates.find(id); it != coordinates.end())
+				points.push_back(it->second);
+		if (points.size() >= 4)
+			rings.push_back(std::move(points));
+	}
+	return rings;
 }
 
 std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data,
@@ -375,34 +502,140 @@ std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data
 		if (node.lat && node.lon && std::isfinite(*node.lat) && std::isfinite(*node.lon))
 			coordinates.emplace(node.id, std::pair{*node.lat, *node.lon});
 
+	struct Roof
+	{
+		std::vector<GeoRing> outer, inner;
+		double top = 0.0;
+	};
+	std::vector<Roof> roofs;
+	std::unordered_map<std::uint64_t, double> node_tops;
+	std::optional<PreparedBuildingData> prepared_suppression;
+	auto get_prepared_suppression = [&]() -> const PreparedBuildingData & {
+		if (!prepared_suppression) {
+			std::unordered_set<std::uint64_t> relevant_ways;
+			std::unordered_set<std::uint64_t> relevant_relations;
+			for (const auto &way : data.ways)
+				if (way.tags.contains("building") || way.tags.contains("building:part"))
+					relevant_ways.insert(way.id);
+			for (const auto &relation : data.relations) {
+				const auto type = relation.tags.get("type");
+				const bool building_relation =
+						type == "building" ||
+						(type == "multipolygon" &&
+								(relation.tags.contains("building") ||
+										relation.tags.contains("building:part")));
+				if (!building_relation)
+					continue;
+				relevant_relations.insert(relation.id);
+				for (const auto &member : relation.members)
+					if (member.type == "way")
+						relevant_ways.insert(member.ref);
+			}
+
+			std::vector<ProcessedElement> suppression_input;
+			suppression_input.reserve(relevant_ways.size() + relevant_relations.size());
+			for (const auto &way : data.ways) {
+				if (!relevant_ways.contains(way.id))
+					continue;
+				ProcessedWay converted;
+				converted.id = way.id;
+				converted.tags = way.tags;
+				converted.source_node_refs = way.node_refs;
+				converted.nodes.reserve(way.node_refs.size());
+				for (const auto node_id : way.node_refs) {
+					const auto point = coordinates.find(node_id);
+					if (point == coordinates.end())
+						continue;
+					ProcessedNode node{};
+					node.id = node_id;
+					node.x = 0;
+					node.z = 0;
+					node.latitude = point->second.first;
+					node.longitude = point->second.second;
+					converted.nodes.push_back(std::move(node));
+				}
+				suppression_input.emplace_back(converted);
+			}
+			for (const auto &relation : data.relations) {
+				if (!relevant_relations.contains(relation.id))
+					continue;
+				ProcessedRelation converted;
+				converted.id = relation.id;
+				converted.tags = relation.tags;
+				converted.source_members.reserve(relation.members.size());
+				for (const auto &member : relation.members)
+					converted.source_members.push_back(
+							{member.type, member.ref, member.role});
+				suppression_input.emplace_back(converted);
+			}
+			prepared_suppression.emplace(prepare_building_data(suppression_input));
+		}
+		return *prepared_suppression;
+	};
 	auto add_outline = [&](std::uint64_t id, bool relation, const tags_t &tags,
-							   const std::vector<std::uint64_t> &node_ids) {
-		if (!is_building_feature(tags) || node_ids.empty())
+							   const std::vector<std::vector<std::uint64_t>> &outer_ids,
+							   const std::vector<std::vector<std::uint64_t>> &inner_ids) {
+		// Rust classifies a mast/antenna/chimney before checking building tags;
+		// a multiply-tagged mast is placed as a mast, never counted as a roof.
+		if (!is_building_feature(tags) || outer_ids.empty() || mast_height_m(tags, false))
 			return;
 		std::vector<std::pair<double, double>> points;
-		points.reserve(node_ids.size());
-		for (const auto id : node_ids)
-			if (const auto it = coordinates.find(id); it != coordinates.end())
-				points.push_back(it->second);
+		std::vector<std::uint64_t> outline_nodes;
+		for (const auto &ring : outer_ids) {
+			outline_nodes.insert(outline_nodes.end(), ring.begin(), ring.end());
+			for (const auto node_id : ring)
+				if (const auto it = coordinates.find(node_id); it != coordinates.end())
+					points.push_back(it->second);
+		}
+		for (const auto &ring : inner_ids)
+			outline_nodes.insert(outline_nodes.end(), ring.begin(), ring.end());
 		if (points.empty())
 			return;
 		const auto [width_m, length_m] = footprint_extent_m(points);
 		buildings::HeightHint hint;
-		if (overture_hints)
-			if (const auto value = overture_hints->hint_for({id, relation}, tags)) {
-				hint.height_m = value->height_m;
-				if (value->num_floors)
-					hint.levels = *value->num_floors;
-			}
-		const auto top = buildings::mapped_top_m(tags, hint, width_m, length_m);
-		if (!top || !may_pass_vanilla(*top, scale))
+		if (overture_hints) {
+			const auto value = overture_hints->hint_for({id, relation}, tags);
+			if (!value)
+				return;
+			hint.height_m = value->height_m;
+			if (value->num_floors)
+				hint.levels = *value->num_floors;
+		}
+		const auto walls = buildings::mapped_walls_m(tags, hint);
+		if (!walls)
 			return;
-		for (const auto id : node_ids)
-			if (const auto it = coordinates.find(id); it != coordinates.end())
-				found.push_back({it->second.first, it->second.second, *top});
+		bool reaches = may_pass_vanilla(walls->first, scale);
+		if (!reaches && walls->second) {
+			constexpr double widest_footprint_m = 1000.0;
+			const auto maximum_top = buildings::mapped_top_m(
+					tags, hint, widest_footprint_m, widest_footprint_m);
+			reaches = maximum_top && may_pass_vanilla(*maximum_top, scale);
+		}
+		if (!reaches)
+			return;
+		const auto &suppression = get_prepared_suppression();
+		const auto kind = relation ? std::string("relation") : std::string("way");
+		if (suppression.outline_suppression.contains({kind, id}) ||
+				(relation && suppression.suppressed_relations.contains(id)))
+			return;
+		const auto top = buildings::mapped_top_m(tags, hint, width_m, length_m);
+		if (!top)
+			return;
+		if (may_pass_vanilla(*top, scale))
+			for (const auto node_id : outline_nodes)
+				if (const auto it = coordinates.find(node_id); it != coordinates.end()) {
+					auto &at = node_tops[node_id];
+					at = std::max(at, *top);
+				}
+		Roof roof;
+		roof.outer = stitch_geo_rings(outer_ids, coordinates);
+		roof.inner = stitch_geo_rings(inner_ids, coordinates);
+		roof.top = *top;
+		if (!roof.outer.empty())
+			roofs.push_back(std::move(roof));
 	};
 	for (const auto &way : data.ways)
-		add_outline(way.id, false, way.tags, way.node_refs);
+		add_outline(way.id, false, way.tags, {way.node_refs}, {});
 	std::unordered_map<std::uint64_t, const osm_parser::RawWay *> ways;
 	ways.reserve(data.ways.size());
 	for (const auto &way : data.ways)
@@ -410,37 +643,56 @@ std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data
 	for (const auto &relation : data.relations) {
 		if (!is_building_feature(relation.tags))
 			continue;
-		std::vector<std::uint64_t> node_ids;
+		std::vector<std::vector<std::uint64_t>> outer, inner;
 		for (const auto &member : relation.members) {
 			if (member.type != "way")
 				continue;
 			const auto way = ways.find(member.ref);
-			if (way != ways.end())
-				node_ids.insert(node_ids.end(), way->second->node_refs.begin(),
-						way->second->node_refs.end());
+			if (way == ways.end())
+				continue;
+			(member.role == "inner" ? inner : outer).push_back(way->second->node_refs);
 		}
-		add_outline(relation.id, true, relation.tags, node_ids);
+		add_outline(relation.id, true, relation.tags, outer, inner);
 	}
-	// Masts and chimneys can independently cross the build ceiling. At this
-	// stage raw OSM does not yet have generated building footprints, so their
-	// explicit/default ground heights are reserved; building-mounted placement
-	// later performs the more precise roof-relative calculation.
-	auto add_mast = [&](const tags_t &tags, const std::vector<std::uint64_t> &node_ids) {
-		const auto height = mast_height_m(tags);
-		if (!height || !may_pass_vanilla(*height, scale))
+	for (const auto &[node_id, top] : node_tops)
+		if (const auto it = coordinates.find(node_id); it != coordinates.end())
+			found.push_back({it->second.first, it->second.second, top});
+
+	// Rust stores only outlines that can exceed the vanilla ceiling, then places
+	// an OSM mast on their mapped roof when its point is inside the outer ring and
+	// outside every hole. This raw-OSM equivalent runs before projected geometry.
+	auto add_mast_at = [&](double lat, double lon, const tags_t &tags) {
+		std::optional<double> roof_top;
+		for (const auto &roof : roofs) {
+			const bool inside_outer = std::any_of(roof.outer.begin(), roof.outer.end(),
+					[&](const GeoRing &ring) { return point_in_ring(lat, lon, ring); });
+			if (!inside_outer)
+				continue;
+			const bool inside_hole = std::any_of(roof.inner.begin(), roof.inner.end(),
+					[&](const GeoRing &ring) { return point_in_ring(lat, lon, ring); });
+			if (!inside_hole)
+				roof_top = std::max(roof_top.value_or(roof.top), roof.top);
+		}
+		const auto metres = mast_height_m(tags, roof_top.has_value());
+		if (!metres)
 			return;
-		for (const auto id : node_ids)
-			if (const auto it = coordinates.find(id); it != coordinates.end())
-				found.push_back({it->second.first, it->second.second, *height});
+		const double top =
+				roof_top ? top_over_roof_m(*metres, *roof_top, scale) : *metres;
+		if (may_pass_vanilla(top, scale))
+			found.push_back({lat, lon, top});
 	};
 	for (const auto &node : data.nodes)
 		if (node.lat && node.lon) {
-			const auto height = mast_height_m(node.tags);
-			if (height && may_pass_vanilla(*height, scale))
-				found.push_back({*node.lat, *node.lon, *height});
+			if (!overture_hints)
+				add_mast_at(*node.lat, *node.lon, node.tags);
 		}
-	for (const auto &way : data.ways)
-		add_mast(way.tags, way.node_refs);
+	if (!overture_hints)
+		for (const auto &way : data.ways)
+			if (mast_height_m(way.tags, false))
+				for (const auto node_id : way.node_refs)
+					if (const auto it = coordinates.find(node_id);
+							it != coordinates.end())
+						add_mast_at(it->second.first, it->second.second, way.tags);
 	std::sort(found.begin(), found.end(), [](const TallModel &a, const TallModel &b) {
 		return std::tie(a.lat, a.lon, a.height_m) < std::tie(b.lat, b.lon, b.height_m);
 	});
@@ -455,7 +707,8 @@ std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data
 
 bool may_pass_vanilla(double height_m, double scale)
 {
-	return std::isfinite(height_m) && std::isfinite(scale) && height_m * scale > 13.0;
+	return std::isfinite(height_m) && std::isfinite(scale) &&
+		   height_m * scale > TERRAIN_HEIGHT_BUFFER - 2;
 }
 
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data)
@@ -464,7 +717,7 @@ TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data)
 }
 
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
-		bool include_models, bool include_structures)
+		bool include_models, bool include_structures, bool overture_follows)
 {
 	TerrainHints hints;
 	hints.peaks = peaks_in(data);
@@ -472,11 +725,24 @@ TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double sca
 		hints.tall_models = tall_models_in(data);
 	if (include_structures)
 		hints.tall_structures = tall_structures_in(data, scale);
+	hints.overture_follows = overture_follows;
+	return hints;
+}
+
+TerrainHints overture_terrain_hints_in(const osm_parser::RawOsmDocument &data,
+		double scale, const ::arnis::overture::OvertureData &overture_data)
+{
+	TerrainHints hints;
+	if (!overture_data.hints.empty())
+		hints.tall_structures = tall_structures_in(data, scale, &overture_data.hints);
+	hints.tall_structures.insert(hints.tall_structures.end(),
+			overture_data.tall_structures.begin(), overture_data.tall_structures.end());
 	return hints;
 }
 
 void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBox &bbox,
-		const std::vector<PeakHint> &peaks, double meters_per_cell)
+		const std::vector<PeakHint> &peaks, double meters_per_cell,
+		std::optional<std::size_t> seam_pad)
 {
 	const auto height = grid.size();
 	const auto width = height ? grid.front().size() : 0;
@@ -492,6 +758,16 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 		std::size_t cx, cy;
 		if (!grid_cell(bbox, width, height, peak.lat, peak.lon, cx, cy))
 			continue;
+		const auto reach = radius_cells(3.0 * SIGMA_M, meters_per_cell);
+		if (seam_pad) {
+			const auto reach_size = static_cast<std::size_t>(reach);
+			if (*seam_pad > std::numeric_limits<std::size_t>::max() - reach_size)
+				continue;
+			const auto margin = *seam_pad + reach_size;
+			if (cx < margin || cy < margin || margin >= width - cx ||
+					margin >= height - cy)
+				continue;
+		}
 		const double gx = (peak.lon - bbox.min().lng()) /
 						  (bbox.max().lng() - bbox.min().lng()) * (width - 1);
 		const double gy = (bbox.max().lat() - peak.lat) /
@@ -510,7 +786,6 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 				shortfall > local_relief(grid, cx, cy, meters_per_cell))
 			continue;
 		const double lift = peak.ele_m - at_node;
-		const auto reach = radius_cells(3.0 * SIGMA_M, meters_per_cell);
 		cells_within(cx, cy, reach, width, height, [&](std::size_t x, std::size_t y) {
 			double &v = grid[y][x];
 			if (!std::isfinite(v))

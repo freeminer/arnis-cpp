@@ -36,6 +36,11 @@ std::vector<std::pair<std::pair<int, int>, int>> rail_deck_footprint(
 		const std::vector<int> &ys);
 }
 
+namespace arnis::highways
+{
+struct HighwayConnectivity;
+}
+
 namespace arnis::bridges
 {
 
@@ -74,11 +79,8 @@ struct BridgeMemberInfo
 
 struct BridgeRampInfo
 {
-	bool bridge_side_at_start = false;
-	int deck_y = 0;
-	int ground_y = 0;
-
-	int y_at(std::size_t tds, std::size_t total_bresenham) const;
+	std::vector<int> ys;
+	int y_at(std::size_t tds) const;
 };
 
 class BridgeStructureMap
@@ -89,6 +91,9 @@ public:
 	static BridgeStructureMap build(const std::vector<ProcessedElement> &elements,
 			const WorldEditor &editor, const bridge_styles::BridgeOutlineIndex &outlines,
 			double scale = 1.0);
+	static BridgeStructureMap build(const std::vector<ProcessedElement> &elements,
+			const WorldEditor &editor, const highways::HighwayConnectivity &connectivity,
+			const bridge_styles::BridgeOutlineIndex &outlines, double scale = 1.0);
 
 	const BridgeMemberInfo *lookup_member(std::uint64_t way_id) const;
 	const BridgeRampInfo *lookup_ramp(std::uint64_t way_id) const;

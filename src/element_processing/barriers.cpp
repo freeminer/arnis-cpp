@@ -288,6 +288,8 @@ std::optional<double> parse_min_height(const std::string &raw)
 		const double height = std::stod(value, &used);
 		if (used != value.size())
 			return std::nullopt;
+		if (!std::isfinite(height) || height < 0.0 || height > 1000.0)
+			return std::nullopt;
 		return height;
 	} catch (...) {
 		return std::nullopt;
@@ -842,13 +844,8 @@ void generate_barriers(world_editor::WorldEditor &editor, const ProcessedElement
 	const double height_scale = lift > 0 ? scale : 1.0;
 	int height = style.height;
 	if (const auto it = element.tags().find("height"); it != element.tags().end()) {
-		try {
-			std::size_t used = 0;
-			const double metres = std::stod(it->second, &used);
-			if (used == it->second.size())
-				height = std::max(1, rust_round_i32(metres * height_scale) - lift);
-		} catch (...) {
-		}
+		if (const auto metres = parse_min_height(it->second))
+			height = std::max(1, rust_round_i32(*metres * height_scale) - lift);
 	}
 	const bool hedge = style.material == block_definitions::OAK_LEAVES;
 	const bool joined =

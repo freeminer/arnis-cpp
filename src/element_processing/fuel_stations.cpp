@@ -432,7 +432,8 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 		site.livery =
 				livery_for(element.tags(), structure_kit::mix(element.id(), 0xF0E1));
 		site.has_canopy = is_roof(element.tags());
-		site.has_shop = element.tags().contains("building") && !site.has_canopy;
+		site.building = element.tags().contains("building") && !site.has_canopy;
+		site.has_shop = site.building;
 		if (element.is_node()) {
 			site.x = element.as_node().x + 0.5;
 			site.z = element.as_node().z + 0.5;
@@ -471,6 +472,9 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 	if (out.sites.empty())
 		return out;
 	const double node_reach = 40.0 * scale;
+	const auto reaches = [](const Site &site) {
+		return site.ring.empty() || site.building;
+	};
 	std::vector<std::array<double, 4>> site_bounds;
 	site_bounds.reserve(out.sites.size());
 	double bounds_min_x = std::numeric_limits<double>::max();
@@ -478,11 +482,8 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 	double bounds_max_x = std::numeric_limits<double>::lowest();
 	double bounds_max_z = std::numeric_limits<double>::lowest();
 	for (const auto &site : out.sites) {
-		std::array<double, 4> bounds;
-		if (site.ring.empty()) {
-			bounds = {site.x - node_reach, site.z - node_reach, site.x + node_reach,
-					site.z + node_reach};
-		} else {
+		std::array<double, 4> bounds{site.x, site.z, site.x, site.z};
+		if (!site.ring.empty()) {
 			bounds = {std::numeric_limits<double>::max(),
 					std::numeric_limits<double>::max(),
 					std::numeric_limits<double>::lowest(),
@@ -494,6 +495,11 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 				bounds[3] = std::max(bounds[3], z);
 			}
 		}
+		const double pad = reaches(site) ? node_reach : 0.0;
+		bounds[0] -= pad;
+		bounds[1] -= pad;
+		bounds[2] += pad;
+		bounds[3] += pad;
 		bounds_min_x = std::min(bounds_min_x, bounds[0]);
 		bounds_min_z = std::min(bounds_min_z, bounds[1]);
 		bounds_max_x = std::max(bounds_max_x, bounds[2]);
@@ -530,8 +536,7 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 			if (x < bounds[0] || x > bounds[2] || z < bounds[1] || z > bounds[3])
 				continue;
 			const double d = std::hypot(site.x - x, site.z - z);
-			if ((site.ring.empty() && d <= node_reach) ||
-					(!site.ring.empty() && inside(site.ring, x, z)))
+			if ((reaches(site) && d <= node_reach) || inside(site.ring, x, z))
 				if (!best || d < best->second)
 					best = std::make_pair(i, d);
 		}
@@ -621,7 +626,15 @@ void generate_station(WorldEditor &editor, const ProcessedElement &element,
 	const auto road =
 			element_processing::get_nearest_road_block(site_x, site_z, 40, roads);
 	const bool shop_building = element.tags().contains("building");
-	if (shop_building && !road)
+	// A station node tagged on a shop footprint is located at that shop, not at
+	// the forecourt. Keep its canopy on the road-facing side just like an area
+	// station whose own element carries the building tag.
+	const bool on_shop =
+			shop_building ||
+			(site->ring.empty() &&
+					footprints.contains(static_cast<int>(std::floor(site->x)),
+							static_cast<int>(std::floor(site->z))));
+	if (on_shop && !road)
 		return;
 	std::unordered_set<std::uint64_t> area;
 	if (element.is_way() && !site->ring.empty() && !shop_building) {
@@ -637,7 +650,7 @@ void generate_station(WorldEditor &editor, const ProcessedElement &element,
 	const double half_l = std::max(7.0 * scale, 5.0);
 	const double half_w = std::max(4.5 * scale, 3.5);
 	double origin_x = site->x, origin_z = site->z, first = 0.0;
-	if (road && shop_building) {
+	if (road && on_shop) {
 		origin_x = road->first + 0.5;
 		origin_z = road->second + 0.5;
 		first = half_w + 2.0;

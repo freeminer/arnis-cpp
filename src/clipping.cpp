@@ -124,6 +124,23 @@ bool is_invented_node_id(std::uint64_t id)
 {
 	return id >= INVENTED_NODE_BASE;
 }
+void mark_cut_ends(std::vector<ProcessedNode> &nodes,
+		const std::array<std::pair<int, int>, 2> &ends, std::uint64_t way_id)
+{
+	if (nodes.empty())
+		return;
+	const auto last = nodes.size() - 1;
+	const auto mark = [&](std::size_t index, const std::pair<int, int> &original) {
+		auto &node = nodes[index];
+		if (std::pair{node.x, node.z} == original)
+			return;
+		node.id = INVENTED_NODE_BASE |
+				  ((way_id * 10000000ULL + static_cast<std::uint64_t>(index)) &
+						  (INVENTED_NODE_BASE - 1));
+	};
+	mark(0, ends[0]);
+	mark(last, ends[1]);
+}
 std::vector<ProcessedNode> clip_way_to_bbox(
 		const std::vector<ProcessedNode> &nodes, const XZBBox &box)
 {

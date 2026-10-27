@@ -7364,12 +7364,15 @@ std::optional<double> mapped_top_m(
 {
 	constexpr double max_plausible_height_m = 1000.0;
 	const bool own = tags.contains("height") || tags.contains("building:levels");
-	const std::string building_type = tags.contains("building")
-			? tags.get("building")
-			: (tags.contains("building:part") ? tags.get("building:part") : "yes");
-	const std::optional<RoofType> shape = tags.contains("roof:shape")
-			? std::optional<RoofType>(parse_roof_type(tags.get("roof:shape")))
-			: std::nullopt;
+	const std::string building_type =
+			tags.contains("building")
+					? tags.get("building")
+					: (tags.contains("building:part") ? tags.get("building:part")
+													  : "yes");
+	const std::optional<RoofType> shape =
+			tags.contains("roof:shape")
+					? std::optional<RoofType>(parse_roof_type(tags.get("roof:shape")))
+					: std::nullopt;
 	auto positive_tag = [&](const char *key) -> std::optional<double> {
 		const auto value = parse_meter_tag(tags, key);
 		return value && std::isfinite(*value) && *value > 0.0 ? value : std::nullopt;
@@ -7397,7 +7400,7 @@ std::optional<double> mapped_top_m(
 	}
 	if (height) {
 		const bool hall = building_type == "industrial" || building_type == "warehouse" ||
-				building_type == "hangar";
+						  building_type == "hangar";
 		if (shape == RoofType::Flat || (shape && roof_height))
 			return height;
 		if (!shape && !roof_height && !hall && !tags.contains("roof:angle"))
@@ -7448,11 +7451,86 @@ std::optional<double> mapped_top_m(
 		if (shape == RoofType::Skillion)
 			run = std::hypot(width_m, length_m);
 		else if (shape == RoofType::Hipped || shape == RoofType::Mansard ||
-				shape == RoofType::Pyramidal)
+				 shape == RoofType::Pyramidal)
 			run = half;
 		rise = std::tan(*roof_angle * std::numbers::pi / 180.0) * run;
 	}
 	return *height + rise;
+}
+
+std::optional<std::pair<double, bool>> mapped_walls_m(const tags_t &tags, HeightHint hint)
+{
+	const bool own = tags.contains("height") || tags.contains("building:levels");
+	const std::optional<RoofType> shape =
+			tags.contains("roof:shape")
+					? std::optional<RoofType>(parse_roof_type(tags.get("roof:shape")))
+					: std::nullopt;
+	auto positive_tag = [&](const char *key) -> std::optional<double> {
+		const auto value = parse_meter_tag(tags, key);
+		return value && std::isfinite(*value) && *value > 0.0 ? value : std::nullopt;
+	};
+	const auto roof_height = positive_tag("roof:height");
+	const std::string building_type =
+			tags.contains("building")
+					? tags.get("building")
+					: (tags.contains("building:part") ? tags.get("building:part")
+													  : "yes");
+	const bool roof_angle = tags.contains("roof:angle");
+	std::optional<double> height;
+	if (own) {
+		if (tags.contains("height"))
+			height = parse_building_height_tag(tags);
+	} else {
+		height = hint.height_m;
+		if (height && (!std::isfinite(*height) || *height > 1000.0))
+			height.reset();
+	}
+	const auto grows_with_footprint = [&] {
+		return (shape == RoofType::Dome || shape == RoofType::Cone ||
+					   shape == RoofType::Onion) ||
+			   roof_angle;
+	};
+	if (height) {
+		const bool hall = building_type == "industrial" || building_type == "warehouse" ||
+						  building_type == "hangar";
+		if (shape == RoofType::Flat || (shape && roof_height))
+			return std::pair{*height, false};
+		if (!shape && !roof_height && !hall && !roof_angle)
+			return std::pair{*height, false};
+		if (!shape && roof_height)
+			return std::pair{*height + *roof_height, false};
+		if (shape && !roof_height &&
+				(*shape == RoofType::Gabled || *shape == RoofType::Hipped ||
+						*shape == RoofType::HalfHipped || *shape == RoofType::Gambrel ||
+						*shape == RoofType::Pyramidal || *shape == RoofType::Mansard) &&
+				!roof_angle)
+			return std::pair{*height, false};
+		return std::pair{*height, grows_with_footprint()};
+	}
+	if (!height) {
+		std::optional<double> levels;
+		if (own) {
+			if (const auto found = tags.find("building:levels"); found != tags.end())
+				levels = strict_parse::f64(found->second);
+		} else {
+			levels = hint.levels;
+		}
+		if (!levels || !std::isfinite(*levels) || *levels < 1.0)
+			return std::nullopt;
+		int cycle = floor_cycle_for(building_type, tags, false);
+		if (*levels > 7.0 && building_type == "yes" && cycle == 3 &&
+				!tags.contains("building:part"))
+			cycle = 4;
+		const double walls = *levels * cycle + GROUND_FLOOR_BONUS;
+		if (walls > 1000.0)
+			return std::nullopt;
+		if (shape == RoofType::Flat)
+			return std::pair{walls, false};
+		if (roof_height)
+			return std::pair{walls + *roof_height, false};
+		return std::pair{walls, grows_with_footprint()};
+	}
+	return std::nullopt;
 }
 
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,

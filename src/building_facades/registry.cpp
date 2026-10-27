@@ -5,15 +5,21 @@
 #include "manifest.h"
 #include "../mapillary/facades.h"
 #include "../mapillary/displays.h"
+#include "../mapillary/atlas.h"
 #include "../osm_parser.h"
 
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <cmath>
+#include <exception>
 #include <iostream>
 #include <iterator>
+#include <limits>
 #include <memory>
 #include <mutex>
+#include <thread>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -58,6 +64,7 @@ struct State
 	bool enabled = false;
 	double scale = 1.0;
 	double ppm = 16.0;
+	std::uint32_t requested_px = 16;
 	std::filesystem::path directory;
 	std::optional<FacadeSet> set;
 	std::unordered_set<std::uint64_t> claimed;
@@ -111,6 +118,7 @@ void reset(bool want, const std::optional<std::filesystem::path> &directory,
 	const auto px_per_block = pixels_per_block ? pixels_per_block : 16u;
 	s.ppm = std::min(
 			SET_PX_PER_M, static_cast<double>(px_per_block) * std::max(0.0, s.scale));
+	s.requested_px = px_per_block;
 	if (!want)
 		return;
 	if (!directory) {
@@ -157,6 +165,7 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 	std::unordered_map<std::uint64_t, GroupPick> groups;
 	double ppm = 16.0;
 	double scale = 1.0;
+	std::uint32_t requested_px = 16;
 	{
 		auto &s = state();
 		std::lock_guard lock(s.mutex);
@@ -168,10 +177,32 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		set = s.set;
 		ppm = s.ppm;
 		scale = s.scale;
+		requested_px = s.requested_px;
 	}
+	std::stable_sort(pending.begin(), pending.end(), [](const auto &a, const auto &b) {
+		const auto a_cell = a.cells.empty() ? std::pair{0, 0} : a.cells.front();
+		const auto b_cell = b.cells.empty() ? std::pair{0, 0} : b.cells.front();
+		return std::tie(a.way_id, a.wall, a_cell) < std::tie(b.way_id, b.wall, b_cell);
+	});
+	// Match Rust's minimum-resolution coverage test before spending atlas space
+	// or creating a display. A panel that rounds to zero pixels at the minimum
+	// supported resolution must be skipped even when the selected pack has more.
+	const double minimum_ppm = std::min(SET_PX_PER_M,
+			static_cast<double>(mapillary::atlas::MIN_PX_PER_BLOCK) * scale);
 	// Cache failed decodes too. Rust's FacadeSet::image stores `None` for a
 	// broken photograph, so every later wall skips it without decoding again.
 	std::unordered_map<std::size_t, std::optional<RgbImage>> images;
+	struct CropJob
+	{
+		Fit fit;
+		std::size_t entry = 0;
+		const RgbImage *source = nullptr;
+		double x0 = 0.0, x1 = 0.0, y0 = 0.0, y1 = 0.0;
+		std::string name;
+		mapillary::displays::Quad quad;
+		std::int8_t facing = 0;
+	};
+	std::vector<CropJob> crop_jobs;
 	std::size_t placed = 0;
 	for (auto &run : pending) {
 		const auto group = groups.find(run.group);
@@ -188,19 +219,6 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 					return top > editor.get_absolute_y(cell.first, 0, cell.second) + 1;
 				});
 		if (!wall_visible)
-			continue;
-		auto image = images.find(choice.entry);
-		if (image == images.end()) {
-			std::string decode_error;
-			auto loaded = load_image(
-					directory, set->entries()[choice.entry], ppm, &decode_error);
-			if (!loaded)
-				std::cerr << "Warning: preset facade "
-						  << set->entries()[choice.entry].file << ": " << decode_error
-						  << "; skipping it.\n";
-			image = images.emplace(choice.entry, std::move(loaded)).first;
-		}
-		if (!image->second)
 			continue;
 		const auto normal = mapillary::displays::outward_normal(
 				run.dir, run.normal.first, run.normal.second);
@@ -285,23 +303,166 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 						const double y1 =
 								static_cast<double>(rows_hidden + display_piece.b1) /
 								std::max(0.001, scale);
-						auto panel = gather_region(fit, *image->second, x0, x1, y0, y1);
-						if (!panel)
+						if (!fit.at(minimum_ppm).covers(x0, x1, y0, y1))
 							continue;
 						const std::string name =
 								"b" + std::to_string(run.way_id) + "_" +
 								std::to_string(run.wall) + "_" + std::to_string(p0) +
 								"_" + std::to_string(rows_hidden + display_piece.b0);
 						const auto facing = mapillary::displays::facing_index(*normal);
-						if (mapillary::displays::place_item_display(editor, name,
-									display_piece.quad, facing, std::move(panel->pixels),
-									panel->width, panel->height)) {
-							++placed;
-						}
+						crop_jobs.push_back({fit, choice.entry, nullptr, x0, x1, y0, y1,
+								name, display_piece.quad, facing});
 					}
 				}
 			}
 			begin = end;
+		}
+	}
+	// Once any earlier display has overflowed the shared atlas, the Rust atlas
+	// refuses all later pending panels as well; keep the same deterministic cap.
+	if (mapillary::atlas::rejected_textures() != 0)
+		crop_jobs.clear();
+	// Select the highest per-block resolution whose unique preset crops fit beside
+	// Mapillary textures already admitted to the shared atlas. The Rust path sizes
+	// all pending facade geometry before it decodes and crops any panel; doing the
+	// same here avoids retaining requested-resolution images that the atlas drops.
+	auto estimated_area = [&](double candidate_ppm) {
+		std::unordered_map<std::size_t, std::unordered_set<std::uint64_t>> unique;
+		std::uint64_t area = mapillary::atlas::used_texture_area();
+		for (const auto &job : crop_jobs) {
+			const auto candidate_fit = job.fit.at(candidate_ppm);
+			const auto [width, height] =
+					candidate_fit.out_size(job.x0, job.x1, job.y0, job.y1);
+			if (!width || !height)
+				continue;
+			const auto key =
+					job.fit.region_key_at(candidate_ppm, job.x0, job.x1, job.y0, job.y1);
+			if (!unique[job.entry].insert(key).second)
+				continue;
+			const std::uint64_t panel_area = std::uint64_t(width) * height;
+			if (panel_area > std::numeric_limits<std::uint64_t>::max() - area)
+				return std::numeric_limits<std::uint64_t>::max();
+			area += panel_area;
+		}
+		return area;
+	};
+	double selected_ppm = std::min(
+			SET_PX_PER_M, static_cast<double>(requested_px) * std::max(0.0, scale));
+	for (std::uint32_t px = requested_px;; --px) {
+		const double candidate_ppm =
+				std::min(SET_PX_PER_M, static_cast<double>(px) * std::max(0.0, scale));
+		if (estimated_area(candidate_ppm) <= mapillary::atlas::atlas_budget()) {
+			selected_ppm = candidate_ppm;
+			break;
+		}
+		if (px <= mapillary::atlas::MIN_PX_PER_BLOCK) {
+			selected_ppm = candidate_ppm;
+			break;
+		}
+	}
+	if (!crop_jobs.empty() &&
+			estimated_area(selected_ppm) > mapillary::atlas::atlas_budget()) {
+		// Even the minimum resolution exceeds the pack. Keep the deterministic
+		// prefix the atlas can hold and avoid decoding/cropping the rejected tail.
+		std::unordered_map<std::size_t, std::unordered_set<std::uint64_t>> admitted;
+		std::uint64_t remaining = mapillary::atlas::atlas_budget() -
+								  std::min(mapillary::atlas::atlas_budget(),
+										  mapillary::atlas::used_texture_area());
+		std::size_t keep = 0;
+		for (; keep < crop_jobs.size(); ++keep) {
+			const auto &job = crop_jobs[keep];
+			const auto fit = job.fit.at(selected_ppm);
+			const auto [width, height] = fit.out_size(job.x0, job.x1, job.y0, job.y1);
+			if (!width || !height)
+				continue;
+			const auto key =
+					fit.region_key_at(selected_ppm, job.x0, job.x1, job.y0, job.y1);
+			if (!admitted[job.entry].insert(key).second)
+				continue;
+			const std::uint64_t area = std::uint64_t(width) * height;
+			if (area > remaining)
+				break;
+			remaining -= area;
+		}
+		if (keep < crop_jobs.size()) {
+			std::cerr
+					<< "Preset facades: " << (crop_jobs.size() - keep)
+					<< " panels left out at minimum resolution to fit the shared texture atlas.\n";
+			crop_jobs.resize(keep);
+		}
+	}
+	if (selected_ppm < ppm) {
+		std::cerr << "Preset facades: reducing crop resolution from " << ppm << " to "
+				  << selected_ppm
+				  << " pixels per metre to fit the shared texture atlas.\n";
+	}
+	ppm = selected_ppm;
+	for (auto &job : crop_jobs)
+		job.fit = job.fit.at(ppm);
+	// Decode only at the selected resolution. Populate the cache before taking
+	// pointers so every job for an entry shares one immutable source image.
+	for (const auto &job : crop_jobs) {
+		if (images.contains(job.entry))
+			continue;
+		std::string decode_error;
+		auto loaded =
+				load_image(directory, set->entries()[job.entry], ppm, &decode_error);
+		if (!loaded)
+			std::cerr << "Warning: preset facade " << set->entries()[job.entry].file
+					  << ": " << decode_error << "; skipping it.\n";
+		images.emplace(job.entry, std::move(loaded));
+	}
+	for (auto &job : crop_jobs) {
+		const auto image = images.find(job.entry);
+		if (image != images.end() && image->second)
+			job.source = &*image->second;
+	}
+	// Crop independent wall panels in parallel, then install them in the same
+	// deterministic order as the source runs. This mirrors Rust's Rayon stage
+	// without making backend entity placement concurrent.
+	std::vector<std::optional<RgbImage>> panels(crop_jobs.size());
+	const unsigned hardware = std::max(1u, std::thread::hardware_concurrency());
+	const auto worker_count =
+			std::min<std::size_t>(crop_jobs.size(), std::min<unsigned>(16u, hardware));
+	std::atomic<std::size_t> next_job{0};
+	std::exception_ptr crop_failure;
+	std::mutex crop_failure_mutex;
+	auto crop_worker = [&] {
+		for (;;) {
+			const auto i = next_job.fetch_add(1, std::memory_order_relaxed);
+			if (i >= crop_jobs.size())
+				break;
+			try {
+				const auto &job = crop_jobs[i];
+				if (!job.source)
+					continue;
+				panels[i] = gather_region(
+						job.fit, *job.source, job.x0, job.x1, job.y0, job.y1);
+			} catch (...) {
+				std::lock_guard lock(crop_failure_mutex);
+				if (!crop_failure)
+					crop_failure = std::current_exception();
+			}
+		}
+	};
+	std::vector<std::jthread> workers;
+	workers.reserve(worker_count > 0 ? worker_count - 1 : 0);
+	for (std::size_t i = 1; i < worker_count; ++i)
+		workers.emplace_back(crop_worker);
+	if (worker_count > 0) {
+		crop_worker();
+		workers.clear(); // jthread joins before the results are read.
+	}
+	if (crop_failure)
+		std::rethrow_exception(crop_failure);
+	for (std::size_t i = 0; i < crop_jobs.size(); ++i) {
+		if (!panels[i])
+			continue;
+		auto &job = crop_jobs[i];
+		auto &panel = *panels[i];
+		if (mapillary::displays::place_item_display(editor, job.name, job.quad,
+					job.facing, std::move(panel.pixels), panel.width, panel.height)) {
+			++placed;
 		}
 	}
 	return placed;

@@ -58,8 +58,7 @@ std::uint64_t Fit::region_key_at(
 	const auto source_height = entry.scaled_size(ppm).second;
 	if (!source_width || !source_height || ppm <= 0.0)
 		return 0;
-	Fit at = *this;
-	at.pixels_per_metre = ppm;
+	const Fit at = this->at(ppm);
 	const auto out_width = static_cast<std::uint32_t>(
 			std::clamp(std::llround((x1_m - x0_m) * ppm), 0LL, 1LL << 15));
 	const auto out_height = static_cast<std::uint32_t>(
@@ -149,5 +148,28 @@ double Fit::map_v(double metres) const
 	// `upper_m` is the shared Rust/C++ manifest invariant.
 	const auto upper = entry.upper_m();
 	return metres < ground ? metres : ground + modulo(metres - ground, upper);
+}
+
+std::pair<std::uint32_t, std::uint32_t> Fit::out_size(
+		double x0_m, double x1_m, double y0_m, double y1_m) const
+{
+	const auto side = [&](double metres) {
+		return static_cast<std::uint32_t>(
+				std::clamp(std::llround(metres * pixels_per_metre), 0LL, 1LL << 15));
+	};
+	return {side(x1_m - x0_m), side(y1_m - y0_m)};
+}
+
+Fit Fit::at(double ppm) const
+{
+	Fit result = *this;
+	result.pixels_per_metre = std::max(0.0, ppm);
+	return result;
+}
+
+bool Fit::covers(double x0_m, double x1_m, double y0_m, double y1_m) const
+{
+	const auto [width, height] = out_size(x0_m, x1_m, y0_m, y1_m);
+	return width > 0 && height > 0;
 }
 } // namespace arnis::building_facades

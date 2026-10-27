@@ -17,6 +17,7 @@
 #include <cstdio>
 #include <cstdint>
 #include <fstream>
+#include <iostream>
 #include <string>
 #include <system_error>
 #include <utility>
@@ -258,7 +259,10 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		const trains::TrainRouteNetwork *trains,
 		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y,
 		const std::vector<discoveries::Place> &places,
-		const std::optional<SpawnDestination> &requested_spawn, std::string *error)
+		const std::optional<SpawnDestination> &requested_spawn, std::string *error,
+		bool wooded, const std::vector<std::pair<std::string, std::uint64_t>> &biomes,
+		std::optional<int> highest_surface, const disasters::Surface *surface,
+		std::optional<int> sea_y)
 {
 	if (args.bedrock || args.luanti || args.one_world_run || world.empty())
 		return true;
@@ -496,7 +500,9 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 			return false;
 		if (disasters) {
 			const disasters::Plan plan(args.body, world_editor::terrain_floor_y(),
-					world_editor::world_max_y());
+					world_editor::world_max_y(), wooded, biomes, highest_surface, surface,
+					sea_y);
+			std::cout << "  Disasters: " << plan.summary() << '\n';
 			if (!write_json(dialog_root + "disasters.json", plan.dialog(area, menu)))
 				return false;
 			for (const auto &[path, contents] : plan.files(area))

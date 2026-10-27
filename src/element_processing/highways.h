@@ -2,11 +2,13 @@
 
 #include "../../../arnis_adapter.h"
 #include "../block_definitions.h"
+#include "fm_highway_connectivity.h"
 
 #include <unordered_map>
 #include <vector>
 #include <optional>
 #include <string>
+#include <functional>
 
 namespace arnis
 {
@@ -38,6 +40,13 @@ bool is_carriageway(const std::string &highway_type);
 std::optional<std::string> surface_highway_type(const ProcessedWay &way);
 bool tunnel_renders_at_surface(
 		const ProcessedWay &way, const world_editor::WorldEditor *editor, double scale);
+
+/// Canonical terrain-following surface profile shared by road and bridge ramps.
+std::vector<int> road_profile(const world_editor::WorldEditor &editor,
+		const ProcessedWay &way, int block_range, const HighwayConnectivity &connectivity,
+		const std::function<std::optional<int>(int, int)> &pin_at);
+/// Stable ground level used for roads meeting at one connected junction.
+int junction_level(const world_editor::WorldEditor &editor, int x, int z);
 
 // True when a node's OSM tags identify a traffic signal accepted by the
 // highway-node dispatcher.

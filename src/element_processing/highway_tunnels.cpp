@@ -293,6 +293,7 @@ TunnelPortalMap collect_tunnel_portals(const std::vector<ProcessedElement> &elem
 			if (!internal.contains(point))
 				portal_nodes.insert(point);
 		}
+	portals.open_ends_ = portal_nodes;
 
 	std::unordered_map<std::pair<int, int>, std::vector<size_t>, TunnelPointHash> ends;
 	for (size_t i = 0; i < surface.size(); ++i)

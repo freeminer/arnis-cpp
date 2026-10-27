@@ -96,7 +96,12 @@ std::optional<double> metres(const tags_t &tags, const char *key)
 	if (trimmed == std::string::npos)
 		return std::nullopt;
 	value.erase(trimmed + 1);
-	return strict_parse::f64(value);
+	const auto parsed = strict_parse::f64(value);
+	// Match Rust's building-dimension guard: non-finite, negative, and
+	// implausibly large OSM heights must not create overflowing tower tops.
+	if (!parsed || !std::isfinite(*parsed) || *parsed < 0.0 || *parsed > 1000.0)
+		return std::nullopt;
+	return parsed;
 }
 
 std::optional<Part> make_part(

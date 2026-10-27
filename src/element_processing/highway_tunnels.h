@@ -67,6 +67,10 @@ class TunnelPortalMap
 {
 public:
 	bool empty() const { return ways_.empty(); }
+	bool is_open_end(const std::pair<int, int> &point) const
+	{
+		return open_ends_.contains(point);
+	}
 	std::optional<TunnelApproach> approach(std::uint64_t way_id) const;
 	int drop_at(const std::pair<int, int> &point) const;
 
@@ -76,6 +80,7 @@ private:
 			const TunnelInternalEndpoints &, double);
 	std::unordered_map<std::uint64_t, TunnelApproach> ways_;
 	std::unordered_map<std::pair<int, int>, int, TunnelPointHash> nodes_;
+	TunnelInternalEndpoints open_ends_;
 };
 
 bool renders_as_highway_tunnel(const ProcessedWay &way);

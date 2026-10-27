@@ -951,6 +951,16 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 		if (!pins[adjacent])
 			pins[adjacent] = level;
 	}
+	// Neighboring One World areas may smooth the same clipped rail differently.
+	// Pin both cells at their shared boundary to the lower cell's terrain level.
+	for (const auto crossing : rail_joins.edge_crossings(cells)) {
+		const auto lower =
+				cells[crossing[0]] < cells[crossing[1]] ? crossing[0] : crossing[1];
+		const int level = ground[lower];
+		for (const auto i : crossing)
+			if (!pins[i])
+				pins[i] = level;
+	}
 	const auto straight = straight_cells(cells,
 			joined_ends[0].beyond.empty() ? std::nullopt
 										  : std::optional(joined_ends[0].beyond.front()),
@@ -1434,6 +1444,17 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 					deep[k] = std::max(deep[k], ground[at] - along / 4);
 				}
 		}
+		// Use the same stable terrain sample from either side of an area seam.
+		// The portal ramp may have raised `deep`, so derive the seam pin from the
+		// original ground profile instead.
+		for (const auto crossing : rail_joins.edge_crossings(cells)) {
+			const auto lower =
+					cells[crossing[0]] < cells[crossing[1]] ? crossing[0] : crossing[1];
+			const int level = std::max(ground[lower] - depth, lowest);
+			for (const auto i : crossing)
+				if (!pins[i])
+					pins[i] = level;
+		}
 		const auto straight = straight_cells(cells,
 				ends[0].beyond.empty() ? std::nullopt
 									   : std::optional(ends[0].beyond.front()),
@@ -1607,10 +1628,15 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 
 		for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx) {
 			for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz) {
+				const int top = editor.get_ground_level(bx + dx, bz + dz);
 				for (int y = floor_y; y <= ceil_y; ++y) {
 					const bool wall_or_ceiling =
 							dx == -WALL_RADIUS || dx == WALL_RADIUS ||
 							dz == -WALL_RADIUS || dz == WALL_RADIUS || y == ceil_y;
+					// A portal or a rising connected track can lie above terrain.
+					// Do not build an exposed tunnel shell around those cells.
+					if (wall_or_ceiling && y > floor_y && y >= top)
+						continue;
 					Block block =
 							y == floor_y ? POLISHED_DEEPSLATE
 										 : (wall_or_ceiling ? rail_tunnel_shell_block(

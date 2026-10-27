@@ -1,4 +1,5 @@
 #include "providers.h"
+#include "tile_math.h"
 #include "../net.h"
 
 #include <atomic>
@@ -427,7 +428,7 @@ std::optional<double> sample_pixel(
 
 std::optional<double> sample_height(
 		const std::unordered_map<std::uint64_t, RgbRaster> &tiles, unsigned top_zoom,
-		double norm_x, double norm_y)
+		unsigned smooth_below, double norm_x, double norm_y)
 {
 	const unsigned floor = std::min<unsigned>(MIN_ZOOM, top_zoom);
 	for (int z = static_cast<int>(top_zoom); z >= static_cast<int>(floor); --z) {
@@ -436,27 +437,16 @@ std::optional<double> sample_height(
 		if (!tiles.contains(pack_key(key)))
 			continue;
 		const double n = std::ldexp(1.0, z);
-		const double fx = norm_x * n * TILE_PIXELS;
-		const double fy = norm_y * n * TILE_PIXELS;
-		double px = fx - key.x * TILE_PIXELS;
-		double py = fy - key.y * TILE_PIXELS;
-		if (px >= TILE_PIXELS)
-			px = TILE_PIXELS - 1.0;
-		if (py >= TILE_PIXELS)
-			py = TILE_PIXELS - 1.0;
-		const int x0 = static_cast<int>(std::floor(px));
-		const int y0 = static_cast<int>(std::floor(py));
-		const double dx = std::clamp(px - x0, 0.0, 1.0);
-		const double dy = std::clamp(py - y0, 0.0, 1.0);
-		const auto v00 = sample_pixel(tiles, key, x0, y0);
-		const auto v10 = sample_pixel(tiles, key, x0 + 1, y0);
-		const auto v01 = sample_pixel(tiles, key, x0, y0 + 1);
-		const auto v11 = sample_pixel(tiles, key, x0 + 1, y0 + 1);
-		const double value = blend_finite_samples(
-				v00.value_or(std::numeric_limits<double>::quiet_NaN()),
-				v10.value_or(std::numeric_limits<double>::quiet_NaN()),
-				v01.value_or(std::numeric_limits<double>::quiet_NaN()),
-				v11.value_or(std::numeric_limits<double>::quiet_NaN()), dx, dy);
+		const double size = static_cast<double>(TILE_PIXELS);
+		const double px =
+				tile_math::in_tile(norm_x * n * size, key.x * size, TILE_PIXELS);
+		const double py =
+				tile_math::in_tile(norm_y * n * size, key.y * size, TILE_PIXELS);
+		const double value =
+				tile_math::sample_pixels(px, py, zoom < smooth_below, [&](int x, int y) {
+					const auto pixel = sample_pixel(tiles, key, x, y);
+					return pixel.value_or(std::numeric_limits<double>::quiet_NaN());
+				});
 		if (std::isfinite(value))
 			return value;
 	}
@@ -472,20 +462,15 @@ void load_chunk_tiles(const std::filesystem::path &root, const GeoBBox &bbox,
 	const double bottom_y =
 			norm_y_for_lat(row_lat(bbox, row_end ? row_end - 1 : row_end, grid_height));
 	const unsigned floor = std::min<unsigned>(MIN_ZOOM, top_zoom);
+	const double min_x = (bbox.min_lon + 180.0) / 360.0;
+	const double max_x = (bbox.max_lon + 180.0) / 360.0;
 	for (unsigned zoom = floor; zoom <= top_zoom; ++zoom) {
-		const auto count = std::int64_t{1} << zoom;
-		const auto x0 = tile_key_at(zoom, (bbox.min_lon + 180.0) / 360.0, top_y).x;
-		const auto x1 = tile_key_at(zoom, (bbox.max_lon + 180.0) / 360.0, top_y).x;
-		const auto y0 = tile_key_at(zoom, 0.0, top_y).y;
-		const auto y1 = tile_key_at(zoom, 0.0, bottom_y).y;
-		const auto min_x = std::min(x0, x1);
-		const auto max_x = static_cast<unsigned>(
-				std::min<std::int64_t>(count - 1, std::int64_t(std::max(x0, x1)) + 1));
-		const auto min_y = std::min(y0, y1);
-		const auto max_y = static_cast<unsigned>(
-				std::min<std::int64_t>(count - 1, std::int64_t(std::max(y0, y1)) + 1));
-		for (unsigned y = min_y; y <= max_y; ++y)
-			for (unsigned x = min_x; x <= max_x; ++x) {
+		const auto [tile_min_x, tile_max_x] =
+				tile_math::tap_tile_range(zoom, min_x, max_x, TILE_PIXELS);
+		const auto [tile_min_y, tile_max_y] =
+				tile_math::tap_tile_range(zoom, top_y, bottom_y, TILE_PIXELS);
+		for (unsigned y = tile_min_y; y <= tile_max_y; ++y)
+			for (unsigned x = tile_min_x; x <= tile_max_x; ++x) {
 				const XyzTileKey key{zoom, x, y};
 				const auto packed = pack_key(key);
 				if (!state.available.contains(packed) ||
@@ -605,6 +590,8 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 
 	std::vector<std::vector<double>> grid(
 			height, std::vector<double>(width, std::numeric_limits<double>::quiet_NaN()));
+	const unsigned smooth_below =
+			tile_math::smooth_below(bbox, zoom, width, height, TILE_PIXELS);
 	for (std::size_t chunk_start = 0; chunk_start < height; chunk_start += 1024) {
 		const auto chunk_end = std::min(height, chunk_start + 1024);
 		std::unordered_map<std::uint64_t, RgbRaster> tiles;
@@ -617,7 +604,8 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 						bbox.min_lon + double(gx) / std::max<std::size_t>(1, width - 1) *
 											   (bbox.max_lon - bbox.min_lon);
 				const double norm_x = (lon + 180.0) / 360.0;
-				if (const auto sample = sample_height(tiles, zoom, norm_x, norm_y)) {
+				if (const auto sample = sample_height(
+							tiles, zoom, smooth_below, norm_x, norm_y)) {
 					grid[gy][gx] = *sample;
 				} else if (state.confirmed_missing.contains(
 								   pack_key(tile_key_at(floor, norm_x, norm_y)))) {

@@ -6,18 +6,16 @@
 #include "../bresenham.h"
 #include "../strict_parse.h"
 #include "road_mask_search.h"
+#include "highways.h"
+#include <algorithm>
 #include <charconv>
 #include <cctype>
+#include <cmath>
 #include <limits>
 #include <map>
 #include <set>
 #include <sstream>
 #include <iostream>
-namespace arnis::highways
-{
-int highway_block_range(const std::string &,
-		const std::unordered_map<std::string, std::string> &, double);
-}
 namespace arnis::signage
 {
 namespace arnis_highways = ::arnis::highways;
@@ -164,9 +162,13 @@ decals::ShieldStyle shield(
 	if (region == decals::SignRegion::NorthAmerica)
 		return ref.starts_with('I') ? decals::ShieldStyle::Interstate
 									: decals::ShieldStyle::White;
-	if (region == decals::SignRegion::UkIreland)
-		return ref.starts_with('M') ? decals::ShieldStyle::Blue
-									: decals::ShieldStyle::Green;
+	if (region == decals::SignRegion::UkIreland) {
+		if (ref.starts_with('M') || highway.starts_with("motorway"))
+			return decals::ShieldStyle::Blue;
+		if (highway.starts_with("trunk") || ref.starts_with('N'))
+			return decals::ShieldStyle::Green;
+		return decals::ShieldStyle::White;
+	}
 	if (region == decals::SignRegion::Germanic)
 		return ref.starts_with('A') || highway.starts_with("motorway")
 					   ? decals::ShieldStyle::Blue
@@ -656,6 +658,183 @@ std::optional<decals::DecalKey> highway_node_sign(const tags_t &tags, SignageLev
 		return decals::TrafficKey{decals::TrafficSign::Crossing};
 	return std::nullopt;
 }
+
+namespace
+{
+bool minor_service_road(const ProcessedWay &way)
+{
+	const auto service = way.tags.get("service");
+	return service == "driveway" || service == "parking_aisle" ||
+		   service == "drive-through";
+}
+
+struct SignRoadNetwork
+{
+	std::vector<const ProcessedWay *> roads;
+	std::unordered_map<std::uint64_t, std::pair<unsigned, unsigned>> ends;
+	std::unordered_map<std::uint64_t, std::vector<std::size_t>> tips;
+
+	explicit SignRoadNetwork(const std::vector<ProcessedElement> &elements)
+	{
+		for (const auto &element : elements) {
+			if (!element.is_way())
+				continue;
+			const auto &way = element.as_way();
+			const auto type = highways::surface_highway_type(way);
+			if (way.nodes.size() < 2 || !type || !highways::is_carriageway(*type))
+				continue;
+			const std::size_t road = roads.size();
+			roads.push_back(&way);
+			const std::size_t last = way.nodes.size() - 1;
+			const bool minor = minor_service_road(way);
+			for (std::size_t i = 0; i < way.nodes.size(); ++i) {
+				const auto &node = way.nodes[i];
+				const bool tip = i == 0 || i == last;
+				const unsigned add = tip ? 1 : 2;
+				auto &count = ends[node.id];
+				count.first = std::min(255u, count.first + add);
+				if (!minor)
+					count.second = std::min(255u, count.second + add);
+				if (tip)
+					tips[node.id].push_back(road);
+			}
+		}
+	}
+
+	bool is_junction(std::uint64_t id, bool minor) const
+	{
+		const auto found = ends.find(id);
+		if (found == ends.end())
+			return false;
+		return (minor ? found->second.first : found->second.second) >= 3;
+	}
+
+	std::optional<double> distance_to_junction(
+			std::size_t road, std::size_t index, bool forward) const
+	{
+		constexpr double max_walk = 400.0;
+		const bool minor = minor_service_road(*roads[road]);
+		double distance = 0.0;
+		for (unsigned hop = 0; hop < 8; ++hop) {
+			const auto &nodes = roads[road]->nodes;
+			for (;;) {
+				if ((forward && index + 1 >= nodes.size()) || (!forward && index == 0))
+					break;
+				const std::size_t next = forward ? index + 1 : index - 1;
+				distance += std::hypot(double(nodes[next].x - nodes[index].x),
+						double(nodes[next].z - nodes[index].z));
+				index = next;
+				if (is_junction(nodes[index].id, minor))
+					return distance;
+			}
+			if (distance > max_walk)
+				return std::nullopt;
+			const auto tip_id = nodes[index].id;
+			const auto found = tips.find(tip_id);
+			if (found == tips.end())
+				return std::nullopt;
+			std::optional<std::size_t> onward;
+			for (const auto candidate : found->second) {
+				if (candidate == road ||
+						(!minor && minor_service_road(*roads[candidate])))
+					continue;
+				if (onward)
+					return std::nullopt;
+				onward = candidate;
+			}
+			if (!onward)
+				return std::nullopt;
+			road = *onward;
+			const auto &next_nodes = roads[road]->nodes;
+			if (next_nodes.front().id == tip_id) {
+				index = 0;
+				forward = true;
+			} else {
+				index = next_nodes.size() - 1;
+				forward = false;
+			}
+		}
+		return std::nullopt;
+	}
+};
+} // namespace
+
+std::unordered_map<std::uint64_t, NodeSignHeading> build_node_headings(
+		const std::vector<ProcessedElement> &elements, SignageLevel level)
+{
+	std::unordered_map<std::uint64_t, std::pair<bool, std::optional<bool>>> signs;
+	for (const auto &element : elements) {
+		if (!element.is_node())
+			continue;
+		const auto &node = element.as_node();
+		const auto key = highway_node_sign(node.tags, level);
+		if (!key)
+			continue;
+		const auto *traffic = std::get_if<decals::TrafficKey>(&*key);
+		const bool one_way =
+				traffic && (traffic->sign == decals::TrafficSign::Stop ||
+								   traffic->sign == decals::TrafficSign::GiveWay);
+		const auto direction = node.tags.get("direction");
+		std::optional<bool> forward;
+		if (direction == "forward")
+			forward = true;
+		else if (direction == "backward")
+			forward = false;
+		signs.emplace(node.id, std::make_pair(one_way, forward));
+	}
+	std::unordered_map<std::uint64_t, NodeSignHeading> result;
+	if (signs.empty())
+		return result;
+	const SignRoadNetwork net(elements);
+	for (std::size_t road = 0; road < net.roads.size(); ++road) {
+		const auto &way = *net.roads[road];
+		const bool minor = minor_service_road(way);
+		const auto oneway = way.tags.get("oneway");
+		std::optional<bool> flow;
+		if (oneway == "yes" || oneway == "true" || oneway == "1")
+			flow = true;
+		else if (oneway == "-1")
+			flow = false;
+		else if (way.tags.get("junction") == "roundabout")
+			flow = true;
+		for (std::size_t i = 0; i < way.nodes.size(); ++i) {
+			const auto &node = way.nodes[i];
+			const auto sign = signs.find(node.id);
+			if (sign == signs.end() || result.contains(node.id) ||
+					net.is_junction(node.id, minor))
+				continue;
+			const auto direction = way_direction_at(way.nodes, i);
+			if (!direction)
+				continue;
+			bool ahead = true;
+			if (sign->second.first) {
+				if (sign->second.second)
+					ahead = *sign->second.second;
+				else if (flow)
+					ahead = *flow;
+				else {
+					const auto forward = net.distance_to_junction(road, i, true);
+					const auto backward = net.distance_to_junction(road, i, false);
+					if (forward && backward)
+						ahead = *forward <= *backward;
+					else if (forward)
+						ahead = true;
+					else if (backward)
+						ahead = false;
+					else
+						continue;
+				}
+			}
+			auto dir = *direction;
+			if (!ahead) {
+				dir.first = -dir.first;
+				dir.second = -dir.second;
+			}
+			result.emplace(node.id, NodeSignHeading{dir, !sign->second.first});
+		}
+	}
+	return result;
+}
 std::optional<decals::DecalKey> power_sign(const tags_t &tags)
 {
 	const auto p = tags.get("power");
@@ -813,8 +992,8 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 				keys.insert(decals::PictogramKey{"tram"});
 				const auto name = clean_name(tags.get("name"));
 				if (!name.empty() && decals::font::supports(name))
-					keys.insert(decals::DecalKey::text({decals::TextStyleKind::StopName},
-							name, utf8_char_count(name) <= 10 ? 1 : 2));
+					keys.insert(decals::DecalKey::text(
+							{decals::TextStyleKind::StopName}, name, 1));
 			} else if (railway == "subway_entrance")
 				keys.insert(decals::PictogramKey{decals::metro_logo(region)});
 			else if (subway)
@@ -875,6 +1054,7 @@ std::shared_ptr<const SignageContext> build_context(
 	context->level = level;
 	context->region = region;
 	context->intersections = build_intersection_index(elements, scale);
+	context->node_headings = build_node_headings(elements, level);
 	context->scale = scale;
 	context->carriageway = carriageway;
 	return context;
@@ -1208,6 +1388,40 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 			return std::nullopt;
 		return head;
 	};
+	auto kerb_for_heading = [&](double dx,
+									double dz) -> std::optional<std::pair<int, int>> {
+		const double side_x = decals::drives_on_left(ctx.region) ? dz : -dz;
+		const double side_z = decals::drives_on_left(ctx.region) ? -dx : dx;
+		int edge = 0;
+		for (int k = 1; k <= 12; ++k) {
+			const int cx = node.x + static_cast<int>(std::round(side_x * k));
+			const int cz = node.z + static_cast<int>(std::round(side_z * k));
+			if (!ctx.carriageway.contains(cx, cz)) {
+				edge = k;
+				break;
+			}
+		}
+		if (!edge)
+			return std::nullopt;
+		for (int k = edge; k < edge + 4; ++k) {
+			const int cx = node.x + static_cast<int>(std::round(side_x * k));
+			const int cz = node.z + static_cast<int>(std::round(side_z * k));
+			if (ctx.carriageway.contains(cx, cz) || footprints.contains(cx, cz) ||
+					editor.is_lc_water(cx, cz))
+				continue;
+			const int ground = editor.get_absolute_y(cx, 0, cz);
+			bool open = true;
+			for (int dy = 1; dy <= 3; ++dy)
+				if (!editor.cell_open_at(cx, ground + dy, cz) ||
+						editor.cell_has_frame(cx, ground + dy, cz)) {
+					open = false;
+					break;
+				}
+			if (open)
+				return std::pair{cx, cz};
+		}
+		return std::nullopt;
+	};
 	// Rust resolves POI facade signage in the node dispatcher, before processing
 	// the node's feature. Keep that ordering: whether a wall already exists is
 	// part of the generation result.
@@ -1234,9 +1448,16 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 
 	auto generate_highway_node_sign = [&] {
 		if (const auto key = highway_node_sign(tags, ctx.level); key && ctx.has(*key)) {
+			const auto heading_it = ctx.node_headings.find(node.id);
+			const NodeSignHeading *heading =
+					heading_it == ctx.node_headings.end() ? nullptr : &heading_it->second;
+			const auto kerb =
+					heading ? kerb_for_heading(heading->dir.first, heading->dir.second)
+							: std::nullopt;
 			int sx = node.x, sz = node.z;
-			const bool on_carriageway = ctx.carriageway.contains(sx, sz);
-			if (on_carriageway) {
+			if (kerb) {
+				std::tie(sx, sz) = *kerb;
+			} else if (ctx.carriageway.contains(sx, sz)) {
 				const auto shoulder = element_processing::get_nearest_non_road_block(
 						node.x, node.z, 10, ctx.carriageway);
 				if (!shoulder)
@@ -1245,16 +1466,27 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 			}
 			if (editor.is_lc_water(sx, sz))
 				return;
-			std::int8_t facing = 3;
-			if (on_carriageway) {
-				facing = facing_for_dir(node.x - sx, node.z - sz);
+			std::vector<std::int8_t> facings;
+			if (heading) {
+				const auto facing =
+						facing_for_dir(-heading->dir.first, -heading->dir.second);
+				facings.push_back(facing);
+				if (heading->both_ways)
+					facings.push_back(opposite(facing));
+			} else if (std::pair{sx, sz} != std::pair{node.x, node.z}) {
+				facings.push_back(facing_for_dir(node.x - sx, node.z - sz));
 			} else if (const auto road = get_nearest_road_block(sx, sz, 8, road_mask)) {
-				facing = facing_for_dir(road->first - sx, road->second - sz);
+				facings.push_back(facing_for_dir(road->first - sx, road->second - sz));
+			} else {
+				facings.push_back(3);
 			}
 			const auto head = place_rust_traffic_post(sx, sz);
 			if (!head)
 				return;
-			if (editor.place_decal(sx, *head, sz, facing, *key))
+			bool placed = false;
+			for (const auto facing : facings)
+				placed |= editor.place_decal(sx, *head, sz, facing, *key);
+			if (placed)
 				ctx.note("stop/give-way/crossing signs", sx, *head, sz);
 		}
 	};
@@ -1333,8 +1565,7 @@ void generate_node_signage(world_editor::WorldEditor &editor, const ProcessedNod
 		ctx.note(
 				glow ? "metro entrance signs" : "tram stop signs", node.x, *head, node.z);
 		if (railway == "tram_stop") {
-			const auto name = make_name_sign(tags, {decals::TextStyleKind::StopName},
-					utf8_char_count(clean_name(tags.get("name"))) <= 10 ? 1 : 2);
+			const auto name = make_name_sign(tags, {decals::TextStyleKind::StopName}, 1);
 			if (name && name->key && ctx.has(*name->key) &&
 					name->key->dims().first == 1) {
 				editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE, node.x,

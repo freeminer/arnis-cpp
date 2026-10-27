@@ -84,7 +84,8 @@ std::optional<ShelterKind> shelter_kind(const tags_t &tags)
 		return ShelterKind::LeanTo;
 	if (type == "gazebo" || type == "sun_shelter" || type == "pavilion")
 		return ShelterKind::Pavilion;
-	if (tag(tags, "bus") == "yes" || tags.contains("public_transport"))
+	if (tag(tags, "bus") == "yes" || tags.contains("public_transport") ||
+			tag(tags, "highway") == "bus_stop")
 		return ShelterKind::Transit;
 	return ShelterKind::PavilionTable;
 }
@@ -231,17 +232,36 @@ void generate_shelter_node(
 	if (!kind)
 		return;
 	const auto [along_x, toward] = road_frame(node.x, node.z, road_mask, node.id);
-	const int base = editor.get_absolute_y(node.x, 0, node.z);
+	int x = node.x, z = node.z;
+	if (*kind == ShelterKind::Pavilion || *kind == ShelterKind::PavilionTable) {
+		for (int distance = 0; distance <= 3; ++distance) {
+			const int candidate_x = node.x - toward.first * distance;
+			const int candidate_z = node.z - toward.second * distance;
+			bool clear = true;
+			for (int dz = -2; dz <= 2 && clear; ++dz)
+				for (int dx = -2; dx <= 2; ++dx)
+					if (road_mask.contains(candidate_x + dx, candidate_z + dz)) {
+						clear = false;
+						break;
+					}
+			if (clear) {
+				x = candidate_x;
+				z = candidate_z;
+				break;
+			}
+		}
+	}
+	const int base = editor.get_absolute_y(x, 0, z);
 	switch (*kind) {
 	case ShelterKind::Transit:
 		transit_shelter(editor, node.x, node.z, base, along_x, toward);
 		break;
 	case ShelterKind::Pavilion:
-		pavilion(editor, node.x, node.z, base);
+		pavilion(editor, x, z, base);
 		break;
 	case ShelterKind::PavilionTable:
-		pavilion(editor, node.x, node.z, base);
-		picnic_table(editor, node.x, node.z, base, along_x);
+		pavilion(editor, x, z, base);
+		picnic_table(editor, x, z, base, along_x);
 		break;
 	case ShelterKind::LeanTo:
 		lean_to(editor, node.x, node.z, base, along_x, toward);

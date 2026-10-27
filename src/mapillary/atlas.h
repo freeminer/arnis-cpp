@@ -17,6 +17,8 @@ void set_atlas_side(std::uint32_t side);
 // Number of pixels available to generated panels after conservative packing
 // allowance.  This is intentionally public for panel sizing code.
 std::uint64_t atlas_budget();
+// Atlas area already reserved by accepted textures in this generation.
+std::uint64_t used_texture_area();
 
 // Kept public for tests and callers that need to preview a settings value
 // without changing the active generation.

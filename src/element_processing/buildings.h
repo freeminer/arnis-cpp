@@ -1,5 +1,6 @@
 #pragma once
 #include <optional>
+#include <utility>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -105,6 +106,10 @@ struct HeightHint
 // Used by elevation fitting for Overture hints before block placement.
 std::optional<double> mapped_top_m(
 		const tags_t &tags, HeightHint hint, double width_m, double length_m);
+// Rust counterpart used by terrain fitting to avoid treating a short wall as
+// a tall building just because the roof may grow with a very wide footprint.
+std::optional<std::pair<double, bool>> mapped_walls_m(
+		const tags_t &tags, HeightHint hint);
 
 // Return the clipped, merged outer rings with the same synthetic IDs used by
 // relation building generation. Consumers that attach per-wall metadata must

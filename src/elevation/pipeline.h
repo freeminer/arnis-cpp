@@ -5,6 +5,7 @@
 #include "postprocess.h"
 
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string_view>
 
@@ -31,6 +32,20 @@ struct HeightBand
 	bool extended{};
 };
 
+// Terrain samples kept outside a cropped One World area so geometry crossing
+// its edge queries the same elevation as the neighboring area.
+struct ElevationHalo
+{
+	std::size_t x0{}, z0{};
+	std::size_t inner_width{}, inner_height{};
+	std::size_t outer_width{}, outer_height{};
+	std::vector<std::vector<float>> rows;
+
+	static ElevationHalo cut(const std::vector<std::vector<float>> &grid, std::size_t x0,
+			std::size_t z0, std::size_t width, std::size_t height);
+	std::optional<float> at(std::int32_t x, std::int32_t z) const;
+};
+
 struct ProcessedElevationData
 {
 	std::vector<std::vector<float>> heights;
@@ -44,6 +59,7 @@ struct ProcessedElevationData
 	int ground_level{0};
 	std::optional<SoftTop> soft_top;
 	bool extended_ceiling{false};
+	std::shared_ptr<const ElevationHalo> halo;
 
 	ElevationAffine affine() const
 	{
@@ -62,7 +78,11 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
 		bool apply_earth_repairs, land_cover::LandCoverData *land_cover,
 		const AffinePolicy &affine = {}, const ProgressCallback &progress = {},
-		const TerrainHints &terrain_hints = {});
+		TerrainHints terrain_hints = {}, bool auto_height = false,
+		std::optional<HeightBand> taller_band = std::nullopt,
+		bool force_extended_height = false,
+		std::optional<std::size_t> seam_pad = std::nullopt,
+		const std::function<std::vector<TallModel>()> &late_overture = {});
 
 ProcessedElevationData fetch_elevation_data(Selector &selector,
 		const geographic::LLBBox &bbox, std::size_t world_width, std::size_t world_height,
@@ -70,8 +90,10 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		double height_multiplier, int ground_level, int min_ground_level,
 		bool disable_height_limit, int extended_max_y, bool apply_earth_repairs,
 		land_cover::LandCoverData *land_cover, const AffinePolicy &affine = {},
-		const ProgressCallback &progress = {}, const TerrainHints &terrain_hints = {},
+		const ProgressCallback &progress = {}, TerrainHints terrain_hints = {},
 		bool auto_height = false, std::optional<HeightBand> taller_band = std::nullopt,
-		bool force_extended_height = false);
+		bool force_extended_height = false,
+		std::optional<std::size_t> seam_pad = std::nullopt,
+		const std::function<std::vector<TallModel>()> &late_overture = {});
 
 } // namespace arnis::elevation

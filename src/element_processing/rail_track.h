@@ -54,9 +54,15 @@ public:
 	static RailJoins build(
 			const std::vector<ProcessedElement> &elements, const LevelFn &level);
 	std::array<TrackEnd, 2> ends(std::uint64_t way) const;
+	void meet_at_edge_of(std::array<int, 4> bounds) { area_bounds_ = bounds; }
+	std::vector<std::array<std::size_t, 2>> edge_crossings(
+			const std::vector<std::pair<int, int>> &cells) const;
 
 private:
 	std::unordered_map<std::uint64_t, std::array<TrackEnd, 2>> ends_;
+	// The One World area whose independently generated neighbors must share
+	// track levels across its boundary.
+	std::optional<std::array<int, 4>> area_bounds_;
 };
 
 } // namespace arnis::railways

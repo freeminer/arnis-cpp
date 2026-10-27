@@ -9,6 +9,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <set>
 #include <string>
 #include <tuple>
@@ -32,17 +33,28 @@ struct IntersectionPost
 };
 using IntersectionIndex = std::unordered_map<std::uint64_t, IntersectionPost>;
 
+struct NodeSignHeading
+{
+	std::pair<double, double> dir{0.0, 0.0};
+	bool both_ways{false};
+};
+
 struct SignageContext
 {
 	std::shared_ptr<const decals::DecalRegistry> registry;
 	SignageLevel level{SignageLevel::None};
 	decals::SignRegion region{decals::SignRegion::Europe};
 	IntersectionIndex intersections;
+	mutable std::unordered_map<std::uint64_t, NodeSignHeading> node_headings;
 	double scale{1.0};
 	// Placement-only mask. Cleared after signage placement to release the large
 	// per-column bitmap before serialization; summary/report data stays resident.
 	mutable RoadMaskBitmap carriageway;
-	void release_placement_masks() const { carriageway = RoadMaskBitmap::new_empty(); }
+	void release_placement_masks() const
+	{
+		carriageway = RoadMaskBitmap::new_empty();
+		node_headings.clear();
+	}
 	void note(const char *kind, int x, int y, int z) const;
 	std::string summary(bool verbose) const;
 
@@ -79,6 +91,8 @@ std::shared_ptr<const SignageContext> build_context(
 		int first_map_id = decals::DecalRegistry::FIRST_ID);
 IntersectionIndex build_intersection_index(
 		const std::vector<ProcessedElement> &elements, double scale);
+std::unordered_map<std::uint64_t, NodeSignHeading> build_node_headings(
+		const std::vector<ProcessedElement> &elements, SignageLevel level);
 void place_node_signage(world_editor::WorldEditor &editor, const ProcessedNode &node,
 		SignageLevel level, decals::SignRegion region);
 void place_way_signage(world_editor::WorldEditor &editor, const ProcessedWay &way,

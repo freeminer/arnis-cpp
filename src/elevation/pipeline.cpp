@@ -36,6 +36,68 @@ std::uint32_t saturating_u32(double value)
 }
 } // namespace
 
+ElevationHalo ElevationHalo::cut(const std::vector<std::vector<float>> &grid,
+		std::size_t x0, std::size_t z0, std::size_t width, std::size_t height)
+{
+	ElevationHalo halo;
+	halo.x0 = x0;
+	halo.z0 = z0;
+	halo.inner_width = width;
+	halo.inner_height = height;
+	halo.outer_width = grid.empty() ? 0 : grid.front().size();
+	halo.outer_height = grid.size();
+	halo.rows.reserve(grid.size());
+	for (std::size_t z = 0; z < grid.size(); ++z) {
+		if (z >= z0 && z - z0 < height) {
+			const auto &row = grid[z];
+			const auto left_end = std::min(x0, row.size());
+			const auto right_begin =
+					left_end == row.size()
+							? row.size()
+							: left_end + std::min(width, row.size() - left_end);
+			std::vector<float> margins;
+			margins.reserve(left_end + row.size() - right_begin);
+			margins.insert(margins.end(), row.begin(),
+					row.begin() + static_cast<std::ptrdiff_t>(left_end));
+			margins.insert(margins.end(),
+					row.begin() + static_cast<std::ptrdiff_t>(right_begin), row.end());
+			halo.rows.push_back(std::move(margins));
+		} else {
+			halo.rows.push_back(grid[z]);
+		}
+	}
+	return halo;
+}
+
+std::optional<float> ElevationHalo::at(std::int32_t x, std::int32_t z) const
+{
+	if (outer_width == 0 || outer_height == 0)
+		return std::nullopt;
+	const auto x64 = static_cast<std::int64_t>(x);
+	const auto z64 = static_cast<std::int64_t>(z);
+	if (x64 >= 0 && z64 >= 0 && static_cast<std::uint64_t>(x64) < inner_width &&
+			static_cast<std::uint64_t>(z64) < inner_height)
+		return std::nullopt;
+	const auto clamp_index = [](std::int64_t coordinate, std::size_t offset,
+									 std::size_t extent) {
+		const auto value = coordinate + static_cast<std::int64_t>(offset);
+		return static_cast<std::size_t>(std::clamp<std::int64_t>(
+				value, 0, static_cast<std::int64_t>(extent - 1)));
+	};
+	const auto px = clamp_index(x64, x0, outer_width);
+	const auto pz = clamp_index(z64, z0, outer_height);
+	if (pz >= rows.size())
+		return std::nullopt;
+	const auto &row = rows[pz];
+	if (row.size() == outer_width || px < x0)
+		return px < row.size() ? std::optional<float>(row[px]) : std::nullopt;
+	if (px >= x0 + inner_width) {
+		const auto index = px - inner_width;
+		return index < row.size() ? std::optional<float>(row[index]) : std::nullopt;
+	}
+	return std::nullopt;
+}
+
 std::optional<int> ProcessedElevationData::lowest_y() const
 {
 	std::optional<int> lowest;
@@ -58,7 +120,10 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		int min_ground_level, bool disable_height_limit, int extended_max_y,
 		bool apply_earth_repairs, land_cover::LandCoverData *land_cover,
 		const AffinePolicy &policy, const ProgressCallback &progress,
-		const TerrainHints &terrain_hints)
+		TerrainHints terrain_hints, bool auto_height,
+		std::optional<HeightBand> taller_band, bool force_extended_height,
+		std::optional<std::size_t> seam_pad,
+		const std::function<std::vector<TallModel>()> &late_overture)
 {
 	const auto grid_height = raw.heights.size();
 	const auto grid_width = grid_height ? raw.heights.front().size() : 0;
@@ -107,22 +172,62 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 	// room for tall landmark models at their actual terrain elevations.
 	// Match Rust: surveyed summits are restored after smoothing for every body;
 	// only the Earth-specific DSM outlier/anomaly repairs above are conditional.
-	raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell);
-	auto tall_cells = model_cells(raw.heights, bbox, terrain_hints.tall_models);
-	const auto structure_cells =
-			model_cells(raw.heights, bbox, terrain_hints.tall_structures);
-	tall_cells.insert(tall_cells.end(), structure_cells.begin(), structure_cells.end());
+	raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell, seam_pad);
+	// Rust chooses the height band only after repairs and surveyed peaks have
+	// been applied. Checking the provider's raw grid in fetch_elevation_data can
+	// miss a peak or a repair-induced overflow and leave the generated terrain
+	// and structures clipped at the vanilla ceiling.
+	bool use_extended = disable_height_limit || (auto_height && force_extended_height);
+	if (auto_height && taller_band) {
+		constexpr int vanilla_min_ground = world_editor::DEFAULT_MIN_Y + 2;
+		constexpr int vanilla_max_ground =
+				world_editor::DEFAULT_MAX_Y - TERRAIN_HEIGHT_BUFFER;
+		if (force_extended_height || ground_level < vanilla_min_ground ||
+				ground_level > vanilla_max_ground) {
+			use_extended = true;
+		} else {
+			auto tops = model_cells(raw.heights, bbox, terrain_hints.tall_models);
+			const auto structures =
+					model_cells(raw.heights, bbox, terrain_hints.tall_structures);
+			tops.insert(tops.end(), structures.begin(), structures.end());
+			auto overflow = vanilla_overflow(
+					raw.heights, tops, scale * height_multiplier, scale, ground_level);
+			// Match Rust's two-stage hint channel: Overture is awaited only if OSM
+			// geometry still fits within vanilla height and Overture hints follow.
+			if (!overflow && terrain_hints.overture_follows && late_overture) {
+				const auto overture_tops =
+						model_cells(raw.heights, bbox, late_overture());
+				tops.insert(tops.end(), overture_tops.begin(), overture_tops.end());
+				overflow = vanilla_overflow(raw.heights, tops, scale * height_multiplier,
+						scale, ground_level);
+			}
+			if (overflow) {
+				std::clog << "Extended build height: " << *overflow << '\n';
+				use_extended = true;
+			}
+		}
+	}
+	if (use_extended && taller_band && auto_height) {
+		ground_level = taller_band->ground_level;
+		min_ground_level = taller_band->min_ground_level;
+		extended_max_y = taller_band->extended_max_y;
+	}
+	// Tall structures only decide whether the vanilla band is sufficient. Rust
+	// releases this potentially large OSM-derived list before the terrain fit;
+	// only placed landmark models need per-cell headroom in the scaled terrain.
+	std::vector<TallModel>().swap(terrain_hints.tall_structures);
+	const auto tall_cells = model_cells(raw.heights, bbox, terrain_hints.tall_models);
 	const int top_reserve =
 			policy.kind == AffinePolicy::Kind::Fixed
 					? 0
 					: top_reserve_for(raw.heights, tall_cells, scale * height_multiplier,
-							  scale, ground_level, min_ground_level, disable_height_limit,
+							  scale, ground_level, min_ground_level, use_extended,
 							  extended_max_y,
 							  policy.kind == AffinePolicy::Kind::FitWithHeadroom);
 
 	auto [minecraft_heights, mapping] = scale_to_minecraft_reserving(raw.heights,
-			scale * height_multiplier, ground_level, min_ground_level,
-			disable_height_limit, extended_max_y, policy, top_reserve,
+			scale * height_multiplier, ground_level, min_ground_level, use_extended,
+			extended_max_y, policy, top_reserve,
 			[&](std::string_view message) { report(progress, -1.0, message); });
 	// The metre grid is no longer needed. Release it before allocating the f32
 	// output so large runs do not keep raw, scaled-f64, and output grids at once.
@@ -138,6 +243,7 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 			mapping.blocks_per_meter > 0.0 ? scale / mapping.blocks_per_meter : 1.0;
 	out.ground_level = mapping.ground_level;
 	out.soft_top = mapping.soft_top;
+	out.extended_ceiling = use_extended && extended_max_y > 319;
 	out.heights.resize(out.height);
 	for (std::size_t z = 0; z < out.height; ++z) {
 		out.heights[z].reserve(minecraft_heights[z].size());
@@ -154,9 +260,10 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		double height_multiplier, int ground_level, int min_ground_level,
 		bool disable_height_limit, int extended_max_y, bool apply_earth_repairs,
 		land_cover::LandCoverData *land_cover, const AffinePolicy &affine,
-		const ProgressCallback &progress, const TerrainHints &terrain_hints,
-		bool auto_height, std::optional<HeightBand> taller_band,
-		bool force_extended_height)
+		const ProgressCallback &progress, TerrainHints terrain_hints, bool auto_height,
+		std::optional<HeightBand> taller_band, bool force_extended_height,
+		std::optional<std::size_t> seam_pad,
+		const std::function<std::vector<TallModel>()> &late_overture)
 {
 	if (selector.source_mode() == providers::SourceMode::Planetary)
 		throw std::invalid_argument(
@@ -168,36 +275,10 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 			maximum.lng(), grid_width, grid_height);
 	raw.world_width = world_width;
 	raw.world_height = world_height;
-	bool use_extended = disable_height_limit || (auto_height && force_extended_height);
-	if (auto_height && taller_band) {
-		constexpr int vanilla_min_ground = world_editor::DEFAULT_MIN_Y + 2;
-		constexpr int vanilla_max_ground =
-				world_editor::DEFAULT_MAX_Y - TERRAIN_HEIGHT_BUFFER;
-		if (force_extended_height || ground_level < vanilla_min_ground ||
-				ground_level > vanilla_max_ground) {
-			use_extended = true;
-		} else {
-			auto tops = model_cells(raw.heights, bbox, terrain_hints.tall_models);
-			const auto structures =
-					model_cells(raw.heights, bbox, terrain_hints.tall_structures);
-			tops.insert(tops.end(), structures.begin(), structures.end());
-			const auto overflow = vanilla_overflow(
-					raw.heights, tops, scale * height_multiplier, scale, ground_level);
-			if (overflow) {
-				std::clog << "Extended build height: " << *overflow << '\n';
-				use_extended = true;
-			}
-		}
-	}
-	if (use_extended && taller_band && auto_height) {
-		ground_level = taller_band->ground_level;
-		min_ground_level = taller_band->min_ground_level;
-		extended_max_y = taller_band->extended_max_y;
-	}
 	auto out = process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
-			ground_level, min_ground_level, use_extended, extended_max_y,
-			apply_earth_repairs, land_cover, affine, progress, terrain_hints);
-	out.extended_ceiling = use_extended && extended_max_y > 319;
+			ground_level, min_ground_level, disable_height_limit, extended_max_y,
+			apply_earth_repairs, land_cover, affine, progress, std::move(terrain_hints),
+			auto_height, taller_band, force_extended_height, seam_pad, late_overture);
 	return out;
 }
 

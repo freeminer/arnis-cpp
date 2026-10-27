@@ -22,6 +22,10 @@ struct Fit
 	bool mirrors() const;
 	std::pair<double, Run> map_u(double) const;
 	double map_v(double) const;
+	std::pair<std::uint32_t, std::uint32_t> out_size(
+			double x0_m, double x1_m, double y0_m, double y1_m) const;
+	Fit at(double pixels_per_metre) const;
+	bool covers(double x0_m, double x1_m, double y0_m, double y1_m) const;
 	std::uint32_t source_x(double, std::uint32_t) const;
 	std::uint32_t source_y(double, std::uint32_t) const;
 	std::array<std::uint32_t, 4> source_bounds(

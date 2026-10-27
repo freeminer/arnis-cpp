@@ -1,4 +1,6 @@
 #include "data_processing.h"
+#include "biome.h"
+#include "fm_datapack_disasters.h"
 #include "fm_arnis_bench.h"
 #include "element_processing/fm_highway_connectivity.h"
 #include "fm_ecoregion_cache.h"
@@ -909,11 +911,18 @@ std::vector<size_t> ground_fill_area_order(const std::vector<ProcessedElement> &
 void sort_ground_fill_areas(std::vector<ProcessedElement> &elements)
 {
 	auto order = ground_fill_area_order(elements);
+	// ground_fill_area_order maps each destination slot to the source element
+	// that belongs there. To apply that permutation by swaps, invert it first:
+	// Rust's sort_ground_fill_areas stores this source-to-destination mapping
+	// (`dest`) and swaps only while an element has not reached its destination.
+	std::vector<size_t> dest(order.size());
+	for (size_t destination = 0; destination < order.size(); ++destination)
+		dest[order[destination]] = destination;
 	for (size_t k = 0; k < order.size(); ++k)
-		while (order[k] != k) {
-			const size_t target = order[k];
+		while (dest[k] != k) {
+			const size_t target = dest[k];
 			std::swap(elements[k], elements[target]);
-			std::swap(order[k], order[target]);
+			std::swap(dest[k], dest[target]);
 		}
 }
 
@@ -2166,9 +2175,16 @@ bool generate_world(WorldEditor &editor,
 		still_surfaces =
 				water_areas::prescan_still_surfaces(elements, editor.ground, xzbbox);
 	progress::emit_gui_progress_update(19.5, "Processing data...");
+	const auto one_world_bounds =
+			args.one_world_run
+					? std::optional<std::array<int, 4>>(std::array<int, 4>{xzbbox.min_x(),
+							  xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()})
+					: std::nullopt;
+	auto highway_connectivity =
+			highways::build_highway_connectivity_map(elements, one_world_bounds);
 	auto bridge_outlines = bridge_styles::BridgeOutlineIndex::build(elements);
 	auto bridge_structures = bridges::BridgeStructureMap::build(
-			elements, editor, bridge_outlines, args.scale);
+			elements, editor, highway_connectivity, bridge_outlines, args.scale);
 	auto bridge_surface =
 			bridges::BridgeSurfaceMap::build(elements, bridge_structures, args.scale);
 	// Rust completes tree-pack loading before generation. Keep the C++ load
@@ -2274,8 +2290,6 @@ bool generate_world(WorldEditor &editor,
 	} regional_tree_scope{editor};
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
-	// Build once for the full area, as Rust does; tile workers only read it.
-	auto highway_connectivity = highways::build_highway_connectivity_map(elements);
 	// Rust also builds the junction/crossing index before it reorders ground
 	// fills; only then does element dispatch begin.
 	const auto geo_bounds = editor.geographic_bounds();
@@ -2343,7 +2357,12 @@ bool generate_world(WorldEditor &editor,
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
-	const auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
+	auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
+	if (args.one_world_run) {
+		const auto [min_x, min_z] = editor.get_min_coords();
+		const auto [max_x, max_z] = editor.get_max_coords();
+		rail_joins.meet_at_edge_of({min_x, min_z, max_x, max_z});
+	}
 	// fm: Share the resolved network with tile workers, including standalone callers.
 	editor.native_rail_network = railways::advtrains::prepare_network(elements, editor);
 	// ===
@@ -3739,13 +3758,102 @@ bool generate_world(WorldEditor &editor,
 			extra_spawn = datapack::SpawnDestination{
 					spawn_xz->first, spawn_xz->second, spawn_ground_y};
 		}
+		bool disaster_wooded = false;
+		std::vector<std::pair<std::string, std::uint64_t>> disaster_biomes;
+		std::optional<int> disaster_highest_surface;
+		std::optional<datapack::disasters::Surface> disaster_surface;
+		std::optional<int> disaster_sea_y;
+		if (args.disasters) {
+			disaster_wooded = std::any_of(elements.begin(), elements.end(),
+					[](const ProcessedElement &element) {
+						const auto &tags = element.tags();
+						const auto landuse = tags.find("landuse");
+						const auto natural = tags.find("natural");
+						return (landuse != tags.end() && landuse->second == "forest") ||
+							   (natural != tags.end() &&
+									   (natural->second == "wood" ||
+											   natural->second == "scrub" ||
+											   natural->second == "heath"));
+					});
+			if (!disaster_wooded && editor.ground && editor.ground->has_land_cover()) {
+				constexpr int SIDE = 64;
+				const auto width = std::int64_t(xzbbox.max_x()) - xzbbox.min_x();
+				const auto height = std::int64_t(xzbbox.max_z()) - xzbbox.min_z();
+				int tree_samples = 0;
+				for (int iz = 0; iz < SIDE; ++iz) {
+					for (int ix = 0; ix < SIDE; ++ix) {
+						const int x = xzbbox.min_x() +
+									  static_cast<int>(width * ix / (SIDE - 1));
+						const int z = xzbbox.min_z() +
+									  static_cast<int>(height * iz / (SIDE - 1));
+						if (editor.ground->cover_class(editor.ground_point(x, z)) ==
+								land_cover::LC_TREE_COVER)
+							++tree_samples;
+					}
+				}
+				disaster_wooded = double(tree_samples) / (SIDE * SIDE) >= 0.03;
+			}
+			if (args.body == CelestialBody::Earth && editor.ground) {
+				disaster_surface.emplace(
+						xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+				std::unordered_map<content_t, datapack::disasters::SurfaceClass> classes;
+				// ARNIS-PORT: datapack/disasters.rs Surface::record_chunk. WorldEditor
+				// has no serialized Java-section callback, so collect the equivalent
+				// committed surface from its written-cell sets at this boundary.
+				auto record_surface = [&](const WorldEditor::WrittenCellSet &cells) {
+					for (const auto &[x, y, z] : cells) {
+						if (!disaster_surface->is_sample(x, z))
+							continue;
+						const auto block = editor.get_block_absolute(x, y, z);
+						if (!block)
+							continue;
+						const auto content = block->getContent();
+						auto found = classes.find(content);
+						if (found == classes.end()) {
+							const auto name = editor.block_name(*block);
+							found = classes.emplace(content,
+												   datapack::disasters::Surface::classify(
+														   name.value_or(std::string{})))
+											.first;
+						}
+						disaster_surface->observe(x, y, z, found->second);
+					}
+				};
+				record_surface(editor.written_cells);
+				record_surface(editor.tile_merged_written_cells);
+				disaster_highest_surface = disaster_surface->highest();
+				if (const auto affine = editor.ground->elevation_affine())
+					disaster_sea_y =
+							static_cast<int>(std::lround(affine->y_for_metres(0.0)));
+
+				auto chunk_of = [](int coordinate) {
+					return coordinate >= 0 ? coordinate / 16 : -((-coordinate + 15) / 16);
+				};
+				std::map<std::string, std::uint64_t> counts;
+				const int min_cx = chunk_of(xzbbox.min_x());
+				const int max_cx = chunk_of(xzbbox.max_x());
+				const int min_cz = chunk_of(xzbbox.min_z());
+				const int max_cz = chunk_of(xzbbox.max_z());
+				for (int cz = min_cz; cz <= max_cz; ++cz) {
+					for (int cx = min_cx; cx <= max_cx; ++cx) {
+						for (const auto &name :
+								biome::chunk_biome_names(cx, cz, editor.ground,
+										centre_lat, ground_origin_x, ground_origin_z))
+							++counts[name];
+					}
+				}
+				disaster_biomes.assign(counts.begin(), counts.end());
+			}
+		}
 		if (!datapack::install_runtime_extras(
 					java_world_path, args, area, red_amber, editor.car_network.get(),
 					editor.train_network.get(),
 					[&editor](std::uint64_t way, int x, int z) {
 						return editor.rail_height(way, x, z);
 					},
-					extra_places, extra_spawn, &error)) {
+					extra_places, extra_spawn, &error, disaster_wooded, disaster_biomes,
+					disaster_highest_surface,
+					disaster_surface ? &*disaster_surface : nullptr, disaster_sea_y)) {
 			const auto message = "failed to install gameplay datapack: " + error;
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';

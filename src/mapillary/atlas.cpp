@@ -61,6 +61,12 @@ std::uint64_t atlas_budget()
 	return active_budget.load(std::memory_order_relaxed);
 }
 
+std::uint64_t used_texture_area()
+{
+	std::lock_guard lock(usage_mutex);
+	return used_area;
+}
+
 void reset_texture_usage()
 {
 	std::lock_guard lock(usage_mutex);

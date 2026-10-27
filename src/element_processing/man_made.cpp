@@ -81,6 +81,30 @@ int feature_height(double metres, double scale, int ground, int base, int minimu
 			std::max(minimum, world_editor::world_max_y() - base - 1));
 }
 
+std::optional<double> mast_metres(const tags_t &tags, bool on_roof)
+{
+	const std::string kind = tags.get("man_made");
+	if (kind.empty())
+		return std::nullopt;
+	const bool lighting = tags.get("tower:type") == "lighting";
+	double default_metres;
+	if (kind == "chimney")
+		default_metres = on_roof ? 2.0 : 40.0;
+	else if (kind == "antenna")
+		default_metres = on_roof ? 3.0 : lighting ? 20.0 : 10.0;
+	else if (kind == "mast")
+		default_metres = on_roof ? 6.0 : lighting ? 20.0 : 30.0;
+	else
+		return std::nullopt;
+	const auto mapped = tags.get("height");
+	if (!mapped.empty()) {
+		const auto parsed = mapillary::geodesy::parse_length_m(mapped);
+		if (parsed && *parsed > 0.0 && *parsed < 1000.0)
+			return parsed;
+	}
+	return default_metres;
+}
+
 bool polygon_contains_cell_center(
 		int x, int z, const std::vector<std::pair<int, int>> &polygon)
 {
@@ -255,16 +279,14 @@ void generate_antenna(WorldEditor &editor, const ProcessedElement &element,
 	if (!point)
 		return;
 	const auto &[x, z] = *point;
-	const bool antenna = element.tag("man_made") == "antenna";
 	const bool lighting = element.tag("tower:type") == "lighting";
 	const int ground = editor.get_ground_level(x, z);
 	const auto roof = roof_top(editor, footprints, x, z);
 	const int base = roof.value_or(ground);
-	const double default_m = roof		? (antenna ? 3.0 : 6.0)
-							 : lighting ? 20.0
-							 : antenna	? 10.0
-										: 30.0;
-	const double metres = tag_metres(element, "height").value_or(default_m);
+	const auto mapped_metres = mast_metres(element.tags(), roof.has_value());
+	if (!mapped_metres)
+		return;
+	const double metres = *mapped_metres;
 	const int height = feature_height(metres, args.scale, ground, base, 2);
 	const int top = base + height;
 	const auto construction = element.tag("tower:construction");
@@ -327,8 +349,10 @@ void generate_chimney(WorldEditor &editor, const ProcessedElement &element,
 	const auto &[x, z] = *point;
 	const int ground = editor.get_ground_level(x, z);
 	const int base = roof_top(editor, footprints, x, z).value_or(ground);
-	const double metres =
-			tag_metres(element, "height").value_or(base > ground ? 2.0 : 40.0);
+	const auto mapped_metres = mast_metres(element.tags(), base > ground);
+	if (!mapped_metres)
+		return;
+	const double metres = *mapped_metres;
 	const int height = feature_height(metres, args.scale, ground, base, 2);
 	Block body = BRICK;
 	const auto material =
