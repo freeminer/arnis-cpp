@@ -226,6 +226,20 @@ public:
 			definitions.check(plan);
 		}
 		UASSERT(!at::two_connection_rail(0, 4));
+		// Repeated visits to a position with different headings must consult the
+		// stable obstacle map only once, while still routing around obstacles.
+		std::map<at::XZ, unsigned> probes;
+		const auto detour = at::route({0, 0}, {0, 30}, 0, 0, [&](const at::XZ &p) {
+			++probes[p];
+			return p == at::XZ(0, 15);
+		});
+		UASSERT(!detour.empty());
+		UASSERT(detour.front() == at::XZ(0, 0));
+		UASSERT(detour.back() == at::XZ(0, 30));
+		for (const auto &p : detour)
+			UASSERT(p != at::XZ(0, 15));
+		for (const auto &[p, count] : probes)
+			UASSERT(count == 1);
 	}
 	void testChunkSeamsKeepSourceTopology()
 	{

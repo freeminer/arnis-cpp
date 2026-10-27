@@ -13,6 +13,7 @@
 #include <set>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 
 #include "log.h"
 
@@ -21,6 +22,16 @@ namespace arnis::railways::advtrains
 using namespace block_definitions;
 thread_local std::shared_ptr<const RailNetwork> active_network;
 thread_local std::vector<v3pos_t> tunnel_floors;
+
+struct XZHash
+{
+	std::size_t operator()(const XZ &p) const noexcept
+	{
+		const auto packed =
+				(std::uint64_t(std::uint32_t(p.first)) << 32) | std::uint32_t(p.second);
+		return std::hash<std::uint64_t>{}(packed);
+	}
+};
 
 const RailPlan *get_plan(const ProcessedWay &way)
 {
@@ -140,6 +151,17 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 	const auto distance = [&](pos_t x, pos_t z) {
 		return std::hypot(double(x - to.first), double(z - to.second));
 	};
+	// The reservation set does not change during a route search, but the same
+	// position can be considered with many headings and in both search margins.
+	std::unordered_map<XZ, bool, XZHash> blocked_cache;
+	const auto is_blocked = [&](const XZ &p) {
+		if (!blocked)
+			return false;
+		auto it = blocked_cache.find(p);
+		if (it != blocked_cache.end())
+			return it->second;
+		return blocked_cache.emplace(p, blocked(p)).first->second;
+	};
 	for (pos_t margin : {16, 48}) {
 		// Visits are only looked up by key, never iterated. Keep the ordered
 		// priority queue and its tie-breaks unchanged for identical route choices.
@@ -188,7 +210,7 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 						next.first > std::max(from.first, to.first) + margin ||
 						next.second < std::min(from.second, to.second) - margin ||
 						next.second > std::max(from.second, to.second) + margin ||
-						(next != to && blocked && blocked(next)))
+						(next != to && is_blocked(next)))
 					continue;
 				const double next_cost = cost + std::hypot(double(dx), double(dz)) +
 										 (turn != 0 ? 0.25 : 0.0);
@@ -456,7 +478,7 @@ std::shared_ptr<const RailNetwork> build_network(
 				for (auto adjacent : users.at(anchor_key(node, *way)))
 					levels.insert(level(*ways.at(adjacent)));
 	}
-	std::map<std::string, std::set<XZ>> occupied;
+	std::map<std::string, std::unordered_set<XZ, XZHash>> occupied;
 	for (const auto &[id, ids] : way_anchors)
 		for (auto a : ids)
 			for (const auto &plane : reservation_levels.at(id))
