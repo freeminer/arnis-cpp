@@ -53,6 +53,7 @@ window.addEventListener("DOMContentLoaded", async () => {
   initDialogs();
   initVoxyLightingCoupling();
   initCavesFillCoupling();
+  initDisastersCoupling();
   refreshHeightLimitRow();
   refreshGameplayRows();
   // After initSettings(), so the slider label and rotation handlers exist
@@ -743,6 +744,7 @@ function setCelestialBody(body) {
   // the world format and the stored source too.
   refreshHeightLimitRow();
   refreshGameplayRows();
+  refreshWorldTypeRow();
   refreshFacadeRows();
   refreshOneWorldState();
 
@@ -1298,6 +1300,9 @@ function initSettings() {
     });
   });
 
+  // Blueprint greys out the traffic lights.
+  document.getElementById("generation-mode-select").addEventListener("change", () => refreshGameplayRows());
+
   // A reloaded map comes back on Earth; restore whatever was picked.
   const bodyMapFrame = getMapFrame();
   if (bodyMapFrame) bodyMapFrame.addEventListener('load', pushBodyToMap);
@@ -1651,6 +1656,14 @@ let selectedWorldFormat = 'java'; // Default to Java
 
 const VALID_FORMATS = ['java', 'bedrock', 'luanti'];
 
+// Sets a toggle another one depends on. Dispatches, so the settings store persists the
+// knock-on change too.
+function setChecked(el, value) {
+  if (el.checked === value) return;
+  el.checked = value;
+  el.dispatchEvent(new Event('change', { bubbles: true }));
+}
+
 // Voxy renders distant terrain from the per-voxel light stored in its LOD
 // cache, so pre-generating one without baked lighting would give a black
 // horizon. Keep the two toggles consistent in the UI rather than quietly
@@ -1660,18 +1673,11 @@ function initVoxyLightingCoupling() {
   const bake = document.getElementById('bake-lighting-toggle');
   if (!voxy || !bake) return;
 
-  // Dispatch so the settings store persists the knock-on change too.
-  const set = (el, value) => {
-    if (el.checked === value) return;
-    el.checked = value;
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  };
-
   voxy.addEventListener('change', () => {
-    if (voxy.checked) set(bake, true);
+    if (voxy.checked) setChecked(bake, true);
   });
   bake.addEventListener('change', () => {
-    if (!bake.checked) set(voxy, false);
+    if (!bake.checked) setChecked(voxy, false);
   });
 }
 
@@ -1682,18 +1688,31 @@ function initCavesFillCoupling() {
   const fill = document.getElementById('fillground-toggle');
   if (!caves || !fill) return;
 
-  // Dispatch so the settings store persists the knock-on change too.
-  const set = (el, value) => {
-    if (el.checked === value) return;
-    el.checked = value;
-    el.dispatchEvent(new Event('change', { bubbles: true }));
-  };
-
   caves.addEventListener('change', () => {
-    if (caves.checked) set(fill, true);
+    if (caves.checked) setChecked(fill, true);
   });
   fill.addEventListener('change', () => {
-    if (!fill.checked) set(caves, false);
+    if (!fill.checked) setChecked(caves, false);
+  });
+}
+
+// Disasters open up the ground and send people indoors, so turning them on turns on Fill
+// Ground and interiors. Turning Fill Ground off takes the disasters with it, as with caves.
+function initDisastersCoupling() {
+  const disasters = document.getElementById('disasters-toggle');
+  const fill = document.getElementById('fillground-toggle');
+  const interior = document.getElementById('interior-toggle');
+  if (!disasters || !fill || !interior) return;
+
+  // Only on a click: restoring saved settings fires change events too, and must not undo a
+  // choice to leave interiors off.
+  disasters.addEventListener('change', (event) => {
+    if (!disasters.checked || !event.isTrusted) return;
+    setChecked(fill, true);
+    if (!interior.disabled) setChecked(interior, true);
+  });
+  fill.addEventListener('change', () => {
+    if (!fill.checked) setChecked(disasters, false);
   });
 }
 
@@ -1787,25 +1806,32 @@ function refreshHeightLimitRow(format) {
 
 // Bedrock and Luanti keep their own flat generators, so the choice only means
 // something for Java. Greyed rather than hidden, like the other format gates.
+// A One World's areas sit at their real heights and a superflat off Earth is
+// grass, so the backend makes both void.
 function refreshWorldTypeRow(format) {
   const group = document.getElementById('world-type-group');
   if (!group) return;
-  const java = (format || selectedWorldFormat) === 'java';
-  group.classList.toggle('segmented-disabled', !java);
+  const available = (format || selectedWorldFormat) === 'java'
+    && selectedCelestialBody === 'earth' && !isOneWorldEnabled();
+  group.classList.toggle('segmented-disabled', !available);
   const row = group.closest('.settings-row');
-  if (row) row.classList.toggle('settings-row-unavailable', !java);
+  if (row) row.classList.toggle('settings-row-unavailable', !available);
 }
 
 // The extras are a Java data pack, and each One World area would write its own over
 // the last one's. Off Earth there are no roads or places, and gravity only differs there.
+// Blueprint builds no signal heads, so there are no lights to run.
 function refreshGameplayRows(format) {
   // The effective state: a ticked One World is off on the Moon and Mars, and greyed out there.
   const pack = (format || selectedWorldFormat) === 'java' && !isOneWorldEnabled();
   const earth = selectedCelestialBody === 'earth';
+  const mode = document.getElementById('generation-mode-select');
+  const blueprint = !!mode && mode.value === 'blueprint';
   setSettingsRowAvailable('pause-menu-toggle', pack);
   setSettingsRowAvailable('zombie-outbreak-toggle', pack);
+  setSettingsRowAvailable('disasters-toggle', pack);
   setSettingsRowAvailable('discoveries-toggle', pack && earth);
-  setSettingsRowAvailable('traffic-lights-toggle', pack && earth);
+  setSettingsRowAvailable('traffic-lights-toggle', pack && earth && !blueprint);
   setSettingsRowAvailable('moving-cars-toggle', pack && earth);
   setSettingsRowAvailable('body-gravity-toggle', pack && !earth);
 }
@@ -3255,7 +3281,10 @@ function initOneWorld() {
   if (!toggle) return;
   // Also fires when the settings store restores the value.
   toggle.addEventListener('change', refreshOneWorldState);
-  toggle.addEventListener('change', () => refreshGameplayRows());
+  toggle.addEventListener('change', () => {
+    refreshGameplayRows();
+    refreshWorldTypeRow();
+  });
   const mode = document.getElementById('generation-mode-select');
   if (mode) mode.addEventListener('change', renderOneWorldStatus);
   const nameToggle = document.getElementById('custom-world-name-toggle');
@@ -3344,7 +3373,9 @@ async function startGeneration() {
     resetProgressUi(STARTING_MESSAGE);
 
     const oneWorld = isOneWorldEnabled();
-    if (oneWorld && !(await prepareOneWorldRun())) {
+    const oneWorldBBox = selectedBBox;
+    // The overlap dialog leaves the page live, so the body, format or area may have changed under it.
+    if (oneWorld && (!(await prepareOneWorldRun()) || !isOneWorldEnabled() || selectedBBox !== oneWorldBBox)) {
       const info = document.getElementById('progress-info');
       if (info && info.textContent === STARTING_MESSAGE) info.textContent = "";
       return;
@@ -3425,6 +3456,10 @@ async function startGeneration() {
 
     // Validate ground_level
     ground_level = isNaN(ground_level) || ground_level < -62 ? -62 : ground_level;
+    // A world the CLI made may sit on another level, and the backend refuses any but its own.
+    if (oneWorld && oneWorldInfo && oneWorldInfo.exists && typeof oneWorldInfo.ground_level === 'number') {
+      ground_level = oneWorldInfo.ground_level;
+    }
 
     // Get telemetry consent (defaults to false if not set)
     const telemetryConsent = window.getTelemetryConsent ? window.getTelemetryConsent() : false;
@@ -3488,6 +3523,7 @@ async function startGeneration() {
         trafficLights: gameplayToggle('traffic-lights-toggle'),
         movingVehicles: gameplayToggle('moving-cars-toggle'),
         zombieOutbreak: gameplayToggle('zombie-outbreak-toggle'),
+        disasters: gameplayToggle('disasters-toggle'),
         bodyGravity: gameplayToggle('body-gravity-toggle'),
         oneWorld: oneWorld,
         oneWorldName: oneWorld ? oneWorldFolderName() : ""

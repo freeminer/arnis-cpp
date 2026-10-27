@@ -41,7 +41,8 @@ const SETTINGS = [
   { id: 'world-type-group', kind: 'segmented', store: OWN, valueAttr: 'data-world-type' },
   { id: 'map-item-toggle', kind: 'checkbox', store: OWN },
   { id: 'custom-world-name-toggle', kind: 'checkbox', store: OWN },
-  { id: 'one-world-toggle', kind: 'checkbox', store: OWN },
+  // Turning One World off writes its pinned values back, so a reset does it first.
+  { id: 'one-world-toggle', kind: 'checkbox', store: OWN, resetFirst: true },
   { id: 'signage-group', kind: 'segmented', store: OWN, valueAttr: 'data-signage' },
 
   // Gameplay
@@ -50,6 +51,7 @@ const SETTINGS = [
   { id: 'traffic-lights-toggle', kind: 'checkbox', store: OWN },
   { id: 'moving-cars-toggle', kind: 'checkbox', store: OWN },
   { id: 'zombie-outbreak-toggle', kind: 'checkbox', store: OWN },
+  { id: 'disasters-toggle', kind: 'checkbox', store: OWN },
   { id: 'body-gravity-toggle', kind: 'checkbox', store: OWN },
   // The facade controls. Registered here like every other segmented control,
   // so the panel's Revert and Reset to defaults reach them: the store reads the
@@ -392,7 +394,8 @@ function resetAll() {
 
   applying = true;
   try {
-    for (const entry of SETTINGS) {
+    const order = [...SETTINGS.filter((e) => e.resetFirst), ...SETTINGS.filter((e) => !e.resetFirst)];
+    for (const entry of order) {
       if (entry.revertable === false || entry.resettable === false) continue;
       const def = defaultValue(entry);
       if (def === undefined) continue;

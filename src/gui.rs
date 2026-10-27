@@ -500,6 +500,13 @@ fn calculate_default_spawn(xzbbox: &XZBBox) -> (i32, i32) {
     (xzbbox.min_x() + 1, xzbbox.min_z() + 1)
 }
 
+/// The map marker, unless it lies outside the area: the map keeps it when the area moves.
+fn spawn_marker(spawn_point: Option<(f64, f64)>, bbox: &LLBBox) -> Option<LLPoint> {
+    spawn_point
+        .and_then(|(lat, lng)| LLPoint::new(lat, lng).ok())
+        .filter(|p| bbox.contains(p))
+}
+
 /// Sets the player spawn point in level.dat using Minecraft XZ coordinates.
 /// The Y coordinate is set to a temporary value (150) and will be updated
 /// after terrain generation by `update_player_spawn_y_after_generation`.
@@ -1041,11 +1048,19 @@ struct OneWorldInfo {
     area_count: usize,
     scale: Option<f64>,
     height_multiplier: Option<f64>,
+    ground_level: Option<i32>,
     terrain: Option<bool>,
     disable_height_limit: Option<bool>,
     aws_only_elevation: Option<bool>,
     /// Changes whenever an area is recorded.
     revision: u32,
+}
+
+fn one_world_request(one_world: bool, world_format: &str, body: &str) -> Result<(), String> {
+    if one_world && (world_format != "java" || body != "earth") {
+        return Err("One World needs a Java world on Earth".to_string());
+    }
+    Ok(())
 }
 
 fn one_world_dir(save_path: &str, world_name: &str) -> PathBuf {
@@ -1071,6 +1086,7 @@ fn gui_one_world_info(save_path: String, world_name: String) -> Result<OneWorldI
         area_count: manifest.as_ref().map(|m| m.areas.len()).unwrap_or(0),
         scale: manifest.as_ref().map(|m| m.scale),
         height_multiplier: manifest.as_ref().map(|m| m.height_multiplier),
+        ground_level: manifest.as_ref().map(|m| m.ground_level),
         terrain: manifest.as_ref().map(|m| m.terrain),
         disable_height_limit: manifest.as_ref().map(|m| m.disable_height_limit),
         aws_only_elevation: manifest.as_ref().map(|m| m.aws_only_elevation),
@@ -1364,8 +1380,8 @@ impl Drop for BusySlot {
     }
 }
 
-// Everything before the `spawn` below - the spawn point written into level.dat,
-// the tall-world datapack install - runs synchronously in this call, and a plain
+// Everything before the `spawn` below - the spawn point written into level.dat -
+// runs synchronously in this call, and a plain
 // `#[tauri::command]` would run all of it on the main thread with the window
 // stalled behind it. `(async)` puts it on the async runtime instead, so the GUI
 // stays live from the click until the first progress event.
@@ -1415,6 +1431,7 @@ fn gui_start_generation(
     discoveries: bool,
     traffic_lights: bool,
     zombie_outbreak: bool,
+    disasters: bool,
     moving_vehicles: bool,
     body_gravity: bool,
     one_world: bool,
@@ -1423,8 +1440,12 @@ fn gui_start_generation(
     use progress::emit_gui_error;
     use LLBBox;
 
-    // A One World is resolved inside the worker, once `Args` exist.
-    let one_world = one_world && world_format == "java" && celestial_body_name == "earth";
+    // A One World is resolved inside the worker, once `Args` exist. Refused rather than
+    // dropped: `selected_world` is then the saves folder, which a new-world cleanup deletes.
+    if let Err(e) = one_world_request(one_world, &world_format, &celestial_body_name) {
+        emit_gui_error(&e);
+        return Err(e);
+    }
     let is_new_world = is_new_world && !one_world;
 
     // Claim the process before touching any shared state. The frontend disables its button
@@ -1449,10 +1470,6 @@ fn gui_start_generation(
     } else {
         celestial_body.world_scale()
     };
-    // apply_body_defaults clears this off Earth, but it runs after the datapack install below
-    // and after the Args literal is built, so both would still see the raw frontend value.
-    let disable_height_limit = disable_height_limit && celestial_body.is_earth();
-
     // The GUI builds Args directly and never runs validate_args, so guard the scale here
     // rather than letting it panic deep in the coordinate transform after the fetch.
     if celestial_body.is_earth() {
@@ -1506,11 +1523,6 @@ fn gui_start_generation(
 
             set_player_spawn_in_level_dat(&selected_world, spawn_x, spawn_z)
                 .map_err(|e| format!("Failed to set spawn point: {e}"))?;
-
-            if disable_height_limit {
-                crate::world_utils::install_tall_datapack(std::path::Path::new(&selected_world))
-                    .map_err(|e| format!("Failed to install tall-world datapack: {e}"))?;
-            }
 
             Ok(())
         })();
@@ -1606,6 +1618,13 @@ fn gui_start_generation(
                 }
             };
 
+            // The toggle lets the terrain fit extend the build height where the area needs it,
+            // in a world this run creates. A world that already exists keeps the height it
+            // has, and a One World is sent the height it keeps.
+            let existing_java =
+                world_format == WorldFormat::JavaAnvil && !is_new_world && !one_world;
+            let existing_tall = existing_java && crate::world_utils::has_tall_datapack(&world_path);
+
             // Create an Args instance with the chosen bounding box
             // Note: path is used for Java-specific features like spawn point update
             let mut args: Args = Args {
@@ -1655,7 +1674,8 @@ fn gui_start_generation(
                 spawn_lat: None,
                 spawn_lng: None,
                 rotation: rotation_angle.clamp(-90.0, 90.0),
-                disable_height_limit,
+                vanilla_height: !existing_tall && (!disable_height_limit || existing_java),
+                disable_height_limit: existing_tall || (one_world && disable_height_limit),
                 aws_only_elevation,
                 benchmark: false,
                 bake_lighting: bake_lighting_enabled,
@@ -1706,15 +1726,13 @@ fn gui_start_generation(
                 discoveries,
                 pause_menu,
                 zombie_outbreak,
+                disasters,
                 moving_vehicles,
             };
             // Same helper the CLI uses. Anything read before this point (the world prep
             // above) has to apply the body rules on its own.
             crate::args::apply_body_defaults(&mut args);
-            // Same as run_cli: caves carve into the filled ground, so they bring it with them.
-            if args.caves {
-                args.fillground = true;
-            }
+            crate::args::apply_feature_needs(&mut args);
 
             let mut one_world_extending = false;
             if one_world {
@@ -1783,8 +1801,11 @@ fn gui_start_generation(
                 }
                 WorldFormat::BedrockMcWorld => {
                     // Bedrock: generate .mcworld in the configured directory
-                    let (output_path, lvl_name) =
-                        crate::world_utils::build_bedrock_output(&bbox, bedrock_output_dir);
+                    let (output_path, lvl_name) = crate::world_utils::build_bedrock_output(
+                        &bbox,
+                        bedrock_output_dir,
+                        celestial_body,
+                    );
                     progress::emit_world_name_update(&lvl_name);
                     (output_path, Some(lvl_name))
                 }
@@ -1825,7 +1846,7 @@ fn gui_start_generation(
             let mc_spawn_point: Option<(i32, i32)> = if let Ok((transformer, pre_rot_bbox)) =
                 crate::projection::ProjectionSpec::from_args(&args).transformer(&bbox)
             {
-                let marker = spawn_point.and_then(|(lat, lng)| LLPoint::new(lat, lng).ok());
+                let marker = spawn_marker(spawn_point, &bbox);
                 match (marker, one_world_extending) {
                     (None, true) => None,
                     (marker, _) => {
@@ -1871,6 +1892,25 @@ fn gui_start_generation(
                 ground::world_top_y_for(&args),
             );
 
+            // Same as run_cli, once the terrain fit has settled the build height.
+            let new_java_world = (world_format == WorldFormat::JavaAnvil && is_new_world)
+                .then_some(generation_path.as_path());
+            let settle = |args: &mut Args, ground: &ground::Ground| {
+                ground::settle_build_height(
+                    args,
+                    ground,
+                    &bbox,
+                    world_format,
+                    &disk_dir,
+                    new_java_world,
+                )
+                .map_err(|e| {
+                    eprintln!("{e}");
+                    emit_gui_error(&e);
+                    e
+                })
+            };
+
             // Ask Args, not the frontend mode: below OBJECT_SKIP_SCALE, or off Earth, no OSM
             // is loaded whatever mode was picked.
             if args.skip_osm() {
@@ -1880,6 +1920,9 @@ fn gui_start_generation(
                     bbox,
                     &crate::elevation::PeakSource::none(),
                 );
+                let mut args = args;
+                settle(&mut args, &ground)?;
+                let args = args;
                 // Matches run_cli.
                 ground.finish_land_cover(args.mode);
 
@@ -1913,6 +1956,7 @@ fn gui_start_generation(
                     generation_options.clone(),
                     osm_parser::OutlineSuppression::new(),
                     osm_parser::PartGroups::new(),
+                    osm_parser::HousingRelationParts::new(),
                 ) {
                     emit_gui_error(&e);
                     return Err(e);
@@ -1954,18 +1998,19 @@ fn gui_start_generation(
                     &args.osm_tiles_url,
                     !args.no_tile_archive,
                 );
-                // The terrain thread waits on this before fitting its height range.
-                if let Ok(raw) = fetch_result.as_ref() {
-                    let _ = peak_tx.send(crate::elevation::TerrainHints {
-                        peaks: crate::elevation::peaks::peaks_in(raw),
-                        tall_models: if args.use_3d {
-                            crate::models_3d::wikidata::tall_models_in(raw)
-                        } else {
-                            Vec::new()
-                        },
-                    });
-                }
-                drop(peak_tx);
+                // The terrain thread waits on this before fitting its height range. Overture's
+                // building heights follow once it is in, for the thread to wait on only if
+                // needed. Without OSM there is nothing to follow, so the sender goes now.
+                let peak_tx = match fetch_result.as_ref() {
+                    Ok(raw) => {
+                        let _ = peak_tx.send(crate::elevation::TerrainHints::from_osm(raw, &args));
+                        Some(peak_tx)
+                    }
+                    Err(_) => {
+                        drop(peak_tx);
+                        None
+                    }
+                };
                 // A panicked worker already reported itself through the panic hook.
                 // Overture is supplementary, so drop it and keep going; terrain is
                 // not, so hand the failure back instead of taking the app down.
@@ -1973,6 +2018,16 @@ fn gui_start_generation(
                     eprintln!("Overture fetch failed, continuing without Overture buildings.");
                     overture::OvertureData::default()
                 });
+                if let (Some(tx), Ok(raw)) = (&peak_tx, fetch_result.as_ref()) {
+                    if crate::elevation::TerrainHints::wants_overture(&args) {
+                        let _ = tx.send(crate::elevation::TerrainHints::from_overture(
+                            raw,
+                            &args,
+                            &overture_data,
+                        ));
+                    }
+                }
+                drop(peak_tx);
                 (fetch_result, overture_data, ground_handle.join().ok())
             });
 
@@ -1982,21 +2037,33 @@ fn gui_start_generation(
                 emit_gui_error(&error_msg);
                 return Err(error_msg);
             };
+            // Nothing to settle when the fetch failed: the run ends below.
+            let mut args = args;
+            if fetch_result.is_ok() {
+                settle(&mut args, &ground)?;
+            }
+            let args = args;
 
             // Run world generation
             match fetch_result {
                 Ok(raw_data) => {
-                    let (mut parsed_elements, mut xzbbox, outline_suppression, part_groups) =
-                        osm_parser::parse_osm_data(
-                            raw_data,
-                            bbox,
-                            args.debug,
-                            &crate::projection::ProjectionSpec::from_args(&args),
-                        );
+                    let (
+                        mut parsed_elements,
+                        mut xzbbox,
+                        outline_suppression,
+                        part_groups,
+                        housing_parts,
+                    ) = osm_parser::parse_osm_data(
+                        raw_data,
+                        bbox,
+                        args.debug,
+                        &crate::projection::ProjectionSpec::from_args(&args),
+                    );
 
                     let overture::OvertureData {
                         elements: overture_elements,
                         hints: overture_hints,
+                        ..
                     } = overture_data;
 
                     // Fill height/levels on OSM buildings that have neither
@@ -2053,6 +2120,7 @@ fn gui_start_generation(
                         generation_options.clone(),
                         outline_suppression,
                         part_groups,
+                        housing_parts,
                     ) {
                         eprintln!("World generation failed: {e}");
                         send_log(LogLevel::Error, &format!("World generation failed: {e}"));
@@ -2267,6 +2335,23 @@ mod locale_tests {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_one_world_off_java_or_off_earth_is_refused() {
+        assert!(one_world_request(true, "java", "earth").is_ok());
+        assert!(one_world_request(false, "bedrock", "moon").is_ok());
+        assert!(one_world_request(true, "bedrock", "earth").is_err());
+        assert!(one_world_request(true, "luanti_mineclonia", "earth").is_err());
+        assert!(one_world_request(true, "java", "moon").is_err());
+    }
+
+    #[test]
+    fn a_spawn_marker_outside_the_area_is_ignored() {
+        let bbox = LLBBox::from_str("52.50,13.37,52.53,13.42").unwrap();
+        assert!(spawn_marker(Some((52.51, 13.40)), &bbox).is_some());
+        assert!(spawn_marker(Some((48.14, 11.58)), &bbox).is_none());
+        assert!(spawn_marker(None, &bbox).is_none());
+    }
 
     fn read_level_dat(world: &Path) -> Value {
         let raw = fs::read(world.join("level.dat")).unwrap();

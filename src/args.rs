@@ -211,9 +211,17 @@ pub struct Args {
     #[arg(long, default_value_t = 0.0, allow_hyphen_values = true)]
     pub rotation: f64,
 
-    /// Extend build height via a bundled pack (Java 1.21.4+: Y=-2032..2031, experimental;
-    /// Bedrock 1.21.120+: up to Y=511).
-    #[arg(long, default_value_t = false)]
+    /// Keep the vanilla build height (Y -64 to 319) and compress taller terrain to fit. By
+    /// default an area that needs more room gets a bundled pack that extends the build
+    /// height (Java 1.21.4+: Y -2032 to 2031, experimental; Bedrock 1.21.120+: up to Y 511).
+    #[arg(long, default_value_t = false, conflicts_with = "disable_height_limit")]
+    pub vanilla_height: bool,
+
+    /// Add the extended build height pack even where the area fits the vanilla height.
+    /// Before the terrain fit this says the height is fixed as extended (this flag or a
+    /// One World); `ground::settle_build_height` then sets it for an area that needs it,
+    /// so from there on it is the world's height.
+    #[arg(long, default_value_t = false, hide = true)]
     pub disable_height_limit: bool,
 
     /// Use only the legacy AWS Terrain Tiles source (~30m) instead of
@@ -265,12 +273,7 @@ pub struct Args {
 
     /// Mapillary API token, from https://www.mapillary.com/developer. Required by
     /// --mapillary-facades and --mapillary-probe.
-    ///
-    /// `hide_env_values` because clap prints `[env: NAME=value]` in `--help` by
-    /// default, and this value is a credential: `arnis --help` with the variable
-    /// set would put the token on stdout, which is where a bug report or a CI log
-    /// picks it up. The variable's name still shows, so the help still says where
-    /// the token can come from.
+    // A credential: --help shows the variable's name but never its value.
     #[arg(long, env = "MAPILLARY_TOKEN", hide_env_values = true)]
     pub mapillary_token: Option<String>,
 
@@ -340,7 +343,7 @@ pub struct Args {
     /// Texture resolution of the facade panels in pixels per block (4, 8, 16 or
     /// 32), for the Mapillary photos and the preset facades alike. Lowered
     /// automatically when the panels would not fit the atlas --facade-detail
-    /// allows.
+    /// allows; walls that still do not fit at 4 are left without a panel.
     #[arg(long, default_value_t = 16, value_parser = parse_facade_px)]
     pub facade_px: u32,
 
@@ -374,6 +377,13 @@ pub struct Args {
     /// last, and a supply drop every morning. Starts the world in survival. Java 1.21.6+.
     #[arg(long, default_value_t = false)]
     pub zombie_outbreak: bool,
+
+    /// Disasters: a meteor shower, a tornado, a flood, an earthquake and more, one every few
+    /// minutes in random order, picked from those the area can have. Floods rise from the
+    /// mapped rivers and the sea. Starts the world in survival. Implies --fillground and a
+    /// ground level of at least -40, as sinkholes and cracks open up the ground. Java 1.21.6+.
+    #[arg(long, default_value_t = false)]
+    pub disasters: bool,
 
     /// Cars that drive the streets at the speed limit, queue behind each other, turn at
     /// junctions and, with --traffic-lights, stop at red; and trains, S-Bahns, metros and
@@ -716,6 +726,21 @@ impl GameMode {
     }
 }
 
+/// Lowest ground a world with disasters is built on. The default puts the lowest ground two
+/// blocks above bedrock, which leaves sinkholes and cracks nothing to open into.
+pub const DISASTER_GROUND_LEVEL: i32 = -40;
+
+/// What some features need from the rest of the world: caves carve into the filled ground,
+/// and disasters dig holes in it, with rock under even the lowest ground.
+pub fn apply_feature_needs(args: &mut Args) {
+    if args.caves || args.disasters {
+        args.fillground = true;
+    }
+    if args.disasters {
+        args.ground_level = args.ground_level.max(DISASTER_GROUND_LEVEL);
+    }
+}
+
 /// Validates CLI arguments after parsing.
 /// For Java Edition: `--path` is required. If the directory doesn't exist, it will be created.
 /// For Bedrock Edition (`--bedrock`): `--path` is optional (defaults to Desktop output).
@@ -730,6 +755,8 @@ pub fn apply_body_defaults(args: &mut Args) {
     // Snow and ruins dress Earth weather and Earth towns.
     args.winter = false;
     args.post_apocalyptic = false;
+    // The superflat template is a grass plain with villages.
+    args.world_type = WorldType::Void;
     args.scale = args.body.world_scale();
     args.mode = GenerationMode::TerrainOnly;
     args.overture = false;
@@ -747,6 +774,7 @@ pub fn apply_body_defaults(args: &mut Args) {
     args.mapillary_facades = Some(false);
     // Relief already fits vanilla height, so the pack would add only empty sky.
     args.disable_height_limit = false;
+    args.vanilla_height = true;
     // No roads or places off Earth.
     args.traffic_lights = false;
     args.discoveries = false;
@@ -759,7 +787,7 @@ pub fn apply_body_defaults(args: &mut Args) {
 }
 
 /// A blueprint shows where buildings stand, not what they look like, so whatever
-/// dresses a building or stands in for one is off.
+/// dresses a building or stands in for one is off, and so is street furniture.
 fn apply_mode_defaults(args: &mut Args) {
     if args.mode != GenerationMode::Blueprint {
         return;
@@ -768,6 +796,9 @@ fn apply_mode_defaults(args: &mut Args) {
     args.interior = false;
     args.building_facades = false;
     args.mapillary_facades = Some(false);
+    args.signage = SignageLevel::None;
+    // Signal nodes are left out, so cars would stop at lights that were never built.
+    args.traffic_lights = false;
 }
 
 /// Clap's `--world-time` default, so `apply_body_defaults` can tell left-alone
@@ -800,6 +831,7 @@ pub fn validate_args(args: &Args) -> Result<(), String> {
         (args.discoveries, "--discoveries"),
         (args.traffic_lights, "--traffic-lights"),
         (args.zombie_outbreak, "--zombie-outbreak"),
+        (args.disasters, "--disasters"),
         (args.body_gravity, "--body-gravity"),
         (args.moving_vehicles, "--moving-vehicles"),
     ];
@@ -1039,8 +1071,8 @@ pub fn validate_args(args: &Args) -> Result<(), String> {
             let llpoint =
                 LLPoint::new(lat, lng).map_err(|e| format!("Invalid spawn coordinates: {e}"))?;
 
-            // Validate that spawn point is within the bounding box. Only enforceable when the
-            // bbox is known up front; a file-derived bbox isn't available until the file is parsed.
+            // Validate that spawn point is within the bounding box. A file-derived bbox is
+            // checked in run_cli once the file is parsed.
             if let Some(bbox) = args.bbox {
                 if !bbox.contains(&llpoint) {
                     return Err(
@@ -1071,12 +1103,12 @@ pub fn validate_args(args: &Args) -> Result<(), String> {
 
 /// Legal `--ground-level` range for the chosen output format. The scaler clamps every column
 /// into `[ground_level, ceiling]`, so a base above the ceiling makes that clamp's min exceed
-/// its max and aborts the run after the whole elevation download.
+/// its max and aborts the run after the whole elevation download. A run that picks its build
+/// height from the area may use the extended range: a base outside vanilla's makes it extend.
 fn ground_level_bounds(args: &Args) -> (i32, i32) {
-    let floor = crate::ground::extended_min_y_for(args) + 2;
-    let ceiling =
-        crate::ground::world_top_y_for(args) - crate::elevation::postprocess::TERRAIN_HEIGHT_BUFFER;
-    (floor, ceiling)
+    let extended = args.disable_height_limit || crate::ground::auto_height(args);
+    let range = crate::ground::ground_level_range(args, extended);
+    (*range.start(), *range.end())
 }
 
 fn parse_duration(arg: &str) -> Result<std::time::Duration, std::num::ParseIntError> {
@@ -1106,6 +1138,30 @@ mod tests {
         assert!(validate_args(&parse(&["--body", "moon", "--body-gravity"])).is_ok());
         let one_world = validate_args(&parse(&["--one-world", "--pause-menu"])).unwrap_err();
         assert!(one_world.contains("--pause-menu"), "{one_world}");
+    }
+
+    #[test]
+    fn disasters_bring_filled_ground_with_rock_under_the_lowest_point() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+        let parse = |extra: &[&str]| {
+            let mut cmd = vec!["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+            cmd.extend_from_slice(extra);
+            let mut args = Args::parse_from(cmd.iter());
+            apply_body_defaults(&mut args);
+            apply_feature_needs(&mut args);
+            args
+        };
+        let plain = parse(&[]);
+        assert!(!plain.fillground);
+        assert_eq!(plain.ground_level, -62);
+        let disasters = parse(&["--disasters"]);
+        assert!(disasters.fillground);
+        assert_eq!(disasters.ground_level, DISASTER_GROUND_LEVEL);
+        assert!(validate_args(&disasters).is_ok());
+        let higher = parse(&["--disasters", "--ground-level", "10"]);
+        assert_eq!(higher.ground_level, 10);
+        assert!(parse(&["--caves"]).fillground);
     }
 
     #[test]
@@ -1224,19 +1280,39 @@ mod tests {
 
         assert!(validate_args(&parse(&[])).is_ok());
         // Vanilla ceiling is 319 - 15; above it the scaler's clamp has min > max and panics.
-        assert!(gl(&[], 304).is_ok());
-        assert!(gl(&[], 305).is_err());
-        assert!(gl(&[], 400).is_err());
+        let vanilla: &[&str] = &["--vanilla-height"];
+        assert!(gl(vanilla, 304).is_ok());
+        assert!(gl(vanilla, 305).is_err());
+        assert!(gl(vanilla, 400).is_err());
         // Below the bedrock plane there is nothing to stand on.
-        assert!(gl(&[], -63).is_err());
+        assert!(gl(vanilla, -63).is_err());
 
         // The tall datapack raises the ceiling to 2031; Bedrock's pack stops far below it.
-        let dhl: &[&str] = &["--disable-height-limit"];
-        assert!(gl(dhl, 2016).is_ok());
-        assert!(gl(dhl, 2017).is_err());
-        assert!(gl(dhl, -2030).is_ok());
-        assert!(gl(dhl, -2031).is_err());
+        // By default a base outside vanilla's range is what makes the run extend.
+        for extended in [&[][..], &["--disable-height-limit"][..]] {
+            assert!(gl(extended, 2016).is_ok(), "{extended:?}");
+            assert!(gl(extended, 2017).is_err(), "{extended:?}");
+            assert!(gl(extended, -2030).is_ok(), "{extended:?}");
+            assert!(gl(extended, -2031).is_err(), "{extended:?}");
+        }
         assert!(gl(&["--bedrock", "--disable-height-limit"], 500).is_err());
+        assert!(gl(&["--bedrock"], 500).is_err());
+    }
+
+    #[test]
+    fn vanilla_height_and_the_forced_pack_exclude_each_other() {
+        let tmpdir = tempfile::tempdir().unwrap();
+        let tmp_path = tmpdir.path().to_str().unwrap();
+        let cmd = |extra: &[&'static str]| {
+            let mut cmd = vec!["arnis", "--output-dir", tmp_path, "--bbox", "1,2,3,4"];
+            cmd.extend_from_slice(extra);
+            cmd
+        };
+        let args = Args::try_parse_from(cmd(&["--vanilla-height"])).unwrap();
+        assert!(args.vanilla_height && !args.disable_height_limit);
+        assert!(
+            Args::try_parse_from(cmd(&["--vanilla-height", "--disable-height-limit"])).is_err()
+        );
     }
 
     #[test]
@@ -1254,7 +1330,8 @@ mod tests {
         for flags in [
             &["--luanti"][..],
             &["--luanti", "--disable-height-limit"][..],
-            &["--bedrock"][..],
+            &["--bedrock", "--vanilla-height"][..],
+            &["--body", "moon"][..],
         ] {
             assert!(gl(flags, -62).is_ok(), "{flags:?} rejected the default");
             assert!(gl(flags, 304).is_ok(), "{flags:?} rejected 304");
@@ -1263,10 +1340,14 @@ mod tests {
         }
 
         // Bedrock's behavior pack raises the ceiling to 511 but leaves the floor vanilla.
-        let bedrock_dhl: &[&str] = &["--bedrock", "--disable-height-limit"];
-        assert!(gl(bedrock_dhl, 496).is_ok());
-        assert!(gl(bedrock_dhl, 497).is_err());
-        assert!(gl(bedrock_dhl, -63).is_err());
+        for bedrock in [
+            &["--bedrock"][..],
+            &["--bedrock", "--disable-height-limit"][..],
+        ] {
+            assert!(gl(bedrock, 496).is_ok(), "{bedrock:?}");
+            assert!(gl(bedrock, 497).is_err(), "{bedrock:?}");
+            assert!(gl(bedrock, -63).is_err(), "{bedrock:?}");
+        }
     }
 
     #[test]
@@ -1525,6 +1606,27 @@ mod tests {
     }
 
     #[test]
+    fn a_blueprint_has_no_street_furniture() {
+        let parse = |extra: &[&str]| {
+            let mut cmd = vec!["arnis", "--output-dir", "out", "--bbox", "1,2,3,4"];
+            cmd.extend_from_slice(extra);
+            let mut args = Args::parse_from(cmd.iter());
+            apply_body_defaults(&mut args);
+            args
+        };
+        let args = parse(&["--traffic-lights", "--signage", "full"]);
+        assert!(args.traffic_lights && args.signage.full());
+        let args = parse(&[
+            "--mode",
+            "blueprint",
+            "--traffic-lights",
+            "--signage",
+            "full",
+        ]);
+        assert!(!args.traffic_lights && !args.signage.enabled());
+    }
+
+    #[test]
     fn gui_mode_names_match_the_cli() {
         assert_eq!(
             GenerationMode::from_name("blueprint"),
@@ -1559,6 +1661,22 @@ mod tests {
         assert!(!args.winter && !args.post_apocalyptic);
     }
 
+    #[test]
+    fn the_grass_plain_stays_on_earth() {
+        let parse = |extra: &[&str]| {
+            let mut cmd = vec!["arnis", "--output-dir", "out", "--bbox", "1,2,3,4"];
+            cmd.extend_from_slice(extra);
+            let mut args = Args::parse_from(cmd.iter());
+            apply_body_defaults(&mut args);
+            args
+        };
+        assert_eq!(parse(&["--world-type", "flat"]).world_type, WorldType::Flat);
+        for body in ["moon", "mars"] {
+            let args = parse(&["--world-type", "flat", "--body", body]);
+            assert_eq!(args.world_type, WorldType::Void);
+        }
+    }
+
     /// `--help` must not print the Mapillary token.
     ///
     /// clap renders `[env: NAME=value]` for an env-backed argument unless
@@ -1587,6 +1705,7 @@ mod tests {
             "the help should name the variable without its value"
         );
         assert!(!help.contains("MAPILLARY_TOKEN="));
+        assert!(!help.contains("hide_env_values"));
     }
 
     #[test]

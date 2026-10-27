@@ -217,10 +217,7 @@ fn run_cli() {
     // Parse input arguments
     let mut args: Args = Args::parse();
     args::apply_body_defaults(&mut args);
-    // Caves carve into the filled ground, so they bring it with them.
-    if args.caves {
-        args.fillground = true;
-    }
+    args::apply_feature_needs(&mut args);
 
     // Validate arguments (path requirements differ between Java and Bedrock)
     if let Err(e) = args::validate_args(&args) {
@@ -280,6 +277,15 @@ fn run_cli() {
                     std::process::exit(1);
                 }
             };
+            // Whole ways reach past the downloaded area, and One World would overwrite
+            // every chunk out to them.
+            if args.one_world && args.bbox.is_none() && file_bounds.is_none() {
+                eprintln!(
+                    "{} '{file}' has no bounds; --one-world needs --bbox, or the area would grow to every node in the file.",
+                    "Error:".red().bold()
+                );
+                std::process::exit(1);
+            }
             let bbox = match osm_parser::resolve_bbox(args.bbox, file_bounds, &data) {
                 Some(bbox) => bbox,
                 None => {
@@ -319,6 +325,18 @@ fn run_cli() {
             (None, bbox)
         }
     };
+    // validate_args checks the spawn only against an explicit --bbox.
+    if let (None, Some(lat), Some(lng)) = (args.bbox, args.spawn_lat, args.spawn_lng) {
+        let inside = coordinate_system::geographic::LLPoint::new(lat, lng)
+            .is_ok_and(|p| effective_bbox.contains(&p));
+        if !inside {
+            eprintln!(
+                "{} Spawn point (--spawn-lat, --spawn-lng) must be within the bounding box.",
+                "Error:".red().bold()
+            );
+            std::process::exit(1);
+        }
+    }
 
     // One World: snaps the bbox to the world's chunk grid and holds its lock.
     let mut one_world_paths: Option<PathBuf> = None;
@@ -428,7 +446,7 @@ fn run_cli() {
             .clone()
             .unwrap_or_else(world_utils::get_bedrock_output_directory);
         let (output_path, lvl_name) =
-            world_utils::build_bedrock_output(&effective_bbox, output_dir);
+            world_utils::build_bedrock_output(&effective_bbox, output_dir, args.body);
         (output_path, Some(lvl_name))
     } else if args.luanti {
         let base_dir = args
@@ -466,20 +484,6 @@ fn run_cli() {
             "Created new world at: {}",
             world_path.display().to_string().bright_white().bold()
         );
-        if args.disable_height_limit {
-            if let Err(e) = world_utils::install_tall_datapack(&world_path) {
-                eprintln!(
-                    "{} Failed to install tall-world datapack: {}",
-                    "Error:".red().bold(),
-                    e
-                );
-                std::process::exit(1);
-            }
-            eprintln!(
-                "Note: tall-world datapack installed (requires Minecraft 1.21.4+). \
-                 First load will prompt 'Experimental Features'; world can't be uploaded to Realms."
-            );
-        }
         (world_path, None)
     };
 
@@ -526,6 +530,8 @@ fn run_cli() {
     let fetch_start = std::time::Instant::now();
     let (peak_tx, peaks) = crate::elevation::PeakSource::channel();
     let (raw_data, overture_data, mut ground) = std::thread::scope(|s| {
+        // Owned here, so a panic below drops it and the terrain thread stops waiting.
+        let peak_tx = peak_tx;
         let overture_handle = s.spawn(|| {
             let t = std::time::Instant::now();
             let data = if args.overture && !skip_objects {
@@ -570,15 +576,9 @@ fn run_cli() {
             })
         };
         bench.report("osm_fetch", t.elapsed());
-        // The terrain thread waits on this before fitting its height range.
-        let _ = peak_tx.send(crate::elevation::TerrainHints {
-            peaks: crate::elevation::peaks::peaks_in(&raw_data),
-            tall_models: if args.use_3d {
-                crate::models_3d::wikidata::tall_models_in(&raw_data)
-            } else {
-                Vec::new()
-            },
-        });
+        // The terrain thread waits on this before fitting its height range. Overture's
+        // building heights follow once it is in, for the thread to wait on only if needed.
+        let _ = peak_tx.send(crate::elevation::TerrainHints::from_osm(&raw_data, &args));
 
         // A panicked worker already reported itself through the panic hook, so
         // degrade instead of taking the whole run down with it.
@@ -590,6 +590,15 @@ fn run_cli() {
             (overture::OvertureData::default(), std::time::Duration::ZERO)
         });
         bench.report("overture_fetch", overture_dur);
+        if crate::elevation::TerrainHints::wants_overture(&args) {
+            let _ = peak_tx.send(crate::elevation::TerrainHints::from_overture(
+                &raw_data,
+                &args,
+                &overture_data,
+            ));
+        }
+        // Nothing more follows, so a terrain thread still waiting is let go before the join.
+        drop(peak_tx);
         let (ground, ground_dur) = ground_handle.join().unwrap_or_else(|_| {
             eprintln!("{} Terrain fetch failed.", "Error:".red().bold());
             exit_failed();
@@ -601,8 +610,31 @@ fn run_cli() {
     bench.report("fetch_total", fetch_start.elapsed());
     bench.reset();
 
+    // The terrain fit has settled the build height.
+    let mut args = args;
+    if !args.mapillary_probe {
+        let new_java_world = (world_format == world_editor::WorldFormat::JavaAnvil)
+            .then_some(generation_path.as_path());
+        if let Err(e) = ground::settle_build_height(
+            &mut args,
+            &ground,
+            &effective_bbox,
+            world_format,
+            &disk_dir,
+            new_java_world,
+        ) {
+            eprintln!("{} {}", "Error:".red().bold(), e);
+            // The world made for this run holds nothing yet. A One World is released below.
+            if let (Some(dir), None) = (new_java_world, &args.one_world_run) {
+                let _ = fs::remove_dir_all(dir);
+            }
+            exit_failed();
+        }
+    }
+    let args = args;
+
     // Parse raw data
-    let (mut parsed_elements, mut xzbbox, outline_suppression, part_groups) =
+    let (mut parsed_elements, mut xzbbox, outline_suppression, part_groups, housing_parts) =
         osm_parser::parse_osm_data(
             raw_data,
             effective_bbox,
@@ -615,6 +647,7 @@ fn run_cli() {
     let overture::OvertureData {
         elements: overture_elements,
         hints: overture_hints,
+        ..
     } = overture_data;
 
     // Fill height/levels on OSM buildings that have neither, before the
@@ -793,11 +826,13 @@ fn run_cli() {
         }
     }
 
+    // Generation places the map item at it; an extended One World moves it only to a marker.
+    let extending = args.one_world_run.as_ref().is_some_and(|r| r.extending);
     let generation_options = data_processing::GenerationOptions {
         path: generation_path.clone(),
         format: world_format,
         level_name,
-        spawn_point,
+        spawn_point: if extending { spawn_point } else { java_spawn },
         luanti_game,
         ground_level: args.ground_level,
         facades: facade_job,
@@ -813,6 +848,7 @@ fn run_cli() {
         generation_options,
         outline_suppression,
         part_groups,
+        housing_parts,
     ) {
         Ok(_) => {
             if args.bedrock {
@@ -824,8 +860,7 @@ fn run_cli() {
             }
 
             // For Java Edition, write the spawn point into level.dat
-            let extending = args.one_world_run.as_ref().is_some_and(|r| r.extending);
-            if !args.bedrock && !extending {
+            if world_format == world_editor::WorldFormat::JavaAnvil && !extending {
                 if let (Some((spawn_x, spawn_z)), Some(spawn_y)) = (java_spawn, spawn_y_for_java) {
                     if let Err(e) = world_utils::set_spawn_in_level_dat(
                         &generation_path,
