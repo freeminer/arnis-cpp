@@ -7359,6 +7359,102 @@ bool is_underground_building(const tags_t &tags)
 		   !tags.contains("building:levels");
 }
 
+std::optional<double> mapped_top_m(
+		const tags_t &tags, HeightHint hint, double width_m, double length_m)
+{
+	constexpr double max_plausible_height_m = 1000.0;
+	const bool own = tags.contains("height") || tags.contains("building:levels");
+	const std::string building_type = tags.contains("building")
+			? tags.get("building")
+			: (tags.contains("building:part") ? tags.get("building:part") : "yes");
+	const std::optional<RoofType> shape = tags.contains("roof:shape")
+			? std::optional<RoofType>(parse_roof_type(tags.get("roof:shape")))
+			: std::nullopt;
+	auto positive_tag = [&](const char *key) -> std::optional<double> {
+		const auto value = parse_meter_tag(tags, key);
+		return value && std::isfinite(*value) && *value > 0.0 ? value : std::nullopt;
+	};
+	const auto roof_height = positive_tag("roof:height");
+	const auto roof_angle = [&]() -> std::optional<double> {
+		const auto found = tags.find("roof:angle");
+		if (found == tags.end())
+			return std::nullopt;
+		std::string value = found->second;
+		constexpr std::string_view degree = "\xC2\xB0";
+		if (value.ends_with(degree))
+			value.resize(value.size() - degree.size());
+		const auto angle = strict_parse::f64(value);
+		return angle && *angle > 0.0 && *angle < 90.0 ? angle : std::nullopt;
+	}();
+	std::optional<double> height;
+	if (own) {
+		if (tags.contains("height"))
+			height = parse_building_height_tag(tags);
+	} else {
+		height = hint.height_m;
+		if (height && (!std::isfinite(*height) || *height > max_plausible_height_m))
+			height.reset();
+	}
+	if (height) {
+		const bool hall = building_type == "industrial" || building_type == "warehouse" ||
+				building_type == "hangar";
+		if (shape == RoofType::Flat || (shape && roof_height))
+			return height;
+		if (!shape && !roof_height && !hall && !tags.contains("roof:angle"))
+			return height;
+		if (!shape && roof_height)
+			return *height + *roof_height;
+		if (shape && !roof_height &&
+				(*shape == RoofType::Gabled || *shape == RoofType::Hipped ||
+						*shape == RoofType::HalfHipped || *shape == RoofType::Gambrel ||
+						*shape == RoofType::Pyramidal || *shape == RoofType::Mansard) &&
+				!tags.contains("roof:angle"))
+			return height;
+	}
+	if (!height) {
+		std::optional<double> levels;
+		if (own) {
+			if (const auto found = tags.find("building:levels"); found != tags.end())
+				levels = strict_parse::f64(found->second);
+		} else {
+			levels = hint.levels;
+		}
+		if (!levels || !std::isfinite(*levels) || *levels < 1.0)
+			return std::nullopt;
+		int cycle = floor_cycle_for(building_type, tags, false);
+		if (*levels > 7.0 && building_type == "yes" && cycle == 3 &&
+				!tags.contains("building:part"))
+			cycle = 4;
+		const double walls = *levels * cycle + GROUND_FLOOR_BONUS;
+		if (walls > max_plausible_height_m)
+			return std::nullopt;
+		if (shape == RoofType::Flat)
+			return walls;
+		if (roof_height)
+			return walls + *roof_height;
+		height = walls;
+	}
+
+	const double half = std::min(width_m, length_m) * 0.5;
+	double rise = std::min(14.0, 0.9 * *height);
+	if (shape == RoofType::Dome)
+		rise = std::max(0.8 * half, 1.0);
+	else if (shape == RoofType::Cone)
+		rise = std::min(std::max(1.2 * half, 2.0), 2.0 * *height);
+	else if (shape == RoofType::Onion)
+		rise = std::min(std::max(1.8 * half, 6.0), 2.0 * *height);
+	else if (roof_angle) {
+		double run = std::max(width_m, length_m) * 0.5;
+		if (shape == RoofType::Skillion)
+			run = std::hypot(width_m, length_m);
+		else if (shape == RoofType::Hipped || shape == RoofType::Mansard ||
+				shape == RoofType::Pyramidal)
+			run = half;
+		rise = std::tan(*roof_angle * std::numbers::pi / 180.0) * run;
+	}
+	return *height + rise;
+}
+
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
@@ -12995,7 +13091,8 @@ void generate_building_from_relation(WorldEditor &editor,
 		const RoadMaskBitmap *road_mask,
 		const BuildingFootprintBitmap *building_footprints,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
-				*group_members)
+				*group_members,
+		const std::unordered_set<std::uint64_t> *housing_relation_parts)
 {
 	if (is_underground_building(relation.tags)) {
 		return;
@@ -13041,10 +13138,12 @@ void generate_building_from_relation(WorldEditor &editor,
 	}
 
 	for (auto &merged_way : outer_ways) {
+		const bool housing =
+				housing_relation_parts && housing_relation_parts->contains(relation.id);
 		generate_buildings(&editor, merged_way, args, relation_levels, flood_fill_cache,
 				building_passages, hole_polygons.empty() ? nullptr : &hole_polygons,
-				std::nullopt, road_mask, building_footprints, group_members,
-				interior_index);
+				osm_parser::seed_with_residential_mark(merged_way.id, housing), road_mask,
+				building_footprints, group_members, interior_index);
 	}
 }
 

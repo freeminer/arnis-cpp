@@ -5,6 +5,7 @@
 #include "overture/cache.h"
 #include "overture/pmtiles.h"
 #include "retrieve_data.h"
+#include "element_processing/buildings.h"
 #include "net.h"
 #include "../../http.h"
 
@@ -36,6 +37,7 @@
 #include <limits>
 #include <memory>
 #include <mutex>
+#include <numbers>
 #include <nlohmann/json.hpp>
 #include <optional>
 #include <queue>
@@ -851,27 +853,35 @@ void OvertureHints::merge(const OvertureHints &other)
 		insert(key, hint);
 }
 
+std::optional<OsmAttributeHint> OvertureHints::hint_for(
+		OvertureOsmRef key, const tags_t &tags) const
+{
+	if (!(tags.contains("building") || tags.contains("building:part")) ||
+			tags.contains("height") || tags.contains("building:levels"))
+		return std::nullopt;
+	const auto found = hints_.find(key);
+	return found == hints_.end() ? std::nullopt
+								 : std::optional<OsmAttributeHint>(found->second);
+}
+
 std::size_t OvertureHints::apply(std::vector<ProcessedElement> &elements) const
 {
 	std::size_t enriched = 0;
 	for (auto &element : elements) {
 		if (element.is_node())
 			continue;
-		const auto hint = hints_.find({element.id(), element.is_relation()});
-		if (hint == hints_.end())
-			continue;
 		tags_t *tags = nullptr;
 		if (element.is_way())
 			tags = &std::get<ProcessedWay>(static_cast<variant_t &>(element)).tags;
 		else
 			tags = &std::get<ProcessedRelation>(static_cast<variant_t &>(element)).tags;
-		if (!(tags->contains("building") || tags->contains("building:part")) ||
-				tags->contains("height") || tags->contains("building:levels"))
+		const auto hint = hint_for({element.id(), element.is_relation()}, *tags);
+		if (!hint)
 			continue;
-		if (hint->second.num_floors)
-			(*tags)["building:levels"] = std::to_string(*hint->second.num_floors);
-		if (hint->second.height_m) {
-			(*tags)["height"] = format_one_decimal(*hint->second.height_m);
+		if (hint->num_floors)
+			(*tags)["building:levels"] = std::to_string(*hint->num_floors);
+		if (hint->height_m) {
+			(*tags)["height"] = format_one_decimal(*hint->height_m);
 		}
 		(*tags)["arnis:height_source"] = "overture_maps";
 		++enriched;
@@ -2316,8 +2326,39 @@ OvertureData fetch_overture_data_from(const BuildingSource &source,
 				continue;
 			if (out.elements.size() >= maximum)
 				continue;
-			if (auto way = overture_building_to_way(building, bbox, projection_spec))
+			if (auto way = overture_building_to_way(building, bbox, projection_spec)) {
+				// Rust counts Overture-mapped tall buildings when fitting the
+				// elevation band. Use the full source footprint for roof extent,
+				// even when the rendered way was clipped to the requested bbox.
+				double min_lat = std::numeric_limits<double>::infinity();
+				double max_lat = -min_lat;
+				double min_lon = min_lat;
+				double max_lon = -min_lat;
+				for (const auto &[lon, lat] : building.exterior_ring) {
+					if (!std::isfinite(lat) || !std::isfinite(lon))
+						continue;
+					min_lat = std::min(min_lat, lat);
+					max_lat = std::max(max_lat, lat);
+					min_lon = std::min(min_lon, lon);
+					max_lon = std::max(max_lon, lon);
+				}
+				if (min_lat <= max_lat && min_lon <= max_lon) {
+					constexpr double meters_per_degree = 111320.0;
+					const double middle_lat =
+							(min_lat + max_lat) * 0.5 * std::numbers::pi / 180.0;
+					const double width_m = (max_lon - min_lon) * meters_per_degree *
+										   std::cos(middle_lat);
+					const double length_m = (max_lat - min_lat) * meters_per_degree;
+					if (const auto top_m = buildings::mapped_top_m(
+								way->tags, {}, width_m, length_m);
+							top_m && *top_m * projection_spec.scale > 13.0) {
+						for (const auto &[lon, lat] : building.exterior_ring)
+							if (std::isfinite(lat) && std::isfinite(lon))
+								out.tall_structures.push_back({lat, lon, *top_m});
+					}
+				}
 				out.elements.push_back(ProcessedElement::FromWay(*way));
+			}
 		}
 		out.hints.merge(collection.hints);
 	} catch (...) {

@@ -147,6 +147,20 @@ bool check_run_size(const Args &args, const geographic::LLBBox &bbox, WorldForma
 	return true;
 }
 
+bool check_disk_for_extended_height(const Args &args, const geographic::LLBBox &bbox,
+		WorldFormat format, const std::filesystem::path &dir, std::string *error)
+{
+	const double area = blocks_km2(args, bbox);
+	auto options = WorldSizeOptions::of(args);
+	auto tall_options = options;
+	tall_options.tall = true;
+	const auto needed = estimated_world_bytes(area, format, tall_options);
+	const auto before = estimated_world_bytes(area, format, options);
+	if (needed <= before)
+		return true;
+	return check_disk_space(dir, needed, error);
+}
+
 namespace
 {
 struct HeldSessionLock
@@ -1045,9 +1059,14 @@ std::string get_area_name_for_bedrock(const geographic::LLBBox &bbox)
 }
 
 std::pair<std::filesystem::path, std::string> build_bedrock_output(
-		const geographic::LLBBox &bbox, const std::filesystem::path &output_dir)
+		const geographic::LLBBox &bbox, const std::filesystem::path &output_dir,
+		CelestialBody body)
 {
-	const auto safe_name = sanitize_for_filename(get_area_name_for_bedrock(bbox));
+	// Reverse geocoding lunar/planetary coordinates can produce a misleading
+	// terrestrial place name. Match Rust by naming those exports after the body.
+	const auto raw_name = is_earth(body) ? get_area_name_for_bedrock(bbox)
+										 : std::string(celestial_body_display_name(body));
+	const auto safe_name = sanitize_for_filename(raw_name);
 	return {output_dir / ("Arnis " + safe_name + ".mcworld"),
 			"Arnis World: " + safe_name};
 }

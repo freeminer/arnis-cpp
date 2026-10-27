@@ -587,8 +587,9 @@ std::uint64_t per_region_estimate_mb(bool fillground)
 	constexpr std::uint64_t BASE_REGION_MB = 26;
 	constexpr int VANILLA_SPAN =
 			world_editor::DEFAULT_MAX_Y - world_editor::DEFAULT_MIN_Y;
-	const auto span = static_cast<std::uint64_t>(std::max(
-			world_editor::world_max_y() - world_editor::terrain_floor_y(), VANILLA_SPAN));
+	const auto span = static_cast<std::uint64_t>(
+			std::max(world_editor::terrain_top_y() - world_editor::terrain_floor_y(),
+					VANILLA_SPAN));
 	return fillground ? BASE_REGION_MB * span / static_cast<std::uint64_t>(VANILLA_SPAN)
 					  : BASE_REGION_MB;
 }
@@ -1428,12 +1429,9 @@ bool generate_world(WorldEditor &editor,
 	elevation::spawn_throttled_cleanup(cache::base_directory());
 
 	Args effective_args = args_;
-	// Rust's CLI and GUI both make cave generation imply underground fill.
-	// Keep direct C++ library callers on the same path as well.
-	if (effective_args.caves)
-		effective_args.fillground = true;
 	effective_args.apply_mode_defaults();
 	effective_args.apply_body_defaults();
+	effective_args.apply_feature_needs();
 	// Rust no longer exposes a roof-generation toggle: roof handling is always
 	// part of building generation. Keep the legacy C++ field for source
 	// compatibility, but normalize it at the pipeline boundary.
@@ -1531,9 +1529,10 @@ bool generate_world(WorldEditor &editor,
 	// placements.  Direct callers of generate_world do not pass through the
 	// GenerationOptions adapter, so set the editor policy here as well.
 	editor.set_place_schematics(args.use_3d);
-	// Rust initializes these on every generation run; do not inherit stale
-	// game settings when a backend reuses its WorldEditor instance.
-	editor.set_game_settings(args.gamemode, args.world_time);
+	// A One World extension keeps the first area's level.dat settings intact;
+	// standalone/new worlds receive this run's requested values.
+	if (!(args.one_world_run && args.one_world_run->extending))
+		editor.set_game_settings(args.gamemode, args.world_time);
 	editor.set_projection_info(projection::to_string(args.projection), args.scale);
 	// Structure schematics and cave packs are distinct asset families. Keep
 	// their roots separate so the installed Arnis assets directory can be
@@ -1560,7 +1559,8 @@ bool generate_world(WorldEditor &editor,
 	// Rust only enables Voxy-driven baked lighting for Java Anvil worlds.
 	// Keep the same format gate for direct C++ callers as well.
 	editor.set_bake_lighting(args.bake_lighting || (args.voxy_lod && java_format));
-	editor.set_start_with_map(args.map_item);
+	if (!(args.one_world_run && args.one_world_run->extending))
+		editor.set_start_with_map(args.map_item);
 	editor.set_map_decals(java_format);
 	int first_decal_map_id = decals::DecalRegistry::FIRST_ID;
 	if (java_format && args.one_world_run) {
@@ -1626,12 +1626,35 @@ bool generate_world(WorldEditor &editor,
 	const auto [ground_origin_x, ground_origin_z] = editor.get_min_coords();
 	editor.set_ground_origin(ground_origin_x, ground_origin_z);
 	editor.reserve_ground_level_cache();
-	world_editor::set_world_bounds(extended_min_y_for(args), world_top_y_for(args));
+	const bool extended_world_height = args.disable_height_limit ||
+									   (editor.ground && editor.ground->extended_ceiling);
+	if (extended_world_height && !args.disable_height_limit) {
+		const auto geo = editor.geographic_bounds();
+		const geographic::LLBBox bbox(geo[0], geo[2], geo[1], geo[3]);
+		const auto world_path = args.one_world_run
+										? args.one_world_run->world_dir
+										: (args.path ? std::filesystem::path(*args.path)
+													 : editor.output_path);
+		if (!world_path.empty()) {
+			std::string disk_error;
+			if (!world_utils::check_disk_for_extended_height(args, bbox,
+						static_cast<WorldFormat>(editor.get_generation_format()),
+						world_path, &disk_error)) {
+				editor.report_generation_error("run refused: " + disk_error);
+				std::cerr << "Earth: Arnis generation refused: " << disk_error << '\n';
+				return false;
+			}
+		}
+	}
+	Args world_height_args = args;
+	world_height_args.disable_height_limit = extended_world_height;
+	world_editor::set_world_bounds(
+			extended_min_y_for(world_height_args), world_top_y_for(world_height_args));
 	if (editor.ground) {
 		editor.ground->set_celestial_body(args.body);
 		editor.ground->set_winter(args.winter);
 		editor.ground->set_extended_ceiling(
-				editor.ground->elevation_enabled && args.disable_height_limit &&
+				extended_world_height &&
 				extended_max_y_for(args) > world_editor::DEFAULT_MAX_Y);
 	}
 	int area_floor = area_floor_for(editor.ground, args);
@@ -3074,8 +3097,8 @@ bool generate_world(WorldEditor &editor,
 						buildings::generate_building_from_relation(editor, rel, args,
 								flood_fill_cache, clip_bbox, building_passages,
 								interior_use_index ? &*interior_use_index : nullptr,
-								&road_mask, &building_footprints,
-								&building_group_members);
+								&road_mask, &building_footprints, &building_group_members,
+								&building_data.housing_relation_parts);
 					}
 					break;
 				case element_processing::RelationArea::Water: {
@@ -3655,7 +3678,7 @@ bool generate_world(WorldEditor &editor,
 	// Rust installs this pack whenever extended Java heights are selected. The
 	// generated sections are otherwise outside the vanilla dimension's bounds
 	// and are discarded or inaccessible when Minecraft opens the world.
-	if (java_world && args.disable_height_limit && !extending_world &&
+	if (java_world && extended_world_height && !extending_world &&
 			!java_world_path.empty()) {
 		std::string error;
 		if (!world_utils::install_tall_datapack(java_world_path, &error)) {

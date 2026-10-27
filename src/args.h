@@ -95,6 +95,7 @@ inline constexpr double MIN_HEIGHT_MULTIPLIER = 0.1;
 inline constexpr double MAX_HEIGHT_MULTIPLIER = 10.0;
 inline constexpr std::int64_t DEFAULT_WORLD_TIME = 6000;
 inline constexpr std::int64_t MIDNIGHT_TICKS = 18000;
+inline constexpr int DISASTER_GROUND_LEVEL = -40;
 
 inline bool valid_scale(double scale)
 {
@@ -216,6 +217,8 @@ struct Args
 	bool bedrock{false};
 	// Select the Luanti-compatible output path when embedding Arnis as a library.
 	bool luanti{false};
+	// Keep terrain under the vanilla ceiling instead of automatically extending it.
+	bool vanilla_height{false};
 
 	// Downloader method (requests/curl/wget) (optional)
 	std::string downloader{std::string("requests")};
@@ -271,6 +274,7 @@ struct Args
 		post_apocalyptic = false;
 		scale = celestial_world_scale(body);
 		mode = GenerationMode::TerrainOnly;
+		world_type = WorldType::Void;
 		overture = false;
 		canopy_height = false;
 		use_3d = false;
@@ -283,6 +287,7 @@ struct Args
 		building_facades = false;
 		mapillary_facades = false;
 		disable_height_limit = false;
+		vanilla_height = true;
 		// Preserve an explicitly selected time; otherwise airless worlds use
 		// Minecraft midnight (Rust's MIDNIGHT_TICKS).
 		if (world_time == DEFAULT_WORLD_TIME)
@@ -310,7 +315,18 @@ struct Args
 			interior = false;
 			building_facades = false;
 			mapillary_facades = false;
+			signage = SignageLevel::None;
+			// Blueprint mode omits signal nodes; keep vehicles from stopping at
+			// traffic lights that will not be generated.
+			traffic_lights = false;
 		}
+	}
+	void apply_feature_needs()
+	{
+		if (caves || disasters)
+			fillground = true;
+		if (disasters)
+			ground_level = std::max(ground_level, DISASTER_GROUND_LEVEL);
 	}
 	bool mapillary_facades_wanted() const
 	{
@@ -401,6 +417,7 @@ struct Args
 	// Minecraft-style cave generation options.  The CLI adapter may populate these;
 	// the generator keeps them optional so existing library callers remain stable.
 	bool caves{false};
+	bool disasters{false};
 	std::optional<std::string> cave_biomes{std::nullopt};
 	std::optional<std::string> cave_asset_pack{std::nullopt};
 	// Rust's diagnostic cave-zone preview controls. The renderer itself is
@@ -433,6 +450,8 @@ struct Args
 			return "invalid scale, height multiplier, or timeout";
 		if (world_time < 0 || world_time >= 24000)
 			return "world time must be between 0 and 23999";
+		if (vanilla_height && disable_height_limit)
+			return "--vanilla-height conflicts with --disable-height-limit";
 		if (bedrock && luanti)
 			return "Bedrock and Luanti output cannot both be enabled";
 		const std::pair<bool, const char *> java_pack_extras[]{
@@ -440,6 +459,7 @@ struct Args
 				{discoveries, "--discoveries"},
 				{traffic_lights, "--traffic-lights"},
 				{zombie_outbreak, "--zombie-outbreak"},
+				{disasters, "--disasters"},
 				{body_gravity, "--body-gravity"},
 				{moving_vehicles_enabled(), "--moving-vehicles"},
 		};

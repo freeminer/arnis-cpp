@@ -14,6 +14,7 @@
 #include "coordinate_system/geographic/llbbox.h"
 #include "projection/projection_spec.h"
 #include "elevation/cache.h"
+#include "elevation/peaks.h"
 #include "overture/pmtiles.h"
 
 namespace arnis::overture
@@ -67,6 +68,10 @@ public:
 	bool empty() const { return hints_.empty(); }
 	void insert(OvertureOsmRef key, OsmAttributeHint hint);
 	void merge(const OvertureHints &other);
+	// Return an Overture height hint only when the OSM feature is an untagged
+	// building. Existing OSM height/levels remain authoritative.
+	std::optional<OsmAttributeHint> hint_for(
+			OvertureOsmRef key, const tags_t &tags) const;
 	std::size_t apply(std::vector<ProcessedElement> &elements) const;
 };
 
@@ -103,6 +108,8 @@ struct OvertureData
 	OvertureData() = default;
 	std::vector<ProcessedElement> elements;
 	OvertureHints hints;
+	// Overture footprints tall enough to affect the fitted terrain height.
+	std::vector<elevation::TallModel> tall_structures;
 	std::size_t apply_hints(std::vector<ProcessedElement> &osm_elements) const;
 	// Apply hints, remove spatial duplicates, then append the supplemental
 	// footprints. Call before preparing flood-fill and building-footprint data.

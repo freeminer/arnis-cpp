@@ -8,6 +8,7 @@
 #include <optional>
 #include <memory>
 #include "coordinate_system/geographic/llbbox.h"
+#include "celestial.h"
 namespace arnis
 {
 struct Args;
@@ -42,6 +43,9 @@ bool check_disk_space(const std::filesystem::path &dir, std::uint64_t needed,
 		std::string *error = nullptr);
 bool check_run_size(const Args &args, const geographic::LLBBox &bbox, WorldFormat format,
 		const std::filesystem::path &dir, RunSizeError *error = nullptr);
+bool check_disk_for_extended_height(const Args &args, const geographic::LLBBox &bbox,
+		WorldFormat format, const std::filesystem::path &dir,
+		std::string *error = nullptr);
 
 struct WorldLayout
 {
@@ -127,6 +131,7 @@ std::string unique_world_folder_name(
 		const std::filesystem::path &base_path, const std::string &custom_name = {});
 std::string get_area_name_for_bedrock(const geographic::LLBBox &bbox);
 std::pair<std::filesystem::path, std::string> build_bedrock_output(
-		const geographic::LLBBox &bbox, const std::filesystem::path &output_dir);
+		const geographic::LLBBox &bbox, const std::filesystem::path &output_dir,
+		CelestialBody body = CelestialBody::Earth);
 }
 }

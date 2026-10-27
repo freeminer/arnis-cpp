@@ -1278,8 +1278,13 @@ bool is_lift(const tags_t &tags)
 CoordinateBitmap clear_corridors(
 		const std::vector<ProcessedElement> &elements, const XZBBox &bounds)
 {
-	CoordinateBitmap map;
-	std::vector<std::pair<const ProcessedWay *, Kind>> lifts;
+	struct Lift
+	{
+		const ProcessedWay *way;
+		double half;
+		double reach;
+	};
+	std::vector<Lift> lifts;
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
@@ -1288,19 +1293,41 @@ CoordinateBitmap clear_corridors(
 			continue;
 		if (const auto kind = kind_of(way.tags);
 				kind && *kind != Kind::MagicCarpet && *kind != Kind::RopeTow)
-			lifts.emplace_back(&way, *kind);
+			lifts.push_back({&way, rope_gauge(*kind, way.tags) / 2.0 + 6.0,
+					std::max(terminal_mouth(*kind, way.tags), 4.0) + 8.0});
 	}
 	if (lifts.empty())
-		return map;
-	map = CoordinateBitmap(bounds);
-	for (const auto &[way, kind] : lifts) {
-		const double half = rope_gauge(kind, way->tags) / 2.0 + 6.0;
+		return CoordinateBitmap::new_empty();
+	// The Rust generator allocates only the lift bands, clipped to the world;
+	// a full-world bitmap wastes several MiB even when there are no nearby lifts.
+	int min_x = std::numeric_limits<int>::max();
+	int min_z = std::numeric_limits<int>::max();
+	int max_x = std::numeric_limits<int>::min();
+	int max_z = std::numeric_limits<int>::min();
+	for (const auto &lift : lifts) {
+		const int pad = static_cast<int>(std::ceil(std::max(lift.half, lift.reach)));
+		for (const auto &node : lift.way->nodes) {
+			min_x = std::min(min_x, node.x - pad);
+			min_z = std::min(min_z, node.z - pad);
+			max_x = std::max(max_x, node.x + pad);
+			max_z = std::max(max_z, node.z + pad);
+		}
+	}
+	min_x = std::max(min_x, bounds.min_x());
+	min_z = std::max(min_z, bounds.min_z());
+	max_x = std::min(max_x, bounds.max_x());
+	max_z = std::min(max_z, bounds.max_z());
+	if (min_x > max_x || min_z > max_z)
+		return CoordinateBitmap::new_empty();
+	const XZBBox corridor_bounds(min_x, min_z, max_x, max_z);
+	CoordinateBitmap map(corridor_bounds);
+	for (const auto &lift : lifts) {
+		const auto *way = lift.way;
 		for (std::size_t i = 1; i < way->nodes.size(); ++i)
 			mark_band(map, way->nodes[i - 1].x, way->nodes[i - 1].z, way->nodes[i].x,
-					way->nodes[i].z, half);
-		const double reach = std::max(terminal_mouth(kind, way->tags), 4.0) + 8.0;
+					way->nodes[i].z, lift.half);
 		for (const auto *node : {&way->nodes.front(), &way->nodes.back()})
-			mark_band(map, node->x, node->z, node->x, node->z, reach);
+			mark_band(map, node->x, node->z, node->x, node->z, lift.reach);
 	}
 	return map;
 }

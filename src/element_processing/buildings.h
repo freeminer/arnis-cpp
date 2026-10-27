@@ -1,6 +1,7 @@
 #pragma once
 #include <optional>
 #include <unordered_map>
+#include <unordered_set>
 #include <vector>
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
@@ -94,6 +95,17 @@ struct HolePolygon
 	bool add_walls{true};
 };
 
+struct HeightHint
+{
+	std::optional<double> height_m;
+	std::optional<double> levels;
+};
+
+// Highest wall/roof point this generator can produce above the footprint.
+// Used by elevation fitting for Overture hints before block placement.
+std::optional<double> mapped_top_m(
+		const tags_t &tags, HeightHint hint, double width_m, double length_m);
+
 // Return the clipped, merged outer rings with the same synthetic IDs used by
 // relation building generation. Consumers that attach per-wall metadata must
 // project against these exact generated ways.
@@ -110,7 +122,8 @@ void generate_building_from_relation(WorldEditor &editor,
 		const RoadMaskBitmap *road_mask = nullptr,
 		const BuildingFootprintBitmap *building_footprints = nullptr,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
-				*group_members = nullptr);
+				*group_members = nullptr,
+		const std::unordered_set<std::uint64_t> *housing_relation_parts = nullptr);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels);

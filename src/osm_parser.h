@@ -65,6 +65,10 @@ inline bool residential_group_from_seed(std::uint64_t seed)
 {
 	return (seed & RESIDENTIAL_GROUP_BIT) != 0;
 }
+inline std::uint64_t seed_with_residential_mark(std::uint64_t seed, bool residential)
+{
+	return residential ? (seed | RESIDENTIAL_GROUP_BIT) : (seed & ~RESIDENTIAL_GROUP_BIT);
+}
 inline std::uint64_t seed_without_residential_mark(std::uint64_t seed)
 {
 	return seed & ~RESIDENTIAL_GROUP_BIT;

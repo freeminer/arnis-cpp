@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <functional>
 #include <optional>
 #include <string>
 #include <vector>
@@ -28,6 +29,12 @@ void chamfer_3_4_dt(
 // the water sub-region instead of scanning the complete world rectangle.
 std::pair<int, int> grid_span_to_block_span(std::size_t grid_lo, std::size_t grid_hi,
 		std::size_t world_dim, std::size_t grid_dim);
+
+// Clear a connected tree while restricting traversal to selected map columns.
+// The predicate is evaluated before reading or mutating the block.
+void clear_tree_within(WorldEditor &editor, int x, int y, int z,
+		const std::function<bool(int, int)> &keep_column);
+void clear_tree_from(WorldEditor &editor, int x, int y, int z);
 
 class BigWaterField
 {

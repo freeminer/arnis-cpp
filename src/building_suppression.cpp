@@ -371,6 +371,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			has_part = true;
 			if (member.type == "relation") {
 				has_relation_part = true;
+				if (housing)
+					out.housing_relation_parts.insert(member.id);
 				continue;
 			}
 			out.part_groups[member.id] = osm_parser::seed_with_metadata(
@@ -599,8 +601,16 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 										 relation_outlines[*best].id})
 				best = i;
 		}
-		if (part.way && best)
-			out.part_groups.try_emplace(*part.way, relation_outlines[*best].seed);
+		if (best) {
+			const auto &outline = relation_outlines[*best];
+			if (part.way) {
+				out.part_groups.try_emplace(*part.way, outline.seed);
+			} else if (osm_parser::residential_group_from_seed(outline.seed)) {
+				// Rust's spatial relation-part pass carries residential context for
+				// the relation itself; unlike a part way it cannot use PartGroups.
+				out.housing_relation_parts.insert(part.id);
+			}
+		}
 	}
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i)
 		if (relation_coverage[i] / relation_outlines[i].area >= MIN_PART_COVERAGE)

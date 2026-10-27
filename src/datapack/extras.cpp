@@ -1,12 +1,14 @@
 #include "extras.h"
 
 #include "mod.h"
+#include "../fm_datapack_disasters.h"
 
 #include "../args.h"
 #include "../assets_root.h"
 #include "../element_processing/cars.h"
 #include "../element_processing/trains.h"
 #include "../world_utils.h"
+#include "../world_editor/floor_state.h"
 
 #include <nlohmann/json.hpp>
 
@@ -130,6 +132,8 @@ json pack_metadata(const std::vector<Feature> &features)
 			active.emplace_back("pause menu");
 		else if (feature.name == std::string("outbreak"))
 			active.emplace_back("zombie outbreak");
+		else if (feature.name == std::string("disaster"))
+			active.emplace_back("disasters");
 	}
 	json overlays = json::array();
 	for (const auto [format, directory] :
@@ -266,11 +270,12 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 	const bool has_discoveries = args.discoveries && !places.empty();
 	const bool menu = args.pause_menu;
 	const bool outbreak = args.zombie_outbreak;
+	const bool disasters = args.disasters;
 	if (!gravity && !traffic && !moving_cars && !moving_trains && !args.discoveries &&
-			!menu && !outbreak)
+			!menu && !outbreak && !disasters)
 		return true;
 	const std::vector<Feature> features{{"gravity", gravity}, {"traffic", traffic},
-			{"cars", moving_cars}, {"trains", moving_trains},
+			{"cars", moving_cars}, {"trains", moving_trains}, {"disaster", disasters},
 			{"discoveries", args.discoveries}, {"menu", menu}, {"outbreak", outbreak}};
 	const auto source_root = assets::path("minecraft/datapack_extras");
 	const auto target_root = world / "datapacks" / PACK_NAME;
@@ -326,7 +331,7 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		for (const auto &[path, contents] : discoveries::advancement_files(area, places))
 			if (!write_text(target_root / path, contents, error))
 				return false;
-	if (menu || outbreak) {
+	if (menu || outbreak || disasters) {
 		json actions = json::array();
 		auto spawn = requested_spawn;
 		if (!spawn)
@@ -355,6 +360,11 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 			dialogs.push_back({{"label", "Zombie Outbreak"},
 					{"tooltip", "Restart, skip to night or stop"},
 					{"action", {{"type", "show_dialog"}, {"dialog", "arnis:outbreak"}}}});
+		if (disasters)
+			dialogs.push_back({{"label", "Disasters"},
+					{"tooltip", "Restart, skip to the next disaster or stop"},
+					{"action",
+							{{"type", "show_dialog"}, {"dialog", "arnis:disasters"}}}});
 		dialogs.push_back({{"label", "Credits"},
 				{"tooltip", "Where this world's data comes from"},
 				{"action", {{"type", "show_dialog"}, {"dialog", "arnis:credits"}}}});
@@ -363,9 +373,17 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 			return write_text(target_root / relative, value.dump(2) + "\n", error);
 		};
 		const std::string dialog_root = "ov80/data/arnis/dialog/";
-		const char *pause_dialog = menu ? "arnis:menu" : "arnis:outbreak";
+		json pause_additions = json::array();
+		if (menu) {
+			pause_additions.push_back("arnis:menu");
+		} else {
+			if (outbreak)
+				pause_additions.push_back("arnis:outbreak");
+			if (disasters)
+				pause_additions.push_back("arnis:disasters");
+		}
 		if (!write_json("ov80/data/minecraft/tags/dialog/pause_screen_additions.json",
-					json{{"values", {pause_dialog}}}))
+					json{{"values", std::move(pause_additions)}}))
 			return false;
 		if (menu) {
 			const auto menu_dialog = json{{"type", "minecraft:multi_action"},
@@ -476,6 +494,15 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 																				"trigger arnis.ob.ctl set 3"}}}}})},
 								{"exit_action", back_to_menu(menu)}, {"pause", false}}))
 			return false;
+		if (disasters) {
+			const disasters::Plan plan(args.body, world_editor::terrain_floor_y(),
+					world_editor::world_max_y());
+			if (!write_json(dialog_root + "disasters.json", plan.dialog(area, menu)))
+				return false;
+			for (const auto &[path, contents] : plan.files(area))
+				if (!write_text(target_root / path, contents, error))
+					return false;
+		}
 		std::string destinations_text;
 		auto append_destination = [&](std::size_t id, const std::string &name, int x,
 										  int z, std::optional<int> ground_y) {
@@ -555,7 +582,7 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 	}
 	if (!world_utils::enable_datapack_in_level_dat(world, PACK_NAME, error))
 		return false;
-	if (outbreak && !world_utils::start_in_survival(world, error))
+	if ((outbreak || disasters) && !world_utils::start_in_survival(world, error))
 		return false;
 	return true;
 }

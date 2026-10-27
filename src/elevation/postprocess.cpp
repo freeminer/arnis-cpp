@@ -1769,8 +1769,6 @@ constexpr double LOWEST_LAND_M = -430.0;
 constexpr double HIGHEST_LAND_M = 8849.0;
 constexpr double SOFT_TOP_BLOCKS = 800.0;
 constexpr double HEADROOM_MAX_BLOCKS = 96.0;
-constexpr int TERRAIN_HEIGHT_BUFFER = 15;
-
 int terrain_ceiling(bool disable_height_limit, int extended_max_y)
 {
 	return (disable_height_limit ? extended_max_y : 319) - TERRAIN_HEIGHT_BUFFER;
@@ -2088,6 +2086,45 @@ int top_reserve_for(const std::vector<std::vector<double>> &heights,
 			short_of_fit = mid;
 	}
 	return fits;
+}
+
+std::optional<std::string> vanilla_overflow(
+		const std::vector<std::vector<double>> &heights,
+		const std::vector<std::pair<double, double>> &tops, double scale,
+		double model_scale, int ground_level)
+{
+	constexpr int vanilla_ceiling = 319 - TERRAIN_HEIGHT_BUFFER;
+	constexpr int vanilla_top = 319 - 2;
+	double lo = std::numeric_limits<double>::max();
+	double hi = std::numeric_limits<double>::lowest();
+	for (const auto &row : heights)
+		for (const double value : row)
+			if (std::isfinite(value)) {
+				lo = std::min(lo, value);
+				hi = std::max(hi, value);
+			}
+	const double range = lo < hi ? hi - lo : 0.0;
+	const double relief = range * scale;
+	const int room = vanilla_ceiling - ground_level;
+	if (room < 0 || relief > room) {
+		std::ostringstream message;
+		message << "the terrain needs " << std::ceil(relief)
+				<< " blocks, vanilla Minecraft holds " << std::max(0, room)
+				<< " above the base";
+		return message.str();
+	}
+	double top = std::numeric_limits<double>::lowest();
+	for (const auto &[ground_m, height_m] : tops) {
+		const double lift = range > 0.0 ? (ground_m - lo) * scale : 0.0;
+		top = std::max(top, ground_level + lift + height_m * model_scale);
+	}
+	if (top > vanilla_top) {
+		std::ostringstream message;
+		message << "a building or landmark reaches Y " << std::ceil(top)
+				<< ", vanilla Minecraft has room up to Y " << vanilla_top;
+		return message.str();
+	}
+	return std::nullopt;
 }
 
 std::tuple<std::vector<std::vector<double>>, double, double, int> scale_to_minecraft(

@@ -1,15 +1,19 @@
 #include "peaks.h"
 
 #include "../coordinate_system/geographic/llbbox.h"
+#include "../element_processing/buildings.h"
 #include "../models_3d/wikidata/wikidata_index.h"
 #include "../osm_parser.h"
+#include "../overture.h"
 #include "../strict_parse.h"
 
 #include <algorithm>
 #include <cmath>
 #include <limits>
+#include <numbers>
 #include <optional>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -302,9 +306,173 @@ std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data)
 	return result;
 }
 
+bool is_building_feature(const tags_t &tags)
+{
+	const auto building = tags.find("building");
+	if (building != tags.end() && !building->second.empty() && building->second != "no")
+		return true;
+	const auto part = tags.find("building:part");
+	return part != tags.end() && !part->second.empty() && part->second != "no";
+}
+
+std::pair<double, double> footprint_extent_m(
+		const std::vector<std::pair<double, double>> &points)
+{
+	if (points.empty())
+		return {};
+	double min_lat = std::numeric_limits<double>::max();
+	double max_lat = std::numeric_limits<double>::lowest();
+	double min_lon = std::numeric_limits<double>::max();
+	double max_lon = std::numeric_limits<double>::lowest();
+	for (const auto &[lat, lon] : points) {
+		if (!std::isfinite(lat) || !std::isfinite(lon))
+			continue;
+		min_lat = std::min(min_lat, lat);
+		max_lat = std::max(max_lat, lat);
+		min_lon = std::min(min_lon, lon);
+		max_lon = std::max(max_lon, lon);
+	}
+	if (min_lat > max_lat)
+		return {};
+	constexpr double meters_per_degree = 111320.0;
+	const double middle_lat = (min_lat + max_lat) * 0.5 * std::numbers::pi / 180.0;
+	return {(max_lon - min_lon) * meters_per_degree * std::cos(middle_lat),
+			(max_lat - min_lat) * meters_per_degree};
+}
+
+std::optional<double> mast_height_m(const tags_t &tags)
+{
+	const auto kind = tags.find("man_made");
+	if (kind == tags.end())
+		return std::nullopt;
+	const bool lighting = tags.get("tower:type") == "lighting";
+	double fallback = 0.0;
+	if (kind->second == "chimney")
+		fallback = 40.0;
+	else if (kind->second == "antenna")
+		fallback = lighting ? 20.0 : 10.0;
+	else if (kind->second == "mast")
+		fallback = lighting ? 20.0 : 30.0;
+	else
+		return std::nullopt;
+	if (const auto height = tags.find("height"); height != tags.end()) {
+		auto parsed = parse_model_height(height->second);
+		if (parsed && *parsed < 1000.0)
+			return parsed;
+	}
+	return fallback;
+}
+
+std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data,
+		double scale, const overture::OvertureHints *overture_hints)
+{
+	std::vector<TallModel> found;
+	if (!std::isfinite(scale) || scale <= 0.0)
+		return found;
+	std::unordered_map<std::uint64_t, std::pair<double, double>> coordinates;
+	coordinates.reserve(data.nodes.size());
+	for (const auto &node : data.nodes)
+		if (node.lat && node.lon && std::isfinite(*node.lat) && std::isfinite(*node.lon))
+			coordinates.emplace(node.id, std::pair{*node.lat, *node.lon});
+
+	auto add_outline = [&](std::uint64_t id, bool relation, const tags_t &tags,
+							   const std::vector<std::uint64_t> &node_ids) {
+		if (!is_building_feature(tags) || node_ids.empty())
+			return;
+		std::vector<std::pair<double, double>> points;
+		points.reserve(node_ids.size());
+		for (const auto id : node_ids)
+			if (const auto it = coordinates.find(id); it != coordinates.end())
+				points.push_back(it->second);
+		if (points.empty())
+			return;
+		const auto [width_m, length_m] = footprint_extent_m(points);
+		buildings::HeightHint hint;
+		if (overture_hints)
+			if (const auto value = overture_hints->hint_for({id, relation}, tags)) {
+				hint.height_m = value->height_m;
+				if (value->num_floors)
+					hint.levels = *value->num_floors;
+			}
+		const auto top = buildings::mapped_top_m(tags, hint, width_m, length_m);
+		if (!top || !may_pass_vanilla(*top, scale))
+			return;
+		for (const auto id : node_ids)
+			if (const auto it = coordinates.find(id); it != coordinates.end())
+				found.push_back({it->second.first, it->second.second, *top});
+	};
+	for (const auto &way : data.ways)
+		add_outline(way.id, false, way.tags, way.node_refs);
+	std::unordered_map<std::uint64_t, const osm_parser::RawWay *> ways;
+	ways.reserve(data.ways.size());
+	for (const auto &way : data.ways)
+		ways.emplace(way.id, &way);
+	for (const auto &relation : data.relations) {
+		if (!is_building_feature(relation.tags))
+			continue;
+		std::vector<std::uint64_t> node_ids;
+		for (const auto &member : relation.members) {
+			if (member.type != "way")
+				continue;
+			const auto way = ways.find(member.ref);
+			if (way != ways.end())
+				node_ids.insert(node_ids.end(), way->second->node_refs.begin(),
+						way->second->node_refs.end());
+		}
+		add_outline(relation.id, true, relation.tags, node_ids);
+	}
+	// Masts and chimneys can independently cross the build ceiling. At this
+	// stage raw OSM does not yet have generated building footprints, so their
+	// explicit/default ground heights are reserved; building-mounted placement
+	// later performs the more precise roof-relative calculation.
+	auto add_mast = [&](const tags_t &tags, const std::vector<std::uint64_t> &node_ids) {
+		const auto height = mast_height_m(tags);
+		if (!height || !may_pass_vanilla(*height, scale))
+			return;
+		for (const auto id : node_ids)
+			if (const auto it = coordinates.find(id); it != coordinates.end())
+				found.push_back({it->second.first, it->second.second, *height});
+	};
+	for (const auto &node : data.nodes)
+		if (node.lat && node.lon) {
+			const auto height = mast_height_m(node.tags);
+			if (height && may_pass_vanilla(*height, scale))
+				found.push_back({*node.lat, *node.lon, *height});
+		}
+	for (const auto &way : data.ways)
+		add_mast(way.tags, way.node_refs);
+	std::sort(found.begin(), found.end(), [](const TallModel &a, const TallModel &b) {
+		return std::tie(a.lat, a.lon, a.height_m) < std::tie(b.lat, b.lon, b.height_m);
+	});
+	found.erase(std::unique(found.begin(), found.end(),
+						[](const TallModel &a, const TallModel &b) {
+							return a.lat == b.lat && a.lon == b.lon &&
+								   a.height_m == b.height_m;
+						}),
+			found.end());
+	return found;
+}
+
+bool may_pass_vanilla(double height_m, double scale)
+{
+	return std::isfinite(height_m) && std::isfinite(scale) && height_m * scale > 13.0;
+}
+
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data)
 {
-	return {peaks_in(data), tall_models_in(data)};
+	return terrain_hints_in(data, 1.0, true, false);
+}
+
+TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
+		bool include_models, bool include_structures)
+{
+	TerrainHints hints;
+	hints.peaks = peaks_in(data);
+	if (include_models)
+		hints.tall_models = tall_models_in(data);
+	if (include_structures)
+		hints.tall_structures = tall_structures_in(data, scale);
+	return hints;
 }
 
 void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBox &bbox,

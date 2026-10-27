@@ -1,6 +1,7 @@
 #pragma once
 
 #include <cstdint>
+#include <vector>
 
 namespace arnis::mapillary::atlas
 {
@@ -20,4 +21,13 @@ std::uint64_t atlas_budget();
 // Kept public for tests and callers that need to preview a settings value
 // without changing the active generation.
 std::uint64_t atlas_budget_for(std::uint32_t side);
+
+// Reset the per-world unique-texture accounting and reserve one panel texture.
+// Repeated pixels at the same dimensions consume atlas space only once.
+void reset_texture_usage();
+bool reserve_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,
+		std::uint32_t height);
+void release_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,
+		std::uint32_t height);
+std::uint64_t rejected_textures();
 }

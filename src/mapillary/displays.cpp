@@ -1,4 +1,5 @@
 #include "displays.h"
+#include "atlas.h"
 #include "../../../arnis_world_editor.h"
 #include "../assets_root.h"
 #include <algorithm>
@@ -609,9 +610,13 @@ bool place_item_display(arnis::world_editor::WorldEditor &editor, const std::str
 	const auto x = static_cast<int>(std::llround(quad.cx));
 	const auto y = static_cast<int>(std::llround(quad.cy));
 	const auto z = static_cast<int>(std::llround(quad.cz));
-	if (!editor.add_item_display(
-				quad.cx, quad.cy, quad.cz, name_seed(name), display_nbt(name, quad)))
+	if (!atlas::reserve_texture(pixels, pixel_width, pixel_height))
 		return false;
+	if (!editor.add_item_display(
+				quad.cx, quad.cy, quad.cz, name_seed(name), display_nbt(name, quad))) {
+		atlas::release_texture(pixels, pixel_width, pixel_height);
+		return false;
+	}
 	editor.record_facade_panel(
 			x, y, z, facing, std::move(pixels), pixel_width, pixel_height, name);
 	return true;
@@ -682,6 +687,11 @@ bool write_world_resource_pack(arnis::world_editor::WorldEditor &editor,
 {
 	if (error)
 		error->clear();
+	const auto atlas_rejections = atlas::rejected_textures();
+	if (atlas_rejections)
+		std::cerr << "Facade displays: " << atlas_rejections
+				  << " display textures did not fit the configured Minecraft atlas; "
+					 "using fallback facade panels where supported.\n";
 	auto panels = editor.take_facade_panels();
 	panels.erase(std::remove_if(panels.begin(), panels.end(),
 						 [](const auto &panel) {

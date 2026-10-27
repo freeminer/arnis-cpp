@@ -702,7 +702,7 @@ LuantiNode to_luanti_node(
 	case 213:
 		return {"mcl_trees:bark_stripped_warped", 0};
 	case 214:
-		return {"mcl_stairs:slab_stone_double", 0};
+		return {"mcl_stairs:slab_stone", 0};
 	case 215:
 		return {"mcl_stairs:slab_deepslate_cobbled", 0};
 	case 216:
@@ -945,6 +945,16 @@ LuantiNode to_luanti_node(
 		return {"mcl_ocean:prismarine", 0};
 	case 345:
 		return {"mcl_end:end_rod", 0};
+	case 346: {
+		const std::string_view direction = facing ? facing : "north";
+		const std::uint8_t param2 = direction == "down"	   ? 0
+									: direction == "up"	   ? 1
+									: direction == "west"  ? 2
+									: direction == "east"  ? 3
+									: direction == "south" ? 4
+														   : 5;
+		return {"mcl_buttons:button_stone_off", param2};
+	}
 	case 347:
 		return {"mcl_signs:wall_sign_spruce", 0};
 	case 348:
@@ -1223,7 +1233,7 @@ LuantiNode to_luanti_node(
 	case 500:
 	case 501:
 	case 502: {
-		static constexpr std::uint8_t wallmounted[] = {5, 2, 4, 3};
+		static constexpr std::uint8_t wallmounted[] = {4, 2, 5, 3};
 		return {"mcl_core:vine", wallmounted[id - 499]};
 	}
 	case 503:

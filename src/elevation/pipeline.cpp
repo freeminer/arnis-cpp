@@ -3,6 +3,7 @@
 #include "../coordinate_system/geographic/llbbox.h"
 #include "../coordinate_system/transformation.h"
 #include "../land_cover/land_cover.h"
+#include "../world_editor/floor_state.h"
 #include "selector.h"
 
 #include <algorithm>
@@ -107,13 +108,16 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 	// Match Rust: surveyed summits are restored after smoothing for every body;
 	// only the Earth-specific DSM outlier/anomaly repairs above are conditional.
 	raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell);
+	auto tall_cells = model_cells(raw.heights, bbox, terrain_hints.tall_models);
+	const auto structure_cells =
+			model_cells(raw.heights, bbox, terrain_hints.tall_structures);
+	tall_cells.insert(tall_cells.end(), structure_cells.begin(), structure_cells.end());
 	const int top_reserve =
 			policy.kind == AffinePolicy::Kind::Fixed
 					? 0
-					: top_reserve_for(raw.heights,
-							  model_cells(raw.heights, bbox, terrain_hints.tall_models),
-							  scale * height_multiplier, scale, ground_level,
-							  min_ground_level, disable_height_limit, extended_max_y,
+					: top_reserve_for(raw.heights, tall_cells, scale * height_multiplier,
+							  scale, ground_level, min_ground_level, disable_height_limit,
+							  extended_max_y,
 							  policy.kind == AffinePolicy::Kind::FitWithHeadroom);
 
 	auto [minecraft_heights, mapping] = scale_to_minecraft_reserving(raw.heights,
@@ -150,7 +154,9 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		double height_multiplier, int ground_level, int min_ground_level,
 		bool disable_height_limit, int extended_max_y, bool apply_earth_repairs,
 		land_cover::LandCoverData *land_cover, const AffinePolicy &affine,
-		const ProgressCallback &progress, const TerrainHints &terrain_hints)
+		const ProgressCallback &progress, const TerrainHints &terrain_hints,
+		bool auto_height, std::optional<HeightBand> taller_band,
+		bool force_extended_height)
 {
 	if (selector.source_mode() == providers::SourceMode::Planetary)
 		throw std::invalid_argument(
@@ -162,9 +168,37 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 			maximum.lng(), grid_width, grid_height);
 	raw.world_width = world_width;
 	raw.world_height = world_height;
-	return process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
-			ground_level, min_ground_level, disable_height_limit, extended_max_y,
+	bool use_extended = disable_height_limit || (auto_height && force_extended_height);
+	if (auto_height && taller_band) {
+		constexpr int vanilla_min_ground = world_editor::DEFAULT_MIN_Y + 2;
+		constexpr int vanilla_max_ground =
+				world_editor::DEFAULT_MAX_Y - TERRAIN_HEIGHT_BUFFER;
+		if (force_extended_height || ground_level < vanilla_min_ground ||
+				ground_level > vanilla_max_ground) {
+			use_extended = true;
+		} else {
+			auto tops = model_cells(raw.heights, bbox, terrain_hints.tall_models);
+			const auto structures =
+					model_cells(raw.heights, bbox, terrain_hints.tall_structures);
+			tops.insert(tops.end(), structures.begin(), structures.end());
+			const auto overflow = vanilla_overflow(
+					raw.heights, tops, scale * height_multiplier, scale, ground_level);
+			if (overflow) {
+				std::clog << "Extended build height: " << *overflow << '\n';
+				use_extended = true;
+			}
+		}
+	}
+	if (use_extended && taller_band && auto_height) {
+		ground_level = taller_band->ground_level;
+		min_ground_level = taller_band->min_ground_level;
+		extended_max_y = taller_band->extended_max_y;
+	}
+	auto out = process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
+			ground_level, min_ground_level, use_extended, extended_max_y,
 			apply_earth_repairs, land_cover, affine, progress, terrain_hints);
+	out.extended_ceiling = use_extended && extended_max_y > 319;
+	return out;
 }
 
 } // namespace arnis::elevation

@@ -384,13 +384,19 @@ void set_xml_tag(tags_t &tags, const XmlEvent &event)
 void filter_tags_impl(tags_t &tags)
 {
 	static constexpr const char *ignored[] = {"created_by", "note", "fixme", "FIXME",
-			"todo", "TODO", "wikipedia", "wikimedia_commons", "import_uuid", "import",
-			"old_name", "loc_name", "official_name", "alt_name", "operator", "phone",
-			"fax", "email", "url", "website", "opening_hours", "description",
-			"attribution", "check_date", "survey:date", "ref:bag", "ref:bygningsnr"};
+			"todo", "TODO", "wikimedia_commons", "import_uuid", "import", "old_name",
+			"loc_name", "official_name", "alt_name", "operator", "phone", "fax", "email",
+			"url", "website", "opening_hours", "description", "attribution", "check_date",
+			"survey:date", "ref:bag", "ref:bygningsnr"};
 	const bool building = tags.contains("building") || tags.contains("building:part");
 	for (auto it = tags.begin(); it != tags.end();) {
 		const auto &k = it->first;
+		if (k == "wikipedia") {
+			// Discoveries only need the article marker, not a language/title string.
+			it->second.clear();
+			++it;
+			continue;
+		}
 		bool remove = k == "start_date" ? !building : false;
 		for (const auto *name : ignored)
 			remove = remove || k == name;

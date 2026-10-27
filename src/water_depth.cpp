@@ -227,28 +227,6 @@ bool is_tree_part(const std::optional<std::string> &name)
 	return is_trunk(name) || has_suffix(name, "_leaves");
 }
 
-void clear_tree_from(WorldEditor &editor, int x, int y, int z)
-{
-	constexpr std::size_t max_tree_blocks = 4096;
-	std::vector<std::tuple<int, int, int>> stack{{x, y, z}};
-	std::size_t cleared = 0;
-	while (!stack.empty() && cleared < max_tree_blocks) {
-		auto [cx, cy, cz] = stack.back();
-		stack.pop_back();
-		if (!is_tree_part(editor.block_name_absolute(cx, cy, cz)))
-			continue;
-		// Rust passes Some(&[]) here: an explicit empty replacement set means
-		// clear this generated tree block regardless of the first-write guard.
-		editor.set_block_absolute(AIR, cx, cy, cz, std::nullopt,
-				std::optional<std::vector<Block>>(std::vector<Block>{}));
-		++cleared;
-		for (const auto &[dx, dy, dz] :
-				std::array<std::tuple<int, int, int>, 6>{{{1, 0, 0}, {-1, 0, 0},
-						{0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}})
-			stack.emplace_back(cx + dx, cy + dy, cz + dz);
-	}
-}
-
 void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 {
 	for (int y = water_y + 1; y <= water_y + 3; ++y) {
@@ -323,6 +301,36 @@ void place_underwater_vegetation(
 
 }
 
+void clear_tree_within(WorldEditor &editor, int x, int y, int z,
+		const std::function<bool(int, int)> &keep_column)
+{
+	constexpr std::size_t max_tree_blocks = 4096;
+	std::vector<std::tuple<int, int, int>> stack{{x, y, z}};
+	std::size_t cleared = 0;
+	while (!stack.empty() && cleared < max_tree_blocks) {
+		auto [cx, cy, cz] = stack.back();
+		stack.pop_back();
+		if (!keep_column(cx, cz))
+			continue;
+		if (!is_tree_part(editor.block_name_absolute(cx, cy, cz)))
+			continue;
+		// Rust passes Some(&[]): an explicit empty replacement set clears
+		// generated tree blocks regardless of the first-write guard.
+		editor.set_block_absolute(AIR, cx, cy, cz, std::nullopt,
+				std::optional<std::vector<Block>>(std::vector<Block>{}));
+		++cleared;
+		for (const auto &[dx, dy, dz] :
+				std::array<std::tuple<int, int, int>, 6>{{{1, 0, 0}, {-1, 0, 0},
+						{0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}})
+			stack.emplace_back(cx + dx, cy + dy, cz + dz);
+	}
+}
+
+void clear_tree_from(WorldEditor &editor, int x, int y, int z)
+{
+	clear_tree_within(editor, x, y, z, [](int, int) { return true; });
+}
+
 bool is_tree_block(const std::optional<std::string> &name)
 {
 	return is_tree_part(name);
@@ -330,7 +338,7 @@ bool is_tree_block(const std::optional<std::string> &name)
 
 void clear_tree(WorldEditor &editor, int x, int y, int z)
 {
-	clear_tree_from(editor, x, y, z);
+	clear_tree_within(editor, x, y, z, [](int, int) { return true; });
 }
 
 int BigWaterField::depth_at(int x, int z) const

@@ -111,17 +111,25 @@ std::vector<crate::block_definitions::Block> cycleway_protected_surfaces()
 	return result;
 }
 
-int perpendicular_median_raw(const crate::world_editor::WorldEditor &editor, int set_x,
+double terrain_exact(const crate::world_editor::WorldEditor &editor, int x, int z)
+{
+	if (const auto height = editor.terrain_level_exact(x, z);
+			height && std::isfinite(*height))
+		return *height;
+	return static_cast<double>(editor.get_ground_level(x, z));
+}
+
+double perpendicular_median_raw(const crate::world_editor::WorldEditor &editor, int set_x,
 		int set_z, int centerline_x, int centerline_z, int block_range,
 		bool dir_horizontal)
 {
 	assert(block_range >= 0 && block_range <= MAX_BLOCK_RANGE);
-	std::array<int, 2 * MAX_BLOCK_RANGE + 1> ys{};
+	std::array<double, 2 * MAX_BLOCK_RANGE + 1> ys{};
 	const std::size_t len = static_cast<std::size_t>(block_range * 2 + 1);
 	std::size_t i = 0;
 	for (int t = -block_range; t <= block_range; ++t)
-		ys[i++] = dir_horizontal ? editor.get_ground_level(set_x, centerline_z + t)
-								 : editor.get_ground_level(centerline_x + t, set_z);
+		ys[i++] = dir_horizontal ? terrain_exact(editor, set_x, centerline_z + t)
+								 : terrain_exact(editor, centerline_x + t, set_z);
 	std::nth_element(ys.begin(), ys.begin() + len / 2, ys.begin() + len);
 	return ys[len / 2];
 }
@@ -130,15 +138,16 @@ int perpendicular_median_ground_y(const crate::world_editor::WorldEditor &editor
 		int set_x, int set_z, int centerline_x, int centerline_z, int block_range,
 		bool dir_horizontal)
 {
-	const int prev = perpendicular_median_raw(editor, dir_horizontal ? set_x - 1 : set_x,
-			dir_horizontal ? set_z : set_z - 1, centerline_x, centerline_z, block_range,
-			dir_horizontal);
-	const int current = perpendicular_median_raw(editor, set_x, set_z, centerline_x,
+	const double prev = perpendicular_median_raw(editor,
+			dir_horizontal ? set_x - 1 : set_x, dir_horizontal ? set_z : set_z - 1,
+			centerline_x, centerline_z, block_range, dir_horizontal);
+	const double current = perpendicular_median_raw(editor, set_x, set_z, centerline_x,
 			centerline_z, block_range, dir_horizontal);
-	const int next = perpendicular_median_raw(editor, dir_horizontal ? set_x + 1 : set_x,
-			dir_horizontal ? set_z : set_z + 1, centerline_x, centerline_z, block_range,
-			dir_horizontal);
-	return std::max(std::min(prev, current), std::min(std::max(prev, current), next));
+	const double next = perpendicular_median_raw(editor,
+			dir_horizontal ? set_x + 1 : set_x, dir_horizontal ? set_z : set_z + 1,
+			centerline_x, centerline_z, block_range, dir_horizontal);
+	return static_cast<int>(std::round(
+			std::max(std::min(prev, current), std::min(std::max(prev, current), next))));
 }
 
 void precompute_row_medians(const crate::world_editor::WorldEditor &editor,
@@ -146,7 +155,7 @@ void precompute_row_medians(const crate::world_editor::WorldEditor &editor,
 		std::array<int, 2 * MAX_BLOCK_RANGE + 1> &out)
 {
 	assert(block_range >= 0 && block_range <= MAX_BLOCK_RANGE);
-	std::array<int, 2 * MAX_BLOCK_RANGE + 3> raw{};
+	std::array<double, 2 * MAX_BLOCK_RANGE + 3> raw{};
 	const int len = block_range * 2 + 1;
 	for (int i = 0; i < len + 2; ++i) {
 		const int axial = -block_range - 1 + i;
@@ -156,7 +165,7 @@ void precompute_row_medians(const crate::world_editor::WorldEditor &editor,
 				sample_z, centerline_x, centerline_z, block_range, dir_horizontal);
 	}
 	for (int i = 0; i < len; ++i) {
-		std::array<int, 3> taps{raw[static_cast<std::size_t>(i)],
+		std::array<double, 3> taps{raw[static_cast<std::size_t>(i)],
 				raw[static_cast<std::size_t>(i + 1)],
 				raw[static_cast<std::size_t>(i + 2)]};
 		std::sort(taps.begin(), taps.end());

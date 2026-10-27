@@ -566,7 +566,8 @@ void hang_vines(WorldEditor &editor, const Column &c, int min_y, int max_y,
 	}
 }
 
-void snow_over(WorldEditor &editor, const Column &c, int min_y, int max_y)
+void snow_over(WorldEditor &editor, const Column &c, int min_y, int max_y,
+		bool preserve_blueprint_outline)
 {
 	const auto surface = top(editor, c, min_y, max_y);
 	if (!surface)
@@ -597,6 +598,11 @@ void snow_over(WorldEditor &editor, const Column &c, int min_y, int max_y)
 		return;
 	}
 	if (k != Kind::Leaves && k != Kind::Solid && k != Kind::Shaped)
+		return;
+	// Rust leaves the blueprint's outline marker visible in winter worlds;
+	// otherwise ordinary snow placement would obscure the construction guide.
+	if (on_ground && preserve_blueprint_outline &&
+			block == block_definitions::LIGHT_BLUE_CONCRETE)
 		return;
 	if (y >= max_y)
 		return;
@@ -653,7 +659,7 @@ void style_chunk(WorldEditor &editor, int bx, int bz, int min_x, int min_z, int 
 	}
 	if (args.winter)
 		for (const auto &c : columns)
-			snow_over(editor, c, min_y, max_y);
+			snow_over(editor, c, min_y, max_y, args.mode == GenerationMode::Blueprint);
 }
 
 int region_floor(int coordinate)

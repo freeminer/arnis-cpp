@@ -25,6 +25,11 @@ namespace arnis::osm_parser
 struct RawOsmDocument;
 }
 
+namespace arnis::overture
+{
+class OvertureHints;
+}
+
 namespace arnis::elevation
 {
 struct PeakHint
@@ -45,6 +50,7 @@ struct TerrainHints
 {
 	std::vector<PeakHint> peaks;
 	std::vector<TallModel> tall_models;
+	std::vector<TallModel> tall_structures;
 };
 
 struct PeakChannel;
@@ -99,7 +105,13 @@ std::optional<PeakHint> peak_from_tags(
 std::vector<PeakHint> peaks_in(const osm_parser::RawOsmDocument &data);
 std::vector<PeakHint> peaks_in(const std::vector<ProcessedElement> &elements);
 std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data);
+// Tall OSM buildings and masts that can exceed the vanilla build ceiling.
+std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data,
+		double scale, const overture::OvertureHints *overture_hints = nullptr);
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data);
+TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
+		bool include_models, bool include_structures);
+bool may_pass_vanilla(double height_m, double scale);
 
 void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBox &bbox,
 		const std::vector<PeakHint> &peaks, double meters_per_cell);

@@ -341,6 +341,9 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		args.disable_height_limit = manifest->disable_height_limit;
 		args.height_multiplier = manifest->height_multiplier;
 	} else {
+		if (args.vanilla_height)
+			return fail_locked(
+					"A new One World always has the extended build height, so any place on Earth fits. Leave out --vanilla-height.");
 		// The first area must not limit the vertical range of future locations.
 		args.disable_height_limit = true;
 		manifest = Manifest::create(args,
@@ -384,6 +387,15 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 	run.session_lock = lock;
 	args.one_world_run = std::move(run);
 	args.projection = projection::ProjectionKind::WebMercator;
+	if (args.world_type == WorldType::Flat) {
+		std::cout
+				<< "Note: One World is always a void world; the flat world type is off.\n";
+		args.world_type = WorldType::Void;
+	}
+	if (args.one_world_run->extending)
+		std::cout
+				<< "Note: One World keeps the game mode, time of day, world type and map "
+				   "item of its first area.\n";
 	args.voxy_lod = false;
 	if (args.mapillary_facades_wanted() &&
 			facade_mode_places_displays(args.mapillary_facade_mode))

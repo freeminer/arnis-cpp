@@ -296,7 +296,24 @@ void chessboard_labels(std::vector<std::uint8_t> &label, std::vector<std::uint16
 		}
 }
 
-void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
+std::size_t positive_mod(int value, std::size_t divisor)
+{
+	const auto mod =
+			static_cast<std::int64_t>(value) % static_cast<std::int64_t>(divisor);
+	return static_cast<std::size_t>(mod < 0 ? mod + divisor : mod);
+}
+
+int saturating_add(int value, std::size_t offset)
+{
+	const auto result =
+			static_cast<std::int64_t>(value) + static_cast<std::int64_t>(offset);
+	return static_cast<int>(
+			std::clamp(result, static_cast<std::int64_t>(std::numeric_limits<int>::min()),
+					static_cast<std::int64_t>(std::numeric_limits<int>::max())));
+}
+
+void fill_with_nearest_wild(
+		LandCoverData &data, biome::Climate climate, std::pair<int, int> origin)
 {
 	const auto w = data.width, h = data.height;
 	if (!w || !h)
@@ -304,13 +321,19 @@ void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
 	const double cpm = std::max(1e-6, data.cells_per_meter);
 	const auto step = std::max<std::size_t>(
 			1, static_cast<std::size_t>(std::max(0.0, std::round(LATTICE_M * cpm))));
-	const auto lw = w / step + (w % step != 0), lh = h / step + (h % step != 0);
+	const auto px = positive_mod(origin.first, step);
+	const auto pz = positive_mod(origin.second, step);
+	const auto lattice_width = w + px, lattice_height = h + pz;
+	const auto lw = lattice_width / step + (lattice_width % step != 0);
+	const auto lh = lattice_height / step + (lattice_height % step != 0);
 	std::vector<std::uint8_t> label(lw * lh, 0);
 	std::vector<std::uint16_t> dist(lw * lh, std::numeric_limits<std::uint16_t>::max());
 	for (std::size_t lz = 0; lz < lh; ++lz) {
-		const auto z = std::min(h - 1, lz * step + step / 2);
+		const auto z_center = lz * step + step / 2;
+		const auto z = std::min(h - 1, z_center > pz ? z_center - pz : 0);
 		for (std::size_t lx = 0; lx < lw; ++lx) {
-			const auto x = std::min(w - 1, lx * step + step / 2);
+			const auto x_center = lx * step + step / 2;
+			const auto x = std::min(w - 1, x_center > px ? x_center - px : 0);
 			const auto c = data.grid[z][x];
 			if (is_wild(c, climate)) {
 				label[lz * lw + lx] = c;
@@ -328,7 +351,8 @@ void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
 			auto &c = data.grid[z][x];
 			if (c != LC_BUILT_UP)
 				continue;
-			const int xi = static_cast<int>(x), zi = static_cast<int>(z);
+			const int xi = saturating_add(origin.first, x);
+			const int zi = saturating_add(origin.second, z);
 			const double wx = (ground_generation::value_noise_salted(
 									   xi, zi, wavelength, SALT_WARP_X) -
 									  .5) *
@@ -337,10 +361,12 @@ void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
 									   xi, zi, wavelength, SALT_WARP_Z) -
 									  .5) *
 							  2.0 * warp;
-			const auto lx = static_cast<std::size_t>(std::clamp(
-					std::floor((x + wx) / step), 0.0, static_cast<double>(lw - 1)));
-			const auto lz = static_cast<std::size_t>(std::clamp(
-					std::floor((z + wz) / step), 0.0, static_cast<double>(lh - 1)));
+			const auto lx = static_cast<std::size_t>(
+					std::clamp(std::floor((static_cast<double>(x + px) + wx) / step), 0.0,
+							static_cast<double>(lw - 1)));
+			const auto lz = static_cast<std::size_t>(
+					std::clamp(std::floor((static_cast<double>(z + pz) + wz) / step), 0.0,
+							static_cast<double>(lh - 1)));
 			const auto nearest = label[lz * lw + lx];
 			c = nearest ? nearest : fallback;
 		}
@@ -349,7 +375,7 @@ void fill_with_nearest_wild(LandCoverData &data, biome::Climate climate)
 }
 
 void naturalize(LandCoverData &data, std::vector<std::vector<float>> *heights,
-		biome::Climate climate)
+		biome::Climate climate, std::pair<int, int> origin, bool reclaim)
 {
 	const auto w = data.width, h = data.height;
 	if (!w || !h || data.grid.size() < h)
@@ -366,10 +392,10 @@ void naturalize(LandCoverData &data, std::vector<std::vector<float>> *heights,
 	}
 	if (!built_up)
 		return;
-	if (reclaim_water(data, heights)) {
+	if (reclaim && reclaim_water(data, heights)) {
 		data.water_distance = compute_water_distance(data.grid, w, h);
 		data.invalidate_water_blend_grid();
 	}
-	fill_with_nearest_wild(data, climate);
+	fill_with_nearest_wild(data, climate, origin);
 }
 }

@@ -52,6 +52,9 @@ struct PreparedBuildingData
 	// untagged building parts in the same prepared group, as in Rust parsing.
 	std::unordered_map<std::uint64_t, tags_t> inherited_facade_tags;
 	std::unordered_set<std::uint64_t> suppressed_relations;
+	// Building-part relations spatially associated with a residential outline
+	// inherit its storey-height scale, matching Rust's HousingRelationParts.
+	std::unordered_set<std::uint64_t> housing_relation_parts;
 };
 
 PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &elements);

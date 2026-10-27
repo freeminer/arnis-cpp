@@ -5,6 +5,7 @@
 #include "postprocess.h"
 
 #include <functional>
+#include <optional>
 #include <string_view>
 
 namespace arnis::geographic
@@ -22,6 +23,14 @@ namespace arnis::elevation
 
 class Selector;
 
+struct HeightBand
+{
+	int ground_level{};
+	int min_ground_level{};
+	int extended_max_y{};
+	bool extended{};
+};
+
 struct ProcessedElevationData
 {
 	std::vector<std::vector<float>> heights;
@@ -34,6 +43,7 @@ struct ProcessedElevationData
 	double slope_correction{1.0};
 	int ground_level{0};
 	std::optional<SoftTop> soft_top;
+	bool extended_ceiling{false};
 
 	ElevationAffine affine() const
 	{
@@ -60,6 +70,8 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		double height_multiplier, int ground_level, int min_ground_level,
 		bool disable_height_limit, int extended_max_y, bool apply_earth_repairs,
 		land_cover::LandCoverData *land_cover, const AffinePolicy &affine = {},
-		const ProgressCallback &progress = {}, const TerrainHints &terrain_hints = {});
+		const ProgressCallback &progress = {}, const TerrainHints &terrain_hints = {},
+		bool auto_height = false, std::optional<HeightBand> taller_band = std::nullopt,
+		bool force_extended_height = false);
 
 } // namespace arnis::elevation
