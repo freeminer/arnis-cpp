@@ -98,6 +98,19 @@ struct LandCoverData
 {
 	std::vector<std::vector<uint8_t>> grid;
 	std::vector<std::vector<uint8_t>> water_distance;
+	struct BeachTileIndex
+	{
+		std::vector<std::uint64_t> bits;
+		std::size_t width = 0;
+		bool any = false;
+	};
+	struct BeachTileCache
+	{
+		std::mutex mutex;
+		std::shared_ptr<const BeachTileIndex> index;
+	};
+	mutable std::shared_ptr<BeachTileCache> beach_tile_cache =
+			std::make_shared<BeachTileCache>();
 	struct WaterBlendCache
 	{
 		std::mutex mutex;
@@ -115,6 +128,7 @@ struct LandCoverData
 
 	const WaterBlendMask &water_blend_mask(
 			std::size_t world_width, std::size_t world_height) const;
+	bool beach_within(std::size_t x, std::size_t z, std::size_t reach) const;
 	void invalidate_water_blend_grid();
 	void remap_rows_to_mercator(double lat_top, double lat_bottom);
 	void crop(std::size_t x0, std::size_t z0, std::size_t width, std::size_t height);

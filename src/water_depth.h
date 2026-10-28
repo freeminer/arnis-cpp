@@ -62,6 +62,7 @@ private:
 };
 
 BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox);
+std::pair<Block, Block> shallow_bed(const WorldEditor &editor, int x, int z);
 int estimate_max_carve_depth(
 		const std::vector<std::vector<std::uint8_t>> &land_cover_grid,
 		std::size_t world_width, std::size_t world_height);

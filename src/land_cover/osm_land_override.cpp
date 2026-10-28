@@ -6,6 +6,7 @@
 #include "../element_processing/bridges.h"
 #include "../element_processing/way_segments.h"
 #include "../element_processing/waterways.h"
+#include "../element_processing/swimming_pools.h"
 
 #include <algorithm>
 #include <array>
@@ -113,8 +114,11 @@ struct GridMap
 	int min_x, min_z;
 	double sx, sz;
 	std::size_t width, height;
-	int x(int value) const { return int(std::lround((value - min_x) * sx)); }
-	int z(int value) const { return int(std::lround((value - min_z) * sz)); }
+	double ox = 0.0, oz = 0.0;
+	double gx(int value) const { return (value - min_x) * sx - ox; }
+	double gz(int value) const { return (value - min_z) * sz - oz; }
+	int x(int value) const { return int(std::lround(gx(value))); }
+	int z(int value) const { return int(std::lround(gz(value))); }
 };
 
 std::vector<std::vector<ProcessedNode>> relation_rings(
@@ -122,7 +126,7 @@ std::vector<std::vector<ProcessedNode>> relation_rings(
 {
 	std::vector<std::vector<ProcessedNode>> outer, inner;
 	for (const auto &member : relation.members) {
-		if (member.way->nodes.size() < 2)
+		if (!member.way || member.way->nodes.size() < 2)
 			continue;
 		if (member.role == ProcessedMemberRole::Outer)
 			outer.push_back(member.way->nodes);
@@ -193,12 +197,12 @@ void fill_rings(std::vector<std::uint64_t> &mask,
 		for (std::size_t i = 0; i < nodes.size(); ++i) {
 			const auto &a = nodes[i];
 			const auto &b = nodes[(i + 1) % nodes.size()];
-			const double ay = (a.z - map.min_z) * map.sz;
-			const double by = (b.z - map.min_z) * map.sz;
+			const double ay = map.gz(a.z);
+			const double by = map.gz(b.z);
 			if (ay == by)
 				continue;
-			const double ax = (a.x - map.min_x) * map.sx;
-			const double bx = (b.x - map.min_x) * map.sx;
+			const double ax = map.gx(a.x);
+			const double bx = map.gx(b.x);
 			const double y_lo = std::min(ay, by);
 			const double y_hi = std::max(ay, by);
 			const auto z_start = static_cast<std::int64_t>(std::ceil(y_lo));
@@ -230,6 +234,95 @@ void fill_ring(std::vector<std::uint64_t> &mask, const std::vector<ProcessedNode
 		const GridMap &map)
 {
 	fill_rings(mask, std::vector<std::vector<ProcessedNode>>{ring}, map);
+}
+
+void pool_changes(const LandCoverData &data,
+		const std::vector<std::vector<ProcessedNode>> &rings, const GridMap &map,
+		const std::vector<std::uint64_t> &water_area,
+		const std::vector<std::uint64_t> &water_line,
+		std::vector<std::tuple<std::size_t, std::size_t, std::uint8_t>> &changes)
+{
+	constexpr std::size_t max_window_cells = 1U << 20;
+	double min_x = std::numeric_limits<double>::max();
+	double max_x = std::numeric_limits<double>::lowest();
+	double min_z = std::numeric_limits<double>::max();
+	double max_z = std::numeric_limits<double>::lowest();
+	for (const auto &ring : rings)
+		for (const auto &node : ring) {
+			min_x = std::min(min_x, map.gx(node.x));
+			max_x = std::max(max_x, map.gx(node.x));
+			min_z = std::min(min_z, map.gz(node.z));
+			max_z = std::max(max_z, map.gz(node.z));
+		}
+	if (min_x > max_x)
+		return;
+	const auto margin = std::max<std::int64_t>(
+								1, static_cast<std::int64_t>(
+										   std::ceil(2.0 * std::max(map.sx, map.sz)))) +
+						1;
+	const auto clamp_cell = [](double v, std::int64_t low, std::int64_t high) {
+		return std::clamp(static_cast<std::int64_t>(v), low, high);
+	};
+	const auto x0 = clamp_cell(
+			std::floor(min_x) - margin, 0, static_cast<std::int64_t>(map.width) - 1);
+	const auto z0 = clamp_cell(
+			std::floor(min_z) - margin, 0, static_cast<std::int64_t>(map.height) - 1);
+	const auto x1 = clamp_cell(
+			std::ceil(max_x) + margin, 0, static_cast<std::int64_t>(map.width) - 1);
+	const auto z1 = clamp_cell(
+			std::ceil(max_z) + margin, 0, static_cast<std::int64_t>(map.height) - 1);
+	if (x0 > x1 || z0 > z1)
+		return;
+	const auto width = static_cast<std::size_t>(x1 - x0 + 1);
+	const auto height = static_cast<std::size_t>(z1 - z0 + 1);
+	if (width > max_window_cells / height)
+		return;
+	GridMap window = map;
+	window.width = width;
+	window.height = height;
+	window.ox = static_cast<double>(x0);
+	window.oz = static_cast<double>(z0);
+	std::vector<std::uint64_t> inside((width * height + 63) / 64);
+	fill_rings(inside, rings, window);
+	const auto m = static_cast<std::size_t>(margin);
+	std::vector<std::uint8_t> row_hit(width * height, 0), near_inside(width * height, 0);
+	for (std::size_t z = 0; z < height; ++z)
+		for (std::size_t x = 0; x < width; ++x) {
+			const auto first = x > m ? x - m : 0;
+			const auto last = std::min(width - 1, x + m);
+			for (std::size_t ix = first; ix <= last; ++ix)
+				if (bit(inside, z * width + ix)) {
+					row_hit[z * width + x] = 1;
+					break;
+				}
+		}
+	for (std::size_t z = 0; z < height; ++z)
+		for (std::size_t x = 0; x < width; ++x) {
+			const auto first = z > m ? z - m : 0;
+			const auto last = std::min(height - 1, z + m);
+			for (std::size_t iz = first; iz <= last; ++iz)
+				if (row_hit[iz * width + x]) {
+					near_inside[z * width + x] = 1;
+					break;
+				}
+		}
+	const int radius = static_cast<int>(
+			std::min<std::size_t>((std::max(width, height) / 2 + m + 2), 64));
+	for (std::size_t z = 0; z < height; ++z)
+		for (std::size_t x = 0; x < width; ++x) {
+			if (!near_inside[z * width + x])
+				continue;
+			const auto gx = static_cast<std::size_t>(x0) + x;
+			const auto gz = static_cast<std::size_t>(z0) + z;
+			const auto index = gz * map.width + gx;
+			if (data.grid[gz][gx] != LC_WATER || bit(water_area, index) ||
+					bit(water_line, index))
+				continue;
+			const auto cls =
+					nearest_land_class(data.grid, map.width, map.height, gx, gz, radius)
+							.value_or(LC_BUILT_UP);
+			changes.emplace_back(gx, gz, cls);
+		}
 }
 
 std::vector<std::uint64_t> dilate(const std::vector<std::uint64_t> &seeds,
@@ -302,11 +395,18 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 	std::vector<std::uint64_t> water_area((count + 63) / 64),
 			water_line((count + 63) / 64), land((count + 63) / 64),
 			over_water((count + 63) / 64);
+	std::vector<std::vector<std::vector<ProcessedNode>>> pools;
 	bool any_area = false;
 	bool any_land = false;
 	for (const auto &element : elements) {
 		if (element.is_relation()) {
 			const auto &relation = element.as_relation();
+			if (swimming_pools::is_swimming_pool(relation.tags)) {
+				auto rings = relation_rings(relation, bbox);
+				if (!rings.empty())
+					pools.push_back(std::move(rings));
+				continue;
+			}
 			std::vector<std::uint64_t> *target = nullptr;
 			if (is_water_area_relation(relation.tags)) {
 				any_area = true;
@@ -355,41 +455,49 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 			any_land = true;
 			continue;
 		}
-		if (building(way.tags) && closed(way.nodes))
+		if (building(way.tags) && closed(way.nodes)) {
 			if (auto ring = clipping::clip_water_ring_to_bbox(way.nodes, bbox)) {
 				fill_ring(land, *ring, map);
 				any_land = true;
 			}
+		} else if (swimming_pools::is_swimming_pool(way.tags) && closed(way.nodes)) {
+			if (auto ring = clipping::clip_water_ring_to_bbox(way.nodes, bbox))
+				pools.push_back({std::move(*ring)});
+		}
 	}
-	if (!any_area && !any_land)
+	if (!any_area && !any_land && pools.empty())
 		return;
-	for (std::size_t i = 0; i < land.size(); ++i)
-		land[i] &= ~over_water[i];
-	std::vector<std::uint64_t> land_seed((count + 63) / 64);
-	for (std::size_t i = 0; i < count; ++i)
-		if (data.grid[i / data.width][i % data.width] != LC_WATER)
-			set_bit(land_seed, i);
-	// Match Rust's band_cells: invalid resolutions use the minimum band, while
-	// very large finite resolutions saturate before integer conversion.
-	const double raw_band = 15.0 * data.cells_per_meter;
-	const int band =
-			!std::isfinite(data.cells_per_meter) || data.cells_per_meter <= 0.0 ? 1
-			: raw_band >= 64.0													? 64
-							   : std::max(1, static_cast<int>(std::lround(raw_band)));
-	const auto rim = dilate(land_seed, data.grid, data.width, data.height, band, true);
-	const auto past_outline =
-			any_area ? dilate(water_area, data.grid, data.width, data.height, band, true)
-					 : std::vector<std::uint64_t>((count + 63) / 64);
 	std::vector<std::tuple<std::size_t, std::size_t, std::uint8_t>> changes;
-	for (std::size_t i = 0; i < count; ++i) {
-		if (!bit(rim, i) || bit(water_area, i) || bit(water_line, i) ||
-				(!bit(land, i) && !bit(past_outline, i)))
-			continue;
-		const int x = i % data.width, z = i / data.width;
-		if (const auto cls = nearest_land_class(
-					data.grid, data.width, data.height, x, z, band + 2))
-			changes.emplace_back(x, z, *cls);
+	if (any_area || any_land) {
+		for (std::size_t i = 0; i < land.size(); ++i)
+			land[i] &= ~over_water[i];
+		std::vector<std::uint64_t> land_seed((count + 63) / 64);
+		for (std::size_t i = 0; i < count; ++i)
+			if (data.grid[i / data.width][i % data.width] != LC_WATER)
+				set_bit(land_seed, i);
+		const double raw_band = 15.0 * data.cells_per_meter;
+		const int band =
+				!std::isfinite(data.cells_per_meter) || data.cells_per_meter <= 0.0 ? 1
+				: raw_band >= 64.0													? 64
+								   : std::max(1, static_cast<int>(std::lround(raw_band)));
+		const auto rim =
+				dilate(land_seed, data.grid, data.width, data.height, band, true);
+		const auto past_outline = any_area
+										  ? dilate(water_area, data.grid, data.width,
+													data.height, band, true)
+										  : std::vector<std::uint64_t>((count + 63) / 64);
+		for (std::size_t i = 0; i < count; ++i) {
+			if (!bit(rim, i) || bit(water_area, i) || bit(water_line, i) ||
+					(!bit(land, i) && !bit(past_outline, i)))
+				continue;
+			const int x = i % data.width, z = i / data.width;
+			if (const auto cls = nearest_land_class(
+						data.grid, data.width, data.height, x, z, band + 2))
+				changes.emplace_back(x, z, *cls);
+		}
 	}
+	for (const auto &rings : pools)
+		pool_changes(data, rings, map, water_area, water_line, changes);
 	for (const auto &[x, z, cls] : changes)
 		data.grid[z][x] = cls;
 	if (!changes.empty()) {

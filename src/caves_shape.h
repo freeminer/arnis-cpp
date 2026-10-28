@@ -46,8 +46,13 @@ struct CaveEllipsoid
 	double horizontal_radius = 1.0, vertical_radius = 1.0;
 	double floor_level = -1.0;
 
-	bool contains(int bx, int by, int bz) const noexcept
+	bool contains(int bx, int by, int bz, int floor_y) const noexcept
 	{
+		// Rust's Ellipsoid::y_span excludes its lower bound, clamped to two blocks
+		// above the translated terrain floor. Keep planning queries in lockstep
+		// with carve_ellipsoid so features never plan against a non-carved floor cell.
+		if (by < floor_y + 2)
+			return false;
 		const double dx = (double(bx) + 0.5 - x) / horizontal_radius;
 		const double dy = (double(by) - 0.5 - y) / vertical_radius;
 		const double dz = (double(bz) + 0.5 - z) / horizontal_radius;

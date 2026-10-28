@@ -70,6 +70,7 @@
 #include "datapack/extras.h"
 #include "element_processing/cars.h"
 #include "element_processing/trains.h"
+#include "element_processing/swimming_pools.h"
 #include "element_processing/rail_track.h"
 #include "element_processing/buildings.h"
 #include "element_processing/blueprint.h"
@@ -828,7 +829,9 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 				tags.contains("highway"))
 			return std::nullopt;
 		bool fills = false;
-		if (tags.contains("landuse"))
+		if (swimming_pools::is_swimming_pool(tags))
+			fills = true;
+		else if (tags.contains("landuse"))
 			fills = landuse_paints_ground(tags);
 		else if (tags.contains("natural")) {
 			const auto natural = tags.find("natural");
@@ -850,6 +853,7 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 		const bool draws_ground =
 				area_kind == element_processing::RelationArea::Natural ||
 				area_kind == element_processing::RelationArea::Park ||
+				area_kind == element_processing::RelationArea::Pool ||
 				(area_kind == element_processing::RelationArea::Landuse &&
 						element_processing::landuse_paints_ground(tags));
 		if (!draws_ground)
@@ -2233,22 +2237,11 @@ bool generate_world(WorldEditor &editor,
 									: std::nullopt;
 					request.want_height =
 							Tree::wanted_height_blocks(tile_editor, slot_x, slot_z);
-					if (request.eco) {
-						const int beach_radius = std::clamp(
-								static_cast<int>(std::lround(12.0 * tile_editor.scale())),
-								2, 12);
-						for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
-									 {{0, 0}, {beach_radius, 0}, {-beach_radius, 0},
-											 {0, beach_radius}, {0, -beach_radius}}})
-							if (tile_editor.ground &&
-									tile_editor.ground->cover_class(
-											tile_editor.ground_point(
-													slot_x + dx, slot_z + dz)) ==
-											land_cover::LC_BEACH) {
-								request.beach = true;
-								break;
-							}
-					}
+					request.beach =
+							request.eco &&
+							tile_editor.near_beach(slot_x, slot_z,
+									std::clamp(std::round(12.0 * tile_editor.scale()),
+											2.0, 12.0));
 					if (!habitat_hint)
 						return trees::place_selected_region_tree_for_cover(tile_editor,
 								*shared_selector, x, z, slot_cover, y, request,
@@ -2977,6 +2970,9 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.get("amenity") == std::optional<std::string>("fuel")) {
 				fuel_stations::generate_station(editor, element, flood_fill_cache,
 						building_footprints, road_mask, args.scale, args.timeout);
+			} else if (swimming_pools::is_swimming_pool(way.tags)) {
+				swimming_pools::generate(editor, way, args, flood_fill_cache,
+						building_footprints, road_mask);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
@@ -3142,6 +3138,10 @@ bool generate_world(WorldEditor &editor,
 				case element_processing::RelationArea::Park:
 					leisure::generate_leisure_from_relation(editor, rel, args,
 							flood_fill_cache, building_footprints, bridge_surface);
+					break;
+				case element_processing::RelationArea::Pool:
+					swimming_pools::generate_relation(editor, rel, args, flood_fill_cache,
+							building_footprints, road_mask);
 					break;
 				case element_processing::RelationArea::ManMade:
 					man_made::generate_man_made(editor, ProcessedElement(rel), args,

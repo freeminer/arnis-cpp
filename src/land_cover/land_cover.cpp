@@ -649,6 +649,73 @@ const WaterBlendMask &LandCoverData::water_blend_mask(
 void LandCoverData::invalidate_water_blend_grid()
 {
 	water_blend_cache = std::make_shared<WaterBlendCache>();
+	beach_tile_cache = std::make_shared<BeachTileCache>();
+}
+
+bool LandCoverData::beach_within(std::size_t x, std::size_t z, std::size_t reach) const
+{
+	constexpr std::size_t TILE_SHIFT = 4;
+	constexpr std::size_t TILE_SIZE = std::size_t{1} << TILE_SHIFT;
+	if (width == 0 || height == 0 || grid.size() < height || x >= width || z >= height)
+		return false;
+	auto cache = beach_tile_cache;
+	if (!cache)
+		return false;
+	std::shared_ptr<const BeachTileIndex> index;
+	{
+		std::lock_guard<std::mutex> lock(cache->mutex);
+		index = cache->index;
+		if (!index) {
+			auto built = std::make_shared<BeachTileIndex>();
+			built->width = (width + TILE_SIZE - 1) >> TILE_SHIFT;
+			const auto tiles_h = (height + TILE_SIZE - 1) >> TILE_SHIFT;
+			const auto tile_count = built->width * tiles_h;
+			built->bits.resize((tile_count + 63) / 64);
+			for (std::size_t tz = 0; tz < tiles_h; ++tz) {
+				const auto z0 = tz << TILE_SHIFT;
+				const auto z1 = std::min(height, z0 + TILE_SIZE);
+				for (std::size_t tx = 0; tx < built->width; ++tx) {
+					const auto x0 = tx << TILE_SHIFT;
+					const auto x1 = std::min(width, x0 + TILE_SIZE);
+					bool has_beach = false;
+					for (std::size_t row = z0; row < z1 && !has_beach; ++row) {
+						if (grid[row].size() < x1)
+							continue;
+						has_beach =
+								std::find(grid[row].begin() + x0, grid[row].begin() + x1,
+										LC_BEACH) != grid[row].begin() + x1;
+					}
+					if (!has_beach)
+						continue;
+					const auto bit = tz * built->width + tx;
+					built->bits[bit >> 6] |= std::uint64_t{1} << (bit & 63);
+					built->any = true;
+				}
+			}
+			cache->index = built;
+			index = std::move(built);
+		}
+	}
+	if (!index->any)
+		return false;
+	const auto x0 = x > reach ? x - reach : 0;
+	const auto z0 = z > reach ? z - reach : 0;
+	const auto x1 = x + std::min(reach, width - 1 - x);
+	const auto z1 = z + std::min(reach, height - 1 - z);
+	for (std::size_t tz = z0 >> TILE_SHIFT; tz <= (z1 >> TILE_SHIFT); ++tz)
+		for (std::size_t tx = x0 >> TILE_SHIFT; tx <= (x1 >> TILE_SHIFT); ++tx) {
+			const auto bit = tz * index->width + tx;
+			if ((index->bits[bit >> 6] >> (bit & 63)) & 1U) {
+				for (std::size_t row = z0; row <= z1; ++row) {
+					if (grid[row].size() <= x1)
+						continue;
+					if (std::find(grid[row].begin() + x0, grid[row].begin() + x1 + 1,
+								LC_BEACH) != grid[row].begin() + x1 + 1)
+						return true;
+				}
+			}
+		}
+	return false;
 }
 
 void LandCoverData::remap_rows_to_mercator(double lat_top, double lat_bottom)
@@ -679,6 +746,7 @@ void mark_beaches(LandCoverData &data)
 {
 	if (data.width == 0 || data.height == 0)
 		return;
+	data.invalidate_water_blend_grid();
 	const double raw_reach = std::round(50.0 * data.cells_per_meter);
 	const int reach = std::isnan(raw_reach)
 							  ? 0

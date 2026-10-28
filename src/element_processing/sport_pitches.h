@@ -9,6 +9,7 @@
 
 namespace arnis::sport_pitches
 {
+std::optional<std::pair<double, double>> longest_edge_dir(const ProcessedWay &way);
 void draw_pitch_markings(WorldEditor &editor, const ProcessedWay &way,
 		const std::vector<std::pair<int, int>> &filled_area, Block surface);
 }

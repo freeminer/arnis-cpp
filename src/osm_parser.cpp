@@ -428,6 +428,13 @@ void filter_tags_impl(tags_t &tags)
 			"arete", "couloir", "coastline"};
 	if (landforms.contains(tags.get("natural")))
 		tags.erase("natural");
+	// A swimming pool is a built basin, not a lake. Keep overlapping OSM water
+	// classifications from routing it through the natural-water generator.
+	if (tags.get("leisure") == "swimming_pool") {
+		if (tags.get("natural") == "water")
+			tags.erase("natural");
+		tags.erase("water");
+	}
 }
 
 } // namespace

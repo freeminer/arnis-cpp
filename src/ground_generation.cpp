@@ -3,6 +3,7 @@
 #include "block_definitions.h"
 #include "element_processing/tree.h"
 #include "element_processing/bush.h"
+#include "element_processing/swimming_pools.h"
 #include "land_cover/land_cover.h"
 #include "trees/schematic.h"
 #include "climate.h"
@@ -17,6 +18,7 @@
 #include "ground_decoration.h"
 #include "surface.h"
 #include "progress.h"
+#include "water_depth.h"
 
 #include <algorithm>
 #include <array>
@@ -84,7 +86,8 @@ const std::optional<std::vector<Block>> &steep_replacements()
 	static const std::optional<std::vector<Block>> blocks{
 			std::vector<Block>{WATER, BEDROCK, GRAY_CONCRETE_POWDER, CYAN_TERRACOTTA,
 					GRAY_CONCRETE, LIGHT_GRAY_CONCRETE, WHITE_CONCRETE, YELLOW_CONCRETE,
-					DIRT_PATH, STONE_BRICKS, BRICK, OAK_PLANKS, BLACK_CONCRETE}};
+					DIRT_PATH, STONE_BRICKS, BRICK, OAK_PLANKS, BLACK_CONCRETE,
+					swimming_pools::COPING, swimming_pools::LINING}};
 	return blocks;
 }
 
@@ -823,12 +826,14 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						}
 						if (place_esa_water) {
 							editor.set_block_if_absent_absolute(WATER, x, water_y, z);
+							const auto [bed, under] =
+									water_depth::shallow_bed(editor, x, z);
 							if (water_y - 1 > world_editor::min_y())
 								editor.set_block_if_absent_absolute(
-										SAND, x, water_y - 1, z);
+										bed, x, water_y - 1, z);
 							if (water_y - 2 > world_editor::min_y())
 								editor.set_block_if_absent_absolute(
-										SANDSTONE, x, water_y - 2, z);
+										under, x, water_y - 2, z);
 							water_columns.forget(x, z);
 						} else {
 
@@ -852,37 +857,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 														cover_here, has_cover);
 							Block surface = palette.first;
 							std::optional<Block> climate_under = palette.second;
-							// Rust shoreline parity: blend the immediate ring around ESA or
-							// already-rendered OSM water to sand on gentle terrain. This keeps
-							// water boundaries from exposing abrupt grass/clay edges.
-							if (!planetary && surface != WATER && slope <= 3) {
-								bool near_esa_water = false;
-								if (has_cover && !esa_water) {
-									for (int dz = -1; dz <= 1 && !near_esa_water; ++dz)
-										for (int dx = -1; dx <= 1; ++dx)
-											if ((dx || dz) &&
-													editor.ground->cover_class(
-															editor.ground_point(
-																	x + dx, z + dz)) ==
-															land_cover::LC_WATER) {
-												near_esa_water = true;
-												break;
-											}
-								}
-								bool near_placed_water = false;
-								for (const auto &[dx, dz] :
-										std::array<std::pair<int, int>, 4>{
-												{{-1, 0}, {1, 0}, {0, -1}, {0, 1}}})
-									if (editor.check_for_block_type_absolute(
-												x + dx, ground_y, z + dz, WATER)) {
-										near_placed_water = true;
-										break;
-									}
-								if (near_esa_water || near_placed_water) {
-									surface = SAND;
-									climate_under = SANDSTONE;
-								}
-							}
 							if (surface == SAND && !climate_under)
 								climate_under = SANDSTONE;
 							else if (!climate_under &&
@@ -936,16 +910,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 												x, water_bottom - 1, z, WATER))
 									--water_bottom;
 								const int floor_y = water_bottom - 1;
-								if (floor_y > world_editor::min_y()) {
-									const auto hash = land_cover::coord_hash(x, z);
-									const Block floor = hash % 5 == 0	? GRAVEL
-														: hash % 5 == 1 ? CLAY
-																		: SAND;
+								if (floor_y > world_editor::min_y() &&
+										!editor.block_exists_absolute(x, floor_y, z)) {
+									const auto [floor, under] =
+											water_depth::shallow_bed(editor, x, z);
 									editor.set_block_if_absent_absolute(
 											floor, x, floor_y, z);
 									if (floor_y - 1 > world_editor::min_y())
 										editor.set_block_if_absent_absolute(
-												SANDSTONE, x, floor_y - 1, z);
+												under, x, floor_y - 1, z);
 								}
 							}
 							if (!surface_is_water) {

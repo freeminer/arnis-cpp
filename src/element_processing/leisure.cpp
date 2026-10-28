@@ -49,8 +49,7 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 				   leisure_type == "pitch" || leisure_type == "beach_resort" ||
 				   leisure_type == "dog_park") {
 			block_type = GREEN_STAINED_HARDENED_CLAY;
-		} else if (leisure_type == "swimming_pool" || leisure_type == "swimming_area" ||
-				   leisure_type == "marina") {
+		} else if (leisure_type == "swimming_area" || leisure_type == "marina") {
 			block_type = WATER;
 		} else if (leisure_type == "bathing_place") {
 			block_type = SMOOTH_SANDSTONE;

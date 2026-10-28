@@ -4,6 +4,7 @@
 #include "overture/mvt.h"
 #include "overture/cache.h"
 #include "overture/pmtiles.h"
+#include "overture/fm_range_fetch.h"
 #include "retrieve_data.h"
 #include "element_processing/buildings.h"
 #include "net.h"
@@ -1248,22 +1249,34 @@ static BuildingTransportSource http_pmtiles_building_transport_source_impl(
 						cached && cached->size() == length)
 					return cached;
 			}
-			std::string bytes;
-			for (unsigned attempt = 0; attempt < 3; ++attempt) {
-				if (attempt > 0)
-					std::this_thread::sleep_for(
-							std::chrono::milliseconds(500U << (attempt - 1)));
-				[[maybe_unused]] auto permit = net::request_permit();
-				bytes = http_get_range(url, offset, length);
-				if (bytes.size() == length)
-					break;
-			}
-			if (bytes.size() != length)
-				return std::nullopt;
-			auto data = std::vector<std::uint8_t>(bytes.begin(), bytes.end());
-			if (!cache_file.empty())
-				cache::write_atomic(cache_file, data);
-			return data;
+			// Fetch workers may still be active during static destruction.
+			static auto *pending = new RangeFetches;
+			return pending->fetch(url, offset, length,
+					[&]() -> std::optional<std::vector<std::uint8_t>> {
+						// Recheck after becoming the owner: a preceding request may have
+						// populated the disk cache between our first read and registration.
+						if (!cache_file.empty()) {
+							if (const auto cached = cache::read(cache_file);
+									cached && cached->size() == length)
+								return cached;
+						}
+						std::string bytes;
+						for (unsigned attempt = 0; attempt < 3; ++attempt) {
+							if (attempt > 0)
+								std::this_thread::sleep_for(
+										std::chrono::milliseconds(500U << (attempt - 1)));
+							// http_get_range owns the shared network permit.
+							bytes = http_get_range(url, offset, length);
+							if (bytes.size() == length)
+								break;
+						}
+						if (bytes.size() != length)
+							return std::nullopt;
+						auto data = std::vector<std::uint8_t>(bytes.begin(), bytes.end());
+						if (!cache_file.empty())
+							cache::write_atomic(cache_file, data);
+						return data;
+					});
 		};
 		pmtiles::Archive archive;
 		{

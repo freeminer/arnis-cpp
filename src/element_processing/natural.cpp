@@ -183,16 +183,8 @@ int wrap_add_i32(int value, int offset)
 
 bool near_beach(const WorldEditor &editor, int x, int z)
 {
-	if (!editor.ground)
-		return false;
-	const int radius =
-			std::clamp(static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
-	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
-				 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
-		if (editor.ground->cover_class(editor.ground_point(x + dx, z + dz)) ==
-				land_cover::LC_BEACH)
-			return true;
-	return false;
+	return editor.near_beach(
+			x, z, std::clamp(std::round(12.0 * editor.scale()), 2.0, 12.0));
 }
 } // namespace
 

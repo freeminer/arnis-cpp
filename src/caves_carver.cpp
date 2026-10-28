@@ -181,7 +181,7 @@ void carve_ellipsoid(world_editor::WorldEditor &editor, const CaveRect &region, 
 	const int max_z = std::min(region.max_z, int(std::floor(oz + radius)));
 	const auto [write_min_y, write_max_y] = editor.writable_y_bounds();
 	const int min_y =
-			std::max({int(std::floor(oy - vertical)), floor_y + 1, write_min_y});
+			std::max({int(std::floor(oy - vertical)), floor_y + 2, write_min_y});
 	const int max_y = std::min(int(std::floor(oy + vertical)) + 1, write_max_y);
 	if (min_y > max_y || min_x > max_x || min_z > max_z)
 		return;

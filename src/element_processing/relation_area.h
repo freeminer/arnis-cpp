@@ -17,6 +17,7 @@ namespace arnis::element_processing
 enum class RelationArea
 {
 	Building,
+	Pool,
 	Water,
 	Natural,
 	Landuse,
@@ -37,6 +38,8 @@ inline std::optional<RelationArea> relation_area(const tags_t &tags)
 	if (tags.contains("building") || tags.contains("building:part") ||
 			(tags.contains("type") && tags.at("type") == "building"))
 		return RelationArea::Building;
+	if (tags.get("leisure") == "swimming_pool")
+		return RelationArea::Pool;
 	if (tags.contains("water") ||
 			(tags.contains("natural") &&
 					(tags.at("natural") == "water" || tags.at("natural") == "bay")))
@@ -57,6 +60,7 @@ inline bool relation_area_fills_members(RelationArea area, const tags_t &tags)
 	switch (area) {
 	case RelationArea::Natural:
 	case RelationArea::Park:
+	case RelationArea::Pool:
 		return true;
 	case RelationArea::Landuse:
 		return landuse_paints_ground(tags);

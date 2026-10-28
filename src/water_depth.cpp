@@ -530,6 +530,21 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 	return out;
 }
 
+std::pair<Block, Block> shallow_bed(const WorldEditor &editor, int x, int z)
+{
+	if (editor.near_beach(x, z, std::max(4.0 * editor.scale(), 1.0)))
+		return {SAND, SANDSTONE};
+	const double n = ground_generation::value_noise_01(x + 211, z + 37, 6);
+	if (n < 0.35)
+		return {GRAVEL, DIRT};
+	if (n < 0.6)
+		return land_cover::coord_hash(x, z) % 3 == 0 ? std::pair{COARSE_DIRT, DIRT}
+													 : std::pair{DIRT, DIRT};
+	if (n < 0.82)
+		return {CLAY, DIRT};
+	return {SAND, DIRT};
+}
+
 void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int depth,
 		const RoadMaskBitmap &road_mask, const BigWaterField &bwf)
 {
@@ -556,7 +571,9 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 
 	Block top_block = SAND;
 	Block under_block = SANDSTONE;
-	if (depth >= 2 && near_bridge) {
+	if (depth <= 1) {
+		std::tie(top_block, under_block) = shallow_bed(editor, x, z);
+	} else if (depth >= 2 && near_bridge) {
 		top_block = (value_noise_01(x, z, 6) < 0.4 && depth <= 3) ? SAND : GRAVEL;
 		under_block = STONE;
 	} else if (depth >= 2) {
@@ -577,7 +594,7 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 				return value_noise_01(wx + dx, wz + dz, scale);
 			};
 			if (d <= 1)
-				top_block = SAND;
+				top_block = shallow_bed(editor, x, z).first;
 			else if (d == 2)
 				top_block = vn(53, 97, 56) > 0.50 ? SAND : GRAVEL;
 			else if (d >= 5 && vn(727, 911, 8) > 0.96)

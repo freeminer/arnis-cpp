@@ -584,17 +584,9 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 					std::max(1, static_cast<int>(std::lround(*height * editor.scale())));
 		if (editor.ground)
 			request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
-		if (request.eco) {
-			const int radius = std::clamp(
-					static_cast<int>(std::lround(12.0 * editor.scale())), 2, 12);
-			for (const auto &[dx, dz] : std::array<std::pair<int, int>, 5>{
-						 {{0, 0}, {radius, 0}, {-radius, 0}, {0, radius}, {0, -radius}}})
-				if (editor.ground->cover_class(editor.ground_point(
-							pos.x + dx, pos.z + dz)) == land_cover::LC_BEACH) {
-					request.beach = true;
-					break;
-				}
-		}
+		if (request.eco)
+			request.beach = editor.near_beach(pos.x, pos.z,
+					std::clamp(std::round(12.0 * editor.scale()), 2.0, 12.0));
 		const auto placed = editor.place_mapped_regional_tree(
 				pos.x, editor.get_absolute_y(pos.x, pos.y, pos.z), pos.z, 0, request);
 		// Rust returns after consulting an active tree pack even if no mapped

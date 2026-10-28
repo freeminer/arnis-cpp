@@ -48,7 +48,7 @@ std::optional<PitchKind> pitch_kind(const ProcessedWay &way)
 	return std::nullopt;
 }
 
-std::optional<std::pair<double, double>> longest_edge_dir(const ProcessedWay &way)
+std::optional<std::pair<double, double>> longest_edge_dir_impl(const ProcessedWay &way)
 {
 	double best = 0.0, bx = 0.0, bz = 0.0;
 	for (size_t i = 1; i < way.nodes.size(); ++i) {
@@ -66,6 +66,11 @@ std::optional<std::pair<double, double>> longest_edge_dir(const ProcessedWay &wa
 	const double len = std::sqrt(best);
 	return std::pair{bx / len, bz / len};
 }
+}
+
+std::optional<std::pair<double, double>> longest_edge_dir(const ProcessedWay &way)
+{
+	return longest_edge_dir_impl(way);
 }
 
 void draw_pitch_markings(WorldEditor &editor, const ProcessedWay &way,
