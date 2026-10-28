@@ -99,7 +99,15 @@ int pool_depth(const tags_t &tags, std::size_t cell_count, double scale)
 		else if (static_cast<double>(cell_count) < PLUNGE_POOL_M2 * scale * scale)
 			metres = 1.0;
 	}
-	return std::clamp(static_cast<int>(std::lround(metres * scale)), 1, MAX_DEPTH);
+	// Rust rounds the positive product and then casts to i32 (saturating for
+	// overflow) before clamping. Avoid lround's out-of-range domain case for
+	// extreme but parseable depth/scale values while preserving half-up rounding.
+	const double scaled = metres * scale;
+	if (!(scaled > 0.5))
+		return 1; // also matches Rust's NaN-to-zero cast followed by clamp
+	if (scaled >= MAX_DEPTH - 0.5)
+		return MAX_DEPTH;
+	return static_cast<int>(std::floor(scaled + 0.5));
 }
 
 std::optional<std::pair<double, double>> lap_pool_size(const tags_t &tags)

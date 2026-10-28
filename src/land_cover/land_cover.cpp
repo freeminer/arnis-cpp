@@ -702,19 +702,25 @@ bool LandCoverData::beach_within(std::size_t x, std::size_t z, std::size_t reach
 	const auto z0 = z > reach ? z - reach : 0;
 	const auto x1 = x + std::min(reach, width - 1 - x);
 	const auto z1 = z + std::min(reach, height - 1 - z);
-	for (std::size_t tz = z0 >> TILE_SHIFT; tz <= (z1 >> TILE_SHIFT); ++tz)
+	bool any_beach_tile = false;
+	for (std::size_t tz = z0 >> TILE_SHIFT; tz <= (z1 >> TILE_SHIFT) && !any_beach_tile;
+			++tz)
 		for (std::size_t tx = x0 >> TILE_SHIFT; tx <= (x1 >> TILE_SHIFT); ++tx) {
 			const auto bit = tz * index->width + tx;
 			if ((index->bits[bit >> 6] >> (bit & 63)) & 1U) {
-				for (std::size_t row = z0; row <= z1; ++row) {
-					if (grid[row].size() <= x1)
-						continue;
-					if (std::find(grid[row].begin() + x0, grid[row].begin() + x1 + 1,
-								LC_BEACH) != grid[row].begin() + x1 + 1)
-						return true;
-				}
+				any_beach_tile = true;
+				break;
 			}
 		}
+	if (!any_beach_tile)
+		return false;
+	for (std::size_t row = z0; row <= z1; ++row) {
+		if (grid[row].size() <= x1)
+			continue;
+		if (std::find(grid[row].begin() + x0, grid[row].begin() + x1 + 1, LC_BEACH) !=
+				grid[row].begin() + x1 + 1)
+			return true;
+	}
 	return false;
 }
 

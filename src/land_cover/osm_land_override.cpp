@@ -502,7 +502,7 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 		data.grid[z][x] = cls;
 	if (!changes.empty()) {
 		std::cerr << "OSM land override: " << changes.size()
-				  << " shore cells reclassified from ESA water to land\n";
+				  << " cells reclassified from ESA water to land\n";
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
 		data.invalidate_water_blend_grid();
 	}
