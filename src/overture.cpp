@@ -218,7 +218,7 @@ size_t release_listing_write(void *data, size_t size, size_t count, void *opaque
 	return size * count;
 }
 
-std::vector<std::string> discover_overture_releases()
+std::vector<std::string> fetch_overture_release_listing()
 {
 	constexpr const char *listing_url =
 			"https://overturemaps-us-west-2.s3.amazonaws.com/?delimiter=/&prefix=release/";
@@ -259,6 +259,23 @@ std::vector<std::string> discover_overture_releases()
 		}
 	});
 	releases.erase(std::unique(releases.begin(), releases.end()), releases.end());
+	return releases;
+}
+
+std::vector<std::string> discover_overture_releases()
+{
+	// Many extracts are prepared concurrently. Share the listing and bound its
+	// lifetime; a failed listing is retried sooner than a successful one.
+	static std::mutex mutex;
+	static std::vector<std::string> releases;
+	static std::chrono::steady_clock::time_point expires;
+	std::lock_guard lock(mutex);
+	const auto now = std::chrono::steady_clock::now();
+	if (now < expires)
+		return releases;
+	releases = fetch_overture_release_listing();
+	expires = std::chrono::steady_clock::now() +
+			  (releases.empty() ? std::chrono::seconds(30) : std::chrono::minutes(15));
 	return releases;
 }
 

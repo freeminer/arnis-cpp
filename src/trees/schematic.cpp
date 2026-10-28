@@ -60,13 +60,44 @@ void drop_stray_leaves(Schematic &schematic)
 			   (std::uint64_t(static_cast<std::uint16_t>(z)) << 16) |
 			   static_cast<std::uint16_t>(x);
 	};
+	// Most tree schematics are compact. A bounded dense index avoids a hash
+	// lookup for each of the 125 neighboring cells; sparse or malformed shapes
+	// retain the original hash-map behavior.
+	constexpr std::size_t max_dense_cells = 1024 * 1024;
+	const auto volume =
+			schematic.width > 0 && schematic.height > 0 && schematic.length > 0 &&
+							std::size_t(schematic.width) <= max_dense_cells &&
+							std::size_t(schematic.height) <= max_dense_cells &&
+							std::size_t(schematic.length) <= max_dense_cells
+					? std::uint64_t(schematic.width) * std::uint64_t(schematic.height) *
+							  std::uint64_t(schematic.length)
+					: 0;
+	const bool dense = volume > 0 && volume <= max_dense_cells &&
+					   std::all_of(schematic.voxels.begin(), schematic.voxels.end(),
+							   [&](const auto &v) {
+								   return v.x >= 0 && v.x < schematic.width && v.y >= 0 &&
+										  v.y < schematic.height && v.z >= 0 &&
+										  v.z < schematic.length;
+							   });
+	const auto dense_key = [&](int x, int y, int z) {
+		return (std::size_t(y) * schematic.length + z) * schematic.width + x;
+	};
+	const auto missing = std::numeric_limits<std::size_t>::max();
+	std::vector<std::size_t> dense_grid(dense ? volume : 0, missing);
 	std::unordered_map<std::uint64_t, std::size_t> grid;
-	grid.reserve(schematic.voxels.size());
+	if (!dense)
+		grid.reserve(schematic.voxels.size());
 	std::vector<bool> linked(schematic.voxels.size(), false);
 	std::deque<std::size_t> todo;
 	for (std::size_t i = 0; i < schematic.voxels.size(); ++i) {
 		const auto &v = schematic.voxels[i];
-		grid.emplace(key(v.x, v.y, v.z), i);
+		if (dense) {
+			auto &entry = dense_grid[dense_key(v.x, v.y, v.z)];
+			if (entry == missing)
+				entry = i;
+		} else {
+			grid.emplace(key(v.x, v.y, v.z), i);
+		}
 		if (is_log_block(v.block)) {
 			linked[i] = true;
 			todo.push_back(i);
@@ -84,11 +115,17 @@ void drop_stray_leaves(Schematic &schematic)
 					++nz)
 				for (int nx = std::max(0, x - 2);
 						nx <= std::min(schematic.width - 1, x + 2); ++nx) {
-					const auto found = grid.find(key(nx, ny, nz));
-					if (found == grid.end() || linked[found->second])
+					std::size_t neighbor = missing;
+					if (dense) {
+						neighbor = dense_grid[dense_key(nx, ny, nz)];
+					} else if (const auto found = grid.find(key(nx, ny, nz));
+							   found != grid.end()) {
+						neighbor = found->second;
+					}
+					if (neighbor == missing || linked[neighbor])
 						continue;
-					linked[found->second] = true;
-					todo.push_back(found->second);
+					linked[neighbor] = true;
+					todo.push_back(neighbor);
 				}
 	}
 	std::size_t i = 0;
@@ -236,17 +273,23 @@ std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &
 	// Detached selector loaders can outlive shutdown of other static objects.
 	static auto *assets = new Assets;
 	const auto key = std::filesystem::absolute(file).lexically_normal().string();
-	// Serialize decoding to avoid duplicate loads and transient allocation spikes.
-	std::lock_guard lock(assets->mutex);
-	if (const auto it = assets->entries.find(key); it != assets->entries.end())
-		if (auto shared = it->second.lock())
-			return shared;
-	if (assets->entries.size() >= 1024)
-		std::erase_if(assets->entries,
-				[](const auto &entry) { return entry.second.expired(); });
+	{
+		std::lock_guard lock(assets->mutex);
+		if (const auto it = assets->entries.find(key); it != assets->entries.end())
+			if (auto shared = it->second.lock())
+				return shared;
+	}
 	auto shared = std::make_shared<const Schematic>(load_schem(file));
-	if (!shared->voxels.empty())
+	if (!shared->voxels.empty()) {
+		std::lock_guard lock(assets->mutex);
+		if (const auto it = assets->entries.find(key); it != assets->entries.end())
+			if (auto existing = it->second.lock())
+				return existing;
+		if (assets->entries.size() >= 1024)
+			std::erase_if(assets->entries,
+					[](const auto &entry) { return entry.second.expired(); });
 		assets->entries.insert_or_assign(key, shared);
+	}
 	return shared;
 }
 int min_log_y(const Schematic &s)

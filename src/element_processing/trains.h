@@ -11,6 +11,11 @@
 #include <utility>
 #include <vector>
 
+namespace arnis::cartesian
+{
+class XZBBox;
+}
+
 namespace arnis::trains
 {
 
@@ -135,7 +140,7 @@ class TrainRouteNetwork
 {
 public:
 	static TrainRouteNetwork build(const std::vector<ProcessedElement> &elements,
-			double scale, const ::XZBBox &world);
+			double scale, const cartesian::XZBBox &world);
 	const std::vector<Route> &routes() const { return routes_; }
 	const std::vector<Service> &services() const { return services_; }
 	double size() const { return size_; }

@@ -2311,7 +2311,10 @@ bool generate_world(WorldEditor &editor,
 	// shares it with the editor so the library's consumer can animate or render
 	// the scheduled rail services.
 	if (args.moving_vehicles_enabled() && java_world) {
-		auto network = trains::TrainRouteNetwork::build(elements, args.scale, xzbbox);
+		const auto train_bounds = cartesian::XZBBox::rect_from_min_max(
+				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		auto network =
+				trains::TrainRouteNetwork::build(elements, args.scale, train_bounds);
 		if (!network.is_empty())
 			editor.train_network =
 					std::make_shared<const trains::TrainRouteNetwork>(std::move(network));

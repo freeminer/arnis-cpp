@@ -442,7 +442,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		if (jobs.empty())
 			return;
 
-		std::vector<std::optional<Schematic>> parsed(jobs.size());
+		std::vector<std::shared_ptr<const Schematic>> parsed(jobs.size());
 		std::atomic_size_t next{0};
 		auto worker = [&] {
 			for (;;) {
@@ -450,9 +450,9 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 				if (index >= jobs.size())
 					return;
 				try {
-					auto schematic = load_schem(jobs[index].path);
-					if (has_leaves(schematic))
-						parsed[index].emplace(std::move(schematic));
+					auto schematic = load_schem_shared(jobs[index].path);
+					if (has_leaves(*schematic))
+						parsed[index] = std::move(schematic);
 				} catch (...) {
 					// A missing or invalid asset is cached as a miss below.
 				}
@@ -470,7 +470,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		for (std::size_t i = 0; i < jobs.size(); ++i) {
 			std::optional<std::size_t> entry;
 			if (parsed[i]) {
-				auto schematic = std::make_shared<const Schematic>(std::move(*parsed[i]));
+				auto schematic = std::move(parsed[i]);
 				const auto size = schematic_size(*schematic);
 				data->entries.push_back({std::move(schematic), size, jobs[i].width});
 				entry = data->entries.size() - 1;

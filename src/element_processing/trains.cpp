@@ -1,5 +1,6 @@
 #include "trains.h"
 
+#include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 #include "../datapack/mod.h"
 #include "../clipping.h"
 #include "../strict_parse.h"
@@ -558,7 +559,7 @@ std::vector<Step> extend(const std::vector<Piece> &pieces,
 	return out;
 }
 
-End end_of(std::uint64_t node, const ::XZBBox &world,
+End end_of(std::uint64_t node, const cartesian::XZBBox &world,
 		const std::unordered_map<std::uint64_t, std::vector<Step>> &at,
 		const std::unordered_map<std::uint64_t, RoutePoint> &positions)
 {
@@ -574,7 +575,7 @@ End end_of(std::uint64_t node, const ::XZBBox &world,
 }
 
 std::optional<Route> lay_out(const std::vector<Piece> &pieces,
-		const std::vector<Step> &run, const ::XZBBox &world,
+		const std::vector<Step> &run, const cartesian::XZBBox &world,
 		const std::unordered_map<std::uint64_t, std::vector<Step>> &at,
 		const std::unordered_map<std::uint64_t, RoutePoint> &positions, double scale)
 {
@@ -722,7 +723,7 @@ std::optional<Route> lay_out(const std::vector<Piece> &pieces,
 }
 
 std::vector<Route> make_routes(
-		const std::vector<Piece> &pieces, const ::XZBBox &world, double scale)
+		const std::vector<Piece> &pieces, const cartesian::XZBBox &world, double scale)
 {
 	std::unordered_map<std::uint64_t, std::vector<Step>> at;
 	std::unordered_map<std::uint64_t, RoutePoint> positions;
@@ -1398,7 +1399,7 @@ double Route::length() const
 }
 
 TrainRouteNetwork TrainRouteNetwork::build(const std::vector<ProcessedElement> &elements,
-		double scale, const ::XZBBox &world)
+		double scale, const cartesian::XZBBox &world)
 {
 	TrainRouteNetwork result;
 	result.size_ = std::clamp(scale, 0.4, 3.0);
