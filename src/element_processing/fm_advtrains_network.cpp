@@ -137,10 +137,16 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 		std::size_t operator()(const State &state) const noexcept
 		{
 			const auto &[x, z, heading] = state;
-			auto hash = std::hash<pos_t>{}(x);
-			hash ^= std::hash<pos_t>{}(z) + 0x9e3779b9 + (hash << 6) + (hash >> 2);
-			return hash ^
-				   (std::hash<int>{}(heading) + 0x9e3779b9 + (hash << 6) + (hash >> 2));
+			// Coordinates and headings have highly correlated low bits on long
+			// straight tracks; mix the packed state before bucket selection.
+			std::uint64_t hash = (std::uint64_t(std::uint16_t(x)) << 20) |
+								 (std::uint64_t(std::uint16_t(z)) << 4) |
+								 std::uint64_t(heading);
+			hash ^= hash >> 30;
+			hash *= 0xbf58476d1ce4e5b9ULL;
+			hash ^= hash >> 27;
+			hash *= 0x94d049bb133111ebULL;
+			return static_cast<std::size_t>(hash ^ (hash >> 31));
 		}
 	};
 	struct Visit
@@ -151,6 +157,13 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 	const auto distance = [&](pos_t x, pos_t z) {
 		return std::hypot(double(x - to.first), double(z - to.second));
 	};
+	static const auto step_costs = [] {
+		std::array<double, 16> costs{};
+		for (std::size_t i = 0; i < costs.size(); ++i)
+			costs[i] = std::hypot(
+					double(DIR_VECTORS[i].first), double(DIR_VECTORS[i].second));
+		return costs;
+	}();
 	// The reservation set does not change during a route search, but the same
 	// position can be considered with many headings and in both search margins.
 	std::unordered_map<XZ, bool, XZHash> blocked_cache;
@@ -212,8 +225,8 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 						next.second > std::max(from.second, to.second) + margin ||
 						(next != to && is_blocked(next)))
 					continue;
-				const double next_cost = cost + std::hypot(double(dx), double(dz)) +
-										 (turn != 0 ? 0.25 : 0.0);
+				const double next_cost =
+						cost + step_costs[direction] + (turn != 0 ? 0.25 : 0.0);
 				const State next_state{next.first, next.second, direction};
 				auto [it, inserted] = visits.emplace(next_state, Visit{next_cost, state});
 				if (!inserted && next_cost >= it->second.cost)
