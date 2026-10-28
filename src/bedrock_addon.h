@@ -77,15 +77,10 @@ struct Addon
 	Pack resources;
 };
 
-// Backend-neutral vehicle data and geometry. The host can package it into a
-// Bedrock behavior/resource pack or consume the entity descriptions itself.
-struct VehiclePayload
-{
-	nlohmann::json data;
-	std::vector<Body> bodies;
-};
-
-std::optional<VehiclePayload> vehicles(const ::arnis::highways::cars::CarNetwork *cars,
+// Return the complete per-world Bedrock behavior/resource-pack descriptors,
+// or no add-on if there are no cars or scheduled train services. The host
+// decides how to persist or consume the returned files.
+std::optional<Addon> vehicles(const ::arnis::highways::cars::CarNetwork *cars,
 		const ::arnis::trains::TrainRouteNetwork *trains,
 		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y);
 

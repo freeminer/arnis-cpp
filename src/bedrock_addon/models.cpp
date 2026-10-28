@@ -167,14 +167,13 @@ nlohmann::json geometry(std::string_view name, const std::vector<Shape> &shapes)
 				std::abs(shape.corner[2] + shape.size[2])});
 		top = std::max(top, shape.corner[1] + shape.size[1]);
 	}
-	const double width = std::ceil(2.0 * reach + 1.0);
-	const double height = std::ceil(top + 1.0);
+	const float width = 2.0f * reach + 1.0f;
+	const float height = top + 1.0f;
 	nlohmann::json description{{"identifier", "geometry.arnis." + std::string(name)},
 			{"texture_width", TEXTURE_WIDTH}, {"texture_height", TEXTURE_HEIGHT},
-			{"visible_bounds_width", round3(static_cast<float>(width))},
-			{"visible_bounds_height", round3(static_cast<float>(height))},
-			{"visible_bounds_offset",
-					{0.0, round3(static_cast<float>(height / 2.0)), 0.0}}};
+			{"visible_bounds_width", round3(std::ceil(width))},
+			{"visible_bounds_height", round3(std::ceil(height))},
+			{"visible_bounds_offset", {0.0, round3(height / 2.0f), 0.0}}};
 	nlohmann::json geometry_entry{
 			{"description", std::move(description)}, {"bones", std::move(bones)}};
 	return {{"format_version", "1.12.0"},

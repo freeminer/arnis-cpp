@@ -3626,8 +3626,7 @@ bool generate_world(WorldEditor &editor,
 				});
 		if (payload)
 			editor.bedrock_vehicle_payload =
-					std::make_shared<const bedrock_addon::VehiclePayload>(
-							std::move(*payload));
+					std::make_shared<const bedrock_addon::Addon>(std::move(*payload));
 		else
 			editor.bedrock_vehicle_payload.reset();
 	} else {

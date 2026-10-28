@@ -10,6 +10,7 @@
 #include <limits>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <utility>
 
 #include "celestial.h"
@@ -309,7 +310,6 @@ struct Args
 		// defaults even when a library caller enabled these before adapting the
 		// requested celestial body.
 		traffic_lights = false;
-		body_gravity = false;
 		discoveries = false;
 		moving_cars = false;
 		moving_vehicles = false;
@@ -478,10 +478,14 @@ struct Args
 				{moving_vehicles_enabled(), "--moving-vehicles"},
 		};
 		if (bedrock || luanti) {
-			for (const auto &[enabled, flag] : java_pack_extras)
-				if (enabled)
+			for (const auto &[enabled, flag] : java_pack_extras) {
+				// Bedrock moving vehicles are generated as an add-on, not a Java
+				// data pack. Luanti has no equivalent backend support.
+				if (enabled &&
+						!(bedrock && std::string_view(flag) == "--moving-vehicles"))
 					return std::string(flag) +
 						   " runs from a Java Edition data pack and is not available for Bedrock or Luanti worlds.";
+			}
 		}
 		if (one_world_run) {
 			for (const auto &[enabled, flag] : java_pack_extras)
