@@ -266,6 +266,8 @@ pub struct WorldEditor<'a> {
     void_world: bool,
     /// Pre-generated voxy LOD cache, fed as regions are saved/flushed. Java only.
     voxy: Option<Arc<crate::voxy::VoxyWriter>>,
+    /// Pre-generated Distant Horizons LOD database, fed the same way. Java only.
+    dh: Option<Arc<crate::distant_horizons::DhWriter>>,
     /// Place bundled schematic props (cars, boats, cranes, ...); off drops them all.
     /// Driven by the same toggle as external 3D models (`args.use_3d`).
     place_schematics: bool,
@@ -275,6 +277,8 @@ pub struct WorldEditor<'a> {
     world_time: i64,
     /// Bedrock only: give the player a starting map that reveals the world as they explore.
     start_with_map: bool,
+    /// Bedrock only: the packs that run the moving vehicles.
+    bedrock_addon: Option<crate::bedrock_addon::Addon>,
     /// Bedrock only: what the run adds to the world's size, which sizes its staging folder.
     size_options: crate::world_utils::WorldSizeOptions,
     /// Place bundled map image decals as map item frames. Java only.
@@ -338,9 +342,11 @@ impl<'a> WorldEditor<'a> {
             place_schematics: true,
             preview: None,
             voxy: None,
+            dh: None,
             game_mode: crate::args::GameMode::Creative,
             world_time: 6000,
             start_with_map: false,
+            bedrock_addon: None,
             size_options: Default::default(),
             map_decals: false,
             signage: None,
@@ -400,9 +406,11 @@ impl<'a> WorldEditor<'a> {
             place_schematics: true,
             preview: None,
             voxy: None,
+            dh: None,
             game_mode: crate::args::GameMode::Creative,
             world_time: 6000,
             start_with_map: false,
+            bedrock_addon: None,
             size_options: Default::default(),
             map_decals: false,
             signage: None,
@@ -462,9 +470,11 @@ impl<'a> WorldEditor<'a> {
             place_schematics: true,
             preview: None,
             voxy: None,
+            dh: None,
             game_mode: crate::args::GameMode::Creative,
             world_time: 6000,
             start_with_map: false,
+            bedrock_addon: None,
             size_options: Default::default(),
             map_decals: false,
             signage: None,
@@ -620,6 +630,14 @@ impl<'a> WorldEditor<'a> {
             .map_or(0, |g| g.cover_class(self.ground_point(x, z)))
     }
 
+    /// Whether beach land cover lies within `reach` blocks of (x, z).
+    #[inline]
+    pub fn near_beach(&self, x: i32, z: i32, reach: f64) -> bool {
+        self.ground
+            .as_ref()
+            .is_some_and(|g| g.beach_within(self.ground_point(x, z), reach))
+    }
+
     /// RESOLVE ecoregion at (x, z), if the area has one there.
     #[inline]
     pub fn ecoregion(&self, x: i32, z: i32) -> Option<crate::ecoregion::Ecoregion> {
@@ -743,6 +761,11 @@ impl<'a> WorldEditor<'a> {
     /// Bedrock only: enable the starting map that reveals the world as the player explores.
     pub fn set_start_with_map(&mut self, enabled: bool) {
         self.start_with_map = enabled;
+    }
+
+    /// Bedrock only: the packs that run the moving vehicles, written into the world on save.
+    pub fn set_bedrock_addon(&mut self, addon: crate::bedrock_addon::Addon) {
+        self.bedrock_addon = Some(addon);
     }
 
     /// Bedrock only: the options the staging folder is sized for.
@@ -1214,6 +1237,11 @@ impl<'a> WorldEditor<'a> {
         self.voxy = Some(voxy);
     }
 
+    /// Attach a Distant Horizons LOD writer, fed and finalized like voxy's.
+    pub fn set_dh(&mut self, dh: Arc<crate::distant_horizons::DhWriter>) {
+        self.dh = Some(dh);
+    }
+
     /// Owned, `Send` context for writing regions off the merge thread.
     pub(crate) fn region_write_ctx(&self) -> java::RegionWriteCtx {
         java::RegionWriteCtx::new(
@@ -1224,6 +1252,7 @@ impl<'a> WorldEditor<'a> {
             self.void_world,
             self.preview.clone(),
             self.voxy.clone(),
+            self.dh.clone(),
             self.region_write_mode(),
             (self.ground_origin_x, self.ground_origin_z),
         )
@@ -2577,6 +2606,7 @@ impl<'a> WorldEditor<'a> {
                     return Err(user_msg.into());
                 }
                 self.finish_voxy();
+                self.finish_dh();
             }
             WorldFormat::BedrockMcWorld => self.save_bedrock()?,
             WorldFormat::LuantiWorld => {
@@ -2626,6 +2656,36 @@ impl<'a> WorldEditor<'a> {
         }
     }
 
+    /// Seal the Distant Horizons database; a failure is reported like voxy's.
+    fn finish_dh(&mut self) {
+        let Some(dh) = self.dh.take() else {
+            return;
+        };
+        match dh.finish() {
+            Ok(summary) => {
+                println!(
+                    "  Distant Horizons LOD: {} sections, {:.1} MB",
+                    summary.sections,
+                    summary.bytes as f64 / (1024.0 * 1024.0)
+                );
+                if let Some(e) = summary.dimensions_error {
+                    let msg = format!(
+                        "The Distant Horizons LOD cache was not placed for Minecraft 26.1+: {e}"
+                    );
+                    eprintln!("{msg}");
+                    #[cfg(feature = "gui")]
+                    send_log(LogLevel::Warning, &msg);
+                }
+            }
+            Err(e) => {
+                let msg = format!("Failed to write the Distant Horizons LOD cache: {e}");
+                eprintln!("{msg}");
+                #[cfg(feature = "gui")]
+                send_log(LogLevel::Warning, &msg);
+            }
+        }
+    }
+
     fn save_bedrock(&mut self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
         println!("{} Saving Bedrock world...", "[7/7]".bold());
         emit_gui_progress_update(90.0, "Saving Bedrock world...");
@@ -2665,6 +2725,7 @@ impl<'a> WorldEditor<'a> {
         )
         .with_ground_origin((self.ground_origin_x, self.ground_origin_z))
         .with_size_options(self.size_options)
+        .with_addon(self.bedrock_addon.take())
         .write_world(&self.world, self.xzbbox, &self.llbbox)
     }
 
@@ -3028,6 +3089,7 @@ mod eviction_guard_tests {
             false,
             None,
             None,
+            None,
             java::RegionWriteMode::Fresh,
             (0, 0),
         )
@@ -3063,6 +3125,7 @@ mod eviction_guard_tests {
                 None,
                 false,
                 void_world,
+                None,
                 None,
                 None,
                 java::RegionWriteMode::Fresh,

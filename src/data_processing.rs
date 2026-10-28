@@ -70,7 +70,9 @@ fn way_ground_fill_area(way: &ProcessedWay) -> Option<f64> {
     {
         return None;
     }
-    let fills_ground = if tags.contains_key("landuse") {
+    let fills_ground = if swimming_pools::is_swimming_pool(tags) {
+        true
+    } else if tags.contains_key("landuse") {
         landuse_paints_ground(tags)
     } else if let Some(natural) = tags.get("natural") {
         // natural=* + amenity=fountain falls through to the fountain handler.
@@ -91,7 +93,7 @@ fn way_ground_fill_area(way: &ProcessedWay) -> Option<f64> {
 fn relation_ground_fill_area(rel: &ProcessedRelation) -> Option<f64> {
     let tags = &rel.tags;
     match RelationArea::of(tags) {
-        Some(RelationArea::Natural | RelationArea::Park) => {}
+        Some(RelationArea::Natural | RelationArea::Park | RelationArea::Pool) => {}
         Some(RelationArea::Landuse) if landuse_paints_ground(tags) => {}
         _ => return None,
     }
@@ -401,6 +403,14 @@ fn process_element(
                     args.scale,
                     args.timeout.as_ref(),
                 );
+            } else if swimming_pools::is_swimming_pool(&way.tags) {
+                let ctx = swimming_pools::PoolContext {
+                    flood_fill_cache,
+                    building_footprints,
+                    road_mask,
+                    timeout: args.timeout.as_ref(),
+                };
+                swimming_pools::generate_swimming_pool(editor, way, &ctx);
             } else if way.tags.contains_key("landuse") {
                 landuse::generate_landuse(
                     editor,
@@ -642,6 +652,15 @@ fn process_element(
                     bridge_surface,
                 );
             }
+            Some(RelationArea::Pool) => {
+                let ctx = swimming_pools::PoolContext {
+                    flood_fill_cache,
+                    building_footprints,
+                    road_mask,
+                    timeout: args.timeout.as_ref(),
+                };
+                swimming_pools::generate_swimming_pool_from_relation(editor, rel, &ctx);
+            }
             Some(RelationArea::ManMade) => {
                 man_made::generate_man_made(
                     editor,
@@ -811,11 +830,12 @@ pub fn generate_world_with_options(
             args.disable_height_limit,
         )
     };
-    // Voxy renders from stored per-voxel light, so an unlit LOD cache would be a
-    // black horizon. The toggle implies baked lighting rather than silently
+    // Voxy and DH render from stored light, so an unlit LOD cache would be a
+    // black horizon. The toggles imply baked lighting rather than silently
     // producing that.
     let wants_voxy = args.voxy_lod && world_format == WorldFormat::JavaAnvil;
-    editor.set_bake_lighting(args.bake_lighting || wants_voxy);
+    let wants_dh = args.dh_lod && world_format == WorldFormat::JavaAnvil;
+    editor.set_bake_lighting(args.bake_lighting || wants_voxy || wants_dh);
     let void_world =
         world_format == WorldFormat::JavaAnvil && args.world_type == crate::args::WorldType::Void;
     editor.set_void_world(void_world);
@@ -1001,6 +1021,12 @@ pub fn generate_world_with_options(
             Err(e) => eprintln!("Skipping the Voxy LOD cache: {e}"),
         }
     }
+    if wants_dh {
+        match crate::distant_horizons::DhWriter::create(&output_path) {
+            Ok(writer) => editor.set_dh(Arc::new(writer)),
+            Err(e) => eprintln!("Skipping the Distant Horizons LOD cache: {e}"),
+        }
+    }
 
     if let (Some(run), Some(affine)) = (one_world, ground.elevation_affine()) {
         crate::one_world::remember_elevation(run, affine)?;
@@ -1052,7 +1078,8 @@ pub fn generate_world_with_options(
         (llbbox.min().lng() + llbbox.max().lng()) / 2.0,
     );
     let road_markings = road_markings::RoadMarkingIndex::build(&elements, args.scale, sign_region);
-    let mut extras = crate::datapack::Extras::from_args(args);
+    // What the world format runs is settled here, so the uses below need no format checks.
+    let mut extras = crate::datapack::Extras::from_args(args).for_format(world_format);
 
     // Collect underground railway centerline points for post-ground-fill air carving (phase 2).
     let mut rail_tunnel_points: Vec<railways::RailTunnelPoint> = Vec::new();
@@ -1120,17 +1147,16 @@ pub fn generate_world_with_options(
     let fuel_index = Arc::new(fuel_stations::FuelIndex::build(&elements, args.scale));
     editor.set_fuel_index(Arc::clone(&fuel_index));
 
-    let traffic_signals =
-        (extras.traffic_lights && world_format == WorldFormat::JavaAnvil).then(|| {
-            Arc::new(
-                crate::element_processing::traffic_lights::SignalIndex::build(
-                    &elements,
-                    args.scale,
-                    sign_region.drives_on_left(),
-                    &road_mask,
-                ),
-            )
-        });
+    let traffic_signals = extras.traffic_lights.then(|| {
+        Arc::new(
+            crate::element_processing::traffic_lights::SignalIndex::build(
+                &elements,
+                args.scale,
+                sign_region.drives_on_left(),
+                &road_mask,
+            ),
+        )
+    });
     if let Some(signals) = &traffic_signals {
         editor.set_traffic_signals(Arc::clone(signals));
     }
@@ -1195,7 +1221,7 @@ pub fn generate_world_with_options(
     // Resolved before the 3D archetypes so they never claim a landmark's element.
     let landmarks = crate::landmarks::prescan(&elements, &xzbbox, llbbox, args);
 
-    let car_network = (extras.cars && world_format == WorldFormat::JavaAnvil).then(|| {
+    let car_network = extras.cars.then(|| {
         let rel = |x: i32, z: i32| {
             crate::coordinate_system::cartesian::XZPoint::new(
                 x - xzbbox.min_x(),
@@ -1220,11 +1246,16 @@ pub fn generate_world_with_options(
         );
         Arc::new(net)
     });
-    if let Some(cars) = &car_network {
+    // Java places the cars as the roads are built; Bedrock's add-on brings them in itself.
+    let placed_cars = car_network
+        .clone()
+        .filter(|_| world_format == WorldFormat::JavaAnvil);
+    if let Some(cars) = &placed_cars {
         editor.set_car_network(Arc::clone(cars));
     }
     // Trains ride the rails as they were laid, so the editors note where each one went.
-    let train_network = (extras.cars && world_format == WorldFormat::JavaAnvil)
+    let train_network = extras
+        .cars
         .then(|| {
             crate::element_processing::trains::TrainNetwork::build(&elements, args.scale, &xzbbox)
         })
@@ -1244,32 +1275,31 @@ pub fn generate_world_with_options(
     }
 
     // The elements are gone by the time the pack is written.
-    let extras_places =
-        (extras.wants_places() && world_format == WorldFormat::JavaAnvil).then(|| {
-            let (mut places, settlement) =
-                crate::datapack::discoveries::collect(&elements, &xzbbox);
-            let rel = |x: i32, z: i32| {
-                crate::coordinate_system::cartesian::XZPoint::new(
-                    x - xzbbox.min_x(),
-                    z - xzbbox.min_z(),
-                )
-            };
-            for place in &mut places {
-                place.settle(
-                    |x, z| {
-                        xzbbox.contains(&crate::coordinate_system::cartesian::XZPoint::new(x, z))
-                            && !building_footprints.contains(x, z)
-                            && ground.cover_class(rel(x, z)) != crate::land_cover::LC_WATER
-                    },
-                    |x, z| road_mask.contains(x, z),
-                    |x, z| ground.level(rel(x, z)),
-                );
-            }
-            (places, settlement)
-        });
+    let extras_places = extras.wants_places().then(|| {
+        let (mut places, settlement) = crate::datapack::discoveries::collect(&elements, &xzbbox);
+        let rel = |x: i32, z: i32| {
+            crate::coordinate_system::cartesian::XZPoint::new(
+                x - xzbbox.min_x(),
+                z - xzbbox.min_z(),
+            )
+        };
+        for place in &mut places {
+            place.settle(
+                |x, z| {
+                    xzbbox.contains(&crate::coordinate_system::cartesian::XZPoint::new(x, z))
+                        && !building_footprints.contains(x, z)
+                        && ground.cover_class(rel(x, z)) != crate::land_cover::LC_WATER
+                },
+                |x, z| road_mask.contains(x, z),
+                |x, z| ground.level(rel(x, z)),
+            );
+        }
+        (places, settlement)
+    });
 
     // The flood maps are worked out from the world as it is written.
-    let disaster_woods = (extras.disasters && world_format == WorldFormat::JavaAnvil)
+    let disaster_woods = extras
+        .disasters
         .then(|| crate::datapack::disasters::wooded(&elements, &ground, &xzbbox));
     // Ends the recording however this run ends, so a failed one does not keep it.
     let _recording = crate::datapack::disasters::Surface::record(disaster_woods.map(|_| &xzbbox));
@@ -1513,7 +1543,7 @@ pub fn generate_world_with_options(
             if let Some(signals) = &traffic_signals {
                 tile_editor.set_traffic_signals(Arc::clone(signals));
             }
-            if let Some(cars) = &car_network {
+            if let Some(cars) = &placed_cars {
                 tile_editor.set_car_network(Arc::clone(cars));
             }
             if let Some(heights) = &rail_heights {
@@ -2222,6 +2252,22 @@ pub fn generate_world_with_options(
         }
         if let Some(report) = crate::building_facades::finalize(&mut editor) {
             println!("{report}");
+        }
+    }
+
+    if world_format == WorldFormat::BedrockMcWorld && extras.cars {
+        // Every editor is done laying rails, so the record can be read in place.
+        let laid = rail_heights.as_ref().and_then(|h| h.lock().ok());
+        match crate::bedrock_addon::vehicles(
+            car_network.as_deref(),
+            train_network.as_ref(),
+            |way, x, z| laid.as_ref().and_then(|m| m.get(&(way, x, z)).copied()),
+        ) {
+            Some(addon) => {
+                editor.set_bedrock_addon(addon);
+                println!("  Moving vehicles: added the vehicle packs to the world");
+            }
+            None => println!("  Moving vehicles: no roads or tracks to drive on here"),
         }
     }
 
