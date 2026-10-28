@@ -13,6 +13,7 @@
 namespace arnis
 {
 struct Args;
+enum class WorldFormat;
 namespace highways::cars
 {
 class CarNetwork;
@@ -24,6 +25,26 @@ class TrainRouteNetwork;
 
 namespace datapack
 {
+// Format-filtered gameplay features used while preparing generation state.
+// Bedrock currently consumes only moving vehicles; Luanti has no gameplay
+// extras. Keep this policy centralized like Rust's Extras.
+struct Extras
+{
+	bool gravity{};
+	bool traffic_lights{};
+	bool discoveries{};
+	bool pause_menu{};
+	bool outbreak{};
+	bool disasters{};
+	bool cars{};
+	bool trains{};
+
+	static Extras from_args(const Args &args);
+	Extras for_format(WorldFormat format) const;
+	bool any() const;
+	bool wants_places() const;
+};
+
 namespace disasters
 {
 class Surface;

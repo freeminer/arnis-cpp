@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../floodfill_cache.h"
+#include "../bedrock_addon.h"
 #include "../../../arnis_adapter.h"
 
 #include <cstddef>
@@ -10,6 +11,8 @@
 #include <string>
 #include <utility>
 #include <vector>
+
+#include <nlohmann/json.hpp>
 
 namespace arnis::cartesian
 {
@@ -147,6 +150,9 @@ public:
 	std::size_t train_count() const;
 	bool is_empty() const { return services_.empty(); }
 	std::vector<std::pair<std::string, std::string>> datapack_functions(
+			const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
+			const;
+	std::pair<nlohmann::json, std::vector<bedrock_addon::Body>> bedrock_data(
 			const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
 			const;
 

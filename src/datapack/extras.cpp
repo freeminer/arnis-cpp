@@ -5,6 +5,7 @@
 
 #include "../args.h"
 #include "../assets_root.h"
+#include "../data_processing.h"
 #include "../element_processing/cars.h"
 #include "../element_processing/trains.h"
 #include "../world_utils.h"
@@ -25,6 +26,45 @@
 
 namespace arnis::datapack
 {
+
+Extras Extras::from_args(const Args &args)
+{
+	if (args.one_world_run)
+		return {};
+	Extras out;
+	out.gravity = args.body_gravity && !is_earth(args.body);
+	out.traffic_lights = args.traffic_lights;
+	out.discoveries = args.discoveries;
+	out.pause_menu = args.pause_menu;
+	out.outbreak = args.zombie_outbreak;
+	out.disasters = args.disasters;
+	out.cars = args.moving_vehicles_enabled();
+	return out;
+}
+
+Extras Extras::for_format(WorldFormat format) const
+{
+	if (format == WorldFormat::JavaAnvil)
+		return *this;
+	if (format == WorldFormat::BedrockMcWorld) {
+		Extras out;
+		out.cars = cars;
+		return out;
+	}
+	return {};
+}
+
+bool Extras::any() const
+{
+	return gravity || traffic_lights || discoveries || pause_menu || outbreak ||
+		   disasters || cars || trains;
+}
+
+bool Extras::wants_places() const
+{
+	return discoveries || pause_menu || outbreak;
+}
+
 namespace
 {
 using json = nlohmann::json;
@@ -266,21 +306,21 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 {
 	if (args.bedrock || args.luanti || args.one_world_run || world.empty())
 		return true;
-	const bool gravity = args.body_gravity && !is_earth(args.body);
-	const bool traffic = args.traffic_lights;
-	const bool moving_cars = args.moving_vehicles_enabled() && cars;
-	const bool moving_trains =
-			args.moving_vehicles_enabled() && trains && !trains->is_empty();
-	const bool has_discoveries = args.discoveries && !places.empty();
-	const bool menu = args.pause_menu;
-	const bool outbreak = args.zombie_outbreak;
-	const bool disasters = args.disasters;
-	if (!gravity && !traffic && !moving_cars && !moving_trains && !args.discoveries &&
+	const auto enabled = Extras::from_args(args).for_format(WorldFormat::JavaAnvil);
+	const bool gravity = enabled.gravity;
+	const bool traffic = enabled.traffic_lights;
+	const bool moving_cars = enabled.cars && cars;
+	const bool moving_trains = enabled.cars && trains && !trains->is_empty();
+	const bool has_discoveries = enabled.discoveries && !places.empty();
+	const bool menu = enabled.pause_menu;
+	const bool outbreak = enabled.outbreak;
+	const bool disasters = enabled.disasters;
+	if (!gravity && !traffic && !moving_cars && !moving_trains && !enabled.discoveries &&
 			!menu && !outbreak && !disasters)
 		return true;
 	const std::vector<Feature> features{{"gravity", gravity}, {"traffic", traffic},
 			{"cars", moving_cars}, {"trains", moving_trains}, {"disaster", disasters},
-			{"discoveries", args.discoveries}, {"menu", menu}, {"outbreak", outbreak}};
+			{"discoveries", enabled.discoveries}, {"menu", menu}, {"outbreak", outbreak}};
 	const auto source_root = assets::path("minecraft/datapack_extras");
 	const auto target_root = world / "datapacks" / PACK_NAME;
 	std::error_code ec;

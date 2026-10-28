@@ -1532,6 +1532,12 @@ bool generate_world(WorldEditor &editor,
 	}
 	const bool java_world =
 			editor.get_generation_format() == static_cast<int>(WorldFormat::JavaAnvil);
+	const bool bedrock_world = editor.get_generation_format() ==
+							   static_cast<int>(WorldFormat::BedrockMcWorld);
+	const auto generation_format = java_world	   ? WorldFormat::JavaAnvil
+								   : bedrock_world ? WorldFormat::BedrockMcWorld
+												   : WorldFormat::LuantiWorld;
+	auto extras = datapack::Extras::from_args(args).for_format(generation_format);
 	const bool extending_world = args.one_world_run && args.one_world_run->extending;
 	const auto java_world_path =
 			args.one_world_run ? args.one_world_run->world_dir : editor.output_path;
@@ -2286,13 +2292,13 @@ bool generate_world(WorldEditor &editor,
 	auto marking_index = road_markings::RoadMarkingIndex::build(elements, args.scale,
 			decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 					(geo_bounds[2] + geo_bounds[3]) * .5));
-	if (args.traffic_lights && java_world) {
+	if (extras.traffic_lights) {
 		editor.traffic_signal_index = highways::SignalIndex::build(
 				elements, args.scale, marking_index.drives_on_left, road_mask);
 	} else {
 		editor.traffic_signal_index.reset();
 	}
-	if (args.moving_vehicles_enabled() && java_world) {
+	if (extras.cars) {
 		auto surface_y = [&](int x, int z) {
 			if (const auto deck = bridge_surface.nearby_deck_y(x, z, 0))
 				return *deck;
@@ -2302,7 +2308,7 @@ bool generate_world(WorldEditor &editor,
 		};
 		editor.car_network = std::make_shared<const highways::cars::CarNetwork>(
 				highways::cars::CarNetwork::build(elements, args.scale,
-						marking_index.drives_on_left, args.traffic_lights, xzbbox,
+						marking_index.drives_on_left, extras.traffic_lights, xzbbox,
 						surface_y));
 	} else {
 		editor.car_network.reset();
@@ -2310,7 +2316,7 @@ bool generate_world(WorldEditor &editor,
 	// Rust builds the backend-neutral train timetable before tile dispatch and
 	// shares it with the editor so the library's consumer can animate or render
 	// the scheduled rail services.
-	if (args.moving_vehicles_enabled() && java_world) {
+	if (extras.cars) {
 		const auto train_bounds = cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 		auto network =
@@ -2331,6 +2337,7 @@ bool generate_world(WorldEditor &editor,
 		editor.rail_heights.reset();
 		editor.rail_heights_mutex.reset();
 	}
+	extras.trains = editor.train_network && !editor.train_network->is_empty();
 	// Rust reorders only ground-fill elements here, after applying OSM ground
 	// overrides and building the shared indexes. Keep the cached element vector
 	// immutable and carry this order as indices to avoid a deep copy per chunk.
@@ -2953,7 +2960,9 @@ bool generate_world(WorldEditor &editor,
 				structures::jetbridge::generate_jet_bridge(
 						editor, way, building_footprints);
 			} else if (way.tags.contains("highway")) {
-				if (editor.car_network)
+				// Bedrock consumes the backend-neutral network when its addon is
+				// assembled after generation; Java places marker/display entities now.
+				if (editor.car_network && java_world)
 					editor.car_network->place_way(editor, way.id);
 				const bool tunnel_rendered =
 						highways::renders_as_highway_tunnel(way) &&
@@ -3610,6 +3619,20 @@ bool generate_world(WorldEditor &editor,
 	// Without a preset registry there was no joint preflight to flush photos.
 	if (!building_facades::enabled())
 		mapillary::facades::finalize_displays(editor);
+	if (bedrock_world && extras.cars) {
+		auto payload = bedrock_addon::vehicles(editor.car_network.get(),
+				editor.train_network.get(), [&editor](std::uint64_t way, int x, int z) {
+					return editor.rail_height(way, x, z);
+				});
+		if (payload)
+			editor.bedrock_vehicle_payload =
+					std::make_shared<const bedrock_addon::VehiclePayload>(
+							std::move(*payload));
+		else
+			editor.bedrock_vehicle_payload.reset();
+	} else {
+		editor.bedrock_vehicle_payload.reset();
+	}
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.
@@ -3623,8 +3646,8 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (java_world && !java_world_path.empty()) {
 		std::string error;
-		if (!mapillary::displays::write_world_resource_pack(editor, java_world_path,
-					args.pause_menu && !args.one_world_run, &error))
+		if (!mapillary::displays::write_world_resource_pack(
+					editor, java_world_path, extras.pause_menu, &error))
 			std::cerr << "Warning: Failed to write facade resource pack: " << error
 					  << '\n';
 		mapillary::facades::clear();
@@ -3714,7 +3737,7 @@ bool generate_world(WorldEditor &editor,
 			return false;
 		}
 	}
-	if (java_world && !args.one_world_run && !java_world_path.empty()) {
+	if (java_world && extras.any() && !java_world_path.empty()) {
 		const auto red_amber_region =
 				decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 						(geo_bounds[2] + geo_bounds[3]) * .5);
@@ -3722,7 +3745,7 @@ bool generate_world(WorldEditor &editor,
 							   red_amber_region == decals::SignRegion::UkIreland;
 		std::vector<datapack::discoveries::Place> extra_places;
 		std::optional<std::string> settlement;
-		if (args.discoveries || args.pause_menu || args.zombie_outbreak) {
+		if (extras.wants_places()) {
 			const auto discovery_bbox = cartesian::XZBBox::rect_from_min_max(
 					xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 			auto collected = datapack::discoveries::collect(elements, discovery_bbox);
@@ -3770,7 +3793,7 @@ bool generate_world(WorldEditor &editor,
 		std::optional<int> disaster_highest_surface;
 		std::optional<datapack::disasters::Surface> disaster_surface;
 		std::optional<int> disaster_sea_y;
-		if (args.disasters) {
+		if (extras.disasters) {
 			disaster_wooded = std::any_of(elements.begin(), elements.end(),
 					[](const ProcessedElement &element) {
 						const auto &tags = element.tags();

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "../../../arnis_adapter.h"
+#include "../bedrock_addon.h"
 #include "../floodfill_cache.h"
 
 #include <array>
@@ -12,6 +13,8 @@
 #include <unordered_map>
 #include <utility>
 #include <vector>
+
+#include <nlohmann/json_fwd.hpp>
 
 namespace arnis::world_editor
 {
@@ -47,6 +50,10 @@ struct Segment
 	bool stub{};
 	std::int32_t speed{};
 	double density{};
+
+	// A lane carries cars only if it has a traversable path and an onward turn.
+	// Keep this predicate shared by the Java and Bedrock data encoders.
+	bool carries_cars() const { return points.size() >= 2 && !next.empty() && !stub; }
 };
 
 enum class VehicleKind : std::uint8_t
@@ -87,6 +94,9 @@ public:
 	std::vector<std::pair<std::string, std::string>> look_functions() const;
 	std::vector<std::pair<std::string, std::string>> body_functions() const;
 	std::vector<std::pair<std::string, std::string>> datapack_functions() const;
+	// Compact backend data and body geometry for the Bedrock vehicle add-on.
+	nlohmann::json bedrock_data() const;
+	std::vector<bedrock_addon::Body> bedrock_bodies() const;
 
 private:
 	std::vector<Segment> segments_;

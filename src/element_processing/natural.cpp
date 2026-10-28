@@ -240,6 +240,9 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 		return;
 	}
 
+	// Rust consumes every natural=tree element in this arm, but only renders
+	// node elements. Tree-tagged ways receive their ground fill in the earlier
+	// ground-fill pass and must not enter generic natural-area decoration here.
 	if (natural_type == "tree") {
 		if (element.is_node()) {
 			int x = element.as_node().x;

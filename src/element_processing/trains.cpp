@@ -47,6 +47,113 @@ constexpr double END_MARGIN_M = 6.0;
 constexpr double JUNCTION_RUN_M = 400.0;
 constexpr double CREEP = 0.03;
 
+std::optional<std::vector<double>> bedrock_route_heights(const Route &route,
+		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
+{
+	std::vector<std::optional<double>> raw;
+	raw.reserve(route.points.size());
+	for (std::size_t i = 0; i < route.points.size(); ++i) {
+		const auto &[x, z] = route.points[i];
+		const std::uint64_t way = i < route.ways.size() ? route.ways[i] : 0;
+		const int bx = static_cast<int>(std::floor(x));
+		const int bz = static_cast<int>(std::floor(z));
+		std::optional<std::pair<int, int>> best;
+		for (int dx = -1; dx <= 1; ++dx)
+			for (int dz = -1; dz <= 1; ++dz)
+				if (const auto y = rail_y(way, bx + dx, bz + dz)) {
+					const int distance = dx * dx + dz * dz;
+					if (!best || distance < best->first)
+						best = std::pair{distance, *y};
+				}
+		raw.push_back(best ? std::optional<double>(best->second) : std::nullopt);
+	}
+	const auto known = static_cast<std::size_t>(std::count_if(
+			raw.begin(), raw.end(), [](const auto &y) { return y.has_value(); }));
+	if (known * 2 < raw.size())
+		return std::nullopt;
+	auto filled = raw;
+	std::optional<double> last;
+	for (auto &y : filled) {
+		if (y)
+			last = y;
+		else if (last)
+			y = last;
+	}
+	std::optional<double> next;
+	for (std::size_t i = filled.size(); i > 0; --i) {
+		if (raw[i - 1])
+			next = raw[i - 1];
+		else if (!filled[i - 1] && next)
+			filled[i - 1] = next;
+	}
+	std::vector<double> heights;
+	heights.reserve(filled.size());
+	for (const auto &y : filled)
+		heights.push_back(y.value_or(0.0));
+	constexpr int reach = 3;
+	const auto n = heights.size();
+	if (n == 0)
+		return heights;
+	std::vector<double> smooth(n);
+	for (std::size_t i = 0; i < n; ++i) {
+		double sum = 0.0;
+		int count = 0;
+		for (int d = -reach; d <= reach; ++d) {
+			long j = static_cast<long>(i) + d;
+			if (route.shape == Shape::Loop) {
+				j %= static_cast<long>(n);
+				if (j < 0)
+					j += static_cast<long>(n);
+			} else if (j < 0 || j >= static_cast<long>(n)) {
+				continue;
+			}
+			sum += heights[static_cast<std::size_t>(j)];
+			++count;
+		}
+		smooth[i] = count ? sum / count : 0.0;
+	}
+	return smooth;
+}
+
+double bedrock_heading(const Route &route, std::size_t i)
+{
+	const auto n = route.points.size();
+	if (n == 0)
+		return 0.0;
+	const RoutePoint *a;
+	const RoutePoint *b;
+	if (route.shape == Shape::Loop) {
+		a = &route.points[i % n];
+		b = &route.points[(i + 1) % n];
+	} else if (i + 1 < n) {
+		a = &route.points[i];
+		b = &route.points[i + 1];
+	} else {
+		a = &route.points[i ? i - 1 : i];
+		b = &route.points[i];
+	}
+	return std::atan2(-(b->x - a->x), b->z - a->z) * 180.0 / std::numbers::pi;
+}
+
+std::vector<std::int64_t> bedrock_run_lengths(const std::vector<std::int32_t> &values)
+{
+	if (values.empty())
+		return {};
+	std::vector<std::int64_t> out{values.front()};
+	for (std::size_t k = 1; k < values.size();) {
+		const auto step = static_cast<std::int64_t>(values[k]) - values[k - 1];
+		std::size_t count = 1;
+		while (k + count < values.size() &&
+				static_cast<std::int64_t>(values[k + count]) - values[k + count - 1] ==
+						step)
+			++count;
+		out.push_back(step);
+		out.push_back(static_cast<std::int64_t>(count));
+		k += count;
+	}
+	return out;
+}
+
 double step_speed(double kmh, double scale)
 {
 	return std::min(kmh / 3.6 / STEPS_PER_S * scale, MAX_STEP);
@@ -1614,6 +1721,117 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 		}
 	}
 	return out;
+}
+
+std::pair<nlohmann::json, std::vector<bedrock_addon::Body>>
+TrainRouteNetwork::bedrock_data(
+		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y) const
+{
+	nlohmann::json routes = nlohmann::json::array();
+	nlohmann::json service_data = nlohmann::json::array();
+	std::vector<bedrock_addon::Body> bodies;
+	std::unordered_map<std::string, std::size_t> body_of;
+	std::size_t carriage = 0;
+	const float size = static_cast<float>(size_);
+	for (const auto &service : services_) {
+		if (service.route >= routes_.size())
+			continue;
+		const auto &route = routes_[service.route];
+		const auto heights = bedrock_route_heights(route, rail_y);
+		if (!heights)
+			continue;
+		std::vector<std::int64_t> points;
+		points.reserve(route.points.size() * 4);
+		std::array<std::int64_t, 4> previous{};
+		for (std::size_t i = 0; i < route.points.size(); ++i) {
+			const auto &[x, z] = route.points[i];
+			const std::array<std::int64_t, 4> at{
+					static_cast<std::int64_t>(std::llround(x * 100.0)),
+					static_cast<std::int64_t>(
+							std::llround(((*heights)[i] + 0.0625) * 1000.0)),
+					static_cast<std::int64_t>(std::llround(z * 100.0)),
+					static_cast<std::int64_t>(
+							std::llround(bedrock_heading(route, i) * 10.0))};
+			for (std::size_t axis = 0; axis < at.size(); ++axis)
+				points.push_back(at[axis] - previous[axis]);
+			previous = at;
+		}
+		if (route.points.empty())
+			continue;
+		double min_x = std::numeric_limits<double>::max();
+		double min_z = std::numeric_limits<double>::max();
+		double max_x = std::numeric_limits<double>::lowest();
+		double max_z = std::numeric_limits<double>::lowest();
+		for (const auto &[x, z] : route.points) {
+			min_x = std::min(min_x, x);
+			min_z = std::min(min_z, z);
+			max_x = std::max(max_x, x);
+			max_z = std::max(max_z, z);
+		}
+		routes.push_back(
+				{{"p", bedrock_addon::list(points)}, {"loop", route.shape == Shape::Loop},
+						{"box", {std::floor(min_x), std::floor(min_z), std::ceil(max_x),
+										std::ceil(max_z)}}});
+
+		const auto length_mm =
+				static_cast<std::int64_t>(std::llround(route.length() * 1000.0));
+		const auto visible = route.shape == Shape::Loop ? length_mm - 1 : length_mm;
+		const auto period = route.shape == Shape::Loop		? length_mm
+							: route.shape == Shape::Through ? service.period
+															: 0;
+		const double middle =
+				service.offsets.empty() ? 0.0 : service.offsets.back() / 2.0;
+		nlohmann::json departures = nlohmann::json::array();
+		for (const auto &departure : service.trains) {
+			nlohmann::json cars = nlohmann::json::array();
+			for (std::size_t i = 0; i < service.coaches.size(); ++i) {
+				const auto &coach = service.coaches[i];
+				const std::string name =
+						"train_" + train_bodies::key(coach, departure.livery);
+				auto [it, inserted] = body_of.emplace(name, bodies.size());
+				if (inserted) {
+					bedrock_addon::Body body;
+					body.name = name;
+					body.fleet = bedrock_addon::Fleet::Train;
+					for (const auto &part :
+							train_bodies::parts(coach, departure.livery)) {
+						bedrock_addon::Shape shape;
+						shape.block = part.block;
+						shape.size = part.size;
+						shape.corner = part.corner;
+						shape.tilt = part.tilt;
+						shape.lamp = part.glow ? bedrock_addon::Lamp::On
+											   : bedrock_addon::Lamp::Off;
+						for (std::size_t axis = 0; axis < 3; ++axis) {
+							shape.size[axis] *= size;
+							shape.corner[axis] *= size;
+						}
+						body.shapes.push_back(std::move(shape));
+					}
+					bodies.push_back(std::move(body));
+				}
+				const double offset =
+						i < service.offsets.size() ? service.offsets[i] : 0.0;
+				cars.push_back({static_cast<std::int64_t>(carriage + i),
+						static_cast<std::int64_t>(it->second),
+						static_cast<std::int64_t>(std::llround(offset * 1000.0))});
+			}
+			carriage += service.coaches.size();
+			departures.push_back({{"phase", departure.phase}, {"cars", std::move(cars)}});
+		}
+		service_data.push_back({{"route", routes.size() - 1},
+				{"steps", bedrock_addon::list(bedrock_run_lengths(service.timetable))},
+				{"count", service.timetable.size()}, {"visible", visible},
+				{"period", period},
+				{"middle", static_cast<std::int64_t>(std::llround(middle * 1000.0))},
+				{"trains", std::move(departures)}});
+	}
+	nlohmann::json names = nlohmann::json::array();
+	for (const auto &body : bodies)
+		names.push_back(body.name);
+	return {{{"routes", std::move(routes)}, {"services", std::move(service_data)},
+					{"bodies", std::move(names)}},
+			std::move(bodies)};
 }
 
 } // namespace arnis::trains

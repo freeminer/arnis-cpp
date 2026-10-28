@@ -17,6 +17,7 @@
 #include <limits>
 #include <numbers>
 #include <sstream>
+#include <stdexcept>
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
@@ -44,6 +45,16 @@ constexpr double SHARP_DEG = 100.0;
 constexpr double SHORT_LANE = 3.0;
 constexpr double CROSSING_REACH = 40.0;
 constexpr double LIMIT_SHARE = 0.92;
+constexpr double ACCEL_MPS2 = 2.5;
+constexpr std::array<std::tuple<double, double, int>, 4> LOOK{
+		{{3.0, 1.7, 3}, {6.0, 1.7, 3}, {10.0, 2.0, 2}, {14.5, 2.5, 1}}};
+constexpr double SAME_WAY_DEG = 67.5;
+constexpr std::pair<double, double> CROSSING_AT{3.0, 1.7};
+constexpr std::array<double, 3> PLAYER_AT{3.0, 6.0, 2.0};
+constexpr int GIVE_WAY_STEPS = 30;
+constexpr std::array<int, 2> PACE{880, 1120};
+constexpr std::array<std::pair<VehicleKind, std::uint32_t>, 3> KINDS{
+		{{VehicleKind::Sedan, 60}, {VehicleKind::Hatchback, 26}, {VehicleKind::Van, 14}}};
 constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> CAR_COLOURS{
 		{{"minecraft:white_concrete", 24}, {"minecraft:black_concrete", 20},
 				{"minecraft:gray_concrete", 17}, {"minecraft:light_gray_concrete", 14},
@@ -862,10 +873,8 @@ std::uint64_t hash(std::uint64_t a, std::uint64_t b)
 	return h ^ (h >> 32);
 }
 
-template <std::size_t N>
-std::string_view pick(
-		const std::array<std::pair<std::string_view, std::uint32_t>, N> &choices,
-		std::uint64_t roll)
+template <typename T, std::size_t N>
+T pick(const std::array<std::pair<T, std::uint32_t>, N> &choices, std::uint64_t roll)
 {
 	std::uint32_t total = 0;
 	for (const auto &choice : choices)
@@ -962,6 +971,79 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 				{-(width + 0.04f) / 2.0f, 1.15f, length / 2.0f - 0.98f}));
 	}
 	return out;
+}
+
+const char *kind_name(VehicleKind kind)
+{
+	switch (kind) {
+	case VehicleKind::Sedan:
+		return "sedan";
+	case VehicleKind::Hatchback:
+		return "hatchback";
+	case VehicleKind::Van:
+		return "van";
+	}
+	return "sedan";
+}
+
+std::string colour_name(std::string_view block)
+{
+	constexpr std::string_view prefix = "minecraft:";
+	constexpr std::string_view suffix = "_concrete";
+	if (block.starts_with(prefix))
+		block.remove_prefix(prefix.size());
+	if (block.ends_with(suffix))
+		block.remove_suffix(suffix.size());
+	return std::string(block);
+}
+
+std::string body_name(VehicleKind kind, std::string_view colour)
+{
+	return std::string("car_") + kind_name(kind) + "_" + colour_name(colour);
+}
+
+std::vector<std::pair<VehicleKind, std::string_view>> all_bodies()
+{
+	std::vector<std::pair<VehicleKind, std::string_view>> out;
+	out.reserve((CAR_COLOURS.size() * 2) + VAN_COLOURS.size());
+	for (const auto &[kind, _] : KINDS) {
+		const auto append = [&](const auto &colours) {
+			for (const auto &[colour, weight] : colours) {
+				(void)weight;
+				out.emplace_back(kind, colour);
+			}
+		};
+		if (kind == VehicleKind::Van)
+			append(VAN_COLOURS);
+		else
+			append(CAR_COLOURS);
+	}
+	return out;
+}
+
+template <std::size_t N>
+std::vector<std::string> respawn_colours(
+		const std::array<std::pair<std::string_view, std::uint32_t>, N> &colours)
+{
+	std::vector<std::string> out;
+	for (const auto &[colour, weight] : colours)
+		for (std::uint32_t i = 0; i < (weight + 3) / 4; ++i)
+			out.push_back(colour_name(colour));
+	return out;
+}
+
+template <typename Range>
+std::string comma_list(const Range &values)
+{
+	std::ostringstream out;
+	bool first = true;
+	for (const auto &value : values) {
+		if (!first)
+			out << ',';
+		first = false;
+		out << value;
+	}
+	return out.str();
 }
 
 std::optional<std::pair<std::size_t, double>> entry(
@@ -1326,7 +1408,7 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 	};
 	double wanted = 0.0;
 	for (const auto &segment : segments)
-		if (segment.points.size() >= 2 && !segment.stub && !segment.next.empty())
+		if (segment.carries_cars())
 			wanted += length(segment) / scale * segment.density;
 	const double thin = wanted > MAX_CARS ? static_cast<double>(MAX_CARS) / wanted : 1.0;
 	std::vector<Car> cars;
@@ -1334,7 +1416,7 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 	double owed = 0.5;
 	for (std::size_t i = 0; i < segments.size(); ++i) {
 		const auto &segment = segments[i];
-		if (segment.points.size() < 2 || segment.stub || segment.next.empty())
+		if (!segment.carries_cars())
 			continue;
 		const double len = length(segment);
 		owed += len / scale * segment.density * thin;
@@ -1357,17 +1439,16 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 										 0.0, 1.0)
 							   : 0.0;
 			const auto roll = hash(i, j);
-			const auto kind_roll = roll % 100;
-			const VehicleKind kind = kind_roll < 60	  ? VehicleKind::Sedan
-									 : kind_roll < 86 ? VehicleKind::Hatchback
-													  : VehicleKind::Van;
+			const VehicleKind kind = pick(KINDS, roll);
 			const std::string_view colour = kind == VehicleKind::Van
 													? pick(VAN_COLOURS, roll >> 16)
 													: pick(CAR_COLOURS, roll >> 16);
 			cars.push_back({i, target,
 					{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t},
 					kind, std::string(colour),
-					static_cast<std::int32_t>(880 + ((roll >> 40) % 241))});
+					static_cast<std::int32_t>(
+							PACE[0] + ((roll >> 40) % static_cast<std::uint64_t>(
+															  PACE[1] - PACE[0] + 1)))});
 		}
 	}
 	return cars;
@@ -1379,7 +1460,8 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	std::vector<std::pair<std::string, std::string>> out;
 	std::ostringstream storage;
 	storage << "scoreboard players set #accel arnis "
-			<< std::max(1, static_cast<int>(std::lround(2.5 * .01 * scale_ * 1000.0)))
+			<< std::max(1,
+					   static_cast<int>(std::lround(ACCEL_MPS2 * .01 * scale_ * 1000.0)))
 			<< "\ndata modify storage arnis:cars seg set value []\n";
 	const auto colour_list = [](const auto &colours) {
 		std::string result;
@@ -1429,7 +1511,7 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 				storage << '}';
 			}
 			storage << "],v:" << segment.speed;
-			if (segment.points.size() < 2 || segment.stub || segment.next.empty())
+			if (!segment.carries_cars())
 				storage << ",o:1b";
 			storage << '}';
 		}
@@ -1458,8 +1540,8 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 			return std::fmod(angle + 540.0, 360.0) - 180.0;
 		};
 		std::ostringstream range;
-		range << std::fixed << std::setprecision(1) << wrap(centre - 67.5) << ".."
-			  << wrap(centre + 67.5);
+		range << std::fixed << std::setprecision(1) << wrap(centre - SAME_WAY_DEG) << ".."
+			  << wrap(centre + SAME_WAY_DEG);
 		const auto ahead = [&](double at, double radius) {
 			std::ostringstream line;
 			line << "execute rotated as @s positioned ^ ^ ^" << distance(at)
@@ -1468,13 +1550,14 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 			return line.str();
 		};
 		std::ostringstream look;
-		look << "# Detect cars on the forward lane cone.\n"
-			 << ahead(3.0, 1.7)
-			 << " run return run scoreboard players set #ahead arnis.car 3\n"
-			 << ahead(6.0, 1.7)
-			 << " run return run scoreboard players set #ahead arnis.car 3\n"
-			 << ahead(10.0, 2.0) << " run scoreboard players set #ahead arnis.car 2\n"
-			 << ahead(14.5, 2.5) << " run scoreboard players set #ahead arnis.car 1\n";
+		look << "# How close the car ahead is: 3 stop a couple of metres behind it, 2 and 1 ease off.\n";
+		for (std::size_t i = 0; i < LOOK.size(); ++i) {
+			const auto &[at, radius, close] = LOOK[i];
+			look << ahead(at, radius) << " run ";
+			if (i + 1 < LOOK.size())
+				look << "return run ";
+			look << "scoreboard players set #ahead arnis.car " << close << '\n';
+		}
 		out.emplace_back("data/arnis/function/cars/look/h" + std::to_string(heading) +
 								 ".mcfunction",
 				look.str());
@@ -1485,20 +1568,21 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 		  << "scoreboard players set #yield arnis.car 0\n"
 		  << "execute if score #jam arnis.car matches 1 run scoreboard players set #yield arnis.car 1\n"
 		  << "execute if score #t arnis.car matches 1.. rotated as @s positioned ^ ^ ^"
-		  << distance(3.0)
+		  << distance(CROSSING_AT.first)
 		  << " if entity @e[type=marker,tag=arnis.car,tag=!arnis.car.held,distance=.."
-		  << distance(1.7) << "] run scoreboard players set #yield arnis.car 1\n"
+		  << distance(CROSSING_AT.second)
+		  << "] run scoreboard players set #yield arnis.car 1\n"
 		  << "execute if score #yield arnis.car matches 0 run scoreboard players set #w arnis.car 0\n"
 		  << "execute if score #yield arnis.car matches 1 run scoreboard players add #w arnis.car 1\n"
 		  << "scoreboard players operation #lim arnis.car = #id arnis.car\n"
 		  << "scoreboard players operation #lim arnis.car %= #32 arnis\n"
-		  << "scoreboard players add #lim arnis.car 30\n"
+		  << "scoreboard players add #lim arnis.car " << GIVE_WAY_STEPS << '\n'
 		  << "execute if score #yield arnis.car matches 1 if score #w arnis.car <= #lim arnis.car run scoreboard players set #t arnis.car 0\n"
-		  << "execute rotated as @s positioned ^ ^ ^" << distance(3.0)
-		  << " if entity @a[gamemode=!spectator,distance=.." << distance(2.0)
+		  << "execute rotated as @s positioned ^ ^ ^" << distance(PLAYER_AT[0])
+		  << " if entity @a[gamemode=!spectator,distance=.." << distance(PLAYER_AT[2])
 		  << "] run scoreboard players set #t arnis.car 0\n"
-		  << "execute rotated as @s positioned ^ ^ ^" << distance(6.0)
-		  << " if entity @a[gamemode=!spectator,distance=.." << distance(2.0)
+		  << "execute rotated as @s positioned ^ ^ ^" << distance(PLAYER_AT[1])
+		  << " if entity @a[gamemode=!spectator,distance=.." << distance(PLAYER_AT[2])
 		  << "] run scoreboard players set #t arnis.car 0\n";
 	out.emplace_back("data/arnis/function/cars/clear.mcfunction", clear.str());
 	std::ostringstream ease;
@@ -1635,6 +1719,120 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 					seed + 1 + static_cast<std::int64_t>(part_index), std::move(extra));
 		}
 	}
+}
+
+nlohmann::json CarNetwork::bedrock_data() const
+{
+	const auto tenths = [](double value) {
+		return static_cast<std::int64_t>(std::llround(value * 10.0));
+	};
+	nlohmann::json lanes = nlohmann::json::array();
+	for (const auto &segment : segments_) {
+		std::vector<std::int64_t> points;
+		points.reserve(segment.points.size() * 3);
+		std::array<std::int64_t, 3> previous{};
+		for (const auto &point : segment.points) {
+			const std::array<std::int64_t, 3> at{
+					tenths(point.x), tenths(point.y), tenths(point.z)};
+			for (std::size_t axis = 0; axis < at.size(); ++axis)
+				points.push_back(at[axis] - previous[axis]);
+			previous = at;
+		}
+		std::vector<std::size_t> turns;
+		turns.reserve(segment.next.size() * 3);
+		for (const auto &turn : segment.next) {
+			turns.push_back(turn.lane);
+			turns.push_back(turn.entry);
+			turns.push_back(turn.crossing ? 1 : 0);
+		}
+		nlohmann::json lane{{"p", comma_list(points)}, {"n", comma_list(turns)},
+				{"v", segment.speed}};
+		std::vector<int> caps;
+		for (std::size_t i = 0; i < segment.points.size(); ++i) {
+			if (segment.points[i].cap) {
+				caps.push_back(static_cast<int>(i));
+				caps.push_back(*segment.points[i].cap);
+			}
+		}
+		if (!caps.empty())
+			lane["m"] = comma_list(caps);
+		if (!segment.carries_cars())
+			lane["o"] = 1;
+		lanes.push_back(std::move(lane));
+	}
+
+	const auto bodies = all_bodies();
+	nlohmann::json body_names = nlohmann::json::array();
+	for (const auto &[kind, colour] : bodies)
+		body_names.push_back(body_name(kind, colour));
+	nlohmann::json start = nlohmann::json::array();
+	for (const auto &car : cars_) {
+		const auto it = std::find_if(bodies.begin(), bodies.end(), [&](const auto &body) {
+			return body.first == car.kind && body.second == car.colour;
+		});
+		if (it == bodies.end())
+			throw std::logic_error("Bedrock car has no matching body definition");
+		const auto body = static_cast<std::size_t>(it - bodies.begin());
+		const auto hundredths = [](double value) {
+			return std::round(value * 100.0) / 100.0;
+		};
+		start.push_back({car.segment, car.target, hundredths(car.position[0]),
+				hundredths(car.position[1]), hundredths(car.position[2]), body,
+				car.pace});
+	}
+
+	nlohmann::json colours = nlohmann::json::object();
+	for (const auto &[kind, _] : KINDS) {
+		const auto values = kind == VehicleKind::Van ? respawn_colours(VAN_COLOURS)
+													 : respawn_colours(CAR_COLOURS);
+		colours[kind_name(kind)] = values;
+	}
+	nlohmann::json kind_rules = nlohmann::json::array();
+	for (const auto &[kind, weight] : KINDS)
+		kind_rules.push_back({kind_name(kind), weight});
+	nlohmann::json look = nlohmann::json::array();
+	for (const auto &[at, radius, close] : LOOK)
+		look.push_back({at, radius, close});
+
+	return {{"size", size_},
+			{"accel", std::max(1, static_cast<int>(std::lround(
+										  ACCEL_MPS2 * 0.01 * scale_ * 1000.0)))},
+			{"lanes", std::move(lanes)}, {"start", std::move(start)},
+			{"bodies", std::move(body_names)}, {"colours", std::move(colours)},
+			{"rules", {{"look", std::move(look)}, {"same_way", SAME_WAY_DEG},
+							  {"crossing", {CROSSING_AT.first, CROSSING_AT.second}},
+							  {"player", PLAYER_AT}, {"give_way", GIVE_WAY_STEPS},
+							  {"pace", PACE}, {"kinds", std::move(kind_rules)}}}};
+}
+
+std::vector<bedrock_addon::Body> CarNetwork::bedrock_bodies() const
+{
+	std::vector<bedrock_addon::Body> out;
+	const auto definitions = all_bodies();
+	out.reserve(definitions.size());
+	const float size = static_cast<float>(size_);
+	for (const auto &[kind, colour] : definitions) {
+		bedrock_addon::Body body;
+		body.name = body_name(kind, colour);
+		body.fleet = bedrock_addon::Fleet::Car;
+		for (const auto &part : body_parts(kind, std::string(colour))) {
+			bedrock_addon::Lamp lamp = bedrock_addon::Lamp::Off;
+			if (part.light == Light::Head)
+				lamp = bedrock_addon::Lamp::On;
+			else if (part.light == Light::Tail)
+				lamp = bedrock_addon::Lamp::Brake;
+			bedrock_addon::Shape shape;
+			shape.block = part.block;
+			shape.lamp = lamp;
+			for (std::size_t axis = 0; axis < 3; ++axis) {
+				shape.size[axis] = part.size[axis] * size;
+				shape.corner[axis] = part.corner[axis] * size;
+			}
+			body.shapes.push_back(std::move(shape));
+		}
+		out.push_back(std::move(body));
+	}
+	return out;
 }
 
 } // namespace arnis::highways::cars
