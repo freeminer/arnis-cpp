@@ -399,21 +399,25 @@ void traffic_sign(Canvas &canvas, TrafficSign sign)
 		canvas.fill_rect(56, 40, 16, 68, WHITE);
 		canvas.fill_rect(30, 28, 68, 14, RED);
 		break;
-	case TrafficSign::LevelCrossing:
-		for (const float flip : {1.0f, -1.0f}) {
+	case TrafficSign::LevelCrossing: {
+		// Red outlines go down first so the white centers join at the crossing.
+		const auto board = [](float half_length, float half_width, float flip) {
 			const float sine = std::sin(0.62f) * flip;
 			const float cosine = std::cos(0.62f);
 			std::vector<std::pair<float, float>> points;
 			for (const auto &[x, y] : std::array<std::pair<float, float>, 4>{
-						 {{-56, -8}, {56, -8}, {56, 8}, {-56, 8}}})
+						 {{-half_length, -half_width}, {half_length, -half_width},
+								 {half_length, half_width}, {-half_length, half_width}}})
 				points.emplace_back(
 						64 + x * cosine - y * sine, 64 + x * sine + y * cosine);
-			canvas.polygon(points, WHITE);
-		}
-		for (const auto &[x, y] : std::array<std::pair<int, int>, 4>{
-					 {{14, 33}, {114, 33}, {14, 95}, {114, 95}}})
-			canvas.disc(x, y, 7, RED);
+			return points;
+		};
+		for (const float flip : {1.0f, -1.0f})
+			canvas.polygon(board(58.0f, 11.0f, flip), RED);
+		for (const float flip : {1.0f, -1.0f})
+			canvas.polygon(board(53.0f, 6.0f, flip), WHITE);
 		break;
+	}
 	case TrafficSign::HighVoltage:
 		canvas.polygon({{64, 8}, {122, 116}, {6, 116}}, BLACK);
 		canvas.polygon({{64, 20}, {112, 110}, {16, 110}}, YELLOW);
@@ -456,14 +460,16 @@ void speed_limit(Canvas &canvas, std::uint16_t value, bool mph, SpeedStyle style
 		return;
 	}
 
-	canvas.rounded_rect(24, 6, 80, 116, 3, WHITE);
-	canvas.stroke_rounded_rect(24, 6, 80, 116, 3, 3, BLACK);
+	// 4:5 like the real plates, wide enough for the legend at 18 px.
+	canvas.rounded_rect(18, 6, 92, 116, 3, WHITE);
+	canvas.stroke_rounded_rect(18, 6, 92, 116, 3, 3, BLACK);
 	const auto &small = Font::get(FontSize::S12);
 	if (style == SpeedStyle::CaPlate)
 		small.draw_centered(canvas, 64, 22, "MAXIMUM", BLACK, 1);
 	else {
-		small.draw_centered(canvas, 64, 14, "SPEED", BLACK, 1);
-		small.draw_centered(canvas, 64, 30, "LIMIT", BLACK, 1);
+		const auto &legend = Font::get(FontSize::S18);
+		legend.draw_centered(canvas, 64, 12, "SPEED", BLACK, 1);
+		legend.draw_centered(canvas, 64, 34, "LIMIT", BLACK, 1);
 	}
 	const auto size = text.size() > 2 ? FontSize::S28 : FontSize::S44;
 	const auto &digits = Font::get(size);
@@ -480,7 +486,9 @@ void route_shield(Canvas &canvas, ShieldStyle style, const std::string &text)
 		const auto plate = style == ShieldStyle::Blue	  ? BLUE
 						   : style == ShieldStyle::Yellow ? YELLOW
 														  : SIGN_GREEN;
-		const auto foreground = style == ShieldStyle::Yellow ? BLACK : WHITE;
+		const auto foreground = style == ShieldStyle::Yellow  ? BLACK
+								: style == ShieldStyle::Green ? YELLOW
+															  : WHITE;
 		const int width = 110, height = 64;
 		canvas.rounded_rect(64 - width / 2, 64 - height / 2, width, height, 6, plate);
 		canvas.stroke_rounded_rect(64 - width / 2, 64 - height / 2, width, height, 6, 3,
@@ -526,9 +534,10 @@ void text_sign(Canvas &canvas, TextStyle style, const std::string &text)
 				{{DARK_GRAY, GOLD, GOLD}},
 		}};
 		const auto &scheme = schemes[str_hash(text) % schemes.size()];
-		canvas.rounded_rect(4, 30, width - 8, 68, 6, scheme[0]);
-		canvas.stroke_rounded_rect(4, 30, width - 8, 68, 6, 2, scheme[2]);
-		if (auto layout = fit_or_abbreviate(text, width - 24, 56, FontSize::S44, true))
+		// Taller plate fits mid-length names on two lines at 28 px.
+		canvas.rounded_rect(4, 24, width - 8, 80, 6, scheme[0]);
+		canvas.stroke_rounded_rect(4, 24, width - 8, 80, 6, 2, scheme[2]);
+		if (auto layout = fit_or_abbreviate(text, width - 24, 68, FontSize::S44, true))
 			layout->draw_centered(canvas, center_x, 64, scheme[1]);
 		break;
 	}

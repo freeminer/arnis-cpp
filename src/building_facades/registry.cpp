@@ -179,6 +179,8 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		scale = s.scale;
 		requested_px = s.requested_px;
 	}
+	requested_px = std::max(mapillary::atlas::MIN_PX_PER_BLOCK,
+			std::min(requested_px, mapillary::atlas::pixel_resolution_cap()));
 	std::stable_sort(pending.begin(), pending.end(), [](const auto &a, const auto &b) {
 		const auto a_cell = a.cells.empty() ? std::pair{0, 0} : a.cells.front();
 		const auto b_cell = b.cells.empty() ? std::pair{0, 0} : b.cells.front();
@@ -322,10 +324,18 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 	// refuses all later pending panels as well; keep the same deterministic cap.
 	if (mapillary::atlas::rejected_textures() != 0)
 		crop_jobs.clear();
-	// Select the highest per-block resolution whose unique preset crops fit beside
-	// Mapillary textures already admitted to the shared atlas. The Rust path sizes
-	// all pending facade geometry before it decodes and crops any panel; doing the
-	// same here avoids retaining requested-resolution images that the atlas drops.
+	// Fit both pending facade sources together before either one is cropped. Rust
+	// includes its already-hung Mapillary panels and these pending preset panels in
+	// one atlas estimate; account for the pending Mapillary set here as well.
+	const auto mapillary_area =
+			mapillary::facades::pending_atlas_area_curve(editor, requested_px);
+	auto mapillary_area_at = [&](double candidate_ppm) {
+		const double safe_scale = std::max(0.001, scale);
+		const auto px = std::clamp<std::uint32_t>(
+				static_cast<std::uint32_t>(std::lround(candidate_ppm / safe_scale)),
+				mapillary::atlas::MIN_PX_PER_BLOCK, requested_px);
+		return px < mapillary_area.size() ? mapillary_area[px] : mapillary_area.back();
+	};
 	auto estimated_area = [&](double candidate_ppm) {
 		std::unordered_map<std::size_t, std::unordered_set<std::uint64_t>> unique;
 		std::uint64_t area = mapillary::atlas::used_texture_area();
@@ -344,6 +354,10 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 				return std::numeric_limits<std::uint64_t>::max();
 			area += panel_area;
 		}
+		const auto pending_mapillary = mapillary_area_at(candidate_ppm);
+		if (pending_mapillary > std::numeric_limits<std::uint64_t>::max() - area)
+			return std::numeric_limits<std::uint64_t>::max();
+		area += pending_mapillary;
 		return area;
 	};
 	double selected_ppm = std::min(
@@ -368,6 +382,8 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 		std::uint64_t remaining = mapillary::atlas::atlas_budget() -
 								  std::min(mapillary::atlas::atlas_budget(),
 										  mapillary::atlas::used_texture_area());
+		const auto future_mapillary = mapillary_area_at(minimum_ppm);
+		remaining -= std::min(remaining, future_mapillary);
 		std::size_t keep = 0;
 		for (; keep < crop_jobs.size(); ++keep) {
 			const auto &job = crop_jobs[keep];
@@ -397,6 +413,17 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 				  << " pixels per metre to fit the shared texture atlas.\n";
 	}
 	ppm = selected_ppm;
+	if (!crop_jobs.empty()) {
+		const auto selected_px = static_cast<std::uint32_t>(
+				std::clamp(std::lround(ppm / std::max(0.001, scale)),
+						static_cast<long>(mapillary::atlas::MIN_PX_PER_BLOCK),
+						static_cast<long>(requested_px)));
+		mapillary::atlas::set_pixel_resolution_cap(selected_px);
+	}
+	// Admit the Mapillary batch at the resolution settled against these pending
+	// preset jobs. This keeps its display ordering ahead of the preset facade
+	// panels while sharing Rust's combined atlas fit.
+	mapillary::facades::finalize_displays(editor);
 	for (auto &job : crop_jobs)
 		job.fit = job.fit.at(ppm);
 	// Decode only at the selected resolution. Populate the cache before taking

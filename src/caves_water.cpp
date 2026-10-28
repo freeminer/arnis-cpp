@@ -445,11 +445,12 @@ void seal_floating_fluid_region(
 	// Match Rust's scan-then-write pass: edits are collected before any plug is
 	// applied, and each fluid cell over an empty cell gets its own support block.
 	std::vector<std::array<int, 3>> plugs;
+	const std::optional<std::vector<Block>> fluids{fluid_blocks()};
 	for (int x = region.min_x; x <= region.max_x; ++x)
 		for (int z = region.min_z; z <= region.max_z; ++z) {
 			const int top = std::min(editor.get_ground_level(x, z) + 2, write_max_y);
 			for (int y = top; y >= min_y; --y)
-				if (editor.check_for_block_absolute(x, y, z, fluid_blocks()) &&
+				if (editor.check_for_block_absolute(x, y, z, fluids) &&
 						!editor.block_exists_absolute(x, y - 1, z))
 					plugs.push_back({x, y, z});
 		}

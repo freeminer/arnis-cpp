@@ -25,7 +25,8 @@ inline constexpr auto WHITE = id(8, 2), OFF_WHITE = id(14, 2), LIGHT_GRAY = id(3
 					  BLACK = id(29, 2), RED = id(4, 0), BRIGHT_RED = id(4, 2),
 					  DARK_RED = id(28, 1), ORANGE = id(15, 2), YELLOW = id(18, 2),
 					  GOLD = id(30, 2), GREEN = id(7, 1), LIGHT_GREEN = id(19, 2),
-					  SIGN_GREEN = id(27, 1), BLUE = id(25, 2), DARK_BLUE = id(25, 0),
+					  // Darkest emerald (0, 114, 30); plain green reads olive on signs.
+		SIGN_GREEN = id(33, 3), BLUE = id(25, 2), DARK_BLUE = id(25, 0),
 					  LIGHT_BLUE = id(17, 2), SKY = id(32, 2), CYAN = id(23, 2),
 					  PURPLE = id(24, 2), MAGENTA = id(16, 2), PINK = id(20, 2),
 					  BROWN = id(26, 2), WOOD = id(13, 2), SAND = id(2, 2),

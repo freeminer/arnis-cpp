@@ -3599,12 +3599,14 @@ bool generate_world(WorldEditor &editor,
 	// them per region after styling; this non-streaming editor releases the
 	// equivalent generation-only index at the same lifetime edge.
 	editor.release_road_surface_overrides();
-	// Rust settles Mapillary photo candidates only after all generated blocks
-	// are final; the shared C++ editor has no disk-eviction region to flush.
-	mapillary::facades::finalize_displays(editor);
 	// Resolve preset facade candidates only after all neighbouring building
 	// blocks exist; party-wall panels are cropped from their finished rooflines.
+	// The enabled registry preflights both sources together and flushes Mapillary
+	// before writing preset panels, preserving Rust's display ordering.
 	building_facades::finalize(editor);
+	// Without a preset registry there was no joint preflight to flush photos.
+	if (!building_facades::enabled())
+		mapillary::facades::finalize_displays(editor);
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.

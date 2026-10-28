@@ -1,5 +1,6 @@
 #include "atlas.h"
 
+#include <algorithm>
 #include <atomic>
 #include <limits>
 #include <mutex>
@@ -16,6 +17,7 @@ constexpr std::uint64_t budget_for(std::uint32_t side)
 }
 
 std::atomic<std::uint64_t> active_budget{budget_for(ATLAS_SIDE_STANDARD)};
+std::atomic<std::uint32_t> active_pixel_cap{std::numeric_limits<std::uint32_t>::max()};
 std::mutex usage_mutex;
 std::unordered_map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> used_textures;
 std::uint64_t used_area = 0;
@@ -57,6 +59,17 @@ void set_atlas_side(std::uint32_t side)
 	reset_texture_usage();
 }
 
+void set_pixel_resolution_cap(std::uint32_t pixels_per_block)
+{
+	active_pixel_cap.store(
+			std::max(MIN_PX_PER_BLOCK, pixels_per_block), std::memory_order_relaxed);
+}
+
+std::uint32_t pixel_resolution_cap()
+{
+	return active_pixel_cap.load(std::memory_order_relaxed);
+}
+
 std::uint64_t atlas_budget()
 {
 	return active_budget.load(std::memory_order_relaxed);
@@ -75,6 +88,8 @@ void reset_texture_usage()
 	used_area = 0;
 	rejected = 0;
 	saturated = false;
+	active_pixel_cap.store(
+			std::numeric_limits<std::uint32_t>::max(), std::memory_order_relaxed);
 }
 
 bool reserve_texture(const std::vector<std::uint8_t> &pixels, std::uint32_t width,

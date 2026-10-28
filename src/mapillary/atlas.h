@@ -14,6 +14,11 @@ inline constexpr std::uint32_t MIN_PX_PER_BLOCK = 4;
 // because facade panels and preset building facades share one atlas.
 void set_atlas_side(std::uint32_t side);
 
+// Shared per-block resolution cap for all facade sources in this generation.
+// Mapillary settles it first; preset facades must not crop above that fit.
+void set_pixel_resolution_cap(std::uint32_t pixels_per_block);
+std::uint32_t pixel_resolution_cap();
+
 // Number of pixels available to generated panels after conservative packing
 // allowance.  This is intentionally public for panel sizing code.
 std::uint64_t atlas_budget();

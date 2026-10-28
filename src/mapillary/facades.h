@@ -93,6 +93,10 @@ std::size_t collect_displays(arnis::world_editor::WorldEditor &, std::uint64_t w
 // evict regions during generation, so the shared-editor path settles them once
 // after all element and terrain passes have merged.
 std::size_t finalize_displays(arnis::world_editor::WorldEditor &);
+// Estimate pending Mapillary texture area at each integer pixels-per-block
+// resolution. Values exclude textures already admitted to the atlas.
+std::vector<std::uint64_t> pending_atlas_area_curve(
+		arnis::world_editor::WorldEditor &, std::uint32_t max_pixels_per_block);
 std::optional<Block> block_at(int x, int y, int z, int start_y_offset,
 		std::uint64_t way_id, Block window_block);
 std::optional<Block> band_block_at(

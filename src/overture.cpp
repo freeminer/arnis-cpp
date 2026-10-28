@@ -836,14 +836,24 @@ void OvertureHints::insert(OvertureOsmRef key, OsmAttributeHint hint)
 		hint.num_floors.reset();
 	if (!hint.height_m && !hint.num_floors)
 		return;
-	const auto found = hints_.find(key);
-	if (found != hints_.end()) {
+	// Once full, existing entries may still acquire missing attributes, but a
+	// new key must not be inserted. Below the limit use a single hash lookup.
+	if (hints_.size() >= limit_) {
+		const auto found = hints_.find(key);
+		if (found == hints_.end())
+			return;
 		if (!found->second.height_m)
 			found->second.height_m = hint.height_m;
 		if (!found->second.num_floors)
 			found->second.num_floors = hint.num_floors;
-	} else if (hints_.size() < limit_) {
-		hints_.emplace(key, hint);
+		return;
+	}
+	const auto [found, inserted] = hints_.try_emplace(key, hint);
+	if (!inserted) {
+		if (!found->second.height_m)
+			found->second.height_m = hint.height_m;
+		if (!found->second.num_floors)
+			found->second.num_floors = hint.num_floors;
 	}
 }
 

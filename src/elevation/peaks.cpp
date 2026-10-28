@@ -3,6 +3,7 @@
 #include "../coordinate_system/geographic/llbbox.h"
 #include "../building_suppression.h"
 #include "../data_processing.h"
+#include "../element_processing/attractions.h"
 #include "../element_processing/buildings.h"
 #include "../models_3d/wikidata/wikidata_index.h"
 #include "../mapillary/geometry.h"
@@ -356,7 +357,8 @@ std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data)
 
 bool is_building_feature(const tags_t &tags)
 {
-	return tags.contains("building") || tags.contains("building:part");
+	return tags.contains("building") || tags.contains("building:part") ||
+		   tags.get("man_made") == "tower";
 }
 
 std::pair<double, double> footprint_extent_m(
@@ -515,16 +517,11 @@ std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data
 			std::unordered_set<std::uint64_t> relevant_ways;
 			std::unordered_set<std::uint64_t> relevant_relations;
 			for (const auto &way : data.ways)
-				if (way.tags.contains("building") || way.tags.contains("building:part"))
+				if (is_building_feature(way.tags) ||
+						attractions::replaces_parts(way.tags))
 					relevant_ways.insert(way.id);
 			for (const auto &relation : data.relations) {
-				const auto type = relation.tags.get("type");
-				const bool building_relation =
-						type == "building" ||
-						(type == "multipolygon" &&
-								(relation.tags.contains("building") ||
-										relation.tags.contains("building:part")));
-				if (!building_relation)
+				if (!is_building_feature(relation.tags))
 					continue;
 				relevant_relations.insert(relation.id);
 				for (const auto &member : relation.members)

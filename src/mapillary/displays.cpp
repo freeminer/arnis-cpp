@@ -678,8 +678,17 @@ bool Registry::collect_to_editor(arnis::world_editor::WorldEditor &editor,
 					if (atlas::admission_closed())
 						return false;
 				}
-				return editor.place_facade_panel(x, y, z, facing, std::move(pixels),
-						panel.pixel_width, panel.pixel_height);
+				// Fallback panels are written to the same resource pack as item
+				// displays, so they must consume the same shared atlas budget.
+				if (!atlas::reserve_texture(
+							pixels, panel.pixel_width, panel.pixel_height))
+					return false;
+				if (editor.place_facade_panel(x, y, z, facing, std::move(pixels),
+							panel.pixel_width, panel.pixel_height))
+					return true;
+				atlas::release_texture(
+						panel.pixels, panel.pixel_width, panel.pixel_height);
+				return false;
 			});
 }
 

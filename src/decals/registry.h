@@ -52,7 +52,7 @@ enum class ShieldStyle
 {
 	Blue,
 	Yellow,
-	Green,
+	Green, // UK and Irish primary routes: yellow number on green.
 	Interstate,
 	White
 };

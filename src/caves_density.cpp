@@ -273,23 +273,39 @@ void carve_density_region(const CaveGen &gen, world_editor::WorldEditor &editor,
 		}
 	const int cx0 = floor_div(min_x, CELL_WIDTH), cx1 = floor_div(max_x, CELL_WIDTH);
 	const int cz0 = floor_div(min_z, CELL_WIDTH), cz1 = floor_div(max_z, CELL_WIDTH);
-	const int cy0 = floor_div(floor_y + 1, CELL_HEIGHT);
-	const int cy1 = floor_div(max_surface - TOP_GATE, CELL_HEIGHT);
+	const int cy0 = floor_div(std::max(floor_y + 1, write_min_y), CELL_HEIGHT);
+	const int cy1 = floor_div(std::min(max_surface - TOP_GATE, write_max_y), CELL_HEIGHT);
+	if (cy0 > cy1)
+		return;
+	// Adjacent interpolation cells share their corners. Evaluate each density
+	// once, including the upper boundary required by the last vertical cell.
+	const std::size_t z_count = std::size_t(cz1 - cz0 + 2);
+	const std::size_t y_count = std::size_t(cy1 - cy0 + 2);
+	std::vector<double> densities(std::size_t(cx1 - cx0 + 2) * z_count * y_count);
+	const auto index = [&](int x, int y, int z) {
+		return (std::size_t(x - cx0) * z_count + std::size_t(z - cz0)) * y_count +
+			   std::size_t(y - cy0);
+	};
+	for (int x = cx0; x <= cx1 + 1; ++x)
+		for (int z = cz0; z <= cz1 + 1; ++z)
+			for (int y = cy0; y <= cy1 + 1; ++y)
+				densities[index(x, y, z)] = gen.combined_density(
+						x * CELL_WIDTH, y * CELL_HEIGHT, z * CELL_WIDTH);
 	for (int cx = cx0; cx <= cx1; ++cx)
 		for (int cz = cz0; cz <= cz1; ++cz) {
 			const int wx0 = cx * CELL_WIDTH, wx1 = wx0 + CELL_WIDTH;
 			const int wz0 = cz * CELL_WIDTH, wz1 = wz0 + CELL_WIDTH;
-			double b00 = gen.combined_density(wx0, cy0 * CELL_HEIGHT, wz0);
-			double b10 = gen.combined_density(wx1, cy0 * CELL_HEIGHT, wz0);
-			double b01 = gen.combined_density(wx0, cy0 * CELL_HEIGHT, wz1);
-			double b11 = gen.combined_density(wx1, cy0 * CELL_HEIGHT, wz1);
+			double b00 = densities[index(cx, cy0, cz)];
+			double b10 = densities[index(cx + 1, cy0, cz)];
+			double b01 = densities[index(cx, cy0, cz + 1)];
+			double b11 = densities[index(cx + 1, cy0, cz + 1)];
 			for (int cy = cy0; cy <= cy1; ++cy) {
 				const int wy0 = cy * CELL_HEIGHT, wy1 = wy0 + CELL_HEIGHT;
 				const double n000 = b00, n100 = b10, n001 = b01, n101 = b11;
-				const double n010 = gen.combined_density(wx0, wy1, wz0);
-				const double n110 = gen.combined_density(wx1, wy1, wz0);
-				const double n011 = gen.combined_density(wx0, wy1, wz1);
-				const double n111 = gen.combined_density(wx1, wy1, wz1);
+				const double n010 = densities[index(cx, cy + 1, cz)];
+				const double n110 = densities[index(cx + 1, cy + 1, cz)];
+				const double n011 = densities[index(cx, cy + 1, cz + 1)];
+				const double n111 = densities[index(cx + 1, cy + 1, cz + 1)];
 				b00 = n010;
 				b10 = n110;
 				b01 = n011;

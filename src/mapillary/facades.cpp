@@ -939,8 +939,141 @@ std::size_t finalize_displays(arnis::world_editor::WorldEditor &editor)
 	std::shared_lock store_lock(store_mutex);
 	if (!store)
 		return 0;
+	// Pick one resolution for this Mapillary batch before placing any entity.
+	// Rust charges at the atlas floor and fits the complete candidate set before
+	// it writes textures; charging each C++ panel at the requested resolution
+	// prematurely discarded walls that would fit after a uniform reduction.
+	std::stable_sort(pending.begin(), pending.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.wall, a.building, a.name) <
+			   std::tie(b.wall, b.building, b.name);
+	});
+	struct Candidate
+	{
+		std::size_t pending_index{};
+		std::uint64_t picture{};
+	};
+	std::vector<Candidate> candidates;
+	std::uint32_t requested_px = std::numeric_limits<std::uint32_t>::max();
+	for (std::size_t i = 0; i < pending.size(); ++i) {
+		const auto &panel = pending[i];
+		const bool visible = std::any_of(
+				panel.wall_cells.begin(), panel.wall_cells.end(), [&](const auto &cell) {
+					return panel.top >
+						   editor.get_absolute_y(cell.first, 0, cell.second) + 1;
+				});
+		if (!visible || panel.building >= store->buildings.size() ||
+				panel.wall >= store->buildings[panel.building].walls.size())
+			continue;
+		const auto &texture = store->buildings[panel.building].walls[panel.wall];
+		if (panel.x0 >= panel.x1 || panel.y0 >= panel.y1 ||
+				panel.x1 > texture.texture_width || panel.y1 > texture.texture_height ||
+				texture.texture_pixels.size() <
+						std::size_t(texture.texture_width) * texture.texture_height)
+			continue;
+		const auto width = panel.x1 - panel.x0;
+		const auto height = panel.y1 - panel.y0;
+		const auto pixels = std::size_t(width) * height;
+		if (!pixels || pixels > 16 * 1024 * 1024)
+			continue;
+		std::size_t valid = 0;
+		std::uint64_t hash = 14695981039346656037ull;
+		auto add = [&](std::uint8_t byte) {
+			hash ^= byte;
+			hash *= 1099511628211ull;
+		};
+		for (int shift = 0; shift < 32; shift += 8) {
+			add(static_cast<std::uint8_t>(width >> shift));
+			add(static_cast<std::uint8_t>(height >> shift));
+		}
+		add(panel.flip ? 1 : 0);
+		for (std::uint32_t y = panel.y0; y < panel.y1; ++y)
+			for (std::uint32_t x = panel.x0; x < panel.x1; ++x) {
+				const auto &px =
+						texture.texture_pixels[std::size_t(y) * texture.texture_width +
+											   x];
+				valid += px[3] > 0;
+				for (const auto channel : px)
+					add(channel);
+			}
+		if (static_cast<double>(valid) < MIN_VALID_FRACTION * pixels)
+			continue;
+		candidates.push_back({i, hash});
+		const auto px = static_cast<std::uint32_t>(
+				std::max(static_cast<long>(atlas::MIN_PX_PER_BLOCK),
+						std::lround(panel.pixels_per_block)));
+		requested_px = std::min(requested_px, px);
+	}
+	if (candidates.empty())
+		return 0;
+	requested_px = std::min(requested_px, atlas::pixel_resolution_cap());
+	struct TextureKey
+	{
+		std::uint64_t picture{};
+		std::uint32_t width{}, height{};
+		bool operator<(const TextureKey &other) const
+		{
+			return std::tie(picture, width, height) <
+				   std::tie(other.picture, other.width, other.height);
+		}
+	};
+	const auto budget = atlas::atlas_budget();
+	const auto already_used = atlas::used_texture_area();
+	auto area_at = [&](std::uint32_t px) {
+		std::set<TextureKey> unique;
+		std::uint64_t area = already_used;
+		for (const auto &candidate : candidates) {
+			const auto &quad = pending[candidate.pending_index].quad;
+			const auto sprite = displays::Sprite::of(quad.w, quad.h, px);
+			if (!unique.insert({candidate.picture, sprite.side_w, sprite.side_h}).second)
+				continue;
+			const auto cost = sprite.area();
+			if (cost > std::numeric_limits<std::uint64_t>::max() - area)
+				return std::numeric_limits<std::uint64_t>::max();
+			area += cost;
+		}
+		return area;
+	};
+	std::uint32_t selected_px = atlas::MIN_PX_PER_BLOCK;
+	for (std::uint32_t px = requested_px;; --px) {
+		if (area_at(px) <= budget || px == atlas::MIN_PX_PER_BLOCK) {
+			selected_px = px;
+			break;
+		}
+	}
+	std::vector<bool> accepted_candidate(pending.size(), false);
+	if (area_at(selected_px) <= budget) {
+		for (const auto &candidate : candidates)
+			accepted_candidate[candidate.pending_index] = true;
+	} else {
+		// At the floor, admit the same deterministic prefix as Rust: after the
+		// first unique texture that cannot fit, later candidates stay bare.
+		std::set<TextureKey> unique;
+		std::uint64_t remaining = budget - std::min(budget, already_used);
+		for (const auto &candidate : candidates) {
+			const auto &quad = pending[candidate.pending_index].quad;
+			const auto sprite =
+					displays::Sprite::of(quad.w, quad.h, atlas::MIN_PX_PER_BLOCK);
+			if (!unique.insert({candidate.picture, sprite.side_w, sprite.side_h})
+							.second) {
+				accepted_candidate[candidate.pending_index] = true;
+				continue;
+			}
+			if (sprite.area() > remaining)
+				break;
+			remaining -= sprite.area();
+			accepted_candidate[candidate.pending_index] = true;
+		}
+	}
+	if (selected_px < requested_px)
+		std::cerr << "Mapillary facades: reducing crop resolution from " << requested_px
+				  << " to " << selected_px
+				  << " pixels per block to fit the shared texture atlas.\n";
+	atlas::set_pixel_resolution_cap(selected_px);
 	std::size_t placed = 0;
-	for (auto &panel : pending) {
+	for (std::size_t pending_index = 0; pending_index < pending.size(); ++pending_index) {
+		if (!accepted_candidate[pending_index])
+			continue;
+		auto &panel = pending[pending_index];
 		const bool visible = std::any_of(
 				panel.wall_cells.begin(), panel.wall_cells.end(), [&](const auto &cell) {
 					return panel.top >
@@ -1038,8 +1171,7 @@ std::size_t finalize_displays(arnis::world_editor::WorldEditor &editor)
 		crop_rgb.reserve(count * 3);
 		for (const auto &pixel : smooth)
 			crop_rgb.insert(crop_rgb.end(), pixel.begin(), pixel.end());
-		const auto sprite =
-				displays::Sprite::of(panel.quad.w, panel.quad.h, panel.pixels_per_block);
+		const auto sprite = displays::Sprite::of(panel.quad.w, panel.quad.h, selected_px);
 		auto pixels = displays::lay_out_rgb(crop_rgb, crop_width, crop_height, sprite);
 		if (pixels.empty())
 			continue;
@@ -1050,15 +1182,129 @@ std::size_t finalize_displays(arnis::world_editor::WorldEditor &editor)
 		// Once the item atlas fills, Rust leaves later walls bare instead of
 		// replacing their blocks with fallback panels. Preserve the fallback only
 		// when item displays are unavailable or the entity itself was refused.
-		if (!accepted && (!editor.has_entity_sink() || !atlas::admission_closed()))
-			accepted = editor.place_facade_panel(
-					static_cast<int>(std::llround(panel.quad.cx)),
-					static_cast<int>(std::llround(panel.quad.cy)),
-					static_cast<int>(std::llround(panel.quad.cz)), panel.facing,
-					std::move(pixels), sprite.side_w, sprite.side_h);
+		if (!accepted && (!editor.has_entity_sink() || !atlas::admission_closed())) {
+			if (atlas::reserve_texture(pixels, sprite.side_w, sprite.side_h)) {
+				accepted = editor.place_facade_panel(
+						static_cast<int>(std::llround(panel.quad.cx)),
+						static_cast<int>(std::llround(panel.quad.cy)),
+						static_cast<int>(std::llround(panel.quad.cz)), panel.facing,
+						pixels, sprite.side_w, sprite.side_h);
+				if (!accepted)
+					atlas::release_texture(pixels, sprite.side_w, sprite.side_h);
+			}
+		}
 		placed += accepted;
 	}
 	return placed;
+}
+
+std::vector<std::uint64_t> pending_atlas_area_curve(
+		arnis::world_editor::WorldEditor &editor, std::uint32_t max_pixels_per_block)
+{
+	max_pixels_per_block = std::max(atlas::MIN_PX_PER_BLOCK, max_pixels_per_block);
+	std::shared_lock store_lock(store_mutex);
+	std::vector<std::uint64_t> areas(
+			static_cast<std::size_t>(max_pixels_per_block) + 1, 0);
+	if (!store)
+		return areas;
+
+	struct Candidate
+	{
+		std::uint64_t picture{};
+		displays::Quad quad;
+		double requested_px{};
+	};
+	std::vector<Candidate> candidates;
+	{
+		std::lock_guard pending_lock(pending_displays_mutex);
+		for (const auto &panel : pending_displays) {
+			const bool visible = std::any_of(panel.wall_cells.begin(),
+					panel.wall_cells.end(), [&](const auto &cell) {
+						return panel.top >
+							   editor.get_absolute_y(cell.first, 0, cell.second) + 1;
+					});
+			if (!visible || panel.building >= store->buildings.size() ||
+					panel.wall >= store->buildings[panel.building].walls.size())
+				continue;
+			const auto &texture = store->buildings[panel.building].walls[panel.wall];
+			if (panel.x0 >= panel.x1 || panel.y0 >= panel.y1 ||
+					panel.x1 > texture.texture_width ||
+					panel.y1 > texture.texture_height ||
+					texture.texture_pixels.size() <
+							std::size_t(texture.texture_width) * texture.texture_height)
+				continue;
+			const auto width = panel.x1 - panel.x0;
+			const auto height = panel.y1 - panel.y0;
+			const auto pixels = std::size_t(width) * height;
+			if (!pixels || pixels > 16 * 1024 * 1024)
+				continue;
+			std::size_t valid = 0;
+			std::uint64_t hash = 14695981039346656037ull;
+			auto add = [&](std::uint8_t byte) {
+				hash ^= byte;
+				hash *= 1099511628211ull;
+			};
+			for (int shift = 0; shift < 32; shift += 8) {
+				add(static_cast<std::uint8_t>(width >> shift));
+				add(static_cast<std::uint8_t>(height >> shift));
+			}
+			add(panel.flip ? 1 : 0);
+			for (std::uint32_t y = panel.y0; y < panel.y1; ++y)
+				for (std::uint32_t x = panel.x0; x < panel.x1; ++x) {
+					const auto &pixel =
+							texture.texture_pixels[std::size_t(y) *
+														   texture.texture_width +
+												   x];
+					valid += pixel[3] > 0;
+					for (const auto channel : pixel)
+						add(channel);
+				}
+			if (static_cast<double>(valid) < MIN_VALID_FRACTION * pixels)
+				continue;
+			candidates.push_back({hash, panel.quad, panel.pixels_per_block});
+		}
+	}
+	if (candidates.empty())
+		return areas;
+
+	std::uint32_t highest_px = max_pixels_per_block;
+	for (const auto &candidate : candidates) {
+		const auto requested = static_cast<std::uint32_t>(
+				std::max(static_cast<long>(atlas::MIN_PX_PER_BLOCK),
+						std::lround(candidate.requested_px)));
+		highest_px = std::min(highest_px, requested);
+	}
+	struct TextureKey
+	{
+		std::uint64_t picture{};
+		std::uint32_t width{}, height{};
+		bool operator<(const TextureKey &other) const
+		{
+			return std::tie(picture, width, height) <
+				   std::tie(other.picture, other.width, other.height);
+		}
+	};
+	for (std::uint32_t px = atlas::MIN_PX_PER_BLOCK; px <= highest_px; ++px) {
+		std::set<TextureKey> unique;
+		std::uint64_t area = 0;
+		for (const auto &candidate : candidates) {
+			const auto sprite =
+					displays::Sprite::of(candidate.quad.w, candidate.quad.h, px);
+			if (!unique.insert({candidate.picture, sprite.side_w, sprite.side_h}).second)
+				continue;
+			const auto cost = sprite.area();
+			if (cost > std::numeric_limits<std::uint64_t>::max() - area) {
+				area = std::numeric_limits<std::uint64_t>::max();
+				break;
+			}
+			area += cost;
+		}
+		areas[px] = area;
+	}
+	for (std::size_t px = static_cast<std::size_t>(highest_px) + 1; px < areas.size();
+			++px)
+		areas[px] = areas[highest_px];
+	return areas;
 }
 
 std::optional<Block> block_at(
