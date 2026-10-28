@@ -167,7 +167,7 @@ decals::ShieldStyle shield(
 			return decals::ShieldStyle::Blue;
 		if (highway.starts_with("trunk") || ref.starts_with('N'))
 			return decals::ShieldStyle::Green;
-		return decals::ShieldStyle::White;
+		return decals::ShieldStyle::WhitePlate;
 	}
 	if (region == decals::SignRegion::Germanic)
 		return ref.starts_with('A') || highway.starts_with("motorway")

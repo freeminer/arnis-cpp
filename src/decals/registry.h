@@ -54,7 +54,8 @@ enum class ShieldStyle
 	Yellow,
 	Green, // UK and Irish primary routes: yellow number on green.
 	Interstate,
-	White
+	White,
+	WhitePlate
 };
 
 struct PictogramKey

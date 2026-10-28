@@ -3,6 +3,7 @@
 #include "tree_pack.h"
 #include "../land_cover/land_cover.h"
 #include "../ground_generation.h"
+#include "../element_processing/tree.h"
 #include "mapped.h"
 #include <algorithm>
 #include <atomic>
@@ -648,7 +649,12 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 	const auto community_count = data->realm.communities.size();
 	std::unordered_map<std::string, std::optional<std::size_t>> resolved_mixes;
 	std::unordered_map<std::string, std::optional<nlohmann::json>> mix_manifests;
+	// Rust attaches ecoregion mixes only when full-size schematic trees can be
+	// placed. At micro-tree scales resolving cross-pack communities is unused
+	// work and can retain a large set of extra schematics for this selector.
 	for (const auto id : ecoregion_ids) {
+		if (scale < MICRO_TREE_MAX_SCALE)
+			continue;
 		const auto mix = ecoregion::tree_mix(id);
 		if (!mix)
 			continue;

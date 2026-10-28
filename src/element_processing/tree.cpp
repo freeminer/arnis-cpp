@@ -4,6 +4,7 @@
 #include "../land_cover/land_cover.h"
 #include "../trees/region.h"
 #include <algorithm>
+#include <cmath>
 #include <initializer_list>
 #include <limits>
 
@@ -846,10 +847,15 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	// Fixed-size tree models dominate country-scale terrain. Keep the same
 	// species palette but scale a nominal 25 m tree into a compact shrub.
 	if (editor.scale() < MICRO_TREE_MAX_SCALE) {
-		const int height = std::clamp(
-				static_cast<int>(
-						std::lround(mapped_height_m.value_or(25.0) * editor.scale())),
-				1, 8);
+		// Rust rounds and casts to i32 (saturating at the integer limits); unlike
+		// the old C++ cap, it does not truncate tall mapped trees to eight blocks.
+		const double rounded_height =
+				std::round(mapped_height_m.value_or(25.0) * editor.scale());
+		const int height = std::isnan(rounded_height) ? 1
+						   : rounded_height >= std::numeric_limits<int>::max()
+								   ? std::numeric_limits<int>::max()
+						   : rounded_height <= 1.0 ? 1
+												   : static_cast<int>(rounded_height);
 		const int trunk = std::max(0, height - 1);
 		for (int dy = 0; dy < trunk; ++dy)
 			editor.set_block_absolute(tree.log_block, pos.x, base_y + dy, pos.z,

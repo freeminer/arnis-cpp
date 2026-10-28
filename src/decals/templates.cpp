@@ -482,17 +482,20 @@ void route_shield(Canvas &canvas, ShieldStyle style, const std::string &text)
 {
 	using namespace colors;
 	if (style == ShieldStyle::Blue || style == ShieldStyle::Yellow ||
-			style == ShieldStyle::Green) {
-		const auto plate = style == ShieldStyle::Blue	  ? BLUE
-						   : style == ShieldStyle::Yellow ? YELLOW
-														  : SIGN_GREEN;
-		const auto foreground = style == ShieldStyle::Yellow  ? BLACK
-								: style == ShieldStyle::Green ? YELLOW
-															  : WHITE;
+			style == ShieldStyle::Green || style == ShieldStyle::WhitePlate) {
+		const auto plate = style == ShieldStyle::Blue		  ? BLUE
+						   : style == ShieldStyle::Yellow	  ? YELLOW
+						   : style == ShieldStyle::WhitePlate ? WHITE
+															  : SIGN_GREEN;
+		const auto foreground = style == ShieldStyle::Yellow	   ? BLACK
+								: style == ShieldStyle::Green	   ? YELLOW
+								: style == ShieldStyle::WhitePlate ? BLACK
+																   : WHITE;
 		const int width = 110, height = 64;
 		canvas.rounded_rect(64 - width / 2, 64 - height / 2, width, height, 6, plate);
 		canvas.stroke_rounded_rect(64 - width / 2, 64 - height / 2, width, height, 6, 3,
-				style == ShieldStyle::Yellow ? BLACK : WHITE);
+				style == ShieldStyle::Yellow || style == ShieldStyle::WhitePlate ? BLACK
+																				 : WHITE);
 		shield_text(canvas, text, width - 16, height - 12, 64, foreground);
 		return;
 	}

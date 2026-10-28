@@ -179,11 +179,9 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 	// and structures clipped at the vanilla ceiling.
 	bool use_extended = disable_height_limit || (auto_height && force_extended_height);
 	if (auto_height && taller_band) {
-		constexpr int vanilla_min_ground = world_editor::DEFAULT_MIN_Y + 2;
-		constexpr int vanilla_max_ground =
-				world_editor::DEFAULT_MAX_Y - TERRAIN_HEIGHT_BUFFER;
-		if (force_extended_height || ground_level < vanilla_min_ground ||
-				ground_level > vanilla_max_ground) {
+		// Rust's vanilla_overflow is authoritative here: a low requested base alone
+		// does not require an extended band; only an actual fit/structure overflow does.
+		if (force_extended_height) {
 			use_extended = true;
 		} else {
 			auto tops = model_cells(raw.heights, bbox, terrain_hints.tall_models);
