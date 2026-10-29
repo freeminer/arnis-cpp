@@ -524,11 +524,10 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 									 type == "service" || type == "steps")
 								   ? pedestrian_default
 								   : road_default;
-	const auto *palette = way.tags.get("highway") == "cycleway"
-								  ? surfaces::cycleway_palette_view(way)
-								  : nullptr;
-	if (!palette)
-		palette = surfaces::get_blocks_for_surface_way_view(way, defaults);
+	auto palette = way.tags.get("highway") == "cycleway" ? surfaces::cycleway_palette(way)
+														 : std::span<const Block>{};
+	if (palette.empty())
+		palette = surfaces::get_blocks_for_surface_way(way, defaults);
 	for (size_t i = 0; i < pts.size(); ++i) {
 		auto [x, z] = pts[i];
 		const int ry = road[i], ty = terrain[i];
@@ -609,7 +608,7 @@ std::vector<TunnelLight> carve_highway_tunnel_interior(
 			for (int dz = -c.half_width; dz <= c.half_width; ++dz)
 				if (!beyond_portal(c.faces, c.x + dx, c.z + dz))
 					editor.set_block_absolute(
-							surfaces::semirandom_surface(c.x + dx, c.z + dz, *c.palette),
+							surfaces::semirandom_surface(c.x + dx, c.z + dz, c.palette),
 							c.x + dx, c.road_y, c.z + dz, road_wl, std::nullopt);
 	std::vector<TunnelLight> lights;
 	for (const auto &c : cells)

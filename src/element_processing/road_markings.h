@@ -5,6 +5,7 @@
 
 #include <cstdint>
 #include <optional>
+#include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -63,9 +64,9 @@ struct CarriagewayClip
 {
 	std::vector<std::pair<int, int>> centreline;
 	int half_width{0};
-	const std::vector<Block> *surface = nullptr;
+	std::span<const Block> surface;
 
-	const std::vector<Block> &palette() const { return *surface; }
+	std::span<const Block> palette() const { return surface; }
 	bool contains(int x, int z) const;
 };
 

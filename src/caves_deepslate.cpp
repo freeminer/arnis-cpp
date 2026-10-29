@@ -51,6 +51,7 @@ void apply_deepslate(
 		world_editor::WorldEditor &e, int min_x, int max_x, int min_z, int max_z)
 {
 	const int floor = world_editor::terrain_floor_y(), band_floor = floor + 5;
+	const std::optional<std::vector<Block>> stone_filter{{STONE}};
 	for (int x = min_x; x <= max_x; ++x)
 		for (int z = min_z; z <= max_z; ++z) {
 			const int ceiling = e.get_ground_level(x, z) - 10,
@@ -61,13 +62,11 @@ void apply_deepslate(
 							 int(std::round((noise(x, 0, z) - .5) * 4));
 			const int transition = std::max(3, band * 5 / 100);
 			for (int y = floor + 1; y <= line + transition; ++y)
-				if (e.check_for_block_absolute(
-							x, y, z, std::optional<std::vector<Block>>{{STONE}})) {
+				if (e.check_for_block_absolute(x, y, z, stone_filter)) {
 					const auto frac = std::uint64_t(std::max(0, line + transition - y)) *
 									  100 / std::uint64_t(std::max(1, transition));
 					if (y <= line || hash3(x, y, z, 0xDEE95147 ^ 0x6A6A) % 100 < frac)
-						e.set_block_absolute(DEEPSLATE, x, y, z,
-								std::optional<std::vector<Block>>{{STONE}});
+						e.set_block_absolute(DEEPSLATE, x, y, z, stone_filter);
 				}
 		}
 }

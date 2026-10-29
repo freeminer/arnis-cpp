@@ -12,6 +12,7 @@ class ProcessedElement;
 }
 namespace arnis::models_3d::wikidata
 {
+inline constexpr float MAX_XZ_EXTENT_M = 225.0f;
 struct Bounds
 {
 	int min_x = 0, min_z = 0, max_x = 0, max_z = 0;

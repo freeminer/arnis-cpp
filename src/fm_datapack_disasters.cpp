@@ -64,7 +64,7 @@ constexpr std::array<KindText, 11> KINDS{{
 		{7, "Flood", "Flood", "Flood", "Get to high ground", "The water has gone down.",
 				"The water has gone down.", "The water has gone down.", "a flood",
 				"a flood", "a flood"},
-		{8, "Wildfire", "Wildfire", "Wildfire", "Keep ahead of the fire front",
+		{8, "Wildfire", "Wildfire", "Wildfire", "Keep ahead of the fire",
 				"The fire front has passed.", "The fire front has passed.",
 				"The fire front has passed.", "a wildfire", "a wildfire", "a wildfire"},
 		{9, "Tsunami", "Tsunami", "Tsunami", "Get away from the coast",
@@ -715,12 +715,14 @@ SurfaceClass Surface::classify(std::string_view block_name)
 			"flower", "tulip", "orchid", "allium", "bluet", "daisy", "poppy", "dandelion",
 			"lily", "rose", "peony", "lilac", "eyeblossom", "grass", "fern", "bush",
 			"vine", "petals", "fence", "pane", "bars", "chain"}};
-	const auto colon = block_name.find(':');
-	auto name =
-			colon == std::string_view::npos ? block_name : block_name.substr(colon + 1);
-	if (name == "water" || name == "water_source" || name == "water_flowing" ||
-			name == "bubble_column" || name == "kelp" || name == "kelp_plant" ||
-			name == "seagrass" || name == "tall_seagrass")
+	// Match Rust's surface_class exactly: only strip Minecraft's namespace. Treating
+	// arbitrary mod namespaces as vanilla fluids/plants changes the recorded terrain,
+	// and the legacy `water_source`/`water_flowing` aliases are not Java block ids.
+	const auto name = block_name.starts_with("minecraft:")
+							  ? block_name.substr(std::string_view("minecraft:").size())
+							  : block_name;
+	if (name == "water" || name == "bubble_column" || name == "kelp" ||
+			name == "kelp_plant" || name == "seagrass" || name == "tall_seagrass")
 		return SurfaceClass::Fluid;
 	const bool solid_kin = name.ends_with("_block") || name.ends_with("_stem");
 	const bool passable = std::any_of(pass_parts.begin(), pass_parts.end(),

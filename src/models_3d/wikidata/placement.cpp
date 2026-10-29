@@ -1,4 +1,5 @@
 #include "placement.h"
+#include "prescan.h"
 #include "../placement_pipeline.h"
 #include "wikidata_index.h"
 #include <algorithm>
@@ -7,7 +8,6 @@ namespace arnis::models_3d::wikidata
 {
 namespace
 {
-constexpr float MAX_XZ_EXTENT_M = 225.0f;
 constexpr float MAX_Y_EXTENT_M = 600.0f;
 constexpr float MIN_EXTENT_M = 2.0f;
 bool finite_position(float x, float y, float z)

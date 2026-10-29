@@ -61,26 +61,13 @@ SchemProperties parse_schem_properties(const std::string &name)
 		}
 	}
 
-	// Rust's Block::properties supplies palette defaults when no explicit block
-	// state was stored for the schematic entry.
-	if (properties.empty()) {
-		auto block_name = name.substr(0, open == std::string::npos ? name.size() : open);
-		const auto namespace_separator = block_name.rfind(':');
-		if (namespace_separator != std::string::npos)
-			block_name.erase(0, namespace_separator + 1);
-		if (block_name == "oak_leaves") {
-			properties.emplace("persistent", "true");
-		} else if (block_name == "sea_pickle") {
-			properties.emplace("pickles", "2");
-			properties.emplace("waterlogged", "true");
-		} else if (block_name == "chain") {
-			properties.emplace("axis", "x");
-		} else if (block_name == "smooth_stone_slab") {
-			properties.emplace("type", "bottom");
-		} else if (block_name == "oak_slab" || block_name == "quartz_slab") {
-			properties.emplace("type", "top");
-		}
-	}
+	// Rust leaves an absent/empty state unset here; the world editor then falls
+	// back to Block::properties() when serializing the palette. Resolve that same
+	// complete default state now so both the generic document and compact
+	// palettized schematic paths retain every block default, not just the handful
+	// that older C++ schematics handled specially.
+	if (properties.empty())
+		properties = default_block_properties(resolve_schem_block(name));
 	return properties;
 }
 

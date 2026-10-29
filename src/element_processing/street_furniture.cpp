@@ -208,10 +208,10 @@ void generate_bicycle_parking_area(WorldEditor &editor, const ProcessedElement &
 		const std::vector<std::pair<int32_t, int32_t>> &area)
 {
 	if (const auto surface = tag(element.tags(), "surface"); !surface.empty()) {
-		if (const auto *blocks = surfaces::get_blocks_for_surface(surface);
-				blocks && !blocks->empty())
+		if (const auto blocks = surfaces::get_blocks_for_surface(surface);
+				!blocks.empty())
 			for (const auto &[x, z] : area)
-				editor.set_block(blocks->front(), x, 0, z);
+				editor.set_block(blocks.front(), x, 0, z);
 	}
 	const auto parking = tag(element.tags(), "bicycle_parking");
 	const bool covered = tag(element.tags(), "covered") == "yes" || parking == "shed" ||

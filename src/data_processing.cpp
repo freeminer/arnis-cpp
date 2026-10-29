@@ -1722,22 +1722,10 @@ bool generate_world(WorldEditor &editor,
 	// can then suppress only procedural crowns overlapping mapped trees, while
 	// preserving deterministic results for streamed tiles.
 	auto mapped_trunks = trees::mapped::MappedTrunks::collect(elements, args.scale);
-	if (editor.ground && editor.ground->has_canopy()) {
-		const int crown_radius = crown_probe_blocks(args.scale);
-		mapped_trunks.measure_typical_height(
-				[&editor, crown_radius](int x, int z) -> std::optional<std::uint8_t> {
-					std::optional<std::uint8_t> top;
-					for (int dz = -crown_radius; dz <= crown_radius; ++dz)
-						for (int dx = -crown_radius; dx <= crown_radius; ++dx)
-							if (const auto height = editor.ground->canopy_height_m(
-										editor.ground_point(x + dx, z + dz));
-									height && *height >= canopy::CANOPY_MIN_M)
-								top = std::max(top, height);
-					return top;
-				});
-	}
-	editor.mapped_trunks =
-			std::make_shared<const trees::mapped::MappedTrunks>(std::move(mapped_trunks));
+	// Ground may receive its shared canopy raster asynchronously below. Do not
+	// freeze the typical mapped-tree height before that fetch completes; Rust
+	// measures this index only after its Ground already owns the final canopy.
+	editor.mapped_trunks.reset();
 	editor.mapped_cranes = std::make_shared<const std::vector<std::pair<int, int>>>(
 			man_made::mapped_crane_points(elements));
 	const auto geo = editor.geographic_bounds();
@@ -2087,6 +2075,14 @@ bool generate_world(WorldEditor &editor,
 			editor.ground->set_canopy_data(std::move(*canopy), final_width, final_height);
 		}
 	}
+	const int mapped_tree_crown_radius = crown_probe_blocks(args.scale);
+	mapped_trunks.measure_typical_height([&editor, mapped_tree_crown_radius](int x,
+												 int z) -> std::optional<std::uint8_t> {
+		const auto top = editor.canopy_top_m(x, z, mapped_tree_crown_radius);
+		return top ? *top : std::nullopt;
+	});
+	editor.mapped_trunks =
+			std::make_shared<const trees::mapped::MappedTrunks>(std::move(mapped_trunks));
 	if (editor.ground && args.body == CelestialBody::Earth &&
 			editor.ground->has_land_cover()) {
 		// These are elevation-mutating passes in Rust. Run them through Ground so

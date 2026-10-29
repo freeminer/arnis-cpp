@@ -598,17 +598,22 @@ std::optional<wikidata::ResolvedPaletteLayers> wikidata::resolve_palette_layers(
 
 ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 		world_editor::WorldEditor &editor, const wikidata::PrescanResult &prescan,
-		double blocks_per_meter)
+		double blocks_per_meter, std::optional<std::span<const std::size_t>> indices)
 {
 	ModelPlacementStats stats;
-	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0)
+	const std::size_t placement_count =
+			indices ? indices->size() : prescan.placements.size();
+	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0 || placement_count == 0)
 		return stats;
 	// Rust's prescan fetches each distinct Commons URL once and shares the
 	// resulting bytes across every placement that references it. Keep that
 	// behavior here too: providers may be keyed by QID, while multiple QIDs can
 	// resolve to the same model URL.
 	std::unordered_map<std::string, std::optional<ModelAsset>> assets_by_url;
-	for (const auto &placement : prescan.placements) {
+	for (std::size_t placement_index = 0; placement_index < placement_count;
+			++placement_index) {
+		const auto &placement = prescan.placements.at(
+				indices ? (*indices)[placement_index] : placement_index);
 		++stats.attempted;
 		// Keep one malformed Commons asset from aborting the remaining
 		// Wikidata placements, matching Rust's per-model error handling.
@@ -714,11 +719,12 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &provider,
 
 ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 		world_editor::WorldEditor &editor, const three_dmr::PrescanResult &prescan,
-		double blocks_per_meter)
+		double blocks_per_meter, std::optional<std::span<const std::size_t>> indices)
 {
 	ModelPlacementStats stats;
-	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0 ||
-			prescan.placements.empty())
+	const std::size_t placement_count =
+			indices ? indices->size() : prescan.placements.size();
+	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0 || placement_count == 0)
 		return stats;
 
 	// Rust fetches metadata and model bytes once per distinct 3DMR ID, then
@@ -726,9 +732,13 @@ ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 	// cache reads and GLB parsing, this keeps duplicate tags from multiplying
 	// memory use during a single generation pass.
 	std::vector<std::uint64_t> model_ids;
-	model_ids.reserve(prescan.placements.size());
-	for (const auto &placement : prescan.placements)
+	model_ids.reserve(placement_count);
+	for (std::size_t placement_index = 0; placement_index < placement_count;
+			++placement_index) {
+		const auto &placement = prescan.placements.at(
+				indices ? (*indices)[placement_index] : placement_index);
 		model_ids.push_back(placement.model_id);
+	}
 	std::sort(model_ids.begin(), model_ids.end());
 	model_ids.erase(std::unique(model_ids.begin(), model_ids.end()), model_ids.end());
 	std::unordered_map<std::uint64_t, three_dmr::ModelInfo> infos;
@@ -779,7 +789,10 @@ ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &provider,
 		assets.emplace(model_ids[i], std::move(fetched[i]->asset));
 	}
 
-	for (const auto &placement : prescan.placements) {
+	for (std::size_t placement_index = 0; placement_index < placement_count;
+			++placement_index) {
+		const auto &placement = prescan.placements.at(
+				indices ? (*indices)[placement_index] : placement_index);
 		++stats.attempted;
 		try {
 			const auto asset = assets.find(placement.model_id);
@@ -849,12 +862,13 @@ ModelPlacementStats place_plane_prescan(ModelProvider &provider,
 }
 
 ModelPlacementStats place_stadium_prescan(ModelProvider &provider,
-		world_editor::WorldEditor &editor,
-		const std::vector<custom::stadium::Placement> &placements,
-		double blocks_per_meter)
+		world_editor::WorldEditor &editor, const custom::stadium::PrescanResult &prescan,
+		double blocks_per_meter, std::optional<std::span<const std::size_t>> indices)
 {
 	ModelPlacementStats stats;
-	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0 || placements.empty())
+	const std::size_t placement_count =
+			indices ? indices->size() : prescan.placements.size();
+	if (!std::isfinite(blocks_per_meter) || blocks_per_meter <= 0 || placement_count == 0)
 		return stats;
 	auto asset = provider.fetch(custom::stadium_model_key());
 	if (!asset)
@@ -871,7 +885,10 @@ ModelPlacementStats place_stadium_prescan(ModelProvider &provider,
 	const float center_x = -(asset->min[0] + asset->max[0]) * 0.5f;
 	const float center_z = -(asset->min[2] + asset->max[2]) * 0.5f;
 	const float block_per_meter = static_cast<float>(blocks_per_meter);
-	for (const auto &placement : placements) {
+	for (std::size_t placement_index = 0; placement_index < placement_count;
+			++placement_index) {
+		const auto &placement = prescan.placements.at(
+				indices ? (*indices)[placement_index] : placement_index);
 		++stats.attempted;
 		const float target_long = placement.long_m * block_per_meter;
 		const float target_short = placement.short_m * block_per_meter;

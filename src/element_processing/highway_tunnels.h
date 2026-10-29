@@ -4,6 +4,7 @@
 #include <unordered_set>
 #include <unordered_map>
 #include <optional>
+#include <span>
 #include <vector>
 
 #include "../../../arnis_adapter.h"
@@ -26,7 +27,7 @@ struct HighwayTunnelCell
 {
 	int x, z, road_y, half_width, carve_top;
 	bool covered, light;
-	const std::vector<Block> *palette{};
+	std::span<const Block> palette{};
 	std::vector<PortalFace> faces;
 };
 

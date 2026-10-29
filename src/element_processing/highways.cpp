@@ -72,6 +72,12 @@ const std::vector<crate::block_definitions::Block> &default_road_mix()
 	return palette;
 }
 
+std::vector<crate::block_definitions::Block> palette_copy(
+		std::span<const crate::block_definitions::Block> palette)
+{
+	return {palette.begin(), palette.end()};
+}
+
 std::vector<crate::block_definitions::Block> road_protected_surfaces()
 {
 	std::vector<crate::block_definitions::Block> result{
@@ -362,44 +368,45 @@ bool is_pedestrian_way_tags(const crate::tags_t &tags)
 	return tags.contains("footway") && footway != "no";
 }
 
-const std::vector<crate::block_definitions::Block> *surface_palette_view(
+std::span<const crate::block_definitions::Block> surface_palette_view(
 		const std::string &highway, const crate::tags_t &tags)
 {
 	if (highway == "construction") {
 		static const std::vector<crate::block_definitions::Block> construction_bed{
 				crate::block_definitions::COARSE_DIRT, crate::block_definitions::GRAVEL,
 				crate::block_definitions::DIRT};
-		return &construction_bed;
+		return construction_bed;
 	}
 	if (highway == "cycleway")
-		if (const auto *blocks = crate::surfaces::cycleway_palette_view(tags))
+		if (const auto blocks = crate::surfaces::cycleway_palette(tags); !blocks.empty())
 			return blocks;
 	const auto surface = tags.get("surface");
 	if (is_pedestrian_way_tags(tags) &&
 			(surface == "concrete" || surface == "paving_stones" || surface == "sett")) {
 		static const std::vector<crate::block_definitions::Block> smooth_stone{
 				crate::block_definitions::SMOOTH_STONE};
-		return &smooth_stone;
+		return smooth_stone;
 	}
-	if (const auto *blocks = crate::surfaces::get_blocks_for_surface(surface))
+	if (const auto blocks = crate::surfaces::get_blocks_for_surface(surface);
+			!blocks.empty())
 		return blocks;
 	if (highway == "footway" || highway == "pedestrian" || highway == "service" ||
 			highway == "steps") {
 		static const std::vector<crate::block_definitions::Block> gray_concrete{
 				crate::block_definitions::GRAY_CONCRETE};
-		return &gray_concrete;
+		return gray_concrete;
 	}
 	if (highway == "path") {
 		static const std::vector<crate::block_definitions::Block> dirt_path{
 				crate::block_definitions::DIRT_PATH};
-		return &dirt_path;
+		return dirt_path;
 	}
 	if (highway == "escape") {
 		static const std::vector<crate::block_definitions::Block> sand{
 				crate::block_definitions::SAND};
-		return &sand;
+		return sand;
 	}
-	return &default_road_mix();
+	return default_road_mix();
 }
 
 struct LaneLine
@@ -961,7 +968,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 											  : it_highway->second;
 	auto protected_surface_blocks = road_protected_surfaces();
 	if (highway_type == "cycleway" && element.is_way() &&
-			crate::surfaces::cycleway_palette_view(element.as_way())) {
+			!crate::surfaces::cycleway_palette(element.as_way()).empty()) {
 		protected_surface_blocks = cycleway_protected_surfaces();
 	}
 	const std::optional<std::vector<crate::block_definitions::Block>> protected_surfaces{
@@ -1115,8 +1122,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			const crate::osm_parser::ProcessedWay &way = element.as_way();
 			static const std::vector<crate::block_definitions::Block> stone_surface{
 					crate::block_definitions::STONE};
-			const auto *surface_blocks =
-					crate::surfaces::get_blocks_for_surface_way_view(way, stone_surface);
+			const auto surface_blocks =
+					crate::surfaces::get_blocks_for_surface_way(way, stone_surface);
 			crate::FloodFillResult filled_area;
 			if (flood_fill_cache) {
 				filled_area = flood_fill_cache->get_or_compute(way, args.timeout);
@@ -1133,7 +1140,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			}
 			for (const auto &p : *filled_area) {
 				const auto surface_block = crate::surfaces::semirandom_surface(
-						p.first, p.second, *surface_blocks);
+						p.first, p.second, surface_blocks);
 				editor.set_block(surface_block, p.first, 0, p.second,
 						std::optional<std::vector<Block>>(),
 						std::optional<std::vector<Block>>());
@@ -1249,7 +1256,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			highway_type != "steps" && highway_type != "construction")
 		place_way_lamps(editor, way, block_range, road_mask);
 
-	const auto &block_types = *surface_palette_view(highway_type, way.tags);
+	const auto block_types = surface_palette_view(highway_type, way.tags);
 	const bool pedestrian = is_pedestrian_way_tags(way.tags);
 	const auto crossing_paint =
 			pedestrian ? markings.crossing_way_paint(way) : std::nullopt;
@@ -1535,6 +1542,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						const auto *line_road = markings.carriageway_at(way.id, lx, lz);
 						if (!line_road)
 							continue;
+						const auto line_palette = palette_copy(line_road->palette());
 						const bool absolute = use_absolute_y || flatten_width;
 						const auto line_approach = approach_at(lx - x, lz - z);
 						const int line_y =
@@ -1550,10 +1558,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 										: current_y;
 						if (absolute)
 							editor.set_block_absolute(line_block, lx, line_y, lz,
-									line_road->palette(), std::nullopt);
+									line_palette, std::nullopt);
 						else
-							editor.set_block(line_block, lx, line_y, lz,
-									line_road->palette(), std::nullopt);
+							editor.set_block(line_block, lx, line_y, lz, line_palette,
+									std::nullopt);
 					}
 				}
 
@@ -1681,7 +1689,12 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 																		ROAD_MARK_SOLID_WHITE_STRIPE_R90)
 											: crate::block_definitions::WHITE_CONCRETE;
 							const auto &zebra_hosts =
-									crossed_road ? crossed_road->palette() : block_types;
+									crossed_road
+											? palette_copy(crossed_road->palette())
+											: std::vector<
+													  crate::block_definitions::Block>(
+													  block_types.begin(),
+													  block_types.end());
 							if (surface_absolute) {
 								editor.set_block_absolute(zebra_block, set_x, surface_y,
 										set_z,
@@ -1997,7 +2010,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 															  Block>{crate::
 															  block_definitions::
 																	  ROAD_ASPHALT}
-											: block_types;
+											: std::vector<
+													  crate::block_definitions::Block>(
+													  block_types.begin(),
+													  block_types.end());
 							if (stripe_absolute) {
 								editor.set_block_absolute(stripe_block, stripe_x,
 										stripe_y, stripe_z, stripe_hosts, std::nullopt);
@@ -2157,9 +2173,9 @@ void generate_aeroway_impl(crate::world_editor::WorldEditor &editor,
 				"ground", "earth", "soil", "unpaved", "gravel", "fine_gravel",
 				"compacted", "sand", "clay", "mud"};
 		if (unpaved_surfaces.contains(surface))
-			if (const auto *palette = crate::surfaces::get_blocks_for_surface(surface);
-					palette && !palette->empty())
-				unpaved = palette->front();
+			if (const auto palette = crate::surfaces::get_blocks_for_surface(surface);
+					!palette.empty())
+				unpaved = palette.front();
 		const Block block = unpaved.value_or(
 				runway_area ? crate::block_definitions::GRAY_CONCRETE
 							: crate::block_definitions::LIGHT_GRAY_CONCRETE);
@@ -2195,9 +2211,9 @@ void generate_aeroway_impl(crate::world_editor::WorldEditor &editor,
 			"ground", "earth", "soil", "unpaved", "gravel", "fine_gravel", "compacted",
 			"sand", "clay", "mud"};
 	if (unpaved_surfaces.contains(surface))
-		if (const auto *palette = crate::surfaces::get_blocks_for_surface(surface);
-				palette && !palette->empty())
-			unpaved = palette->front();
+		if (const auto palette = crate::surfaces::get_blocks_for_surface(surface);
+				!palette.empty())
+			unpaved = palette.front();
 	double half_width_m = stand_line ? 2.5 : 12.0;
 	if (!stand_line)
 		if (const auto metres = parse_width_tag_m(way.tags))

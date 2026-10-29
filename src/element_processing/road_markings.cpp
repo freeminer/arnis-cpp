@@ -31,7 +31,7 @@ struct Road
 	int oneway;
 	bool marked;
 	int half_width;
-	const std::vector<Block> *surface;
+	std::span<const Block> surface;
 	std::vector<std::uint32_t> node_t;
 };
 
@@ -490,7 +490,7 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 			continue;
 		}
 		const auto range = arnis::highways::highway_block_range(highway, way.tags, scale);
-		const auto *surface = arnis::highways::surface_palette_view(highway, way.tags);
+		const auto surface = arnis::highways::surface_palette_view(highway, way.tags);
 		const auto [rank, link] = road_class(highway);
 		roads.push_back({&way, rank, link, is_roundabout(way.tags),
 				oneway_sign_impl(highway, way.tags),

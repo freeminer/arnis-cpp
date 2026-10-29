@@ -20,6 +20,11 @@ struct Ore
 	Block stone, deep;
 	int size;
 };
+const std::optional<std::vector<Block>> &stone_only()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{STONE}};
+	return blocks;
+}
 int chunk_floor(int v)
 {
 	// Rust's `>> 4` is an arithmetic shift, therefore negative coordinates
@@ -30,11 +35,8 @@ void blob(
 		world_editor::WorldEditor &e, int cx, int cy, int cz, const Ore &o, ChaCha8Rng &r)
 {
 	for (int i = 0; i < o.size; ++i) {
-		if (e.check_for_block_absolute(cx, cy, cz,
-					std::optional<std::vector<Block>>(std::vector<Block>{STONE})))
-			e.set_block_absolute(o.stone, cx, cy, cz,
-					std::optional<std::vector<Block>>(std::vector<Block>{STONE}),
-					std::nullopt);
+		if (e.check_for_block_absolute(cx, cy, cz, stone_only()))
+			e.set_block_absolute(o.stone, cx, cy, cz, stone_only(), std::nullopt);
 		switch (r.uniform(6)) {
 		case 0:
 			++cx;
@@ -80,23 +82,23 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 			ChaCha8Rng r = coord_rng(cx, cz, 0xC0DE);
 			int ground = e.get_ground_level(cx * 16 + 8, cz * 16 + 8);
 			for (const auto &rule : rules()) {
-				int lo = std::max(floor + 1, ground - MAX_ORE_DEPTH),
-					hi = std::max(lo, ground - rule.depth_min),
-					span = std::max(0, hi - lo + 1),
-					orig_span = rule.depth_max - rule.depth_min + 1,
-					max_veins =
-							orig_span > 0
-									? int(rule.avg_veins_per_chunk * span * 2 / orig_span)
-									: 0,
-					n = static_cast<int>(
-							r.uniform(static_cast<std::uint32_t>(max_veins + 1)));
+				const int lo = std::max(floor + 1, ground - MAX_ORE_DEPTH);
+				const int hi = ground - rule.depth_min;
+				if (lo > hi)
+					continue;
+				const auto span = static_cast<std::uint32_t>(hi - lo + 1);
+				const auto orig_span =
+						static_cast<std::uint32_t>(rule.depth_max - rule.depth_min + 1);
+				const auto max_veins = static_cast<std::uint32_t>(
+						static_cast<std::uint64_t>(rule.avg_veins_per_chunk) * span * 2 /
+						orig_span);
+				const int n = static_cast<int>(r.uniform(max_veins + 1));
 				for (int i = 0; i < n; ++i) {
 					// Match Rust's per-vein random draw order: starting X, Z, Y,
 					// followed by vein size. Changing this shifts every later vein.
 					const int x = cx * 16 + r.uniform(16);
 					const int z = cz * 16 + r.uniform(16);
-					const int y = lo + r.uniform(static_cast<std::uint32_t>(
-											   std::max(0, hi - lo + 1)));
+					const int y = lo + r.uniform(span);
 					const int size = static_cast<int>(
 							rule.vein_min + r.uniform(rule.vein_max - rule.vein_min + 1));
 					Ore o{rule.block, rule.deep_block, size};

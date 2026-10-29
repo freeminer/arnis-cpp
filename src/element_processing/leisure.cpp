@@ -65,10 +65,10 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 
 		if (auto surf_it = element.tags.find(std::string("surface"));
 				surf_it != element.tags.end()) {
-			if (const auto *surface_blocks =
+			if (const auto surface_blocks =
 							surfaces::get_blocks_for_surface(surf_it->second);
-					surface_blocks && !surface_blocks->empty()) {
-				block_type = surface_blocks->front();
+					!surface_blocks.empty()) {
+				block_type = surface_blocks.front();
 			}
 		}
 

@@ -4,6 +4,7 @@
 #include <string>
 #include <unordered_map>
 #include <optional>
+#include <span>
 #include <tuple>
 #include <cstdlib>
 #include <initializer_list>
@@ -536,12 +537,14 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 
 	if (amenity_type == "parking") {
 		using B = crate::block_definitions::Block;
-		std::vector<B> block_types{crate::block_definitions::GRAY_CONCRETE_POWDER,
+		static const std::array<B, 2> parking_surface{
+				crate::block_definitions::GRAY_CONCRETE_POWDER,
 				crate::block_definitions::CYAN_TERRACOTTA};
+		std::span<const B> block_types(parking_surface);
 		if (const auto surface = tags.find("surface"); surface != tags.end())
-			if (const auto *mapped = surfaces::get_blocks_for_surface(surface->second);
-					mapped && !mapped->empty())
-				block_types = *mapped;
+			if (const auto mapped = surfaces::get_blocks_for_surface(surface->second);
+					!mapped.empty())
+				block_types = mapped;
 		const std::optional<std::vector<B>> outline_replacements =
 				std::vector<B>{crate::block_definitions::BLACK_CONCRETE,
 						crate::block_definitions::GRAY_CONCRETE_POWDER,

@@ -260,17 +260,22 @@ void pool_changes(const LandCoverData &data,
 								1, static_cast<std::int64_t>(
 										   std::ceil(2.0 * std::max(map.sx, map.sz)))) +
 						1;
-	const auto clamp_cell = [](double v, std::int64_t low, std::int64_t high) {
-		return std::clamp(static_cast<std::int64_t>(v), low, high);
-	};
-	const auto x0 = clamp_cell(
-			std::floor(min_x) - margin, 0, static_cast<std::int64_t>(map.width) - 1);
-	const auto z0 = clamp_cell(
-			std::floor(min_z) - margin, 0, static_cast<std::int64_t>(map.height) - 1);
-	const auto x1 = clamp_cell(
-			std::ceil(max_x) + margin, 0, static_cast<std::int64_t>(map.width) - 1);
-	const auto z1 = clamp_cell(
-			std::ceil(max_z) + margin, 0, static_cast<std::int64_t>(map.height) - 1);
+	// Match Rust's window clipping: lower bounds are only clamped at zero,
+	// while upper bounds are only clamped at the far edge. Clamping both ends
+	// into the grid would turn an entirely out-of-bounds pool into a one-cell
+	// window along the border.
+	const auto x0 = std::max<std::int64_t>(
+			static_cast<std::int64_t>(std::floor(min_x)) - margin, 0);
+	const auto z0 = std::max<std::int64_t>(
+			static_cast<std::int64_t>(std::floor(min_z)) - margin, 0);
+	const auto x1 = std::max<std::int64_t>(
+			std::min<std::int64_t>(static_cast<std::int64_t>(std::ceil(max_x)) + margin,
+					static_cast<std::int64_t>(map.width) - 1),
+			0);
+	const auto z1 = std::max<std::int64_t>(
+			std::min<std::int64_t>(static_cast<std::int64_t>(std::ceil(max_z)) + margin,
+					static_cast<std::int64_t>(map.height) - 1),
+			0);
 	if (x0 > x1 || z0 > z1)
 		return;
 	const auto width = static_cast<std::size_t>(x1 - x0 + 1);

@@ -3,12 +3,14 @@
 #include <cstdint>
 #include <cctype>
 #include <algorithm>
+#include <array>
 #include <unordered_map>
+#include <vector>
 
 namespace arnis::surfaces
 {
 
-const std::vector<Block> *get_blocks_for_surface(const std::string &surface_type)
+std::span<const Block> get_blocks_for_surface(const std::string &surface_type)
 {
 	using namespace block_definitions;
 	static const std::unordered_map<std::string, std::vector<Block>> surfaces = {
@@ -53,32 +55,25 @@ const std::vector<Block> *get_blocks_for_surface(const std::string &surface_type
 	};
 
 	auto it = surfaces.find(surface_type);
-	if (it == surfaces.end())
-		return nullptr;
-	return &it->second;
+	return it == surfaces.end() ? std::span<const Block>{}
+								: std::span<const Block>(it->second);
 }
 
-std::vector<Block> get_blocks_for_surface_way(
-		const ProcessedWay &way, const std::vector<Block> &default_blocks)
-{
-	return *get_blocks_for_surface_way_view(way, default_blocks);
-}
-
-const std::vector<Block> *get_blocks_for_surface_way_view(
-		const ProcessedWay &way, const std::vector<Block> &default_blocks)
+std::span<const Block> get_blocks_for_surface_way(
+		const ProcessedWay &way, std::span<const Block> default_blocks)
 {
 	auto it = way.tags.find("surface");
 	if (it != way.tags.end()) {
-		if (const auto *blocks = get_blocks_for_surface(it->second))
+		if (const auto blocks = get_blocks_for_surface(it->second); !blocks.empty())
 			return blocks;
 	}
-	return &default_blocks;
+	return default_blocks;
 }
 
-const std::vector<Block> *cycleway_palette_view(const tags_t &tags)
+std::span<const Block> cycleway_palette(const tags_t &tags)
 {
 	if (tags.get("cycleway") == "crossing" || tags.contains("crossing"))
-		return nullptr;
+		return {};
 	const auto surface_colour = tags.find("surface:colour");
 	const auto colour = tags.find("colour");
 	const auto selected_colour = surface_colour != tags.end() ? surface_colour : colour;
@@ -107,7 +102,7 @@ const std::vector<Block> *cycleway_palette_view(const tags_t &tags)
 			}
 		}
 		if (!red)
-			return nullptr;
+			return {};
 	}
 	const auto surface = tags.get("surface");
 	if (!surface.empty() && surface != "asphalt" && surface != "paved" &&
@@ -115,30 +110,18 @@ const std::vector<Block> *cycleway_palette_view(const tags_t &tags)
 			surface != "concrete:lanes" && surface != "cement" && surface != "chipseal" &&
 			surface != "bitmac" && surface != "paving_stones" && surface != "sett" &&
 			surface != "bricks" && surface != "brick")
-		return nullptr;
-	static const std::vector<Block> palette{block_definitions::RED_TERRACOTTA,
+		return {};
+	static const std::array<Block, 3> palette{block_definitions::RED_TERRACOTTA,
 			block_definitions::RED_TERRACOTTA, block_definitions::RED_CONCRETE};
-	return &palette;
+	return palette;
 }
 
-const std::vector<Block> *cycleway_palette_view(const ProcessedWay &way)
-{
-	return cycleway_palette_view(way.tags);
-}
-
-std::optional<std::vector<Block>> cycleway_palette(const tags_t &tags)
-{
-	if (const auto *palette = cycleway_palette_view(tags))
-		return *palette;
-	return std::nullopt;
-}
-
-std::optional<std::vector<Block>> cycleway_palette(const ProcessedWay &way)
+std::span<const Block> cycleway_palette(const ProcessedWay &way)
 {
 	return cycleway_palette(way.tags);
 }
 
-Block semirandom_surface(int x, int z, const std::vector<Block> &block_types)
+Block semirandom_surface(int x, int z, std::span<const Block> block_types)
 {
 	if (block_types.empty())
 		return block_definitions::STONE;

@@ -9,6 +9,7 @@
 #include <optional>
 #include <string>
 #include <functional>
+#include <span>
 
 namespace arnis
 {
@@ -81,7 +82,7 @@ int lane_marking_count(const std::string &highway_type, const crate::tags_t &tag
 // Rust exposes the selected way palette as a static block slice. The returned
 // palette is backed by process-lifetime storage, so callers can retain this
 // view without copying a vector for every OSM way.
-const std::vector<crate::block_definitions::Block> *surface_palette_view(
+std::span<const crate::block_definitions::Block> surface_palette_view(
 		const std::string &highway_type, const crate::tags_t &tags);
 
 } // namespace arnis::highways

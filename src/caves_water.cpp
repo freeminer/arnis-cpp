@@ -187,7 +187,12 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 	const int stone_transition = floor_y + 64;
 	const std::vector<Block> rim_rock{
 			STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE, DIORITE, ANDESITE};
-	for (const auto p : supported) {
+	// Rust applies these edits from its deterministic FNV set. Keep C++ output
+	// independent of std::unordered_set bucket order as well; adjacent lava cells
+	// can share rim targets, so use one canonical packed-position order.
+	std::vector<std::int64_t> ordered_supported(supported.begin(), supported.end());
+	std::sort(ordered_supported.begin(), ordered_supported.end());
+	for (const auto p : ordered_supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		const bool touches_water = std::any_of(
 				neighbours.begin(), neighbours.end(), [&](const auto &offset) {
@@ -204,7 +209,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 		if (basin_fluid)
 			basin_fluid->insert(p);
 	}
-	for (const auto &p : supported) {
+	for (const auto p : ordered_supported) {
 		const auto [x, y, z] = unpack_cave_pos(p);
 		for (const auto &offset : neighbours) {
 			const int nx = x + offset[0], ny = y + offset[1], nz = z + offset[2];

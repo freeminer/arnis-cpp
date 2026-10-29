@@ -11,6 +11,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <span>
 namespace arnis::models_3d
 {
 std::vector<std::filesystem::path> model_cache_roots()
@@ -124,18 +125,23 @@ std::vector<std::vector<std::pair<int, int>>> Models3dPipeline::placement_region
 	std::vector<std::vector<std::pair<int, int>>> out;
 	out.reserve(three_dmr_.placements.size() + wikidata_.placements.size() +
 				stadium_.placements.size());
-	for (const auto &placement : three_dmr_.placements) {
-		three_dmr::PrescanResult one;
-		one.placements.push_back(placement);
-		out.push_back(three_dmr::deferred_regions(one, scale));
+	const int three_dmr_radius =
+			static_cast<int>(std::ceil(three_dmr::ASSUMED_HALF_EXTENT_M * scale));
+	for (const auto &placement : three_dmr_.placements)
+		out.push_back(region_keys_around(
+				placement.anchor_x, placement.anchor_z, three_dmr_radius));
+	const int wikidata_radius = static_cast<int>(
+			std::ceil(static_cast<double>(wikidata::MAX_XZ_EXTENT_M) * scale));
+	for (const auto &placement : wikidata_.placements)
+		out.push_back(region_keys_around(
+				placement.anchor_x, placement.anchor_z, wikidata_radius));
+	for (const auto &placement : stadium_.placements) {
+		const double half_diagonal =
+				static_cast<double>(std::hypot(placement.long_m, placement.short_m)) *
+				0.5;
+		const int radius = static_cast<int>(std::ceil(half_diagonal * scale));
+		out.push_back(region_keys_around(placement.anchor_x, placement.anchor_z, radius));
 	}
-	for (const auto &placement : wikidata_.placements) {
-		wikidata::PrescanResult one;
-		one.placements.push_back(placement);
-		out.push_back(wikidata::deferred_regions(one, scale));
-	}
-	for (const auto &placement : stadium_.placements)
-		out.push_back(custom::stadium::deferred_regions({placement}, scale));
 	return out;
 }
 
@@ -218,8 +224,8 @@ ModelPlacementStats place_custom_models(const Models3dPipeline &pipeline,
 		double blocks_per_meter)
 {
 	ModelPlacementStats out;
-	const auto stadiums = place_stadium_prescan(
-			provider, editor, pipeline.stadium().placements, blocks_per_meter);
+	const auto stadiums =
+			place_stadium_prescan(provider, editor, pipeline.stadium(), blocks_per_meter);
 	out.attempted = stadiums.attempted;
 	out.placed = stadiums.placed;
 	out.voxels = stadiums.voxels;
@@ -249,27 +255,40 @@ ModelPlacementStats Models3dPipeline::place_selected(
 	ModelPlacementStats stats;
 	const auto three_dmr_end = three_dmr_.placements.size();
 	const auto wikidata_end = three_dmr_end + wikidata_.placements.size();
-	three_dmr::PrescanResult selected_three_dmr;
-	wikidata::PrescanResult selected_wikidata;
-	std::vector<custom::stadium::Placement> selected_stadiums;
+	std::vector<std::size_t> selected_three_dmr;
+	std::vector<std::size_t> selected_wikidata;
+	std::vector<std::size_t> selected_stadiums;
+	std::size_t three_dmr_count = 0;
+	std::size_t wikidata_count = 0;
+	std::size_t stadium_count = 0;
 	for (const auto index : indices) {
 		if (index < three_dmr_end)
-			selected_three_dmr.placements.push_back(three_dmr_.placements[index]);
+			++three_dmr_count;
 		else if (index < wikidata_end)
-			selected_wikidata.placements.push_back(
-					wikidata_.placements[index - three_dmr_end]);
+			++wikidata_count;
+		else if (index - wikidata_end < stadium_.placements.size())
+			++stadium_count;
+	}
+	selected_three_dmr.reserve(three_dmr_count);
+	selected_wikidata.reserve(wikidata_count);
+	selected_stadiums.reserve(stadium_count);
+	for (const auto index : indices) {
+		if (index < three_dmr_end)
+			selected_three_dmr.push_back(index);
+		else if (index < wikidata_end)
+			selected_wikidata.push_back(index - three_dmr_end);
 		else {
 			const auto stadium_index = index - wikidata_end;
 			if (stadium_index < stadium_.placements.size())
-				selected_stadiums.push_back(stadium_.placements[stadium_index]);
+				selected_stadiums.push_back(stadium_index);
 		}
 	}
-	stats.add(place_three_dmr_prescan(
-			three_dmr_provider, editor, selected_three_dmr, blocks_per_meter));
-	stats.add(place_wikidata_prescan(
-			wikidata_provider, editor, selected_wikidata, blocks_per_meter));
-	stats.add(place_stadium_prescan(
-			custom_provider, editor, selected_stadiums, blocks_per_meter));
+	stats.add(place_three_dmr_prescan(three_dmr_provider, editor, three_dmr_,
+			blocks_per_meter, std::span<const std::size_t>(selected_three_dmr)));
+	stats.add(place_wikidata_prescan(wikidata_provider, editor, wikidata_,
+			blocks_per_meter, std::span<const std::size_t>(selected_wikidata)));
+	stats.add(place_stadium_prescan(custom_provider, editor, stadium_, blocks_per_meter,
+			std::span<const std::size_t>(selected_stadiums)));
 	return stats;
 }
 
