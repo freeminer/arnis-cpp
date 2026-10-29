@@ -4,6 +4,7 @@
 #include "models_3d/pipeline.h"
 #include "structures/schem_decoder.h"
 #include "structures/elizabeth_tower.h"
+#include "unicode_text.h"
 #include "world_editor/floor_state.h"
 
 #include <algorithm>
@@ -32,11 +33,8 @@ std::string tag(const ProcessedElement &element, const char *name)
 
 std::string trim(std::string value)
 {
-	const auto first = value.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos)
-		return {};
-	const auto last = value.find_last_not_of(" \t\r\n");
-	return value.substr(first, last - first + 1);
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	return value.substr(begin, end - begin);
 }
 
 std::vector<std::pair<int, int>> points(const ProcessedElement &element)

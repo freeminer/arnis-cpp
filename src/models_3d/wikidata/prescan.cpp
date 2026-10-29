@@ -5,10 +5,10 @@
 #include "../../block_definitions.h"
 #include "../../rust_numeric.h"
 #include "../../strict_parse.h"
+#include "../../unicode_text.h"
 #include "../../tile.h"
 #include <algorithm>
 #include <atomic>
-#include <cctype>
 #include <cmath>
 #include <thread>
 #include <unordered_map>
@@ -25,11 +25,8 @@ std::string tag(const ProcessedElement &e, const char *n)
 }
 std::string trim(std::string value)
 {
-	const auto first = value.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos)
-		return {};
-	const auto last = value.find_last_not_of(" \t\r\n");
-	return value.substr(first, last - first + 1);
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	return value.substr(begin, end - begin);
 }
 bool has(const std::vector<std::pair<std::string, std::uint64_t>> &v,
 		const std::pair<std::string, std::uint64_t> &k)
@@ -66,8 +63,9 @@ bool direction(const std::string &s, double &o)
 			{"ENE", 67.5}, {"ESE", 112.5}, {"SSE", 157.5}, {"SSW", 202.5}, {"WSW", 247.5},
 			{"WNW", 292.5}, {"NNW", 337.5}};
 	std::string u = value;
-	std::transform(u.begin(), u.end(), u.begin(),
-			[](unsigned char c) { return std::toupper(c); });
+	std::transform(u.begin(), u.end(), u.begin(), [](unsigned char c) {
+		return static_cast<char>(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
+	});
 	for (auto [n, d] : v)
 		if (u == n) {
 			o = d;
@@ -77,11 +75,8 @@ bool direction(const std::string &s, double &o)
 }
 std::optional<double> meters(std::string s)
 {
-	auto first = s.find_first_not_of(" \t\r\n\f\v");
-	if (first == std::string::npos)
-		return std::nullopt;
-	auto last = s.find_last_not_of(" \t\r\n\f\v");
-	std::string_view value(s.data() + first, last - first + 1);
+	const auto [begin, end] = unicode_text::trim_whitespace(s);
+	std::string_view value(s.data() + begin, end - begin);
 	const auto positive = [](std::optional<double> parsed) -> std::optional<double> {
 		return parsed && std::isfinite(*parsed) && *parsed > 0.0 ? parsed : std::nullopt;
 	};
@@ -89,8 +84,8 @@ std::optional<double> meters(std::string s)
 		return parsed;
 	while (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
 		value.remove_suffix(1);
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-		value.remove_suffix(1);
+	const auto [number_begin, number_end] = unicode_text::trim_whitespace(value);
+	value = value.substr(number_begin, number_end - number_begin);
 	return positive(strict_parse::f64(value));
 }
 std::vector<Block> palette_for(const ProcessedElement &e)
@@ -136,8 +131,9 @@ std::vector<Block> palette_for(const ProcessedElement &e)
 	const auto material = tag(e, "building:material");
 	const auto lower = [&] {
 		std::string v = material;
-		std::transform(v.begin(), v.end(), v.begin(),
-				[](unsigned char c) { return std::tolower(c); });
+		std::transform(v.begin(), v.end(), v.begin(), [](unsigned char c) {
+			return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+		});
 		return v;
 	}();
 	if (lower == "brick")

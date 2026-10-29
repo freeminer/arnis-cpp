@@ -6,6 +6,7 @@
 #include "traffic_lights.h"
 #include "../clipping.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 #include "../../../arnis_world_editor.h"
 
 #include <algorithm>
@@ -153,23 +154,15 @@ std::int32_t step_speed(double kmh, double scale)
 
 std::optional<double> parse_maxspeed(const std::string &raw)
 {
-	std::string value = raw;
+	const auto [begin, end] = unicode_text::trim_whitespace(raw);
+	std::string value = raw.substr(begin, end - begin);
 	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
 		return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
 	});
-	const auto trim = [](std::string &s) {
-		const auto first = s.find_first_not_of(" \t\r\n");
-		if (first == std::string::npos) {
-			s.clear();
-			return;
-		}
-		s.erase(0, first);
-		s.erase(s.find_last_not_of(" \t\r\n") + 1);
-	};
-	trim(value);
 	if (value.ends_with("mph")) {
 		value.resize(value.size() - 3);
-		trim(value);
+		const auto [mph_begin, mph_end] = unicode_text::trim_whitespace(value);
+		value = value.substr(mph_begin, mph_end - mph_begin);
 		if (const auto mph = strict_parse::f64(value))
 			return *mph * 1.609;
 		return std::nullopt;

@@ -1,6 +1,7 @@
 #include "power.h"
 #include "../bresenham.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 #include "../structures/structures.h"
 #include <algorithm>
 #include <array>
@@ -17,10 +18,8 @@ static std::optional<double> parse_rust_metre_tag(const std::string &text)
 	std::string_view value(text);
 	while (!value.empty() && value.back() == 'm')
 		value.remove_suffix(1);
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-		value.remove_suffix(1);
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-		value.remove_prefix(1);
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	value = value.substr(begin, end - begin);
 	return strict_parse::f64(value);
 }
 

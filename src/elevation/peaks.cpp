@@ -10,6 +10,7 @@
 #include "../osm_parser.h"
 #include "../overture.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 #include "postprocess.h"
 
 #include <algorithm>
@@ -19,6 +20,7 @@
 #include <numbers>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <tuple>
 #include <unordered_map>
 #include <unordered_set>
@@ -50,13 +52,8 @@ std::optional<double> parse_elevation(const std::string &input)
 {
 	std::string value = input;
 	auto trim = [](std::string &s) {
-		const auto first = s.find_first_not_of(" \t\r\n");
-		if (first == std::string::npos) {
-			s.clear();
-			return;
-		}
-		const auto last = s.find_last_not_of(" \t\r\n");
-		s = s.substr(first, last - first + 1);
+		const auto [begin, end] = mapillary::geodesy::trim_rust_whitespace(s);
+		s = s.substr(begin, end - begin);
 	};
 	trim(value);
 	if (!value.empty() && value.back() == 'm') {
@@ -76,22 +73,12 @@ std::optional<double> parse_elevation(const std::string &input)
 // carry either lower- or upper-case metre suffixes.
 std::optional<double> parse_model_height(const std::string &input)
 {
-	std::string value = input;
-	auto trim = [](std::string &s) {
-		const auto first = s.find_first_not_of(" \t\r\n");
-		if (first == std::string::npos) {
-			s.clear();
-			return;
-		}
-		const auto last = s.find_last_not_of(" \t\r\n");
-		s = s.substr(first, last - first + 1);
-	};
-	trim(value);
+	const auto [begin, end] = unicode_text::trim_whitespace(input);
+	std::string_view value(input.data() + begin, end - begin);
 	while (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
-		value.pop_back();
-	trim(value);
-	if (value.empty())
-		return std::nullopt;
+		value.remove_suffix(1);
+	const auto [number_begin, number_end] = unicode_text::trim_whitespace(value);
+	value = value.substr(number_begin, number_end - number_begin);
 	const auto parsed = strict_parse::f64(value);
 	if (!parsed || !std::isfinite(*parsed) || *parsed <= 0.0)
 		return std::nullopt;
@@ -103,12 +90,11 @@ std::optional<double> model_height(const tags_t &tags)
 	const auto qid = tags.find("wikidata");
 	if (qid == tags.end())
 		return std::nullopt;
-	const auto first = qid->second.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos)
+	const auto [first, last] = unicode_text::trim_whitespace(qid->second);
+	if (first == last)
 		return std::nullopt;
-	const auto last = qid->second.find_last_not_of(" \t\r\n");
 	const auto *entry =
-			models_3d::lookup_wikidata(qid->second.substr(first, last - first + 1));
+			models_3d::lookup_wikidata(qid->second.substr(first, last - first));
 	// Rust's terrain fit reserves space only for models in the bundled
 	// Wikidata index. An arbitrary/unknown QID with a height tag is not a model
 	// that the placement pipeline can actually generate.

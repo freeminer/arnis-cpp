@@ -1,9 +1,11 @@
 #include "prescan.h"
 #include "../../../../arnis_adapter.h"
+#include "../../strict_parse.h"
 #include "../../tile.h"
+#include "../../unicode_text.h"
 #include <algorithm>
-#include <cctype>
 #include <cmath>
+#include <string_view>
 namespace arnis::models_3d::three_dmr
 {
 namespace
@@ -34,19 +36,12 @@ std::vector<std::pair<int, int>> points(const ProcessedElement &e)
 }
 bool direction(const std::string &s, double &o)
 {
-	const auto first = s.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos)
-		return false;
-	const auto last = s.find_last_not_of(" \t\r\n");
-	const std::string value = s.substr(first, last - first + 1);
-	try {
-		std::size_t i = 0;
-		o = std::stod(value, &i);
-		if (i == value.size() && std::isfinite(o)) {
-			o = std::fmod(std::fmod(o, 360) + 360, 360);
-			return true;
-		}
-	} catch (...) {
+	const auto [begin, end] = unicode_text::trim_whitespace(s);
+	const std::string_view value(s.data() + begin, end - begin);
+	if (const auto degrees = strict_parse::f64(value);
+			degrees && std::isfinite(*degrees)) {
+		o = std::fmod(std::fmod(*degrees, 360.0) + 360.0, 360.0);
+		return true;
 	}
 	static const std::pair<const char *, double> names[] = {{"N", 0}, {"NORTH", 0},
 			{"NNE", 22.5}, {"NE", 45}, {"ENE", 67.5}, {"E", 90}, {"EAST", 90},
@@ -54,8 +49,9 @@ bool direction(const std::string &s, double &o)
 			{"SSW", 202.5}, {"SW", 225}, {"WSW", 247.5}, {"W", 270}, {"WEST", 270},
 			{"WNW", 292.5}, {"NW", 315}, {"NNW", 337.5}};
 	std::string u = value;
-	std::transform(u.begin(), u.end(), u.begin(),
-			[](unsigned char c) { return static_cast<char>(std::toupper(c)); });
+	std::transform(u.begin(), u.end(), u.begin(), [](unsigned char c) {
+		return static_cast<char>(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
+	});
 	for (auto [n, d] : names)
 		if (u == n) {
 			o = d;
@@ -75,22 +71,22 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 			continue;
 		std::uint64_t model = 0;
 		try {
-			auto raw = tag(e, "3dmr");
-			const auto first = raw.find_first_not_of(" \t\r\n");
-			if (first == std::string::npos)
+			const auto raw = tag(e, "3dmr");
+			const auto [first, last] = unicode_text::trim_whitespace(raw);
+			std::string_view value(raw.data() + first, last - first);
+			if (value.empty())
 				continue;
-			const auto last = raw.find_last_not_of(" \t\r\n");
-			raw = raw.substr(first, last - first + 1);
 			const auto digits_begin =
-					raw.starts_with('+') ? std::size_t{1} : std::size_t{0};
-			if (digits_begin == raw.size() ||
-					!std::all_of(raw.begin() + static_cast<std::ptrdiff_t>(digits_begin),
-							raw.end(),
+					value.starts_with('+') ? std::size_t{1} : std::size_t{0};
+			if (digits_begin == value.size() ||
+					!std::all_of(
+							value.begin() + static_cast<std::ptrdiff_t>(digits_begin),
+							value.end(),
 							[](unsigned char c) { return c >= '0' && c <= '9'; }))
 				continue;
 			std::size_t n = 0;
-			model = std::stoull(raw.substr(digits_begin), &n);
-			if (n != raw.size() - digits_begin)
+			model = std::stoull(std::string(value.substr(digits_begin)), &n);
+			if (n != value.size() - digits_begin)
 				continue;
 		} catch (...) {
 			continue;

@@ -4,6 +4,7 @@
 #include "world_editor.h"
 #include "waterways.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 
 #include <vector>
 #include <string>
@@ -60,13 +61,9 @@ bool is_underground_waterway(const tags_t &tags)
 											 it->second != "0" && it->second != "false")
 		return true;
 	if (const auto it = tags.find("layer"); it != tags.end()) {
-		const auto &value = it->second;
-		const auto first = value.find_first_not_of(" \t\r\n\f\v");
-		if (first == std::string::npos)
-			return false;
-		const auto last = value.find_last_not_of(" \t\r\n\f\v");
-		if (const auto layer = strict_parse::i32(
-					std::string_view(value).substr(first, last - first + 1)))
+		const auto [begin, end] = unicode_text::trim_whitespace(it->second);
+		const std::string_view value(it->second.data() + begin, end - begin);
+		if (const auto layer = strict_parse::i32(value))
 			return *layer < 0;
 	}
 	return false;
@@ -78,23 +75,12 @@ int waterway_width(const std::string &type, const tags_t &tags)
 		// Rust trims the whole tag and splits only on a literal space. In
 		// particular, reject unit-suffixed values and tab-separated tokens
 		// instead of silently accepting a numeric prefix.
-		const auto first_nonspace = it->second.find_first_not_of(" \t\r\n\f\v");
-		if (first_nonspace == std::string::npos)
-			return get_waterway_width(type);
-		const auto last_nonspace = it->second.find_last_not_of(" \t\r\n\f\v");
-		const auto trimmed =
-				it->second.substr(first_nonspace, last_nonspace - first_nonspace + 1);
+		const auto [begin, end] = unicode_text::trim_whitespace(it->second);
+		const std::string_view trimmed(it->second.data() + begin, end - begin);
 		const auto first_space = trimmed.find(' ');
 		const auto token = trimmed.substr(0, first_space);
-		std::size_t consumed = 0;
-		double width = 0.0;
-		try {
-			width = std::stod(token, &consumed);
-		} catch (...) {
-			consumed = 0;
-		}
-		if (consumed == token.size() && std::isfinite(width)) {
-			const double rounded = std::round(width);
+		if (const auto width = strict_parse::f64(token); width && std::isfinite(*width)) {
+			const double rounded = std::round(*width);
 			if (rounded < 1)
 				return get_waterway_width(type);
 			return rounded >= MAX_WATERWAY_WIDTH ? MAX_WATERWAY_WIDTH

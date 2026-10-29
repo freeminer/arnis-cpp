@@ -44,7 +44,7 @@ Block beam_block(std::uint8_t axis, Block block, Block vertical)
 
 Frame Frame::new_frame(double x, double z, double dx, double dz)
 {
-	const double length = std::hypot(dx, dz);
+	const double length = std::sqrt(dx * dx + dz * dz);
 	return {x, z, length > 1e-9 ? dx / length : 1.0, length > 1e-9 ? dz / length : 0.0,
 			1.0};
 }
@@ -165,12 +165,12 @@ std::optional<Block> concrete_for_colour(const std::string &text)
 		return std::nullopt;
 	const auto [tl, ta, tb] =
 			rgb_to_oklab(std::get<0>(*rgb), std::get<1>(*rgb), std::get<2>(*rgb));
-	const double tc = std::hypot(ta, tb);
+	const double tc = std::sqrt(ta * ta + tb * tb);
 	double best = std::numeric_limits<double>::infinity();
 	Block selected = WHITE_CONCRETE;
 	for (const auto &[block, colour] : CONCRETE) {
 		const auto [l, a, b] = rgb_to_oklab(colour[0], colour[1], colour[2]);
-		const double c = std::hypot(a, b), dl = 0.25 * (tl - l);
+		const double c = std::sqrt(a * a + b * b), dl = 0.25 * (tl - l);
 		double d;
 		if (tc < 0.04) {
 			d = (ta - a) * (ta - a) + (tb - b) * (tb - b);

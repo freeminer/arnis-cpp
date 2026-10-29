@@ -34,6 +34,7 @@
 #include "traffic_lights.h"
 #include "cars.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 namespace arnis
 {
 
@@ -49,15 +50,12 @@ std::optional<double> parse_width_tag_m(
 	const auto it = tags.find("width");
 	if (it == tags.end())
 		return std::nullopt;
-	std::string_view width = it->second;
-	while (!width.empty() && std::isspace(static_cast<unsigned char>(width.front())))
-		width.remove_prefix(1);
-	while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-		width.remove_suffix(1);
+	const auto [begin, end] = unicode_text::trim_whitespace(it->second);
+	std::string_view width(it->second.data() + begin, end - begin);
 	while (!width.empty() && width.back() == 'm')
 		width.remove_suffix(1);
-	while (!width.empty() && std::isspace(static_cast<unsigned char>(width.back())))
-		width.remove_suffix(1);
+	const auto [number_begin, number_end] = unicode_text::trim_whitespace(width);
+	width = width.substr(number_begin, number_end - number_begin);
 	const auto metres = crate::strict_parse::f64(width);
 	if (!metres || !std::isfinite(*metres) || *metres <= 0.0)
 		return std::nullopt;

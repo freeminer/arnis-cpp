@@ -266,7 +266,8 @@ std::vector<std::pair<int, int>> disc(double x, double z, double r)
 	for (int px = int(std::floor(x)) - extent; px <= int(std::floor(x)) + extent; ++px)
 		for (int pz = int(std::floor(z)) - extent; pz <= int(std::floor(z)) + extent;
 				++pz)
-			if (std::hypot(px + 0.5 - x, pz + 0.5 - z) <= r)
+			if (std::sqrt((px + 0.5 - x) * (px + 0.5 - x) +
+						  (pz + 0.5 - z) * (pz + 0.5 - z)) <= r)
 				v.emplace_back(px, pz);
 	return v;
 }
@@ -435,7 +436,8 @@ std::uint64_t cell_key(int x, int z)
 }
 double distance_to(double cx, double cz, int x, int z)
 {
-	return std::hypot(x + 0.5 - cx, z + 0.5 - cz);
+	const double dx = x + 0.5 - cx, dz = z + 0.5 - cz;
+	return std::sqrt(dx * dx + dz * dz);
 }
 double angle_of(double cx, double cz, int x, int z)
 {
@@ -517,7 +519,7 @@ void draw_carousel(WorldEditor &e, const Site &s, const OwnCells &own,
 			for (int y = deck + 1; y < roof_y; ++y)
 				e.set_block_absolute(y == deck + 1 || y == eave - 1
 											 ? GOLD_BLOCK
-											 : (sector % 2 ? main : WHITE_CONCRETE),
+											 : (sector % 2 ? WHITE_CONCRETE : main),
 						x, y, z);
 	}
 	const int ax = int(std::floor(s.x)), az = int(std::floor(s.z));
@@ -676,7 +678,8 @@ void draw_star_flyer(WorldEditor &e, const Site &s, const OwnCells &own,
 		const structure_kit::Point3 to{
 				from[0] + ux * 9.0 * .57, from[1] - 9.0 * .82, from[2] + uz * 9.0 * .57};
 		structure_kit::beam(e, from, to, .06, "minecraft:gray_concrete",
-				static_cast<std::int64_t>(seed + k), CHAIN_X, CHAIN_Y);
+				std::bit_cast<std::int64_t>(seed + static_cast<std::uint64_t>(k)),
+				CHAIN_X, CHAIN_Y);
 		const auto out = structure_kit::axis_of(ux, uz);
 		structure_kit::place(e,
 				structure_kit::stair_backed(DARK_OAK_STAIRS, {-out.first, -out.second}),

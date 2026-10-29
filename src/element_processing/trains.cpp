@@ -4,9 +4,9 @@
 #include "../datapack/mod.h"
 #include "../clipping.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 
 #include <algorithm>
-#include <cctype>
 #include <cmath>
 #include <deque>
 #include <functional>
@@ -474,17 +474,15 @@ std::optional<RoutePoint> unit(double x, double z)
 
 std::optional<double> parse_kmh(std::string_view raw)
 {
-	while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.front())))
-		raw.remove_prefix(1);
-	while (!raw.empty() && std::isspace(static_cast<unsigned char>(raw.back())))
-		raw.remove_suffix(1);
-	std::string value(raw);
-	std::transform(value.begin(), value.end(), value.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	const auto [begin, end] = unicode_text::trim_whitespace(raw);
+	std::string value(raw.substr(begin, end - begin));
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+	});
 	if (value.ends_with("mph")) {
 		value.resize(value.size() - 3);
-		while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-			value.pop_back();
+		const auto [mph_begin, mph_end] = unicode_text::trim_whitespace(value);
+		value = value.substr(mph_begin, mph_end - mph_begin);
 		if (auto mph = strict_parse::f64(value))
 			return *mph * 1.609;
 		return std::nullopt;

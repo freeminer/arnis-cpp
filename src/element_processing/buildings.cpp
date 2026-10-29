@@ -47,6 +47,7 @@
 #include "../structures/structures.h"
 #include "../structures/starship.h"
 #include "../deterministic_rng.h"
+#include "../unicode_text.h"
 #include "../block_palette.h"
 #include "../data_processing.h"
 #include "../osm_parser.h"
@@ -180,13 +181,11 @@ std::optional<Block> rust_regional_wall_block(BuildingCategory category, ArchEra
 
 std::optional<double> parse_roof_direction_degrees(const std::string &value)
 {
-	std::string s = value;
-	while (!s.empty() && std::isspace(static_cast<unsigned char>(s.front())))
-		s.erase(s.begin());
-	while (!s.empty() && std::isspace(static_cast<unsigned char>(s.back())))
-		s.pop_back();
-	std::transform(s.begin(), s.end(), s.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	const auto [first, last] = unicode_text::trim_whitespace(value);
+	std::string s = value.substr(first, last - first);
+	std::transform(s.begin(), s.end(), s.begin(), [](unsigned char c) {
+		return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+	});
 	if (s == "n" || s == "north")
 		return 0.0;
 	if (s == "ne")
@@ -701,18 +700,13 @@ bool passage_at(const CoordinateBitmap *building_passages, int x, int z)
 	return building_passages && building_passages->contains(x, z);
 }
 
-std::optional<double> parse_meter_value(std::string value)
+std::optional<double> parse_meter_value(std::string_view value)
 {
-	const auto trim = [&value] {
-		while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-			value.erase(value.begin());
-		while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-			value.pop_back();
-	};
-	trim();
+	// Rust removes the unit suffix before trimming surrounding whitespace.
 	while (!value.empty() && value.back() == 'm')
-		value.pop_back();
-	trim();
+		value.remove_suffix(1);
+	const auto [first, last] = unicode_text::trim_whitespace(value);
+	value = value.substr(first, last - first);
 	return strict_parse::f64(value);
 }
 
@@ -722,10 +716,8 @@ std::optional<double> parse_numeric_tag(const tags_t &tags, const char *key)
 	if (it == tags.end())
 		return std::nullopt;
 	std::string_view value = it->second;
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-		value.remove_prefix(1);
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-		value.remove_suffix(1);
+	const auto [first, last] = unicode_text::trim_whitespace(value);
+	value = value.substr(first, last - first);
 	return strict_parse::f64(value);
 }
 
@@ -736,12 +728,20 @@ double parse_tag_meters(const std::string &value, double fallback = 0.0)
 
 std::string normalized_material(std::string_view material)
 {
+	auto is_unicode_whitespace = [](std::uint32_t cp) {
+		return (cp >= 0x0009 && cp <= 0x000d) || cp == 0x0020 || cp == 0x0085 ||
+			   cp == 0x00a0 || cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) ||
+			   cp == 0x2028 || cp == 0x2029 || cp == 0x202f || cp == 0x205f ||
+			   cp == 0x3000;
+	};
+	const auto lower = unicode_text::lowercase(material);
 	std::string out;
-	out.reserve(material.size());
-	for (unsigned char c : material) {
-		if (std::isspace(c) || c == '_' || c == '-')
-			continue;
-		out.push_back(static_cast<char>(std::tolower(c)));
+	out.reserve(lower.size());
+	for (std::size_t offset = 0; offset < lower.size();) {
+		const auto [cp, length] = unicode_text::codepoint_at(lower, offset);
+		if (!is_unicode_whitespace(cp) && cp != '_' && cp != '-')
+			out.append(lower, offset, length);
+		offset += length;
 	}
 	return out;
 }
@@ -2360,7 +2360,7 @@ std::optional<Block> get_wall_block_for_material_cpp(
 			m == "timberplanks" || m == "halftimber" || m == "halftimbered" ||
 			m == "loghouse" || m == "logs" || m == "bamboo")
 		return choose_block({OAK_PLANKS, SPRUCE_PLANKS, DARK_OAK_PLANKS, OAK_LOG}, rng);
-	if (m == "reed")
+	if (m == "reed" || m == "thatch" || m == "straw")
 		return HAY_BALE;
 	if (m == "metal" || m == "steel" || m == "iron" || m == "aluminium" ||
 			m == "aluminum" || m == "corrugatedsteel" || m == "corrugatediron" ||
@@ -4030,13 +4030,9 @@ std::pair<int, bool> calculate_building_height(const ProcessedWay &element,
 	int height = std::max(3, int(10.0 * scale));
 	bool tall = false, has_source = false, explicit_height = false;
 	if (auto it = element.tags.find("building:levels"); it != element.tags.end()) {
-		auto level_value = it->second;
-		while (!level_value.empty() &&
-				std::isspace(static_cast<unsigned char>(level_value.front())))
-			level_value.erase(level_value.begin());
-		while (!level_value.empty() &&
-				std::isspace(static_cast<unsigned char>(level_value.back())))
-			level_value.pop_back();
+		std::string_view level_value = it->second;
+		const auto [first, last] = unicode_text::trim_whitespace(level_value);
+		level_value = level_value.substr(first, last - first);
 		if (const auto levels_value = strict_parse::f64(level_value)) {
 			const double levels = *levels_value, lev = levels - min_level;
 			if (lev >= 1) {

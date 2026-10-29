@@ -3,6 +3,7 @@
 #include "../../buildings.h"
 #include "../../way_segments.h"
 #include "../../../strict_parse.h"
+#include "../../../unicode_text.h"
 #include "../../relation_area.h"
 
 #include <algorithm>
@@ -63,18 +64,10 @@ struct Outline
 			if (it == tags.end())
 				return std::nullopt;
 			std::string_view value = it->second;
-			auto trim = [&]() {
-				while (!value.empty() &&
-						std::isspace(static_cast<unsigned char>(value.front())))
-					value.remove_prefix(1);
-				while (!value.empty() &&
-						std::isspace(static_cast<unsigned char>(value.back())))
-					value.remove_suffix(1);
-			};
-			trim();
 			while (!value.empty() && value.back() == 'm')
 				value.remove_suffix(1);
-			trim();
+			const auto [begin, end] = unicode_text::trim_whitespace(value);
+			value = value.substr(begin, end - begin);
 			const auto parsed = strict_parse::f64(value);
 			if (!parsed || !(*parsed > 0.0))
 				return std::nullopt;

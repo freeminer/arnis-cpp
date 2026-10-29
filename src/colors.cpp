@@ -10,13 +10,59 @@
 #include <cmath>
 
 #include "colors.h"
+#include "unicode_text.h"
+
+namespace
+{
+bool is_unicode_whitespace(std::uint32_t codepoint)
+{
+	return (codepoint >= 0x0009 && codepoint <= 0x000d) || codepoint == 0x0020 ||
+		   codepoint == 0x0085 || codepoint == 0x00a0 || codepoint == 0x1680 ||
+		   (codepoint >= 0x2000 && codepoint <= 0x200a) || codepoint == 0x2028 ||
+		   codepoint == 0x2029 || codepoint == 0x202f || codepoint == 0x205f ||
+		   codepoint == 0x3000;
+}
+
+std::string_view trim_unicode_whitespace(std::string_view text)
+{
+	std::size_t begin = 0;
+	while (begin < text.size()) {
+		const auto [codepoint, length] = arnis::unicode_text::codepoint_at(text, begin);
+		if (!is_unicode_whitespace(codepoint))
+			break;
+		begin += length;
+	}
+	std::size_t end = text.size();
+	while (end > begin) {
+		std::size_t start = end - 1;
+		while (start > begin && (static_cast<unsigned char>(text[start]) & 0xc0) == 0x80)
+			--start;
+		const auto [codepoint, length] = arnis::unicode_text::codepoint_at(text, start);
+		if (start + length != end || !is_unicode_whitespace(codepoint))
+			break;
+		end = start;
+	}
+	return text.substr(begin, end - begin);
+}
+
+std::string normalize_color_name(std::string_view text)
+{
+	const auto lower = arnis::unicode_text::lowercase(text);
+	std::string normalized;
+	normalized.reserve(lower.size());
+	for (std::size_t offset = 0; offset < lower.size();) {
+		const auto [codepoint, length] = arnis::unicode_text::codepoint_at(lower, offset);
+		if (!is_unicode_whitespace(codepoint) && codepoint != '_' && codepoint != '-')
+			normalized.append(lower, offset, length);
+		offset += length;
+	}
+	return normalized;
+}
+} // namespace
 
 std::optional<RGBTuple> color_text_to_rgb_tuple(std::string_view text)
 {
-	while (!text.empty() && std::isspace(static_cast<unsigned char>(text.front())))
-		text.remove_prefix(1);
-	while (!text.empty() && std::isspace(static_cast<unsigned char>(text.back())))
-		text.remove_suffix(1);
+	text = trim_unicode_whitespace(text);
 	if (auto rgb = full_hex_color_to_rgb_tuple(text))
 		return rgb;
 	if (auto rgb = short_hex_color_to_rgb_tuple(text))
@@ -67,11 +113,7 @@ std::array<float, 3> rgb_to_oklab(std::uint8_t red, std::uint8_t green, std::uin
 }
 std::optional<RGBTuple> color_name_to_rgb_tuple(std::string_view text)
 {
-	std::string normalized;
-	normalized.reserve(text.size());
-	for (unsigned char c : text)
-		if (!std::isspace(c) && c != '_' && c != '-')
-			normalized.push_back(char(std::tolower(c)));
+	const std::string normalized = normalize_color_name(text);
 	text = normalized;
 	if (text == "aqua" || text == "cyan")
 		return std::make_optional(

@@ -1,7 +1,10 @@
 #include "stadium.h"
 #include "../../../../arnis_adapter.h"
+#include "../../strict_parse.h"
+#include "../../unicode_text.h"
 #include <algorithm>
 #include <cmath>
+#include <string_view>
 
 namespace arnis::models_3d::custom::stadium
 {
@@ -120,23 +123,19 @@ bool placement(const ProcessedElement &e, double scale, Placement &o)
 			sm, theta * 180 / M_PI, 0, false};
 	auto hs = tag(e, "height");
 	if (!hs.empty()) {
-		std::string value = hs;
-		const auto first = value.find_first_not_of(" \t\r\n");
-		const auto last = value.find_last_not_of(" \t\r\n");
-		if (first != std::string::npos)
-			value = value.substr(first, last - first + 1);
-		if (!value.empty() && (value.back() == 'm' || value.back() == 'M'))
-			value.pop_back();
-		const auto numeric_end = value.find_last_not_of(" \t\r\n");
-		if (numeric_end != std::string::npos)
-			value.resize(numeric_end + 1);
-		try {
-			std::size_t consumed = 0;
-			const float parsed = std::stof(value, &consumed);
-			if (consumed == value.size() && std::isfinite(parsed) && parsed > 0)
-				o.osm_height_m = std::min(200.f, parsed);
+		const auto [begin, end] = unicode_text::trim_whitespace(hs);
+		std::string_view value(hs.data() + begin, end - begin);
+		// Rust's custom-provider parser strips lowercase `m` only, then trims
+		// again and requires a complete f64 parse. Keep uppercase M exclusive to
+		// the Wikidata provider, whose Rust parser accepts both suffixes.
+		while (!value.empty() && value.back() == 'm')
+			value.remove_suffix(1);
+		const auto [number_begin, number_end] = unicode_text::trim_whitespace(value);
+		value = value.substr(number_begin, number_end - number_begin);
+		if (const auto parsed = strict_parse::f64(value);
+				parsed && std::isfinite(*parsed) && *parsed > 0.0) {
+			o.osm_height_m = std::min(200.f, static_cast<float>(*parsed));
 			o.has_osm_height = o.osm_height_m > 0;
-		} catch (...) {
 		}
 	}
 	return true;
@@ -193,7 +192,8 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double scal
 		// as pitches/tracks. Claim these before testing the inner footprint so a
 		// single mapped stadium never places overlapping GLB models.
 		if (std::any_of(r.placements.begin(), r.placements.end(),
-					[&,cx=cx, cz=cz](const auto &p) { return p.footprint.contains(cx, cz); })) {
+					[&, cx = cx, cz = cz](
+							const auto &p) { return p.footprint.contains(cx, cz); })) {
 			r.suppressed.push_back(std::move(key));
 			continue;
 		}

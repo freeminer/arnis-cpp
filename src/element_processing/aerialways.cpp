@@ -7,11 +7,12 @@
 #include "structure_kit.h"
 
 #include "../../../arnis_world_editor.h"
+#include "../unicode_text.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <charconv>
-#include <cctype>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -38,6 +39,11 @@ enum class Kind
 	ZipLine,
 	Goods,
 };
+
+double distance(double dx, double dz)
+{
+	return std::sqrt(dx * dx + dz * dz);
+}
 
 std::optional<Kind> kind_of(const tags_t &tags)
 {
@@ -100,7 +106,7 @@ void mark_band(
 	for (int x = x0; x <= x1; ++x)
 		for (int z = z0; z <= z1; ++z) {
 			const double t = std::clamp(((x - ax) * dx + (z - az) * dz) / len2, 0.0, 1.0);
-			if (std::hypot(x - ax - t * dx, z - az - t * dz) <= half)
+			if (distance(x - ax - t * dx, z - az - t * dz) <= half)
 				map.set(x, z);
 		}
 }
@@ -166,7 +172,7 @@ double ground_at(const WorldEditor &editor, double x, double z)
 
 double rope_at(const Support &a, const Support &b, double t, double sag)
 {
-	const double len = std::hypot(b.x - a.x, b.z - a.z);
+	const double len = distance(b.x - a.x, b.z - a.z);
 	return a.rope_y + (b.rope_y - a.rope_y) * t - 4.0 * sag * len * t * (1.0 - t);
 }
 
@@ -195,8 +201,7 @@ std::vector<Support> supports_for(
 		if (!edge && endpoint)
 			role = Support::Role::Station;
 		const double x = node.x + 0.5, z = node.z + 0.5;
-		if (!points.empty() &&
-				std::hypot(points.back().x - x, points.back().z - z) < 1.0 &&
+		if (!points.empty() && distance(points.back().x - x, points.back().z - z) < 1.0 &&
 				i + 1 != way.nodes.size())
 			continue;
 		points.push_back({x, z, role, skip});
@@ -226,7 +231,7 @@ std::vector<Support> supports_for(
 		if (support.role == Support::Role::Pylon && !spaced.empty()) {
 			const auto &previous = spaced.back();
 			const double to_previous =
-					std::hypot(support.x - previous.x, support.z - previous.z);
+					distance(support.x - previous.x, support.z - previous.z);
 			const bool crowded =
 					to_previous <
 					(previous.role == Support::Role::Station ? terminal_clearance : 8.0);
@@ -235,7 +240,7 @@ std::vector<Support> supports_for(
 			const auto &end = supports.back();
 			const bool near_station =
 					i + 1 < supports.size() && end.role == Support::Role::Station &&
-					std::hypot(support.x - end.x, support.z - end.z) < terminal_clearance;
+					distance(support.x - end.x, support.z - end.z) < terminal_clearance;
 			if (crowded || near_station)
 				continue;
 		}
@@ -247,7 +252,7 @@ std::vector<Support> supports_for(
 	if (spec.spacing > 0.0 && supports.size() == 2) {
 		const Support &a = supports.front();
 		const Support &b = supports.back();
-		const double length = std::hypot(b.x - a.x, b.z - a.z);
+		const double length = distance(b.x - a.x, b.z - a.z);
 		const int count = static_cast<int>(std::round(length / spec.spacing));
 		std::vector<Support> planned;
 		planned.reserve(static_cast<std::size_t>(std::max(0, count)) + 1);
@@ -268,7 +273,7 @@ std::vector<Support> supports_for(
 	auto required_rope_y = [&](double x, double z, const Support &a, const Support &b) {
 		const double dx = b.x - a.x;
 		const double dz = b.z - a.z;
-		const double length = std::max(1e-6, std::hypot(dx, dz));
+		const double length = std::max(1e-6, distance(dx, dz));
 		const double rx = -dz / length, rz = dx / length;
 		double ground = ground_at(editor, x, z);
 		if (gauge_half > 0.0) {
@@ -280,15 +285,15 @@ std::vector<Support> supports_for(
 		double nearest_station = std::numeric_limits<double>::max();
 		for (const auto &support : supports)
 			if (support.role == Support::Role::Station)
-				nearest_station = std::min(
-						nearest_station, std::hypot(x - support.x, z - support.z));
+				nearest_station =
+						std::min(nearest_station, distance(x - support.x, z - support.z));
 		const double ramp = std::clamp((nearest_station - mouth) / 20.0, 0.0, 1.0);
 		return ground + spec.hang + spec.clearance * ramp;
 	};
 	auto worst_shortfall =
 			[&](const Support &a,
 					const Support &b) -> std::optional<std::pair<double, double>> {
-		const double len = std::hypot(b.x - a.x, b.z - a.z);
+		const double len = distance(b.x - a.x, b.z - a.z);
 		if (len < 1.0)
 			return std::nullopt;
 		const int steps = static_cast<int>(std::ceil(len));
@@ -309,7 +314,7 @@ std::vector<Support> supports_for(
 	};
 	double total_length = 0.0;
 	for (std::size_t i = 1; i < supports.size(); ++i)
-		total_length += std::hypot(
+		total_length += distance(
 				supports[i].x - supports[i - 1].x, supports[i].z - supports[i - 1].z);
 	const std::size_t max_supports = 2 + static_cast<std::size_t>(total_length / 12.0);
 	const bool can_insert = kind != Kind::ZipLine;
@@ -347,7 +352,7 @@ std::vector<Support> supports_for(
 			if (da > 0.01 || db > 0.01)
 				changed = true;
 			if (gained + 0.1 < short_amount) {
-				const double len = std::hypot(supports[i + 1].x - supports[i].x,
+				const double len = distance(supports[i + 1].x - supports[i].x,
 						supports[i + 1].z - supports[i].z);
 				if (can_insert && supports.size() < max_supports && t * len >= 8.0 &&
 						(1.0 - t) * len >= 8.0) {
@@ -375,8 +380,8 @@ std::vector<Support> supports_for(
 		if (support.inferred && support.role == Support::Role::Pylon) {
 			const auto &a = supports[i - 1];
 			const auto &b = supports[i + 1];
-			const double whole = std::max(1e-6, std::hypot(b.x - a.x, b.z - a.z));
-			const double t = std::hypot(support.x - a.x, support.z - a.z) / whole;
+			const double whole = std::max(1e-6, distance(b.x - a.x, b.z - a.z));
+			const double t = distance(support.x - a.x, support.z - a.z) / whole;
 			const double chord = a.rope_y + (b.rope_y - a.rope_y) * t;
 			if (chord - support.ground > spec.max_rope && !span_has_shortfall(a, b)) {
 				supports.erase(supports.begin() + i);
@@ -421,10 +426,13 @@ int occupancy(const tags_t &tags, int fallback)
 	int value = 0;
 	const auto *begin = it->second.data();
 	const auto *end = begin + it->second.size();
-	while (begin != end && std::isspace(static_cast<unsigned char>(*begin)))
+	const auto [trimmed_begin, trimmed_end] = unicode_text::trim_whitespace(it->second);
+	begin += trimmed_begin;
+	end = it->second.data() + trimmed_end;
+	if (begin != end && *begin == '+')
 		++begin;
-	while (begin != end && std::isspace(static_cast<unsigned char>(end[-1])))
-		--end;
+	if (begin == end)
+		return fallback;
 	const auto parsed = std::from_chars(begin, end, value);
 	return parsed.ec == std::errc{} && parsed.ptr == end && value >= 1 && value <= 250
 				   ? value
@@ -701,7 +709,7 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 			const std::size_t next = std::min(i + 1, supports.size() - 1);
 			double dx = supports[next][0] - supports[previous][0];
 			double dz = supports[next][2] - supports[previous][2];
-			const double length = std::max(1e-6, std::hypot(dx, dz));
+			const double length = std::max(1e-6, distance(dx, dz));
 			dx /= length;
 			dz /= length;
 			const double rx = -dz, rz = dx;
@@ -729,7 +737,7 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 	std::vector<double> lengths;
 	double total = 0.0;
 	for (std::size_t i = 1; i < length_anchors.size(); ++i) {
-		const double len = std::hypot(length_anchors[i][0] - length_anchors[i - 1][0],
+		const double len = distance(length_anchors[i][0] - length_anchors[i - 1][0],
 				length_anchors[i][2] - length_anchors[i - 1][2]);
 		lengths.push_back(len);
 		total += len;
@@ -769,7 +777,7 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 			const double travel = side >= 0.0 ? 1.0 : -1.0;
 			draw_carrier(editor, carrier_kind, colour, x, y, z, dx * travel, dz * travel,
 					width, length, has_bubble,
-					static_cast<std::int64_t>(segment_id + identity));
+					std::bit_cast<std::int64_t>(segment_id + identity));
 			return;
 		}
 	};
@@ -939,7 +947,8 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 			const auto q = frame.world(-half_a + 1.5, side * radius);
 			structure_kit::beam(editor, {p.first, rope + 0.5, p.second},
 					{q.first, rope + 0.5, q.second}, 0.09, "minecraft:gray_concrete",
-					static_cast<std::int64_t>(section_id * 7919 + (side > 0.0 ? 1 : 2)),
+					std::bit_cast<std::int64_t>(
+							section_id * 7919 + (side > 0.0 ? 1ULL : 2ULL)),
 					CHAIN_X, CHAIN_Y);
 		}
 	}
@@ -966,7 +975,7 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 			const double direction = bottom ? side : -side;
 			draw_carrier(editor, kind, lift_colour(way), x, rope, z, frame.ux * direction,
 					frame.uz * direction, half_w, half_l, kind == Kind::Chair && bubble,
-					static_cast<std::int64_t>(section_id + (side > 0.0 ? 0 : 1)));
+					std::bit_cast<std::int64_t>(section_id + (side > 0.0 ? 0ULL : 1ULL)));
 		}
 	}
 }
@@ -1356,7 +1365,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 	std::vector<double> support_along(supports.size(), 0.0);
 	for (std::size_t i = 1; i < supports.size(); ++i)
 		support_along[i] =
-				support_along[i - 1] + std::hypot(supports[i].x - supports[i - 1].x,
+				support_along[i - 1] + distance(supports[i].x - supports[i - 1].x,
 											   supports[i].z - supports[i - 1].z);
 	std::size_t section_start = 0;
 	for (std::size_t i = 0; i < supports.size(); ++i) {
@@ -1436,7 +1445,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 		const auto next = std::min(index + 1, supports.size() - 1);
 		double dx = supports[next].x - supports[previous].x;
 		double dz = supports[next].z - supports[previous].z;
-		const double length = std::max(1e-6, std::hypot(dx, dz));
+		const double length = std::max(1e-6, distance(dx, dz));
 		dx /= length;
 		dz /= length;
 		const double rx = -dz, rz = dx;
@@ -1460,7 +1469,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 		for (std::size_t i = 1; i < supports.size(); ++i) {
 			const auto p0 = support_anchor(i - 1, side);
 			const auto p1 = support_anchor(i, side);
-			const double rail_len = std::hypot(p1[0] - p0[0], p1[2] - p0[2]);
+			const double rail_len = distance(p1[0] - p0[0], p1[2] - p0[2]);
 			const int rail_chords =
 					std::max(1, static_cast<int>(std::ceil(rail_len / 12.0)));
 			for (int chord = 0; chord < rail_chords; ++chord) {
@@ -1478,7 +1487,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 								static_cast<int>(std::floor(to[2]))))
 					continue;
 				structure_kit::beam(editor, from, to, 0.09, "minecraft:gray_concrete",
-						static_cast<std::int64_t>(++rope_seed), CHAIN_X, CHAIN_Y);
+						std::bit_cast<std::int64_t>(++rope_seed), CHAIN_X, CHAIN_Y);
 			}
 		}
 	}
@@ -1493,7 +1502,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 			const auto next = std::min(station_index + 1, supports.size() - 1);
 			double dx = supports[next].x - supports[previous].x;
 			double dz = supports[next].z - supports[previous].z;
-			const double heading_length = std::max(1e-6, std::hypot(dx, dz));
+			const double heading_length = std::max(1e-6, distance(dx, dz));
 			dx /= heading_length;
 			dz /= heading_length;
 			const double right_x = -dz, right_z = dx;
@@ -1521,8 +1530,8 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 				const auto q = frame.world(path[k].first, path[k].second);
 				structure_kit::beam(editor, {p.first, station.rope_y, p.second},
 						{q.first, station.rope_y, q.second}, 0.09,
-						"minecraft:gray_concrete", static_cast<std::int64_t>(++rope_seed),
-						CHAIN_X, CHAIN_Y);
+						"minecraft:gray_concrete",
+						std::bit_cast<std::int64_t>(++rope_seed), CHAIN_X, CHAIN_Y);
 			}
 		}
 	}
@@ -1562,8 +1571,7 @@ void generate_aerialway(WorldEditor &editor, const ProcessedWay &way,
 	for (std::size_t i = 0; i < way.nodes.size(); ++i) {
 		const auto &node = way.nodes[i];
 		const double x = node.x + 0.5, z = node.z + 0.5;
-		if (!points.empty() &&
-				std::hypot(points.back().x - x, points.back().z - z) < 1.0 &&
+		if (!points.empty() && distance(points.back().x - x, points.back().z - z) < 1.0 &&
 				i != last_node)
 			continue;
 		Hint hint;
@@ -1582,7 +1590,7 @@ void generate_aerialway(WorldEditor &editor, const ProcessedWay &way,
 	if (points.size() < 2)
 		return;
 	const auto point_distance = [](const Point &a, const Point &b) {
-		return std::hypot(a.x - b.x, a.z - b.z);
+		return distance(a.x - b.x, a.z - b.z);
 	};
 	double total_length = 0.0;
 	for (std::size_t i = 1; i < points.size(); ++i)

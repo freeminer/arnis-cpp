@@ -10,6 +10,7 @@
 #include <cctype>
 #include <charconv>
 #include <nlohmann/json.hpp>
+#include "unicode_text.h"
 #include "strict_parse.h"
 
 namespace arnis::osm_parser
@@ -19,10 +20,20 @@ namespace
 
 std::string norm_style(std::string v)
 {
+	const auto lower = unicode_text::lowercase(v);
 	std::string out;
-	for (unsigned char c : v)
-		if (!std::isspace(c) && c != '_' && c != '-')
-			out.push_back(std::tolower(c));
+	for (std::size_t offset = 0; offset < lower.size();) {
+		const auto [codepoint, length] = unicode_text::codepoint_at(lower, offset);
+		const bool whitespace =
+				(codepoint >= 0x0009 && codepoint <= 0x000d) || codepoint == 0x0020 ||
+				codepoint == 0x0085 || codepoint == 0x00a0 || codepoint == 0x1680 ||
+				(codepoint >= 0x2000 && codepoint <= 0x200a) || codepoint == 0x2028 ||
+				codepoint == 0x2029 || codepoint == 0x202f || codepoint == 0x205f ||
+				codepoint == 0x3000;
+		if (!whitespace && codepoint != '_' && codepoint != '-')
+			out.append(lower, offset, length);
+		offset += length;
+	}
 	return out;
 }
 

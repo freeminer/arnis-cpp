@@ -2,6 +2,7 @@
 #include "../assets_root.h"
 #include "../land_cover/land_cover.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 #include "../trees/schematic.h"
 #include "schem_decoder.h"
 #include <algorithm>
@@ -163,13 +164,8 @@ void place_mapped(WorldEditor &editor, int x, int z, const tags_t &tags,
 	if (!best_water) {
 		const auto direction = tags.find("direction");
 		if (direction != tags.end()) {
-			std::string_view bearing = direction->second;
-			while (!bearing.empty() &&
-					std::isspace(static_cast<unsigned char>(bearing.front())))
-				bearing.remove_prefix(1);
-			while (!bearing.empty() &&
-					std::isspace(static_cast<unsigned char>(bearing.back())))
-				bearing.remove_suffix(1);
+			const auto [begin, end] = unicode_text::trim_whitespace(direction->second);
+			const std::string_view bearing(direction->second.data() + begin, end - begin);
 			if (const auto degrees = strict_parse::f64(bearing))
 				rotation = quarter_for_bearing(*schematic, *degrees);
 			else

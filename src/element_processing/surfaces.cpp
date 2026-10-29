@@ -1,7 +1,8 @@
 #include "surfaces.h"
 
+#include "../unicode_text.h"
+
 #include <cstdint>
-#include <cctype>
 #include <algorithm>
 #include <array>
 #include <unordered_map>
@@ -74,20 +75,21 @@ namespace
 {
 bool is_red_colour(std::string value)
 {
-	const auto not_space = [](unsigned char c) { return !std::isspace(c); };
-	value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-	value.erase(
-			std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
-	std::transform(value.begin(), value.end(), value.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	value = value.substr(begin, end - begin);
+	std::transform(value.begin(), value.end(), value.begin(), [](unsigned char c) {
+		return static_cast<char>(c >= 'A' && c <= 'Z' ? c + ('a' - 'A') : c);
+	});
 
 	// Match Rust's is_red_colour: a value beginning with '#' is parsed only as
 	// hex, never as a named colour, even if malformed text contains "red".
 	if (!value.empty() && value.front() == '#') {
 		const std::string hex = value.substr(1);
 		if ((hex.size() != 3 && hex.size() != 6) ||
-				!std::all_of(hex.begin(), hex.end(),
-						[](unsigned char c) { return std::isxdigit(c); }))
+				!std::all_of(hex.begin(), hex.end(), [](unsigned char c) {
+					return (c >= '0' && c <= '9') || (c >= 'a' && c <= 'f') ||
+						   (c >= 'A' && c <= 'F');
+				}))
 			return false;
 		const int step = hex.size() == 3 ? 1 : 2;
 		const auto channel = [&](std::size_t i) {

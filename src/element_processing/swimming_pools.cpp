@@ -9,7 +9,6 @@
 
 #include <algorithm>
 #include <array>
-#include <cctype>
 #include <cmath>
 #include <cstdint>
 #include <limits>
@@ -119,11 +118,11 @@ std::optional<std::pair<double, double>> lap_pool_size(const tags_t &tags)
 			const auto end = sport.find(';', begin);
 			std::string_view item(sport.data() + begin,
 					(end == std::string::npos ? sport.size() : end) - begin);
-			while (!item.empty() &&
-					std::isspace(static_cast<unsigned char>(item.front())))
-				item.remove_prefix(1);
-			while (!item.empty() && std::isspace(static_cast<unsigned char>(item.back())))
-				item.remove_suffix(1);
+			const std::string item_string(item);
+			const auto [trimmed_begin, trimmed_end] =
+					mapillary::geodesy::trim_rust_whitespace(item_string);
+			item = std::string_view(item_string)
+						   .substr(trimmed_begin, trimmed_end - trimmed_begin);
 			if (item == "swimming") {
 				sport_swimming = true;
 				break;

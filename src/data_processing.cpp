@@ -3570,7 +3570,14 @@ bool generate_world(WorldEditor &editor,
 	decltype(dispatch_state.rail_tunnel_points){}.swap(dispatch_state.rail_tunnel_points);
 	decltype(dispatch_state.highway_tunnel_cells){}.swap(
 			dispatch_state.highway_tunnel_cells);
-	filtered_building_footprints.reset();
+	const BuildingFootprintBitmap *style_building_footprints = &no_building_footprints;
+	if (args.post_apocalyptic) {
+		style_building_footprints = &building_footprints;
+	} else {
+		// Rust retains the footprint bitmap for the style pass only when ruins
+		// need it. Winter styling does not inspect footprints.
+		filtered_building_footprints.reset();
+	}
 	building_part_groups = {};
 	building_group_members = {};
 	std::vector<TileBounds>{}.swap(element_tiles);
@@ -3602,9 +3609,11 @@ bool generate_world(WorldEditor &editor,
 	// flushed. Keep that ordering so generated panels remain visible over winter
 	// snow and post-apocalyptic block substitutions.
 	if (deferred_placements_active)
-		world_style::apply_remaining(editor, args, building_footprints, styled_regions);
+		world_style::apply_remaining(
+				editor, args, *style_building_footprints, styled_regions);
 	else
-		world_style::apply(editor, args, building_footprints);
+		world_style::apply(editor, args, *style_building_footprints);
+	filtered_building_footprints.reset();
 	if (apply_world_style)
 		editor.release_sealed_surface();
 	// The final style pass is the last consumer of road elevations. Rust drops

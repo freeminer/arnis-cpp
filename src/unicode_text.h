@@ -175,6 +175,35 @@ inline std::pair<std::uint32_t, std::size_t> codepoint_at(
 	return {codepoint, length};
 }
 
+inline bool is_whitespace(std::uint32_t cp)
+{
+	return (cp >= 0x09 && cp <= 0x0d) || cp == 0x20 || cp == 0x85 || cp == 0xa0 ||
+		   cp == 0x1680 || (cp >= 0x2000 && cp <= 0x200a) || cp == 0x2028 ||
+		   cp == 0x2029 || cp == 0x202f || cp == 0x205f || cp == 0x3000;
+}
+
+inline std::pair<std::size_t, std::size_t> trim_whitespace(std::string_view text)
+{
+	std::size_t begin = 0;
+	while (begin < text.size()) {
+		const auto [cp, length] = codepoint_at(text, begin);
+		if (!is_whitespace(cp))
+			break;
+		begin += length;
+	}
+	std::size_t end = text.size();
+	while (end > begin) {
+		std::size_t start = end - 1;
+		while (start > begin && (static_cast<unsigned char>(text[start]) & 0xc0) == 0x80)
+			--start;
+		const auto [cp, length] = codepoint_at(text, start);
+		if (start + length != end || !is_whitespace(cp))
+			break;
+		end = start;
+	}
+	return {begin, end};
+}
+
 inline bool is_alphanumeric(std::uint32_t codepoint)
 {
 	if (codepoint < 0x80)

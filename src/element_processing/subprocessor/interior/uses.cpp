@@ -1,4 +1,5 @@
 #include "uses.h"
+#include "../../../unicode_text.h"
 
 #include <algorithm>
 #include <charconv>
@@ -16,11 +17,10 @@ constexpr int SAME_TENANT_DIST = 4;
 
 std::optional<double> parse_float(std::string_view value)
 {
-	const auto first = value.find_first_not_of(" \t\n\r\f\v");
-	if (first == std::string_view::npos)
+	const auto [first, last] = unicode_text::trim_whitespace(value);
+	value = value.substr(first, last - first);
+	if (value.empty())
 		return std::nullopt;
-	const auto last = value.find_last_not_of(" \t\n\r\f\v");
-	value = value.substr(first, last - first + 1);
 	// from_chars is locale-independent like Rust's f64 parser, but unlike
 	// strtod/std::stod it does not accept a leading plus sign.
 	if (value.front() == '+')

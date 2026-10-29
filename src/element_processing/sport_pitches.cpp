@@ -1,10 +1,11 @@
 #include "sport_pitches.h"
+#include "../unicode_text.h"
 
 #include <algorithm>
 #include <cmath>
 #include <optional>
 #include <set>
-#include <sstream>
+#include <string_view>
 
 namespace arnis::sport_pitches
 {
@@ -23,15 +24,13 @@ std::optional<PitchKind> pitch_kind(const ProcessedWay &way)
 	auto it = way.tags.find("sport");
 	if (it == way.tags.end())
 		return std::nullopt;
-	std::istringstream values(it->second);
-	std::string sport;
-	constexpr const char *whitespace = " \t\n\r\f\v";
-	while (std::getline(values, sport, ';')) {
-		const auto first = sport.find_first_not_of(whitespace);
-		if (first == std::string::npos)
-			continue;
-		const auto last = sport.find_last_not_of(whitespace);
-		sport = sport.substr(first, last - first + 1);
+	const std::string_view sports(it->second);
+	for (std::size_t begin = 0; begin <= sports.size();) {
+		const auto separator = sports.find(';', begin);
+		const auto end = separator == std::string_view::npos ? sports.size() : separator;
+		const auto item = sports.substr(begin, end - begin);
+		const auto [trim_begin, trim_end] = unicode_text::trim_whitespace(item);
+		const auto sport = item.substr(trim_begin, trim_end - trim_begin);
 		if (sport == "soccer" || sport == "football")
 			return PitchKind::Soccer;
 		if (sport == "basketball")
@@ -44,6 +43,9 @@ std::optional<PitchKind> pitch_kind(const ProcessedWay &way)
 				sport == "badminton" || sport == "netball" || sport == "korfball" ||
 				sport == "team_handball" || sport == "multi")
 			return PitchKind::Generic;
+		if (separator == std::string_view::npos)
+			break;
+		begin = separator + 1;
 	}
 	return std::nullopt;
 }

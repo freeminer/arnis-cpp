@@ -3,6 +3,7 @@
 #include "../block_definitions.h"
 #include "../block_palette.h"
 #include "../strict_parse.h"
+#include "../unicode_text.h"
 #include "bridge_styles.h"
 #include "connected_blocks.h"
 
@@ -15,6 +16,7 @@
 #include <limits>
 #include <numeric>
 #include <string>
+#include <string_view>
 #include <unordered_map>
 
 namespace arnis::bridge_towers
@@ -84,18 +86,12 @@ std::optional<double> metres(const tags_t &tags, const char *key)
 	const auto it = tags.find(key);
 	if (it == tags.end())
 		return std::nullopt;
-	std::string value = it->second;
-	auto first = value.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos)
-		return std::nullopt;
-	auto last = value.find_last_not_of(" \t\r\n");
-	value = value.substr(first, last - first + 1);
+	const auto [begin, end] = unicode_text::trim_whitespace(it->second);
+	std::string_view value(it->second.data() + begin, end - begin);
 	while (!value.empty() && value.back() == 'm')
-		value.pop_back();
-	const auto trimmed = value.find_last_not_of(" \t\r\n");
-	if (trimmed == std::string::npos)
-		return std::nullopt;
-	value.erase(trimmed + 1);
+		value.remove_suffix(1);
+	const auto [number_begin, number_end] = unicode_text::trim_whitespace(value);
+	value = value.substr(number_begin, number_end - number_begin);
 	const auto parsed = strict_parse::f64(value);
 	// Match Rust's building-dimension guard: non-finite, negative, and
 	// implausibly large OSM heights must not create overflowing tower tops.

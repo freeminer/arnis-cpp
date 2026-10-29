@@ -5,6 +5,8 @@
 #include "world_editor.h"
 #include "highways.h"
 #include "highway_tunnels.h"
+//#include "strict_parse.h"
+#include "unicode_text.h"
 
 #include <string>
 #include <unordered_map>
@@ -17,6 +19,7 @@
 #include <algorithm>
 #include <limits>
 #include <memory>
+#include <string_view>
 #include <unordered_set>
 
 #include "../../../arnis_adapter.h"
@@ -273,27 +276,18 @@ int rust_round_i32(double value)
 
 std::optional<double> parse_min_height(const std::string &raw)
 {
-	std::string value = raw;
-	// Match Rust's `trim_end_matches('m').trim()`: remove unit suffixes before
-	// whitespace trimming, so trailing whitespace does not make the suffix count.
+	// Match Rust's `trim_end_matches('m').trim()`: remove all trailing
+	// lowercase suffixes before trimming Unicode whitespace, so trailing space
+	// prevents the suffix from matching.
+	std::string_view value(raw);
 	while (!value.empty() && value.back() == 'm')
-		value.pop_back();
-	const auto first = value.find_first_not_of(" \t\r\n");
-	if (first == std::string::npos)
+		value.remove_suffix(1);
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	value = value.substr(begin, end - begin);
+	const auto height = strict_parse::f64(value);
+	if (!height || !std::isfinite(*height) || *height < 0.0 || *height > 1000.0)
 		return std::nullopt;
-	const auto last = value.find_last_not_of(" \t\r\n");
-	value = value.substr(first, last - first + 1);
-	try {
-		std::size_t used = 0;
-		const double height = std::stod(value, &used);
-		if (used != value.size())
-			return std::nullopt;
-		if (!std::isfinite(height) || height < 0.0 || height > 1000.0)
-			return std::nullopt;
-		return height;
-	} catch (...) {
-		return std::nullopt;
-	}
+	return height;
 }
 
 std::vector<std::optional<int>> barrier_bases(world_editor::WorldEditor &editor,

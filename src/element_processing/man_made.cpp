@@ -9,11 +9,13 @@
 #include <limits>
 #include <unordered_set>
 #include <vector>
+#include <string_view>
 
 #include "../bresenham.h"
 #include "../strict_parse.h"
 #include "../structures/structures.h"
 #include "../mapillary/geometry.h"
+#include "../unicode_text.h"
 #include "../world_editor/floor_state.h"
 #include "connected_blocks.h"
 #include "waterfront.h"
@@ -610,6 +612,11 @@ std::string lower_copy(std::string value)
 	return value;
 }
 
+std::string unicode_lower_copy(std::string_view value)
+{
+	return unicode_text::lowercase(value);
+}
+
 int read_height(const ProcessedElement &element, int default_height, double scale_factor)
 {
 	auto tag = element.tag("height");
@@ -618,10 +625,8 @@ int read_height(const ProcessedElement &element, int default_height, double scal
 	std::string_view value = *tag;
 	while (!value.empty() && value.back() == 'm')
 		value.remove_suffix(1);
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.front())))
-		value.remove_prefix(1);
-	while (!value.empty() && std::isspace(static_cast<unsigned char>(value.back())))
-		value.remove_suffix(1);
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	value = value.substr(begin, end - begin);
 	const auto parsed = strict_parse::f64(value);
 	if (!parsed)
 		return std::max(default_height, 3);
@@ -651,7 +656,7 @@ Block tank_material_block(const ProcessedElement &element)
 	if (!material.has_value())
 		return SMOOTH_STONE;
 
-	const std::string value = lower_copy(material.value());
+	const std::string value = unicode_lower_copy(material.value());
 	if (value == "metal" || value == "steel" || value == "aluminium" ||
 			value == "aluminum" || value == "iron" || value == "tin")
 		return IRON_BLOCK;
@@ -751,7 +756,7 @@ void generate_storage_tank(
 
 	Block body_block = SMOOTH_STONE;
 	if (auto content = element.tag("content"); content.has_value()) {
-		const std::string value = lower_copy(content.value());
+		const std::string value = unicode_lower_copy(content.value());
 		if (value == "oil" || value == "fuel" || value == "diesel" ||
 				value == "petroleum" || value == "tar")
 			body_block = BLACK_TERRACOTTA;

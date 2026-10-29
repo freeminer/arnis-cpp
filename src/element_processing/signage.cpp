@@ -7,15 +7,16 @@
 #include "../strict_parse.h"
 #include "road_mask_search.h"
 #include "highways.h"
+#include "../unicode_text.h"
 #include <algorithm>
 #include <charconv>
-#include <cctype>
 #include <cmath>
 #include <limits>
 #include <map>
 #include <set>
 #include <sstream>
 #include <iostream>
+#include <string_view>
 namespace arnis::signage
 {
 namespace arnis_highways = ::arnis::highways;
@@ -24,22 +25,35 @@ bool place_post(world_editor::WorldEditor &editor, int x, int z,
 		std::int8_t selected_facing = 3);
 namespace
 {
-std::string clean_street_name(const std::string &raw)
+bool is_unicode_whitespace(std::uint32_t codepoint)
 {
-	std::string out;
-	bool pending_space = false;
-	for (unsigned char ch : raw) {
-		if (std::isspace(ch)) {
-			pending_space = !out.empty();
-			continue;
-		}
-		if (pending_space && out.size() < 60)
-			out.push_back(' ');
-		pending_space = false;
-		if (out.size() < 60)
-			out.push_back(static_cast<char>(ch));
+	return (codepoint >= 0x0009 && codepoint <= 0x000d) || codepoint == 0x0020 ||
+		   codepoint == 0x0085 || codepoint == 0x00a0 || codepoint == 0x1680 ||
+		   (codepoint >= 0x2000 && codepoint <= 0x200a) || codepoint == 0x2028 ||
+		   codepoint == 0x2029 || codepoint == 0x202f || codepoint == 0x205f ||
+		   codepoint == 0x3000;
+}
+
+std::string_view trim_unicode_whitespace(std::string_view text)
+{
+	std::size_t begin = 0;
+	while (begin < text.size()) {
+		const auto [codepoint, length] = unicode_text::codepoint_at(text, begin);
+		if (!is_unicode_whitespace(codepoint))
+			break;
+		begin += length;
 	}
-	return out;
+	std::size_t end = text.size();
+	while (end > begin) {
+		std::size_t start = end - 1;
+		while (start > begin && (static_cast<unsigned char>(text[start]) & 0xc0) == 0x80)
+			--start;
+		const auto [codepoint, length] = unicode_text::codepoint_at(text, start);
+		if (start + length != end || !is_unicode_whitespace(codepoint))
+			break;
+		end = start;
+	}
+	return text.substr(begin, end - begin);
 }
 
 std::string clean_name(const std::string &raw)
@@ -180,16 +194,12 @@ decals::ShieldStyle shield(
 std::optional<std::pair<std::uint16_t, bool>> maxspeed(
 		const tags_t &tags, decals::SignRegion region)
 {
-	auto raw = tags.get("maxspeed");
-	const auto first = raw.find_first_not_of(" \t\r\n\f\v");
-	if (first == std::string::npos)
+	const std::string raw =
+			unicode_text::lowercase(trim_unicode_whitespace(tags.get("maxspeed")));
+	if (raw.empty())
 		return std::nullopt;
-	const auto last = raw.find_last_not_of(" \t\r\n\f\v");
-	raw = raw.substr(first, last - first + 1);
-	std::transform(raw.begin(), raw.end(), raw.begin(),
-			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	std::size_t n = 0;
-	while (n < raw.size() && std::isdigit((unsigned char)raw[n]))
+	while (n < raw.size() && raw[n] >= '0' && raw[n] <= '9')
 		++n;
 	if (!n)
 		return std::nullopt;
@@ -532,7 +542,7 @@ IntersectionIndex build_intersection_index(
 				(way.tags.contains("tunnel") && way.tags.get("tunnel") != "no") ||
 				way.tags.get("indoor") == "yes")
 			continue;
-		auto name = clean_street_name(way.tags.get("name"));
+		auto name = clean_name(way.tags.get("name"));
 		if (name.empty() || !decals::font::supports(name))
 			continue;
 		streets.push_back({&way, std::move(name),
@@ -1228,9 +1238,9 @@ std::optional<std::string> get_house_number(const tags_t &tags)
 {
 	auto it = tags.find("addr:housenumber");
 	if (it != tags.end()) {
-		auto value = trim_ascii(it->second);
+		const auto value = trim_unicode_whitespace(it->second);
 		if (!value.empty())
-			return value;
+			return std::string(value);
 	}
 	return std::nullopt;
 }
@@ -1911,27 +1921,17 @@ bool generate_billboard(
 	int height = 6;
 	auto it_height = node.tags.find("height");
 	if (it_height != node.tags.end()) {
-		std::string h_str = it_height->second;
-		while (!h_str.empty() && h_str.back() == 'm')
-			h_str.pop_back();
-		const auto first = h_str.find_first_not_of(" \t\r\n\f\v");
-		const auto last = h_str.find_last_not_of(" \t\r\n\f\v");
-		if (first == std::string::npos)
-			h_str.clear();
-		else
-			h_str = h_str.substr(first, last - first + 1);
-		try {
-			std::size_t parsed = 0;
-			const double h_val = std::stod(h_str, &parsed);
-			if (parsed == h_str.size()) {
-				const double rounded = std::round(h_val);
-				height = std::isnan(rounded) ? 0
-						 : rounded <= 4.0	 ? 4
-						 : rounded >= 12.0	 ? 12
-											 : static_cast<int>(rounded);
-			}
-		} catch (...) {
-			height = 6;
+		std::string_view value(it_height->second);
+		while (!value.empty() && value.back() == 'm')
+			value.remove_suffix(1);
+		const auto [begin, end] = unicode_text::trim_whitespace(value);
+		value = value.substr(begin, end - begin);
+		if (const auto parsed = strict_parse::f64(value)) {
+			const double rounded = std::round(*parsed);
+			height = std::isnan(rounded) ? 0
+					 : rounded <= 4.0	 ? 4
+					 : rounded >= 12.0	 ? 12
+										 : static_cast<int>(rounded);
 		}
 	}
 	height = std::clamp(height, 4, 12);

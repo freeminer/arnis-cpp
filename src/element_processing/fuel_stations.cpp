@@ -456,18 +456,20 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 		if (!site.ring.empty())
 			areas.push_back(site);
 	const double merge = 30.0 * scale;
-	out.sites.erase(std::remove_if(out.sites.begin(), out.sites.end(),
-							[&](const Site &s) {
-								if (!s.ring.empty())
-									return false;
-								return std::any_of(
-										areas.begin(), areas.end(), [&](const Site &a) {
-											return !a.ring.empty() &&
-												   (inside(a.ring, s.x, s.z) ||
-														   std::hypot(a.x - s.x,
-																   a.z - s.z) < merge);
-										});
-							}),
+	out.sites.erase(
+			std::remove_if(out.sites.begin(), out.sites.end(),
+					[&](const Site &s) {
+						if (!s.ring.empty())
+							return false;
+						return std::any_of(
+								areas.begin(), areas.end(), [&](const Site &a) {
+									return !a.ring.empty() &&
+										   (inside(a.ring, s.x, s.z) ||
+												   std::sqrt((a.x - s.x) * (a.x - s.x) +
+															 (a.z - s.z) * (a.z - s.z)) <
+														   merge);
+								});
+					}),
 			out.sites.end());
 	if (out.sites.empty())
 		return out;
@@ -535,7 +537,8 @@ FuelIndex FuelIndex::build(const std::vector<ProcessedElement> &elements, double
 			const auto &bounds = site_bounds[i];
 			if (x < bounds[0] || x > bounds[2] || z < bounds[1] || z > bounds[3])
 				continue;
-			const double d = std::hypot(site.x - x, site.z - z);
+			const double dx = site.x - x, dz = site.z - z;
+			const double d = std::sqrt(dx * dx + dz * dz);
 			if ((reaches(site) && d <= node_reach) || inside(site.ring, x, z))
 				if (!best || d < best->second)
 					best = std::make_pair(i, d);
@@ -645,7 +648,7 @@ void generate_station(WorldEditor &editor, const ProcessedElement &element,
 	const auto [rx, rz] = road ? std::pair<double, double>{road->first + 0.5 - site->x,
 										 road->second + 0.5 - site->z}
 							   : std::pair<double, double>{0.0, 1.0};
-	const double distance = std::max(1e-6, std::hypot(rx, rz));
+	const double distance = std::max(1e-6, std::sqrt(rx * rx + rz * rz));
 	const std::pair<double, double> away{-rx / distance, -rz / distance};
 	const double half_l = std::max(7.0 * scale, 5.0);
 	const double half_w = std::max(4.5 * scale, 3.5);

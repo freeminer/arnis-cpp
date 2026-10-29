@@ -257,7 +257,7 @@ std::vector<std::pair<double, double>> stations(
 			const double ax = way->nodes[i - 1].x, az = way->nodes[i - 1].z;
 			const double dx = double(way->nodes[i].x) - ax;
 			const double dz = double(way->nodes[i].z) - az;
-			const double length = std::hypot(dx, dz);
+			const double length = std::sqrt(dx * dx + dz * dz);
 			if (length <= 0.0)
 				continue;
 			double distance = carry;
