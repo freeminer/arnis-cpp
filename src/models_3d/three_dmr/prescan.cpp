@@ -48,7 +48,7 @@ bool direction(const std::string &s, double &o)
 			{"ESE", 112.5}, {"SE", 135}, {"SSE", 157.5}, {"S", 180}, {"SOUTH", 180},
 			{"SSW", 202.5}, {"SW", 225}, {"WSW", 247.5}, {"W", 270}, {"WEST", 270},
 			{"WNW", 292.5}, {"NW", 315}, {"NNW", 337.5}};
-	std::string u = value;
+	std::string u{value};
 	std::transform(u.begin(), u.end(), u.begin(), [](unsigned char c) {
 		return static_cast<char>(c >= 'a' && c <= 'z' ? c - ('a' - 'A') : c);
 	});

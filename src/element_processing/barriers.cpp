@@ -4,9 +4,8 @@
 #include "connected_blocks.h"
 #include "world_editor.h"
 #include "highways.h"
-#include "highway_tunnels.h"
-//#include "strict_parse.h"
-#include "unicode_text.h"
+#include "../strict_parse.h"
+#include "../unicode_text.h"
 
 #include <string>
 #include <unordered_map>
