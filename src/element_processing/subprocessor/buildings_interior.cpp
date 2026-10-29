@@ -4350,6 +4350,95 @@ inline std::optional<Block> get_interior_block(char c, bool is_layer2, Block wal
 	}
 }
 
+void place_interior_layout_block(
+		WorldEditor &editor, Block block, char layout_char, int x, int y, int z)
+{
+	// Rust's four chiseled-bookshelf palette entries are distinct block IDs whose
+	// default block states carry the facing.  The C++ host palette intentionally
+	// aliases them to one node ID, so preserve that state explicitly when placing
+	// the layout symbols rather than silently turning every shelf north.
+	const char *facing = nullptr;
+	const char *part = nullptr;
+	std::uint8_t facedir = 0;
+	switch (layout_char) {
+	case 'a':
+		facing = "north";
+		facedir = 2;
+		break;
+	case 'b':
+		facing = "east";
+		facedir = 1;
+		break;
+	case 'c':
+		facing = "south";
+		facedir = 0;
+		break;
+	case 'd':
+		facing = "west";
+		facedir = 3;
+		break;
+	case '1':
+		facing = "north";
+		facedir = 2;
+		part = "head";
+		break;
+	case '2':
+		facing = "north";
+		facedir = 2;
+		part = "foot";
+		break;
+	case '3':
+		facing = "east";
+		facedir = 1;
+		part = "head";
+		break;
+	case '4':
+		facing = "east";
+		facedir = 1;
+		part = "foot";
+		break;
+	case '5':
+		facing = "south";
+		facedir = 0;
+		part = "head";
+		break;
+	case '6':
+		facing = "south";
+		facedir = 0;
+		part = "foot";
+		break;
+	case '7':
+		facing = "west";
+		facedir = 3;
+		part = "head";
+		break;
+	case '8':
+		facing = "west";
+		facedir = 3;
+		part = "foot";
+		break;
+	default:
+		break;
+	}
+	if (facing) {
+		// Freeminer stores horizontal facedir in param2 (south=0, east=1,
+		// north=2, west=3). Preserve the orientation in the generated node as
+		// well as the backend-neutral Rust-style property payload. The Rust bed
+		// variants also carry the independent head/foot part state.
+		block.setParam2(facedir);
+		BlockWithProperties::Properties properties{{"facing", facing}};
+		if (part) {
+			properties.emplace("part", part);
+			properties.emplace("occupied", "false");
+		}
+		editor.set_block_with_properties_absolute(
+				BlockWithProperties{block, std::move(properties)}, x, y, z, std::nullopt,
+				std::nullopt);
+	} else {
+		editor.set_block_absolute(block, x, y, z, std::nullopt, std::nullopt);
+	}
+}
+
 } // namespace
 
 /// Generates interior layouts inside buildings at each floor level
@@ -4898,8 +4987,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			auto opt_block1 = get_interior_block(cell1, false, wall_block);
 			if (opt_block1.has_value()) {
 				const int placement_y = floor_y + y_offset + abs_terrain_offset;
-				editor.set_block_absolute(opt_block1.value(), x, placement_y, z,
-						std::nullopt, std::nullopt);
+				place_interior_layout_block(
+						editor, opt_block1.value(), cell1, x, placement_y, z);
 				if (cell1 >= '1' && cell1 <= '8') {
 					const auto placed = editor.get_block_absolute(x, placement_y, z);
 					if (placed && placed->id() == opt_block1->id())
@@ -4919,9 +5008,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			// Place second layer blocks
 			auto opt_block2 = get_interior_block(cell2, true, wall_block);
 			if (opt_block2.has_value()) {
-				editor.set_block_absolute(opt_block2.value(), x,
-						floor_y + y_offset + abs_terrain_offset + 1, z, std::nullopt,
-						std::nullopt);
+				place_interior_layout_block(editor, opt_block2.value(), cell2, x,
+						floor_y + y_offset + abs_terrain_offset + 1, z);
 			}
 		}
 

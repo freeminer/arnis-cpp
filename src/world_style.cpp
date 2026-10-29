@@ -106,10 +106,10 @@ Kind kind_uncached(WorldEditor &editor, const Block &block)
 			"lily_of_the_valley", "pink_petals", "wildflowers", "leaf_litter",
 			"torchflower", "open_eyeblossom", "closed_eyeblossom", "brown_mushroom",
 			"red_mushroom"};
-	if (std::find(plants.begin(), plants.end(), n) != plants.end() ||
+	if (std::find(plants.begin(), plants.end(), n) != plants.end() || n == "grass_3" ||
 			n.ends_with("_sapling"))
 		return Kind::Plant;
-	if (n.ends_with("_leaves"))
+	if (n.ends_with("_leaves") || n == "jungleleaves" || n == "pine_needles")
 		return Kind::Leaves;
 	if (n.find("glass") != std::string_view::npos)
 		return Kind::Glass;
@@ -118,7 +118,7 @@ Kind kind_uncached(WorldEditor &editor, const Block &block)
 			n == "end_rod" || n.ends_with("lantern") || n.ends_with("froglight") ||
 			n.find("torch") != std::string_view::npos || n.ends_with("candle"))
 		return Kind::Light;
-	static constexpr std::array<std::string_view, 50> thin = {"fence", "_wall", "door",
+	static constexpr std::array<std::string_view, 51> thin = {"fence", "_wall", "door",
 			"sign", "banner", "button", "lever", "rail", "carpet", "pressure_plate",
 			"ladder", "vine", "chain", "bars", "_head", "skull", "potted", "flower_pot",
 			"bell", "anvil", "_bed", "chest", "cake", "campfire", "hopper", "cauldron",
@@ -126,7 +126,7 @@ Kind kind_uncached(WorldEditor &editor, const Block &block)
 			"seagrass", "coral", "pickle", "lichen", "bamboo", "sugar_cane", "cactus",
 			"dripstone", "dripleaf", "azalea", "amethyst_bud", "amethyst_cluster",
 			"sculk_vein", "sculk_sensor", "sculk_shrieker", "daylight_detector",
-			"brewing_stand", "composter"};
+			"brewing_stand", "composter", "papyrus"};
 	if (std::any_of(thin.begin(), thin.end(),
 				[&](auto part) { return n.find(part) != std::string_view::npos; }))
 		return Kind::Thin;
@@ -196,9 +196,9 @@ bool flammable(WorldEditor &editor, const Block &block)
 			"wool", "carpet", "vine", "hay", "bookshelf", "barrel", "scaffolding",
 			"lectern", "composter", "beehive", "bee_nest", "target", "tnt", "coal_block",
 			"moss", "azalea"};
-	result = result || std::any_of(parts.begin(), parts.end(), [&](auto part) {
-		return n.find(part) != std::string_view::npos;
-	});
+	result = result || n == "tree" || n == "jungletree" || n.ends_with("_tree") ||
+			 std::any_of(parts.begin(), parts.end(),
+					 [&](auto part) { return n.find(part) != std::string_view::npos; });
 	if (definitions) {
 		std::lock_guard<std::mutex> lock(mutex);
 		return cache.emplace(key, result).first->second;

@@ -70,6 +70,38 @@ std::span<const Block> get_blocks_for_surface_way(
 	return default_blocks;
 }
 
+namespace
+{
+bool is_red_colour(std::string value)
+{
+	const auto not_space = [](unsigned char c) { return !std::isspace(c); };
+	value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
+	value.erase(
+			std::find_if(value.rbegin(), value.rend(), not_space).base(), value.end());
+	std::transform(value.begin(), value.end(), value.begin(),
+			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+
+	// Match Rust's is_red_colour: a value beginning with '#' is parsed only as
+	// hex, never as a named colour, even if malformed text contains "red".
+	if (!value.empty() && value.front() == '#') {
+		const std::string hex = value.substr(1);
+		if ((hex.size() != 3 && hex.size() != 6) ||
+				!std::all_of(hex.begin(), hex.end(),
+						[](unsigned char c) { return std::isxdigit(c); }))
+			return false;
+		const int step = hex.size() == 3 ? 1 : 2;
+		const auto channel = [&](std::size_t i) {
+			const int n = std::stoi(hex.substr(i * step, step), nullptr, 16);
+			return step == 1 ? n * 17 : n;
+		};
+		const int r = channel(0), g = channel(1), b = channel(2);
+		return r >= 0x80 && 2 * r > 3 * g && 2 * r > 3 * b;
+	}
+	return value.find("red") != std::string::npos || value == "maroon" ||
+		   value == "crimson" || value == "brick";
+}
+} // namespace
+
 std::span<const Block> cycleway_palette(const tags_t &tags)
 {
 	if (tags.get("cycleway") == "crossing" || tags.contains("crossing"))
@@ -77,33 +109,8 @@ std::span<const Block> cycleway_palette(const tags_t &tags)
 	const auto surface_colour = tags.find("surface:colour");
 	const auto colour = tags.find("colour");
 	const auto selected_colour = surface_colour != tags.end() ? surface_colour : colour;
-	if (selected_colour != tags.end()) {
-		std::string value = selected_colour->second;
-		const auto not_space = [](unsigned char c) { return !std::isspace(c); };
-		value.erase(value.begin(), std::find_if(value.begin(), value.end(), not_space));
-		value.erase(std::find_if(value.rbegin(), value.rend(), not_space).base(),
-				value.end());
-		std::transform(value.begin(), value.end(), value.begin(),
-				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
-		bool red = value.find("red") != std::string::npos || value == "maroon" ||
-				   value == "crimson" || value == "brick";
-		if (!red && value.size() > 1 && value[0] == '#') {
-			const std::string hex = value.substr(1);
-			if ((hex.size() == 3 || hex.size() == 6) &&
-					std::all_of(hex.begin(), hex.end(),
-							[](unsigned char c) { return std::isxdigit(c); })) {
-				const int step = hex.size() == 3 ? 1 : 2;
-				auto channel = [&](std::size_t i) {
-					const int n = std::stoi(hex.substr(i * step, step), nullptr, 16);
-					return step == 1 ? n * 17 : n;
-				};
-				const int r = channel(0), g = channel(1), b = channel(2);
-				red = r >= 0x80 && 2 * r > 3 * g && 2 * r > 3 * b;
-			}
-		}
-		if (!red)
-			return {};
-	}
+	if (selected_colour != tags.end() && !is_red_colour(selected_colour->second))
+		return {};
 	const auto surface = tags.get("surface");
 	if (!surface.empty() && surface != "asphalt" && surface != "paved" &&
 			surface != "concrete" && surface != "concrete:plates" &&

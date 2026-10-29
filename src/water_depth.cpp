@@ -219,12 +219,19 @@ bool has_suffix(const std::optional<std::string> &name, const char *suffix)
 
 bool is_trunk(const std::optional<std::string> &name)
 {
-	return has_suffix(name, "_log") || has_suffix(name, "_stem");
+	// Rust classifies these by canonical block IDs (oak_log, mangrove_stem,
+	// etc.). Freeminer may resolve those IDs to Luanti Game's differently
+	// named tree nodes, so include the host names used as fallbacks in
+	// mapgen/earth/blocks.cpp as well.
+	return has_suffix(name, "_log") || has_suffix(name, "_stem") ||
+		   has_suffix(name, "_tree") || has_suffix(name, ":tree") ||
+		   has_suffix(name, "jungletree");
 }
 
 bool is_tree_part(const std::optional<std::string> &name)
 {
-	return is_trunk(name) || has_suffix(name, "_leaves");
+	return is_trunk(name) || has_suffix(name, "_leaves") ||
+		   has_suffix(name, "jungleleaves") || has_suffix(name, "_needles");
 }
 
 void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)

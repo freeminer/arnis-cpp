@@ -154,7 +154,7 @@ bool reclaim_water(LandCoverData &data, std::vector<std::vector<float>> *heights
 			}))
 		return false;
 	const auto has_heights = heights && heights->size() >= h &&
-							 std::all_of(heights->begin(), heights->begin() + h,
+							 std::all_of(heights->begin(), heights->end(),
 									 [&](const auto &row) { return row.size() >= w; });
 	const auto radius = std::max<std::size_t>(
 			1, rust_numeric::round_usize(WATER_SPAN_M * 0.5 * data.cells_per_meter));
