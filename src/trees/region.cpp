@@ -1327,12 +1327,16 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 				}
 			} else {
 				if (!choose_mix_community()) {
-					// `pick_from_mix(...).or_else(pick_vanilla(...))` in Rust keeps
-					// the biome's vanilla stand when this mix has no usable pool.
-					if (const auto vanilla = choose_vanilla()) {
-						pack = &data_->vanilla;
-						ci = *vanilla;
-						selected_from_mix = true;
+					// Procedural selection mirrors Rust's pick_from_mix().or_else(
+					// pick_vanilla()). Mapped trees instead fall back to the realm's
+					// locality-selected community below; Rust's pick_mapped does not
+					// substitute a vanilla community when the tagged mix has no pool.
+					if (!mapped_selection) {
+						if (const auto vanilla = choose_vanilla()) {
+							pack = &data_->vanilla;
+							ci = *vanilla;
+							selected_from_mix = true;
+						}
 					}
 				}
 			}

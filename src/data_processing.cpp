@@ -3551,7 +3551,10 @@ bool generate_world(WorldEditor &editor,
 	interior_use_index.reset();
 	road_mask_owner.reset();
 	editor.traffic_signal_index.reset();
-	editor.car_network.reset();
+	// Java has finished placing its cars, but Bedrock still needs the route
+	// network when the vehicle behavior/resource packs are assembled below.
+	if (!bedrock_world || !extras.cars)
+		editor.car_network.reset();
 	big_water_field = {};
 	tunnel_footprint = {};
 	rail_mask = {};
@@ -3629,6 +3632,10 @@ bool generate_world(WorldEditor &editor,
 	} else {
 		editor.bedrock_vehicle_payload.reset();
 	}
+	// The Bedrock add-on now owns the serialized route data; release the
+	// generation-only network before backend persistence finalization.
+	if (bedrock_world)
+		editor.car_network.reset();
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.
