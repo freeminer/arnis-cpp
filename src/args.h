@@ -402,6 +402,7 @@ struct Args
 	bool map_item{true};
 	bool benchmark{false};
 	bool voxy_lod{false};
+	bool dh_lod{false};
 	bool debug{false};
 	std::optional<double> spawn_lat{std::nullopt};
 	std::optional<double> spawn_lng{std::nullopt};

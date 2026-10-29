@@ -3,6 +3,7 @@
 #include "../palette.h"
 #include "../../colors.h"
 #include "../../block_definitions.h"
+#include "../../rust_numeric.h"
 #include "../../strict_parse.h"
 #include "../../tile.h"
 #include <algorithm>
@@ -286,7 +287,8 @@ PrescanResult prescan(const std::vector<ProcessedElement> &elements, double rota
 std::vector<std::pair<int, int>> deferred_regions(const PrescanResult &r, double scale)
 {
 	std::vector<std::pair<int, int>> o;
-	int d = std::ceil(225 * scale);
+	const int d = rust_numeric::saturating_i32(
+			std::ceil(static_cast<double>(MAX_XZ_EXTENT_M) * scale));
 	for (auto &p : r.placements)
 		// Rust's region_keys_around reserves one extra region on each side.
 		// Keep the same safety ring for streamed model voxelization.

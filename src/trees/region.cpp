@@ -4,6 +4,7 @@
 #include "../land_cover/land_cover.h"
 #include "../ground_generation.h"
 #include "../element_processing/tree.h"
+#include "../rust_numeric.h"
 #include "mapped.h"
 #include <algorithm>
 #include <atomic>
@@ -236,11 +237,11 @@ double smooth_noise(int x, int z, int scale)
 }
 int height_tolerance(int want)
 {
-	return std::max(2, static_cast<int>(std::lround(want * .15)));
+	return std::max(2, rust_numeric::round_i32(want * .15));
 }
 int height_slack(int want)
 {
-	return std::max(1, static_cast<int>(std::lround(want * .08)));
+	return std::max(1, rust_numeric::round_i32(want * .08));
 }
 double default_height_m(int x, int z)
 {
@@ -259,7 +260,7 @@ int default_height_blocks(int x, int z, double scale)
 {
 	// Match RegionSelector::default_height: even at very small map scales, a
 	// requested schematic height is at least one block.
-	return std::max(1, static_cast<int>(std::lround(default_height_m(x, z) * scale)));
+	return std::max(1, rust_numeric::round_i32(default_height_m(x, z) * scale));
 }
 }
 

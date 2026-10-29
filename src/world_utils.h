@@ -26,6 +26,7 @@ struct WorldSizeOptions
 	bool interior = false;
 	bool bake_lighting = false;
 	bool voxy_lod = false;
+	bool dh_lod = false;
 	bool caves = false;
 	bool fillground = false;
 	bool tall = false;

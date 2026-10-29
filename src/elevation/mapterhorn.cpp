@@ -499,8 +499,10 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 	(void)height;
 	return std::nullopt;
 #else
-	if (!width || !height)
+	if (!height)
 		return std::vector<std::vector<double>>{};
+	if (!width)
+		return std::vector<std::vector<double>>(height, std::vector<double>{});
 	const auto root = cache_root / "mapterhorn";
 	std::error_code ec;
 	std::filesystem::create_directories(root, ec);

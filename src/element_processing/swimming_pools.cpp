@@ -33,15 +33,7 @@ using Cells = std::unordered_set<Cell, world_editor::WorldEditor::XZCellHash>;
 
 bool tree_part(const WorldEditor &editor, int x, int y, int z)
 {
-	const auto name = editor.block_name_absolute(x, y, z);
-	if (!name)
-		return false;
-	const auto suffix = [&](const char *s) {
-		const std::string_view tail(s);
-		return name->size() >= tail.size() &&
-			   name->compare(name->size() - tail.size(), tail.size(), tail) == 0;
-	};
-	return suffix("_log") || suffix("_stem") || suffix("_leaves");
+	return water_depth::is_tree_block(editor.block_name_absolute(x, y, z));
 }
 
 bool under_floor(const WorldEditor &editor, const BuildingFootprintBitmap &footprints,

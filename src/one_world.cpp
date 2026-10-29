@@ -396,11 +396,22 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		std::cout
 				<< "Note: One World keeps the game mode, time of day, world type and map "
 				   "item of its first area.\n";
+	if (args.voxy_lod)
+		std::cout << "Note: the Voxy LOD cache is off in One World mode.\n";
 	args.voxy_lod = false;
+	if (args.dh_lod)
+		std::cout << "Note: the Distant Horizons LOD cache is off in One World mode.\n";
+	args.dh_lod = false;
 	if (args.mapillary_facades_wanted() &&
-			facade_mode_places_displays(args.mapillary_facade_mode))
+			facade_mode_places_displays(args.mapillary_facade_mode)) {
+		std::cout
+				<< "Note: One World builds Mapillary facades as blocks; photo panels are off.\n";
 		args.mapillary_facade_mode = FacadeMode::Blocks;
-	args.building_facades = false;
+	}
+	if (args.building_facades) {
+		std::cout << "Note: the preset building facades are off in One World mode.\n";
+		args.building_facades = false;
+	}
 	args.map_preview = true;
 	return Session{created, effective_bbox, rect, std::move(lock)};
 }

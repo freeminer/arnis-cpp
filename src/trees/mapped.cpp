@@ -3,6 +3,7 @@
 #include "unicode_case.h"
 #include "../deterministic_rng.h"
 #include "../mapillary/geometry.h"
+#include "../rust_numeric.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -254,15 +255,15 @@ std::vector<std::pair<int, int>> tree_row_positions(
 		total += dist(nodes[i - 1], nodes[i]);
 	if (total < 1)
 		return {nodes.front()};
-	const int intervals =
-			std::max(1, int(std::round(total / std::max(1.0, ROW_SPACING_M * scale))));
+	const auto intervals = std::max<std::size_t>(
+			1, rust_numeric::round_usize(total / std::max(1.0, ROW_SPACING_M * scale)));
 	const bool closed = nodes.size() > 2 && nodes.front() == nodes.back();
 	std::vector<std::pair<int, int>> out;
 	size_t seg = 0;
 	double start = 0, step = total / intervals;
-	const int count = closed ? intervals : intervals + 1;
-	for (int k = 0; k < count && seg + 1 < nodes.size(); ++k) {
-		double target = k * step;
+	const auto count = closed ? intervals : intervals + 1;
+	for (std::size_t k = 0; k < count && seg + 1 < nodes.size(); ++k) {
+		double target = static_cast<double>(k) * step;
 		while (seg + 2 < nodes.size() &&
 				start + dist(nodes[seg], nodes[seg + 1]) < target) {
 			start += dist(nodes[seg], nodes[seg + 1]);
@@ -286,7 +287,7 @@ MappedTrunks MappedTrunks::collect(
 		const std::vector<ProcessedElement> &elements, double scale)
 {
 	MappedTrunks result;
-	result.radius_ = std::max(1, int(std::lround(CROWN_RADIUS_M * scale)));
+	result.radius_ = std::max(1, rust_numeric::round_i32(CROWN_RADIUS_M * scale));
 	const auto add = [&](int x, int z) {
 		const int r = result.radius_;
 		result.trunks_.push_back({div_euclid(x, r), div_euclid(z, r), x, z});

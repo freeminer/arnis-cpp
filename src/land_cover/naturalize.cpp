@@ -1,6 +1,7 @@
 #include "naturalize.h"
 
 #include "../ground_generation.h"
+#include "../rust_numeric.h"
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -156,8 +157,7 @@ bool reclaim_water(LandCoverData &data, std::vector<std::vector<float>> *heights
 							 std::all_of(heights->begin(), heights->begin() + h,
 									 [&](const auto &row) { return row.size() >= w; });
 	const auto radius = std::max<std::size_t>(
-			1, static_cast<std::size_t>(std::max(
-					   0.0, std::round(WATER_SPAN_M * 0.5 * data.cells_per_meter))));
+			1, rust_numeric::round_usize(WATER_SPAN_M * 0.5 * data.cells_per_meter));
 	std::vector<std::uint8_t> mask(w * h);
 	parallel_rows(h, [&](std::size_t z) {
 		for (std::size_t x = 0; x < w; ++x)
@@ -319,8 +319,8 @@ void fill_with_nearest_wild(
 	if (!w || !h)
 		return;
 	const double cpm = std::max(1e-6, data.cells_per_meter);
-	const auto step = std::max<std::size_t>(
-			1, static_cast<std::size_t>(std::max(0.0, std::round(LATTICE_M * cpm))));
+	const auto step =
+			std::max<std::size_t>(1, rust_numeric::round_usize(LATTICE_M * cpm));
 	const auto px = positive_mod(origin.first, step);
 	const auto pz = positive_mod(origin.second, step);
 	const auto lattice_width = w + px, lattice_height = h + pz;
@@ -344,8 +344,7 @@ void fill_with_nearest_wild(
 	chessboard_labels(label, dist, lw, lh);
 	const auto fallback = is_wild(LC_BARE, climate) ? LC_BARE : LC_GRASSLAND;
 	const double warp = WARP_M * cpm;
-	const auto wavelength = std::max(
-			1, static_cast<int>(std::max(0.0, std::round(WARP_WAVELENGTH_M * cpm))));
+	const auto wavelength = std::max(1, rust_numeric::round_i32(WARP_WAVELENGTH_M * cpm));
 	parallel_rows(h, [&](std::size_t z) {
 		for (std::size_t x = 0; x < w; ++x) {
 			auto &c = data.grid[z][x];

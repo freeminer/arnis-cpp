@@ -36,8 +36,8 @@ namespace arnis::world_utils
 {
 WorldSizeOptions WorldSizeOptions::of(const Args &args)
 {
-	return {args.interior, args.bake_lighting, args.voxy_lod, args.caves, args.fillground,
-			args.disable_height_limit};
+	return {args.interior, args.bake_lighting, args.voxy_lod, args.dh_lod, args.caves,
+			args.fillground, args.disable_height_limit};
 }
 
 const char *RunSizeError::short_message() const
@@ -56,6 +56,8 @@ std::uint64_t estimated_world_bytes(
 		per_km2 += 10.0;
 	if (o.voxy_lod)
 		per_km2 += 20.0;
+	if (o.dh_lod)
+		per_km2 += 19.0;
 	if (o.caves)
 		per_km2 += o.tall ? 35.0 : 12.0;
 	else if (o.fillground)

@@ -2,6 +2,7 @@
 #include "../trees/mapped.h"
 #include "../deterministic_rng.h"
 #include "../land_cover/land_cover.h"
+#include "../rust_numeric.h"
 #include "../trees/region.h"
 #include <algorithm>
 #include <cmath>
@@ -13,7 +14,7 @@ namespace arnis
 
 int crown_probe_blocks(double scale)
 {
-	return std::max(1, static_cast<int>(std::lround(2.0 * scale)));
+	return std::max(1, rust_numeric::round_i32(2.0 * scale));
 }
 
 // Rust's leaf_gap_at/leaf_hash helpers: keep canopy gaps deterministic and
@@ -38,14 +39,14 @@ static std::optional<double> wanted_tree_height_m(WorldEditor &editor, int x, in
 {
 	if (mapped && mapped->height_m)
 		return mapped->height_m;
-	const int radius = std::max(1, static_cast<int>(std::lround(2.0 * editor.scale())));
+	const int radius = std::max(1, rust_numeric::round_i32(2.0 * editor.scale()));
 	const auto nearby = editor.canopy_top_m(x, z, radius);
 	if (!nearby)
 		return std::nullopt;
 	if (*nearby)
 		return **nearby;
 	const int wide_radius =
-			std::max(radius + 1, static_cast<int>(std::lround(8.0 * editor.scale())));
+			std::max(radius + 1, rust_numeric::round_i32(8.0 * editor.scale()));
 	if (const auto wide = editor.canopy_top_m(x, z, wide_radius); wide && *wide)
 		return **wide;
 	if (mapped)
@@ -60,7 +61,7 @@ std::optional<int> Tree::wanted_height_blocks(WorldEditor &editor, int x, int z)
 	const auto height_m = wanted_tree_height_m(editor, x, z);
 	if (!height_m)
 		return std::nullopt;
-	return std::max(1, static_cast<int>(std::lround(*height_m * editor.scale())));
+	return std::max(1, rust_numeric::round_i32(*height_m * editor.scale()));
 }
 
 // Additional leaves fill patterns for new tree types
@@ -581,7 +582,7 @@ void Tree::create_mapped(WorldEditor &editor, const Coord &pos,
 		request.conifer = mapped.conifer;
 		if (const auto height = wanted_tree_height_m(editor, pos.x, pos.z, &mapped))
 			request.want_height =
-					std::max(1, static_cast<int>(std::lround(*height * editor.scale())));
+					std::max(1, rust_numeric::round_i32(*height * editor.scale()));
 		if (editor.ground)
 			request.eco = editor.ground->ecoregion_at(editor.ground_point(pos.x, pos.z));
 		if (request.eco)

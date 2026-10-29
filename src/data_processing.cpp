@@ -1575,9 +1575,10 @@ bool generate_world(WorldEditor &editor,
 	// are Java-only; the editor still receives the requested map-item policy,
 	// while the format-specific exporter decides whether to emit it.
 	const bool java_format = !args.bedrock && !args.luanti;
-	// Rust only enables Voxy-driven baked lighting for Java Anvil worlds.
+	// Rust enables baked lighting when either Java LOD backend is requested.
 	// Keep the same format gate for direct C++ callers as well.
-	editor.set_bake_lighting(args.bake_lighting || (args.voxy_lod && java_format));
+	editor.set_bake_lighting(
+			args.bake_lighting || ((args.voxy_lod || args.dh_lod) && java_format));
 	if (!(args.one_world_run && args.one_world_run->extending))
 		editor.set_start_with_map(args.map_item);
 	editor.set_map_decals(java_format);

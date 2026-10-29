@@ -1,5 +1,6 @@
 #include "tile.h"
 #include "element_processing/highways.h"
+#include "rust_numeric.h"
 
 #include <algorithm>
 #include <cmath>
@@ -19,19 +20,6 @@ struct Aabb
 {
 	int32_t min_x, max_x, min_z, max_z;
 };
-
-// Rust's `f64 as i32` conversion saturates (and maps NaN to zero). Keep the
-// linear-element halo calculation defined for extreme or malformed scales too.
-int32_t rust_saturating_i32(double value) noexcept
-{
-	if (std::isnan(value))
-		return 0;
-	if (value >= static_cast<double>(std::numeric_limits<int32_t>::max()))
-		return std::numeric_limits<int32_t>::max();
-	if (value <= static_cast<double>(std::numeric_limits<int32_t>::min()))
-		return std::numeric_limits<int32_t>::min();
-	return static_cast<int32_t>(value);
-}
 
 struct Region
 {
@@ -131,7 +119,7 @@ std::vector<std::vector<std::size_t>> assign_elements_to_tiles(
 {
 	std::vector<std::vector<std::size_t>> assigned(tiles.size());
 	const int32_t linear_halo = std::max<int32_t>(TILE_EDITOR_HALO,
-			rust_saturating_i32(std::ceil(MAX_LINEAR_HALF_WIDTH_M * scale)));
+			rust_numeric::saturating_i32(std::ceil(MAX_LINEAR_HALF_WIDTH_M * scale)));
 	std::unordered_map<Region, std::size_t, RegionHash> tile_grid;
 	tile_grid.reserve(tiles.size());
 	for (std::size_t i = 0; i < tiles.size(); ++i)
