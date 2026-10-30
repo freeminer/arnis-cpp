@@ -22,6 +22,7 @@
 
 #include "../bresenham.h"
 #include "../clipping.h"
+#include "../rust_numeric.h"
 #include "../strict_parse.h"
 #include "bridge_modules.h"
 #include "highways.h"
@@ -89,7 +90,7 @@ struct DeckCoordHash
 	std::size_t operator()(const std::pair<int, int> &p) const noexcept
 	{
 		return std::hash<long long>()((static_cast<long long>(p.first) << 32) ^
-					static_cast<unsigned long long>(p.second));
+									  static_cast<unsigned long long>(p.second));
 	}
 };
 
@@ -215,7 +216,7 @@ void settle_deck(std::vector<std::vector<int>> &ys,
 			if (d > far)
 				continue;
 			const float t = static_cast<float>(d) / static_cast<float>(far);
-			const int ramp = static_cast<int>(std::lround(hold.y + (level - hold.y) * t));
+			const int ramp = rust_numeric::round_i32(hold.y + (level - hold.y) * t);
 			auto &y = ys[cell.first][cell.second];
 			y = down ? std::min(y, ramp) : std::max(y, ramp);
 		}
@@ -249,7 +250,7 @@ void settle_deck(std::vector<std::vector<int>> &ys,
 			if (!clear)
 				continue;
 			for (const auto cell : path) {
-				const int y = std::max(static_cast<int>(std::lround(line_y(cell))),
+				const int y = std::max(rust_numeric::round_i32(line_y(cell)),
 						needs[cell.first][cell.second]);
 				ys[cell.first][cell.second] = std::min(ys[cell.first][cell.second], y);
 			}
@@ -945,8 +946,8 @@ std::vector<int> ramp_profile(
 	ys.reserve(ground.size());
 	for (std::size_t i = 0; i < ground.size(); ++i) {
 		const auto from_deck = bridge_side_at_start ? i : ground.size() - 1 - i;
-		const int grade = static_cast<int>(
-				std::round(deck_y - fall * static_cast<float>(from_deck)));
+		const int grade =
+				rust_numeric::round_i32(deck_y - fall * static_cast<float>(from_deck));
 		ys.push_back(std::max(grade, ground[i]));
 	}
 	return ys;
@@ -974,14 +975,14 @@ int BridgeMemberInfo::y_at(
 	const float denom = static_cast<float>(std::max<std::size_t>(1, ramp_length - 1));
 	if (start_internal_ramp && tds < ramp_length) {
 		const float t = std::min(1.0f, static_cast<float>(tds) / denom);
-		return static_cast<int>(
-				std::round(*start_internal_ramp + (deck_y - *start_internal_ramp) * t));
+		return rust_numeric::round_i32(
+				*start_internal_ramp + (deck_y - *start_internal_ramp) * t);
 	}
 	const auto dist_from_end = last_idx > tds ? last_idx - tds : 0;
 	if (end_internal_ramp && dist_from_end < ramp_length) {
 		const float t = std::min(1.0f, static_cast<float>(dist_from_end) / denom);
-		return static_cast<int>(
-				std::round(*end_internal_ramp + (deck_y - *end_internal_ramp) * t));
+		return rust_numeric::round_i32(
+				*end_internal_ramp + (deck_y - *end_internal_ramp) * t);
 	}
 	return deck_y;
 }
@@ -1632,17 +1633,17 @@ BridgeStructureMap BridgeStructureMap::build(
 			const auto joins_external_bridge = [&](const std::pair<int, int> &xz) {
 				const auto members = node_to_bridge_indices.find(xz);
 				return members != node_to_bridge_indices.end() &&
-						std::any_of(members->second.begin(), members->second.end(),
-								[&](std::size_t member) {
-									return std::find(group_indices.begin(),
-											group_indices.end(), member) ==
-											group_indices.end();
-								});
+					   std::any_of(members->second.begin(), members->second.end(),
+							   [&](std::size_t member) {
+								   return std::find(group_indices.begin(),
+												  group_indices.end(),
+												  member) == group_indices.end();
+							   });
 			};
 			const auto anchors_end = [&](const std::pair<int, int> &xz) {
 				return (is_boundary(xz) || fork_landings.contains(xz)) &&
-						!cut_ends.contains(xz) && !covered_boundaries.contains(xz) &&
-						!external_ramp_ends.contains(xz) && !joins_external_bridge(xz);
+					   !cut_ends.contains(xz) && !covered_boundaries.contains(xz) &&
+					   !external_ramp_ends.contains(xz) && !joins_external_bridge(xz);
 			};
 			// At-grade roads that meet a landing share one junction height with the
 			// bridge. Apply it before deriving the bridge's longitudinal profile,
@@ -1654,13 +1655,15 @@ BridgeStructureMap BridgeStructureMap::build(
 				if (terrain.empty())
 					continue;
 				const auto &way = *bridge_ways[idx];
-				const std::array<std::pair<std::pair<int, int>, std::size_t>, 2> ends{{
-						{{way.nodes.front().x, way.nodes.front().z}, 0},
-						{{way.nodes.back().x, way.nodes.back().z}, terrain.size() - 1}}};
+				const std::array<std::pair<std::pair<int, int>, std::size_t>, 2> ends{
+						{{{way.nodes.front().x, way.nodes.front().z}, 0},
+								{{way.nodes.back().x, way.nodes.back().z},
+										terrain.size() - 1}}};
 				for (const auto &[xz, cell] : ends) {
 					if (cell < terrain.size() && anchors_end(xz) &&
 							connectivity.is_shared(xz.first, xz.second))
-						terrain[cell] = highways::junction_level(editor, xz.first, xz.second);
+						terrain[cell] =
+								highways::junction_level(editor, xz.first, xz.second);
 				}
 			}
 			terrain_min = std::numeric_limits<int>::max();
@@ -1679,7 +1682,7 @@ BridgeStructureMap BridgeStructureMap::build(
 					continue;
 				const auto &us = path_axis[idx];
 				const auto collect_endpoint = [&](const ProcessedNode &node, float u,
-												std::size_t cell) {
+													  std::size_t cell) {
 					const std::pair<int, int> xz{node.x, node.z};
 					const auto count = node_members.find(xz);
 					const bool boundary =
@@ -1797,10 +1800,9 @@ BridgeStructureMap BridgeStructureMap::build(
 						const float capped = std::max(static_cast<float>(ground),
 								std::min(static_cast<float>(need), reachable(us[i])));
 						profile_requirements.emplace_back(us[i], capped);
-						needs[i] =
-								std::max(needs[i], static_cast<int>(std::lround(capped)));
-						raised_top = std::max(
-								raised_top, static_cast<int>(std::lround(capped)));
+						needs[i] = std::max(needs[i], rust_numeric::round_i32(capped));
+						raised_top =
+								std::max(raised_top, rust_numeric::round_i32(capped));
 					}
 				}
 			}
@@ -1936,7 +1938,7 @@ BridgeStructureMap BridgeStructureMap::build(
 							std::max(side_end(saddles.front().first, -1.0f), min_u),
 							std::min(side_end(saddles.back().first, 1.0f), max_u)};
 					const auto deck_at = [&](float u) {
-						return static_cast<int>(std::lround(hull_at(profile_hull, u)));
+						return rust_numeric::round_i32(hull_at(profile_hull, u));
 					};
 					if (auto span = bridge_towers::make_cable_span(axis_start.first,
 								axis_start.second, axis_dx, axis_dz, saddles, anchors,
@@ -1969,8 +1971,8 @@ BridgeStructureMap BridgeStructureMap::build(
 				const auto &terrain = path_terrain[idx];
 				ys.reserve(path.size());
 				for (std::size_t i = 0; i < path.size(); ++i) {
-					const int y = follows_axis ? static_cast<int>(std::lround(
-														 hull_at(profile_hull, us[i])))
+					const int y = follows_axis ? rust_numeric::round_i32(
+														 hull_at(profile_hull, us[i]))
 											   : profile_level;
 					ys.push_back(std::max(y, terrain[i]));
 				}
@@ -2021,8 +2023,8 @@ BridgeStructureMap BridgeStructureMap::build(
 					const int top = ys[ramp_len];
 					for (std::size_t k = 0; k < ramp_len; ++k) {
 						const float t = static_cast<float>(k) / ramp_len;
-						const int ramp_y = static_cast<int>(
-								std::lround(ground_start + (top - ground_start) * t));
+						const int ramp_y = rust_numeric::round_i32(
+								ground_start + (top - ground_start) * t);
 						ys[k] = std::min(ys[k], ramp_y);
 					}
 				}
@@ -2030,8 +2032,8 @@ BridgeStructureMap BridgeStructureMap::build(
 					const int top = ys[total - 1 - ramp_len];
 					for (std::size_t k = 0; k < ramp_len; ++k) {
 						const float t = static_cast<float>(k) / ramp_len;
-						const int ramp_y = static_cast<int>(
-								std::lround(ground_end + (top - ground_end) * t));
+						const int ramp_y = rust_numeric::round_i32(
+								ground_end + (top - ground_end) * t);
 						ys[total - 1 - k] = std::min(ys[total - 1 - k], ramp_y);
 					}
 				}
@@ -2108,21 +2110,22 @@ BridgeStructureMap BridgeStructureMap::build(
 						group_indices.begin(), group_indices.end(), owner->second);
 				if (owner_slot == group_indices.end())
 					continue;
-				const auto m = static_cast<std::size_t>(owner_slot - group_indices.begin());
+				const auto m =
+						static_cast<std::size_t>(owner_slot - group_indices.begin());
 				if (deck_profiles[m].empty())
 					continue;
 				for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
 					const std::pair<int, int> xz{node->x, node->z};
 					const auto roads = roads_out.find(xz);
-					const bool on_grade = roads != roads_out.end() &&
+					const bool on_grade =
+							roads != roads_out.end() &&
 							std::any_of(roads->second.begin(), roads->second.end(),
 									[&](const RoadOut &road) {
 										return road.at_grade && road.vehicular;
 									}) &&
 							std::all_of(roads->second.begin(), roads->second.end(),
 									[&](const RoadOut &road) { return road.at_grade; });
-					if (!on_grade ||
-							!(is_boundary(xz) || fork_landings.contains(xz)) ||
+					if (!on_grade || !(is_boundary(xz) || fork_landings.contains(xz)) ||
 							external_ramp_ends.contains(xz) || joins_external_bridge(xz))
 						continue;
 					std::size_t nearest = 0;

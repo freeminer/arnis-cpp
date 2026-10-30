@@ -664,6 +664,31 @@ std::optional<OvertureOsmRef> parse_osm_reference(const std::string &sources)
 	return find_reference(document);
 }
 
+// PMTiles encodes `sources` as the same JSON array Rust's tile reader expects.
+// Keep this path strict: the recursive parser above is for Parquet's nested
+// source groups and would otherwise accept malformed tile entries Rust ignores.
+std::optional<OvertureOsmRef> parse_tile_osm_reference(const std::string &sources)
+{
+	const auto document = nlohmann::json::parse(sources, nullptr, false);
+	if (document.is_discarded() || !document.is_array())
+		return std::nullopt;
+	for (const auto &entry : document) {
+		if (!entry.is_object())
+			continue;
+		const auto dataset = entry.find("dataset");
+		const auto record_id = entry.find("record_id");
+		if (dataset == entry.end() || !dataset->is_string() || record_id == entry.end() ||
+				!record_id->is_string() ||
+				!ascii_iequals(dataset->get_ref<const std::string &>(), "openstreetmap"))
+			continue;
+		// Delegate record-id syntax and way/relation interpretation to the same
+		// parser used by the Parquet adapter, but pass only this direct entry.
+		if (auto reference = parse_osm_reference(nlohmann::json::array({entry}).dump()))
+			return reference;
+	}
+	return std::nullopt;
+}
+
 double ring_area2(const std::vector<std::pair<double, double>> &ring)
 {
 	double sum = 0.0;
@@ -1007,7 +1032,7 @@ std::optional<std::vector<OvertureBuilding>> try_decode_overture_building_tile(
 			if (building.is_osm_sourced && !include_osm_sourced)
 				continue;
 			if (sources)
-				building.osm_ref = parse_osm_reference(*sources);
+				building.osm_ref = parse_tile_osm_reference(*sources);
 			building.height = attribute_number(layer, feature, "height");
 			building.min_height = attribute_number(layer, feature, "min_height");
 			if (const auto floors = attribute_number(layer, feature, "num_floors");

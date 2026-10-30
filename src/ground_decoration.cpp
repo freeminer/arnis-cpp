@@ -9,6 +9,7 @@
 #include "ecoregion.h"
 #include "floodfill_cache.h"
 #include "ground_generation.h"
+#include "rust_numeric.h"
 #include "../../arnis_adapter.h"
 
 #include <algorithm>
@@ -763,9 +764,8 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 			snow_y == std::numeric_limits<int>::max() ||
 							snow_y == std::numeric_limits<int>::min()
 					? snow_y
-					: snow_y - static_cast<int>(
-									   std::lround(ALPINE_BAND_METRES *
-												   editor.ground->blocks_per_meter()));
+					: snow_y - rust_numeric::round_i32(ALPINE_BAND_METRES *
+													   editor.ground->blocks_per_meter());
 	for (int chunk_x = chunk_min_x; chunk_x <= chunk_max_x; ++chunk_x) {
 		for (int chunk_z = chunk_min_z; chunk_z <= chunk_max_z; ++chunk_z) {
 			for (std::uint64_t origin = 0; origin < 4; ++origin) {

@@ -248,7 +248,6 @@ double merc_x(double lon)
 }
 double merc_y(double lat)
 {
-	lat = std::clamp(lat, -85.05112878, 85.05112878);
 	return MERCATOR_WORLD *
 		   std::log(std::tan(std::acos(-1.0) / 4.0 + lat * std::acos(-1.0) / 360.0)) /
 		   std::acos(-1.0);

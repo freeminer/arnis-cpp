@@ -272,11 +272,12 @@ std::vector<std::pair<int, int>> tree_row_positions(
 		double len = dist(nodes[seg], nodes[seg + 1]),
 			   t = len ? std::clamp((target - start) / len, 0.0, 1.0) : 0;
 		auto p = std::make_pair(
-				int(std::lround(double(nodes[seg].first) +
-								(double(nodes[seg + 1].first) - nodes[seg].first) * t)),
-				int(std::lround(
+				rust_numeric::round_i32(
+						double(nodes[seg].first) +
+						(double(nodes[seg + 1].first) - nodes[seg].first) * t),
+				rust_numeric::round_i32(
 						double(nodes[seg].second) +
-						(double(nodes[seg + 1].second) - nodes[seg].second) * t)));
+						(double(nodes[seg + 1].second) - nodes[seg].second) * t));
 		if (out.empty() || out.back() != p)
 			out.push_back(p);
 	}

@@ -8838,22 +8838,35 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		}
 	}
 
-	const bool mapped_entrance = std::any_of(
+	const bool outline_has_mapped_entrance = std::any_of(
 			element.nodes.begin(), element.nodes.end(), [](const ProcessedNode &node) {
-				const auto entrance = node.tags.get("entrance");
-				const auto door = node.tags.get("door");
-				if ((!node.tags.contains("entrance") || entrance == "no") &&
-						(!node.tags.contains("door") || door == "no"))
-					return false;
-				if (const auto level = node.tags.get("level"); !level.empty()) {
-					if (const auto parsed = strict_parse::f64(level);
-							parsed && *parsed != 0.0)
-						return false;
-				}
-				return true;
+				return node.tags.contains("entrance") || node.tags.contains("door");
 			});
+	bool mapped_entrance = false;
+	std::unordered_set<std::pair<int, int>, PairHash> mapped_entrance_nodes;
+	for (std::size_t i = 0; i < element.nodes.size(); ++i) {
+		const auto &node = element.nodes[i];
+		if (!node.tags.contains("entrance") && !node.tags.contains("door"))
+			continue;
+		if (!mapped_entrance_nodes.emplace(node.x, node.z).second ||
+				node.tags.get("entrance") == "no" || node.tags.get("door") == "no")
+			continue;
+		if (const auto level = node.tags.get("level"); !level.empty()) {
+			if (const auto parsed = strict_parse::f64(level); parsed && *parsed != 0.0)
+				continue;
+		}
+		const bool before = i > 0 && i - 1 < facade_plan.segments.size() &&
+							facade_plan.segments[i - 1].has_value();
+		const bool after =
+				i < facade_plan.segments.size() && facade_plan.segments[i].has_value();
+		if (before || after) {
+			mapped_entrance = true;
+			break;
+		}
+	}
 	const bool thin_ring_footprint = cached_footprint_size <= THIN_RING_MAX_CELLS;
-	const bool allow_preset_utility_door = !mapped_entrance && !thin_ring_footprint &&
+	const bool allow_preset_utility_door = !outline_has_mapped_entrance &&
+										   !thin_ring_footprint &&
 										   condition != BuildingCondition::Construction &&
 										   condition != BuildingCondition::Ruined &&
 										   condition != BuildingCondition::Abandoned;
@@ -8868,8 +8881,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		std::unordered_set<std::pair<int, int>, PairHash> reserved_entrances;
 		for (std::size_t i = 0; i < element.nodes.size(); ++i) {
 			const auto &node = element.nodes[i];
-			if (!((node.tags.contains("entrance") && node.tags.get("entrance") != "no") ||
-						(node.tags.contains("door") && node.tags.get("door") != "no")))
+			if (!node.tags.contains("entrance") && !node.tags.contains("door"))
+				continue;
+			if (!reserved_entrances.emplace(node.x, node.z).second ||
+					node.tags.get("entrance") == "no" || node.tags.get("door") == "no")
 				continue;
 			if (const auto level_it = node.tags.find("level");
 					level_it != node.tags.end()) {
@@ -8884,8 +8899,6 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						parsed && *parsed != 0.0)
 					continue;
 			}
-			if (!reserved_entrances.emplace(node.x, node.z).second)
-				continue;
 			const building_facade::SegmentFacade *before =
 					i > 0 && i - 1 < facade_plan.segments.size() &&
 									facade_plan.segments[i - 1]
@@ -8898,51 +8911,28 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			const auto *segment = before && after
 										  ? (before->len >= after->len ? before : after)
 										  : (before ? before : after);
-			if (segment) {
-				facade_plan.mark_door_column(node.x, node.z);
-				facade_plan.mark_door_column(
-						node.x + segment->normal.first, node.z + segment->normal.second);
-				if (node.tags.get("entrance") == "main" &&
-						(category == BuildingCategory::Commercial ||
-								category == BuildingCategory::Office ||
-								category == BuildingCategory::Hotel) &&
-						segment->len >= 8 &&
-						(segment->tangent.first == 0 || segment->tangent.second == 0)) {
-					const bool ends_here =
-							before && (!after || before->len >= after->len);
-					const auto tangent = ends_here ? std::pair{-segment->tangent.first,
-															 -segment->tangent.second}
-												   : segment->tangent;
-					const int x = node.x + tangent.first, z = node.z + tangent.second;
-					if (!passage_at(effective_passages, x, z) &&
-							!facade_plan.is_party(x, z)) {
-						facade_plan.mark_door_column(x, z);
-						facade_plan.mark_door_column(
-								x + segment->normal.first, z + segment->normal.second);
-					}
-				}
+			if (!segment)
 				continue;
-			}
-			// If there is no road-derived facade segment, use the same footprint
-			// inward-neighbour inference as the mapped-door renderer below.
-			std::optional<std::pair<int, int>> inward;
-			int best_score = std::numeric_limits<int>::min();
-			for (const auto direction : {std::pair{0, -1}, std::pair{1, 0},
-						 std::pair{0, 1}, std::pair{-1, 0}}) {
-				if (!current_footprint.contains(
-							{node.x + direction.first, node.z + direction.second}))
-					continue;
-				const int score = direction.first * (min_x + max_x - 2 * node.x) +
-								  direction.second * (min_z + max_z - 2 * node.z);
-				if (!inward || score > best_score) {
-					inward = direction;
-					best_score = score;
+			facade_plan.mark_door_column(node.x, node.z);
+			facade_plan.mark_door_column(
+					node.x + segment->normal.first, node.z + segment->normal.second);
+			if (node.tags.get("entrance") == "main" &&
+					(category == BuildingCategory::Commercial ||
+							category == BuildingCategory::Office ||
+							category == BuildingCategory::Hotel) &&
+					segment->len >= 8 &&
+					(segment->tangent.first == 0 || segment->tangent.second == 0)) {
+				const bool ends_here = before && (!after || before->len >= after->len);
+				const auto tangent = ends_here ? std::pair{-segment->tangent.first,
+														 -segment->tangent.second}
+											   : segment->tangent;
+				const int x = node.x + tangent.first, z = node.z + tangent.second;
+				if (!passage_at(effective_passages, x, z) &&
+						!facade_plan.is_party(x, z)) {
+					facade_plan.mark_door_column(x, z);
+					facade_plan.mark_door_column(
+							x + segment->normal.first, z + segment->normal.second);
 				}
-			}
-			if (inward) {
-				facade_plan.mark_door_column(node.x, node.z);
-				facade_plan.mark_door_column(
-						node.x - inward->first, node.z - inward->second);
 			}
 		}
 	}
@@ -10232,122 +10222,90 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		for (std::size_t node_index = 0; node_index < element.nodes.size();
 				++node_index) {
 			const auto &node = element.nodes[node_index];
-			if ((node.tags.contains("entrance") && node.tags.get("entrance") != "no") ||
-					(node.tags.contains("door") && node.tags.get("door") != "no")) {
-				if (const auto level_it = node.tags.find("level");
-						level_it != node.tags.end()) {
-					std::string_view level_text = level_it->second;
-					while (!level_text.empty() &&
-							std::isspace(static_cast<unsigned char>(level_text.front())))
-						level_text.remove_prefix(1);
-					while (!level_text.empty() &&
-							std::isspace(static_cast<unsigned char>(level_text.back())))
-						level_text.remove_suffix(1);
-					if (const auto level = strict_parse::f64(level_text);
-							level && *level != 0.0)
-						continue;
-				}
-				if (!rendered_entrances.emplace(node.x, node.z).second)
+			if (!node.tags.contains("entrance") && !node.tags.contains("door"))
+				continue;
+			if (!rendered_entrances.emplace(node.x, node.z).second ||
+					node.tags.get("entrance") == "no" || node.tags.get("door") == "no")
+				continue;
+			if (const auto level_it = node.tags.find("level");
+					level_it != node.tags.end()) {
+				std::string_view level_text = level_it->second;
+				while (!level_text.empty() &&
+						std::isspace(static_cast<unsigned char>(level_text.front())))
+					level_text.remove_prefix(1);
+				while (!level_text.empty() &&
+						std::isspace(static_cast<unsigned char>(level_text.back())))
+					level_text.remove_suffix(1);
+				if (const auto level = strict_parse::f64(level_text);
+						level && *level != 0.0)
 					continue;
-				// An outline node belongs to the segment before and/or after it.
-				// Rust uses the longer side to decide the exterior normal; that
-				// avoids putting thresholds into a short return wall at corners.
-				const building_facade::SegmentFacade *before =
-						node_index > 0 && node_index - 1 < facade_plan.segments.size() &&
-										facade_plan.segments[node_index - 1]
-								? &*facade_plan.segments[node_index - 1]
-								: nullptr;
-				const building_facade::SegmentFacade *after =
-						node_index < facade_plan.segments.size() &&
-										facade_plan.segments[node_index]
-								? &*facade_plan.segments[node_index]
-								: nullptr;
-				const building_facade::SegmentFacade *entrance_façade =
-						before && after ? (before->len >= after->len ? before : after)
-										: (before ? before : after);
-				facade_plan.mark_door_column(node.x, node.z);
-				const auto [door_block, unused_trapdoor] = entrance_door_style(false);
-				(void)unused_trapdoor;
-				if (entrance_façade) {
-					const auto inward = std::pair{-entrance_façade->normal.first,
-							-entrance_façade->normal.second};
-					facade_plan.mark_door_column(node.x + entrance_façade->normal.first,
-							node.z + entrance_façade->normal.second);
-					const bool ends_here =
-							before && (!after || before->len >= after->len);
-					const std::pair<int, int> tangent =
-							ends_here ? std::pair{-entrance_façade->tangent.first,
-												-entrance_façade->tangent.second}
-									  : entrance_façade->tangent;
-					const bool double_door =
-							node.tags.get("entrance") == "main" &&
-							(category == BuildingCategory::Commercial ||
-									category == BuildingCategory::Office ||
-									category == BuildingCategory::Hotel) &&
-							entrance_façade->len >= 8 &&
-							(entrance_façade->tangent.first == 0 ||
-									entrance_façade->tangent.second == 0);
-					bool second_leaf = false;
-					put_entrance_door(door_block, node.x, node.z,
-							entrance_façade->normal.first, entrance_façade->normal.second,
-							"left");
-					if (double_door &&
-							!passage_at(effective_passages, node.x + tangent.first,
-									node.z + tangent.second) &&
-							!facade_plan.is_party(
-									node.x + tangent.first, node.z + tangent.second)) {
-						put_entrance_door(door_block, node.x + tangent.first,
-								node.z + tangent.second, entrance_façade->normal.first,
-								entrance_façade->normal.second, "right");
-						facade_plan.mark_door_column(
-								node.x + tangent.first, node.z + tangent.second);
-						facade_plan.mark_door_column(
-								node.x + tangent.first + entrance_façade->normal.first,
-								node.z + tangent.second + entrance_façade->normal.second);
-						second_leaf = true;
-					}
-					interior_entries.push_back(
-							{{node.x + inward.first, node.z + inward.second}, inward});
-					if (!signage_anchor)
-						signage_anchor = building_facade::FacadeAnchor{node.x, node.z,
-								entrance_façade->normal, 0, 0, std::pair{node.x, node.z}};
-					put_threshold(node.x, node.z, entrance_façade->normal.first,
-							entrance_façade->normal.second);
-					if (second_leaf)
-						put_threshold(node.x + tangent.first, node.z + tangent.second,
-								entrance_façade->normal.first,
-								entrance_façade->normal.second);
-					mapped_entrance_rendered = true;
-				} else {
-					// Still provide the interior with a usable entry when no road-based
-					// facade plan exists: infer the inward neighbour from the actual
-					// rasterized footprint rather than assuming a cardinal wall normal.
-					std::optional<std::pair<int, int>> inward;
-					int best_score = std::numeric_limits<int>::min();
-					for (const auto direction : {std::pair{0, -1}, std::pair{1, 0},
-								 std::pair{0, 1}, std::pair{-1, 0}}) {
-						if (!current_footprint.contains({node.x + direction.first,
-									node.z + direction.second}))
-							continue;
-						const int score = direction.first * (min_x + max_x - 2 * node.x) +
-										  direction.second * (min_z + max_z - 2 * node.z);
-						if (!inward || score > best_score) {
-							inward = direction;
-							best_score = score;
-						}
-					}
-					if (inward) {
-						facade_plan.mark_door_column(
-								node.x - inward->first, node.z - inward->second);
-						put_entrance_door(door_block, node.x, node.z, -inward->first,
-								-inward->second, "left");
-						interior_entries.push_back(
-								{{node.x + inward->first, node.z + inward->second},
-										*inward});
-						mapped_entrance_rendered = true;
-					}
-				}
 			}
+			// An outline node belongs to the segment before and/or after it.
+			// Rust uses the longer side to decide the exterior normal; that
+			// avoids putting thresholds into a short return wall at corners.
+			const building_facade::SegmentFacade *before =
+					node_index > 0 && node_index - 1 < facade_plan.segments.size() &&
+									facade_plan.segments[node_index - 1]
+							? &*facade_plan.segments[node_index - 1]
+							: nullptr;
+			const building_facade::SegmentFacade *after =
+					node_index < facade_plan.segments.size() &&
+									facade_plan.segments[node_index]
+							? &*facade_plan.segments[node_index]
+							: nullptr;
+			const building_facade::SegmentFacade *entrance_façade =
+					before && after ? (before->len >= after->len ? before : after)
+									: (before ? before : after);
+			if (!entrance_façade)
+				continue;
+			facade_plan.mark_door_column(node.x, node.z);
+			const auto [door_block, unused_trapdoor] = entrance_door_style(false);
+			(void)unused_trapdoor;
+			const auto inward = std::pair{
+					-entrance_façade->normal.first, -entrance_façade->normal.second};
+			facade_plan.mark_door_column(node.x + entrance_façade->normal.first,
+					node.z + entrance_façade->normal.second);
+			const bool ends_here = before && (!after || before->len >= after->len);
+			const std::pair<int, int> tangent =
+					ends_here ? std::pair{-entrance_façade->tangent.first,
+										-entrance_façade->tangent.second}
+							  : entrance_façade->tangent;
+			const bool double_door = node.tags.get("entrance") == "main" &&
+									 (category == BuildingCategory::Commercial ||
+											 category == BuildingCategory::Office ||
+											 category == BuildingCategory::Hotel) &&
+									 entrance_façade->len >= 8 &&
+									 (entrance_façade->tangent.first == 0 ||
+											 entrance_façade->tangent.second == 0);
+			bool second_leaf = false;
+			put_entrance_door(door_block, node.x, node.z, entrance_façade->normal.first,
+					entrance_façade->normal.second, "left");
+			if (double_door &&
+					!passage_at(effective_passages, node.x + tangent.first,
+							node.z + tangent.second) &&
+					!facade_plan.is_party(
+							node.x + tangent.first, node.z + tangent.second)) {
+				put_entrance_door(door_block, node.x + tangent.first,
+						node.z + tangent.second, entrance_façade->normal.first,
+						entrance_façade->normal.second, "right");
+				facade_plan.mark_door_column(
+						node.x + tangent.first, node.z + tangent.second);
+				facade_plan.mark_door_column(
+						node.x + tangent.first + entrance_façade->normal.first,
+						node.z + tangent.second + entrance_façade->normal.second);
+				second_leaf = true;
+			}
+			interior_entries.push_back(
+					{{node.x + inward.first, node.z + inward.second}, inward});
+			if (!signage_anchor)
+				signage_anchor = building_facade::FacadeAnchor{node.x, node.z,
+						entrance_façade->normal, 0, 0, std::pair{node.x, node.z}};
+			put_threshold(node.x, node.z, entrance_façade->normal.first,
+					entrance_façade->normal.second);
+			if (second_leaf)
+				put_threshold(node.x + tangent.first, node.z + tangent.second,
+						entrance_façade->normal.first, entrance_façade->normal.second);
+			mapped_entrance_rendered = true;
 		}
 		if (!mapped_entrance_rendered) {
 			if (synthetic_entrance_plan) {

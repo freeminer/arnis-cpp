@@ -2114,6 +2114,31 @@ bool generate_world(WorldEditor &editor,
 	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
 			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
 	const auto &road_mask = *road_mask_owner;
+	std::vector<datapack::discoveries::Place> extra_places;
+	std::optional<std::string> settlement;
+	if (extras.wants_places()) {
+		const auto discovery_bbox = cartesian::XZBBox::rect_from_min_max(
+				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		auto collected = datapack::discoveries::collect(elements, discovery_bbox);
+		extra_places = std::move(collected.first);
+		settlement = std::move(collected.second);
+		for (auto &place : extra_places) {
+			place.settle(
+					[&](int x, int z) {
+						return xzbbox.contains(x, z) &&
+							   !building_footprints.contains(x, z) &&
+							   (!editor.ground || editor.ground->cover_class(
+														  editor.ground_point(x, z)) !=
+														  land_cover::LC_WATER);
+					},
+					[&](int x, int z) { return road_mask.contains(x, z); },
+					[&](int x, int z) {
+						return editor.ground
+									   ? editor.ground->level(editor.ground_point(x, z))
+									   : args.ground_level;
+					});
+		}
+	}
 	const auto clear_corridors = std::make_shared<const CoordinateBitmap>(
 			aerialways::clear_corridors(elements, xzbbox));
 	editor.set_clear_corridors(clear_corridors);
@@ -3755,15 +3780,6 @@ bool generate_world(WorldEditor &editor,
 						(geo_bounds[2] + geo_bounds[3]) * .5);
 		const bool red_amber = red_amber_region == decals::SignRegion::Germanic ||
 							   red_amber_region == decals::SignRegion::UkIreland;
-		std::vector<datapack::discoveries::Place> extra_places;
-		std::optional<std::string> settlement;
-		if (extras.wants_places()) {
-			const auto discovery_bbox = cartesian::XZBBox::rect_from_min_max(
-					xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
-			auto collected = datapack::discoveries::collect(elements, discovery_bbox);
-			extra_places = std::move(collected.first);
-			settlement = std::move(collected.second);
-		}
 		std::string area = std::string(celestial_body_display_name(args.body));
 		if (is_earth(args.body)) {
 			area.clear();

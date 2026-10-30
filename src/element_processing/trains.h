@@ -113,4 +113,9 @@ private:
 	double size_{1.0};
 };
 
+// Keep the Rust module's public type name available to library consumers;
+// TrainRouteNetwork remains as the descriptive C++ name used by existing
+// backend integrations.
+using TrainNetwork = TrainRouteNetwork;
+
 } // namespace arnis::trains

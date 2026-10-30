@@ -51,10 +51,13 @@ std::optional<std::vector<double>> bedrock_route_heights(const Route &route,
 		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
 {
 	std::vector<std::optional<double>> raw;
-	raw.reserve(route.points.size());
-	for (std::size_t i = 0; i < route.points.size(); ++i) {
+	// Rust zips points with ways, so a malformed/partial route must not probe
+	// way id 0 for points that have no corresponding source way.
+	const auto point_count = std::min(route.points.size(), route.ways.size());
+	raw.reserve(point_count);
+	for (std::size_t i = 0; i < point_count; ++i) {
 		const auto &[x, z] = route.points[i];
-		const std::uint64_t way = i < route.ways.size() ? route.ways[i] : 0;
+		const std::uint64_t way = route.ways[i];
 		const int bx = static_cast<int>(std::floor(x));
 		const int bz = static_cast<int>(std::floor(z));
 		std::optional<std::pair<int, int>> best;

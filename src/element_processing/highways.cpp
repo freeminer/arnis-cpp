@@ -28,6 +28,7 @@
 #include "road_mask_search.h"
 #include "signage.h"
 #include "../floodfill.h"
+#include "../rust_numeric.h"
 #include "../structures/helicopter.h"
 #include "fm_highway_connectivity.h"
 #include "fm_traffic_signals.h"
@@ -247,7 +248,7 @@ std::vector<int> road_profile(const crate::world_editor::WorldEditor &editor,
 			if (inside(i - 1) == inside(i))
 				continue;
 			const auto lower = cells[i - 1] < cells[i] ? i - 1 : i;
-			const int y = static_cast<int>(std::lround(smooth[lower]));
+			const int y = rust_numeric::round_i32(smooth[lower]);
 			if (!pins[i - 1])
 				pins[i - 1] = y;
 			if (!pins[i])
@@ -264,7 +265,7 @@ int junction_level(const crate::world_editor::WorldEditor &editor, int x, int z)
 		for (int dx = -JUNCTION_RADIUS; dx <= JUNCTION_RADIUS; ++dx)
 			sum += terrain_exact(editor, x + dx, z + dz);
 	const double side = 2 * JUNCTION_RADIUS + 1;
-	return static_cast<int>(std::lround(sum / (side * side)));
+	return rust_numeric::round_i32(sum / (side * side));
 }
 
 double perpendicular_median_raw(const crate::world_editor::WorldEditor &editor, int set_x,
@@ -294,8 +295,8 @@ int perpendicular_median_ground_y(const crate::world_editor::WorldEditor &editor
 	const double next = perpendicular_median_raw(editor,
 			dir_horizontal ? set_x + 1 : set_x, dir_horizontal ? set_z : set_z + 1,
 			centerline_x, centerline_z, block_range, dir_horizontal);
-	return static_cast<int>(std::round(
-			std::max(std::min(prev, current), std::min(std::max(prev, current), next))));
+	return rust_numeric::round_i32(
+			std::max(std::min(prev, current), std::min(std::max(prev, current), next)));
 }
 
 void precompute_row_medians(const crate::world_editor::WorldEditor &editor,
@@ -913,7 +914,8 @@ int calculate_point_elevation(std::size_t distance, std::size_t total_distance,
 	if (needs_end_slope)
 		share = std::min(
 				share, ramp(total_distance > distance ? total_distance - distance : 0));
-	return static_cast<int>(std::round(static_cast<float>(base_elevation) * share));
+	return rust_numeric::round_i32(
+			static_cast<double>(static_cast<float>(base_elevation) * share));
 }
 
 void generate_highways_internal(crate::world_editor::WorldEditor &editor,
@@ -2326,7 +2328,7 @@ void paint_helipad_disc(WorldEditor &editor, int cx, int cz, const Args &args,
 		const CoordinateBitmap &building_footprints)
 {
 	const int radius =
-			std::max(4, static_cast<int>(std::round(HELIPAD_NODE_RADIUS_M * args.scale)));
+			std::max(4, rust_numeric::round_i32(HELIPAD_NODE_RADIUS_M * args.scale));
 	std::vector<std::pair<int, int>> cells;
 	for (int dx = -radius; dx <= radius; ++dx)
 		for (int dz = -radius; dz <= radius; ++dz)

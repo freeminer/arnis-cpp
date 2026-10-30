@@ -5,6 +5,7 @@
 #include "bridge_towers.h"
 #include "bridges.h"
 #include "connected_blocks.h"
+#include "../rust_numeric.h"
 #include <fstream>
 #include <cmath>
 
@@ -209,10 +210,10 @@ std::pair<std::pair<int, int>, std::pair<int, int>> side_offsets(
 {
 	const float rail_dist =
 			static_cast<float>(block_range) * (std::abs(px) + std::abs(pz)) + 1.0f;
-	const int lx = static_cast<int>(std::round(static_cast<float>(cx) + px * rail_dist));
-	const int lz = static_cast<int>(std::round(static_cast<float>(cz) + pz * rail_dist));
-	const int rx = static_cast<int>(std::round(static_cast<float>(cx) - px * rail_dist));
-	const int rz = static_cast<int>(std::round(static_cast<float>(cz) - pz * rail_dist));
+	const int lx = rust_numeric::round_i32(static_cast<float>(cx) + px * rail_dist);
+	const int lz = rust_numeric::round_i32(static_cast<float>(cz) + pz * rail_dist);
+	const int rx = rust_numeric::round_i32(static_cast<float>(cx) - px * rail_dist);
+	const int rz = rust_numeric::round_i32(static_cast<float>(cz) - pz * rail_dist);
 	return {{lx, lz}, {rx, rz}};
 }
 
@@ -226,8 +227,8 @@ bool side_faces_open(const bridges::BridgeSurfaceMap &surface, std::pair<int, in
 		float outward_x, float outward_z, int deck_y)
 {
 	for (int k = 0; k <= 2; ++k) {
-		const int x = static_cast<int>(std::lround(edge.first + outward_x * k));
-		const int z = static_cast<int>(std::lround(edge.second + outward_z * k));
+		const int x = rust_numeric::round_i32(edge.first + outward_x * k);
+		const int z = rust_numeric::round_i32(edge.second + outward_z * k);
 		if (surface.deck_near(x, z, deck_y, 2))
 			return false;
 	}
@@ -477,7 +478,7 @@ void decorate_suspension(WorldEditor &editor, const std::vector<BridgePathSample
 			const float base_y =
 					static_cast<float>(top_a) + static_cast<float>(top_b - top_a) * t;
 			const int cable_y =
-					static_cast<int>(std::round(base_y - dip * 4.0f * t * (1.0f - t)));
+					rust_numeric::round_i32(base_y - dip * 4.0f * t * (1.0f - t));
 			const Block chain =
 					std::abs(s.perp_x) > std::abs(s.perp_z) ? CHAIN_Z : CHAIN_X;
 			const std::array<std::pair<bool, std::pair<int, int>>, 2> edges{
@@ -814,8 +815,8 @@ void place_pier_bent(WorldEditor &editor, const bridges::BridgeSurfaceMap &surfa
 		int half_width)
 {
 	const auto at = [x, z, perp](int offset) {
-		return std::pair{static_cast<int>(std::lround(x + perp.first * offset)),
-				static_cast<int>(std::lround(z + perp.second * offset))};
+		return std::pair{rust_numeric::round_i32(x + perp.first * offset),
+				rust_numeric::round_i32(z + perp.second * offset)};
 	};
 	Block body = STONE_BRICKS;
 	bool footing = true;

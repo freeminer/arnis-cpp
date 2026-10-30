@@ -1,5 +1,6 @@
 #include "cars.h"
 
+#include "../rust_numeric.h"
 #include "../datapack/mod.h"
 #include "highways.h"
 #include "road_markings.h"
@@ -1453,8 +1454,7 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	std::vector<std::pair<std::string, std::string>> out;
 	std::ostringstream storage;
 	storage << "scoreboard players set #accel arnis "
-			<< std::max(1,
-					   static_cast<int>(std::lround(ACCEL_MPS2 * .01 * scale_ * 1000.0)))
+			<< std::max(1, rust_numeric::round_i32(ACCEL_MPS2 * .01 * scale_ * 1000.0))
 			<< "\ndata modify storage arnis:cars seg set value []\n";
 	const auto colour_list = [](const auto &colours) {
 		std::string result;
@@ -1788,8 +1788,8 @@ nlohmann::json CarNetwork::bedrock_data() const
 		look.push_back({at, radius, close});
 
 	return {{"size", size_},
-			{"accel", std::max(1, static_cast<int>(std::lround(
-										  ACCEL_MPS2 * 0.01 * scale_ * 1000.0)))},
+			{"accel", std::max(1, rust_numeric::round_i32(
+										  ACCEL_MPS2 * 0.01 * scale_ * 1000.0))},
 			{"lanes", std::move(lanes)}, {"start", std::move(start)},
 			{"bodies", std::move(body_names)}, {"colours", std::move(colours)},
 			{"rules", {{"look", std::move(look)}, {"same_way", SAME_WAY_DEG},

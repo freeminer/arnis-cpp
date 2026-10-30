@@ -39,6 +39,8 @@ struct PendingRun
 {
 	std::uint64_t way_id = 0;
 	std::uint64_t group = 0;
+	// Index among the building's own runs, matching Rust Candidate::run.
+	std::uint32_t run = 0;
 	std::uint32_t wall = 0;
 	std::size_t entry = 0;
 	Choice choice;
@@ -182,9 +184,7 @@ std::size_t finalize(world_editor::WorldEditor &editor)
 	requested_px = std::max(mapillary::atlas::MIN_PX_PER_BLOCK,
 			std::min(requested_px, mapillary::atlas::pixel_resolution_cap()));
 	std::stable_sort(pending.begin(), pending.end(), [](const auto &a, const auto &b) {
-		const auto a_cell = a.cells.empty() ? std::pair{0, 0} : a.cells.front();
-		const auto b_cell = b.cells.empty() ? std::pair{0, 0} : b.cells.front();
-		return std::tie(a.way_id, a.wall, a_cell) < std::tie(b.way_id, b.wall, b_cell);
+		return std::tie(a.way_id, a.run) < std::tie(b.way_id, b.run);
 	});
 	// Match Rust's minimum-resolution coverage test before spending atlas space
 	// or creating a display. A panel that rounds to zero pixels at the minimum
@@ -580,6 +580,7 @@ building_facade::PointSet collect(world_editor::WorldEditor &editor,
 			PendingRun pending_run;
 			pending_run.way_id = way_id;
 			pending_run.group = osm_parser::group_key(group_seed);
+			pending_run.run = static_cast<std::uint32_t>(collected_runs.size());
 			pending_run.wall = static_cast<std::uint32_t>(i);
 			pending_run.entry = choice->entry;
 			pending_run.choice = *choice;

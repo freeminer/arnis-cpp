@@ -134,8 +134,8 @@ std::vector<std::vector<std::size_t>> assign_elements_to_tiles(
 			if (aeroway != node.tags.end() && aeroway->second == "helipad") {
 				const int32_t reach =
 						std::max<int32_t>(
-								4, static_cast<int32_t>(std::round(
-										   highways::HELIPAD_NODE_RADIUS_M * scale))) +
+								4, rust_numeric::round_i32(
+										   highways::HELIPAD_NODE_RADIUS_M * scale)) +
 						12;
 				const Aabb box{
 						node.x - reach, node.x + reach, node.z - reach, node.z + reach};

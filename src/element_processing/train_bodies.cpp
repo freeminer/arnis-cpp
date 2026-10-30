@@ -219,8 +219,8 @@ std::vector<Part> loco(const Livery &livery)
 {
 	const float half = 9.75f, hw = 1.5f, floor = 1.15f, top = 4.1f;
 	std::vector<Part> out;
-	append(out, box(BOGIE, {-hw + 0.35f, hw - 0.35f}, {0.04f, 1.0f}, {-7.95f, -4.35f}));
-	append(out, box(BOGIE, {-hw + 0.35f, hw - 0.35f}, {0.04f, 1.0f}, {4.35f, 7.95f}));
+	append(out, box(BOGIE, {-hw + 0.35f, hw - 0.35f}, {0.04f, 0.85f}, {-7.95f, -4.35f}));
+	append(out, box(BOGIE, {-hw + 0.35f, hw - 0.35f}, {0.04f, 0.85f}, {4.35f, 7.95f}));
 	append(out, box(UNDER, {-hw + 0.15f, hw - 0.15f}, {0.55f, floor}, {-9.25f, 9.25f}));
 	append(out, box(livery.body, {-hw, hw}, {floor, top}, {-9.6f, 9.6f}));
 	append(out, box(livery.lower, {-hw - 0.01f, hw + 0.01f}, {floor, floor + 0.35f},

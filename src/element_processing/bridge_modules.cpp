@@ -1,6 +1,7 @@
 #include "bridge_modules.h"
 #include "../assets_root.h"
 #include "../block_definitions.h"
+#include "../rust_numeric.h"
 #include "bridges.h"
 #include "../structures/schem_decoder.h"
 #include <algorithm>
@@ -61,8 +62,8 @@ static bool side_faces_open(const bridges::BridgeSurfaceMap &surface,
 		std::pair<int, int> cell, std::pair<float, float> outward, int deck_y)
 {
 	for (int k = 0; k <= 2; ++k) {
-		const int x = static_cast<int>(std::lround(cell.first + outward.first * k));
-		const int z = static_cast<int>(std::lround(cell.second + outward.second * k));
+		const int x = rust_numeric::round_i32(cell.first + outward.first * k);
+		const int z = rust_numeric::round_i32(cell.second + outward.second * k);
 		if (surface.deck_near(x, z, deck_y, 2))
 			return false;
 	}
@@ -196,8 +197,8 @@ void sweep_module(world_editor::WorldEditor *editor,
 		for (const auto &[sign, count] : std::array<std::pair<float, std::size_t *>, 2>{
 					 {{1.0f, &open_left_count}, {-1.0f, &open_right_count}}}) {
 			const std::pair<int, int> cell{
-					static_cast<int>(std::lround(sample.x + sample.px * sign * edge)),
-					static_cast<int>(std::lround(sample.z + sample.pz * sign * edge))};
+					rust_numeric::round_i32(sample.x + sample.px * sign * edge),
+					rust_numeric::round_i32(sample.z + sample.pz * sign * edge)};
 			*count += side_faces_open(
 					surface, cell, {sample.px * sign, sample.pz * sign}, sample.deck_y);
 		}
@@ -206,8 +207,8 @@ void sweep_module(world_editor::WorldEditor *editor,
 	const bool open_right = open_right_count * 2 >= path.size();
 	const auto for_cells = [](const BridgePathSample &sample, int w, auto &&fn) {
 		const auto at = [&](int offset) {
-			return std::pair{static_cast<int>(std::lround(sample.x + sample.px * offset)),
-					static_cast<int>(std::lround(sample.z + sample.pz * offset))};
+			return std::pair{rust_numeric::round_i32(sample.x + sample.px * offset),
+					rust_numeric::round_i32(sample.z + sample.pz * offset)};
 		};
 		const auto [x, z] = at(w);
 		const int step = (w > 0) - (w < 0);

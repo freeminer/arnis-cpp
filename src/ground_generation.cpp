@@ -19,6 +19,7 @@
 #include "surface.h"
 #include "progress.h"
 #include "water_depth.h"
+#include "rust_numeric.h"
 
 #include <algorithm>
 #include <array>
@@ -350,18 +351,17 @@ std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int orig
 	if (!cell)
 		return {false, false};
 	const auto &[fraction, top] = *cell;
-	const double p =
-			!schematic_trees ? canopy::flat_slot_probability(
-									   fraction, spacing, canopy::COLUMNS_PER_TREE_LEGACY)
-			: scale < MICRO_TREE_MAX_SCALE
-					? canopy::flat_slot_probability(
-							  fraction, spacing, canopy::COLUMNS_PER_TREE_MICRO)
-			: editor.tree_crown_columns
-					? canopy::slot_probability(fraction, spacing,
-							  editor.tree_crown_columns(std::max(
-									  1, static_cast<int>(std::lround(top * scale)))))
-					: canopy::flat_slot_probability(
-							  fraction, spacing, canopy::COLUMNS_PER_TREE_LEGACY);
+	const double p = !schematic_trees ? canopy::flat_slot_probability(fraction, spacing,
+												canopy::COLUMNS_PER_TREE_LEGACY)
+					 : scale < MICRO_TREE_MAX_SCALE
+							 ? canopy::flat_slot_probability(
+									   fraction, spacing, canopy::COLUMNS_PER_TREE_MICRO)
+					 : editor.tree_crown_columns
+							 ? canopy::slot_probability(fraction, spacing,
+									   editor.tree_crown_columns(std::max(
+											   1, rust_numeric::round_i32(top * scale))))
+							 : canopy::flat_slot_probability(fraction, spacing,
+									   canopy::COLUMNS_PER_TREE_LEGACY);
 	const double roll =
 			double(land_cover::coord_hash(x ^ 0x434d, z ^ 0x484d) % 10000) / 10000.0;
 	return {true, roll < p};
@@ -722,7 +722,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 											  ground_cache ? &*ground_cache : nullptr,
 											  args.ground_level)
 									: std::pair{0.0, std::pair{0.0, 0.0}};
-					const int slope = static_cast<int>(std::lround(slope_f));
+					const int slope = rust_numeric::round_i32(slope_f);
 					// Match ground_generation.rs: preserve sand through its angle of
 					// repose, but replace mapped surfaces on steeper faces.
 					const bool mapped_sand =

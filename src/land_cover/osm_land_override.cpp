@@ -476,6 +476,9 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 	if (any_area || any_land) {
 		for (std::size_t i = 0; i < land.size(); ++i)
 			land[i] &= ~over_water[i];
+		// Rust drops this temporary immediately after merging it. Keep its full
+		// raster allocation out of the peak while the shoreline masks are built.
+		std::vector<std::uint64_t>().swap(over_water);
 		std::vector<std::uint64_t> land_seed((count + 63) / 64);
 		for (std::size_t i = 0; i < count; ++i)
 			if (data.grid[i / data.width][i % data.width] != LC_WATER)
