@@ -3,6 +3,7 @@
 #include "../floodfill_cache.h"
 #include "../bedrock_addon.h"
 #include "../../../arnis_adapter.h"
+#include "train_bodies.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -44,60 +45,10 @@ enum class Shape : std::uint8_t
 	Shuttle
 };
 
-enum class TrainKind : std::uint8_t
-{
-	Tram,
-	Metro,
-	SBahn,
-	Regional,
-	DoubleDeck,
-	Intercity,
-	Freight
-};
-
-enum class CoachKind : std::uint8_t
-{
-	TramCab,
-	TramMid,
-	TramShort,
-	MetroCab,
-	MetroMid,
-	SBahnCab,
-	SBahnMid,
-	RegioCab,
-	RegioMid,
-	DeckCab,
-	DeckMid,
-	Loco,
-	IceCab,
-	IceMid,
-	Container,
-	Tank,
-	Boxcar
-};
-
-struct Coach
-{
-	CoachKind kind{CoachKind::Loco};
-	bool front{};
-	std::uint8_t variant{};
-};
-
-struct Livery
-{
-	std::string body;
-	std::string lower;
-	std::string stripe;
-	std::string door;
-	std::string roof;
-	std::string name;
-	std::uint8_t seed{};
-};
-
-/// Compose the carriage consist and per-departure livery for a service.
-/// departure_index selects a stable livery variant for repeated departures.
-std::pair<std::vector<Coach>, Livery> compose(TrainKind kind, std::uint64_t seed,
-		bool short_train, std::size_t departure_index = 0);
+using TrainKind = train_bodies::Kind;
+using CoachKind = train_bodies::CoachKind;
+using Coach = train_bodies::Coach;
+using Livery = train_bodies::Livery;
 
 struct TrainDeparture
 {
@@ -163,14 +114,3 @@ private:
 };
 
 } // namespace arnis::trains
-
-// The backend-neutral carriage geometry API is available with the route model.
-#include "fm_train_bodies.h"
-
-namespace arnis::train_bodies
-{
-/// Compose a consist and deterministic livery for a departure. Rust returns a
-/// livery-producing closure; the C++ library takes its departure index here.
-std::pair<std::vector<trains::Coach>, trains::Livery> compose(
-		Kind kind, std::uint64_t seed, bool short_train, std::size_t departure_index = 0);
-} // namespace arnis::train_bodies

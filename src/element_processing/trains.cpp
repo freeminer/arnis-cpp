@@ -195,228 +195,12 @@ struct StopFeature
 	RoutePoint centre;
 };
 
-using LiverySet = std::vector<Livery>;
-
-Livery make_livery(const char *name, const char *body, const char *lower,
-		const char *stripe, const char *door, const char *roof)
-{
-	return {body, lower, stripe, door, roof, name, 0};
-}
-
-const LiverySet &liveries(TrainKind kind)
-{
-	static const std::string light_gray = "minecraft:light_gray_concrete";
-	static const std::string white = "minecraft:white_concrete";
-	static const LiverySet trams{make_livery("ty", "minecraft:yellow_concrete",
-										 light_gray.c_str(), "minecraft:yellow_concrete",
-										 "minecraft:yellow_concrete", light_gray.c_str()),
-			make_livery("twr", white.c_str(), "minecraft:red_concrete",
-					"minecraft:red_concrete", "minecraft:red_concrete",
-					light_gray.c_str()),
-			make_livery("trw", "minecraft:red_concrete", white.c_str(), white.c_str(),
-					white.c_str(), light_gray.c_str()),
-			make_livery("tbw", white.c_str(), "minecraft:blue_concrete",
-					"minecraft:blue_concrete", "minecraft:blue_concrete",
-					light_gray.c_str()),
-			make_livery("tgw", white.c_str(), "minecraft:green_concrete",
-					"minecraft:green_concrete", "minecraft:green_concrete",
-					light_gray.c_str())};
-	static const LiverySet metros{
-			make_livery("my", "minecraft:yellow_concrete", "minecraft:gray_concrete",
-					"minecraft:yellow_concrete", "minecraft:yellow_concrete",
-					light_gray.c_str()),
-			make_livery("mb", light_gray.c_str(), light_gray.c_str(),
-					"minecraft:blue_concrete", "minecraft:blue_concrete",
-					"minecraft:gray_concrete"),
-			make_livery("mr", white.c_str(), white.c_str(), "minecraft:red_concrete",
-					"minecraft:red_concrete", light_gray.c_str()),
-			make_livery("mo", light_gray.c_str(), light_gray.c_str(),
-					"minecraft:orange_concrete", "minecraft:orange_concrete",
-					"minecraft:gray_concrete")};
-	static const LiverySet sbahns{
-			make_livery("sb", "minecraft:yellow_terracotta", "minecraft:red_concrete",
-					"minecraft:yellow_terracotta", "minecraft:red_concrete",
-					light_gray.c_str()),
-			make_livery("sd", white.c_str(), light_gray.c_str(), "minecraft:red_concrete",
-					"minecraft:red_concrete", light_gray.c_str()),
-			make_livery("sg", white.c_str(), "minecraft:green_concrete",
-					"minecraft:green_concrete", "minecraft:green_concrete",
-					light_gray.c_str())};
-	static const LiverySet regionals{
-			make_livery("rr", "minecraft:red_concrete", light_gray.c_str(), white.c_str(),
-					light_gray.c_str(), light_gray.c_str()),
-			make_livery("rb", white.c_str(), "minecraft:blue_concrete",
-					"minecraft:blue_concrete", "minecraft:blue_concrete",
-					light_gray.c_str()),
-			make_livery("rg", white.c_str(), "minecraft:lime_concrete",
-					"minecraft:green_concrete", "minecraft:lime_concrete",
-					light_gray.c_str()),
-			make_livery("rk", "minecraft:yellow_concrete", "minecraft:gray_concrete",
-					"minecraft:gray_concrete", "minecraft:gray_concrete",
-					light_gray.c_str())};
-	static const LiverySet decks{
-			make_livery("dr", "minecraft:red_concrete", light_gray.c_str(), white.c_str(),
-					light_gray.c_str(), light_gray.c_str()),
-			make_livery("db", white.c_str(), "minecraft:blue_concrete",
-					"minecraft:blue_concrete", "minecraft:blue_concrete",
-					light_gray.c_str())};
-	static const LiverySet intercity{
-			make_livery("ice", white.c_str(), white.c_str(), "minecraft:red_concrete",
-					light_gray.c_str(), light_gray.c_str()),
-			make_livery("icb", white.c_str(), white.c_str(), "minecraft:blue_concrete",
-					light_gray.c_str(), light_gray.c_str())};
-	static const LiverySet locos{
-			make_livery("fr", "minecraft:red_concrete", "minecraft:gray_concrete",
-					white.c_str(), "minecraft:red_concrete", light_gray.c_str()),
-			make_livery("fb", "minecraft:blue_concrete", "minecraft:gray_concrete",
-					white.c_str(), "minecraft:blue_concrete", light_gray.c_str()),
-			make_livery("fs", light_gray.c_str(), "minecraft:gray_concrete",
-					"minecraft:red_concrete", light_gray.c_str(),
-					"minecraft:gray_concrete"),
-			make_livery("fg", "minecraft:green_concrete", "minecraft:gray_concrete",
-					"minecraft:yellow_concrete", "minecraft:green_concrete",
-					light_gray.c_str()),
-			make_livery("fk", "minecraft:black_concrete", "minecraft:gray_concrete",
-					"minecraft:yellow_concrete", "minecraft:black_concrete",
-					"minecraft:gray_concrete")};
-	switch (kind) {
-	case TrainKind::Tram:
-		return trams;
-	case TrainKind::Metro:
-		return metros;
-	case TrainKind::SBahn:
-		return sbahns;
-	case TrainKind::Regional:
-		return regionals;
-	case TrainKind::DoubleDeck:
-		return decks;
-	case TrainKind::Intercity:
-		return intercity;
-	case TrainKind::Freight:
-		return locos;
-	}
-	return regionals;
-}
-
-std::uint64_t body_roll(std::uint64_t seed, std::uint64_t k)
-{
-	std::uint64_t h = seed ^ (k * 0x9E3779B97F4A7C15ULL);
-	h ^= h >> 31;
-	h *= 0xBF58476D1CE4E5B9ULL;
-	return h ^ (h >> 29);
-}
-
 std::uint64_t network_hash(std::uint64_t a, std::uint64_t b)
 {
 	std::uint64_t h = a * 0x9E3779B97F4A7C15ULL ^ b * 0xC2B2AE3D27D4EB4FULL;
 	h ^= h >> 29;
 	h *= 0xBF58476D1CE4E5B9ULL;
 	return h ^ (h >> 32);
-}
-
-double coach_length_m(Coach coach)
-{
-	switch (coach.kind) {
-	case CoachKind::TramCab:
-		return 7.4;
-	case CoachKind::TramMid:
-		return 7.0;
-	case CoachKind::TramShort:
-		return 4.0;
-	case CoachKind::MetroCab:
-	case CoachKind::MetroMid:
-		return 16.0;
-	case CoachKind::SBahnCab:
-	case CoachKind::SBahnMid:
-		return 18.4;
-	case CoachKind::RegioCab:
-	case CoachKind::RegioMid:
-		return 20.0;
-	case CoachKind::DeckCab:
-	case CoachKind::DeckMid:
-		return 26.8;
-	case CoachKind::Loco:
-		return 19.5;
-	case CoachKind::IceCab:
-		return 25.8;
-	case CoachKind::IceMid:
-		return 24.8;
-	case CoachKind::Container:
-		return 18.4;
-	case CoachKind::Tank:
-		return 15.0;
-	case CoachKind::Boxcar:
-		return 16.5;
-	}
-	return 0.0;
-}
-
-std::pair<std::vector<Coach>, Livery> compose_impl(
-		TrainKind kind, std::uint64_t seed, bool short_train, std::size_t departure_index)
-{
-	const auto &palette = liveries(kind);
-	Livery base = palette[body_roll(seed, 1) % palette.size()];
-	std::vector<Coach> coaches;
-	const auto add = [&](CoachKind kind, bool front = false) {
-		coaches.push_back({kind, front, 0});
-	};
-	const auto repeated = [&](CoachKind kind, std::size_t count) {
-		for (std::size_t i = 0; i < count; ++i)
-			add(kind);
-	};
-	switch (kind) {
-	case TrainKind::Tram:
-		add(CoachKind::TramCab, true);
-		add(CoachKind::TramShort);
-		if (!short_train) {
-			add(CoachKind::TramMid);
-			add(CoachKind::TramShort);
-		}
-		add(CoachKind::TramCab, false);
-		break;
-	case TrainKind::Metro:
-		add(CoachKind::MetroCab, true);
-		repeated(CoachKind::MetroMid, short_train ? 2 : 4);
-		add(CoachKind::MetroCab, false);
-		break;
-	case TrainKind::SBahn:
-		add(CoachKind::SBahnCab, true);
-		repeated(CoachKind::SBahnMid, short_train ? 2 : 4);
-		add(CoachKind::SBahnCab, false);
-		break;
-	case TrainKind::Regional:
-		add(CoachKind::RegioCab, true);
-		repeated(CoachKind::RegioMid, short_train ? 1 : 2);
-		add(CoachKind::RegioCab, false);
-		break;
-	case TrainKind::Intercity:
-		add(CoachKind::IceCab, true);
-		repeated(CoachKind::IceMid, short_train ? 2 : 5);
-		add(CoachKind::IceCab, false);
-		break;
-	case TrainKind::DoubleDeck:
-		add(CoachKind::Loco);
-		repeated(CoachKind::DeckMid, short_train ? 1 : 3);
-		add(CoachKind::DeckCab, false);
-		break;
-	case TrainKind::Freight:
-		add(CoachKind::Loco);
-		for (std::uint64_t k = 0; k < (short_train ? 4U : 10U); ++k) {
-			const auto r = body_roll(seed, 100 + k);
-			const auto variant = static_cast<std::uint8_t>(r >> 8);
-			const auto choice = r % 100;
-			add(choice <= 44	   ? CoachKind::Container
-					: choice <= 74 ? CoachKind::Tank
-								   : CoachKind::Boxcar,
-					false);
-			coaches.back().variant = variant;
-		}
-		base = palette[body_roll(seed, 50 + departure_index) % palette.size()];
-		base.seed =
-				static_cast<std::uint8_t>(body_roll(seed, 60 + departure_index) & 0xff);
-		break;
-	}
-	return {std::move(coaches), std::move(base)};
 }
 
 std::string_view tag(const tags_t &tags, const char *key)
@@ -1437,12 +1221,12 @@ std::optional<Service> service_for(
 	const double len_m = route.length() / scale;
 	const auto kind = route_kind(route, !route.stops.empty(), len_m, seed);
 	for (bool short_train : {false, true}) {
-		auto [coaches, ignored] = compose(kind, seed, short_train || len_m < 400.0, 0);
-		(void)ignored;
+		auto [coaches, livery_for_departure] =
+				train_bodies::compose(kind, seed, short_train || len_m < 400.0);
 		std::vector<double> lengths;
 		lengths.reserve(coaches.size());
 		for (auto coach : coaches)
-			lengths.push_back(coach_length_m(coach) * size);
+			lengths.push_back(train_bodies::length_m(coach) * size);
 		std::vector<double> offsets{0};
 		for (std::size_t i = 1; i < lengths.size(); ++i)
 			offsets.push_back(offsets.back() + (lengths[i - 1] + lengths[i]) / 2 +
@@ -1459,9 +1243,7 @@ std::optional<Service> service_for(
 		auto [times, period] = std::move(*schedule);
 		std::vector<TrainDeparture> departures;
 		if (route.shape == Shape::Shuttle) {
-			auto [unused, livery] = compose(kind, seed, short_train || len_m < 400.0, 0);
-			(void)unused;
-			departures.push_back({0, std::move(livery)});
+			departures.push_back({0, livery_for_departure(0)});
 		} else {
 			const auto headway =
 					static_cast<std::size_t>(headway_seconds(route.mode) * STEPS_PER_S);
@@ -1475,11 +1257,8 @@ std::optional<Service> service_for(
 			const auto start =
 					static_cast<std::size_t>(network_hash(seed, 7) % times.size());
 			for (std::size_t k = 0; k < count; ++k) {
-				auto [unused, livery] =
-						compose(kind, seed, short_train || len_m < 400.0, k);
-				(void)unused;
 				departures.push_back({(start + k * times.size() / count) % times.size(),
-						std::move(livery)});
+						livery_for_departure(k)});
 			}
 		}
 		return Service{route_index, std::move(coaches), std::move(offsets),
@@ -1489,12 +1268,6 @@ std::optional<Service> service_for(
 }
 
 } // namespace
-
-std::pair<std::vector<Coach>, Livery> compose(
-		TrainKind kind, std::uint64_t seed, bool short_train, std::size_t departure_index)
-{
-	return compose_impl(kind, seed, short_train, departure_index);
-}
 
 double Route::length() const
 {
