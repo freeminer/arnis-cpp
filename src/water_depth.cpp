@@ -539,13 +539,10 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 
 std::pair<Block, Block> shallow_bed(const WorldEditor &editor, int x, int z)
 {
-	// Match Rust's shallow_bed beach test: sample the same 5x5 lattice at
-	// two-block intervals.  A scale-adjusted radius changes the beach band in
-	// non-unit-scale worlds and can turn an entire shoreline into sand.
-	for (int dz = -4; dz <= 4; dz += 2)
-		for (int dx = -4; dx <= 4; dx += 2)
-			if (editor.cover_class(x + dx, z + dz) == land_cover::LC_BEACH)
-				return {SAND, SANDSTONE};
+	// Match Rust's block-space reach, including its scale conversion for
+	// non-unit worlds. A fixed sampling lattice changes the beach band width.
+	if (editor.near_beach(x, z, std::max(4.0 * editor.scale(), 1.0)))
+		return {SAND, SANDSTONE};
 	const double n = ground_generation::value_noise_01(x + 211, z + 37, 6);
 	if (n < 0.35)
 		return {GRAVEL, DIRT};

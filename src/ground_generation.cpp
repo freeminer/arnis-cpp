@@ -914,8 +914,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										!editor.block_exists_absolute(x, floor_y, z)) {
 									const auto [floor, under] =
 											water_depth::shallow_bed(editor, x, z);
-									editor.set_block_if_absent_absolute(
-											floor, x, floor_y, z);
+									editor.set_block_absolute(floor, x, floor_y, z);
 									if (floor_y - 1 > world_editor::min_y())
 										editor.set_block_if_absent_absolute(
 												under, x, floor_y - 1, z);
