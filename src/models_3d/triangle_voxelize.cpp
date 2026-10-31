@@ -111,23 +111,17 @@ void draw_line(const Vec3 &start, const Vec3 &end, Emit &&emit)
 
 	while (current != last) {
 		emit(VoxelKey{current[0], current[1], current[2]});
-		// Keep the exact tie-breaking order used by dda-voxelize: X, then Y,
-		// otherwise Z. This makes edge/corner intersections deterministic.
-		if (tmax[0] < tmax[1]) {
-			if (tmax[0] < tmax[2]) {
-				current[0] += step[0];
-				tmax[0] += tdelta[0];
-			} else {
-				current[2] += step[2];
-				tmax[2] += tdelta[2];
-			}
-		} else if (tmax[1] < tmax[2]) {
-			current[1] += step[1];
-			tmax[1] += tdelta[1];
-		} else {
-			current[2] += step[2];
-			tmax[2] += tdelta[2];
+		// Never step past an endpoint, even when float rounding makes its next
+		// boundary appear earlier than that of an unfinished axis. Reverse
+		// iteration preserves the original Z, Y, X priority for equal tmax.
+		int axis = -1;
+		for (int candidate = 2; candidate >= 0; --candidate) {
+			if (current[candidate] != last[candidate] &&
+					(axis < 0 || tmax[candidate] < tmax[axis]))
+				axis = candidate;
 		}
+		current[axis] += step[axis];
+		tmax[axis] += tdelta[axis];
 	}
 	emit(VoxelKey{last[0], last[1], last[2]});
 }
