@@ -8,6 +8,7 @@
 #include <chrono>
 #include <cmath>
 #include <map>
+#include <memory_resource>
 #include <mutex>
 #include <queue>
 #include <set>
@@ -27,9 +28,15 @@ struct XZHash
 {
 	std::size_t operator()(const XZ &p) const noexcept
 	{
-		const auto packed =
+		auto packed =
 				(std::uint64_t(std::uint32_t(p.first)) << 32) | std::uint32_t(p.second);
-		return std::hash<std::uint64_t>{}(packed);
+		// Adjacent track cells have highly correlated coordinates. Mix both
+		// halves before unordered containers choose a bucket.
+		packed ^= packed >> 30;
+		packed *= 0xbf58476d1ce4e5b9ULL;
+		packed ^= packed >> 27;
+		packed *= 0x94d049bb133111ebULL;
+		return static_cast<std::size_t>(packed ^ (packed >> 31));
 	}
 };
 
@@ -166,7 +173,8 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 	}();
 	// The reservation set does not change during a route search, but the same
 	// position can be considered with many headings and in both search margins.
-	std::unordered_map<XZ, bool, XZHash> blocked_cache;
+	std::pmr::monotonic_buffer_resource blocked_memory;
+	std::pmr::unordered_map<XZ, bool, XZHash> blocked_cache{&blocked_memory};
 	const auto is_blocked = [&](const XZ &p) {
 		if (!blocked)
 			return false;
@@ -175,10 +183,63 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 			return it->second;
 		return blocked_cache.emplace(p, blocked(p)).first->second;
 	};
+	// The first and final moves have fixed headings. If either required
+	// intermediate cell is reserved, neither search margin can find a route.
+	if (from != to && departure >= 0 && departure < 16 && arrival >= 0 && arrival < 16) {
+		const auto &[first_dx, first_dz] = DIR_VECTORS[departure];
+		const auto &[last_dx, last_dz] = DIR_VECTORS[arrival];
+		const XZ first{from.first + first_dx, from.second + first_dz};
+		const XZ last{to.first - last_dx, to.second - last_dz};
+		if ((first == to && departure != arrival) || (first != to && is_blocked(first)) ||
+				(last != from && is_blocked(last)))
+			return {};
+		if (first != to && blocked) {
+			bool can_continue = false;
+			for (int turn : {0, -1, 1}) {
+				const int direction = (departure + turn + 16) % 16;
+				const auto &[dx, dz] = DIR_VECTORS[direction];
+				const XZ next{first.first + dx, first.second + dz};
+				if (next == from || (next == to && direction != arrival))
+					continue;
+				if (next == to || !is_blocked(next)) {
+					can_continue = true;
+					break;
+				}
+			}
+			if (!can_continue)
+				return {};
+		}
+	}
+	// A clear straight route is the unique shortest path and needs no search.
+	// Probe through the shared cache so a blocked route falls back to the same
+	// search without querying any position twice.
+	if (departure == arrival && departure >= 0 && departure < 16) {
+		const auto &[dx, dz] = DIR_VECTORS[departure];
+		const auto delta_x = std::int64_t(to.first) - from.first;
+		const auto delta_z = std::int64_t(to.second) - from.second;
+		const auto steps = dx ? delta_x / dx : delta_z / dz;
+		if (steps >= 0 && steps * dx == delta_x && steps * dz == delta_z) {
+			std::vector<XZ> straight;
+			straight.reserve(static_cast<std::size_t>(steps) + 1);
+			bool clear = true;
+			for (std::int64_t i = 0; i <= steps; ++i) {
+				const XZ p{static_cast<int>(from.first + i * dx),
+						static_cast<int>(from.second + i * dz)};
+				if (i != 0 && i != steps && is_blocked(p)) {
+					clear = false;
+					break;
+				}
+				straight.push_back(p);
+			}
+			if (clear)
+				return straight;
+		}
+	}
 	for (pos_t margin : {16, 48}) {
 		// Visits are only looked up by key, never iterated. Keep the ordered
 		// priority queue and its tie-breaks unchanged for identical route choices.
-		std::unordered_map<State, Visit, StateHash> visits;
+		std::pmr::monotonic_buffer_resource visit_memory;
+		std::pmr::unordered_map<State, Visit, StateHash> visits{&visit_memory};
 		visits.reserve(4096);
 		using Entry = std::tuple<double, double, State>;
 		std::priority_queue<Entry, std::vector<Entry>, std::greater<Entry>> queue;
@@ -197,7 +258,7 @@ std::vector<XZ> route(const XZ &from, const XZ &to, int departure, int arrival,
 			const auto &[x, z, heading] = state;
 			if (XZ{x, z} == to && heading == arrival) {
 				std::vector<XZ> result;
-				std::set<XZ> seen;
+				std::unordered_set<XZ, XZHash> seen;
 				State cursor = state;
 				for (;;) {
 					const auto &[cx, cz, cd] = cursor;
@@ -498,25 +559,32 @@ std::shared_ptr<const RailNetwork> build_network(
 				occupied[plane].insert(anchors[a].position);
 	for (const auto &[id, ids] : way_anchors) {
 		const auto &way = *ways.at(id);
+		const auto way_level = level(way);
+		const bool is_underground = underground(way);
+		const bool is_bridge = bridge(way);
+		const int height_offset = (is_underground || is_bridge) ? level_offset(way) : 0;
+		std::vector<std::unordered_set<XZ, XZHash> *> occupied_planes;
+		for (const auto &plane : reservation_levels.at(id))
+			occupied_planes.push_back(&occupied[plane]);
 		for (std::size_t i = 1; i < ids.size(); ++i) {
 			const auto [a, b] = std::minmax(ids[i - 1], ids[i]);
-			const SegmentKey key{a, b, level(way)};
+			const SegmentKey key{a, b, way_level};
 			auto [it, inserted] =
-					segments.try_emplace(key, Segment{a, b, level(way), {}, {}, {}});
+					segments.try_emplace(key, Segment{a, b, way_level, {}, {}, {}});
 			auto &segment = it->second;
 			if (inserted && !invalid.contains(a) && !invalid.contains(b)) {
 				segment.line = route(anchors[a].position, anchors[b].position,
 						anchors[a].ports.at(b), (anchors[b].ports.at(a) + 8) % 16,
 						[&](const XZ &p) {
-							for (const auto &plane : reservation_levels.at(id))
-								if (occupied[plane].contains(p))
+							for (const auto *plane : occupied_planes)
+								if (plane->contains(p))
 									return true;
 							return false;
 						});
 			}
-			for (const auto &plane : reservation_levels.at(id))
+			for (auto *plane : occupied_planes)
 				for (const auto &p : segment.line)
-					occupied[plane].insert(p);
+					plane->insert(p);
 			if (segment.line.empty()) {
 				// Shared segments are already cached, including failed routes.
 				if (inserted) {
@@ -530,19 +598,20 @@ std::shared_ptr<const RailNetwork> build_network(
 			std::vector<std::optional<int>> road_surfaces;
 			seed.reserve(segment.line.size());
 			ground.reserve(segment.line.size());
-			road_surfaces.reserve(segment.line.size());
+			if (!is_underground && !is_bridge)
+				road_surfaces.reserve(segment.line.size());
 			for (const auto &[x, z] : segment.line) {
 				ground.push_back(editor.get_ground_level(x, z));
-				road_surfaces.push_back(editor.surface_override(x, z));
-				seed.push_back(
-						ground.back() + (underground(way) ? level_offset(way) : 0));
+				if (!is_underground && !is_bridge)
+					road_surfaces.push_back(editor.surface_override(x, z));
+				seed.push_back(ground.back() + (is_underground ? height_offset : 0));
 			}
-			if (bridge(way)) {
+			if (is_bridge) {
 				const auto [lo, hi] = std::minmax_element(seed.begin(), seed.end());
 				const int deck =
-						*hi + (*hi - *lo < 4 ? level_offset(way) : level_offset(way) - 8);
+						*hi + (*hi - *lo < 4 ? height_offset : height_offset - 8);
 				std::fill(seed.begin(), seed.end(), deck);
-			} else if (!underground(way)) {
+			} else if (!is_underground) {
 				// Seed native slope fitting from the Rust at-grade profile instead of
 				// the raw ground samples. Native nodes still constrain the final ramp
 				// shape below, while the target heights honor straight-cell climbs,
@@ -574,25 +643,50 @@ std::shared_ptr<const RailNetwork> build_network(
 	}
 	report_route_failures(failed_routes, example_failed_way);
 	std::vector<int> anchor_heights(anchors.size(), std::numeric_limits<int>::min());
-	bool changed;
-	do {
-		changed = false;
-		for (auto &[key, s] : segments) {
+	// Revisit only segments whose endpoint heights can have changed. Keep the
+	// map's original order within each pass so junction updates are deterministic.
+	std::vector<Segment *> ordered_segments;
+	std::vector<std::vector<std::size_t>> incident(anchors.size());
+	std::set<std::size_t> pending, next_pass;
+	for (auto &[key, segment] : segments) {
+		if (segment.line.empty())
+			continue;
+		const auto index = ordered_segments.size();
+		ordered_segments.push_back(&segment);
+		incident[segment.a].push_back(index);
+		incident[segment.b].push_back(index);
+		pending.insert(pending.end(), index);
+	}
+	while (!pending.empty()) {
+		while (!pending.empty()) {
+			const auto index = *pending.begin();
+			pending.erase(pending.begin());
+			auto &s = *ordered_segments[index];
 			if (s.line.empty())
 				continue;
 			for (const auto &[a, i] :
 					{std::pair{s.a, std::size_t{0}}, std::pair{s.b, s.line.size() - 1}}) {
 				const int height = std::max(anchor_heights[a], s.heights[i]);
-				changed |= anchor_heights[a] != height || s.heights[i] != height;
+				if (anchor_heights[a] != height) {
+					for (const auto other : incident[a]) {
+						if (other > index)
+							pending.insert(other);
+						else
+							next_pass.insert(other);
+					}
+				}
 				anchor_heights[a] = s.heights[i] = height;
 			}
-			const auto before = s.heights;
+			const int first = s.heights.front();
+			const int last = s.heights.back();
 			std::vector<bool> flat(s.line.size(), false);
 			flat.front() = flat.back() = true;
 			fit_profile(s.line, s.heights, flat);
-			changed |= before != s.heights;
+			if (first != s.heights.front() || last != s.heights.back())
+				next_pass.insert(index);
 		}
-	} while (changed);
+		pending.swap(next_pass);
+	}
 	for (auto &[key, s] : segments) {
 		for (std::size_t i = 0; i < s.line.size(); ++i) {
 			std::optional<Block> rail;

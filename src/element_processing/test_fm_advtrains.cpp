@@ -114,6 +114,7 @@ public:
 	void runTests(IGameDef *) override
 	{
 		TEST(testProfiles);
+		TEST(testProfileFittingMatchesFullScans);
 		TEST(testRustAtGradeProfileParity);
 		TEST(testRustRailJoinSelectionParity);
 		TEST(testRustAreaEdgeCrossingOrder);
@@ -154,6 +155,84 @@ public:
 				const auto before = plan.heights;
 				at::fit_profile(plan.line, plan.heights, flat);
 				UASSERT(before == plan.heights);
+			}
+		}
+	}
+	void testProfileFittingMatchesFullScans()
+	{
+		TrackDefinitions definitions;
+		std::mt19937 random(7841);
+		for (int family = 0; family < 3; ++family) {
+			ADVTRAINS_GENTLE_SLOPES_AVAILABLE = family == 0;
+			ADVTRAINS_SLOPES_AVAILABLE = family != 2;
+			ADVTRAINS_DIAGONAL_SLOPES_AVAILABLE = family != 2;
+			for (int sample = 0; sample < 200; ++sample) {
+				std::vector<at::XZ> line;
+				std::vector<int> expected;
+				std::vector<bool> flat;
+				int x = 0, z = 0;
+				for (int i = 0; i < 80; ++i) {
+					line.emplace_back(x, z);
+					expected.push_back(int(random() % 15) - 7);
+					flat.push_back(random() % 11 == 0);
+					const auto &step = at::DIR_VECTORS[random() % 16];
+					x += step.first;
+					z += step.second;
+				}
+				auto actual = expected;
+				bool changed;
+				do {
+					changed = false;
+					for (std::size_t i = 0; i + 1 < expected.size(); ++i) {
+						if (expected[i] == expected[i + 1])
+							continue;
+						const bool ascending = expected[i] < expected[i + 1];
+						const std::size_t low_index = ascending ? i : i + 1;
+						const int low = expected[low_index];
+						const int high = expected[ascending ? i + 1 : i];
+						const auto dir = at::direction_between(line[i], line[i + 1]);
+						const std::size_t count =
+								!dir ? 0
+								: *dir % 4 == 0
+										? (ADVTRAINS_GENTLE_SLOPES_AVAILABLE   ? 3
+												  : ADVTRAINS_SLOPES_AVAILABLE ? 2
+																			   : 0)
+										: (*dir % 4 == 2 && ADVTRAINS_DIAGONAL_SLOPES_AVAILABLE
+														  ? 2
+														  : 0);
+						bool valid = count && high == low + 1;
+						for (std::size_t offset = 0; valid && offset < count; ++offset) {
+							if ((ascending && i < offset) ||
+									(!ascending && i + 1 + offset >= expected.size())) {
+								valid = false;
+								break;
+							}
+							const std::size_t cell =
+									ascending ? i - offset : i + 1 + offset;
+							valid = !flat[cell] && expected[cell] == low;
+							if (cell > 0)
+								valid &= at::direction_between(
+												 line[cell - 1], line[cell]) == dir;
+							if (cell + 1 < line.size())
+								valid &= at::direction_between(
+												 line[cell], line[cell + 1]) == dir;
+							if (offset + 1 == count)
+								for (std::size_t clearance = 1; clearance <= count;
+										++clearance) {
+									if (ascending && cell >= clearance)
+										valid &= expected[cell - clearance] <= low;
+									if (!ascending && cell + clearance < expected.size())
+										valid &= expected[cell + clearance] <= low;
+								}
+						}
+						if (!valid) {
+							expected[low_index] = high - (high - low > 1 ? 1 : 0);
+							changed = true;
+						}
+					}
+				} while (changed);
+				at::fit_profile(line, actual, flat);
+				UASSERT(actual == expected);
 			}
 		}
 	}
@@ -223,6 +302,14 @@ public:
 	void testRoutes()
 	{
 		TrackDefinitions definitions;
+		for (int direction = 0; direction < 16; ++direction) {
+			const auto [dx, dz] = at::DIR_VECTORS[direction];
+			const auto straight = at::route({-100, 200},
+					{-100 + 120 * dx, 200 + 120 * dz}, direction, direction, {});
+			UASSERT(straight.size() == 121);
+			for (std::size_t i = 0; i < straight.size(); ++i)
+				UASSERT(straight[i] == at::XZ(-100 + int(i) * dx, 200 + int(i) * dz));
+		}
 		for (const auto &target :
 				{at::XZ{11, 31}, at::XZ{-17, 9}, at::XZ{40, 0}, at::XZ{2, 3}}) {
 			const int d = at::closest_direction(target.first, target.second);
@@ -240,6 +327,23 @@ public:
 			definitions.check(plan);
 		}
 		UASSERT(!at::two_connection_rail(0, 4));
+		for (const auto obstacle : {at::XZ(0, 1), at::XZ(0, 29)}) {
+			unsigned probes = 0;
+			const auto impossible =
+					at::route({0, 0}, {0, 30}, 0, 0, [&](const at::XZ &p) {
+						++probes;
+						return p == obstacle;
+					});
+			UASSERT(impossible.empty());
+			UASSERT(probes <= 2);
+		}
+		unsigned trapped_probes = 0;
+		const auto trapped = at::route({0, 0}, {0, 30}, 0, 0, [&](const at::XZ &p) {
+			++trapped_probes;
+			return p == at::XZ(0, 2) || p == at::XZ(-1, 3) || p == at::XZ(1, 3);
+		});
+		UASSERT(trapped.empty());
+		UASSERT(trapped_probes <= 5);
 		// Repeated visits to a position with different headings must consult the
 		// stable obstacle map only once, while still routing around obstacles.
 		std::map<at::XZ, unsigned> probes;

@@ -4,6 +4,7 @@
 #include <array>
 #include <cmath>
 #include <limits>
+#include <set>
 #include <unordered_map>
 #include <unordered_set>
 
@@ -190,10 +191,18 @@ std::size_t slope_length(int direction)
 void fit_profile(const std::vector<XZ> &line, std::vector<int> &profile,
 		const std::vector<bool> &flat)
 {
-	bool changed;
-	do {
-		changed = false;
-		for (std::size_t i = 0; i + 1 < profile.size(); ++i) {
+	if (profile.size() < 2)
+		return;
+	// Preserve the original left-to-right passes while revisiting only edges
+	// whose inputs changed. A ramp checks at most three cells and three more
+	// clearance cells, so a height change affects edges at most six cells away.
+	std::set<std::size_t> pending, next_pass;
+	for (std::size_t i = 0; i + 1 < profile.size(); ++i)
+		pending.insert(pending.end(), i);
+	while (!pending.empty()) {
+		while (!pending.empty()) {
+			const std::size_t i = *pending.begin();
+			pending.erase(pending.begin());
 			if (profile[i] == profile[i + 1])
 				continue;
 			const bool ascending = profile[i] < profile[i + 1];
@@ -227,10 +236,18 @@ void fit_profile(const std::vector<XZ> &line, std::vector<int> &profile,
 			}
 			if (!valid) {
 				profile[low_index] = high - (high - low > 1 ? 1 : 0);
-				changed = true;
+				const std::size_t first = low_index > 6 ? low_index - 6 : 0;
+				const std::size_t last = std::min(profile.size() - 2, low_index + 6);
+				for (std::size_t edge = first; edge <= last; ++edge) {
+					if (edge > i)
+						pending.insert(edge);
+					else
+						next_pass.insert(edge);
+				}
 			}
 		}
-	} while (changed);
+		pending.swap(next_pass);
+	}
 }
 
 std::vector<int> height_profile(WorldEditor &editor, const std::vector<XZ> &line)

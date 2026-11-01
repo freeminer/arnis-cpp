@@ -129,13 +129,16 @@ std::vector<int> rail_profile(const std::vector<bool> &straight,
 	std::vector<int> lows;
 	std::vector<std::size_t> starts;
 	std::vector<std::uint32_t> back;
-	std::vector<double> prev;
+	std::vector<double> prev, cur;
+	lows.reserve(n);
+	starts.reserve(n);
 	for (std::size_t i = 0; i < n; ++i) {
 		auto [lo, hi] = range(i);
 		if (lo > hi)
 			std::swap(lo, hi);
 		const auto width = static_cast<std::size_t>(hi - lo + 1);
-		std::vector<double> cur(width * 2, std::numeric_limits<double>::infinity());
+		// Reuse both DP rows across track cells; most ranges have the same width.
+		cur.assign(width * 2, std::numeric_limits<double>::infinity());
 		starts.push_back(back.size());
 		const auto base = starts.back();
 		back.resize(base + width * 2, std::numeric_limits<std::uint32_t>::max());
@@ -145,6 +148,8 @@ std::vector<int> rail_profile(const std::vector<bool> &straight,
 			if (nearest != prev.end())
 				far_floor = *nearest + 2.0 * BROKEN;
 		}
+		const bool straight_before = i > 0 && straight[i - 1];
+		const bool straight_here = straight[i];
 		for (std::size_t bi = 0; bi < width; ++bi) {
 			const int b = lo + static_cast<int>(bi);
 			const double own = cost(i, b);
@@ -161,9 +166,9 @@ std::vector<int> rail_profile(const std::vector<bool> &straight,
 					const int d = b - a;
 					double extra = 0.0;
 					bool low = false;
-					if (d == 1 && straight[i - 1] && !climbing_back)
+					if (d == 1 && straight_before && !climbing_back)
 						extra = step_cost;
-					else if (d == -1 && straight[i]) {
+					else if (d == -1 && straight_here) {
 						extra = step_cost;
 						low = true;
 					} else if (d != 0) {
@@ -195,7 +200,7 @@ std::vector<int> rail_profile(const std::vector<bool> &straight,
 			}
 		}
 		lows.push_back(lo);
-		prev = std::move(cur);
+		prev.swap(cur);
 	}
 	auto state = static_cast<std::size_t>(
 			std::min_element(prev.begin(), prev.end()) - prev.begin());
