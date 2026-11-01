@@ -845,7 +845,7 @@ pub fn generate_world_with_options(
         crate::world_utils::remove_untouched_template_region(&output_path);
     }
     editor.set_place_schematics(args.use_3d);
-    editor.set_game_settings(args.gamemode, args.world_time);
+    editor.set_game_settings(args.gamemode, args.world_time, args.mob_spawning);
     editor.set_start_with_map(args.map_item);
     editor.set_size_options(crate::world_utils::WorldSizeOptions::of(args));
     editor.set_map_decals(world_format == WorldFormat::JavaAnvil);
@@ -949,22 +949,24 @@ pub fn generate_world_with_options(
     // Signage pre-pass: every decal the world needs gets its map id now, so the tile
     // threads only read the registry. Java only; other formats keep banner fallbacks.
     let signage_start = args.benchmark.then(std::time::Instant::now);
-    // A One World continues after its last map id.
+    // Maps continue after the world's own: a new world's start at FIRST_MAP_ID, a world
+    // generated into again after its last. The preview and branding maps come first.
     let wants_map_item = args.map_item && world_format == WorldFormat::JavaAnvil && !extending;
     let place_branding = world_format == WorldFormat::JavaAnvil && !extending;
-    let first_decal_id = if one_world.is_some() {
+    let first_map_id = if world_format == WorldFormat::JavaAnvil {
         let layout = crate::world_utils::WorldLayout::of(&output_path);
-        let next = crate::map_item::next_map_id(&layout.maps_dir(&output_path));
-        next + if wants_map_item {
+        crate::map_item::next_map_id(&layout.maps_dir(&output_path))
+    } else {
+        crate::map_item::FIRST_MAP_ID
+    };
+    let first_decal_id = first_map_id
+        + if wants_map_item {
             2
         } else if place_branding {
             1
         } else {
             0
-        }
-    } else {
-        crate::decals::registry::DecalRegistry::FIRST_ID
-    };
+        };
     let mut signage_ctx: Option<Arc<signage::SignageContext>> = (world_format
         == WorldFormat::JavaAnvil)
         .then(|| signage::build_context(&elements, args, llbbox, &xzbbox, first_decal_id))
@@ -1060,7 +1062,10 @@ pub fn generate_world_with_options(
     bench.reset();
 
     // Per-cell water depth field from the LC_WATER mask; empty without land cover.
-    let big_water_field = crate::water_depth::compute_big_water_field(&ground, &xzbbox);
+    // Shared with the editors, so a bore under water keeps its cover under the carved bed.
+    let big_water_field = Arc::new(crate::water_depth::compute_big_water_field(
+        &ground, &xzbbox,
+    ));
     // Resolved once here: a body spanning many tiles must not be measured per tile.
     let still_surfaces = water_areas::prescan_still_surfaces(&elements, &ground, &xzbbox);
 
@@ -1087,6 +1092,7 @@ pub fn generate_world_with_options(
 
     // Set ground reference in the editor to enable elevation-aware block placement
     editor.set_ground(Arc::clone(&ground));
+    editor.set_water_field(Arc::clone(&big_water_field));
     if let Some(ref tp) = tree_pack {
         editor.set_tree_pack(Arc::clone(tp));
     }
@@ -1217,6 +1223,25 @@ pub fn generate_world_with_options(
         &tunnel_internal_endpoints,
         args.scale,
     );
+
+    // Platforms and halls, laid out before any track so the tracks can keep level with them.
+    let stations = Arc::new(stations::StationIndex::build(
+        &elements,
+        &stations::StationInputs {
+            editor: &editor,
+            xzbbox: &xzbbox,
+            bridges: &bridge_structures,
+            tunnel_footprint: &tunnel_footprint,
+            building_footprints: &building_footprints,
+            road_mask: &road_mask,
+            rail_joins: &rail_joins,
+            scale: args.scale,
+            timeout: args.timeout.as_ref(),
+            underground: args.mode != GenerationMode::Blueprint,
+        },
+    ));
+    editor.set_stations(Arc::clone(&stations));
+    let mut station_voids: Vec<stations::StationVoid> = Vec::new();
 
     // Resolved before the 3D archetypes so they never claim a landmark's element.
     let landmarks = crate::landmarks::prescan(&elements, &xzbbox, llbbox, args);
@@ -1524,6 +1549,7 @@ pub fn generate_world_with_options(
 
             let mut tile_editor = WorldEditor::new(PathBuf::new(), &tile_xzbbox, llbbox);
             tile_editor.set_ground(Arc::clone(&ground));
+            tile_editor.set_water_field(Arc::clone(&big_water_field));
             tile_editor.set_ground_origin(xzbbox.min_x(), xzbbox.min_z());
             // Ground generation runs on tile editors, so they need the real scale.
             tile_editor.set_projection_info(&args.projection.to_string(), args.scale);
@@ -1555,6 +1581,8 @@ pub fn generate_world_with_options(
                 tile_bounds.max_x - 1,
                 tile_bounds.max_z - 1,
             );
+            tile_editor.set_stations(Arc::clone(&stations));
+            stations.register_levels(&mut tile_editor);
 
             let mut tile_rail_tunnel_points: Vec<railways::RailTunnelPoint> = Vec::new();
             let mut tile_tunnel_cells: Vec<highways::HighwayTunnelCell> = Vec::new();
@@ -1603,6 +1631,8 @@ pub fn generate_world_with_options(
             }
 
             release_tile_fills(&tile_fill_ids[tile_idx], &fill_readers, &flood_fill_cache);
+            let mut tile_station_voids: Vec<stations::StationVoid> = Vec::new();
+            stations.render(&mut tile_editor, &mut tile_station_voids);
 
             // Per-tile ground + ore + ESA-water over strict bounds (parallel);
             // neighbour reads use the editor halo from intersection assignment.
@@ -1624,9 +1654,14 @@ pub fn generate_world_with_options(
                 g_max_z,
                 false,
             );
+            railways::clear_rail_gauge(&mut tile_editor, &building_footprints);
             // Caves bring their own vanilla ore table, placed after the carve so no
             // vein hangs in a cave; the plain veins only fill caveless ground.
             if args.caves {
+                let dug = |x: i32, z: i32| {
+                    (!tunnel_footprint.is_empty() && tunnel_footprint.contains(x, z))
+                        || stations.digs(x, z)
+                };
                 crate::caves::carve_region(
                     &mut tile_editor,
                     args,
@@ -1635,6 +1670,7 @@ pub fn generate_world_with_options(
                     g_max_x,
                     g_min_z,
                     g_max_z,
+                    &dug,
                 );
             } else if args.fillground {
                 crate::ore_generation::generate_ores_region(
@@ -1673,6 +1709,7 @@ pub fn generate_world_with_options(
                     &tile_tunnel_cells,
                 ));
                 highways::hang_tunnel_lights(&mut tile_editor, &lights);
+                stations::carve_voids(&mut tile_editor, &tile_station_voids);
             }
             // Seal floating water/lava last: the water-depth carve and the tunnel carves
             // above can each undercut a water body over a cave. Under eviction this tile
@@ -1703,6 +1740,7 @@ pub fn generate_world_with_options(
                 tile_rail_tunnel_points,
                 tile_tunnel_cells,
                 tile_road_overrides,
+                tile_station_voids,
             )
         };
 
@@ -1762,6 +1800,7 @@ pub fn generate_world_with_options(
                         tile_rail_tunnel_points,
                         tile_tunnel_cells,
                         tile_road_overrides,
+                        tile_station_voids,
                     )) = pending.remove(&next_merge)
                     {
                         let merge_start = std::time::Instant::now();
@@ -1864,6 +1903,11 @@ pub fn generate_world_with_options(
                                     .filter(|p| tiles[tile_idx].contains(p.0, p.1)),
                             );
                             tunnel_cells.extend(tile_tunnel_cells);
+                            station_voids.extend(
+                                tile_station_voids
+                                    .into_iter()
+                                    .filter(|v| tiles[tile_idx].contains(v.0, v.1)),
+                            );
                         }
 
                         // Step 20%->70% per merged tile, throttled to whole-percent steps.
@@ -1912,6 +1956,7 @@ pub fn generate_world_with_options(
         drop(elements);
     } else {
         // Small area: sequential processing along the original code path.
+        stations.register_levels(&mut editor);
         let elements_count: usize = elements.len();
         // A way's flood fill is read by the way itself and by every relation
         // listing it as a member, and sort_ground_fill_areas interleaves both
@@ -2033,6 +2078,7 @@ pub fn generate_world_with_options(
 
         process_pb.inc(element_counter % pb_batch_size);
         process_pb.finish();
+        stations.render(&mut editor, &mut station_voids);
         bench.mark("elements_sequential");
     }
 
@@ -2056,6 +2102,7 @@ pub fn generate_world_with_options(
             &tunnel_footprint,
             &bridge_surface,
         )?;
+        railways::clear_rail_gauge(&mut editor, &building_footprints);
     }
     bench.mark("ground_gen");
 
@@ -2063,7 +2110,11 @@ pub fn generate_world_with_options(
         if args.caves {
             println!("{} Carving caves...", "[6b/7]".bold());
             emit_gui_progress_update(89.0, "Carving caves...");
-            crate::caves::carve(&mut editor, args, &xzbbox);
+            let dug = |x: i32, z: i32| {
+                (!tunnel_footprint.is_empty() && tunnel_footprint.contains(x, z))
+                    || stations.digs(x, z)
+            };
+            crate::caves::carve(&mut editor, args, &xzbbox, &dug);
         } else if args.fillground {
             crate::ore_generation::generate_ores(&mut editor, &xzbbox);
         }
@@ -2108,6 +2159,7 @@ pub fn generate_world_with_options(
     drop(tunnel_footprint);
     drop(rail_mask);
     drop(rail_joins);
+    editor.release_water_field();
     drop(big_water_field);
     // The ruins break buildings open where these say they stand.
     let building_footprints = args.post_apocalyptic.then_some(building_footprints);
@@ -2130,7 +2182,9 @@ pub fn generate_world_with_options(
             ));
         }
         highways::hang_tunnel_lights(&mut editor, &lights);
+        stations::carve_voids(&mut editor, &station_voids);
     }
+    drop(station_voids);
     // Seal floating water/lava as the final underground pass; eviction tiles did it in-tile.
     if args.caves && !eviction_active {
         crate::caves::seal_floating_fluid_region(
@@ -2229,16 +2283,17 @@ pub fn generate_world_with_options(
         eprintln!("[BENCHMARK] block_hash={:016x}", h);
     }
 
-    // Map id 0 is the first map; branding is id 1 with the preview on, else id 0.
+    // The preview is this run's first map and branding the next, or branding the first with
+    // the preview off: the ids the map writers below are given.
     if place_branding {
         let (sx, sz) = options
             .spawn_point
             .or_else(|| crate::map_item::read_spawn_xz(&output_path))
             .unwrap_or((xzbbox.min_x() + 1, xzbbox.min_z() + 1));
         if wants_map_item {
-            editor.place_map_item_frame(sx, sz, 0, 1);
+            editor.place_map_item_frame(sx, sz, first_map_id, first_map_id + 1);
         } else {
-            editor.place_branding_map_only(sx, sz, 0);
+            editor.place_branding_map_only(sx, sz, first_map_id);
         }
     }
 
@@ -2291,13 +2346,13 @@ pub fn generate_world_with_options(
 
     if wants_map_item {
         if let Some(p) = preview.as_ref() {
-            match crate::map_item::write_map_item(&output_path, p, &xzbbox) {
+            match crate::map_item::write_map_item(&output_path, p, &xzbbox, first_map_id) {
                 Ok(()) => println!("World map item added to the player inventory."),
                 Err(e) => eprintln!("Warning: Failed to create world map item: {e}"),
             }
         }
     } else if place_branding {
-        if let Err(e) = crate::map_item::write_branding_map_only(&output_path) {
+        if let Err(e) = crate::map_item::write_branding_map_only(&output_path, first_map_id) {
             eprintln!("Warning: Failed to create arnismc.com map: {e}");
         }
     }
@@ -2402,6 +2457,7 @@ pub fn generate_world_with_options(
             args.gamemode,
             args.world_time,
             args.world_type,
+            args.mob_spawning,
         ) {
             eprintln!("Warning: Failed to apply world settings: {e}");
         }

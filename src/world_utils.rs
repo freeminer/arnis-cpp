@@ -817,7 +817,10 @@ pub fn has_tall_datapack(world_path: &Path) -> bool {
 /// Overlays must declare their range only via
 /// `min_format`/`max_format`; the deprecated `formats` key makes 1.21.9+ drop
 /// the whole overlays section and fall back to the legacy tree.
-pub fn install_tall_datapack(world_path: &Path) -> Result<(), String> {
+///
+/// Every copy declares `min_y..=max_y`, which must be the bounds the world's chunks are
+/// written for: `TALL_DATAPACK_FULL_RANGE`, or the part of it an area needs.
+pub fn install_tall_datapack(world_path: &Path, min_y: i32, max_y: i32) -> Result<(), String> {
     const PACK_MCMETA: &[u8] = include_bytes!("../assets/minecraft/datapack_tall/pack.mcmeta");
     const OVERWORLD_JSON: &[u8] = include_bytes!(
         "../assets/minecraft/datapack_tall/data/minecraft/dimension_type/overworld.json"
@@ -848,8 +851,11 @@ pub fn install_tall_datapack(world_path: &Path) -> Result<(), String> {
             .join("dimension_type");
         fs::create_dir_all(&dim_dir)
             .map_err(|e| format!("Failed to create datapack directories: {e}"))?;
-        fs::write(dim_dir.join("overworld.json"), bytes)
-            .map_err(|e| format!("Failed to write overworld.json: {e}"))?;
+        fs::write(
+            dim_dir.join("overworld.json"),
+            dimension_with_range(bytes, min_y, max_y)?,
+        )
+        .map_err(|e| format!("Failed to write overworld.json: {e}"))?;
     }
 
     fs::write(dp_root.join("pack.mcmeta"), PACK_MCMETA)
@@ -858,6 +864,52 @@ pub fn install_tall_datapack(world_path: &Path) -> Result<(), String> {
     enable_datapack_in_level_dat(world_path, TALL_DATAPACK_NAME)?;
 
     Ok(())
+}
+
+/// The range an installed tall-world datapack declares, as `(min_y, max_y)`. A run into the
+/// world has to keep it: its chunks were written for it, and a heightmap that happens to have
+/// the length another range expects is read against the wrong floor.
+pub fn tall_datapack_range(world_path: &Path) -> Option<(i32, i32)> {
+    let json = fs::read(
+        world_path
+            .join("datapacks")
+            .join(TALL_DATAPACK_NAME)
+            .join("data/minecraft/dimension_type/overworld.json"),
+    )
+    .ok()?;
+    let dimension: serde_json::Value = serde_json::from_slice(&json).ok()?;
+    let min_y = dimension["min_y"].as_i64()?;
+    let max_y = min_y.checked_add(dimension["height"].as_i64()?)? - 1;
+    // Only a range Arnis could have written: on section bounds, within the pack's and
+    // holding vanilla's, which the terrain base and its bedrock assume.
+    let (full_min, full_max) = TALL_DATAPACK_FULL_RANGE;
+    let vanilla = i64::from(crate::world_editor::DEFAULT_MIN_Y)
+        ..=i64::from(crate::world_editor::DEFAULT_MAX_Y);
+    let fits = min_y.rem_euclid(16) == 0
+        && max_y.rem_euclid(16) == 15
+        && (i64::from(full_min)..=*vanilla.start()).contains(&min_y)
+        && (*vanilla.end()..=i64::from(full_max)).contains(&max_y);
+    fits.then_some((min_y as i32, max_y as i32))
+}
+
+/// The whole range the tall-world datapack can declare, which a One World always takes.
+pub const TALL_DATAPACK_FULL_RANGE: (i32, i32) = (-2032, 2031);
+
+/// A bundled dimension type, its height range set to `min_y..=max_y`.
+fn dimension_with_range(bundled: &[u8], min_y: i32, max_y: i32) -> Result<Vec<u8>, String> {
+    let mut dimension: serde_json::Value = serde_json::from_slice(bundled)
+        .map_err(|e| format!("Failed to read the bundled overworld.json: {e}"))?;
+    let fields = dimension
+        .as_object_mut()
+        .ok_or("The bundled overworld.json is not an object")?;
+    let height = max_y + 1 - min_y;
+    fields.insert("min_y".to_string(), min_y.into());
+    fields.insert("height".to_string(), height.into());
+    fields.insert("logical_height".to_string(), height.into());
+    let mut json = serde_json::to_vec_pretty(&dimension)
+        .map_err(|e| format!("Failed to write overworld.json: {e}"))?;
+    json.push(b'\n');
+    Ok(json)
 }
 
 /// Appends `file/<pack_dir_name>` to `Data.DataPacks.Enabled` if missing, so the
@@ -1202,13 +1254,37 @@ fn singleplayer_file(
     Some(world.join("players").join("data").join(name))
 }
 
-// Writes GameType, DayTime, the player's game mode and what the game generates around the
-// area into an existing level.dat.
+/// Natural spawning, in the template's 1.21.4 game rule names: 1.21.11 renames them to
+/// `spawn_mobs` and `mob_griefing` when it upgrades the world. Monsters need a difficulty
+/// above the template's Peaceful, and mob griefing off keeps creepers and endermen from
+/// taking the city apart. All three are written whatever the choice, so a level.dat written
+/// before with another one does not keep its difficulty or griefing.
+fn apply_mob_spawning(
+    data: &mut std::collections::HashMap<String, Value>,
+    mobs: crate::args::MobSpawning,
+) {
+    let flag = |on: bool| Value::String(on.to_string());
+    if let Value::Compound(rules) = data
+        .entry("GameRules".to_string())
+        .or_insert_with(|| Value::Compound(Default::default()))
+    {
+        rules.insert("doMobSpawning".to_string(), flag(mobs.spawns()));
+        rules.insert("mobGriefing".to_string(), flag(!mobs.monsters()));
+    }
+    data.insert(
+        "Difficulty".to_string(),
+        Value::Byte(mobs.java_difficulty()),
+    );
+}
+
+// Writes GameType, DayTime, the player's game mode, what spawns and what the game generates
+// around the area into an existing level.dat.
 pub fn apply_java_world_settings(
     world_path: &Path,
     game_mode: crate::args::GameMode,
     world_time: i64,
     world_type: crate::args::WorldType,
+    mob_spawning: crate::args::MobSpawning,
 ) -> Result<(), String> {
     let level_path = world_path.join("level.dat");
     if !level_path.exists() {
@@ -1240,6 +1316,7 @@ pub fn apply_java_world_settings(
         if let Some(Value::Compound(ref mut player)) = data.get_mut("Player") {
             player.insert("playerGameType".to_string(), Value::Int(game_type));
         }
+        apply_mob_spawning(data, mob_spawning);
     }
 
     // Folded into this rewrite rather than a second read/write: both need the post-generation
@@ -1783,6 +1860,7 @@ mod tests {
             crate::args::GameMode::Survival,
             13000,
             crate::args::WorldType::Void,
+            crate::args::MobSpawning::Off,
         )
         .unwrap();
 
@@ -1803,6 +1881,64 @@ mod tests {
         if let Some(Value::Compound(player)) = data.get("Player") {
             assert_eq!(player.get("playerGameType"), Some(&Value::Int(0)));
         }
+    }
+
+    #[test]
+    fn mob_spawning_sets_the_game_rules_and_the_difficulty_monsters_need() {
+        use crate::args::MobSpawning;
+        let tmp = tempfile::tempdir().unwrap();
+        // Each choice applied in turn to one new world.
+        let written = |choices: &[MobSpawning]| {
+            let world = PathBuf::from(create_new_world(tmp.path()).unwrap());
+            for &mobs in choices {
+                apply_java_world_settings(
+                    &world,
+                    crate::args::GameMode::Survival,
+                    6000,
+                    crate::args::WorldType::Void,
+                    mobs,
+                )
+                .unwrap();
+            }
+            let Value::Compound(mut root) = level_dat_root(&world) else {
+                panic!("root not a compound");
+            };
+            let Some(Value::Compound(mut data)) = root.remove("Data") else {
+                panic!("missing Data");
+            };
+            let Some(Value::Compound(rules)) = data.remove("GameRules") else {
+                panic!("missing GameRules");
+            };
+            let rule = |name: &str| match rules.get(name) {
+                Some(Value::String(v)) => v.clone(),
+                other => panic!("{name}: {other:?}"),
+            };
+            (
+                rule("doMobSpawning"),
+                rule("mobGriefing"),
+                data.get("Difficulty").cloned(),
+            )
+        };
+        let peaceful = Some(Value::Byte(0));
+        let off = ("false".into(), "true".into(), peaceful.clone());
+        assert_eq!(
+            written(&[MobSpawning::Off]),
+            off,
+            "the template as it always was"
+        );
+        assert_eq!(
+            written(&[MobSpawning::Animals]),
+            ("true".into(), "true".into(), peaceful)
+        );
+        assert_eq!(
+            written(&[MobSpawning::All]),
+            ("true".into(), "false".into(), Some(Value::Byte(2)))
+        );
+        assert_eq!(
+            written(&[MobSpawning::All, MobSpawning::Off]),
+            off,
+            "nothing of an earlier choice is left behind"
+        );
     }
 
     fn flat_layers(root: &Value) -> Vec<(String, i32)> {
@@ -1891,6 +2027,7 @@ mod tests {
             crate::args::GameMode::Creative,
             6000,
             crate::args::WorldType::Flat,
+            crate::args::MobSpawning::Off,
         )
         .unwrap();
         let vanilla_layers = flat_layers(&level_dat_root(&vanilla));
@@ -1903,6 +2040,7 @@ mod tests {
             crate::args::GameMode::Creative,
             6000,
             crate::args::WorldType::Flat,
+            crate::args::MobSpawning::Off,
         )
         .unwrap();
         let tall_layers = flat_layers(&level_dat_root(&tall));
@@ -1927,6 +2065,7 @@ mod tests {
             crate::args::GameMode::Creative,
             6000,
             crate::args::WorldType::Void,
+            crate::args::MobSpawning::Off,
         )
         .unwrap();
         let root = level_dat_root(&world);
@@ -1969,8 +2108,62 @@ mod tests {
 
     fn install_pack_for_test(tmp: &std::path::Path) -> PathBuf {
         let world = PathBuf::from(create_new_world(tmp).unwrap());
-        install_tall_datapack(&world).unwrap();
+        let (min_y, max_y) = TALL_DATAPACK_FULL_RANGE;
+        install_tall_datapack(&world, min_y, max_y).unwrap();
         world.join("datapacks").join(TALL_DATAPACK_NAME)
+    }
+
+    #[test]
+    fn every_copy_of_the_dimension_declares_the_range_it_is_given() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = PathBuf::from(create_new_world(tmp.path()).unwrap());
+        install_tall_datapack(&world, -128, 399).unwrap();
+        let root = world.join("datapacks").join(TALL_DATAPACK_NAME);
+        for overlay in ["", "overlay_attributes", "overlay_2601"] {
+            let dim = read_json(
+                &root
+                    .join(overlay)
+                    .join("data/minecraft/dimension_type/overworld.json"),
+            );
+            assert_eq!(dim["min_y"], -128, "{overlay}");
+            assert_eq!(dim["height"], 528, "{overlay}");
+            assert_eq!(dim["logical_height"], 528, "{overlay}");
+            // Everything else is the bundled file's.
+            assert_eq!(dim["has_skylight"], true, "{overlay}");
+        }
+        let bundled: serde_json::Value = serde_json::from_slice(include_bytes!(
+            "../assets/minecraft/datapack_tall/overlay_2601/data/minecraft/dimension_type/overworld.json"
+        ))
+        .unwrap();
+        let mut written =
+            read_json(&root.join("overlay_2601/data/minecraft/dimension_type/overworld.json"));
+        for key in ["min_y", "height", "logical_height"] {
+            written[key] = bundled[key].clone();
+        }
+        assert_eq!(written, bundled);
+    }
+
+    #[test]
+    fn the_declared_range_reads_back_from_the_installed_pack() {
+        let tmp = tempfile::tempdir().unwrap();
+        let world = PathBuf::from(create_new_world(tmp.path()).unwrap());
+        assert_eq!(tall_datapack_range(&world), None);
+        install_tall_datapack(&world, -128, 399).unwrap();
+        assert_eq!(tall_datapack_range(&world), Some((-128, 399)));
+        let (min_y, max_y) = TALL_DATAPACK_FULL_RANGE;
+        install_tall_datapack(&world, min_y, max_y).unwrap();
+        assert_eq!(tall_datapack_range(&world), Some(TALL_DATAPACK_FULL_RANGE));
+        // A pack edited by hand past what the world can hold is not taken as its range.
+        for (min_y, max_y) in [(0, 255), (-4096, 2031), (-128, 4095)] {
+            install_tall_datapack(&world, min_y, max_y).unwrap();
+            assert_eq!(tall_datapack_range(&world), None, "{min_y}..{max_y}");
+        }
+        let dim = world
+            .join("datapacks")
+            .join(TALL_DATAPACK_NAME)
+            .join("data/minecraft/dimension_type/overworld.json");
+        fs::write(&dim, r#"{"min_y": 9223372036854775807, "height": 16}"#).unwrap();
+        assert_eq!(tall_datapack_range(&world), None);
     }
 
     fn read_json(path: &Path) -> serde_json::Value {

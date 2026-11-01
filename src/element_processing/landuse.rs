@@ -5,6 +5,7 @@ use crate::deterministic_rng::element_rng;
 use crate::element_processing::bridges::BridgeSurfaceMap;
 use crate::element_processing::bush::{place_bush, BushKind};
 use crate::element_processing::construction_site;
+use crate::element_processing::field_texture::{place_cover, FieldLayout, Plot};
 use crate::element_processing::tree::{Tree, TreeType};
 use crate::floodfill_cache::{
     in_hole, without_holes, BuildingFootprintBitmap, FloodFillCache, Holes, InnerRings,
@@ -143,6 +144,10 @@ fn landuse_area(
     let climate = editor.climate();
     let site_arid = construction_site::is_arid(climate);
 
+    let field_layout = (landuse_tag == "farmland")
+        .then(|| FieldLayout::new(args.fields, args.scale, element.id, &element.nodes))
+        .flatten();
+
     let draws_per_cell = matches!(landuse_tag.as_str(), "industrial" | "quarry");
     for &(x, z) in floor_area.iter() {
         if in_hole(holes, x, z) {
@@ -157,8 +162,12 @@ fn landuse_area(
             }
             continue;
         }
+        let plot = field_layout.as_ref().map(|l| l.plot_at(x, z));
+
         // Apply per-block randomness for certain landuse types
-        let actual_block = if landuse_tag == "industrial" {
+        let actual_block = if let Some(p) = &plot {
+            p.surface(x, z)
+        } else if landuse_tag == "industrial" {
             // Industrial: primarily stone, with some stone bricks and smooth stone
             let random_value = rng.random_range(0..100);
             if random_value < 70 {
@@ -300,6 +309,11 @@ fn landuse_area(
                             editor.set_block(GRASS, x, 1, z, None, None);
                         }
                     }
+                }
+            }
+            "farmland" if field_layout.is_some() => {
+                if let Some(p) = plot.filter(|_| !is_protected) {
+                    plant_plot(editor, &p, actual_block, x, z);
                 }
             }
             "farmland" if !editor.check_for_block(x, 0, z, Some(&[WATER])) => {
@@ -455,6 +469,17 @@ fn landuse_area(
     }
 }
 
+/// Grows a field plot's cell, which holds `surface` if nothing else claimed it first.
+fn plant_plot(editor: &mut WorldEditor, plot: &Plot, surface: Block, x: i32, z: i32) {
+    if !editor.check_for_block(x, 0, z, Some(&[surface])) {
+        return;
+    }
+    if let Some(cover) = plot.cover(surface, x, z) {
+        let ground_y = editor.get_absolute_y(x, 0, z);
+        place_cover(editor, cover, x, ground_y, z);
+    }
+}
+
 /// Ground for `landuse=military`. A base is mown grass and worn training ground around a
 /// paved core, and the land cover says which of those a cell is, so a base that is really a
 /// forest, a heath or a desert keeps looking like one instead of turning into a concrete slab.
@@ -493,7 +518,10 @@ fn military_ground(
         }
         _ => {
             // Arid and polar bases sit on the region's own ground.
-            if let Some((surface, _)) = climate.surface_palette(cover, x, z) {
+            let red =
+                crate::terrain_surface::Rock::at(climate, x, z, |sx, sz| editor.ecoregion(sx, sz))
+                    == crate::terrain_surface::Rock::Red;
+            if let Some((surface, _)) = climate.surface_palette(cover, x, z, red) {
                 return Some(surface);
             }
             // Vehicle tracks and training ground as organic patches in the grass: about a
@@ -900,6 +928,7 @@ mod sealed_surface_tests {
             water_distance: vec![vec![0, 1]; 2],
             water_blend_cache: once_cell::sync::OnceCell::new(),
             beach_tiles: once_cell::sync::OnceCell::new(),
+            inland_water: Default::default(),
             width: 2,
             height: 2,
             cells_per_meter: 1.0,

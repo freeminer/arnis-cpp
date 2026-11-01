@@ -31,6 +31,7 @@ const SETTINGS = [
   { id: 'caves-toggle', kind: 'checkbox', store: OWN },
   { id: 'canopy-height-toggle', kind: 'checkbox', store: OWN },
   { id: 'max-tree-size-group', kind: 'segmented', store: OWN, valueAttr: 'data-max-tree-size' },
+  { id: 'field-preset-group', kind: 'segmented', store: OWN, valueAttr: 'data-field-preset' },
   { id: 'legacy-trees-toggle', kind: 'checkbox', store: OWN },
   { id: 'winter-toggle', kind: 'checkbox', store: OWN },
   { id: 'post-apocalyptic-toggle', kind: 'checkbox', store: OWN },
@@ -39,6 +40,7 @@ const SETTINGS = [
   { id: 'gamemode-group', kind: 'segmented', store: OWN, valueAttr: 'data-gamemode' },
   { id: 'world-time-slider', kind: 'number', store: OWN },
   { id: 'world-type-group', kind: 'segmented', store: OWN, valueAttr: 'data-world-type' },
+  { id: 'mob-spawning-group', kind: 'segmented', store: OWN, valueAttr: 'data-mob-spawning' },
   { id: 'map-item-toggle', kind: 'checkbox', store: OWN },
   { id: 'custom-world-name-toggle', kind: 'checkbox', store: OWN },
   // Turning One World off writes its pinned values back, so a reset does it first.

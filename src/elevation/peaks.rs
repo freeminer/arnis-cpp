@@ -36,16 +36,38 @@ pub struct TerrainHints {
     pub tall_structures: Vec<TallModel>,
     /// A second message with Overture's tall structures follows.
     pub overture_follows: bool,
+    /// Points along the ways bored as tunnels, so a fit with water over one can leave it
+    /// room under the bed.
+    pub bores: Vec<(f64, f64)>,
+    /// The roads, railways and waterways graded into the ground, as `(lat, lon)` lines, so
+    /// the detail added to steep, coarsely sampled ground stays off them.
+    pub graded: Vec<Vec<(f64, f64)>>,
+    /// Points of the platforms halls are dug round, with how deep under the street each
+    /// hall's floor goes, so the fit leaves it room over the world's floor.
+    pub stations: Vec<StationHint>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct StationHint {
+    pub lat: f64,
+    pub lon: f64,
+    pub depth: i32,
 }
 
 impl TerrainHints {
     /// The hints a run's terrain fit wants from its raw OSM data. Models and structures only
     /// count where the mode builds them.
     pub fn from_osm(data: &crate::osm_parser::OsmData, args: &crate::args::Args) -> Self {
+        // The graded ways only matter where the steep-slope detail can run, on Mapterhorn
+        // terrain. Terrain-only builds no roads but keeps the waterways.
+        let graded = (args.terrain() && !args.aws_only_elevation).then_some(!args.skip_objects());
+        let (bores, graded) = terrain_ways(data, graded);
         Self {
             peaks: peaks_in(data),
             tall_models: if args.use_3d && !args.skip_objects() {
-                crate::models_3d::wikidata::tall_models_in(data)
+                let mut models = crate::models_3d::wikidata::tall_models_in(data);
+                models.extend(crate::landmarks::tall_models_in(data, args.bbox.as_ref()));
+                models
             } else {
                 Vec::new()
             },
@@ -55,6 +77,14 @@ impl TerrainHints {
                 Vec::new()
             },
             overture_follows: Self::wants_overture(args),
+            bores,
+            graded,
+            // Only a run fitting its own height lifts the terrain for its halls.
+            stations: if wants_structures(args) {
+                station_hints(data)
+            } else {
+                Vec::new()
+            },
         }
     }
 
@@ -91,10 +121,346 @@ fn wants_structures(args: &crate::args::Args) -> bool {
         && crate::ground::auto_height(args)
 }
 
+/// How far an untagged platform's middle lies from a bored track it serves, in metres.
+const BORE_PLATFORM_M: f64 = 12.0;
+
+/// Distance within which underground platforms count as one interchange, in metres.
+const INTERCHANGE_M: f64 = 250.0;
+
+/// Underground platform points, each as deep as the crossing lines at its interchange push it.
+fn station_hints(data: &crate::osm_parser::OsmData) -> Vec<StationHint> {
+    use crate::element_processing::stations::{
+        depth_key, is_low, is_rail_platform, tagged_surface, tagged_underground,
+    };
+    let elements = data.elements();
+    let ways: HashMap<u64, &[u64]> = elements
+        .iter()
+        .filter(|e| e.r#type == "way")
+        .filter_map(|e| Some((e.id, e.nodes.as_deref()?)))
+        .collect();
+    // Platforms the tags put under ground, and untagged ones a bored track may.
+    let mut platforms: Vec<(i32, Vec<u64>, bool)> = Vec::new();
+    for e in elements {
+        let Some(tags) = e
+            .tags
+            .as_ref()
+            .filter(|t| is_rail_platform(t) && !tagged_surface(t) && !is_low(t))
+        else {
+            continue;
+        };
+        let key = depth_key(tags).unwrap_or(-1);
+        let nodes: Vec<u64> = match e.r#type.as_str() {
+            "way" => e.nodes.clone().unwrap_or_default(),
+            "relation" => e
+                .members
+                .iter()
+                .filter(|m| m.r#type == "way")
+                .filter_map(|m| ways.get(&m.r#ref))
+                .flat_map(|n| n.iter().copied())
+                .collect(),
+            _ => continue,
+        };
+        platforms.push((key, nodes, tagged_underground(tags)));
+    }
+    if platforms.is_empty() {
+        return Vec::new();
+    }
+    let bores: Vec<&[u64]> = if platforms.iter().all(|p| p.2) {
+        Vec::new()
+    } else {
+        elements
+            .iter()
+            .filter(|e| e.r#type == "way")
+            .filter(|e| {
+                e.tags.as_ref().is_some_and(|t| {
+                    matches!(
+                        t.get("railway").map(String::as_str),
+                        Some("rail" | "subway" | "light_rail" | "narrow_gauge" | "monorail")
+                    ) && is_bored(t)
+                })
+            })
+            .filter_map(|e| e.nodes.as_deref())
+            .collect()
+    };
+    let wanted_nodes: HashSet<u64> = platforms
+        .iter()
+        .flat_map(|p| p.1.iter().copied())
+        .chain(bores.iter().flat_map(|n| n.iter().copied()))
+        .collect();
+    let at: HashMap<u64, (f64, f64)> = elements
+        .iter()
+        .filter(|e| e.r#type == "node" && wanted_nodes.contains(&e.id))
+        .filter_map(|e| Some((e.id, (e.lat?, e.lon?))))
+        .collect();
+    let Some(&(lat0, lon0)) = platforms
+        .iter()
+        .flat_map(|p| p.1.iter())
+        .find_map(|n| at.get(n))
+    else {
+        return Vec::new();
+    };
+    let m_per_lon = 111_320.0 * lat0.to_radians().cos();
+    let local = |&(lat, lon): &(f64, f64)| ((lon - lon0) * m_per_lon, (lat - lat0) * 111_320.0);
+    let segments: Vec<((f64, f64), (f64, f64))> = bores
+        .iter()
+        .flat_map(|nodes| {
+            nodes
+                .windows(2)
+                .filter_map(|w| Some((local(at.get(&w[0])?), local(at.get(&w[1])?))))
+        })
+        .collect();
+    // An untagged platform counts when its middle lies within a track's reach of a bore.
+    let beside_bore = |(px, py): (f64, f64)| {
+        segments.iter().any(|&((ax, ay), (bx, by))| {
+            let (dx, dy) = (bx - ax, by - ay);
+            let t =
+                (((px - ax) * dx + (py - ay) * dy) / (dx * dx + dy * dy).max(1e-9)).clamp(0.0, 1.0);
+            (ax + t * dx - px).hypot(ay + t * dy - py) <= BORE_PLATFORM_M
+        })
+    };
+    let points: Vec<(i32, Vec<(f64, f64)>)> = platforms
+        .into_iter()
+        .map(|(k, nodes, tagged)| {
+            let pts: Vec<(f64, f64)> = nodes.iter().filter_map(|n| at.get(n).copied()).collect();
+            (k, pts, tagged)
+        })
+        .filter(|(_, p, tagged)| {
+            !p.is_empty() && {
+                let q: Vec<(f64, f64)> = p.iter().map(local).collect();
+                let n = q.len() as f64;
+                *tagged
+                    || beside_bore((
+                        q.iter().map(|a| a.0).sum::<f64>() / n,
+                        q.iter().map(|a| a.1).sum::<f64>() / n,
+                    ))
+            }
+        })
+        .map(|(k, p, _)| (k, p))
+        .collect();
+    if points.is_empty() {
+        return Vec::new();
+    }
+    // Middle and heading in metres east and north of the first platform.
+    let shape: Vec<((f64, f64), (f64, f64))> = points
+        .iter()
+        .map(|(_, p)| {
+            let q: Vec<(f64, f64)> = p.iter().map(local).collect();
+            let n = q.len() as f64;
+            let (cx, cy) = (
+                q.iter().map(|a| a.0).sum::<f64>() / n,
+                q.iter().map(|a| a.1).sum::<f64>() / n,
+            );
+            let (mut xx, mut yy, mut xy) = (0.0, 0.0, 0.0);
+            for a in &q {
+                xx += (a.0 - cx).powi(2);
+                yy += (a.1 - cy).powi(2);
+                xy += (a.0 - cx) * (a.1 - cy);
+            }
+            let angle = 0.5 * (2.0 * xy).atan2(xx - yy);
+            ((cx, cy), (angle.cos(), angle.sin()))
+        })
+        .collect();
+    let parallel = |a: (f64, f64), b: (f64, f64)| (a.0 * b.0 + a.1 * b.1).abs() >= 0.9;
+    let mut out = Vec::new();
+    for (i, (key, pts)) in points.iter().enumerate() {
+        // Crossing lines mapped at or over this one, one per heading; a tie may end up either way.
+        let mut over: Vec<(f64, f64)> = Vec::new();
+        for (j, (other, _)) in points.iter().enumerate() {
+            let (a, b) = (shape[i], shape[j]);
+            let near = (a.0 .0 - b.0 .0).hypot(a.0 .1 - b.0 .1) <= INTERCHANGE_M;
+            if near
+                && i != j
+                && *other >= *key
+                && !parallel(a.1, b.1)
+                && !over.iter().any(|&h| parallel(h, b.1))
+            {
+                over.push(b.1);
+            }
+        }
+        let rank = over.len().min(2) as i32;
+        let depth = crate::element_processing::stations::HALL_DEPTH
+            + crate::element_processing::stations::HALL_STACK * rank;
+        out.extend(
+            pts.iter()
+                .map(|&(lat, lon)| StationHint { lat, lon, depth }),
+        );
+    }
+    out
+}
+
 /// Whether a structure this tall could reach past the vanilla ceiling at `scale`. Anything
 /// shorter stays under it wherever the terrain itself fits.
 pub(crate) fn may_pass_vanilla(height_m: f64, scale: f64) -> bool {
     height_m * scale > f64::from(super::postprocess::TERRAIN_HEIGHT_BUFFER - 2)
+}
+
+/// Spacing in metres of the points `terrain_ways` lays along a tunnel: finer than the land
+/// cover, so a bore under a narrow river still puts a point on its water.
+const BORE_STEP_M: f64 = 2.0;
+
+/// Whether a way with these tags is bored as a tunnel: a road or track tagged as one, or a
+/// subway not tagged otherwise. Errs wide, as a hint only leaves room.
+fn is_bored(tags: &HashMap<String, String>) -> bool {
+    let tunnel = tags.get("tunnel").map(String::as_str);
+    let railway = tags.get("railway").map(String::as_str);
+    (tunnel == Some("yes") && (tags.contains_key("highway") || railway.is_some()))
+        || (railway == Some("subway") && tunnel != Some("no"))
+}
+
+/// Points along the bored ways, and the `(lat, lon)` lines of the graded ones.
+type TerrainWays = (Vec<(f64, f64)>, Vec<Vec<(f64, f64)>>);
+
+/// The ways of a raw OSM fetch the terrain needs, from one pass over it: points every
+/// `BORE_STEP_M` along those bored as tunnels, and the `(lat, lon)` lines of those graded
+/// into the ground when `graded` is set, with roads and railways if it is true.
+fn terrain_ways(data: &crate::osm_parser::OsmData, graded: Option<bool>) -> TerrainWays {
+    let [bored, graded] = way_lines(data, |tags| {
+        if is_bored(tags) {
+            Some(0)
+        } else {
+            graded.filter(|&roads| is_graded(tags, roads)).map(|_| 1)
+        }
+    });
+    let mut points = Vec::new();
+    for line in bored {
+        points.extend(line.first());
+        for pair in line.windows(2) {
+            let (a, b) = (pair[0], pair[1]);
+            let (ew, ns) = extent_m([a, b].into_iter());
+            let steps = ((ew.hypot(ns) / BORE_STEP_M).ceil() as usize).max(1);
+            points.extend((1..=steps).map(|k| {
+                let t = k as f64 / steps as f64;
+                (a.0 + (b.0 - a.0) * t, a.1 + (b.1 - a.1) * t)
+            }));
+        }
+    }
+    (points, graded)
+}
+
+/// Whether a way with these tags is graded into the ground: a waterway, or with `roads` a
+/// road, railway or building outline, on the ground rather than through or over it. Trails
+/// keep the ground's own lie.
+fn is_graded(tags: &HashMap<String, String>, roads: bool) -> bool {
+    if ["tunnel", "bridge"]
+        .iter()
+        .any(|key| tags.get(*key).is_some_and(|v| v != "no"))
+    {
+        return false;
+    }
+    let is =
+        |key: &str, values: &[&str]| tags.get(key).is_some_and(|v| values.contains(&v.as_str()));
+    is(
+        "waterway",
+        &[
+            "river",
+            "stream",
+            "canal",
+            "ditch",
+            "drain",
+            "brook",
+            "tidal_channel",
+        ],
+    ) || (roads
+        && (tags.get("building").is_some_and(|v| v != "no")
+            || tags.get("highway").is_some_and(|v| {
+                !matches!(
+                    v.as_str(),
+                    "path"
+                        | "footway"
+                        | "bridleway"
+                        | "steps"
+                        | "via_ferrata"
+                        | "corridor"
+                        | "elevator"
+                        | "platform"
+                        | "proposed"
+                        | "abandoned"
+                        | "razed"
+                        | "disused"
+                )
+            })
+            || is(
+                "railway",
+                &[
+                    "rail",
+                    "light_rail",
+                    "narrow_gauge",
+                    "tram",
+                    "funicular",
+                    "monorail",
+                    "preserved",
+                    "miniature",
+                ],
+            )))
+}
+
+/// The `(lat, lon)` lines of the ways `kind` sorts into one of `N` kinds, by kind: one pass
+/// over the ways and one node index for all kinds. A way is split where the fetch lacks a
+/// node, so a road leaving the area and coming back is not joined across the gap.
+fn way_lines<const N: usize>(
+    data: &crate::osm_parser::OsmData,
+    kind: impl Fn(&HashMap<String, String>) -> Option<usize>,
+) -> [Vec<Vec<(f64, f64)>>; N] {
+    let ways: Vec<(usize, &[u64])> = data
+        .elements()
+        .iter()
+        .filter(|e| e.r#type == "way")
+        .filter_map(|e| Some((kind(e.tags.as_ref()?)?, e.nodes.as_deref()?)))
+        .collect();
+    let mut lines: [Vec<Vec<(f64, f64)>>; N] = std::array::from_fn(|_| Vec::new());
+    if ways.is_empty() {
+        return lines;
+    }
+    let wanted: HashSet<u64> = ways.iter().flat_map(|(_, w)| w.iter().copied()).collect();
+    let at: HashMap<u64, (f64, f64)> = data
+        .elements()
+        .iter()
+        .filter(|e| e.r#type == "node" && wanted.contains(&e.id))
+        .filter_map(|e| Some((e.id, (e.lat?, e.lon?))))
+        .collect();
+    for (k, way) in ways {
+        let mut line = Vec::new();
+        for id in way {
+            match at.get(id) {
+                Some(&p) => line.push(p),
+                None if !line.is_empty() => lines[k].push(std::mem::take(&mut line)),
+                None => {}
+            }
+        }
+        if !line.is_empty() {
+            lines[k].push(line);
+        }
+    }
+    lines
+}
+
+/// The land-cover cells (column, row) of `bores` that lie on water, over `bbox`, in order.
+pub(crate) fn bore_water_cells(
+    land_cover: &crate::land_cover::LandCoverData,
+    bbox: &LLBBox,
+    bores: &[(f64, f64)],
+) -> Vec<(usize, usize)> {
+    let (w, h) = (land_cover.width, land_cover.height);
+    if w < 2 || h < 2 {
+        return Vec::new();
+    }
+    let (min_lat, max_lat) = (bbox.min().lat(), bbox.max().lat());
+    let (min_lon, max_lon) = (bbox.min().lng(), bbox.max().lng());
+    let mut cells: Vec<(usize, usize)> = bores
+        .iter()
+        .filter(|&&(lat, lon)| inside(bbox, lat, lon))
+        .map(|&(lat, lon)| {
+            let x = ((lon - min_lon) / (max_lon - min_lon) * (w - 1) as f64).round() as usize;
+            let y = ((max_lat - lat) / (max_lat - min_lat) * (h - 1) as f64).round() as usize;
+            (x, y)
+        })
+        .filter(|&(x, y)| {
+            land_cover.grid.get(y).and_then(|row| row.get(x)) == Some(&crate::land_cover::LC_WATER)
+        })
+        .collect();
+    cells.sort_unstable();
+    cells.dedup();
+    cells
 }
 
 /// Whether a point lies in `bbox`, edges included.
@@ -586,6 +952,71 @@ mod tests {
     }
 
     #[test]
+    fn crossing_underground_lines_ask_for_room_a_storey_under_each_other() {
+        use crate::element_processing::stations::{HALL_DEPTH, HALL_STACK};
+        // An east-west and a north-south platform crossing, a far one and a surface one.
+        let hints = |levels: [&str; 2]| {
+            let data: crate::osm_parser::OsmData = serde_json::from_str(&format!(
+                r#"{{"elements": [
+                    {{"type": "node", "id": 1, "lat": 48.0, "lon": 11.0}},
+                    {{"type": "node", "id": 2, "lat": 48.0, "lon": 11.001}},
+                    {{"type": "node", "id": 3, "lat": 47.9996, "lon": 11.0005}},
+                    {{"type": "node", "id": 4, "lat": 48.0004, "lon": 11.0005}},
+                    {{"type": "node", "id": 5, "lat": 48.0, "lon": 11.02}},
+                    {{"type": "node", "id": 6, "lat": 48.0, "lon": 11.021}},
+                    {{"type": "way", "id": 10, "nodes": [1, 2], "tags": {{"railway": "platform", "location": "underground"{}}}}},
+                    {{"type": "way", "id": 11, "nodes": [3, 4], "tags": {{"railway": "platform", "location": "underground"{}}}}},
+                    {{"type": "way", "id": 12, "nodes": [5, 6], "tags": {{"railway": "platform", "tunnel": "yes"}}}},
+                    {{"type": "way", "id": 13, "nodes": [1, 2], "tags": {{"railway": "platform"}}}}
+                ]}}"#,
+                levels[0], levels[1]
+            ))
+            .unwrap();
+            let hints = station_hints(&data);
+            assert_eq!(hints.len(), 6);
+            [(48.0, 11.0), (47.9996, 11.0005), (48.0, 11.02)].map(|(lat, lon)| {
+                hints
+                    .iter()
+                    .find(|h| h.lat == lat && h.lon == lon)
+                    .unwrap()
+                    .depth
+            })
+        };
+        let (one, two) = (HALL_DEPTH, HALL_DEPTH + HALL_STACK);
+        // Untagged, either may end up under the other.
+        assert_eq!(hints(["", ""]), [two, two, one]);
+        assert_eq!(
+            hints([r#", "level": "-1""#, r#", "level": "-2""#]),
+            [one, two, one]
+        );
+    }
+
+    #[test]
+    fn an_untagged_platform_beside_a_bored_track_asks_for_room() {
+        use crate::element_processing::stations::HALL_DEPTH;
+        let data: crate::osm_parser::OsmData = serde_json::from_str(
+            r#"{"elements": [
+                {"type": "node", "id": 1, "lat": 48.0001, "lon": 11.0},
+                {"type": "node", "id": 2, "lat": 48.0001, "lon": 11.001},
+                {"type": "node", "id": 3, "lat": 48.0, "lon": 10.999},
+                {"type": "node", "id": 4, "lat": 48.0, "lon": 11.002},
+                {"type": "node", "id": 5, "lat": 48.01, "lon": 11.0},
+                {"type": "node", "id": 6, "lat": 48.01, "lon": 11.001},
+                {"type": "way", "id": 10, "nodes": [1, 2], "tags": {"railway": "platform"}},
+                {"type": "way", "id": 11, "nodes": [3, 4], "tags": {"railway": "subway"}},
+                {"type": "way", "id": 12, "nodes": [5, 6], "tags": {"railway": "platform"}},
+                {"type": "way", "id": 13, "nodes": [1, 2], "tags": {"railway": "platform", "tunnel": "no"}}
+            ]}"#,
+        )
+        .unwrap();
+        let hints = station_hints(&data);
+        assert_eq!(hints.len(), 2);
+        assert!(hints
+            .iter()
+            .all(|h| h.lat == 48.0001 && h.depth == HALL_DEPTH));
+    }
+
+    #[test]
     fn tall_structures_are_buildings_towers_and_masts_with_a_height() {
         let data: crate::osm_parser::OsmData = serde_json::from_str(
             r#"{"elements": [
@@ -644,6 +1075,111 @@ mod tests {
         ] {
             assert!(hints(none).is_empty(), "{none:?}");
         }
+    }
+
+    #[test]
+    fn graded_ways_are_surface_roads_railways_waterways_and_buildings() {
+        let data: crate::osm_parser::OsmData = serde_json::from_str(
+            r#"{"elements": [
+                {"type": "node", "id": 1, "lat": 46.000, "lon": 8.000},
+                {"type": "node", "id": 2, "lat": 46.001, "lon": 8.000},
+                {"type": "way", "id": 10, "nodes": [1, 2], "tags": {"highway": "secondary"}},
+                {"type": "way", "id": 11, "nodes": [1, 2], "tags": {"highway": "track"}},
+                {"type": "way", "id": 12, "nodes": [1, 2], "tags": {"railway": "rail"}},
+                {"type": "way", "id": 13, "nodes": [1, 2], "tags": {"waterway": "stream"}},
+                {"type": "way", "id": 14, "nodes": [1, 2], "tags": {"highway": "path"}},
+                {"type": "way", "id": 15, "nodes": [1, 2], "tags": {"highway": "primary", "tunnel": "yes"}},
+                {"type": "way", "id": 16, "nodes": [1, 2], "tags": {"railway": "abandoned"}},
+                {"type": "way", "id": 17, "nodes": [1, 2], "tags": {"natural": "cliff"}},
+                {"type": "way", "id": 18, "nodes": [1, 99], "tags": {"waterway": "river"}},
+                {"type": "way", "id": 19, "nodes": [1, 2], "tags": {"railway": "rail", "bridge": "viaduct"}},
+                {"type": "way", "id": 20, "nodes": [1, 2], "tags": {"railway": "subway"}},
+                {"type": "way", "id": 21, "nodes": [1, 2, 1], "tags": {"building": "hut"}},
+                {"type": "way", "id": 22, "nodes": [1, 98, 2], "tags": {"highway": "tertiary"}}
+            ]}"#,
+        )
+        .unwrap();
+        // The road, the track, the railway, both waterways and the hut, not the viaduct or
+        // the subway; the river keeps the node the fetch has.
+        let lines = terrain_ways(&data, Some(true)).1;
+        let (p1, p2) = ((46.000, 8.000), (46.001, 8.000));
+        assert_eq!(lines.len(), 8);
+        assert_eq!(lines[0], vec![p1, p2]);
+        assert_eq!(lines[4], vec![p1]);
+        assert_eq!(lines[5], vec![p1, p2, p1]);
+        // A way missing a node in the middle is split there, not joined across the gap.
+        assert_eq!(&lines[6..], &[vec![p1], vec![p2]]);
+        // Without roads only the waterways.
+        assert_eq!(terrain_ways(&data, Some(false)).1.len(), 2);
+        // Nor anything where no detail can run.
+        assert!(terrain_ways(&data, None).1.is_empty());
+    }
+
+    /// A tunnel under a river often has no node on the water, so its points run the whole way.
+    #[test]
+    fn bores_run_along_tunnels_and_find_the_water_they_cross() {
+        let data: crate::osm_parser::OsmData = serde_json::from_str(
+            r#"{"elements": [
+                {"type": "node", "id": 1, "lat": 40.700, "lon": -74.010},
+                {"type": "node", "id": 2, "lat": 40.700, "lon": -74.000},
+                {"type": "node", "id": 3, "lat": 40.705, "lon": -74.010},
+                {"type": "node", "id": 4, "lat": 40.705, "lon": -74.000},
+                {"type": "way", "id": 10, "nodes": [1, 2], "tags": {"railway": "subway"}},
+                {"type": "way", "id": 11, "nodes": [3, 4], "tags": {"highway": "primary", "tunnel": "yes"}},
+                {"type": "way", "id": 12, "nodes": [1, 3], "tags": {"railway": "subway", "tunnel": "no"}},
+                {"type": "way", "id": 13, "nodes": [2, 4], "tags": {"highway": "footway", "tunnel": "building_passage"}},
+                {"type": "way", "id": 14, "nodes": [1, 4], "tags": {"highway": "primary"}}
+            ]}"#,
+        )
+        .unwrap();
+        let bores = terrain_ways(&data, None).0;
+        // Both bored ways, about 840 m each, every two metres; none of the others.
+        assert!((800..900).contains(&bores.len()), "{}", bores.len());
+        assert!(bores.iter().all(|&(lat, _)| lat == 40.700 || lat == 40.705));
+        let gap = bores
+            .windows(2)
+            .filter(|p| p[0].0 == p[1].0)
+            .map(|p| extent_m(p.iter().copied()).0)
+            .fold(0.0, f64::max);
+        assert!(gap <= BORE_STEP_M, "{gap} m between points");
+
+        // A river between lon -74.006 and -74.004, on a 100-cell land cover over the area.
+        let bbox = LLBBox::new(40.695, -74.012, 40.710, -73.998).unwrap();
+        let cover = |water: bool| {
+            let n = 100;
+            let grid = (0..n)
+                .map(|_| {
+                    (0..n)
+                        .map(|x| {
+                            let lon = -74.012 + 0.014 * x as f64 / (n - 1) as f64;
+                            if water && (-74.006..-74.004).contains(&lon) {
+                                crate::land_cover::LC_WATER
+                            } else {
+                                crate::land_cover::LC_GRASSLAND
+                            }
+                        })
+                        .collect()
+                })
+                .collect();
+            crate::land_cover::LandCoverData {
+                grid,
+                water_distance: vec![vec![0u8; n]; n],
+                water_blend_cache: once_cell::sync::OnceCell::new(),
+                beach_tiles: once_cell::sync::OnceCell::new(),
+                inland_water: Default::default(),
+                width: n,
+                height: n,
+                cells_per_meter: 1.0,
+            }
+        };
+        let crossed = bore_water_cells(&cover(true), &bbox, &bores);
+        // Both bores cross the river's 14 or so columns, each cell once.
+        assert!((20..=34).contains(&crossed.len()), "{crossed:?}");
+        assert!(crossed.windows(2).all(|p| p[0] < p[1]));
+        assert!(bore_water_cells(&cover(false), &bbox, &bores).is_empty());
+        // Water outside the area the land cover covers does not count.
+        let away = LLBBox::new(40.800, -74.012, 40.815, -73.998).unwrap();
+        assert!(bore_water_cells(&cover(true), &away, &bores).is_empty());
     }
 
     // The IHZ: a 25-storey outline is built as its 93.5 m flat parts, so only they count.

@@ -1,4 +1,5 @@
 pub mod cache;
+mod detail;
 pub mod peaks;
 pub mod postprocess;
 pub mod provider;
@@ -54,6 +55,9 @@ pub struct ElevationData {
     pub(crate) soft_top: Option<SoftTop>,
     /// The fit used a ceiling a pack raised above vanilla's.
     pub(crate) extended_ceiling: bool,
+    /// When the fit raised the build height for this area itself: the highest terrain Y and
+    /// the tallest building or model on it, in blocks. They size the raised dimension.
+    pub(crate) raised_for: Option<RaisedFor>,
     /// The margin `crop` cut away, read only past the area.
     pub(crate) halo: Option<Halo>,
 }
@@ -116,6 +120,37 @@ impl Halo {
     }
 }
 
+/// What an area that needed more than vanilla's height reaches, so its dimension is
+/// raised only that far.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct RaisedFor {
+    pub terrain_top_y: i32,
+    pub tallest_blocks: i32,
+    /// Overture's structures still have to be counted, by `with_overture`.
+    pub overture_pending: bool,
+}
+
+impl RaisedFor {
+    /// Counts Overture's structures too, waiting for them if the fit did not. Waited for
+    /// here rather than in the fit, so the terrain work after it runs while they download.
+    pub(crate) fn with_overture(self, peaks: &PeakSource, scale: f64) -> Self {
+        if !self.overture_pending {
+            return self;
+        }
+        let tallest = (tallest_m(&peaks.take_overture()) * scale).ceil() as i32;
+        Self {
+            tallest_blocks: self.tallest_blocks.max(tallest),
+            overture_pending: false,
+            ..self
+        }
+    }
+}
+
+/// Height of the tallest of `models`, in metres.
+fn tallest_m(models: &[TallModel]) -> f64 {
+    models.iter().map(|m| m.height_m).fold(0.0, f64::max)
+}
+
 /// Room the height fit has: the base it starts from, the lowest base it may sink to and the
 /// ceiling (`extended_max_y` when `disable_height_limit`, vanilla's otherwise).
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -124,11 +159,57 @@ pub struct HeightBand {
     pub min_ground_level: i32,
     pub disable_height_limit: bool,
     pub extended_max_y: i32,
+    /// The world's floor, which a tunnel under carved water has to keep off.
+    pub floor_y: i32,
 }
 
 impl HeightBand {
     fn extended_ceiling(&self) -> bool {
         self.disable_height_limit && self.extended_max_y > crate::world_editor::DEFAULT_MAX_Y
+    }
+
+    /// This band, its base high enough that a tunnel under each of `crossings` keeps its
+    /// cover under the carved bed, `BORE_ROOM` over the floor. A body's surface stands as
+    /// far over the base as its lowest terrain over the area's lowest, `lo_m`, at `bpm`
+    /// blocks per metre, so water up the relief needs less of a lift, and a shallow body
+    /// less than the deepest. Only as much as the deepest of them needs, then.
+    fn with_bore_room(
+        self,
+        crossings: &[crate::water_depth::BoreCrossing],
+        lo_m: f64,
+        range_m: f64,
+        bpm: f64,
+    ) -> Self {
+        let room = |c: &crate::water_depth::BoreCrossing, over_base: i32| {
+            self.floor_y + c.depth + 2 + crate::water_depth::BORE_ROOM - over_base
+        };
+        let Some(worst) = crossings.iter().map(|c| room(c, 0)).max() else {
+            return self;
+        };
+        // The fit keeps the full scale while the relief takes at most half the column over
+        // the base, all a top reserve leaves it. Past that it may compress the relief, and
+        // a body up it then stands lower than its terrain says: count none of its height.
+        let ceiling = postprocess::terrain_ceiling(self.disable_height_limit, self.extended_max_y);
+        let exact = range_m * bpm <= f64::from(ceiling - worst.max(self.ground_level)) / 2.0;
+        let needed = crossings
+            .iter()
+            .map(|c| {
+                // Two blocks short, for the levelling and the snap of a water surface.
+                let over_base = if exact && c.lowest_m.is_finite() {
+                    (((c.lowest_m - lo_m) * bpm).floor() as i32 - 2).max(0)
+                } else {
+                    0
+                };
+                room(c, over_base)
+            })
+            .max()
+            .unwrap_or(worst);
+        let ground_level = self.ground_level.max(needed);
+        Self {
+            ground_level,
+            min_ground_level: self.min_ground_level.max(needed).min(ground_level),
+            ..self
+        }
     }
 }
 
@@ -297,6 +378,36 @@ pub fn compute_grid_dims(bbox: &LLBBox, scale: f64) -> (usize, usize, usize, usi
     compute_grid_dims_for_world(world_width, world_height)
 }
 
+/// A `BoreCrossing` per platform point a hall is dug under: room for the hall's depth over
+/// the floor, on the terrain there.
+fn station_crossings(
+    stations: &[peaks::StationHint],
+    bbox: &LLBBox,
+    height_grid: &[Vec<f64>],
+) -> Vec<crate::water_depth::BoreCrossing> {
+    let gh = height_grid.len();
+    let gw = height_grid.first().map_or(0, Vec::len);
+    if gw < 2 || gh < 2 {
+        return Vec::new();
+    }
+    let (min_lat, max_lat) = (bbox.min().lat(), bbox.max().lat());
+    let (min_lon, max_lon) = (bbox.min().lng(), bbox.max().lng());
+    stations
+        .iter()
+        .filter(|s| peaks::inside(bbox, s.lat, s.lon))
+        .filter_map(|s| {
+            let x = ((s.lon - min_lon) / (max_lon - min_lon) * (gw - 1) as f64).round() as usize;
+            let y = ((max_lat - s.lat) / (max_lat - min_lat) * (gh - 1) as f64).round() as usize;
+            let h = *height_grid.get(y)?.get(x)?;
+            // The room asked is depth + 2 + BORE_ROOM over the floor; a hall wants depth + 1.
+            h.is_finite().then(|| crate::water_depth::BoreCrossing {
+                depth: s.depth - 1 - crate::water_depth::BORE_ROOM,
+                lowest_m: h,
+            })
+        })
+        .collect()
+}
+
 /// `compute_grid_dims` for a world whose block size is already known.
 pub fn compute_grid_dims_for_world(
     world_width: usize,
@@ -322,6 +433,15 @@ pub fn compute_grid_dims_for_world(
     (world_width, world_height, grid_width, grid_height)
 }
 
+/// A One World area's margin: the grid runs `pad` cells past the area on every side. With
+/// one cell per block its cell (0, 0) is world block `origin`, so neighbouring areas can
+/// line up what they work out over the margin they share.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Seam {
+    pub pad: usize,
+    pub origin: Option<(i64, i64)>,
+}
+
 /// Fetch elevation data for the given bounding box.
 ///
 /// Fetches from Mapterhorn, falling back to AWS Terrain Tiles if it fails.
@@ -336,7 +456,7 @@ pub fn compute_grid_dims_for_world(
 /// `dims` comes from `compute_grid_dims`, so it matches the land cover grid.
 /// `height_multiplier` scales blocks per metre on the vertical axis only.
 /// The fit uses `band`, or `taller` when the area needs more room than `band` has.
-/// `seam_pad` is a One World's margin around its area, in cells.
+/// `seam` is set for a One World's area, fetched with a margin past its edges.
 #[allow(clippy::too_many_arguments)]
 pub fn fetch_elevation_data(
     bbox: &LLBBox,
@@ -344,13 +464,13 @@ pub fn fetch_elevation_data(
     height_multiplier: f64,
     band: HeightBand,
     taller: Option<HeightBand>,
-    land_cover: Option<&mut LandCoverData>,
+    mut land_cover: Option<&mut LandCoverData>,
     source_mode: SourceMode,
     benchmark: bool,
     dims: (usize, usize, usize, usize),
     affine: AffinePolicy,
     peaks: &PeakSource,
-    seam_pad: Option<usize>,
+    seam: Option<Seam>,
 ) -> Result<ElevationData, Box<dyn std::error::Error>> {
     let mut bench = crate::bench::Bench::new(benchmark);
     let (world_width, world_height, grid_width, grid_height) = dims;
@@ -370,7 +490,10 @@ pub fn fetch_elevation_data(
     emit_gui_progress_update(12.0, "Processing elevation...");
 
     // Shared post-processing pipeline
-    let mut height_grid = raw.heights_meters;
+    let RawElevationGrid {
+        heights_meters: mut height_grid,
+        source_pixels,
+    } = raw;
     let (bbox_height_m, bbox_width_m) = geo_distance(bbox.min(), bbox.max());
     let m_per_cell = (bbox_width_m / grid_width as f64 + bbox_height_m / grid_height as f64) * 0.5;
     // Both passes target Earth DSM defects and actively damage altimetry: the outlier
@@ -419,7 +542,7 @@ pub fn fetch_elevation_data(
         (0.0, 0)
     };
 
-    if let Some(lc) = land_cover {
+    if let Some(lc) = land_cover.as_deref_mut() {
         // The land-cover Gaussian is the slowest elevation step on big areas;
         // animate the bar across 14->16% as it runs instead of freezing.
         apply_land_cover_repair(
@@ -432,20 +555,96 @@ pub fn fetch_elevation_data(
         );
     }
     bench.mark("elev_landcover_repair");
+    let mut hints = peaks.take();
+    let graded = std::mem::take(&mut hints.graded);
+    // After the repairs, which would smooth it away, and before the peaks, which set their
+    // summits over it. Only where the source was coarse.
+    if let Some(source) = source_pixels {
+        let changed = detail::add_steep_detail(
+            &mut height_grid,
+            bbox,
+            &source,
+            scale,
+            seam.and_then(|s| s.origin),
+            land_cover.as_deref(),
+            &graded,
+        );
+        if changed > 0 {
+            println!(
+                "Steep detail: roughened {:.1}% of the terrain, steep ground with only coarse elevation data",
+                changed as f64 * 100.0 / (grid_width * grid_height) as f64
+            );
+        }
+    }
+    drop(graded);
+    bench.mark("elev_steep_detail");
     // After the repairs, which would smooth a restored needle back down, and
     // before the fit, so the summit counts towards the height range.
-    let mut hints = peaks.take();
-    peaks::raise_peaks(&mut height_grid, bbox, &hints.peaks, m_per_cell, seam_pad);
+    peaks::raise_peaks(
+        &mut height_grid,
+        bbox,
+        &hints.peaks,
+        m_per_cell,
+        seam.map(|s| s.pad),
+    );
+    // A tunnel under the water has to get under its carved bed, and the floor the carve
+    // was given may leave no room for one.
+    let mut crossings = land_cover.as_deref().map_or_else(Vec::new, |lc| {
+        let cells = peaks::bore_water_cells(lc, bbox, &hints.bores);
+        // The repair skips a land cover of another size than the heights; so do these.
+        crate::water_depth::bore_crossings(&lc.grid, world_width, world_height, &cells, |x, y| {
+            height_grid
+                .get(y)
+                .and_then(|row| row.get(x))
+                .copied()
+                .unwrap_or(f64::NAN)
+        })
+    });
+    // A station hall needs its depth over the floor too, on the ground over its platform.
+    crossings.extend(station_crossings(&hints.stations, bbox, &height_grid));
+    let (band, taller) = if crossings.is_empty() {
+        (band, taller)
+    } else {
+        let (lo, hi) = height_grid
+            .iter()
+            .flatten()
+            .filter(|h| h.is_finite())
+            .fold((f64::MAX, f64::MIN), |(a, b), &h| (a.min(h), b.max(h)));
+        let lift = |b: HeightBand| {
+            b.with_bore_room(
+                &crossings,
+                lo,
+                (hi - lo).max(0.0),
+                scale * height_multiplier,
+            )
+        };
+        (lift(band), taller.map(lift))
+    };
+    // Overture's list can be read only once, so its tallest is kept on the way past.
+    let overture_tallest = std::cell::Cell::new(None);
     let band = pick_band(
         &height_grid,
         bbox,
         &hints,
-        || peaks.take_overture(),
+        || {
+            let structures = peaks.take_overture();
+            overture_tallest.set(Some(tallest_m(&structures)));
+            structures
+        },
         scale,
         height_multiplier,
         band,
         taller,
     );
+    // A band raised for this area is sized by the tallest thing standing on it. Overture's
+    // count too, even where OSM's alone made the case; those the fit did not wait for are
+    // left to `RaisedFor::with_overture`.
+    let overture_pending = hints.overture_follows && overture_tallest.get().is_none();
+    let tallest_structure_m = (taller == Some(band)).then(|| {
+        tallest_m(&hints.tall_models)
+            .max(tallest_m(&hints.tall_structures))
+            .max(overture_tallest.get().unwrap_or(0.0))
+    });
     // Only the band needed them, and a city's worth would sit through the fit.
     hints.tall_structures = Vec::new();
     let HeightBand {
@@ -453,6 +652,7 @@ pub fn fetch_elevation_data(
         min_ground_level,
         disable_height_limit,
         extended_max_y,
+        ..
     } = band;
     // The models stand at world scale, not at the terrain's compressed one.
     let top_reserve = match affine {
@@ -534,6 +734,16 @@ pub fn fetch_elevation_data(
         ground_level: effective_ground_level,
         soft_top,
         extended_ceiling: band.extended_ceiling(),
+        // The models stand at world scale, as in the reserve above.
+        raised_for: tallest_structure_m.map(|m| RaisedFor {
+            terrain_top_y: if max_block_height >= min_block_height {
+                max_block_height.ceil() as i32
+            } else {
+                effective_ground_level
+            },
+            tallest_blocks: (m * scale).ceil() as i32,
+            overture_pending,
+        }),
         halo: None,
     })
 }
@@ -632,6 +842,7 @@ mod band_tests {
             min_ground_level: if extended { -2030 } else { -62 },
             disable_height_limit: extended,
             extended_max_y: 2031,
+            floor_y: if extended { -2032 } else { -64 },
         }
     }
 
@@ -723,6 +934,51 @@ mod band_tests {
             ..Default::default()
         };
         assert_eq!(pick(&hills, &elsewhere, true), band(false));
+    }
+
+    /// A tunnel needs room under its water's carved bed: on the vanilla floor the deepest
+    /// lies on bedrock, so the base lifts by what the crossed water needs, and no more.
+    #[test]
+    fn a_bore_under_the_water_lifts_the_base_by_what_its_water_needs() {
+        use crate::water_depth::BoreCrossing;
+        let lift = |b: HeightBand, crossings: &[BoreCrossing], range_m: f64| {
+            let b = b.with_bore_room(crossings, 0.0, range_m, 1.0);
+            (b.ground_level, b.min_ground_level)
+        };
+        let deep = BoreCrossing {
+            depth: 6,
+            lowest_m: 0.0,
+        };
+        let shallow = BoreCrossing {
+            depth: 2,
+            lowest_m: 0.0,
+        };
+        // A carve six deep at the area's lowest point: the floor, the bed and its block
+        // under it, the depth and the room.
+        assert_eq!(lift(band(false), &[deep], 50.0), (-48, -48));
+        assert_eq!(lift(band(false), &[shallow, deep], 50.0), (-48, -48));
+        assert_eq!(lift(band(false), &[shallow], 50.0), (-52, -52));
+        // Water 10 m up the relief stands 10 blocks over the base, less two to be safe.
+        let up = BoreCrossing {
+            depth: 6,
+            lowest_m: 10.0,
+        };
+        assert_eq!(lift(band(false), &[up], 50.0), (-56, -56));
+        // ...unless the relief is tall enough that the fit may compress it.
+        assert_eq!(lift(band(false), &[up], 300.0), (-48, -48));
+        // The extended floor has room, and a base already over the need stays.
+        let extended = band(true).with_bore_room(&[deep], 0.0, 50.0, 1.0);
+        assert_eq!(
+            (extended.ground_level, extended.min_ground_level),
+            (-62, -2016)
+        );
+        let high = HeightBand {
+            ground_level: 10,
+            min_ground_level: 10,
+            ..band(false)
+        };
+        assert_eq!(high.with_bore_room(&[deep], 0.0, 50.0, 1.0), high);
+        assert_eq!(band(false).with_bore_room(&[], 0.0, 50.0, 1.0), band(false));
     }
 
     #[test]

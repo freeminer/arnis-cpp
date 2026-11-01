@@ -831,7 +831,8 @@ fn scanline_fill_water(
                 {
                     continue;
                 }
-                // Over a bore, fill down to the terrain but never carve into it.
+                // Over a bore, fill down to the terrain but never carve into it: its shell
+                // may not be built yet. The land-cover carve deepens it once it is.
                 if tunnel_footprint.contains(x, z) {
                     for y in (ground_y + 1).min(water_y)..=water_y {
                         editor.set_block_absolute(WATER, x, y, z, None, Some(&[]));
@@ -951,6 +952,7 @@ mod tests {
             water_distance: vec![vec![0u8; n]; n],
             water_blend_cache: once_cell::sync::OnceCell::new(),
             beach_tiles: once_cell::sync::OnceCell::new(),
+            inland_water: Default::default(),
             width: n,
             height: n,
             cells_per_meter: 1.0,
