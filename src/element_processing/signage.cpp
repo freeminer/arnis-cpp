@@ -7,6 +7,7 @@
 #include "../strict_parse.h"
 #include "road_mask_search.h"
 #include "highways.h"
+#include "stations.h"
 #include "../unicode_text.h"
 #include <algorithm>
 #include <charconv>
@@ -885,16 +886,46 @@ std::optional<decals::DecalKey> furniture_pictogram(const tags_t &tags)
 	if ((a == "recycling" && tags.get("recycling_type") == "container") ||
 			a == "waste_basket" || a == "waste_disposal")
 		return decals::PictogramKey{"recycling"};
-	if (a == "vending_machine")
-		return decals::PictogramKey{"vending_machine"};
-	if (a == "atm")
-		return decals::PictogramKey{"atm"};
+	if (machine_front(tags))
+		return std::nullopt;
 	if (tags.get("emergency") == "fire_hydrant" &&
 			tags.get("fire_hydrant:type") != "underground" &&
 			tags.get("fire_hydrant:type") != "wall" &&
 			tags.get("fire_hydrant:type") != "pond")
 		return decals::PictogramKey{"hydrant"};
 	return std::nullopt;
+}
+
+std::optional<std::string> machine_front(const tags_t &tags)
+{
+	const auto amenity = tags.get("amenity");
+	if (amenity == "atm")
+		return "atm";
+	if (amenity != "vending_machine")
+		return std::nullopt;
+	const auto vending = tags.get("vending");
+	const auto separator = vending.find(';');
+	auto goods = vending.substr(0, separator);
+	const auto first = goods.find_first_not_of(" \t\r\n");
+	if (first == std::string::npos)
+		goods.clear();
+	else
+		goods = goods.substr(first, goods.find_last_not_of(" \t\r\n") - first + 1);
+	if (goods == "excrement_bags")
+		return "dog_bags";
+	if (goods == "condoms" || goods == "chewing_gum" || goods == "stamps" ||
+			goods == "newspapers")
+		return "dispenser";
+	if (goods == "elongated_coin")
+		return "coin_press";
+	if (goods == "public_transport_tickets" || goods == "parking_tickets" ||
+			goods == "admission_tickets" || goods == "fuel")
+		return "ticket_machine";
+	if (goods == "drinks" || goods == "water" || goods == "coffee" || goods == "milk" ||
+			goods == "hot_drinks" || goods == "soft_drinks" || goods == "beverages" ||
+			goods == "juice" || goods == "beer" || goods == "wine")
+		return "vending_drinks";
+	return "vending_snacks";
 }
 
 void SignageContext::note(const char *kind, int x, int y, int z) const
@@ -979,6 +1010,8 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 				keys.insert(*key);
 			if (auto key = furniture_pictogram(node.tags))
 				keys.insert(*key);
+			if (const auto machine = machine_front(node.tags))
+				keys.insert(decals::MachineKey{*machine});
 			for (auto &key : advertising_keys(node.tags, node.id))
 				keys.insert(std::move(key));
 			if (tags.get("highway") == "bus_stop") {
@@ -1009,6 +1042,12 @@ std::shared_ptr<const decals::DecalRegistry> build_registry(
 			else if (subway)
 				keys.insert(decals::PictogramKey{decals::metro_logo(region)});
 			if (auto key = plaque_key(tags))
+				keys.insert(*key);
+		}
+		if (!element.is_node() && stations::is_rail_platform(element.tags()) &&
+				!stations::tagged_underground(element.tags()) &&
+				!stations::is_low(element.tags())) {
+			if (const auto key = platform_name_key(element.tags()))
 				keys.insert(*key);
 		}
 	}
@@ -2105,6 +2144,28 @@ std::optional<decals::DecalKey> plaque_key(const tags_t &tags)
 	if (text.empty() || !decals::font::supports(text))
 		return std::nullopt;
 	return decals::DecalKey::text({decals::TextStyleKind::Plaque}, text, 1);
+}
+
+std::optional<decals::DecalKey> platform_name_key(const tags_t &tags)
+{
+	const auto name = clean_name(tags.get("name"));
+	if (name.empty() || !decals::font::supports(name))
+		return std::nullopt;
+	return decals::DecalKey::text({decals::TextStyleKind::StationBoard}, name, 3);
+}
+
+bool place_platform_name(WorldEditor &editor, int x, int y, int z, std::int8_t facing,
+		const std::string &name)
+{
+	tags_t tags;
+	tags.emplace("name", name);
+	const auto sign = make_name_sign(tags, {decals::TextStyleKind::StationBoard}, 3);
+	if (!sign)
+		return false;
+	if (sign->key &&
+			(!editor.signage_context || !editor.signage_context->has(*sign->key)))
+		return false;
+	return place_name_sign(editor, x, y, z, facing, *sign);
 }
 
 bool generate_plaque(WorldEditor &editor, const ProcessedNode &node)

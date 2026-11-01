@@ -9,6 +9,7 @@
 
 #include "../bresenham.h"
 #include "../strict_parse.h"
+#include "../water_depth.h"
 #include "../world_editor/floor_state.h"
 #include "bridges.h"
 #include "surfaces.h"
@@ -22,6 +23,8 @@ int highway_block_range(const std::string &highway_type,
 namespace
 {
 constexpr int CEIL_OFFSET = 5, COVER_DROP = 7, RAMP_RUN = 3, LAYER_DROP = 7;
+static_assert(COVER_DROP < water_depth::BORE_ROOM);
+
 int min_road_y()
 {
 	return world_editor::terrain_floor_y() + 2;
@@ -434,6 +437,17 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 	const int wall = hw + 1;
 	const auto [terrain, cover] = tunnel_cover_profile(editor, pts, wall);
 	const size_t last = pts.size() - 1;
+	// Water is carved down to its bed after the tunnel shell is planned. Aim the
+	// bore below the deepest bed across its footprint so the later water pass
+	// cannot leave the road roof standing in the channel.
+	std::vector<int> aim_y;
+	aim_y.reserve(pts.size());
+	for (std::size_t i = 0; i < pts.size(); ++i) {
+		const auto [x, z] = pts[i];
+		const int surface = cover[i];
+		const auto bed = editor.lowest_carved_bed(x, z, wall);
+		aim_y.push_back(bed ? std::min(*bed, surface) : surface);
+	}
 	const bool start_internal = internal.contains(pts.front()),
 			   end_internal = internal.contains(pts.back());
 	const int extra = layer_extra(way);
@@ -455,7 +469,7 @@ bool generate_highway_tunnel_shell(WorldEditor &editor, const ProcessedWay &way,
 				std::round(static_cast<float>(terrain.front()) +
 						   static_cast<float>(terrain.back() - terrain.front()) * t));
 		const int cover_drop = COVER_DROP + extra;
-		const int desired = std::min(grade, cover[i] - cover_drop);
+		const int desired = std::min(grade, aim_y[i] - cover_drop);
 		const int rs = start_internal ? INT_MIN
 									  : terrain.front() - start_drop -
 												static_cast<int>(i) / RAMP_RUN;

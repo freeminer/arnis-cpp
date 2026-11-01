@@ -16,9 +16,10 @@ namespace arnis::terrain_surface
 namespace
 {
 constexpr uint32_t STRATA_WARP = 0x5157A7A1, LEDGE = 0x1ED6E5A1, SCREE = 0x5C4EE0B2,
-				   WORN = 0x0B0A4E11, BARE_ROCK = 0xBA4E40C3, SNOW_LINE = 0x5A0E11A4,
-				   SNOW_DRIFT = 0xD41F7B05, SNOW_FIELD = 0xF1E1D5A0,
-				   STRATA_WAVE = 0x5157A7A2, BED_EDGE = 0x5157A7A4, BED_LENS = 0x5157A7A5,
+				   WORN = 0x0B0A4E11, BARE_ROCK = 0xBA4E40C3, FRAY = 0xF4A73D19,
+				   SNOW_LINE = 0x5A0E11A4, SNOW_DRIFT = 0xD41F7B05,
+				   SNOW_FIELD = 0xF1E1D5A0, STRATA_WAVE = 0x5157A7A2,
+				   BED_EDGE = 0x5157A7A4, BED_LENS = 0x5157A7A5,
 				   SCREE_EDGE_SALT = 0x5C4EED6E, STREAK = 0x57EAC0DE,
 				   STREAK_RUN = 0x57EA0F11, SHADE_X = 0x05ADE0A1, SHADE_Z = 0x05ADE0B2;
 constexpr int BED_FLOOR = -2200, BED_CEIL = 4200;
@@ -31,6 +32,29 @@ const std::array<Block, 6> &face_ramp()
 	static const std::array<Block, 6> blocks{
 			ANDESITE, STONE, COBBLESTONE, TUFF, COBBLED_DEEPSLATE, DEEPSLATE};
 	return blocks;
+}
+
+const std::array<Block, 6> &red_ramp()
+{
+	static const std::array<Block, 6> blocks{SMOOTH_RED_SANDSTONE, RED_SANDSTONE,
+			ORANGE_TERRACOTTA, TERRACOTTA, RED_TERRACOTTA, BROWN_TERRACOTTA};
+	return blocks;
+}
+
+const std::array<Block, 6> &ramp(Rock rock)
+{
+	return rock == Rock::Red ? red_ramp() : face_ramp();
+}
+
+Block rock_base(Rock rock)
+{
+	return rock == Rock::Red ? RED_SANDSTONE : STONE;
+}
+
+std::pair<Block, Block> rock_loose(Rock rock)
+{
+	return rock == Rock::Red ? std::pair{RED_SAND, RED_SANDSTONE}
+							 : std::pair{GRAVEL, STONE};
 }
 
 double value_noise_salted(int x, int z, int scale, uint32_t salt)
@@ -132,6 +156,18 @@ bool vegetated(uint8_t c)
 }
 }
 
+std::pair<int, int> fray_red_earth(int x, int z)
+{
+	const auto shift = [x, z](std::uint32_t salt) {
+		return static_cast<int>((value_noise_salted(x, z, 32, salt) - .5) * 80.0);
+	};
+	const auto add_wrapped = [](int a, int b) {
+		return std::bit_cast<std::int32_t>(
+				static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b));
+	};
+	return {add_wrapped(x, shift(FRAY)), add_wrapped(z, shift(std::rotl(FRAY, 11)))};
+}
+
 Strata Strata::at(int x, int z)
 {
 	return {x, z,
@@ -143,15 +179,17 @@ Block Strata::block(int y) const
 	std::size_t cursor = 0;
 	return bed_kind(x, z, stratum_layer(x, z, warp, y, cursor));
 }
-void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks)
+void fill_strata(
+		WorldEditor &editor, int x, int z, int lo, int hi, bool streaks, Rock rock)
 {
 	if (lo > hi)
 		return;
 	const auto s = Strata::at(x, z);
 	const auto streak_noise = streaks ? noise(x, z, 3, STREAK) : 1.0;
-	const Block streak_block = streak_noise < .08	? DEEPSLATE
-							   : streak_noise < .22 ? TUFF
-													: Block{};
+	const Block streak_block =
+			streak_noise < .08	 ? (rock == Rock::Red ? BROWN_TERRACOTTA : DEEPSLATE)
+			: streak_noise < .22 ? (rock == Rock::Red ? RED_TERRACOTTA : TUFF)
+								 : Block{};
 	const bool has_streak = streaks && streak_noise < .22;
 	std::size_t cursor = 0;
 	int layer = stratum_layer(x, z, s.warp, lo, cursor);
@@ -181,7 +219,7 @@ void fill_strata(WorldEditor &editor, int x, int z, int lo, int hi, bool streaks
 			kind = bed_kind(x, z, layer);
 		}
 		const double tone = tone_a + (tone_b - tone_a) * double(y - tone_y) / TONE_STEP;
-		return face_ramp()[ramp_step(kind, tone, hi + 1 - y)];
+		return ramp(rock)[ramp_step(kind, tone, hi + 1 - y)];
 	};
 	editor.fill_column_with_absolute(x, z, lo, hi, block_at, true);
 }
@@ -256,35 +294,47 @@ bool takes_talus(std::uint8_t cover)
 }
 
 std::optional<std::pair<Block, Block>> talus_palette(
-		int x, int z, double nearr, std::uint8_t cover)
+		int x, int z, double nearr, std::uint8_t cover, Rock rock_kind)
 {
 	if (nearr <= 0.0 || !takes_talus(cover) || noise(x, z, 7, 0x07A105CE) >= .8 * nearr)
 		return std::nullopt;
-	const double rock = noise(x, z, 4, 0x07A10B0D);
-	if (rock < .55)
+	const double n = noise(x, z, 4, 0x07A10B0D);
+	if (rock_kind == Rock::Red) {
+		if (n < .55)
+			return std::pair{RED_SAND, RED_SANDSTONE};
+		if (n < .75)
+			return std::pair{TERRACOTTA, RED_SANDSTONE};
+		return std::pair{RED_SANDSTONE, RED_SANDSTONE};
+	}
+	if (n < .55)
 		return std::pair{GRAVEL, STONE};
-	if (rock < .75)
+	if (n < .75)
 		return std::pair{ANDESITE, STONE};
-	if (rock < .9)
+	if (n < .9)
 		return std::pair{COBBLESTONE, STONE};
 	return std::pair{STONE, STONE};
 }
 
-std::pair<Block, Block> bare_rock_palette(int x, int z)
+std::pair<Block, Block> bare_rock_palette(int x, int z, Rock rock)
 {
-	const auto n = noise(x, z, 9, BARE_ROCK);
-	return n < .15	 ? std::pair{GRAVEL, STONE}
-		   : n < .35 ? std::pair{ANDESITE, STONE}
-					 : std::pair{STONE, STONE};
+	const auto n = ground_generation::ground_noise(x, z, 9, BARE_ROCK);
+	if (rock == Rock::Red) {
+		const Block surface = n < .2	? TERRACOTTA
+							  : n < .32 ? SMOOTH_RED_SANDSTONE
+										: RED_SANDSTONE;
+		return {surface, RED_SANDSTONE};
+	}
+	const Block surface = n < .15 ? GRAVEL : n < .35 ? ANDESITE : STONE;
+	return {climate::speckle(surface, x, z), STONE};
 }
 std::pair<Block, Block> steep_palette(
-		int x, int z, int ground_y, int slope, uint8_t cover)
+		int x, int z, int ground_y, int slope, uint8_t cover, Rock rock)
 {
 	if (slope > 6)
 		return slope <= 8 && noise(x, z, 10, LEDGE) < .1
-					   ? std::pair{GRAVEL, STONE}
+					   ? rock_loose(rock)
 					   : std::pair{
-								 face_ramp()[std::min(TOP_RAMP_MAX,
+								 ramp(rock)[std::min(TOP_RAMP_MAX,
 										 ramp_step(Strata::at(x, z).block(ground_y),
 												 value_noise_salted(wrapped_twice(x),
 														 ground_y, 12, SHADE_X) *
@@ -294,15 +344,15 @@ std::pair<Block, Block> steep_palette(
 																 ground_y, 12, SHADE_Z) *
 																 .5,
 												 0))],
-								 STONE};
-	const double rock =
+								 rock_base(rock)};
+	const double outcrop =
 			.7 * noise(x, z, 14, SCREE) + .3 * noise(x, z, 5, SCREE_EDGE_SALT);
-	if (vegetated(cover) && rock < .53)
+	if (vegetated(cover) && outcrop < .53)
 		return noise(x, z, 6, WORN) < .08 ? std::pair{COARSE_DIRT, DIRT}
 										  : std::pair{GRASS_BLOCK, DIRT};
-	if (!vegetated(cover) && rock < .33)
-		return {GRAVEL, STONE};
-	return bare_rock_palette(x, z);
+	if (!vegetated(cover) && outcrop < .33)
+		return rock_loose(rock);
+	return bare_rock_palette(x, z, rock);
 }
 SnowLine::SnowLine(int threshold, double bpm, double latitude, double rotation) :
 		threshold_y(threshold), band_blocks(std::fmax(200.0 * bpm, 4.0))

@@ -9,6 +9,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <limits>
 namespace arnis
 {
 class ProcessedElement;
@@ -98,6 +99,8 @@ struct LandCoverData
 {
 	std::vector<std::vector<uint8_t>> grid;
 	std::vector<std::vector<uint8_t>> water_distance;
+	// OSM-mapped lakes, rivers and canals, packed one bit per land-cover cell.
+	std::vector<std::uint64_t> inland_water_bits;
 	struct BeachTileIndex
 	{
 		std::vector<std::uint64_t> bits;
@@ -125,6 +128,34 @@ struct LandCoverData
 	// Retain source data for shoreline/vector operations, matching Rust's
 	// geographic mapping through shoreline reconstruction.
 	GeographicBounds source_bounds{};
+
+	bool inland_water_at(std::size_t x, std::size_t z) const
+	{
+		if (x >= width || z >= height ||
+				z > (std::numeric_limits<std::size_t>::max() - x) / width)
+			return false;
+		const auto i = z * width + x;
+		return i / 64 < inland_water_bits.size() &&
+			   ((inland_water_bits[i / 64] >> (i % 64)) & 1U) != 0;
+	}
+	void set_inland_water(std::size_t x, std::size_t z)
+	{
+		if (x >= width || z >= height || width == 0 ||
+				z > (std::numeric_limits<std::size_t>::max() - x) / width)
+			return;
+		const auto i = z * width + x;
+		if (inland_water_bits.size() <= i / 64)
+			inland_water_bits.resize(i / 64 + 1);
+		inland_water_bits[i / 64] |= std::uint64_t{1} << (i % 64);
+	}
+	void clear_inland_water()
+	{
+		if (height != 0 && width > std::numeric_limits<std::size_t>::max() / height) {
+			inland_water_bits.clear();
+			return;
+		}
+		inland_water_bits.assign(width * height / 64 + (width * height % 64 != 0), 0);
+	}
 
 	const WaterBlendMask &water_blend_mask(
 			std::size_t world_width, std::size_t world_height) const;

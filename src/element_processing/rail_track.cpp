@@ -287,6 +287,26 @@ std::optional<TrackLevel> track_level(const ProcessedWay &way)
 	return underground ? TrackLevel::Tunnel : TrackLevel::Surface;
 }
 
+std::vector<std::pair<int, int>> track_cells(const ProcessedWay &way)
+{
+	std::vector<std::pair<int, int>> cells;
+	if (way.nodes.size() < 2)
+		return cells;
+	cells.reserve(way.nodes.size());
+	cells.emplace_back(way.nodes.front().x, way.nodes.front().z);
+	for (std::size_t k = 1; k < way.nodes.size(); ++k) {
+		const auto &a = way.nodes[k - 1];
+		const auto &b = way.nodes[k];
+		const auto line = bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
+		for (const auto &[x, y, z] : smooth_diagonal_rails(line)) {
+			(void)y;
+			if (cells.back() != std::pair{x, z})
+				cells.emplace_back(x, z);
+		}
+	}
+	return cells;
+}
+
 RailJoins RailJoins::build(
 		const std::vector<ProcessedElement> &elements, const LevelFn &level)
 {

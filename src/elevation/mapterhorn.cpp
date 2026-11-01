@@ -1,5 +1,6 @@
 #include "providers.h"
 #include "tile_math.h"
+#include "elevation.h"
 #include "../net.h"
 
 #include <atomic>
@@ -48,6 +49,8 @@ constexpr std::size_t DOWNLOAD_CHUNK_SIZE = 64;
 constexpr std::size_t PROBE_MIN_LEVEL_TILES = 64;
 constexpr std::size_t PROBE_TILE_COUNT = 16;
 constexpr std::size_t OUTAGE_FAILURE_THRESHOLD = 128;
+constexpr unsigned GLO30_TOP_ZOOM = 12;
+constexpr float GLO30_PIXEL_METRES = 30.0f;
 
 template <typename Function>
 void parallel_rows(std::size_t begin, std::size_t end, Function &&function)
@@ -428,7 +431,7 @@ std::optional<double> sample_pixel(
 
 std::optional<double> sample_height(
 		const std::unordered_map<std::uint64_t, RgbRaster> &tiles, unsigned top_zoom,
-		unsigned smooth_below, double norm_x, double norm_y)
+		unsigned smooth_below, double norm_x, double norm_y, unsigned *sample_zoom)
 {
 	const unsigned floor = std::min<unsigned>(MIN_ZOOM, top_zoom);
 	for (int z = static_cast<int>(top_zoom); z >= static_cast<int>(floor); --z) {
@@ -447,10 +450,26 @@ std::optional<double> sample_height(
 					const auto pixel = sample_pixel(tiles, key, x, y);
 					return pixel.value_or(std::numeric_limits<double>::quiet_NaN());
 				});
-		if (std::isfinite(value))
+		if (std::isfinite(value)) {
+			if (sample_zoom)
+				*sample_zoom = zoom;
 			return value;
+		}
 	}
 	return std::nullopt;
+}
+
+float source_pixel_metres(const GeoBBox &bbox, unsigned zoom, unsigned top_zoom)
+{
+	constexpr double EARTH_RADIUS_M = 6'378'137.0;
+	const double mid_lat = (bbox.min_lat + bbox.max_lat) * 0.5;
+	const double circumference = 2.0 * std::numbers::pi * EARTH_RADIUS_M;
+	const double pixels = static_cast<double>(TILE_PIXELS) * std::ldexp(1.0, zoom);
+	double metres = circumference *
+					std::abs(std::cos(mid_lat * std::numbers::pi / 180.0)) / pixels;
+	if (zoom < top_zoom && zoom <= GLO30_TOP_ZOOM)
+		metres = std::max(metres, static_cast<double>(GLO30_PIXEL_METRES));
+	return static_cast<float>(metres);
 }
 
 void load_chunk_tiles(const std::filesystem::path &root, const GeoBBox &bbox,
@@ -490,19 +509,28 @@ void load_chunk_tiles(const std::filesystem::path &root, const GeoBBox &bbox,
 
 std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 		const std::filesystem::path &cache_root, const GeoBBox &bbox, std::size_t width,
-		std::size_t height)
+		std::size_t height, SourcePixels *source_pixels)
 {
 #ifndef FM_HAVE_WEBP
 	(void)cache_root;
 	(void)bbox;
 	(void)width;
 	(void)height;
+	(void)source_pixels;
 	return std::nullopt;
 #else
-	if (!height)
+	if (!height) {
+		if (source_pixels)
+			*source_pixels = {};
 		return std::vector<std::vector<double>>{};
-	if (!width)
+	}
+	if (!width) {
+		if (source_pixels) {
+			source_pixels->rows.clear();
+			source_pixels->rows.resize(height);
+		}
 		return std::vector<std::vector<double>>(height, std::vector<double>{});
+	}
 	const auto root = cache_root / "mapterhorn";
 	std::error_code ec;
 	std::filesystem::create_directories(root, ec);
@@ -592,6 +620,8 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 
 	std::vector<std::vector<double>> grid(
 			height, std::vector<double>(width, std::numeric_limits<double>::quiet_NaN()));
+	SourcePixels sampled_sources;
+	sampled_sources.rows.resize(height);
 	const unsigned smooth_below =
 			tile_math::smooth_below(bbox, zoom, width, height, TILE_PIXELS);
 	for (std::size_t chunk_start = 0; chunk_start < height; chunk_start += 1024) {
@@ -601,21 +631,29 @@ std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 		parallel_rows(chunk_start, chunk_end, [&](std::size_t gy) {
 			const double lat = row_lat(bbox, gy, height);
 			const double norm_y = norm_y_for_lat(lat);
+			SourceRow &source_row = sampled_sources.rows[gy];
 			for (std::size_t gx = 0; gx < width; ++gx) {
 				const double lon =
 						bbox.min_lon + double(gx) / std::max<std::size_t>(1, width - 1) *
 											   (bbox.max_lon - bbox.min_lon);
 				const double norm_x = (lon + 180.0) / 360.0;
+				unsigned sample_zoom = 0;
 				if (const auto sample = sample_height(
-							tiles, zoom, smooth_below, norm_x, norm_y)) {
+							tiles, zoom, smooth_below, norm_x, norm_y, &sample_zoom)) {
 					grid[gy][gx] = *sample;
+					source_row.push(gx, source_pixel_metres(bbox, sample_zoom, zoom));
 				} else if (state.confirmed_missing.contains(
 								   pack_key(tile_key_at(floor, norm_x, norm_y)))) {
 					grid[gy][gx] = 0.0;
+					source_row.push(gx, std::numeric_limits<float>::infinity());
+				} else {
+					source_row.push(gx, std::numeric_limits<float>::infinity());
 				}
 			}
 		});
 	}
+	if (source_pixels)
+		*source_pixels = std::move(sampled_sources);
 	return grid;
 #endif
 }

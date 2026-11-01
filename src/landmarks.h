@@ -38,6 +38,7 @@ struct Landmark
 	int ground_overlap;
 	double suppress_half_x, suppress_half_z;
 	int reach_m;
+	int height;
 	std::shared_ptr<const structures::PalettizedSchematic> (*built_model)() = nullptr;
 };
 

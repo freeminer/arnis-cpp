@@ -34,14 +34,17 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 	auto leisure_it = element.tags.find(std::string("leisure"));
 	if (leisure_it != element.tags.end()) {
 		const std::string &leisure_type = leisure_it->second;
+		// A nature_reserve is a boundary around whatever grows there. Land-cover
+		// generation owns its vegetation; treating the whole polygon as lawn erases it.
+		if (leisure_type == "nature_reserve")
+			return;
 		std::optional<std::pair<int, int>> previous_node = std::nullopt;
 		std::tuple<int, int, int> corner_addup = std::make_tuple(0, 0, 0);
 		std::vector<std::pair<int, int>> current_leisure;
 
 		Block block_type = GRASS_BLOCK;
-		if (leisure_type == "park" || leisure_type == "nature_reserve" ||
-				leisure_type == "garden" || leisure_type == "disc_golf_course" ||
-				leisure_type == "golf_course") {
+		if (leisure_type == "park" || leisure_type == "garden" ||
+				leisure_type == "disc_golf_course" || leisure_type == "golf_course") {
 			block_type = GRASS_BLOCK;
 		} else if (leisure_type == "schoolyard") {
 			block_type = BLACK_CONCRETE;
@@ -130,8 +133,7 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 						std::optional<std::vector<Block>>({GRASS_BLOCK}), std::nullopt);
 
 				// Add decorative elements for parks and gardens
-				if ((leisure_type == "park" || leisure_type == "garden" ||
-							leisure_type == "nature_reserve") &&
+				if ((leisure_type == "park" || leisure_type == "garden") &&
 						editor.owns(x, z) &&
 						editor.check_for_block(x, 0, z,
 								std::optional<std::vector<Block>>({GRASS_BLOCK})) &&
@@ -142,9 +144,7 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 					if (random_choice < 30) {
 						if (random_choice < 22) {
 							ground_decoration::place_scattered_flower(editor, x, z,
-									leisure_type == "nature_reserve"
-											? ground_decoration::FlowerSetting::Meadow
-											: ground_decoration::FlowerSetting::Garden);
+									ground_decoration::FlowerSetting::Garden);
 						} else {
 							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
 						}

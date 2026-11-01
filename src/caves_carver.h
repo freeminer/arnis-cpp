@@ -1,6 +1,7 @@
 #pragma once
 #include "caves_shape.h"
 #include "caves_shape_query.h"
+#include <functional>
 #include <unordered_set>
 
 namespace arnis::world_editor
@@ -28,7 +29,8 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		const CaveShapeQuery &cave_shape, const WaterPlan &water_plan,
 		const std::unordered_set<std::int64_t> *basin_fluid = nullptr,
 		const std::unordered_set<std::int64_t> *water_cells = nullptr,
-		const std::unordered_set<std::int64_t> *cave_air = nullptr);
+		const std::unordered_set<std::int64_t> *cave_air = nullptr,
+		std::function<bool(int, int)> keep_out = {});
 // Rust caves::schems counterpart: load the configured cave-pack manifest and
 // deterministically stamp formations into carved cave openings.
 void stamp_schematics_region(world_editor::WorldEditor &editor, const CaveRect &region,

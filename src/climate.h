@@ -12,5 +12,6 @@ arnis::biome::Climate classify(double latitude, double longitude);
 arnis::biome::Climate classify_bbox(double min_latitude, double min_longitude,
 		double max_latitude, double max_longitude);
 std::optional<std::pair<Block, Block>> surface_palette(
-		arnis::biome::Climate, std::uint8_t, int, int);
+		arnis::biome::Climate, std::uint8_t, int, int, bool red_earth = false);
+Block speckle(Block block, int x, int z);
 }

@@ -33,8 +33,9 @@ int next_map_id(const std::filesystem::path &maps_dir)
 		if (const auto value = world_utils::map_id_counter(maps_dir / name))
 			highest = highest ? std::max(*highest, *value) : *value;
 	}
-	return highest ? (*highest == std::numeric_limits<int>::max() ? *highest
-																  : *highest + 1)
-				   : 0;
+	return highest ? (*highest == std::numeric_limits<int>::max()
+									 ? *highest
+									 : std::max(*highest + 1, FIRST_MAP_ID))
+				   : FIRST_MAP_ID;
 }
 } // namespace arnis::map_item

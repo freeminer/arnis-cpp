@@ -47,11 +47,27 @@ struct TallModel
 	double height_m{};
 };
 
+struct StationHint
+{
+	double lat{};
+	double lon{};
+	int depth{};
+};
+
+struct TerrainWays
+{
+	std::vector<std::pair<double, double>> bores;
+	std::vector<std::vector<std::pair<double, double>>> graded;
+};
+
 struct TerrainHints
 {
 	std::vector<PeakHint> peaks;
 	std::vector<TallModel> tall_models;
 	std::vector<TallModel> tall_structures;
+	std::vector<std::vector<std::pair<double, double>>> graded;
+	std::vector<std::pair<double, double>> bores;
+	std::vector<StationHint> stations;
 	bool overture_follows{};
 };
 
@@ -115,12 +131,24 @@ std::optional<PeakHint> peak_from_tags(
 std::vector<PeakHint> peaks_in(const osm_parser::RawOsmDocument &data);
 std::vector<PeakHint> peaks_in(const std::vector<ProcessedElement> &elements);
 std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data);
+std::vector<TallModel> landmark_tall_models_in(
+		const osm_parser::RawOsmDocument &data, const geographic::LLBBox &bbox);
 // Tall OSM buildings and masts that can exceed the vanilla build ceiling.
 std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data,
 		double scale, const overture::OvertureHints *overture_hints = nullptr);
+std::vector<std::vector<std::pair<double, double>>> graded_ways_in(
+		const osm_parser::RawOsmDocument &data, bool include_roads);
+TerrainWays terrain_ways_in(
+		const osm_parser::RawOsmDocument &data, bool include_graded, bool include_roads);
+std::vector<std::pair<double, double>> bored_ways_in(
+		const osm_parser::RawOsmDocument &data);
+std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data);
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data);
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
 		bool include_models, bool include_structures, bool overture_follows = false);
+TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
+		bool include_models, bool include_structures, bool overture_follows,
+		bool include_graded, bool include_roads);
 TerrainHints overture_terrain_hints_in(const osm_parser::RawOsmDocument &data,
 		double scale, const ::arnis::overture::OvertureData &overture_data);
 bool may_pass_vanilla(double height_m, double scale);

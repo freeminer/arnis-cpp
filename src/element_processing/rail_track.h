@@ -15,6 +15,11 @@
 namespace arnis::railways
 {
 
+inline constexpr int RAIL_TUNNEL_DEPTH = 3;
+inline constexpr int RAIL_TUNNEL_INTERIOR_HEIGHT = 4;
+inline constexpr int RAIL_TUNNEL_FLOOR_DEPTH =
+		RAIL_TUNNEL_DEPTH + RAIL_TUNNEL_INTERIOR_HEIGHT + 1;
+
 enum class TrackLevel
 {
 	Surface,
@@ -31,6 +36,8 @@ struct TrackEnd
 };
 
 std::optional<TrackLevel> track_level(const ProcessedWay &way);
+// Smoothed world-space raster of a way's rail centreline.
+std::vector<std::pair<int, int>> track_cells(const ProcessedWay &way);
 
 std::vector<bool> straight_cells(const std::vector<std::pair<int, int>> &cells,
 		std::optional<std::pair<int, int>> before = std::nullopt,

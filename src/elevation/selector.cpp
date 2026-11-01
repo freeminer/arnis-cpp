@@ -52,10 +52,11 @@ ElevationData Selector::raw_grid(
 	}
 	if (cached_.mode() != providers::SourceMode::Planetary) {
 		std::optional<std::vector<std::vector<double>>> heights;
+		SourcePixels source_pixels;
 		std::string fetch_error;
 		try {
 			heights = providers::fetch_mapterhorn_terrain_grid(
-					cached_.root(), {a, b, c, d}, w, h);
+					cached_.root(), {a, b, c, d}, w, h, &source_pixels);
 		} catch (const std::exception &error) {
 			fetch_error = error.what();
 		} catch (...) {
@@ -70,6 +71,7 @@ ElevationData Selector::raw_grid(
 				out.world_width = w;
 				out.world_height = h;
 				out.heights = std::move(*heights);
+				out.source_pixels = std::move(source_pixels);
 				return out;
 			}
 			std::cerr << "Warning: Elevation provider 'mapterhorn' returned "

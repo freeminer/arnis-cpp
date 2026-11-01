@@ -16,6 +16,7 @@
 #include <limits>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace arnis::highways
@@ -60,6 +61,33 @@ int bridge_block_range_world(const ProcessedWay &way, double scale)
 int world_to_grid(int relative, double scale)
 {
 	return static_cast<int>(std::lround(std::max(relative, 0) * scale));
+}
+
+void join_inland_water(LandCoverData &data, std::vector<std::size_t> cells)
+{
+	while (!cells.empty()) {
+		std::vector<std::size_t> remaining;
+		remaining.reserve(cells.size());
+		bool changed = false;
+		for (const auto index : cells) {
+			const auto x = index % data.width;
+			const auto z = index / data.width;
+			const bool touches_inland =
+					(x > 0 && data.inland_water_at(x - 1, z)) ||
+					(x + 1 < data.width && data.inland_water_at(x + 1, z)) ||
+					(z > 0 && data.inland_water_at(x, z - 1)) ||
+					(z + 1 < data.height && data.inland_water_at(x, z + 1));
+			if (touches_inland) {
+				data.set_inland_water(x, z);
+				changed = true;
+			} else {
+				remaining.push_back(index);
+			}
+		}
+		if (!changed)
+			return;
+		cells.swap(remaining);
+	}
 }
 
 } // namespace
@@ -219,6 +247,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 	bool water_changed = false;
 	std::size_t mutated = 0;
 	std::size_t reclassified_to_water = 0;
+	std::vector<std::size_t> newly_inland_water;
 	for (const auto cell : bridge_cells) {
 		const auto assignment = assigned.find(cell);
 		if (assignment == assigned.end())
@@ -233,6 +262,7 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 		++mutated;
 		if (new_class == LC_WATER) {
 			++reclassified_to_water;
+			newly_inland_water.push_back(static_cast<std::size_t>(z) * data.width + x);
 			const auto level = water_levels.find(cell);
 			if (level != water_levels.end() && std::isfinite(level->second) &&
 					std::isfinite(heights[z][x]) && heights[z][x] > level->second)
@@ -246,6 +276,9 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 		data.water_distance = compute_water_distance(data.grid, data.width, data.height);
 		data.invalidate_water_blend_grid();
 	}
+	// Bridge cells reclassified as water inherit the inland marker from their
+	// connected river/lake banks, matching Rust's join_inland pass.
+	join_inland_water(data, std::move(newly_inland_water));
 }
 
 } // namespace arnis::land_cover

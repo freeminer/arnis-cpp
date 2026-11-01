@@ -3,7 +3,9 @@
 #include <cstddef>
 #include <cstdint>
 #include <functional>
+#include <optional>
 #include <tuple>
+#include <utility>
 #include <vector>
 
 namespace arnis::geographic
@@ -19,6 +21,25 @@ inline constexpr std::size_t MAX_ELEVATION_GRID_DIM = 16384;
 inline constexpr std::size_t MAX_ELEVATION_GRID_CELLS =
 		MAX_ELEVATION_GRID_DIM * MAX_ELEVATION_GRID_DIM;
 
+// Compact per-row record of the native source resolution behind resampled
+// heights. Consecutive equal resolutions are represented as one run.
+struct SourceRow
+{
+	std::vector<std::pair<std::uint32_t, float>> runs;
+	void push(std::size_t column, float metres)
+	{
+		if (runs.empty() || runs.back().second != metres)
+			runs.emplace_back(static_cast<std::uint32_t>(column), metres);
+	}
+};
+
+struct SourcePixels
+{
+	std::vector<SourceRow> rows;
+	std::size_t height() const { return rows.size(); }
+	const SourceRow &row(std::size_t index) const { return rows[index]; }
+};
+
 struct ElevationData
 {
 	std::vector<std::vector<double>> heights;
@@ -26,6 +47,7 @@ struct ElevationData
 	std::size_t height{0};
 	std::size_t world_width{0};
 	std::size_t world_height{0};
+	std::optional<SourcePixels> source_pixels;
 	double min_height_m{0.0};
 	double blocks_per_meter{0.0};
 	int ground_level{0};

@@ -72,6 +72,7 @@
 #include "element_processing/trains.h"
 #include "element_processing/swimming_pools.h"
 #include "element_processing/rail_track.h"
+#include "element_processing/stations.h"
 #include "element_processing/buildings.h"
 #include "element_processing/blueprint.h"
 #include "element_processing/waterfront.h"
@@ -1358,6 +1359,7 @@ void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &way,
 
 namespace railways
 {
+void clear_rail_gauge(WorldEditor &editor, const CoordinateBitmap &building_footprints);
 void generate_roller_coaster(WorldEditor &editor, const ProcessedWay &way);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element);
 void generate_railways(WorldEditor &editor, const ProcessedWay &element,
@@ -1551,7 +1553,7 @@ bool generate_world(WorldEditor &editor,
 	// A One World extension keeps the first area's level.dat settings intact;
 	// standalone/new worlds receive this run's requested values.
 	if (!(args.one_world_run && args.one_world_run->extending))
-		editor.set_game_settings(args.gamemode, args.world_time);
+		editor.set_game_settings(args.gamemode, args.world_time, args.mob_spawning);
 	editor.set_projection_info(projection::to_string(args.projection), args.scale);
 	// Structure schematics and cave packs are distinct asset families. Keep
 	// their roots separate so the installed Arnis assets directory can be
@@ -1582,15 +1584,16 @@ bool generate_world(WorldEditor &editor,
 	if (!(args.one_world_run && args.one_world_run->extending))
 		editor.set_start_with_map(args.map_item);
 	editor.set_map_decals(java_format);
-	int first_decal_map_id = decals::DecalRegistry::FIRST_ID;
-	if (java_format && args.one_world_run) {
-		const auto &run = *args.one_world_run;
+	const bool wants_map_item = args.map_item && java_world && !extending_world;
+	const bool place_branding = java_world && !extending_world;
+	int first_map_id = map_item::FIRST_MAP_ID;
+	if (java_world) {
 		const auto maps_dir =
-				world_utils::WorldLayout::of(run.world_dir).maps_dir(run.world_dir);
-		first_decal_map_id = map_item::next_map_id(maps_dir);
-		if (!run.extending)
-			first_decal_map_id += args.map_item ? 2 : 1;
+				world_utils::WorldLayout::of(java_world_path).maps_dir(java_world_path);
+		first_map_id = map_item::next_map_id(maps_dir);
 	}
+	const int first_decal_map_id =
+			first_map_id + (wants_map_item ? 2 : (place_branding ? 1 : 0));
 	editor.set_first_decal_map_id(first_decal_map_id);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
@@ -1668,8 +1671,12 @@ bool generate_world(WorldEditor &editor,
 	}
 	Args world_height_args = args;
 	world_height_args.disable_height_limit = extended_world_height;
-	world_editor::set_world_bounds(
-			extended_min_y_for(world_height_args), world_top_y_for(world_height_args));
+	// Ground preparation has already sized an automatically extended Java
+	// dimension around this area's terrain and tallest structures. Preserve
+	// those bounds so chunk heightmaps and the installed datapack agree.
+	if (!editor.ground || !editor.ground->extended_ceiling)
+		world_editor::set_world_bounds(extended_min_y_for(world_height_args),
+				world_top_y_for(world_height_args));
 	if (editor.ground) {
 		editor.ground->set_celestial_body(args.body);
 		editor.ground->set_winter(args.winter);
@@ -2142,6 +2149,11 @@ bool generate_world(WorldEditor &editor,
 	const auto clear_corridors = std::make_shared<const CoordinateBitmap>(
 			aerialways::clear_corridors(elements, xzbbox));
 	editor.set_clear_corridors(clear_corridors);
+	const auto station_platforms = stations::collect_platforms(elements, args.timeout);
+	std::vector<stations::Platform> station_surface_groups;
+	const auto station_tree_clearance = std::make_shared<const stations::SparseCells>(
+			stations::surface_track_tree_clearance(elements, station_platforms));
+	editor.set_station_tree_clearance(station_tree_clearance);
 	editor.set_fuel_index(std::make_shared<const fuel_stations::FuelIndex>(
 			fuel_stations::FuelIndex::build(elements, args.scale)));
 	auto barrier_clearance =
@@ -2200,7 +2212,9 @@ bool generate_world(WorldEditor &editor,
 				},
 				true);
 	}
-	auto big_water_field = water_depth::compute_big_water_field(editor, xzbbox);
+	auto big_water_field = std::make_shared<const water_depth::BigWaterField>(
+			water_depth::compute_big_water_field(editor, xzbbox));
+	editor.set_water_field(big_water_field);
 	// Pre-scan still water surfaces for consistent water levels across tiles
 	StillWaterSurfaces still_surfaces;
 	if (editor.ground)
@@ -2380,6 +2394,29 @@ bool generate_world(WorldEditor &editor,
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
 	auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
+	// Rust registers fitted station surfaces before dispatch so rail profiles
+	// and adjoining track beds can use the shared station elevation immediately.
+	auto station_track_beds =
+			stations::register_surface_platform_levels(editor, station_platforms,
+					elements, bridge_structures, xzbbox.min_x(), xzbbox.min_z(),
+					xzbbox.max_x(), xzbbox.max_z(), true, &station_surface_groups);
+	editor.set_station_track_beds(std::make_shared<const stations::TrackBedIndex>(
+			std::move(station_track_beds)));
+	editor.set_station_surface_levels(
+			std::make_shared<const WorldEditor::RoadSurfaceOverrides>(
+					editor.road_surface_overrides));
+	auto tunnel_pins = std::make_shared<const stations::TunnelPinIndex>(
+			stations::underground_track_pins(elements, station_platforms, editor,
+					rail_joins, xzbbox, tunnel_footprint, building_footprints, args.scale,
+					args.mode != GenerationMode::Blueprint));
+	if (args.mode != GenerationMode::Blueprint) {
+		auto tree_clearance = stations::surface_track_tree_clearance(
+				elements, station_platforms, tunnel_pins.get());
+		tree_clearance.merge(tunnel_pins->entrance_tree_clearance());
+		editor.set_station_tree_clearance(
+				std::make_shared<const stations::SparseCells>(std::move(tree_clearance)));
+	}
+	editor.station_tunnel_pins = std::move(tunnel_pins);
 	if (args.one_world_run) {
 		const auto [min_x, min_z] = editor.get_min_coords();
 		const auto [max_x, max_z] = editor.get_max_coords();
@@ -2707,6 +2744,11 @@ bool generate_world(WorldEditor &editor,
 		const int min_z = std::max(tile.min_z, xzbbox.min_z());
 		const int max_z = std::min(tile.max_z - 1, xzbbox.max_z());
 		tile_editor.set_strict_bounds(min_x, min_z, max_x, max_z);
+		tile_editor.set_tile_editor_bounds(
+				std::max(tile.min_x - TILE_EDITOR_HALO, xzbbox.min_x()),
+				std::max(tile.min_z - TILE_EDITOR_HALO, xzbbox.min_z()),
+				std::min(tile.max_x - 1 + TILE_EDITOR_HALO, xzbbox.max_x()),
+				std::min(tile.max_z - 1 + TILE_EDITOR_HALO, xzbbox.max_z()));
 		const bool began = tile_editor.begin_tile(
 				tile.min_x, tile.min_z, tile.max_x - 1, tile.max_z - 1);
 		if (!began)
@@ -2803,6 +2845,10 @@ bool generate_world(WorldEditor &editor,
 				building_footprints, min_x, max_x, min_z, max_z,
 				tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 				&bridge_surface);
+		stations::render_surface_platforms(editor, station_surface_groups, elements,
+				bridge_structures, road_mask, building_footprints, min_x, min_z, max_x,
+				max_z);
+		railways::clear_rail_gauge(editor, building_footprints);
 		if (args.caves) {
 			const caves::CaveRect cave_world{
 					xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
@@ -2828,12 +2874,16 @@ bool generate_world(WorldEditor &editor,
 					editor, cave_region, CAVE_SEED, world_editor::terrain_floor_y());
 			caves::decorate_region(editor, cave_region, cave_world, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, cave_shape, cave_water_plan,
-					&cave_basin_fluid, &cave_water_cells, &cave_air);
+					&cave_basin_fluid, &cave_water_cells, &cave_air, [&](int x, int z) {
+						return tunnel_footprint.contains(x, z) ||
+							   (editor.station_tunnel_pins &&
+									   editor.station_tunnel_pins->digs(x, z));
+					});
 		} else if (args.fillground) {
 			ore_generation::generate_ores_region(
 					editor, min_x, max_x, min_z, max_z, false);
 		}
-		water_depth::carve_lc_water_region(editor, big_water_field, road_mask,
+		water_depth::carve_lc_water_region(editor, *big_water_field, road_mask,
 				tunnel_footprint, min_x, max_x, min_z, max_z, &bridge_surface);
 		highways::drop_lamps_in_water(editor);
 		// Rust's eviction path cannot run these passes after regions have been
@@ -2853,10 +2903,14 @@ bool generate_world(WorldEditor &editor,
 						tunnel_lights.end(), road_lights.begin(), road_lights.end());
 			}
 			highways::hang_tunnel_lights(editor, tunnel_lights);
-			if (args.caves)
-				caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
-						world_editor::terrain_floor_y());
 		}
+		if (editor.station_tunnel_pins)
+			stations::render_underground_halls(editor, *editor.station_tunnel_pins);
+		// Station stairs and halls are opened after the tile ground/water passes;
+		// seal any fluids those openings exposed before merging this tile.
+		if (regional_ground_passes && eviction_active && args.caves)
+			caves::seal_floating_fluid_region(editor, {min_x, max_x, min_z, max_z},
+					world_editor::terrain_floor_y());
 		if (deferred_placements_active && !args.winter) {
 			std::lock_guard<std::mutex> lock(water_borders_mutex);
 			water_steps::collect_region_candidates(
@@ -3037,7 +3091,7 @@ bool generate_world(WorldEditor &editor,
 					if (still_surfaces.has("way", way.id))
 						surface_level = still_surfaces.get("way", way.id);
 					water_areas::generate_water_area_from_way(editor, way,
-							big_water_field, road_mask,
+							*big_water_field, road_mask,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 							bridge_surface, surface_level);
 				} else {
@@ -3155,7 +3209,7 @@ bool generate_world(WorldEditor &editor,
 					if (still_surfaces.has("relation", rel.id))
 						surface_level = still_surfaces.get("relation", rel.id);
 					water_areas::generate_water_areas_from_relation(editor, rel,
-							clip_bbox, big_water_field, road_mask,
+							clip_bbox, *big_water_field, road_mask,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 							bridge_surface, surface_level);
 					break;
@@ -3477,6 +3531,7 @@ bool generate_world(WorldEditor &editor,
 				building_footprints,
 				tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 				&bridge_surface);
+		railways::clear_rail_gauge(editor, building_footprints);
 	}
 	if (!regional_ground_passes) {
 		if (args.caves) {
@@ -3507,7 +3562,11 @@ bool generate_world(WorldEditor &editor,
 					CAVE_SEED, world_editor::terrain_floor_y());
 			caves::decorate_region(editor, cave_world, cave_world, CAVE_SEED,
 					world_editor::terrain_floor_y(), args, cave_shape, cave_water_plan,
-					&cave_basin_fluid, &cave_water_cells, &cave_air);
+					&cave_basin_fluid, &cave_water_cells, &cave_air, [&](int x, int z) {
+						return tunnel_footprint.contains(x, z) ||
+							   (editor.station_tunnel_pins &&
+									   editor.station_tunnel_pins->digs(x, z));
+					});
 		} else if (args.fillground) {
 			ore_generation::generate_ores(editor, xzbbox.min_x(), xzbbox.max_x(),
 					xzbbox.min_z(), xzbbox.max_z(), true);
@@ -3520,7 +3579,7 @@ bool generate_world(WorldEditor &editor,
 
 	if (!regional_ground_passes)
 		water_depth::carve_lc_water_pass(
-				editor, big_water_field, road_mask, tunnel_footprint, &bridge_surface);
+				editor, *big_water_field, road_mask, tunnel_footprint, &bridge_surface);
 	if (!regional_ground_passes)
 		highways::drop_lamps_in_water(editor);
 	// Keep the surface mask alive when the post-generation style pass needs to
@@ -3580,7 +3639,8 @@ bool generate_world(WorldEditor &editor,
 	// network when the vehicle behavior/resource packs are assembled below.
 	if (!bedrock_world || !extras.cars)
 		editor.car_network.reset();
-	big_water_field = {};
+	editor.set_water_field({});
+	big_water_field.reset();
 	tunnel_footprint = {};
 	rail_mask = {};
 	building_passages = {};
@@ -3757,7 +3817,7 @@ bool generate_world(WorldEditor &editor,
 		if (!world_utils::apply_java_world_settings(java_world_path,
 					java_game_type(args.gamemode), args.world_time,
 					args.world_type == WorldType::Void, world_editor::base_chunk_y(),
-					world_editor::min_y(), &error))
+					world_editor::min_y(), args.mob_spawning, &error))
 			std::cerr << "Warning: Failed to apply Java world settings: " << error
 					  << '\n';
 	}
@@ -3767,7 +3827,8 @@ bool generate_world(WorldEditor &editor,
 	if (java_world && extended_world_height && !extending_world &&
 			!java_world_path.empty()) {
 		std::string error;
-		if (!world_utils::install_tall_datapack(java_world_path, &error)) {
+		if (!world_utils::install_tall_datapack(java_world_path, world_editor::min_y(),
+					world_editor::world_max_y(), &error)) {
 			const auto message = "failed to install tall-world datapack: " + error;
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';

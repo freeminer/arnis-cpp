@@ -5,6 +5,7 @@
 #include <string>
 #include <vector>
 #include <optional>
+#include <utility>
 #include "ecoregion.h"
 namespace arnis
 {
@@ -25,6 +26,22 @@ enum class Climate
 	Tundra,
 	IceCap
 };
+
+struct Cell
+{
+	std::uint8_t land_cover = 0;
+	bool inland_water = false;
+	bool shore = false;
+	std::optional<double> above_snow_m;
+	int slope = 0;
+	int y = -62;
+	std::optional<ecoregion::Ecoregion> eco;
+};
+
+bool climate_is_dry(Climate climate);
+bool red_earth(Climate climate, const std::optional<ecoregion::Ecoregion> &eco);
+std::pair<int, int> frayed_ecoregion_offset(int x, int z);
+std::string cell_biome(const Cell &cell, Climate climate, double latitude);
 std::string biome_for_class(std::uint8_t land_cover, Climate climate, double latitude,
 		std::uint8_t water_distance);
 // Ecoregion-aware override used by Rust before the latitude fallback.

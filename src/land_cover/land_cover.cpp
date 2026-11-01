@@ -735,6 +735,7 @@ void LandCoverData::remap_rows_to_mercator(double lat_top, double lat_bottom)
 	};
 	grid_ops::remap_rows_in_place(grid, source, nearest);
 	grid_ops::remap_rows_in_place(water_distance, source, nearest);
+	inland_water_bits.clear();
 	invalidate_water_blend_grid();
 }
 
@@ -745,6 +746,7 @@ void LandCoverData::crop(
 	grid_ops::crop_rows(water_distance, x0, z0, new_width, new_height);
 	width = new_width;
 	height = new_height;
+	inland_water_bits.clear();
 	invalidate_water_blend_grid();
 }
 

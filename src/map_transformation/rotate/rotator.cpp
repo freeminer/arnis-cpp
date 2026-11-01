@@ -268,9 +268,15 @@ void rotate_world_with_ground(double angle_degrees,
 	const int original_width = original_bbox.max_x() - original_bbox.min_x() + 1;
 	const int original_height = original_bbox.max_z() - original_bbox.min_z() + 1;
 	std::vector<std::vector<std::uint8_t>> cover, water;
+	std::vector<std::uint64_t> inland_water_bits;
 	if (had_land_cover) {
 		cover.assign(grid_height, std::vector<std::uint8_t>(grid_width));
 		water.assign(grid_height, std::vector<std::uint8_t>(grid_width));
+		if (grid_height != 0 &&
+				grid_width <= std::numeric_limits<std::size_t>::max() / grid_height) {
+			const auto cells = grid_width * grid_height;
+			inland_water_bits.resize(cells / 64 + (cells % 64 != 0));
+		}
 	}
 	std::vector<std::uint8_t> canopy;
 	if (had_canopy)
@@ -298,6 +304,11 @@ void rotate_world_with_ground(double angle_degrees,
 			if (had_land_cover) {
 				cover[zi][xi] = ground.cover_class(source);
 				water[zi][xi] = ground.water_distance(source);
+				if (ground.inland_water_mapped(source)) {
+					const auto index = zi * grid_width + xi;
+					if (index / 64 < inland_water_bits.size())
+						inland_water_bits[index / 64] |= std::uint64_t{1} << (index % 64);
+				}
 			}
 			if (had_canopy) {
 				canopy[zi * grid_width + xi] =
@@ -331,7 +342,8 @@ void rotate_world_with_ground(double angle_degrees,
 				heights, grid_width, grid_height, new_width, new_height);
 	ground.set_world_dims(new_width, new_height);
 	if (had_land_cover)
-		ground.set_land_cover_data(cover, water, grid_width, grid_height);
+		ground.set_land_cover_data(
+				cover, water, inland_water_bits, grid_width, grid_height);
 	if (had_canopy)
 		ground.set_canopy_data(
 				canopy::CanopyData(std::move(canopy), grid_width, grid_height), new_width,

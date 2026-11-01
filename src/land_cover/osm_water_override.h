@@ -24,4 +24,7 @@ void apply_osm_water_override(LandCoverData &data,
 		std::vector<std::vector<float>> &heights, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
 		const XZBBox &bbox);
+void mark_inland_water(LandCoverData &data, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox);
 }

@@ -30,6 +30,7 @@ struct HeightBand
 	int min_ground_level{};
 	int extended_max_y{};
 	bool extended{};
+	int floor_y{};
 };
 
 // Terrain samples kept outside a cropped One World area so geometry crossing
@@ -48,6 +49,13 @@ struct ElevationHalo
 
 struct ProcessedElevationData
 {
+	struct RaisedFor
+	{
+		int terrain_top_y{};
+		int tallest_blocks{};
+		bool overture_pending{};
+	};
+
 	std::vector<std::vector<float>> heights;
 	std::size_t width{0};
 	std::size_t height{0};
@@ -59,6 +67,7 @@ struct ProcessedElevationData
 	int ground_level{0};
 	std::optional<SoftTop> soft_top;
 	bool extended_ceiling{false};
+	std::optional<RaisedFor> raised_for;
 	std::shared_ptr<const ElevationHalo> halo;
 
 	ElevationAffine affine() const
@@ -82,7 +91,9 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		std::optional<HeightBand> taller_band = std::nullopt,
 		bool force_extended_height = false,
 		std::optional<std::size_t> seam_pad = std::nullopt,
-		const std::function<std::vector<TallModel>()> &late_overture = {});
+		const std::function<std::vector<TallModel>()> &late_overture = {},
+		std::optional<std::pair<std::int64_t, std::int64_t>> one_world_origin =
+				std::nullopt);
 
 ProcessedElevationData fetch_elevation_data(Selector &selector,
 		const geographic::LLBBox &bbox, std::size_t world_width, std::size_t world_height,
@@ -94,6 +105,8 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		bool auto_height = false, std::optional<HeightBand> taller_band = std::nullopt,
 		bool force_extended_height = false,
 		std::optional<std::size_t> seam_pad = std::nullopt,
-		const std::function<std::vector<TallModel>()> &late_overture = {});
+		const std::function<std::vector<TallModel>()> &late_overture = {},
+		std::optional<std::pair<std::int64_t, std::int64_t>> one_world_origin =
+				std::nullopt);
 
 } // namespace arnis::elevation

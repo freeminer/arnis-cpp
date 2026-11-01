@@ -7,6 +7,10 @@
 #include <vector>
 #include "../celestial.h"
 #include <array>
+namespace arnis::elevation
+{
+struct SourcePixels;
+}
 namespace arnis::elevation::providers
 {
 // Shared XYZ tile request budget used by both Rust tile providers.  Keep zoom
@@ -112,7 +116,7 @@ std::vector<std::vector<double>> fetch_aws_terrain_grid(
 		std::size_t height);
 std::optional<std::vector<std::vector<double>>> fetch_mapterhorn_terrain_grid(
 		const std::filesystem::path &cache_root, const GeoBBox &, std::size_t width,
-		std::size_t height);
+		std::size_t height, SourcePixels *source_pixels = nullptr);
 // Provider-neutral pieces of AWS/Mapterhorn Terrarium decoding.  Image and
 // HTTP backends only need to supply decoded RGB pixels to these routines.
 struct RgbRaster

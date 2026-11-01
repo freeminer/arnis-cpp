@@ -75,6 +75,10 @@ public:
 			refill();
 		return block_[next_++];
 	}
+	std::uint64_t random_u64()
+	{
+		return std::uint64_t((*this)()) | (std::uint64_t((*this)()) << 32);
+	}
 	bool random_bool(double probability = 0.5)
 	{
 		// rand::Rng::random_bool delegates to random::<f64>(); the standard
@@ -82,8 +86,7 @@ public:
 		// ChaCha words here preserves both the Rust sequence and probability.
 		// rand_core::next_u64_from_u32 treats the first generated word as
 		// the low half, then the second as the high half.
-		const std::uint64_t raw =
-				std::uint64_t((*this)()) | (std::uint64_t((*this)()) << 32);
+		const std::uint64_t raw = random_u64();
 		const std::uint64_t mantissa = raw >> 11;
 		return static_cast<long double>(mantissa) / 9007199254740992.0L < probability;
 	}

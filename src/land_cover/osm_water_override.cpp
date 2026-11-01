@@ -7,6 +7,7 @@
 #include "../clipping.h"
 
 #include <algorithm>
+#include <array>
 #include <atomic>
 #include <charconv>
 #include <cmath>
@@ -238,19 +239,98 @@ bool WaterOverrideGuard::allows(const std::vector<std::vector<float>> &heights,
 	return !std::isfinite(h) || !std::isfinite(water) || h <= water + tolerance;
 }
 
-void apply_osm_water_override(LandCoverData &data,
-		std::vector<std::vector<float>> &heights, std::size_t world_width,
-		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox)
+namespace
+{
+bool is_inland_water(const tags_t &tags)
+{
+	const auto get = [&](const char *key) -> const std::string * {
+		const auto it = tags.find(key);
+		return it == tags.end() ? nullptr : &it->second;
+	};
+	const auto *natural = get("natural");
+	const auto *waterway = get("waterway");
+	const auto *water = get("water");
+	return !(natural && *natural == "bay") && !(waterway && *waterway == "dock") &&
+		   !(water && (*water == "lagoon" || *water == "bay" || *water == "sea" ||
+							  *water == "harbour" || *water == "fjord"));
+}
+
+bool mask_get(const std::vector<std::uint64_t> &mask, std::size_t index)
+{
+	return index / 64 < mask.size() && ((mask[index / 64] >> (index % 64)) & 1U);
+}
+
+void mask_set(std::vector<std::uint64_t> &mask, std::size_t index)
+{
+	mask[index / 64] |= std::uint64_t{1} << (index % 64);
+}
+
+void spread_inland_water(LandCoverData &data, const std::vector<std::uint64_t> &sea)
+{
+	const auto width = data.width, height = data.height;
+	if (!width || !height || width > std::numeric_limits<std::size_t>::max() / height)
+		return;
+	const auto open = [&](std::size_t x, std::size_t z) {
+		if (x >= width || z >= height || data.grid[z][x] != LC_WATER)
+			return false;
+		const auto i = z * width + x;
+		return !mask_get(data.inland_water_bits, i) && !mask_get(sea, i);
+	};
+	std::vector<std::size_t> frontier, next;
+	for (std::size_t z = 0; z < height; ++z)
+		for (std::size_t x = 0; x < width; ++x) {
+			if (!data.inland_water_at(x, z))
+				continue;
+			if ((x > 0 && open(x - 1, z)) || (x + 1 < width && open(x + 1, z)) ||
+					(z > 0 && open(x, z - 1)) || (z + 1 < height && open(x, z + 1)))
+				frontier.push_back(z * width + x);
+		}
+	const auto max_reach = width + height;
+	const double mapped_reach = std::round(600.0 * std::max(0.0, data.cells_per_meter));
+	const auto reach =
+			mapped_reach >= static_cast<double>(max_reach)
+					? max_reach
+					: std::max<std::size_t>(1, static_cast<std::size_t>(mapped_reach));
+	for (std::size_t step = 0; step < reach && !frontier.empty(); ++step) {
+		next.clear();
+		for (const auto i : frontier) {
+			const auto x = i % width, z = i / width;
+			const std::array<std::pair<std::size_t, std::size_t>, 4> neighbours{
+					{{x ? x - 1 : width, z}, {x + 1, z}, {x, z ? z - 1 : height},
+							{x, z + 1}}};
+			for (const auto &[nx, nz] : neighbours)
+				if (open(nx, nz)) {
+					const auto ni = nz * width + nx;
+					data.set_inland_water(nx, nz);
+					next.push_back(ni);
+				}
+		}
+		frontier.swap(next);
+	}
+}
+
+void rasterize_osm_water(LandCoverData &data, std::vector<std::vector<float>> *heights,
+		std::size_t world_width, std::size_t world_height,
+		const std::vector<ProcessedElement> &elements, const XZBBox &bbox,
+		bool write_land_cover)
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
-			heights.size() < data.height ||
-			std::any_of(heights.begin(), heights.begin() + data.height,
-					[&](const auto &row) { return row.size() < data.width; }))
+			data.width > std::numeric_limits<std::size_t>::max() / data.height ||
+			(write_land_cover &&
+					(!heights || heights->size() < data.height ||
+							std::any_of(heights->begin(), heights->begin() + data.height,
+									[&](const auto &row) {
+										return row.size() < data.width;
+									}))))
 		return;
 	const double sx = double(data.width - 1) / double(world_width - 1);
 	const double sz = double(data.height - 1) / double(world_height - 1);
-	const auto guard = build_water_override_guard(data.grid, heights, sx * sz);
+	static const std::vector<std::vector<float>> no_heights;
+	const auto &height_grid = heights ? *heights : no_heights;
+	const auto guard = build_water_override_guard(data.grid, height_grid, sx * sz);
+	data.clear_inland_water();
+	std::vector<std::uint64_t> sea_mask(
+			data.width * data.height / 64 + (data.width * data.height % 64 != 0));
 	const auto tag = [](const tags_t &tags, const char *name) -> const std::string * {
 		auto it = tags.find(name);
 		return it == tags.end() ? nullptr : &it->second;
@@ -274,6 +354,8 @@ void apply_osm_water_override(LandCoverData &data,
 		return (natural && (*natural == "water" || *natural == "bay")) ||
 			   has_explicit_water(tags);
 	};
+	bool current_inland = false;
+	bool current_sea = false;
 	const auto closed_ring = [](const std::vector<ProcessedNode> &nodes) {
 		if (nodes.size() < 3)
 			return false;
@@ -291,10 +373,21 @@ void apply_osm_water_override(LandCoverData &data,
 	};
 	std::size_t changed = 0;
 	const auto write_water = [&](std::size_t x, std::size_t z) {
+		// Rust records the polygon/line's inland-vs-sea identity for every rasterized
+		// cell before deciding whether it may reclassify that cell. In particular,
+		// mark_inland_water() must retain the OSM mask even where the elevation guard
+		// or an existing compact land component prevents changing the land-cover grid.
+		const auto i = z * data.width + x;
+		if (current_inland)
+			data.set_inland_water(x, z);
+		else if (current_sea)
+			mask_set(sea_mask, i);
 		// Match Rust's passes_water_guard for both polygon fills and line rasterization:
 		// OSM water must not overwrite large compact land components or climb above
 		// the nearest ESA-water elevation by more than the configured tolerance.
-		if (data.grid[z][x] == LC_WATER || !guard.allows(heights, x, z, 1.5f))
+		if (!guard.allows(height_grid, x, z, 1.5f))
+			return std::size_t{0};
+		if (data.grid[z][x] == LC_WATER || !write_land_cover)
 			return std::size_t{0};
 		data.grid[z][x] = LC_WATER;
 		return std::size_t{1};
@@ -416,6 +509,8 @@ void apply_osm_water_override(LandCoverData &data,
 			const auto &rel = e.as_relation();
 			if (!is_water_relation(rel.tags))
 				continue;
+			current_inland = is_inland_water(rel.tags);
+			current_sea = !current_inland;
 			std::vector<std::vector<ProcessedNode>> outer_nodes, inner_nodes;
 			for (const auto &m : rel.members) {
 				if (m.way->nodes.size() < 2)
@@ -461,6 +556,8 @@ void apply_osm_water_override(LandCoverData &data,
 		const auto &w = e.as_way();
 		const auto *waterway = tag(w.tags, "waterway");
 		if (is_water_polygon_way(w)) {
+			current_inland = is_inland_water(w.tags);
+			current_sea = !current_inland;
 			if (!closed_ring(w.nodes))
 				continue;
 			auto clipped = clipping::clip_water_ring_to_bbox(w.nodes, bbox);
@@ -469,10 +566,13 @@ void apply_osm_water_override(LandCoverData &data,
 			changed += fill_rings({to_world_ring(*clipped)}, {});
 		} else if (waterway && waterways::is_channel_waterway(*waterway) &&
 				   !waterways::is_underground_waterway(w.tags)) {
+			current_inland = true;
+			current_sea = false;
 			const int half_width = waterways::waterway_width(*waterway, w.tags) / 2;
 			changed += rasterize_line(w.nodes, half_width);
 		}
 	}
+	spread_inland_water(data, sea_mask);
 	if (changed) {
 		std::clog << "OSM water override: reclassified " << changed
 				  << " cells to LC_WATER inside OSM water polygons/lines\n";
@@ -481,18 +581,18 @@ void apply_osm_water_override(LandCoverData &data,
 		// OSM water may extend ESA water slightly, but should not float on a raised
 		// bank. Sink only newly reachable cells that are within Rust's 1.5-block
 		// elevation guard; the ESA water seeds remain at their sampled heights.
-		if (guard.has_elevation) {
+		if (write_land_cover && heights && guard.has_elevation) {
 			std::size_t sunk = 0;
 			for (std::size_t z = 0; z < data.height; ++z)
 				for (std::size_t x = 0; x < data.width; ++x) {
 					const auto index = z * guard.width + x;
-					if (data.grid[z][x] != LC_WATER || !std::isfinite(heights[z][x]) ||
+					if (data.grid[z][x] != LC_WATER || !std::isfinite((*heights)[z][x]) ||
 							index >= guard.nearest_water_y.size())
 						continue;
 					const float water_y = guard.nearest_water_y[index];
-					if (std::isfinite(water_y) && heights[z][x] > water_y &&
-							heights[z][x] <= water_y + 1.5f) {
-						heights[z][x] = water_y;
+					if (std::isfinite(water_y) && (*heights)[z][x] > water_y &&
+							(*heights)[z][x] <= water_y + 1.5f) {
+						(*heights)[z][x] = water_y;
 						++sunk;
 					}
 				}
@@ -501,5 +601,21 @@ void apply_osm_water_override(LandCoverData &data,
 						  << " overridden cells onto the adjacent water surface\n";
 		}
 	}
+}
+} // namespace
+
+void apply_osm_water_override(LandCoverData &data,
+		std::vector<std::vector<float>> &heights, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox)
+{
+	rasterize_osm_water(data, &heights, world_width, world_height, elements, bbox, true);
+}
+
+void mark_inland_water(LandCoverData &data, std::size_t world_width,
+		std::size_t world_height, const std::vector<ProcessedElement> &elements,
+		const XZBBox &bbox)
+{
+	rasterize_osm_water(data, nullptr, world_width, world_height, elements, bbox, false);
 }
 } // namespace arnis::land_cover

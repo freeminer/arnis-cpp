@@ -15,6 +15,7 @@
 #include <numeric>
 #include <optional>
 #include <random>
+#include <set>
 #include <string>
 #include <string_view>
 #include <tuple>
@@ -1496,7 +1497,26 @@ enum class BalconyBand
 {
 	Scattered,
 	EveryBay,
-	Alternating
+	Alternating,
+	Filant
+};
+
+enum class BalconyKitKind
+{
+	Panels,
+	Wrought,
+	Glass,
+	Parapet
+};
+
+struct BalconyKit
+{
+	BalconyKitKind kind = BalconyKitKind::Panels;
+	Block panel = OAK_TRAPDOOR;
+	Block parapet = SMOOTH_STONE;
+	bool glazed = false;
+
+	int depth() const { return kind == BalconyKitKind::Wrought ? 2 : 3; }
 };
 
 enum class WindowFrameStyle
@@ -1652,19 +1672,108 @@ std::optional<WindowFrameStyle> pick_window_frame(BuildingCategory category, Arc
 }
 
 BalconyBand pick_balcony_band(BuildingCategory category, ArchEra era,
-		building_style::BuildingRegion region, int height, int floor_cycle,
-		bool has_street, std::uint64_t seed)
+		building_style::BuildingRegion region, building_style::MaterialRegion materials,
+		int height, int floor_cycle, bool tall, bool has_street, std::uint64_t seed)
 {
 	const bool old_europe = region == building_style::BuildingRegion::Europe &&
 							era != ArchEra::PostWarPanel && era != ArchEra::Contemporary;
 	if ((category != BuildingCategory::Residential &&
 				category != BuildingCategory::House) ||
-			height < 3 * floor_cycle || !has_street || old_europe)
+			height < 3 * floor_cycle || !has_street)
 		return BalconyBand::Scattered;
 	const auto roll = element_rng(seed ^ 0xBA1C041700000009ULL).uniform(100);
+	if (tall)
+		return roll < 50 ? BalconyBand::EveryBay : BalconyBand::Alternating;
+	if (old_europe) {
+		const std::uint32_t filant =
+				materials == building_style::MaterialRegion::France ? 60
+				: (materials == building_style::MaterialRegion::Mediterranean ||
+						  materials == building_style::MaterialRegion::Central)
+						? 10
+						: 0;
+		return category == BuildingCategory::Residential && height >= 5 * floor_cycle &&
+							   roll < filant
+					   ? BalconyBand::Filant
+					   : BalconyBand::Scattered;
+	}
 	return roll < 30   ? BalconyBand::Scattered
 		   : roll < 60 ? BalconyBand::EveryBay
 					   : BalconyBand::Alternating;
+}
+
+std::pair<BalconyKit, bool> pick_balcony_kit(BuildingCategory category, ArchEra era,
+		building_style::BuildingRegion region, building_style::MaterialRegion materials,
+		BalconyBand band, std::uint64_t seed)
+{
+	using MaterialRegion = building_style::MaterialRegion;
+	auto rng = element_rng(seed ^ 0xBA1C041700000021ULL);
+	const auto roll = rng.uniform(100);
+	const bool old_europe = region == building_style::BuildingRegion::Europe &&
+							era != ArchEra::PostWarPanel && era != ArchEra::Contemporary;
+	static const std::array<Block, 4> shutter_options{
+			OAK_TRAPDOOR_OPEN_NORTH, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR, BIRCH_TRAPDOOR};
+	const Block timber =
+			materials == MaterialRegion::Nordic || materials == MaterialRegion::Central ||
+							materials == MaterialRegion::CentralEast ||
+							materials == MaterialRegion::Canada
+					? SPRUCE_TRAPDOOR
+			: materials == MaterialRegion::BritishIsles ||
+							materials == MaterialRegion::BrickNorth
+					? DARK_OAK_TRAPDOOR
+					: shutter_options[rng.uniform(
+							  static_cast<std::uint32_t>(shutter_options.size()))];
+	static const std::array<Block, 4> parapets{
+			WHITE_CONCRETE, LIGHT_GRAY_CONCRETE, SMOOTH_STONE, SMOOTH_QUARTZ};
+	const Block parapet =
+			parapets[rng.uniform(static_cast<std::uint32_t>(parapets.size()))];
+	const bool soviet = materials == MaterialRegion::EastEurope ||
+						materials == MaterialRegion::CentralAsia;
+	const bool stacked =
+			band == BalconyBand::EveryBay || band == BalconyBand::Alternating;
+	BalconyKit kit;
+	if (category == BuildingCategory::House) {
+		kit.kind = era == ArchEra::Contemporary && roll < 50 ? BalconyKitKind::Glass
+															 : BalconyKitKind::Panels;
+		kit.panel = timber;
+	} else if (soviet && (era == ArchEra::PostWarPanel || era == ArchEra::Contemporary)) {
+		kit = {BalconyKitKind::Parapet, IRON_TRAPDOOR, parapet, stacked && roll < 60};
+	} else if (era == ArchEra::PostWarPanel) {
+		kit = roll < 55
+					  ? BalconyKit{BalconyKitKind::Parapet, IRON_TRAPDOOR, parapet, false}
+					  : BalconyKit{BalconyKitKind::Panels, IRON_TRAPDOOR, parapet, false};
+	} else if (era == ArchEra::Contemporary && roll < 55) {
+		kit.kind = BalconyKitKind::Glass;
+	} else if (era == ArchEra::Contemporary && roll < 85) {
+		kit = {BalconyKitKind::Panels, IRON_TRAPDOOR, parapet, false};
+	} else if (era == ArchEra::Contemporary) {
+		kit = {BalconyKitKind::Parapet, IRON_TRAPDOOR, parapet, false};
+	} else if (soviet) {
+		kit = {BalconyKitKind::Parapet, IRON_TRAPDOOR, parapet, stacked && roll < 40};
+	} else if (old_europe || band == BalconyBand::Filant) {
+		kit.kind = roll < 70 ? BalconyKitKind::Wrought : BalconyKitKind::Panels;
+		kit.panel = timber;
+	} else if (materials == MaterialRegion::MiddleEast ||
+			   materials == MaterialRegion::SouthAsia ||
+			   materials == MaterialRegion::SubSaharanAfrica ||
+			   materials == MaterialRegion::EastAsia ||
+			   materials == MaterialRegion::Korea) {
+		kit.kind = roll < 60 ? BalconyKitKind::Parapet : BalconyKitKind::Wrought;
+		kit.parapet = parapet;
+	} else {
+		kit.kind = roll < 50 ? BalconyKitKind::Wrought : BalconyKitKind::Panels;
+		kit.panel = timber;
+	}
+	const unsigned french_chance =
+			materials == MaterialRegion::France			 ? 55
+			: materials == MaterialRegion::Mediterranean ? 25
+			: materials == MaterialRegion::Central ||
+							materials == MaterialRegion::CentralEast
+					? 10
+					: 0;
+	const bool french = band == BalconyBand::Filant ||
+						(category == BuildingCategory::Residential && old_europe &&
+								rng.uniform(100) < french_chance);
+	return {kit, french};
 }
 
 Block base_course_for_wall(Block wall)
@@ -1703,6 +1812,33 @@ Block trim_block_for_wall(Block wall, std::uint64_t seed)
 	if (wall == DARK_OAK_PLANKS)
 		return SPRUCE_PLANKS;
 	return POLISHED_DIORITE;
+}
+
+Block balcony_trim_slab(Block trim)
+{
+	if (trim == SMOOTH_STONE)
+		return SMOOTH_STONE_SLAB;
+	if (trim == POLISHED_DIORITE)
+		return POLISHED_DIORITE_SLAB;
+	if (trim == SMOOTH_SANDSTONE || trim == SANDSTONE)
+		return CUT_SANDSTONE_SLAB;
+	if (trim == QUARTZ_BLOCK)
+		return QUARTZ_SLAB_TOP;
+	if (trim == DARK_OAK_PLANKS)
+		return DARK_OAK_SLAB;
+	if (trim == SPRUCE_PLANKS)
+		return SPRUCE_SLAB;
+	if (trim == POLISHED_ANDESITE)
+		return POLISHED_ANDESITE_SLAB;
+	if (trim == POLISHED_BLACKSTONE)
+		return POLISHED_BLACKSTONE_SLAB;
+	if (trim == POLISHED_DEEPSLATE)
+		return POLISHED_DEEPSLATE_SLAB;
+	if (trim == BLACK_CONCRETE)
+		return BLACKSTONE_SLAB;
+	if (trim == DARK_PRISMARINE)
+		return DARK_PRISMARINE_SLAB;
+	return get_slab_block_for_material(trim);
 }
 
 WallDepthStyle wall_depth_style_for(BuildingCategory category)
@@ -8327,9 +8463,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					(category == BuildingCategory::Hotel &&
 							element_rng(group_seed ^ 0xF10A401E00000003ULL)
 									.random_bool(.2)));
-	const BalconyBand balcony_band =
-			pick_balcony_band(category, era, building_style::building_region(wall_region),
-					building_height, floor_cycle, facade_plan.has_any_street, group_seed);
+	const BalconyBand balcony_band = pick_balcony_band(category, era,
+			building_style::building_region(wall_region), wall_region, building_height,
+			floor_cycle, is_tall_building, facade_plan.has_any_street, group_seed);
+	const auto [balcony_kit, french_windows] =
+			pick_balcony_kit(category, era, building_style::building_region(wall_region),
+					wall_region, balcony_band, group_seed);
+	std::set<std::tuple<int, int, int>> balcony_taken;
 	const Block base_course_block = base_course_for_wall(wall_block);
 	const bool has_base_course =
 			min_level_offset == 0 && has_windows &&
@@ -9591,6 +9731,13 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 											!facade_plan.is_party(cx, cz) &&
 											!passage_at(effective_passages, cx, cz);
 								}
+								const int balcony_storey = floor_div(
+										sill_y - start_y_offset - grammar_anchor,
+										std::max(1, floor_cycle));
+								const int top_storey =
+										floor_div(start_y_offset + building_height - 1 -
+														  grammar_anchor,
+												std::max(1, floor_cycle));
 								wants_balcony =
 										balcony_fits &&
 										((balcony_band == BalconyBand::Scattered &&
@@ -9605,7 +9752,15 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 														((floor_div(wall_u + window_phase,
 																  6) % 2 +
 																 2) % 2 ==
-																0)));
+																0)) ||
+												(balcony_band == BalconyBand::Filant &&
+														category == BuildingCategory::
+																			Residential &&
+														facade_plan.is_street(bx, bz) &&
+														(balcony_storey == 2 ||
+																(top_storey > 3 &&
+																		balcony_storey ==
+																				top_storey))));
 							}
 							const std::uint32_t sill_roll_max = rear_facade ? 8u : 15u;
 							if (!wants_balcony && decoration_roll < sill_roll_max) {
@@ -9710,7 +9865,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						if (depth_clear && floor_row == 0 && bay_slot.is_window() &&
 								window_col == (bay_slot.width - 1) / 2 &&
 								h >= start_y_offset + 2 + floor_cycle &&
-								h <= start_y_offset + building_height - floor_cycle) {
+								(h <= start_y_offset + building_height - floor_cycle ||
+										balcony_band == BalconyBand::Filant)) {
 							const int floor_idx = h / floor_cycle;
 							const int seg_cross = segment_is_x ? prev.second : prev.first;
 							auto decoration_rng = coord_rng(wall_u + floor_idx * 3,
@@ -9731,16 +9887,34 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 								balcony_fits = balcony_fits && on_segment &&
 											   !facade_plan.is_party(wx, wz) &&
 											   !passage_at(effective_passages, wx, wz);
+								for (int d = 1; d <= balcony_kit.depth() && balcony_fits;
+										++d) {
+									const int px = wx + outward.first * d;
+									const int pz = wz + outward.second * d;
+									balcony_fits =
+											!current_footprint.contains({px, pz}) &&
+											(!building_footprints ||
+													!building_footprints->contains(
+															px, pz)) &&
+											!passage_at(effective_passages, px, pz) &&
+											!balcony_taken.contains({px, h, pz});
+								}
 							}
 							const bool above_ground =
 									min_level_offset != 0 ||
 									h >= start_y_offset + 2 + floor_cycle;
+							const int balcony_storey =
+									floor_div(h - start_y_offset - grammar_anchor,
+											std::max(1, floor_cycle));
+							const int top_storey = floor_div(
+									start_y_offset + building_height - 1 - grammar_anchor,
+									std::max(1, floor_cycle));
 							const bool residential =
 									category == BuildingCategory::House ||
 									category == BuildingCategory::Residential;
 							const bool balcony =
-									residential && has_windows && !is_tall_building &&
-									above_ground && balcony_fits &&
+									residential && has_windows && above_ground &&
+									balcony_band != BalconyBand::Filant && balcony_fits &&
 									((balcony_band == BalconyBand::EveryBay &&
 											 street_facing) ||
 											(balcony_band == BalconyBand::Alternating &&
@@ -9752,7 +9926,16 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 											(balcony_band == BalconyBand::Scattered &&
 													decoration_roll >= 15 &&
 													decoration_roll <
-															(street_facing ? 23u : 18u)));
+															(street_facing ? 23u
+																		   : 18u)) ||
+											(balcony_band == BalconyBand::Filant &&
+													category == BuildingCategory::
+																		Residential &&
+													street_facing &&
+													(balcony_storey == 2 ||
+															(top_storey > 3 &&
+																	balcony_storey ==
+																			top_storey))));
 							if (balcony) {
 								// Port Rust's full 3-wide by 2-deep balcony rather than a
 								// lone projecting slab. The centre column is the bay anchor;
@@ -9770,73 +9953,165 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 											{{"facing", facing(nx, nz)}, {"open", "true"},
 													{"half", "top"}});
 								};
-								static const std::array<Block, 4> trapdoor_options{
-										OAK_TRAPDOOR, DARK_OAK_TRAPDOOR, SPRUCE_TRAPDOOR,
-										BIRCH_TRAPDOOR};
-								const Block trapdoor = trapdoor_options
-										[element_rng(element.id)
-														.uniform(static_cast<
-																std::uint32_t>(
-																trapdoor_options
-																		.size()))];
-								const auto balcony_floor = cached_prop_block(
-										SMOOTH_STONE_SLAB, {{"type", "top"}});
-								const auto front_fence = open_trapdoor(
-										trapdoor, outward.first, outward.second);
-								const auto left_fence =
-										open_trapdoor(trapdoor, -tangent_x, -tangent_z);
-								const auto right_fence =
-										open_trapdoor(trapdoor, tangent_x, tangent_z);
 								const std::optional<std::vector<Block>> air{
 										std::vector<Block>{AIR}};
-								for (int t = -1; t <= 1; ++t) {
-									for (int depth = 1; depth <= 2; ++depth)
+								const int depth = balcony_kit.depth();
+								const Block floor_block =
+										balcony_kit.kind == BalconyKitKind::Glass
+												? SMOOTH_QUARTZ_SLAB
+										: balcony_kit.kind == BalconyKitKind::Parapet
+												? SMOOTH_STONE_SLAB
+												: balcony_trim_slab(tower_trim_block);
+								const auto balcony_floor =
+										cached_prop_block(floor_block, {{"type", "top"}});
+								const auto cell = [&](int t, int d) {
+									return std::pair{
+											bx + tangent_x * t + outward.first * d,
+											bz + tangent_z * t + outward.second * d};
+								};
+								const auto on_rim = [&](int t, int d) {
+									return std::abs(t) == 2 || d == depth;
+								};
+								const bool panels =
+										balcony_kit.kind == BalconyKitKind::Panels;
+								for (int t = -2; t <= 2; ++t) {
+									for (int d = 1; d <= depth; ++d) {
+										const auto [tx, tz] = cell(t, d);
+										balcony_taken.emplace(tx, h, tz);
+										if (panels && on_rim(t, d))
+											continue;
 										editor->set_block_with_properties_absolute(
-												balcony_floor,
-												bx + tangent_x * t +
-														outward.first * depth,
-												balcony_y,
-												bz + tangent_z * t +
-														outward.second * depth,
-												air, std::nullopt);
-									const int fx = bx + tangent_x * t + outward.first * 3;
-									const int fz =
-											bz + tangent_z * t + outward.second * 3;
-									editor->set_block_with_properties_absolute(
-											front_fence, fx, balcony_y + 1, fz, air,
-											std::nullopt);
+												balcony_floor, tx, balcony_y, tz, air,
+												std::nullopt);
+									}
 								}
-								for (int depth = 1; depth <= 2; ++depth) {
-									const int lx =
-											bx - tangent_x * 2 + outward.first * depth;
-									const int lz =
-											bz - tangent_z * 2 + outward.second * depth;
-									const int rx =
-											bx + tangent_x * 2 + outward.first * depth;
-									const int rz =
-											bz + tangent_z * 2 + outward.second * depth;
-									editor->set_block_with_properties_absolute(left_fence,
-											lx, balcony_y + 1, lz, air, std::nullopt);
-									editor->set_block_with_properties_absolute(
-											right_fence, rx, balcony_y + 1, rz, air,
-											std::nullopt);
+								if (panels) {
+									for (int t = -2; t <= 2; ++t) {
+										for (int d = 1; d <= depth; ++d) {
+											if (!on_rim(t, d) ||
+													(d == depth && std::abs(t) == 2))
+												continue;
+											const int nx = d == depth
+																   ? outward.first
+																   : (t < 0 ? -tangent_x
+																			: tangent_x);
+											const int nz = d == depth
+																   ? outward.second
+																   : (t < 0 ? -tangent_z
+																			: tangent_z);
+											const auto [fx, fz] = cell(t, d);
+											editor->set_block_with_properties_absolute(
+													open_trapdoor(
+															balcony_kit.panel, nx, nz),
+													fx, balcony_y + 1, fz, air,
+													std::nullopt);
+										}
+									}
+								} else if (balcony_kit.kind == BalconyKitKind::Parapet) {
+									for (int t = -2; t <= 2; ++t)
+										for (int d = 1; d <= depth; ++d)
+											if (on_rim(t, d)) {
+												const auto [fx, fz] = cell(t, d);
+												editor->set_block_absolute(
+														balcony_kit.parapet, fx,
+														balcony_y + 1, fz, air,
+														std::nullopt);
+											}
+								} else {
+									const Block rail =
+											balcony_kit.kind == BalconyKitKind::Glass
+													? GLASS_PANE
+													: IRON_BARS;
+									std::vector<std::pair<int, int>> rail_cells;
+									for (int t = -2; t <= 2; ++t)
+										for (int d = 1; d <= depth; ++d)
+											if (on_rim(t, d))
+												rail_cells.push_back(cell(t, d));
+									const std::array<std::pair<int, int>, 2> wall_cells{
+											std::pair{bx - 2 * tangent_x,
+													bz - 2 * tangent_z},
+											std::pair{bx + 2 * tangent_x,
+													bz + 2 * tangent_z}};
+									const auto present = [](const auto &cells, int x,
+																 int z) {
+										return std::find(cells.begin(), cells.end(),
+													   std::pair{x, z}) != cells.end();
+									};
+									for (const auto &[fx, fz] : rail_cells) {
+										const auto joins = [&](int dx, int dz) {
+											return present(rail_cells, fx + dx,
+														   fz + dz) ||
+												   present(wall_cells, fx + dx, fz + dz);
+										};
+										auto state = connected_blocks::connected_fence(
+												rail, joins(0, -1), joins(0, 1),
+												joins(1, 0), joins(-1, 0));
+										editor->set_block_with_properties_absolute(state,
+												fx, balcony_y + 1, fz, air, std::nullopt);
+									}
+									if (balcony_kit.kind == BalconyKitKind::Wrought) {
+										const auto support = cached_prop_block(
+												get_stair_block_for_material(
+														tower_trim_block),
+												{{"facing", facing(outward.first,
+																	outward.second)},
+														{"half", "top"}});
+										for (const int t : {-2, 2}) {
+											const auto [wx, wz] = cell(t, 0);
+											const auto below = editor->get_block_absolute(
+													wx, balcony_y - 1, wz);
+											const auto name = editor->block_name_absolute(
+													wx, balcony_y - 1, wz);
+											if (below && *below != AIR &&
+													(!name ||
+															name->find("glass") ==
+																	std::string::npos)) {
+												const auto [sx, sz] = cell(t, 1);
+												editor->set_block_with_properties_absolute(
+														support, sx, balcony_y - 1, sz,
+														air, std::nullopt);
+											}
+										}
+									}
 								}
-								// Stable per-bay furnishing: a planter or an outward-facing
-								// stair chair, matching Rust's two common balcony details.
-								auto furniture_rng = coord_rng(bx + floor_idx * 11,
+								if (balcony_kit.kind == BalconyKitKind::Parapet &&
+										balcony_kit.glazed) {
+									const int glass_top =
+											std::min(balcony_y + floor_cycle,
+													start_y_offset + building_height +
+															abs_terrain_offset);
+									for (int gy = balcony_y + 2; gy < glass_top; ++gy) {
+										for (int t = -2; t <= 2; ++t)
+											for (int d = 1; d <= depth; ++d) {
+												if (!on_rim(t, d))
+													continue;
+												const auto [gx, gz] = cell(t, d);
+												editor->set_block_absolute(GLASS_PANE, gx,
+														gy, gz, air, std::nullopt);
+											}
+									}
+									for (int t = -2; t <= 2; ++t)
+										for (int d = 1; d <= depth; ++d) {
+											const auto [gx, gz] = cell(t, d);
+											editor->set_block_with_properties_absolute(
+													balcony_floor, gx, glass_top, gz, air,
+													std::nullopt);
+										}
+								}
+								auto seed_rng = coord_rng(bx + floor_idx * 11,
 										bz + floor_idx * 17, element.id);
+								auto furniture_rng = element_rng(seed_rng.random_u64());
 								const auto furniture_roll = furniture_rng.uniform(100);
-								const int side = furniture_rng.random_bool(.5) ? -1 : 1;
-								const int px = bx + tangent_x * side + outward.first;
-								const int pz = bz + tangent_z * side + outward.second;
-								if (furniture_roll < 30) {
-									editor->set_block_absolute(CAULDRON, px,
-											balcony_y + 1, pz, air, std::nullopt);
-									editor->set_block_absolute(OAK_LEAVES, px,
-											balcony_y + 2, pz, air, std::nullopt);
-								} else if (furniture_roll < 55) {
-									const auto chair_facing =
-											facing(-outward.first, -outward.second);
+								const int end = furniture_rng.random_bool(.5) ? 1 : 3;
+								const auto put = [&](Block block, std::pair<int, int> pos,
+														 int dy) {
+									editor->set_block_absolute(block, pos.first,
+											balcony_y + dy, pos.second, air,
+											std::nullopt);
+								};
+								const auto chair = [&](std::pair<int, int> pos, int fx,
+														   int fz) {
+									const auto chair_facing = facing(fx, fz);
 									const auto stair_facing =
 											std::string_view(chair_facing) == "north"
 													? StairFacing::North
@@ -9848,7 +10123,34 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									editor->set_block_with_properties_absolute(
 											create_stair_with_properties(OAK_STAIRS,
 													stair_facing, StairShape::Straight),
-											px, balcony_y + 1, pz, air, std::nullopt);
+											pos.first, balcony_y + 1, pos.second, air,
+											std::nullopt);
+								};
+								if (furniture_roll < 20) {
+									put(CAULDRON, cell(end, 1), 1);
+									put(OAK_LEAVES, cell(end, 1), 2);
+								} else if (furniture_roll < 38) {
+									chair(cell(end, 1), -outward.first, -outward.second);
+								} else if (furniture_roll < 48 && depth >= 3) {
+									const int middle = 2;
+									put(OAK_FENCE, cell(middle, depth - 1), 1);
+									put(OAK_PRESSURE_PLATE, cell(middle, depth - 1), 2);
+									for (const int i : {middle - 1, middle + 1})
+										chair(cell(i, depth - 1),
+												(i - middle) * tangent_x,
+												(i - middle) * tangent_z);
+								} else if (furniture_roll < 62 && depth >= 2) {
+									for (int i = 1; i < 4; ++i)
+										if (furniture_rng.random_bool(.6)) {
+											const Block plant = potted_plant_options
+													[furniture_rng.uniform(
+															static_cast<std::uint32_t>(
+																	potted_plant_options
+																			.size()))];
+											put(plant, cell(i, depth - 1), 1);
+										}
+								} else if (furniture_roll < 70) {
+									put(BARREL, cell(end, 1), 1);
 								}
 							}
 						}
@@ -9872,6 +10174,315 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		previous_node = std::make_pair(x, z);
 	}
 
+	// Rust's Paris/filant band is one continuous balcony across each straight
+	// street-facing facade run, on the second storey and (for taller fronts) the
+	// top storey. Keep it separate from the per-window balcony path above.
+	if (balcony_band == BalconyBand::Filant &&
+			category == BuildingCategory::Residential &&
+			condition == BuildingCondition::Normal && has_windows &&
+			!horizontal_windows) {
+		std::map<int, std::vector<const FacadeWindowColumn *>> runs;
+		for (const auto &column : facade_window_columns)
+			if (facade_plan.is_street(column.x, column.z))
+				runs[column.run].push_back(&column);
+		const int top_h = start_y_offset + building_height;
+		const int top_storey = floor_div(
+				top_h - 1 - start_y_offset - grammar_anchor, std::max(1, floor_cycle));
+		const int first_h = start_y_offset + grammar_anchor + floor_cycle;
+		const int depth = balcony_kit.depth();
+		for (auto &[run, columns] : runs) {
+			(void)run;
+			std::sort(columns.begin(), columns.end(), [](const auto *a, const auto *b) {
+				return a->position < b->position;
+			});
+			columns.erase(std::unique(columns.begin(), columns.end(),
+								  [](const auto *a, const auto *b) {
+									  return a->position == b->position;
+								  }),
+					columns.end());
+			std::vector<std::size_t> windows;
+			for (std::size_t i = 0; i < columns.size(); ++i)
+				if (columns[i]->slot.is_window())
+					windows.push_back(i);
+			if (windows.empty())
+				continue;
+			const std::size_t first = windows.front() == 0 ? 0 : windows.front() - 1;
+			const std::size_t last = std::min(windows.back() + 1, columns.size() - 1);
+			if (last - first + 1 < 5)
+				continue;
+			std::vector<std::pair<int, int>> span;
+			span.reserve(last - first + 1);
+			const auto normal = std::pair{columns[first]->nx, columns[first]->nz};
+			const auto tangent = std::pair{-normal.second, normal.first};
+			for (std::size_t i = first; i <= last; ++i) {
+				const auto delta = i > first
+										   ? std::pair{columns[i]->x - columns[i - 1]->x,
+													 columns[i]->z - columns[i - 1]->z}
+										   : tangent;
+				if (columns[i]->nx != normal.first || columns[i]->nz != normal.second ||
+						(i > first && delta != tangent &&
+								delta != std::pair{-tangent.first, -tangent.second})) {
+					span.clear();
+					break;
+				}
+				span.emplace_back(columns[i]->x, columns[i]->z);
+			}
+			if (span.empty())
+				continue;
+			bool fits = true;
+			for (const auto &[wx, wz] : span) {
+				if (facade_plan.is_party(wx, wz) ||
+						passage_at(effective_passages, wx, wz) ||
+						is_flat_column(wx, wz)) {
+					fits = false;
+					break;
+				}
+				for (int d = 1; d <= depth; ++d) {
+					const int px = wx + normal.first * d;
+					const int pz = wz + normal.second * d;
+					if (current_footprint.contains({px, pz}) ||
+							(building_footprints &&
+									building_footprints->contains(px, pz)) ||
+							passage_at(effective_passages, px, pz)) {
+						fits = false;
+						break;
+					}
+				}
+				if (!fits)
+					break;
+			}
+			if (!fits)
+				continue;
+			const auto &window = *columns[windows.front()];
+			for (int h = first_h; h < top_h; ++h) {
+				if ((h - start_y_offset - grammar_anchor) % floor_cycle != 0)
+					continue;
+				const auto pane = editor->get_block_absolute(window.x - normal.first,
+						h + 1 + abs_terrain_offset, window.z - normal.second);
+				const auto face = editor->get_block_absolute(
+						window.x, h + 1 + abs_terrain_offset, window.z);
+				if (!pane || (*pane != window_block && *pane != GLASS) ||
+						(face && *face != AIR))
+					continue;
+				const int storey = floor_div(
+						h - start_y_offset - grammar_anchor, std::max(1, floor_cycle));
+				if (storey != 2 && !(top_storey > 3 && storey == top_storey))
+					continue;
+				const int y = h + abs_terrain_offset;
+				const Block floor_block = balcony_kit.kind == BalconyKitKind::Glass
+												  ? SMOOTH_QUARTZ_SLAB
+										  : balcony_kit.kind == BalconyKitKind::Parapet
+												  ? SMOOTH_STONE_SLAB
+												  : balcony_trim_slab(tower_trim_block);
+				const auto floor = cached_prop_block(floor_block, {{"type", "top"}});
+				const auto cell = [&](std::size_t i, int d) {
+					return std::pair{span[i].first + normal.first * d,
+							span[i].second + normal.second * d};
+				};
+				const auto rim = [&](std::size_t i, int d) {
+					return i == 0 || i + 1 == span.size() || d == depth;
+				};
+				std::set<std::pair<int, int>> rim_cells;
+				const std::set<std::pair<int, int>> wall_cells{span.front(), span.back()};
+				for (std::size_t i = 0; i < span.size(); ++i)
+					for (int d = 1; d <= depth; ++d)
+						if (rim(i, d))
+							rim_cells.insert(cell(i, d));
+				const std::optional<std::vector<Block>> air{std::vector<Block>{AIR}};
+				for (std::size_t i = 0; i < span.size(); ++i)
+					for (int d = 1; d <= depth; ++d) {
+						const auto [px, pz] = cell(i, d);
+						balcony_taken.emplace(px, h, pz);
+						if (balcony_kit.kind != BalconyKitKind::Panels || !rim(i, d))
+							editor->set_block_with_properties_absolute(
+									floor, px, y, pz, air, std::nullopt);
+					}
+				if (balcony_kit.kind == BalconyKitKind::Panels) {
+					for (std::size_t i = 0; i < span.size(); ++i)
+						for (int d = 1; d <= depth; ++d) {
+							if (!rim(i, d) ||
+									(d == depth && (i == 0 || i + 1 == span.size())))
+								continue;
+							const auto [px, pz] = cell(i, d);
+							const auto direction =
+									d == depth
+											? normal
+											: std::pair{(i == 0 ? 1 : -1) * tangent.first,
+													  (i == 0 ? 1 : -1) * tangent.second};
+							const auto side =
+									std::abs(direction.first) >=
+													std::abs(direction.second)
+											? (direction.first >= 0 ? "east" : "west")
+											: (direction.second >= 0 ? "south" : "north");
+							editor->set_block_with_properties_absolute(
+									cached_prop_block(balcony_kit.panel,
+											{{"facing", side}, {"open", "true"},
+													{"half", "top"}}),
+									px, y + 1, pz, air, std::nullopt);
+						}
+				} else {
+					const Block rail = balcony_kit.kind == BalconyKitKind::Glass
+											   ? GLASS_PANE
+									   : balcony_kit.kind == BalconyKitKind::Wrought
+											   ? IRON_BARS
+											   : balcony_kit.parapet;
+					for (const auto &[px, pz] : rim_cells) {
+						const auto joins = [&](int dx, int dz) {
+							const auto neighbour = std::pair{px + dx, pz + dz};
+							return rim_cells.contains(neighbour) ||
+								   wall_cells.contains(neighbour);
+						};
+						const auto state =
+								balcony_kit.kind == BalconyKitKind::Parapet
+										? BlockWithProperties{rail}
+										: connected_blocks::connected_fence(rail,
+												  joins(0, -1), joins(0, 1), joins(1, 0),
+												  joins(-1, 0));
+						editor->set_block_with_properties_absolute(
+								state, px, y + 1, pz, air, std::nullopt);
+					}
+				}
+				if (balcony_kit.kind == BalconyKitKind::Parapet && balcony_kit.glazed) {
+					const int glass_top = std::min(y + floor_cycle,
+							start_y_offset + building_height + abs_terrain_offset);
+					for (int gy = y + 2; gy < glass_top; ++gy)
+						for (const auto &[px, pz] : rim_cells) {
+							const auto joins = [&](int dx, int dz) {
+								const auto neighbour = std::pair{px + dx, pz + dz};
+								return rim_cells.contains(neighbour) ||
+									   wall_cells.contains(neighbour);
+							};
+							const auto pane = connected_blocks::connected_fence(
+									GLASS_PANE, joins(0, -1), joins(0, 1), joins(1, 0),
+									joins(-1, 0));
+							editor->set_block_with_properties_absolute(
+									pane, px, gy, pz, air, std::nullopt);
+						}
+					for (std::size_t i = 0; i < span.size(); ++i)
+						for (int d = 1; d <= depth; ++d) {
+							const auto [px, pz] = cell(i, d);
+							editor->set_block_with_properties_absolute(
+									floor, px, glass_top, pz, air, std::nullopt);
+						}
+				}
+				const int last = static_cast<int>(span.size()) - 1;
+				const int floor_index = h / std::max(1, floor_cycle);
+				auto seed_rng = coord_rng(span.front().first + floor_index * 11,
+						span.front().second + floor_index * 17, element.id);
+				auto furniture_rng = element_rng(seed_rng.random_u64());
+				const auto furniture_roll = furniture_rng.uniform(100);
+				const int end = furniture_rng.random_bool(.5) ? 1 : last - 1;
+				const auto put = [&](Block block, std::pair<int, int> pos, int dy) {
+					editor->set_block_absolute(
+							block, pos.first, y + dy, pos.second, air, std::nullopt);
+				};
+				const auto chair = [&](std::pair<int, int> pos, int fx, int fz) {
+					const char *facing = std::abs(fx) >= std::abs(fz)
+												 ? (fx >= 0 ? "east" : "west")
+												 : (fz >= 0 ? "south" : "north");
+					const auto stair_facing =
+							std::string_view(facing) == "north"	  ? StairFacing::North
+							: std::string_view(facing) == "south" ? StairFacing::South
+							: std::string_view(facing) == "east"  ? StairFacing::East
+																  : StairFacing::West;
+					editor->set_block_with_properties_absolute(
+							create_stair_with_properties(
+									OAK_STAIRS, stair_facing, StairShape::Straight),
+							pos.first, y + 1, pos.second, air, std::nullopt);
+				};
+				if (furniture_roll < 20) {
+					const auto pos = cell(static_cast<std::size_t>(end), 1);
+					put(CAULDRON, pos, 1);
+					put(OAK_LEAVES, pos, 2);
+				} else if (furniture_roll < 38) {
+					chair(cell(static_cast<std::size_t>(end), 1), -normal.first,
+							-normal.second);
+				} else if (furniture_roll < 48 && depth >= 3 && last >= 4) {
+					const int middle = last / 2;
+					put(OAK_FENCE, cell(static_cast<std::size_t>(middle), depth - 1), 1);
+					put(OAK_PRESSURE_PLATE,
+							cell(static_cast<std::size_t>(middle), depth - 1), 2);
+					for (const int i : {middle - 1, middle + 1}) {
+						const auto toward_center =
+								std::pair{span[middle].first - span[i].first,
+										span[middle].second - span[i].second};
+						chair(cell(static_cast<std::size_t>(i), depth - 1),
+								-toward_center.first, -toward_center.second);
+					}
+				} else if (furniture_roll < 62 && depth >= 2) {
+					const double chance = std::min(3.0 / (last - 1), .6);
+					for (int i = 1; i < last; ++i)
+						if (furniture_rng.random_bool(chance)) {
+							const Block plant =
+									potted_plant_options[furniture_rng.uniform(
+											static_cast<std::uint32_t>(
+													potted_plant_options.size()))];
+							put(plant, cell(static_cast<std::size_t>(i), depth - 1), 1);
+						}
+				} else if (furniture_roll < 70) {
+					put(BARREL, cell(static_cast<std::size_t>(end), 1), 1);
+				}
+			}
+		}
+	}
+
+	// Port Rust's French window railings after all facade panes and balconies
+	// exist, so glass recesses and balcony occupancy can be tested accurately.
+	if (french_windows && condition == BuildingCondition::Normal && has_windows &&
+			!horizontal_windows && category != BuildingCategory::Tower) {
+		using FrenchBar = std::tuple<int, int, int>;
+		std::map<FrenchBar, std::optional<std::pair<int, int>>> bars;
+		const int top_h = start_y_offset + building_height;
+		const int first_h = start_y_offset + grammar_anchor + floor_cycle;
+		for (const auto &column : facade_window_columns) {
+			if (!column.slot.is_window() ||
+					passage_at(effective_passages, column.x, column.z) ||
+					facade_plan.is_party(column.x, column.z) ||
+					facade_plan.is_door(column.x, column.z))
+				continue;
+			for (int h = first_h; h < top_h; ++h) {
+				const int floor_row =
+						((h - start_y_offset - grammar_anchor) % floor_cycle +
+								floor_cycle) %
+						floor_cycle;
+				if (floor_row != 0 || balcony_taken.contains({column.x + column.nx, h,
+											  column.z + column.nz}))
+					continue;
+				const int y = h + 1 + abs_terrain_offset;
+				const auto pane = editor->get_block_absolute(
+						column.x - column.nx, y, column.z - column.nz);
+				const auto face = editor->get_block_absolute(column.x, y, column.z);
+				if (!pane || (*pane != window_block && *pane != GLASS))
+					continue;
+				if (!face || *face == AIR) {
+					bars.emplace(FrenchBar{column.x, y, column.z},
+							std::pair{column.nx, column.nz});
+				} else {
+					const int ox = column.x + column.nx;
+					const int oz = column.z + column.nz;
+					const auto outside = editor->get_block_absolute(ox, y, oz);
+					if (!outside || *outside == AIR)
+						bars.emplace(FrenchBar{ox, y, oz}, std::nullopt);
+				}
+			}
+		}
+		for (const auto &[cell, normal] : bars) {
+			const auto [x, y, z] = cell;
+			const auto joins = [&](int dx, int dz) {
+				if (bars.contains({x + dx, y, z + dz}))
+					return true;
+				if (!normal || dx * normal->first + dz * normal->second != 0)
+					return false;
+				const auto name = editor->block_name_absolute(x + dx, y, z + dz);
+				return name && name->find("glass") == std::string::npos &&
+					   name->find("air") == std::string::npos;
+			};
+			const auto state = connected_blocks::connected_fence(
+					IRON_BARS, joins(0, -1), joins(0, 1), joins(1, 0), joins(-1, 0));
+			editor->set_block_with_properties_absolute(
+					state, x, y, z, std::vector<Block>{AIR}, std::nullopt);
+		}
+	}
 	// Rust's window-life pass decorates only recessed panes and keys each
 	// decision to the complete window bay/storey, so all columns in one window
 	// share the same curtain and air-conditioner choice.
@@ -11754,7 +12365,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	mapillary::facades::collect_displays(*editor, element.id, start_y_offset,
 			abs_terrain_offset, building_height, args.facade_px);
 	return signage_anchor;
-}
+	}
 
 // multiply_scale implementation
 inline int32_t multiply_scale(int32_t value, double scale_factor)

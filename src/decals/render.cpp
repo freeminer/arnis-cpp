@@ -1,5 +1,6 @@
 #include "render.h"
 #include "font.h"
+#include "machines.h"
 #include "pictograms.h"
 #include "posters.h"
 #include "templates.h"
@@ -100,6 +101,10 @@ Canvas render(const DecalKey &key, const std::optional<PreviewRaster> &preview)
 					templates::route_shield(canvas, value.style, value.text);
 				else if constexpr (std::is_same_v<Key, PictogramKey>) {
 					if (const auto path = pictograms::asset(value.name);
+							!path || !image(canvas, *path))
+						templates::blank_plate(canvas, colors::GRAY);
+				} else if constexpr (std::is_same_v<Key, MachineKey>) {
+					if (const auto path = machines::asset(value.name);
 							!path || !image(canvas, *path))
 						templates::blank_plate(canvas, colors::GRAY);
 				} else if constexpr (std::is_same_v<Key, PosterKey>) {

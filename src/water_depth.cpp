@@ -9,9 +9,11 @@
 #include <iostream>
 #include <limits>
 #include <tuple>
+#include <unordered_map>
 #include <vector>
 
 #include "land_cover/land_cover.h"
+#include "block_definitions.h"
 #include "element_processing/bridges.h"
 #include "ground_generation.h"
 #include "ground_decoration.h"
@@ -175,6 +177,27 @@ int dune_amp(int body_max, int depth)
 {
 	const int target = body_max <= 3 ? 2 : body_max <= 5 ? 3 : 4;
 	return std::min(target, std::max(depth - 1, 0));
+}
+
+int carve_depth(int depth, int water_y)
+{
+	return std::min(std::clamp(depth, 0, MAX_WATER_DEPTH),
+			std::max(0, water_y - world_editor::min_y() - 2));
+}
+
+std::optional<int> depth_over_bore(
+		WorldEditor &editor, int x, int z, int water_y, int depth)
+{
+	static const std::optional<std::vector<Block>> shell = std::vector<Block>{
+			STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, POLISHED_DEEPSLATE};
+	const int bottom = water_y - depth - 2;
+	for (int y = water_y; y >= bottom; --y) {
+		if (!editor.check_for_block_absolute(x, y, z, shell))
+			continue;
+		const int fits = water_y - y - 3;
+		return fits >= 0 ? std::optional<int>(fits) : std::nullopt;
+	}
+	return depth;
 }
 
 int place_underwater_dunes(WorldEditor &editor, int x, int z, int water_y, int bed_y,
@@ -358,6 +381,39 @@ int BigWaterField::depth_at(int x, int z) const
 	const auto idx = static_cast<std::size_t>(lz) * width_ + static_cast<std::size_t>(lx);
 	return static_cast<int>(nibble_get(depth_, idx));
 }
+
+bool BigWaterField::reaches(int x, int z, int radius) const
+{
+	if (empty() || radius < 0)
+		return false;
+	const auto px = static_cast<std::int64_t>(x);
+	const auto pz = static_cast<std::int64_t>(z);
+	const auto r = static_cast<std::int64_t>(radius);
+	const auto x0 = static_cast<std::int64_t>(min_x_);
+	const auto z0 = static_cast<std::int64_t>(min_z_);
+	return px + r >= x0 && pz + r >= z0 &&
+		   px - r < x0 + static_cast<std::int64_t>(width_) &&
+		   pz - r < z0 + static_cast<std::int64_t>(height_);
+}
+
+std::optional<int> lc_carved_bed(
+		const WorldEditor &editor, const BigWaterField &field, int x, int z)
+{
+	if (field.empty() || x < field.min_x() || x > field.max_x() || z < field.min_z() ||
+			z > field.max_z() || !editor.get_ground() || !editor.is_lc_water(x, z))
+		return std::nullopt;
+	int water_y = editor.get_water_level(x, z);
+	const int ground_y = editor.get_ground_level(x, z);
+	if (ground_y > water_y) {
+		if (!editor.get_ground()->is_interior_water(editor.ground_point(x, z)))
+			return std::nullopt;
+		water_y = ground_y;
+	}
+	const int depth = std::min(
+			field.depth_at(x, z), std::max(0, water_y - world_editor::min_y() - 2));
+	return water_y - depth - 1;
+}
+
 int BigWaterField::body_max_7x7(int x, int z) const
 {
 	int maximum = 0;
@@ -400,6 +456,98 @@ int estimate_max_carve_depth(const std::vector<std::vector<std::uint8_t>> &grid,
 	return depth_from_dt(scaled + 2.,
 			static_cast<std::uint16_t>(
 					std::min(scaled, double(std::numeric_limits<std::uint16_t>::max()))));
+}
+
+std::vector<BoreCrossing> bore_crossings(
+		const std::vector<std::vector<std::uint8_t>> &grid, std::size_t world_width,
+		std::size_t world_height,
+		const std::vector<std::pair<std::size_t, std::size_t>> &input_cells,
+		const std::function<double(std::size_t, std::size_t)> &height_m)
+{
+	const std::size_t gh = grid.size();
+	const std::size_t gw = gh ? grid.front().size() : 0;
+	if (gw == 0 || gh == 0 || gw > std::numeric_limits<std::size_t>::max() / gh)
+		return {};
+	for (const auto &row : grid)
+		if (row.size() != gw)
+			return {};
+	std::vector<std::pair<std::size_t, std::size_t>> cells;
+	for (const auto &[x, z] : input_cells)
+		if (x < gw && z < gh && grid[z][x] == land_cover::LC_WATER)
+			cells.emplace_back(x, z);
+	if (cells.empty())
+		return {};
+	const std::size_t total = gw * gh;
+	std::vector<std::uint8_t> dt(total, 0);
+	for (std::size_t z = 0; z < gh; ++z)
+		for (std::size_t x = 0; x < gw; ++x)
+			if (grid[z][x] == land_cover::LC_WATER)
+				dt[z * gw + x] = DT_MAX;
+	chamfer_3_4_dt(dt, gw, gh);
+	const double wr = static_cast<double>(std::max<std::size_t>(
+							  1, world_width > 1 ? world_width - 1 : 1)) /
+					  static_cast<double>(std::max<std::size_t>(1, gw > 1 ? gw - 1 : 1));
+	const double hr = static_cast<double>(std::max<std::size_t>(
+							  1, world_height > 1 ? world_height - 1 : 1)) /
+					  static_cast<double>(std::max<std::size_t>(1, gh > 1 ? gh - 1 : 1));
+	const double ratio = std::max({wr, hr, 1.0});
+	std::unordered_map<std::size_t, std::size_t> crossing_at;
+	for (std::size_t k = 0; k < cells.size(); ++k)
+		crossing_at[cells[k].second * gw + cells[k].first] = k;
+	std::vector<double> lowest(cells.size(), std::numeric_limits<double>::infinity());
+	std::vector<std::uint64_t> seen((total + 63) / 64, 0);
+	for (const auto &[x, z] : cells) {
+		const std::size_t start = z * gw + x;
+		if (bit_get(seen, start))
+			continue;
+		bit_set(seen, start);
+		std::vector<std::size_t> members;
+		std::vector<std::size_t> frontier{start};
+		double low = std::numeric_limits<double>::infinity();
+		while (!frontier.empty()) {
+			const auto i = frontier.back();
+			frontier.pop_back();
+			if (const auto found = crossing_at.find(i); found != crossing_at.end())
+				members.push_back(found->second);
+			const double h = height_m ? height_m(i % gw, i / gw)
+									  : std::numeric_limits<double>::quiet_NaN();
+			if (std::isfinite(h))
+				low = std::min(low, h);
+			const std::size_t px = i % gw, pz = i / gw;
+			const auto visit = [&](std::size_t n) {
+				if (dt[n] != 0 && !bit_get(seen, n)) {
+					bit_set(seen, n);
+					frontier.push_back(n);
+				}
+			};
+			if (px > 0)
+				visit(i - 1);
+			if (px + 1 < gw)
+				visit(i + 1);
+			if (pz > 0)
+				visit(i - gw);
+			if (pz + 1 < gh)
+				visit(i + gw);
+		}
+		for (const auto k : members)
+			lowest[k] = low;
+	}
+	std::vector<BoreCrossing> result;
+	result.reserve(cells.size());
+	for (std::size_t k = 0; k < cells.size(); ++k) {
+		const auto [x, z] = cells[k];
+		std::uint8_t near = 0;
+		for (std::size_t j = z > 0 ? z - 1 : 0; j <= std::min(z + 1, gh - 1); ++j)
+			for (std::size_t i = x > 0 ? x - 1 : 0; i <= std::min(x + 1, gw - 1); ++i)
+				near = std::max(near, dt[j * gw + i]);
+		const double dt_eff = static_cast<double>(near) * ratio + 2.0;
+		int depth = 0;
+		for (const std::uint16_t tier : {std::uint16_t{0}, std::uint16_t{21},
+					 std::uint16_t{45}, std::uint16_t{75}})
+			depth = std::max(depth, depth_from_dt(dt_eff, tier));
+		result.push_back({depth, lowest[k]});
+	}
+	return result;
 }
 
 BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
@@ -663,7 +811,7 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 		return;
 	for (int z = bwf.min_z(); z <= bwf.max_z(); ++z) {
 		for (int x = bwf.min_x(); x <= bwf.max_x(); ++x) {
-			if (tunnel_footprint.contains(x, z) || !editor.is_lc_water(x, z))
+			if (!editor.is_lc_water(x, z))
 				continue;
 			int water_y = editor.get_water_level(x, z);
 			if (editor.get_ground_level(x, z) > water_y) {
@@ -679,7 +827,14 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 					(!bridge_surface || !bridge_surface->deck_clears(x, z, water_y) ||
 							bridge_surface->over_grade_way(x, z)))
 				continue;
-			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
+			int depth = carve_depth(bwf.depth_at(x, z), water_y);
+			if (tunnel_footprint.contains(x, z)) {
+				const auto fits = depth_over_bore(editor, x, z, water_y, depth);
+				if (!fits)
+					continue;
+				depth = *fits;
+			}
+			carve_water_column(editor, x, z, water_y, depth, road_mask, bwf);
 		}
 	}
 }
@@ -706,7 +861,7 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 		return;
 	for (int z = z0; z <= z1; ++z)
 		for (int x = x0; x <= x1; ++x) {
-			if (tunnel_footprint.contains(x, z) || !editor.is_lc_water(x, z))
+			if (!editor.is_lc_water(x, z))
 				continue;
 			int water_y = editor.get_water_level(x, z);
 			if (editor.get_ground_level(x, z) > water_y) {
@@ -719,7 +874,14 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 					(!bridge_surface || !bridge_surface->deck_clears(x, z, water_y) ||
 							bridge_surface->over_grade_way(x, z)))
 				continue;
-			carve_water_column(editor, x, z, water_y, bwf.depth_at(x, z), road_mask, bwf);
+			int depth = carve_depth(bwf.depth_at(x, z), water_y);
+			if (tunnel_footprint.contains(x, z)) {
+				const auto fits = depth_over_bore(editor, x, z, water_y, depth);
+				if (!fits)
+					continue;
+				depth = *fits;
+			}
+			carve_water_column(editor, x, z, water_y, depth, road_mask, bwf);
 		}
 }
 

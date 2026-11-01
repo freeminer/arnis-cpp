@@ -40,7 +40,8 @@ namespace
 {
 constexpr int LAYER_HEIGHT_STEP = 6;
 constexpr int FLAT_TERRAIN_DIP_THRESHOLD = 4;
-constexpr std::size_t SHORT_BRIDGE_LENGTH_BLOCKS = 30;
+constexpr float SHORT_BRIDGE_LENGTH_BLOCKS = 40.0f;
+constexpr float ARCH_MIN_SPAN_BLOCKS = 30.0f;
 constexpr int BRIDGE_NAME_FUSE_DISTANCE_BLOCKS = 200;
 constexpr float DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS = 12.0f;
 constexpr float DUAL_CARRIAGEWAY_HEADING_TOLERANCE_DEG = 20.0f;
@@ -328,6 +329,7 @@ struct GradeSegment
 	float bz = 0.0f;
 	float reach = 0.0f;
 	int headroom = 0;
+	bool must_clear = false;
 	std::size_t way = 0;
 };
 
@@ -346,7 +348,8 @@ std::int64_t dist2(std::pair<int, int> a, std::pair<int, int> b)
 	return dx * dx + dz * dz;
 }
 
-std::optional<std::pair<int, int>> grade_obstacle(const ProcessedWay &way, double scale)
+std::optional<std::tuple<int, int, bool>> grade_obstacle(
+		const ProcessedWay &way, double scale)
 {
 	if (way.nodes.size() < 2 || way.tags.get("area") == "yes" ||
 			way.tags.get("indoor") == "yes")
@@ -364,18 +367,18 @@ std::optional<std::pair<int, int>> grade_obstacle(const ProcessedWay &way, doubl
 							  highway == "platform" || highway == "corridor";
 		if (is_bridge_way(way) || below_ground || effective_layer(way) > 0 || excluded)
 			return std::nullopt;
-		const auto headroom = is_non_vehicular_bridge_highway(way) || highway == "track"
-									  ? PATH_HEADROOM
-									  : ROAD_HEADROOM;
-		return std::pair{highway_block_range(way, scale), headroom};
+		const bool path = is_non_vehicular_bridge_highway(way) || highway == "track";
+		const int headroom = path ? PATH_HEADROOM : ROAD_HEADROOM;
+		return std::tuple{highway_block_range(way, scale), headroom, !path};
 	}
 
 	const auto railway = way.tags.get("railway");
 	if (railways::is_at_grade_track(way)) {
-		const int headroom = railway == "tram"		  ? ROAD_HEADROOM
-							 : railway == "miniature" ? PATH_HEADROOM
-													  : RAIL_HEADROOM;
-		return std::pair{1, headroom};
+		const bool must_clear = railway != "miniature";
+		const int headroom = railway == "tram" ? ROAD_HEADROOM
+							 : must_clear	   ? RAIL_HEADROOM
+											   : PATH_HEADROOM;
+		return std::tuple{1, headroom, must_clear};
 	}
 	return std::nullopt;
 }
@@ -436,10 +439,11 @@ struct GradeObstacleIndex
 			const auto water_clearance = waterway_clearance(way);
 			if (!obstacle && !water_clearance)
 				continue;
-			const int half_width = obstacle ? obstacle->first : 0;
+			const int half_width = obstacle ? std::get<0>(*obstacle) : 0;
 			const float reach = static_cast<float>(half_width) + 0.5f;
 			const int padding = half_width + 1;
-			const int headroom = obstacle ? obstacle->second : *water_clearance;
+			const int headroom = obstacle ? std::get<1>(*obstacle) : *water_clearance;
+			const bool must_clear = obstacle && std::get<2>(*obstacle);
 			std::optional<std::size_t> way_index;
 			for (std::size_t i = 1; i < way.nodes.size(); ++i) {
 				const auto &a = way.nodes[i - 1];
@@ -457,7 +461,7 @@ struct GradeObstacleIndex
 				const auto segment_index = segments.size();
 				segments.push_back({static_cast<float>(a.x), static_cast<float>(a.z),
 						static_cast<float>(b.x), static_cast<float>(b.z), reach, headroom,
-						*way_index});
+						must_clear, *way_index});
 				for (int bx = div_euclid(x0, OBSTACLE_GRID_CELL);
 						bx <= div_euclid(x1, OBSTACLE_GRID_CELL); ++bx) {
 					for (int bz = div_euclid(z0, OBSTACLE_GRID_CELL);
@@ -1438,6 +1442,22 @@ BridgeStructureMap BridgeStructureMap::build(
 								 (z - axis_start.second) * axis_dz);
 				follows_axis = follows_axis && is_monotonic(us, 2.0f);
 			}
+			float min_u = std::numeric_limits<float>::max();
+			float max_u = std::numeric_limits<float>::lowest();
+			for (const auto &[idx, values] : path_axis) {
+				(void)idx;
+				for (const float u : values) {
+					min_u = std::min(min_u, u);
+					max_u = std::max(max_u, u);
+				}
+			}
+			const float span = std::max(0.0f, max_u - min_u);
+			std::size_t longest_member = 0;
+			for (const auto idx : group_indices)
+				longest_member =
+						std::max(longest_member, way_length_blocks(*bridge_ways[idx]));
+			const bool short_deck = std::max(span, static_cast<float>(longest_member)) <
+									SHORT_BRIDGE_LENGTH_BLOCKS;
 			std::unordered_set<std::uint64_t> cable_carriers;
 			std::vector<std::pair<int, int>> cable_pylons;
 			std::vector<std::pair<int, int>> mapped_cable_pylons;
@@ -1774,8 +1794,10 @@ BridgeStructureMap BridgeStructureMap::build(
 					if (const auto *nearby = obstacles.at(x, z)) {
 						for (const auto segment_index : *nearby) {
 							const auto &segment = obstacles.segments[segment_index];
-							if (point_segment_distance(static_cast<float>(x),
-										static_cast<float>(z), segment) > segment.reach ||
+							if ((short_deck && !segment.must_clear) ||
+									point_segment_distance(static_cast<float>(x),
+											static_cast<float>(z),
+											segment) > segment.reach ||
 									!crosses_segment(heading_x, heading_z, segment))
 								continue;
 							const auto [touch_it, inserted] =
@@ -1812,26 +1834,16 @@ BridgeStructureMap BridgeStructureMap::build(
 						return is_edge({way.nodes.front().x, way.nodes.front().z}) ||
 							   is_edge({way.nodes.back().x, way.nodes.back().z});
 					});
-			const bool flat_span = has_boundary_endpoint &&
-								   dip < FLAT_TERRAIN_DIP_THRESHOLD &&
-								   total_length >= SHORT_BRIDGE_LENGTH_BLOCKS;
-			int profile_clearance = flat_span ? max_layer * LAYER_HEIGHT_STEP : 0;
-			if (flat_span && group_style == bridge_styles::BridgeStyle::Arch)
+			const bool flat = has_boundary_endpoint && dip < FLAT_TERRAIN_DIP_THRESHOLD;
+			int profile_clearance =
+					flat && !short_deck ? max_layer * LAYER_HEIGHT_STEP : 0;
+			if (flat && group_style == bridge_styles::BridgeStyle::Arch &&
+					span >= ARCH_MIN_SPAN_BLOCKS)
 				profile_clearance =
 						std::max(profile_clearance, bridges::ARCH_MIN_CLEARANCE);
 			profile_level = std::max(profile_level, terrain_max + profile_clearance);
 			if (profile_clearance > 0) {
 				raised_top = std::max(raised_top, profile_level);
-				float min_u = std::numeric_limits<float>::max();
-				float max_u = std::numeric_limits<float>::lowest();
-				for (const auto &[idx, values] : path_axis) {
-					(void)idx;
-					for (const float u : values) {
-						min_u = std::min(min_u, u);
-						max_u = std::max(max_u, u);
-					}
-				}
-				const float span = std::max(0.0f, max_u - min_u);
 				const float ramp =
 						std::min(std::clamp(span * 0.35f, 15.0f, 50.0f), span / 2.0f);
 				bool placed_plateau = false;
@@ -2643,7 +2655,7 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 		const auto obstacle = grade_obstacle(way, scale);
 		if (!obstacle)
 			continue;
-		const int reach = obstacle->first + 1;
+		const int reach = std::get<0>(*obstacle) + 1;
 		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
 			const auto &a = way.nodes[i - 1];
 			const auto &b = way.nodes[i];

@@ -15,6 +15,10 @@ std::pair<std::uint32_t, std::uint32_t> DecalKey::dims() const
 				using Key = std::decay_t<decltype(key)>;
 				if constexpr (std::is_same_v<Key, TextKey>)
 					return {key.cols, 1};
+				if constexpr (std::is_same_v<Key, MachineKey>)
+					return key.name == "dispenser" || key.name == "dog_bags"
+								   ? std::pair<std::uint32_t, std::uint32_t>{1, 1}
+								   : std::pair<std::uint32_t, std::uint32_t>{1, 2};
 				if constexpr (std::is_same_v<Key, PosterKey>)
 					return {3, 2};
 				if constexpr (std::is_same_v<Key, ColumnPosterKey>)

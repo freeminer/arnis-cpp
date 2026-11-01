@@ -17,6 +17,24 @@
 namespace arnis::terrain_surface
 {
 
+enum class Rock : std::uint8_t
+{
+	Grey,
+	Red
+};
+
+std::pair<int, int> fray_red_earth(int x, int z);
+
+template <typename EcoregionAt>
+Rock rock_at(biome::Climate climate, int x, int z, EcoregionAt &&ecoregion_at)
+{
+	if (!biome::climate_is_dry(climate))
+		return Rock::Grey;
+	const auto [sample_x, sample_z] = fray_red_earth(x, z);
+	return biome::red_earth(climate, ecoregion_at(sample_x, sample_z)) ? Rock::Red
+																	   : Rock::Grey;
+}
+
 struct Strata
 {
 	int x{0};
@@ -27,7 +45,7 @@ struct Strata
 };
 
 void fill_strata(::arnis::WorldEditor &editor, int x, int z, int y_min, int y_max,
-		bool streaks = false);
+		bool streaks = false, Rock rock = Rock::Grey);
 
 struct TalusField
 {
@@ -44,10 +62,10 @@ struct TalusField
 const std::vector<Block> &talus_buries();
 bool takes_talus(std::uint8_t cover);
 std::optional<std::pair<Block, Block>> talus_palette(
-		int x, int z, double nearr, std::uint8_t cover);
+		int x, int z, double nearr, std::uint8_t cover, Rock rock = Rock::Grey);
 std::pair<Block, Block> steep_palette(
-		int x, int z, int ground_y, int slope, uint8_t cover);
-std::pair<Block, Block> bare_rock_palette(int x, int z);
+		int x, int z, int ground_y, int slope, uint8_t cover, Rock rock = Rock::Grey);
+std::pair<Block, Block> bare_rock_palette(int x, int z, Rock rock = Rock::Grey);
 
 struct Snow
 {

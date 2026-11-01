@@ -18,6 +18,13 @@ class BridgeSurfaceMap;
 namespace arnis::water_depth
 {
 
+inline constexpr int BORE_ROOM = 8;
+struct BoreCrossing
+{
+	int depth{};
+	double lowest_m{};
+};
+
 // In-place 3-4 chamfer distance transform, saturating at u8::MAX. Shared with
 // elevation postprocessing for the bank-distance raster, matching Rust's
 // crate-visible helper.
@@ -42,6 +49,7 @@ public:
 	BigWaterField() = default;
 
 	bool empty() const { return depth_.empty() || width_ == 0 || height_ == 0; }
+	bool reaches(int x, int z, int radius) const;
 	int depth_at(int x, int z) const;
 	int body_max_7x7(int x, int z) const;
 
@@ -62,10 +70,17 @@ private:
 };
 
 BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox);
+std::optional<int> lc_carved_bed(
+		const WorldEditor &editor, const BigWaterField &field, int x, int z);
 std::pair<Block, Block> shallow_bed(const WorldEditor &editor, int x, int z);
 int estimate_max_carve_depth(
 		const std::vector<std::vector<std::uint8_t>> &land_cover_grid,
 		std::size_t world_width, std::size_t world_height);
+std::vector<BoreCrossing> bore_crossings(
+		const std::vector<std::vector<std::uint8_t>> &land_cover_grid,
+		std::size_t world_width, std::size_t world_height,
+		const std::vector<std::pair<std::size_t, std::size_t>> &cells,
+		const std::function<double(std::size_t, std::size_t)> &height_m);
 
 void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int depth,
 		const RoadMaskBitmap &road_mask, const BigWaterField &bwf);

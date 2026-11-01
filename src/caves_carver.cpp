@@ -388,7 +388,8 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 
 void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int floor_y,
 		const CaveRect &world_bounds, std::uint64_t seed,
-		const CaveShapeQuery &cave_shape, const WaterPlan &water_plan)
+		const CaveShapeQuery &cave_shape, const WaterPlan &water_plan,
+		const std::function<bool(int, int)> &keep_out)
 {
 	constexpr double inner_radius = 4.2;
 	constexpr double amethyst_radius = 5.0;
@@ -432,6 +433,16 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 			if (!world_bounds.contains(gx, gz) ||
 					gy + radius + 2 >= cave_shape.surface_y(gx, gz) ||
 					!water_plan.solid(cave_shape, gx, gy, gz))
+				continue;
+			bool protected_column = false;
+			if (keep_out)
+				for (int dx = -radius; dx <= radius && !protected_column; ++dx)
+					for (int dz = -radius; dz <= radius; ++dz)
+						if (keep_out(gx + dx, gz + dz)) {
+							protected_column = true;
+							break;
+						}
+			if (protected_column)
 				continue;
 			centers.emplace_back(gx, gy, gz);
 		}
@@ -641,7 +652,8 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		const CaveShapeQuery &cave_shape, const WaterPlan &water_plan,
 		const std::unordered_set<std::int64_t> *basin_fluid,
 		const std::unordered_set<std::int64_t> *water_cells,
-		const std::unordered_set<std::int64_t> *cave_air)
+		const std::unordered_set<std::int64_t> *cave_air,
+		std::function<bool(int, int)> keep_out)
 {
 	const auto amounts = args.cave_biomes
 								 ? biome_amounts_for_generation(*args.cave_biomes)
@@ -987,6 +999,6 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 	// Geodes are a chunk/region-level feature pass in Rust, independent of the
 	// cave-air and water-cell counts. Keep it outside both per-cell passes.
 	place_geodes(editor, region, floor_y, world_bounds, decoration_seed, cave_shape,
-			water_plan);
+			water_plan, keep_out);
 }
 } // namespace arnis::caves

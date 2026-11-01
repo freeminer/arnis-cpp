@@ -4,6 +4,7 @@
 #include "element_processing/tree.h"
 #include "element_processing/bush.h"
 #include "element_processing/swimming_pools.h"
+#include "element_processing/field_texture.h"
 #include "land_cover/land_cover.h"
 #include "trees/schematic.h"
 #include "climate.h"
@@ -39,6 +40,8 @@ namespace
 {
 
 constexpr int CHUNK_SIZE = 16;
+constexpr std::uint32_t SALT_SHRUB_DIRT = 0x5B7BD127u;
+constexpr std::uint32_t SALT_BARE_EARTH = 0xBA4EEA27u;
 
 int chunk_index(int coordinate)
 {
@@ -66,6 +69,19 @@ const std::optional<std::vector<Block>> &protected_surfaces()
 const std::optional<std::vector<Block>> &farmland_ground()
 {
 	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{FARMLAND}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &mapped_sands()
+{
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{SAND, RED_SAND}};
+	return blocks;
+}
+
+const std::optional<std::vector<Block>> &stone_surface()
+{
+	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{STONE}};
 	return blocks;
 }
 
@@ -275,13 +291,15 @@ bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 }
 
 std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int z,
-		int ground_y, int slope, int slope_t27, std::uint8_t cover, bool has_cover)
+		int ground_y, int slope, int slope_t27, std::uint8_t cover, bool has_cover,
+		terrain_surface::Rock rock)
 {
 	if (slope > slope_t27)
-		return terrain_surface::steep_palette(x, z, ground_y, slope, cover);
+		return terrain_surface::steep_palette(x, z, ground_y, slope, cover, rock);
 	if (has_cover && editor.ground) {
-		auto climate_palette =
-				climate::surface_palette(editor.ground->climate(), cover, x, z);
+		const auto climate = editor.ground->climate();
+		auto climate_palette = climate::surface_palette(
+				climate, cover, x, z, rock == terrain_surface::Rock::Red);
 		if (climate_palette)
 			return *climate_palette;
 	}
@@ -318,16 +336,17 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 			}
 		if (neighboring_bare == 0)
 			return {GRASS_BLOCK, DIRT};
-		if (value_noise_01(x, z, 6) < .45)
+		if (ground_noise(x, z, 6, SALT_BARE_EARTH) < .45)
 			return {COARSE_DIRT, DIRT};
-		return terrain_surface::bare_rock_palette(x, z);
+		return terrain_surface::bare_rock_palette(x, z, rock);
 	}
 	if (cover == land_cover::LC_WETLAND || cover == land_cover::LC_MANGROVES)
 		return {MUD, DIRT};
 	if (cover == land_cover::LC_SHRUBLAND) {
 		const auto h = land_cover::coord_hash(x, z);
-		return value_noise_01(x, z, 5) < .4 && h % 5 != 0 ? std::pair{COARSE_DIRT, DIRT}
-														  : std::pair{GRASS_BLOCK, DIRT};
+		return ground_noise(x, z, 5, SALT_SHRUB_DIRT) < .2 && h % 5 != 0
+					   ? std::pair{COARSE_DIRT, DIRT}
+					   : std::pair{GRASS_BLOCK, DIRT};
 	}
 	return {GRASS_BLOCK, DIRT};
 }
@@ -371,7 +390,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
 		const CoordinateBitmap *tunnel_footprint,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
-		double forest_fern_share, int tree_spacing, bool schematic_trees)
+		double forest_fern_share, int tree_spacing, bool schematic_trees,
+		const field_texture::Plot *cropland_plot)
 {
 	const bool sealed = editor.surface_is_sealed(x, z);
 	if (editor.check_for_block_absolute(x, ground_y + 1, z))
@@ -436,6 +456,13 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			place_decoration(fern_roll < forest_fern_share ? FERN : GRASS, ground_y + 1);
 		}
 	} else if (cover == land_cover::LC_CROPLAND) {
+		if (cropland_plot) {
+			if (ground_block) {
+				if (const auto cover = cropland_plot->cover(*ground_block, x, z))
+					field_texture::place_cover(editor, *cover, x, ground_y, z);
+			}
+			return;
+		}
 		const bool farmland =
 				editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND);
 		if (farmland && rng.uniform(76) == 0) {
@@ -561,6 +588,23 @@ double patch_noise(int x, int z, int scale, std::uint32_t salt)
 	return 1.0;
 }
 
+double ground_noise(int x, int z, int scale, std::uint32_t salt)
+{
+	const double bend = value_noise_salted(x, z, scale * 3, salt ^ 0x5A5A0F0Fu) - .5;
+	const int shift = static_cast<int>(bend * scale * 2.5);
+	const double coarse = patch_noise(x + shift, z - shift, scale * 2, salt);
+	const double fine = patch_noise(
+			x - shift, z + shift, std::max(scale / 2, 2), salt << 7 | salt >> 25);
+	constexpr double a = .7, b = 1.0 - a;
+	const double s = a * coarse + b * fine;
+	constexpr double k = .5 / (a * b);
+	if (s <= b)
+		return s * s * k;
+	if (s <= a)
+		return (s - b * .5) / a;
+	return 1.0 - (1.0 - s) * (1.0 - s) * k;
+}
+
 void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints, int iter_min_x,
 		int iter_max_x, int iter_min_z, int iter_max_z,
@@ -634,6 +678,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 													  : std::numeric_limits<int>::max(),
 			editor.ground ? editor.ground->blocks_per_meter() : 0.0,
 			celestial_center_latitude, args.rotation);
+	auto cropland = field_texture::CroplandGrid::make(args.fields, args.scale);
 	for (int chunk_x = chunk_index(min_x); chunk_x <= chunk_index(max_x); ++chunk_x) {
 		const int chunk_min_x = std::max(min_x, chunk_x * 16);
 		const int chunk_max_x = std::min(max_x, chunk_x * 16 + 15);
@@ -725,8 +770,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					const int slope = rust_numeric::round_i32(slope_f);
 					// Match ground_generation.rs: preserve sand through its angle of
 					// repose, but replace mapped surfaces on steeper faces.
-					const bool mapped_sand =
-							editor.check_for_block_type_absolute(x, ground_y, z, SAND);
+					const bool mapped_sand = editor.check_for_block_absolute(
+							x, ground_y, z, mapped_sands());
 					const bool steep_override =
 							terrain_enabled && slope > 4 && (slope > 6 || !mapped_sand);
 					const auto relative = editor.ground_point(x, z);
@@ -735,9 +780,26 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							editor.ground && editor.ground->has_land_cover();
 					const std::uint8_t cover_here =
 							has_cover ? editor.ground->cover_class(relative) : 0;
+					const auto rock =
+							editor.ground
+									? terrain_surface::rock_at(editor.ground->climate(),
+											  x, z,
+											  [&](int sx, int sz) {
+												  return editor.ground->ecoregion_at(
+														  editor.ground_point(sx, sz));
+											  })
+									: terrain_surface::Rock::Grey;
 					bool did_underfill = false;
+					// Authored stone is already a terrain surface except where snow or
+					// exposed bare ground needs the generated palette to replace it.
 					const bool has_existing_stone =
-							editor.check_for_block_type_absolute(x, ground_y, z, STONE);
+							editor.check_for_block_absolute(
+									x, ground_y, z, stone_surface()) &&
+							snow_line.depth(x, z, ground_y) <
+									terrain_surface::SNOW_MIN_DEPTH &&
+							!(has_cover &&
+									(cover_here == land_cover::LC_BARE ||
+											cover_here == land_cover::LC_SNOW_ICE));
 					if (steep_override || !has_existing_stone) {
 						// Rust treats plausible ESA snow/ice cells as glacier even below the
 						// ordinary snow line. Compute this before choosing the base surface so
@@ -775,7 +837,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								talus_block = terrain_surface::talus_palette(x, z,
 										talus_field->near_(x, z,
 												editor.ground->level_exact(relative)),
-										cover_here);
+										cover_here, rock);
 						}
 						const bool blend_is_water =
 								has_cover &&
@@ -845,16 +907,36 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 														celestial_center_latitude,
 														ground_y, x, z)
 											  : std::pair<Block, Block>{};
-							const std::pair<Block, Block> palette =
+							std::optional<std::pair<field_texture::Plot, Block>>
+									cropland_plot;
+							auto palette =
 									planetary	  ? planetary_palette
 									: talus_block ? *talus_block
 									: slope > slope_t27
-											? terrain_surface::steep_palette(
-													  x, z, ground_y, slope, cover_here)
+											? terrain_surface::steep_palette(x, z,
+													  ground_y, slope, cover_here, rock)
 									: glacier ? std::pair{PACKED_ICE, PACKED_ICE}
 											  : natural_surface_palette(editor, x, z,
 														ground_y, slope, slope_t27,
-														cover_here, has_cover);
+														cover_here, has_cover, rock);
+							// Rust's field preset overrides the generic cropland palette only when
+							// no mapped element owns the column and no higher-priority climate,
+							// slope, talus, or glacier palette selected its surface.
+							if (has_cover && cover_here == land_cover::LC_CROPLAND &&
+									cropland && !planetary && !talus_block &&
+									slope <= slope_t27 && !glacier &&
+									!(editor.ground &&
+											climate::surface_palette(
+													editor.ground->climate(), cover_here,
+													x, z,
+													rock == terrain_surface::Rock::
+																	Red)) &&
+									!editor.block_exists_absolute(x, ground_y, z)) {
+								auto plot = cropland->plot_at(x, z);
+								const auto top = plot.surface(x, z);
+								cropland_plot = std::pair{std::move(plot), top};
+								palette = {top, DIRT};
+							}
 							Block surface = palette.first;
 							std::optional<Block> climate_under = palette.second;
 							if (surface == SAND && !climate_under)
@@ -872,6 +954,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 												terrain_surface::is_ice(surface))) &&
 									!blend_is_water && surface != WATER)
 								surface = SNOW_BLOCK;
+							if (cropland_plot && cropland_plot->second != surface)
+								cropland_plot.reset();
 							natural_snow_surface = surface;
 							if (steep_override) {
 								// Match Rust's steep-face blacklist: roads, structures, bedrock,
@@ -942,9 +1026,13 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									const int y_min = std::max(
 											ground_y - depth, world_editor::min_y() + 1);
 									if (terrain_enabled && !planetary &&
-											slope > slope_t27 && climate_under == STONE)
+											slope > slope_t27 &&
+											climate_under ==
+													(rock == terrain_surface::Rock::Red
+																	? RED_SANDSTONE
+																	: STONE))
 										terrain_surface::fill_strata(editor, x, z, y_min,
-												y_max, slope > slope_t37);
+												y_max, slope > slope_t37, rock);
 									else
 										editor.fill_column_absolute(
 												*climate_under, x, z, y_min, y_max, true);
@@ -990,7 +1078,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										building_footprints, xzbbox.min_x(),
 										xzbbox.min_z(), tunnel_footprint, bridge_surface,
 										args.scale, slope, forest_fern_share,
-										tree_spacing, schematic_trees);
+										tree_spacing, schematic_trees,
+										cropland_plot ? &cropland_plot->first : nullptr);
 						}
 					}
 

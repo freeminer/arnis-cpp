@@ -582,13 +582,13 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 	static const std::vector<Block> shade_soil{
 			GRASS_BLOCK, PODZOL, DIRT, COARSE_DIRT, MOSS_BLOCK, MYCELIUM};
 	static const std::vector<Block> cane_soil{
-			GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, SAND, MUD};
-	static const std::vector<Block> dry_soil{SAND, COARSE_DIRT, DIRT, TERRACOTTA,
-			RED_TERRACOTTA, ORANGE_TERRACOTTA, YELLOW_TERRACOTTA};
+			GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, SAND, RED_SAND, MUD};
+	static const std::vector<Block> dry_soil{SAND, RED_SAND, COARSE_DIRT, DIRT,
+			TERRACOTTA, RED_TERRACOTTA, ORANGE_TERRACOTTA, YELLOW_TERRACOTTA};
 	static const std::vector<Block> grass_block{GRASS_BLOCK};
 	static const std::vector<Block> grass{GRASS};
 	static const std::optional<std::vector<Block>> replace_grass{grass};
-	static const std::vector<Block> sand{SAND};
+	static const std::vector<Block> sand{SAND, RED_SAND};
 	const auto open = [&](int x, int y, int z) {
 		return (!editor.block_exists_absolute(x, y + 1, z) ||
 					   editor.check_for_block_absolute(x, y + 1, z, grass)) &&

@@ -569,7 +569,7 @@ bool touch_last_played(const std::filesystem::path &world, std::string *error)
 
 bool apply_java_world_settings(const std::filesystem::path &world, int game_type,
 		std::int64_t world_time, bool void_world, std::int32_t base_y, std::int32_t min_y,
-		std::string *error)
+		MobSpawning mob_spawning, std::string *error)
 {
 	if (error)
 		error->clear();
@@ -590,6 +590,20 @@ bool apply_java_world_settings(const std::filesystem::path &world, int game_type
 				set_field(*data, std::move(time));
 				if (Tag *player = field(*data, "Player"); player && player->type == 10)
 					set_field(*player, int_tag("playerGameType", game_type));
+				Tag *rules = field(*data, "GameRules");
+				if (!rules || rules->type != 10) {
+					set_field(*data, compound_tag("GameRules"));
+					rules = field(*data, "GameRules");
+				}
+				set_field(*rules,
+						string_tag("doMobSpawning",
+								mob_spawning_enabled(mob_spawning) ? "true" : "false"));
+				set_field(*rules,
+						string_tag("mobGriefing",
+								mob_spawning_monsters(mob_spawning) ? "false" : "true"));
+				set_field(*data,
+						byte_tag("Difficulty", static_cast<std::uint8_t>(
+													   java_difficulty(mob_spawning))));
 				if (void_world)
 					set_void_generator(root);
 				else

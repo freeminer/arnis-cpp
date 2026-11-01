@@ -3,8 +3,10 @@
 #include "../coordinate_system/geographic/llbbox.h"
 #include "../coordinate_system/transformation.h"
 #include "../land_cover/land_cover.h"
+#include "../water_depth.h"
 #include "../world_editor/floor_state.h"
 #include "selector.h"
+#include "detail.h"
 
 #include <algorithm>
 #include <cmath>
@@ -33,6 +35,107 @@ std::uint32_t saturating_u32(double value)
 	if (value >= std::numeric_limits<std::uint32_t>::max())
 		return std::numeric_limits<std::uint32_t>::max();
 	return static_cast<std::uint32_t>(value);
+}
+
+std::vector<std::pair<std::size_t, std::size_t>> bore_water_cells(
+		const land_cover::LandCoverData &cover, const geographic::LLBBox &bbox,
+		const std::vector<std::pair<double, double>> &bores)
+{
+	const auto width = cover.width;
+	const auto height = cover.height;
+	if (width < 2 || height < 2)
+		return {};
+	const double min_lat = bbox.min().lat(), max_lat = bbox.max().lat();
+	const double min_lon = bbox.min().lng(), max_lon = bbox.max().lng();
+	if (!(max_lat > min_lat) || !(max_lon > min_lon))
+		return {};
+	std::vector<std::pair<std::size_t, std::size_t>> cells;
+	cells.reserve(bores.size());
+	for (const auto &[lat, lon] : bores) {
+		if (!std::isfinite(lat) || !std::isfinite(lon) || lat < min_lat ||
+				lat > max_lat || lon < min_lon || lon > max_lon)
+			continue;
+		const auto x = static_cast<std::size_t>(
+				std::llround((lon - min_lon) / (max_lon - min_lon) * (width - 1)));
+		const auto z = static_cast<std::size_t>(
+				std::llround((max_lat - lat) / (max_lat - min_lat) * (height - 1)));
+		const auto cell_x = std::min(x, width - 1);
+		const auto cell_z = std::min(z, height - 1);
+		if (cell_z < cover.grid.size() && cell_x < cover.grid[cell_z].size() &&
+				cover.grid[cell_z][cell_x] == land_cover::LC_WATER)
+			cells.emplace_back(cell_x, cell_z);
+	}
+	std::sort(cells.begin(), cells.end());
+	cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+	return cells;
+}
+
+std::vector<water_depth::BoreCrossing> station_crossings(
+		const std::vector<StationHint> &stations, const geographic::LLBBox &bbox,
+		const std::vector<std::vector<double>> &heights)
+{
+	const std::size_t gh = heights.size();
+	const std::size_t gw = gh ? heights.front().size() : 0;
+	if (gw < 2 || gh < 2)
+		return {};
+	const double min_lat = bbox.min().lat(), max_lat = bbox.max().lat();
+	const double min_lon = bbox.min().lng(), max_lon = bbox.max().lng();
+	if (!(max_lat > min_lat) || !(max_lon > min_lon))
+		return {};
+	std::vector<water_depth::BoreCrossing> result;
+	for (const auto &station : stations) {
+		if (!std::isfinite(station.lat) || !std::isfinite(station.lon) ||
+				station.lat < min_lat || station.lat > max_lat || station.lon < min_lon ||
+				station.lon > max_lon)
+			continue;
+		const auto x = static_cast<std::size_t>(
+				std::llround((station.lon - min_lon) / (max_lon - min_lon) * (gw - 1)));
+		const auto z = static_cast<std::size_t>(
+				std::llround((max_lat - station.lat) / (max_lat - min_lat) * (gh - 1)));
+		if (z >= gh || x >= heights[z].size())
+			continue;
+		const double ground = heights[z][x];
+		if (std::isfinite(ground))
+			result.push_back({station.depth - 1 - water_depth::BORE_ROOM, ground});
+	}
+	return result;
+}
+
+HeightBand with_bore_room(HeightBand band,
+		const std::vector<water_depth::BoreCrossing> &crossings, double lowest_m,
+		double range_m, double blocks_per_metre)
+{
+	if (crossings.empty())
+		return band;
+	const auto room = [&](const water_depth::BoreCrossing &crossing, int over_base) {
+		return band.floor_y + crossing.depth + 2 + water_depth::BORE_ROOM - over_base;
+	};
+	int worst = std::numeric_limits<int>::min();
+	for (const auto &crossing : crossings)
+		worst = std::max(worst, room(crossing, 0));
+	const int ceiling =
+			(band.extended ? band.extended_max_y : MAX_Y) - TERRAIN_HEIGHT_BUFFER;
+	const bool exact = range_m * blocks_per_metre <=
+					   double(ceiling - std::max(worst, band.ground_level)) / 2.0;
+	int needed = std::numeric_limits<int>::min();
+	for (const auto &crossing : crossings) {
+		int over_base = 0;
+		if (exact && std::isfinite(crossing.lowest_m)) {
+			const double blocks =
+					std::floor((crossing.lowest_m - lowest_m) * blocks_per_metre);
+			over_base = blocks <= 2.0 ? 0
+						: blocks >= std::numeric_limits<int>::max()
+								? std::numeric_limits<int>::max()
+								: static_cast<int>(blocks) - 2;
+		}
+		needed = std::max(needed, room(crossing, over_base));
+	}
+	if (needed == std::numeric_limits<int>::min())
+		needed = worst;
+	band.ground_level = std::max(band.ground_level, needed);
+	band.min_ground_level =
+			std::min(band.ground_level, std::max(band.min_ground_level, needed));
+	return band;
 }
 } // namespace
 
@@ -123,7 +226,8 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		TerrainHints terrain_hints, bool auto_height,
 		std::optional<HeightBand> taller_band, bool force_extended_height,
 		std::optional<std::size_t> seam_pad,
-		const std::function<std::vector<TallModel>()> &late_overture)
+		const std::function<std::vector<TallModel>()> &late_overture,
+		std::optional<std::pair<std::int64_t, std::int64_t>> one_world_origin)
 {
 	const auto grid_height = raw.heights.size();
 	const auto grid_width = grid_height ? raw.heights.front().size() : 0;
@@ -168,16 +272,70 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 				meters_per_cell, subprogress);
 	}
 	report(progress, 16.0, "Processing elevation...");
+	if (raw.source_pixels) {
+		const auto changed =
+				detail::add_steep_detail(raw.heights, bbox, *raw.source_pixels, scale,
+						one_world_origin, land_cover, terrain_hints.graded);
+		if (changed > 0) {
+			const auto total = grid_width * grid_height;
+			std::clog
+					<< "Steep detail: roughened "
+					<< (total ? static_cast<double>(changed) * 100.0 / total : 0.0)
+					<< "% of the terrain, steep ground with only coarse elevation data\n";
+		}
+	}
+	// Detail runs after land-cover repair, which would otherwise smooth it away,
+	// and before surveyed peak restoration, matching the Rust elevation order.
 	// Restore surveyed natural summits after smoothing, then fit terrain with
 	// room for tall landmark models at their actual terrain elevations.
 	// Match Rust: surveyed summits are restored after smoothing for every body;
 	// only the Earth-specific DSM outlier/anomaly repairs above are conditional.
 	raise_peaks(raw.heights, bbox, terrain_hints.peaks, meters_per_cell, seam_pad);
+	// A water carve can cut six blocks into an LC water body, while a station
+	// hall needs a similar reserve below its platform. Lift the terrain base
+	// before fitting it so both cuts retain their cover above the world floor.
+	std::vector<water_depth::BoreCrossing> crossings;
+	if (land_cover) {
+		const auto cells = bore_water_cells(*land_cover, bbox, terrain_hints.bores);
+		auto water_crossings = water_depth::bore_crossings(land_cover->grid, world_width,
+				world_height, cells, [&](std::size_t x, std::size_t z) {
+					return z < raw.heights.size() && x < raw.heights[z].size()
+								   ? raw.heights[z][x]
+								   : std::numeric_limits<double>::quiet_NaN();
+				});
+		crossings.insert(crossings.end(), water_crossings.begin(), water_crossings.end());
+	}
+	auto station_water_crossings =
+			station_crossings(terrain_hints.stations, bbox, raw.heights);
+	crossings.insert(crossings.end(), station_water_crossings.begin(),
+			station_water_crossings.end());
+	if (!crossings.empty()) {
+		double lowest = std::numeric_limits<double>::infinity();
+		double highest = -std::numeric_limits<double>::infinity();
+		for (const auto &row : raw.heights)
+			for (const double height : row)
+				if (std::isfinite(height)) {
+					lowest = std::min(lowest, height);
+					highest = std::max(highest, height);
+				}
+		if (lowest <= highest) {
+			HeightBand band{ground_level, min_ground_level, extended_max_y,
+					disable_height_limit, world_editor::min_y()};
+			band = with_bore_room(
+					band, crossings, lowest, highest - lowest, scale * height_multiplier);
+			ground_level = band.ground_level;
+			min_ground_level = band.min_ground_level;
+			if (taller_band)
+				*taller_band = with_bore_room(*taller_band, crossings, lowest,
+						highest - lowest, scale * height_multiplier);
+		}
+	}
 	// Rust chooses the height band only after repairs and surveyed peaks have
 	// been applied. Checking the provider's raw grid in fetch_elevation_data can
 	// miss a peak or a repair-induced overflow and leave the generated terrain
 	// and structures clipped at the vanilla ceiling.
 	bool use_extended = disable_height_limit || (auto_height && force_extended_height);
+	std::optional<double> overture_tallest;
 	if (auto_height && taller_band) {
 		// Rust's vanilla_overflow is authoritative here: a low requested base alone
 		// does not require an extended band; only an actual fit/structure overflow does.
@@ -193,8 +351,13 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 			// Match Rust's two-stage hint channel: Overture is awaited only if OSM
 			// geometry still fits within vanilla height and Overture hints follow.
 			if (!overflow && terrain_hints.overture_follows && late_overture) {
+				const auto overture_models = late_overture();
+				double tallest = 0.0;
+				for (const auto &model : overture_models)
+					tallest = std::max(tallest, model.height_m);
+				overture_tallest = tallest;
 				const auto overture_tops =
-						model_cells(raw.heights, bbox, late_overture());
+						model_cells(raw.heights, bbox, overture_models);
 				tops.insert(tops.end(), overture_tops.begin(), overture_tops.end());
 				overflow = vanilla_overflow(raw.heights, tops, scale * height_multiplier,
 						scale, ground_level);
@@ -209,6 +372,17 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 		ground_level = taller_band->ground_level;
 		min_ground_level = taller_band->min_ground_level;
 		extended_max_y = taller_band->extended_max_y;
+	}
+	const bool raised_for_tall_structure = use_extended && taller_band && auto_height;
+	const bool overture_pending = terrain_hints.overture_follows && !overture_tallest;
+	double tallest_structure_m = 0.0;
+	if (raised_for_tall_structure) {
+		for (const auto &model : terrain_hints.tall_models)
+			tallest_structure_m = std::max(tallest_structure_m, model.height_m);
+		for (const auto &model : terrain_hints.tall_structures)
+			tallest_structure_m = std::max(tallest_structure_m, model.height_m);
+		if (overture_tallest)
+			tallest_structure_m = std::max(tallest_structure_m, *overture_tallest);
 	}
 	// Tall structures only decide whether the vanilla band is sufficient. Rust
 	// releases this potentially large OSM-derived list before the terrain fit;
@@ -242,6 +416,18 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 	out.ground_level = mapping.ground_level;
 	out.soft_top = mapping.soft_top;
 	out.extended_ceiling = use_extended && extended_max_y > 319;
+	if (raised_for_tall_structure) {
+		double max_height = -std::numeric_limits<double>::infinity();
+		for (const auto &row : minecraft_heights)
+			for (const double value : row)
+				if (std::isfinite(value))
+					max_height = std::max(max_height, value);
+		out.raised_for = ProcessedElevationData::RaisedFor{
+				std::isfinite(max_height) ? static_cast<int>(std::ceil(max_height))
+										  : mapping.ground_level,
+				static_cast<int>(std::ceil(tallest_structure_m * scale)),
+				overture_pending};
+	}
 	out.heights.resize(out.height);
 	for (std::size_t z = 0; z < out.height; ++z) {
 		out.heights[z].reserve(minecraft_heights[z].size());
@@ -261,7 +447,8 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		const ProgressCallback &progress, TerrainHints terrain_hints, bool auto_height,
 		std::optional<HeightBand> taller_band, bool force_extended_height,
 		std::optional<std::size_t> seam_pad,
-		const std::function<std::vector<TallModel>()> &late_overture)
+		const std::function<std::vector<TallModel>()> &late_overture,
+		std::optional<std::pair<std::int64_t, std::int64_t>> one_world_origin)
 {
 	if (selector.source_mode() == providers::SourceMode::Planetary)
 		throw std::invalid_argument(
@@ -276,7 +463,8 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 	auto out = process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
 			ground_level, min_ground_level, disable_height_limit, extended_max_y,
 			apply_earth_repairs, land_cover, affine, progress, std::move(terrain_hints),
-			auto_height, taller_band, force_extended_height, seam_pad, late_overture);
+			auto_height, taller_band, force_extended_height, seam_pad, late_overture,
+			one_world_origin);
 	return out;
 }
 

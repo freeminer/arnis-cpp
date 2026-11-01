@@ -14,6 +14,7 @@ namespace arnis::ground_generation
 double value_noise_01(int x, int z, int scale);
 double value_noise_salted(int x, int z, int scale, std::uint32_t salt);
 double patch_noise(int x, int z, int scale, std::uint32_t salt);
+double ground_noise(int x, int z, int scale, std::uint32_t salt);
 
 void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints,

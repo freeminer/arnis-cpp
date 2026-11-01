@@ -21,9 +21,11 @@
 #include "bridges.h"
 #include "../ground_decoration.h"
 #include "../ground_generation.h"
+#include "../terrain_surface.h"
 #include "../climate.h"
 #include "../land_cover/land_cover.h"
 #include "relation_area.h"
+#include "field_texture.h"
 
 #include "../../../arnis_adapter.h"
 #include "../../../arnis_ground.h"
@@ -57,7 +59,14 @@ std::optional<Block> military_ground(
 			return ANDESITE;
 		return STONE;
 	}
-	if (const auto palette = climate::surface_palette(climate_value, cover, x, z))
+	const auto rock =
+			ground ? terrain_surface::rock_at(climate_value, x, z,
+							 [&](int sx, int sz) {
+								 return ground->ecoregion_at(editor.ground_point(sx, sz));
+							 })
+				   : terrain_surface::Rock::Grey;
+	if (const auto palette = climate::surface_palette(
+				climate_value, cover, x, z, rock == terrain_surface::Rock::Red))
 		return palette->first;
 	const double worn_share = cover == land_cover::LC_BARE ? .7 : rough ? .4 : .25;
 	if (ground_generation::value_noise_01(x + 97, z + 31, 9) >= worn_share)
@@ -67,6 +76,18 @@ std::optional<Block> military_ground(
 	if (hash % 10 <= 7)
 		return DIRT;
 	return GRAVEL;
+}
+
+void plant_field_plot(
+		WorldEditor &editor, const field_texture::Plot &plot, Block surface, int x, int z)
+{
+	if (!editor.check_for_block(
+				x, 0, z, std::optional<std::vector<Block>>{std::vector<Block>{surface}}))
+		return;
+	if (const auto cover = plot.cover(surface, x, z)) {
+		const int ground_y = editor.get_absolute_y(x, 0, z);
+		field_texture::place_cover(editor, *cover, x, ground_y, z);
+	}
 }
 } // namespace
 
@@ -143,6 +164,10 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 	// Get the area of the landuse element using cache
 	const auto fill = flood_fill_cache.get_or_compute(element, args.timeout_ref());
 	const auto &floor_area = *fill;
+	const auto field_layout = landuse_tag == "farmland"
+									  ? field_texture::FieldLayout::make(args.fields,
+												args.scale, element.id, element.nodes)
+									  : std::nullopt;
 
 	// Trees ok to generate based on leaf_type
 	std::vector<TreeType> trees_ok_to_generate;
@@ -207,10 +232,16 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				(void)rng.uniform(100);
 			continue;
 		}
+		const auto plot =
+				field_layout
+						? std::optional<field_texture::Plot>{field_layout->plot_at(x, z)}
+						: std::nullopt;
 
 		// Apply per-block randomness for certain landuse types
 		Block actual_block = block_type;
-		if (landuse_tag == "construction") {
+		if (plot) {
+			actual_block = plot->surface(x, z);
+		} else if (landuse_tag == "construction") {
 			actual_block = construction_site::ground_block(x, z, site_arid);
 		} else if (landuse_tag == "industrial") {
 			// Industrial: primarily stone, with some stone bricks and smooth stone
@@ -426,8 +457,12 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 			}
 		} else if (landuse_tag == "farmland") {
-			if (!editor.check_for_block(x, 0, z,
-						std::optional<std::vector<Block>>{std::vector<Block>{WATER}})) {
+			if (field_layout) {
+				if (plot && !is_protected)
+					plant_field_plot(editor, *plot, actual_block, x, z);
+			} else if (!editor.check_for_block(x, 0, z,
+							   std::optional<std::vector<Block>>{
+									   std::vector<Block>{WATER}})) {
 				int r = static_cast<int>(rng.uniform(76));
 				if (r == 0) {
 					int special_choice = 1 + static_cast<int>(rng.uniform(10));

@@ -5,6 +5,8 @@
 #include "../data_processing.h"
 #include "../element_processing/attractions.h"
 #include "../element_processing/buildings.h"
+#include "../element_processing/stations.h"
+#include "../landmarks.h"
 #include "../models_3d/wikidata/wikidata_index.h"
 #include "../mapillary/geometry.h"
 #include "../osm_parser.h"
@@ -337,6 +339,59 @@ std::vector<TallModel> tall_models_in(const osm_parser::RawOsmDocument &data)
 			}
 		if (count)
 			result.push_back({lat / count, lon / count, *h});
+	}
+	return result;
+}
+
+std::vector<TallModel> landmark_tall_models_in(
+		const osm_parser::RawOsmDocument &data, const geographic::LLBBox &bbox)
+{
+	const auto identity_matches = [](const landmarks::Landmark &landmark,
+										  std::string_view type, std::uint64_t id,
+										  const tags_t &tags) {
+		const bool osm_match = std::any_of(landmark.osm_ids.begin(),
+				landmark.osm_ids.end(),
+				[&](const auto &key) { return key.first == type && key.second == id; });
+		if (osm_match)
+			return true;
+		const auto qid = tags.find("wikidata");
+		if (qid == tags.end())
+			return false;
+		const auto [begin, end] = unicode_text::trim_whitespace(qid->second);
+		return qid->second.substr(begin, end - begin) == landmark.qid;
+	};
+	std::vector<TallModel> result;
+	for (const auto &landmark : landmarks::catalogue()) {
+		bool in_data = false;
+		for (const auto &node : data.nodes)
+			if (identity_matches(landmark, "node", node.id, node.tags)) {
+				in_data = true;
+				break;
+			}
+		if (!in_data)
+			for (const auto &way : data.ways)
+				if (identity_matches(landmark, "way", way.id, way.tags)) {
+					in_data = true;
+					break;
+				}
+		if (!in_data)
+			for (const auto &relation : data.relations)
+				if (identity_matches(landmark, "relation", relation.id, relation.tags)) {
+					in_data = true;
+					break;
+				}
+		const double lat_m = 111'320.0;
+		const double lon_m =
+				lat_m *
+				std::max(0.01, std::cos(landmark.latitude * std::numbers::pi / 180.0));
+		const double reach = landmark.reach_m;
+		const bool in_reach = landmark.latitude + reach / lat_m >= bbox.min().lat() &&
+							  landmark.latitude - reach / lat_m <= bbox.max().lat() &&
+							  landmark.longitude + reach / lon_m >= bbox.min().lng() &&
+							  landmark.longitude - reach / lon_m <= bbox.max().lng();
+		if (in_data || in_reach)
+			result.push_back({landmark.latitude, landmark.longitude,
+					static_cast<double>(landmark.height)});
 	}
 	return result;
 }
@@ -702,14 +757,469 @@ TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data)
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
 		bool include_models, bool include_structures, bool overture_follows)
 {
+	return terrain_hints_in(data, scale, include_models, include_structures,
+			overture_follows, false, false);
+}
+
+TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double scale,
+		bool include_models, bool include_structures, bool overture_follows,
+		bool include_graded, bool include_roads)
+{
 	TerrainHints hints;
 	hints.peaks = peaks_in(data);
+	auto ways = terrain_ways_in(data, include_graded, include_roads);
+	hints.bores = std::move(ways.bores);
+	hints.graded = std::move(ways.graded);
 	if (include_models)
 		hints.tall_models = tall_models_in(data);
-	if (include_structures)
+	if (include_structures) {
 		hints.tall_structures = tall_structures_in(data, scale);
+		hints.stations = station_hints_in(data);
+	}
 	hints.overture_follows = overture_follows;
 	return hints;
+}
+
+std::vector<std::vector<std::pair<double, double>>> graded_ways_in(
+		const osm_parser::RawOsmDocument &data, bool include_roads)
+{
+	const auto value = [](const tags_t &tags, std::string_view key) -> std::string_view {
+		const auto found = tags.find(std::string(key));
+		return found == tags.end() ? std::string_view{} : std::string_view(found->second);
+	};
+	const auto one_of = [](std::string_view text,
+								std::initializer_list<std::string_view> values) {
+		return std::find(values.begin(), values.end(), text) != values.end();
+	};
+	const auto graded = [&](const tags_t &tags) {
+		for (const auto key : {"tunnel", "bridge"}) {
+			const auto found = tags.find(key);
+			if (found != tags.end() && found->second != "no")
+				return false;
+		}
+		const auto waterway = value(tags, "waterway");
+		if (one_of(waterway, {"river", "stream", "canal", "ditch", "drain", "brook",
+									 "tidal_channel"}))
+			return true;
+		if (!include_roads)
+			return false;
+		const auto building = tags.find("building");
+		if (building != tags.end() && building->second != "no")
+			return true;
+		const auto highway = tags.find("highway");
+		if (highway != tags.end() &&
+				!one_of(highway->second,
+						{"path", "footway", "bridleway", "steps", "via_ferrata",
+								"corridor", "elevator", "platform", "proposed",
+								"abandoned", "razed", "disused"}))
+			return true;
+		return one_of(value(tags, "railway"),
+				{"rail", "light_rail", "narrow_gauge", "tram", "funicular", "monorail",
+						"preserved", "miniature"});
+	};
+
+	std::unordered_set<std::uint64_t> wanted;
+	for (const auto &way : data.ways)
+		if (graded(way.tags))
+			wanted.insert(way.node_refs.begin(), way.node_refs.end());
+	if (wanted.empty())
+		return {};
+	std::unordered_map<std::uint64_t, std::pair<double, double>> coordinates;
+	coordinates.reserve(wanted.size());
+	for (const auto &node : data.nodes)
+		if (wanted.contains(node.id) && node.lat && node.lon &&
+				std::isfinite(*node.lat) && std::isfinite(*node.lon))
+			coordinates.emplace(node.id, std::pair{*node.lat, *node.lon});
+
+	std::vector<std::vector<std::pair<double, double>>> result;
+	for (const auto &way : data.ways) {
+		if (!graded(way.tags))
+			continue;
+		std::vector<std::pair<double, double>> line;
+		for (const auto id : way.node_refs) {
+			const auto found = coordinates.find(id);
+			if (found == coordinates.end()) {
+				if (!line.empty()) {
+					result.push_back(std::move(line));
+					line.clear();
+				}
+			} else {
+				line.push_back(found->second);
+			}
+		}
+		if (!line.empty())
+			result.push_back(std::move(line));
+	}
+	return result;
+}
+
+TerrainWays terrain_ways_in(
+		const osm_parser::RawOsmDocument &data, bool include_graded, bool include_roads)
+{
+	using Point = std::pair<double, double>;
+	const auto value = [](const tags_t &tags, std::string_view key) -> std::string_view {
+		const auto found = tags.find(std::string(key));
+		return found == tags.end() ? std::string_view{} : std::string_view(found->second);
+	};
+	const auto is_bore = [&](const tags_t &tags) {
+		const auto tunnel = value(tags, "tunnel");
+		const auto railway = value(tags, "railway");
+		return (tunnel == "yes" &&
+					   (tags.contains("highway") || tags.contains("railway"))) ||
+			   (railway == "subway" && tunnel != "no");
+	};
+	const auto one_of = [](std::string_view text,
+								std::initializer_list<std::string_view> values) {
+		return std::find(values.begin(), values.end(), text) != values.end();
+	};
+	const auto is_graded = [&](const tags_t &tags) {
+		for (const auto key : {"tunnel", "bridge"}) {
+			const auto found = tags.find(key);
+			if (found != tags.end() && found->second != "no")
+				return false;
+		}
+		if (one_of(value(tags, "waterway"), {"river", "stream", "canal", "ditch", "drain",
+													"brook", "tidal_channel"}))
+			return true;
+		if (!include_roads)
+			return false;
+		const auto building = tags.find("building");
+		if (building != tags.end() && building->second != "no")
+			return true;
+		const auto highway = tags.find("highway");
+		if (highway != tags.end() &&
+				!one_of(highway->second,
+						{"path", "footway", "bridleway", "steps", "via_ferrata",
+								"corridor", "elevator", "platform", "proposed",
+								"abandoned", "razed", "disused"}))
+			return true;
+		return one_of(value(tags, "railway"),
+				{"rail", "light_rail", "narrow_gauge", "tram", "funicular", "monorail",
+						"preserved", "miniature"});
+	};
+	struct SelectedWay
+	{
+		const osm_parser::RawWay *way{};
+		bool bore{};
+		bool graded{};
+	};
+	std::vector<SelectedWay> selected;
+	std::unordered_set<std::uint64_t> wanted;
+	for (const auto &way : data.ways) {
+		const bool bore = is_bore(way.tags);
+		const bool graded = include_graded && is_graded(way.tags);
+		if (!bore && !graded)
+			continue;
+		selected.push_back({&way, bore, graded});
+		wanted.insert(way.node_refs.begin(), way.node_refs.end());
+	}
+	TerrainWays result;
+	if (selected.empty())
+		return result;
+	std::unordered_map<std::uint64_t, Point> coordinates;
+	coordinates.reserve(wanted.size());
+	for (const auto &node : data.nodes)
+		if (wanted.contains(node.id) && node.lat && node.lon &&
+				std::isfinite(*node.lat) && std::isfinite(*node.lon))
+			coordinates.emplace(node.id, Point{*node.lat, *node.lon});
+	for (const auto &item : selected) {
+		std::vector<Point> line;
+		const auto flush_bore = [&] {
+			if (line.empty())
+				return;
+			result.bores.push_back(line.front());
+			for (std::size_t i = 1; i < line.size(); ++i) {
+				const auto [lat_a, lon_a] = line[i - 1];
+				const auto [lat_b, lon_b] = line[i];
+				const double mean_lat = (lat_a + lat_b) * 0.5 * std::numbers::pi / 180.0;
+				const double dx = (lon_b - lon_a) * 111'320.0 * std::cos(mean_lat);
+				const double dz = (lat_b - lat_a) * 111'320.0;
+				const auto steps = std::max<std::size_t>(
+						1, static_cast<std::size_t>(std::ceil(std::hypot(dx, dz) / 2.0)));
+				for (std::size_t k = 1; k <= steps; ++k) {
+					const double t = static_cast<double>(k) / steps;
+					result.bores.emplace_back(
+							lat_a + (lat_b - lat_a) * t, lon_a + (lon_b - lon_a) * t);
+				}
+			}
+			line.clear();
+		};
+		const auto flush_graded = [&] {
+			if (line.empty())
+				return;
+			result.graded.push_back(std::move(line));
+			line.clear();
+		};
+		for (const auto id : item.way->node_refs) {
+			const auto found = coordinates.find(id);
+			if (found != coordinates.end()) {
+				line.push_back(found->second);
+				continue;
+			}
+			if (item.bore)
+				flush_bore();
+			else if (item.graded)
+				flush_graded();
+		}
+		if (item.bore)
+			flush_bore();
+		else if (item.graded)
+			flush_graded();
+	}
+	return result;
+}
+
+namespace
+{
+constexpr double BORE_STEP_M = 2.0;
+constexpr double BORE_PLATFORM_M = 12.0;
+constexpr double INTERCHANGE_M = 250.0;
+constexpr double METRES_PER_DEGREE = 111'320.0;
+
+std::string_view tag_value(const tags_t &tags, std::string_view key)
+{
+	const auto found = tags.find(std::string(key));
+	return found == tags.end() ? std::string_view{} : std::string_view(found->second);
+}
+
+bool is_bored(const tags_t &tags)
+{
+	const auto tunnel = tag_value(tags, "tunnel");
+	const auto railway = tag_value(tags, "railway");
+	return (tunnel == "yes" && (tags.contains("highway") || tags.contains("railway"))) ||
+		   (railway == "subway" && tunnel != "no");
+}
+
+using GeoPoint = std::pair<double, double>;
+
+std::unordered_map<std::uint64_t, GeoPoint> wanted_coordinates(
+		const osm_parser::RawOsmDocument &data,
+		const std::unordered_set<std::uint64_t> &wanted)
+{
+	std::unordered_map<std::uint64_t, GeoPoint> coordinates;
+	coordinates.reserve(wanted.size());
+	for (const auto &node : data.nodes)
+		if (wanted.contains(node.id) && node.lat && node.lon &&
+				std::isfinite(*node.lat) && std::isfinite(*node.lon))
+			coordinates.emplace(node.id, GeoPoint{*node.lat, *node.lon});
+	return coordinates;
+}
+} // namespace
+
+std::vector<std::pair<double, double>> bored_ways_in(
+		const osm_parser::RawOsmDocument &data)
+{
+	std::unordered_set<std::uint64_t> wanted;
+	for (const auto &way : data.ways)
+		if (is_bored(way.tags))
+			wanted.insert(way.node_refs.begin(), way.node_refs.end());
+	if (wanted.empty())
+		return {};
+	const auto coordinates = wanted_coordinates(data, wanted);
+	std::vector<std::pair<double, double>> points;
+	for (const auto &way : data.ways) {
+		if (!is_bored(way.tags))
+			continue;
+		std::vector<GeoPoint> line;
+		const auto flush = [&] {
+			if (line.empty())
+				return;
+			points.push_back(line.front());
+			for (std::size_t i = 1; i < line.size(); ++i) {
+				const auto [lat_a, lon_a] = line[i - 1];
+				const auto [lat_b, lon_b] = line[i];
+				const double mean_lat = (lat_a + lat_b) * 0.5 * std::numbers::pi / 180.0;
+				const double dx =
+						(lon_b - lon_a) * METRES_PER_DEGREE * std::cos(mean_lat);
+				const double dz = (lat_b - lat_a) * METRES_PER_DEGREE;
+				const auto steps = std::max<std::size_t>(
+						1, static_cast<std::size_t>(
+								   std::ceil(std::hypot(dx, dz) / BORE_STEP_M)));
+				for (std::size_t k = 1; k <= steps; ++k) {
+					const double t = static_cast<double>(k) / steps;
+					points.emplace_back(
+							lat_a + (lat_b - lat_a) * t, lon_a + (lon_b - lon_a) * t);
+				}
+			}
+			line.clear();
+		};
+		for (const auto id : way.node_refs) {
+			const auto found = coordinates.find(id);
+			if (found == coordinates.end())
+				flush();
+			else
+				line.push_back(found->second);
+		}
+		flush();
+	}
+	return points;
+}
+
+std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data)
+{
+	struct PlatformNodes
+	{
+		int depth{};
+		std::vector<std::uint64_t> nodes;
+		bool tagged_underground{};
+	};
+	std::unordered_map<std::uint64_t, const osm_parser::RawWay *> ways;
+	for (const auto &way : data.ways)
+		ways.emplace(way.id, &way);
+	std::vector<PlatformNodes> platforms;
+	const auto add_platform = [&](const tags_t &tags, std::vector<std::uint64_t> nodes) {
+		if (!stations::is_rail_platform(tags) || stations::tagged_surface(tags) ||
+				stations::is_low(tags) || nodes.empty())
+			return;
+		platforms.push_back({stations::depth_key(tags).value_or(-1), std::move(nodes),
+				stations::tagged_underground(tags)});
+	};
+	for (const auto &way : data.ways)
+		add_platform(way.tags, way.node_refs);
+	for (const auto &relation : data.relations) {
+		std::vector<std::uint64_t> nodes;
+		for (const auto &member : relation.members) {
+			if (member.type != "way")
+				continue;
+			const auto found = ways.find(member.ref);
+			if (found != ways.end())
+				nodes.insert(nodes.end(), found->second->node_refs.begin(),
+						found->second->node_refs.end());
+		}
+		add_platform(relation.tags, std::move(nodes));
+	}
+	if (platforms.empty())
+		return {};
+	const bool all_tagged = std::all_of(platforms.begin(), platforms.end(),
+			[](const PlatformNodes &platform) { return platform.tagged_underground; });
+	std::vector<const osm_parser::RawWay *> bores;
+	if (!all_tagged) {
+		const auto is_station_railway_bore = [](const tags_t &tags) {
+			const auto railway = tag_value(tags, "railway");
+			return (railway == "rail" || railway == "subway" || railway == "light_rail" ||
+						   railway == "narrow_gauge" || railway == "monorail") &&
+				   is_bored(tags);
+		};
+		for (const auto &way : data.ways)
+			if (is_station_railway_bore(way.tags))
+				bores.push_back(&way);
+	}
+	std::unordered_set<std::uint64_t> wanted;
+	for (const auto &platform : platforms)
+		wanted.insert(platform.nodes.begin(), platform.nodes.end());
+	for (const auto *way : bores)
+		wanted.insert(way->node_refs.begin(), way->node_refs.end());
+	const auto at = wanted_coordinates(data, wanted);
+	std::optional<GeoPoint> origin;
+	for (const auto &platform : platforms) {
+		const auto found = std::find_if(platform.nodes.begin(), platform.nodes.end(),
+				[&](std::uint64_t id) { return at.contains(id); });
+		if (found != platform.nodes.end()) {
+			origin = at.at(*found);
+			break;
+		}
+	}
+	if (!origin)
+		return {};
+	const double m_per_lon =
+			METRES_PER_DEGREE * std::cos(origin->first * std::numbers::pi / 180.0);
+	const auto local = [&](GeoPoint point) {
+		return GeoPoint{(point.second - origin->second) * m_per_lon,
+				(point.first - origin->first) * METRES_PER_DEGREE};
+	};
+	std::vector<std::pair<GeoPoint, GeoPoint>> segments;
+	for (const auto *way : bores) {
+		std::optional<GeoPoint> previous;
+		for (const auto id : way->node_refs) {
+			const auto found = at.find(id);
+			if (found == at.end()) {
+				previous.reset();
+				continue;
+			}
+			const auto current = local(found->second);
+			if (previous)
+				segments.emplace_back(*previous, current);
+			previous = current;
+		}
+	}
+	const auto beside_bore = [&](GeoPoint point) {
+		for (const auto &[a, b] : segments) {
+			const double dx = b.first - a.first, dz = b.second - a.second;
+			const double t = std::clamp(
+					((point.first - a.first) * dx + (point.second - a.second) * dz) /
+							(dx * dx + dz * dz + 1e-9),
+					0.0, 1.0);
+			if (std::hypot(a.first + t * dx - point.first,
+						a.second + t * dz - point.second) <= BORE_PLATFORM_M)
+				return true;
+		}
+		return false;
+	};
+	struct Shape
+	{
+		int depth{};
+		std::vector<GeoPoint> points;
+		GeoPoint centre{}, heading{};
+	};
+	std::vector<Shape> shapes;
+	for (const auto &platform : platforms) {
+		Shape shape;
+		shape.depth = platform.depth;
+		for (const auto id : platform.nodes) {
+			const auto found = at.find(id);
+			if (found != at.end())
+				shape.points.push_back(found->second);
+		}
+		if (shape.points.empty())
+			continue;
+		GeoPoint centre{};
+		for (const auto point : shape.points) {
+			const auto p = local(point);
+			centre.first += p.first;
+			centre.second += p.second;
+		}
+		centre.first /= shape.points.size();
+		centre.second /= shape.points.size();
+		if (!platform.tagged_underground && !beside_bore(centre))
+			continue;
+		double xx = 0.0, zz = 0.0, xz = 0.0;
+		for (const auto point : shape.points) {
+			const auto p = local(point);
+			const double dx = p.first - centre.first, dz = p.second - centre.second;
+			xx += dx * dx;
+			zz += dz * dz;
+			xz += dx * dz;
+		}
+		const double angle = 0.5 * std::atan2(2.0 * xz, xx - zz);
+		shape.centre = centre;
+		shape.heading = {std::cos(angle), std::sin(angle)};
+		shapes.push_back(std::move(shape));
+	}
+	const auto parallel = [](GeoPoint a, GeoPoint b) {
+		return std::abs(a.first * b.first + a.second * b.second) >= 0.9;
+	};
+	std::vector<StationHint> result;
+	for (std::size_t i = 0; i < shapes.size(); ++i) {
+		std::vector<GeoPoint> crossing_headings;
+		for (std::size_t j = 0; j < shapes.size(); ++j) {
+			const auto &a = shapes[i];
+			const auto &b = shapes[j];
+			if (i == j || b.depth < a.depth ||
+					std::hypot(a.centre.first - b.centre.first,
+							a.centre.second - b.centre.second) > INTERCHANGE_M ||
+					parallel(a.heading, b.heading))
+				continue;
+			if (std::none_of(crossing_headings.begin(), crossing_headings.end(),
+						[&](GeoPoint heading) { return parallel(heading, b.heading); }))
+				crossing_headings.push_back(b.heading);
+		}
+		const int rank =
+				static_cast<int>(std::min<std::size_t>(2, crossing_headings.size()));
+		const int depth = stations::HALL_DEPTH + stations::HALL_STACK * rank;
+		for (const auto point : shapes[i].points)
+			result.push_back({point.first, point.second, depth});
+	}
+	return result;
 }
 
 TerrainHints overture_terrain_hints_in(const osm_parser::RawOsmDocument &data,

@@ -15,6 +15,7 @@
 #include "../structures/structures.h"
 #include "surfaces.h"
 #include "signage.h"
+#include "../decals/machines.h"
 #include "road_mask_search.h"
 #include "street_furniture.h"
 #include "../strict_parse.h"
@@ -389,13 +390,33 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 
 	if (amenity_type == "vending_machine" || amenity_type == "atm") {
 		if (first_node.has_value()) {
-			editor.set_block(crate::block_definitions::IRON_BLOCK, first_node->x, 1,
-					first_node->z, std::nullopt, std::nullopt);
-			editor.set_block(crate::block_definitions::IRON_BLOCK, first_node->x, 2,
-					first_node->z, std::nullopt, std::nullopt);
-			place_furniture_decals(editor, tags, first_node->x,
-					editor.get_absolute_y(first_node->x, 2, first_node->z),
-					first_node->z);
+			const auto name = signage::machine_front(element.tags()).value_or("");
+			Block cabinet = crate::block_definitions::IRON_BLOCK;
+			if (name == "vending_drinks")
+				cabinet = crate::block_definitions::BLUE_CONCRETE;
+			else if (name == "vending_snacks")
+				cabinet = crate::block_definitions::GRAY_CONCRETE;
+			else if (name == "coin_press")
+				cabinet = crate::block_definitions::RED_CONCRETE;
+			else if (name == "dog_bags")
+				cabinet = crate::block_definitions::GREEN_CONCRETE;
+			else if (name == "dispenser")
+				cabinet = crate::block_definitions::LIGHT_GRAY_CONCRETE;
+			const Block base = decals::machines::is_small(name)
+									   ? crate::block_definitions::IRON_BARS
+									   : cabinet;
+			editor.set_block(
+					base, first_node->x, 1, first_node->z, std::nullopt, std::nullopt);
+			editor.set_block(
+					cabinet, first_node->x, 2, first_node->z, std::nullopt, std::nullopt);
+			if (!name.empty()) {
+				const decals::DecalKey key = decals::MachineKey{name};
+				if (editor.decal_registry && editor.decal_registry->contains(key))
+					for (std::int8_t facing : {2, 3, 4, 5})
+						editor.place_decal_panel(first_node->x,
+								editor.get_absolute_y(first_node->x, 2, first_node->z),
+								first_node->z, facing, key, true, true);
+			}
 		}
 		return;
 	}

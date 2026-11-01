@@ -11,6 +11,9 @@
 namespace arnis::map_item
 {
 constexpr int MAP_SIZE = 128;
+// Keep generated maps clear of the host world's low-numbered map IDs. Rust uses
+// the same high range so Arnis map files can be copied into Paper/Spigot worlds.
+constexpr int FIRST_MAP_ID = 1'000'000;
 constexpr int BUS_STOP_MAP_ID = 2, RECYCLING_MAP_ID = 3, HYDRANT_MAP_ID = 4;
 std::tuple<int, std::int8_t, bool> map_geometry(int max_dimension);
 std::optional<std::pair<int, int>> read_spawn_xz(const std::filesystem::path &world_path);
@@ -186,7 +189,7 @@ inline std::vector<std::uint8_t> render_rgb_grid(
 }
 namespace arnis::map_item
 {
-inline int next_map_id(const std::vector<int> &existing, int start = 0)
+inline int next_map_id(const std::vector<int> &existing, int start = FIRST_MAP_ID)
 {
 	int id = std::max(0, start);
 	for (;; ++id)

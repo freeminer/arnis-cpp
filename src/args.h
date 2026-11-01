@@ -16,6 +16,7 @@
 #include "celestial.h"
 #include "projection/web_mercator.h"
 #include "one_world.h"
+#include "element_processing/field_texture.h"
 #include "trees/tree_library.h"
 #include "caves_biomes.h"
 
@@ -40,6 +41,31 @@ enum class WorldType
 	Void,
 	Flat
 };
+// Natural spawning mode written to Java level.dat. Monsters require a
+// non-Peaceful difficulty; when enabled, mob griefing stays disabled so they
+// cannot damage the generated city.
+enum class MobSpawning
+{
+	Off,
+	Animals,
+	All
+};
+constexpr bool mob_spawning_enabled(MobSpawning mobs)
+{
+	return mobs != MobSpawning::Off;
+}
+constexpr bool mob_spawning_monsters(MobSpawning mobs)
+{
+	return mobs == MobSpawning::All;
+}
+constexpr std::int8_t java_difficulty(MobSpawning mobs)
+{
+	return mob_spawning_monsters(mobs) ? 2 : 0;
+}
+constexpr std::int32_t bedrock_difficulty(MobSpawning mobs)
+{
+	return mobs == MobSpawning::Animals ? 0 : 2;
+}
 constexpr int java_game_type(GameMode mode)
 {
 	return mode == GameMode::Survival ? 0 : (mode == GameMode::Creative ? 1 : 3);
@@ -252,6 +278,10 @@ struct Args
 	double celestial_latitude_degrees{0.0};
 	// Fixed world frame inherited when this run extends a One World manifest.
 	std::optional<one_world::RunContext> one_world_run;
+	// Existing Java dimension bounds supplied by library/UI callers. When absent,
+	// generation discovers them from the destination world's tall datapack.
+	std::optional<std::pair<std::int32_t, std::int32_t>> tall_range;
+	field_texture::FieldPreset fields{field_texture::FieldPreset::Patchwork};
 
 	// Ground level to use in the Minecraft world
 	int ground_level{-62};
@@ -313,6 +343,7 @@ struct Args
 		discoveries = false;
 		moving_cars = false;
 		moving_vehicles = false;
+		mob_spawning = MobSpawning::Off;
 		// Body defaults replace the requested generation mode, so refresh the
 		// compatibility cache after that normalization as well.
 		apply_mode_defaults();
@@ -340,6 +371,10 @@ struct Args
 			fillground = true;
 		if (disasters)
 			ground_level = std::max(ground_level, DISASTER_GROUND_LEVEL);
+		// These features bring their own mobs and difficulty; never enable
+		// ambient spawning alongside their scripted encounters.
+		if (disasters || zombie_outbreak)
+			mob_spawning = MobSpawning::Off;
 	}
 	bool mapillary_facades_wanted() const
 	{
@@ -409,6 +444,7 @@ struct Args
 	double rotation{0.0};
 	OvertureSource overture_source{OvertureSource::Auto};
 	GameMode gamemode{GameMode::Creative};
+	MobSpawning mob_spawning{MobSpawning::Off};
 	int64_t world_time{6000};
 	WorldType world_type{WorldType::Void};
 	SignageLevel signage{SignageLevel::Basic};
@@ -515,6 +551,8 @@ struct Args
 			return "legacy terrain cannot be combined with geo-only mode";
 		if (map_preview && luanti)
 			return "map preview is not supported for Luanti output";
+		if (mob_spawning_enabled(mob_spawning) && luanti)
+			return "--mob-spawning is not available for Luanti worlds.";
 		if (one_world_run &&
 				(bedrock || luanti || !is_earth(body) ||
 						std::abs(rotation) > std::numeric_limits<double>::epsilon() ||

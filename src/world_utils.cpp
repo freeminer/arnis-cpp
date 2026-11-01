@@ -5,8 +5,11 @@
 #include "retrieve_data.h"
 #include "projection/projection_spec.h"
 #include "osm_tiles.h"
+#include "world_editor/floor_state.h"
+#include "../../arnis_world_editor.h"
 #include <algorithm>
 #include <atomic>
+#include <charconv>
 #include <cctype>
 #include <chrono>
 #include <cmath>
@@ -776,10 +779,115 @@ std::filesystem::path WorldLayout::maps_dir(const std::filesystem::path &world) 
 									: world / "data";
 }
 
-bool install_tall_datapack(const std::filesystem::path &world, std::string *error)
+namespace
+{
+bool replace_json_integer(std::string &json, std::string_view key, std::int32_t value)
+{
+	const auto quoted_key = "\"" + std::string(key) + "\"";
+	const auto key_pos = json.find(quoted_key);
+	if (key_pos == std::string::npos)
+		return false;
+	auto value_begin = json.find(':', key_pos + quoted_key.size());
+	if (value_begin == std::string::npos)
+		return false;
+	++value_begin;
+	while (value_begin < json.size() &&
+			std::isspace(static_cast<unsigned char>(json[value_begin])))
+		++value_begin;
+	auto value_end = value_begin;
+	if (value_end < json.size() && json[value_end] == '-')
+		++value_end;
+	while (value_end < json.size() &&
+			std::isdigit(static_cast<unsigned char>(json[value_end])))
+		++value_end;
+	if (value_end == value_begin ||
+			(json[value_begin] == '-' && value_end == value_begin + 1))
+		return false;
+	json.replace(value_begin, value_end - value_begin, std::to_string(value));
+	return true;
+}
+
+std::optional<std::int64_t> json_integer(const std::string &json, std::string_view key)
+{
+	const auto quoted_key = "\"" + std::string(key) + "\"";
+	const auto key_pos = json.find(quoted_key);
+	if (key_pos == std::string::npos)
+		return std::nullopt;
+	auto value_begin = json.find(':', key_pos + quoted_key.size());
+	if (value_begin == std::string::npos)
+		return std::nullopt;
+	++value_begin;
+	while (value_begin < json.size() &&
+			std::isspace(static_cast<unsigned char>(json[value_begin])))
+		++value_begin;
+	const auto value_end = json.find_first_of(",}] \t\r\n", value_begin);
+	const auto token = json.substr(value_begin, value_end - value_begin);
+	if (token.empty())
+		return std::nullopt;
+	std::int64_t value = 0;
+	const auto [end, error] =
+			std::from_chars(token.data(), token.data() + token.size(), value);
+	if (error != std::errc{} || end != token.data() + token.size())
+		return std::nullopt;
+	return value;
+}
+
+bool dimension_with_range(
+		std::vector<std::uint8_t> &contents, std::int32_t min_y, std::int32_t max_y)
+{
+	if (min_y > max_y)
+		return false;
+	const auto height = static_cast<std::int64_t>(max_y) - min_y + 1;
+	if (height <= 0 || height > std::numeric_limits<std::int32_t>::max())
+		return false;
+	std::string json(contents.begin(), contents.end());
+	if (!replace_json_integer(json, "min_y", min_y) ||
+			!replace_json_integer(json, "height", static_cast<std::int32_t>(height)) ||
+			!replace_json_integer(
+					json, "logical_height", static_cast<std::int32_t>(height)))
+		return false;
+	contents.assign(json.begin(), json.end());
+	return true;
+}
+} // namespace
+
+std::optional<std::pair<std::int32_t, std::int32_t>> tall_datapack_range(
+		const std::filesystem::path &world)
+{
+	const auto path = world / "datapacks" / std::string(TALL_DATAPACK_NAME) /
+					  "data/minecraft/dimension_type/overworld.json";
+	std::ifstream input(path, std::ios::binary);
+	if (!input)
+		return std::nullopt;
+	const std::string json(
+			(std::istreambuf_iterator<char>(input)), std::istreambuf_iterator<char>());
+	const auto min_y = json_integer(json, "min_y");
+	const auto height = json_integer(json, "height");
+	if (!min_y || !height || *height <= 0 ||
+			*min_y > std::numeric_limits<std::int64_t>::max() - (*height - 1))
+		return std::nullopt;
+	const auto max_y = *min_y + *height - 1;
+	const auto [full_min, full_max] = TALL_DATAPACK_FULL_RANGE;
+	if (*min_y < full_min || *min_y > world_editor::DEFAULT_MIN_Y ||
+			max_y < world_editor::DEFAULT_MAX_Y || max_y > full_max || *min_y % 16 != 0 ||
+			(max_y + 1) % 16 != 0)
+		return std::nullopt;
+	return std::pair{static_cast<std::int32_t>(*min_y), static_cast<std::int32_t>(max_y)};
+}
+
+bool install_tall_datapack(const std::filesystem::path &world, std::int32_t min_y,
+		std::int32_t max_y, std::string *error)
 {
 	if (error)
 		error->clear();
+	const auto [full_min, full_max] = TALL_DATAPACK_FULL_RANGE;
+	if (min_y > max_y || min_y < full_min || min_y > world_editor::DEFAULT_MIN_Y ||
+			max_y < world_editor::DEFAULT_MAX_Y || max_y > full_max || min_y % 16 != 0 ||
+			(max_y + 1) % 16 != 0) {
+		if (error)
+			*error = "invalid tall-world datapack range";
+		return false;
+	}
 	const auto root = world / "datapacks" / std::string(TALL_DATAPACK_NAME);
 	const std::array<std::pair<std::filesystem::path, std::filesystem::path>, 4> files{{
 			{"minecraft/datapack_tall/pack.mcmeta", "pack.mcmeta"},
@@ -798,8 +906,15 @@ bool install_tall_datapack(const std::filesystem::path &world, std::string *erro
 				*error = "failed to read bundled datapack file " + source.string();
 			return false;
 		}
-		const std::vector<std::uint8_t> contents((std::istreambuf_iterator<char>(input)),
+		std::vector<std::uint8_t> contents((std::istreambuf_iterator<char>(input)),
 				std::istreambuf_iterator<char>());
+		if (pack_name.filename() == "overworld.json" &&
+				!dimension_with_range(contents, min_y, max_y)) {
+			if (error)
+				*error = "failed to set tall-world range in bundled datapack file " +
+						 source.string();
+			return false;
+		}
 		const auto destination = root / pack_name;
 		std::error_code ec;
 		std::filesystem::create_directories(destination.parent_path(), ec);

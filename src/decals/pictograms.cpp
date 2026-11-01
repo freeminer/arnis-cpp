@@ -5,9 +5,8 @@ namespace arnis::decals::pictograms
 {
 const std::vector<std::string> &names()
 {
-	static const std::vector<std::string> value{"atm", "bus_stop", "hydrant",
-			"information", "metro_m", "metro_s", "metro_u", "parking", "recycling",
-			"train", "tram", "vending_machine"};
+	static const std::vector<std::string> value{"bus_stop", "hydrant", "information",
+			"metro_m", "metro_s", "metro_u", "parking", "recycling", "train", "tram"};
 	return value;
 }
 std::optional<std::filesystem::path> asset(

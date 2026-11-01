@@ -14,6 +14,7 @@ namespace arnis
 {
 struct Args;
 enum class WorldFormat;
+enum class MobSpawning;
 namespace world_utils
 {
 inline constexpr std::int32_t DIMENSION_FOLDERS_DATA_VERSION = 4772;
@@ -108,15 +109,20 @@ void remove_untouched_template_region(const std::filesystem::path &world);
 // the existing overworld is flat, matching Rust's conservative behavior.
 bool apply_java_world_settings(const std::filesystem::path &world, int game_type,
 		std::int64_t world_time, bool void_world, std::int32_t base_y, std::int32_t min_y,
-		std::string *error = nullptr);
+		MobSpawning mob_spawning, std::string *error = nullptr);
 // Configure an outbreak world so its zombies survive and the game starts on Normal.
 bool start_in_survival(const std::filesystem::path &world, std::string *error = nullptr);
 // Whether the world already contains the bundled extended-height datapack.
 bool has_tall_datapack(const std::filesystem::path &world);
+inline constexpr std::pair<std::int32_t, std::int32_t> TALL_DATAPACK_FULL_RANGE{
+		-2032, 2031};
+std::optional<std::pair<std::int32_t, std::int32_t>> tall_datapack_range(
+		const std::filesystem::path &world);
 // Install the bundled dimension override required for worlds generated beyond
-// vanilla's build-height limits, then enable the pack in level.dat.
-bool install_tall_datapack(
-		const std::filesystem::path &world, std::string *error = nullptr);
+// vanilla's build-height limits, set to the exact chunk range, then enable the
+// pack in level.dat.
+bool install_tall_datapack(const std::filesystem::path &world, std::int32_t min_y,
+		std::int32_t max_y, std::string *error = nullptr);
 bool enable_datapack_in_level_dat(const std::filesystem::path &world,
 		std::string_view pack_dir_name, std::string *error = nullptr);
 bool touch_last_played(const std::filesystem::path &world, std::string *error = nullptr);

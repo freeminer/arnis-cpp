@@ -1,6 +1,7 @@
 #pragma once
 
 #include "region.h"
+#include "../map_item.h"
 
 #include <cstdint>
 #include <map>
@@ -63,6 +64,12 @@ struct PictogramKey
 	std::string name;
 	bool operator==(const PictogramKey &) const = default;
 	bool operator<(const PictogramKey &other) const { return name < other.name; }
+};
+struct MachineKey
+{
+	std::string name;
+	bool operator==(const MachineKey &) const = default;
+	bool operator<(const MachineKey &other) const { return name < other.name; }
 };
 struct TextKey
 {
@@ -127,8 +134,9 @@ struct LocalMapKey
 	}
 };
 
-class DecalKey : public std::variant<PictogramKey, TextKey, TrafficKey, SpeedLimitKey,
-						 RouteShieldKey, PosterKey, ColumnPosterKey, LocalMapKey>
+class DecalKey
+		: public std::variant<PictogramKey, TextKey, TrafficKey, SpeedLimitKey,
+				  RouteShieldKey, PosterKey, ColumnPosterKey, MachineKey, LocalMapKey>
 {
 public:
 	using variant::variant;
@@ -156,7 +164,7 @@ struct DecalEntry
 class DecalRegistry
 {
 public:
-	static constexpr int FIRST_ID = 2;
+	static constexpr int FIRST_ID = map_item::FIRST_MAP_ID + 2;
 
 private:
 	std::map<DecalKey, DecalEntry> entries_;

@@ -128,6 +128,10 @@ bool generate_poster_box_posters(WorldEditor &editor, const ProcessedNode &node)
 bool generate_information_board(
 		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask);
 std::optional<decals::DecalKey> plaque_key(const tags_t &tags);
+std::optional<std::string> machine_front(const tags_t &tags);
+std::optional<decals::DecalKey> platform_name_key(const tags_t &tags);
+bool place_platform_name(WorldEditor &editor, int x, int y, int z, std::int8_t facing,
+		const std::string &name);
 bool generate_plaque(WorldEditor &editor, const ProcessedNode &node);
 void place_bus_stop_signs(
 		WorldEditor &editor, const tags_t &tags, int x, int sign_y, int z);

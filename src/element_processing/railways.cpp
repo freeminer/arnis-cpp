@@ -22,7 +22,10 @@ using std::vector;
 
 #include "../bresenham.h"
 #include "../floodfill_cache.h"
+#include "../ground_decoration.h"
+#include "../water_depth.h"
 #include "../world_editor/floor_state.h"
+#include "../world_editor/common.h"
 #include "../strict_parse.h"
 #include "../../../arnis_adapter.h"
 #include "bridge_styles.h"
@@ -38,7 +41,6 @@ namespace arnis
 namespace railways
 {
 
-const int RAIL_TUNNEL_DEPTH = 3;
 const std::size_t CATENARY_MAST_INTERVAL = 16;
 const int CATENARY_MAST_OFFSET = 3;
 const int CATENARY_WIRE_HEIGHT = 6;
@@ -52,8 +54,11 @@ const int RAIL_DECK_GAP_FILL = 4;
 constexpr int RAIL_ABUTMENT_MAX_HEIGHT = 3;
 const int WALL_RADIUS = 2;
 const int AIR_RADIUS = 1;
-const int INTERIOR_HEIGHT = 4;
+constexpr int INTERIOR_HEIGHT = RAIL_TUNNEL_INTERIOR_HEIGHT;
 const std::size_t LIGHT_INTERVAL = 8;
+constexpr double TUNNEL_SHALLOW_COST = 0.25;
+constexpr double TUNNEL_SHALLOW_UNDER_WATER_COST = 1.0;
+static_assert(RAIL_TUNNEL_DEPTH + INTERIOR_HEIGHT < water_depth::BORE_ROOM);
 
 static const optional<vector<Block>> &rail_clear_variants()
 {
@@ -839,10 +844,16 @@ void generate_catenary(WorldEditor &editor, const vector<pair<int, int>> &points
 		if (i % CATENARY_MAST_INTERVAL)
 			continue;
 		int sx = -dz, sz = dx;
-		if (!mast_base_clear(cx, cz, sx, sz, roads, buildings, rails)) {
+		const auto clear_side = [&](int side_x, int side_z) {
+			const int mast_x = cx + side_x * CATENARY_MAST_OFFSET;
+			const int mast_z = cz + side_z * CATENARY_MAST_OFFSET;
+			return mast_base_clear(cx, cz, side_x, side_z, roads, buildings, rails) &&
+				   !editor.station_on_platform(mast_x, mast_z);
+		};
+		if (!clear_side(sx, sz)) {
 			sx = -sx;
 			sz = -sz;
-			if (!mast_base_clear(cx, cz, sx, sz, roads, buildings, rails))
+			if (!clear_side(sx, sz))
 				continue;
 		}
 		const int mx = cx + sx * CATENARY_MAST_OFFSET,
@@ -961,6 +972,12 @@ void generate_at_grade_rail(WorldEditor &editor, const ProcessedWay &element,
 			if (!pins[i])
 				pins[i] = level;
 	}
+	// Tracks alongside a station platform follow its fitted deck height rather
+	// than the independent terrain profile, matching Rust's StationIndex pin.
+	for (std::size_t i = 0; i < cells.size(); ++i)
+		if (const auto bed = editor.station_track_bed(
+					element.id, cells[i].first, cells[i].second))
+			pins[i] = *bed;
 	const auto straight = straight_cells(cells,
 			joined_ends[0].beyond.empty() ? std::nullopt
 										  : std::optional(joined_ends[0].beyond.front()),
@@ -1323,7 +1340,12 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 					if (y - 2 > ground && style != bridge_styles::BridgeStyle::Boardwalk)
 						editor.set_block_absolute(slab, cx, y - 2, cz, nullopt, nullopt);
 					support_cells.emplace_back(std::pair{cx, cz}, i);
-					if (!railing || y - ground < 2) {
+					const bool by_platform = editor.station_on_platform(cx, cz) ||
+											 editor.station_on_platform(cx + 1, cz) ||
+											 editor.station_on_platform(cx - 1, cz) ||
+											 editor.station_on_platform(cx, cz + 1) ||
+											 editor.station_on_platform(cx, cz - 1);
+					if (!railing || y - ground < 2 || by_platform) {
 						previous_tops[side].reset();
 						continue;
 					}
@@ -1409,6 +1431,31 @@ void generate_rail_bridge(WorldEditor &editor, const ProcessedWay &way,
 				bridge_path, 0, start_is_boundary, end_is_boundary);
 }
 
+void clear_rail_gauge(WorldEditor &editor, const CoordinateBitmap &building_footprints)
+{
+	static const std::vector<Block> leaves{OAK_LEAVES, BIRCH_LEAVES, SPRUCE_LEAVES,
+			DARK_OAK_LEAVES, JUNGLE_LEAVES, ACACIA_LEAVES, CHERRY_LEAVES, MANGROVE_LEAVES,
+			AZALEA_LEAVES, FLOWERING_AZALEA_LEAVES};
+	std::vector<Block> leaves_and_wood = leaves;
+	const auto &wood = ground_decoration::wood_blocks();
+	leaves_and_wood.insert(leaves_and_wood.end(), wood.begin(), wood.end());
+	const std::optional<std::vector<Block>> leaf_whitelist{leaves};
+	const std::optional<std::vector<Block>> branch_whitelist{leaves_and_wood};
+	for (const auto &[x, z, y] : editor.take_laid_rails()) {
+		for (int dx = -1; dx <= 1; ++dx) {
+			for (int dz = -1; dz <= 1; ++dz) {
+				if (building_footprints.contains(x + dx, z + dz))
+					continue;
+				for (int dy = 0; dy <= CATENARY_WIRE_HEIGHT - 1; ++dy) {
+					const auto &replace = dy == 0 ? leaf_whitelist : branch_whitelist;
+					editor.set_block_absolute(
+							AIR, x + dx, y + dy, z + dz, replace, std::nullopt);
+				}
+			}
+		}
+	}
+}
+
 void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element,
 		vector<tuple<int, int, int, bool>> &rail_tunnel_points,
 		const RailJoins &rail_joins)
@@ -1419,18 +1466,34 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 		if (n < 2)
 			return;
 		const auto ends = rail_joins.ends(element.id);
-		const int depth = RAIL_TUNNEL_DEPTH + INTERIOR_HEIGHT + 1;
-		std::vector<int> ground(n), deep(n);
+		const int depth = RAIL_TUNNEL_FLOOR_DEPTH;
+		const int lowest = world_editor::min_y() + 1;
+		std::vector<int> ground(n), surface(n), deep(n);
+		std::vector<std::optional<int>> carved_bed(n);
 		for (std::size_t i = 0; i < n; ++i) {
 			ground[i] = editor.get_ground_level(cells[i].first, cells[i].second);
-			deep[i] = ground[i] - depth;
+			carved_bed[i] = editor.lowest_carved_bed(
+					cells[i].first, cells[i].second, WALL_RADIUS);
+			if (carved_bed[i] && *carved_bed[i] >= ground[i])
+				carved_bed[i].reset();
+			const int bed = carved_bed[i].value_or(ground[i]);
+			surface[i] = bed;
+			deep[i] = surface[i] - depth;
 		}
-		const int lowest = world_editor::min_y() + 1;
 		std::vector<std::optional<int>> pins(n);
+		std::optional<int> joint_low;
 		for (std::size_t e = 0; e < 2; ++e) {
 			const auto &end = ends[e];
 			const std::size_t at = e == 0 ? 0 : n - 1;
-			const int level = end.meets_surface ? ground[at] : deep[at];
+			int level = end.meets_surface ? ground[at] : deep[at];
+			if (!end.meets_surface) {
+				const auto [x, z] = cells[at];
+				if (const auto joint = editor.station_tunnel_joint_floor(x, z);
+						joint && *joint < deep[at]) {
+					level = *joint;
+					joint_low = joint_low ? std::min(*joint_low, *joint) : *joint;
+				}
+			}
 			if (end.shared) {
 				const std::size_t next = e == 0 ? 1 : n - 2;
 				if (!pins[at])
@@ -1455,6 +1518,20 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				if (!pins[i])
 					pins[i] = level;
 		}
+		std::vector<std::optional<std::pair<int, bool>>> station_pins(n);
+		std::optional<int> station_pin_low;
+		for (std::size_t i = 0; i < n; ++i) {
+			const auto [x, z] = cells[i];
+			station_pins[i] = editor.station_tunnel_pin(element.id, x, z);
+			if (station_pins[i]) {
+				pins[i] = station_pins[i]->first;
+				station_pin_low = station_pin_low ? std::min(*station_pin_low,
+															station_pins[i]->first)
+												  : station_pins[i]->first;
+			}
+		}
+		if (joint_low && (!station_pin_low || *joint_low < *station_pin_low))
+			station_pin_low = *joint_low;
 		const auto straight = straight_cells(cells,
 				ends[0].beyond.empty() ? std::nullopt
 									   : std::optional(ends[0].beyond.front()),
@@ -1464,17 +1541,29 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				straight,
 				[&](std::size_t i) {
 					return pins[i] ? std::pair{*pins[i], *pins[i]}
-								   : std::pair{std::max(deep[i] - 10, lowest),
+								   : std::pair{
+											 std::max(std::min(deep[i] - 10,
+															  station_pin_low.value_or(
+																	  std::numeric_limits<
+																			  int>::
+																			  max())),
+													 lowest),
 											 std::max(ground[i], lowest)};
 				},
 				[&](std::size_t i, int y) {
 					const int shallower = y - deep[i];
-					return shallower > 0 ? .25 * shallower : -shallower;
+					if (shallower <= 0)
+						return static_cast<double>(-shallower);
+					return (carved_bed[i] ? TUNNEL_SHALLOW_UNDER_WATER_COST
+										  : TUNNEL_SHALLOW_COST) *
+						   shallower;
 				},
 				2.5);
 		for (std::size_t i = 0; i < n; ++i) {
 			const auto [x, z] = cells[i];
 			const int floor_y = floors[i];
+			if (station_pins[i] && station_pins[i]->second)
+				continue;
 			const int ceil_y = floor_y + INTERIOR_HEIGHT + 1;
 			rail_tunnel_points.emplace_back(x, z, floor_y, i % LIGHT_INTERVAL == 0);
 			if (floor_y <= world_editor::min_y())
@@ -1499,6 +1588,8 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 		const std::optional<std::vector<Block>> replace(std::vector<Block>{STONE_BRICKS,
 				CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, POLISHED_DEEPSLATE});
 		for (std::size_t i = 0; i < n; ++i) {
+			if (station_pins[i] && station_pins[i]->second)
+				continue;
 			if (floors[i] <= world_editor::min_y())
 				continue;
 			const auto [x, z] = cells[i];
@@ -1522,7 +1613,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 			if (lays)
 				editor.set_block_absolute(rail, x, floors[i] + 1, z,
 						std::optional<std::vector<Block>>{*replace}, nullopt);
-			editor.register_rail(element.id, x, z, floors[i] + 1);
+			editor.register_buried_rail(element.id, x, z, floors[i] + 1);
 		}
 		return;
 	}
@@ -1599,18 +1690,104 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 						std::optional<std::vector<Block>>(
 								{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
 						std::nullopt);
-				editor.register_rail(element.id, bx, bz, floor_y + 1);
+				editor.register_buried_rail(element.id, bx, bz, floor_y + 1);
 			}
 		}
 		return;
 	}
 	const auto smoothed = build_connected_centerline(element);
+	std::vector<int> station_profile;
+	std::vector<std::optional<std::pair<int, bool>>> station_pins(smoothed.size());
+	std::optional<int> station_pin_low;
+	std::optional<int> joint_low;
+	for (std::size_t j = 0; j < smoothed.size(); ++j) {
+		station_pins[j] = editor.station_tunnel_pin(
+				element.id, smoothed[j].first, smoothed[j].second);
+		if (station_pins[j])
+			station_pin_low = station_pin_low
+									  ? std::min(*station_pin_low, station_pins[j]->first)
+									  : station_pins[j]->first;
+	}
+	if (station_pin_low && smoothed.size() >= 2) {
+		const auto ends = rail_joins.ends(element.id);
+		const int depth = RAIL_TUNNEL_FLOOR_DEPTH;
+		const int lowest = world_editor::min_y() + 1;
+		std::vector<int> ground(smoothed.size()), surface(smoothed.size()),
+				deep(smoothed.size());
+		std::vector<std::optional<int>> pins(smoothed.size());
+		for (std::size_t j = 0; j < smoothed.size(); ++j) {
+			ground[j] = editor.get_ground_level(smoothed[j].first, smoothed[j].second);
+			const int bed = editor.lowest_carved_bed(smoothed[j].first,
+										  smoothed[j].second, WALL_RADIUS)
+									.value_or(ground[j]);
+			surface[j] = std::min(ground[j], bed);
+			deep[j] = surface[j] - depth;
+		}
+		for (std::size_t e = 0; e < 2; ++e) {
+			const auto &end = ends[e];
+			const std::size_t at = e == 0 ? 0 : smoothed.size() - 1;
+			int level = end.meets_surface ? ground[at] : deep[at];
+			if (!end.meets_surface) {
+				const auto [x, z] = smoothed[at];
+				if (const auto joint = editor.station_tunnel_joint_floor(x, z);
+						joint && *joint < deep[at]) {
+					level = *joint;
+					joint_low = joint_low ? std::min(*joint_low, *joint) : *joint;
+				}
+			}
+			if (end.shared) {
+				const std::size_t next = e == 0 ? 1 : smoothed.size() - 2;
+				pins[at] = std::max(level, lowest);
+				pins[next] = std::max(level, lowest);
+			}
+			if (end.meets_surface)
+				for (std::size_t j = 0; j < smoothed.size(); ++j) {
+					const auto distance = static_cast<int>(j > at ? j - at : at - j);
+					deep[j] = std::max(deep[j], ground[at] - distance / 4);
+				}
+		}
+		for (const auto crossing : rail_joins.edge_crossings(smoothed)) {
+			const auto lower = smoothed[crossing[0]] < smoothed[crossing[1]]
+									   ? crossing[0]
+									   : crossing[1];
+			const int level = std::max(ground[lower] - depth, lowest);
+			for (const auto i : crossing)
+				if (!pins[i])
+					pins[i] = level;
+		}
+		for (std::size_t j = 0; j < station_pins.size(); ++j)
+			if (station_pins[j])
+				pins[j] = station_pins[j]->first;
+		if (joint_low && (!station_pin_low || *joint_low < *station_pin_low))
+			station_pin_low = *joint_low;
+		const auto straight = straight_cells(smoothed,
+				ends[0].beyond.empty() ? std::nullopt
+									   : std::optional(ends[0].beyond.front()),
+				ends[1].beyond.empty() ? std::nullopt
+									   : std::optional(ends[1].beyond.front()));
+		station_profile = rail_profile(
+				straight,
+				[&](std::size_t j) {
+					if (pins[j])
+						return std::pair{*pins[j], *pins[j]};
+					return std::pair{
+							std::max(std::min(deep[j] - 10, *station_pin_low), lowest),
+							std::max(ground[j], lowest)};
+				},
+				[&](std::size_t j, int y) {
+					const int shallower = y - deep[j];
+					return shallower > 0 ? .25 * shallower : -shallower;
+				},
+				2.5);
+	}
 	for (size_t j = 0; j < smoothed.size(); ++j) {
 		int bx = smoothed[j].first;
 		int bz = smoothed[j].second;
 		const int ground_y = editor.get_ground_level(bx, bz);
-		const pos_t floor_y = plan ? plan->heights[j]
-								   : ground_y - RAIL_TUNNEL_DEPTH - INTERIOR_HEIGHT - 1;
+		pos_t floor_y =
+				station_profile.empty()
+						? (plan ? plan->heights[j] : ground_y - RAIL_TUNNEL_FLOOR_DEPTH)
+						: station_profile[j];
 		record_point(bx, bz, floor_y);
 		const pos_t ceil_y = floor_y + INTERIOR_HEIGHT + 1;
 		if (floor_y <= world_editor::min_y())
@@ -1662,7 +1839,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				std::optional<std::vector<Block>>(
 						{STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS}),
 				std::optional<std::vector<Block>>());
-		editor.register_rail(element.id, bx, bz, floor_y + 1);
+		editor.register_buried_rail(element.id, bx, bz, floor_y + 1);
 	}
 }
 

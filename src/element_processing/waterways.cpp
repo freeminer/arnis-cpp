@@ -3,6 +3,7 @@
 #include "../osm_parser.h"
 #include "world_editor.h"
 #include "waterways.h"
+#include "field_texture.h"
 #include "../strict_parse.h"
 #include "../unicode_text.h"
 
@@ -117,7 +118,12 @@ void create_water_channel(
 						WATER, x, water_y.value(), z, std::nullopt, std::nullopt);
 				editor.set_block_absolute(AIR, x, water_y.value() + 1, z,
 						std::optional<std::vector<Block>>(
-								std::vector<Block>{GRASS, WHEAT, CARROTS, POTATOES}),
+								std::vector<Block>(field_texture::PLOT_PLANTS.begin(),
+										field_texture::PLOT_PLANTS.end())),
+						std::nullopt);
+				editor.set_block_absolute(AIR, x, water_y.value() + 2, z,
+						std::optional<std::vector<Block>>(
+								std::vector<Block>{SUNFLOWER_UPPER}),
 						std::nullopt);
 			}
 		}

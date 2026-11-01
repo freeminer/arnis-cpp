@@ -19,7 +19,9 @@
 #include "../floodfill_cache.h"
 #include "../ground_generation.h"
 #include "../biome.h"
+#include "../climate.h"
 #include "../land_cover/land_cover.h"
+#include "../terrain_surface.h"
 #include "../deterministic_rng.h"
 #include "../trees/mapped.h"
 #include "../trees/region.h"
@@ -61,6 +63,47 @@ Block vary_rock_block(Block base, int x, int z)
 
 namespace
 {
+struct NaturalCellSurface
+{
+	Block mapped;
+	Block surface;
+};
+
+NaturalCellSurface natural_cell_surface(const WorldEditor &editor,
+		const std::string &natural_type, Block block_type, int x, int z,
+		bool rock_variation)
+{
+	const auto climate_value = editor.climate();
+	const bool dry_ground = (natural_type == "scrub" || natural_type == "grassland" ||
+									natural_type == "heath") &&
+							biome::climate_is_dry(climate_value);
+	const bool bare_rock = natural_type == "bare_rock" || natural_type == "rock" ||
+						   natural_type == "stone";
+	const bool needs_rock = dry_ground || bare_rock || block_type == SAND;
+	const auto rock =
+			needs_rock ? terrain_surface::rock_at(climate_value, x, z,
+								 [&](int sx, int sz) { return editor.ecoregion(sx, sz); })
+					   : terrain_surface::Rock::Grey;
+	const Block mapped = block_type == SAND && rock == terrain_surface::Rock::Red
+								 ? RED_SAND
+								 : block_type;
+	Block surface = mapped;
+	if (dry_ground) {
+		auto palette = climate::surface_palette(climate_value, editor.cover_class(x, z),
+				x, z, rock == terrain_surface::Rock::Red);
+		if (!palette)
+			palette = climate::surface_palette(climate_value, land_cover::LC_SHRUBLAND, x,
+					z, rock == terrain_surface::Rock::Red);
+		if (palette)
+			surface = palette->first;
+	} else if (bare_rock) {
+		surface = terrain_surface::bare_rock_palette(x, z, rock).first;
+	} else if (rock_variation) {
+		surface = vary_rock_block(mapped, x, z);
+	}
+	return {mapped, surface};
+}
+
 bool wetland_wet_zone(int x, int z)
 {
 	return ground_generation::value_noise_01(x + 11, z + 7, 28) > 0.55;
@@ -110,9 +153,10 @@ const std::optional<std::vector<Block>> &water_block_only()
 	return blocks;
 }
 
-const std::optional<std::vector<Block>> &sand_block_only()
+const std::optional<std::vector<Block>> &sand_surface_blocks()
 {
-	static const std::optional<std::vector<Block>> blocks{std::vector<Block>{SAND}};
+	static const std::optional<std::vector<Block>> blocks{
+			std::vector<Block>{SAND, RED_SAND}};
 	return blocks;
 }
 
@@ -508,9 +552,9 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				int bz = std::get<2>(t);
 				if (!edge_in_hole(holes, bx, bz) && !editor.surface_is_sealed(bx, bz) &&
 						!editor.check_for_block(bx, 0, bz, protected_surface_blocks)) {
-					Block block = rock_variation ? vary_rock_block(block_type, bx, bz)
-												 : block_type;
-					editor.set_block(block, bx, 0, bz, std::nullopt, std::nullopt);
+					const auto cell = natural_cell_surface(
+							editor, natural_type, block_type, bx, bz, rock_variation);
+					editor.set_block(cell.surface, bx, 0, bz, std::nullopt, std::nullopt);
 				}
 			}
 			current_natural.emplace_back(x, z);
@@ -582,6 +626,9 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 												  climate == biome::Climate::HotSteppe ||
 												  climate == biome::Climate::ColdDesert ||
 												  climate == biome::Climate::ColdSteppe);
+		const bool dry_ground = (natural_type == "scrub" || natural_type == "grassland" ||
+										natural_type == "heath") &&
+								biome::climate_is_dry(climate);
 		std::optional<Block> shrubbery_species;
 		for (const auto &p : filled_area) {
 			int x = p.first;
@@ -594,10 +641,11 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 			if (!editor.in_bounds(x, z) && !editor.owns(x, z))
 				continue;
 			const bool sealed = editor.surface_is_sealed(x, z);
+			const auto cell_surface = natural_cell_surface(
+					editor, natural_type, block_type, x, z, rock_variation);
 			if (!sealed && !editor.check_for_block(x, 0, z, protected_fill_blocks)) {
-				Block block =
-						rock_variation ? vary_rock_block(block_type, x, z) : block_type;
-				editor.set_block(block, x, 0, z, std::nullopt, std::nullopt);
+				editor.set_block(
+						cell_surface.surface, x, 0, z, std::nullopt, std::nullopt);
 			}
 			if (sealed)
 				continue;
@@ -606,27 +654,15 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 			if (natural_type == "beach" || natural_type == "sand" ||
 					natural_type == "dune" || natural_type == "shoal") {
 				// Preserve the natural=beach/shoal surface=* mapping during fill.
-				editor.set_block(block_type, x, 0, z, std::nullopt, std::nullopt);
+				editor.set_block(
+						cell_surface.mapped, x, 0, z, std::nullopt, std::nullopt);
 			} else if (natural_type == "glacier") {
 				editor.set_block(PACKED_ICE, x, 0, z, std::nullopt, std::nullopt);
 				editor.set_block(STONE, x, -1, z, std::nullopt, std::nullopt);
 			} else if (natural_type == "bare_rock" || natural_type == "rock" ||
 					   natural_type == "stone") {
-				const uint64_t h = coord_hash(x, z) % 12;
-				Block rock = STONE;
-				if (h <= 4)
-					rock = STONE;
-				else if (h <= 6)
-					rock = ANDESITE;
-				else if (h <= 8)
-					rock = COBBLESTONE;
-				else if (h == 9)
-					rock = GRAVEL;
-				else if (h == 10)
-					rock = TUFF;
-				else
-					rock = COARSE_DIRT;
-				editor.set_block(rock, x, 0, z, std::nullopt, std::nullopt);
+				editor.set_block(
+						cell_surface.surface, x, 0, z, std::nullopt, std::nullopt);
 			}
 
 			// Generate surface elements
@@ -641,7 +677,10 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				continue;
 			}
 
-			if (natural_type == "grassland") {
+			if (dry_ground && !editor.check_for_block(x, 0, z, grass_block_only())) {
+				if (rng.uniform(60) == 0)
+					editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
+			} else if (natural_type == "grassland") {
 				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
 					continue;
 				}
@@ -716,7 +755,7 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				}
 			} else if (natural_type == "sand") {
-				if (arid && editor.check_for_block(x, 0, z, sand_block_only()) &&
+				if (arid && editor.check_for_block(x, 0, z, sand_surface_blocks()) &&
 						rng.uniform(100) == 1) {
 					editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
 				}
@@ -724,7 +763,7 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				if (rng.random_bool(.05)) {
 					editor.set_block(WATER, x, 0, z,
 							std::optional<std::vector<Block>>{
-									std::vector<Block>{SAND, GRAVEL}},
+									std::vector<Block>{SAND, RED_SAND, GRAVEL}},
 							std::nullopt);
 				}
 			} else if (natural_type == "wetland") {
