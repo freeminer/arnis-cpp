@@ -184,7 +184,9 @@ std::optional<Ride> kind(const tags_t &tags)
 	if (r == Ride::Swing) {
 		const auto *h = tag(tags, "height");
 		const auto height = h ? mapillary::geodesy::parse_length_m(*h) : std::nullopt;
-		if ((height && *height > 1.0 && *height < 400.0 && *height >= 30.0) ||
+		// Ride classification follows Rust's height_m() threshold. The drawing
+		// path independently rejects implausible explicit heights when sizing it.
+		if ((height && *height >= 30.0) ||
 				(tag(tags, "man_made") && *tag(tags, "man_made") == "tower"))
 			r = Ride::StarFlyer;
 	}

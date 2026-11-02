@@ -22,6 +22,15 @@
 namespace arnis::water_depth
 {
 
+const std::array<Block, 4> &bore_shell()
+{
+	// Resolve registered node IDs on first use, after the block catalogue has
+	// initialized; avoid copying them into a header-level static at load time.
+	static const std::array<Block, 4> blocks{
+			STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, POLISHED_DEEPSLATE};
+	return blocks;
+}
+
 void chamfer_3_4_dt(std::vector<std::uint8_t> &d, std::size_t w, std::size_t h)
 {
 	if (w == 0 || h == 0 || w > std::numeric_limits<std::size_t>::max() / h ||
@@ -188,8 +197,9 @@ int carve_depth(int depth, int water_y)
 std::optional<int> depth_over_bore(
 		WorldEditor &editor, int x, int z, int water_y, int depth)
 {
-	static const std::optional<std::vector<Block>> shell = std::vector<Block>{
-			STONE_BRICKS, CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, POLISHED_DEEPSLATE};
+	static const auto &blocks = bore_shell();
+	static const std::optional<std::vector<Block>> shell =
+			std::vector<Block>(blocks.begin(), blocks.end());
 	const int bottom = water_y - depth - 2;
 	for (int y = water_y; y >= bottom; --y) {
 		if (!editor.check_for_block_absolute(x, y, z, shell))

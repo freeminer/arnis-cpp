@@ -1585,8 +1585,9 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 					}
 				}
 		}
-		const std::optional<std::vector<Block>> replace(std::vector<Block>{STONE_BRICKS,
-				CRACKED_STONE_BRICKS, MOSSY_STONE_BRICKS, POLISHED_DEEPSLATE});
+		const auto &bore_shell = water_depth::bore_shell();
+		const std::optional<std::vector<Block>> replace(
+				std::vector<Block>(bore_shell.begin(), bore_shell.end()));
 		for (std::size_t i = 0; i < n; ++i) {
 			if (station_pins[i] && station_pins[i]->second)
 				continue;

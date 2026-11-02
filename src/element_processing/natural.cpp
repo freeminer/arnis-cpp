@@ -201,7 +201,12 @@ const std::vector<Block> &mud_only()
 
 bool try_place_wetland_puddle(WorldEditor &editor, int x, int z)
 {
-	const auto &ground = wetland_ground_blocks();
+	// Rust only permits wetland puddles to replace mud or grass blocks. The
+	// broader wetland ground palette also contains dirt, coarse dirt and moss,
+	// which are valid for decoration but must not turn into water.
+	static const std::optional<std::vector<Block>> puddle_ground{
+			std::vector<Block>{MUD, GRASS_BLOCK}};
+	const auto &ground = puddle_ground;
 	if (!editor.check_for_block(x, 0, z, ground))
 		return false;
 	editor.set_block(WATER, x, 0, z, ground, std::nullopt);
@@ -361,9 +366,13 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				int bz = std::get<2>(t);
 				if (!edge_in_hole(holes, bx, bz) && !editor.surface_is_sealed(bx, bz) &&
 						!editor.check_for_block(bx, 0, bz, protected_surface_blocks)) {
-					const auto cell = natural_cell_surface(
-							editor, natural_type, block_type, bx, bz, rock_variation);
-					editor.set_block(cell.surface, bx, 0, bz, std::nullopt, std::nullopt);
+					// Match Rust's outline pass: it paints the natural tag's base
+					// block (or its deterministic rock variation), not the climate-
+					// and land-cover-adjusted fill palette used for interior cells.
+					const Block edge_block = rock_variation
+													 ? vary_rock_block(block_type, bx, bz)
+													 : block_type;
+					editor.set_block(edge_block, bx, 0, bz, std::nullopt, std::nullopt);
 				}
 			}
 			current_natural.emplace_back(x, z);

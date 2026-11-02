@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cmath>
 #include <cstddef>
@@ -63,6 +64,12 @@ constexpr std::array<std::string_view, 21> INTERIOR_EXCLUSIONS = {"garage", "gar
 		"carport", "shed", "parking", "roof", "bridge", "greenhouse", "glasshouse",
 		"silo", "storage_tank", "transformer_tower", "water_tower", "service", "toilets",
 		"bunker", "container", "outbuilding", "allotment_house", "boathouse", "pavilion"};
+
+int wrapping_add_i32(int value, int offset)
+{
+	return std::bit_cast<std::int32_t>(
+			static_cast<std::uint32_t>(value) + static_cast<std::uint32_t>(offset));
+}
 }
 
 namespace man_made
@@ -9859,6 +9866,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 							auto decoration_rng = coord_rng(wall_u + floor_idx * 3,
 									seg_cross + floor_idx * 5, element.id);
 							const auto decoration_roll = decoration_rng.uniform(100);
+							const auto balcony_roll =
+									coord_rng(wrapping_add_i32(bx, floor_idx * 3),
+											wrapping_add_i32(bz, floor_idx * 5),
+											element.id ^ 0xBA1C041700000011ULL)
+											.uniform(100);
 							bool balcony_fits = true;
 							const int tangent_x = -outward.second;
 							const int tangent_z = outward.first;
@@ -9871,10 +9883,22 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 											return std::get<0>(point) == wx &&
 												   std::get<2>(point) == wz;
 										});
-								balcony_fits = balcony_fits && on_segment &&
-											   !facade_plan.is_party(wx, wz) &&
-											   !is_flat_column(wx, wz) &&
-											   !passage_at(effective_passages, wx, wz);
+								const auto wall_column = std::find_if(
+										facade_window_columns.begin(),
+										facade_window_columns.end(),
+										[&](const FacadeWindowColumn &column) {
+											return column.x == wx && column.z == wz;
+										});
+								balcony_fits =
+										balcony_fits && on_segment &&
+										wall_column != facade_window_columns.end() &&
+										wall_column->run ==
+												static_cast<int>(node_index - 1) &&
+										wall_column->nx == outward.first &&
+										wall_column->nz == outward.second &&
+										!facade_plan.is_party(wx, wz) &&
+										!is_flat_column(wx, wz) &&
+										!passage_at(effective_passages, wx, wz);
 								for (int d = 1; d <= balcony_kit.depth() && balcony_fits;
 										++d) {
 									const int px = wx + outward.first * d;
@@ -9912,10 +9936,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 															 2) % 2 ==
 															0)) ||
 											(balcony_band == BalconyBand::Scattered &&
-													decoration_roll >= 15 &&
-													decoration_roll <
-															(street_facing ? 23u
-																		   : 18u)) ||
+													balcony_roll <
+															(street_facing ? 8u : 3u)) ||
 											(balcony_band == BalconyBand::Filant &&
 													category == BuildingCategory::
 																		Residential &&
@@ -10086,8 +10108,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 													std::nullopt);
 										}
 								}
-								auto seed_rng = coord_rng(bx + floor_idx * 11,
-										bz + floor_idx * 17, element.id);
+								const int balcony_start_x =
+										wrapping_add_i32(bx, -2 * tangent_x);
+								const int balcony_start_z =
+										wrapping_add_i32(bz, -2 * tangent_z);
+								auto seed_rng = coord_rng(
+										wrapping_add_i32(balcony_start_x, floor_idx * 11),
+										wrapping_add_i32(balcony_start_z, floor_idx * 17),
+										element.id);
 								auto furniture_rng = element_rng(seed_rng.random_u64());
 								const auto furniture_roll = furniture_rng.uniform(100);
 								const int end = furniture_rng.random_bool(.5) ? 1 : 3;
@@ -10423,9 +10451,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		const int top_h = start_y_offset + building_height;
 		const int first_h = start_y_offset + grammar_anchor + floor_cycle;
 		for (const auto &column : facade_window_columns) {
-			if (!column.slot.is_window() ||
+			if (!column.slot.is_window() || (column.nx == 0 && column.nz == 0) ||
 					passage_at(effective_passages, column.x, column.z) ||
 					facade_plan.is_party(column.x, column.z) ||
+					is_flat_column(column.x, column.z) ||
 					facade_plan.is_door(column.x, column.z))
 				continue;
 			for (int h = first_h; h < top_h; ++h) {
@@ -10440,7 +10469,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				const auto pane = editor->get_block_absolute(
 						column.x - column.nx, y, column.z - column.nz);
 				const auto face = editor->get_block_absolute(column.x, y, column.z);
-				if (!pane || (*pane != window_block && *pane != GLASS))
+				if (!pane || (*pane != window_block && *pane != GLASS &&
+									 *pane != shop_display_glass))
 					continue;
 				if (!face || *face == AIR) {
 					bars.emplace(FrenchBar{column.x, y, column.z},
@@ -10461,9 +10491,11 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					return true;
 				if (!normal || dx * normal->first + dz * normal->second != 0)
 					return false;
+				const auto adjacent = editor->get_block_absolute(x + dx, y, z + dz);
+				if (!adjacent || *adjacent == AIR)
+					return false;
 				const auto name = editor->block_name_absolute(x + dx, y, z + dz);
-				return name && name->find("glass") == std::string::npos &&
-					   name->find("air") == std::string::npos;
+				return name && name->find("glass") == std::string::npos;
 			};
 			const auto state = connected_blocks::connected_fence(
 					IRON_BARS, joins(0, -1), joins(0, 1), joins(1, 0), joins(-1, 0));

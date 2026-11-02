@@ -4,7 +4,6 @@
 #include "element_processing/attractions.h"
 #include "element_processing/buildings.h"
 #include "osm_parser.h"
-#include "strict_parse.h"
 
 #include <algorithm>
 #include <array>
@@ -65,36 +64,6 @@ std::string normalized_role(std::string role)
 	std::transform(role.begin(), role.end(), role.begin(),
 			[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
 	return role;
-}
-
-bool covers_ground(const tags_t &tags)
-{
-	for (const char *key : {"min_height", "building:min_level"}) {
-		const auto it = tags.find(key);
-		if (it == tags.end())
-			continue;
-		const auto &text = it->second;
-		const auto start = text.find_first_not_of(" \t\r\n\f\v");
-		if (start == std::string::npos)
-			continue;
-		std::size_t end = start;
-		bool dot = false;
-		for (; end < text.size(); ++end) {
-			const char c = text[end];
-			if ((c >= '0' && c <= '9') || ((c == '+' || c == '-') && end == start))
-				continue;
-			if (c == '.' && !dot) {
-				dot = true;
-				continue;
-			}
-			break;
-		}
-		if (const auto height = strict_parse::f64(
-					std::string_view(text).substr(start, end - start));
-				height && *height > 0.0)
-			return false;
-	}
-	return true;
 }
 
 std::vector<GeoPoint> geo_ring(const ProcessedWay &way)
@@ -387,7 +356,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			out.part_groups[member.id] = osm_parser::seed_with_metadata(
 					RELATION_SEED_BIT | relation->id, hint, relation_year, housing);
 			const auto way = ways.find(member.id);
-			if (way != ways.end() && covers_ground(way->second->tags))
+			if (way != ways.end() &&
+					osm_parser::part_covers_ground(way->second->tags))
 				part_area += ring_area(geo_ring(*way->second));
 		}
 		if (!has_part)
@@ -473,7 +443,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		for (auto index : candidates->second) {
 			if (!point_in_ring(lat, lon, outlines[index].ring))
 				continue;
-			if (covers_ground(part->tags))
+			if (osm_parser::part_covers_ground(part->tags))
 				covered[index] += area;
 			if (!best || std::pair{outlines[index].area, outlines[index].way->id} <
 								 std::pair{outlines[*best].area, outlines[*best].way->id})
@@ -533,7 +503,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 								  osm_parser::building_year_for_parts(relation.tags),
 								  osm_parser::is_housing_type(relation.tags))
 						: 0,
-				covers_ground(relation.tags), std::nullopt,
+				osm_parser::part_covers_ground(relation.tags), std::nullopt,
 				part && listed_relation_parts.contains(relation.id)};
 		(outline ? relation_outlines : relation_parts).push_back(std::move(footprint));
 	}
@@ -559,7 +529,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		lat /= ring.size();
 		lon /= ring.size();
 		relation_parts.push_back({way->id, {std::move(ring)}, {}, area, lat, lon, 0,
-				covers_ground(way->tags), way->id});
+				osm_parser::part_covers_ground(way->tags), way->id});
 	}
 	std::map<GridCell, std::vector<std::size_t>> relation_grid;
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i) {

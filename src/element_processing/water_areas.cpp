@@ -28,6 +28,7 @@
 #include "../data_processing.h"
 #include "../strict_parse.h"
 #include "relation_area.h"
+#include "way_segments.h"
 namespace arnis
 {
 
@@ -41,8 +42,6 @@ using BgLinestring = boost::geometry::model::linestring<BgPoint>;
 using BgPolygon = boost::geometry::model::polygon<BgPoint>;
 using BgBox = boost::geometry::model::box<BgPoint>;
 
-// Forward declarations
-static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops);
 static bool verify_closed_rings(const std::vector<std::vector<ProcessedNode>> &rings);
 
 static void rect_fill(
@@ -679,85 +678,6 @@ static void discard_broken_inner_rings(std::vector<std::vector<ProcessedNode>> &
 										   std::abs(first.z - last.z) > 1);
 						}),
 			rings.end());
-	for (auto &ring : rings)
-		if (!ring.empty() &&
-				(ring.front().x != ring.back().x || ring.front().z != ring.back().z))
-			ring.push_back(ring.front());
-}
-
-static void merge_loopy_loops(std::vector<std::vector<ProcessedNode>> &loops)
-{
-	std::vector<bool> removed(loops.size(), false);
-	std::vector<std::vector<ProcessedNode>> merged;
-	auto nodes_match = [](const ProcessedNode &a, const ProcessedNode &b) {
-		if (a.id == b.id)
-			return true;
-		const auto dx = std::llabs(static_cast<long long>(a.x) - b.x);
-		const auto dz = std::llabs(static_cast<long long>(a.z) - b.z);
-		return dx <= 1 && dz <= 1;
-	};
-
-	for (std::size_t i = 0; i < loops.size(); ++i) {
-		for (std::size_t j = 0; j < loops.size(); ++j) {
-			if (i == j || removed[i] || removed[j]) {
-				continue;
-			}
-
-			const std::vector<ProcessedNode> &x = loops[i];
-			const std::vector<ProcessedNode> &y = loops[j];
-
-			if (x.empty() || y.empty()) {
-				continue;
-			}
-
-			if (nodes_match(x.front(), x.back())) {
-				continue;
-			}
-			if (nodes_match(y.front(), y.back())) {
-				continue;
-			}
-
-			if (nodes_match(x.front(), y.front())) {
-				removed[i] = removed[j] = true;
-
-				std::vector<ProcessedNode> r = x;
-				std::reverse(r.begin(), r.end());
-				r.insert(r.end(), y.begin() + 1, y.end());
-				merged.push_back(std::move(r));
-			} else if (nodes_match(x.back(), y.back())) {
-				removed[i] = removed[j] = true;
-
-				std::vector<ProcessedNode> r = x;
-				r.insert(r.end(), y.rbegin() + 1, y.rend());
-				merged.push_back(std::move(r));
-			} else if (nodes_match(x.front(), y.back())) {
-				removed[i] = removed[j] = true;
-
-				std::vector<ProcessedNode> r = y;
-				r.insert(r.end(), x.begin() + 1, x.end());
-				merged.push_back(std::move(r));
-			} else if (nodes_match(x.back(), y.front())) {
-				removed[i] = removed[j] = true;
-
-				std::vector<ProcessedNode> r = x;
-				r.insert(r.end(), y.begin() + 1, y.end());
-				merged.push_back(std::move(r));
-			}
-		}
-	}
-
-	for (std::size_t i = removed.size(); i > 0; --i)
-		if (removed[i - 1])
-			loops.erase(loops.begin() + static_cast<std::ptrdiff_t>(i - 1));
-
-	std::size_t merged_len = merged.size();
-	for (auto &m : merged) {
-		loops.push_back(std::move(m));
-	}
-
-	if (merged_len > 0) {
-		merge_loopy_loops(loops);
-	}
 }
 
 void generate_water_area_from_way(WorldEditor &editor, const ProcessedWay &element,
@@ -816,13 +736,13 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 	}
 
 	// Preserve OSM-defined outer/inner roles without modification
-	merge_loopy_loops(outers);
+	merge_way_segments(outers);
 	std::vector<std::vector<ProcessedNode>> clipped_outers;
 	for (const auto &ring : outers)
 		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
 			clipped_outers.push_back(std::move(*clipped));
 	outers = std::move(clipped_outers);
-	merge_loopy_loops(inners);
+	merge_way_segments(inners);
 	std::vector<std::vector<ProcessedNode>> clipped_inners;
 	for (const auto &ring : inners)
 		if (auto clipped = clipping::clip_water_ring_to_bbox(ring, xzbbox))
@@ -859,7 +779,7 @@ void generate_water_areas_from_relation(WorldEditor &editor,
 		}
 	}
 
-	merge_loopy_loops(inners);
+	merge_way_segments(inners);
 	// A malformed inner ring should lose only its own island/hole, not the entire lake.
 	discard_broken_inner_rings(inners);
 
@@ -920,7 +840,7 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 				else if (member.role == ProcessedMemberRole::Inner)
 					inners.push_back(member.way->nodes);
 			}
-			merge_loopy_loops(outers);
+			merge_way_segments(outers);
 			auto clip_rings = [&](std::vector<std::vector<ProcessedNode>> &rings) {
 				std::vector<std::vector<ProcessedNode>> clipped;
 				for (const auto &ring : rings)
@@ -928,7 +848,7 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 						clipped.push_back(std::move(*part));
 				rings = std::move(clipped);
 			};
-			merge_loopy_loops(inners);
+			merge_way_segments(inners);
 			clip_rings(outers);
 			clip_rings(inners);
 			if (!verify_closed_rings(outers)) {
@@ -948,7 +868,7 @@ StillWaterSurfaces prescan_still_surfaces(const std::vector<ProcessedElement> &e
 				if (outers.empty() || !verify_closed_rings(outers))
 					continue;
 			}
-			merge_loopy_loops(inners);
+			merge_way_segments(inners);
 			discard_broken_inner_rings(inners);
 			kind = "relation";
 			id = relation.id;

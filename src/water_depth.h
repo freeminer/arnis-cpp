@@ -1,5 +1,6 @@
 #pragma once
 
+#include <array>
 #include <cstdint>
 #include <functional>
 #include <optional>
@@ -19,6 +20,10 @@ namespace arnis::water_depth
 {
 
 inline constexpr int BORE_ROOM = 8;
+// Keep every block that can obstruct an underwater bore in one shared set,
+// matching Rust's water_depth::BORE_SHELL. Water carving uses this to leave
+// the channel bed on top of the shell when there is not enough room below it.
+const std::array<Block, 4> &bore_shell();
 struct BoreCrossing
 {
 	int depth{};

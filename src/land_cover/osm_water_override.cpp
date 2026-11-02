@@ -279,17 +279,19 @@ void spread_inland_water(LandCoverData &data, const std::vector<std::uint64_t> &
 	std::vector<std::size_t> frontier, next;
 	for (std::size_t z = 0; z < height; ++z)
 		for (std::size_t x = 0; x < width; ++x) {
-			if (!data.inland_water_at(x, z))
+			if (data.grid[z][x] != LC_WATER || !data.inland_water_at(x, z))
 				continue;
 			if ((x > 0 && open(x - 1, z)) || (x + 1 < width && open(x + 1, z)) ||
 					(z > 0 && open(x, z - 1)) || (z + 1 < height && open(x, z + 1)))
 				frontier.push_back(z * width + x);
 		}
-	const auto max_reach = width + height;
 	const double mapped_reach = std::round(600.0 * std::max(0.0, data.cells_per_meter));
+	// Match Rust's saturating float-to-usize cast and configured metric reach.
+	// A width+height cap is not equivalent on winding connected waterways: their
+	// shortest path can be much longer than either grid dimension's Manhattan sum.
 	const auto reach =
-			mapped_reach >= static_cast<double>(max_reach)
-					? max_reach
+			mapped_reach >= static_cast<double>(std::numeric_limits<std::size_t>::max())
+					? std::numeric_limits<std::size_t>::max()
 					: std::max<std::size_t>(1, static_cast<std::size_t>(mapped_reach));
 	for (std::size_t step = 0; step < reach && !frontier.empty(); ++step) {
 		next.clear();
