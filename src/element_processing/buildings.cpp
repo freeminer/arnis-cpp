@@ -9729,6 +9729,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									balcony_fits =
 											balcony_fits && on_segment &&
 											!facade_plan.is_party(cx, cz) &&
+											!is_flat_column(cx, cz) &&
 											!passage_at(effective_passages, cx, cz);
 								}
 								const int balcony_storey = floor_div(
@@ -9886,6 +9887,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 										});
 								balcony_fits = balcony_fits && on_segment &&
 											   !facade_plan.is_party(wx, wz) &&
+											   !is_flat_column(wx, wz) &&
 											   !passage_at(effective_passages, wx, wz);
 								for (int d = 1; d <= balcony_kit.depth() && balcony_fits;
 										++d) {
@@ -12365,7 +12367,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	mapillary::facades::collect_displays(*editor, element.id, start_y_offset,
 			abs_terrain_offset, building_height, args.facade_px);
 	return signage_anchor;
-	}
+}
 
 // multiply_scale implementation
 inline int32_t multiply_scale(int32_t value, double scale_factor)

@@ -46,6 +46,28 @@ RawElevationGrid PlanetaryElevationProvider::fetch_raw(
 	return {std::move(elevation->heights), std::nullopt};
 }
 
+std::unique_ptr<ElevationProvider> select_provider(const geographic::LLBBox &bbox,
+		providers::SourceMode mode, const std::filesystem::path &cache_root,
+		std::optional<CelestialBody> body)
+{
+	// Mapterhorn is currently global. Keep bbox in the selector contract so a
+	// future regional provider can use it without changing the generation API.
+	(void)bbox;
+	switch (mode) {
+	case providers::SourceMode::AwsOnly:
+		return std::make_unique<AwsElevationProvider>(cache_root);
+	case providers::SourceMode::Planetary:
+		if (!body)
+			throw std::invalid_argument(
+					"Planetary elevation mode requires a celestial body");
+		return std::make_unique<PlanetaryElevationProvider>(*body, cache_root);
+	case providers::SourceMode::Auto:
+	case providers::SourceMode::GlobalOnly:
+		return std::make_unique<MapterhornElevationProvider>(cache_root);
+	}
+	throw std::invalid_argument("unknown elevation source mode");
+}
+
 RawElevationGrid fetch_raw_with_fallback(
 		const std::vector<std::reference_wrapper<const ElevationProvider>> &chain,
 		const geographic::LLBBox &bbox, std::size_t grid_width, std::size_t grid_height)

@@ -2,6 +2,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <functional>
+#include <memory>
 #include <optional>
 #include <string>
 #include <string_view>
@@ -88,6 +89,14 @@ public:
 	RawElevationGrid fetch_raw(const ::arnis::geographic::LLBBox &bbox,
 			std::size_t grid_width, std::size_t grid_height) const override;
 };
+
+// Select the primary provider as Rust's elevation::select_provider does. The
+// cache root and body are explicit because this library is embedded by callers
+// that own both settings.
+std::unique_ptr<ElevationProvider> select_provider(
+		const ::arnis::geographic::LLBBox &bbox, providers::SourceMode mode,
+		const std::filesystem::path &cache_root,
+		std::optional<CelestialBody> body = std::nullopt);
 
 RawElevationGrid fetch_raw_with_fallback(
 		const std::vector<std::reference_wrapper<const ElevationProvider>> &chain,

@@ -431,9 +431,14 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 			maximum.lng(), grid_width, grid_height);
 	raw.world_width = world_width;
 	raw.world_height = world_height;
+	// Rust gates Earth-specific outlier and anomaly repair from SourceMode itself.
+	// Keep the explicit C++ opt-out for callers, but never apply those repairs to
+	// planetary DEMs even if an embedding caller accidentally leaves it enabled.
+	const bool repair_earth = apply_earth_repairs &&
+							  providers::allows_earth_fallback(selector.source_mode());
 	auto out = process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
 			ground_level, min_ground_level, disable_height_limit, extended_max_y,
-			apply_earth_repairs, land_cover, affine, progress, std::move(terrain_hints),
+			repair_earth, land_cover, affine, progress, std::move(terrain_hints),
 			auto_height, taller_band, force_extended_height, seam_pad, late_overture,
 			one_world_origin);
 	return out;

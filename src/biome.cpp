@@ -17,55 +17,6 @@ constexpr std::array<std::uint16_t, 9> RED_EARTH_ECOREGIONS{
 		207, 208, 209, 210, 211, 213, 214, 215, 429};
 constexpr int ROCK_FACE_SLOPE = 4;
 
-std::optional<std::string> cell_ecoregion_biome(const Cell &cell, Climate climate)
-{
-	using namespace land_cover;
-	using ecoregion::EcoBiome;
-	const auto lc = cell.land_cover;
-	const bool open = lc == LC_TREE_COVER || lc == LC_SHRUBLAND || lc == LC_GRASSLAND ||
-					  lc == LC_BARE;
-	if (open && red_earth(climate, cell.eco))
-		return lc == LC_TREE_COVER ? "minecraft:wooded_badlands" : "minecraft:badlands";
-	if (!cell.eco || climate == Climate::HotDesert || climate == Climate::ColdDesert ||
-			climate == Climate::Boreal || climate == Climate::Tundra ||
-			climate == Climate::IceCap)
-		return std::nullopt;
-	const auto eco = cell.eco->biome;
-	const bool dry_warm = climate != Climate::ColdSteppe;
-	if (lc == LC_TREE_COVER) {
-		if (eco == EcoBiome::MoistTropical)
-			return "minecraft:jungle";
-		if (eco == EcoBiome::DryTropical)
-			return "minecraft:sparse_jungle";
-		if (eco == EcoBiome::TropicalConifer || eco == EcoBiome::TemperateBroadleaf ||
-				eco == EcoBiome::TemperateGrassland ||
-				eco == EcoBiome::MontaneGrassland || eco == EcoBiome::Mediterranean)
-			return "minecraft:forest";
-		if (eco == EcoBiome::TemperateConifer || eco == EcoBiome::Boreal)
-			return "minecraft:taiga";
-		if ((eco == EcoBiome::TropicalGrassland || eco == EcoBiome::Desert) && dry_warm)
-			return "minecraft:savanna";
-	} else if (lc == LC_SHRUBLAND) {
-		if (eco == EcoBiome::MoistTropical || eco == EcoBiome::DryTropical)
-			return "minecraft:sparse_jungle";
-		if (eco == EcoBiome::Mediterranean && dry_warm)
-			return "minecraft:savanna";
-		if ((eco == EcoBiome::TropicalGrassland || eco == EcoBiome::Desert) && dry_warm)
-			return "minecraft:savanna";
-		if (eco == EcoBiome::MontaneGrassland)
-			return "minecraft:meadow";
-		if (eco == EcoBiome::TemperateConifer || eco == EcoBiome::Boreal ||
-				eco == EcoBiome::Tundra)
-			return "minecraft:taiga";
-	} else if (lc == LC_GRASSLAND) {
-		if ((eco == EcoBiome::TropicalGrassland || eco == EcoBiome::Desert) && dry_warm)
-			return "minecraft:savanna";
-		if (eco == EcoBiome::MontaneGrassland)
-			return "minecraft:meadow";
-	}
-	return std::nullopt;
-}
-
 std::optional<std::string> cell_mountain_biome(const Cell &cell, Climate climate)
 {
 	using namespace land_cover;
@@ -289,7 +240,7 @@ std::string cell_biome(const Cell &cell, Climate climate, double latitude)
 	}
 	if (const auto mountain = cell_mountain_biome(cell, climate))
 		name = *mountain;
-	else if (const auto eco = cell_ecoregion_biome(cell, climate))
+	else if (const auto eco = ecoregion_biome(cell.land_cover, climate, cell.eco))
 		name = *eco;
 	else
 		name = cell_land_biome(cell, climate, latitude);
@@ -301,11 +252,18 @@ std::string cell_biome(const Cell &cell, Climate climate, double latitude)
 std::optional<std::string> ecoregion_biome(
 		std::uint8_t lc, Climate climate, const std::optional<ecoregion::Ecoregion> &eco)
 {
+	using namespace land_cover;
+	const bool open = lc == LC_TREE_COVER || lc == LC_SHRUBLAND || lc == LC_GRASSLAND ||
+					  lc == LC_BARE;
+	// Keep the public classifier in step with Rust's ecoregion_biome(): the
+	// Australian/Colorado red-earth override does not require a warm ecoregion
+	// biome, but does require both a dry climate and one of the red-earth IDs.
+	if (open && red_earth(climate, eco))
+		return lc == LC_TREE_COVER ? "minecraft:wooded_badlands" : "minecraft:badlands";
 	if (!eco || climate == Climate::HotDesert || climate == Climate::ColdDesert ||
 			climate == Climate::Boreal || climate == Climate::Tundra ||
 			climate == Climate::IceCap)
 		return std::nullopt;
-	using namespace land_cover;
 	using ecoregion::EcoBiome;
 	const bool dry_warm = climate != Climate::ColdSteppe;
 	switch (eco->biome) {
