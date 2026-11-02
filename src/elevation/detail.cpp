@@ -57,6 +57,39 @@ std::size_t detail_worker_count()
 	return std::max<std::size_t>(1, static_cast<std::size_t>(hardware * 0.9));
 }
 
+template <typename Function>
+void parallel_for(std::size_t count, Function &&function)
+{
+	if (count == 0)
+		return;
+	const auto workers_count = std::min(count, detail_worker_count());
+	std::atomic_size_t next{0};
+	auto work = [&] {
+		for (;;) {
+			const auto index = next.fetch_add(1, std::memory_order_relaxed);
+			if (index >= count)
+				return;
+			function(index);
+		}
+	};
+	if (workers_count <= 1) {
+		work();
+		return;
+	}
+	std::vector<std::thread> workers;
+	workers.reserve(workers_count - 1);
+	for (std::size_t i = 1; i < workers_count; ++i) {
+		try {
+			workers.emplace_back(work);
+		} catch (...) {
+			break;
+		}
+	}
+	work();
+	for (auto &worker : workers)
+		worker.join();
+}
+
 double smoothstep(double edge0, double edge1, double value)
 {
 	const double t = std::clamp((value - edge0) / (edge1 - edge0), 0.0, 1.0);
@@ -194,7 +227,7 @@ struct Gate
 		}
 
 		std::vector<float> coarse(width * height, 0.0f);
-		for (std::size_t bz = 0; bz < height; ++bz) {
+		parallel_for(height, [&](std::size_t bz) {
 			std::vector<float> finest(width, std::numeric_limits<float>::infinity());
 			for (std::size_t gz = block_rows[bz].first; gz < block_rows[bz].second;
 					++gz) {
@@ -222,13 +255,13 @@ struct Gate
 										  RES_FULL_BLOCKS,
 										  static_cast<double>(finest[bx]) * scale))
 								: 0.0f;
-		}
+		});
 		if (std::none_of(coarse.begin(), coarse.end(), [](float v) { return v > 0.0f; }))
 			return std::nullopt;
 
 		std::vector<float> keep(width * height, 1.0f);
 		if (land_cover && land_cover->width == cols && land_cover->height == rows) {
-			for (std::size_t bz = 0; bz < height; ++bz) {
+			parallel_for(height, [&](std::size_t bz) {
 				for (std::size_t gz = block_rows[bz].first; gz < block_rows[bz].second;
 						++gz) {
 					if (gz >= land_cover->grid.size())
@@ -242,7 +275,7 @@ struct Gate
 													  gx))] = 0.0f;
 					}
 				}
-			}
+			});
 		}
 
 		const double reach = GRADED_CLEAR_M / cell_m;
@@ -584,45 +617,22 @@ std::size_t add_steep_detail(std::vector<std::vector<double>> &heights,
 				end < rows ? heights[end] : std::vector<double>{});
 	}
 	std::vector<std::size_t> changed_by_band(bands, 0);
-	std::atomic_size_t next_band{0};
-	auto work = [&] {
-		for (;;) {
-			const auto band = next_band.fetch_add(1, std::memory_order_relaxed);
-			if (band >= bands)
-				return;
-			const auto start = band * BAND_ROWS;
-			const auto end = std::min(start + BAND_ROWS, rows);
-			std::vector<double> prev = std::move(edges[band].first);
-			auto &changed = changed_by_band[band];
-			for (std::size_t z = start; z < end; ++z) {
-				auto orig = heights[z];
-				const std::vector<double> *above = prev.empty() ? nullptr : &prev;
-				const std::vector<double> *below =
-						z + 1 < end ? &heights[z + 1]
-									: (edges[band].second.empty() ? nullptr
-																  : &edges[band].second);
-				changed += field.row(z, heights[z], orig, above, below);
-				prev.swap(orig);
-			}
+	parallel_for(bands, [&](std::size_t band) {
+		const auto start = band * BAND_ROWS;
+		const auto end = std::min(start + BAND_ROWS, rows);
+		std::vector<double> prev = std::move(edges[band].first);
+		auto &changed = changed_by_band[band];
+		for (std::size_t z = start; z < end; ++z) {
+			auto orig = heights[z];
+			const std::vector<double> *above = prev.empty() ? nullptr : &prev;
+			const std::vector<double> *below =
+					z + 1 < end ? &heights[z + 1]
+								: (edges[band].second.empty() ? nullptr
+															  : &edges[band].second);
+			changed += field.row(z, heights[z], orig, above, below);
+			prev.swap(orig);
 		}
-	};
-	const auto workers_count = std::min(bands, detail_worker_count());
-	if (workers_count <= 1) {
-		work();
-	} else {
-		std::vector<std::thread> workers;
-		workers.reserve(workers_count - 1);
-		for (std::size_t i = 1; i < workers_count; ++i) {
-			try {
-				workers.emplace_back(work);
-			} catch (...) {
-				break;
-			}
-		}
-		work();
-		for (auto &worker : workers)
-			worker.join();
-	}
+	});
 	const std::size_t changed = std::accumulate(
 			changed_by_band.begin(), changed_by_band.end(), std::size_t{0});
 	return changed;

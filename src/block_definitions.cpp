@@ -37,6 +37,27 @@ BlockWithProperties::Properties default_block_properties(const Block &block)
 			return one("axis", "z");
 		return one("axis", "y");
 	}
+	// These blocks may resolve to arbitrary host content IDs. Use the named
+	// Arnis handles rather than their Rust palette indices when supplying the
+	// same default states as block_definitions.rs.
+	if (block == block_definitions::BEETROOTS &&
+			block_definitions::BEETROOTS != block_definitions::WHEAT)
+		return one("age", "3");
+	if (block == block_definitions::WHEAT_YOUNG &&
+			block_definitions::WHEAT_YOUNG != block_definitions::WHEAT)
+		return one("age", "3");
+	if (block == block_definitions::CARROTS_YOUNG &&
+			block_definitions::CARROTS_YOUNG != block_definitions::CARROTS)
+		return one("age", "2");
+	if (block == block_definitions::POTATOES_YOUNG &&
+			block_definitions::POTATOES_YOUNG != block_definitions::POTATOES)
+		return one("age", "2");
+	if (block == block_definitions::BEETROOTS_YOUNG &&
+			block_definitions::BEETROOTS_YOUNG != block_definitions::BEETROOTS)
+		return one("age", "1");
+	if (block == block_definitions::WHEAT || block == block_definitions::CARROTS ||
+			block == block_definitions::POTATOES)
+		return one("age", "7");
 	switch (block.id()) {
 	case 3:
 	case 49:

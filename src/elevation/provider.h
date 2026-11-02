@@ -4,17 +4,96 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <string_view>
 #include <vector>
 #include <array>
 #include <utility>
 #include "elevation.h"
 #include "providers.h"
+#include "../celestial.h"
 namespace arnis::land_cover
 {
 struct LandCoverData;
 }
+namespace arnis::geographic
+{
+class LLBBox;
+}
+
 namespace arnis::elevation
 {
+// Provider result before any world-format-specific processing. Missing samples
+// stay non-finite so the shared elevation pipeline can repair them consistently.
+struct RawElevationGrid
+{
+	std::vector<std::vector<double>> heights_meters;
+	std::optional<SourcePixels> source_pixels;
+};
+
+// Rust's ElevationProvider contract, expressed as an interface for native
+// providers and downstream library extensions. fetch_raw throws on transport,
+// decode, or coverage failures; callers decide whether and how to fall back.
+class ElevationProvider
+{
+public:
+	virtual ~ElevationProvider() = default;
+	virtual std::string_view name() const noexcept = 0;
+	virtual double native_resolution_m() const noexcept = 0;
+	virtual RawElevationGrid fetch_raw(const ::arnis::geographic::LLBBox &bbox,
+			std::size_t grid_width, std::size_t grid_height) const = 0;
+};
+
+// Earth providers implementing the same contract as Rust's concrete providers.
+// Their cache root is supplied by the caller so a library consumer can share
+// the application's configured Arnis cache tree.
+class AwsElevationProvider final : public ElevationProvider
+{
+	std::filesystem::path root_;
+
+public:
+	explicit AwsElevationProvider(std::filesystem::path root) : root_(std::move(root)) {}
+	std::string_view name() const noexcept override { return "aws"; }
+	double native_resolution_m() const noexcept override { return 30.0; }
+	RawElevationGrid fetch_raw(const ::arnis::geographic::LLBBox &bbox,
+			std::size_t grid_width, std::size_t grid_height) const override;
+};
+
+class MapterhornElevationProvider final : public ElevationProvider
+{
+	std::filesystem::path root_;
+
+public:
+	explicit MapterhornElevationProvider(std::filesystem::path root) :
+			root_(std::move(root))
+	{
+	}
+	std::string_view name() const noexcept override { return "mapterhorn"; }
+	double native_resolution_m() const noexcept override { return 30.0; }
+	RawElevationGrid fetch_raw(const ::arnis::geographic::LLBBox &bbox,
+			std::size_t grid_width, std::size_t grid_height) const override;
+};
+
+class PlanetaryElevationProvider final : public ElevationProvider
+{
+	CelestialBody body_;
+	std::filesystem::path cache_root_;
+
+public:
+	PlanetaryElevationProvider(CelestialBody body, std::filesystem::path cache_root) :
+			body_(body), cache_root_(std::move(cache_root))
+	{
+	}
+	std::string_view name() const noexcept override;
+	double native_resolution_m() const noexcept override;
+	RawElevationGrid fetch_raw(const ::arnis::geographic::LLBBox &bbox,
+			std::size_t grid_width, std::size_t grid_height) const override;
+};
+
+RawElevationGrid fetch_raw_with_fallback(
+		const std::vector<std::reference_wrapper<const ElevationProvider>> &chain,
+		const ::arnis::geographic::LLBBox &bbox, std::size_t grid_width,
+		std::size_t grid_height);
+
 struct LandCoverRepairConfig
 {
 	land_cover::LandCoverData *data{nullptr};

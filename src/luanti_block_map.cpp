@@ -46,8 +46,8 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 							 : defaults		  ? *defaults
 											  : empty_properties;
 	const bool white_bed = block.block == WHITE_BED;
-	if (block.block == RED_SAND)
-		return {"mcl_core:red_sand", 0};
+	if (block.block == RED_SAND && RED_SAND != SAND)
+		return {"mcl_core:redsand", 0};
 	const bool red_bed =
 			block.block == RED_BED_NORTH_HEAD || block.block == RED_BED_NORTH_FOOT ||
 			block.block == RED_BED_EAST_HEAD || block.block == RED_BED_EAST_FOOT ||
@@ -683,24 +683,24 @@ LuantiNode to_luanti_node(
 	case 204:
 		return {"mcl_stairs:slab_diorite_smooth", 0};
 	case 205:
-		return {"mcl_stairs:slab_warped", 0};
+		return {"mcl_farming:beetroot", 0};
 	case 206:
-		return stair("mcl_stairs:stair_warped");
+		return {"mcl_farming:wheat_7", 0};
 	case 207:
 		return {"mcl_colorblocks:concrete_green", 0};
 	case 208:
 		return {"mcl_walls:brick", 0};
 	case 209:
-		return {"mcl_redstone_torch:redstoneblock", 0};
+		return {"mcl_farming:carrot_7", 0};
 	case 210:
 	case 362:
 		return {"mcl_lanterns:chain", static_cast<std::uint8_t>(id == 210 ? 12 : 4)};
 	case 211:
 		return trapdoor("mcl_doors:trapdoor_warped", "mcl_doors:trapdoor_warped_open");
 	case 212:
-		return {"mcl_trees:stripped_warped", 0};
+		return {"mcl_farming:potato_4", 0};
 	case 213:
-		return {"mcl_trees:bark_stripped_warped", 0};
+		return {"mcl_farming:beetroot", 0};
 	case 214:
 		return {"mcl_stairs:slab_stone", 0};
 	case 215:
@@ -1270,6 +1270,20 @@ LuantiNode to_luanti_node(
 		return {"mcl_raw_ores:raw_gold_block", 0};
 	case 519:
 		return {"mcl_core:lapisblock", 0};
+	case 520:
+		return {"mcl_core:redsand", 0};
+	case 521:
+		return {"mcl_core:redsandstone", 0};
+	case 522:
+		return {"mcl_stairs:slab_warped", 0};
+	case 523:
+		return stair("mcl_stairs:stair_warped");
+	case 524:
+		return {"mcl_redstone_torch:redstoneblock", 0};
+	case 525:
+		return {"mcl_trees:stripped_warped", 0};
+	case 526:
+		return {"mcl_trees:bark_stripped_warped", 0};
 	default:
 		return {"mcl_core:stone", 0};
 	}

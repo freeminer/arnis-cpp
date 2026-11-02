@@ -1651,7 +1651,18 @@ bool generate_world(WorldEditor &editor,
 	editor.reserve_ground_level_cache();
 	const bool extended_world_height = args.disable_height_limit ||
 									   (editor.ground && editor.ground->extended_ceiling);
-	if (extended_world_height && !args.disable_height_limit) {
+	// An automatic extension caused only by a tall building/model does not grow
+	// terrain, caves, or filled ground. Rust's settle_build_height therefore
+	// repeats the disk-space check only when the fitted terrain itself exceeds
+	// the vanilla ground-level band.
+	const int vanilla_ground_min = world_editor::DEFAULT_MIN_Y + 2;
+	const int vanilla_ground_max =
+			world_editor::DEFAULT_MAX_Y - elevation::TERRAIN_HEIGHT_BUFFER;
+	const bool terrain_exceeds_vanilla =
+			editor.ground &&
+			(editor.ground->base_level(args.ground_level) < vanilla_ground_min ||
+					world_editor::terrain_top_y() > vanilla_ground_max);
+	if (extended_world_height && !args.disable_height_limit && terrain_exceeds_vanilla) {
 		const auto geo = editor.geographic_bounds();
 		const geographic::LLBBox bbox(geo[0], geo[2], geo[1], geo[3]);
 		const auto world_path = args.one_world_run

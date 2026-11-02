@@ -14,6 +14,7 @@
 #include "../strict_parse.h"
 #include "../unicode_text.h"
 #include "postprocess.h"
+#include "../land_cover/land_cover.h"
 
 #include <algorithm>
 #include <cmath>
@@ -402,8 +403,7 @@ bool is_building_feature(const tags_t &tags)
 		   tags.get("man_made") == "tower";
 }
 
-std::pair<double, double> footprint_extent_m(
-		const std::vector<std::pair<double, double>> &points)
+std::pair<double, double> extent_m(const std::vector<std::pair<double, double>> &points)
 {
 	if (points.empty())
 		return {};
@@ -629,7 +629,7 @@ std::vector<TallModel> tall_structures_in(const osm_parser::RawOsmDocument &data
 			outline_nodes.insert(outline_nodes.end(), ring.begin(), ring.end());
 		if (points.empty())
 			return;
-		const auto [width_m, length_m] = footprint_extent_m(points);
+		const auto [width_m, length_m] = extent_m(points);
 		buildings::HeightHint hint;
 		if (overture_hints) {
 			const auto value = overture_hints->hint_for({id, relation}, tags);
@@ -747,6 +747,39 @@ bool may_pass_vanilla(double height_m, double scale)
 {
 	return std::isfinite(height_m) && std::isfinite(scale) &&
 		   height_m * scale > TERRAIN_HEIGHT_BUFFER - 2;
+}
+
+std::vector<std::pair<std::size_t, std::size_t>> bore_water_cells(
+		const land_cover::LandCoverData &cover, const geographic::LLBBox &bbox,
+		const std::vector<std::pair<double, double>> &bores)
+{
+	const auto width = cover.width;
+	const auto height = cover.height;
+	if (width < 2 || height < 2)
+		return {};
+	const double min_lat = bbox.min().lat(), max_lat = bbox.max().lat();
+	const double min_lon = bbox.min().lng(), max_lon = bbox.max().lng();
+	if (!(max_lat > min_lat) || !(max_lon > min_lon))
+		return {};
+	std::vector<std::pair<std::size_t, std::size_t>> cells;
+	cells.reserve(bores.size());
+	for (const auto &[lat, lon] : bores) {
+		if (!std::isfinite(lat) || !std::isfinite(lon) || lat < min_lat ||
+				lat > max_lat || lon < min_lon || lon > max_lon)
+			continue;
+		const auto x = static_cast<std::size_t>(
+				std::llround((lon - min_lon) / (max_lon - min_lon) * (width - 1)));
+		const auto z = static_cast<std::size_t>(
+				std::llround((max_lat - lat) / (max_lat - min_lat) * (height - 1)));
+		const auto cell_x = std::min(x, width - 1);
+		const auto cell_z = std::min(z, height - 1);
+		if (cell_z < cover.grid.size() && cell_x < cover.grid[cell_z].size() &&
+				cover.grid[cell_z][cell_x] == land_cover::LC_WATER)
+			cells.emplace_back(cell_x, cell_z);
+	}
+	std::sort(cells.begin(), cells.end());
+	cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+	return cells;
 }
 
 TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data)
@@ -1158,6 +1191,7 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 	struct Shape
 	{
 		int depth{};
+		std::vector<std::uint64_t> node_ids;
 		std::vector<GeoPoint> points;
 		GeoPoint centre{}, heading{};
 	};
@@ -1165,6 +1199,7 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 	for (const auto &platform : platforms) {
 		Shape shape;
 		shape.depth = platform.depth;
+		shape.node_ids = platform.nodes;
 		for (const auto id : platform.nodes) {
 			const auto found = at.find(id);
 			if (found != at.end())
@@ -1204,7 +1239,11 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 		for (std::size_t j = 0; j < shapes.size(); ++j) {
 			const auto &a = shapes[i];
 			const auto &b = shapes[j];
+			// Rust orders a platform by (depth, original node IDs). This makes
+			// equal-depth crossing platforms stack in a stable order instead of
+			// assigning every member of an interchange the same rank.
 			if (i == j || b.depth < a.depth ||
+					(b.depth == a.depth && b.node_ids < a.node_ids) ||
 					std::hypot(a.centre.first - b.centre.first,
 							a.centre.second - b.centre.second) > INTERCHANGE_M ||
 					parallel(a.heading, b.heading))

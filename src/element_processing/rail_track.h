@@ -37,7 +37,12 @@ struct TrackEnd
 
 std::optional<TrackLevel> track_level(const ProcessedWay &way);
 // Smoothed world-space raster of a way's rail centreline.
-std::vector<std::pair<int, int>> track_cells(const ProcessedWay &way);
+struct TrackCells
+{
+	std::vector<std::pair<int, int>> cells;
+	std::vector<std::size_t> node_cells;
+};
+TrackCells track_cells(const ProcessedWay &way);
 
 std::vector<bool> straight_cells(const std::vector<std::pair<int, int>> &cells,
 		std::optional<std::pair<int, int>> before = std::nullopt,

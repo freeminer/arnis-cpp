@@ -1,10 +1,34 @@
 #include "selector.h"
+#include "../coordinate_system/geographic/llbbox.h"
 #include <cmath>
 #include <exception>
 #include <iostream>
+#include <stdexcept>
 
 namespace arnis::elevation
 {
+RawElevationGrid AwsElevationProvider::fetch_raw(
+		const geographic::LLBBox &bbox, std::size_t width, std::size_t height) const
+{
+	const providers::GeoBBox bounds{
+			bbox.min().lat(), bbox.min().lng(), bbox.max().lat(), bbox.max().lng()};
+	return {providers::fetch_aws_terrain_grid(root_, bounds, width, height),
+			std::nullopt};
+}
+
+RawElevationGrid MapterhornElevationProvider::fetch_raw(
+		const geographic::LLBBox &bbox, std::size_t width, std::size_t height) const
+{
+	const providers::GeoBBox bounds{
+			bbox.min().lat(), bbox.min().lng(), bbox.max().lat(), bbox.max().lng()};
+	SourcePixels source_pixels;
+	auto heights = providers::fetch_mapterhorn_terrain_grid(
+			root_, bounds, width, height, &source_pixels);
+	if (!heights)
+		throw std::runtime_error("Mapterhorn returned no elevation grid");
+	return {std::move(*heights), std::move(source_pixels)};
+}
+
 namespace
 {
 double non_finite_ratio(const std::vector<std::vector<double>> &heights)
@@ -40,14 +64,39 @@ std::optional<double> Selector::sample(double lat, double lon)
 ElevationData Selector::raw_grid(
 		double a, double b, double c, double d, std::size_t w, std::size_t h)
 {
-	if (cached_.mode() == providers::SourceMode::AwsOnly) {
+	if (cached_.mode() == providers::SourceMode::Planetary) {
+		if (!planetary_body_)
+			throw std::invalid_argument(
+					"Planetary elevation mode requires a celestial body");
+		const geographic::LLBBox bbox(a, b, c, d);
+		PlanetaryElevationProvider provider(*planetary_body_, cached_.root());
+		auto raw = provider.fetch_raw(bbox, w, h);
 		ElevationData out;
 		out.width = w;
 		out.height = h;
 		out.world_width = w;
 		out.world_height = h;
-		out.heights =
-				providers::fetch_aws_terrain_grid(cached_.root(), {a, b, c, d}, w, h);
+		out.heights = std::move(raw.heights_meters);
+		out.source_pixels = std::move(raw.source_pixels);
+		return out;
+	}
+	if (cached_.mode() == providers::SourceMode::AwsOnly ||
+			cached_.mode() == providers::SourceMode::Auto) {
+		AwsElevationProvider aws(cached_.root());
+		MapterhornElevationProvider mapterhorn(cached_.root());
+		const geographic::LLBBox bbox(a, b, c, d);
+		std::vector<std::reference_wrapper<const ElevationProvider>> chain;
+		if (cached_.mode() == providers::SourceMode::Auto)
+			chain.emplace_back(mapterhorn);
+		chain.emplace_back(aws);
+		auto raw = fetch_raw_with_fallback(chain, bbox, w, h);
+		ElevationData out;
+		out.width = w;
+		out.height = h;
+		out.world_width = w;
+		out.world_height = h;
+		out.heights = std::move(raw.heights_meters);
+		out.source_pixels = std::move(raw.source_pixels);
 		return out;
 	}
 	if (cached_.mode() != providers::SourceMode::Planetary) {

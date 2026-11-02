@@ -1,16 +1,109 @@
 #include "provider.h"
 #include "providers.h"
+#include "planetary.h"
 #include "elevation.h"
 #include "postprocess.h"
 #include "../coordinate_system/transformation.h"
+#include "../coordinate_system/geographic/llbbox.h"
+#include "../progress.h"
+#include "../telemetry.h"
 #include <cmath>
 #include <utility>
 #include <fstream>
 #include <cstdint>
 #include <algorithm>
 #include <limits>
+#include <iostream>
+#include <stdexcept>
 namespace arnis::elevation
 {
+std::string_view PlanetaryElevationProvider::name() const noexcept
+{
+	switch (body_) {
+	case CelestialBody::Moon:
+		return "lola";
+	case CelestialBody::Mars:
+		return "mola";
+	case CelestialBody::Earth:
+		return "planetary";
+	}
+	return "planetary";
+}
+
+double PlanetaryElevationProvider::native_resolution_m() const noexcept
+{
+	return planetary_native_resolution_m(body_);
+}
+
+RawElevationGrid PlanetaryElevationProvider::fetch_raw(
+		const ::arnis::geographic::LLBBox &bbox, std::size_t grid_width,
+		std::size_t grid_height) const
+{
+	auto elevation = fetch_planetary_elevation(body_, bbox, grid_width, grid_height,
+			http_planetary_range_reader(), cache_root_);
+	if (!elevation)
+		throw std::runtime_error("planetary elevation provider returned no data");
+	return {std::move(elevation->heights), std::nullopt};
+}
+
+RawElevationGrid fetch_raw_with_fallback(
+		const std::vector<std::reference_wrapper<const ElevationProvider>> &chain,
+		const geographic::LLBBox &bbox, std::size_t grid_width, std::size_t grid_height)
+{
+	if (chain.empty())
+		throw std::invalid_argument("elevation provider chain is empty");
+	for (std::size_t i = 0; i < chain.size(); ++i) {
+		const auto &provider = chain[i].get();
+		const bool has_fallback = i + 1 < chain.size();
+		const auto next_name =
+				has_fallback ? chain[i + 1].get().name() : std::string_view{};
+		try {
+			auto raw = provider.fetch_raw(bbox, grid_width, grid_height);
+			if (has_fallback) {
+				std::size_t total = 0, missing = 0;
+				for (const auto &row : raw.heights_meters)
+					for (const double height : row) {
+						++total;
+						missing += !std::isfinite(height);
+					}
+				const double ratio = total ? static_cast<double>(missing) / total : 1.0;
+				if (ratio > 0.5) {
+					const std::string warning =
+							"Elevation provider '" + std::string(provider.name()) +
+							"' returned " + std::to_string(std::lround(ratio * 100.0)) +
+							"% empty data. Falling back to '" + std::string(next_name) +
+							"'.";
+					std::cerr << "Warning: " << warning << '\n';
+					telemetry::send_log(telemetry::LogLevel::Warning, warning);
+					progress::emit_gui_progress_update(10.0, "Downloading data...");
+					continue;
+				}
+			}
+			return raw;
+		} catch (const std::exception &error) {
+			if (!has_fallback)
+				throw;
+			const std::string warning =
+					"Elevation provider '" + std::string(provider.name()) +
+					"' failed: " + error.what() + ". Falling back to '" +
+					std::string(next_name) + "'.";
+			std::cerr << "Warning: " << warning << '\n';
+			telemetry::send_log(telemetry::LogLevel::Warning, warning);
+			progress::emit_gui_progress_update(10.0, "Downloading data...");
+		} catch (...) {
+			if (!has_fallback)
+				throw;
+			const std::string warning =
+					"Elevation provider '" + std::string(provider.name()) +
+					"' failed. Falling back to '" + std::string(next_name) + "'.";
+			std::cerr << "Warning: " << warning << '\n';
+			telemetry::send_log(telemetry::LogLevel::Warning, warning);
+			progress::emit_gui_progress_update(10.0, "Downloading data...");
+		}
+	}
+	throw std::logic_error("elevation provider chain exhausted without a result");
+}
+
 std::optional<std::vector<std::int16_t>> read_hgt(const Tile &t)
 {
 	std::ifstream f(t.file, std::ios::binary);

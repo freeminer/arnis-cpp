@@ -198,8 +198,8 @@ std::string snow_safe(std::string name, int y, bool trees)
 	return name;
 }
 
-Cell classify_cell(
-		const Ground &ground, const XZPoint &coord, const XZPoint &eco_coord, int snow_y)
+Cell classify_cell(const Ground &ground, const XZPoint &coord, const XZPoint &eco_coord,
+		int snow_y, const std::optional<int> &sea_max)
 {
 	using namespace land_cover;
 	const auto lc = ground.cover_class(coord);
@@ -221,7 +221,6 @@ Cell classify_cell(
 	}
 	Cell cell;
 	cell.land_cover = lc;
-	const auto sea_max = ground.sea_surface_max_y();
 	cell.inland_water = lc == LC_WATER &&
 						(ground.inland_water_mapped(coord) || (sea_max && y > *sea_max));
 	cell.shore = shore;
@@ -396,65 +395,13 @@ std::optional<std::string> mountain_biome(std::uint8_t lc, Climate climate,
 
 std::string biome_for_class(std::uint8_t lc, Climate c, double lat, std::uint8_t wd)
 {
-	const double a = std::abs(lat);
-	if (lc == land_cover::LC_WATER) {
-		bool cold = c == Climate::IceCap || c == Climate::Tundra || c == Climate::Boreal;
-		if (wd < 8)
-			return cold ? "minecraft:frozen_river" : "minecraft:river";
-		if (cold)
-			return wd >= 12 ? "minecraft:deep_frozen_ocean" : "minecraft:frozen_ocean";
-		if (a < 23.5 || c == Climate::HotDesert || c == Climate::HotSteppe ||
-				c == Climate::TropicalSavanna)
-			return "minecraft:warm_ocean";
-		if (a < 45)
-			return wd >= 12 ? "minecraft:deep_lukewarm_ocean"
-							: "minecraft:lukewarm_ocean";
-		return wd >= 12 ? "minecraft:deep_cold_ocean" : "minecraft:cold_ocean";
-	}
-	switch (c) {
-	case Climate::HotDesert:
-	case Climate::ColdDesert:
-		return "minecraft:desert";
-	case Climate::HotSteppe:
-	case Climate::TropicalSavanna:
-	case Climate::DryContinental:
-		return "minecraft:savanna";
-	case Climate::ColdSteppe:
-		return "minecraft:plains";
-	case Climate::Tundra:
-	case Climate::IceCap:
-		return "minecraft:snowy_plains";
-	case Climate::Boreal:
-		return lc == land_cover::LC_WETLAND ? "minecraft:swamp"
-			   : lc == land_cover::LC_BEACH
-					   ? "minecraft:snowy_beach"
-					   : (lc == land_cover::LC_TREE_COVER || lc == land_cover::LC_MOSS
-										 ? "minecraft:taiga"
-										 : "minecraft:snowy_plains");
-	case Climate::Temperate:
-		break;
-	}
-	if (lc == land_cover::LC_TREE_COVER)
-		return a > 55 ? "minecraft:taiga"
-					  : (a < 23.5 ? "minecraft:jungle" : "minecraft:forest");
-	if (lc == land_cover::LC_SHRUBLAND)
-		return a < 23.5 ? "minecraft:sparse_jungle" : "minecraft:savanna";
-	if (lc == land_cover::LC_GRASSLAND || lc == land_cover::LC_CROPLAND ||
-			lc == land_cover::LC_BUILT_UP)
-		return "minecraft:plains";
-	if (lc == land_cover::LC_BARE)
-		return "minecraft:desert";
-	if (lc == land_cover::LC_BEACH)
-		return "minecraft:beach";
-	if (lc == land_cover::LC_SNOW_ICE)
-		return "minecraft:snowy_plains";
-	if (lc == land_cover::LC_WETLAND)
-		return "minecraft:swamp";
-	if (lc == land_cover::LC_MANGROVES)
-		return "minecraft:mangrove_swamp";
-	if (lc == land_cover::LC_MOSS)
-		return "minecraft:taiga";
-	return "minecraft:plains";
+	// Keep the simple sampler API on the same climate/cover rules as Rust's
+	// cell_biome(). Its water-distance input is the only inland-water hint it
+	// has; the active ground-backed path uses the richer Cell classification.
+	Cell cell;
+	cell.land_cover = lc;
+	cell.inland_water = lc == land_cover::LC_WATER && wd < 8;
+	return cell_biome(cell, c, lat);
 }
 
 unsigned biome_bits_per_index(std::size_t palette_size)
@@ -521,20 +468,22 @@ std::array<std::string, 16> chunk_biome_names(int chunk_x, int chunk_z,
 		names.fill(std::string(celestial_body_biome(ground->body())));
 		return names;
 	}
+	const auto climate = ground->climate();
+	const int snow_y = ground->elevation_enabled ? ground->snow_threshold_y()
+												 : std::numeric_limits<int>::max();
+	const auto sea_max = ground->sea_surface_max_y();
 	for (int zi = 0; zi < 4; ++zi)
 		for (int xi = 0; xi < 4; ++xi) {
 			const int world_x = chunk_x * 16 + xi * 4 + 2;
 			const int world_z = chunk_z * 16 + zi * 4 + 2;
 			const XZPoint local{world_x - world_origin_x, world_z - world_origin_z};
-			const auto climate = ground->climate();
 			XZPoint eco_coord = local;
 			if (climate_is_dry(climate)) {
 				const auto [sample_x, sample_z] =
 						frayed_ecoregion_offset(world_x, world_z);
 				eco_coord = {sample_x - world_origin_x, sample_z - world_origin_z};
 			}
-			const auto cell =
-					classify_cell(*ground, local, eco_coord, ground->snow_threshold_y());
+			const auto cell = classify_cell(*ground, local, eco_coord, snow_y, sea_max);
 			auto name = cell_biome(cell, climate, center_latitude);
 			if (ground->winter())
 				name = winter_biome(name);

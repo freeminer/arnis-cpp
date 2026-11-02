@@ -20,6 +20,11 @@ namespace arnis::geographic
 class LLBBox;
 }
 
+namespace arnis::land_cover
+{
+struct LandCoverData;
+}
+
 namespace arnis::osm_parser
 {
 struct RawOsmDocument;
@@ -152,6 +157,12 @@ TerrainHints terrain_hints_in(const osm_parser::RawOsmDocument &data, double sca
 TerrainHints overture_terrain_hints_in(const osm_parser::RawOsmDocument &data,
 		double scale, const ::arnis::overture::OvertureData &overture_data);
 bool may_pass_vanilla(double height_m, double scale);
+std::vector<std::pair<std::size_t, std::size_t>> bore_water_cells(
+		const ::arnis::land_cover::LandCoverData &cover, const geographic::LLBBox &bbox,
+		const std::vector<std::pair<double, double>> &bores);
+// East-west and north-south extent in metres of geographic (latitude, longitude)
+// points, matching Rust elevation::peaks::extent_m.
+std::pair<double, double> extent_m(const std::vector<std::pair<double, double>> &points);
 
 void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBox &bbox,
 		const std::vector<PeakHint> &peaks, double meters_per_cell,

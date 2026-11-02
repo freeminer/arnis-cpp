@@ -7,11 +7,13 @@ class Selector
 {
 	CachedProvider cached_;
 	GridCache cache_;
+	std::optional<CelestialBody> planetary_body_;
 
 public:
 	explicit Selector(std::filesystem::path root,
-			providers::SourceMode mode = providers::SourceMode::Auto) :
-			cached_(root, mode), cache_(std::move(root))
+			providers::SourceMode mode = providers::SourceMode::Auto,
+			std::optional<CelestialBody> planetary_body = std::nullopt) :
+			cached_(root, mode), cache_(std::move(root)), planetary_body_(planetary_body)
 	{
 	}
 	providers::SourceMode source_mode() const { return cached_.mode(); }

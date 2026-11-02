@@ -7,6 +7,7 @@
 #include "osm_tiles.h"
 #include "world_editor/floor_state.h"
 #include "../../arnis_world_editor.h"
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <atomic>
 #include <charconv>
@@ -781,55 +782,25 @@ std::filesystem::path WorldLayout::maps_dir(const std::filesystem::path &world) 
 
 namespace
 {
-bool replace_json_integer(std::string &json, std::string_view key, std::int32_t value)
-{
-	const auto quoted_key = "\"" + std::string(key) + "\"";
-	const auto key_pos = json.find(quoted_key);
-	if (key_pos == std::string::npos)
-		return false;
-	auto value_begin = json.find(':', key_pos + quoted_key.size());
-	if (value_begin == std::string::npos)
-		return false;
-	++value_begin;
-	while (value_begin < json.size() &&
-			std::isspace(static_cast<unsigned char>(json[value_begin])))
-		++value_begin;
-	auto value_end = value_begin;
-	if (value_end < json.size() && json[value_end] == '-')
-		++value_end;
-	while (value_end < json.size() &&
-			std::isdigit(static_cast<unsigned char>(json[value_end])))
-		++value_end;
-	if (value_end == value_begin ||
-			(json[value_begin] == '-' && value_end == value_begin + 1))
-		return false;
-	json.replace(value_begin, value_end - value_begin, std::to_string(value));
-	return true;
-}
-
 std::optional<std::int64_t> json_integer(const std::string &json, std::string_view key)
 {
-	const auto quoted_key = "\"" + std::string(key) + "\"";
-	const auto key_pos = json.find(quoted_key);
-	if (key_pos == std::string::npos)
+	try {
+		const auto dimension = nlohmann::json::parse(json);
+		if (!dimension.is_object())
+			return std::nullopt;
+		const auto it = dimension.find(std::string(key));
+		if (it == dimension.end() ||
+				(!it->is_number_integer() && !it->is_number_unsigned()))
+			return std::nullopt;
+		if (it->is_number_unsigned() &&
+				it->get<std::uint64_t>() >
+						static_cast<std::uint64_t>(
+								std::numeric_limits<std::int64_t>::max()))
+			return std::nullopt;
+		return it->get<std::int64_t>();
+	} catch (const nlohmann::json::exception &) {
 		return std::nullopt;
-	auto value_begin = json.find(':', key_pos + quoted_key.size());
-	if (value_begin == std::string::npos)
-		return std::nullopt;
-	++value_begin;
-	while (value_begin < json.size() &&
-			std::isspace(static_cast<unsigned char>(json[value_begin])))
-		++value_begin;
-	const auto value_end = json.find_first_of(",}] \t\r\n", value_begin);
-	const auto token = json.substr(value_begin, value_end - value_begin);
-	if (token.empty())
-		return std::nullopt;
-	std::int64_t value = 0;
-	const auto [end, error] =
-			std::from_chars(token.data(), token.data() + token.size(), value);
-	if (error != std::errc{} || end != token.data() + token.size())
-		return std::nullopt;
-	return value;
+	}
 }
 
 bool dimension_with_range(
@@ -840,12 +811,19 @@ bool dimension_with_range(
 	const auto height = static_cast<std::int64_t>(max_y) - min_y + 1;
 	if (height <= 0 || height > std::numeric_limits<std::int32_t>::max())
 		return false;
-	std::string json(contents.begin(), contents.end());
-	if (!replace_json_integer(json, "min_y", min_y) ||
-			!replace_json_integer(json, "height", static_cast<std::int32_t>(height)) ||
-			!replace_json_integer(
-					json, "logical_height", static_cast<std::int32_t>(height)))
+	nlohmann::json dimension;
+	try {
+		const std::string bundled_json(contents.begin(), contents.end());
+		dimension = nlohmann::json::parse(bundled_json);
+	} catch (const nlohmann::json::exception &) {
 		return false;
+	}
+	if (!dimension.is_object())
+		return false;
+	dimension["min_y"] = min_y;
+	dimension["height"] = static_cast<std::int32_t>(height);
+	dimension["logical_height"] = static_cast<std::int32_t>(height);
+	const auto json = dimension.dump(2) + '\n';
 	contents.assign(json.begin(), json.end());
 	return true;
 }
@@ -988,8 +966,21 @@ bool is_writable_directory(const std::filesystem::path &dir)
 	if (!std::filesystem::is_directory(dir, ec) || ec)
 		return false;
 	const auto probe = dir / (".arnis-write-test-" + unique_path_suffix());
-	if (!std::filesystem::create_directory(probe, ec) || ec)
+	// Match Rust's OpenOptions::create_new probe: test the ability to create a
+	// regular file, without overwriting a colliding path or changing directory
+	// metadata by creating a subdirectory.
+#if defined(_WIN32)
+	const auto handle = CreateFileW(probe.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_NEW,
+			FILE_ATTRIBUTE_TEMPORARY, nullptr);
+	if (handle == INVALID_HANDLE_VALUE)
 		return false;
+	CloseHandle(handle);
+#else
+	const int fd = open(probe.c_str(), O_WRONLY | O_CREAT | O_EXCL, 0600);
+	if (fd < 0)
+		return false;
+	close(fd);
+#endif
 	std::filesystem::remove(probe, ec);
 	return true;
 }
@@ -1040,10 +1031,13 @@ std::filesystem::path get_luanti_worlds_directory()
 bool replace_file_atomically(
 		const std::filesystem::path &path, const std::vector<std::uint8_t> &bytes)
 {
-	if (path.parent_path().empty())
+	// A bare filename is still a sibling-replaceable path in the current
+	// directory. Rust's Path::parent() returns an empty path for that case,
+	// rather than treating it as having no parent.
+	if (path.empty())
 		return false;
-	static std::atomic_uint64_t sequence{0};
-	const auto temporary = path.string() + ".tmp" + std::to_string(++sequence);
+	auto temporary = path;
+	temporary += ".tmp" + unique_path_suffix();
 	std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
 	if (!output)
 		return false;

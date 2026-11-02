@@ -37,39 +37,6 @@ std::uint32_t saturating_u32(double value)
 	return static_cast<std::uint32_t>(value);
 }
 
-std::vector<std::pair<std::size_t, std::size_t>> bore_water_cells(
-		const land_cover::LandCoverData &cover, const geographic::LLBBox &bbox,
-		const std::vector<std::pair<double, double>> &bores)
-{
-	const auto width = cover.width;
-	const auto height = cover.height;
-	if (width < 2 || height < 2)
-		return {};
-	const double min_lat = bbox.min().lat(), max_lat = bbox.max().lat();
-	const double min_lon = bbox.min().lng(), max_lon = bbox.max().lng();
-	if (!(max_lat > min_lat) || !(max_lon > min_lon))
-		return {};
-	std::vector<std::pair<std::size_t, std::size_t>> cells;
-	cells.reserve(bores.size());
-	for (const auto &[lat, lon] : bores) {
-		if (!std::isfinite(lat) || !std::isfinite(lon) || lat < min_lat ||
-				lat > max_lat || lon < min_lon || lon > max_lon)
-			continue;
-		const auto x = static_cast<std::size_t>(
-				std::llround((lon - min_lon) / (max_lon - min_lon) * (width - 1)));
-		const auto z = static_cast<std::size_t>(
-				std::llround((max_lat - lat) / (max_lat - min_lat) * (height - 1)));
-		const auto cell_x = std::min(x, width - 1);
-		const auto cell_z = std::min(z, height - 1);
-		if (cell_z < cover.grid.size() && cell_x < cover.grid[cell_z].size() &&
-				cover.grid[cell_z][cell_x] == land_cover::LC_WATER)
-			cells.emplace_back(cell_x, cell_z);
-	}
-	std::sort(cells.begin(), cells.end());
-	cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
-	return cells;
-}
-
 std::vector<water_depth::BoreCrossing> station_crossings(
 		const std::vector<StationHint> &stations, const geographic::LLBBox &bbox,
 		const std::vector<std::vector<double>> &heights)
@@ -272,10 +239,15 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 				meters_per_cell, subprogress);
 	}
 	report(progress, 16.0, "Processing elevation...");
-	if (raw.source_pixels) {
-		const auto changed =
-				detail::add_steep_detail(raw.heights, bbox, *raw.source_pixels, scale,
-						one_world_origin, land_cover, terrain_hints.graded);
+	// The graded OSM ways are needed only while steep-detail strength is
+	// rasterized. Rust moves them out of TerrainHints and drops them here; do the
+	// same so large areas do not retain this geometry through peak/height fitting.
+	auto graded = std::move(terrain_hints.graded);
+	auto source_pixels = std::move(raw.source_pixels);
+	raw.source_pixels.reset();
+	if (source_pixels) {
+		const auto changed = detail::add_steep_detail(raw.heights, bbox, *source_pixels,
+				scale, one_world_origin, land_cover, graded);
 		if (changed > 0) {
 			const auto total = grid_width * grid_height;
 			std::clog
@@ -284,6 +256,8 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 					<< "% of the terrain, steep ground with only coarse elevation data\n";
 		}
 	}
+	source_pixels.reset();
+	std::vector<std::vector<std::pair<double, double>>>().swap(graded);
 	// Detail runs after land-cover repair, which would otherwise smooth it away,
 	// and before surveyed peak restoration, matching the Rust elevation order.
 	// Restore surveyed natural summits after smoothing, then fit terrain with
@@ -450,9 +424,6 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 		const std::function<std::vector<TallModel>()> &late_overture,
 		std::optional<std::pair<std::int64_t, std::int64_t>> one_world_origin)
 {
-	if (selector.source_mode() == providers::SourceMode::Planetary)
-		throw std::invalid_argument(
-				"Planetary elevation must be fetched with fetch_planetary_elevation");
 	report(progress, 10.0, "Downloading elevation data...");
 	const auto &minimum = bbox.min();
 	const auto &maximum = bbox.max();

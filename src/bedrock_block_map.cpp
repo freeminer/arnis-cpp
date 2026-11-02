@@ -25,6 +25,8 @@ static std::string_view renamed(std::string_view name)
 		name.remove_prefix(separator + 1);
 	if (name == "bricks")
 		return "brick_block";
+	if (name == "beetroots")
+		return "beetroot";
 	if (name == "cobweb")
 		return "web";
 	if (name == "dead_bush")
@@ -249,6 +251,16 @@ BedrockBlock to_bedrock_block(const Block &block)
 		return state("stained_glass_pane", {{"color", std::string("orange")}});
 	if (block == MAGENTA_STAINED_GLASS)
 		return state("stained_glass_pane", {{"color", std::string("magenta")}});
+	if (block == BEETROOTS && BEETROOTS != WHEAT)
+		return state("beetroot", {{"growth", 7}});
+	if (block == BEETROOTS_YOUNG && BEETROOTS_YOUNG != BEETROOTS)
+		return state("beetroot", {{"growth", 2}});
+	if (block == WHEAT_YOUNG && WHEAT_YOUNG != WHEAT)
+		return state("wheat", {{"growth", 3}});
+	if (block == CARROTS_YOUNG && CARROTS_YOUNG != CARROTS)
+		return state("carrots", {{"growth", 2}});
+	if (block == POTATOES_YOUNG && POTATOES_YOUNG != POTATOES)
+		return state("potatoes", {{"growth", 2}});
 	if (block == CARROTS)
 		return state("carrots", {{"growth", 7}});
 	if (block == POTATOES)
@@ -1070,7 +1082,13 @@ static BedrockBlock convert_block_with_properties(
 		set("dead_bit", string_prop("waterlogged", "true") != "true");
 		return out;
 	}
-	if (name == "beetroots" || name == "sweet_berry_bush") {
+	if (name == "beetroot") {
+		constexpr std::array<int, 4> growth{0, 2, 4, 7};
+		const int age = std::clamp(int_prop("age", 3), 0, 3);
+		set("growth", growth[static_cast<std::size_t>(age)]);
+		return out;
+	}
+	if (name == "sweet_berry_bush") {
 		set("growth", std::max(0, int_prop("age", 0)));
 		return out;
 	}

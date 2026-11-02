@@ -287,13 +287,16 @@ std::optional<TrackLevel> track_level(const ProcessedWay &way)
 	return underground ? TrackLevel::Tunnel : TrackLevel::Surface;
 }
 
-std::vector<std::pair<int, int>> track_cells(const ProcessedWay &way)
+TrackCells track_cells(const ProcessedWay &way)
 {
-	std::vector<std::pair<int, int>> cells;
+	TrackCells result;
+	auto &cells = result.cells;
 	if (way.nodes.size() < 2)
-		return cells;
+		return result;
 	cells.reserve(way.nodes.size());
 	cells.emplace_back(way.nodes.front().x, way.nodes.front().z);
+	result.node_cells.reserve(way.nodes.size());
+	result.node_cells.push_back(0);
 	for (std::size_t k = 1; k < way.nodes.size(); ++k) {
 		const auto &a = way.nodes[k - 1];
 		const auto &b = way.nodes[k];
@@ -303,8 +306,9 @@ std::vector<std::pair<int, int>> track_cells(const ProcessedWay &way)
 			if (cells.back() != std::pair{x, z})
 				cells.emplace_back(x, z);
 		}
+		result.node_cells.push_back(cells.size() - 1);
 	}
-	return cells;
+	return result;
 }
 
 RailJoins RailJoins::build(
@@ -321,17 +325,9 @@ RailJoins RailJoins::build(
 		Track track;
 		track.way = &way;
 		track.level = *track_level;
-		track.cells.emplace_back(way.nodes.front().x, way.nodes.front().z);
-		track.node_cells.push_back(0);
-		for (std::size_t k = 1; k < way.nodes.size(); ++k) {
-			const auto &a = way.nodes[k - 1];
-			const auto &b = way.nodes[k];
-			const auto line = bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
-			for (const auto &[x, _, z] : smooth_diagonal_rails(line))
-				if (track.cells.back() != std::pair{x, z})
-					track.cells.emplace_back(x, z);
-			track.node_cells.push_back(track.cells.size() - 1);
-		}
+		auto cells = track_cells(way);
+		track.cells = std::move(cells.cells);
+		track.node_cells = std::move(cells.node_cells);
 		if (!track.cells.empty())
 			tracks.push_back(std::move(track));
 	}

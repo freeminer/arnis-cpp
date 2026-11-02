@@ -410,7 +410,9 @@ bool tagged_underground(const tags_t &tags)
 	const auto tunnel = tag(tags, "tunnel");
 	const auto location = tag(tags, "location");
 	const auto depth = depth_key(tags);
-	return (!tunnel.empty() && tunnel != "no") || location == "underground" ||
+	// Match Rust's `is_some_and(|value| value != "no")`: tag presence, rather
+	// than a non-empty value, is what marks the platform as tunneled.
+	return (tags.contains("tunnel") && tunnel != "no") || location == "underground" ||
 		   (depth && *depth < 0);
 }
 
@@ -570,7 +572,7 @@ TrackBedIndex register_surface_platform_levels(WorldEditor &editor,
 		const auto level = railways::track_level(way);
 		if (!level)
 			continue;
-		const auto cells = railways::track_cells(way);
+		const auto cells = railways::track_cells(way).cells;
 		if (cells.empty())
 			continue;
 		const auto *deck = bridge_structures.rail_deck(way.id);
@@ -833,7 +835,7 @@ void render_surface_platforms(WorldEditor &editor, const std::vector<Platform> &
 		const auto level = railways::track_level(way);
 		if (!level)
 			continue;
-		const auto cells = railways::track_cells(way);
+		const auto cells = railways::track_cells(way).cells;
 		if (cells.empty())
 			continue;
 		const auto *deck = bridge_structures.rail_deck(way.id);
@@ -1269,7 +1271,7 @@ SparseCells surface_track_tree_clearance(const std::vector<ProcessedElement> &el
 		if (!level || *level != railways::TrackLevel::Surface)
 			continue;
 		const int reach = tag(way.tags, "railway") == "tram" ? 1 : TRACK_TREE_REACH;
-		for (const auto &[x, z] : railways::track_cells(way))
+		for (const auto &[x, z] : railways::track_cells(way).cells)
 			result.set_square(x, z, reach);
 	}
 	// Rust's StationIndex::build also keeps trees off the station platform
@@ -1298,7 +1300,7 @@ TrackBedIndex surface_track_beds(const std::vector<ProcessedElement> &elements,
 		if (!level || *level != railways::TrackLevel::Surface ||
 				bridge_structures.rail_deck(way.id))
 			continue;
-		const auto cells = railways::track_cells(way);
+		const auto cells = railways::track_cells(way).cells;
 		if (cells.empty())
 			continue;
 		for (std::size_t i = 0; i < cells.size(); ++i) {
@@ -1442,7 +1444,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 		const auto level = railways::track_level(way);
 		if (!level)
 			continue;
-		const auto cells = railways::track_cells(way);
+		const auto cells = railways::track_cells(way).cells;
 		if (cells.empty())
 			continue;
 		if (*level == railways::TrackLevel::Tunnel &&
@@ -2290,21 +2292,40 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 				const int floor = hall.floor;
 				const int walk = floor + HALL_HEIGHT;
 				const int roof = walk + WALK_HEIGHT;
-				const int street = surface_at(entry.first, entry.second);
+				// Rust memoizes these per entrance route. Candidate stairs and walks
+				// probe the same columns many times; keep terrain/floor-state reads
+				// bounded by the distinct cells rather than route combinations.
+				std::unordered_map<Xz, int, XzHash> surface_cache;
+				const auto surface = [&](Xz cell) {
+					const auto [it, inserted] = surface_cache.try_emplace(cell, 0);
+					if (inserted)
+						it->second = surface_at(cell.first, cell.second);
+					return it->second;
+				};
+				const int street = surface(entry);
 				const int steps = street - walk - 1;
 				if (steps < 1)
 					continue;
+				std::unordered_map<Xz, bool, XzHash> free_cache;
 				const auto free = [&](Xz c) {
-					if (!bounds.contains(c.first, c.second) || taken.contains(c) ||
-							(tunnel_footprint.contains(c.first, c.second) &&
-									!hall.footprint.contains(c)))
-						return false;
-					if (const auto found = hall_cover.find(c); found != hall_cover.end())
-						for (const auto other : found->second)
-							if (other != best_hall &&
-									result.halls()[other].floor >= floor)
-								return false;
-					return true;
+					if (const auto found = free_cache.find(c); found != free_cache.end())
+						return found->second;
+					bool available = bounds.contains(c.first, c.second) &&
+									 !taken.contains(c) &&
+									 (!tunnel_footprint.contains(c.first, c.second) ||
+											 hall.footprint.contains(c));
+					if (available) {
+						if (const auto found = hall_cover.find(c);
+								found != hall_cover.end())
+							for (const auto other : found->second)
+								if (other != best_hall &&
+										result.halls()[other].floor >= floor) {
+									available = false;
+									break;
+								}
+					}
+					free_cache.emplace(c, available);
+					return available;
 				};
 				const auto frame_x =
 						std::abs(hall.heading.first) >= std::abs(hall.heading.second)
@@ -2366,7 +2387,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 									fits = false;
 									break;
 								}
-								const int s = surface_at(c.first, c.second);
+								const int s = surface(c);
 								const int step = std::clamp(j, 1, steps);
 								const bool open = street - step + 4 > s - 1;
 								if (open && tree_clearance.contains(c.first, c.second)) {
@@ -2390,7 +2411,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 									!fenced.contains(c) && !on_platform.contains(c) &&
 									!taken.contains(c);
 							if (entry_clear)
-								entry_clear = surface_at(c.first, c.second) <= street;
+								entry_clear = surface(c) <= street;
 						}
 						if (entry_clear)
 							street_flights.push_back({e, q, c0});
@@ -2460,8 +2481,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 						for (int dz = -2; dz <= 2 && path_clear; ++dz)
 							for (const auto &p : path) {
 								const Xz c{p.first + dx, p.second + dz};
-								if (!free(c) ||
-										surface_at(c.first, c.second) < roof + 1) {
+								if (!free(c) || surface(c) < roof + 1) {
 									path_clear = false;
 									break;
 								}
@@ -2472,7 +2492,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 					const int climb = facing_of({-sf.e.first, -sf.e.second});
 					const auto roof_at = [&](int j, Xz c) -> std::optional<int> {
 						const int y = street - j;
-						if (y + 4 < surface_at(c.first, c.second))
+						if (y + 4 < surface(c))
 							return y + 4;
 						return std::nullopt;
 					};
@@ -2692,9 +2712,23 @@ void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
 					GRAY_CONCRETE}},
 	}};
 	constexpr int hall_height = HALL_HEIGHT;
+	constexpr int crust = 3;
+	struct VoidRange
+	{
+		int x, z, lo, hi;
+		Block wall;
+	};
+	std::vector<VoidRange> voids;
 	const auto [x0, z0, x1, z1] = editor.bounds();
 	const auto overlaps = [=](const std::array<int, 4> &box) {
 		return box[0] <= x1 && box[2] >= x0 && box[1] <= z1 && box[3] >= z0;
+	};
+	const auto open_void = [&](int x, int z, int lo, int hi, Block wall) {
+		if (lo > hi || !editor.in_bounds(x, z))
+			return;
+		voids.push_back({x, z, lo, hi, wall});
+		for (int y = lo; y <= hi; ++y)
+			editor.set_block_absolute(LIGHT, x, y, z, std::nullopt, rails);
 	};
 	for (const auto &hall : index.halls()) {
 		if (!overlaps(hall.bbox))
@@ -2722,15 +2756,13 @@ void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
 				break;
 			case TunnelHallPart::Portal:
 				put(POLISHED_DEEPSLATE, floor);
-				for (int y = floor + 1; y <= floor + 4; ++y)
-					put(AIR, y);
+				open_void(x, z, floor + 1, floor + 4, style[0]);
 				put(style[0], floor + 5);
 				put(style[1], roof);
 				break;
 			case TunnelHallPart::Trackbed:
 				put(POLISHED_DEEPSLATE, floor);
-				for (int y = floor + 1; y < roof; ++y)
-					put(AIR, y);
+				open_void(x, z, floor + 1, roof - 1, style[0]);
 				put(cell.light ? SEA_LANTERN : style[1], roof);
 				break;
 			case TunnelHallPart::Platform:
@@ -2739,8 +2771,7 @@ void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
 						: cell.deck == TunnelHallDeck::Line ? WHITE_CONCRETE
 															: style[2],
 						floor + 1);
-				for (int y = floor + 2; y < roof; ++y)
-					put(AIR, y);
+				open_void(x, z, floor + 2, roof - 1, style[0]);
 				put(cell.light ? SEA_LANTERN : style[1], roof);
 				break;
 			}
@@ -2867,14 +2898,12 @@ void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
 	for (const auto &entrance : index.entrances()) {
 		if (!overlaps(entrance.bbox))
 			continue;
+		const auto &style = styles[entrance.style % styles.size()];
 		for (const auto &cell : entrance.cells) {
 			const int x = cell.x, z = cell.z;
 			if (!editor.in_bounds(x, z))
 				continue;
-			const auto clear = [&](int lo, int hi) {
-				for (int y = lo; y <= hi; ++y)
-					editor.set_block_absolute(AIR, x, y, z, std::nullopt, rails);
-			};
+			const auto clear = [&](int lo, int hi) { open_void(x, z, lo, hi, style[0]); };
 			switch (cell.part) {
 			case TunnelEntrancePart::Stair:
 				if (cell.has_top)
@@ -2905,6 +2934,28 @@ void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
 			}
 		}
 	}
+	// Rust seals the outside edge and caps of each open station volume up to
+	// three blocks below the local surface. Keep Rust's LIGHT sentinel until after
+	// sealing so later props and glass panes replace it and survive carving.
+	constexpr std::array<Xz, 4> neighbours{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+	for (const auto &v : voids) {
+		for (const auto &[dx, dz] : neighbours) {
+			const int nx = v.x + dx, nz = v.z + dz;
+			if (!editor.in_bounds(nx, nz))
+				continue;
+			const int top = std::min(v.hi, editor.get_ground_level(nx, nz) - crust);
+			for (int y = v.lo; y <= top; ++y)
+				editor.set_block_absolute(v.wall, nx, y, nz);
+		}
+		const int top = editor.get_ground_level(v.x, v.z) - crust;
+		for (const int y : {v.lo - 1, v.hi + 1})
+			if (y <= top)
+				editor.set_block_absolute(v.wall, v.x, y, v.z);
+	}
+	for (const auto &v : voids)
+		for (int y = v.lo; y <= v.hi; ++y)
+			if (editor.get_block_absolute(v.x, y, v.z) == LIGHT)
+				editor.set_block_absolute(AIR, v.x, y, v.z, std::nullopt, rails);
 }
 
 } // namespace arnis::stations
