@@ -434,8 +434,8 @@ ProcessedElevationData fetch_elevation_data(Selector &selector,
 	// Rust gates Earth-specific outlier and anomaly repair from SourceMode itself.
 	// Keep the explicit C++ opt-out for callers, but never apply those repairs to
 	// planetary DEMs even if an embedding caller accidentally leaves it enabled.
-	const bool repair_earth = apply_earth_repairs &&
-							  providers::allows_earth_fallback(selector.source_mode());
+	const bool repair_earth =
+			apply_earth_repairs && selector.source_mode().allows_earth_fallback();
 	auto out = process_elevation_data(bbox, std::move(raw), scale, height_multiplier,
 			ground_level, min_ground_level, disable_height_limit, extended_max_y,
 			repair_earth, land_cover, affine, progress, std::move(terrain_hints),

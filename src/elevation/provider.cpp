@@ -47,22 +47,23 @@ RawElevationGrid PlanetaryElevationProvider::fetch_raw(
 }
 
 std::unique_ptr<ElevationProvider> select_provider(const geographic::LLBBox &bbox,
-		providers::SourceMode mode, const std::filesystem::path &cache_root,
-		std::optional<CelestialBody> body)
+		providers::SourceMode mode, const std::filesystem::path &cache_root)
 {
 	// Mapterhorn is currently global. Keep bbox in the selector contract so a
 	// future regional provider can use it without changing the generation API.
 	(void)bbox;
-	switch (mode) {
-	case providers::SourceMode::AwsOnly:
+	switch (mode.kind()) {
+	case providers::SourceMode::Kind::AwsOnly:
+		std::cout << "Using AWS Terrain Tiles only (legacy mode, ~30m resolution)\n";
 		return std::make_unique<AwsElevationProvider>(cache_root);
-	case providers::SourceMode::Planetary:
-		if (!body)
+	case providers::SourceMode::Kind::Planetary:
+		if (!mode.body())
 			throw std::invalid_argument(
 					"Planetary elevation mode requires a celestial body");
-		return std::make_unique<PlanetaryElevationProvider>(*body, cache_root);
-	case providers::SourceMode::Auto:
-	case providers::SourceMode::GlobalOnly:
+		return std::make_unique<PlanetaryElevationProvider>(*mode.body(), cache_root);
+	case providers::SourceMode::Kind::Auto:
+		std::cout
+				<< "Using Mapterhorn terrain tiles (global; high-res where available)\n";
 		return std::make_unique<MapterhornElevationProvider>(cache_root);
 	}
 	throw std::invalid_argument("unknown elevation source mode");
@@ -332,7 +333,7 @@ ElevationData build_processed_grid(const std::vector<Tile> &tiles, double a, dou
 					 : 0.0;
 	// Rust applies these Earth-calibrated filters only when the source mode can
 	// fall back to Earth DEMs; MAD repair otherwise erases real planetary relief.
-	if (providers::allows_earth_fallback(mode)) {
+	if (mode.allows_earth_fallback()) {
 		// Filters must see missing samples as NaN, before gap fill creates values.
 		filter_elevation_outliers(out.heights);
 		repair_terrain_anomalies(out.heights, meters_per_cell);

@@ -1534,17 +1534,11 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 						? false
 						: tunnel_count * 2 > static_cast<std::ptrdiff_t>(adjacent.size());
 		if (!underground) {
-			std::unordered_set<Xz, XzHash> bed_zone;
-			for (const auto &[key, track] : adjacent) {
-				if (track.tunnel)
-					continue;
-				for (int dx = -1; dx <= 1; ++dx)
-					for (int dz = -1; dz <= 1; ++dz)
-						bed_zone.emplace(track.x + dx, track.z + dz);
-			}
+			// Rust's StationIndex::build records the complete surface footprint
+			// for both tree clearance and catenary-mast avoidance, including cells
+			// directly over the track bed.
 			for (const auto &cell : platform_cells)
-				if (!bed_zone.contains(cell))
-					result.set_platform_cell(cell.first, cell.second);
+				result.set_platform_cell(cell.first, cell.second);
 			continue;
 		}
 		if (!allow_underground)
@@ -2698,7 +2692,8 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 	return result;
 }
 
-void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
+std::vector<StationVoid> render_underground_halls(
+		WorldEditor &editor, const TunnelPinIndex &index)
 {
 	static const std::vector<Block> rails{RAIL, RAIL_NORTH_SOUTH, RAIL_EAST_WEST,
 			RAIL_ASCENDING_EAST, RAIL_ASCENDING_WEST, RAIL_ASCENDING_NORTH,
@@ -2952,6 +2947,19 @@ void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index)
 			if (y <= top)
 				editor.set_block_absolute(v.wall, v.x, y, v.z);
 	}
+	std::vector<StationVoid> reserved;
+	reserved.reserve(voids.size());
+	for (const auto &v : voids)
+		reserved.push_back({v.x, v.z, v.lo, v.hi});
+	return reserved;
+}
+
+void clear_underground_voids(WorldEditor &editor, const std::vector<StationVoid> &voids)
+{
+	static const std::vector<Block> rails{RAIL, RAIL_NORTH_SOUTH, RAIL_EAST_WEST,
+			RAIL_ASCENDING_EAST, RAIL_ASCENDING_WEST, RAIL_ASCENDING_NORTH,
+			RAIL_ASCENDING_SOUTH, RAIL_NORTH_EAST, RAIL_NORTH_WEST, RAIL_SOUTH_EAST,
+			RAIL_SOUTH_WEST};
 	for (const auto &v : voids)
 		for (int y = v.lo; y <= v.hi; ++y)
 			if (editor.get_block_absolute(v.x, y, v.z) == LIGHT)

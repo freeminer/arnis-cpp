@@ -286,6 +286,14 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 		const CoordinateBitmap &tunnel_footprint,
 		const CoordinateBitmap &building_footprints, double scale,
 		bool allow_underground = true);
-void render_underground_halls(WorldEditor &editor, const TunnelPinIndex &index);
+struct StationVoid
+{
+	int x, z, lo, hi;
+};
+// Render the hall/entrance shell and reserve open volumes before terrain/cave
+// passes. Clear the returned reserved cells after those passes finish.
+std::vector<StationVoid> render_underground_halls(
+		WorldEditor &editor, const TunnelPinIndex &index);
+void clear_underground_voids(WorldEditor &editor, const std::vector<StationVoid> &voids);
 
 } // namespace arnis::stations

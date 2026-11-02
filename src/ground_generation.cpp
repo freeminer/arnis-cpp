@@ -391,7 +391,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const CoordinateBitmap *tunnel_footprint,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
 		double forest_fern_share, int tree_spacing, bool schematic_trees,
-		const field_texture::Plot *cropland_plot)
+		bool cropland_enabled, const field_texture::Plot *cropland_plot)
 {
 	const bool sealed = editor.surface_is_sealed(x, z);
 	if (editor.check_for_block_absolute(x, ground_y + 1, z))
@@ -455,7 +455,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 					double(land_cover::coord_hash(x ^ 0xfe, z ^ 0x4e) % 100) / 100.0;
 			place_decoration(fern_roll < forest_fern_share ? FERN : GRASS, ground_y + 1);
 		}
-	} else if (cover == land_cover::LC_CROPLAND) {
+	} else if (cover == land_cover::LC_CROPLAND && cropland_enabled) {
 		if (cropland_plot) {
 			if (ground_block) {
 				if (const auto cover = cropland_plot->cover(*ground_block, x, z))
@@ -463,12 +463,12 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			}
 			return;
 		}
-		const bool farmland =
-				editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND);
-		if (farmland && rng.uniform(76) == 0) {
+	} else if (cover == land_cover::LC_CROPLAND &&
+			   editor.check_for_block_type_absolute(x, ground_y, z, FARMLAND)) {
+		if (rng.uniform(76) == 0) {
 			if (rng.uniform(10) < 4)
 				place_decoration(HAY_BALE, ground_y + 1);
-		} else if (farmland) {
+		} else {
 			const auto crop_choice = rng.uniform(3);
 			const Block crop = crop_choice == 0	  ? WHEAT
 							   : crop_choice == 1 ? CARROTS
@@ -780,15 +780,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							editor.ground && editor.ground->has_land_cover();
 					const std::uint8_t cover_here =
 							has_cover ? editor.ground->cover_class(relative) : 0;
-					const auto rock =
-							editor.ground
-									? terrain_surface::rock_at(editor.ground->climate(),
-											  x, z,
-											  [&](int sx, int sz) {
-												  return editor.ground->ecoregion_at(
-														  editor.ground_point(sx, sz));
-											  })
-									: terrain_surface::Rock::Grey;
 					bool did_underfill = false;
 					// Authored stone is already a terrain surface except where snow or
 					// exposed bare ground needs the generated palette to replace it.
@@ -801,44 +792,6 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									(cover_here == land_cover::LC_BARE ||
 											cover_here == land_cover::LC_SNOW_ICE));
 					if (steep_override || !has_existing_stone) {
-						// Rust treats plausible ESA snow/ice cells as glacier even below the
-						// ordinary snow line. Compute this before choosing the base surface so
-						// the packed-ice substrate and the later snow cap use the same verdict.
-						double snow_depth = snow_line.depth(x, z, ground_y);
-						const bool glacier =
-								!planetary &&
-								terrain_surface::is_glacier_cover(cover_here) &&
-								editor.ground &&
-								terrain_surface::is_plausible_ice(
-										snow_depth, editor.ground->climate());
-						if (glacier)
-							snow_depth = terrain_surface::glacier_depth(snow_depth);
-						auto snow = terrain_surface::Snow::none();
-						if (!planetary && editor.ground &&
-								snow_depth >= terrain_surface::SNOW_MIN_DEPTH) {
-							snow = terrain_surface::snow_cover(
-									snow_depth, slope_f,
-									[&] { return editor.ground->convexity(relative); },
-									snow_line.shade(
-											gradient.first, gradient.second, slope_f),
-									x, z);
-						}
-						std::optional<Block> natural_snow_surface;
-						std::optional<std::pair<Block, Block>> talus_block;
-						if (terrain_enabled && !planetary && editor.ground &&
-								slope <= 6 && terrain_surface::takes_talus(cover_here)) {
-							if (!talus_checked) {
-								talus_field = terrain_surface::TalusField::build(
-										*editor.ground, chunk_x, chunk_z, xzbbox.min_x(),
-										xzbbox.min_z());
-								talus_checked = true;
-							}
-							if (talus_field)
-								talus_block = terrain_surface::talus_palette(x, z,
-										talus_field->near_(x, z,
-												editor.ground->level_exact(relative)),
-										cover_here, rock);
-						}
 						const bool blend_is_water =
 								has_cover &&
 								editor.ground->water_blend_is_water(relative);
@@ -898,7 +851,57 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										under, x, water_y - 2, z);
 							water_columns.forget(x, z);
 						} else {
-
+							// Rust resolves snow and ecoregion terrain only after the ESA/OSM
+							// water decision, so water columns skip these surface calculations.
+							double snow_depth = snow_line.depth(x, z, ground_y);
+							const bool glacier =
+									!planetary &&
+									terrain_surface::is_glacier_cover(cover_here) &&
+									editor.ground &&
+									terrain_surface::is_plausible_ice(
+											snow_depth, editor.ground->climate());
+							if (glacier)
+								snow_depth = terrain_surface::glacier_depth(snow_depth);
+							auto snow = terrain_surface::Snow::none();
+							if (!planetary && editor.ground &&
+									snow_depth >= terrain_surface::SNOW_MIN_DEPTH) {
+								snow = terrain_surface::snow_cover(
+										snow_depth, slope_f,
+										[&] {
+											return editor.ground->convexity(relative);
+										},
+										snow_line.shade(
+												gradient.first, gradient.second, slope_f),
+										x, z);
+							}
+							std::optional<Block> natural_snow_surface;
+							// Rust only resolves the ecoregion palette for non-water columns.
+							const auto rock =
+									editor.ground
+											? terrain_surface::rock_at(
+													  editor.ground->climate(), x, z,
+													  [&](int sx, int sz) {
+														  return editor.ground->ecoregion_at(
+																  editor.ground_point(
+																		  sx, sz));
+													  })
+											: terrain_surface::Rock::Grey;
+							std::optional<std::pair<Block, Block>> talus_block;
+							if (terrain_enabled && !planetary && editor.ground &&
+									slope <= 6 &&
+									terrain_surface::takes_talus(cover_here)) {
+								if (!talus_checked) {
+									talus_field = terrain_surface::TalusField::build(
+											*editor.ground, chunk_x, chunk_z,
+											xzbbox.min_x(), xzbbox.min_z());
+									talus_checked = true;
+								}
+								if (talus_field)
+									talus_block = terrain_surface::talus_palette(x, z,
+											talus_field->near_(x, z,
+													editor.ground->level_exact(relative)),
+											cover_here, rock);
+							}
 							// Rust computes the natural under-material even when an authored
 							// surface already occupies the cell; its absent-only setter protects
 							// that surface while the selected under-block still closes the terrain.
@@ -1079,6 +1082,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 										xzbbox.min_z(), tunnel_footprint, bridge_surface,
 										args.scale, slope, forest_fern_share,
 										tree_spacing, schematic_trees,
+										cropland.has_value(),
 										cropland_plot ? &cropland_plot->first : nullptr);
 						}
 					}

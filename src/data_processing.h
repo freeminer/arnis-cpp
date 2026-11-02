@@ -59,11 +59,6 @@ struct PreparedBuildingData
 
 PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &elements);
 
-// Remove generated building footprints occupying aircraft pavement before
-// flood-fill and prepared-building caches are constructed.
-std::size_t drop_buildings_on_aircraft_pavement(
-		std::vector<ProcessedElement> &elements, double scale);
-
 struct GenerationOptions
 {
 	WorldFormat format = WorldFormat::JavaAnvil;

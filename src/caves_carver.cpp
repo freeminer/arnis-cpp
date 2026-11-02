@@ -416,7 +416,9 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 	};
 	const auto expanded = region.grow(radius + 1).clip(world_bounds);
 	const auto [cx0, cx1, cz0, cz1] = expanded.chunks();
-	const std::vector<Block> bedrock{BEDROCK};
+	// Rust places geodes over any existing block except bedrock. Tunnel and
+	// station columns are protected at candidate selection by keep_out above.
+	static const std::optional<std::vector<Block>> bedrock{std::vector<Block>{BEDROCK}};
 	// Decide every center before writing any geode. Rust tests a candidate
 	// against CaveShape/WaterPlan, not against shells or hollows from geodes
 	// encountered earlier in this region; the shared shape and water plan keep

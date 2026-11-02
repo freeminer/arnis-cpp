@@ -68,7 +68,7 @@ const std::array<Family, 10> &membrane_families()
 	return families;
 }
 
-std::uint64_t hash2(std::uint64_t seed, std::int32_t a, std::int32_t b)
+std::uint64_t hash2_impl(std::uint64_t seed, std::int32_t a, std::int32_t b)
 {
 	std::uint64_t h =
 			seed ^
@@ -90,7 +90,7 @@ double value_noise(std::uint64_t seed, std::int32_t x, std::int32_t z, int cell)
 	const double fx = static_cast<double>(rx) / cell;
 	const double fz = static_cast<double>(rz) / cell;
 	const auto corner = [&](int i, int j) {
-		return static_cast<double>(hash2(seed, gx + i, gz + j) >> 11) /
+		return static_cast<double>(hash2_impl(seed, gx + i, gz + j) >> 11) /
 			   static_cast<double>(std::uint64_t{1} << 53);
 	};
 	const auto ease = [](double t) { return t * t * (3.0 - 2.0 * t); };
@@ -493,6 +493,11 @@ std::size_t lay_row(RoofDeck &deck, std::pair<int, int> start,
 }
 
 } // namespace
+
+std::uint64_t hash2(std::uint64_t seed, std::int32_t a, std::int32_t b)
+{
+	return hash2_impl(seed, a, b);
+}
 
 int RoofDistanceGrid::get(int x, int z) const
 {

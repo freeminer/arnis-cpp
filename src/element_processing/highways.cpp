@@ -2565,5 +2565,157 @@ crate::CoordinateBitmap collect_building_passage_coords(
 	}
 	return bitmap;
 }
+
+namespace
+{
+
+struct AircraftStripSegment
+{
+	double ax, az, bx, bz, half;
+
+	bool contains(double x, double z) const
+	{
+		const double dx = bx - ax, dz = bz - az;
+		const double length_squared = dx * dx + dz * dz;
+		const double t =
+				length_squared > 0.0
+						? std::clamp(((x - ax) * dx + (z - az) * dz) / length_squared,
+								  0.0, 1.0)
+						: 0.0;
+		const double px = ax + t * dx - x, pz = az + t * dz - z;
+		return px * px + pz * pz <= half * half;
+	}
+};
+
+void append_aircraft_strip_segments(std::vector<AircraftStripSegment> &segments,
+		const ProcessedWay &way, double scale)
+{
+	const auto width_metres = parse_width_tag_m(way.tags);
+	const double half_metres =
+			width_metres ? std::clamp(*width_metres * 0.5, 6.0, 40.0) : 12.0;
+	const double half = std::max(1.0, std::round(half_metres * scale));
+	for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+		const auto &a = way.nodes[i - 1];
+		const auto &b = way.nodes[i];
+		segments.push_back({static_cast<double>(a.x), static_cast<double>(a.z),
+				static_cast<double>(b.x), static_cast<double>(b.z), half});
+	}
+}
+
+bool aircraft_area_contains(
+		const std::vector<std::pair<int, int>> &ring, double x, double z)
+{
+	bool inside = false;
+	for (std::size_t i = 1; i < ring.size(); ++i) {
+		const auto &[x1i, z1i] = ring[i - 1];
+		const auto &[x2i, z2i] = ring[i];
+		const double x1 = x1i, z1 = z1i, x2 = x2i, z2 = z2i;
+		if ((z1 > z) != (z2 > z) && x < x1 + (z - z1) * (x2 - x1) / (z2 - z1))
+			inside = !inside;
+	}
+	return inside;
+}
+
+} // namespace
+
+std::size_t drop_buildings_on_aircraft_pavement(
+		const std::vector<ProcessedElement> &elements,
+		std::vector<ProcessedElement> &filtered_elements, double scale)
+{
+	std::vector<AircraftStripSegment> runways, taxiways;
+	std::vector<std::vector<std::pair<int, int>>> runway_areas, aprons;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto aeroway = way.tags.get("aeroway");
+		const auto area_kind = aeroway_area_kind(way);
+		auto ring = [&] {
+			std::vector<std::pair<int, int>> points;
+			points.reserve(way.nodes.size());
+			for (const auto &node : way.nodes)
+				points.emplace_back(node.x, node.z);
+			return points;
+		};
+		if (area_kind == AerowayAreaKind::Runway) {
+			runway_areas.push_back(ring());
+		} else if (area_kind == AerowayAreaKind::Apron) {
+			aprons.push_back(ring());
+		} else if (aeroway == "runway" || aeroway == "stopway") {
+			append_aircraft_strip_segments(runways, way, scale);
+		} else if (aeroway == "taxiway") {
+			append_aircraft_strip_segments(taxiways, way, scale);
+		}
+	}
+	if (runways.empty() && taxiways.empty() && runway_areas.empty() && aprons.empty())
+		return 0;
+
+	double min_x = std::numeric_limits<double>::max();
+	double min_z = std::numeric_limits<double>::max();
+	double max_x = std::numeric_limits<double>::lowest();
+	double max_z = std::numeric_limits<double>::lowest();
+	for (const auto &strip : runways) {
+		min_x = std::min(min_x, std::min(strip.ax, strip.bx) - strip.half);
+		max_x = std::max(max_x, std::max(strip.ax, strip.bx) + strip.half);
+		min_z = std::min(min_z, std::min(strip.az, strip.bz) - strip.half);
+		max_z = std::max(max_z, std::max(strip.az, strip.bz) + strip.half);
+	}
+	for (const auto &strip : taxiways) {
+		min_x = std::min(min_x, std::min(strip.ax, strip.bx) - strip.half);
+		max_x = std::max(max_x, std::max(strip.ax, strip.bx) + strip.half);
+		min_z = std::min(min_z, std::min(strip.az, strip.bz) - strip.half);
+		max_z = std::max(max_z, std::max(strip.az, strip.bz) + strip.half);
+	}
+	for (const auto *areas : {&runway_areas, &aprons})
+		for (const auto &area : *areas)
+			for (const auto &[x, z] : area) {
+				min_x = std::min(min_x, static_cast<double>(x));
+				max_x = std::max(max_x, static_cast<double>(x));
+				min_z = std::min(min_z, static_cast<double>(z));
+				max_z = std::max(max_z, static_cast<double>(z));
+			}
+
+	auto should_drop = [&](const ProcessedElement &element) {
+		if (!element.is_way())
+			return false;
+		const auto &way = element.as_way();
+		if (way.nodes.size() < 3 ||
+				(!way.tags.contains("building") && !way.tags.contains("building:part")))
+			return false;
+		double cx = 0.0, cz = 0.0;
+		for (const auto &node : way.nodes) {
+			cx += node.x;
+			cz += node.z;
+		}
+		cx /= way.nodes.size();
+		cz /= way.nodes.size();
+		if (cx < min_x || cx > max_x || cz < min_z || cz > max_z)
+			return false;
+		if (std::any_of(runways.begin(), runways.end(),
+					[&](const auto &strip) { return strip.contains(cx, cz); }) ||
+				std::any_of(
+						runway_areas.begin(), runway_areas.end(), [&](const auto &area) {
+							return aircraft_area_contains(area, cx, cz);
+						}))
+			return true;
+		const bool traced_overture = way.tags.get("source") == "overture_maps";
+		return traced_overture &&
+			   (std::any_of(taxiways.begin(), taxiways.end(), [&](const auto &strip) {
+				   return strip.contains(cx, cz);
+			   }) || std::any_of(aprons.begin(), aprons.end(), [&](const auto &area) {
+				   return aircraft_area_contains(area, cx, cz);
+			   }));
+	};
+	if (std::none_of(elements.begin(), elements.end(), should_drop))
+		return 0;
+	auto candidate_elements = elements;
+	const auto before = candidate_elements.size();
+	candidate_elements.erase(std::remove_if(candidate_elements.begin(),
+									 candidate_elements.end(), should_drop),
+			candidate_elements.end());
+	const auto dropped = before - candidate_elements.size();
+	filtered_elements = std::move(candidate_elements);
+	return dropped;
+}
 }
 }

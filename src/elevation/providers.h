@@ -28,23 +28,38 @@ struct GeoBBox
 std::pair<double, double> bbox_dimensions_m(const GeoBBox &);
 bool bboxes_overlap(const GeoBBox &, const GeoBBox &);
 bool usgs_3dep_covers(const GeoBBox &);
-enum class SourceMode
+struct SourceMode
 {
-	Auto,
-	GlobalOnly,
-	AwsOnly,
-	// Non-terrestrial DEMs are fetched by planetary.cpp.  Keeping this mode in
-	// the common selector prevents an accidental Earth-provider fallback when a
-	// caller is generating a Moon or Mars world.
-	Planetary
+	enum class Kind
+	{
+		Auto,
+		AwsOnly,
+		// Non-terrestrial DEMs are fetched by planetary.cpp.  Keeping this mode in
+		// the common selector prevents an accidental Earth-provider fallback when a
+		// caller is generating a Moon or Mars world.
+		Planetary
+	};
+
+private:
+	Kind kind_{Kind::Auto};
+	std::optional<CelestialBody> body_;
+
+	SourceMode(Kind kind, std::optional<CelestialBody> body) : kind_(kind), body_(body) {}
+
+public:
+	SourceMode() = default;
+	bool operator==(const SourceMode &) const = default;
+
+	static SourceMode Auto() { return {}; }
+	static SourceMode AwsOnly() { return {Kind::AwsOnly, std::nullopt}; }
+	static SourceMode Planetary(CelestialBody body) { return {Kind::Planetary, body}; }
+	constexpr Kind kind() const { return kind_; }
+	const std::optional<CelestialBody> &body() const { return body_; }
+	constexpr bool allows_earth_fallback() const { return kind_ != Kind::Planetary; }
 };
-constexpr bool allows_earth_fallback(SourceMode mode)
-{
-	return mode != SourceMode::Planetary;
-}
 // Ordered fetch plan.  Auto deliberately exposes both the regional primary
 // and global fallbacks, mirroring Rust's fetch-time fallback chain.
-std::vector<Source> select_sources(const GeoBBox &, SourceMode = SourceMode::Auto);
+std::vector<Source> select_sources(const GeoBBox &, SourceMode = SourceMode::Auto());
 constexpr double MERCATOR_LIMIT = 20037508.342789244;
 constexpr double MERCATOR_LAT_LIMIT = 85.05112878;
 constexpr double MERCATOR_RADIUS_M = 6378137.0;
@@ -144,7 +159,7 @@ std::string mapterhorn_url(double lat, double lon);
 bool download_tile(const std::string &url, const std::filesystem::path &file,
 		std::uint64_t minimum_bytes = 1024);
 bool fetch_with_fallback(int lat, int lon, const std::filesystem::path &file,
-		SourceMode mode = SourceMode::Auto);
+		SourceMode mode = SourceMode::Auto());
 void set_download_retries(unsigned retries);
 void enable_aws(bool enabled);
 void enable_mapterhorn(bool enabled);
@@ -164,7 +179,7 @@ enum class Source
 	None
 };
 Source select_source(int lat, int lon, const std::filesystem::path &file,
-		SourceMode mode = SourceMode::Auto);
+		SourceMode mode = SourceMode::Auto());
 const char *source_name(Source);
 struct ProviderStats
 {

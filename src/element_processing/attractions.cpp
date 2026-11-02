@@ -763,8 +763,10 @@ void draw_bumper_cars(WorldEditor &e, const Site &s, const OwnCells &own,
 		const BuildingFootprintBitmap &fp, const RoadMaskBitmap &roads,
 		std::uint64_t seed, Block main, Block accent)
 {
-	Cells cells = s.cells;
-	if (cells.size() < 30) {
+	Cells cells;
+	if (s.cells.size() >= 30) {
+		cells = s.cells;
+	} else {
 		const auto f = structure_kit::Frame::from_heading(s.x, s.z, s.ux, s.uz);
 		for (const auto &c : f.cells(-8, 8, -5, 5))
 			cells.emplace_back(c.x, c.z);
@@ -902,6 +904,64 @@ bool replaces_parts(const tags_t &tags)
 {
 	auto r = kind(tags);
 	return r && *r != Ride::Spinner;
+}
+
+std::unordered_set<std::uint64_t> building_parts_to_suppress(
+		const std::vector<ProcessedElement> &elements)
+{
+	using Point = std::pair<double, double>;
+	std::vector<std::vector<Point>> outlines;
+	for (const auto &element : elements) {
+		if (!element.is_way() || !replaces_parts(element.tags()))
+			continue;
+		const auto &nodes = element.as_way().nodes;
+		if (nodes.size() < 4)
+			continue;
+		auto &ring = outlines.emplace_back();
+		ring.reserve(nodes.size());
+		for (const auto &node : nodes)
+			ring.emplace_back(node.x + 0.5, node.z + 0.5);
+	}
+	if (outlines.empty())
+		return {};
+
+	const auto contains = [](double x, double z, const std::vector<Point> &ring) {
+		if (ring.size() < 3)
+			return false;
+		bool inside = false;
+		std::size_t j = ring.size() - 1;
+		for (std::size_t i = 0; i < ring.size(); ++i) {
+			const auto [xi, zi] = ring[i];
+			const auto [xj, zj] = ring[j];
+			if ((zi > z) != (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi)
+				inside = !inside;
+			j = i;
+		}
+		return inside;
+	};
+	std::unordered_set<std::uint64_t> suppressed;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto part = way.tags.get("building:part");
+		const bool is_no = part.size() == 2 && (part[0] == 'n' || part[0] == 'N') &&
+						   (part[1] == 'o' || part[1] == 'O');
+		if (!way.tags.contains("building:part") || is_no || claims(way.tags) ||
+				way.nodes.empty())
+			continue;
+		double x = 0.0, z = 0.0;
+		for (const auto &node : way.nodes) {
+			x += node.x + 0.5;
+			z += node.z + 0.5;
+		}
+		x /= way.nodes.size();
+		z /= way.nodes.size();
+		if (std::any_of(outlines.begin(), outlines.end(),
+					[&](const auto &ring) { return contains(x, z, ring); }))
+			suppressed.insert(way.id);
+	}
+	return suppressed;
 }
 
 bool generate_ride(WorldEditor &editor, const ProcessedElement &e,

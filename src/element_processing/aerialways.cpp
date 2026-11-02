@@ -20,6 +20,7 @@
 #include <set>
 #include <sstream>
 #include <string_view>
+#include <variant>
 
 namespace arnis::aerialways
 {
@@ -123,8 +124,83 @@ struct Support
 	bool inferred = false;
 };
 
-struct RopeSpec
+struct ChairCarrier
 {
+	int half{};
+	bool bubble{};
+};
+
+struct CabinCarrier
+{
+	int half_w{};
+	int half_l{};
+};
+
+struct TramCarrier
+{
+	int half_w{};
+	int half_l{};
+};
+
+struct BarCarrier
+{
+	int half{};
+};
+
+struct JBarCarrier
+{
+};
+
+struct PlatterCarrier
+{
+};
+
+struct BucketCarrier
+{
+};
+
+using Carrier = std::variant<ChairCarrier, CabinCarrier, TramCarrier, BarCarrier,
+		JBarCarrier, PlatterCarrier, BucketCarrier>;
+
+struct CarrierShape
+{
+	Kind kind{};
+	int half_w{};
+	int half_l{};
+	bool bubble{};
+};
+
+CarrierShape carrier_shape(const Carrier &carrier, Kind line_kind)
+{
+	if (const auto *chair = std::get_if<ChairCarrier>(&carrier))
+		return {Kind::Chair, chair->half, 0, chair->bubble};
+	if (const auto *cabin = std::get_if<CabinCarrier>(&carrier))
+		return {line_kind == Kind::Mixed ? Kind::Mixed : Kind::Gondola, cabin->half_w,
+				cabin->half_l, false};
+	if (const auto *tram = std::get_if<TramCarrier>(&carrier))
+		return {Kind::CableCar, tram->half_w, tram->half_l, false};
+	if (const auto *bar = std::get_if<BarCarrier>(&carrier))
+		return {Kind::TBar, bar->half, 0, false};
+	if (std::holds_alternative<JBarCarrier>(carrier))
+		return {Kind::JBar, 0, 0, false};
+	if (std::holds_alternative<PlatterCarrier>(carrier))
+		return {Kind::Platter, 0, 0, false};
+	return {Kind::Goods, 0, 0, false};
+}
+
+enum class Terminal
+{
+	Open,
+	Housing,
+	Hall,
+	Post,
+	Platform,
+};
+
+struct Spec
+{
+	Kind kind = Kind::Gondola;
+	double gauge = 6.0;
 	double station_rope = 5.5;
 	double pylon_rope = 9.0;
 	double min_rope = 6.0;
@@ -133,35 +209,160 @@ struct RopeSpec
 	double clearance = 2.0;
 	double sag = 0.015;
 	double spacing = 70.0;
+	double gap = 12.0;
+	std::optional<Carrier> carrier;
+	std::optional<Carrier> alternate;
+	Terminal terminal = Terminal::Open;
+	double terminal_len = 0.0;
+
+	double mouth() const
+	{
+		switch (terminal) {
+		case Terminal::Housing:
+		case Terminal::Hall:
+			return terminal_len / 2.0;
+		case Terminal::Open:
+			return gauge / 2.0;
+		case Terminal::Post:
+		case Terminal::Platform:
+			return 0.0;
+		}
+		return 0.0;
+	}
 };
 
-double rope_gauge(Kind kind, const tags_t &tags);
-double terminal_mouth(Kind kind, const tags_t &tags);
+int occupancy(const tags_t &tags, int fallback);
+bool chair_detachable(const tags_t &tags, int seats);
 
-RopeSpec rope_spec(Kind kind)
+Spec spec_for(Kind kind, const tags_t &tags)
 {
+	Spec spec;
+	spec.kind = kind;
+	const int default_seats = kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8);
+	const int seats = occupancy(tags, default_seats);
 	switch (kind) {
-	case Kind::CableCar:
-		return {8.5, 30.0, 14.0, 90.0, 8.5, 6.0, 0.02, 0.0};
+	case Kind::CableCar: {
+		const int half_w = seats > 110 ? 3 : 2;
+		const int half_l = seats <= 40 ? 2 : (seats <= 110 ? 3 : 4);
+		spec.gauge = 2.0 * half_w + 1.0 + 5.0;
+		spec.carrier = TramCarrier{half_w, half_l};
+		spec.terminal = Terminal::Hall;
+		spec.terminal_len = 16.0;
+		spec.station_rope = 8.5;
+		spec.pylon_rope = 30.0;
+		spec.min_rope = 14.0;
+		spec.max_rope = 90.0;
+		spec.hang = 8.5;
+		spec.clearance = 6.0;
+		spec.sag = 0.02;
+		spec.spacing = 0.0;
+		spec.gap = 0.0;
+	} break;
 	case Kind::Gondola:
-	case Kind::Mixed:
-		return {6.5, 13.0, 9.0, 45.0, 6.5, 3.0, 0.015, 110.0};
+	case Kind::Mixed: {
+		const int half_w = seats <= 10 ? 1 : (seats <= 20 ? 1 : 2);
+		const int half_l = seats <= 10 ? 1 : (seats <= 20 ? 2 : 2);
+		const bool mixed = kind == Kind::Mixed;
+		spec.gauge = (mixed ? 5.0 : 2.0 * half_w + 1.0) + 3.0;
+		spec.carrier = CabinCarrier{half_w, half_l};
+		if (mixed)
+			spec.alternate = ChairCarrier{2, true};
+		spec.terminal = Terminal::Housing;
+		spec.terminal_len = 18.0;
+		spec.station_rope = 6.5;
+		spec.pylon_rope = 13.0;
+		spec.min_rope = 9.0;
+		spec.max_rope = 45.0;
+		spec.hang = 6.5;
+		spec.clearance = 3.0;
+		spec.sag = 0.015;
+		spec.spacing = 110.0;
+		spec.gap = mixed ? 45.0 : (half_w > 1 ? 80.0 : 54.0);
+	} break;
 	case Kind::TBar:
 	case Kind::JBar:
 	case Kind::Platter:
-		return {6.5, 6.5, 5.0, 11.0, 4.5, 1.0, 0.01, 55.0};
+		spec.gauge = 3.0;
+		spec.station_rope = 6.5;
+		spec.pylon_rope = 6.5;
+		spec.min_rope = 5.0;
+		spec.max_rope = 11.0;
+		spec.hang = 4.5;
+		spec.clearance = 1.0;
+		spec.sag = 0.01;
+		spec.spacing = 55.0;
+		spec.gap = kind == Kind::Platter ? 10.0 : 12.0;
+		if (kind == Kind::TBar)
+			spec.carrier = BarCarrier{1};
+		else if (kind == Kind::JBar)
+			spec.carrier = JBarCarrier{};
+		else
+			spec.carrier = PlatterCarrier{};
+		break;
 	case Kind::RopeTow:
-		return {1.3, 1.3, 1.1, 2.0, 0.0, 0.2, 0.0, 20.0};
+		spec.gauge = 2.0;
+		spec.station_rope = 1.3;
+		spec.pylon_rope = 1.3;
+		spec.min_rope = 1.1;
+		spec.max_rope = 2.0;
+		spec.hang = 0.0;
+		spec.clearance = 0.2;
+		spec.sag = 0.0;
+		spec.spacing = 20.0;
+		spec.terminal = Terminal::Post;
+		break;
 	case Kind::Goods:
-		return {4.5, 10.0, 5.0, 30.0, 2.5, 2.0, 0.015, 120.0};
+		spec.gauge = 3.0;
+		spec.station_rope = 4.5;
+		spec.pylon_rope = 10.0;
+		spec.min_rope = 5.0;
+		spec.max_rope = 30.0;
+		spec.hang = 2.5;
+		spec.clearance = 2.0;
+		spec.sag = 0.015;
+		spec.spacing = 120.0;
+		spec.gap = 30.0;
+		spec.carrier = BucketCarrier{};
+		break;
 	case Kind::ZipLine:
-		return {10.5, 10.5, 2.0, 10.5, 0.0, 0.0, 0.02, 0.0};
-	case Kind::Chair:
-		return {};
 	case Kind::MagicCarpet:
-		return {};
+		spec.gauge = 0.0;
+		spec.station_rope = 10.5;
+		spec.pylon_rope = 10.5;
+		spec.min_rope = 2.0;
+		spec.max_rope = 10.5;
+		spec.hang = 0.0;
+		spec.clearance = 0.0;
+		spec.sag = 0.02;
+		spec.spacing = 0.0;
+		spec.gap = 0.0;
+		spec.terminal = Terminal::Platform;
+		break;
+	case Kind::Chair: {
+		const int half = seats == 1 ? 0 : (seats <= 4 ? 1 : 2);
+		const bool bubble =
+				tags.contains("aerialway:bubble") && tags.at("aerialway:bubble") == "yes";
+		const bool detachable = chair_detachable(tags, seats);
+		spec.gauge = (2.0 * half + 1.0) + 3.0;
+		spec.gap = detachable ? 36.0 : 18.0;
+		spec.carrier = ChairCarrier{half, bubble};
+		if (detachable)
+			spec.terminal = Terminal::Housing;
+		spec.terminal_len = 16.0;
+		break;
 	}
-	return {};
+	}
+	return spec;
+}
+
+double rope_gauge(Kind kind, const tags_t &tags)
+{
+	return spec_for(kind, tags).gauge;
+}
+
+double terminal_mouth(Kind kind, const tags_t &tags)
+{
+	return spec_for(kind, tags).mouth();
 }
 
 double ground_at(const WorldEditor &editor, double x, double z)
@@ -186,7 +387,7 @@ std::vector<Support> supports_for(
 		bool skip;
 	};
 	std::vector<Point> points;
-	const RopeSpec spec = rope_spec(kind);
+	const Spec spec = spec_for(kind, way.tags);
 	for (std::size_t i = 0; i < way.nodes.size(); ++i) {
 		const auto &node = way.nodes[i];
 		const bool endpoint = i == 0 || i + 1 == way.nodes.size();
@@ -223,7 +424,7 @@ std::vector<Support> supports_for(
 	// Avoid placing a pylon immediately beside another support or inside a
 	// terminal mouth. The Rust planner preserves stations while dropping only
 	// the redundant intermediate supports.
-	const double terminal_clearance = terminal_mouth(kind, way.tags) + 4.0;
+	const double terminal_clearance = spec.mouth() + 4.0;
 	std::vector<Support> spaced;
 	spaced.reserve(supports.size());
 	for (std::size_t i = 0; i < supports.size(); ++i) {
@@ -268,8 +469,8 @@ std::vector<Support> supports_for(
 		planned.push_back(b);
 		supports = std::move(planned);
 	}
-	const double gauge_half = rope_gauge(kind, way.tags) * 0.5;
-	const double mouth = terminal_mouth(kind, way.tags);
+	const double gauge_half = spec.gauge * 0.5;
+	const double mouth = spec.mouth();
 	auto required_rope_y = [&](double x, double z, const Support &a, const Support &b) {
 		const double dx = b.x - a.x;
 		const double dz = b.z - a.z;
@@ -452,51 +653,6 @@ bool chair_detachable(const tags_t &tags, int seats)
 	return seats >= 4 || bubble;
 }
 
-double rope_gauge(Kind kind, const tags_t &tags)
-{
-	const int seats =
-			occupancy(tags, kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8));
-	switch (kind) {
-	case Kind::CableCar:
-		return (seats <= 40 ? 5.0 : seats <= 110 ? 5.0 : 7.0) + 5.0;
-	case Kind::Gondola:
-		return (seats > 20 ? 5.0 : 3.0) + 3.0;
-	case Kind::Mixed:
-		return 8.0;
-	case Kind::Chair:
-		return (seats == 1 ? 1.0 : seats <= 4 ? 3.0 : 5.0) + 3.0;
-	case Kind::TBar:
-	case Kind::JBar:
-	case Kind::Platter:
-		return 3.0;
-	case Kind::RopeTow:
-		return 2.0;
-	case Kind::Goods:
-		return 3.0;
-	case Kind::ZipLine:
-	case Kind::MagicCarpet:
-		return 0.0;
-	}
-	return 0.0;
-}
-
-double terminal_mouth(Kind kind, const tags_t &tags)
-{
-	if (kind == Kind::CableCar)
-		return 8.0;
-	if (kind == Kind::Gondola || kind == Kind::Mixed)
-		return 9.0;
-	// Rust models rope-tow terminals as Terminal::Post, whose mouth is zero;
-	// unlike open terminals, they do not extend the rope into a terminal hall.
-	if (kind == Kind::RopeTow)
-		return 0.0;
-	if (kind == Kind::Chair) {
-		if (chair_detachable(tags, occupancy(tags, 4)))
-			return 8.0;
-	}
-	return rope_gauge(kind, tags) / 2.0;
-}
-
 // Aerialway carriers are ordinary blocks, so keep their layout deterministic
 // and visible to all backends rather than representing them as display entities.
 void cabin_body(WorldEditor &editor, Block colour, int hx, int hz, int fx, int fz,
@@ -665,42 +821,16 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 {
 	if (kind == Kind::MagicCarpet || kind == Kind::RopeTow || kind == Kind::ZipLine)
 		return;
-	const int seats = occupancy(
-			way.tags, kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8));
-	const bool bubble = way.tags.contains("aerialway:bubble") &&
-						way.tags.at("aerialway:bubble") == "yes";
-	const bool detachable = chair_detachable(way.tags, seats);
-	const double gap = kind == Kind::CableCar ? 0.0
-					   : kind == Kind::Chair  ? (detachable ? 36.0 : 18.0)
-					   : kind == Kind::Mixed
-							   ? 45.0
-							   : (kind == Kind::Gondola ? (seats > 20 ? 80.0 : 54.0)
-										 : kind == Kind::TBar || kind == Kind::JBar ? 12.0
-										 : kind == Kind::Platter					? 10.0
-										 : kind == Kind::Goods						? 30.0
-															   : 0.0);
+	const Spec spec = spec_for(kind, way.tags);
+	if (!spec.carrier)
+		return;
+	const double gap = spec.gap;
 	const Block colour = lift_colour(way);
-	const int carrier_width = kind == Kind::Chair	   ? (seats == 1		  ? 0
-																 : seats <= 4 ? 1
-																			  : 2)
-							  : kind == Kind::CableCar ? (seats <= 40			? 2
-																 : seats <= 110 ? 2
-																				: 3)
-							  : (kind == Kind::Gondola || kind == Kind::Mixed)
-									  ? (seats > 20 ? 2 : 1)
-							  : kind == Kind::TBar ? 1
-												   : 0;
-	const int carrier_length =
-			kind == Kind::CableCar
-					? (seats <= 40			 ? 2
-							  : seats <= 110 ? 3
-											 : 4)
-					: ((kind == Kind::Gondola || kind == Kind::Mixed) && seats > 10 ? 2
-																					: 1);
 	const double rail_gauge = rope_gauge(kind, way.tags);
-	const RopeSpec spec = rope_spec(kind);
+	const bool detachable = spec.terminal == Terminal::Housing && kind == Kind::Chair;
 	const bool enclosed = kind == Kind::CableCar || kind == Kind::Gondola ||
 						  kind == Kind::Mixed || (kind == Kind::Chair && detachable);
+	const auto carrier = carrier_shape(*spec.carrier, kind);
 	auto anchors_for_side = [&](double side) {
 		std::vector<structure_kit::Point3> result;
 		result.reserve(supports.size());
@@ -723,8 +853,8 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 				z += rz * lateral;
 				if (roles[i] == Support::Role::Station && enclosed) {
 					const double inward = i == 0 ? 1.0 : -1.0;
-					x += dx * inward * terminal_mouth(kind, way.tags);
-					z += dz * inward * terminal_mouth(kind, way.tags);
+					x += dx * inward * spec.mouth();
+					z += dz * inward * spec.mouth();
 				}
 			}
 			result.push_back({x, supports[i][1], z});
@@ -755,8 +885,7 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 				continue;
 			}
 			const auto keep = [&](Support::Role role) {
-				return role == Support::Role::Station
-							   ? terminal_mouth(kind, way.tags) + 3.0
+				return role == Support::Role::Station ? spec.mouth() + 3.0
 					   : role == Support::Role::Pylon ? 3.0
 													  : 0.0;
 			};
@@ -782,18 +911,21 @@ void place_carriers_segment(WorldEditor &editor, const ProcessedWay &way, Kind k
 		}
 	};
 	if (kind == Kind::CableCar) {
-		place_at(1.0, total * 0.42, kind, 0, carrier_width, carrier_length, false);
-		place_at(-1.0, total * 0.58, kind, 1, carrier_width, carrier_length, false);
+		place_at(1.0, total * 0.42, carrier.kind, 0, carrier.half_w, carrier.half_l,
+				carrier.bubble);
+		place_at(-1.0, total * 0.58, carrier.kind, 1, carrier.half_w, carrier.half_l,
+				carrier.bubble);
 		return;
 	}
 	for (const double side : {1.0, -1.0}) {
 		double distance = side > 0.0 ? gap * 0.5 : gap;
 		std::size_t index = 0;
 		while (distance < total) {
-			const bool mixed_chair = kind == Kind::Mixed && index % 3 == 2;
-			place_at(side, distance, mixed_chair ? Kind::Chair : kind,
-					index + (side < 0.0 ? 1 : 0), mixed_chair ? 2 : carrier_width,
-					carrier_length, mixed_chair || bubble);
+			const bool use_alternate = spec.alternate && index % 3 == 2;
+			const auto current =
+					use_alternate ? carrier_shape(*spec.alternate, kind) : carrier;
+			place_at(side, distance, current.kind, index + (side < 0.0 ? 1 : 0),
+					current.half_w, current.half_l, current.bubble);
 			distance += gap;
 			++index;
 		}
@@ -806,8 +938,9 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 		const RoadMaskBitmap &road_mask)
 {
 	const bool tram = kind == Kind::CableCar;
-	const double half_a = tram || kind == Kind::Chair ? 8.0 : 9.0;
-	const double radius = rope_gauge(kind, way.tags) / 2.0;
+	const Spec spec = spec_for(kind, way.tags);
+	const double half_a = spec.terminal_len / 2.0;
+	const double radius = spec.gauge / 2.0;
 	const double half_b = radius + (tram ? 4.0 : 2.5);
 	const int roof = rope + (tram ? 3 : 2);
 	const double apron = tram ? 1.0 : 1.5;
@@ -954,27 +1087,16 @@ void draw_enclosed_terminal(WorldEditor &editor, const ProcessedWay &way,
 	}
 	place_lift_name(editor, way, frame, half_a - 0.5, tram ? half_b - 0.5 : -half_b + 0.5,
 			tram ? rope + 2 : floor + 3);
-	const int seats = occupancy(
-			way.tags, kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8));
-	const int half_w = kind == Kind::CableCar ? (seats > 110 ? 3 : 2)
-					   : kind == Kind::Chair  ? (seats == 1			 ? 0
-														: seats <= 4 ? 1
-																	 : 2)
-					   : seats > 20			  ? 2
-											  : 1;
-	const int half_l = kind == Kind::CableCar				 ? (seats <= 40			  ? 2
-																	   : seats <= 110 ? 3
-																					  : 4)
-					   : kind == Kind::Gondola && seats > 10 ? 2
-															 : 1;
-	const bool bubble = way.tags.contains("aerialway:bubble") &&
-						way.tags.at("aerialway:bubble") == "yes";
+	const auto carrier = spec.carrier ? carrier_shape(*spec.carrier, kind)
+									  : CarrierShape{kind, 0, 0, false};
+	const int half_w = carrier.half_w;
+	const int half_l = carrier.half_l;
 	if (!tram) {
 		for (const double side : {-1.0, 1.0}) {
 			const auto [x, z] = frame.world(half_a - 3.0, side * radius);
 			const double direction = bottom ? side : -side;
 			draw_carrier(editor, kind, lift_colour(way), x, rope, z, frame.ux * direction,
-					frame.uz * direction, half_w, half_l, kind == Kind::Chair && bubble,
+					frame.uz * direction, half_w, half_l, carrier.bubble,
 					std::bit_cast<std::int64_t>(section_id + (side > 0.0 ? 0ULL : 1ULL)));
 		}
 	}
@@ -990,11 +1112,9 @@ void draw_lift_terminal(WorldEditor &editor, const ProcessedWay &way,
 			support.x, support.z, heading_x, heading_z);
 	const int floor = static_cast<int>(std::floor(support.ground));
 	const int rope = static_cast<int>(std::floor(support.rope_y));
-	const int seats = occupancy(
-			way.tags, kind == Kind::CableCar ? 80 : (kind == Kind::Chair ? 4 : 8));
-	const bool detachable = chair_detachable(way.tags, seats);
-	const bool enclosed = kind == Kind::CableCar || kind == Kind::Gondola ||
-						  kind == Kind::Mixed || (kind == Kind::Chair && detachable);
+	const Spec spec = spec_for(kind, way.tags);
+	const bool enclosed =
+			spec.terminal == Terminal::Hall || spec.terminal == Terminal::Housing;
 	if (enclosed) {
 		draw_enclosed_terminal(editor, way, section_id, kind, frame, floor, rope, bottom,
 				footprints, road_mask);
@@ -1425,18 +1545,14 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 		draw_lift_pylon(editor, way, *kind, supports, i);
 		anchors.push_back({support.x, support.rope_y, support.z});
 	}
-	const RopeSpec line_spec = rope_spec(*kind);
+	const Spec line_spec = spec_for(*kind, way.tags);
 	const double rail_gauge = rope_gauge(*kind, way.tags);
 	const int rail_count = rail_gauge > 0.0 ? 2 : 1;
 	// Rust advances one wrapping seed in side/span/chord order, including the
 	// housing bullwheel chords below.
 	std::uint64_t rope_seed = section_id * 1'000'003ULL;
-	const int seats = occupancy(
-			way.tags, *kind == Kind::CableCar ? 80 : (*kind == Kind::Chair ? 4 : 8));
-	const bool detachable = chair_detachable(way.tags, seats);
-	const bool enclosed_terminal = *kind == Kind::CableCar || *kind == Kind::Gondola ||
-								   *kind == Kind::Mixed ||
-								   (*kind == Kind::Chair && detachable);
+	const bool enclosed_terminal = line_spec.terminal == Terminal::Housing ||
+								   line_spec.terminal == Terminal::Hall;
 	// Rust computes one tangent at each support from its neighbouring supports,
 	// then shares that anchor between the spans on either side. Offsetting each
 	// span by its own heading leaves a gap (or kink) at every mapped bend.
@@ -1458,7 +1574,7 @@ static void generate_aerialway_section(WorldEditor &editor, const ProcessedWay &
 			z = std::floor(z) + 0.5;
 		} else if (support.role == Support::Role::Station && enclosed_terminal) {
 			const double inward = index == 0 ? 1.0 : -1.0;
-			const double mouth = terminal_mouth(*kind, way.tags);
+			const double mouth = line_spec.mouth();
 			x += dx * inward * mouth;
 			z += dz * inward * mouth;
 		}

@@ -12,6 +12,8 @@
 namespace arnis::buildings::rooftops
 {
 
+std::uint64_t hash2(std::uint64_t seed, std::int32_t a, std::int32_t b);
+
 struct RoofMembrane
 {
 	Block base;

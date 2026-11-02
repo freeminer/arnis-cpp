@@ -60,9 +60,9 @@ bool usgs_3dep_covers(const GeoBBox &bbox)
 }
 std::vector<Source> select_sources(const GeoBBox &, SourceMode mode)
 {
-	if (mode == SourceMode::Planetary)
+	if (mode.kind() == SourceMode::Kind::Planetary)
 		return {};
-	if (mode == SourceMode::AwsOnly)
+	if (mode.kind() == SourceMode::Kind::AwsOnly)
 		return {Source::AWS};
 	std::vector<Source> out;
 	if (g_mapterhorn)
@@ -682,9 +682,9 @@ ProviderConfig config()
 }
 Source select_source(int lat, int lon, const std::filesystem::path &file, SourceMode mode)
 {
-	if (mode == SourceMode::Planetary)
+	if (mode.kind() == SourceMode::Kind::Planetary)
 		return Source::None;
-	if (mode == SourceMode::AwsOnly)
+	if (mode.kind() == SourceMode::Kind::AwsOnly)
 		return g_aws ? Source::AWS : Source::None;
 	if (std::filesystem::exists(file))
 		return Source::Mapterhorn;
@@ -781,9 +781,9 @@ bool fetch_with_fallback(
 {
 	if (std::filesystem::exists(file))
 		return true;
-	if (mode == SourceMode::Planetary)
+	if (mode.kind() == SourceMode::Kind::Planetary)
 		return false;
-	if (mode != SourceMode::AwsOnly && g_fixed && g_fixed_enabled) {
+	if (mode.kind() != SourceMode::Kind::AwsOnly && g_fixed && g_fixed_enabled) {
 		std::filesystem::create_directories(file.parent_path());
 		std::ofstream f(file, std::ios::binary);
 		if (f) {
@@ -798,7 +798,7 @@ bool fetch_with_fallback(
 		}
 	}
 	std::vector<std::pair<std::string, int>> urls;
-	if (mode == SourceMode::AwsOnly) {
+	if (mode.kind() == SourceMode::Kind::AwsOnly) {
 		if (g_aws)
 			urls.push_back({aws_terrain_url(lat, lon), 0});
 	} else {

@@ -49,10 +49,6 @@ std::vector<int> road_profile(const world_editor::WorldEditor &editor,
 /// Stable ground level used for roads meeting at one connected junction.
 int junction_level(const world_editor::WorldEditor &editor, int x, int z);
 
-// True when a node's OSM tags identify a traffic signal accepted by the
-// highway-node dispatcher.
-bool is_signal(const tags_t &tags);
-
 // Closed aeroway polygons handled by the aeroway renderer and flood-fill cache.
 enum class AerowayAreaKind
 {
@@ -61,6 +57,12 @@ enum class AerowayAreaKind
 };
 std::optional<AerowayAreaKind> aeroway_area_kind(const ProcessedWay &way);
 bool is_aeroway_area(const ProcessedWay &way);
+// Remove buildings that occupy aircraft pavement before building-dependent
+// indices and masks are prepared. The filtered output is left untouched when
+// no buildings are removed, avoiding a copy of the OSM element vector.
+std::size_t drop_buildings_on_aircraft_pavement(
+		const std::vector<ProcessedElement> &elements,
+		std::vector<ProcessedElement> &filtered_elements, double scale);
 // Paved airport areas which take part in sealed-surface precedence.
 std::optional<crate::block_definitions::Block> aeroway_area_block(
 		const ProcessedWay &way);

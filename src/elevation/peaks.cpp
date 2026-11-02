@@ -1102,7 +1102,7 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 	std::vector<PlatformNodes> platforms;
 	const auto add_platform = [&](const tags_t &tags, std::vector<std::uint64_t> nodes) {
 		if (!stations::is_rail_platform(tags) || stations::tagged_surface(tags) ||
-				stations::is_low(tags) || nodes.empty())
+				stations::is_low(tags))
 			return;
 		platforms.push_back({stations::depth_key(tags).value_or(-1), std::move(nodes),
 				stations::tagged_underground(tags)});
@@ -1191,7 +1191,6 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 	struct Shape
 	{
 		int depth{};
-		std::vector<std::uint64_t> node_ids;
 		std::vector<GeoPoint> points;
 		GeoPoint centre{}, heading{};
 	};
@@ -1199,7 +1198,6 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 	for (const auto &platform : platforms) {
 		Shape shape;
 		shape.depth = platform.depth;
-		shape.node_ids = platform.nodes;
 		for (const auto id : platform.nodes) {
 			const auto found = at.find(id);
 			if (found != at.end())
@@ -1239,11 +1237,8 @@ std::vector<StationHint> station_hints_in(const osm_parser::RawOsmDocument &data
 		for (std::size_t j = 0; j < shapes.size(); ++j) {
 			const auto &a = shapes[i];
 			const auto &b = shapes[j];
-			// Rust orders a platform by (depth, original node IDs). This makes
-			// equal-depth crossing platforms stack in a stable order instead of
-			// assigning every member of an interchange the same rank.
+			// Match Rust: equal-depth crossing platforms may both rank each other.
 			if (i == j || b.depth < a.depth ||
-					(b.depth == a.depth && b.node_ids < a.node_ids) ||
 					std::hypot(a.centre.first - b.centre.first,
 							a.centre.second - b.centre.second) > INTERCHANGE_M ||
 					parallel(a.heading, b.heading))

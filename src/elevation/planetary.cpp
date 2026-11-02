@@ -209,7 +209,9 @@ PlanetaryRangeReader http_planetary_range_reader()
 		// http_get_range owns the shared request permit. Acquiring one here too
 		// would let every planetary worker hold a permit while waiting for a
 		// second one inside the transport, deadlocking once the limit is reached.
-		const auto response = http_get_range(url, offset, length);
+		// Match the PDS provider's fixed 60-second request timeout rather than
+		// inheriting Freeminer's general file-download setting.
+		const auto response = http_get_range(url, offset, length, 60);
 		if (response.size() != length)
 			return std::nullopt;
 		return std::vector<std::uint8_t>(response.begin(), response.end());

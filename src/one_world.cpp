@@ -10,10 +10,13 @@
 #include <nlohmann/json.hpp>
 #include <chrono>
 #include <cctype>
+#include <iomanip>
 #include <fstream>
 #include <limits>
 #include <cmath>
 #include <iostream>
+#include <numbers>
+#include <sstream>
 #include <system_error>
 namespace arnis::one_world
 {
@@ -26,6 +29,13 @@ std::uint64_t unix_now()
 	const auto now = std::chrono::system_clock::now().time_since_epoch();
 	return static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::seconds>(now).count());
+}
+
+std::string fixed_2(double value)
+{
+	std::ostringstream out;
+	out << std::fixed << std::setprecision(2) << value;
+	return out.str();
 }
 
 ElevationAffine from_elevation_affine(const elevation::ElevationAffine &affine)
@@ -206,11 +216,12 @@ bool Manifest::valid(std::string *error) const
 					(!std::isfinite(elevation->min_height_m) ||
 							elevation->blocks_per_meter < 0.0 ||
 							!std::isfinite(elevation->blocks_per_meter) ||
-							elevation->soft_top &&
+							(elevation->soft_top &&
 									(!std::isfinite(elevation->soft_top->knee_m) ||
 											!std::isfinite(
 													elevation->soft_top->width_blocks) ||
-											elevation->soft_top->width_blocks <= 0.0)))) {
+											elevation->soft_top->width_blocks <=
+													0.0))))) {
 		if (error)
 			*error = "invalid world frame";
 		return false;
@@ -315,9 +326,9 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 					" has a One World manifest but no level.dat; the world seems damaged.");
 		std::vector<std::string> mismatches;
 		if (std::abs(manifest->scale - args.scale) > 1e-9)
-			mismatches.push_back("world scale " + std::to_string(args.scale) +
+			mismatches.push_back("world scale " + fixed_2(args.scale) +
 								 " does not match the world's " +
-								 std::to_string(manifest->scale));
+								 fixed_2(manifest->scale));
 		if (manifest->ground_level != args.ground_level)
 			mismatches.push_back("ground level " + std::to_string(args.ground_level) +
 								 " does not match the world's " +
@@ -338,8 +349,27 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 					world_dir.string() + ": " + joined +
 					". Change the setting, or use another world name to start a new One World.");
 		}
-		args.disable_height_limit = manifest->disable_height_limit;
-		args.height_multiplier = manifest->height_multiplier;
+		if (manifest->disable_height_limit != args.disable_height_limit) {
+			std::cout << "Note: One World keeps the build height it was created with ("
+					  << (manifest->disable_height_limit ? "extended" : "vanilla")
+					  << ").\n";
+			args.disable_height_limit = manifest->disable_height_limit;
+		}
+		if (manifest->height_multiplier != args.height_multiplier) {
+			std::cout
+					<< "Note: One World keeps the terrain height multiplier it was created "
+					   "with ("
+					<< manifest->height_multiplier << "x).\n";
+			args.height_multiplier = manifest->height_multiplier;
+		}
+		if (manifest->aws_only_elevation != args.aws_only_elevation) {
+			std::cout
+					<< "Note: One World keeps the elevation source it was created with ("
+					<< (manifest->aws_only_elevation ? "legacy AWS terrain"
+													 : "high-resolution terrain")
+					<< ").\n";
+			args.aws_only_elevation = manifest->aws_only_elevation;
+		}
 	} else {
 		if (args.vanilla_height)
 			return fail_locked(
@@ -393,9 +423,8 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		args.world_type = WorldType::Void;
 	}
 	if (args.one_world_run->extending)
-		std::cout
-				<< "Note: One World keeps the game mode, time of day, world type and map "
-				   "item of its first area.\n";
+		std::cout << "Note: One World keeps the game mode, time of day, world type, mob "
+					 "spawning and map item of its first area.\n";
 	if (args.voxy_lod)
 		std::cout << "Note: the Voxy LOD cache is off in One World mode.\n";
 	args.voxy_lod = false;
@@ -413,6 +442,29 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		args.building_facades = false;
 	}
 	args.map_preview = true;
+	const auto area_name = world_dir.filename().string();
+	std::cout << "One World: "
+			  << (created								 ? "created"
+						 : args.one_world_run->extending ? "extending"
+														 : "using")
+			  << ' ' << (area_name.empty() ? DEFAULT_WORLD_NAME : area_name) << " at "
+			  << world_dir.string() << '\n';
+	std::cout << "  area #" << area_id << ": blocks x " << rect.min().x
+			  << "..=" << rect.max().x << " z " << rect.min().z << "..=" << rect.max().z
+			  << " (" << rect.total_blocks_x() / 16 << " x " << rect.total_blocks_z() / 16
+			  << " chunks)";
+	if (replaced > 0)
+		std::cout << ", " << replaced << " existing chunks will be replaced";
+	std::cout << ")\n";
+	const double centre_lat =
+			(effective_bbox.min().lat() + effective_bbox.max().lat()) * 0.5;
+	const double density = std::cos(manifest->origin_lat * std::numbers::pi / 180.0) /
+						   std::cos(centre_lat * std::numbers::pi / 180.0);
+	if (!(density >= 0.8 && density <= 1.25)) {
+		std::cout << "Note: this far from the world's origin one metre is "
+				  << fixed_2(args.scale * density) << " blocks instead of "
+				  << fixed_2(args.scale) << ".\n";
+	}
 	return Session{created, effective_bbox, rect, std::move(lock)};
 }
 

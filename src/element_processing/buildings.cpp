@@ -5587,25 +5587,11 @@ bool category_has_parapet_preset(BuildingCategory category)
 	}
 }
 
-std::uint64_t rooftop_hash2(std::uint64_t seed, int x, int z)
-{
-	std::uint64_t h = seed ^
-					  (static_cast<std::uint64_t>(static_cast<std::uint32_t>(x)) *
-							  0x9E3779B97F4A7C15ULL) ^
-					  (static_cast<std::uint64_t>(static_cast<std::uint32_t>(z)) *
-							  0xC2B2AE3D27D4EB4FULL);
-	h ^= h >> 30;
-	h *= 0xBF58476D1CE4E5B9ULL;
-	h ^= h >> 27;
-	h *= 0x94D049BB133111EBULL;
-	return h ^ (h >> 31);
-}
-
 Block parapet_coping(Block wall, Block accent, std::uint64_t seed)
 {
 	const auto pick = [seed](std::initializer_list<Block> blocks) {
 		const auto index =
-				rooftop_hash2(seed ^ 0xC0B1460000000001ULL, 0, 0) % blocks.size();
+				rooftops::hash2(seed ^ 0xC0B1460000000001ULL, 0, 0) % blocks.size();
 		return *(blocks.begin() + static_cast<std::ptrdiff_t>(index));
 	};
 	if (wall == BRICK || wall == MUD_BRICKS || wall == TERRACOTTA ||
@@ -9656,7 +9642,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 									h - start_y_offset - grammar_anchor, floor_cycle);
 							const Block panel =
 									floor_row == 0 ? backing.spandrel
-									: rooftop_hash2(group_seed ^ 0x6B4CBAC4ULL,
+									: rooftops::hash2(group_seed ^ 0x6B4CBAC4ULL,
 											  floor_div(wall_u, 2),
 											  storey) % 6 ==
 													0

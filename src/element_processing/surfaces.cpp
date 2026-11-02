@@ -113,13 +113,16 @@ std::span<const Block> cycleway_palette(const tags_t &tags)
 	const auto selected_colour = surface_colour != tags.end() ? surface_colour : colour;
 	if (selected_colour != tags.end() && !is_red_colour(selected_colour->second))
 		return {};
-	const auto surface = tags.get("surface");
-	if (!surface.empty() && surface != "asphalt" && surface != "paved" &&
-			surface != "concrete" && surface != "concrete:plates" &&
-			surface != "concrete:lanes" && surface != "cement" && surface != "chipseal" &&
-			surface != "bitmac" && surface != "paving_stones" && surface != "sett" &&
-			surface != "bricks" && surface != "brick")
-		return {};
+	const auto surface = tags.find("surface");
+	if (surface != tags.end()) {
+		const auto &value = surface->second;
+		if (value != "asphalt" && value != "paved" && value != "concrete" &&
+				value != "concrete:plates" && value != "concrete:lanes" &&
+				value != "cement" && value != "chipseal" && value != "bitmac" &&
+				value != "paving_stones" && value != "sett" && value != "bricks" &&
+				value != "brick")
+			return {};
+	}
 	static const std::array<Block, 3> palette{block_definitions::RED_TERRACOTTA,
 			block_definitions::RED_TERRACOTTA, block_definitions::RED_CONCRETE};
 	return palette;

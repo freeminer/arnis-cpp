@@ -3,8 +3,8 @@
 #include "ground_decoration.h"
 #include "ground_generation.h"
 #include "land_cover/land_cover.h"
+#include "terrain_surface.h"
 #include "../../arnis_adapter.h"
-#include <bit>
 #include <cmath>
 #include <algorithm>
 #include <limits>
@@ -195,17 +195,7 @@ bool climate_is_dry(Climate climate)
 
 std::pair<int, int> frayed_ecoregion_offset(int x, int z)
 {
-	constexpr std::uint32_t salt = 0xF4A73D19u;
-	const auto shift = [x, z](std::uint32_t value) {
-		return static_cast<int>(
-				(ground_generation::value_noise_salted(x, z, 32, value) - .5) * 80.0);
-	};
-	const auto add_wrapped = [](int a, int b) {
-		return std::bit_cast<std::int32_t>(
-				static_cast<std::uint32_t>(a) + static_cast<std::uint32_t>(b));
-	};
-	return {add_wrapped(x, shift(salt)),
-			add_wrapped(z, shift((salt << 11) | (salt >> 21)))};
+	return terrain_surface::fray_red_earth(x, z);
 }
 
 bool red_earth(Climate climate, const std::optional<ecoregion::Ecoregion> &eco)

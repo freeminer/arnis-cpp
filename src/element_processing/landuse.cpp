@@ -509,9 +509,9 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				else if (resource == "clay" || resource == "kaolinite")
 					ore_block = CLAY;
 				int abs_y = editor.get_absolute_y(x, 0, z);
-				const int resource_range = abs_y > std::numeric_limits<int>::max() - 100
-												   ? std::numeric_limits<int>::max()
-												   : std::max(1, 100 + abs_y);
+				const auto resource_range = static_cast<int>(
+						std::clamp<std::int64_t>(static_cast<std::int64_t>(abs_y) + 100,
+								1, std::numeric_limits<int>::max()));
 				int random_choice = static_cast<int>(rng.uniform(resource_range));
 				if (random_choice < 5) {
 					editor.set_block(ore_block, x, 0, z,

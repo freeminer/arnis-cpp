@@ -309,184 +309,6 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 	return {};
 }
 
-struct AircraftStripSegment
-{
-	double ax, az, bx, bz, half;
-
-	bool contains(double x, double z) const
-	{
-		const double dx = bx - ax, dz = bz - az;
-		const double length_squared = dx * dx + dz * dz;
-		const double t =
-				length_squared > 0.0
-						? std::clamp(((x - ax) * dx + (z - az) * dz) / length_squared,
-								  0.0, 1.0)
-						: 0.0;
-		const double px = ax + t * dx - x, pz = az + t * dz - z;
-		return px * px + pz * pz <= half * half;
-	}
-};
-
-void append_aircraft_strip_segments(std::vector<AircraftStripSegment> &segments,
-		const ProcessedWay &way, double scale)
-{
-	double half_m = 12.0;
-	const auto width = way.tags.get("width");
-	if (!width.empty()) {
-		std::string raw = width;
-		const auto first = raw.find_first_not_of(" \t\r\n");
-		if (first != std::string::npos) {
-			raw.erase(0, first);
-			const auto last = raw.find_last_not_of(" \t\r\n");
-			raw.erase(last + 1);
-			while (!raw.empty() && raw.back() == 'm')
-				raw.pop_back();
-			const auto end = raw.find_last_not_of(" \t\r\n");
-			raw.erase(end == std::string::npos ? 0 : end + 1);
-			try {
-				std::size_t parsed = 0;
-				const double value = std::stod(raw, &parsed);
-				if (parsed == raw.size() && std::isfinite(value) && value > 0.0)
-					half_m = std::clamp(value * 0.5, 6.0, 40.0);
-			} catch (...) {
-				// Match Rust: malformed width falls back to the default strip width.
-			}
-		}
-	}
-	const double half = std::max(1.0, std::round(half_m * scale));
-	for (std::size_t i = 1; i < way.nodes.size(); ++i) {
-		const auto &a = way.nodes[i - 1];
-		const auto &b = way.nodes[i];
-		segments.push_back({static_cast<double>(a.x), static_cast<double>(a.z),
-				static_cast<double>(b.x), static_cast<double>(b.z), half});
-	}
-}
-
-bool aircraft_area_contains(
-		const std::vector<std::pair<int, int>> &ring, double x, double z)
-{
-	bool inside = false;
-	for (std::size_t i = 1; i < ring.size(); ++i) {
-		const auto &[x1i, z1i] = ring[i - 1];
-		const auto &[x2i, z2i] = ring[i];
-		const double x1 = x1i, z1 = z1i, x2 = x2i, z2 = z2i;
-		if ((z1 > z) != (z2 > z) && x < x1 + (z - z1) * (x2 - x1) / (z2 - z1))
-			inside = !inside;
-	}
-	return inside;
-}
-
-std::size_t drop_buildings_on_aircraft_pavement(
-		const std::vector<ProcessedElement> &elements,
-		std::vector<ProcessedElement> &filtered_elements, double scale)
-{
-	std::vector<AircraftStripSegment> runways, taxiways;
-	std::vector<std::vector<std::pair<int, int>>> runway_areas, aprons;
-	for (const auto &element : elements) {
-		if (!element.is_way())
-			continue;
-		const auto &way = element.as_way();
-		const auto aeroway = way.tags.get("aeroway");
-		const auto area_kind = highways::aeroway_area_kind(way);
-		auto ring = [&] {
-			std::vector<std::pair<int, int>> points;
-			points.reserve(way.nodes.size());
-			for (const auto &node : way.nodes)
-				points.emplace_back(node.x, node.z);
-			return points;
-		};
-		if (area_kind == highways::AerowayAreaKind::Runway) {
-			runway_areas.push_back(ring());
-		} else if (area_kind == highways::AerowayAreaKind::Apron) {
-			aprons.push_back(ring());
-		} else if (aeroway == std::optional<std::string>("runway") ||
-				   aeroway == std::optional<std::string>("stopway")) {
-			append_aircraft_strip_segments(runways, way, scale);
-		} else if (aeroway == std::optional<std::string>("taxiway")) {
-			append_aircraft_strip_segments(taxiways, way, scale);
-		}
-	}
-	if (runways.empty() && taxiways.empty() && runway_areas.empty() && aprons.empty())
-		return 0;
-
-	double min_x = std::numeric_limits<double>::max();
-	double min_z = std::numeric_limits<double>::max();
-	double max_x = std::numeric_limits<double>::lowest();
-	double max_z = std::numeric_limits<double>::lowest();
-	for (const auto &strip : runways) {
-		min_x = std::min(min_x, std::min(strip.ax, strip.bx) - strip.half);
-		max_x = std::max(max_x, std::max(strip.ax, strip.bx) + strip.half);
-		min_z = std::min(min_z, std::min(strip.az, strip.bz) - strip.half);
-		max_z = std::max(max_z, std::max(strip.az, strip.bz) + strip.half);
-	}
-	for (const auto &strip : taxiways) {
-		min_x = std::min(min_x, std::min(strip.ax, strip.bx) - strip.half);
-		max_x = std::max(max_x, std::max(strip.ax, strip.bx) + strip.half);
-		min_z = std::min(min_z, std::min(strip.az, strip.bz) - strip.half);
-		max_z = std::max(max_z, std::max(strip.az, strip.bz) + strip.half);
-	}
-	for (const auto *areas : {&runway_areas, &aprons})
-		for (const auto &area : *areas)
-			for (const auto &[x, z] : area) {
-				min_x = std::min(min_x, static_cast<double>(x));
-				max_x = std::max(max_x, static_cast<double>(x));
-				min_z = std::min(min_z, static_cast<double>(z));
-				max_z = std::max(max_z, static_cast<double>(z));
-			}
-
-	auto should_drop = [&](const ProcessedElement &element) {
-		if (!element.is_way())
-			return false;
-		const auto &way = element.as_way();
-		if (way.nodes.size() < 3 ||
-				(!way.tags.contains("building") && !way.tags.contains("building:part")))
-			return false;
-		double cx = 0.0, cz = 0.0;
-		for (const auto &node : way.nodes) {
-			cx += node.x;
-			cz += node.z;
-		}
-		cx /= way.nodes.size();
-		cz /= way.nodes.size();
-		if (cx < min_x || cx > max_x || cz < min_z || cz > max_z)
-			return false;
-		if (std::any_of(runways.begin(), runways.end(),
-					[&](const auto &strip) { return strip.contains(cx, cz); }) ||
-				std::any_of(
-						runway_areas.begin(), runway_areas.end(), [&](const auto &ring) {
-							return aircraft_area_contains(ring, cx, cz);
-						}))
-			return true;
-		const bool traced_overture =
-				way.tags.get("source") == std::optional<std::string>("overture_maps");
-		return traced_overture &&
-			   (std::any_of(taxiways.begin(), taxiways.end(), [&](const auto &strip) {
-				   return strip.contains(cx, cz);
-			   }) || std::any_of(aprons.begin(), aprons.end(), [&](const auto &ring) {
-				   return aircraft_area_contains(ring, cx, cz);
-			   }));
-	};
-	if (std::none_of(elements.begin(), elements.end(), should_drop))
-		return 0;
-	auto candidate_elements = elements;
-	const auto before = candidate_elements.size();
-	candidate_elements.erase(std::remove_if(candidate_elements.begin(),
-									 candidate_elements.end(), should_drop),
-			candidate_elements.end());
-	const auto dropped = before - candidate_elements.size();
-	filtered_elements = std::move(candidate_elements);
-	return dropped;
-}
-}
-
-std::size_t drop_buildings_on_aircraft_pavement(
-		std::vector<ProcessedElement> &elements, double scale)
-{
-	std::vector<ProcessedElement> filtered;
-	const auto dropped = drop_buildings_on_aircraft_pavement(elements, filtered, scale);
-	if (dropped > 0)
-		elements = std::move(filtered);
-	return dropped;
 }
 
 // Helper functions for ground fill area detection
@@ -1472,8 +1294,9 @@ bool generate_world(WorldEditor &editor,
 	// derives building-dependent state (facade projection, tree masks, indices).
 	// Keep one filtered view for the rest of this generation call.
 	std::vector<ProcessedElement> aircraft_filtered_elements;
-	std::size_t dropped_aircraft_buildings = drop_buildings_on_aircraft_pavement(
-			generation_input, aircraft_filtered_elements, args.scale);
+	std::size_t dropped_aircraft_buildings =
+			highways::drop_buildings_on_aircraft_pavement(
+					generation_input, aircraft_filtered_elements, args.scale);
 	const std::vector<ProcessedElement> *elements_source = &generation_input;
 	if (dropped_aircraft_buildings > 0) {
 		std::cout << "  Skipped " << dropped_aircraft_buildings
@@ -1956,14 +1779,28 @@ bool generate_world(WorldEditor &editor,
 	// Rust disables both landmark suppression and placement when model objects
 	// are off; otherwise a no-3D run could still discard the OSM feature that a
 	// bundled schematic would have replaced.
+	const auto attraction_parts = attractions::building_parts_to_suppress(elements);
+	std::vector<std::pair<std::string, std::uint64_t>> attraction_suppression;
+	attraction_suppression.reserve(attraction_parts.size());
+	for (const auto id : attraction_parts)
+		attraction_suppression.emplace_back("way", id);
 	const auto [landmark_min_x, landmark_min_z] = editor.get_min_coords();
 	const auto [landmark_max_x, landmark_max_z] = editor.get_max_coords();
-	auto landmark_plan = args.use_3d && !args.skip_objects()
-								 ? landmarks::prescan(elements, landmark_anchors,
-										   {landmark_min_x, landmark_min_z,
-												   landmark_max_x, landmark_max_z},
-										   args.scale, args.rotation)
-								 : landmarks::PrescanResult{};
+	auto landmark_plan =
+			args.use_3d && !args.skip_objects()
+					? landmarks::prescan(elements, landmark_anchors,
+							  {landmark_min_x, landmark_min_z, landmark_max_x,
+									  landmark_max_z},
+							  args.scale, args.rotation, attraction_suppression)
+					: landmarks::PrescanResult{};
+	auto provider_suppression = landmark_plan.suppressed;
+	provider_suppression.reserve(
+			provider_suppression.size() + attraction_suppression.size());
+	for (const auto &key : attraction_suppression) {
+		if (std::find(provider_suppression.begin(), provider_suppression.end(), key) ==
+				provider_suppression.end())
+			provider_suppression.push_back(key);
+	}
 	// Match Rust's Models3dPipeline::prescan: a Wikidata or stadium feature is
 	// suppressed only after its model is fetchable. The providers memoize/cache
 	// successful fetches, so placement below reuses these assets rather than
@@ -1980,7 +1817,7 @@ bool generate_world(WorldEditor &editor,
 										  return custom_model_provider.fetch("stadium")
 												  .has_value();
 									  },
-									  args.rotation, landmark_plan.suppressed))
+									  args.rotation, provider_suppression))
 					: std::nullopt;
 	const auto plane_candidates =
 			args.use_3d ? structures::plane::prescan_placements(elements, args.scale)
@@ -2102,8 +1939,7 @@ bool generate_world(WorldEditor &editor,
 	});
 	editor.mapped_trunks =
 			std::make_shared<const trees::mapped::MappedTrunks>(std::move(mapped_trunks));
-	if (editor.ground && args.body == CelestialBody::Earth &&
-			editor.ground->has_land_cover()) {
+	if (editor.ground && editor.ground->has_land_cover()) {
 		// These are elevation-mutating passes in Rust. Run them through Ground so
 		// water snapping and bridge repair update the authoritative DEM, rather
 		// than a rounded land-cover-sized sample that is discarded afterwards.
@@ -2405,6 +2241,12 @@ bool generate_world(WorldEditor &editor,
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
 	auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
+	// Rust extends the shared rail graph to the One World boundary before station
+	// layout, so halls and tunnel pins see the same clipped endpoints as track
+	// rendering in every adjacent area.
+	if (args.one_world_run)
+		rail_joins.meet_at_edge_of(cartesian::XZBBox::rect_from_min_max(
+				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()));
 	// Rust registers fitted station surfaces before dispatch so rail profiles
 	// and adjoining track beds can use the shared station elevation immediately.
 	auto station_track_beds =
@@ -2428,12 +2270,6 @@ bool generate_world(WorldEditor &editor,
 				std::make_shared<const stations::SparseCells>(std::move(tree_clearance)));
 	}
 	editor.station_tunnel_pins = std::move(tunnel_pins);
-	if (args.one_world_run) {
-		const auto [min_x, min_z] = editor.get_min_coords();
-		const auto [max_x, max_z] = editor.get_max_coords();
-		rail_joins.meet_at_edge_of(
-				cartesian::XZBBox::rect_from_min_max(min_x, min_z, max_x, max_z));
-	}
 	// fm: Share the resolved network with tile workers, including standalone callers.
 	editor.native_rail_network = railways::advtrains::prepare_network(elements, editor);
 	// ===
@@ -2453,6 +2289,7 @@ bool generate_world(WorldEditor &editor,
 	for (const auto &[kind, id] : outline_suppression)
 		if (kind == "way")
 			suppressed_building_outlines.insert(id);
+	suppressed_building_outlines.insert(attraction_parts.begin(), attraction_parts.end());
 	const auto &suppressed_relations = building_data.suppressed_relations;
 	std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> building_group_members;
 	// Match Rust's grouping key, which clears packed facade, year and housing metadata.
@@ -2823,6 +2660,8 @@ bool generate_world(WorldEditor &editor,
 				completed_generation_tiles.fetch_add(1, std::memory_order_relaxed) + 1;
 		report_generation_work(completed);
 	};
+	std::vector<stations::StationVoid> deferred_station_voids;
+	std::mutex deferred_station_voids_mutex;
 	auto finish_ground_tile = [&](WorldEditor &tile_editor,
 									  ElementDispatchState &tile_state,
 									  std::size_t tile_index,
@@ -2852,13 +2691,23 @@ bool generate_world(WorldEditor &editor,
 					signage::generate_node_facade_signage(
 							editor, element.as_node(), building_footprints, road_mask);
 			}
+		// Rust renders station platforms immediately after element placement and
+		// before ground decoration; keep that order so the ground pass sees the
+		// platform deck and does not leave vegetation/details through it.
+		stations::render_surface_platforms(editor, station_surface_groups, elements,
+				bridge_structures, road_mask, building_footprints, min_x, min_z, max_x,
+				max_z);
+		// Rust reserves underground halls and entrance voids before terrain and
+		// cave generation. Keep the LIGHT placeholders until the final hall pass
+		// below so carving, ores, and decoration cannot claim those cells.
+		std::vector<stations::StationVoid> tile_station_voids;
+		if (editor.station_tunnel_pins)
+			tile_station_voids = stations::render_underground_halls(
+					editor, *editor.station_tunnel_pins);
 		ground_generation::generate_ground_region(editor, args, xzbbox,
 				building_footprints, min_x, max_x, min_z, max_z,
 				tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 				&bridge_surface);
-		stations::render_surface_platforms(editor, station_surface_groups, elements,
-				bridge_structures, road_mask, building_footprints, min_x, min_z, max_x,
-				max_z);
 		railways::clear_rail_gauge(editor, building_footprints);
 		if (args.caves) {
 			const caves::CaveRect cave_world{
@@ -2915,8 +2764,13 @@ bool generate_world(WorldEditor &editor,
 			}
 			highways::hang_tunnel_lights(editor, tunnel_lights);
 		}
-		if (editor.station_tunnel_pins)
-			stations::render_underground_halls(editor, *editor.station_tunnel_pins);
+		if (regional_ground_passes && eviction_active) {
+			stations::clear_underground_voids(editor, tile_station_voids);
+		} else if (regional_ground_passes && !tile_station_voids.empty()) {
+			std::lock_guard<std::mutex> lock(deferred_station_voids_mutex);
+			deferred_station_voids.insert(deferred_station_voids.end(),
+					tile_station_voids.begin(), tile_station_voids.end());
+		}
 		// Station stairs and halls are opened after the tile ground/water passes;
 		// seal any fluids those openings exposed before merging this tile.
 		if (regional_ground_passes && eviction_active && args.caves)
@@ -3537,7 +3391,16 @@ bool generate_world(WorldEditor &editor,
 	progress::emit_gui_progress_update_ex(70.0, "", eviction_active);
 	editor.clear_strict_bounds();
 	caves::CaveEllipsoids cave_ellipsoids;
+	std::vector<stations::StationVoid> station_voids;
 	if (!regional_ground_passes) {
+		// Rust renders station surfaces and reserves hall/entrance voids in the
+		// sequential path too; finish_ground_tile is only used by regional passes.
+		stations::render_surface_platforms(editor, station_surface_groups, elements,
+				bridge_structures, road_mask, building_footprints, xzbbox.min_x(),
+				xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		if (editor.station_tunnel_pins)
+			station_voids = stations::render_underground_halls(
+					editor, *editor.station_tunnel_pins);
 		ground_generation::generate_ground_layer(editor, args, xzbbox,
 				building_footprints,
 				tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
@@ -3614,6 +3477,10 @@ bool generate_world(WorldEditor &editor,
 		}
 		highways::hang_tunnel_lights(editor, tunnel_lights);
 	}
+	if (regional_ground_passes && !eviction_active)
+		stations::clear_underground_voids(editor, deferred_station_voids);
+	if (!regional_ground_passes)
+		stations::clear_underground_voids(editor, station_voids);
 	if (args.caves && !(regional_ground_passes && eviction_active))
 		caves::seal_floating_fluid_region(editor,
 				{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},

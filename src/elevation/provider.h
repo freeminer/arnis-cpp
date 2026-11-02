@@ -91,12 +91,10 @@ public:
 };
 
 // Select the primary provider as Rust's elevation::select_provider does. The
-// cache root and body are explicit because this library is embedded by callers
-// that own both settings.
+// source mode carries the optional planetary body just like Rust's enum variant.
 std::unique_ptr<ElevationProvider> select_provider(
 		const ::arnis::geographic::LLBBox &bbox, providers::SourceMode mode,
-		const std::filesystem::path &cache_root,
-		std::optional<CelestialBody> body = std::nullopt);
+		const std::filesystem::path &cache_root);
 
 RawElevationGrid fetch_raw_with_fallback(
 		const std::vector<std::reference_wrapper<const ElevationProvider>> &chain,
@@ -155,7 +153,7 @@ ElevationData build_grid(const std::vector<Tile> &, double min_lat, double min_l
 ElevationData build_processed_grid(const std::vector<Tile> &, double min_lat,
 		double min_lon, double max_lat, double max_lon, std::size_t width,
 		std::size_t height, const LandCoverRepairConfig &repair = {},
-		providers::SourceMode mode = providers::SourceMode::Auto);
+		providers::SourceMode mode = providers::SourceMode::Auto());
 void normalize_grid(ElevationData &, double sea_level, double scale, double min_height,
 		double max_height);
 ElevationData resample_grid(const ElevationData &, std::size_t width, std::size_t height);
@@ -194,11 +192,11 @@ public:
 class CachedProvider : public Provider
 {
 	std::filesystem::path root_;
-	providers::SourceMode mode_{providers::SourceMode::Auto};
+	providers::SourceMode mode_{providers::SourceMode::Auto()};
 
 public:
 	explicit CachedProvider(std::filesystem::path root,
-			providers::SourceMode mode = providers::SourceMode::Auto) :
+			providers::SourceMode mode = providers::SourceMode::Auto()) :
 			root_(std::move(root)), mode_(mode)
 	{
 	}
@@ -210,5 +208,5 @@ public:
 };
 std::vector<Tile> tiles_for_bbox(double min_lat, double min_lon, double max_lat,
 		double max_lon, const std::filesystem::path &root,
-		providers::SourceMode mode = providers::SourceMode::Auto);
+		providers::SourceMode mode = providers::SourceMode::Auto());
 }

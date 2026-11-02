@@ -49,8 +49,7 @@ ElevationData Selector::raw_grid(
 		double a, double b, double c, double d, std::size_t w, std::size_t h)
 {
 	const geographic::LLBBox bbox(a, b, c, d);
-	auto provider =
-			select_provider(bbox, cached_.mode(), cached_.root(), planetary_body_);
+	auto provider = select_provider(bbox, cached_.mode(), cached_.root());
 	const auto as_grid = [w, h](RawElevationGrid raw) {
 		ElevationData out;
 		out.width = w;
@@ -61,27 +60,20 @@ ElevationData Selector::raw_grid(
 		out.source_pixels = std::move(raw.source_pixels);
 		return out;
 	};
-	if (cached_.mode() == providers::SourceMode::Planetary)
+	if (cached_.mode().kind() == providers::SourceMode::Kind::Planetary)
 		return as_grid(provider->fetch_raw(bbox, w, h));
-	if (cached_.mode() == providers::SourceMode::AwsOnly ||
-			cached_.mode() == providers::SourceMode::Auto) {
+	if (cached_.mode().kind() == providers::SourceMode::Kind::AwsOnly ||
+			cached_.mode().kind() == providers::SourceMode::Kind::Auto) {
 		std::unique_ptr<ElevationProvider> aws;
 		std::vector<std::reference_wrapper<const ElevationProvider>> chain;
 		chain.emplace_back(*provider);
-		if (cached_.mode() == providers::SourceMode::Auto) {
+		if (cached_.mode().kind() == providers::SourceMode::Kind::Auto) {
 			aws = std::make_unique<AwsElevationProvider>(cached_.root());
 			chain.emplace_back(*aws);
 		}
 		return as_grid(fetch_raw_with_fallback(chain, bbox, w, h));
 	}
-	// The legacy GlobalOnly source mode keeps its tile-plan fallback. Try its
-	// selected provider through the same interface first, then retain that path.
-	try {
-		return as_grid(provider->fetch_raw(bbox, w, h));
-	} catch (const std::exception &) {
-	}
-	auto tiles = tiles_for_bbox(a, b, c, d, cached_.root(), cached_.mode());
-	return build_grid(tiles, a, b, c, d, w, h);
+	throw std::logic_error("unknown elevation source mode");
 }
 ElevationData Selector::grid(double a, double b, double c, double d, std::size_t w,
 		std::size_t h, const LandCoverRepairConfig &repair)

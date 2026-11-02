@@ -64,5 +64,6 @@ private:
 };
 
 bool is_vehicular(const std::string &highway);
+bool is_signal(const tags_t &tags);
 
 } // namespace arnis::highways
