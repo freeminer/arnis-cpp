@@ -451,11 +451,11 @@ double value_noise(const std::array<double, 3> &p, std::uint64_t salt)
 	const auto lerp = [](double a, double c, double weight) {
 		return a + (c - a) * weight;
 	};
-	const double near = lerp(lerp(corner(0, 0, 0), corner(1, 0, 0), t[0]),
+	const double near_ = lerp(lerp(corner(0, 0, 0), corner(1, 0, 0), t[0]),
 			lerp(corner(0, 1, 0), corner(1, 1, 0), t[0]), t[1]);
-	const double far = lerp(lerp(corner(0, 0, 1), corner(1, 0, 1), t[0]),
+	const double far_ = lerp(lerp(corner(0, 0, 1), corner(1, 0, 1), t[0]),
 			lerp(corner(0, 1, 1), corner(1, 1, 1), t[0]), t[1]);
-	return lerp(near, far, t[2]);
+	return lerp(near_, far_, t[2]);
 }
 
 struct Field
