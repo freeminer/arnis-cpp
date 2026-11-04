@@ -1442,12 +1442,12 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 		return result;
 	// StationIndex indexes the 3x3 block halo around platforms rather than every
 	// rail cell in a large extraction, which keeps this prescan bounded.
-	std::unordered_set<Xz, XzHash> near;
+	std::unordered_set<Xz, XzHash> near_;
 	for (const auto &platform : platforms)
 		for (const auto &[x, z] : platform.cells)
 			for (int dx = -1; dx <= 1; ++dx)
 				for (int dz = -1; dz <= 1; ++dz)
-					near.emplace((x >> 4) + dx, (z >> 4) + dz);
+					near_.emplace((x >> 4) + dx, (z >> 4) + dz);
 	std::unordered_map<Xz, std::vector<TrackCell>, XzHash> tracks;
 	std::unordered_map<std::uint64_t, std::vector<Xz>> tunnel_ways;
 	std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> tunnel_nodes;
@@ -1463,7 +1463,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 			continue;
 		if (*level == railways::TrackLevel::Tunnel &&
 				std::any_of(cells.begin(), cells.end(), [&](const Xz &cell) {
-					return near.contains({cell.first >> 4, cell.second >> 4});
+					return near_.contains({cell.first >> 4, cell.second >> 4});
 				})) {
 			tunnel_ways.try_emplace(way.id, cells);
 			auto &nodes = tunnel_nodes[way.id];
@@ -1472,7 +1472,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 				nodes.push_back(node.id);
 		}
 		for (std::size_t i = 0; i < cells.size(); ++i) {
-			if (!near.contains({cells[i].first >> 4, cells[i].second >> 4}))
+			if (!near_.contains({cells[i].first >> 4, cells[i].second >> 4}))
 				continue;
 			const auto a = cells[i > HEADING_CELLS ? i - HEADING_CELLS : 0];
 			const auto b = cells[std::min(i + HEADING_CELLS, cells.size() - 1)];
