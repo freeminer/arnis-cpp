@@ -4,6 +4,8 @@
 #include "../bresenham.h"
 #include "../strict_parse.h"
 #include "surfaces.h"
+#include "raceways.h"
+#include "stations.h"
 
 #include <algorithm>
 #include <array>
@@ -186,6 +188,18 @@ bool describes_crossing(const ProcessedNode &node)
 	const auto highway = node.tags.get("highway");
 	return highway == "crossing" ||
 		   (highway == "traffic_signals" && node.tags.contains("crossing"));
+}
+
+bool raceway_is_pit_lane(const tags_t &tags)
+{
+	const auto value = tags.get("raceway");
+	return value == "pitlane" || value == "pit_lane" || value == "pit" || value == "pits";
+}
+
+bool raceway_is_start_line(const std::string &value)
+{
+	return value == "start-finish" || value == "start" || value == "finish" ||
+		   value == "startline" || value == "start/finish" || value == "finish_line";
 }
 
 // Outer nullopt means no crossing tag; an engaged empty optional means
@@ -451,6 +465,439 @@ RoadMarkingIndex RoadMarkingIndex::build(const std::vector<ProcessedElement> &el
 	result.drives_on_left = decals::drives_on_left(region);
 	result.yellow_centre = region == decals::SignRegion::NorthAmerica ||
 						   region == decals::SignRegion::Canada;
+	// Raceway edges are resolved from all source ways before tiles are dispatched,
+	// so borders remain continuous where neighbouring ways meet or split at a chunk.
+	std::map<int, stations::SparseCells> track_surface, paved_track;
+	std::vector<const ProcessedWay *> track_ways;
+	std::vector<std::tuple<const ProcessedWay *, int, int>> raceway_ways;
+	std::unordered_map<std::uint64_t, std::vector<int>> end_decks;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto level = strict_parse::i32(way.tags.get("level"));
+		if (way.tags.get("highway") != "raceway" || way.nodes.size() < 2 ||
+				way.tags.get("area") == "yes" || way.tags.get("indoor") == "yes" ||
+				(way.tags.contains("tunnel") && way.tags.get("tunnel") != "no") ||
+				(level && *level < 0))
+			continue;
+		const int half = arnis::highways::highway_block_range("raceway", way.tags, scale);
+		const int deck = raceways::deck(way.tags);
+		raceway_ways.emplace_back(&way, half, deck);
+		end_decks[way.nodes.front().id].push_back(deck);
+		end_decks[way.nodes.back().id].push_back(deck);
+	}
+	for (const auto &[way, half, deck] : raceway_ways) {
+		const bool painted = half >= 2 && raceways::is_paved(way->tags);
+		const auto cells = way_cells(*way);
+		for (const auto &[x, z] : cells) {
+			track_surface[deck].set_square(x, z, half);
+			if (painted)
+				paved_track[deck].set_square(x, z, half);
+		}
+		const std::size_t reach = std::min<std::size_t>(half + 2, cells.size());
+		const auto copy_joint = [&](std::uint64_t id, std::size_t begin,
+										std::size_t end) {
+			for (const auto other_deck : end_decks[id]) {
+				if (other_deck == deck)
+					continue;
+				for (std::size_t i = begin; i < end; ++i)
+					track_surface[other_deck].set_square(
+							cells[i].first, cells[i].second, half);
+			}
+		};
+		copy_joint(way->nodes.front().id, 0, reach);
+		copy_joint(way->nodes.back().id, cells.size() - reach, cells.size());
+		if (painted)
+			track_ways.push_back(way);
+	}
+	struct RacewayLineCell
+	{
+		int x, z;
+		float s, tx, tz;
+		int half, deck;
+		std::int8_t kerb;
+		bool both;
+	};
+	struct RacewayLine
+	{
+		std::vector<RacewayLineCell> cells;
+		float length{0.0f};
+		bool closed{false};
+		std::size_t order{0};
+	};
+	std::vector<RacewayLine> raceway_lines;
+	for (const auto &[deck, painted_cells] : paved_track) {
+		if (painted_cells.empty())
+			continue;
+		// Join split centerlines at unambiguous two-way OSM nodes. This keeps
+		// curvature estimates and kerb striping continuous through way boundaries,
+		// including where connected ways change bridge/layer deck.
+		const auto &ways = track_ways;
+		std::unordered_map<std::uint64_t, std::vector<std::size_t>> ends;
+		for (std::size_t i = 0; i < ways.size(); ++i) {
+			if (ways[i]->nodes.front().id == ways[i]->nodes.back().id)
+				continue;
+			ends[ways[i]->nodes.front().id].push_back(i);
+			ends[ways[i]->nodes.back().id].push_back(i);
+		}
+		std::vector<bool> visited(ways.size(), false);
+		for (std::size_t start = 0; start < ways.size(); ++start) {
+			if (visited[start])
+				continue;
+			std::deque<std::pair<std::size_t, bool>> run{{start, false}};
+			visited[start] = true;
+			const auto first_id = [&](std::size_t i) {
+				return ways[i]->nodes.front().id;
+			};
+			const auto last_id = [&](std::size_t i) { return ways[i]->nodes.back().id; };
+			const auto next_way = [&](std::uint64_t node) -> std::optional<std::size_t> {
+				const auto it = ends.find(node);
+				if (it == ends.end() || it->second.size() != 2)
+					return std::nullopt;
+				for (const auto index : it->second)
+					if (!visited[index])
+						return index;
+				return std::nullopt;
+			};
+			if (first_id(start) != last_id(start)) {
+				auto tail = last_id(start);
+				while (const auto next = next_way(tail)) {
+					const auto index = *next;
+					visited[index] = true;
+					const bool reversed = last_id(index) == tail;
+					tail = reversed ? first_id(index) : last_id(index);
+					run.emplace_back(index, reversed);
+				}
+				auto head = first_id(start);
+				while (const auto next = next_way(head)) {
+					const auto index = *next;
+					visited[index] = true;
+					const bool reversed = first_id(index) == head;
+					head = reversed ? last_id(index) : first_id(index);
+					run.emplace_front(index, reversed);
+				}
+			}
+			if (raceways::deck(ways[run.front().first]->tags) != deck)
+				continue;
+
+			std::vector<std::pair<int, int>> path;
+			std::vector<int> half_by_cell;
+			std::vector<bool> kerbs_by_cell;
+			std::vector<int> deck_by_cell;
+			std::vector<float> distance_by_cell;
+			std::vector<float> node_distances{0.0f};
+			std::vector<const ProcessedNode *> chain_nodes;
+			std::vector<int> half_by_node;
+			std::vector<bool> kerbs_by_node;
+			std::vector<int> deck_by_node;
+			for (const auto &[index, reversed] : run) {
+				const auto *way = ways[index];
+				const int half =
+						arnis::highways::highway_block_range("raceway", way->tags, scale);
+				const bool kerbs = !raceway_is_pit_lane(way->tags);
+				const std::size_t skip = chain_nodes.empty() ? 0 : 1;
+				for (std::size_t i = skip; i < way->nodes.size(); ++i) {
+					const std::size_t node_index =
+							reversed ? way->nodes.size() - 1 - i : i;
+					chain_nodes.push_back(&way->nodes[node_index]);
+					half_by_node.push_back(half);
+					kerbs_by_node.push_back(kerbs);
+					deck_by_node.push_back(raceways::deck(way->tags));
+				}
+			}
+			// Preserve Rust's chain geometry and its cumulative Euclidean `s`;
+			// each connected way contributes all nodes except the shared join.
+			float cumulative_distance = 0.0f;
+			for (std::size_t k = 1; k < chain_nodes.size(); ++k) {
+				const auto &a = *chain_nodes[k - 1];
+				const auto &b = *chain_nodes[k];
+				const auto points = bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
+				const float dx = static_cast<float>(b.x) - static_cast<float>(a.x);
+				const float dz = static_cast<float>(b.z) - static_cast<float>(a.z);
+				const float segment_length = std::hypot(dx, dz);
+				const float steps =
+						static_cast<float>(std::max<std::size_t>(1, points.size() - 1));
+				const std::size_t begin = k == 1 ? 0 : 1;
+				for (std::size_t j = begin; j < points.size(); ++j) {
+					path.emplace_back(std::get<0>(points[j]), std::get<2>(points[j]));
+					half_by_cell.push_back(half_by_node[k]);
+					kerbs_by_cell.push_back(kerbs_by_node[k]);
+					deck_by_cell.push_back(deck_by_node[k]);
+					distance_by_cell.push_back(
+							cumulative_distance +
+							segment_length * static_cast<float>(j) / steps);
+				}
+				cumulative_distance += segment_length;
+				node_distances.push_back(cumulative_distance);
+			}
+			if (path.empty())
+				continue;
+			const float curve_window = std::max(16.0f * static_cast<float>(scale), 4.0f);
+			const bool closed = chain_nodes.size() > 3 &&
+								chain_nodes.front()->id == chain_nodes.back()->id;
+			struct Bend
+			{
+				double tx{1.0}, tz{0.0};
+				std::int8_t side{0};
+				bool tight{false};
+			};
+			std::vector<Bend> bends(path.size());
+			const auto line_at = [&](float distance) {
+				if (closed && cumulative_distance > 0.0f) {
+					distance = std::fmod(distance, cumulative_distance);
+					if (distance < 0.0f)
+						distance += cumulative_distance;
+				} else {
+					distance = std::clamp(distance, 0.0f, cumulative_distance);
+				}
+				const auto upper = std::upper_bound(
+						node_distances.begin(), node_distances.end(), distance);
+				const std::size_t i = std::clamp<std::size_t>(
+						upper - node_distances.begin(), 1, chain_nodes.size() - 1);
+				const float segment = node_distances[i] - node_distances[i - 1];
+				const float fraction =
+						segment > 0.0f ? (distance - node_distances[i - 1]) / segment
+									   : 0.0f;
+				const auto &a = *chain_nodes[i - 1];
+				const auto &b = *chain_nodes[i];
+				return std::pair{static_cast<float>(a.x) +
+										 (static_cast<float>(b.x) - a.x) * fraction,
+						static_cast<float>(a.z) +
+								(static_cast<float>(b.z) - a.z) * fraction};
+			};
+			for (std::size_t pi = 0; pi < path.size(); ++pi) {
+				const bool kerbs = kerbs_by_cell[pi];
+				const auto behind = line_at(distance_by_cell[pi] - 2.0f);
+				const auto ahead = line_at(distance_by_cell[pi] + 2.0f);
+				const float tangent_x = ahead.first - behind.first;
+				const float tangent_z = ahead.second - behind.second;
+				const float tangent_length = std::hypot(tangent_x, tangent_z);
+				if (tangent_length > 0.0f) {
+					bends[pi].tx = tangent_x / tangent_length;
+					bends[pi].tz = tangent_z / tangent_length;
+				}
+				if (!kerbs)
+					continue;
+				if (!closed && (distance_by_cell[pi] < curve_window * 0.75f ||
+									   cumulative_distance - distance_by_cell[pi] <
+											   curve_window * 0.75f))
+					continue;
+				const auto p = line_at(distance_by_cell[pi]);
+				const auto a = line_at(distance_by_cell[pi] - curve_window);
+				const auto b = line_at(distance_by_cell[pi] + curve_window);
+				const float d1x = p.first - a.first, d1z = p.second - a.second;
+				const float d2x = b.first - p.first, d2z = b.second - p.second;
+				const float l1 = std::hypot(d1x, d1z), l2 = std::hypot(d2x, d2z);
+				if (l1 >= 1.0f && l2 >= 1.0f) {
+					const float turn =
+							std::atan2(d1x * d2z - d1z * d2x, d1x * d2x + d1z * d2z);
+					const float curvature = std::abs(turn) / ((l1 + l2) * 0.5f);
+					if (curvature > 1.0f / (90.0f * static_cast<float>(scale))) {
+						bends[pi].side = turn > 0.0f ? 1 : -1;
+						bends[pi].tight =
+								curvature > 1.0f / (35.0f * static_cast<float>(scale));
+					}
+				}
+			}
+			// Ignore tiny curvature spikes, matching Rust's minimum useful kerb run.
+			const auto drop_short_runs = [](std::vector<std::int8_t> &flags,
+												 std::size_t min_run, bool loop) {
+				const auto n = flags.size();
+				if (n == 0)
+					return;
+				std::size_t start = 0;
+				if (loop) {
+					const auto zero = std::find(flags.begin(), flags.end(), 0);
+					if (zero == flags.end())
+						return;
+					start = static_cast<std::size_t>(zero - flags.begin());
+				}
+				for (std::size_t i = 0; i < n;) {
+					const auto value = flags[(start + i) % n];
+					std::size_t length = 1;
+					while (i + length < n && flags[(start + i + length) % n] == value)
+						++length;
+					if (value != 0 && length < min_run)
+						for (std::size_t j = 0; j < length; ++j)
+							flags[(start + i + j) % n] = 0;
+					i += length;
+				}
+			};
+			std::vector<std::int8_t> side(path.size()), tight(path.size());
+			for (std::size_t i = 0; i < bends.size(); ++i) {
+				side[i] = bends[i].side;
+				tight[i] = bends[i].tight ? 1 : 0;
+			}
+			const auto min_kerb_run = static_cast<std::size_t>(
+					std::max(6.0f * static_cast<float>(scale), 3.0f));
+			drop_short_runs(side, min_kerb_run, closed);
+			drop_short_runs(tight, min_kerb_run, closed);
+			RacewayLine line;
+			line.length = cumulative_distance;
+			line.closed = closed;
+			line.order = start;
+			line.cells.reserve(path.size());
+			for (std::size_t pi = 0; pi < path.size(); ++pi) {
+				line.cells.push_back({path[pi].first, path[pi].second,
+						distance_by_cell[pi], static_cast<float>(bends[pi].tx),
+						static_cast<float>(bends[pi].tz), half_by_cell[pi],
+						deck_by_cell[pi], side[pi], side[pi] != 0 && tight[pi] != 0});
+			}
+			raceway_lines.push_back(std::move(line));
+		}
+	}
+	// Start/finish markers are snapped to the nearest continuous raceway chain.
+	// Re-check each painted cell against that same chain so parallel pit lanes
+	// and nearby circuits do not inherit the marker.
+	std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>>
+			raceway_grid;
+	int max_raceway_half = 1;
+	for (std::size_t ci = 0; ci < raceway_lines.size(); ++ci) {
+		for (std::size_t i = 0; i < raceway_lines[ci].cells.size(); ++i) {
+			const auto &cell = raceway_lines[ci].cells[i];
+			max_raceway_half = std::max(max_raceway_half, cell.half);
+			raceway_grid[{cell.x >> 3, cell.z >> 3}].emplace_back(ci, i);
+		}
+	}
+	const int raceway_reach = max_raceway_half * 3 / 2 + 2;
+	const auto nearest_raceway_cell = [&](int x, int z, std::optional<int> deck)
+			-> std::optional<std::pair<std::size_t, std::size_t>> {
+		std::optional<
+				std::tuple<bool, std::int64_t, std::size_t, std::size_t, std::size_t>>
+				best;
+		for (int gx = (x - raceway_reach) >> 3; gx <= (x + raceway_reach) >> 3; ++gx) {
+			for (int gz = (z - raceway_reach) >> 3; gz <= (z + raceway_reach) >> 3;
+					++gz) {
+				const auto bucket = raceway_grid.find({gx, gz});
+				if (bucket == raceway_grid.end())
+					continue;
+				for (const auto &[ci, i] : bucket->second) {
+					const auto &line = raceway_lines[ci];
+					const auto &cell = line.cells[i];
+					if (deck && *deck != cell.deck)
+						continue;
+					const auto dx = static_cast<std::int64_t>(cell.x) - x;
+					const auto dz = static_cast<std::int64_t>(cell.z) - z;
+					const bool outside = std::max(std::abs(dx), std::abs(dz)) > cell.half;
+					const auto d2 = dx * dx + dz * dz;
+					const auto candidate = std::tuple{outside, d2, line.order, i, ci};
+					if (!best || candidate < *best)
+						best = candidate;
+				}
+			}
+		}
+		if (!best)
+			return std::nullopt;
+		return std::pair{std::get<4>(*best), std::get<3>(*best)};
+	};
+	for (const auto &[deck, paved] : paved_track) {
+		const auto surface_it = track_surface.find(deck);
+		if (surface_it == track_surface.end())
+			continue;
+		const auto &surface = surface_it->second;
+		const auto rim = [&](int x, int z) {
+			return surface.contains(x, z) &&
+				   (!surface.contains(x + 1, z) || !surface.contains(x - 1, z) ||
+						   !surface.contains(x, z + 1) || !surface.contains(x, z - 1));
+		};
+		for (const auto &line : raceway_lines) {
+			for (const auto &cell : line.cells) {
+				if (cell.deck != deck)
+					continue;
+				for (int dx = -cell.half; dx <= cell.half; ++dx) {
+					for (int dz = -cell.half; dz <= cell.half; ++dz) {
+						const int x = cell.x + dx, z = cell.z + dz;
+						if (!paved.contains(x, z))
+							continue;
+						const int depth = rim(x, z) ? 0
+										  : (rim(x + 1, z) || rim(x - 1, z) ||
+													rim(x, z + 1) || rim(x, z - 1))
+												  ? 1
+												  : -1;
+						if (depth < 0)
+							continue;
+						const auto nearest = nearest_raceway_cell(x, z, deck);
+						if (!nearest)
+							continue;
+						const auto &[chain_index, cell_index] = *nearest;
+						const auto &nearest_cell =
+								raceway_lines[chain_index].cells[cell_index];
+						const float rel_x = static_cast<float>(x - nearest_cell.x);
+						const float rel_z = static_cast<float>(z - nearest_cell.z);
+						const float side_value =
+								nearest_cell.tx * rel_z - nearest_cell.tz * rel_x;
+						const int side = side_value > 0.5f	  ? 1
+										 : side_value < -0.5f ? -1
+															  : 0;
+						const bool kerb =
+								nearest_cell.kerb != 0 && side != 0 &&
+								(side == nearest_cell.kerb || nearest_cell.both) &&
+								(depth == 0 || nearest_cell.half >= 5);
+						if (kerb) {
+							const auto stripe = static_cast<std::int64_t>(
+									std::floor(nearest_cell.s / 2.0f));
+							result.raceway_paint_[{deck, x, z}] =
+									stripe % 2 == 0
+											? crate::block_definitions::RED_CONCRETE
+											: crate::block_definitions::WHITE_CONCRETE;
+						} else if (depth == 0) {
+							result.raceway_paint_[{deck, x, z}] =
+									crate::block_definitions::WHITE_CONCRETE;
+						}
+					}
+				}
+			}
+		}
+	}
+	for (const auto &element : elements) {
+		if (!element.is_node())
+			continue;
+		const auto &node = element.as_node();
+		const auto marker = node.tags.get("raceway");
+		if (!raceway_is_start_line(marker))
+			continue;
+		const auto nearest = nearest_raceway_cell(node.x, node.z, std::nullopt);
+		if (!nearest)
+			continue;
+		const auto &[chain_index, cell_index] = *nearest;
+		const auto &line = raceway_lines[chain_index];
+		const auto &cell = line.cells[cell_index];
+		if (std::max(std::abs(cell.x - node.x), std::abs(cell.z - node.z)) >
+				cell.half + 2)
+			continue;
+		const auto surface = paved_track.find(cell.deck);
+		if (surface == paved_track.end())
+			continue;
+		const int radius = cell.half * 3 / 2 + 1;
+		for (int x = cell.x - radius; x <= cell.x + radius; ++x) {
+			for (int z = cell.z - radius; z <= cell.z + radius; ++z) {
+				if (!surface->second.contains(x, z))
+					continue;
+				const float dx = static_cast<float>(x - cell.x);
+				const float dz = static_cast<float>(z - cell.z);
+				const float along = dx * cell.tx + dz * cell.tz;
+				if (along < -1.0 || along >= 1.0)
+					continue;
+				const auto same_chain = nearest_raceway_cell(x, z, cell.deck);
+				if (!same_chain || same_chain->first != chain_index)
+					continue;
+				const auto &other =
+						raceway_lines[same_chain->first].cells[same_chain->second];
+				float gap = std::abs(other.s - cell.s);
+				if (line.closed)
+					gap = std::min(gap, line.length - gap);
+				if (gap > 3.0f)
+					continue;
+				const auto col = static_cast<std::int64_t>(
+						std::floor(cell.tx * dz - cell.tz * dx));
+				const auto row = static_cast<std::int64_t>(std::floor(along));
+				result.raceway_paint_[{cell.deck, x, z}] =
+						((row + col) % 2 == 0) ? crate::block_definitions::WHITE_CONCRETE
+											   : crate::block_definitions::BLACK_CONCRETE;
+			}
+		}
+	}
 	std::uint32_t lines = 0, zebras = 0;
 	for (const auto &element : elements) {
 		const auto &tags = element.tags();
@@ -1243,6 +1690,12 @@ const CarriagewayClip *RoadMarkingIndex::carriageway_at(
 	const auto it = std::find_if(clips->begin(), clips->end(),
 			[&](const auto &clip) { return clip.contains(x, z); });
 	return it == clips->end() ? nullptr : &*it;
+}
+
+std::optional<Block> RoadMarkingIndex::raceway_at(int deck, int x, int z) const
+{
+	const auto it = raceway_paint_.find({deck, x, z});
+	return it == raceway_paint_.end() ? std::nullopt : std::optional<Block>(it->second);
 }
 
 std::optional<CrossingPaint> RoadMarkingIndex::crossing_way_paint(

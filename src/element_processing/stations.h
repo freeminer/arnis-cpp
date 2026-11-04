@@ -65,6 +65,7 @@ public:
 	void merge(const SparseCells &other);
 	bool contains(int x, int z) const;
 	bool empty() const { return blocks_.empty(); }
+	std::vector<Xz> iter() const;
 
 private:
 	struct Hash

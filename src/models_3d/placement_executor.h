@@ -1,7 +1,5 @@
 #pragma once
 
-#include "custom/plane.h"
-#include "custom/stadium.h"
 #include "provider.h"
 #include "three_dmr/client.h"
 #include "three_dmr/prescan.h"
@@ -37,10 +35,5 @@ ModelPlacementStats place_wikidata_prescan(ModelProvider &, world_editor::WorldE
 ModelPlacementStats place_three_dmr_prescan(three_dmr::Client &,
 		world_editor::WorldEditor &, const three_dmr::PrescanResult &,
 		double blocks_per_meter,
-		std::optional<std::span<const std::size_t>> indices = std::nullopt);
-ModelPlacementStats place_plane_prescan(ModelProvider &, world_editor::WorldEditor &,
-		const std::vector<custom::plane::Placement> &, double blocks_per_meter);
-ModelPlacementStats place_stadium_prescan(ModelProvider &, world_editor::WorldEditor &,
-		const custom::stadium::PrescanResult &, double blocks_per_meter,
 		std::optional<std::span<const std::size_t>> indices = std::nullopt);
 }

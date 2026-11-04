@@ -10,6 +10,7 @@
 #include <span>
 #include <utility>
 #include <vector>
+#include <string_view>
 
 namespace arnis::element_processing
 {
@@ -19,9 +20,10 @@ enum class RelationArea
 	Building,
 	Pool,
 	Water,
+	Golf,
+	Leisure,
 	Natural,
 	Landuse,
-	Park,
 	ManMade,
 };
 
@@ -44,12 +46,50 @@ inline std::optional<RelationArea> relation_area(const tags_t &tags)
 			(tags.contains("natural") &&
 					(tags.at("natural") == "water" || tags.at("natural") == "bay")))
 		return RelationArea::Water;
+	if (tags.contains("golf") &&
+			(tags.at("golf") == "green" || tags.at("golf") == "fairway" ||
+					tags.at("golf") == "tee" || tags.at("golf") == "rough" ||
+					tags.at("golf") == "bunker" || tags.at("golf") == "driving_range") &&
+			!tags.contains("building") && !tags.contains("building:part") &&
+			!tags.contains("highway") && tags.get("natural") != "water" &&
+			tags.get("natural") != "wetland")
+		return RelationArea::Golf;
 	if (tags.contains("natural"))
 		return RelationArea::Natural;
 	if (tags.contains("landuse"))
 		return RelationArea::Landuse;
-	if (tags.contains("leisure") && tags.at("leisure") == "park")
-		return RelationArea::Park;
+	if (tags.get("leisure") == "park")
+		return RelationArea::Leisure;
+	if (tags.get("leisure") == "track" &&
+			(tags.get("area") == "yes" || tags.get("type") == "multipolygon")) {
+		const auto sport = tags.get("sport");
+		for (std::size_t begin = 0; begin <= sport.size();) {
+			const auto sep = sport.find(';', begin);
+			const auto end = sep == std::string::npos ? sport.size() : sep;
+			const std::string_view item(sport.data() + begin, end - begin);
+			const auto [a, b] =
+					item.find_first_not_of(" \t\n\r\f\v") == std::string_view::npos
+							? std::pair{item.size(), item.size()}
+							: std::pair{item.find_first_not_of(" \t\n\r\f\v"),
+									  item.find_last_not_of(" \t\n\r\f\v") + 1};
+			const auto discipline = item.substr(a, b - a);
+			if (discipline == "motor" || discipline == "motorsport" ||
+					discipline == "motor_racing" || discipline == "motorcycle_racing" ||
+					discipline == "auto_racing" || discipline == "drag_racing" ||
+					discipline == "karting" || discipline == "kart" ||
+					discipline == "go_kart" || discipline == "go-kart" ||
+					discipline == "motocross" || discipline == "enduro" ||
+					discipline == "supercross" || discipline == "speedway" ||
+					discipline == "bmx" || discipline == "dirt_bike" ||
+					discipline == "rc_car" || discipline == "model" ||
+					discipline == "model_car" || discipline == "modelrace" ||
+					discipline == "rc")
+				return RelationArea::Leisure;
+			if (sep == std::string::npos)
+				break;
+			begin = sep + 1;
+		}
+	}
 	if (tags.contains("man_made"))
 		return RelationArea::ManMade;
 	return std::nullopt;
@@ -59,8 +99,9 @@ inline bool relation_area_fills_members(RelationArea area, const tags_t &tags)
 {
 	switch (area) {
 	case RelationArea::Natural:
-	case RelationArea::Park:
 	case RelationArea::Pool:
+	case RelationArea::Golf:
+	case RelationArea::Leisure:
 		return true;
 	case RelationArea::Landuse:
 		return landuse_paints_ground(tags);

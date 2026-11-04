@@ -4,6 +4,7 @@
 #include "element_processing/way_segments.h"
 #include "element_processing/relation_area.h"
 #include "element_processing/highways.h"
+#include "element_processing/golf.h"
 #include "bresenham.h"
 #include "strict_parse.h"
 #include <algorithm>
@@ -186,6 +187,8 @@ const std::unordered_set<std::string> &planted_landuse_values()
 
 bool is_sealed_surface_way(const ProcessedWay &way)
 {
+	if (golf::is_managed(way.tags))
+		return true;
 	const auto leisure = way.tags.find("leisure");
 	if (leisure != way.tags.end() && sealed_leisure_values().contains(leisure->second))
 		return true;
@@ -239,6 +242,11 @@ bool relation_fills_members(const ProcessedRelation &relation)
 }
 
 } // namespace
+
+bool is_sealed_leisure_surface(std::string_view leisure_type)
+{
+	return sealed_leisure_values().contains(std::string(leisure_type));
+}
 
 InnerRings::InnerRings(const ProcessedRelation &relation)
 {
@@ -572,6 +580,20 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 	std::vector<std::pair<uint64_t, bool>> sealed_ids;
 	std::vector<uint64_t> planted_ids;
 	for (const auto &element : elements) {
+		if (element.is_relation()) {
+			const auto &relation = element.as_relation();
+			if (golf::is_managed(relation.tags)) {
+				for (const auto &member : relation.members) {
+					if (!member.way || !contains(member.way->id))
+						continue;
+					if (member.role == ProcessedMemberRole::Outer)
+						sealed_ids.emplace_back(member.way->id, true);
+					else if (member.role == ProcessedMemberRole::Inner)
+						planted_ids.push_back(member.way->id);
+				}
+			}
+			continue;
+		}
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
@@ -803,8 +825,8 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 	const bool waterfront = is_waterfront(way.tags);
 	const bool needed = has_building || has_building_part || has_landuse || has_leisure ||
 						has_amenity || natural_not_tree || (has_highway && area_yes) ||
-						highways::is_aeroway_area(way) || tomb_pyramid || waterfront ||
-						solar_generator;
+						highways::is_aeroway_area(way) || golf::claims(way.tags) ||
+						tomb_pyramid || waterfront || solar_generator;
 	return needed && !fill_goes_unread(way);
 }
 

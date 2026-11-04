@@ -128,6 +128,7 @@ std::string overpass_query(const geographic::LLBBox &bbox)
 		<< "nwr[\"attraction\"];nwr[\"barrier\"];nwr[\"entrance\"];nwr[\"door\"];"
 		<< "nwr[\"power\"];nwr[\"historic\"];nwr[\"emergency\"];nwr[\"advertising\"];"
 		<< "nwr[\"man_made\"];nwr[\"aeroway\"];nwr[\"3dmr\"];nwr[\"shop\"];nwr[\"office\"];"
+		<< "node[\"raceway\"];"
 		<< "node[\"place\"~\"^(city|town|borough|suburb|village|quarter|neighbourhood|hamlet)$\"];"
 		<< "way[~\".\"~\".\"];\n)->.candidates;\n"
 		<< "(nwr.candidates[\"landuse\"=\"salt_pond\"];"

@@ -15,6 +15,7 @@
 #include "world_editor.h"
 #include "surfaces.h"
 #include "sport_pitches.h"
+#include "raceways.h"
 #include "bridges.h"
 #include "../ground_decoration.h"
 #include "bush.h"
@@ -62,9 +63,14 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 			block_type = LIGHT_GRAY_CONCRETE;
 		} else if (leisure_type == "ice_rink") {
 			block_type = PACKED_ICE;
+		} else if (leisure_type == "track") {
+			block_type = raceways::track_area_block(element.tags).value_or(GRASS_BLOCK);
 		} else {
 			block_type = GRASS_BLOCK;
 		}
+		if (leisure_type == "pitch" || leisure_type == "track")
+			if (const auto sport_surface = sport_pitches::default_surface(element.tags))
+				block_type = *sport_surface;
 
 		if (auto surf_it = element.tags.find(std::string("surface"));
 				surf_it != element.tags.end()) {
@@ -74,6 +80,8 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 				block_type = surface_blocks.front();
 			}
 		}
+		const bool spares_nested_turf =
+				block_type != GRASS_BLOCK && !is_sealed_leisure_surface(leisure_type);
 
 		// Rust parity: decide whether the capped fill is usable before drawing
 		// the perimeter, otherwise a refused huge ring leaves an orphan border.
@@ -129,6 +137,8 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 					continue;
 				if (leisure_type == "schoolyard" && editor.nested_area_owns(x, z))
 					continue;
+				if (spares_nested_turf && editor.surface_is_sealed(x, z))
+					continue;
 				editor.set_block(block_type, x, 0, z,
 						std::optional<std::vector<Block>>({GRASS_BLOCK}), std::nullopt);
 
@@ -164,14 +174,14 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 			}
 
 			if (leisure_type == "playground" || leisure_type == "recreation_ground" ||
-					leisure_type == "pitch") {
+					leisure_type == "pitch" || leisure_type == "track") {
 				// Match Rust's Arc-backed fill: keep the cached allocation when there
 				// are no holes, and only materialize a filtered list when needed.
 				const auto area_without_holes = without_holes(fill_result, holes);
 				if (leisure_type == "playground" || leisure_type == "recreation_ground")
 					structures::playground::scatter_playgrounds(
 							editor, *area_without_holes);
-				if (leisure_type == "pitch") {
+				if (leisure_type == "pitch" || leisure_type == "track") {
 					const auto &vegetation = ground_decoration::loose_plant_blocks();
 					for (const auto &[x, z] : *area_without_holes) {
 						if (editor.is_hedge(x, z))
@@ -201,7 +211,10 @@ void generate_leisure_from_relation(WorldEditor &editor, const ProcessedRelation
 		const bridges::BridgeSurfaceMap &bridge_surface)
 {
 	auto leisure_it = rel.tags.find(std::string("leisure"));
-	if (leisure_it != rel.tags.end() && leisure_it->second == "park") {
+	if (leisure_it != rel.tags.end() &&
+			(leisure_it->second == "park" ||
+					(leisure_it->second == "track" &&
+							raceways::track_area_block(rel.tags).has_value()))) {
 		// Process each outer member way individually using cached flood fill.
 		// We intentionally do not combine all outer nodes into one mega-way,
 		// because that creates a nonsensical polygon spanning the whole relation

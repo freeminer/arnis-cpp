@@ -1,12 +1,11 @@
 #include "pipeline.h"
 #include "placement_pipeline.h"
-#include "custom/stadium.h"
-#include "custom/client.h"
 #include "three_dmr/prescan.h"
 #include "three_dmr/client.h"
 #include "wikidata/prescan.h"
 #include "wikidata/client.h"
 #include "../../../arnis_adapter.h"
+#include "../cache_root.h"
 #include "../tile.h"
 #include <array>
 #include <cmath>
@@ -16,14 +15,16 @@ namespace arnis::models_3d
 {
 std::vector<std::filesystem::path> model_cache_roots()
 {
-	return {three_dmr::cache_root(), wikidata_client::cache_root(), custom::cache_root()};
+	return {three_dmr::cache_root(), wikidata_client::cache_root(),
+			arnis::cache::provider_cache_root("custom_models")};
 }
 
 elevation::CacheClearStats clear_model_caches()
 {
 	return elevation::clear_cache_dir(three_dmr::cache_root())
 			.combined(elevation::clear_cache_dir(wikidata_client::cache_root()))
-			.combined(elevation::clear_cache_dir(custom::cache_root()));
+			.combined(elevation::clear_cache_dir(
+					arnis::cache::provider_cache_root("custom_models")));
 }
 
 namespace
@@ -43,15 +44,13 @@ Models3dPipeline Models3dPipeline::prescan(const std::vector<ProcessedElement> &
 {
 	Models3dPipeline out;
 	out.suppressed_ = already_suppressed;
-	// Rust order is intentional: explicit 3DMR, then Wikidata, then custom
-	// stadiums.  Every later provider observes all previous claims.
+	// Rust order is intentional: explicit 3DMR, then Wikidata. Stadiums are
+	// planned and placed by element_processing::stadiums, outside this pipeline.
 	out.three_dmr_ = three_dmr::prescan(elements, world_rotation, out.suppressed_);
 	append_unique(out.suppressed_, out.three_dmr_.suppressed);
 	out.pre_wikidata_suppressed_ = out.suppressed_;
 	out.wikidata_ = wikidata::prescan(elements, world_rotation, scale, out.suppressed_);
 	append_unique(out.suppressed_, out.wikidata_.suppressed);
-	out.stadium_ = custom::stadium::prescan(elements, scale, out.suppressed_);
-	append_unique(out.suppressed_, out.stadium_.suppressed);
 	return out;
 }
 
@@ -68,33 +67,6 @@ Models3dPipeline Models3dPipeline::prescan_fetchable_wikidata(
 	out.wikidata_ = wikidata::prescan(elements, world_rotation, scale, out.suppressed_);
 	wikidata::retain_fetchable(out.wikidata_, fetchable);
 	append_unique(out.suppressed_, out.wikidata_.suppressed);
-	out.stadium_ = custom::stadium::prescan(elements, scale, out.suppressed_);
-	append_unique(out.suppressed_, out.stadium_.suppressed);
-	return out;
-}
-
-Models3dPipeline Models3dPipeline::prescan_fetchable_models(
-		const std::vector<ProcessedElement> &elements, double scale,
-		const std::function<bool(const std::string &)> &wikidata_fetchable,
-		const std::function<bool()> &stadium_fetchable, double world_rotation,
-		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
-{
-	Models3dPipeline out;
-	out.suppressed_ = already_suppressed;
-	out.three_dmr_ = three_dmr::prescan(elements, world_rotation, out.suppressed_);
-	append_unique(out.suppressed_, out.three_dmr_.suppressed);
-	out.pre_wikidata_suppressed_ = out.suppressed_;
-	out.wikidata_ = wikidata::prescan(elements, world_rotation, scale, out.suppressed_);
-	wikidata::retain_fetchable(out.wikidata_, wikidata_fetchable);
-	append_unique(out.suppressed_, out.wikidata_.suppressed);
-	out.stadium_ = custom::stadium::prescan(elements, scale, out.suppressed_);
-	// Rust returns before fetching the shared stadium GLB when no eligible
-	// stadium placement exists. Do not call the provider callback on an empty
-	// pre-scan: it may perform network I/O even though there is nothing to place.
-	if (!out.stadium_.placements.empty())
-		custom::stadium::retain_fetchable(
-				out.stadium_, !stadium_fetchable || stadium_fetchable());
-	append_unique(out.suppressed_, out.stadium_.suppressed);
 	return out;
 }
 
@@ -102,12 +74,9 @@ void Models3dPipeline::retain_fetchable_wikidata(
 		const std::function<bool(const std::string &)> &fetchable)
 {
 	wikidata::retain_fetchable(wikidata_, fetchable);
-	// Existing stadium candidates were scanned against the old set and cannot
-	// be rediscovered here, but stale Wikidata claims must still be released.
-	// prescan_fetchable_wikidata is the fully ordered API for new callers.
+	// Release stale Wikidata claims after reevaluating fetchability.
 	suppressed_ = pre_wikidata_suppressed_;
 	append_unique(suppressed_, wikidata_.suppressed);
-	append_unique(suppressed_, stadium_.suppressed);
 }
 
 std::vector<std::pair<int, int>> Models3dPipeline::deferred_regions(double scale) const
@@ -115,7 +84,6 @@ std::vector<std::pair<int, int>> Models3dPipeline::deferred_regions(double scale
 	std::vector<std::pair<int, int>> out;
 	append_unique(out, three_dmr::deferred_regions(three_dmr_, scale));
 	append_unique(out, wikidata::deferred_regions(wikidata_, scale));
-	append_unique(out, custom::stadium::deferred_regions(stadium_.placements, scale));
 	return out;
 }
 
@@ -123,8 +91,7 @@ std::vector<std::vector<std::pair<int, int>>> Models3dPipeline::placement_region
 		double scale) const
 {
 	std::vector<std::vector<std::pair<int, int>>> out;
-	out.reserve(three_dmr_.placements.size() + wikidata_.placements.size() +
-				stadium_.placements.size());
+	out.reserve(three_dmr_.placements.size() + wikidata_.placements.size());
 	const int three_dmr_radius =
 			static_cast<int>(std::ceil(three_dmr::ASSUMED_HALF_EXTENT_M * scale));
 	for (const auto &placement : three_dmr_.placements)
@@ -135,13 +102,6 @@ std::vector<std::vector<std::pair<int, int>>> Models3dPipeline::placement_region
 	for (const auto &placement : wikidata_.placements)
 		out.push_back(region_keys_around(
 				placement.anchor_x, placement.anchor_z, wikidata_radius));
-	for (const auto &placement : stadium_.placements) {
-		const double half_diagonal =
-				static_cast<double>(std::hypot(placement.long_m, placement.short_m)) *
-				0.5;
-		const int radius = static_cast<int>(std::ceil(half_diagonal * scale));
-		out.push_back(region_keys_around(placement.anchor_x, placement.anchor_z, radius));
-	}
 	return out;
 }
 
@@ -149,7 +109,6 @@ ModelDiscovery Models3dPipeline::discovery(double scale) const
 {
 	ModelDiscovery out;
 	out.suppressed = suppressed_;
-	out.stadium_count = stadium_.placements.size();
 	out.three_dmr_count = three_dmr_.placements.size();
 	out.wikidata_count = wikidata_.placements.size();
 	out.deferred_regions = deferred_regions(scale);
@@ -209,86 +168,42 @@ ModelDiscovery discover_models_fetchable_wikidata(
 			.discovery(scale);
 }
 
-ModelDiscovery discover_models_fetchable(const std::vector<ProcessedElement> &elements,
-		double scale, const std::function<bool(const std::string &)> &wikidata_fetchable,
-		const std::function<bool()> &stadium_fetchable, double world_rotation,
-		const std::vector<std::pair<std::string, std::uint64_t>> &already_suppressed)
-{
-	return Models3dPipeline::prescan_fetchable_models(elements, scale, wikidata_fetchable,
-			stadium_fetchable, world_rotation, already_suppressed)
-			.discovery(scale);
-}
-
-ModelPlacementStats place_custom_models(const Models3dPipeline &pipeline,
-		ModelProvider &provider, world_editor::WorldEditor &editor,
-		double blocks_per_meter)
-{
-	ModelPlacementStats out;
-	const auto stadiums =
-			place_stadium_prescan(provider, editor, pipeline.stadium(), blocks_per_meter);
-	out.attempted = stadiums.attempted;
-	out.placed = stadiums.placed;
-	out.voxels = stadiums.voxels;
-	return out;
-}
-
 ModelPlacementStats Models3dPipeline::place(three_dmr::Client &three_dmr_provider,
-		ModelProvider &wikidata_provider, ModelProvider &custom_provider,
-		world_editor::WorldEditor &editor, double blocks_per_meter) const
+		ModelProvider &wikidata_provider, world_editor::WorldEditor &editor,
+		double blocks_per_meter) const
 {
 	ModelPlacementStats stats;
 	// Keep provider precedence stable: explicit 3DMR models claim and render
-	// before Wikidata, followed by the custom archetypes.
+	// before Wikidata models.
 	stats.add(place_three_dmr_prescan(
 			three_dmr_provider, editor, three_dmr_, blocks_per_meter));
 	stats.add(place_wikidata_prescan(
 			wikidata_provider, editor, wikidata_, blocks_per_meter));
-	stats.add(place_custom_models(*this, custom_provider, editor, blocks_per_meter));
 	return stats;
 }
 
 ModelPlacementStats Models3dPipeline::place_selected(
 		three_dmr::Client &three_dmr_provider, ModelProvider &wikidata_provider,
-		ModelProvider &custom_provider, world_editor::WorldEditor &editor,
-		double blocks_per_meter, const std::vector<std::size_t> &indices) const
+		world_editor::WorldEditor &editor, double blocks_per_meter,
+		const std::vector<std::size_t> &indices) const
 {
 	ModelPlacementStats stats;
 	const auto three_dmr_end = three_dmr_.placements.size();
 	const auto wikidata_end = three_dmr_end + wikidata_.placements.size();
 	std::vector<std::size_t> selected_three_dmr;
 	std::vector<std::size_t> selected_wikidata;
-	std::vector<std::size_t> selected_stadiums;
-	std::size_t three_dmr_count = 0;
-	std::size_t wikidata_count = 0;
-	std::size_t stadium_count = 0;
-	for (const auto index : indices) {
-		if (index < three_dmr_end)
-			++three_dmr_count;
-		else if (index < wikidata_end)
-			++wikidata_count;
-		else if (index - wikidata_end < stadium_.placements.size())
-			++stadium_count;
-	}
-	selected_three_dmr.reserve(three_dmr_count);
-	selected_wikidata.reserve(wikidata_count);
-	selected_stadiums.reserve(stadium_count);
+	selected_three_dmr.reserve(indices.size());
+	selected_wikidata.reserve(indices.size());
 	for (const auto index : indices) {
 		if (index < three_dmr_end)
 			selected_three_dmr.push_back(index);
 		else if (index < wikidata_end)
 			selected_wikidata.push_back(index - three_dmr_end);
-		else {
-			const auto stadium_index = index - wikidata_end;
-			if (stadium_index < stadium_.placements.size())
-				selected_stadiums.push_back(stadium_index);
-		}
 	}
 	stats.add(place_three_dmr_prescan(three_dmr_provider, editor, three_dmr_,
 			blocks_per_meter, std::span<const std::size_t>(selected_three_dmr)));
 	stats.add(place_wikidata_prescan(wikidata_provider, editor, wikidata_,
 			blocks_per_meter, std::span<const std::size_t>(selected_wikidata)));
-	stats.add(place_stadium_prescan(custom_provider, editor, stadium_, blocks_per_meter,
-			std::span<const std::size_t>(selected_stadiums)));
 	return stats;
 }
 

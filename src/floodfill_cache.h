@@ -8,6 +8,7 @@
 #include <mutex>
 #include <unordered_map>
 #include <utility>
+#include <string_view>
 
 #include "mapgen/earth/arnis_adapter.h"
 #include "osm_parser.h"
@@ -42,6 +43,8 @@ struct XZBBox
 
 namespace arnis
 {
+
+bool is_sealed_leisure_surface(std::string_view leisure_type);
 
 /// A memory-efficient bitmap for storing coordinates.
 ///

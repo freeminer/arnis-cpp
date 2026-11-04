@@ -4,12 +4,14 @@
 #include "../decals/region.h"
 
 #include <cstdint>
+#include <map>
 #include <optional>
 #include <span>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
+#include <tuple>
 
 namespace arnis::road_markings
 {
@@ -83,10 +85,12 @@ public:
 	std::optional<CrossingPaint> crossing_way_paint(const ProcessedWay &way) const;
 	const std::vector<CarriagewayClip> *crossing_clips(std::uint64_t id) const;
 	const CarriagewayClip *carriageway_at(std::uint64_t id, int x, int z) const;
+	std::optional<Block> raceway_at(int deck, int x, int z) const;
 
 private:
 	std::unordered_map<std::uint64_t, WayMarks> ways_;
 	std::unordered_map<std::uint64_t, std::vector<CarriagewayClip>> crossings_;
 	std::unordered_set<std::uint64_t> crossing_road_nodes_;
+	std::map<std::tuple<int, int, int>, Block> raceway_paint_;
 };
 } // namespace arnis::road_markings

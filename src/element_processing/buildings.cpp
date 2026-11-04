@@ -4090,6 +4090,16 @@ InferredHeight infer_building_height(const std::string &type, const tags_t &tags
 	};
 	if (tags.get("man_made") == "tower")
 		return pick(true, {{12, 40}, {16, 35}, {20, 25}});
+	const bool arena = type == "stadium" || type == "arena" ||
+					   (type == "yes" && tags.get("leisure") == "stadium");
+	if (arena) {
+		if (area >= 5000)
+			return pick(true, {{20, 40}, {24, 40}, {28, 20}});
+		return pick(true, {{10, 50}, {12, 50}});
+	}
+	if (type == "sports_hall" || type == "sports_centre" || type == "gymnasium" ||
+			type == "riding_hall")
+		return pick(true, {{8, 40}, {10, 40}, {12, 20}});
 	if (type == "bungalow" || type == "static_caravan")
 		return pick(false, {{1, 100}});
 	if (type == "house" || type == "detached" || type == "villa" || type == "farm")

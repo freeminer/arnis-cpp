@@ -309,6 +309,8 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 	} else if (natural_type == "bare_rock" || natural_type == "rock" ||
 			   natural_type == "stone") {
 		block_type = STONE;
+	} else if (natural_type == "shingle") {
+		block_type = GRAVEL;
 	} else if (natural_type == "blockfield") {
 		block_type = COBBLESTONE;
 	} else if (natural_type == "glacier") {

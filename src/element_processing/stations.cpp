@@ -376,6 +376,20 @@ bool SparseCells::contains(int x, int z) const
 		   (found->second[bit >> 6] & (std::uint64_t{1} << (bit & 63U))) != 0;
 }
 
+std::vector<Xz> SparseCells::iter() const
+{
+	std::vector<Xz> result;
+	for (const auto &[section, words] : blocks_) {
+		for (std::size_t bit = 0; bit < 256; ++bit) {
+			if ((words[bit >> 6] & (std::uint64_t{1} << (bit & 63U))) == 0)
+				continue;
+			result.emplace_back(section.first * 16 + static_cast<int>(bit & 15U),
+					section.second * 16 + static_cast<int>(bit >> 4));
+		}
+	}
+	return result;
+}
+
 bool is_rail_platform(const tags_t &tags)
 {
 	if (tag(tags, "railway") == "platform")

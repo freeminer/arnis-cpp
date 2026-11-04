@@ -186,7 +186,7 @@ std::optional<Ride> kind(const tags_t &tags)
 		const auto height = h ? mapillary::geodesy::parse_length_m(*h) : std::nullopt;
 		// Ride classification follows Rust's height_m() threshold. The drawing
 		// path independently rejects implausible explicit heights when sizing it.
-		if ((height && *height >= 30.0) ||
+		if ((height && *height >= 30.0 && *height < 400.0) ||
 				(tag(tags, "man_made") && *tag(tags, "man_made") == "tower"))
 			r = Ride::StarFlyer;
 	}
@@ -906,64 +906,6 @@ bool replaces_parts(const tags_t &tags)
 {
 	auto r = kind(tags);
 	return r && *r != Ride::Spinner;
-}
-
-std::unordered_set<std::uint64_t> building_parts_to_suppress(
-		const std::vector<ProcessedElement> &elements)
-{
-	using Point = std::pair<double, double>;
-	std::vector<std::vector<Point>> outlines;
-	for (const auto &element : elements) {
-		if (!element.is_way() || !replaces_parts(element.tags()))
-			continue;
-		const auto &nodes = element.as_way().nodes;
-		if (nodes.size() < 4)
-			continue;
-		auto &ring = outlines.emplace_back();
-		ring.reserve(nodes.size());
-		for (const auto &node : nodes)
-			ring.emplace_back(node.x + 0.5, node.z + 0.5);
-	}
-	if (outlines.empty())
-		return {};
-
-	const auto contains = [](double x, double z, const std::vector<Point> &ring) {
-		if (ring.size() < 3)
-			return false;
-		bool inside = false;
-		std::size_t j = ring.size() - 1;
-		for (std::size_t i = 0; i < ring.size(); ++i) {
-			const auto [xi, zi] = ring[i];
-			const auto [xj, zj] = ring[j];
-			if ((zi > z) != (zj > z) && x < (xj - xi) * (z - zi) / (zj - zi) + xi)
-				inside = !inside;
-			j = i;
-		}
-		return inside;
-	};
-	std::unordered_set<std::uint64_t> suppressed;
-	for (const auto &element : elements) {
-		if (!element.is_way())
-			continue;
-		const auto &way = element.as_way();
-		const auto part = way.tags.get("building:part");
-		const bool is_no = part.size() == 2 && (part[0] == 'n' || part[0] == 'N') &&
-						   (part[1] == 'o' || part[1] == 'O');
-		if (!way.tags.contains("building:part") || is_no || claims(way.tags) ||
-				way.nodes.empty())
-			continue;
-		double x = 0.0, z = 0.0;
-		for (const auto &node : way.nodes) {
-			x += node.x + 0.5;
-			z += node.z + 0.5;
-		}
-		x /= way.nodes.size();
-		z /= way.nodes.size();
-		if (std::any_of(outlines.begin(), outlines.end(),
-					[&](const auto &ring) { return contains(x, z, ring); }))
-			suppressed.insert(way.id);
-	}
-	return suppressed;
 }
 
 bool generate_ride(WorldEditor &editor, const ProcessedElement &e,

@@ -57,6 +57,8 @@
 #include "element_processing/aerialways.h"
 #include "element_processing/attractions.h"
 #include "element_processing/fuel_stations.h"
+#include "element_processing/golf.h"
+#include "element_processing/stadiums.h"
 #include "element_processing/power.h"
 #include "element_processing/emergency.h"
 #include "element_processing/advertising.h"
@@ -123,7 +125,6 @@
 #include "trees/mapped.h"
 #include "models_3d/pipeline.h"
 #include "models_3d/placement_executor.h"
-#include "models_3d/custom/client.h"
 #include "models_3d/three_dmr/client.h"
 #include "landmarks.h"
 #include "deferred_placement.h"
@@ -652,7 +653,7 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 				tags.contains("highway"))
 			return std::nullopt;
 		bool fills = false;
-		if (swimming_pools::is_swimming_pool(tags))
+		if (swimming_pools::is_swimming_pool(tags) || golf::claims(tags))
 			fills = true;
 		else if (tags.contains("landuse"))
 			fills = landuse_paints_ground(tags);
@@ -675,7 +676,8 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 		const auto area_kind = element_processing::relation_area(tags);
 		const bool draws_ground =
 				area_kind == element_processing::RelationArea::Natural ||
-				area_kind == element_processing::RelationArea::Park ||
+				area_kind == element_processing::RelationArea::Leisure ||
+				area_kind == element_processing::RelationArea::Golf ||
 				area_kind == element_processing::RelationArea::Pool ||
 				(area_kind == element_processing::RelationArea::Landuse &&
 						element_processing::landuse_paints_ground(tags));
@@ -1709,9 +1711,6 @@ bool generate_world(WorldEditor &editor,
 	models_3d::RemoteModelProvider wikidata_provider(
 			cache::provider_cache_root("wikidata"));
 	models_3d::three_dmr::Client three_dmr_provider(cache::provider_cache_root("3dmr"));
-	const auto model_asset_root = assets::path("models");
-	models_3d::custom::Client custom_model_provider(
-			cache::provider_cache_root("custom_models"), {}, model_asset_root);
 	// Landmarks use their matched OSM feature's projected centre as the world
 	// anchor.  This keeps the C++ mapgen host independent of Rust's geographic
 	// projection plumbing while preserving the same suppression/late-placement
@@ -1776,49 +1775,31 @@ bool generate_world(WorldEditor &editor,
 			break;
 		}
 	}
-	// Rust disables both landmark suppression and placement when model objects
-	// are off; otherwise a no-3D run could still discard the OSM feature that a
-	// bundled schematic would have replaced.
-	const auto attraction_parts = attractions::building_parts_to_suppress(elements);
-	std::vector<std::pair<std::string, std::uint64_t>> attraction_suppression;
-	attraction_suppression.reserve(attraction_parts.size());
-	for (const auto id : attraction_parts)
-		attraction_suppression.emplace_back("way", id);
 	const auto [landmark_min_x, landmark_min_z] = editor.get_min_coords();
 	const auto [landmark_max_x, landmark_max_z] = editor.get_max_coords();
-	auto landmark_plan =
-			args.use_3d && !args.skip_objects()
-					? landmarks::prescan(elements, landmark_anchors,
-							  {landmark_min_x, landmark_min_z, landmark_max_x,
-									  landmark_max_z},
-							  args.scale, args.rotation, attraction_suppression)
-					: landmarks::PrescanResult{};
+	auto landmark_plan = args.use_3d && !args.skip_objects()
+								 ? landmarks::prescan(elements, landmark_anchors,
+										   {landmark_min_x, landmark_min_z,
+												   landmark_max_x, landmark_max_z},
+										   args.scale, args.rotation)
+								 : landmarks::PrescanResult{};
 	auto provider_suppression = landmark_plan.suppressed;
-	provider_suppression.reserve(
-			provider_suppression.size() + attraction_suppression.size());
-	for (const auto &key : attraction_suppression) {
-		if (std::find(provider_suppression.begin(), provider_suppression.end(), key) ==
-				provider_suppression.end())
-			provider_suppression.push_back(key);
-	}
-	// Match Rust's Models3dPipeline::prescan: a Wikidata or stadium feature is
-	// suppressed only after its model is fetchable. The providers memoize/cache
-	// successful fetches, so placement below reuses these assets rather than
-	// downloading them a second time.
+	// Match Rust's prescan ordering: 3DMR claims first, then Wikidata claims,
+	// before stadiums decide which remaining OSM geometry they can replace.
 	const auto model_pipeline =
 			args.use_3d
 					? std::optional<models_3d::Models3dPipeline>(
-							  models_3d::Models3dPipeline::prescan_fetchable_models(
-									  elements, args.scale,
-									  [&](const std::string &qid) {
-										  return wikidata_provider.fetch(qid).has_value();
-									  },
-									  [&] {
-										  return custom_model_provider.fetch("stadium")
-												  .has_value();
-									  },
+							  models_3d::Models3dPipeline::prescan(elements, args.scale,
 									  args.rotation, provider_suppression))
 					: std::nullopt;
+	std::set<element_processing::stadiums::Key> stadium_already;
+	for (const auto &key : landmark_plan.suppressed)
+		stadium_already.emplace(key.first, key.second);
+	if (model_pipeline)
+		for (const auto &key : model_pipeline->suppressed())
+			stadium_already.emplace(key.first, key.second);
+	const auto stadium_plan =
+			element_processing::stadiums::prescan(elements, args, stadium_already);
 	const auto plane_candidates =
 			args.use_3d ? structures::plane::prescan_placements(elements, args.scale)
 						: std::vector<structures::plane::Placement>{};
@@ -2289,7 +2270,6 @@ bool generate_world(WorldEditor &editor,
 	for (const auto &[kind, id] : outline_suppression)
 		if (kind == "way")
 			suppressed_building_outlines.insert(id);
-	suppressed_building_outlines.insert(attraction_parts.begin(), attraction_parts.end());
 	const auto &suppressed_relations = building_data.suppressed_relations;
 	std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> building_group_members;
 	// Match Rust's grouping key, which clears packed facade, year and housing metadata.
@@ -2411,13 +2391,14 @@ bool generate_world(WorldEditor &editor,
 			tiled_element_dispatch && java_format && element_tiles.size() >= 3;
 	const std::size_t model_unit_count =
 			model_pipeline ? model_pipeline->three_dmr().placements.size() +
-									 model_pipeline->wikidata().placements.size() +
-									 model_pipeline->stadium().placements.size()
+									 model_pipeline->wikidata().placements.size()
 						   : 0;
 	const std::size_t plane_unit_count = plane_candidates.size();
+	const std::size_t stadium_unit_count = stadium_plan.placement_count();
 	const std::size_t landmark_unit_count = landmark_plan.placements.size();
 	const std::size_t plane_unit_begin = model_unit_count;
-	const std::size_t landmark_unit_begin = plane_unit_begin + plane_unit_count;
+	const std::size_t stadium_unit_begin = plane_unit_begin + plane_unit_count;
+	const std::size_t landmark_unit_begin = stadium_unit_begin + stadium_unit_count;
 	DeferredPlacements deferred_placements;
 	const bool deferred_placements_active = eviction_active && regional_ground_passes;
 	std::set<std::pair<int, int>> styled_regions;
@@ -2436,6 +2417,10 @@ bool generate_world(WorldEditor &editor,
 		unit_regions.insert(unit_regions.end(),
 				std::make_move_iterator(plane_regions.begin()),
 				std::make_move_iterator(plane_regions.end()));
+		auto stadium_regions = stadium_plan.placement_regions();
+		unit_regions.insert(unit_regions.end(),
+				std::make_move_iterator(stadium_regions.begin()),
+				std::make_move_iterator(stadium_regions.end()));
 		auto landmark_regions = landmarks::placement_regions(landmark_plan, args.scale);
 		unit_regions.insert(unit_regions.end(),
 				std::make_move_iterator(landmark_regions.begin()),
@@ -2473,18 +2458,20 @@ bool generate_world(WorldEditor &editor,
 	auto execute_deferred_placements = [&](const std::vector<std::size_t> &units) {
 		if (units.empty())
 			return;
-		std::vector<std::size_t> model_units, plane_units, landmark_units;
+		std::vector<std::size_t> model_units, plane_units, stadium_units, landmark_units;
 		for (const auto unit : units) {
 			if (unit < model_unit_count)
 				model_units.push_back(unit);
-			else if (unit < landmark_unit_begin)
+			else if (unit < stadium_unit_begin)
 				plane_units.push_back(unit - plane_unit_begin);
+			else if (unit < landmark_unit_begin)
+				stadium_units.push_back(unit - stadium_unit_begin);
 			else if (unit < landmark_unit_begin + landmark_unit_count)
 				landmark_units.push_back(unit - landmark_unit_begin);
 		}
 		if (model_pipeline && !model_units.empty())
-			model_pipeline->place_selected(three_dmr_provider, wikidata_provider,
-					custom_model_provider, editor, args.scale, model_units);
+			model_pipeline->place_selected(three_dmr_provider, wikidata_provider, editor,
+					args.scale, model_units);
 		if (!plane_units.empty()) {
 			std::vector<structures::plane::Placement> selected;
 			selected.reserve(plane_units.size());
@@ -2493,6 +2480,9 @@ bool generate_world(WorldEditor &editor,
 					selected.push_back(plane_candidates[index]);
 			structures::plane::place_plane_placements(editor, selected);
 		}
+		if (!stadium_units.empty())
+			element_processing::stadiums::place_stadiums(
+					editor, stadium_plan, stadium_units);
 		for (const auto index : landmark_units)
 			if (index < landmark_plan.placements.size())
 				landmarks::place(editor, landmark_plan.placements[index], args.scale,
@@ -2836,6 +2826,11 @@ bool generate_world(WorldEditor &editor,
 			release_task_fills(task_index);
 			return;
 		}
+		if (stadium_plan.suppressed.contains(
+					{std::string(element.kind()), element.id()})) {
+			release_task_fills(task_index);
+			return;
+		}
 
 		if (element.is_way()) {
 			auto const &way = element.as_way();
@@ -2926,6 +2921,8 @@ bool generate_world(WorldEditor &editor,
 			} else if (swimming_pools::is_swimming_pool(way.tags)) {
 				swimming_pools::generate(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask);
+			} else if (golf::claims(way.tags)) {
+				golf::generate_golf(editor, way, args, flood_fill_cache);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
@@ -2988,6 +2985,8 @@ bool generate_world(WorldEditor &editor,
 					signage::generate_power_signage(editor, way, road_mask);
 			} else if (way.tags.contains("place")) {
 				landuse::generate_place(editor, way, args, flood_fill_cache);
+			} else if (golf::is_hole(way.tags)) {
+				golf::generate_hole_flag(editor, way);
 			}
 		} else if (element.is_node()) {
 			auto const &node = element.as_node();
@@ -3079,6 +3078,14 @@ bool generate_world(WorldEditor &editor,
 							bridge_surface, surface_level);
 					break;
 				}
+				case element_processing::RelationArea::Golf:
+					golf::generate_golf_from_relation(
+							editor, rel, args, flood_fill_cache);
+					break;
+				case element_processing::RelationArea::Leisure:
+					leisure::generate_leisure_from_relation(editor, rel, args,
+							flood_fill_cache, building_footprints, bridge_surface);
+					break;
 				case element_processing::RelationArea::Natural:
 					natural::generate_natural_from_relation(editor, rel, args,
 							flood_fill_cache, building_footprints, bridge_surface);
@@ -3087,10 +3094,6 @@ bool generate_world(WorldEditor &editor,
 					landuse::generate_landuse_from_relation(editor, rel, args,
 							flood_fill_cache, building_footprints, road_mask,
 							bridge_surface);
-					break;
-				case element_processing::RelationArea::Park:
-					leisure::generate_leisure_from_relation(editor, rel, args,
-							flood_fill_cache, building_footprints, bridge_surface);
 					break;
 				case element_processing::RelationArea::Pool:
 					swimming_pools::generate_relation(editor, rel, args, flood_fill_cache,
@@ -3557,13 +3560,16 @@ bool generate_world(WorldEditor &editor,
 		signage_context->release_placement_masks();
 	editor.set_signage_context(std::move(signage_context));
 	if (model_pipeline && !deferred_placements_active) {
-		model_pipeline->place(three_dmr_provider, wikidata_provider,
-				custom_model_provider, editor, args.scale);
+		model_pipeline->place(three_dmr_provider, wikidata_provider, editor, args.scale);
 	}
 	// Rust places plane models after the other 3D providers and immediately
 	// before landmarks; preserve that ordering for overlap and suppression.
 	if (!deferred_placements_active) {
 		structures::plane::place_plane_placements(editor, plane_candidates);
+		std::vector<std::size_t> stadium_indices(stadium_unit_count);
+		std::iota(stadium_indices.begin(), stadium_indices.end(), 0);
+		element_processing::stadiums::place_stadiums(
+				editor, stadium_plan, stadium_indices);
 		landmarks::place_all(editor, landmark_plan, args.scale, args.rotation);
 	}
 
