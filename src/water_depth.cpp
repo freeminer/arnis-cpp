@@ -546,11 +546,11 @@ std::vector<BoreCrossing> bore_crossings(
 	result.reserve(cells.size());
 	for (std::size_t k = 0; k < cells.size(); ++k) {
 		const auto [x, z] = cells[k];
-		std::uint8_t near = 0;
+		std::uint8_t near_ = 0;
 		for (std::size_t j = z > 0 ? z - 1 : 0; j <= std::min(z + 1, gh - 1); ++j)
 			for (std::size_t i = x > 0 ? x - 1 : 0; i <= std::min(x + 1, gw - 1); ++i)
-				near = std::max(near, dt[j * gw + i]);
-		const double dt_eff = static_cast<double>(near) * ratio + 2.0;
+				near_ = std::max(near_, dt[j * gw + i]);
+		const double dt_eff = static_cast<double>(near_) * ratio + 2.0;
 		int depth = 0;
 		for (const std::uint16_t tier : {std::uint16_t{0}, std::uint16_t{21},
 					 std::uint16_t{45}, std::uint16_t{75}})
