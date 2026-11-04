@@ -324,7 +324,7 @@ std::vector<std::pair<double, double>> lane_line(
 		for (std::size_t j = k + 1; j < centre.size() && !out; ++j)
 			if (far_(k, j))
 				out = direction(k, j);
-		const auto near = [&]() -> std::optional<std::pair<double, double>> {
+		const auto near_ = [&]() -> std::optional<std::pair<double, double>> {
 			if (k > 0)
 				if (auto d = direction(k - 1, k))
 					return d;
@@ -339,7 +339,7 @@ std::vector<std::pair<double, double>> lane_line(
 			d = *into;
 		else if (out)
 			d = *out;
-		else if (const auto fallback = near())
+		else if (const auto fallback = near_())
 			d = *fallback;
 		const std::pair<double, double> side =
 				left ? std::pair{d.second, -d.first} : std::pair{-d.second, d.first};
