@@ -11,6 +11,8 @@
 
 #include "../../../arnis_adapter.h"
 
+struct XZBBox;
+
 namespace arnis::railways::advtrains
 {
 
@@ -36,6 +38,8 @@ struct RailNetwork
 };
 std::shared_ptr<const RailNetwork> build_network(
 		const std::vector<ProcessedElement> &elements, world_editor::WorldEditor &editor);
+std::vector<ProcessedElement> bounded_rail_elements(
+		const std::vector<ProcessedElement> &elements, const ::XZBBox &bounds);
 void use_network(world_editor::WorldEditor &editor);
 // ===
 const RailPlan *get_plan(const ProcessedWay &way);

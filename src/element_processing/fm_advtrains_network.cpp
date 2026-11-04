@@ -1,6 +1,7 @@
 #include "advtrains.h"
 #include "../fm_native_trains.h"
 #include "rail_track.h"
+#include "../clipping.h"
 
 #include <algorithm>
 #include <bit>
@@ -414,6 +415,7 @@ struct Segment
 	std::string level;
 	std::vector<XZ> line;
 	std::vector<int> heights;
+	std::vector<int> reference_heights;
 	std::vector<Block> rails;
 };
 
@@ -455,6 +457,42 @@ bool assign_ports(Anchor &anchor, const std::vector<Anchor> &anchors,
 	return true;
 }
 } // namespace
+
+std::vector<ProcessedElement> bounded_rail_elements(
+		const std::vector<ProcessedElement> &elements, const ::XZBBox &bounds)
+{
+	std::vector<ProcessedElement> result;
+	for (const auto &element : elements) {
+		if (!element.is_way() || !track_way(element.as_way()))
+			continue;
+		const auto &source = element.as_way();
+		// A closed railway is a line, not a polygon. Keep it whole when it
+		// intersects the planning window rather than clipping it as a ring.
+		const bool closed = (source.nodes.front().id != 0 &&
+									source.nodes.front().id == source.nodes.back().id) ||
+							(source.nodes.front().x == source.nodes.back().x &&
+									source.nodes.front().z == source.nodes.back().z);
+		if (closed) {
+			if (std::any_of(
+						source.nodes.begin(), source.nodes.end(), [&](const auto &node) {
+							return bounds.contains(node.x, node.z);
+						}))
+				result.push_back(element);
+			continue;
+		}
+		auto nodes = clipping::clip_way_to_bbox(source.nodes, bounds);
+		if (nodes.size() < 2)
+			continue;
+		const std::array<std::pair<int, int>, 2> ends{
+				{{source.nodes.front().x, source.nodes.front().z},
+						{source.nodes.back().x, source.nodes.back().z}}};
+		clipping::mark_cut_ends(nodes, ends, source.id);
+		auto way = source;
+		way.nodes = std::move(nodes);
+		result.emplace_back(std::move(way));
+	}
+	return result;
+}
 
 std::shared_ptr<const RailNetwork> prepare_network(
 		const std::vector<ProcessedElement> &elements, WorldEditor &editor)
@@ -570,7 +608,7 @@ std::shared_ptr<const RailNetwork> build_network(
 			const auto [a, b] = std::minmax(ids[i - 1], ids[i]);
 			const SegmentKey key{a, b, way_level};
 			auto [it, inserted] =
-					segments.try_emplace(key, Segment{a, b, way_level, {}, {}, {}});
+					segments.try_emplace(key, Segment{a, b, way_level, {}, {}, {}, {}});
 			auto &segment = it->second;
 			if (inserted && !invalid.contains(a) && !invalid.contains(b)) {
 				segment.line = route(anchors[a].position, anchors[b].position,
@@ -634,11 +672,16 @@ std::shared_ptr<const RailNetwork> build_network(
 						},
 						2.5);
 			}
-			if (segment.heights.empty())
+			if (segment.heights.empty()) {
+				segment.reference_heights = seed;
 				segment.heights = std::move(seed);
-			else
-				for (std::size_t j = 0; j < seed.size(); ++j)
+			} else {
+				for (std::size_t j = 0; j < seed.size(); ++j) {
 					segment.heights[j] = std::max(segment.heights[j], seed[j]);
+					segment.reference_heights[j] =
+							std::max(segment.reference_heights[j], seed[j]);
+				}
+			}
 		}
 	}
 	report_route_failures(failed_routes, example_failed_way);
@@ -686,6 +729,44 @@ std::shared_ptr<const RailNetwork> build_network(
 				next_pass.insert(index);
 		}
 		pending.swap(next_pass);
+	}
+	// Fitting only raises cells to make complete native slopes. Translate each
+	// connected component back towards its original terrain/deck profile: a
+	// single translation preserves every fitted slope and shared junction.
+	// Keep bridge and tunnel reference heights, and do not bury an at-grade
+	// reference by more than 16 nodes. Infeasible components remain high.
+	std::vector<bool> visited(ordered_segments.size(), false);
+	for (std::size_t start = 0; start < ordered_segments.size(); ++start) {
+		if (visited[start])
+			continue;
+		std::vector<std::size_t> component{start};
+		visited[start] = true;
+		std::vector<int> shifts;
+		int lower_bound = std::numeric_limits<int>::min();
+		for (std::size_t at = 0; at < component.size(); ++at) {
+			const auto &segment = *ordered_segments[component[at]];
+			for (std::size_t i = 0; i < segment.heights.size(); ++i) {
+				const int delta = segment.reference_heights[i] - segment.heights[i];
+				shifts.push_back(delta);
+				const bool protected_deck = segment.level.starts_with("bridge:") ||
+											segment.level.starts_with("tunnel:");
+				lower_bound = std::max(lower_bound, delta - (protected_deck ? 0 : 16));
+			}
+			for (const auto anchor : {segment.a, segment.b})
+				for (const auto next : incident[anchor])
+					if (!visited[next]) {
+						visited[next] = true;
+						component.push_back(next);
+					}
+		}
+		if (shifts.empty())
+			continue;
+		auto middle = shifts.begin() + shifts.size() / 2;
+		std::nth_element(shifts.begin(), middle, shifts.end());
+		const int shift = std::min(0, std::max(*middle, lower_bound));
+		for (const auto index : component)
+			for (auto &height : ordered_segments[index]->heights)
+				height += shift;
 	}
 	for (auto &[key, s] : segments) {
 		for (std::size_t i = 0; i < s.line.size(); ++i) {

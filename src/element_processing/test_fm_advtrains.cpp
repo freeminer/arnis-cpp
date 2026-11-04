@@ -3,6 +3,7 @@
 #include "advtrains.h"
 #include "../clipping.h"
 #include "rail_track.h"
+#include "../../../arnis_ground.h"
 #include "unittest/test.h"
 
 #include <map>
@@ -120,6 +121,7 @@ public:
 		TEST(testRustAreaEdgeCrossingOrder);
 		TEST(testRoutes);
 		TEST(testNetwork);
+		TEST(testBoundedTerrainNetwork);
 		TEST(testChunkSeamsKeepSourceTopology);
 		TEST(testParallelWorkersKeepNativeNetworkAndCompletion);
 		TEST(testCrossoverAvoidsBothConnectedLayers);
@@ -399,6 +401,41 @@ public:
 				UASSERT(!at::get_plan(trunk));
 			}
 		}
+	}
+
+	void testBoundedTerrainNetwork()
+	{
+		TrackDefinitions definitions;
+		Ground ground;
+		ground.elevation_enabled = true;
+		ground.host_elevation = [](const XZPoint &p) {
+			return p.z >= 15 && p.z <= 20 ? 110 : 100;
+		};
+		WorldEditor editor;
+		editor.ground = &ground;
+		std::vector<ProcessedElement> source{way(1, {{1, {}, 0, -15}, {2, {}, 0, -10}}),
+				way(2, {{2, {}, 0, -10}, {3, {}, 0, -5}}),
+				way(3, {{3, {}, 0, -5}, {4, {}, 0, 0}}),
+				way(4, {{4, {}, 0, 0}, {5, {}, 0, 5}}),
+				way(5, {{5, {}, 0, 5}, {6, {}, 0, 10}}),
+				way(6, {{6, {}, 0, 10}, {7, {}, 0, 15}}),
+				way(7, {{7, {}, 0, 15}, {8, {}, 0, 10000}}),
+				way(8, {{8, {}, 0, 10000}, {9, {}, 0, 10100}})};
+		const XZBBox bounds(-100, -100, 100, 100);
+		const auto local = at::bounded_rail_elements(source, bounds);
+		UASSERT(local.size() == 7);
+		UASSERT(local.back().as_way().nodes.back().z == 100);
+		const auto network = at::build_network(local, editor);
+		UASSERT(network->plans.size() == 7);
+		for (const auto &[id, plan] : network->plans) {
+			definitions.check(plan);
+			for (const auto height : plan.heights)
+				UASSERT(height >= 84 && height <= 126);
+		}
+		UASSERT(network->plans.at(1).heights.front() <= 102);
+		for (std::uint64_t id = 1; id < 7; ++id)
+			UASSERT(network->plans.at(id).heights.back() ==
+					network->plans.at(id + 1).heights.front());
 	}
 
 	void testParallelWorkersKeepNativeNetworkAndCompletion()
