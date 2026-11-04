@@ -1278,13 +1278,13 @@ StadiumPlan prescan(const std::vector<ProcessedElement> &elements, const Args &a
 		const auto quick = quick_bbox(element);
 		if (!quick)
 			continue;
-		bool near = false;
+		bool near_ = false;
 		for (const auto cell : coarse_cells(*quick))
 			if (nearby.contains(cell)) {
-				near = true;
+				near_ = true;
 				break;
 			}
-		if (!near)
+		if (!near_)
 			continue;
 		auto candidate = make_candidate(element, already);
 		if (!candidate)

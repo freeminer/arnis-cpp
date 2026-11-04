@@ -795,7 +795,7 @@ void assign_stops(Route &route, const std::vector<StopFeature> &features, double
 
 void keep_right(std::vector<Route> &routes, double scale)
 {
-	const double near = 2.0 * scale, far = 8.0 * scale, cell = std::max(far, 1.0);
+	const double near_ = 2.0 * scale, far = 8.0 * scale, cell = std::max(far, 1.0);
 	using Cell = std::pair<int, int>;
 	using Ref = std::pair<std::size_t, std::size_t>;
 	const auto key = [cell](RoutePoint p) {
@@ -844,7 +844,7 @@ void keep_right(std::vector<Route> &routes, double scale)
 			for (const auto &[b, candidate] : nearest_by_route) {
 				(void)b;
 				const auto [distance, q] = candidate;
-				if (distance < near || distance > far)
+				if (distance < near_ || distance > far)
 					continue;
 				const double cross =
 						direction->x * (q.z - p.z) - direction->z * (q.x - p.x);
