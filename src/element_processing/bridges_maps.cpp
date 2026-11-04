@@ -199,24 +199,24 @@ void settle_deck(std::vector<std::vector<int>> &ys,
 									next_hold_distance == std::numeric_limits<int>::max()
 											? ease_length(hold.member)
 											: next_hold_distance / 2));
-		int far = 0;
+		int far_ = 0;
 		for (const auto &[cell, d] : distance)
 			if (d <= len)
-				far = std::max(far, d);
-		if (far <= 0)
+				far_ = std::max(far_, d);
+		if (far_ <= 0)
 			continue;
 		std::optional<int> rim;
 		for (const auto &[cell, d] : distance) {
-			if (d != far)
+			if (d != far_)
 				continue;
 			const int y = profile[cell.first][cell.second];
 			rim = rim ? (down ? std::max(*rim, y) : std::min(*rim, y)) : y;
 		}
 		const int level = rim.value_or(hold.y);
 		for (const auto &[cell, d] : distance) {
-			if (d > far)
+			if (d > far_)
 				continue;
-			const float t = static_cast<float>(d) / static_cast<float>(far);
+			const float t = static_cast<float>(d) / static_cast<float>(far_);
 			const int ramp = rust_numeric::round_i32(hold.y + (level - hold.y) * t);
 			auto &y = ys[cell.first][cell.second];
 			y = down ? std::min(y, ramp) : std::max(y, ramp);
@@ -1626,9 +1626,9 @@ BridgeStructureMap BridgeStructureMap::build(
 							continue;
 						const bool at_start = candidate.nodes.front().x == xz.first &&
 											  candidate.nodes.front().z == xz.second;
-						const auto &far = at_start ? candidate.nodes.back()
+						const auto &far_ = at_start ? candidate.nodes.back()
 												   : candidate.nodes.front();
-						if (node_members.contains({far.x, far.z}))
+						if (node_members.contains({far_.x, far_.z}))
 							continue;
 						const auto highway = candidate.tags.get("highway");
 						auto ground = highways::road_profile(editor, candidate,

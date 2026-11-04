@@ -312,17 +312,17 @@ std::vector<std::pair<double, double>> lane_line(
 	};
 	std::vector<std::pair<double, double>> result;
 	result.reserve(centre.size());
-	const auto far = [&](std::size_t a, std::size_t b) {
+	const auto far_ = [&](std::size_t a, std::size_t b) {
 		return std::hypot(centre[b].first - centre[a].first,
 					   centre[b].second - centre[a].second) >= MIN_LEG;
 	};
 	for (std::size_t k = 0; k < centre.size(); ++k) {
 		std::optional<std::pair<double, double>> into, out;
 		for (std::size_t j = k; j > 0 && !into; --j)
-			if (far(j - 1, k))
+			if (far_(j - 1, k))
 				into = direction(j - 1, k);
 		for (std::size_t j = k + 1; j < centre.size() && !out; ++j)
-			if (far(k, j))
+			if (far_(k, j))
 				out = direction(k, j);
 		const auto near = [&]() -> std::optional<std::pair<double, double>> {
 			if (k > 0)

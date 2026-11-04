@@ -7409,10 +7409,10 @@ std::optional<Block> facade_tone_for_colour(
 		return std::nullopt;
 	const auto &best = same_hue[0].first <= 4.0f * any[0].first ? same_hue : any;
 	const float cutoff = std::max(best[0].first, 1.0e-6f) * 1.25f;
-	std::size_t near = 0;
-	while (near < best.size() && best[near].first <= cutoff)
-		++near;
-	return best[rng.uniform(static_cast<std::uint32_t>(near))].second;
+	std::size_t near_ = 0;
+	while (near_ < best.size() && best[near_].first <= cutoff)
+		++near_;
+	return best[rng.uniform(static_cast<std::uint32_t>(near_))].second;
 }
 
 std::optional<std::uint8_t> facade_family_for_material(const std::string &material)
