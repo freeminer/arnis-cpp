@@ -2813,7 +2813,7 @@ std::vector<StationVoid> render_underground_halls(
 						SPRUCE_STAIRS, BlockWithProperties::Properties{
 											   {"facing", stair_facing(cell.facing_b)},
 											   {"half", "bottom"}}};
-				BlockWithProperties far{
+				BlockWithProperties far_{
 						SPRUCE_STAIRS, BlockWithProperties::Properties{
 											   {"facing", stair_facing(cell.facing_a)},
 											   {"half", "bottom"}}};
@@ -2824,8 +2824,8 @@ std::vector<StationVoid> render_underground_halls(
 				editor.set_block_with_properties_absolute(
 						near_, cell.x, y, cell.z, std::nullopt, rails);
 				if (platform_cells.contains({cell.x + step.first, cell.z + step.second}))
-					editor.set_block_with_properties_absolute(far, cell.x + step.first, y,
-							cell.z + step.second, std::nullopt, rails);
+					editor.set_block_with_properties_absolute(far_, cell.x + step.first,
+							y, cell.z + step.second, std::nullopt, rails);
 				break;
 			}
 			case TunnelHallProp::Bin:
