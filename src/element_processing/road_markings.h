@@ -16,6 +16,7 @@
 namespace arnis::road_markings
 {
 int oneway_sign(const std::string &highway, const tags_t &tags);
+bool is_roundabout(const tags_t &tags);
 
 struct TransverseMark
 {

@@ -2162,21 +2162,6 @@ bool generate_world(WorldEditor &editor,
 	} else {
 		editor.traffic_signal_index.reset();
 	}
-	if (extras.cars) {
-		auto surface_y = [&](int x, int z) {
-			if (const auto deck = bridge_surface.nearby_deck_y(x, z, 0))
-				return *deck;
-			if (editor.ground)
-				return editor.ground->level(editor.ground_point(x, z));
-			return args.ground_level;
-		};
-		editor.car_network = std::make_shared<const highways::cars::CarNetwork>(
-				highways::cars::CarNetwork::build(elements, args.scale,
-						marking_index.drives_on_left, extras.traffic_lights, xzbbox,
-						surface_y));
-	} else {
-		editor.car_network.reset();
-	}
 	// Rust builds the backend-neutral train timetable before tile dispatch and
 	// shares it with the editor so the library's consumer can animate or render
 	// the scheduled rail services.
@@ -2221,6 +2206,22 @@ bool generate_world(WorldEditor &editor,
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
+	if (extras.cars) {
+		auto surfaces = highways::RoadSurfaces(editor, bridge_structures,
+				highway_connectivity, tunnel_portals, args.scale);
+		editor.car_network = std::make_shared<const highways::cars::CarNetwork>(
+				highways::cars::CarNetwork::build(
+						elements, args.scale, marking_index.drives_on_left,
+						extras.traffic_lights, xzbbox,
+						[&](const ProcessedWay &way, int x, int z) {
+							return surfaces.y_at(way, x, z);
+						},
+						[&](int x, int z) {
+							return building_footprints.contains(x, z);
+						}));
+	} else {
+		editor.car_network.reset();
+	}
 	auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
 	// Rust extends the shared rail graph to the One World boundary before station
 	// layout, so halls and tunnel pins see the same clipped endpoints as track

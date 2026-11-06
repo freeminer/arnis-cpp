@@ -274,6 +274,126 @@ int junction_level(const crate::world_editor::WorldEditor &editor, int x, int z)
 	return rust_numeric::round_i32(sum / (side * side));
 }
 
+namespace
+{
+
+std::vector<int> at_grade_profile(const crate::world_editor::WorldEditor &editor,
+		const ProcessedWay &way, int block_range, const HighwayConnectivity &connectivity,
+		const TunnelPortalMap &tunnel_portals)
+{
+	return road_profile(editor, way, block_range, connectivity,
+			[&](int x, int z) -> std::optional<int> {
+				if (!connectivity.is_shared(x, z))
+					return std::nullopt;
+				if (tunnel_portals.is_open_end({x, z}))
+					return editor.terrain_level(x, z).value_or(
+							editor.get_ground_level(x, z));
+				return junction_level(editor, x, z);
+			});
+}
+
+struct XZCellHash
+{
+	std::size_t operator()(const std::pair<int, int> &p) const noexcept
+	{
+		return std::hash<std::int64_t>{}(
+				(std::int64_t(p.first) << 32) ^ std::uint32_t(p.second));
+	}
+};
+
+} // namespace
+
+struct RoadSurfaces::WaySurface
+{
+	static constexpr int SURFACE_TILE = 16;
+	std::vector<std::pair<int, int>> cells;
+	std::vector<int> ys;
+	std::unordered_map<std::pair<int, int>, std::vector<std::uint32_t>, XZCellHash> tiles;
+
+	WaySurface(std::vector<std::pair<int, int>> cells_, std::vector<int> ys_) :
+			cells(std::move(cells_)), ys(std::move(ys_))
+	{
+		for (std::size_t i = 0; i < cells.size(); ++i)
+			tiles[{cells[i].first / SURFACE_TILE - (cells[i].first % SURFACE_TILE < 0),
+						  cells[i].second / SURFACE_TILE -
+								  (cells[i].second % SURFACE_TILE < 0)}]
+					.push_back(static_cast<std::uint32_t>(i));
+	}
+
+	std::size_t nearest(int x, int z) const
+	{
+		if (cells.empty())
+			return 0;
+		auto distance = [&](std::size_t i) {
+			const auto dx = std::int64_t(cells[i].first) - x;
+			const auto dz = std::int64_t(cells[i].second) - z;
+			return dx * dx + dz * dz;
+		};
+		const int tx = x / SURFACE_TILE - (x % SURFACE_TILE < 0);
+		const int tz = z / SURFACE_TILE - (z % SURFACE_TILE < 0);
+		std::optional<std::size_t> best;
+		for (int dz = -1; dz <= 1; ++dz)
+			for (int dx = -1; dx <= 1; ++dx)
+				if (const auto it = tiles.find({tx + dx, tz + dz}); it != tiles.end())
+					for (const auto i : it->second)
+						if (!best || distance(i) < distance(*best))
+							best = i;
+		if (best && distance(*best) <= std::int64_t(SURFACE_TILE * SURFACE_TILE))
+			return *best;
+		return static_cast<std::size_t>(std::min_element(cells.begin(), cells.end(),
+												[&](const auto &a, const auto &b) {
+													return distance(&a - cells.data()) <
+														   distance(&b - cells.data());
+												}) -
+										cells.begin());
+	}
+};
+
+RoadSurfaces::RoadSurfaces(const crate::world_editor::WorldEditor &editor,
+		const bridges::BridgeStructureMap &bridges,
+		const HighwayConnectivity &connectivity, const TunnelPortalMap &tunnel_portals,
+		double scale) :
+		editor_(editor), bridges_(bridges), connectivity_(connectivity),
+		tunnel_portals_(tunnel_portals), scale_(scale)
+{
+}
+
+RoadSurfaces::~RoadSurfaces() = default;
+
+std::shared_ptr<const RoadSurfaces::WaySurface> RoadSurfaces::surface_of(
+		const ProcessedWay &way) const
+{
+	auto cells = bridges::way_cells(way);
+	std::vector<int> ys;
+	if (const auto *member = bridges_.lookup_member(way.id)) {
+		ys.reserve(cells.size());
+		for (std::size_t i = 0; i < cells.size(); ++i)
+			ys.push_back(member->drive_y_at(i));
+	} else if (const auto *ramp = bridges_.lookup_ramp(way.id)) {
+		ys.reserve(cells.size());
+		for (std::size_t i = 0; i < cells.size(); ++i)
+			ys.push_back(ramp->y_at(i));
+	} else {
+		const int half = highway_block_range(way.tags.get("highway"), way.tags, scale_);
+		ys = at_grade_profile(editor_, way, half, connectivity_, tunnel_portals_);
+		if (const auto approach = tunnel_portals_.approach(way.id))
+			for (std::size_t i = 0; i < ys.size(); ++i)
+				ys[i] += std::min(0, approach->offset(static_cast<int>(i)));
+	}
+	return std::make_shared<const WaySurface>(std::move(cells), std::move(ys));
+}
+
+int RoadSurfaces::y_at(const ProcessedWay &way, int x, int z) const
+{
+	auto [it, inserted] = ways_.try_emplace(way.id);
+	if (inserted)
+		it->second = surface_of(way);
+	const auto nearest = it->second->nearest(x, z);
+	if (nearest < it->second->ys.size())
+		return it->second->ys[nearest];
+	return editor_.get_ground_level(x, z);
+}
+
 double perpendicular_median_raw(const crate::world_editor::WorldEditor &editor, int set_x,
 		int set_z, int centerline_x, int centerline_z, int block_range,
 		bool dir_horizontal)

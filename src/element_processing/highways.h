@@ -10,6 +10,7 @@
 #include <string>
 #include <functional>
 #include <span>
+#include <memory>
 
 namespace arnis
 {
@@ -20,6 +21,12 @@ struct Args;
 namespace world_editor
 {
 struct WorldEditor;
+}
+namespace bridges
+{
+struct BridgeMemberInfo;
+struct BridgeRampInfo;
+class BridgeStructureMap;
 }
 }
 
@@ -48,6 +55,30 @@ std::vector<int> road_profile(const world_editor::WorldEditor &editor,
 		const std::function<std::optional<int>(int, int)> &pin_at);
 /// Stable ground level used for roads meeting at one connected junction.
 int junction_level(const world_editor::WorldEditor &editor, int x, int z);
+
+class TunnelPortalMap;
+// Exact road surface for moving traffic: a deck, ramp, or the laid at-grade
+// profile, rather than the top of whatever happens to occupy a column.
+class RoadSurfaces
+{
+public:
+	RoadSurfaces(const world_editor::WorldEditor &editor,
+			const bridges::BridgeStructureMap &bridges,
+			const HighwayConnectivity &connectivity,
+			const TunnelPortalMap &tunnel_portals, double scale);
+	~RoadSurfaces();
+	int y_at(const ProcessedWay &way, int x, int z) const;
+
+private:
+	struct WaySurface;
+	const world_editor::WorldEditor &editor_;
+	const bridges::BridgeStructureMap &bridges_;
+	const HighwayConnectivity &connectivity_;
+	const TunnelPortalMap &tunnel_portals_;
+	double scale_;
+	mutable std::unordered_map<std::uint64_t, std::shared_ptr<const WaySurface>> ways_;
+	std::shared_ptr<const WaySurface> surface_of(const ProcessedWay &way) const;
+};
 
 // Closed aeroway polygons handled by the aeroway renderer and flood-fill cache.
 enum class AerowayAreaKind

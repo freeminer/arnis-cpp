@@ -10,6 +10,8 @@
 #include <cmath>
 #include <cstdint>
 #include <initializer_list>
+#include <map>
+#include <unordered_map>
 #include <mutex>
 #include <optional>
 #include <string_view>
@@ -25,14 +27,18 @@ bool is_active(const Args &args)
 
 namespace
 {
-constexpr std::uint32_t SALT_COLLAPSE = 0x5255'494E, SALT_JAG = 0x4A41'4747,
-						SALT_HOLE = 0x484F'4C45, SALT_CRACK = 0x4352'4B53,
-						SALT_RUBBLE = 0x5242'4C45, SALT_DEPTH = 0x534E'4F57,
-						SALT_PLOW = 0x504C'4F57, SALT_ICE = 0x4943'4521,
-						SALT_VINE = 0x5649'4E45, SALT_MOSS = 0x4D4F'5353,
-						SALT_ROOF = 0x524F'4F46;
-constexpr int RUBBLE_REACH = 2, MOSS_REACH = 6, LAMP_REACH = 12;
-constexpr double VINE_SHARE = .35, WHITE_ROOF_SHARE = .85;
+constexpr std::uint32_t SALT_JAG = 0x4A41'4747, SALT_HOLE = 0x484F'4C45,
+						SALT_CRACK = 0x4352'4B53, SALT_RUBBLE = 0x5242'4C45,
+						SALT_DEPTH = 0x534E'4F57, SALT_PLOW = 0x504C'4F57,
+						SALT_ICE = 0x4943'4521, SALT_VINE = 0x5649'4E45,
+						SALT_MOSS = 0x4D4F'5353, SALT_ROOF = 0x524F'4F46,
+						SALT_DECAY = 0x4445'4359, SALT_BREAK = 0x4252'4B31,
+						SALT_FLOORS = 0x464C'5253, SALT_ROOF_HOLE = 0x5248'4F4C,
+						SALT_GROWTH = 0x4752'4F57, SALT_WRECK = 0x5743'4152;
+constexpr int RUBBLE_REACH = 3, FIRE_ODDS = 500, MOSS_REACH = 9, CORNER_WALK = 512,
+			  TOWER_HEIGHT = 40, RUIN_TREE_ODDS = 170, WRECK_ODDS = 5, LAMP_REACH = 12;
+constexpr double VINE_SHARE = .45, WHITE_ROOF_SHARE = .85, VINE_REACH = 34.0,
+				 TOWER_SHARE = .6;
 
 enum class Kind
 {
@@ -303,37 +309,64 @@ void swap_material(
 Block weathered(WorldEditor &editor, const Block &b, std::uint64_t h)
 {
 	const auto roll = h % 100;
+	const std::pair<const Block *, const char *> weather[] = {
+			{&STONE_BRICK_STAIRS, "mossy_stone_brick_stairs"},
+			{&STONE_BRICK_SLAB, "mossy_stone_brick_slab"},
+			{&STONE_BRICK_WALL, "mossy_stone_brick_wall"},
+			{&COBBLESTONE, "mossy_cobblestone"},
+			{&COBBLESTONE_STAIRS, "mossy_cobblestone_stairs"},
+			{&COBBLESTONE_SLAB, "mossy_cobblestone_slab"},
+			{&COBBLESTONE_WALL, "mossy_cobblestone_wall"},
+			{&DEEPSLATE_BRICKS, "cracked_deepslate_bricks"},
+			{&DEEPSLATE_TILES, "cracked_deepslate_tiles"},
+			{&POLISHED_BLACKSTONE_BRICKS, "cracked_polished_blackstone_bricks"},
+			{&NETHER_BRICK, "cracked_nether_bricks"}, {&CALCITE, "tuff"},
+			{&DIORITE, "cobblestone"}};
 	if (b == STONE_BRICKS && roll < 30)
 		return named(editor, {"cracked_stone_bricks"}, b);
-	if (b == STONE_BRICKS && roll < 55)
-		return named(editor, {"mossy_stone_bricks"}, MOSSY_STONE_BRICKS);
-	if (b == STONE_BRICK_STAIRS && roll < 35)
-		return named(editor, {"mossy_stone_brick_stairs"}, b);
-	if (b == STONE_BRICK_SLAB && roll < 35)
-		return named(editor, {"mossy_stone_brick_slab"}, b);
-	if (b == STONE_BRICK_WALL && roll < 35)
-		return named(editor, {"mossy_stone_brick_wall"}, b);
-	if (b == COBBLESTONE && roll < 40)
-		return named(editor, {"mossy_cobblestone"}, MOSSY_COBBLESTONE);
-	if (b == COBBLESTONE_STAIRS && roll < 35)
-		return named(editor, {"mossy_cobblestone_stairs"}, b);
-	if (b == COBBLESTONE_SLAB && roll < 35)
-		return named(editor, {"mossy_cobblestone_slab"}, b);
-	if (b == COBBLESTONE_WALL && roll < 35)
-		return named(editor, {"mossy_cobblestone_wall"}, MOSSY_COBBLESTONE_WALL);
-	if (b == DEEPSLATE_BRICKS && roll < 40)
-		return named(editor, {"cracked_deepslate_bricks"}, b);
-	if (b == DEEPSLATE_TILES && roll < 40)
-		return named(editor, {"cracked_deepslate_tiles"}, b);
-	if (b == POLISHED_BLACKSTONE_BRICKS && roll < 40)
-		return named(editor, {"cracked_polished_blackstone_bricks"}, b);
-	if (b == NETHER_BRICK && roll < 40)
-		return named(editor, {"cracked_nether_bricks"}, b);
+	if (b == STONE_BRICKS)
+		return named(editor, {"mossy_stone_bricks"}, roll < 55 ? MOSSY_STONE_BRICKS : b);
+	for (const auto &[block, name] : weather) {
+		const unsigned share =
+				block == &CALCITE || block == &DIORITE
+						? 18
+						: (block == &STONE_BRICK_STAIRS || block == &STONE_BRICK_SLAB ||
+												  block == &STONE_BRICK_WALL ||
+												  block == &COBBLESTONE_STAIRS ||
+												  block == &COBBLESTONE_SLAB
+										  ? 35
+										  : 40);
+		if (b == *block && roll < share)
+			return named(editor, {name}, b);
+	}
 	if ((b == STONE || b == SMOOTH_STONE || b == POLISHED_ANDESITE) && roll < 18)
 		return roll < 12 ? COBBLESTONE : MOSSY_COBBLESTONE;
+	if ((b == WHITE_CONCRETE || b == GRAY_CONCRETE) && roll < 18)
+		return named(editor, {"light_gray_concrete"}, b);
+	if (b == LIGHT_GRAY_CONCRETE && roll < 12)
+		return named(editor, {"gray_concrete"}, b);
+	if ((b == WHITE_TERRACOTTA || b == BROWN_TERRACOTTA) && roll < 18)
+		return b;
+	if (b == GRAY_TERRACOTTA && roll < 16)
+		return named(editor, {"brown_terracotta"}, b);
+	if (b == RED_TERRACOTTA && roll < 12)
+		return COARSE_DIRT;
+	if (b == BLACK_CONCRETE && roll < 10)
+		return named(editor, {"polished_deepslate"}, b);
+	if (b == QUARTZ_BLOCK && roll < 15)
+		return named(editor, {"smooth_quartz"}, b);
+	if (b == SMOOTH_QUARTZ && roll < 10)
+		return AIR;
+	if (b == BRICK && roll < 22)
+		return roll < 14 ? named(editor, {"granite"}, b) : COBBLESTONE;
+	if (b == SMOOTH_SANDSTONE && roll < 40)
+		return SANDSTONE;
+	if (b == OAK_PLANKS && roll < 25)
+		return named(editor, {"spruce_planks"}, b);
+	if (b == TERRACOTTA && roll < 12)
+		return COARSE_DIRT;
 	return b;
 }
-
 Block rubble(WorldEditor &editor, std::uint64_t h)
 {
 	switch (h % 6) {
@@ -351,6 +384,92 @@ Block rubble(WorldEditor &editor, std::uint64_t h)
 	}
 }
 
+enum class Decay
+{
+	Shell,
+	Roofless,
+	Broken,
+	Fallen
+};
+
+struct RuinPlan
+{
+	Decay decay;
+	bool wall;
+	int eave;
+	int top;
+};
+
+struct RegionTops
+{
+	std::unordered_map<std::uint64_t, int> tops;
+	static std::uint64_t key(int x, int z)
+	{
+		return (std::uint64_t(std::uint32_t(x)) << 32) | std::uint32_t(z);
+	}
+	void build(const BuildingFootprintBitmap &footprints, int min_x, int min_z, int max_x,
+			int max_z, int min_y, int max_y, WorldEditor &editor)
+	{
+		for (int z = min_z; z <= max_z; ++z)
+			for (int x = min_x; x <= max_x; ++x) {
+				if (!footprints.contains(x, z))
+					continue;
+				if (const auto column_top = top(editor,
+							Column{x, z, editor.get_ground_level(x, z)}, min_y, max_y))
+					tops[key(x, z)] = column_top->first;
+			}
+	}
+	std::optional<int> get(int x, int z) const
+	{
+		const auto it = tops.find(key(x, z));
+		return it == tops.end() ? std::nullopt : std::optional(it->second);
+	}
+};
+
+std::optional<std::pair<int, int>> corner_step(
+		const BuildingFootprintBitmap &footprints, int x, int z)
+{
+	static constexpr int slide[] = {
+			0, -1, 1, -2, 2, -3, 3, -4, 4, -5, 5, -6, 6, -7, 7, -8, 8};
+	for (const int dz : slide) {
+		bool inside = true;
+		for (int t = std::min(z, z + dz); t <= std::max(z, z + dz); ++t)
+			inside &= footprints.contains(x, t);
+		if (inside && footprints.contains(x - 1, z + dz))
+			return std::pair{x - 1, z + dz};
+	}
+	if (footprints.contains(x, z - 1))
+		return std::pair{x, z - 1};
+	return std::nullopt;
+}
+
+std::pair<int, int> building_corner(
+		const BuildingFootprintBitmap &footprints, int x, int z)
+{
+	std::pair at{x, z};
+	for (int i = 0; i < CORNER_WALK; ++i) {
+		const auto next = corner_step(footprints, at.first, at.second);
+		if (!next)
+			break;
+		at = *next;
+	}
+	return at;
+}
+
+Decay decay_of(std::pair<int, int> corner, int x, int z)
+{
+	const double own =
+			((land_cover::coord_hash(corner.first, corner.second) >> 16) % 1000) / 1000.0;
+	const double value = .75 * own + .25 * noise(x, z, 40, SALT_DECAY);
+	if (value < .17)
+		return Decay::Fallen;
+	if (value < .39)
+		return Decay::Broken;
+	if (value < .72)
+		return Decay::Roofless;
+	return Decay::Shell;
+}
+
 struct FireSpot
 {
 	Column column;
@@ -361,7 +480,7 @@ struct FireSpot
 void rubble_or_fire(WorldEditor &editor, const Column &c, int y, std::uint64_t h,
 		std::vector<FireSpot> &fires)
 {
-	if (((h >> 24) % 100) == 0)
+	if (((h >> 24) % FIRE_ODDS) == 0)
 		fires.push_back({c, y, h});
 	else
 		put(editor, rubble(editor, h), c.x, y, c.z);
@@ -395,58 +514,353 @@ void light_fire(WorldEditor &editor, const FireSpot &spot, int bx, int bz, int m
 	}
 }
 
-void ruin_building(WorldEditor &editor, const Column &c, int min_y, int max_y,
+using RuinPlans = std::array<std::array<std::optional<RuinPlan>, 16>, 16>;
+
+RuinPlans plan_ruins(const std::vector<Column> &columns,
+		const BuildingFootprintBitmap &footprints, const RegionTops &tops)
+{
+	RuinPlans plans;
+	const auto wall = [&](int x, int z) {
+		return footprints.contains(x, z) &&
+			   (!footprints.contains(x + 1, z) || !footprints.contains(x - 1, z) ||
+					   !footprints.contains(x, z + 1) || !footprints.contains(x, z - 1));
+	};
+	for (const auto &column : columns) {
+		if (!footprints.contains(column.x, column.z))
+			continue;
+		const auto column_top = tops.get(column.x, column.z);
+		if (!column_top)
+			continue;
+		const bool is_wall = wall(column.x, column.z);
+		int eave = *column_top;
+		if (!is_wall)
+			for (const auto &[dx, dz] : {std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}})
+				for (int reach = 1; reach <= 48; ++reach) {
+					const int x = column.x + dx * reach, z = column.z + dz * reach;
+					if (!footprints.contains(x, z))
+						break;
+					if (wall(x, z)) {
+						if (const auto y = tops.get(x, z))
+							eave = std::min(eave, *y);
+						break;
+					}
+				}
+		const auto corner = building_corner(footprints, column.x, column.z);
+		plans[column.z & 15][column.x & 15] = {
+				decay_of(corner, column.x, column.z), is_wall, eave, *column_top};
+	}
+	return plans;
+}
+double hole_share(Decay d)
+{
+	return d == Decay::Shell ? .04 : d == Decay::Roofless ? .07 : .1;
+}
+double floor_share(Decay d)
+{
+	return d == Decay::Shell ? .12 : d == Decay::Roofless ? .3 : .55;
+}
+double rubble_share(Decay d)
+{
+	return d == Decay::Shell	  ? .04
+		   : d == Decay::Roofless ? .16
+		   : d == Decay::Broken	  ? .42
+								  : .6;
+}
+
+int standing_height(const Column &c, int height, const RuinPlan &plan)
+{
+	const double line = noise(c.x, c.z, 11, SALT_BREAK) - .5;
+	const double jag = (noise(c.x, c.z, 5, SALT_JAG) - .5) * 4;
+	const auto of = [&](int h, double share) {
+		return h * (height >= TOWER_HEIGHT ? std::max(share, TOWER_SHARE) : share);
+	};
+	double standing = 0;
+	if (plan.wall)
+		switch (plan.decay) {
+		case Decay::Shell:
+			standing = height;
+			break;
+		case Decay::Roofless:
+			standing = of(height, .96 + line * .08) + jag;
+			break;
+		case Decay::Broken:
+			standing = of(height, .62 + line * .5) + jag;
+			break;
+		case Decay::Fallen:
+			standing = of(height, .22 + line * .3) + jag;
+			break;
+		}
+	else {
+		const int eave = std::min(plan.eave - c.ground, height);
+		const double floors = noise(c.x, c.z, 9, SALT_FLOORS);
+		switch (plan.decay) {
+		case Decay::Shell:
+			standing = noise(c.x, c.z, 7, SALT_ROOF_HOLE) < .22
+							   ? height - 1 - col_hash(c, 0) % 3
+							   : height;
+			break;
+		case Decay::Roofless:
+			standing = eave - 1 - col_hash(c, 1) % 2;
+			break;
+		case Decay::Broken:
+			standing = of(eave, .2 + floors * .4);
+			break;
+		case Decay::Fallen:
+			standing = 0;
+			break;
+		}
+	}
+	return std::clamp(static_cast<int>(std::round(standing)), 1, height);
+}
+void grow(WorldEditor &, const Column &, int, std::uint64_t, unsigned, int);
+
+void overgrow(WorldEditor &editor, const Column &c, int y, std::uint64_t h, int max_y)
+{
+	if (y >= max_y)
+		return;
+	const auto block = editor.get_block_absolute(c.x, y, c.z);
+	if (!block)
+		return;
+	if (kind(editor, *block) == Kind::Solid) {
+		put(editor, MOSS_BLOCK, c.x, y, c.z);
+		grow(editor, c, y + 1, h >> 8, 55, max_y);
+	} else if (kind(editor, *block) == Kind::Shaped && h % 2 == 0)
+		put(editor, MOSS_CARPET, c.x, y + 1, c.z);
+}
+Block debris(WorldEditor &editor, const std::optional<Block> &material, std::uint64_t h)
+{
+	return material && h % 5 < 2 ? *material : rubble(editor, h >> 3);
+}
+
+void pile_up(WorldEditor &editor, const Column &c, int y, int height,
+		const std::optional<Block> &material, std::uint64_t h, int max_y,
 		std::vector<FireSpot> &fires)
+{
+	for (int i = 0; i < height; ++i) {
+		const int at = y + i;
+		if (at > max_y || editor.block_at(c.x, at, c.z))
+			return;
+		const auto mix = h + std::uint64_t(std::uint32_t(i)) * 0x9E3779B9ULL;
+		if (i == height - 1) {
+			if (mix % 3 == 0)
+				put(editor, COBBLESTONE_SLAB, c.x, at, c.z);
+			else
+				rubble_or_fire(editor, c, at, mix, fires);
+		} else
+			put(editor, debris(editor, material, mix), c.x, at, c.z);
+	}
+}
+void grow_tree(WorldEditor &editor, const Column &c, int bx, int bz, int surface,
+		std::uint64_t h, int max_y)
+{
+	if (c.x - bx < 2 || c.x - bx > 13 || c.z - bz < 2 || c.z - bz > 13)
+		return;
+	const int trunk = 3 + ((h >> 4) % 3), crown = surface + trunk;
+	if (crown + 2 > max_y)
+		return;
+	for (int dz = -2; dz <= 2; ++dz)
+		for (int dx = -2; dx <= 2; ++dx)
+			for (int y = surface + 1; y <= crown + 1; ++y)
+				if (editor.block_at(c.x + dx, y, c.z + dz))
+					return;
+	for (int y = surface + 1; y <= crown; ++y)
+		put(editor, OAK_LOG, c.x, y, c.z);
+	for (int dz = -2; dz <= 2; ++dz)
+		for (int dx = -2; dx <= 2; ++dx)
+			for (const auto &[y, reach] :
+					{std::pair{crown - 1, 3}, {crown, 3}, {crown + 1, 1}})
+				if (std::abs(dx) + std::abs(dz) <= reach &&
+						!(dx == 0 && dz == 0 && y <= crown))
+					put(editor, OAK_LEAVES, c.x + dx, y, c.z + dz);
+}
+
+void ruin_building(WorldEditor &editor, const Column &c, int min_y, int max_y,
+		const RuinPlan &plan, int bx, int bz, std::vector<FireSpot> &fires)
 {
 	const auto top_block = top(editor, c, min_y, max_y);
 	if (!top_block)
 		return;
-	const int top_y = top_block->first;
-	const int height = top_y - c.ground;
+	const int top_y = top_block->first, height = top_y - c.ground;
 	if (height < 2)
 		return;
-	const double standing = noise(c.x, c.z, 26, SALT_COLLAPSE);
-	const double share = standing > .72 ? 1.0 : .1 + standing / .72 * .8;
-	const int cut =
-			c.ground +
-			std::clamp(
-					static_cast<int>(std::round(
-							height * share + (noise(c.x, c.z, 5, SALT_JAG) - .5) * 4.0)),
-					1, height);
+	const int cut = c.ground + standing_height(c, height, plan);
+	std::optional<Block> material;
+	for (int y = top_y; y > c.ground && !material; --y) {
+		const auto b = editor.get_block_absolute(c.x, y, c.z);
+		if (b && kind(editor, *b) == Kind::Solid)
+			material = b;
+	}
+	int fallen = top_y - cut;
 	for (int y = cut + 1; y <= top_y; ++y)
 		put(editor, AIR, c.x, y, c.z);
 	for (int y = c.ground + 1; y <= cut; ++y) {
 		const auto block = editor.get_block_absolute(c.x, y, c.z);
-		if (!block || kind(editor, *block) == Kind::Air)
+		if (!block)
 			continue;
 		const auto k = kind(editor, *block);
 		const auto h = col_hash(c, y);
 		const auto roll = h % 100;
-		const bool hole = noise(c.x + y * 3, c.z - y * 2, 4, SALT_HOLE) < .1;
-		if (hole || k == Kind::Light || (k == Kind::Glass && roll >= 4 && roll < 85)) {
+		const bool hole =
+				noise(c.x + y * 3, c.z - y * 2, 4, SALT_HOLE) < hole_share(plan.decay);
+		const auto below = editor.get_block_absolute(c.x, y - 1, c.z);
+		const bool floor_gone = !plan.wall && y > c.ground + 1 &&
+								(k == Kind::Solid || k == Kind::Shaped) && !below &&
+								noise(c.x, c.z, 6, SALT_FLOORS + std::uint32_t(y)) <
+										floor_share(plan.decay);
+		if (floor_gone) {
+			++fallen;
+			put(editor, AIR, c.x, y, c.z);
+			if (y < cut) {
+				const auto above = editor.get_block_absolute(c.x, y + 1, c.z);
+				if (above && kind(editor, *above) != Kind::Solid)
+					put(editor, AIR, c.x, y + 1, c.z);
+			}
+		} else if (hole || k == Kind::Light ||
+				   (k == Kind::Glass && roll >= 4 && roll < 85)) {
 			put(editor, AIR, c.x, y, c.z);
 		} else if (k == Kind::Glass && roll < 4) {
 			put(editor, COBWEB, c.x, y, c.z);
 		} else if (k == Kind::Solid && y - c.ground <= MOSS_REACH &&
 				   noise(c.x + y, c.z - y, 5, SALT_MOSS) <
-						   .22 * (1.0 - double(y - c.ground - 1) / MOSS_REACH)) {
+						   .22 * (1 - double(y - c.ground - 1) / MOSS_REACH)) {
 			put(editor, MOSS_BLOCK, c.x, y, c.z);
 		} else {
 			const auto variant = weathered(editor, *block, h);
-			if (variant.id() != block->id())
+			if (variant != *block)
 				swap_material(editor, c, y, *block, variant);
 		}
 	}
-	if (cut < top_y && cut < max_y) {
-		const auto cap = editor.get_block_absolute(c.x, cut, c.z);
-		if (cap && kind(editor, *cap) == Kind::Solid) {
-			const auto h = col_hash(c, cut + 1);
-			if (h % 6 < 2)
-				rubble_or_fire(editor, c, cut + 1, col_hash(c, cut + 2), fires);
-			else if (h % 6 == 2)
-				put(editor, MOSS_CARPET, c.x, cut + 1, c.z);
+	if (plan.wall) {
+		if (fallen > 0 && cut < max_y) {
+			const auto cap = editor.get_block_absolute(c.x, cut, c.z);
+			if (cap && kind(editor, *cap) == Kind::Solid)
+				switch (col_hash(c, cut + 1) % 6) {
+				case 0:
+					put(editor, rubble(editor, col_hash(c, cut + 2)), c.x, cut + 1, c.z);
+					break;
+				case 1:
+				case 2:
+					put(editor, MOSS_CARPET, c.x, cut + 1, c.z);
+					break;
+				}
+		}
+		return;
+	}
+	const auto h = col_hash(c, cut + 3);
+	const double lying = noise(c.x, c.z, 7, SALT_RUBBLE);
+	const int pile = plan.decay == Decay::Shell		 ? 0
+					 : plan.decay == Decay::Roofless ? int(lying < .25)
+					 : plan.decay == Decay::Broken	 ? int(fallen >= 3 ? lying * 3.5 : 0)
+													 : 1 + int(lying * 4);
+	int floor = max_y;
+	for (int y = c.ground + 1; y <= max_y; ++y)
+		if (!editor.block_at(c.x, y, c.z)) {
+			floor = y;
+			break;
+		}
+	if (pile > 0)
+		pile_up(editor, c, floor, pile, material, h, max_y, fires);
+	if (plan.decay == Decay::Shell) {
+		if (fallen > 0 && col_hash(c, cut + 1) % 4 == 0)
+			overgrow(editor, c, cut, h, max_y);
+		return;
+	}
+	const auto surface = top(editor, c, min_y, max_y);
+	if (!surface)
+		return;
+	if (noise(c.x, c.z, 8, SALT_GROWTH) < .6)
+		overgrow(editor, c, surface->first, h, max_y);
+	if (plan.decay != Decay::Roofless && (h >> 20) % RUIN_TREE_ODDS == 0)
+		grow_tree(editor, c, bx, bz, surface->first, h, max_y);
+}
+void drop_overhangs(WorldEditor &editor, const Column &c, int min_y, int max_y,
+		const RuinPlans &plans)
+{
+	const auto surface = top(editor, c, min_y, max_y);
+	if (!surface)
+		return;
+	const int top_y = surface->first;
+	const auto solid = [&](int y) {
+		const auto block = editor.get_block_absolute(c.x, y, c.z);
+		return block && (kind(editor, *block) == Kind::Solid ||
+								kind(editor, *block) == Kind::Shaped);
+	};
+	if (top_y <= c.ground + 2 || !solid(top_y))
+		return;
+	int bottom = top_y;
+	while (bottom > top_y - 1 && solid(bottom - 1))
+		--bottom;
+	if (editor.block_at(c.x, bottom - 1, c.z) || bottom <= c.ground + 2)
+		return;
+	for (const auto &[dx, dz] : {std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+		const int x = c.x + dx, z = c.z + dz;
+		const auto &plan = plans[z & 15][x & 15];
+		if (!plan)
+			continue;
+		const auto now = top(editor, Column{x, z, c.ground}, min_y, max_y);
+		if (top_y <= plan->top + 1 && bottom > (now ? now->first : c.ground)) {
+			for (int y = bottom; y <= top_y; ++y)
+				put(editor, AIR, c.x, y, c.z);
+			return;
 		}
 	}
+}
+
+static Block street_bush(std::uint64_t h)
+{
+	return (h >> 24) % 3 == 0 ? BIRCH_LEAVES : OAK_LEAVES;
+}
+
+void wreck_a_car(WorldEditor &editor, int bx, int bz, const std::vector<Column> &columns,
+		int min_y, int max_y, const BuildingFootprintBitmap &footprints)
+{
+	const auto h = land_cover::coord_hash(bx >> 4, bz >> 4);
+	if (h % WRECK_ODDS != 0)
+		return;
+	const int lx = 4 + (h >> 8) % 8, lz = 4 + (h >> 16) % 8;
+	const auto found = std::find_if(columns.begin(), columns.end(),
+			[&](const auto &c) { return (c.x - bx) == lx && (c.z - bz) == lz; });
+	if (found == columns.end())
+		return;
+	const auto centre = *found;
+	const auto run = [&](int dx, int dz) {
+		int n = 0;
+		for (int i = 1;
+				i <= 8 && editor.surface_is_sealed(centre.x + dx * i, centre.z + dz * i);
+				++i)
+			++n;
+		return n;
+	};
+	const bool along_x = run(1, 0) + run(-1, 0) >= run(0, 1) + run(0, -1);
+	const int ax = along_x ? 1 : 0, az = 1 - ax;
+	const auto cell = [&](int along, int across) {
+		return Column{centre.x + along * ax + across * az,
+				centre.z + along * az + across * ax, centre.ground};
+	};
+	if (centre.ground + 3 > max_y)
+		return;
+	for (int along = -2; along <= 1; ++along)
+		for (int across = 0; across <= 1; ++across) {
+			const auto c = cell(along, across);
+			if (!editor.surface_is_sealed(c.x, c.z) || footprints.contains(c.x, c.z) ||
+					editor.get_ground_level(c.x, c.z) != centre.ground)
+				return;
+			const auto surface = top(editor, c, min_y, max_y);
+			if (!surface || surface->first != centre.ground ||
+					kind(editor, surface->second) != Kind::Solid)
+				return;
+		}
+	static const Block paint[] = {
+			BROWN_TERRACOTTA, GRAY_TERRACOTTA, RED_TERRACOTTA, BLACK_CONCRETE};
+	for (int along = -2; along <= 1; ++along)
+		for (int across = 0; across <= 1; ++across) {
+			const auto c = cell(along, across);
+			put(editor, paint[(h >> 24) % 4], c.x, centre.ground + 1, c.z);
+			if (along == -1 || along == 0)
+				put(editor, TINTED_GLASS, c.x, centre.ground + 2, c.z);
+			else if ((h >> 28) % 2 == 0)
+				put(editor, MOSS_CARPET, c.x, centre.ground + 2, c.z);
+		}
 }
 
 void grow(WorldEditor &editor, const Column &c, int y, std::uint64_t h, unsigned percent,
@@ -477,8 +891,30 @@ void grow(WorldEditor &editor, const Column &c, int y, std::uint64_t h, unsigned
 	}
 }
 
+std::optional<std::tuple<int, int, int>> nearest_footprint(
+		const BuildingFootprintBitmap &footprints, int x, int z)
+{
+	for (int distance = 1; distance <= RUBBLE_REACH; ++distance)
+		for (int dz = -distance; dz <= distance; ++dz)
+			for (int dx = -distance; dx <= distance; ++dx)
+				if ((std::abs(dx) == distance || std::abs(dz) == distance) &&
+						footprints.contains(x + dx, z + dz))
+					return std::tuple{distance, x + dx, z + dz};
+	return std::nullopt;
+}
+
+int heap_height(const Column &c, int distance, Decay decay)
+{
+	const double share = rubble_share(decay), patch = noise(c.x, c.z, 6, SALT_RUBBLE);
+	if (patch >= share)
+		return 0;
+	const int most = RUBBLE_REACH + 1 - distance;
+	return std::min(most, 1 + int((share - patch) / share * most));
+}
+
 void ruin_open_ground(WorldEditor &editor, const Column &c, int min_y, int max_y,
-		const BuildingFootprintBitmap &footprints, std::vector<FireSpot> &fires)
+		const BuildingFootprintBitmap &footprints, int bx, int bz,
+		std::vector<FireSpot> &fires)
 {
 	const auto surface = top(editor, c, min_y, max_y);
 	if (!surface)
@@ -492,46 +928,52 @@ void ruin_open_ground(WorldEditor &editor, const Column &c, int min_y, int max_y
 	if (top_y != c.ground || kind(editor, block) != Kind::Solid || top_y + 1 > max_y)
 		return;
 	const auto h = col_hash(c, top_y);
-	bool near_ruin = false;
-	for (int dz = -RUBBLE_REACH; dz <= RUBBLE_REACH && !near_ruin; ++dz)
-		for (int dx = -RUBBLE_REACH; dx <= RUBBLE_REACH; ++dx)
-			near_ruin |= footprints.contains(c.x + dx, c.z + dz);
-	if (near_ruin && noise(c.x, c.z, 6, SALT_RUBBLE) < .45 && h % 3 == 0) {
-		rubble_or_fire(editor, c, top_y + 1, h >> 8, fires);
-		return;
+	if (const auto nearest = nearest_footprint(footprints, c.x, c.z)) {
+		const auto &[distance, wx, wz] = *nearest;
+		const auto corner = building_corner(footprints, wx, wz);
+		const int height = heap_height(c, distance, decay_of(corner, wx, wz));
+		if (height > 0) {
+			put(editor, AIR, c.x, top_y, c.z);
+			std::optional<Block> material;
+			if (wx >= bx && wx < bx + 16 && wz >= bz && wz < bz + 16)
+				for (int y = c.ground + 1; y <= c.ground + 4 && !material; ++y) {
+					const auto b = editor.get_block_absolute(wx, y, wz);
+					if (b && kind(editor, *b) == Kind::Solid)
+						material = b;
+				}
+			pile_up(editor, c, top_y, height, material, h, max_y, fires);
+			return;
+		}
 	}
 	if (editor.surface_is_sealed(c.x, c.z)) {
-		if (noise(c.x, c.z, 7, SALT_CRACK) < .32) {
-			Block ground;
-			switch (h % 10) {
-			case 0:
-			case 1:
-			case 2:
-			case 3:
-				ground = GRASS_BLOCK;
-				break;
-			case 4:
-			case 5:
-				ground = COARSE_DIRT;
-				break;
-			case 6:
-			case 7:
-				ground = GRAVEL;
-				break;
-			case 8:
-				ground = MOSS_BLOCK;
-				break;
-			default:
-				ground = COBBLESTONE;
-				break;
-			}
-			put(editor, ground, c.x, top_y, c.z);
-			if (ground.id() == GRASS_BLOCK.id() || ground.id() == MOSS_BLOCK.id())
-				grow(editor, c, top_y + 1, h >> 8, 70, max_y);
+		const double patch = noise(c.x, c.z, 7, SALT_CRACK);
+		if (patch < .25) {
+			put(editor, street_bush(h), c.x, top_y + 1, c.z);
+		} else if (patch < .33 || patch < .48 && h % 4 == 0) {
+			put(editor, COARSE_DIRT, c.x, top_y, c.z);
+			put(editor, MOSS_CARPET, c.x, top_y + 1, c.z);
+			grow(editor, c, top_y + 2, h >> 8, 45, max_y);
+		} else if (patch < .46) {
+			put(editor, COARSE_DIRT, c.x, top_y, c.z);
+			grow(editor, c, top_y + 1, h >> 8, 60, max_y);
+		} else if (patch < .52) {
+			put(editor, GRASS_BLOCK, c.x, top_y, c.z);
+			grow(editor, c, top_y + 1, h >> 8, 80, max_y);
 		}
-	} else if (block.id() == GRASS_BLOCK.id()) {
-		grow(editor, c, top_y + 1, h >> 8, 30, max_y);
+		return;
 	}
+	int overgrown = 0;
+	for (const auto &[dx, dz] : {std::pair{1, 0}, {-1, 0}, {0, 1}, {0, -1}}) {
+		const auto neighbour = editor.get_block_absolute(c.x + dx, top_y + 1, c.z + dz);
+		if (neighbour && (*neighbour == MOSS_BLOCK || *neighbour == VINE))
+			++overgrown;
+	}
+	if (overgrown >= 3)
+		put(editor, MOSS_BLOCK, c.x, top_y, c.z);
+	const auto moss = noise(c.x, c.z, 11, SALT_MOSS) < .75 ? h : h >> 8;
+	if (noise(c.x, c.z, 8, SALT_GROWTH) < .55 ||
+			(block.id() == GRASS_BLOCK.id() && c.ground % 3 == 0))
+		grow(editor, c, top_y + 1, moss, 65, max_y);
 }
 
 void hang_vines(WorldEditor &editor, const Column &c, int min_y, int max_y,
@@ -540,7 +982,7 @@ void hang_vines(WorldEditor &editor, const Column &c, int min_y, int max_y,
 	const double patch = noise(c.x, c.z, 9, SALT_VINE);
 	if (patch > VINE_SHARE)
 		return;
-	const int height = 2 + int((VINE_SHARE - patch) / VINE_SHARE * 14.0);
+	const int height = 2 + int((VINE_SHARE - patch) / VINE_SHARE * VINE_REACH);
 	constexpr int dx[] = {0, 1, 0, -1};
 	constexpr int dz[] = {-1, 0, 1, 0};
 	constexpr const char *facing[] = {"north", "east", "south", "west"};
@@ -633,7 +1075,7 @@ void snow_over(WorldEditor &editor, const Column &c, int min_y, int max_y,
 
 void style_chunk(WorldEditor &editor, int bx, int bz, int min_x, int min_z, int max_x,
 		int max_z, int min_y, int max_y, const Args &args,
-		const BuildingFootprintBitmap &footprints)
+		const BuildingFootprintBitmap &footprints, const RegionTops *tops)
 {
 	std::vector<Column> columns;
 	columns.reserve(256);
@@ -645,15 +1087,20 @@ void style_chunk(WorldEditor &editor, int bx, int bz, int min_x, int min_z, int 
 		}
 	if (args.post_apocalyptic) {
 		std::vector<FireSpot> fires;
+		const auto plans = tops ? plan_ruins(columns, footprints, *tops) : RuinPlans{};
 		for (const auto &c : columns) {
-			if (footprints.contains(c.x, c.z))
-				ruin_building(editor, c, min_y, max_y, fires);
+			const auto &plan = plans[c.z & 15][c.x & 15];
+			if (footprints.contains(c.x, c.z) && plan)
+				ruin_building(editor, c, min_y, max_y, *plan, bx, bz, fires);
 			else
-				ruin_open_ground(editor, c, min_y, max_y, footprints, fires);
+				ruin_open_ground(editor, c, min_y, max_y, footprints, bx, bz, fires);
 		}
 		for (const auto &c : columns)
-			if (!footprints.contains(c.x, c.z))
+			if (!footprints.contains(c.x, c.z)) {
+				drop_overhangs(editor, c, min_y, max_y, plans);
 				hang_vines(editor, c, min_y, max_y, footprints, bx, bz);
+			}
+		wreck_a_car(editor, bx, bz, columns, min_y, max_y, footprints);
 		for (const auto &fire : fires)
 			light_fire(editor, fire, bx, bz, max_y);
 	}
@@ -682,6 +1129,18 @@ void apply_chunks(WorldEditor &editor, const Args &args,
 		return;
 	const int first_cx = min_x >> 4, last_cx = max_x >> 4;
 	const int first_cz = min_z >> 4, last_cz = max_z >> 4;
+	std::map<std::pair<int, int>, RegionTops> region_tops;
+	if (args.post_apocalyptic && !building_footprints.is_empty()) {
+		for (int rz = min_z >> 9; rz <= max_z >> 9; ++rz)
+			for (int rx = min_x >> 9; rx <= max_x >> 9; ++rx) {
+				const std::pair key{rx, rz};
+				auto &tops = region_tops[key];
+				const int rx0 = rx * 512, rz0 = rz * 512;
+				tops.build(building_footprints, std::max(min_x, rx0),
+						std::max(min_z, rz0), std::min(max_x, rx0 + 511),
+						std::min(max_z, rz0 + 511), min_y, max_y, editor);
+			}
+	}
 	for (int cz = first_cz; cz <= last_cz; ++cz)
 		for (int cx = first_cx; cx <= last_cx; ++cx) {
 			const int bx = cx << 4, bz = cz << 4;
@@ -689,7 +1148,10 @@ void apply_chunks(WorldEditor &editor, const Args &args,
 					skip_regions->contains({region_floor(bx), region_floor(bz)}))
 				continue;
 			style_chunk(editor, bx, bz, min_x, min_z, max_x, max_z, min_y, max_y, args,
-					building_footprints);
+					building_footprints,
+					args.post_apocalyptic
+							? &region_tops[{region_floor(bx), region_floor(bz)}]
+							: nullptr);
 		}
 }
 }

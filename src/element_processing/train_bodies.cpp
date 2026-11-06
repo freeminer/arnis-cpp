@@ -700,6 +700,63 @@ std::vector<Part> parts(const Coach &coach, const Livery &livery)
 	return passenger(s, livery);
 }
 
+std::vector<float> doors(const Coach &coach)
+{
+	if (std::holds_alternative<Container>(coach) || std::holds_alternative<Tank>(coach) ||
+			std::holds_alternative<Boxcar>(coach))
+		return {};
+	const float length = static_cast<float>(length_m(coach));
+	const auto count =
+			std::max<std::size_t>(1, static_cast<std::size_t>(std::ceil(length / 5.5f)));
+	const float spacing = length / count;
+	std::vector<float> out;
+	for (std::size_t i = 0; i < count; ++i)
+		out.push_back(-length / 2 + spacing * (i + 0.5f));
+	return out;
+}
+
+std::string door_key(const Coach &coach)
+{
+	if (doors(coach).empty())
+		return NO_DOORS;
+	return "m" +
+		   std::to_string(static_cast<unsigned>(std::llround(length_m(coach) * 10.0)));
+}
+
+std::pair<std::string, std::string> door_functions(
+		const std::string &key, const std::vector<float> &spots, double size)
+{
+	if (spots.empty())
+		return {};
+	const float scale = static_cast<float>(size);
+	float extent = 0;
+	for (const float spot : spots)
+		extent = std::max(extent, std::abs(spot));
+	const float reach = extent * scale + 12;
+	const float seat = std::max(2.12 * size - 1.02, 0.0);
+	std::ostringstream keep, make;
+	keep << std::fixed << std::setprecision(2);
+	make << std::fixed << std::setprecision(2);
+	keep << "$execute unless entity @e[type=interaction,tag=arnis.ts$(c),distance=.."
+		 << reach << "] run function arnis:trains/door_new/" << key << " {c:$(c)}\n"
+		 << "$scoreboard players operation @e[tag=arnis.ts$(c),distance=.." << reach
+		 << "] arnis.te = #now arnis.train\n";
+	for (std::size_t i = 0; i < spots.size(); ++i) {
+		const float at = spots[i] * scale;
+		keep << "$tp @e[type=interaction,tag=arnis.ts$(c),tag=arnis.td" << i
+			 << ",distance=.." << reach << "] ^ ^ ^" << at
+			 << "\n$tp @e[type=block_display,tag=arnis.ts$(c),tag=arnis.td" << i
+			 << ",distance=.." << reach << "] ^ ^" << seat << " ^" << at << '\n';
+		make << "$summon interaction ^ ^ ^" << at
+			 << " {Tags:[\"arnis.tp\",\"arnis.ts$(c)\",\"arnis.td" << i
+			 << "\"],width:" << 4.4 * scale << "f,height:" << 3.8 * scale << "f}\n"
+			 << "$summon block_display ^ ^" << seat << " ^" << at
+			 << " {Tags:[\"arnis.tp\",\"arnis.ts$(c)\",\"arnis.td" << i
+			 << "\",\"arnis.seat\"],teleport_duration:2}\n";
+	}
+	return {keep.str(), make.str()};
+}
+
 std::string key(const Coach &coach, const Livery &livery)
 {
 	const auto kind = coach_kind(coach);

@@ -1330,6 +1330,8 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 	network << "data modify storage arnis:trains tmp set value []\n";
 	std::ostringstream all;
 	std::map<std::string, std::vector<train_bodies::Part>> bodies;
+	std::map<std::string, std::vector<float>> doors;
+	doors.emplace(train_bodies::NO_DOORS, std::vector<float>{});
 	std::size_t carriage = 0;
 	for (std::size_t route_index = 0; route_index < services_.size(); ++route_index) {
 		const auto &service = services_[route_index];
@@ -1467,13 +1469,16 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 				const auto &livery = departure.livery;
 				const auto body_key = train_bodies::key(coach, livery);
 				bodies.try_emplace(body_key, train_bodies::parts(coach, livery));
+				const auto door_key = train_bodies::door_key(coach);
+				doors.try_emplace(door_key, train_bodies::doors(coach));
 				const double offset =
 						i < service.offsets.size() ? service.offsets[i] : 0.0;
 				text << "scoreboard players operation #sk arnis.train = #s arnis.train\n"
 					 << "scoreboard players remove #sk arnis.train "
 					 << static_cast<std::int64_t>(std::llround(offset * 1000.0)) << '\n'
 					 << "data modify storage arnis:trains c set value {r:" << r
-					 << ",c:" << carriage + i << ",b:\"" << body_key << "\"}\n"
+					 << ",c:" << carriage + i << ",b:\"" << body_key << "\",d:\""
+					 << door_key << "\"}\n"
 					 << "function arnis:trains/car\n";
 			}
 			carriage += service.coaches.size();
@@ -1485,6 +1490,12 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 	network << "data remove storage arnis:trains tmp\n";
 	out.emplace_back("data/arnis/function/trains/network.mcfunction", network.str());
 	out.emplace_back("data/arnis/function/trains/all.mcfunction", all.str());
+	for (const auto &[key, spots] : doors) {
+		const auto &[keep, make] = train_bodies::door_functions(key, spots, size_);
+		out.emplace_back("data/arnis/function/trains/door/" + key + ".mcfunction", keep);
+		out.emplace_back(
+				"data/arnis/function/trains/door_new/" + key + ".mcfunction", make);
+	}
 	for (const auto &[key, parts] : bodies) {
 		for (const bool bare : {false, true}) {
 			const auto body = train_bodies::summon_function(parts, size_, bare);

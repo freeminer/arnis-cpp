@@ -620,6 +620,10 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		for (const auto &[path, contents] : cars->datapack_functions())
 			if (!write_text(target_root / path, contents, error))
 				return false;
+		for (const auto &[path, contents] :
+				{cars->kind_function(), cars->seat_function()})
+			if (!write_text(target_root / path, contents, error))
+				return false;
 	}
 	if (moving_trains) {
 		for (const auto &[path, contents] : trains->datapack_functions(rail_y))

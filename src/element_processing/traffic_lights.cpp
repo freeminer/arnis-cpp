@@ -87,6 +87,7 @@ bool signal_upstream_impl(const std::vector<ProcessedNode> &nodes, std::size_t i
 
 void add_arms(std::unordered_map<std::uint64_t, SignalNode> &nodes,
 		const ProcessedWay &way, int half, int oneway, Kind kind, double scale,
+		const Junctions *junctions,
 		const std::function<bool(const ProcessedNode &)> &wanted)
 {
 	const double upstream = std::max(UPSTREAM_M * scale, 6.0);
@@ -102,10 +103,15 @@ void add_arms(std::unordered_map<std::uint64_t, SignalNode> &nodes,
 		const std::array<std::pair<std::optional<std::pair<double, double>>, bool>, 2>
 				candidates{{{arm_dir(way.nodes, i, -1),
 									forward_ok &&
-											!signal_upstream(way.nodes, i, -1, upstream)},
+											!signal_upstream(
+													way.nodes, i, -1, upstream) &&
+											!(oneway == 0 && junctions &&
+													junctions->passed(way.nodes, i, -1))},
 						{arm_dir(way.nodes, i, 1),
 								backward_ok &&
-										!signal_upstream(way.nodes, i, 1, upstream)}}};
+										!signal_upstream(way.nodes, i, 1, upstream) &&
+										!(oneway == 0 && junctions &&
+												junctions->passed(way.nodes, i, 1))}}};
 		auto [entry, inserted] = nodes.try_emplace(
 				node.id, SignalNode{node.x, node.z,
 								 node.tags.contains("crossing") &&
@@ -305,6 +311,100 @@ bool is_vehicular(const std::string &highway)
 	return values.contains(highway);
 }
 
+Junctions Junctions::build(const std::vector<ProcessedElement> &elements, double scale)
+{
+	Junctions result;
+	result.upstream_ = std::max(UPSTREAM_M * scale, 6.0);
+	std::vector<const ProcessedWay *> roads;
+	for (const auto &element : elements)
+		if (element.is_way() && element.as_way().nodes.size() >= 2 &&
+				cars::drivable(element.as_way().tags))
+			roads.push_back(&element.as_way());
+	for (const auto *way : roads) {
+		const int half = highway_block_range(way->tags.at("highway"), way->tags, scale);
+		const bool closed = way->nodes.front().id == way->nodes.back().id;
+		const std::size_t first = closed ? 1 : 0;
+		for (std::size_t i = first; i < way->nodes.size(); ++i) {
+			const auto &node = way->nodes[i];
+			const bool end = !closed && (i == 0 || i + 1 == way->nodes.size());
+			result.arms_[node.id] += end ? 1 : 2;
+			result.widest_[node.id] = std::max(result.widest_[node.id], half);
+		}
+	}
+	for (const auto *way : roads)
+		for (std::size_t i = 0; i < way->nodes.size(); ++i) {
+			const auto &node = way->nodes[i];
+			if (!is_signal(node.tags))
+				continue;
+			if (result.is_junction(node.id)) {
+				result.signals_[node.id].push_back(node.id);
+				continue;
+			}
+			for (const int step : {-1, 1})
+				if (const auto junction = result.nearest(way->nodes, i, step);
+						junction && junction->second <= result.reach(junction->first))
+					result.signals_[junction->first].push_back(node.id);
+		}
+	return result;
+}
+
+std::uint32_t Junctions::arms(std::uint64_t id) const
+{
+	const auto it = arms_.find(id);
+	return it == arms_.end() ? 0 : it->second;
+}
+
+int Junctions::widest(std::uint64_t id) const
+{
+	const auto it = widest_.find(id);
+	return it == widest_.end() ? 1 : it->second;
+}
+
+double Junctions::reach(std::uint64_t id) const
+{
+	return upstream_ + widest(id) + 1;
+}
+
+std::optional<std::pair<std::uint64_t, double>> Junctions::nearest(
+		const std::vector<ProcessedNode> &nodes, std::size_t index, int step) const
+{
+	const ProcessedNode *at = &nodes[index];
+	double distance = 0;
+	for (auto i = std::ptrdiff_t(index) + step;
+			i >= 0 && static_cast<std::size_t>(i) < nodes.size(); i += step) {
+		const auto &node = nodes[static_cast<std::size_t>(i)];
+		distance += std::hypot(double(node.x - at->x), double(node.z - at->z));
+		if (is_junction(node.id))
+			return std::pair{node.id, distance};
+		at = &node;
+	}
+	return std::nullopt;
+}
+
+bool Junctions::passed(
+		const std::vector<ProcessedNode> &nodes, std::size_t index, int step) const
+{
+	const auto &node = nodes[index];
+	if (is_junction(node.id) || node.tags.contains("traffic_signals:direction"))
+		return false;
+	const auto junction = nearest(nodes, index, step);
+	if (!junction)
+		return false;
+	const auto crossing = node.tags.find("crossing");
+	const bool own_green =
+			crossing != node.tags.end() && crossing->second == "traffic_signals";
+	if (junction->second > (own_green ? widest(junction->first) + upstream_ / 2.0
+									  : reach(junction->first)))
+		return false;
+	if (const auto ahead = nearest(nodes, index, -step);
+			ahead && ahead->second <= junction->second)
+		return false;
+	const auto signals = signals_.find(junction->first);
+	return signals != signals_.end() &&
+		   std::any_of(signals->second.begin(), signals->second.end(),
+				   [&](std::uint64_t id) { return id != node.id; });
+}
+
 std::shared_ptr<const SignalIndex> SignalIndex::build(
 		const std::vector<ProcessedElement> &elements, double scale, bool drives_on_left,
 		const RoadMaskBitmap &road_mask)
@@ -318,6 +418,7 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 				ways.push_back(&way);
 		}
 
+	const auto junctions = Junctions::build(elements, scale);
 	std::unordered_map<std::uint64_t, SignalNode> nodes;
 	for (const auto *way : ways) {
 		const auto highway = way->tags.find("highway");
@@ -325,7 +426,7 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 			continue;
 		add_arms(nodes, *way, highway_block_range(highway->second, way->tags, scale),
 				road_markings::oneway_sign(highway->second, way->tags), Kind::Car, scale,
-				[](const ProcessedNode &) { return true; });
+				&junctions, [](const ProcessedNode &) { return true; });
 	}
 
 	auto offroad = std::unordered_map<std::uint64_t, SignalNode>{};
@@ -341,7 +442,7 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 				highway.empty() ? 1 : highway_block_range(highway, way->tags, scale);
 		const int oneway =
 				highway.empty() ? 0 : road_markings::oneway_sign(highway, way->tags);
-		add_arms(offroad, *way, half, oneway, Kind::Bike, scale,
+		add_arms(offroad, *way, half, oneway, Kind::Bike, scale, nullptr,
 				[&](const ProcessedNode &node) {
 					if (nodes.contains(node.id))
 						return false;

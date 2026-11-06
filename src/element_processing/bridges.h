@@ -71,11 +71,16 @@ struct BridgeMemberInfo
 	int module_half_width = 0;
 	bool covered_by_wider = false;
 	std::vector<int> ys;
+	// Traffic on a covered way follows the wider deck above it.
+	std::vector<int> carried_ys;
 	std::optional<std::vector<std::pair<int, int>>> cable_pylons;
 	std::shared_ptr<const bridge_towers::CableSpan> cable_span;
 
 	int y_at(std::size_t tds, std::size_t total_bresenham, std::size_t ramp_length) const;
+	int drive_y_at(std::size_t tds) const;
 };
+
+std::vector<std::pair<int, int>> way_cells(const ProcessedWay &way);
 
 struct BridgeRampInfo
 {

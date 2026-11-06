@@ -792,6 +792,8 @@ std::pair<int, int> centroid(const ProcessedWay &way)
 	return {static_cast<int>(sx / n), static_cast<int>(sz / n)};
 }
 
+} // namespace
+
 std::vector<std::pair<int, int>> way_cells(const ProcessedWay &way)
 {
 	std::vector<std::pair<int, int>> cells;
@@ -804,6 +806,9 @@ std::vector<std::pair<int, int>> way_cells(const ProcessedWay &way)
 	}
 	return cells;
 }
+
+namespace
+{
 
 std::optional<float> heading_deg(const ProcessedWay &way)
 {
@@ -989,6 +994,14 @@ int BridgeMemberInfo::y_at(
 				*end_internal_ramp + (deck_y - *end_internal_ramp) * t);
 	}
 	return deck_y;
+}
+
+int BridgeMemberInfo::drive_y_at(std::size_t tds) const
+{
+	if (!carried_ys.empty())
+		return carried_ys[std::min(tds, carried_ys.size() - 1)];
+	const std::size_t cells = std::max<std::size_t>(tds + 1, ys.size());
+	return y_at(tds, cells, cells);
 }
 
 int BridgeRampInfo::y_at(std::size_t tds) const
@@ -1627,7 +1640,7 @@ BridgeStructureMap BridgeStructureMap::build(
 						const bool at_start = candidate.nodes.front().x == xz.first &&
 											  candidate.nodes.front().z == xz.second;
 						const auto &far_ = at_start ? candidate.nodes.back()
-												   : candidate.nodes.front();
+													: candidate.nodes.front();
 						if (node_members.contains({far_.x, far_.z}))
 							continue;
 						const auto highway = candidate.tags.get("highway");
@@ -2299,6 +2312,23 @@ BridgeStructureMap BridgeStructureMap::build(
 				if (const auto profile = member_profiles.find(idx);
 						profile != member_profiles.end())
 					info.ys = profile->second;
+				if (const auto owner = cover_of.find(idx); owner != cover_of.end()) {
+					const auto profile = member_profiles.find(owner->second);
+					const auto cells = paths.find(idx);
+					const auto carrying = paths.find(owner->second);
+					if (profile != member_profiles.end() && cells != paths.end() &&
+							carrying != paths.end() && !carrying->second.empty()) {
+						for (const auto &cell : cells->second) {
+							std::size_t nearest = 0;
+							for (std::size_t i = 1; i < carrying->second.size(); ++i)
+								if (dist2(carrying->second[i], cell) <
+										dist2(carrying->second[nearest], cell))
+									nearest = i;
+							if (nearest < profile->second.size())
+								info.carried_ys.push_back(profile->second[nearest]);
+						}
+					}
+				}
 				if (structure_has_module && !info.covered_by_wider &&
 						!is_non_vehicular_bridge_highway(way)) {
 					const int width =

@@ -17,8 +17,12 @@
 #include <iomanip>
 #include <iterator>
 #include <limits>
+#include <map>
 #include <numbers>
+#include <numeric>
 #include <sstream>
+#include <span>
+#include <set>
 #include <stdexcept>
 #include <string_view>
 #include <tuple>
@@ -31,7 +35,10 @@ namespace
 {
 constexpr double MAX_SPAN = 24.0;
 constexpr std::size_t MAX_CARS = 1500;
+constexpr std::size_t MAX_NEAR = 120;
+constexpr double SPOT_CELL = 64.0;
 constexpr std::size_t LANES_PER_LINE = 256;
+constexpr std::size_t SPOT_CELLS_PER_LINE = 256;
 constexpr double STOP_BACK = 1.5;
 constexpr double JUNCTION_KMH = 25.0;
 constexpr double LANE_END_KMH = 32.0;
@@ -50,13 +57,25 @@ constexpr double LIMIT_SHARE = 0.92;
 constexpr double ACCEL_MPS2 = 2.5;
 constexpr std::array<std::tuple<double, double, int>, 4> LOOK{
 		{{3.0, 1.7, 3}, {6.0, 1.7, 3}, {10.0, 2.0, 2}, {14.5, 2.5, 1}}};
+constexpr double LONG_EXTRA = 2.7;
+constexpr double CLOSE_AHEAD = 0.7, CLOSE_ROUND = 0.65;
+constexpr double LONG_CLOSE_AHEAD = 2.7, LONG_CLOSE_ROUND = 1.4;
+constexpr double STACKED = 1.2;
 constexpr double SAME_WAY_DEG = 67.5;
 constexpr std::pair<double, double> CROSSING_AT{3.0, 1.7};
+constexpr double RIDER_EYE_OVER_SEAT = 1.02;
+constexpr double CAR_HALF_WIDTH = 0.9;
+constexpr int MIN_LANE_WIDTH = 3;
+constexpr std::size_t MAX_LANES = 4;
+constexpr double NARROW_LANE_OFFSET = 0.5;
+constexpr double ONCOMING_OFFSET = 1.0;
 constexpr std::array<double, 3> PLAYER_AT{3.0, 6.0, 2.0};
 constexpr int GIVE_WAY_STEPS = 30;
 constexpr std::array<int, 2> PACE{880, 1120};
-constexpr std::array<std::pair<VehicleKind, std::uint32_t>, 3> KINDS{
-		{{VehicleKind::Sedan, 60}, {VehicleKind::Hatchback, 26}, {VehicleKind::Van, 14}}};
+constexpr std::array<std::pair<VehicleKind, std::uint32_t>, 6> KINDS{
+		{{VehicleKind::Sedan, 52}, {VehicleKind::Hatchback, 24}, {VehicleKind::Van, 10},
+				{VehicleKind::Pickup, 6}, {VehicleKind::Truck, 5},
+				{VehicleKind::Bus, 3}}};
 constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> CAR_COLOURS{
 		{{"minecraft:white_concrete", 24}, {"minecraft:black_concrete", 20},
 				{"minecraft:gray_concrete", 17}, {"minecraft:light_gray_concrete", 14},
@@ -65,6 +84,15 @@ constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> CAR_COLOURS{
 constexpr std::array<std::pair<std::string_view, std::uint32_t>, 3> VAN_COLOURS{
 		{{"minecraft:white_concrete", 70}, {"minecraft:light_gray_concrete", 20},
 				{"minecraft:gray_concrete", 10}}};
+constexpr std::array<std::pair<std::string_view, std::uint32_t>, 5> PICKUP_COLOURS{
+		{{"minecraft:white_concrete", 25}, {"minecraft:black_concrete", 25},
+				{"minecraft:red_concrete", 20}, {"minecraft:blue_concrete", 20},
+				{"minecraft:green_concrete", 10}}};
+constexpr std::array<std::pair<std::string_view, std::uint32_t>, 3> TRUCK_COLOURS{
+		{{"minecraft:white_concrete", 50}, {"minecraft:red_concrete", 30},
+				{"minecraft:blue_concrete", 20}}};
+constexpr std::array<std::pair<std::string_view, std::uint32_t>, 2> BUS_COLOURS{
+		{{"minecraft:red_concrete", 50}, {"minecraft:white_concrete", 50}}};
 
 struct Path
 {
@@ -80,6 +108,7 @@ struct Path
 			return points.front();
 		distance = std::clamp(distance, 0.0, length());
 		const auto it = std::lower_bound(at.begin(), at.end(), distance);
+		;
 		const auto k = std::clamp<std::size_t>(
 				static_cast<std::size_t>(it - at.begin()), 1, points.size() - 1);
 		const auto &[ax, az] = points[k - 1];
@@ -125,6 +154,9 @@ struct Lane
 	std::vector<const ProcessedNode *> nodes;
 	std::optional<std::size_t> reverse;
 	bool two_way{};
+	bool backward{};
+	double offset{};
+	std::size_t count{};
 };
 
 struct Mark
@@ -224,22 +256,22 @@ double density(const std::string &highway)
 {
 	if (highway == "motorway" || highway == "trunk" || highway == "motorway_link" ||
 			highway == "trunk_link")
-		return 1.0 / 60.0;
+		return 1.0 / 40.0;
 	if (highway == "primary" || highway == "secondary" || highway == "primary_link" ||
 			highway == "secondary_link")
-		return 1.0 / 40.0;
+		return 1.0 / 25.0;
 	if (highway == "tertiary" || highway == "tertiary_link")
-		return 1.0 / 60.0;
+		return 1.0 / 40.0;
 	if (highway == "unclassified" || highway == "road")
-		return 1.0 / 150.0;
+		return 1.0 / 80.0;
 	if (highway == "residential")
-		return 1.0 / 200.0;
+		return 1.0 / 100.0;
 	if (highway == "service")
-		return 1.0 / 400.0;
-	return 1.0 / 500.0;
+		return 1.0 / 250.0;
+	return 1.0 / 300.0;
 }
 
-bool drivable(const tags_t &tags)
+bool drivable_impl(const tags_t &tags)
 {
 	const auto get = [&](const char *key) -> std::string_view {
 		const auto it = tags.find(key);
@@ -349,6 +381,113 @@ std::vector<std::pair<double, double>> lane_line(
 	return result;
 }
 
+std::vector<std::pair<double, double>> fitted_lane_line(
+		const std::vector<const ProcessedNode *> &nodes, double offset, double floor,
+		bool drives_on_left, const std::function<bool(int, int)> &built)
+{
+	if (std::abs(offset) <= floor)
+		return lane_line(nodes, offset, drives_on_left);
+	const double sign = offset < 0 ? -1.0 : 1.0;
+	std::vector<double> offsets{std::abs(offset)};
+	while (offsets.back() > floor)
+		offsets.push_back(std::max(offsets.back() - 0.5, floor));
+	std::vector<std::vector<std::pair<double, double>>> lines, edges;
+	for (const double distance : offsets) {
+		lines.push_back(lane_line(nodes, sign * distance, drives_on_left));
+		edges.push_back(
+				lane_line(nodes, sign * (distance + CAR_HALF_WIDTH), drives_on_left));
+	}
+	const auto clear = [&](const auto &a, const auto &b) {
+		const auto steps = std::max<std::size_t>(
+				static_cast<std::size_t>(
+						std::ceil(std::hypot(b.first - a.first, b.second - a.second))),
+				1);
+		for (std::size_t i = 0; i <= steps; ++i) {
+			const double t = static_cast<double>(i) / steps;
+			if (built(static_cast<int>(std::floor(a.first + (b.first - a.first) * t)),
+						static_cast<int>(
+								std::floor(a.second + (b.second - a.second) * t))))
+				return false;
+		}
+		return true;
+	};
+	std::vector<std::pair<double, double>> result;
+	result.reserve(nodes.size());
+	for (std::size_t k = 0; k < nodes.size(); ++k) {
+		const std::size_t begin = k > 0 ? k - 1 : 0;
+		const std::size_t end = std::min(k + 1, nodes.size() - 1);
+		std::size_t fit = 0;
+		for (; fit + 1 < edges.size(); ++fit) {
+			bool fits = true;
+			for (std::size_t i = begin; i < end && fits; ++i)
+				fits = clear(edges[fit][i], edges[fit][i + 1]);
+			if (fits)
+				break;
+		}
+		result.push_back(lines[fit][k]);
+	}
+	return result;
+}
+
+std::optional<std::size_t> positive_count(const crate::tags_t &tags, const char *key)
+{
+	const auto it = tags.find(key);
+	if (it == tags.end())
+		return std::nullopt;
+	std::size_t value = 0;
+	const auto [end, error] = std::from_chars(
+			it->second.data(), it->second.data() + it->second.size(), value);
+	if (error != std::errc{} || end != it->second.data() + it->second.size() ||
+			value == 0)
+		return std::nullopt;
+	return value;
+}
+
+std::pair<std::size_t, std::size_t> lanes_each_way(
+		const ProcessedWay &way, int half, int oneway)
+{
+	const std::string highway = way.tags.get("highway");
+	const std::size_t total =
+			positive_count(way.tags, "lanes")
+					.value_or(road_markings::is_roundabout(way.tags)
+									  ? 1
+									  : std::max(1, highway_default_lanes(highway)));
+	if (oneway != 0) {
+		const auto n = std::min({total,
+				std::max<std::size_t>(1, (2 * half + 1) / MIN_LANE_WIDTH), MAX_LANES});
+		return oneway > 0 ? std::pair{n, std::size_t(0)} : std::pair{std::size_t(0), n};
+	}
+	const auto room = std::max<std::size_t>(1, half / MIN_LANE_WIDTH);
+	const auto fit = [&](std::size_t n) {
+		return std::clamp(n, std::size_t(1), std::min(room, MAX_LANES));
+	};
+	return {fit(positive_count(way.tags, "lanes:forward").value_or((total + 1) / 2)),
+			fit(positive_count(way.tags, "lanes:backward").value_or(total / 2))};
+}
+
+double lane_floor(int half, double offset, std::size_t count, bool two_way)
+{
+	double beside = 0;
+	if (count > 1 && two_way)
+		beside = std::abs(offset) - MIN_LANE_WIDTH + 2.0 * CAR_HALF_WIDTH;
+	else if (count > 1) {
+		const double spacing = double(2 * half + 1) / count;
+		beside = std::max(
+				std::abs(offset) - spacing + 2.0 * CAR_HALF_WIDTH, CAR_HALF_WIDTH);
+	}
+	return std::max({beside, two_way ? ONCOMING_OFFSET : 0.0, NARROW_LANE_OFFSET});
+}
+
+double lane_offset(int half, std::size_t count, std::size_t k, bool two_way)
+{
+	const double share = (k + 0.5) / std::max<std::size_t>(count, 1);
+	if (!two_way)
+		return -(2 * half + 1) / 2.0 + (2 * half + 1) * share;
+	if (count <= 1)
+		return std::max((half + 1.0) / 2.0, 1.0);
+	return 0.5 + half * share;
+}
+
 struct RoadRef
 {
 	const ProcessedWay *way{};
@@ -366,12 +505,20 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 		const ::XZBBox &world, const std::function<std::int32_t(double)> &speed_at,
 		Reach reach);
 std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale);
+std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>> spots(
+		const std::vector<Segment> &segments, double scale);
 
 } // namespace
 
+bool drivable(const tags_t &tags)
+{
+	return drivable_impl(tags);
+}
+
 CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, double scale,
 		bool drives_on_left, bool stop_at_signals, const ::XZBBox &world,
-		const std::function<int(int, int)> &surface_y)
+		const std::function<int(const ProcessedWay &, int, int)> &surface_y,
+		const std::function<bool(int, int)> &built)
 {
 	std::vector<RoadRef> roads;
 	for (const auto &element : elements) {
@@ -387,23 +534,8 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 				road_markings::oneway_sign(highway_it->second, way.tags)});
 	}
 
-	std::unordered_map<std::uint64_t, unsigned> arms;
-	std::unordered_map<std::uint64_t, int> widest;
-	for (const auto &road : roads) {
-		const auto &nodes = road.way->nodes;
-		const bool closed = nodes.size() > 2 && nodes.front().id == nodes.back().id;
-		const std::size_t begin = closed ? 1 : 0;
-		const std::size_t end = nodes.size();
-		for (std::size_t i = begin; i < end; ++i) {
-			const bool endpoint = !closed && (i == 0 || i + 1 == end);
-			arms[nodes[i].id] += endpoint ? 1 : 2;
-			widest[nodes[i].id] = std::max(widest[nodes[i].id], road.half);
-		}
-	}
-	const auto is_junction = [&](std::uint64_t id) {
-		const auto it = arms.find(id);
-		return it != arms.end() && it->second >= 3;
-	};
+	const auto junctions = Junctions::build(elements, scale);
+	const auto is_junction = [&](std::uint64_t id) { return junctions.is_junction(id); };
 
 	std::vector<Piece> pieces;
 	for (const auto &road : roads) {
@@ -424,17 +556,24 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 	std::vector<Lane> lanes;
 	for (std::size_t p = 0; p < pieces.size(); ++p) {
 		const auto &piece = pieces[p];
+		const bool two_way = piece.oneway == 0;
+		const auto [along, against] =
+				lanes_each_way(*piece.way, piece.half, piece.oneway);
 		const std::size_t first = lanes.size();
-		if (piece.oneway >= 0)
-			lanes.push_back({p, piece.nodes, std::nullopt, piece.oneway == 0});
-		if (piece.oneway <= 0) {
-			auto reversed = piece.nodes;
-			std::reverse(reversed.begin(), reversed.end());
-			lanes.push_back({p, std::move(reversed), std::nullopt, piece.oneway == 0});
+		for (const auto [count, backward] :
+				{std::pair{along, false}, std::pair{against, true}}) {
+			auto nodes = piece.nodes;
+			if (backward)
+				std::reverse(nodes.begin(), nodes.end());
+			for (std::size_t k = 0; k < count; ++k)
+				lanes.push_back({p, nodes, std::nullopt, two_way, backward,
+						lane_offset(piece.half, count, k, two_way), count});
 		}
-		if (piece.oneway == 0) {
-			lanes[first].reverse = first + 1;
-			lanes[first + 1].reverse = first;
+		if (two_way) {
+			for (std::size_t k = 0; k < along; ++k)
+				lanes[first + k].reverse = first + along + std::min(k, against - 1);
+			for (std::size_t k = 0; k < against; ++k)
+				lanes[first + along + k].reverse = first + std::min(k, along - 1);
 		}
 	}
 
@@ -455,9 +594,10 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 			const auto cap = step_speed(kmh, scale);
 			return cap < speed ? std::optional<std::int32_t>(cap) : std::nullopt;
 		};
-		const double offset =
-				lane.two_way ? std::max((piece.half + 1.0) / 2.0, 1.0) : 0.0;
-		const Path path = make_path(lane_line(lane.nodes, offset, drives_on_left));
+		const Path path = make_path(
+				::arnis::highways::cars::fitted_lane_line(lane.nodes, lane.offset,
+						lane_floor(piece.half, lane.offset, lane.count, lane.two_way),
+						drives_on_left, built));
 		if (lane.nodes.empty()) {
 			segments.emplace_back();
 			continue;
@@ -469,13 +609,10 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 				clipping::is_invented_node_id(last_id) ||
 				end_node->x - world.min_x() < 3 || world.max_x() - end_node->x < 3 ||
 				end_node->z - world.min_z() < 3 || world.max_z() - end_node->z < 3;
-		const auto arm_count = arms.contains(last_id) ? arms.at(last_id) : 0;
+		const auto arm_count = junctions.arms(last_id);
 		const bool turns_back = lane.reverse.has_value() && arm_count <= 1 && !edge;
 		const auto trim = [&](std::uint64_t id) {
-			if (!is_junction(id))
-				return 0.0;
-			const auto it = widest.find(id);
-			return (it == widest.end() ? 1 : it->second) + 1.0;
+			return is_junction(id) ? junctions.widest(id) + 1.0 : 0.0;
 		};
 		double from = trim(first_id), to = path.length() - trim(last_id);
 		if (to - from < 2.0) {
@@ -517,7 +654,8 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 				const bool held = dir == "forward"	  ? forward_way
 								  : dir == "backward" ? !forward_way
 													  : true;
-				if (!held || signal_upstream(along, k, -1, upstream))
+				if (!held || signal_upstream(along, k, -1, upstream) ||
+						(lane.two_way && junctions.passed(along, k, -1)))
 					continue;
 				const auto heading = unit(
 						node->x - lane.nodes[k - 1]->x, node->z - lane.nodes[k - 1]->z)
@@ -544,7 +682,7 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		}
 		const auto y_at = [&](double s) {
 			const auto [x, z] = path.point_at(s);
-			return static_cast<double>(surface_y(static_cast<int>(std::floor(x)),
+			return static_cast<double>(surface_y(way, static_cast<int>(std::floor(x)),
 											   static_cast<int>(std::floor(z))) +
 									   1);
 		};
@@ -559,7 +697,7 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		segment.into_junction = is_junction(last_id);
 		segment.turns_back = turns_back;
 		segment.speed = speed;
-		segment.density = density(highway);
+		segment.density = density(highway) * 2.0 / (lane.count + 1.0);
 		for (const auto &station : stations) {
 			const auto [x, z] = path.point_at(station.distance);
 			const int ix = static_cast<int>(std::floor(x));
@@ -585,6 +723,7 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 	for (std::size_t i = 0; i < result.cars_.size(); ++i)
 		result.by_way_[segments[result.cars_[i].segment].way].push_back(i);
 	result.segments_ = std::move(segments);
+	result.spots_ = spots(result.segments_, scale);
 	result.size_ = std::clamp(scale, 0.4, 3.0);
 	result.scale_ = scale;
 	return result;
@@ -927,6 +1066,27 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 		wheel = 0.68f;
 		lights = 0.75f;
 		break;
+	case VehicleKind::Pickup:
+		length = 5.3f;
+		width = 1.95f;
+		axle = 1.0f;
+		wheel = 0.74f;
+		lights = 0.78f;
+		break;
+	case VehicleKind::Truck:
+		length = 7.6f;
+		width = 2.4f;
+		axle = 1.25f;
+		wheel = 0.95f;
+		lights = 0.8f;
+		break;
+	case VehicleKind::Bus:
+		length = 10.0f;
+		width = 2.5f;
+		axle = 2.2f;
+		wheel = 0.98f;
+		lights = 0.8f;
+		break;
 	}
 	const auto part = [](std::string block, std::array<float, 3> size,
 							  std::array<float, 3> corner, Light light = Light::None) {
@@ -940,10 +1100,15 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 		return part(block, {width - 0.3f, 0.13f, 0.04f},
 				{-(width - 0.3f) / 2.0f, lights, z}, light);
 	};
+	const auto plate = [&](float z) {
+		return part("minecraft:white_concrete", {0.52f, 0.11f, 0.02f},
+				{-0.26f, lights - 0.2f, z});
+	};
 	std::vector<ModelPart> out{wheels(length / 2.0f - axle),
 			wheels(-length / 2.0f + axle),
 			lamp("minecraft:white_concrete", length / 2.0f, Light::Head),
-			lamp("minecraft:red_concrete", -length / 2.0f - 0.04f, Light::Tail)};
+			lamp("minecraft:red_concrete", -length / 2.0f - 0.04f, Light::Tail),
+			plate(length / 2.0f), plate(-length / 2.0f - 0.02f)};
 	if (kind == VehicleKind::Sedan) {
 		out.push_back(part(
 				colour, {width, 0.72f, length}, {-width / 2.0f, 0.22f, -length / 2.0f}));
@@ -958,11 +1123,31 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 				{-(width - 0.18f) / 2.0f, 0.94f, -1.78f}));
 		out.push_back(part(colour, {width - 0.16f, 0.07f, 2.1f},
 				{-(width - 0.16f) / 2.0f, 1.47f, -1.72f}));
-	} else {
+	} else if (kind == VehicleKind::Van) {
 		out.push_back(part(
 				colour, {width, 1.5f, length}, {-width / 2.0f, 0.3f, -length / 2.0f}));
 		out.push_back(part("minecraft:tinted_glass", {width + 0.04f, 0.55f, 1.0f},
 				{-(width + 0.04f) / 2.0f, 1.15f, length / 2.0f - 0.98f}));
+	} else if (kind == VehicleKind::Pickup) {
+		out.push_back(part(
+				colour, {width, 0.62f, length}, {-width / 2.0f, 0.36f, -length / 2.0f}));
+		out.push_back(part("minecraft:tinted_glass", {width - 0.2f, 0.56f, 2.1f},
+				{-(width - 0.2f) / 2.0f, 0.98f, -0.4f}));
+		out.push_back(part(colour, {width - 0.18f, 0.07f, 1.9f},
+				{-(width - 0.18f) / 2.0f, 1.54f, -0.3f}));
+	} else if (kind == VehicleKind::Truck) {
+		out.push_back(part(colour, {width, 1.95f, 1.95f},
+				{-width / 2.0f, 0.55f, length / 2.0f - 1.95f}));
+		out.push_back(part("minecraft:tinted_glass", {width + 0.04f, 0.62f, 0.95f},
+				{-(width + 0.04f) / 2.0f, 1.65f, length / 2.0f - 0.93f}));
+		out.push_back(part("minecraft:light_gray_concrete", {width + 0.06f, 2.4f, 5.5f},
+				{-(width + 0.06f) / 2.0f, 0.85f, -length / 2.0f}));
+	} else if (kind == VehicleKind::Bus) {
+		out.push_back(part(
+				colour, {width, 2.55f, length}, {-width / 2.0f, 0.35f, -length / 2.0f}));
+		out.push_back(
+				part("minecraft:tinted_glass", {width + 0.04f, 0.95f, length - 0.28f},
+						{-(width + 0.04f) / 2.0f, 1.5f, -length / 2.0f + 0.3f}));
 	}
 	return out;
 }
@@ -976,8 +1161,89 @@ const char *kind_name(VehicleKind kind)
 		return "hatchback";
 	case VehicleKind::Van:
 		return "van";
+	case VehicleKind::Pickup:
+		return "pickup";
+	case VehicleKind::Truck:
+		return "truck";
+	case VehicleKind::Bus:
+		return "bus";
 	}
 	return "sedan";
+}
+
+std::span<const std::pair<std::string_view, std::uint32_t>> vehicle_colours(
+		VehicleKind kind)
+{
+	switch (kind) {
+	case VehicleKind::Van:
+		return VAN_COLOURS;
+	case VehicleKind::Pickup:
+		return PICKUP_COLOURS;
+	case VehicleKind::Truck:
+		return TRUCK_COLOURS;
+	case VehicleKind::Bus:
+		return BUS_COLOURS;
+	default:
+		return CAR_COLOURS;
+	}
+}
+
+std::string_view vehicle_colour(VehicleKind kind, std::uint64_t roll)
+{
+	const auto colours = vehicle_colours(kind);
+	std::uint32_t total = 0;
+	for (const auto &choice : colours)
+		total += choice.second;
+	auto at = static_cast<std::uint32_t>(roll % total);
+	for (const auto &choice : colours) {
+		if (at < choice.second)
+			return choice.first;
+		at -= choice.second;
+	}
+	return colours.front().first;
+}
+
+bool is_long(VehicleKind kind)
+{
+	return kind == VehicleKind::Truck || kind == VehicleKind::Bus;
+}
+
+std::pair<double, double> seat(VehicleKind kind)
+{
+	switch (kind) {
+	case VehicleKind::Sedan:
+		return {0.4, 1.15};
+	case VehicleKind::Hatchback:
+		return {0.1, 1.2};
+	case VehicleKind::Van:
+		return {1.25, 1.42};
+	case VehicleKind::Pickup:
+		return {0.95, 1.28};
+	case VehicleKind::Truck:
+		return {2.7, 1.95};
+	case VehicleKind::Bus:
+		return {3.9, 2.0};
+	}
+	return {0.4, 1.15};
+}
+
+std::pair<float, float> hitbox(VehicleKind kind)
+{
+	switch (kind) {
+	case VehicleKind::Sedan:
+		return {2.4f, 1.45f};
+	case VehicleKind::Hatchback:
+		return {2.4f, 1.5f};
+	case VehicleKind::Van:
+		return {2.6f, 1.8f};
+	case VehicleKind::Pickup:
+		return {2.6f, 1.6f};
+	case VehicleKind::Truck:
+		return {3.0f, 2.7f};
+	case VehicleKind::Bus:
+		return {3.0f, 2.6f};
+	}
+	return {2.4f, 1.45f};
 }
 
 std::string colour_name(std::string_view block)
@@ -1001,23 +1267,16 @@ std::vector<std::pair<VehicleKind, std::string_view>> all_bodies()
 	std::vector<std::pair<VehicleKind, std::string_view>> out;
 	out.reserve((CAR_COLOURS.size() * 2) + VAN_COLOURS.size());
 	for (const auto &[kind, _] : KINDS) {
-		const auto append = [&](const auto &colours) {
-			for (const auto &[colour, weight] : colours) {
-				(void)weight;
-				out.emplace_back(kind, colour);
-			}
-		};
-		if (kind == VehicleKind::Van)
-			append(VAN_COLOURS);
-		else
-			append(CAR_COLOURS);
+		for (const auto &[colour, weight] : vehicle_colours(kind)) {
+			(void)weight;
+			out.emplace_back(kind, colour);
+		}
 	}
 	return out;
 }
 
-template <std::size_t N>
 std::vector<std::string> respawn_colours(
-		const std::array<std::pair<std::string_view, std::uint32_t>, N> &colours)
+		const std::span<const std::pair<std::string_view, std::uint32_t>> &colours)
 {
 	std::vector<std::string> out;
 	for (const auto &[colour, weight] : colours)
@@ -1227,15 +1486,40 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 		if (usable(segments[i]) && !lanes[i].nodes.empty())
 			starting[lanes[i].nodes.front()->id].push_back(i);
 	std::vector<std::vector<std::size_t>> ways_on(lanes.size());
+	const auto goes_back = [&](std::size_t i, std::size_t j) {
+		return lanes[i].piece == lanes[j].piece && lanes[i].backward != lanes[j].backward;
+	};
+	const auto keep_to_nearest = [&](std::size_t i, std::vector<std::size_t> next) {
+		const auto &end = segments[i].points.back();
+		const auto gap = [&](std::size_t j) {
+			if (segments[j].points.empty())
+				return std::numeric_limits<double>::max();
+			const auto &start = segments[j].points.front();
+			return std::hypot(start.x - end.x, start.z - end.z);
+		};
+		std::stable_sort(next.begin(), next.end(),
+				[&](std::size_t a, std::size_t b) { return gap(a) < gap(b); });
+		std::set<std::pair<std::size_t, bool>> seen;
+		next.erase(std::remove_if(next.begin(), next.end(),
+						   [&](std::size_t j) {
+							   return !seen.emplace(lanes[j].piece, lanes[j].backward)
+											   .second;
+						   }),
+				next.end());
+		return next;
+	};
 	for (std::size_t i = 0; i < lanes.size() && i < segments.size(); ++i) {
 		const auto &lane = lanes[i];
-		if (lane.nodes.empty())
+		if (lane.nodes.empty() || !usable(segments[i]))
 			continue;
 		const auto found = starting.find(lane.nodes.back()->id);
-		if (found != starting.end())
-			for (const auto next : found->second)
-				if (!lane.reverse || next != *lane.reverse)
-					ways_on[i].push_back(next);
+		if (found != starting.end()) {
+			std::vector<std::size_t> next;
+			for (const auto j : found->second)
+				if (!goes_back(i, j))
+					next.push_back(j);
+			ways_on[i] = keep_to_nearest(i, std::move(next));
+		}
 		if (ways_on[i].empty() && segments[i].turns_back && lane.reverse &&
 				*lane.reverse < segments.size() && usable(segments[*lane.reverse]))
 			ways_on[i].push_back(*lane.reverse);
@@ -1253,7 +1537,6 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 				SHORT_LANE;
 	}
 	for (std::size_t i = 0; i < lanes.size() && i < segments.size(); ++i) {
-		const auto &lane = lanes[i];
 		std::vector<std::size_t> next;
 		bool through_short = false;
 		std::vector<std::pair<std::size_t, unsigned>> todo;
@@ -1267,7 +1550,7 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 			if (short_lane[j] && depth < 3 && !ways_on[j].empty()) {
 				through_short = true;
 				for (const auto &k : ways_on[j])
-					if (k != i && (!lane.reverse || k != *lane.reverse))
+					if (k != i && !goes_back(i, k))
 						todo.emplace_back(k, depth + 1);
 			} else if (std::find(next.begin(), next.end(), j) == next.end()) {
 				next.push_back(j);
@@ -1434,9 +1717,7 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 							   : 0.0;
 			const auto roll = hash(i, j);
 			const VehicleKind kind = pick(KINDS, roll);
-			const std::string_view colour = kind == VehicleKind::Van
-													? pick(VAN_COLOURS, roll >> 16)
-													: pick(CAR_COLOURS, roll >> 16);
+			const std::string_view colour = vehicle_colour(kind, roll >> 16);
 			cars.push_back({i, target,
 					{a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t, a.z + (b.z - a.z) * t},
 					kind, std::string(colour),
@@ -1447,6 +1728,43 @@ std::vector<Car> place_cars(const std::vector<Segment> &segments, double scale)
 	}
 	return cars;
 }
+std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>> spots(
+		const std::vector<Segment> &segments, double scale)
+{
+	std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>> grid;
+	double owed = 0.5;
+	for (std::size_t i = 0; i < segments.size(); ++i) {
+		const auto &segment = segments[i];
+		if (!segment.carries_cars() || segment.arcs.empty())
+			continue;
+		const double first = segment.arcs.front();
+		const double length = segment.arcs.back() - first;
+		owed += length / scale * segment.density;
+		if (owed < 0.0 || !std::isfinite(owed))
+			continue;
+		const auto count = static_cast<std::size_t>(std::floor(owed));
+		owed -= count;
+		std::optional<std::size_t> previous;
+		for (std::size_t j = 0; j < count; ++j) {
+			const double s = first + length * (j + 0.5) / count;
+			const auto point =
+					std::clamp<std::size_t>(std::upper_bound(segment.arcs.begin(),
+													segment.arcs.end(), s) -
+													segment.arcs.begin(),
+							1, segment.points.size() - 1) -
+					1;
+			if (previous == point)
+				continue;
+			previous = point;
+			const auto &p = segment.points[point];
+			grid[{static_cast<int>(std::floor(p.x / SPOT_CELL)),
+						 static_cast<int>(std::floor(p.z / SPOT_CELL))}]
+					.emplace_back(i, point);
+		}
+	}
+	return grid;
+}
+
 } // namespace
 
 std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions() const
@@ -1455,6 +1773,9 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	std::ostringstream storage;
 	storage << "scoreboard players set #accel arnis "
 			<< std::max(1, rust_numeric::round_i32(ACCEL_MPS2 * .01 * scale_ * 1000.0))
+			<< "\nscoreboard players set #near_cap arnis.car " << MAX_NEAR
+			<< "\nscoreboard players set #spot_cell arnis.car "
+			<< rust_numeric::round_i32(SPOT_CELL)
 			<< "\ndata modify storage arnis:cars seg set value []\n";
 	const auto colour_list = [](const auto &colours) {
 		std::string result;
@@ -1467,9 +1788,15 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 		}
 		return result;
 	};
-	storage << "data modify storage arnis:cars colours set value {car:["
-			<< colour_list(CAR_COLOURS) << "],van:[" << colour_list(VAN_COLOURS) << "]}\n"
-			<< std::fixed;
+	storage << "data modify storage arnis:cars colours set value {";
+	for (std::size_t i = 0; i < KINDS.size(); ++i) {
+		if (i)
+			storage << ',';
+		const auto &[kind, weight] = KINDS[i];
+		(void)weight;
+		storage << kind_name(kind) << ":[" << colour_list(vehicle_colours(kind)) << ']';
+	}
+	storage << "}\n" << std::fixed;
 	for (std::size_t begin = 0; begin < segments_.size(); begin += LANES_PER_LINE) {
 		const auto end = std::min(segments_.size(), begin + LANES_PER_LINE);
 		storage << "data modify storage arnis:cars batch set value [";
@@ -1503,14 +1830,37 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 					storage << ",j:1b";
 				storage << '}';
 			}
-			storage << "],v:" << segment.speed;
-			if (!segment.carries_cars())
-				storage << ",o:1b";
-			storage << '}';
+			storage << "],v:" << segment.speed << '}';
 		}
 		storage << "]\ndata modify storage arnis:cars seg append from storage arnis:cars batch[]\n";
 	}
-	storage << "data remove storage arnis:cars batch\n";
+	storage << "data remove storage arnis:cars batch\ndata modify storage arnis:cars grid set value {}\n";
+	std::size_t batch_index = 0;
+	std::ostringstream cells;
+	bool open_cell = false;
+	for (const auto &[cell, spots] : spots_) {
+		if (batch_index && batch_index % SPOT_CELLS_PER_LINE == 0) {
+			storage << cells.str() << "}\n";
+			cells.str("");
+			open_cell = false;
+		}
+		if (!open_cell) {
+			cells << "data modify storage arnis:cars grid merge value {";
+			open_cell = true;
+		} else {
+			cells << ',';
+		}
+		cells << '"' << cell.first << '_' << cell.second << "\":[";
+		for (std::size_t i = 0; i < spots.size(); ++i) {
+			if (i)
+				cells << ',';
+			cells << "[I;" << spots[i].first << ',' << spots[i].second << ']';
+		}
+		cells << ']';
+		++batch_index;
+	}
+	if (open_cell)
+		storage << cells.str() << "}\n";
 	out.emplace_back("data/arnis/function/cars/network.mcfunction", storage.str());
 
 	const auto distance = [this](double metres) {
@@ -1520,14 +1870,32 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	};
 	std::ostringstream dispatch;
 	dispatch
-			<< "# Direction selects which nearby cars count as traffic ahead.\n"
+			<< "# Close traffic and cars on the same spot are handled before the look-ahead.\n"
+			<< "execute rotated as @s positioned ^ ^ ^" << distance(CLOSE_AHEAD)
+			<< " if entity @e[type=marker,tag=arnis.car,distance=.."
+			<< distance(CLOSE_ROUND)
+			<< "] run return run scoreboard players set #ahead arnis.car 3\n"
+			<< "execute if entity @s[tag=arnis.car.long] rotated as @s positioned ^ ^ ^"
+			<< distance(LONG_CLOSE_AHEAD)
+			<< " if entity @e[type=marker,tag=arnis.car,distance=.."
+			<< distance(LONG_CLOSE_ROUND)
+			<< "] run return run scoreboard players set #ahead arnis.car 3\n"
+			<< "execute rotated as @s as @e[type=marker,tag=arnis.car,distance=.."
+			<< distance(STACKED)
+			<< "] if score @s arnis.car < #id arnis.car positioned ^ ^ ^-"
+			<< distance(CLOSE_AHEAD) << " unless entity @s[distance=.."
+			<< distance(CLOSE_ROUND)
+			<< "] run return run scoreboard players set #ahead arnis.car 3\n"
 			<< "execute store result score #h arnis.car run data get entity @s Rotation[0]\n"
 			<< "scoreboard players add #h arnis.car 202\n"
 			<< "scoreboard players operation #h arnis.car /= #45 arnis\n"
 			<< "scoreboard players operation #h arnis.car %= #8 arnis\n";
 	for (int heading = 0; heading < 8; ++heading) {
 		dispatch << "execute if score #h arnis.car matches " << heading
-				 << " run function arnis:cars/look/h" << heading << '\n';
+				 << " unless entity @s[tag=arnis.car.long] run function arnis:cars/look/h"
+				 << heading << "\nexecute if score #h arnis.car matches " << heading
+				 << " if entity @s[tag=arnis.car.long] run function arnis:cars/look/l"
+				 << heading << '\n';
 		const double centre = heading * 45.0 - 180.0;
 		const auto wrap = [](double angle) {
 			return std::fmod(angle + 540.0, 360.0) - 180.0;
@@ -1535,33 +1903,54 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 		std::ostringstream range;
 		range << std::fixed << std::setprecision(1) << wrap(centre - SAME_WAY_DEG) << ".."
 			  << wrap(centre + SAME_WAY_DEG);
-		const auto ahead = [&](double at, double radius) {
+		const auto ahead = [&](double at, double radius, const char *tag) {
 			std::ostringstream line;
 			line << "execute rotated as @s positioned ^ ^ ^" << distance(at)
-				 << " if entity @e[type=marker,tag=arnis.car,distance=.."
+				 << " if entity @e[type=marker,tag=" << tag << ",distance=.."
 				 << distance(radius) << ",y_rotation=" << range.str() << ']';
 			return line.str();
 		};
-		std::ostringstream look;
-		look << "# How close the car ahead is: 3 stop a couple of metres behind it, 2 and 1 ease off.\n";
-		for (std::size_t i = 0; i < LOOK.size(); ++i) {
-			const auto &[at, radius, close] = LOOK[i];
-			look << ahead(at, radius) << " run ";
-			if (i + 1 < LOOK.size())
-				look << "return run ";
-			look << "scoreboard players set #ahead arnis.car " << close << '\n';
+		for (const auto [name, own] : {std::pair{'h', 0.0}, std::pair{'l', LONG_EXTRA}}) {
+			double reach = 0;
+			for (const auto &[at, radius, close] : LOOK)
+				reach = std::max(reach, at + own + LONG_EXTRA + radius);
+			std::ostringstream look;
+			look << "# Buses and trucks need more room than cars.\n"
+				 << "scoreboard players set #longs arnis.car 0\n"
+				 << "execute if entity @e[type=marker,tag=arnis.car.long,distance=.."
+				 << distance(reach)
+				 << "] run scoreboard players set #longs arnis.car 1\n";
+			for (std::size_t i = 0; i < LOOK.size(); ++i) {
+				const auto &[at, radius, close] = LOOK[i];
+				for (int part = 0; part < 2; ++part) {
+					const bool large = part == 1;
+					if (large && own == 0.0)
+						continue;
+					const auto line = ahead(at + own + (large ? LONG_EXTRA : 0.0), radius,
+							large ? "arnis.car.long" : "arnis.car");
+					look << "execute if score #longs arnis.car matches 1 "
+						 << line.substr(std::string("execute ").size());
+					look << (i + 1 < LOOK.size() ? " return run " : " run ")
+						 << "scoreboard players set #ahead arnis.car " << close << '\n';
+				}
+			}
+			out.emplace_back("data/arnis/function/cars/look/" + std::string(1, name) +
+									 std::to_string(heading) + ".mcfunction",
+					look.str());
 		}
-		out.emplace_back("data/arnis/function/cars/look/h" + std::to_string(heading) +
-								 ".mcfunction",
-				look.str());
 	}
 	out.emplace_back("data/arnis/function/cars/look.mcfunction", dispatch.str());
 	std::ostringstream clear;
-	clear << "# Yield at junctions, while allowing a deadlock to unwind.\n"
+	clear << "# Give way at junctions, yet allow a deadlock to unwind.\n"
 		  << "scoreboard players set #yield arnis.car 0\n"
 		  << "execute if score #jam arnis.car matches 1 run scoreboard players set #yield arnis.car 1\n"
-		  << "execute if score #t arnis.car matches 1.. rotated as @s positioned ^ ^ ^"
+		  << "execute if score #t arnis.car matches 1.. if entity @s[tag=!arnis.car.long] rotated as @s positioned ^ ^ ^"
 		  << distance(CROSSING_AT.first)
+		  << " if entity @e[type=marker,tag=arnis.car,tag=!arnis.car.held,distance=.."
+		  << distance(CROSSING_AT.second)
+		  << "] run scoreboard players set #yield arnis.car 1\n"
+		  << "execute if score #t arnis.car matches 1.. if entity @s[tag=arnis.car.long] rotated as @s positioned ^ ^ ^"
+		  << distance(CROSSING_AT.first + LONG_EXTRA)
 		  << " if entity @e[type=marker,tag=arnis.car,tag=!arnis.car.held,distance=.."
 		  << distance(CROSSING_AT.second)
 		  << "] run scoreboard players set #yield arnis.car 1\n"
@@ -1570,13 +1959,15 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 		  << "scoreboard players operation #lim arnis.car = #id arnis.car\n"
 		  << "scoreboard players operation #lim arnis.car %= #32 arnis\n"
 		  << "scoreboard players add #lim arnis.car " << GIVE_WAY_STEPS << '\n'
-		  << "execute if score #yield arnis.car matches 1 if score #w arnis.car <= #lim arnis.car run scoreboard players set #t arnis.car 0\n"
-		  << "execute rotated as @s positioned ^ ^ ^" << distance(PLAYER_AT[0])
-		  << " if entity @a[gamemode=!spectator,distance=.." << distance(PLAYER_AT[2])
-		  << "] run scoreboard players set #t arnis.car 0\n"
-		  << "execute rotated as @s positioned ^ ^ ^" << distance(PLAYER_AT[1])
-		  << " if entity @a[gamemode=!spectator,distance=.." << distance(PLAYER_AT[2])
-		  << "] run scoreboard players set #t arnis.car 0\n";
+		  << "execute if score #yield arnis.car matches 1 if score #w arnis.car <= #lim arnis.car run scoreboard players set #t arnis.car 0\n";
+	for (const auto &[condition, extra] :
+			{std::pair{"tag=!arnis.car.long", 0.0}, {"tag=arnis.car.long", LONG_EXTRA}})
+		for (std::size_t i = 0; i < 2; ++i)
+			clear << "execute if entity @s[" << condition
+				  << "] rotated as @s positioned ^ ^ ^" << distance(PLAYER_AT[i] + extra)
+				  << " if entity @a[gamemode=!spectator,tag=!arnis.riding,distance=.."
+				  << distance(PLAYER_AT[2])
+				  << "] run scoreboard players set #t arnis.car 0\n";
 	out.emplace_back("data/arnis/function/cars/clear.mcfunction", clear.str());
 	std::ostringstream ease;
 	ease << "# Brake smoothly at a red signal.\n"
@@ -1588,13 +1979,17 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	out.emplace_back("data/arnis/function/cars/ease.mcfunction", ease.str());
 
 	const float size = static_cast<float>(size_);
-	for (const auto &[kind, name] : std::array<std::pair<VehicleKind, const char *>, 3>{
-				 {{VehicleKind::Sedan, "sedan"}, {VehicleKind::Hatchback, "hatchback"},
-						 {VehicleKind::Van, "van"}}}) {
+	for (const auto &[kind, weight] : KINDS) {
+		(void)weight;
+		const char *name = kind_name(kind);
 		for (const auto &[prefix, bare] : std::array<std::pair<const char *, bool>, 2>{
 					 {{"", false}, {"ov121/", true}}}) {
 			std::ostringstream body;
-			body << std::fixed << std::setprecision(3);
+			const auto [width, height] = hitbox(kind);
+			body << "$summon interaction $(x) $(y) $(z) {Tags:[\"arnis.car.part\",\"arnis.k_"
+				 << name << "\"],width:" << std::fixed << std::setprecision(2)
+				 << width * size << "f,height:" << height * size << "f}\n"
+				 << std::setprecision(3);
 			for (const auto &part : body_parts(kind, "$(colour)")) {
 				const auto block =
 						bare ? "\"" + part.block + "\"" : "{Name:\"" + part.block + "\"}";
@@ -1613,7 +2008,7 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 					glow = ",brightness:{sky:7,block:7}";
 				}
 				body << "$summon block_display $(x) $(y) $(z) {Tags:[" << tags
-					 << "],teleport_duration:2,block_state:" << block
+					 << "],teleport_duration:2,view_range:3f,block_state:" << block
 					 << ",transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],translation:"
 					 << vector(part.corner) << ",scale:" << vector(part.size) << '}'
 					 << glow << "}\n";
@@ -1624,6 +2019,38 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 		}
 	}
 	return out;
+}
+
+std::pair<std::string, std::string> CarNetwork::kind_function() const
+{
+	const auto total = std::accumulate(KINDS.begin(), KINDS.end(), 0u,
+			[](std::uint32_t sum, const auto &choice) { return sum + choice.second; });
+	std::ostringstream text;
+	text << "execute store result score #r arnis.car run random value 0.." << total - 1
+		 << '\n';
+	std::uint32_t from = 0;
+	for (const auto &[kind, weight] : KINDS) {
+		text << "execute if score #r arnis.car matches " << from << ".."
+			 << from + weight - 1
+			 << " run data modify storage arnis:cars spawn merge value {kind:\""
+			 << kind_name(kind) << "\",long:" << (is_long(kind) ? 1 : 0) << "b}\n";
+		from += weight;
+	}
+	return {"data/arnis/function/cars/respawn_kind.mcfunction", text.str()};
+}
+
+std::pair<std::string, std::string> CarNetwork::seat_function() const
+{
+	std::ostringstream text;
+	for (const auto &[kind, weight] : KINDS) {
+		(void)weight;
+		const auto &[ahead, eye] = seat(kind);
+		text << "execute if entity @s[tag=arnis.k_" << kind_name(kind)
+			 << "] run data modify storage arnis:cars seat set value {f:" << std::fixed
+			 << std::setprecision(2) << ahead * size_
+			 << "d,u:" << std::max(eye * size_ - RIDER_EYE_OVER_SEAT, 0.0) << "d}\n";
+	}
+	return {"data/arnis/function/cars/seat_kind.mcfunction", text.str()};
 }
 
 std::string CarNetwork::storage_function() const
@@ -1682,11 +2109,20 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 			data["g"] = *target.stop;
 		if (target.cap)
 			data["m"] = *target.cap;
-		const std::int64_t seed = static_cast<std::int64_t>(car_index) * 16;
+		nlohmann::json tags = {"arnis.car"};
+		if (is_long(car.kind))
+			tags.push_back("arnis.car.long");
+		const std::int64_t seed = static_cast<std::int64_t>(car_index) * 32;
 		editor.add_entity_exact("minecraft:marker", x, y, z, seed,
-				{{"data", std::move(data)}, {"Tags", {"arnis.car"}},
+				{{"data", std::move(data)}, {"Tags", std::move(tags)},
 						{"Rotation", rotation}});
 		const float scale = static_cast<float>(size_);
+		const auto [width, height] = hitbox(car.kind);
+		editor.add_entity_exact("minecraft:interaction", x, y, z, seed + 31,
+				{{"width", width * scale}, {"height", height * scale},
+						{"Tags", {"arnis.car.part",
+										 std::string("arnis.k_") + kind_name(car.kind)}},
+						{"Rotation", rotation}});
 		const auto parts = body_parts(car.kind, car.colour);
 		for (std::size_t part_index = 0; part_index < parts.size(); ++part_index) {
 			const auto &part = parts[part_index];
@@ -1703,7 +2139,7 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 									{"translation", scaled(part.corner)},
 									{"scale", scaled(part.size)}}},
 					{"Tags", std::move(tags)}, {"teleport_duration", 2},
-					{"Rotation", rotation}};
+					{"view_range", 3.0f}, {"Rotation", rotation}};
 			if (part.light == Light::Head)
 				extra["brightness"] = {{"sky", 15}, {"block", 15}};
 			else if (part.light == Light::Tail)
@@ -1749,8 +2185,6 @@ nlohmann::json CarNetwork::bedrock_data() const
 		}
 		if (!caps.empty())
 			lane["m"] = comma_list(caps);
-		if (!segment.carries_cars())
-			lane["o"] = 1;
 		lanes.push_back(std::move(lane));
 	}
 
@@ -1776,9 +2210,24 @@ nlohmann::json CarNetwork::bedrock_data() const
 
 	nlohmann::json colours = nlohmann::json::object();
 	for (const auto &[kind, _] : KINDS) {
-		const auto values = kind == VehicleKind::Van ? respawn_colours(VAN_COLOURS)
-													 : respawn_colours(CAR_COLOURS);
+		const auto values = respawn_colours(vehicle_colours(kind));
 		colours[kind_name(kind)] = values;
+	}
+	nlohmann::json spot_grid = nlohmann::json::object();
+	for (const auto &[cell, spots] : spots_) {
+		std::vector<std::size_t> flat;
+		for (const auto &[lane, point] : spots) {
+			flat.push_back(lane);
+			flat.push_back(point);
+		}
+		spot_grid[std::to_string(cell.first) + "_" + std::to_string(cell.second)] =
+				comma_list(flat);
+	}
+	nlohmann::json long_kinds = nlohmann::json::array();
+	for (const auto &[kind, weight] : KINDS) {
+		(void)weight;
+		if (is_long(kind))
+			long_kinds.push_back(kind_name(kind));
 	}
 	nlohmann::json kind_rules = nlohmann::json::array();
 	for (const auto &[kind, weight] : KINDS)
@@ -1791,11 +2240,18 @@ nlohmann::json CarNetwork::bedrock_data() const
 			{"accel", std::max(1, rust_numeric::round_i32(
 										  ACCEL_MPS2 * 0.01 * scale_ * 1000.0))},
 			{"lanes", std::move(lanes)}, {"start", std::move(start)},
-			{"bodies", std::move(body_names)}, {"colours", std::move(colours)},
-			{"rules", {{"look", std::move(look)}, {"same_way", SAME_WAY_DEG},
-							  {"crossing", {CROSSING_AT.first, CROSSING_AT.second}},
-							  {"player", PLAYER_AT}, {"give_way", GIVE_WAY_STEPS},
-							  {"pace", PACE}, {"kinds", std::move(kind_rules)}}}};
+			{"spots", std::move(spot_grid)}, {"bodies", std::move(body_names)},
+			{"colours", std::move(colours)},
+			{"rules",
+					{{"look", std::move(look)}, {"same_way", SAME_WAY_DEG},
+							{"long_extra", LONG_EXTRA}, {"stacked", STACKED},
+							{"close_ahead", {CLOSE_AHEAD, CLOSE_ROUND}},
+							{"long_close_ahead", {LONG_CLOSE_AHEAD, LONG_CLOSE_ROUND}},
+							{"long_kinds", std::move(long_kinds)},
+							{"crossing", {CROSSING_AT.first, CROSSING_AT.second}},
+							{"player", PLAYER_AT}, {"give_way", GIVE_WAY_STEPS},
+							{"pace", PACE}, {"near", MAX_NEAR}, {"spot_cell", SPOT_CELL},
+							{"kinds", std::move(kind_rules)}}}};
 }
 
 std::vector<bedrock_addon::Body> CarNetwork::bedrock_bodies() const

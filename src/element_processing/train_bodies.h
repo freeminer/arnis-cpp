@@ -136,6 +136,11 @@ struct Part
 std::pair<std::vector<Coach>, std::function<Livery(std::size_t)>> compose(
 		Kind kind, std::uint64_t seed, bool short_train);
 double length_m(const Coach &coach);
+inline constexpr const char *NO_DOORS = "none";
+std::vector<float> doors(const Coach &coach);
+std::string door_key(const Coach &coach);
+std::pair<std::string, std::string> door_functions(
+		const std::string &key, const std::vector<float> &spots, double size);
 std::vector<Part> parts(const Coach &coach, const Livery &livery);
 std::string key(const Coach &coach, const Livery &livery);
 /// Emit the macro body that summons a carriage's block displays at its centre.

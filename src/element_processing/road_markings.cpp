@@ -131,7 +131,7 @@ std::pair<int, bool> road_class(const std::string &highway)
 	return {-1, false};
 }
 
-bool is_roundabout(const tags_t &tags)
+bool is_roundabout_impl(const tags_t &tags)
 {
 	return tags.get("junction") == "roundabout" || tags.get("junction") == "circular";
 }
@@ -140,7 +140,8 @@ int oneway_sign_impl(const std::string &highway, const tags_t &tags)
 {
 	const auto value = tags.get("oneway");
 	if (value == "yes" || value == "true" || value == "1")
-		return 1;
+		return ::arnis::road_markings::is_roundabout(tags) || highway == "motorway" ||
+			   highway == "motorway_link";
 	if (value == "-1" || value == "reverse")
 		return -1;
 	if (value == "no" || value == "false" || value == "0" || value == "reversible" ||
@@ -429,6 +430,11 @@ int chebyshev_distance_to(const std::vector<std::pair<int, int>> &cells, int x, 
 }
 
 } // namespace
+
+bool is_roundabout(const tags_t &tags)
+{
+	return is_roundabout_impl(tags);
+}
 
 int oneway_sign(const std::string &highway, const tags_t &tags)
 {

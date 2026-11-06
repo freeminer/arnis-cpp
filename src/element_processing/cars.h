@@ -10,6 +10,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <map>
 #include <unordered_map>
 #include <utility>
 #include <vector>
@@ -60,7 +61,10 @@ enum class VehicleKind : std::uint8_t
 {
 	Sedan,
 	Hatchback,
-	Van
+	Van,
+	Pickup,
+	Truck,
+	Bus
 };
 
 struct Car
@@ -79,7 +83,8 @@ class CarNetwork
 public:
 	static CarNetwork build(const std::vector<ProcessedElement> &elements, double scale,
 			bool drives_on_left, bool stop_at_signals, const ::XZBBox &world,
-			const std::function<int(int, int)> &surface_y);
+			const std::function<int(const ProcessedWay &, int, int)> &surface_y,
+			const std::function<bool(int, int)> &built);
 	void place_way(world_editor::WorldEditor &editor, std::uint64_t way) const;
 
 	std::size_t car_count() const { return cars_.size(); }
@@ -93,6 +98,8 @@ public:
 	std::string storage_function() const;
 	std::vector<std::pair<std::string, std::string>> look_functions() const;
 	std::vector<std::pair<std::string, std::string>> body_functions() const;
+	std::pair<std::string, std::string> kind_function() const;
+	std::pair<std::string, std::string> seat_function() const;
 	std::vector<std::pair<std::string, std::string>> datapack_functions() const;
 	// Compact backend data and body geometry for the Bedrock vehicle add-on.
 	nlohmann::json bedrock_data() const;
@@ -102,6 +109,9 @@ private:
 	std::vector<Segment> segments_;
 	std::vector<Car> cars_;
 	std::unordered_map<std::uint64_t, std::vector<std::size_t>> by_way_;
+	// (lane, waypoint) respawn spots by 64-block map cell.
+	std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>>
+			spots_;
 	double size_{1.0};
 	double scale_{1.0};
 };

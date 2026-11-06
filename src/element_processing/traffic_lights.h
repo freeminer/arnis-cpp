@@ -24,6 +24,33 @@ char group_of(double direction_x, double direction_z);
 bool signal_upstream(const std::vector<ProcessedNode> &nodes, std::size_t index, int step,
 		double reach);
 
+namespace cars
+{
+bool drivable(const tags_t &tags);
+}
+
+/// Drivable-road junctions and their approach signals, shared by physical
+/// poles and the moving-car network.
+class Junctions
+{
+public:
+	static Junctions build(const std::vector<ProcessedElement> &elements, double scale);
+	std::uint32_t arms(std::uint64_t id) const;
+	bool is_junction(std::uint64_t id) const { return arms(id) >= 3; }
+	int widest(std::uint64_t id) const;
+	bool passed(
+			const std::vector<ProcessedNode> &nodes, std::size_t index, int step) const;
+
+private:
+	double reach(std::uint64_t id) const;
+	std::optional<std::pair<std::uint64_t, double>> nearest(
+			const std::vector<ProcessedNode> &nodes, std::size_t index, int step) const;
+	std::unordered_map<std::uint64_t, std::uint32_t> arms_;
+	std::unordered_map<std::uint64_t, int> widest_;
+	std::unordered_map<std::uint64_t, std::vector<std::uint64_t>> signals_;
+	double upstream_ = UPSTREAM_M;
+};
+
 /// Area-wide traffic-signal geometry. Planning is separate from rendering so
 /// backends can consume the same poles, approaches, and signal groups.
 class SignalIndex
