@@ -1,5 +1,8 @@
 #include "data_processing.h"
 #include "biome.h"
+// fm: Optional full-source bridge analysis shared by streamed chunks.
+#include "element_processing/fm_bridge_context.h"
+// ===
 #include "fm_datapack_disasters.h"
 #include "fm_arnis_bench.h"
 #include "element_processing/fm_highway_connectivity.h"
@@ -1259,7 +1262,10 @@ bool generate_world(WorldEditor &editor,
 		FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &input_building_footprints, bool elements_prepared,
 		const PreparedBuildingData *prepared_buildings, mapillary::FacadeJob *facade_job,
-		std::optional<std::pair<int, int>> spawn_point)
+		std::optional<std::pair<int, int>> spawn_point,
+		// fm: Immutable bridge profiles shared by streamed chunks.
+		const bridges::BridgeContext *shared_bridges)
+// ===
 {
 	// Rust starts this best-effort sweep from both CLI and GUI entry points.
 	// The C++ library has a single generation boundary, so do it here using
@@ -2053,11 +2059,23 @@ bool generate_world(WorldEditor &editor,
 	if (args.one_world_run)
 		highway_connectivity.meet_at_edge_of(cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()));
-	auto bridge_outlines = bridge_styles::BridgeOutlineIndex::build(elements);
-	auto bridge_structures = bridges::BridgeStructureMap::build(
-			elements, editor, highway_connectivity, bridge_outlines, args.scale);
-	auto bridge_surface =
-			bridges::BridgeSurfaceMap::build(elements, bridge_structures, args.scale);
+	// fm: Shared chunks retain the full-source bridge analysis. Other callers keep
+	// building their own map from the elements supplied to this invocation.
+	std::optional<bridges::BridgeContext> local_bridge_context;
+	const auto *bridge_context = shared_bridges;
+	if (!bridge_context) {
+		local_bridge_context.emplace();
+		local_bridge_context->outlines =
+				bridge_styles::BridgeOutlineIndex::build(elements);
+		local_bridge_context->structures = bridges::BridgeStructureMap::build(elements,
+				editor, highway_connectivity, local_bridge_context->outlines, args.scale);
+		local_bridge_context->surface = bridges::BridgeSurfaceMap::build(
+				elements, local_bridge_context->structures, args.scale);
+		bridge_context = &*local_bridge_context;
+	}
+	const auto &bridge_structures = bridge_context->structures;
+	const auto &bridge_surface = bridge_context->surface;
+	// ===
 	// Rust completes tree-pack loading before generation. Keep the C++ load
 	// overlapped with earlier passes, but do not silently skip schematic trees
 	// on this first generation merely because the async cache was still warming.
@@ -2962,8 +2980,8 @@ bool generate_world(WorldEditor &editor,
 				}
 			} else if (way.tags.contains("railway")) {
 				railways::generate_railways(editor, way, state.rail_tunnel_points,
-						bridge_outlines, road_mask, building_footprints, rail_mask,
-						bridge_structures, bridge_surface, rail_joins);
+						bridge_context->outlines, road_mask, building_footprints,
+						rail_mask, bridge_structures, bridge_surface, rail_joins);
 			} else if (way.tags.contains("roller_coaster")) {
 				railways::generate_roller_coaster(editor, way);
 			} else if (way.tags.contains("aeroway") ||
@@ -3531,9 +3549,11 @@ bool generate_world(WorldEditor &editor,
 	still_surfaces = {};
 	decltype(tunnel_internal_endpoints){}.swap(tunnel_internal_endpoints);
 	tunnel_portals = {};
-	bridge_outlines = {};
-	bridge_structures = {};
-	bridge_surface = {};
+	// fm: Retain the optional cache until this invocation ends. Shared storage
+	// stays owned by the extract cache and is never cleared by a chunk.
+	if (local_bridge_context)
+		local_bridge_context.reset();
+	// ===
 	decltype(dispatch_state.rail_tunnel_points){}.swap(dispatch_state.rail_tunnel_points);
 	decltype(dispatch_state.highway_tunnel_cells){}.swap(
 			dispatch_state.highway_tunnel_cells);

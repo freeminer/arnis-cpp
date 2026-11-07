@@ -303,13 +303,21 @@ void prepare_elements_for_generation(std::vector<ProcessedElement> &elements);
 std::shared_ptr<mapillary::FacadeJob> start_mapillary_facade_job(
 		const Args &, const std::array<double, 4> &geographic_bounds);
 
+// fm: Optional immutable bridge profile cache shared by streamed chunks.
+namespace bridges
+{
+struct BridgeContext;
+}
+// ===
+
 bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &elements,
 		const Args &args, FloodFillCache &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
 		bool elements_prepared = false,
 		const PreparedBuildingData *prepared_buildings = nullptr,
 		mapillary::FacadeJob *facade_job = nullptr,
-		std::optional<std::pair<int, int>> spawn_point = std::nullopt);
+		std::optional<std::pair<int, int>> spawn_point = std::nullopt,
+		const bridges::BridgeContext *shared_bridges = nullptr);
 // Options-aware entry point matching Rust's generate_world_with_options for
 // library callers that already own the backend editor instance.
 bool generate_world_with_options(WorldEditor &editor,

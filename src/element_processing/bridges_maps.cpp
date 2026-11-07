@@ -941,6 +941,41 @@ bridge_styles::BridgeStyle majority_style(const std::vector<std::size_t> &group_
 	return best;
 }
 
+bool past_way_end(float px, float pz, const ProcessedWay &way)
+{
+	const auto past = [](float x, float z, const ProcessedNode &end, auto begin,
+							  auto finish) {
+		const auto inward = std::find_if(begin, finish,
+				[&](const auto &node) { return node.x != end.x || node.z != end.z; });
+		if (inward == finish)
+			return false;
+		const float dx = static_cast<float>(end.x - inward->x);
+		const float dz = static_cast<float>(end.z - inward->z);
+		return ((x - end.x) * dx + (z - end.z) * dz) / std::hypot(dx, dz) > 1.0f;
+	};
+	if (way.nodes.empty())
+		return false;
+	return past(px, pz, way.nodes.front(), way.nodes.begin(), way.nodes.end()) ||
+		   past(px, pz, way.nodes.back(), way.nodes.rbegin(), way.nodes.rend());
+}
+
+bool continues_past(const ProcessedWay &way, const ProcessedWay &other)
+{
+	if (way.nodes.empty() || other.nodes.empty())
+		return false;
+	const auto &a = way.nodes.front();
+	const auto &b = way.nodes.back();
+	for (const auto &[joint, far] : {std::pair{&a, &b}, std::pair{&b, &a}}) {
+		if (!std::any_of(other.nodes.begin(), other.nodes.end(), [&](const auto &end) {
+				return end.x == joint->x && end.z == joint->z;
+			}))
+			continue;
+		if (past_way_end(far->x, far->z, other))
+			return true;
+	}
+	return false;
+}
+
 constexpr float RAMP_RUN_PER_BLOCK = 8.0f;
 
 std::vector<int> ramp_profile(
@@ -1384,7 +1419,7 @@ BridgeStructureMap BridgeStructureMap::build(
 									threshold, DUAL_CARRIAGEWAY_MAX_DISTANCE_BLOCKS);
 						const auto samples = coverage_samples(way);
 						const bool covered =
-								!samples.empty() &&
+								!samples.empty() && !continues_past(way, wider) &&
 								std::all_of(samples.begin(), samples.end(),
 										[&](const auto &point) {
 											return lateral_offset_to_way(point.first,
