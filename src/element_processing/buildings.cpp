@@ -1101,6 +1101,11 @@ Block rust_pitched_roof_block(BuildingCategory category, ArchEra era, RoofType r
 																	 : dominant;
 	}
 	const bool same = selected == wall_block;
+	// Red tile uses the same brick stair profile as brick tile. On brick walls
+	// either choice reads as a single red-brick mass, so select a contrasting
+	// orange tile family instead.
+	const bool brick_on_brick =
+			wall_block == BRICK && get_stair_block_for_material(selected) == BRICK_STAIRS;
 	const int warm_tone = selected == tile_brick						  ? 1
 						  : selected == tile_red || selected == tile_dark ? 2
 						  : selected == tile_orange						  ? 3
@@ -1123,9 +1128,12 @@ Block rust_pitched_roof_block(BuildingCategory category, ArchEra era, RoofType r
 						   wall_block == LIGHT_GRAY_CONCRETE ||
 						   wall_block == LIGHT_GRAY_CONCRETE_POWDER ||
 						   wall_block == CYAN_TERRACOTTA || wall_block == TUFF;
-	if (same || warm_wall || (grey_roof && grey_wall)) {
-		if (warm_tone != 0 && region != R::BritishIsles)
+	if (same || brick_on_brick || warm_wall || (grey_roof && grey_wall)) {
+		if (warm_tone != 0 && region != R::BritishIsles) {
+			if (wall_block == BRICK)
+				return tile_orange;
 			return warm_tone == 2 ? tile_brick : tile_red;
+		}
 		return selected == slate_dark || region == R::BrickNorth ? black : slate_dark;
 	}
 	return selected;

@@ -274,14 +274,63 @@ std::vector<std::pair<int, int>> disc(double x, double z, double r)
 	return v;
 }
 
-void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
-		const Site &site, int floor, double height, bool explicit_height, Block tagged)
+constexpr double OBSERVATION_WHEEL_M = 90.0;
+constexpr double CAPSULE_OUT = 4.0;
+constexpr double CAPSULE_RING = 15.0;
+constexpr double SMALLEST_WHEEL = 12.0;
+
+void draw_observation_capsule(WorldEditor &editor, const structure_kit::Frame &frame,
+		double t, double radius, double hub_y, double half_gap, int cabin_height,
+		Block rim)
 {
+	const auto at = [&](double a, double b, double y) {
+		const auto [x, z] = frame.world(a, b);
+		return std::array<int, 3>{static_cast<int>(std::floor(x)),
+				static_cast<int>(std::floor(y)), static_cast<int>(std::floor(z))};
+	};
+	const double out = radius + CAPSULE_OUT;
+	const double centre_a = out * std::cos(t), centre_y = hub_y + out * std::sin(t);
+	for (const double side : {-half_gap, half_gap})
+		for (const double distance : {0.5, 1.0, 1.5}) {
+			const auto [x, y, z] = at((radius + distance) * std::cos(t), side,
+					hub_y + (radius + distance) * std::sin(t));
+			editor.set_block_absolute(rim, x, y, z);
+		}
+	const int floor_y = static_cast<int>(std::floor(centre_y - 2.0));
+	const int roof = floor_y + cabin_height;
+	for (const auto &cell :
+			frame.cells(centre_a - 2.5, centre_a + 2.5, -half_gap, half_gap)) {
+		const bool edge_a = std::abs(cell.a - centre_a) > 1.5;
+		const bool edge_b = std::abs(cell.b) > half_gap - 1.0;
+		for (int y = floor_y; y <= roof; ++y) {
+			const bool level = y == floor_y || y == roof;
+			if (!level && !edge_a && !edge_b)
+				continue;
+			const Block block =
+					level && !edge_a && !edge_b && y == roof
+							? GLASS
+							: (level || (edge_a && edge_b) ? WHITE_CONCRETE : GLASS);
+			editor.set_block_absolute(block, cell.x, y, cell.z);
+		}
+	}
+}
+
+void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
+		const Site &site, int floor, double height, bool explicit_height, double scale,
+		Block tagged)
+{
+	const std::optional<double> mapped =
+			explicit_height		? std::optional<double>(height - 4.0)
+			: site.length > 0.0 ? std::optional<double>(site.length)
+								: std::nullopt;
+	const bool observation = is_observation_wheel(
+			explicit_height ? std::optional<double>(height) : std::nullopt, site.length,
+			scale);
 	const double diameter =
-			std::clamp(explicit_height	   ? std::max(double(height) - 4.0, 12.0)
-					   : site.length > 0.0 ? std::max(site.length, 12.0)
-										   : 30.0,
-					12.0, 150.0);
+			std::clamp(observation && explicit_height ? height - CAPSULE_RING
+					   : mapped						  ? *mapped
+													  : 30.0,
+					SMALLEST_WHEEL, 150.0);
 	const double radius = diameter * 0.5;
 	const double half_gap = diameter >= 50.0 ? 3.0 : 2.0;
 	const int cabin_half = static_cast<int>(half_gap - 1.0);
@@ -293,7 +342,8 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 				static_cast<int>(std::floor(y)), static_cast<int>(std::floor(z))};
 	};
 	const int cabin_height = diameter >= 50.0 ? 4 : 3;
-	const double hub_y = floor + 3.0 + cabin_height + radius;
+	const double hub_y = observation ? floor + 4.5 + CAPSULE_OUT + radius
+									 : floor + 3.0 + cabin_height + radius;
 	const Block rim = tagged == AIR ? WHITE_CONCRETE : tagged;
 	const auto steps = static_cast<std::size_t>(std::ceil(TAU * radius * 2.5));
 	for (const double side : {-half_gap, half_gap}) {
@@ -304,8 +354,9 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 			editor.set_block_absolute(k % 9 == 0 ? SEA_LANTERN : rim, x, y, z);
 		}
 	}
+	const double spacing = observation ? 12.0 : 6.0;
 	const auto count = static_cast<std::size_t>(
-			std::clamp(std::round(TAU * radius / 6.0), 8.0, 48.0));
+			std::clamp(std::round(TAU * radius / spacing), 8.0, 48.0));
 	static const Block cabin_colours[] = {RED_CONCRETE, ORANGE_CONCRETE, YELLOW_CONCRETE,
 			LIME_CONCRETE, LIGHT_BLUE_CONCRETE, BLUE_CONCRETE, PURPLE_CONCRETE,
 			PINK_CONCRETE};
@@ -326,6 +377,11 @@ void draw_big_wheel(WorldEditor &editor, const ProcessedElement &element,
 		for (int b = -static_cast<int>(half_gap); b <= static_cast<int>(half_gap); ++b) {
 			const auto [x, y, z] = at(a, b, gondola_y);
 			editor.set_block_absolute(rim, x, y, z);
+		}
+		if (observation) {
+			draw_observation_capsule(
+					editor, frame, t, radius, hub_y, half_gap, cabin_height, rim);
+			continue;
 		}
 		const Block colour = cabin_colours[k % std::size(cabin_colours)];
 		const int roof = static_cast<int>(std::floor(gondola_y)) - 1;
@@ -898,6 +954,14 @@ void draw_spinner(WorldEditor &e, const Site &s, const OwnCells &own,
 
 } // namespace
 
+bool is_observation_wheel(
+		const std::optional<double> &height, double footprint_length, double scale)
+{
+	const double cutoff = OBSERVATION_WHEEL_M * scale;
+	return height ? *height >= cutoff && *height - CAPSULE_RING >= SMALLEST_WHEEL
+				  : footprint_length >= cutoff;
+}
+
 bool claims(const tags_t &tags)
 {
 	return kind(tags).has_value();
@@ -986,7 +1050,7 @@ bool generate_ride(WorldEditor &editor, const ProcessedElement &e,
 				wheel_colour
 						? structure_kit::concrete_for_colour(*wheel_colour).value_or(AIR)
 						: AIR;
-		draw_big_wheel(editor, e, s, floor, h, explicit_height, tagged_rim);
+		draw_big_wheel(editor, e, s, floor, h, explicit_height, scale, tagged_rim);
 	} else if (*ride == Ride::Tower) {
 		floor = level_ride(editor, ride_disc(s.x, s.z, 7.5), own, footprints, roads,
 				POLISHED_ANDESITE);

@@ -578,6 +578,53 @@ bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
 	return true;
 }
 
+bool record_live_tile(const std::filesystem::path &world_dir,
+		const geographic::LLBBox &llbbox, const cartesian::XZBBox &xzbbox,
+		const std::optional<std::filesystem::path> &preview,
+		const std::string &arnis_version, std::string *error)
+{
+	std::string load_error;
+	auto manifest = Manifest::load(world_dir, &load_error);
+	if (!manifest) {
+		if (error)
+			*error = load_error.empty() ? Manifest::path_in(world_dir).string() +
+												  " vanished during live generation"
+										: std::move(load_error);
+		return false;
+	}
+
+	const auto area_id = manifest->next_area_id;
+	std::optional<std::filesystem::path> managed_preview;
+	if (preview) {
+		std::error_code ec;
+		const auto directory = world_dir / PREVIEW_DIR;
+		std::filesystem::create_directories(directory, ec);
+		if (!ec) {
+			const auto destination =
+					directory / ("area-" + std::to_string(area_id) + ".png");
+			ec.clear();
+			std::filesystem::rename(*preview, destination, ec);
+			if (ec) {
+				ec.clear();
+				std::filesystem::copy_file(*preview, destination,
+						std::filesystem::copy_options::overwrite_existing, ec);
+			}
+			if (!ec)
+				managed_preview = destination;
+		}
+	}
+
+	RunContext run;
+	run.world_dir = world_dir;
+	run.origin_lat = manifest->origin_lat;
+	run.origin_lon = manifest->origin_lon;
+	run.extending = true;
+	run.elevation = manifest->elevation;
+	run.area_id = area_id;
+	return record_area(run, llbbox, xzbbox, manifest->elevation, managed_preview,
+			arnis_version, error);
+}
+
 bool remember_elevation(
 		const RunContext &run, const ElevationAffine &elevation, std::string *error)
 {

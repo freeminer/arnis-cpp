@@ -151,6 +151,8 @@ ColumnSchematic load_column_schematic(const std::vector<std::uint8_t> &gzip_data
 StructureSchematic structure_schematic(const SchemDocument &document);
 Block resolve_schem_block(const std::string &name);
 BlockWithProperties resolve_schem_block_with_properties(const std::string &name);
+std::vector<std::pair<int, int>> structure_base(const StructureSchematic &structure,
+		int base_x, int base_z, unsigned rotation, int storey);
 // Free-yaw counterpart of the quarter-turn schematic placement path.  It
 // samples destination columns so oblique placements remain gap-free.
 bool place_schem_document_yaw(world_editor::WorldEditor &, const SchemDocument &,

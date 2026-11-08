@@ -64,7 +64,7 @@ bool building(const tags_t &tags)
 	return enabled_tag(tags, "building") || tags.contains("building:part");
 }
 
-std::optional<int> over_water_half_width(const ProcessedWay &way, double scale)
+std::optional<int> over_water_half_width_impl(const ProcessedWay &way, double scale)
 {
 	const auto man_made = way.tags.get("man_made");
 	const bool structure = man_made == "pier" || man_made == "breakwater" ||
@@ -382,6 +382,18 @@ std::vector<std::uint64_t> dilate(const std::vector<std::uint64_t> &seeds,
 	return out;
 }
 
+}
+
+bool is_over_water_structure(const tags_t &tags)
+{
+	const auto man_made = tags.get("man_made");
+	return man_made == "pier" || man_made == "breakwater" || man_made == "groyne" ||
+		   man_made == "dolphin" || man_made == "quay" || tags.get("floating") == "yes";
+}
+
+std::optional<int> over_water_half_width(const ProcessedWay &way, double scale)
+{
+	return over_water_half_width_impl(way, scale);
 }
 
 void apply_osm_land_override(LandCoverData &data, std::size_t world_width,

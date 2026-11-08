@@ -17,6 +17,12 @@
 #include "elevation/peaks.h"
 #include "overture/pmtiles.h"
 
+struct XZBBox;
+namespace arnis
+{
+struct Ground;
+}
+
 namespace arnis::overture
 {
 
@@ -76,6 +82,11 @@ public:
 };
 
 std::size_t overture_building_budget(const geographic::LLBBox &bbox);
+
+// Remove model-detected buildings that are predominantly over open water,
+// preserving supported OSM piers/wharves and OSM-authored buildings.
+std::size_t drop_footprints_in_water(std::vector<ProcessedElement> &elements,
+		const arnis::Ground &ground, const ::XZBBox &bbox, double scale);
 
 // Provider-neutral decoded GeoParquet row. A host can use Arrow/Parquet, GDAL,
 // or a custom range reader and return normalized rows in OvertureCollection.

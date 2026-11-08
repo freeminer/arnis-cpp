@@ -15,8 +15,10 @@
 #include "../unicode_text.h"
 #include "postprocess.h"
 #include "../land_cover/land_cover.h"
+#include "../progress.h"
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <iterator>
 #include <limits>
@@ -39,6 +41,16 @@ constexpr double MIN_DEFICIT_M = 3.0;
 constexpr double MAX_DEFICIT_M = 400.0;
 constexpr double RELIEF_M = 500.0;
 constexpr double RELIEF_SAMPLES = 50.0;
+constexpr double DOME_SEARCH_M = 45.0;
+constexpr double NEARBY_M = 300.0;
+constexpr double LEVEL_SHARE = 0.25;
+constexpr std::size_t SIDES = 16;
+constexpr std::size_t HOLLOW_SIDES = 12;
+constexpr double SUMMIT_NOISE_M = 10.0;
+constexpr double STRETCH_RADIUS_M = 200.0;
+constexpr double STRETCH_REACH_M = 1.5 * STRETCH_RADIUS_M;
+constexpr double STRETCH_DEPTH = 2.0;
+constexpr double PLATEAU_M = 100.0;
 
 std::ptrdiff_t radius_cells(double meters, double meters_per_cell)
 {
@@ -165,6 +177,222 @@ double local_relief(const std::vector<std::vector<double>> &grid, std::size_t cx
 	return std::isfinite(lo) && std::isfinite(hi) ? std::max(hi - lo, 0.0) : 0.0;
 }
 
+struct Summit
+{
+	double gx{}, gy{}, ele{};
+};
+
+struct Shape
+{
+	enum class Kind
+	{
+		Stretch,
+		Bump
+	};
+	Kind kind = Kind::Bump;
+	double base{}, gain{}, lift{};
+};
+
+struct Lift
+{
+	double gx{}, gy{}, ele{};
+	std::ptrdiff_t reach{};
+	Shape shape;
+};
+
+double highest_within(const std::vector<std::vector<double>> &grid, double gx, double gy,
+		double radius_m, double meters_per_cell)
+{
+	const auto height = grid.size(), width = grid.front().size();
+	const double r = radius_m / meters_per_cell;
+	const auto cx = static_cast<std::size_t>(std::llround(gx));
+	const auto cy = static_cast<std::size_t>(std::llround(gy));
+	double top = -std::numeric_limits<double>::infinity();
+	cells_within(cx, cy, radius_cells(radius_m, meters_per_cell), width, height,
+			[&](std::size_t x, std::size_t y) {
+				if (std::pow(static_cast<double>(x) - gx, 2.0) +
+										std::pow(static_cast<double>(y) - gy, 2.0) <=
+								r * r &&
+						std::isfinite(grid[y][x]))
+					top = std::max(top, grid[y][x]);
+			});
+	return top;
+}
+
+std::optional<double> ring_mean(const std::vector<std::vector<double>> &grid, double gx,
+		double gy, double radius_m, double meters_per_cell)
+{
+	const auto height = grid.size(), width = grid.front().size();
+	const double radius = radius_m / meters_per_cell;
+	double sum = 0.0;
+	std::size_t count = 0;
+	for (std::size_t side = 0; side < SIDES; ++side) {
+		const double angle = side * 2.0 * std::numbers::pi / SIDES;
+		const auto x =
+				static_cast<std::ptrdiff_t>(std::llround(gx + std::cos(angle) * radius));
+		const auto y =
+				static_cast<std::ptrdiff_t>(std::llround(gy + std::sin(angle) * radius));
+		if (x < 0 || y < 0 || static_cast<std::size_t>(x) >= width ||
+				static_cast<std::size_t>(y) >= height)
+			continue;
+		const double value =
+				grid[static_cast<std::size_t>(y)][static_cast<std::size_t>(x)];
+		if (std::isfinite(value)) {
+			sum += value;
+			++count;
+		}
+	}
+	return count ? std::optional<double>(sum / count) : std::nullopt;
+}
+
+std::size_t rising_sides(const std::vector<std::vector<double>> &grid, double gx,
+		double gy, double target, double meters_per_cell)
+{
+	const auto height = grid.size(), width = grid.front().size();
+	const double radius = RELIEF_M / meters_per_cell;
+	const double step = std::max(std::ceil(radius / RELIEF_SAMPLES), 1.0);
+	std::size_t count = 0;
+	for (std::size_t side = 0; side < SIDES; ++side) {
+		const double angle = side * 2.0 * std::numbers::pi / SIDES;
+		bool rises = false;
+		const auto samples = static_cast<std::size_t>(radius / step);
+		for (std::size_t i = 1; i <= samples; ++i) {
+			const auto x = static_cast<std::ptrdiff_t>(
+					std::llround(gx + std::cos(angle) * step * i));
+			const auto y = static_cast<std::ptrdiff_t>(
+					std::llround(gy + std::sin(angle) * step * i));
+			if (x >= 0 && y >= 0 && static_cast<std::size_t>(x) < width &&
+					static_cast<std::size_t>(y) < height &&
+					grid[static_cast<std::size_t>(y)][static_cast<std::size_t>(x)] >
+							target) {
+				rises = true;
+				break;
+			}
+		}
+		count += rises;
+	}
+	return count;
+}
+
+double stretch_fade(double distance)
+{
+	const auto fade = [](double d) {
+		const double ratio = d / STRETCH_RADIUS_M;
+		return std::exp(-ratio * ratio * ratio * ratio);
+	};
+	const double edge = fade(STRETCH_REACH_M);
+	return std::max((fade(distance) - edge) / (1.0 - edge), 0.0);
+}
+
+std::optional<Lift> plan_lift(const std::vector<std::vector<double>> &grid, double ele,
+		double gx, double gy, double meters_per_cell, std::optional<std::size_t> seam_pad)
+{
+	const auto height = grid.size(), width = grid.front().size();
+	const auto cx = static_cast<std::size_t>(std::llround(gx));
+	const auto cy = static_cast<std::size_t>(std::llround(gy));
+	const double at_node = grid[cy][cx];
+	std::size_t top_x = cx, top_y = cy;
+	double dem_top = -std::numeric_limits<double>::infinity();
+	cells_within(cx, cy, radius_cells(SEARCH_M, meters_per_cell), width, height,
+			[&](std::size_t x, std::size_t y) {
+				if (std::isfinite(grid[y][x]) && grid[y][x] > dem_top) {
+					dem_top = grid[y][x];
+					top_x = x;
+					top_y = y;
+				}
+			});
+	const double shortfall = ele - dem_top;
+	if (!std::isfinite(at_node) ||
+			!(shortfall >= MIN_DEFICIT_M && shortfall <= MAX_DEFICIT_M) ||
+			shortfall > local_relief(grid, cx, cy, meters_per_cell))
+		return std::nullopt;
+	const double level = std::max(shortfall * LEVEL_SHARE, MIN_DEFICIT_M);
+	const double near_top = highest_within(grid, gx, gy, NEARBY_M, meters_per_cell);
+	if (near_top >= ele - level ||
+			rising_sides(grid, gx, gy, dem_top + level, meters_per_cell) >= HOLLOW_SIDES)
+		return std::nullopt;
+	if (near_top > dem_top + SUMMIT_NOISE_M) {
+		double dome_top = -std::numeric_limits<double>::infinity();
+		cells_within(cx, cy, radius_cells(DOME_SEARCH_M, meters_per_cell), width, height,
+				[&](std::size_t x, std::size_t y) {
+					if (std::isfinite(grid[y][x]) && grid[y][x] > dome_top) {
+						dome_top = grid[y][x];
+						top_x = x;
+						top_y = y;
+					}
+				});
+		if (std::isfinite(dome_top))
+			dem_top = dome_top;
+	}
+	const double dome_shortfall = ele - dem_top;
+	const bool keeps_summit = near_top <= dem_top + SUMMIT_NOISE_M;
+	const double tx = static_cast<double>(top_x), ty = static_cast<double>(top_y);
+	const auto drop_at = [&](double radius) -> std::optional<double> {
+		const auto mean = ring_mean(grid, tx, ty, radius, meters_per_cell);
+		return mean ? std::optional<double>(dem_top - *mean) : std::nullopt;
+	};
+	if (keeps_summit) {
+		const auto plateau_drop = drop_at(PLATEAU_M);
+		if (plateau_drop && *plateau_drop < level)
+			return std::nullopt;
+	}
+	const auto stretch_drop = drop_at(STRETCH_RADIUS_M);
+	const bool stretch = keeps_summit && stretch_drop &&
+						 *stretch_drop >= STRETCH_DEPTH * dome_shortfall;
+	const double reach_m = stretch ? STRETCH_REACH_M : 3.0 * SIGMA_M;
+	const auto reach = radius_cells(reach_m, meters_per_cell);
+	if (seam_pad) {
+		const auto r = static_cast<std::size_t>(reach);
+		if (*seam_pad > std::numeric_limits<std::size_t>::max() - r)
+			return std::nullopt;
+		const auto margin = *seam_pad + r;
+		if (cx < margin || cy < margin || margin >= width - cx || margin >= height - cy)
+			return std::nullopt;
+	}
+	Shape shape;
+	if (stretch) {
+		const double d_top = std::hypot(tx - gx, ty - gy) * meters_per_cell;
+		shape = {Shape::Kind::Stretch, dem_top - STRETCH_DEPTH * dome_shortfall,
+				1.0 / (STRETCH_DEPTH * stretch_fade(d_top)), 0.0};
+	} else {
+		shape = {Shape::Kind::Bump, 0.0, 0.0, ele - at_node};
+	}
+	return Lift{gx, gy, ele, reach, shape};
+}
+
+void apply_lift(const Lift &lift, std::vector<std::vector<double>> &grid,
+		double meters_per_cell, const std::vector<Summit> &lower)
+{
+	const auto height = grid.size(), width = grid.front().size();
+	const auto cx = static_cast<std::size_t>(std::llround(lift.gx));
+	const auto cy = static_cast<std::size_t>(std::llround(lift.gy));
+	cells_within(cx, cy, lift.reach, width, height, [&](std::size_t x, std::size_t y) {
+		double &value = grid[y][x];
+		if (!std::isfinite(value))
+			return;
+		const auto distance = [&](double gx, double gy) {
+			return std::hypot(static_cast<double>(x) - gx, static_cast<double>(y) - gy) *
+				   meters_per_cell;
+		};
+		const double d = distance(lift.gx, lift.gy);
+		double cap = lift.ele;
+		for (const auto &summit : lower)
+			cap = std::min(cap, summit.ele + CONE_SLOPE * distance(summit.gx, summit.gy));
+		if (lift.shape.kind == Shape::Kind::Stretch) {
+			if (value > lift.shape.base)
+				value = std::max(
+						value, std::min(value + (value - lift.shape.base) *
+														lift.shape.gain * stretch_fade(d),
+									   cap));
+		} else {
+			const double room =
+					std::max(std::min(lift.ele - CONE_SLOPE * d, cap) - value, 0.0);
+			value += std::min(
+					lift.shape.lift * std::exp(-std::pow(d / SIGMA_M, 2.0)), room);
+		}
+	});
+}
+
 bool grid_cell(const geographic::LLBBox &bbox, std::size_t width, std::size_t height,
 		double lat, double lon, std::size_t &x, std::size_t &y)
 {
@@ -241,7 +469,10 @@ TerrainHints PeakSource::take() const
 		future = future_;
 	}
 	try {
-		auto hints = future.get();
+		auto hints = future.wait_for(std::chrono::seconds(0)) == std::future_status::ready
+							 ? future.get()
+							 : progress::while_waiting("Waiting for map data...",
+									   [&] { return future.get(); });
 		{
 			std::lock_guard lock(take_mutex_);
 			overture_allowed_ = hints.overture_follows;
@@ -264,7 +495,10 @@ std::vector<TallModel> PeakSource::take_overture() const
 		future = overture_future_;
 	}
 	try {
-		return future.get().tall_structures;
+		if (future.wait_for(std::chrono::seconds(0)) == std::future_status::ready)
+			return future.get().tall_structures;
+		return progress::while_waiting("Waiting for Overture buildings...",
+				[&] { return future.get().tall_structures; });
 	} catch (const std::future_error &) {
 		return {};
 	}
@@ -1276,53 +1510,49 @@ void raise_peaks(std::vector<std::vector<double>> &grid, const geographic::LLBBo
 	if (width < 2 || height < 2 || !std::isfinite(meters_per_cell) ||
 			meters_per_cell <= 0.0)
 		return;
+	const double min_lat = bbox.min().lat(), max_lat = bbox.max().lat();
+	const double min_lon = bbox.min().lng(), max_lon = bbox.max().lng();
+	if (!(max_lat > min_lat) || !(max_lon > min_lon))
+		return;
+	std::vector<Summit> summits;
 	for (const auto &peak : peaks) {
-		// `RangeInclusive::contains` in the Rust implementation rejects NaN.
-		// Ordered comparisons alone do not, so reject non-finite public hints
-		// here before they can propagate NaNs through the elevation grid.
-		if (!std::isfinite(peak.ele_m))
+		if (!std::isfinite(peak.ele_m) || peak.lat < min_lat || peak.lat > max_lat ||
+				peak.lon < min_lon || peak.lon > max_lon)
 			continue;
-		std::size_t cx, cy;
-		if (!grid_cell(bbox, width, height, peak.lat, peak.lon, cx, cy))
+		summits.push_back({(peak.lon - min_lon) / (max_lon - min_lon) * (width - 1),
+				(max_lat - peak.lat) / (max_lat - min_lat) * (height - 1), peak.ele_m});
+	}
+	std::vector<Summit> tagged;
+	for (const auto &summit : summits)
+		if (summit.ele + SUMMIT_NOISE_M >=
+				highest_within(grid, summit.gx, summit.gy, SEARCH_M, meters_per_cell))
+			tagged.push_back(summit);
+	std::vector<Lift> lifts;
+	for (const auto &summit : summits)
+		if (auto lift = plan_lift(
+					grid, summit.ele, summit.gx, summit.gy, meters_per_cell, seam_pad))
+			lifts.push_back(std::move(*lift));
+	std::sort(lifts.begin(), lifts.end(), [](const Lift &a, const Lift &b) {
+		if (a.ele != b.ele)
+			return a.ele > b.ele;
+		if (a.gx != b.gx)
+			return a.gx < b.gx;
+		return a.gy < b.gy;
+	});
+	for (const auto &lift : lifts) {
+		if (highest_within(grid, lift.gx, lift.gy, SEARCH_M, meters_per_cell) >=
+				lift.ele - MIN_DEFICIT_M)
 			continue;
-		const auto reach = radius_cells(3.0 * SIGMA_M, meters_per_cell);
-		if (seam_pad) {
-			const auto reach_size = static_cast<std::size_t>(reach);
-			if (*seam_pad > std::numeric_limits<std::size_t>::max() - reach_size)
-				continue;
-			const auto margin = *seam_pad + reach_size;
-			if (cx < margin || cy < margin || margin >= width - cx ||
-					margin >= height - cy)
-				continue;
+		const double reach_m = static_cast<double>(lift.reach) * meters_per_cell;
+		std::vector<Summit> lower;
+		for (const auto &summit : tagged) {
+			const double distance = std::hypot(summit.gx - lift.gx, summit.gy - lift.gy) *
+									meters_per_cell;
+			if (summit.ele < lift.ele &&
+					distance < reach_m + (lift.ele - summit.ele) / CONE_SLOPE)
+				lower.push_back(summit);
 		}
-		const double gx = (peak.lon - bbox.min().lng()) /
-						  (bbox.max().lng() - bbox.min().lng()) * (width - 1);
-		const double gy = (bbox.max().lat() - peak.lat) /
-						  (bbox.max().lat() - bbox.min().lat()) * (height - 1);
-		const double at_node = grid[cy][cx];
-		if (!std::isfinite(at_node))
-			continue;
-		const auto search = radius_cells(SEARCH_M, meters_per_cell);
-		double dem_top = std::numeric_limits<double>::lowest();
-		cells_within(cx, cy, search, width, height, [&](std::size_t x, std::size_t y) {
-			if (std::isfinite(grid[y][x]))
-				dem_top = std::max(dem_top, grid[y][x]);
-		});
-		const double shortfall = peak.ele_m - dem_top;
-		if (!(shortfall >= MIN_DEFICIT_M && shortfall <= MAX_DEFICIT_M) ||
-				shortfall > local_relief(grid, cx, cy, meters_per_cell))
-			continue;
-		const double lift = peak.ele_m - at_node;
-		cells_within(cx, cy, reach, width, height, [&](std::size_t x, std::size_t y) {
-			double &v = grid[y][x];
-			if (!std::isfinite(v))
-				return;
-			const double dx = static_cast<double>(x) - gx;
-			const double dy = static_cast<double>(y) - gy;
-			const double d = std::hypot(dx, dy) * meters_per_cell;
-			const double room = std::max(peak.ele_m - CONE_SLOPE * d - v, 0.0);
-			v += std::min(lift * std::exp(-std::pow(d / SIGMA_M, 2.0)), room);
-		});
+		apply_lift(lift, grid, meters_per_cell, lower);
 	}
 }
 

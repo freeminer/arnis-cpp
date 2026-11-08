@@ -356,6 +356,35 @@ bool place_structure(world_editor::WorldEditor &editor,
 	}
 	return placed;
 }
+
+std::vector<std::pair<int, int>> structure_base(const StructureSchematic &structure,
+		int base_x, int base_z, unsigned rotation, int storey)
+{
+	const unsigned k = rotation & 3u;
+	const auto rotate_cell = [&](int x, int z) {
+		switch (k) {
+		case 1:
+			return std::pair{structure.length - 1 - z, x};
+		case 2:
+			return std::pair{structure.width - 1 - x, structure.length - 1 - z};
+		case 3:
+			return std::pair{z, structure.width - 1 - x};
+		default:
+			return std::pair{x, z};
+		}
+	};
+	const auto [anchor_x, anchor_z] = rotate_cell(structure.anchor_x, structure.anchor_z);
+	std::vector<std::pair<int, int>> columns;
+	for (const auto &voxel : structure.voxels) {
+		if (voxel.y >= storey || voxel.resolved_block == block_definitions::AIR)
+			continue;
+		const auto [rx, rz] = rotate_cell(voxel.x, voxel.z);
+		columns.emplace_back(base_x + rx - anchor_x, base_z + rz - anchor_z);
+	}
+	std::sort(columns.begin(), columns.end());
+	columns.erase(std::unique(columns.begin(), columns.end()), columns.end());
+	return columns;
+}
 StructureSchematic StructureSchematic::centered() const &
 {
 	auto out = *this;

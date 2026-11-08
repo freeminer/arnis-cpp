@@ -9,6 +9,7 @@
 #include "fm_ecoregion_cache.h"
 #include "element_processing/signage.h"
 #include "element_processing/advtrains.h"
+#include "overture.h"
 #include "world_style.h"
 #include <sys/types.h>
 #include <atomic>
@@ -1590,13 +1591,6 @@ bool generate_world(WorldEditor &editor,
 	// but direct library callers may pass one derived from the unfiltered input.
 	// Rebuild only in that case so removed airport buildings do not continue to
 	// suppress trees, ground decoration, or other footprint-aware features.
-	std::optional<BuildingFootprintBitmap> filtered_building_footprints;
-	if (dropped_aircraft_buildings > 0)
-		filtered_building_footprints.emplace(
-				flood_fill_cache.collect_building_footprints(elements, xzbbox));
-	const BuildingFootprintBitmap &building_footprints =
-			filtered_building_footprints ? *filtered_building_footprints
-										 : generation_footprints;
 	// Persist the elevation mapping before terrain or structures are written so
 	// a later failed generation cannot leave chunks using an unrecorded mapping.
 	if (args.one_world_run && editor.ground) {
@@ -1918,6 +1912,7 @@ bool generate_world(WorldEditor &editor,
 			editor.ground->set_canopy_data(std::move(*canopy), final_width, final_height);
 		}
 	}
+	std::size_t dropped_water_footprints = 0;
 	const int mapped_tree_crown_radius = crown_probe_blocks(args.scale);
 	mapped_trunks.measure_typical_height([&editor, mapped_tree_crown_radius](int x,
 												 int z) -> std::optional<std::uint8_t> {
@@ -1931,6 +1926,17 @@ bool generate_world(WorldEditor &editor,
 		// water snapping and bridge repair update the authoritative DEM, rather
 		// than a rounded land-cover-sized sample that is discarded afterwards.
 		editor.ground->apply_osm_water_override(land_cover_elements, xzbbox);
+		// Match Rust's order: drop water/bridge-shadow detections after OSM water
+		// is carved, but before pier and shoreline overrides turn supported cells
+		// into land.
+		if (!skip_osm) {
+			dropped_water_footprints = overture::drop_footprints_in_water(
+					ordered_source_elements, *editor.ground, xzbbox, args.scale);
+			if (dropped_water_footprints > 0) {
+				mode_filtered_elements = ordered_source_elements;
+				mode_filter::retain_for_mode(mode_filtered_elements, args.mode);
+			}
+		}
 		editor.ground->apply_osm_land_override(land_cover_elements, xzbbox, args.scale);
 		if (args.debug)
 			editor.ground->save_land_cover_debug_image("landcover_debug_post_osm_water");
@@ -1947,6 +1953,13 @@ bool generate_world(WorldEditor &editor,
 			editor.ground->save_land_cover_debug_image(
 					"landcover_debug_post_bridge_repair");
 	}
+	std::optional<BuildingFootprintBitmap> filtered_building_footprints;
+	if (dropped_aircraft_buildings > 0 || dropped_water_footprints > 0)
+		filtered_building_footprints.emplace(
+				flood_fill_cache.collect_building_footprints(elements, xzbbox));
+	const BuildingFootprintBitmap &building_footprints =
+			filtered_building_footprints ? *filtered_building_footprints
+										 : generation_footprints;
 	// Rust materializes the lazy one-bit-per-world-column ESA water mask after
 	// ground/shoreline preparation and before terrain workers start. This also
 	// keeps the call harmless when a backend supplied no land-cover data.

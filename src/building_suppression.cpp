@@ -3,6 +3,7 @@
 #include "data_processing.h"
 #include "element_processing/attractions.h"
 #include "element_processing/buildings.h"
+#include "mapillary/geometry.h"
 #include "osm_parser.h"
 
 #include <algorithm>
@@ -27,6 +28,9 @@ namespace
 {
 constexpr double GRID_CELL_DEGREES = 0.0005;
 constexpr double MIN_PART_COVERAGE = 0.5;
+constexpr double COVERAGE_ROW_M = 2.0;
+constexpr std::size_t COVERAGE_ROWS = 48;
+constexpr std::size_t MAX_COVERAGE_ROWS = 2048;
 constexpr std::uint64_t RELATION_SEED_BIT = std::uint64_t{1} << 63;
 constexpr double PI = 3.14159265358979323846;
 
@@ -105,6 +109,118 @@ bool point_in_ring(double lat, double lon, const std::vector<GeoPoint> &ring)
 		j = i;
 	}
 	return inside;
+}
+
+struct GeoBounds
+{
+	double south = std::numeric_limits<double>::infinity();
+	double west = std::numeric_limits<double>::infinity();
+	double north = -std::numeric_limits<double>::infinity();
+	double east = -std::numeric_limits<double>::infinity();
+};
+
+GeoBounds bounds_of(const std::vector<std::vector<GeoPoint>> &rings)
+{
+	GeoBounds bounds;
+	for (const auto &ring : rings)
+		for (const auto &point : ring) {
+			bounds.south = std::min(bounds.south, point.lat);
+			bounds.west = std::min(bounds.west, point.lon);
+			bounds.north = std::max(bounds.north, point.lat);
+			bounds.east = std::max(bounds.east, point.lon);
+		}
+	return bounds;
+}
+
+using Span = std::pair<double, double>;
+
+void row_spans(const std::vector<GeoPoint> &ring, double latitude,
+		std::vector<double> &crossings, std::vector<Span> &out)
+{
+	crossings.clear();
+	if (ring.empty())
+		return;
+	GeoPoint previous = ring.back();
+	for (const auto &point : ring) {
+		if ((point.lat > latitude) != (previous.lat > latitude))
+			crossings.push_back((previous.lon - point.lon) * (latitude - point.lat) /
+										(previous.lat - point.lat) +
+								point.lon);
+		previous = point;
+	}
+	std::sort(crossings.begin(), crossings.end());
+	for (std::size_t i = 0; i + 1 < crossings.size(); i += 2)
+		out.emplace_back(crossings[i], crossings[i + 1]);
+}
+
+void merge_spans(std::vector<Span> &spans)
+{
+	std::sort(spans.begin(), spans.end());
+	std::size_t kept = 0;
+	for (const auto span : spans) {
+		if (kept && span.first <= spans[kept - 1].second)
+			spans[kept - 1].second = std::max(spans[kept - 1].second, span.second);
+		else
+			spans[kept++] = span;
+	}
+	spans.resize(kept);
+}
+
+double span_overlap(const std::vector<Span> &a, const std::vector<Span> &b)
+{
+	std::size_t i = 0, j = 0;
+	double shared = 0;
+	while (i < a.size() && j < b.size()) {
+		shared += std::max(0.0,
+				std::min(a[i].second, b[j].second) - std::max(a[i].first, b[j].first));
+		if (a[i].second < b[j].second)
+			++i;
+		else
+			++j;
+	}
+	return shared;
+}
+
+// Measure geometric coverage rather than adding gross part areas: stacked floors
+// and overlapping parts must not make sparse outlines disappear.
+bool parts_cover(const std::vector<std::vector<GeoPoint>> &outline,
+		const std::vector<std::vector<GeoPoint>> &parts)
+{
+	double outline_area = 0, part_area = 0;
+	for (const auto &ring : outline)
+		outline_area += ring_area(ring);
+	for (const auto &ring : parts)
+		part_area += ring_area(ring);
+	if (!(outline_area > 0) || part_area < MIN_PART_COVERAGE * outline_area)
+		return false;
+	const auto bounds = bounds_of(outline);
+	if (!(bounds.south < bounds.north && bounds.west < bounds.east))
+		return false;
+	const auto rows = std::clamp<std::size_t>(
+			static_cast<std::size_t>(std::ceil(
+					(bounds.north - bounds.south) * 111'320.0 / COVERAGE_ROW_M)),
+			COVERAGE_ROWS, MAX_COVERAGE_ROWS);
+	double total = 0, covered = 0;
+	std::vector<double> crossings;
+	std::vector<Span> ground, over;
+	for (std::size_t row = 0; row < rows; ++row) {
+		const double latitude =
+				bounds.south + (row + 0.5) * (bounds.north - bounds.south) / rows;
+		ground.clear();
+		for (const auto &ring : outline)
+			row_spans(ring, latitude, crossings, ground);
+		merge_spans(ground);
+		if (ground.empty())
+			continue;
+		over.clear();
+		for (const auto &part : parts)
+			row_spans(part, latitude, crossings, over);
+		merge_spans(over);
+		for (const auto &span : ground)
+			total += span.second - span.first;
+		covered += span_overlap(ground, over);
+	}
+	return total > 0 && covered / total >= MIN_PART_COVERAGE;
 }
 
 using GridCell = std::pair<std::int64_t, std::int64_t>;
@@ -263,6 +379,35 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			building_relations.push_back(&element.as_relation());
 		}
 	}
+	std::unordered_map<std::uint64_t, const tags_t *> multipolygon_owners;
+	for (const auto &element : elements) {
+		if (!element.is_relation())
+			continue;
+		const auto &owner = element.as_relation();
+		if (!tag_is(owner.tags, "type", "multipolygon") ||
+				!owner.tags.contains("building"))
+			continue;
+		if (!owner.source_members.empty()) {
+			for (const auto &member : owner.source_members)
+				if (member.type == "way" &&
+						(normalized_role(member.role) == "outer" ||
+								normalized_role(member.role) == "outline"))
+					multipolygon_owners.try_emplace(member.id, &owner.tags);
+		} else {
+			for (const auto &member : owner.members)
+				if (member.role == ProcessedMemberRole::Outer)
+					multipolygon_owners.try_emplace(member.way->id, &owner.tags);
+		}
+	}
+	std::unordered_set<std::uint64_t> tagged_parts;
+	std::unordered_map<std::uint64_t, double> way_heights;
+	for (const auto *way : ordered_ways) {
+		if (is_building_part(way->tags))
+			tagged_parts.insert(way->id);
+		if (const auto height = way->tags.find("height"); height != way->tags.end())
+			if (const auto metres = mapillary::geodesy::parse_length_m(height->second))
+				way_heights.emplace(way->id, *metres);
+	}
 
 	// Building relation members are prepared in geographic space. The relation
 	// owns a stable seed; packed facade/year/housing metadata do not change it.
@@ -286,7 +431,32 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			if (member.type == "relation" && normalized_role(member.role) == "part")
 				listed_relation_parts.insert(member.id);
 	for (const auto *relation : building_relations) {
-		const auto hint = [&] {
+		const tags_t *owner_tags = nullptr;
+		const auto find_owner = [&](std::uint64_t id) {
+			if (const auto it = multipolygon_owners.find(id);
+					it != multipolygon_owners.end())
+				owner_tags = it->second;
+		};
+		if (!relation->source_members.empty()) {
+			for (const auto &member : relation->source_members) {
+				if (member.type == "way" &&
+						(normalized_role(member.role) == "outer" ||
+								normalized_role(member.role) == "outline")) {
+					find_owner(member.id);
+					if (owner_tags)
+						break;
+				}
+			}
+		} else {
+			for (const auto &member : relation->members) {
+				if (member.role == ProcessedMemberRole::Outer) {
+					find_owner(member.way->id);
+					if (owner_tags)
+						break;
+				}
+			}
+		}
+		auto hint = [&] {
 			auto value = osm_parser::building_style_hint(relation->tags);
 			if (value == osm_parser::StyleHint::None) {
 				if (!relation->source_members.empty()) {
@@ -310,7 +480,10 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			}
 			return value;
 		}();
-		double part_area = 0;
+		if (hint == osm_parser::StyleHint::None && owner_tags)
+			hint = osm_parser::building_style_hint(*owner_tags);
+		std::vector<std::vector<GeoPoint>> part_rings;
+		std::optional<double> tallest_part;
 		bool has_part = false;
 		bool has_relation_part = false;
 		std::vector<ProcessedMemberRef> fallback_refs;
@@ -342,6 +515,13 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 					break;
 			}
 		}
+		if (owner_tags) {
+			if (!relation_year)
+				relation_year = osm_parser::building_year_for_parts(*owner_tags);
+			housing = housing || osm_parser::is_housing_type(*owner_tags);
+		}
+		const auto group_seed = osm_parser::seed_with_metadata(
+				RELATION_SEED_BIT | relation->id, hint, relation_year, housing);
 		for (const auto &member : source_refs) {
 			if (normalized_role(member.role) != "part" ||
 					(member.type != "way" && member.type != "relation"))
@@ -353,12 +533,16 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 					out.housing_relation_parts.insert(member.id);
 				continue;
 			}
-			out.part_groups[member.id] = osm_parser::seed_with_metadata(
-					RELATION_SEED_BIT | relation->id, hint, relation_year, housing);
+			out.part_groups[member.id] = group_seed;
 			const auto way = ways.find(member.id);
-			if (way != ways.end() &&
-					osm_parser::part_covers_ground(way->second->tags))
-				part_area += ring_area(geo_ring(*way->second));
+			if (way != ways.end()) {
+				if (const auto height = way_heights.find(member.id);
+						height != way_heights.end())
+					tallest_part = tallest_part ? std::max(*tallest_part, height->second)
+												: height->second;
+				if (osm_parser::part_covers_ground(way->second->tags))
+					part_rings.push_back(geo_ring(*way->second));
+			}
 		}
 		if (!has_part)
 			continue;
@@ -370,8 +554,20 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			if (member.type == "way" && !has_relation_part) {
 				const auto way = ways.find(member.id);
 				if (way != ways.end()) {
-					const double area = ring_area(geo_ring(*way->second));
-					if (area > 0 && part_area / area < MIN_PART_COVERAGE)
+					if (tagged_parts.contains(member.id)) {
+						const auto outline_height = way_heights.find(member.id);
+						const bool podium = outline_height == way_heights.end() ||
+											!tallest_part ||
+											outline_height->second < *tallest_part;
+						if (podium) {
+							out.part_groups[member.id] = group_seed;
+							continue;
+						}
+					}
+					const std::vector<std::vector<GeoPoint>> outline{
+							geo_ring(*way->second)};
+					if (ring_area(outline.front()) > 0 &&
+							!parts_cover(outline, part_rings))
 						continue;
 				}
 			}
@@ -423,11 +619,10 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			for (auto lon = lon0; lon <= lon1; ++lon)
 				grid[{lat, lon}].push_back(i);
 	}
-	std::vector<double> covered(outlines.size(), 0.0);
+	std::vector<std::vector<std::vector<GeoPoint>>> covered(outlines.size());
 	for (const auto *part : parts) {
 		auto ring = geo_ring(*part);
-		const auto area = ring_area(ring);
-		if (area <= 0 || ring.empty())
+		if (ring_area(ring) <= 0 || ring.empty())
 			continue;
 		double lat = 0, lon = 0;
 		for (const auto &point : ring) {
@@ -444,7 +639,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			if (!point_in_ring(lat, lon, outlines[index].ring))
 				continue;
 			if (osm_parser::part_covers_ground(part->tags))
-				covered[index] += area;
+				covered[index].push_back(ring);
 			if (!best || std::pair{outlines[index].area, outlines[index].way->id} <
 								 std::pair{outlines[*best].area, outlines[*best].way->id})
 				best = index;
@@ -463,7 +658,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		}
 	}
 	for (std::size_t i = 0; i < outlines.size(); ++i)
-		if (covered[i] / outlines[i].area >= MIN_PART_COVERAGE)
+		if (parts_cover({outlines[i].ring}, covered[i]))
 			out.outline_suppression.emplace("way", outlines[i].way->id);
 	// Relations whose boundaries are split over member ways need stitched rings. Also
 	// include closed building:part ways: Rust's spatial pass treats both sources alike,
@@ -554,7 +749,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 			for (auto lon = lon0; lon <= lon1; ++lon)
 				relation_grid[{lat, lon}].push_back(i);
 	}
-	std::vector<double> relation_coverage(relation_outlines.size(), 0.0);
+	std::vector<std::vector<std::vector<GeoPoint>>> relation_coverage(
+			relation_outlines.size());
 	for (const auto &part : relation_parts) {
 		const auto candidates =
 				relation_grid.find(grid_cell(part.center_lat, part.center_lon));
@@ -575,7 +771,8 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 									}))
 				continue;
 			if (part.ground)
-				relation_coverage[i] += part.area;
+				relation_coverage[i].insert(
+						relation_coverage[i].end(), part.rings.begin(), part.rings.end());
 			if (!best || std::pair{outline.area, outline.id} <
 								 std::pair{relation_outlines[*best].area,
 										 relation_outlines[*best].id})
@@ -594,7 +791,7 @@ PreparedBuildingData prepare_building_data(const std::vector<ProcessedElement> &
 		}
 	}
 	for (std::size_t i = 0; i < relation_outlines.size(); ++i)
-		if (relation_coverage[i] / relation_outlines[i].area >= MIN_PART_COVERAGE)
+		if (parts_cover(relation_outlines[i].rings, relation_coverage[i]))
 			out.suppressed_relations.insert(relation_outlines[i].id);
 
 	// Rust's osm_parser::suppress_ride_parts runs before ways are clipped into

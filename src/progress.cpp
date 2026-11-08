@@ -8,6 +8,7 @@
 #include <iostream>
 #include <limits>
 #include <mutex>
+#include <string>
 #include <utility>
 
 namespace arnis::progress
@@ -19,6 +20,7 @@ std::atomic<std::uint32_t> suppress_count{0};
 std::mutex handler_mutex;
 std::recursive_mutex emit_mutex;
 EventHandler event_handler;
+thread_local std::string last_status;
 
 EventHandler current_handler()
 {
@@ -112,6 +114,9 @@ double clamp_progress(double progress)
 
 void emit_gui_progress_update(double progress, const std::string &message)
 {
+	if (!message.empty() && message.rfind("Error!", 0) != 0 &&
+			message.rfind("Done!", 0) != 0)
+		last_status = message;
 	if (emits_suppressed(progress, message) || !has_event_handler())
 		return;
 	Event event;
@@ -124,6 +129,9 @@ void emit_gui_progress_update(double progress, const std::string &message)
 void emit_gui_progress_update_ex(
 		double progress, const std::string &message, bool streaming)
 {
+	if (!message.empty() && message.rfind("Error!", 0) != 0 &&
+			message.rfind("Done!", 0) != 0)
+		last_status = message;
 	if (emits_suppressed(progress, message) || !has_event_handler())
 		return;
 	Event event;
@@ -161,5 +169,22 @@ void emit_show_in_folder(const std::string &path)
 	event.kind = Event::Kind::ShowInFolder;
 	event.message = path;
 	emit(std::move(event));
+}
+
+WaitingStatus::WaitingStatus(const std::string &message) : previous_(last_status)
+{
+	if (previous_.empty())
+		return;
+	active_ = true;
+	emit_gui_progress_update(MESSAGE_ONLY, message);
+	last_status = previous_;
+}
+
+WaitingStatus::~WaitingStatus()
+{
+	if (!active_)
+		return;
+	emit_gui_progress_update(MESSAGE_ONLY, previous_);
+	last_status = previous_;
 }
 } // namespace arnis::progress

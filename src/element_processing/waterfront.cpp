@@ -219,7 +219,7 @@ std::vector<FootCell> footprint(const ProcessedElement &element,
 	return area_footprint(element, cache, args);
 }
 
-void drive_pile(
+void drive_pile_impl(
 		world_editor::WorldEditor &editor, int x, int z, int top, const Block &block)
 {
 	const int ground = editor.get_ground_level(x, z);
@@ -345,6 +345,14 @@ Block rubble(int x, int z)
 	}
 }
 } // namespace
+
+void drive_pile(
+		world_editor::WorldEditor &editor, int x, int z, int top, const Block &block)
+{
+	// Share the same pile placement policy between mapped waterfronts and
+	// structures whose schematic footing reaches through water.
+	drive_pile_impl(editor, x, z, top, block);
+}
 
 void generate_pier(world_editor::WorldEditor &editor, const ProcessedElement &element,
 		const FloodFillCache &cache, const Args &args)

@@ -7,8 +7,13 @@
 #include "overture/fm_range_fetch.h"
 #include "retrieve_data.h"
 #include "element_processing/buildings.h"
+#include "bresenham.h"
+#include "floodfill_cache.h"
+#include "land_cover/osm_land_override.h"
+#include "mapillary/geometry.h"
 #include "net.h"
 #include "../../http.h"
+#include "../../arnis_ground.h"
 
 #if defined(USE_ARROW) && USE_ARROW
 #include <arrow/api.h>
@@ -2073,6 +2078,136 @@ std::optional<OvertureData> fetch_overture_parquet_candidates(
 	return std::nullopt;
 }
 } // namespace
+
+std::size_t drop_footprints_in_water(std::vector<ProcessedElement> &elements,
+		const arnis::Ground &ground, const ::XZBBox &bbox, double scale)
+{
+	const auto is_overture = [](const ProcessedElement &element) {
+		const auto *way =
+				std::get_if<ProcessedWay>(static_cast<const variant_t *>(&element));
+		return way && (way->id & OVERTURE_ID_HIGH_BIT) != 0;
+	};
+	if (!ground.has_land_cover() ||
+			std::none_of(elements.begin(), elements.end(), is_overture))
+		return 0;
+
+	const auto wet = [&ground, &bbox](int x, int z) {
+		return ground.cover_class({x - bbox.min_x(), z - bbox.min_z()}) ==
+			   land_cover::LC_WATER;
+	};
+	const int shore = std::max(1,
+			static_cast<int>(std::ceil(land_cover::SHORE_BAND_M * std::max(0.0, scale))));
+	const std::array<std::pair<int, int>, 8> around{
+			{{shore, 0}, {-shore, 0}, {0, shore}, {0, -shore}, {shore, shore},
+					{shore, -shore}, {-shore, shore}, {-shore, -shore}}};
+
+	std::vector<std::vector<std::pair<double, double>>> deck_areas;
+	std::unordered_set<std::uint64_t> deck_cells;
+	const auto add_area = [&deck_areas](const std::vector<ProcessedNode> &nodes) {
+		if (nodes.size() < 4 || nodes.front().x != nodes.back().x ||
+				nodes.front().z != nodes.back().z)
+			return false;
+		auto &ring = deck_areas.emplace_back();
+		ring.reserve(nodes.size());
+		for (const auto &node : nodes)
+			ring.emplace_back(node.z, node.x);
+		return true;
+	};
+	const auto add_line = [&deck_cells](const std::vector<ProcessedNode> &nodes,
+								  int half_width) {
+		for (std::size_t i = 1; i < nodes.size(); ++i) {
+			const auto &a = nodes[i - 1];
+			const auto &b = nodes[i];
+			for (const auto &[x, _y, z] :
+					crate::bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z))
+				for (int dz = -half_width; dz <= half_width; ++dz)
+					for (int dx = -half_width; dx <= half_width; ++dx) {
+						const auto ux = static_cast<std::uint32_t>(x + dx);
+						const auto uz = static_cast<std::uint32_t>(z + dz);
+						deck_cells.insert((std::uint64_t{ux} << 32) | uz);
+					}
+		}
+	};
+	for (const auto &element : elements) {
+		if (const auto *way = std::get_if<ProcessedWay>(
+					static_cast<const variant_t *>(&element))) {
+			if ((way->id & OVERTURE_ID_HIGH_BIT) != 0 ||
+					!land_cover::is_over_water_structure(way->tags))
+				continue;
+			const bool area = way->tags.get("area") != "no" && add_area(way->nodes);
+			if (!area) {
+				const auto tagged = way->tags.get("width");
+				const auto parsed = tagged.empty()
+											? std::nullopt
+											: mapillary::geodesy::parse_length_m(tagged);
+				const int tagged_half =
+						parsed && *parsed >= 0.0 && *parsed < 200.0
+								? static_cast<int>(std::ceil(*parsed * scale / 2.0))
+								: 0;
+				const int half = std::max(tagged_half,
+										 land_cover::over_water_half_width(*way, scale)
+												 .value_or(2)) +
+								 1;
+				add_line(way->nodes, half);
+			}
+		} else if (const auto *relation = std::get_if<ProcessedRelation>(
+						   static_cast<const variant_t *>(&element));
+				   relation && land_cover::is_over_water_structure(relation->tags)) {
+			for (const auto &member : relation->members)
+				if (member.role == ProcessedMemberRole::Outer)
+					add_area(member.way->nodes);
+		}
+	}
+	const auto supported = [&deck_areas, &deck_cells](int x, int z) {
+		const auto ux = static_cast<std::uint32_t>(x);
+		const auto uz = static_cast<std::uint32_t>(z);
+		if (deck_cells.contains((std::uint64_t{ux} << 32) | uz))
+			return true;
+		for (const auto &ring : deck_areas) {
+			bool inside = false;
+			for (std::size_t i = 0, j = ring.size() - 1; i < ring.size(); j = i++) {
+				const auto [zi, xi] = ring[i];
+				const auto [zj, xj] = ring[j];
+				if (((zi > z) != (zj > z)) && x < (xj - xi) * (z - zi) / (zj - zi) + xi)
+					inside = !inside;
+			}
+			if (inside)
+				return true;
+		}
+		return false;
+	};
+
+	const auto before = elements.size();
+	std::erase_if(elements, [&](const ProcessedElement &element) {
+		const auto *way =
+				std::get_if<ProcessedWay>(static_cast<const variant_t *>(&element));
+		if (!way || !is_overture(element) || way->nodes.empty())
+			return false;
+		std::size_t corner_count = way->nodes.size();
+		if (corner_count >= 2 && way->nodes.front().x == way->nodes.back().x &&
+				way->nodes.front().z == way->nodes.back().z)
+			--corner_count;
+		if (!corner_count)
+			return false;
+		std::int64_t sx = 0, sz = 0;
+		std::size_t wet_corners = 0;
+		for (std::size_t i = 0; i < corner_count; ++i) {
+			const auto &node = way->nodes[i];
+			sx += node.x;
+			sz += node.z;
+			wet_corners += wet(node.x, node.z);
+		}
+		const int cx = static_cast<int>(sx / static_cast<std::int64_t>(corner_count));
+		const int cz = static_cast<int>(sz / static_cast<std::int64_t>(corner_count));
+		const bool offshore =
+				wet(cx, cz) && wet_corners * 2 > corner_count &&
+				std::all_of(around.begin(), around.end(), [&](const auto &offset) {
+					return wet(cx + offset.first, cz + offset.second);
+				});
+		return offshore && !supported(cx, cz);
+	});
+	return before - elements.size();
+}
 
 std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::path &path,
 		const geographic::LLBBox &bbox, std::size_t maximum)

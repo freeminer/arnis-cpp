@@ -3,6 +3,7 @@
 #include <functional>
 #include <optional>
 #include <string>
+#include <utility>
 
 namespace arnis::progress
 {
@@ -42,4 +43,24 @@ void emit_gui_error(const std::string &message);
 void emit_world_name_update(const std::string &name);
 void emit_map_preview_ready();
 void emit_show_in_folder(const std::string &path);
+
+class WaitingStatus
+{
+public:
+	explicit WaitingStatus(const std::string &message);
+	~WaitingStatus();
+	WaitingStatus(const WaitingStatus &) = delete;
+	WaitingStatus &operator=(const WaitingStatus &) = delete;
+
+private:
+	std::string previous_;
+	bool active_{};
+};
+
+template <typename F>
+decltype(auto) while_waiting(const std::string &message, F &&wait)
+{
+	WaitingStatus status(message);
+	return std::forward<F>(wait)();
+}
 } // namespace arnis::progress

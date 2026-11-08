@@ -11,6 +11,9 @@
 namespace arnis::waterfront
 {
 
+void drive_pile(
+		world_editor::WorldEditor &editor, int x, int z, int top, const Block &block);
+
 void generate_pier(world_editor::WorldEditor &editor, const ProcessedElement &element,
 		const FloodFillCache &cache, const Args &args);
 void generate_breakwater(world_editor::WorldEditor &editor,

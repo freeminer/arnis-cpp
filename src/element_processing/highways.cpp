@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <functional>
 #include <limits>
+#include <numeric>
 #include <string_view>
 #include <unordered_set>
 #include <utility>
@@ -233,13 +234,16 @@ std::vector<int> road_profile(const crate::world_editor::WorldEditor &editor,
 	}
 	std::vector<double> smooth(n);
 	const auto half = ROAD_SMOOTHING.size() / 2;
+	const double smoothing_weight =
+			std::accumulate(ROAD_SMOOTHING.begin(), ROAD_SMOOTHING.end(), 0.0);
 	for (std::size_t i = 0; i < n; ++i)
 		for (std::size_t k = 0; k < ROAD_SMOOTHING.size(); ++k) {
 			const auto sample = std::clamp<std::ptrdiff_t>(
 					static_cast<std::ptrdiff_t>(i) + static_cast<std::ptrdiff_t>(k) -
 							static_cast<std::ptrdiff_t>(half),
 					0, static_cast<std::ptrdiff_t>(n - 1));
-			smooth[i] += ROAD_SMOOTHING[k] * across[static_cast<std::size_t>(sample)];
+			smooth[i] += ROAD_SMOOTHING[k] * across[static_cast<std::size_t>(sample)] /
+						 smoothing_weight;
 		}
 	std::vector<std::optional<int>> pins(n);
 	for (std::size_t i = 0; i < way.nodes.size(); ++i)
