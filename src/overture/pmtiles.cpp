@@ -1,10 +1,12 @@
 #include "pmtiles.h"
 #include <algorithm>
 #include <array>
+#include <climits>
 #include <cmath>
 #include <limits>
 #include <zlib.h>
 #include <zstd.h>
+
 namespace arnis::overture::pmtiles
 {
 namespace
