@@ -2077,6 +2077,7 @@ std::optional<OvertureData> fetch_overture_parquet_candidates(
 	return std::nullopt;
 }
 } // namespace
+#endif // USE_ARROW
 
 std::size_t drop_footprints_in_water(std::vector<ProcessedElement> &elements,
 		double scale, const std::function<bool(int, int)> &is_water)
@@ -2204,6 +2205,7 @@ std::size_t drop_footprints_in_water(std::vector<ProcessedElement> &elements,
 	return before - elements.size();
 }
 
+#if defined(USE_ARROW) && USE_ARROW
 std::vector<OvertureBuilding> read_overture_geoparquet(const std::filesystem::path &path,
 		const geographic::LLBBox &bbox, std::size_t maximum)
 {
