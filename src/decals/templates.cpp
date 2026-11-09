@@ -574,12 +574,24 @@ void text_sign(Canvas &canvas, TextStyle style, const std::string &text)
 		if (auto layout = fit_or_abbreviate(text, width - 30, 42, FontSize::S44, false))
 			layout->draw_centered(canvas, center_x, 64, WHITE);
 		break;
-	case TextStyleKind::StopName:
-		canvas.rounded_rect(4, 46, width - 8, 36, 3, WHITE);
-		canvas.stroke_rounded_rect(4, 46, width - 8, 36, 3, 2, DARK_GRAY);
+	case TextStyleKind::StopName: {
+		canvas.rounded_rect(0, 46, width, 36, 3, WHITE);
+		canvas.stroke_rounded_rect(0, 46, width, 36, 3, 2, DARK_GRAY);
+		std::vector<std::uint8_t> border;
+		border.reserve(4 * 36);
+		for (int x : {0, 1, width - 2, width - 1})
+			for (int y = 46; y < 82; ++y)
+				border.push_back(canvas.get(x, y));
 		if (auto layout = fit_or_abbreviate(text, width - 6, 32, FontSize::S28, true))
 			layout->draw_centered(canvas, center_x, 64, BLACK);
+		// C++ font glyphs can overhang their measured advance further than the
+		// Rust glyphs. Preserve even the transparent rounded corners.
+		std::size_t i = 0;
+		for (int x : {0, 1, width - 2, width - 1})
+			for (int y = 46; y < 82; ++y)
+				canvas.set(x, y, border[i++]);
 		break;
+	}
 	case TextStyleKind::Plaque:
 		canvas.rounded_rect(8, 28, width - 16, 72, 4, LIGHT_GRAY);
 		canvas.stroke_rounded_rect(8, 28, width - 16, 72, 4, 3, GRAY);

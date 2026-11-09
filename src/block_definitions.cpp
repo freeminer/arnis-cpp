@@ -86,7 +86,6 @@ BlockWithProperties::Properties default_block_properties(const Block &block)
 	case 107:
 	case 138:
 	case 198:
-	case 299:
 	case 365:
 	case 366:
 	case 416:
@@ -145,6 +144,8 @@ BlockWithProperties::Properties default_block_properties(const Block &block)
 		return one("type", "top");
 	case 236:
 		return {{"facing", "north"}, {"open", "true"}, {"half", "top"}};
+	case 299:
+		return one("half", "top");
 	case 274:
 		return {{"rotation", "6"}, {"waterlogged", "false"}};
 	case 294:
