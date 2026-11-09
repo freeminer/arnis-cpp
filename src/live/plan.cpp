@@ -14,16 +14,11 @@ bool Square::contains(std::int32_t cx, std::int32_t cz) const
 		   static_cast<std::int64_t>(cz) < static_cast<std::int64_t>(min_cz) + side;
 }
 
-std::pair<double, double> Square::centre_blocks() const
+std::tuple<double, double, double> Square::border() const
 {
 	const double size = static_cast<double>(side) * 16.0;
 	return {static_cast<double>(min_cx) * 16.0 + size / 2.0,
-			static_cast<double>(min_cz) * 16.0 + size / 2.0};
-}
-
-double Square::border_size_blocks() const
-{
-	return static_cast<double>(side) * 16.0;
+			static_cast<double>(min_cz) * 16.0 + size / 2.0, size};
 }
 
 std::int32_t Square::inset(std::int32_t cx, std::int32_t cz) const

@@ -7,6 +7,7 @@
 #include <set>
 #include <filesystem>
 #include <optional>
+#include <string>
 #include "map_item_palette.h"
 namespace arnis::map_item
 {
@@ -21,6 +22,8 @@ std::optional<std::pair<int, int>> read_spawn_xz(const std::filesystem::path &wo
 namespace arnis::map_item
 {
 int next_map_id(const std::filesystem::path &maps_dir);
+bool set_map_counter(const std::filesystem::path &world_path, int last_id,
+		std::string *error = nullptr);
 }
 namespace arnis::map_item
 {

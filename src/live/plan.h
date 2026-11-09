@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <functional>
 #include <optional>
+#include <tuple>
 #include <utility>
 #include <vector>
 
@@ -15,9 +16,8 @@ struct Square
 	std::int32_t side = 0;
 
 	bool contains(std::int32_t cx, std::int32_t cz) const;
-	// Centre and width in blocks, as Minecraft's worldborder command takes them.
-	std::pair<double, double> centre_blocks() const;
-	double border_size_blocks() const;
+	// Centre X/Z and width in blocks, as Minecraft's worldborder command takes them.
+	std::tuple<double, double, double> border() const;
 	std::int32_t inset(std::int32_t cx, std::int32_t cz) const;
 };
 

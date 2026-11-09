@@ -13,7 +13,6 @@
 #include "mapillary/geometry.h"
 #include "net.h"
 #include "../../http.h"
-#include "../../arnis_ground.h"
 
 #if defined(USE_ARROW) && USE_ARROW
 #include <arrow/api.h>
@@ -2080,21 +2079,17 @@ std::optional<OvertureData> fetch_overture_parquet_candidates(
 } // namespace
 
 std::size_t drop_footprints_in_water(std::vector<ProcessedElement> &elements,
-		const arnis::Ground &ground, const ::XZBBox &bbox, double scale)
+		double scale, const std::function<bool(int, int)> &is_water)
 {
 	const auto is_overture = [](const ProcessedElement &element) {
 		const auto *way =
 				std::get_if<ProcessedWay>(static_cast<const variant_t *>(&element));
 		return way && (way->id & OVERTURE_ID_HIGH_BIT) != 0;
 	};
-	if (!ground.has_land_cover() ||
-			std::none_of(elements.begin(), elements.end(), is_overture))
+	if (!is_water || std::none_of(elements.begin(), elements.end(), is_overture))
 		return 0;
 
-	const auto wet = [&ground, &bbox](int x, int z) {
-		return ground.cover_class({x - bbox.min_x(), z - bbox.min_z()}) ==
-			   land_cover::LC_WATER;
-	};
+	const auto wet = [&is_water](int x, int z) { return is_water(x, z); };
 	const int shore = std::max(1,
 			static_cast<int>(std::ceil(land_cover::SHORE_BAND_M * std::max(0.0, scale))));
 	const std::array<std::pair<int, int>, 8> around{

@@ -1931,7 +1931,11 @@ bool generate_world(WorldEditor &editor,
 		// into land.
 		if (!skip_osm) {
 			dropped_water_footprints = overture::drop_footprints_in_water(
-					ordered_source_elements, *editor.ground, xzbbox, args.scale);
+					ordered_source_elements, args.scale,
+					[&editor, &xzbbox](int x, int z) {
+						return editor.ground->cover_class({x - xzbbox.min_x(),
+									   z - xzbbox.min_z()}) == land_cover::LC_WATER;
+					});
 			if (dropped_water_footprints > 0) {
 				mode_filtered_elements = ordered_source_elements;
 				mode_filter::retain_for_mode(mode_filtered_elements, args.mode);

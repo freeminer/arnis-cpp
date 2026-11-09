@@ -67,7 +67,7 @@ std::optional<double> parse_number(std::string_view v)
 }
 } // namespace
 
-struct Client::State
+struct Rcon::State
 {
 	boost::asio::io_context io;
 	Tcp::socket socket{io};
@@ -174,14 +174,14 @@ struct Client::State
 	}
 };
 
-Client::Client(std::unique_ptr<State> state) : state_(std::move(state))
+Rcon::Rcon(std::unique_ptr<State> state) : state_(std::move(state))
 {
 }
-Client::~Client() = default;
-Client::Client(Client &&) noexcept = default;
-Client &Client::operator=(Client &&) noexcept = default;
+Rcon::~Rcon() = default;
+Rcon::Rcon(Rcon &&) noexcept = default;
+Rcon &Rcon::operator=(Rcon &&) noexcept = default;
 
-std::unique_ptr<Client> Client::connect(
+std::unique_ptr<Rcon> Rcon::connect(
 		std::uint16_t port, const std::string &password, std::string &error)
 {
 	auto state = std::make_unique<State>();
@@ -211,11 +211,11 @@ std::unique_ptr<Client> Client::connect(
 			return nullptr;
 		}
 		if (rid == id && kind == EXEC)
-			return std::unique_ptr<Client>(new Client(std::move(state)));
+			return std::unique_ptr<Rcon>(new Rcon(std::move(state)));
 	}
 }
 
-std::optional<std::string> Client::command(const std::string &command, std::string &error)
+std::optional<std::string> Rcon::cmd(const std::string &command, std::string &error)
 {
 	if (!state_) {
 		error = "RCON client is not connected";

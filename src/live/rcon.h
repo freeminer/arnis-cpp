@@ -16,22 +16,22 @@ struct PlayerPos
 	double z = 0.0;
 };
 
-class Client
+class Rcon
 {
 public:
-	static std::unique_ptr<Client> connect(
+	static std::unique_ptr<Rcon> connect(
 			std::uint16_t port, const std::string &password, std::string &error);
-	~Client();
-	Client(const Client &) = delete;
-	Client &operator=(const Client &) = delete;
-	Client(Client &&) noexcept;
-	Client &operator=(Client &&) noexcept;
+	~Rcon();
+	Rcon(const Rcon &) = delete;
+	Rcon &operator=(const Rcon &) = delete;
+	Rcon(Rcon &&) noexcept;
+	Rcon &operator=(Rcon &&) noexcept;
 
-	std::optional<std::string> command(const std::string &command, std::string &error);
+	std::optional<std::string> cmd(const std::string &command, std::string &error);
 
 private:
 	struct State;
-	explicit Client(std::unique_ptr<State> state);
+	explicit Rcon(std::unique_ptr<State> state);
 	std::unique_ptr<State> state_;
 };
 
