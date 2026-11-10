@@ -33,6 +33,14 @@ constexpr std::size_t DRY_GAP = 3;
 constexpr double CHANNEL_M = 48.0;
 constexpr std::size_t CHANNEL_STRIDE = 3;
 
+std::uint64_t ship_hash(std::uint64_t a, std::uint64_t b)
+{
+	std::uint64_t h = a * 0x9E3779B97F4A7C15ULL ^ b * 0xC2B2AE3D27D4EB4FULL;
+	h ^= h >> 29;
+	h *= 0xBF58476D1CE4E5B9ULL;
+	return h ^ (h >> 32);
+}
+
 using ShipNode = std::tuple<std::uint64_t, double, double>;
 using ShipNodes = std::vector<ShipNode>;
 
@@ -415,8 +423,84 @@ std::vector<std::int32_t> shuttle_timetable(std::size_t points, double speed)
 	return out;
 }
 
-std::optional<std::pair<double, double>> widest(const std::vector<int> &room,
-		const std::vector<double> &offsets, bool middle)
+std::pair<std::vector<std::int32_t>, std::int64_t> through_timetable(
+		const trains::Route &route)
+{
+	std::vector<std::int32_t> positions;
+	const double length = route.length();
+	if (length <= 0.0 || route.points.empty())
+		return {std::move(positions), 0};
+	positions.reserve(static_cast<std::size_t>(length));
+	double distance = 0.0;
+	while (distance < length && positions.size() <= 72000) {
+		positions.push_back(static_cast<std::int32_t>(std::llround(distance * 1000.0)));
+		const auto index = std::min<std::size_t>(
+				static_cast<std::size_t>(distance), route.points.size() - 1);
+		const double speed =
+				index < route.speed_caps.size() ? route.speed_caps[index] : 0.1;
+		if (speed <= 0.0)
+			return {{}, 0};
+		distance += speed;
+	}
+	if (positions.size() > 72000)
+		return {{}, 0};
+	return {std::move(positions),
+			static_cast<std::int64_t>(std::llround(length * 1000.0))};
+}
+
+double waterway_headway(std::uint8_t klass)
+{
+	if (klass >= 6)
+		return 300.0;
+	if (klass == 5)
+		return 420.0;
+	if (klass == 4)
+		return 600.0;
+	return klass == 0 ? 900.0 : 1200.0;
+}
+
+std::vector<double> vessel_speed_caps(const std::vector<trains::RoutePoint> &points,
+		ship_bodies::Vessel vessel, double scale)
+{
+	if (points.empty())
+		return {};
+	const auto lateral = ship_bodies::acceleration(vessel)[2];
+	const auto reach = static_cast<std::ptrdiff_t>(
+			std::clamp(std::llround(30.0 * scale), 3LL, 60LL));
+	const auto heading = [&](std::size_t i) -> std::optional<std::pair<double, double>> {
+		if (i + 1 >= points.size())
+			return std::nullopt;
+		return unit(points[i + 1].x - points[i].x, points[i + 1].z - points[i].z);
+	};
+	std::vector<double> turns(points.size(), 0.0);
+	for (std::size_t i = 1; i < points.size(); ++i) {
+		const auto a = heading(i - 1), b = heading(i);
+		if (a && b)
+			turns[i] = std::atan2(a->first * b->second - a->second * b->first,
+					a->first * b->first + a->second * b->second);
+	}
+	std::vector<double> caps;
+	caps.reserve(points.size());
+	for (std::size_t i = 0; i < points.size(); ++i) {
+		double turn = 0.0;
+		const auto begin = i > static_cast<std::size_t>(reach)
+								   ? i - static_cast<std::size_t>(reach)
+								   : 0;
+		const auto end = std::min(points.size(), i + static_cast<std::size_t>(reach) + 1);
+		for (std::size_t j = begin; j < end; ++j)
+			turn += turns[j];
+		double kmh = ship_bodies::cruise_kmh(vessel);
+		if (std::abs(turn) > 1e-3) {
+			const double radius = (2.0 * reach + 1.0) / std::abs(turn) / scale;
+			kmh = std::min(kmh, std::max(3.0, std::sqrt(lateral * radius) * 3.6));
+		}
+		caps.push_back(std::min(7.9, kmh * scale / 36.0));
+	}
+	return caps;
+}
+
+std::optional<std::pair<double, double>> widest(
+		const std::vector<int> &room, const std::vector<double> &offsets, bool middle)
 {
 	std::optional<std::pair<double, double>> best;
 	std::optional<std::size_t> start;
@@ -437,18 +521,18 @@ std::optional<std::pair<double, double>> widest(const std::vector<int> &room,
 }
 
 std::optional<std::vector<double>> water_levels(
-		const std::vector<trains::RoutePoint> &points, const water_probe::WaterProbe &probe)
+		const std::vector<trains::RoutePoint> &points,
+		const water_probe::WaterProbe &probe)
 {
 	std::vector<std::optional<double>> raw;
 	raw.reserve(points.size());
 	for (const auto &point : points) {
 		const auto sample = sample_at(probe, point.x, point.z);
-		raw.push_back(sample && sample->water()
-				? std::optional<double>(*sample->water())
-				: std::nullopt);
+		raw.push_back(sample && sample->water() ? std::optional<double>(*sample->water())
+												: std::nullopt);
 	}
-	const auto first = std::find_if(raw.begin(), raw.end(),
-			[](const auto &level) { return level.has_value(); });
+	const auto first = std::find_if(
+			raw.begin(), raw.end(), [](const auto &level) { return level.has_value(); });
 	if (first == raw.end())
 		return std::nullopt;
 	std::vector<double> filled;
@@ -477,7 +561,7 @@ std::optional<std::vector<double>> water_levels(
 std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 		std::uint8_t water_class, std::uint64_t way,
 		const std::vector<trains::RoutePoint> &points,
-		const water_probe::WaterProbe &probe, double size)
+		const water_probe::WaterProbe &probe, double scale, double size)
 {
 	if (points.size() < 2)
 		return std::nullopt;
@@ -492,8 +576,8 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 			const double sign = side == 0 ? 1.0 : -1.0;
 			row[side].reserve(offsets.size());
 			for (const double d : offsets) {
-				const auto sample = sample_at(probe, p.x + sign * nx * d,
-						p.z + sign * nz * d);
+				const auto sample =
+						sample_at(probe, p.x + sign * nx * d, p.z + sign * nz * d);
 				const auto clearance = sample ? sample->clearance() : std::nullopt;
 				row[side].push_back(clearance ? (*clearance >= 1 ? *clearance : -1) : 0);
 			}
@@ -518,8 +602,8 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 		const std::size_t side = direction > 0.0 ? 0 : 1;
 		const auto spans = spans_for(side);
 		const auto lane_for = [&](double length, double half) {
-			const auto window = static_cast<std::size_t>(
-					std::ceil(length / 2.0 / CHANNEL_STRIDE));
+			const auto window =
+					static_cast<std::size_t>(std::ceil(length / 2.0 / CHANNEL_STRIDE));
 			std::vector<std::optional<std::pair<double, double>>> bands;
 			bands.reserve(spans.size());
 			for (std::size_t k = 0; k < spans.size(); ++k) {
@@ -540,8 +624,8 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 				else
 					bands.push_back(std::nullopt);
 			}
-			std::vector<double> lane(bands.size(),
-					std::numeric_limits<double>::quiet_NaN());
+			std::vector<double> lane(
+					bands.size(), std::numeric_limits<double>::quiet_NaN());
 			for (std::size_t k = 0; k < bands.size(); ++k) {
 				const auto span = spans[k];
 				if (bands[k])
@@ -560,35 +644,36 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 			const double step = static_cast<double>(CHANNEL_STRIDE) / 8.0;
 			const auto keep = [&](std::size_t k, double offset) {
 				if (bands[k] && bands[k]->first + half <= bands[k]->second - half)
-					return std::clamp(offset, bands[k]->first + half,
-							bands[k]->second - half);
+					return std::clamp(
+							offset, bands[k]->first + half, bands[k]->second - half);
 				return offset;
 			};
 			for (int pass = 0; pass < 3; ++pass) {
 				for (std::size_t k = 1; k < lane.size(); ++k)
-					lane[k] = keep(k, std::clamp(lane[k], lane[k - 1] - step,
-							lane[k - 1] + step));
+					lane[k] = keep(k,
+							std::clamp(lane[k], lane[k - 1] - step, lane[k - 1] + step));
 				for (std::size_t k = lane.size(); k-- > 1;)
-					lane[k - 1] = keep(k - 1, std::clamp(lane[k - 1],
-							lane[k] - step, lane[k] + step));
+					lane[k - 1] = keep(k - 1,
+							std::clamp(lane[k - 1], lane[k] - step, lane[k] + step));
 			}
 			std::vector<std::pair<double, double>> result;
 			result.reserve(lane.size());
 			for (std::size_t k = 0; k < lane.size(); ++k) {
-				const double room = bands[k]
-						? std::min(lane[k] - bands[k]->first,
-								bands[k]->second - lane[k])
-						: -1.0;
+				const double room = bands[k] ? std::min(lane[k] - bands[k]->first,
+													   bands[k]->second - lane[k])
+											 : -1.0;
 				result.emplace_back(lane[k], room);
 			}
 			return result;
 		};
-		const auto candidates = waterway_vessels(water_class, way ^ side);
+		const auto seed = ship_hash(way, side);
+		const auto candidates = waterway_vessels(water_class, seed);
 		for (const auto vessel : candidates) {
 			const double length = ship_bodies::size_m(vessel).first * size;
 			const double half = ship_bodies::size_m(vessel).second * size / 2.0;
 			const auto lane = lane_for(length, half);
-			const auto ends = static_cast<std::size_t>(std::ceil(length / CHANNEL_STRIDE));
+			const auto ends =
+					static_cast<std::size_t>(std::ceil(length / CHANNEL_STRIDE));
 			std::vector<double> room;
 			if (lane.size() > 2 * ends)
 				for (std::size_t i = ends; i < lane.size() - ends; ++i)
@@ -598,9 +683,10 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 				continue;
 			std::optional<bool> low;
 			for (const bool lowered : ship_bodies::lowers(vessel)
-						? std::array{false, true}
-						: std::array{false, false}) {
-				const double top = ship_bodies::air_draft_m(vessel, lowered) * size + HEADROOM;
+											  ? std::array{false, true}
+											  : std::array{false, false}) {
+				const double top =
+						ship_bodies::air_draft_m(vessel, lowered) * size + HEADROOM;
 				bool fits = true;
 				for (std::size_t r = 0; r < rows.size() && fits; ++r)
 					for (std::size_t j = 0; j < offsets.size(); ++j) {
@@ -645,10 +731,10 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 			route.ends[0] = route.ends[1] = trains::End::Edge;
 			route.points = std::move(shifted);
 			route.ways.assign(route.points.size(), way);
+			route.speed_caps = vessel_speed_caps(route.points, vessel, size);
 			route.surface_y = std::move(heights);
 			route.surface_lift = WATER_LIFT;
-			const double speed = std::min(7.9, ship_bodies::cruise_kmh(vessel) * size / 36.0);
-			const auto timetable = shuttle_timetable(route.points.size(), speed);
+			auto [timetable, period] = through_timetable(route);
 			const auto liveries = ship_bodies::liveries(vessel);
 			if (timetable.empty() || liveries.empty())
 				continue;
@@ -656,8 +742,25 @@ std::optional<std::pair<trains::Route, trains::Service>> waterway_route(
 			service.coaches.emplace_back(train_bodies::Ship{vessel, *low});
 			service.offsets.push_back(0.0);
 			service.timetable = timetable;
-			service.trains.push_back(
-					{0, liveries[static_cast<std::size_t>(way % liveries.size())]});
+			service.period = period;
+			const auto headway_steps =
+					static_cast<std::size_t>(waterway_headway(water_class) * 10.0);
+			const auto count = std::max<std::size_t>(
+					1, (timetable.size() + headway_steps / 2) / headway_steps);
+			const auto spacing =
+					static_cast<std::size_t>((std::max(length, 0.0) + 40.0 * scale));
+			const auto spaced_count =
+					std::max<std::size_t>(1, static_cast<std::size_t>(route.length()) /
+													 std::max<std::size_t>(spacing, 1));
+			const auto boat_count = std::min(count, spaced_count);
+			const auto start =
+					static_cast<std::size_t>(ship_hash(seed, 7) % timetable.size());
+			for (std::size_t k = 0; k < boat_count; ++k) {
+				const auto phase =
+						(start + k * timetable.size() / boat_count) % timetable.size();
+				const auto livery_index = ship_hash(seed, 11 + k) % liveries.size();
+				service.trains.push_back({phase, liveries[livery_index]});
+			}
 			return std::pair{std::move(route), std::move(service)};
 		}
 	}
@@ -809,8 +912,8 @@ std::vector<std::pair<trains::Route, trains::Service>> ShipPlan::finish(
 	std::vector<std::pair<trains::Route, trains::Service>> out;
 	for (const auto &line : lines_) {
 		if (line.waterway_class) {
-			if (auto ship = waterway_route(
-						*line.waterway_class, line.way, line.points, probe, size_))
+			if (auto ship = waterway_route(*line.waterway_class, line.way, line.points,
+						probe, scale_, size_))
 				out.push_back(std::move(*ship));
 			continue;
 		}
