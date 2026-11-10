@@ -497,6 +497,25 @@ bool is_pedestrian_way_tags(const crate::tags_t &tags)
 	return tags.contains("footway") && footway != "no";
 }
 
+std::span<const crate::block_definitions::Block> pedestrian_paving_palette(
+		const crate::tags_t &tags)
+{
+	if (!is_pedestrian_way_tags(tags))
+		return {};
+	const auto surface = tags.get("surface");
+	static const std::vector<crate::block_definitions::Block> gray_concrete{
+			crate::block_definitions::GRAY_CONCRETE};
+	static const std::vector<crate::block_definitions::Block> smooth_stone{
+			crate::block_definitions::SMOOTH_STONE};
+	if (surface == "concrete" || surface == "concrete:plates" ||
+			surface == "concrete:lanes" || surface == "paving_stones" ||
+			surface == "sett" || surface == "paved" || surface == "cement")
+		return smooth_stone;
+	if (surface == "asphalt" || surface == "chipseal" || surface == "bitmac")
+		return gray_concrete;
+	return {};
+}
+
 std::span<const crate::block_definitions::Block> surface_palette_view(
 		const std::string &highway, const crate::tags_t &tags)
 {
@@ -509,21 +528,9 @@ std::span<const crate::block_definitions::Block> surface_palette_view(
 	if (highway == "cycleway")
 		if (const auto blocks = crate::surfaces::cycleway_palette(tags); !blocks.empty())
 			return blocks;
+	if (const auto blocks = pedestrian_paving_palette(tags); !blocks.empty())
+		return blocks;
 	const auto surface = tags.get("surface");
-	if (is_pedestrian_way_tags(tags) &&
-			(surface == "concrete" || surface == "concrete:plates" ||
-					surface == "concrete:lanes" || surface == "paving_stones" ||
-					surface == "sett" || surface == "paved" || surface == "cement" ||
-					surface == "asphalt" || surface == "chipseal" ||
-					surface == "bitmac")) {
-		static const std::vector<crate::block_definitions::Block> gray_concrete{
-				crate::block_definitions::GRAY_CONCRETE};
-		static const std::vector<crate::block_definitions::Block> smooth_stone{
-				crate::block_definitions::SMOOTH_STONE};
-		return surface == "asphalt" || surface == "chipseal" || surface == "bitmac"
-					   ? std::span<const Block>(gray_concrete)
-					   : std::span<const Block>(smooth_stone);
-	}
 	if (const auto blocks = crate::surfaces::get_blocks_for_surface(surface);
 			!blocks.empty())
 		return blocks;
@@ -1271,7 +1278,7 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			const auto fallback = highway_type == "raceway"
 										  ? surface_palette_view(highway_type, way.tags)
 										  : std::span<const Block>(stone_surface);
-			const auto pedestrian_surface = surface_palette_view(highway_type, way.tags);
+			const auto pedestrian_surface = pedestrian_paving_palette(way.tags);
 			const auto surface_blocks =
 					is_pedestrian_way_tags(way.tags) && !pedestrian_surface.empty()
 							? pedestrian_surface

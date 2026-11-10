@@ -28,7 +28,8 @@ enum class Mode : std::uint8_t
 	Tram,
 	Metro,
 	SBahn,
-	Rail
+	Rail,
+	Water
 };
 
 enum class End : std::uint8_t
@@ -79,6 +80,8 @@ struct RoutePoint
 struct Route
 {
 	Mode mode{Mode::Rail};
+	/// Present for water routes, corresponding to the Rust `Mode::Water(Vessel)` payload.
+	std::optional<ship_bodies::Vessel> water_vessel;
 	Shape shape{Shape::Shuttle};
 	End ends[2]{End::Buffer, End::Buffer};
 	std::vector<RoutePoint> points;
@@ -91,6 +94,11 @@ struct Route
 	double surface_lift{0.0625};
 	double length() const;
 };
+
+/// Build the single-vessel timetable used by a mapped ferry crossing.
+std::optional<Service> ship_service(const Route &route, ship_bodies::Vessel vessel,
+		bool low, std::uint64_t seed, double scale, double size,
+		std::optional<double> headway_seconds = std::nullopt);
 
 /// Topology, mapped stops and backend-neutral service schedules for railway,
 /// metro, tram and light-rail ways. Rendering belongs to the consumer.

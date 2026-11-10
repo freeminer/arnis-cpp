@@ -1866,9 +1866,12 @@ bool generate_world(WorldEditor &editor,
 		const auto bounds = ground_fetch_bounds;
 		const auto width = grid_width;
 		const auto height = grid_height;
-		land_cover_job.emplace(std::async(std::launch::async, [bounds, width, height] {
-			return land_cover::fetch_land_cover_data(bounds, width, height);
-		}));
+		const auto meters_per_cell = ground_fetch_plan.meters_per_cell;
+		land_cover_job.emplace(
+				std::async(std::launch::async, [bounds, width, height, meters_per_cell] {
+					return land_cover::fetch_land_cover_data(
+							bounds, width, height, true, meters_per_cell);
+				}));
 	}
 	if (fetch_canopy) {
 		const std::array<double, 4> bounds{ground_fetch_plan.bbox.min().lat(),
@@ -2213,7 +2216,11 @@ bool generate_world(WorldEditor &editor,
 		const auto train_bounds = cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 		ship_plan.emplace(element_processing::ships::ShipPlan::build(
-				elements, args.scale, train_bounds));
+				elements, args.scale, train_bounds, [&](int x, int z) {
+					return editor.ground &&
+						   editor.ground->cover_class(editor.ground_point(x, z)) ==
+								   land_cover::LC_WATER;
+				}));
 		if (!ship_plan->is_empty()) {
 			water_probe = ship_plan->probe();
 			editor.set_water_probe(water_probe);
@@ -3665,12 +3672,19 @@ bool generate_world(WorldEditor &editor,
 	extras.pedestrians = walk_network.has_value();
 	if (ship_plan && water_probe && generation_train_network) {
 		generation_train_network->add_ships(ship_plan->finish(*water_probe));
-		editor.train_network = generation_train_network;
-		extras.trains = !generation_train_network->is_empty();
 		const auto boats = generation_train_network->ship_count();
 		if (boats > 0)
 			std::cout << "  Moving vehicles: " << boats
 					  << " ferries and boats on mapped crossings\n";
+		// Keep the network only when finished-world probing left scheduled services.
+		// A ship plan may exist even when every crossing proves unnavigable.
+		if (generation_train_network->is_empty()) {
+			generation_train_network.reset();
+			editor.train_network.reset();
+		} else {
+			editor.train_network = generation_train_network;
+		}
+		extras.trains = generation_train_network != nullptr;
 	}
 	if (apply_world_style)
 		editor.release_sealed_surface();

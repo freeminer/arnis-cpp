@@ -87,8 +87,21 @@ struct Plan
 	{
 		const int gx = x - min_x, gz = z - min_z;
 		if (edge(x, z)) {
-			const bool corner = (!inside(x + 1, z) || !inside(x - 1, z)) &&
-								(!inside(x, z + 1) || !inside(x, z - 1));
+			const std::array<Cell, 4> directions{{{1, 0}, {-1, 0}, {0, 1}, {0, -1}}};
+			std::array<Cell, 4> outward{};
+			std::size_t count = 0;
+			for (const auto &[dx, dz] : directions)
+				if (!inside(x + dx, z + dz))
+					outward[count++] = {dx, dz};
+			bool corner = false;
+			for (std::size_t a = 0; a < count && !corner; ++a)
+				for (std::size_t b = a + 1; b < count; ++b)
+					if (outward[a].first * outward[b].first +
+									outward[a].second * outward[b].second ==
+							0) {
+						corner = true;
+						break;
+					}
 			return corner || euclidean_mod(gx + gz, span) == 0;
 		}
 		if (euclidean_mod(gx, span) || euclidean_mod(gz, span))

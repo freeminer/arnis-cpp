@@ -307,7 +307,6 @@ std::vector<Part> build(Vessel v, float len, float beam, const Livery &l, bool l
 		break;
 	}
 	}
-	train_bodies::apart(out);
 	return out;
 }
 
@@ -464,7 +463,9 @@ std::pair<std::vector<float>, double> seats_m(Vessel v)
 std::vector<train_bodies::Part> parts(Vessel v, const Livery &l, bool low)
 {
 	auto [len, beam] = size_m(v);
-	return build(v, static_cast<float>(len), static_cast<float>(beam), l, low);
+	auto result = build(v, static_cast<float>(len), static_cast<float>(beam), l, low);
+	train_bodies::apart(result);
+	return result;
 }
 double air_draft_m(Vessel v, bool low)
 {
@@ -472,7 +473,9 @@ double air_draft_m(Vessel v, bool low)
 	if (ls.empty())
 		return 0;
 	double top = 0;
-	for (const auto &p : parts(v, ls.front(), low))
+	const auto [len, beam] = size_m(v);
+	for (const auto &p :
+			build(v, static_cast<float>(len), static_cast<float>(beam), ls.front(), low))
 		top = std::max(top, double(p.corner[1] + p.size[1]));
 	return top;
 }

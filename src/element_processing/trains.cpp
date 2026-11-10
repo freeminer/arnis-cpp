@@ -1,5 +1,7 @@
 #include "trains.h"
 
+#include "ship_bodies.h"
+
 #include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 #include "../datapack/mod.h"
 #include "../clipping.h"
@@ -293,6 +295,8 @@ double cruise_kmh(Mode mode)
 		return 80.0;
 	case Mode::Rail:
 		return 110.0;
+	case Mode::Water:
+		return 0.0;
 	}
 	return 110.0;
 }
@@ -308,6 +312,8 @@ double lateral_accel(Mode mode)
 		return 0.7;
 	case Mode::Rail:
 		return 0.6;
+	case Mode::Water:
+		return 0.0;
 	}
 	return 0.6;
 }
@@ -322,7 +328,7 @@ bool served_by(Mode mode, StopFeature::Kind kind)
 	case StopFeature::Kind::Train:
 		return mode == Mode::SBahn || mode == Mode::Rail;
 	case StopFeature::Kind::Any:
-		return mode != Mode::Tram;
+		return mode != Mode::Tram && mode != Mode::Water;
 	}
 	return false;
 }
@@ -917,6 +923,8 @@ std::pair<double, double> accel_brake(Mode mode)
 		return {0.9, 0.9};
 	case Mode::Rail:
 		return {0.6, 0.7};
+	case Mode::Water:
+		return {0.0, 0.0};
 	}
 	return {0.6, 0.7};
 }
@@ -932,6 +940,8 @@ std::pair<double, double> dwell_seconds(Mode mode)
 		return {22, 40};
 	case Mode::Rail:
 		return {35, 60};
+	case Mode::Water:
+		return {0.0, 0.0};
 	}
 	return {35, 60};
 }
@@ -946,6 +956,8 @@ double headway_seconds(Mode mode)
 		return 200;
 	case Mode::Rail:
 		return 330;
+	case Mode::Water:
+		return 0;
 	}
 	return 330;
 }
@@ -1073,11 +1085,20 @@ struct Trip
 std::optional<std::pair<std::vector<std::int32_t>, std::int64_t>> timetable(
 		const Route &route, const Body &body, double scale)
 {
-	const auto [accel, brake] = accel_brake(route.mode);
+	auto [accel, brake] = accel_brake(route.mode);
+	double max_speed = cruise_kmh(route.mode);
+	auto dwell = dwell_seconds(route.mode);
+	if (route.mode == Mode::Water && route.water_vessel) {
+		const auto vessel_accel = ship_bodies::acceleration(*route.water_vessel);
+		accel = vessel_accel[0];
+		brake = vessel_accel[1];
+		max_speed = ship_bodies::cruise_kmh(*route.water_vessel);
+		dwell = ship_bodies::dwell_seconds(*route.water_vessel);
+	}
 	const double a = accel / (STEPS_PER_S * STEPS_PER_S) * scale;
 	const double b = brake / (STEPS_PER_S * STEPS_PER_S) * scale;
-	const double cruise = step_speed(cruise_kmh(route.mode), scale);
-	const auto [ds, de] = dwell_seconds(route.mode);
+	const double cruise = step_speed(max_speed, scale);
+	const auto [ds, de] = dwell;
 	const auto dwell_stop = static_cast<std::size_t>(ds * STEPS_PER_S);
 	const auto dwell_end = static_cast<std::size_t>(de * STEPS_PER_S);
 	const double len = route.length(), margin = END_MARGIN_M * scale;
@@ -1274,6 +1295,45 @@ std::optional<Service> service_for(
 }
 
 } // namespace
+
+std::optional<Service> ship_service(const Route &route, ship_bodies::Vessel vessel,
+		bool low, std::uint64_t seed, double scale, double size,
+		std::optional<double> headway_seconds)
+{
+	const double length = ship_bodies::size_m(vessel).first * size;
+	const Body body{length / 2.0, length / 2.0, 0.0};
+	auto schedule = timetable(route, body, scale);
+	if (!schedule)
+		return std::nullopt;
+	auto [times, period] = std::move(*schedule);
+	const auto liveries = ship_bodies::liveries(vessel);
+	if (times.empty() || liveries.empty())
+		return std::nullopt;
+	std::size_t count = 1;
+	if (headway_seconds) {
+		const auto headway = static_cast<std::size_t>(*headway_seconds * STEPS_PER_S);
+		if (headway == 0)
+			return std::nullopt;
+		const double room = (length + 40.0 * scale) * 1000.0;
+		count = std::max<std::size_t>(1, (times.size() + headway / 2) / headway);
+		while (count > 1 && closest(times, period, count) < room)
+			--count;
+	}
+	Service service;
+	service.coaches.emplace_back(train_bodies::Ship{vessel, low});
+	service.offsets.push_back(0.0);
+	service.timetable = std::move(times);
+	service.period = period;
+	const auto phase =
+			static_cast<std::size_t>(network_hash(seed, 7) % service.timetable.size());
+	for (std::size_t k = 0; k < count; ++k) {
+		const auto departure =
+				(phase + k * service.timetable.size() / count) % service.timetable.size();
+		const auto livery = network_hash(seed, 11 + k) % liveries.size();
+		service.trains.push_back({departure, liveries[livery]});
+	}
+	return service;
+}
 
 double Route::length() const
 {
