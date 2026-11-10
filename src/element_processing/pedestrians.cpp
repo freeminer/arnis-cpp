@@ -8,6 +8,7 @@
 
 #include <algorithm>
 #include <array>
+#include <charconv>
 #include <cmath>
 #include <cstdint>
 #include <iomanip>
@@ -263,13 +264,13 @@ bool off_limits(const tags_t &tags)
 	};
 	bool underground_layer = false;
 	if (!layer.empty()) {
-		try {
-			const auto bridge = tags.get("bridge");
-			underground_layer =
-					std::stoi(layer) < 0 && (!tags.contains("bridge") || bridge == "no");
-		} catch (...) {
-			// An unparseable layer does not exclude a way, as in Rust.
-		}
+		int parsed_layer{};
+		const auto [end, error] =
+				std::from_chars(layer.data(), layer.data() + layer.size(), parsed_layer);
+		const auto bridge = tags.get("bridge");
+		underground_layer = error == std::errc{} && end == layer.data() + layer.size() &&
+							parsed_layer < 0 &&
+							(!tags.contains("bridge") || bridge == "no");
 	}
 	return (tags.contains("tunnel") && tags.get("tunnel") != "no") || underground_layer ||
 		   (tags.contains("level") && level != "0") || tags.get("indoor") == "yes" ||

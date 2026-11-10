@@ -129,16 +129,12 @@ void generate_monument(WorldEditor &editor, const ProcessedNode &node)
 	int z = node.z;
 
 	// Monuments are typically larger structures
-	int height = 10;
-	auto it_height = node.tags.find("height");
-	if (it_height != node.tags.end()) {
-		try {
-			height = std::stoi(it_height->second);
-		} catch (...) {
-			// ignore parse errors
-		}
-	}
-	height = std::max(5, std::min(20, height));
+	const auto it_height = node.tags.find("height");
+	const int height =
+			std::clamp(it_height == node.tags.end()
+							   ? 10
+							   : strict_parse::i32(it_height->second).value_or(10),
+					5, 20);
 
 	// Large base platform
 	for (int dx = -2; dx <= 2; ++dx) {

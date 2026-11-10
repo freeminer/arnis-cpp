@@ -59,16 +59,12 @@ void generate_advertising_flag(WorldEditor &editor, const ProcessedNode &node)
 	auto rng = element_rng(node.id);
 
 	// Get height from tags or default
-	int height = 6;
-	auto it_height = node.tags.find("height");
-	if (it_height != node.tags.end()) {
-		try {
-			height = std::stoi(it_height->second);
-		} catch (...) {
-			// ignore parse errors
-		}
-	}
-	height = std::clamp(height, 4, 12);
+	const auto it_height = node.tags.find("height");
+	const int height =
+			std::clamp(it_height == node.tags.end()
+							   ? 6
+							   : strict_parse::i32(it_height->second).value_or(6),
+					4, 12);
 
 	// Flagpole
 	for (int y = 1; y <= height; ++y) {

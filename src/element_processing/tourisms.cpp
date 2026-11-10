@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "../../../arnis_adapter.h"
+#include "../strict_parse.h"
 #include "signage.h"
 
 namespace arnis
@@ -14,19 +15,9 @@ namespace arnis
 namespace tourisms
 {
 
-
 std::optional<int> parse_int(const std::string &s)
 {
-	try {
-		size_t pos = 0;
-		int v = std::stoi(s, &pos);
-		if (pos != s.length()) {
-			return std::nullopt;
-		}
-		return v;
-	} catch (const std::exception &) {
-		return std::nullopt;
-	}
+	return strict_parse::i32(s);
 }
 
 void generate_tourisms(WorldEditor &editor, const ProcessedNode &element,
@@ -64,7 +55,8 @@ void generate_tourisms(WorldEditor &editor, const ProcessedNode &element,
 						return;
 					}
 					// Fallback: simple banner board if decal unavailable
-					editor.set_block(COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
+					editor.set_block(
+							COBBLESTONE_WALL, x, 1, z, std::nullopt, std::nullopt);
 					editor.set_block(OAK_PLANKS, x, 2, z, std::nullopt, std::nullopt);
 
 					const int abs_y = editor.get_ground_level(x, z) + 2;
