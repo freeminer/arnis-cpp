@@ -85,6 +85,10 @@ struct Route
 	std::vector<std::uint64_t> ways;
 	std::vector<double> speed_caps;
 	std::vector<double> stops;
+	/// Optional surface heights for waterborne routes, read from the completed world.
+	/// Rail routes leave this empty and resolve their track from registered rail nodes.
+	std::vector<double> surface_y;
+	double surface_lift{0.0625};
 	double length() const;
 };
 
@@ -99,7 +103,11 @@ public:
 	const std::vector<Service> &services() const { return services_; }
 	double size() const { return size_; }
 	std::size_t train_count() const;
+	std::size_t ship_count() const;
 	bool is_empty() const { return services_.empty(); }
+	/// Append water services planned from the finished-world water probe. Each item owns one
+	/// route and its backend-neutral schedule, just like a rail service.
+	void add_ships(std::vector<std::pair<Route, Service>> ships);
 	std::vector<std::pair<std::string, std::string>> datapack_functions(
 			const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
 			const;
@@ -111,6 +119,7 @@ private:
 	std::vector<Route> routes_;
 	std::vector<Service> services_;
 	double size_{1.0};
+	std::size_t ship_services_{};
 };
 
 // Keep the Rust module's public type name available to library consumers;

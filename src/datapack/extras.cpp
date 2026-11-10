@@ -39,6 +39,7 @@ Extras Extras::from_args(const Args &args)
 	out.outbreak = args.zombie_outbreak;
 	out.disasters = args.disasters;
 	out.cars = args.moving_vehicles_enabled();
+	out.pedestrians = args.pedestrians;
 	return out;
 }
 
@@ -57,7 +58,7 @@ Extras Extras::for_format(WorldFormat format) const
 bool Extras::any() const
 {
 	return gravity || traffic_lights || discoveries || pause_menu || outbreak ||
-		   disasters || cars || trains;
+		   disasters || cars || trains || pedestrians;
 }
 
 bool Extras::wants_places() const
@@ -100,6 +101,10 @@ bool selected_asset(
 		const auto overlay =
 				std::string("ov80/data/arnis/function/") + feature.name + "/";
 		if (path.starts_with(overlay))
+			return true;
+		const auto mannequin =
+				std::string("ov88/data/arnis/function/") + feature.name + "/";
+		if (path.starts_with(mannequin))
 			return true;
 		const auto modern =
 				std::string("ov101/data/arnis/function/") + feature.name + "/";
@@ -167,6 +172,8 @@ json pack_metadata(const std::vector<Feature> &features)
 			active.emplace_back("moving cars");
 		else if (feature.name == std::string("trains"))
 			active.emplace_back("trains");
+		else if (feature.name == std::string("walk"))
+			active.emplace_back("pedestrians");
 		else if (feature.name == std::string("discoveries"))
 			active.emplace_back("discoveries");
 		else if (feature.name == std::string("menu"))
@@ -178,8 +185,9 @@ json pack_metadata(const std::vector<Feature> &features)
 	}
 	json overlays = json::array();
 	for (const auto [format, directory] :
-			std::array<std::pair<std::uint32_t, const char *>, 5>{{{71, "ov71"},
-					{80, "ov80"}, {101, "ov101"}, {107, "ov107"}, {121, "ov121"}}}) {
+			std::array<std::pair<std::uint32_t, const char *>, 6>{
+					{{71, "ov71"}, {80, "ov80"}, {88, "ov88"}, {101, "ov101"},
+							{107, "ov107"}, {121, "ov121"}}}) {
 		overlays.push_back(
 				{{"formats", {{"min_inclusive", format}, {"max_inclusive", MAX_FORMAT}}},
 						{"min_format", {format, 0}},
@@ -302,7 +310,8 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		const std::optional<SpawnDestination> &requested_spawn, std::string *error,
 		bool wooded, const std::vector<std::pair<std::string, std::uint64_t>> &biomes,
 		std::optional<int> highest_surface, const disasters::Surface *surface,
-		std::optional<int> sea_y)
+		std::optional<int> sea_y,
+		const std::vector<std::pair<std::string, std::string>> *walk_functions)
 {
 	if (args.bedrock || args.luanti || args.one_world_run || world.empty())
 		return true;
@@ -311,16 +320,18 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 	const bool traffic = enabled.traffic_lights;
 	const bool moving_cars = enabled.cars && cars;
 	const bool moving_trains = enabled.cars && trains && !trains->is_empty();
+	const bool pedestrians = enabled.pedestrians;
 	const bool has_discoveries = enabled.discoveries && !places.empty();
 	const bool menu = enabled.pause_menu;
 	const bool outbreak = enabled.outbreak;
 	const bool disasters = enabled.disasters;
-	if (!gravity && !traffic && !moving_cars && !moving_trains && !enabled.discoveries &&
-			!menu && !outbreak && !disasters)
+	if (!gravity && !traffic && !moving_cars && !moving_trains && !pedestrians &&
+			!enabled.discoveries && !menu && !outbreak && !disasters)
 		return true;
 	const std::vector<Feature> features{{"gravity", gravity}, {"traffic", traffic},
-			{"cars", moving_cars}, {"trains", moving_trains}, {"disaster", disasters},
-			{"discoveries", enabled.discoveries}, {"menu", menu}, {"outbreak", outbreak}};
+			{"cars", moving_cars}, {"trains", moving_trains}, {"walk", pedestrians},
+			{"disaster", disasters}, {"discoveries", enabled.discoveries}, {"menu", menu},
+			{"outbreak", outbreak}};
 	const auto source_root = assets::path("minecraft/datapack_extras");
 	const auto target_root = world / "datapacks" / PACK_NAME;
 	std::error_code ec;
@@ -617,7 +628,7 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 			return false;
 	}
 	if (moving_cars) {
-		for (const auto &[path, contents] : cars->datapack_functions())
+		for (const auto &[path, contents] : cars->datapack_functions(pedestrians))
 			if (!write_text(target_root / path, contents, error))
 				return false;
 		for (const auto &[path, contents] :
@@ -630,6 +641,10 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 			if (!write_text(target_root / path, contents, error))
 				return false;
 	}
+	if (pedestrians && walk_functions)
+		for (const auto &[path, contents] : *walk_functions)
+			if (!write_text(target_root / path, contents, error))
+				return false;
 	if (!world_utils::enable_datapack_in_level_dat(world, PACK_NAME, error))
 		return false;
 	if ((outbreak || disasters) && !world_utils::start_in_survival(world, error))

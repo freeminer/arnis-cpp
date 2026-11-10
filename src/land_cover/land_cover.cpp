@@ -191,7 +191,8 @@ std::vector<std::tuple<int, int, std::string>> esa_tiles_for_bbox(
 }
 
 LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t width,
-		std::size_t height, bool smooth_boundaries)
+		std::size_t height, bool smooth_boundaries,
+		std::optional<double> frame_meters_per_cell)
 {
 	if (!bbox.valid() || width == 0 || height == 0)
 		return {};
@@ -210,7 +211,8 @@ LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t wi
 					bbox.max_lat, bbox.max_lng, tile, fetch))
 			tiles.push_back(std::move(tile));
 	}
-	return assemble_land_cover_data(bbox, width, height, tiles, smooth_boundaries);
+	return assemble_land_cover_data(
+			bbox, width, height, tiles, smooth_boundaries, frame_meters_per_cell);
 }
 bool fetch_esa_tile(const std::string &url, const std::filesystem::path &file)
 {
@@ -346,7 +348,7 @@ void smooth_land_cover_boundaries(std::vector<std::vector<uint8_t>> &grid,
 
 LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t width,
 		std::size_t height, const std::vector<EsaRasterTile> &tiles,
-		bool smooth_boundaries)
+		bool smooth_boundaries, std::optional<double> frame_meters_per_cell)
 {
 	LandCoverData out;
 	if (!bbox.valid() || width == 0 || height == 0)
@@ -354,7 +356,11 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 	out.source_bounds = bbox;
 	out.width = width;
 	out.height = height;
-	out.cells_per_meter = cells_per_meter(bbox, width);
+	out.cells_per_meter = frame_meters_per_cell &&
+										  std::isfinite(*frame_meters_per_cell) &&
+										  *frame_meters_per_cell > 0.0
+								  ? 1.0 / *frame_meters_per_cell
+								  : cells_per_meter(bbox, width);
 	out.grid.assign(height, std::vector<uint8_t>(width));
 	// The shoreline assembler also performs Rust-compatible pixel-span
 	// sampling. Do not pre-sample at grid endpoints here: a coarse output grid

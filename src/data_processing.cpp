@@ -75,7 +75,10 @@
 #include "element_processing/traffic_lights.h"
 #include "datapack/extras.h"
 #include "element_processing/cars.h"
+#include "element_processing/pedestrians.h"
+#include "water_probe.h"
 #include "element_processing/trains.h"
+#include "element_processing/ships.h"
 #include "element_processing/swimming_pools.h"
 #include "element_processing/rail_track.h"
 #include "element_processing/stations.h"
@@ -1290,9 +1293,10 @@ bool generate_world(WorldEditor &editor,
 	static const std::vector<ProcessedElement> no_osm_elements;
 	const bool skip_osm = args.skip_osm();
 	const auto &generation_input = skip_osm ? no_osm_elements : input_elements;
-	static const BuildingFootprintBitmap no_building_footprints;
-	const auto &generation_footprints =
-			skip_osm ? no_building_footprints : input_building_footprints;
+	// Rust derives its footprint mask from the final element set and clipped
+	// generation bounds. Keep the legacy precomputed argument for ABI/source
+	// compatibility, but don't let its unpadded bounds truncate One World seams.
+	(void)input_building_footprints;
 	const PreparedBuildingData *generation_prepared_buildings =
 			skip_osm ? nullptr : prepared_buildings;
 	if (skip_osm && facade_job) {
@@ -1957,20 +1961,19 @@ bool generate_world(WorldEditor &editor,
 			editor.ground->save_land_cover_debug_image(
 					"landcover_debug_post_bridge_repair");
 	}
-	std::optional<BuildingFootprintBitmap> filtered_building_footprints;
-	if (dropped_aircraft_buildings > 0 || dropped_water_footprints > 0)
-		filtered_building_footprints.emplace(
-				flood_fill_cache.collect_building_footprints(elements, xzbbox));
-	const BuildingFootprintBitmap &building_footprints =
-			filtered_building_footprints ? *filtered_building_footprints
-										 : generation_footprints;
+	// Elements may have been removed above (runway/water footprints), and the
+	// caller's legacy bitmap is bounded to the original extract, not clip_bbox.
+	// Rebuild from the final elements so vegetation and structures agree at seams.
+	const BuildingFootprintBitmap building_footprints =
+			flood_fill_cache.collect_building_footprints(elements, clip_bbox);
 	// Rust materializes the lazy one-bit-per-world-column ESA water mask after
 	// ground/shoreline preparation and before terrain workers start. This also
 	// keeps the call harmless when a backend supplied no land-cover data.
 	if (editor.ground)
 		editor.ground->warm_water_blend();
-	auto road_mask_owner = std::make_shared<const RoadMaskBitmap>(
-			highways::collect_road_surface_coords(elements, editor, xzbbox, args.scale));
+	auto road_mask_owner =
+			std::make_shared<const RoadMaskBitmap>(highways::collect_road_surface_coords(
+					elements, editor, clip_bbox, args.scale));
 	const auto &road_mask = *road_mask_owner;
 	std::vector<datapack::discoveries::Place> extra_places;
 	std::optional<std::string> settlement;
@@ -2184,7 +2187,7 @@ bool generate_world(WorldEditor &editor,
 		}
 	} regional_tree_scope{editor};
 	auto building_passages =
-			highways::collect_building_passage_coords(elements, xzbbox, args.scale);
+			highways::collect_building_passage_coords(elements, clip_bbox, args.scale);
 	// Rust also builds the junction/crossing index before it reorders ground
 	// fills; only then does element dispatch begin.
 	const auto geo_bounds = editor.geographic_bounds();
@@ -2197,20 +2200,34 @@ bool generate_world(WorldEditor &editor,
 	} else {
 		editor.traffic_signal_index.reset();
 	}
+	std::optional<element_processing::ships::ShipPlan> ship_plan;
+	std::shared_ptr<water_probe::WaterProbe> water_probe;
+	std::optional<element_processing::pedestrians::WalkNetwork> walk_network;
+	std::shared_ptr<water_probe::WalkProbe> walk_probe;
+	editor.set_walk_probe({});
+	std::shared_ptr<trains::TrainRouteNetwork> generation_train_network;
 	// Rust builds the backend-neutral train timetable before tile dispatch and
 	// shares it with the editor so the library's consumer can animate or render
 	// the scheduled rail services.
 	if (extras.cars) {
 		const auto train_bounds = cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		ship_plan.emplace(element_processing::ships::ShipPlan::build(
+				elements, args.scale, train_bounds));
+		if (!ship_plan->is_empty()) {
+			water_probe = ship_plan->probe();
+			editor.set_water_probe(water_probe);
+		}
 		auto network =
 				trains::TrainRouteNetwork::build(elements, args.scale, train_bounds);
-		if (!network.is_empty())
-			editor.train_network =
-					std::make_shared<const trains::TrainRouteNetwork>(std::move(network));
-		else
+		const bool has_rail_trains = !network.is_empty();
+		if (has_rail_trains || (ship_plan && !ship_plan->is_empty())) {
+			generation_train_network =
+					std::make_shared<trains::TrainRouteNetwork>(std::move(network));
+			editor.train_network = generation_train_network;
+		} else
 			editor.train_network.reset();
-		if (editor.train_network)
+		if (has_rail_trains)
 			editor.enable_rail_height_collection();
 		else {
 			editor.rail_heights.reset();
@@ -2239,6 +2256,23 @@ bool generate_world(WorldEditor &editor,
 			highways::collect_tunnel_internal_endpoints(elements, xzbbox);
 	auto tunnel_portals = highways::collect_tunnel_portals(
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
+	if (extras.pedestrians) {
+		const auto walk_bounds = cartesian::XZBBox::rect_from_min_max(
+				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		const highways::RoadSurfaces surfaces(editor, bridge_structures,
+				highway_connectivity, tunnel_portals, args.scale);
+		auto network = element_processing::pedestrians::WalkNetwork::build(elements,
+				args.scale, marking_index.drives_on_left, extras.traffic_lights,
+				walk_bounds, [&surfaces](const ProcessedWay &way, int x, int z) {
+					return surfaces.y_at(way, x, z);
+				});
+		if (!network.is_empty()) {
+			walk_probe = network.probe();
+			editor.set_walk_probe(walk_probe);
+			walk_network.emplace(std::move(network));
+		}
+	}
+	extras.pedestrians = walk_network.has_value();
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
 	if (extras.cars) {
@@ -3574,13 +3608,10 @@ bool generate_world(WorldEditor &editor,
 	decltype(dispatch_state.rail_tunnel_points){}.swap(dispatch_state.rail_tunnel_points);
 	decltype(dispatch_state.highway_tunnel_cells){}.swap(
 			dispatch_state.highway_tunnel_cells);
+	static const BuildingFootprintBitmap no_building_footprints;
 	const BuildingFootprintBitmap *style_building_footprints = &no_building_footprints;
 	if (args.post_apocalyptic) {
 		style_building_footprints = &building_footprints;
-	} else {
-		// Rust retains the footprint bitmap for the style pass only when ruins
-		// need it. Winter styling does not inspect footprints.
-		filtered_building_footprints.reset();
 	}
 	building_part_groups = {};
 	building_group_members = {};
@@ -3620,7 +3651,27 @@ bool generate_world(WorldEditor &editor,
 				editor, args, *style_building_footprints, styled_regions);
 	else
 		world_style::apply(editor, args, *style_building_footprints);
-	filtered_building_footprints.reset();
+	// Routes and footways sample the world after its final terrain/style pass, while
+	// the generated voxel data is still resident in the editor.
+	editor.probe_resident();
+	if (walk_network && walk_probe) {
+		walk_network->finish(*walk_probe);
+		std::cout << "  Pedestrians: " << walk_network->lane_count()
+				  << " footway lanes to walk\n";
+		if (walk_network->is_empty())
+			walk_network.reset();
+		editor.set_walk_probe({});
+	}
+	extras.pedestrians = walk_network.has_value();
+	if (ship_plan && water_probe && generation_train_network) {
+		generation_train_network->add_ships(ship_plan->finish(*water_probe));
+		editor.train_network = generation_train_network;
+		extras.trains = !generation_train_network->is_empty();
+		const auto boats = generation_train_network->ship_count();
+		if (boats > 0)
+			std::cout << "  Moving vehicles: " << boats
+					  << " ferries and boats on mapped crossings\n";
+	}
 	if (apply_world_style)
 		editor.release_sealed_surface();
 	// The final style pass is the last consumer of road elevations. Rust drops
@@ -3886,6 +3937,9 @@ bool generate_world(WorldEditor &editor,
 				disaster_biomes.assign(counts.begin(), counts.end());
 			}
 		}
+		const auto walk_functions =
+				walk_network ? std::optional(walk_network->pack_functions())
+							 : std::nullopt;
 		if (!datapack::install_runtime_extras(
 					java_world_path, args, area, red_amber, editor.car_network.get(),
 					editor.train_network.get(),
@@ -3894,7 +3948,8 @@ bool generate_world(WorldEditor &editor,
 					},
 					extra_places, extra_spawn, &error, disaster_wooded, disaster_biomes,
 					disaster_highest_surface,
-					disaster_surface ? &*disaster_surface : nullptr, disaster_sea_y)) {
+					disaster_surface ? &*disaster_surface : nullptr, disaster_sea_y,
+					walk_functions ? &*walk_functions : nullptr)) {
 			const auto message = "failed to install gameplay datapack: " + error;
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';

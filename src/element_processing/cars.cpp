@@ -5,6 +5,7 @@
 #include "highways.h"
 #include "road_markings.h"
 #include "traffic_lights.h"
+#include "train_bodies.h"
 #include "../clipping.h"
 #include "../strict_parse.h"
 #include "../unicode_text.h"
@@ -1149,6 +1150,16 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 				part("minecraft:tinted_glass", {width + 0.04f, 0.95f, length - 0.28f},
 						{-(width + 0.04f) / 2.0f, 1.5f, -length / 2.0f + 0.3f}));
 	}
+	std::vector<train_bodies::Part> boxes;
+	boxes.reserve(out.size());
+	for (const auto &part : out)
+		boxes.push_back(
+				{part.block, part.size, part.corner, 0.0f, part.light != Light::None});
+	train_bodies::apart(boxes);
+	for (std::size_t i = 0; i < out.size(); ++i) {
+		out[i].size = boxes[i].size;
+		out[i].corner = boxes[i].corner;
+	}
 	return out;
 }
 
@@ -1767,7 +1778,8 @@ std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>> 
 
 } // namespace
 
-std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions() const
+std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
+		bool walkers) const
 {
 	std::vector<std::pair<std::string, std::string>> out;
 	std::ostringstream storage;
@@ -1968,6 +1980,25 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 				  << " if entity @a[gamemode=!spectator,tag=!arnis.riding,distance=.."
 				  << distance(PLAYER_AT[2])
 				  << "] run scoreboard players set #t arnis.car 0\n";
+	if (walkers) {
+		const auto near = distance(PLAYER_AT[0]);
+		const auto far = distance(PLAYER_AT[1]);
+		const auto long_near = distance(PLAYER_AT[0] + LONG_EXTRA);
+		const auto long_far = distance(PLAYER_AT[1] + LONG_EXTRA);
+		const auto radius = distance(1.2);
+		for (const auto &[condition, front, rear] :
+				{std::tuple{"tag=!arnis.car.long", near, far},
+						std::tuple{"tag=arnis.car.long", long_near, long_far}})
+			clear << "# Yield to a pedestrian crossing the road, not one walking beside it.\n"
+				  << "execute if entity @s[" << condition
+				  << "] rotated as @s positioned ^ ^ ^" << front
+				  << " if entity @e[tag=arnis.walker,distance=.." << radius
+				  << "] run scoreboard players set #t arnis.car 0\n"
+				  << "execute if entity @s[" << condition
+				  << "] rotated as @s positioned ^ ^ ^" << rear
+				  << " if entity @e[tag=arnis.walker,distance=.." << radius
+				  << "] run scoreboard players set #t arnis.car 0\n";
+	}
 	out.emplace_back("data/arnis/function/cars/clear.mcfunction", clear.str());
 	std::ostringstream ease;
 	ease << "# Brake smoothly at a red signal.\n"
@@ -2063,10 +2094,11 @@ std::string CarNetwork::storage_function() const
 	return found == functions.end() ? std::string{} : found->second;
 }
 
-std::vector<std::pair<std::string, std::string>> CarNetwork::look_functions() const
+std::vector<std::pair<std::string, std::string>> CarNetwork::look_functions(
+		bool walkers) const
 {
 	std::vector<std::pair<std::string, std::string>> result;
-	for (auto &entry : datapack_functions())
+	for (auto &entry : datapack_functions(walkers))
 		if (entry.first == "data/arnis/function/cars/look.mcfunction" ||
 				entry.first.starts_with("data/arnis/function/cars/look/"))
 			result.push_back(std::move(entry));

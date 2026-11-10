@@ -208,7 +208,8 @@ ProcessedElevationData process_elevation_data(const geographic::LLBBox &bbox,
 	const auto [bbox_height_m, bbox_width_m] =
 			coordinate_system::geo_distance(bbox.min(), bbox.max());
 	const double meters_per_cell =
-			grid_width && grid_height
+			seam_pad && *seam_pad > 0 ? 1.0 / scale
+			: grid_width && grid_height
 					? (bbox_width_m / static_cast<double>(grid_width) +
 							  bbox_height_m / static_cast<double>(grid_height)) *
 							  0.5

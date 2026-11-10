@@ -8,6 +8,7 @@
 #include <utility>
 #include <variant>
 #include <vector>
+#include "ship_bodies.h"
 
 namespace arnis::train_bodies
 {
@@ -41,7 +42,8 @@ enum class CoachKind : std::uint8_t
 	IceMid,
 	Container,
 	Tank,
-	Boxcar
+	Boxcar,
+	Ship
 };
 
 struct TramCab
@@ -104,11 +106,16 @@ struct Boxcar
 {
 	std::uint8_t variant{};
 };
+struct Ship
+{
+	ship_bodies::Vessel vessel{ship_bodies::Vessel::WaterBus};
+	bool low{};
+};
 
 /// One carriage, mirroring the Rust enum: payloads exist only on variants that use them.
 using Coach = std::variant<TramCab, TramMid, TramShort, MetroCab, MetroMid, SBahnCab,
 		SBahnMid, RegioCab, RegioMid, DeckCab, DeckMid, Loco, IceCab, IceMid, Container,
-		Tank, Boxcar>;
+		Tank, Boxcar, Ship>;
 
 /// A train's colours and deterministic freight palette seed.
 struct Livery
@@ -137,11 +144,27 @@ std::pair<std::vector<Coach>, std::function<Livery(std::size_t)>> compose(
 		Kind kind, std::uint64_t seed, bool short_train);
 double length_m(const Coach &coach);
 inline constexpr const char *NO_DOORS = "none";
-std::vector<float> doors(const Coach &coach);
+/// Passenger interaction locations and the dimensions/height of each clickable seat.
+/// The deck flag puts the seat directly above its interaction, as on a vessel.
+struct Doors
+{
+	std::vector<float> spots;
+	double eye{2.12};
+	float width{4.4f};
+	float height{3.8f};
+	bool deck{};
+	bool empty() const { return spots.empty(); }
+};
+Doors doors(const Coach &coach);
 std::string door_key(const Coach &coach);
+std::pair<std::string, std::string> door_functions(
+		const std::string &key, const Doors &doors, double size);
+/// Compatibility overload for clients that only have the former list of door positions.
 std::pair<std::string, std::string> door_functions(
 		const std::string &key, const std::vector<float> &spots, double size);
 std::vector<Part> parts(const Coach &coach, const Livery &livery);
+std::vector<std::pair<std::size_t, bool>> shared_faces(const Part &a, const Part &b);
+void apart(std::vector<Part> &parts);
 std::string key(const Coach &coach, const Livery &livery);
 /// Emit the macro body that summons a carriage's block displays at its centre.
 std::string summon_function(const std::vector<Part> &parts, double size, bool bare);

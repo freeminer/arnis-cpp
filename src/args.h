@@ -343,6 +343,7 @@ struct Args
 		discoveries = false;
 		moving_cars = false;
 		moving_vehicles = false;
+		pedestrians = false;
 		mob_spawning = MobSpawning::Off;
 		// Body defaults replace the requested generation mode, so refresh the
 		// compatibility cache after that normalization as well.
@@ -461,6 +462,9 @@ struct Args
 	bool moving_vehicles{false};
 	bool moving_cars{false};
 	bool moving_vehicles_enabled() const { return moving_vehicles || moving_cars; }
+	// Java-only autonomous footway pedestrians; they share the moving-vehicle
+	// data pack and are disabled for airless bodies by body defaults.
+	bool pedestrians{false};
 
 	// Enable filling ground (optional)
 	bool fillground{false};
@@ -513,6 +517,7 @@ struct Args
 				{disasters, "--disasters"},
 				{body_gravity, "--body-gravity"},
 				{moving_vehicles_enabled(), "--moving-vehicles"},
+				{pedestrians, "--pedestrians"},
 		};
 		if (bedrock || luanti) {
 			for (const auto &[enabled, flag] : java_pack_extras) {

@@ -39,10 +39,10 @@ inline constexpr const char *MANIFEST_FILE = "arnis_one_world.json";
 inline constexpr const char *PREVIEW_DIR = "arnis_one_world/previews";
 inline constexpr const char *DEFAULT_WORLD_NAME = "Arnis One World";
 inline constexpr std::uint32_t MANIFEST_VERSION = 3;
-inline constexpr int CLIP_PAD_BLOCKS = 64;
+inline constexpr int CLIP_PAD_BLOCKS = 128;
 inline int ground_pad_blocks(double scale)
 {
-	return std::max(96, int(std::ceil(100.0 * scale)));
+	return std::max(96, int(std::ceil(100.0 * scale))) + CLIP_PAD_BLOCKS;
 }
 inline double stable(double value, int decimals)
 {

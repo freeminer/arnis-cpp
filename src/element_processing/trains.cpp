@@ -39,6 +39,7 @@ constexpr double MAX_STEP = 7.9;
 constexpr double LAYOVER_S = 25.0;
 constexpr std::size_t MAX_TRAINS = 160;
 constexpr std::size_t MAX_CARRIAGES = 1400;
+constexpr std::size_t MAX_BOATS = 60;
 constexpr std::size_t MAX_POINTS = 250000;
 constexpr std::size_t MAX_STEPS = 72000;
 constexpr double COUPLING_M = 0.4;
@@ -50,6 +51,8 @@ constexpr double CREEP = 0.03;
 std::optional<std::vector<double>> bedrock_route_heights(const Route &route,
 		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
 {
+	if (route.surface_y.size() == route.points.size())
+		return route.surface_y;
 	std::vector<std::optional<double>> raw;
 	// Rust zips points with ways, so a malformed/partial route must not probe
 	// way id 0 for points that have no corresponding source way.
@@ -1317,9 +1320,41 @@ TrainRouteNetwork TrainRouteNetwork::build(const std::vector<ProcessedElement> &
 std::size_t TrainRouteNetwork::train_count() const
 {
 	std::size_t total = 0;
-	for (const auto &service : services_)
-		total += service.trains.size();
+	for (std::size_t i = 0;
+			i < services_.size() - std::min(ship_services_, services_.size()); ++i)
+		total += services_[i].trains.size();
 	return total;
+}
+
+std::size_t TrainRouteNetwork::ship_count() const
+{
+	std::size_t total = 0;
+	const auto first = services_.size() - std::min(ship_services_, services_.size());
+	for (std::size_t i = first; i < services_.size(); ++i)
+		total += services_[i].trains.size();
+	return total;
+}
+
+void TrainRouteNetwork::add_ships(std::vector<std::pair<Route, Service>> ships)
+{
+	std::size_t used_points = 0;
+	for (const auto &service : services_)
+		if (service.route < routes_.size())
+			used_points += routes_[service.route].points.size();
+	std::size_t room = MAX_POINTS > used_points ? MAX_POINTS - used_points : 0;
+	std::size_t boats = MAX_BOATS;
+	for (auto &[route, service] : ships) {
+		if (route.points.size() > room || boats == 0)
+			continue;
+		room -= route.points.size();
+		if (service.trains.size() > boats)
+			service.trains.resize(boats);
+		boats -= service.trains.size();
+		service.route = routes_.size();
+		routes_.push_back(std::move(route));
+		services_.push_back(std::move(service));
+		++ship_services_;
+	}
 }
 
 std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_functions(
@@ -1330,8 +1365,8 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 	network << "data modify storage arnis:trains tmp set value []\n";
 	std::ostringstream all;
 	std::map<std::string, std::vector<train_bodies::Part>> bodies;
-	std::map<std::string, std::vector<float>> doors;
-	doors.emplace(train_bodies::NO_DOORS, std::vector<float>{});
+	std::map<std::string, train_bodies::Doors> doors;
+	doors.emplace(train_bodies::NO_DOORS, train_bodies::Doors{});
 	std::size_t carriage = 0;
 	for (std::size_t route_index = 0; route_index < services_.size(); ++route_index) {
 		const auto &service = services_[route_index];
@@ -1341,63 +1376,68 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 		const std::size_t n = route.points.size();
 		if (n == 0 || route.ways.size() < n)
 			continue;
-		std::vector<std::optional<double>> raw(n);
-		for (std::size_t i = 0; i < n; ++i) {
-			const auto bx = static_cast<int>(std::floor(route.points[i].x));
-			const auto bz = static_cast<int>(std::floor(route.points[i].z));
-			std::optional<std::pair<int, int>> best;
-			for (int dx = -1; dx <= 1; ++dx)
-				for (int dz = -1; dz <= 1; ++dz)
-					if (const auto y = rail_y(route.ways[i], bx + dx, bz + dz)) {
-						const int distance = dx * dx + dz * dz;
-						if (!best || distance < best->first)
-							best = std::pair{distance, *y};
-					}
-			if (best)
-				raw[i] = best->second;
-		}
-		const auto known = static_cast<std::size_t>(std::count_if(
-				raw.begin(), raw.end(), [](const auto &v) { return v.has_value(); }));
-		if (known * 2 < n)
-			continue;
-		auto filled = raw;
-		std::optional<double> previous;
-		for (auto &height : filled) {
-			if (height)
-				previous = height;
-			else
-				height = previous;
-		}
-		std::optional<double> next;
-		for (std::size_t i = n; i-- > 0;) {
-			if (raw[i])
-				next = raw[i];
-			else if (!filled[i])
-				filled[i] = next;
-		}
-		std::vector<double> heights(n);
-		for (std::size_t i = 0; i < n; ++i)
-			heights[i] = filled[i].value_or(0.0);
-		const auto unsmoothed_heights = heights;
-		const bool looped = route.shape == Shape::Loop;
-		for (std::size_t i = 0; i < n; ++i) {
-			double sum = 0.0;
-			int count = 0;
-			for (int d = -3; d <= 3; ++d) {
-				const auto j = static_cast<std::int64_t>(i) + d;
-				if (looped) {
-					const auto wrapped = static_cast<std::size_t>(
-							(j % static_cast<std::int64_t>(n) +
-									static_cast<std::int64_t>(n)) %
-							static_cast<std::int64_t>(n));
-					sum += unsmoothed_heights[wrapped];
-					++count;
-				} else if (j >= 0 && j < static_cast<std::int64_t>(n)) {
-					sum += unsmoothed_heights[static_cast<std::size_t>(j)];
-					++count;
-				}
+		std::vector<double> heights;
+		if (route.surface_y.size() == n) {
+			heights = route.surface_y;
+		} else {
+			std::vector<std::optional<double>> raw(n);
+			for (std::size_t i = 0; i < n; ++i) {
+				const auto bx = static_cast<int>(std::floor(route.points[i].x));
+				const auto bz = static_cast<int>(std::floor(route.points[i].z));
+				std::optional<std::pair<int, int>> best;
+				for (int dx = -1; dx <= 1; ++dx)
+					for (int dz = -1; dz <= 1; ++dz)
+						if (const auto y = rail_y(route.ways[i], bx + dx, bz + dz)) {
+							const int distance = dx * dx + dz * dz;
+							if (!best || distance < best->first)
+								best = std::pair{distance, *y};
+						}
+				if (best)
+					raw[i] = best->second;
 			}
-			heights[i] = sum / count;
+			const auto known = static_cast<std::size_t>(std::count_if(
+					raw.begin(), raw.end(), [](const auto &v) { return v.has_value(); }));
+			if (known * 2 < n)
+				continue;
+			auto filled = raw;
+			std::optional<double> previous;
+			for (auto &height : filled) {
+				if (height)
+					previous = height;
+				else
+					height = previous;
+			}
+			std::optional<double> next;
+			for (std::size_t i = n; i-- > 0;) {
+				if (raw[i])
+					next = raw[i];
+				else if (!filled[i])
+					filled[i] = next;
+			}
+			heights.resize(n);
+			for (std::size_t i = 0; i < n; ++i)
+				heights[i] = filled[i].value_or(0.0);
+			const auto unsmoothed_heights = heights;
+			const bool looped = route.shape == Shape::Loop;
+			for (std::size_t i = 0; i < n; ++i) {
+				double sum = 0.0;
+				int count = 0;
+				for (int d = -3; d <= 3; ++d) {
+					const auto j = static_cast<std::int64_t>(i) + d;
+					if (looped) {
+						const auto wrapped = static_cast<std::size_t>(
+								(j % static_cast<std::int64_t>(n) +
+										static_cast<std::int64_t>(n)) %
+								static_cast<std::int64_t>(n));
+						sum += unsmoothed_heights[wrapped];
+						++count;
+					} else if (j >= 0 && j < static_cast<std::int64_t>(n)) {
+						sum += unsmoothed_heights[static_cast<std::size_t>(j)];
+						++count;
+					}
+				}
+				heights[i] = sum / count;
+			}
 		}
 
 		const std::size_t r = route_index;
@@ -1418,7 +1458,8 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 						std::atan2(-(b.x - a.x), b.z - a.z) * 180.0 / std::numbers::pi;
 				network << "{x:" << std::fixed << std::setprecision(2)
 						<< ::arnis::datapack::macro_coord(route.points[i].x)
-						<< "d,y:" << std::setprecision(3) << heights[i] + 0.0625
+						<< "d,y:" << std::setprecision(3)
+						<< heights[i] + route.surface_lift
 						<< "d,z:" << std::setprecision(2)
 						<< ::arnis::datapack::macro_coord(route.points[i].z)
 						<< "d,h:" << std::setprecision(1) << heading << "f}";
@@ -1490,8 +1531,8 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 	network << "data remove storage arnis:trains tmp\n";
 	out.emplace_back("data/arnis/function/trains/network.mcfunction", network.str());
 	out.emplace_back("data/arnis/function/trains/all.mcfunction", all.str());
-	for (const auto &[key, spots] : doors) {
-		const auto &[keep, make] = train_bodies::door_functions(key, spots, size_);
+	for (const auto &[key, door_set] : doors) {
+		const auto &[keep, make] = train_bodies::door_functions(key, door_set, size_);
 		out.emplace_back("data/arnis/function/trains/door/" + key + ".mcfunction", keep);
 		out.emplace_back(
 				"data/arnis/function/trains/door_new/" + key + ".mcfunction", make);
@@ -1533,7 +1574,7 @@ TrainRouteNetwork::bedrock_data(
 			const std::array<std::int64_t, 4> at{
 					static_cast<std::int64_t>(std::llround(x * 100.0)),
 					static_cast<std::int64_t>(
-							std::llround(((*heights)[i] + 0.0625) * 1000.0)),
+							std::llround(((*heights)[i] + route.surface_lift) * 1000.0)),
 					static_cast<std::int64_t>(std::llround(z * 100.0)),
 					static_cast<std::int64_t>(
 							std::llround(bedrock_heading(route, i) * 10.0))};

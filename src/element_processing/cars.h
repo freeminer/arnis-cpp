@@ -96,11 +96,13 @@ public:
 	// Rust exposes these backend-neutral datapack payloads separately; retain
 	// those entry points for library consumers while keeping the combined writer.
 	std::string storage_function() const;
-	std::vector<std::pair<std::string, std::string>> look_functions() const;
+	std::vector<std::pair<std::string, std::string>> look_functions(
+			bool walkers = false) const;
 	std::vector<std::pair<std::string, std::string>> body_functions() const;
 	std::pair<std::string, std::string> kind_function() const;
 	std::pair<std::string, std::string> seat_function() const;
-	std::vector<std::pair<std::string, std::string>> datapack_functions() const;
+	std::vector<std::pair<std::string, std::string>> datapack_functions(
+			bool walkers = false) const;
 	// Compact backend data and body geometry for the Bedrock vehicle add-on.
 	nlohmann::json bedrock_data() const;
 	std::vector<bedrock_addon::Body> bedrock_bodies() const;

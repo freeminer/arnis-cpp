@@ -1,4 +1,5 @@
 #include "train_bodies.h"
+#include "ship_bodies.h"
 
 #include <algorithm>
 #include <cmath>
@@ -385,8 +386,10 @@ CoachKind coach_kind(const Coach &coach)
 					return CoachKind::Container;
 				else if constexpr (std::is_same_v<T, Tank>)
 					return CoachKind::Tank;
-				else
+				else if constexpr (std::is_same_v<T, Boxcar>)
 					return CoachKind::Boxcar;
+				else
+					return CoachKind::Ship;
 			},
 			coach);
 }
@@ -456,6 +459,8 @@ Coach make_coach(CoachKind kind, bool front = false, std::uint8_t variant = 0)
 		return Tank{variant};
 	case CoachKind::Boxcar:
 		return Boxcar{variant};
+	case CoachKind::Ship:
+		return Ship{};
 	}
 	return Loco{};
 }
@@ -577,12 +582,72 @@ double length_m(const Coach &coach)
 		return 15.0;
 	case CoachKind::Boxcar:
 		return 16.5;
+	case CoachKind::Ship:
+		return ship_bodies::size_m(std::get<Ship>(coach).vessel).first;
 	}
 	return 0.0;
 }
 
+std::vector<std::pair<std::size_t, bool>> shared_faces(const Part &a, const Part &b)
+{
+	if (a.tilt != 0.0f || b.tilt != 0.0f || a.block == b.block)
+		return {};
+	std::vector<std::pair<std::size_t, bool>> faces;
+	for (std::size_t axis = 0; axis < 3; ++axis)
+		for (const bool far : {false, true}) {
+			const auto face = [axis, far](const Part &p) {
+				return p.corner[axis] + (far ? p.size[axis] : 0.0f);
+			};
+			if (std::abs(face(a) - face(b)) > 0.02f)
+				continue;
+			bool overlaps = true;
+			for (std::size_t k = 0; k < 3; ++k) {
+				if (k == axis)
+					continue;
+				const float lo = std::max(a.corner[k], b.corner[k]);
+				const float hi =
+						std::min(a.corner[k] + a.size[k], b.corner[k] + b.size[k]);
+				if (hi - lo <= 1e-3f)
+					overlaps = false;
+			}
+			if (overlaps)
+				faces.emplace_back(axis, far);
+		}
+	return faces;
+}
+
+void apart(std::vector<Part> &parts)
+{
+	constexpr float separation = 0.03f;
+	const auto volume = [](const Part &p) { return p.size[0] * p.size[1] * p.size[2]; };
+	for (int pass = 0; pass < 4; ++pass) {
+		bool moved = false;
+		for (std::size_t j = 1; j < parts.size(); ++j)
+			for (std::size_t i = 0; i < j; ++i)
+				for (const auto [axis, far] : shared_faces(parts[i], parts[j])) {
+					const std::size_t fixed = volume(parts[i]) < volume(parts[j]) ? j : i;
+					const std::size_t pushed = fixed == i ? j : i;
+					const auto &f = parts[fixed];
+					const float edge = f.corner[axis] + (far ? f.size[axis] : 0.0f);
+					auto &p = parts[pushed];
+					if (far) {
+						p.size[axis] = edge + separation - p.corner[axis];
+					} else {
+						const float end = p.corner[axis] + p.size[axis];
+						p.corner[axis] = edge - separation;
+						p.size[axis] = end - p.corner[axis];
+					}
+					moved = true;
+				}
+		if (!moved)
+			break;
+	}
+}
+
 std::vector<Part> parts(const Coach &coach, const Livery &livery)
 {
+	if (const auto *ship = std::get_if<Ship>(&coach))
+		return ship_bodies::parts(ship->vessel, livery, ship->low);
 	const auto kind = coach_kind(coach);
 	const float len = static_cast<float>(length_m(coach));
 	const float half = len / 2.0f;
@@ -653,8 +718,11 @@ std::vector<Part> parts(const Coach &coach, const Livery &livery)
 				true};
 		break;
 	}
-	case CoachKind::Loco:
-		return loco(livery);
+	case CoachKind::Loco: {
+		auto out = loco(livery);
+		apart(out);
+		return out;
+	}
 	case CoachKind::Container:
 	case CoachKind::Tank:
 	case CoachKind::Boxcar: {
@@ -694,14 +762,25 @@ std::vector<Part> parts(const Coach &coach, const Livery &livery)
 			append(out, box("minecraft:gray_terracotta", {-1.43f, 1.43f}, {1.4f, 3.7f},
 								{-1.6f, 1.6f}));
 		}
+		apart(out);
 		return out;
 	}
+	case CoachKind::Ship:
+		break; // Handled above because ships carry their own archetype and lowered state.
 	}
-	return passenger(s, livery);
+	auto out = passenger(s, livery);
+	apart(out);
+	return out;
 }
 
-std::vector<float> doors(const Coach &coach)
+Doors doors(const Coach &coach)
 {
+	if (const auto *ship = std::get_if<Ship>(&coach)) {
+		auto [spots, eye] = ship_bodies::seats_m(ship->vessel);
+		const auto beam = ship_bodies::size_m(ship->vessel).second;
+		return Doors{std::move(spots), eye, static_cast<float>(std::max(beam, 4.4)),
+				static_cast<float>(eye + .5), true};
+	}
 	if (std::holds_alternative<Container>(coach) || std::holds_alternative<Tank>(coach) ||
 			std::holds_alternative<Boxcar>(coach))
 		return {};
@@ -712,20 +791,23 @@ std::vector<float> doors(const Coach &coach)
 	std::vector<float> out;
 	for (std::size_t i = 0; i < count; ++i)
 		out.push_back(-length / 2 + spacing * (i + 0.5f));
-	return out;
+	return Doors{std::move(out), 2.12, 4.4f, 3.8f, false};
 }
 
 std::string door_key(const Coach &coach)
 {
-	if (doors(coach).empty())
+	if (const auto *ship = std::get_if<Ship>(&coach))
+		return "w_" + std::string(ship_bodies::name(ship->vessel));
+	if (doors(coach).spots.empty())
 		return NO_DOORS;
 	return "m" +
 		   std::to_string(static_cast<unsigned>(std::llround(length_m(coach) * 10.0)));
 }
 
 std::pair<std::string, std::string> door_functions(
-		const std::string &key, const std::vector<float> &spots, double size)
+		const std::string &key, const Doors &door_set, double size)
 {
+	const auto &spots = door_set.spots;
 	if (spots.empty())
 		return {};
 	const float scale = static_cast<float>(size);
@@ -733,7 +815,8 @@ std::pair<std::string, std::string> door_functions(
 	for (const float spot : spots)
 		extent = std::max(extent, std::abs(spot));
 	const float reach = extent * scale + 12;
-	const float seat = std::max(2.12 * size - 1.02, 0.0);
+	const float seat = static_cast<float>(std::max(door_set.eye * size - 1.02, 0.0));
+	const char *deck = door_set.deck ? ",\"arnis.tdeck\"" : "";
 	std::ostringstream keep, make;
 	keep << std::fixed << std::setprecision(2);
 	make << std::fixed << std::setprecision(2);
@@ -748,13 +831,20 @@ std::pair<std::string, std::string> door_functions(
 			 << "\n$tp @e[type=block_display,tag=arnis.ts$(c),tag=arnis.td" << i
 			 << ",distance=.." << reach << "] ^ ^" << seat << " ^" << at << '\n';
 		make << "$summon interaction ^ ^ ^" << at
-			 << " {Tags:[\"arnis.tp\",\"arnis.ts$(c)\",\"arnis.td" << i
-			 << "\"],width:" << 4.4 * scale << "f,height:" << 3.8 * scale << "f}\n"
+			 << " {Tags:[\"arnis.tp\",\"arnis.ts$(c)\",\"arnis.td" << i << "\"" << deck
+			 << "],width:" << door_set.width * scale
+			 << "f,height:" << door_set.height * scale << "f}\n"
 			 << "$summon block_display ^ ^" << seat << " ^" << at
 			 << " {Tags:[\"arnis.tp\",\"arnis.ts$(c)\",\"arnis.td" << i
-			 << "\",\"arnis.seat\"],teleport_duration:2}\n";
+			 << "\",\"arnis.seat\"" << deck << "],teleport_duration:2}\n";
 	}
 	return {keep.str(), make.str()};
+}
+
+std::pair<std::string, std::string> door_functions(
+		const std::string &key, const std::vector<float> &spots, double size)
+{
+	return door_functions(key, Doors{spots, 2.12, 4.4f, 3.8f, false}, size);
 }
 
 std::string key(const Coach &coach, const Livery &livery)
@@ -816,6 +906,9 @@ std::string key(const Coach &coach, const Livery &livery)
 		base = "boxcar_" +
 			   std::to_string(wagon(coach_variant(coach), livery.seed) % BOXCARS.size());
 		break;
+	case CoachKind::Ship:
+		return "ship_" + std::string(ship_bodies::name(std::get<Ship>(coach).vessel)) +
+			   (std::get<Ship>(coach).low ? "_low_" : "_") + livery.name;
 	}
 	if (kind != CoachKind::Container && kind != CoachKind::Tank &&
 			kind != CoachKind::Boxcar)

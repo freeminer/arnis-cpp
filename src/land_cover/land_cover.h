@@ -173,13 +173,15 @@ void mark_beaches(LandCoverData &data);
 // `LandCoverData` is returned when no valid ESA class covered the extent.
 LandCoverData assemble_land_cover_data(const GeographicBounds &bbox,
 		std::size_t grid_width, std::size_t grid_height,
-		const std::vector<EsaRasterTile> &tiles, bool smooth_boundaries = true);
+		const std::vector<EsaRasterTile> &tiles, bool smooth_boundaries = true,
+		std::optional<double> frame_meters_per_cell = std::nullopt);
 
 // Rust-equivalent remote ESA provider. It uses HTTP ranges and therefore never
 // downloads an entire WorldCover COG; failures of individual tiles are
 // tolerated and yield an empty result only when no tile contributes a class.
 LandCoverData fetch_land_cover_data(const GeographicBounds &bbox, std::size_t grid_width,
-		std::size_t grid_height, bool smooth_boundaries = true);
+		std::size_t grid_height, bool smooth_boundaries = true,
+		std::optional<double> frame_meters_per_cell = std::nullopt);
 
 // Public equivalents of the Rust post-read cleanup stages.  They are useful
 // when a provider streams or incrementally updates a classification grid.
