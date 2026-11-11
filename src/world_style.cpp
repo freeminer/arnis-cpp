@@ -300,8 +300,10 @@ void swap_material(
 	// Rust's Column::swap keeps the generated block's actual per-cell state;
 	// fall back to the block definition's baked-in state when none was emitted.
 	if (const auto previous = editor.get_block_with_properties_absolute(c.x, y, c.z))
-		put(editor, BlockWithProperties{replacement, previous->property_values()}, c.x, y,
-				c.z);
+		put(editor,
+				BlockWithProperties{
+						replacement, previous->properties, previous->nbt_properties},
+				c.x, y, c.z);
 	else
 		put(editor, replacement, c.x, y, c.z);
 }

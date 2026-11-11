@@ -285,8 +285,12 @@ struct Args
 	CelestialBody body{CelestialBody::Earth};
 	projection::ProjectionKind projection{projection::ProjectionKind::Local};
 	double celestial_latitude_degrees{0.0};
+	// Requested persistent One World mode. Kept separate from the prepared run
+	// context so validation and height fitting match Rust before prepare().
+	bool one_world{false};
 	// Fixed world frame inherited when this run extends a One World manifest.
 	std::optional<one_world::RunContext> one_world_run;
+	bool one_world_enabled() const { return one_world || one_world_run.has_value(); }
 	// Existing Java dimension bounds supplied by library/UI callers. When absent,
 	// generation discovers them from the destination world's tall datapack.
 	std::optional<std::pair<std::int32_t, std::int32_t>> tall_range;
@@ -504,7 +508,7 @@ struct Args
 	// diagnostic/error type.
 	std::optional<std::string> validation_error() const
 	{
-		if (shapes && one_world_run)
+		if (shapes && one_world_enabled())
 			return "--polygon makes a world of its own and cannot be combined with --one-world";
 		if ((polygon_file || !polygon.empty()) && !shapes)
 			return "polygon inputs must be resolved before generation";
@@ -542,7 +546,7 @@ struct Args
 						   " runs from a Java Edition data pack and is not available for Bedrock or Luanti worlds.";
 			}
 		}
-		if (one_world_run) {
+		if (one_world_enabled()) {
 			for (const auto &[enabled, flag] : java_pack_extras)
 				if (enabled)
 					return std::string(flag) + " is not available with --one-world yet.";
@@ -580,12 +584,12 @@ struct Args
 			return "map preview is not supported for Luanti output";
 		if (mob_spawning_enabled(mob_spawning) && luanti)
 			return "--mob-spawning is not available for Luanti worlds.";
-		if (one_world_run &&
+		if (one_world_enabled() &&
 				(bedrock || luanti || !is_earth(body) ||
 						std::abs(rotation) > std::numeric_limits<double>::epsilon() ||
 						mapillary_probe))
 			return "One World mode conflicts with the selected format, body, rotation, or Mapillary probe";
-		if (!one_world_run && world_name)
+		if (!one_world_enabled() && world_name)
 			return "--world-name only applies to --one-world.";
 		// Rust accepts standalone Web Mercator and warns that scale varies with
 		// latitude; the library validator must not turn that warning into a rejection.

@@ -1,11 +1,15 @@
 #include <mutex>
+#include <array>
+#include <unordered_map>
 #include <vector>
 #include <string>
 #include <random>
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <optional>
+#include <nlohmann/json.hpp>
 
 #include "colors.h"
 #include "block_palette.h"
@@ -14,6 +18,281 @@
 #include "../../arnis_adapter.h"
 namespace arnis
 {
+
+namespace
+{
+void append_size(std::string &out, std::size_t value)
+{
+	out += std::to_string(value);
+	out.push_back(':');
+}
+
+template <typename T>
+void append_binary(std::string &out, const T &value)
+{
+	out.append(reinterpret_cast<const char *>(&value), sizeof(value));
+}
+
+void append_canonical_value(std::string &out, const NbtValue &value)
+{
+	out.push_back(static_cast<char>(value.tag));
+	switch (value.tag) {
+	case NbtValue::Tag::Null:
+		break;
+	case NbtValue::Tag::Byte: {
+		const auto v = static_cast<std::int8_t>(value.integer);
+		append_binary(out, v);
+		break;
+	}
+	case NbtValue::Tag::Short: {
+		const auto v = static_cast<std::int16_t>(value.integer);
+		append_binary(out, v);
+		break;
+	}
+	case NbtValue::Tag::Int: {
+		const auto v = static_cast<std::int32_t>(value.integer);
+		append_binary(out, v);
+		break;
+	}
+	case NbtValue::Tag::Long:
+		append_binary(out, value.integer);
+		break;
+	case NbtValue::Tag::Float: {
+		const auto v = static_cast<float>(value.decimal);
+		append_binary(out, v);
+		break;
+	}
+	case NbtValue::Tag::Double:
+		append_binary(out, value.decimal);
+		break;
+	case NbtValue::Tag::ByteArray:
+		append_size(out, value.bytes.size());
+		if (!value.bytes.empty())
+			out.append(reinterpret_cast<const char *>(value.bytes.data()),
+					value.bytes.size());
+		break;
+	case NbtValue::Tag::String:
+		append_size(out, value.text.size());
+		out += value.text;
+		break;
+	case NbtValue::Tag::List:
+		append_size(out, value.list.size());
+		for (const auto &item : value.list)
+			append_canonical_value(out, item);
+		break;
+	case NbtValue::Tag::Compound:
+		append_size(out, value.compound.size());
+		for (const auto &[key, item] : value.compound) {
+			append_size(out, key.size());
+			out += key;
+			append_canonical_value(out, item);
+		}
+		break;
+	case NbtValue::Tag::IntArray:
+		append_size(out, value.ints.size());
+		for (const auto item : value.ints)
+			append_binary(out, item);
+		break;
+	case NbtValue::Tag::LongArray:
+		append_size(out, value.longs.size());
+		for (const auto item : value.longs)
+			append_binary(out, item);
+		break;
+	}
+}
+} // namespace
+
+NbtValue NbtValue::byte(std::int8_t value)
+{
+	NbtValue result;
+	result.tag = Tag::Byte;
+	result.integer = value;
+	return result;
+}
+NbtValue NbtValue::short_(std::int16_t value)
+{
+	NbtValue result;
+	result.tag = Tag::Short;
+	result.integer = value;
+	return result;
+}
+NbtValue NbtValue::int_(std::int32_t value)
+{
+	NbtValue result;
+	result.tag = Tag::Int;
+	result.integer = value;
+	return result;
+}
+NbtValue NbtValue::long_(std::int64_t value)
+{
+	NbtValue result;
+	result.tag = Tag::Long;
+	result.integer = value;
+	return result;
+}
+NbtValue NbtValue::float_(float value)
+{
+	NbtValue result;
+	result.tag = Tag::Float;
+	result.decimal = value;
+	return result;
+}
+NbtValue NbtValue::double_(double value)
+{
+	NbtValue result;
+	result.tag = Tag::Double;
+	result.decimal = value;
+	return result;
+}
+NbtValue NbtValue::byte_array(std::vector<std::int8_t> value)
+{
+	NbtValue result;
+	result.tag = Tag::ByteArray;
+	result.bytes = std::move(value);
+	return result;
+}
+NbtValue NbtValue::string(std::string value)
+{
+	NbtValue result;
+	result.tag = Tag::String;
+	result.text = std::move(value);
+	return result;
+}
+NbtValue NbtValue::list_value(std::vector<NbtValue> value)
+{
+	NbtValue result;
+	result.tag = Tag::List;
+	result.list = std::move(value);
+	return result;
+}
+NbtValue NbtValue::compound_value(std::map<std::string, NbtValue> value)
+{
+	NbtValue result;
+	result.tag = Tag::Compound;
+	result.compound = std::move(value);
+	return result;
+}
+NbtValue NbtValue::int_array(std::vector<std::int32_t> value)
+{
+	NbtValue result;
+	result.tag = Tag::IntArray;
+	result.ints = std::move(value);
+	return result;
+}
+NbtValue NbtValue::long_array(std::vector<std::int64_t> value)
+{
+	NbtValue result;
+	result.tag = Tag::LongArray;
+	result.longs = std::move(value);
+	return result;
+}
+NbtValue NbtValue::from_json(const nlohmann::json &value)
+{
+	if (value.is_null())
+		return {};
+	if (value.is_boolean())
+		return byte(value.get<bool>() ? 1 : 0);
+	if (value.is_number_unsigned()) {
+		const auto number = value.get<std::uint64_t>();
+		if (number <=
+				static_cast<std::uint64_t>(std::numeric_limits<std::int32_t>::max()))
+			return int_(static_cast<std::int32_t>(number));
+		return long_(static_cast<std::int64_t>(number));
+	}
+	if (value.is_number_integer()) {
+		const auto number = value.get<std::int64_t>();
+		if (number >= std::numeric_limits<std::int32_t>::min() &&
+				number <= std::numeric_limits<std::int32_t>::max())
+			return int_(static_cast<std::int32_t>(number));
+		return long_(number);
+	}
+	if (value.is_number_float())
+		return double_(value.get<double>());
+	if (value.is_string())
+		return string(value.get<std::string>());
+	if (value.is_binary()) {
+		std::vector<std::int8_t> bytes;
+		const auto &input = value.get_binary();
+		bytes.reserve(input.size());
+		for (const auto byte_value : input)
+			bytes.push_back(static_cast<std::int8_t>(byte_value));
+		return byte_array(std::move(bytes));
+	}
+	if (value.is_array()) {
+		std::vector<NbtValue> values;
+		values.reserve(value.size());
+		for (const auto &item : value)
+			values.push_back(from_json(item));
+		return list_value(std::move(values));
+	}
+	std::map<std::string, NbtValue> values;
+	for (auto it = value.begin(); it != value.end(); ++it)
+		values.emplace(it.key(), from_json(it.value()));
+	return compound_value(std::move(values));
+}
+
+bool NbtValue::operator==(const NbtValue &other) const
+{
+	return canonical_property_value(*this) == canonical_property_value(other);
+}
+
+bool NbtValue::operator==(const nlohmann::json &other) const
+{
+	return *this == from_json(other);
+}
+
+std::string canonical_property_value(const BlockWithProperties::PropertyValue &value)
+{
+	std::string result;
+	append_canonical_value(result, value);
+	return result;
+}
+
+BlockWithProperties BlockWithProperties::from_value(Block block, PropertyValue value)
+{
+	BlockWithProperties result{block};
+	if (value.tag == NbtValue::Tag::Compound) {
+		Properties string_properties;
+		for (const auto &[key, item] : value.compound)
+			if (item.tag == NbtValue::Tag::String)
+				string_properties.emplace(key, item.text);
+		result.properties = intern_properties(std::move(string_properties));
+	}
+	result.nbt_properties = intern_value(std::move(value));
+	return result;
+}
+
+BlockWithProperties BlockWithProperties::from_value(
+		Block block, const nlohmann::json &value)
+{
+	return from_value(block, NbtValue::from_json(value));
+}
+
+std::shared_ptr<const BlockWithProperties::PropertyValue>
+BlockWithProperties::intern_value(PropertyValue value)
+{
+	struct Shard
+	{
+		std::mutex mutex;
+		std::unordered_map<std::string, std::weak_ptr<const PropertyValue>> values;
+	};
+	static std::array<Shard, 16> shards;
+	const auto key = canonical_property_value(value);
+	auto &shard = shards[std::hash<std::string>{}(key) % shards.size()];
+	std::lock_guard lock(shard.mutex);
+	if (const auto found = shard.values.find(key); found != shard.values.end())
+		if (auto existing = found->second.lock())
+			return existing;
+	if (shard.values.size() >= 64)
+		for (auto it = shard.values.begin(); it != shard.values.end();)
+			if (it->second.expired())
+				it = shard.values.erase(it);
+			else
+				++it;
+	auto shared = std::make_shared<const PropertyValue>(std::move(value));
+	shard.values.insert_or_assign(key, shared);
+	return shared;
+}
 
 BlockWithProperties::Properties default_block_properties(const Block &block)
 {

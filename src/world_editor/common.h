@@ -743,6 +743,9 @@ struct PaletteItem
 {
 	std::string name;
 	BlockWithProperties::Properties properties;
+	// Typed fastnbt-compatible value; `properties` remains the convenient string
+	// state view used by block generators and format adapters.
+	BlockWithProperties::PropertyValue property_value;
 };
 struct PackedPalette
 {
@@ -750,6 +753,14 @@ struct PackedPalette
 	std::vector<std::uint64_t> data;
 	std::size_t bits_per_block = 4;
 };
+inline BlockWithProperties::PropertyValue property_value_json(
+		const BlockWithProperties::Properties &properties)
+{
+	std::map<std::string, NbtValue> entries;
+	for (const auto &[key, item] : properties)
+		entries.emplace(key, NbtValue::string(item));
+	return NbtValue::compound_value(std::move(entries));
+}
 inline std::size_t section_index(int x, int y, int z)
 {
 	return (static_cast<std::size_t>(y & 15) << 8) |
@@ -779,11 +790,16 @@ struct SectionToModify
 	std::unordered_map<std::size_t,
 			std::shared_ptr<const BlockWithProperties::Properties>>
 			properties;
+	std::unordered_map<std::size_t,
+			std::shared_ptr<const BlockWithProperties::PropertyValue>>
+			nbt_properties;
 	BlockWithProperties get_block_with_properties(int x, int y, int z) const
 	{
 		const auto index = section_index(x, y, z);
 		const auto state = properties.find(index);
-		return {storage.get(index), state == properties.end() ? nullptr : state->second};
+		const auto raw = nbt_properties.find(index);
+		return {storage.get(index), state == properties.end() ? nullptr : state->second,
+				raw == nbt_properties.end() ? nullptr : raw->second};
 	}
 	std::optional<Block> get_block(int x, int y, int z) const
 	{
@@ -797,6 +813,8 @@ struct SectionToModify
 		// Empty maps are common for terrain sections; avoid hashing on every write.
 		if (!properties.empty())
 			properties.erase(index);
+		if (!nbt_properties.empty())
+			nbt_properties.erase(index);
 	}
 	void set_block(int x, int y, int z, Block b)
 	{
@@ -810,20 +828,29 @@ struct SectionToModify
 		storage.set(index, bwp.block);
 		if (bwp.properties && !bwp.properties->empty())
 			properties[index] = bwp.properties;
-		else
-			clear_properties_at(index);
+		else if (!properties.empty())
+			properties.erase(index);
+		if (bwp.nbt_properties)
+			nbt_properties[index] = bwp.nbt_properties;
+		else if (!nbt_properties.empty())
+			nbt_properties.erase(index);
 	}
 	Block get_block_at_index(std::size_t i) const { return storage.get(i); }
 	void set_block_with_properties_at_index(std::size_t i, Block b,
-			std::shared_ptr<const BlockWithProperties::Properties> state)
+			std::shared_ptr<const BlockWithProperties::Properties> state,
+			std::shared_ptr<const BlockWithProperties::PropertyValue> raw = nullptr)
 	{
 		if (i >= SECTION_VOLUME)
 			return;
 		storage.set(i, b);
 		if (state && !state->empty())
 			properties[i] = std::move(state);
-		else
-			clear_properties_at(i);
+		else if (!properties.empty())
+			properties.erase(i);
+		if (raw)
+			nbt_properties[i] = std::move(raw);
+		else if (!nbt_properties.empty())
+			nbt_properties.erase(i);
 	}
 	template <typename Written>
 	void reconcile_properties(const SectionToModify &source, Written &&written)
@@ -837,6 +864,15 @@ struct SectionToModify
 		for (const auto &[index, state] : source.properties)
 			if (written(index))
 				properties[index] = state;
+		if (!nbt_properties.empty())
+			for (auto it = nbt_properties.begin(); it != nbt_properties.end();)
+				if (written(it->first))
+					it = nbt_properties.erase(it);
+				else
+					++it;
+		for (const auto &[index, state] : source.nbt_properties)
+			if (written(index))
+				nbt_properties[index] = state;
 	}
 	void retain_properties_on_blocks()
 	{
@@ -847,10 +883,17 @@ struct SectionToModify
 					it = properties.erase(it);
 				else
 					++it;
+		if (!nbt_properties.empty())
+			for (auto it = nbt_properties.begin(); it != nbt_properties.end();)
+				if (it->first >= SECTION_VOLUME ||
+						storage.get(it->first).id() == block_definitions::AIR.id())
+					it = nbt_properties.erase(it);
+				else
+					++it;
 	}
 	void compact()
 	{
-		if (properties.empty())
+		if (properties.empty() && nbt_properties.empty())
 			storage.compact();
 	}
 	void merge_non_air(const SectionToModify &other, bool overwrite)
@@ -866,13 +909,15 @@ struct SectionToModify
 			if (overwrite) {
 				storage.fill(source);
 				properties = other.properties;
+				nbt_properties = other.nbt_properties;
 				retain_properties_on_blocks();
 				return;
 			}
 			if (storage.uniform() && !destination_all_air)
 				return;
 		}
-		if (destination_all_air && properties.empty() && other.properties.empty()) {
+		if (destination_all_air && properties.empty() && other.properties.empty() &&
+				nbt_properties.empty() && other.nbt_properties.empty()) {
 			storage = other.storage;
 			return;
 		}
@@ -890,6 +935,7 @@ struct SectionToModify
 	{
 		storage.fill(b);
 		properties.clear();
+		nbt_properties.clear();
 	}
 	Block get_index(std::size_t i) const { return storage.get(i); }
 	void set_index(std::size_t i, Block b)
@@ -1558,7 +1604,8 @@ struct WorldToModify
 		const auto index = section_index(x & 15, y & 15, z & 15);
 		if (section.storage.get(index).id() != block_definitions::AIR.id())
 			return false;
-		section.set_block_with_properties_at_index(index, bwp.block, bwp.properties);
+		section.set_block_with_properties_at_index(
+				index, bwp.block, bwp.properties, bwp.nbt_properties);
 		return true;
 	}
 	bool set_block_if_absent(int x, int y, int z, Block b)
@@ -1624,7 +1671,8 @@ struct WorldToModify
 		bool clean = true;
 		for (int sy = section_y_min; sy <= section_y_max; ++sy) {
 			auto &s = c.sections[sy];
-			bool empty = s.properties.empty() && s.storage.uniform() &&
+			bool empty = s.properties.empty() && s.nbt_properties.empty() &&
+						 s.storage.uniform() &&
 						 s.storage.get(0).id() == block_definitions::AIR.id();
 			if (empty)
 				s.storage.fill(b);
@@ -3556,8 +3604,10 @@ inline PackedPalette pack_palette(const BlockStorage &storage)
 		if (lookup[id] == UINT16_MAX) {
 			lookup[id] = static_cast<std::uint16_t>(out.palette.size());
 			const auto defaults = block.properties();
-			out.palette.push_back({std::to_string(id),
-					defaults ? *defaults : BlockWithProperties::Properties{}});
+			const auto properties =
+					defaults ? *defaults : BlockWithProperties::Properties{};
+			out.palette.push_back(
+					{std::to_string(id), properties, property_value_json(properties)});
 		}
 	}
 	const std::size_t bits = std::max<std::size_t>(4,
@@ -3599,18 +3649,17 @@ inline PackedPalette pack_palette(const SectionToModify &section)
 			state = *it->second;
 		else if (const auto defaults = blocks[i].properties())
 			state = *defaults;
-		auto ordered = std::vector<std::pair<std::string, std::string>>(
-				state.begin(), state.end());
-		std::sort(ordered.begin(), ordered.end());
-		std::string key = std::to_string(id) + ':';
-		for (const auto &[name, value] : ordered) {
-			key += std::to_string(name.size()) + ':' + name;
-			key += std::to_string(value.size()) + ':' + value;
-		}
+		auto value = property_value_json(state);
+		if (const auto it = section.nbt_properties.find(i);
+				it != section.nbt_properties.end() && it->second)
+			value = *it->second;
+		// Match Rust's recursive, type-sensitive Value canonicalization.
+		std::string key = std::to_string(id) + ':' + canonical_property_value(value);
 		auto [it, inserted] = palette_lookup.emplace(
 				std::move(key), static_cast<std::uint16_t>(out.palette.size()));
 		if (inserted)
-			out.palette.push_back({std::to_string(id), std::move(state)});
+			out.palette.push_back(
+					{std::to_string(id), std::move(state), std::move(value)});
 		indices[i] = it->second;
 	}
 	const std::size_t bits = std::max<std::size_t>(4,

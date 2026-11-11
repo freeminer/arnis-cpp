@@ -275,13 +275,12 @@ std::optional<cartesian::XZPoint> XZBBoxShape::first_inside() const
 			for (const auto &[a, b] : row(static_cast<std::int32_t>(z))) {
 				const auto lo = std::max(a, rect_->min().x);
 				const auto hi = std::min(b, rect_->max().x);
-				int attempts = 0;
-				for (std::int64_t x = lo; x + size <= hi && attempts < 256;
-						x += std::max(1, margin), ++attempts)
-					if (covers(static_cast<std::int32_t>(x), static_cast<std::int32_t>(z),
-								x + size, z + size))
-						return cartesian::XZPoint{static_cast<int>(x + margin),
-								static_cast<int>(z + margin)};
+				if (static_cast<std::int64_t>(hi) - lo < size)
+					continue;
+				if (covers(lo, static_cast<std::int32_t>(z), lo + size,
+							static_cast<std::int32_t>(z + size)))
+					return cartesian::XZPoint{
+							lo + margin, static_cast<std::int32_t>(z + margin)};
 			}
 		}
 	}

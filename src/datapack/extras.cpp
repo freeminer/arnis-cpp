@@ -29,7 +29,7 @@ namespace arnis::datapack
 
 Extras Extras::from_args(const Args &args)
 {
-	if (args.one_world_run)
+	if (args.one_world_enabled())
 		return {};
 	Extras out;
 	out.gravity = args.body_gravity && !is_earth(args.body);
@@ -313,7 +313,7 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		std::optional<int> sea_y,
 		const std::vector<std::pair<std::string, std::string>> *walk_functions)
 {
-	if (args.bedrock || args.luanti || args.one_world_run || world.empty())
+	if (args.bedrock || args.luanti || args.one_world_enabled() || world.empty())
 		return true;
 	const auto enabled = Extras::from_args(args).for_format(WorldFormat::JavaAnvil);
 	const bool gravity = enabled.gravity;

@@ -239,6 +239,7 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 		const geographic::LLBBox &requested, Args &args, const std::string &arnis_version,
 		std::string *error)
 {
+	args.one_world = true;
 	auto fail = [&](std::string message) -> std::optional<Session> {
 		if (error)
 			*error = std::move(message);
@@ -246,6 +247,9 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 	};
 	args.apply_mode_defaults();
 	args.apply_body_defaults();
+	if (args.shapes)
+		return fail(
+				"--polygon makes a world of its own; --one-world generates rectangles.");
 	if (args.bedrock || args.luanti)
 		return fail("One World is available for Java Edition worlds only.");
 	if (!is_earth(args.body))
