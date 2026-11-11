@@ -3258,8 +3258,11 @@ bool generate_world(WorldEditor &editor,
 			// Snapshot the host editor on this thread: merging another completed
 			// worker may mutate the host while the tile itself is being processed.
 			auto tile_editor = editor.make_tile_worker();
+			const auto tile_floor_state = world_editor::floor_state_snapshot();
 			workers[slot] = std::async(std::launch::async,
-					[&, tile_index, tile_editor = std::move(tile_editor)]() mutable {
+					[&, tile_index, tile_editor = std::move(tile_editor),
+							tile_floor_state]() mutable {
+						world_editor::ScopedFloorState floor_state(tile_floor_state);
 						ElementDispatchState tile_state;
 						if (!begin_generation_tile(tile_editor, tile_index))
 							throw std::runtime_error("failed to begin Arnis tile worker");

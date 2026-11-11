@@ -13,6 +13,9 @@ namespace
 using Json = nlohmann::json;
 using RawRing = std::vector<std::pair<double, double>>;
 using RawPolygon = std::vector<RawRing>;
+constexpr const char *ACROSS_MERIDIAN =
+		"it spans more than half the globe east to west, which is how an area across the "
+		"180° meridian looks; keep it on one side";
 
 void set_error(std::string *error, std::string value)
 {
@@ -61,6 +64,9 @@ bool collect_geojson(const Json &value, std::vector<RawPolygon> &out, unsigned d
 		return true;
 	}
 	if (type == "Feature") {
+		// Match Rust's GeoJSON walker: a Feature without geometry (or with an
+		// explicit null geometry) contributes no area, but does not invalidate
+		// other Polygon features in the same collection.
 		if (!value.contains("geometry") || value["geometry"].is_null())
 			return true;
 		return collect_geojson(value["geometry"], out, depth + 1, error);
@@ -155,20 +161,27 @@ std::optional<LLShapes> LLShapes::create(
 		return std::nullopt;
 	}
 	std::size_t point_count = 0;
+	for (const auto &polygon : source)
+		for (const auto &ring : polygon)
+			point_count += ring.size();
+	if (point_count > MAX_POINTS) {
+		set_error(error, "The shapes have " + std::to_string(point_count) +
+								 " points; at most " + std::to_string(MAX_POINTS) +
+								 " are supported.");
+		return std::nullopt;
+	}
 	LLShapes result;
 	double global_min_lng = 180, global_max_lng = -180;
-	for (const auto &polygon : source) {
+	for (std::size_t polygon_index = 0; polygon_index < source.size(); ++polygon_index) {
+		const auto &polygon = source[polygon_index];
+		const auto shape_prefix = "Shape " + std::to_string(polygon_index + 1) + ": ";
 		if (polygon.empty()) {
-			set_error(error, "shape has no outline");
+			set_error(error,
+					"Shape " + std::to_string(polygon_index + 1) + " has no outline.");
 			return std::nullopt;
 		}
 		Polygon checked;
 		for (const auto &input : polygon) {
-			point_count += input.size();
-			if (point_count > MAX_POINTS) {
-				set_error(error, "the shapes exceed the supported 200000 points");
-				return std::nullopt;
-			}
 			Ring ring;
 			for (const auto &point : input) {
 				if (ring.empty() || ring.back().lat() != point.lat() ||
@@ -179,7 +192,9 @@ std::optional<LLShapes> LLShapes::create(
 					ring.front().lng() == ring.back().lng())
 				ring.pop_back();
 			if (ring.size() < 3) {
-				set_error(error, "an outline needs at least three different points");
+				set_error(error,
+						shape_prefix +
+								"an outline needs at least three different points");
 				return std::nullopt;
 			}
 			double min_lat = 90, max_lat = -90, min_lng = 180, max_lng = -180;
@@ -200,13 +215,12 @@ std::optional<LLShapes> LLShapes::create(
 						(b.lng() - origin.lng()) * (a.lat() - origin.lat());
 			}
 			if (max_lng - min_lng > 180.0) {
-				set_error(
-						error, "the outline spans more than half the globe east to west");
+				set_error(error, shape_prefix + ACROSS_MERIDIAN);
 				return std::nullopt;
 			}
 			if (max_lat <= min_lat || max_lng <= min_lng ||
 					std::abs(area) <= 1e-9 * (max_lat - min_lat) * (max_lng - min_lng)) {
-				set_error(error, "the outline encloses no area");
+				set_error(error, shape_prefix + "the outline encloses no area");
 				return std::nullopt;
 			}
 			checked.push_back(std::move(ring));
@@ -214,8 +228,7 @@ std::optional<LLShapes> LLShapes::create(
 		result.polygons_.push_back(std::move(checked));
 	}
 	if (global_max_lng - global_min_lng > 180.0) {
-		set_error(
-				error, "the shapes together span more than half the globe east to west");
+		set_error(error, "the shapes together: " + std::string(ACROSS_MERIDIAN));
 		return std::nullopt;
 	}
 	return result;

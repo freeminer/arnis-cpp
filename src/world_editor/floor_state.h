@@ -30,6 +30,28 @@ struct FloorState
 
 inline thread_local FloorState FLOOR_STATE;
 
+inline FloorState floor_state_snapshot()
+{
+	return FLOOR_STATE;
+}
+
+class ScopedFloorState
+{
+public:
+	explicit ScopedFloorState(const FloorState &state) : previous_(FLOOR_STATE)
+	{
+		FLOOR_STATE = state;
+	}
+
+	~ScopedFloorState() { FLOOR_STATE = previous_; }
+
+	ScopedFloorState(const ScopedFloorState &) = delete;
+	ScopedFloorState &operator=(const ScopedFloorState &) = delete;
+
+private:
+	FloorState previous_;
+};
+
 inline void set_world_bounds(int minimum, int maximum)
 {
 	const auto rem_euclid_16 = [](int value) {

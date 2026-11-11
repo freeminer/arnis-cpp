@@ -52,6 +52,13 @@ std::vector<OutlineWay<T>> cut_ways_to_outline(
 {
 	std::vector<OutlineWay<T>> result;
 	result.reserve(ways.size());
+	// Match Rust's borrowed fast path. Most generated areas are rectangles, so
+	// avoid building per-way coordinate vectors just to discover there is no mask.
+	if (!world.outline()) {
+		for (const auto &[way, value] : ways)
+			result.push_back({way, std::nullopt, value});
+		return result;
+	}
 	for (const auto &[way, value] : ways) {
 		if (auto pieces = cut_way_to_outline(*way, world)) {
 			for (auto &piece : *pieces)

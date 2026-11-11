@@ -408,6 +408,8 @@ std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
 std::optional<std::vector<ProcessedWay>> cut_way_to_outline(
 		const ProcessedWay &way, const XZBBox &world)
 {
+	if (!world.outline())
+		return std::nullopt;
 	std::vector<OutlinePoint> points;
 	points.reserve(way.nodes.size());
 	for (const auto &node : way.nodes)
