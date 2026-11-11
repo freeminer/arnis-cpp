@@ -42,7 +42,7 @@ std::pair<double, double> geo_distance(
 	return {lat_distance(a.lat(), b.lat()),
 			lon_distance((a.lat() + b.lat()) / 2, a.lng(), b.lng())};
 }
-::arnis::cartesian::XZPoint CoordTransformer::transform_point(
+std::pair<double, double> CoordTransformer::transform_point_f64(
 		::arnis::geographic::LLPoint p) const
 {
 	if (mercator_) {
@@ -51,11 +51,36 @@ std::pair<double, double> geo_distance(
 		const double z =
 				-R * std::log(std::tan(PI / 4 + lat * PI / 360.0)) * cos_ref_ * scale_ +
 				z_offset_;
-		return {static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z))};
+		return {x, z};
 	}
 	double rx = len_lng_ == 0 ? 0 : (p.lng() - min_lng_) / len_lng_,
 		   rz = len_lat_ == 0 ? 0 : 1 - (p.lat() - min_lat_) / len_lat_;
-	return {int(rx * sx_), int(rz * sz_)};
+	return {rx * sx_, rz * sz_};
+}
+::arnis::cartesian::XZPoint CoordTransformer::transform_point(
+		::arnis::geographic::LLPoint p) const
+{
+	const auto [x, z] = transform_point_f64(p);
+	return {static_cast<int>(std::floor(x)), static_cast<int>(std::floor(z))};
+}
+::arnis::XZBBoxShape::Polygons CoordTransformer::transform_shapes(
+		const ::arnis::LLShapes &shapes) const
+{
+	::arnis::XZBBoxShape::Polygons result;
+	result.reserve(shapes.polygons().size());
+	for (const auto &source_polygon : shapes.polygons()) {
+		::arnis::XZBBoxShape::Polygon polygon;
+		polygon.reserve(source_polygon.size());
+		for (const auto &source_ring : source_polygon) {
+			::arnis::XZBBoxShape::Ring ring;
+			ring.reserve(source_ring.size());
+			for (const auto &point : source_ring)
+				ring.push_back(transform_point_f64(point));
+			polygon.push_back(std::move(ring));
+		}
+		result.push_back(std::move(polygon));
+	}
+	return result;
 }
 std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect>
 CoordTransformer::with_web_mercator(const ::arnis::geographic::LLBBox &b, double scale)

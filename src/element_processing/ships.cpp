@@ -494,7 +494,8 @@ std::vector<LeisureLoop> leisure_loops(const cartesian::XZBBox &world, double sc
 	std::vector<bool> open(w * h);
 	for (std::size_t i = 0; i < open.size(); ++i) {
 		const auto [x, z] = centre(i % w, i / w);
-		open[i] = x <= world.max_x() && z <= world.max_z() && is_water(x, z);
+		open[i] = x <= world.max_x() && z <= world.max_z() &&
+				  world.contains(cartesian::XZPoint{x, z}) && is_water(x, z);
 	}
 	if (std::none_of(open.begin(), open.end(), [](bool value) { return value; }))
 		return {};
@@ -1083,6 +1084,16 @@ ShipPlan ShipPlan::build(const std::vector<ProcessedElement> &elements, double s
 	ShipPlan plan;
 	plan.scale_ = scale;
 	plan.size_ = std::clamp(scale, 0.4, 3.0);
+	const ::XZBBox clipping_world =
+			::XZBBox(world.min_x(), world.min_z(), world.max_x(), world.max_z())
+					.with_outline(world.outline());
+	const auto in_outline = [&](ShipNodes nodes, std::uint64_t way, std::uint64_t &cuts) {
+		if (auto runs = clipping::cut_line_to_outline(way, nodes, clipping_world, cuts))
+			return *runs;
+		std::vector<ShipNodes> runs;
+		runs.push_back(std::move(nodes));
+		return runs;
+	};
 	std::vector<FerryWay> ferry_ways;
 	std::vector<FerryWay> waterway_ways;
 	std::vector<ShipNodes> rivers;
@@ -1136,19 +1147,30 @@ ShipPlan ShipPlan::build(const std::vector<ProcessedElement> &elements, double s
 		if (cars && ferry.duration)
 			durations.insert_or_assign(way.id, *ferry.duration);
 		if (channel_class && !cars) {
+			std::uint64_t cuts = 0;
 			for (auto &segment : split_at_barriers(way)) {
 				if (segment.size() < 2)
 					continue;
-				waterway_ways.push_back({std::move(segment), way.id, false,
-						*channel_class, std::nullopt});
+				for (auto &run : in_outline(std::move(segment), way.id, cuts))
+					if (run.size() >= 2)
+						waterway_ways.push_back({std::move(run), way.id, false,
+								*channel_class, std::nullopt});
 			}
 			continue;
 		}
 		ferry.nodes.reserve(way.nodes.size());
 		for (const auto &node : way.nodes)
 			ferry.nodes.emplace_back(node.id, node.x + 0.5, node.z + 0.5);
-		if (cars)
-			ferry_ways.push_back(std::move(ferry));
+		if (cars) {
+			std::uint64_t cuts = 0;
+			for (auto &run : in_outline(std::move(ferry.nodes), way.id, cuts)) {
+				if (run.size() < 2)
+					continue;
+				auto piece = ferry;
+				piece.nodes = std::move(run);
+				ferry_ways.push_back(std::move(piece));
+			}
+		}
 	}
 	const auto at_edge = [&](const ShipNode &node) {
 		const auto [id, x, z] = node;

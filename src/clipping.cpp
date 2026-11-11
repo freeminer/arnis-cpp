@@ -2,6 +2,7 @@
 #include <algorithm>
 #include <cmath>
 #include <map>
+#include <unordered_map>
 #include <utility>
 namespace arnis::clipping
 {
@@ -263,5 +264,203 @@ std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 				int(std::lround(p[i].z))});
 	out.push_back(out.front());
 	return out;
+}
+
+std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
+		const std::vector<OutlinePoint> &points, const XZBBox &world, std::uint64_t &cuts)
+{
+	if (!world.outline())
+		return std::nullopt;
+	constexpr int slack = 2;
+	constexpr double min_cut_run = 12.0;
+	constexpr std::uint64_t cut_base = 9'000'000;
+	const auto block = [](double x, double z) {
+		return std::pair{static_cast<std::int32_t>(std::floor(x)),
+				static_cast<std::int32_t>(std::floor(z))};
+	};
+	const auto inside = [&](double x, double z) {
+		const auto [bx, bz] = block(x, z);
+		return world.contains(bx, bz);
+	};
+	const auto between = [&](std::int32_t bx, std::int32_t bz) {
+		const auto hit = [&](int dx, int dz) {
+			for (int k = 1; k <= 2 * slack; ++k)
+				if (world.contains(bx + dx * k, bz + dz * k))
+					return true;
+			return false;
+		};
+		return (hit(1, 0) && hit(-1, 0)) || (hit(0, 1) && hit(0, -1));
+	};
+	const auto near = [&](double x, double z) {
+		const auto [bx, bz] = block(x, z);
+		return world.touches(bx - slack, bz - slack, bx + slack, bz + slack) &&
+			   !between(bx, bz);
+	};
+	const auto initial_cuts = cuts;
+	const std::uint64_t base = cut_base + (way_id >> 62) * 250'000;
+	const auto cut_at = [&](double x, double z) {
+		++cuts;
+		const auto id = INVENTED_NODE_BASE | ((way_id * 10'000'000ULL + base + cuts) &
+													 (INVENTED_NODE_BASE - 1));
+		return OutlinePoint{id, x, z};
+	};
+	std::vector<OutlineRun> runs;
+	OutlineRun run;
+	bool starts_cut = false;
+	const auto first = points.empty() ? OutlinePoint{} : points.front();
+	bool is_in = !points.empty() && inside(std::get<1>(first), std::get<2>(first));
+	std::tuple<double, double, std::size_t> last_in{
+			points.empty() ? 0.0 : std::get<1>(first),
+			points.empty() ? 0.0 : std::get<2>(first), 1};
+	std::optional<std::pair<double, double>> after_in;
+	if (is_in)
+		run.push_back(first);
+	const auto boundary = [&](double ax, double az, double bx, double bz) {
+		double lo = 0.0, hi = 1.0;
+		for (int i = 0; i < 16; ++i) {
+			const double mid = (lo + hi) * 0.5;
+			if (inside(ax + (bx - ax) * mid, az + (bz - az) * mid))
+				lo = mid;
+			else
+				hi = mid;
+		}
+		return std::pair{ax + (bx - ax) * lo, az + (bz - az) * lo};
+	};
+	const auto close = [&](bool began_cut, bool ended_cut) {
+		double length = 0.0;
+		for (std::size_t i = 1; i < run.size(); ++i)
+			length += std::hypot(std::get<1>(run[i]) - std::get<1>(run[i - 1]),
+					std::get<2>(run[i]) - std::get<2>(run[i - 1]));
+		if (run.size() >= 2 && !(began_cut && ended_cut && length < min_cut_run))
+			runs.push_back(std::move(run));
+		run.clear();
+	};
+	for (std::size_t pair_index = 1; pair_index < points.size(); ++pair_index) {
+		const auto a = points[pair_index - 1], b = points[pair_index];
+		const double ax = std::get<1>(a), az = std::get<2>(a);
+		const double bx = std::get<1>(b), bz = std::get<2>(b);
+		const auto at = [&](double t) {
+			return std::pair{ax + (bx - ax) * t, az + (bz - az) * t};
+		};
+		const auto steps = static_cast<std::size_t>(
+				std::max(1.0, std::ceil(std::hypot(bx - ax, bz - az) * 2.0)));
+		double t0 = 0.0;
+		for (std::size_t sample = 1; sample <= steps; ++sample) {
+			const double t1 = static_cast<double>(sample) / steps;
+			const auto [x, z] = at(t1);
+			if (is_in) {
+				if (inside(x, z)) {
+					if (sample < steps)
+						last_in = {x, z, run.size()};
+					after_in.reset();
+				} else {
+					if (!after_in)
+						after_in = {x, z};
+					if (!near(x, z)) {
+						const auto [lx, lz, length] = last_in;
+						const auto [cx, cz] =
+								boundary(lx, lz, after_in->first, after_in->second);
+						if (run.size() > length)
+							run.resize(length);
+						run.push_back(cut_at(cx, cz));
+						close(starts_cut, true);
+						is_in = false;
+					}
+				}
+			} else if (inside(x, z)) {
+				const auto [cx, cz] = boundary(x, z, at(t0).first, at(t0).second);
+				run.push_back(cut_at(cx, cz));
+				starts_cut = true;
+				last_in = {x, z, run.size()};
+				after_in.reset();
+				is_in = true;
+			}
+			t0 = t1;
+		}
+		if (is_in) {
+			run.push_back(b);
+			if (inside(bx, bz)) {
+				last_in = {bx, bz, run.size()};
+				after_in.reset();
+			}
+		}
+	}
+	if (is_in) {
+		if (after_in) {
+			const auto [lx, lz, length] = last_in;
+			const auto [cx, cz] = boundary(lx, lz, after_in->first, after_in->second);
+			if (run.size() > length)
+				run.resize(length);
+			run.push_back(cut_at(cx, cz));
+			close(starts_cut, true);
+		} else {
+			close(starts_cut, false);
+		}
+	}
+	if (cuts == initial_cuts && runs.size() == 1 && runs.front().size() == points.size())
+		return std::nullopt;
+	return runs;
+}
+
+std::optional<std::vector<ProcessedWay>> cut_way_to_outline(
+		const ProcessedWay &way, const XZBBox &world)
+{
+	std::vector<OutlinePoint> points;
+	points.reserve(way.nodes.size());
+	for (const auto &node : way.nodes)
+		points.emplace_back(node.id, node.x + 0.5, node.z + 0.5);
+	std::uint64_t cuts = 0;
+	auto runs = cut_line_to_outline(way.id, points, world, cuts);
+	if (!runs)
+		return std::nullopt;
+	std::unordered_map<std::uint64_t, const ProcessedNode *> by_id;
+	for (const auto &node : way.nodes)
+		by_id.emplace(node.id, &node);
+	std::vector<ProcessedWay> result;
+	result.reserve(runs->size());
+	for (const auto &line : *runs) {
+		ProcessedWay clipped;
+		clipped.id = way.id;
+		clipped.tags = way.tags;
+		clipped.nodes.reserve(line.size());
+		for (const auto &[id, x, z] : line) {
+			const auto it = by_id.find(id);
+			if (it != by_id.end() && !is_invented_node_id(id)) {
+				clipped.nodes.push_back(*it->second);
+			} else {
+				clipped.nodes.push_back({id, {}, static_cast<int>(std::floor(x)),
+						static_cast<int>(std::floor(z))});
+			}
+		}
+		result.push_back(std::move(clipped));
+	}
+	return result;
+}
+
+std::vector<ProcessedElement> cut_elements_to_outline(
+		const std::vector<ProcessedElement> &elements, const XZBBox &world)
+{
+	if (!world.outline())
+		return elements;
+	std::vector<ProcessedElement> result;
+	result.reserve(elements.size());
+	for (const auto &element : elements) {
+		if (element.is_way()) {
+			const auto &way = element.as_way();
+			if (auto clipped = cut_way_to_outline(way, world)) {
+				for (auto &piece : *clipped)
+					result.emplace_back(std::move(piece));
+			} else {
+				result.emplace_back(way);
+			}
+		} else if (element.is_node()) {
+			const auto &node = element.as_node();
+			if (world.contains(node.x, node.z))
+				result.emplace_back(node);
+		} else {
+			result.emplace_back(element.as_relation());
+		}
+	}
+	return result;
 }
 }

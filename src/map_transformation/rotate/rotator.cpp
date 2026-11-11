@@ -8,6 +8,7 @@
 #include <cctype>
 #include <limits>
 #include <optional>
+#include <stdexcept>
 #include <string>
 #include <string_view>
 #include <variant>
@@ -128,6 +129,7 @@ void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
 {
 	if (std::abs(angle_degrees) < std::numeric_limits<double>::epsilon())
 		return;
+	const auto source_outline = xzbbox.outline();
 
 	const double rad = -angle_degrees * M_PI / 180.0;
 	const double sin_r = std::sin(rad);
@@ -184,6 +186,25 @@ void rotate_world(double angle_degrees, std::vector<ProcessedElement> &elements,
 			rust_numeric::saturating_i32(std::floor(min_z)),
 			rust_numeric::saturating_i32(std::ceil(max_x)),
 			rust_numeric::saturating_i32(std::ceil(max_z)));
+	if (source_outline) {
+		auto polygons = source_outline->polygons();
+		for (auto &polygon : polygons)
+			for (auto &ring : polygon)
+				for (auto &[x, z] : ring) {
+					// Match Rust's block-centre rotation so the outline raster follows the
+					// same rounded columns as transformed OSM nodes and ground grids.
+					auto [rx, rz] = rotate_point(x - 0.5, z - 0.5, cx, cz, sin_r, cos_r);
+					x = rx + 0.5;
+					z = rz + 0.5;
+				}
+		std::string error;
+		auto rotated =
+				XZBBoxShape::create(xzbbox.bounding_rect(), std::move(polygons), &error);
+		if (!rotated)
+			throw std::runtime_error("could not rotate generation outline: " + error);
+		xzbbox = xzbbox.with_outline(
+				std::make_shared<const XZBBoxShape>(std::move(*rotated)));
+	}
 }
 
 void rotate_world_with_ground(double angle_degrees,

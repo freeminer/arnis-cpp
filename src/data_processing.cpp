@@ -468,11 +468,12 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground)
 	return should_stream_to_disk(tile_count, available_memory_mb(), fillground);
 }
 
-bool should_use_parallel_tiles(std::size_t tile_count, bool java_format)
+bool should_use_parallel_tiles(
+		std::size_t tile_count, bool java_format, bool bedrock_format)
 {
-	// Rust only parallelizes Java region work once there are enough tiles to
-	// amortize thread/editor setup; Bedrock and Luanti retain ordered writes.
-	return java_format && tile_count >= 3;
+	// Match Rust: Java and Bedrock writers can use independent tile editors;
+	// Luanti retains ordered writes because its editor carries per-game state.
+	return (java_format || bedrock_format) && tile_count >= 3;
 }
 
 GenerationFeatureFlags generation_features(
@@ -487,12 +488,11 @@ GenerationFeatureFlags generation_features(
 }
 
 GenerationTilePolicy generation_tile_policy(
-		std::size_t tile_count, bool java_format, bool fillground)
+		std::size_t tile_count, bool java_format, bool fillground, bool bedrock_format)
 {
-	return {should_use_parallel_tiles(tile_count, java_format),
-			// Rust's eviction path is Java-region specific.  Bedrock and Luanti
-			// keep their native writers ordered and must never inherit the Java
-			// stream-to-disk decision.
+	return {should_use_parallel_tiles(tile_count, java_format, bedrock_format),
+			// Rust's eviction path is Java-region specific. Bedrock may parallelize
+			// tile placement, but neither Bedrock nor Luanti inherits Java streaming.
 			java_format && should_stream_to_disk(tile_count, fillground)};
 }
 
@@ -1278,6 +1278,16 @@ bool generate_world(WorldEditor &editor,
 	elevation::spawn_throttled_cleanup(cache::base_directory());
 
 	Args effective_args = args_;
+	if (!effective_args.shapes &&
+			(!effective_args.polygon.empty() || effective_args.polygon_file)) {
+		std::string shape_error;
+		if (!effective_args.resolve_shapes(&shape_error)) {
+			const std::string message = "invalid polygon selection: " + shape_error;
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
 	effective_args.apply_mode_defaults();
 	effective_args.apply_body_defaults();
 	effective_args.apply_feature_needs();
@@ -1379,8 +1389,11 @@ bool generate_world(WorldEditor &editor,
 	const bool extending_world = args.one_world_run && args.one_world_run->extending;
 	const auto java_world_path =
 			args.one_world_run ? args.one_world_run->world_dir : editor.output_path;
-	if (java_world && args.world_type == WorldType::Void && !extending_world &&
-			!java_world_path.empty())
+	// A drawn outline can leave untouched template chunks in an otherwise flat
+	// Java world too; remove those just as for a void world. Never alter a world
+	// being extended, whose existing chunks are authoritative.
+	if (java_world && !extending_world && !java_world_path.empty() &&
+			(args.world_type == WorldType::Void || args.shapes.has_value()))
 		world_utils::remove_untouched_template_region(java_world_path);
 	// Rust uses the same 3D toggle for bundled schematic props and model
 	// placements.  Direct callers of generate_world do not pass through the
@@ -1588,8 +1601,43 @@ bool generate_world(WorldEditor &editor,
 	auto [min_x, min_z] = editor.get_min_coords();
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
+	if (args.shapes) {
+		try {
+			const geographic::LLBBox geographic_bbox(geo[0], geo[2], geo[1], geo[3]);
+			const auto projection_spec = projection::ProjectionSpec::from_args(args);
+			const auto [transformer, projected_rect] =
+					projection_spec.transformer(geographic_bbox);
+			auto projected = transformer.transform_shapes(*args.shapes);
+			if (args.projection == projection::ProjectionKind::Local)
+				for (auto &polygon : projected)
+					for (auto &ring : polygon)
+						for (auto &[x, z] : ring) {
+							x += min_x;
+							z += min_z;
+						}
+			const cartesian::XZBBoxRect generation_rect({min_x, min_z}, {max_x, max_z});
+			std::string outline_error;
+			if (auto outline = XZBBoxShape::create(
+						generation_rect, std::move(projected), &outline_error)) {
+				xzbbox = xzbbox.with_outline(
+						std::make_shared<const XZBBoxShape>(std::move(*outline)));
+			} else {
+				const std::string message = "invalid polygon outline: " + outline_error;
+				editor.report_generation_error(message);
+				std::cerr << "Arnis generation error: " << message << '\n';
+				return false;
+			}
+		} catch (const std::exception &e) {
+			const std::string message =
+					std::string("could not project polygon outline: ") + e.what();
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
 	editor.set_generation_bounds(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+	editor.set_generation_outline(xzbbox.outline());
 	// Rust filters aircraft-pavement buildings before deriving its footprint
 	// bitmap. The Freeminer host normally supplies an already-filtered bitmap,
 	// but direct library callers may pass one derived from the unfiltered input.
@@ -2213,8 +2261,10 @@ bool generate_world(WorldEditor &editor,
 	// shares it with the editor so the library's consumer can animate or render
 	// the scheduled rail services.
 	if (extras.cars) {
-		const auto train_bounds = cartesian::XZBBox::rect_from_min_max(
+		auto train_bounds = cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		if (xzbbox.outline())
+			train_bounds = train_bounds.with_outline(xzbbox.outline());
 		ship_plan.emplace(element_processing::ships::ShipPlan::build(
 				elements, args.scale, train_bounds, [&](int x, int z) {
 					return editor.ground &&
@@ -2264,8 +2314,10 @@ bool generate_world(WorldEditor &editor,
 	auto tunnel_portals = highways::collect_tunnel_portals(
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
 	if (extras.pedestrians) {
-		const auto walk_bounds = cartesian::XZBBox::rect_from_min_max(
+		auto walk_bounds = cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
+		if (xzbbox.outline())
+			walk_bounds = walk_bounds.with_outline(xzbbox.outline());
 		const highways::RoadSurfaces surfaces(editor, bridge_structures,
 				highway_connectivity, tunnel_portals, args.scale);
 		auto network = element_processing::pedestrians::WalkNetwork::build(elements,
@@ -2367,7 +2419,7 @@ bool generate_world(WorldEditor &editor,
 	// keep each fill alive until its last tile has consumed it.
 	auto element_tiles = create_tiles(xzbbox, DEFAULT_TILE_SIZE);
 	const bool tiled_element_dispatch =
-			should_use_parallel_tiles(element_tiles.size(), java_format);
+			should_use_parallel_tiles(element_tiles.size(), java_format, bedrock_world);
 	// Streaming is independent of scheduling policy: ARNIS_NO_BAND only switches
 	// the eviction-safe row bands back to LPT order for diagnosis.
 	const bool force_lpt_tile_order = std::getenv("ARNIS_NO_BAND") != nullptr;
@@ -2461,11 +2513,12 @@ bool generate_world(WorldEditor &editor,
 	};
 
 	// All roads share the same immutable connectivity and marking index.
-	// Rust builds Java tiles against independent editors, then merges results in
-	// stable order in bounded batches. Only use worker editors when the host
-	// supplies overlay-backed writes and backend callbacks are tile-safe.
-	const bool regional_ground_passes =
-			tiled_element_dispatch && java_format && element_tiles.size() >= 3;
+	// Rust builds Java and Bedrock tiles against independent editors, then merges
+	// results in stable order in bounded batches. Only use worker editors when
+	// the host supplies overlay-backed writes and backend callbacks are tile-safe.
+	const bool regional_ground_passes = tiled_element_dispatch &&
+										(java_format || bedrock_world) &&
+										element_tiles.size() >= 3;
 	const std::size_t model_unit_count =
 			model_pipeline ? model_pipeline->three_dmr().placements.size() +
 									 model_pipeline->wikidata().placements.size()
@@ -3717,6 +3770,24 @@ bool generate_world(WorldEditor &editor,
 	// generation-only network before backend persistence finalization.
 	if (bedrock_world)
 		editor.car_network.reset();
+	// Match Rust's generation-time map/branding display. The entity and chest
+	// payloads remain backend-neutral records for the host to persist.
+	if (place_branding) {
+		auto map_spawn = spawn_point;
+		if (!map_spawn && !java_world_path.empty())
+			map_spawn = map_item::read_spawn_xz(java_world_path);
+		if (!map_spawn && editor.generation_outline)
+			if (const auto point = editor.generation_outline->first_inside())
+				map_spawn = std::pair{point->x, point->z};
+		if (!map_spawn)
+			map_spawn = std::pair{xzbbox.min_x() + 1, xzbbox.min_z() + 1};
+		if (wants_map_item)
+			editor.place_map_item_frame(
+					map_spawn->first, map_spawn->second, first_map_id, first_map_id + 1);
+		else
+			editor.place_branding_map_only(
+					map_spawn->first, map_spawn->second, first_map_id);
+	}
 	// Mark the completed generation for the format-specific persistence layer.
 	// Java/Bedrock/Luanti writers consume these lifecycle requests when wired by
 	// their respective WorldEditor backends.

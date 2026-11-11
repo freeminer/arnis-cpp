@@ -8,6 +8,7 @@
 #include <functional>
 #include <memory>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 namespace arnis::world_editor
@@ -35,6 +36,8 @@ class Junctions
 {
 public:
 	static Junctions build(const std::vector<ProcessedElement> &elements, double scale);
+	static Junctions build(
+			const std::vector<std::pair<const ProcessedWay *, int>> &roads, double scale);
 	std::uint32_t arms(std::uint64_t id) const;
 	bool is_junction(std::uint64_t id) const { return arms(id) >= 3; }
 	int widest(std::uint64_t id) const;

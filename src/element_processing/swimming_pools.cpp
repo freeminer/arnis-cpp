@@ -17,18 +17,27 @@
 
 namespace arnis::swimming_pools
 {
-const Block COPING = SMOOTH_QUARTZ;
-const Block LINING = LIGHT_BLUE_CONCRETE;
+const Block &COPING = SMOOTH_QUARTZ;
+const Block &LINING = LIGHT_BLUE_CONCRETE;
 namespace
 {
-const Block LANE_LINE = BLUE_CONCRETE;
-const std::array<Block, 7> NATURAL_GROUND = {
-		GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, MUD, SAND, GRAVEL};
+const Block &LANE_LINE = BLUE_CONCRETE;
 constexpr double DEFAULT_DEPTH_M = 2.0;
 constexpr double PLUNGE_POOL_M2 = 12.0;
 constexpr int MAX_DEPTH = 5;
 using Cell = std::pair<int, int>;
 using Cells = std::unordered_set<Cell, world_editor::WorldEditor::XZCellHash>;
+
+bool natural_ground(const Block &block)
+{
+	return block == GRASS_BLOCK || block == DIRT || block == COARSE_DIRT ||
+		   block == PODZOL || block == MUD || block == SAND || block == GRAVEL;
+}
+
+std::vector<Block> natural_ground_blocks()
+{
+	return {GRASS_BLOCK, DIRT, COARSE_DIRT, PODZOL, MUD, SAND, GRAVEL};
+}
 
 bool tree_part(const WorldEditor &editor, int x, int y, int z)
 {
@@ -41,8 +50,7 @@ bool under_floor(const WorldEditor &editor, const BuildingFootprintBitmap &footp
 	if (!footprints.contains(x, z))
 		return false;
 	const auto block = editor.get_block_absolute(x, editor.get_ground_level(x, z), z);
-	return block && std::find(NATURAL_GROUND.begin(), NATURAL_GROUND.end(), *block) ==
-							NATURAL_GROUND.end();
+	return block && !natural_ground(*block);
 }
 
 void place_pool_block(WorldEditor &editor, Block block, int x, int y, int z, int ground_y)
@@ -278,11 +286,11 @@ void generate_ring(WorldEditor &editor, const ProcessedWay &way, const Args &arg
 		const int top = std::max(water_y, ground_y);
 		if (top > ground_y)
 			editor.fill_column_absolute(COPING, x, z, ground_y + 1, top, true);
-		else if (!roads.contains(x, z))
+		else if (!roads.contains(x, z)) {
+			const auto natural = natural_ground_blocks();
 			editor.set_block_absolute(COPING, x, top, z,
-					std::optional<std::vector<Block>>(std::vector<Block>(
-							NATURAL_GROUND.begin(), NATURAL_GROUND.end())),
-					std::nullopt);
+					std::optional<std::vector<Block>>(natural), std::nullopt);
+		}
 		editor.fill_column_absolute(LINING, x, z, std::min(floor_y - 1, ground_y),
 				std::min(ground_y, top - 1), true);
 	}

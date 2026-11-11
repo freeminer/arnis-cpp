@@ -1347,8 +1347,20 @@ TrainRouteNetwork TrainRouteNetwork::build(const std::vector<ProcessedElement> &
 {
 	TrainRouteNetwork result;
 	result.size_ = std::clamp(scale, 0.4, 3.0);
-	auto track_pieces = make_pieces(elements);
+	std::vector<ProcessedElement> outline_elements;
+	const auto *network_elements = &elements;
+	if (world.outline()) {
+		const ::XZBBox outline_world(
+				world.min_x(), world.min_z(), world.max_x(), world.max_z());
+		outline_elements = clipping::cut_elements_to_outline(
+				elements, outline_world.with_outline(world.outline()));
+		network_elements = &outline_elements;
+	}
+	auto track_pieces = make_pieces(*network_elements);
 	result.routes_ = make_routes(track_pieces, world, scale);
+	// Rust clips the track ways before building pieces, but derives stations from
+	// the original elements. Keep nearby stops available to routes whose cut ends
+	// reach the drawn outline boundary.
 	const auto stops = stop_features(elements);
 	for (auto &route : result.routes_)
 		assign_stops(route, stops, scale);

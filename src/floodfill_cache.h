@@ -12,6 +12,7 @@
 
 #include "mapgen/earth/arnis_adapter.h"
 #include "osm_parser.h"
+#include "fm_xz_bbox_shape.h"
 
 /// Simple bounding box structure for defining world bounds
 struct XZBBox
@@ -20,6 +21,7 @@ struct XZBBox
 	int32_t min_z_;
 	int32_t max_x_;
 	int32_t max_z_;
+	std::shared_ptr<const arnis::XZBBoxShape> outline_;
 
 	XZBBox(int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) :
 			min_x_(min_x), min_z_(min_z), max_x_(max_x), max_z_(max_z)
@@ -32,8 +34,28 @@ struct XZBBox
 	int32_t max_z() const { return max_z_; }
 	bool contains(int32_t x, int32_t z) const
 	{
-		return x >= min_x_ && x <= max_x_ && z >= min_z_ && z <= max_z_;
+		return x >= min_x_ && x <= max_x_ && z >= min_z_ && z <= max_z_ &&
+				(!outline_ || outline_->contains(x, z));
 	}
+	bool covers(int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) const
+	{
+		if (min_x < min_x_ || min_z < min_z_ || max_x > max_x_ || max_z > max_z_)
+			return false;
+		return !outline_ || outline_->covers(min_x, min_z, max_x, max_z);
+	}
+	bool touches(int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) const
+	{
+		if (!outline_)
+			return min_x <= max_x_ && max_x >= min_x_ && min_z <= max_z_ && max_z >= min_z_;
+		return outline_->touches(min_x, min_z, max_x, max_z);
+	}
+	XZBBox with_outline(std::shared_ptr<const arnis::XZBBoxShape> shape) const
+	{
+		XZBBox result(*this);
+		result.outline_ = std::move(shape);
+		return result;
+	}
+	const std::shared_ptr<const arnis::XZBBoxShape> &outline() const { return outline_; }
 	template <typename Point>
 	bool contains(const Point &point) const
 	{

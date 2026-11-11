@@ -7,8 +7,8 @@
 
 namespace arnis::swimming_pools
 {
-extern const Block COPING;
-extern const Block LINING;
+extern const Block &COPING;
+extern const Block &LINING;
 
 bool is_swimming_pool(const tags_t &tags);
 void generate(WorldEditor &, const ProcessedWay &, const Args &, const FloodFillCache &,

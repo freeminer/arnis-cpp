@@ -1,5 +1,7 @@
 #pragma once
 #include "geographic/llbbox.h"
+#include "../fm_ll_shapes.h"
+#include "../fm_xz_bbox_shape.h"
 #include "cartesian/xzbbox/rectangle.h"
 #include <utility>
 #include <stdexcept>
@@ -22,7 +24,10 @@ public:
 	}
 	double scale_factor_x() const { return sx_; }
 	double scale_factor_z() const { return sz_; }
+	std::pair<double, double> transform_point_f64(::arnis::geographic::LLPoint p) const;
 	::arnis::cartesian::XZPoint transform_point(::arnis::geographic::LLPoint p) const;
+	::arnis::XZBBoxShape::Polygons transform_shapes(
+			const ::arnis::LLShapes &shapes) const;
 	static std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect> llbbox_to_xzbbox(
 			const ::arnis::geographic::LLBBox &, double scale);
 	static std::pair<CoordTransformer, ::arnis::cartesian::XZBBoxRect> with_web_mercator(

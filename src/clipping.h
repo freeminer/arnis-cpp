@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <utility>
 #include <vector>
+#include <tuple>
 #include "../../arnis_adapter.h"
 #include "floodfill_cache.h"
 namespace arnis::clipping
@@ -23,4 +24,13 @@ std::vector<ProcessedNode> clip_way_to_bbox_owned(
 		std::vector<ProcessedNode>, const XZBBox &);
 std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 		const std::vector<ProcessedNode> &, const XZBBox &);
+using OutlinePoint = std::tuple<std::uint64_t, double, double>;
+using OutlineRun = std::vector<OutlinePoint>;
+std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
+		const std::vector<OutlinePoint> &points, const XZBBox &world,
+		std::uint64_t &cuts);
+std::optional<std::vector<ProcessedWay>> cut_way_to_outline(
+		const ProcessedWay &way, const XZBBox &world);
+std::vector<ProcessedElement> cut_elements_to_outline(
+		const std::vector<ProcessedElement> &elements, const XZBBox &world);
 }

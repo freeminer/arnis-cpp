@@ -620,6 +620,9 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	const int max_z = std::min(iter_max_z, xzbbox.max_z());
 	if (min_x > max_x || min_z > max_z)
 		return;
+	const bool shaped = static_cast<bool>(xzbbox.outline());
+	const bool filler_outside =
+			shaped && args.world_type == WorldType::Flat && !args.bedrock && !args.luanti;
 	// Rust binds every tile editor's land-cover frame to the shared world bbox.
 	// Keep this entry point self-contained as it is also called directly by
 	// library users and must not inherit a stale host editor origin.
@@ -685,6 +688,16 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 		for (int chunk_z = chunk_index(min_z); chunk_z <= chunk_index(max_z); ++chunk_z) {
 			const int chunk_min_z = std::max(min_z, chunk_z * 16);
 			const int chunk_max_z = std::min(max_z, chunk_z * 16 + 15);
+			if (shaped &&
+					!xzbbox.touches(chunk_min_x, chunk_min_z, chunk_max_x, chunk_max_z)) {
+				for (int x = chunk_min_x; x <= chunk_max_x; ++x)
+					for (int z = chunk_min_z; z <= chunk_max_z; ++z) {
+						if (filler_outside)
+							editor.set_filler_outside_outline(x, z);
+						advance_progress();
+					}
+				continue;
+			}
 			double forest_fern_share = .12;
 			if (editor.ground) {
 				const int sample_x = chunk_origin(chunk_x) + 8;
@@ -718,6 +731,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 						chunk_max_z == chunk_origin(chunk_z) + 15;
 				const bool rotated_in =
 						chunk_fully_in_bbox &&
+						(!shaped || xzbbox.covers(chunk_min_x, chunk_min_z, chunk_max_x,
+											chunk_max_z)) &&
 						(!editor.ground || (editor.ground->is_in_rotated_bounds(
 													chunk_min_x, chunk_min_z) &&
 												   editor.ground->is_in_rotated_bounds(
@@ -749,10 +764,14 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 			}
 			for (int x = chunk_min_x; x <= chunk_max_x; ++x) {
 				for (int z = chunk_min_z; z <= chunk_max_z; ++z) {
+					const bool outside_outline = shaped && !xzbbox.contains(x, z);
 					// Rotation expands the output AABB. Rust masks columns whose inverse
 					// rotated coordinate lies outside the original source bbox; otherwise
 					// the expanded corners receive fabricated terrain and vegetation.
-					if (editor.ground && !editor.ground->inside_rotation_mask(x, z)) {
+					if ((editor.ground && !editor.ground->inside_rotation_mask(x, z)) ||
+							outside_outline) {
+						if (outside_outline && filler_outside)
+							editor.set_filler_outside_outline(x, z);
 						water_columns.forget(x, z);
 						advance_progress();
 						continue;

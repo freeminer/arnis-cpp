@@ -11,6 +11,7 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
+#include <deque>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -559,6 +560,9 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 	network.scale_ = scale;
 	network.size_ = std::clamp(scale, 0.4, 3.0);
 	network.keep_left_ = keep_left;
+	const ::XZBBox clipping_world =
+			::XZBBox(world.min_x(), world.min_z(), world.max_x(), world.max_z())
+					.with_outline(world.outline());
 	struct WayRef
 	{
 		const ProcessedWay *way;
@@ -573,6 +577,7 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 		bool shared{};
 	};
 	std::vector<WayRef> ways;
+	std::deque<ProcessedWay> clipped_ways;
 	std::unordered_map<std::uint64_t, RoadUse> roads;
 	std::unordered_map<std::uint64_t, std::size_t> uses;
 	std::vector<std::pair<double, double>> destinations;
@@ -580,12 +585,22 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 	for (const auto &element : elements) {
 		if (element.is_way()) {
 			const auto &way = element.as_way();
-			if (way.nodes.size() >= 2)
-				if (const auto density = walk_density(way.tags))
-					ways.push_back({&way,
-							highways::highway_block_range(
-									way.tags.get("highway"), way.tags, scale),
-							*density, false});
+			if (way.nodes.size() >= 2) {
+				if (const auto density = walk_density(way.tags)) {
+					const int half = highways::highway_block_range(
+							way.tags.get("highway"), way.tags, scale);
+					if (auto pieces = clipping::cut_way_to_outline(way, clipping_world)) {
+						for (auto &piece : *pieces) {
+							if (piece.nodes.size() < 2)
+								continue;
+							clipped_ways.push_back(std::move(piece));
+							ways.push_back({&clipped_ways.back(), half, *density, false});
+						}
+					} else {
+						ways.push_back({&way, half, *density, false});
+					}
+				}
+			}
 			if (highways::cars::drivable(way.tags)) {
 				const int half = highways::highway_block_range(
 						way.tags.get("highway"), way.tags, scale);
@@ -619,7 +634,17 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 	for (const auto &ref : ways)
 		for (const auto &node : ref.way->nodes)
 			++uses[node.id];
-	const auto squares = across_squares(elements, scale);
+	const auto generated_squares = across_squares(elements, scale);
+	std::vector<std::pair<ProcessedWay, double>> squares;
+	for (const auto &[way, density] : generated_squares) {
+		if (auto pieces = clipping::cut_way_to_outline(way, clipping_world)) {
+			for (auto &piece : *pieces)
+				if (piece.nodes.size() >= 2)
+					squares.emplace_back(std::move(piece), density);
+		} else {
+			squares.emplace_back(way, density);
+		}
+	}
 	for (const auto &[way, _] : squares)
 		for (const auto &node : way.nodes)
 			++uses[node.id];

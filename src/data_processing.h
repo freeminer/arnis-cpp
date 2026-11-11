@@ -167,7 +167,8 @@ bool should_stream_to_disk(std::size_t tile_count, bool fillground = false);
 // Compatibility overload; available_mb is retained but does not affect policy.
 bool should_stream_to_disk(
 		std::size_t tile_count, std::uint64_t available_mb, bool fillground);
-bool should_use_parallel_tiles(std::size_t tile_count, bool java_format);
+bool should_use_parallel_tiles(
+		std::size_t tile_count, bool java_format, bool bedrock_format = false);
 struct GenerationFeatureFlags
 {
 	bool map_item = false, map_preview = false, branding = false, map_decals = false;
@@ -179,8 +180,8 @@ struct GenerationTilePolicy
 	bool parallel = false;
 	bool stream_to_disk = false;
 };
-GenerationTilePolicy generation_tile_policy(
-		std::size_t tile_count, bool java_format, bool fillground = false);
+GenerationTilePolicy generation_tile_policy(std::size_t tile_count, bool java_format,
+		bool fillground = false, bool bedrock_format = false);
 struct GenerationProgress
 {
 	double processing = 19.5, world_start = 20.0, world_end = 70.0, ground_start = 70.0,
@@ -240,7 +241,8 @@ struct GenerationRuntime
 	{
 		features = generation_features(is_java(options.format), is_luanti(options.format),
 				options.map_item, options.map_preview);
-		tiles = generation_tile_policy(tile_count, is_java(options.format), fillground);
+		tiles = generation_tile_policy(tile_count, is_java(options.format), fillground,
+				is_bedrock(options.format));
 		progress = GenerationProgress{};
 		initialized = true;
 		completed = false;

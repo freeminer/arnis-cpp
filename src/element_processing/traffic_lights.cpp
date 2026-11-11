@@ -313,15 +313,27 @@ bool is_vehicular(const std::string &highway)
 
 Junctions Junctions::build(const std::vector<ProcessedElement> &elements, double scale)
 {
-	Junctions result;
-	result.upstream_ = std::max(UPSTREAM_M * scale, 6.0);
-	std::vector<const ProcessedWay *> roads;
+	std::vector<std::pair<const ProcessedWay *, int>> roads;
 	for (const auto &element : elements)
 		if (element.is_way() && element.as_way().nodes.size() >= 2 &&
-				cars::drivable(element.as_way().tags))
-			roads.push_back(&element.as_way());
-	for (const auto *way : roads) {
-		const int half = highway_block_range(way->tags.at("highway"), way->tags, scale);
+				cars::drivable(element.as_way().tags)) {
+			const auto &way = element.as_way();
+			const auto highway = way.tags.find("highway");
+			if (highway != way.tags.end())
+				roads.emplace_back(
+						&way, highway_block_range(highway->second, way.tags, scale));
+		}
+	return build(roads, scale);
+}
+
+Junctions Junctions::build(
+		const std::vector<std::pair<const ProcessedWay *, int>> &roads, double scale)
+{
+	Junctions result;
+	result.upstream_ = std::max(UPSTREAM_M * scale, 6.0);
+	for (const auto &[way, half] : roads) {
+		if (!way || way->nodes.size() < 2)
+			continue;
 		const bool closed = way->nodes.front().id == way->nodes.back().id;
 		const std::size_t first = closed ? 1 : 0;
 		for (std::size_t i = first; i < way->nodes.size(); ++i) {
@@ -331,7 +343,9 @@ Junctions Junctions::build(const std::vector<ProcessedElement> &elements, double
 			result.widest_[node.id] = std::max(result.widest_[node.id], half);
 		}
 	}
-	for (const auto *way : roads)
+	for (const auto &[way, _] : roads) {
+		if (!way || way->nodes.size() < 2)
+			continue;
 		for (std::size_t i = 0; i < way->nodes.size(); ++i) {
 			const auto &node = way->nodes[i];
 			if (!is_signal(node.tags))
@@ -345,6 +359,7 @@ Junctions Junctions::build(const std::vector<ProcessedElement> &elements, double
 						junction && junction->second <= result.reach(junction->first))
 					result.signals_[junction->first].push_back(node.id);
 		}
+	}
 	return result;
 }
 

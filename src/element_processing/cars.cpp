@@ -15,6 +15,7 @@
 #include <array>
 #include <charconv>
 #include <cmath>
+#include <deque>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -522,6 +523,9 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		const std::function<bool(int, int)> &built)
 {
 	std::vector<RoadRef> roads;
+	// Keep clipped way storage stable: RoadRef and later lane vertices retain
+	// pointers into these temporary outline-cut copies for the duration of build.
+	std::deque<ProcessedWay> clipped_ways;
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
@@ -531,11 +535,25 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		const auto highway_it = way.tags.find("highway");
 		if (highway_it == way.tags.end())
 			continue;
-		roads.push_back({&way, highway_block_range(highway_it->second, way.tags, scale),
-				road_markings::oneway_sign(highway_it->second, way.tags)});
+		const int half = highway_block_range(highway_it->second, way.tags, scale);
+		const int oneway = road_markings::oneway_sign(highway_it->second, way.tags);
+		if (auto pieces = clipping::cut_way_to_outline(way, world)) {
+			for (auto &piece : *pieces) {
+				if (piece.nodes.size() < 2)
+					continue;
+				clipped_ways.push_back(std::move(piece));
+				roads.push_back({&clipped_ways.back(), half, oneway});
+			}
+		} else {
+			roads.push_back({&way, half, oneway});
+		}
 	}
 
-	const auto junctions = Junctions::build(elements, scale);
+	std::vector<std::pair<const ProcessedWay *, int>> junction_roads;
+	junction_roads.reserve(roads.size());
+	for (const auto &road : roads)
+		junction_roads.emplace_back(road.way, road.half);
+	const auto junctions = Junctions::build(junction_roads, scale);
 	const auto is_junction = [&](std::uint64_t id) { return junctions.is_junction(id); };
 
 	std::vector<Piece> pieces;
@@ -1667,14 +1685,20 @@ void link(std::vector<Segment> &segments, const std::vector<Lane> &lanes,
 		return value < static_cast<double>(lo) + EDGE_REACH ||
 			   value > static_cast<double>(hi + 1) - EDGE_REACH;
 	};
+	const int outline_reach = static_cast<int>(std::ceil(EDGE_REACH));
 	for (std::size_t i = 0; i < segments.size(); ++i) {
 		const auto network = find_root(i, find_root);
 		network_length[network] += lane_length(segments[i]);
 		if (segments[i].points.empty())
 			continue;
 		const auto at_edge = [&](const Waypoint &p) {
+			const int x = static_cast<int>(std::floor(p.x));
+			const int z = static_cast<int>(std::floor(p.z));
+			const bool off_outline =
+					world.outline() && !world.covers(x - outline_reach, z - outline_reach,
+											   x + outline_reach, z + outline_reach);
 			return near_edge(p.x, world.min_x(), world.max_x()) ||
-				   near_edge(p.z, world.min_z(), world.max_z());
+				   near_edge(p.z, world.min_z(), world.max_z()) || off_outline;
 		};
 		if (at_edge(segments[i].points.front()) || at_edge(segments[i].points.back()))
 			open_networks.insert(network);

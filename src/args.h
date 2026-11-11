@@ -12,6 +12,7 @@
 #include <string>
 #include <string_view>
 #include <utility>
+#include <vector>
 
 #include "celestial.h"
 #include "projection/web_mercator.h"
@@ -19,6 +20,7 @@
 #include "element_processing/field_texture.h"
 #include "trees/tree_library.h"
 #include "caves_biomes.h"
+#include "fm_ll_shapes.h"
 
 namespace arnis
 {
@@ -238,6 +240,13 @@ inline SignageLevel signage_level_from_string(const std::string &value)
 
 struct Args
 {
+	// Optional Rust-compatible geographic polygon selection. Library callers can
+	// set `shapes` directly or provide --polygon/GeoJSON values and resolve them.
+	std::vector<std::string> polygon;
+	std::optional<std::string> polygon_file;
+	std::optional<LLShapes> shapes;
+	std::optional<geographic::LLBBox> bbox;
+	bool resolve_shapes(std::string *error = nullptr);
 	// Bounding box of the area (min_lat,min_lng,max_lat,max_lng) (required)
 	//LLBBox bbox{};
 
@@ -495,6 +504,10 @@ struct Args
 	// diagnostic/error type.
 	std::optional<std::string> validation_error() const
 	{
+		if (shapes && one_world_run)
+			return "--polygon makes a world of its own and cannot be combined with --one-world";
+		if ((polygon_file || !polygon.empty()) && !shapes)
+			return "polygon inputs must be resolved before generation";
 		// Planetary scales intentionally sit below the Earth object scale
 		// minimum; Rust validates scale only for geographic Earth worlds.
 		if (is_earth(body) && !valid_scale(scale))
@@ -543,6 +556,15 @@ struct Args
 						*spawn_lat < -90.0 || *spawn_lat > 90.0 || *spawn_lng < -180.0 ||
 						*spawn_lng > 180.0))
 			return "Invalid spawn coordinates: latitude/longitude out of range";
+		if (spawn_lat && spawn_lng) {
+			const geographic::LLPoint spawn(*spawn_lat, *spawn_lng);
+			// Match Rust validate_args: a spawn inside the area rectangle may
+			// still lie in a gap or a polygon hole.
+			if (bbox && !bbox->contains(spawn))
+				return "Spawn point (--spawn-lat, --spawn-lng) must be within the bounding box.";
+			if (shapes && !shapes->contains(spawn))
+				return "Spawn point (--spawn-lat, --spawn-lng) must be inside the --polygon shapes.";
+		}
 		if (!std::isfinite(rotation) || rotation < -90.0 || rotation > 90.0)
 			return "Rotation angle must be between -90 and 90 degrees.";
 		const int floor = (disable_height_limit && !bedrock && !luanti ? -2032 : -64) + 2;

@@ -30,7 +30,7 @@ void local_map(Canvas &canvas, int x, int z, const std::optional<PreviewRaster> 
 						pz < static_cast<int>(image.height)) {
 					const auto offset =
 							(static_cast<std::size_t>(pz) * image.width + px) * 4;
-					if (offset + 2 < image.pixels.size())
+					if (offset + 3 < image.pixels.size() && image.pixels[offset + 3] > 0)
 						color = map_palette::nearest_map_color(image.pixels[offset],
 								image.pixels[offset + 1], image.pixels[offset + 2]);
 				}
