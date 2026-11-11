@@ -65,6 +65,39 @@ ProjectionSpec::transformer(const geographic::LLBBox &bbox) const
 	return coordinate_system::CoordTransformer::with_web_mercator(bbox, scale);
 }
 
+std::optional<cartesian::XZBBox> ProjectionSpec::shaped(const geographic::LLBBox &bbox,
+		const cartesian::XZBBox &xzbbox, const LLShapes &shapes, std::string *error) const
+{
+	try {
+		const auto [coordinate_transformer, unused_rect] = transformer(bbox);
+		(void)unused_rect;
+		auto polygons = coordinate_transformer.transform_shapes(shapes);
+		// Local projection coordinates start at zero in the library. Freeminer's
+		// generation frame is world-positioned, so move the outline into that frame.
+		if (kind == ProjectionKind::Local)
+			for (auto &polygon : polygons)
+				for (auto &ring : polygon)
+					for (auto &[x, z] : ring) {
+						x += xzbbox.min_x();
+						z += xzbbox.min_z();
+					}
+		std::string shape_error;
+		auto outline = XZBBoxShape::create(
+				xzbbox.bounding_rect(), std::move(polygons), &shape_error);
+		if (!outline) {
+			if (error)
+				*error = std::move(shape_error);
+			return std::nullopt;
+		}
+		return xzbbox.with_outline(
+				std::make_shared<const XZBBoxShape>(std::move(*outline)));
+	} catch (const std::exception &e) {
+		if (error)
+			*error = e.what();
+		return std::nullopt;
+	}
+}
+
 cartesian::XZBBoxRect ProjectionSpec::clip_bbox(const cartesian::XZBBoxRect &bbox) const
 {
 	if (clip_pad <= 0)

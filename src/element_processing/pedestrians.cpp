@@ -11,7 +11,6 @@
 #include <charconv>
 #include <cmath>
 #include <cstdint>
-#include <deque>
 #include <iomanip>
 #include <limits>
 #include <numeric>
@@ -178,7 +177,7 @@ std::vector<std::pair<double, double>> lane_line(
 			if (std::hypot(centre[j].first - centre[k].first,
 						centre[j].second - centre[k].second) >= 2.0)
 				out = direction(k, j);
-		const auto near = [&]() -> std::optional<std::pair<double, double>> {
+		const auto near_ = [&]() -> std::optional<std::pair<double, double>> {
 			if (k > 0)
 				if (auto d = direction(k - 1, k))
 					return d;
@@ -193,7 +192,7 @@ std::vector<std::pair<double, double>> lane_line(
 			d = *into;
 		else if (out)
 			d = *out;
-		else if (const auto fallback = near())
+		else if (const auto fallback = near_())
 			d = *fallback;
 		const std::pair<double, double> side =
 				keep_left ? std::pair{d.second, -d.first} : std::pair{-d.second, d.first};
@@ -317,25 +316,21 @@ double Footfall::at(std::pair<double, double> point) const
 {
 	const int x = static_cast<int>(std::floor(point.first / cell_size_));
 	const int z = static_cast<int>(std::floor(point.second / cell_size_));
-	std::uint32_t near = 0;
+	std::uint32_t near_ = 0;
 	for (int dx = -1; dx <= 1; ++dx)
 		for (int dz = -1; dz <= 1; ++dz)
 			if (const auto found = counts_.find({x + dx, z + dz}); found != counts_.end())
-				near += found->second;
-	return 1.0 + static_cast<double>(std::min<std::uint32_t>(near, 30)) / 6.0;
+				near_ += found->second;
+	return 1.0 + static_cast<double>(std::min<std::uint32_t>(near_, 30)) / 6.0;
 }
 
-std::vector<std::pair<ProcessedWay, double>> across_squares(
-		const std::vector<ProcessedElement> &elements, double scale)
+namespace
 {
-	struct WalkWay
-	{
-		const ProcessedWay *way;
-		int half;
-		double density;
-	};
-	std::vector<WalkWay> ways;
-	std::unordered_map<std::uint64_t, std::size_t> uses;
+std::vector<std::pair<ProcessedWay, double>> across_squares_clipped(
+		const std::vector<ProcessedElement> &elements,
+		const std::vector<const ProcessedWay *> &walk_ways,
+		const std::unordered_map<std::uint64_t, std::size_t> &uses, double scale)
+{
 	std::unordered_map<std::uint64_t, std::tuple<int, std::uint64_t, bool>> roads;
 	for (const auto &element : elements) {
 		if (!element.is_way())
@@ -343,14 +338,6 @@ std::vector<std::pair<ProcessedWay, double>> across_squares(
 		const auto &way = element.as_way();
 		if (way.nodes.size() < 2)
 			continue;
-		if (const auto density = walk_density(way.tags)) {
-			ways.push_back({&way,
-					highways::highway_block_range(
-							way.tags.get("highway"), way.tags, scale),
-					*density});
-			for (const auto &node : way.nodes)
-				++uses[node.id];
-		}
 		if (highways::cars::drivable(way.tags)) {
 			const int half = highways::highway_block_range(
 					way.tags.get("highway"), way.tags, scale);
@@ -409,7 +396,7 @@ std::vector<std::pair<ProcessedWay, double>> across_squares(
 				if (found == grid.end())
 					continue;
 				for (const auto i : found->second)
-					if (hit.insert(i).second && squares[i].near(p, GRID + half))
+					if (hit.insert(i).second && squares[i].near_(p, GRID + half))
 						near_roads[i].emplace_back(a, b, half);
 			}
 		}
@@ -420,8 +407,8 @@ std::vector<std::pair<ProcessedWay, double>> across_squares(
 		std::vector<std::uint64_t> ways;
 	};
 	std::vector<std::vector<Door>> doors(squares.size());
-	for (const auto &walk : ways) {
-		const auto &way = *walk.way;
+	for (const auto *walk_way : walk_ways) {
+		const auto &way = *walk_way;
 		for (std::size_t k = 0; k < way.nodes.size(); ++k) {
 			const auto &node = way.nodes[k];
 			if (roads.contains(node.id) || clipping::is_invented_node_id(node.id))
@@ -432,7 +419,7 @@ std::vector<std::pair<ProcessedWay, double>> across_squares(
 				continue;
 			for (const auto i : found->second) {
 				const auto &square = squares[i];
-				if (!square.near(p, 2.0))
+				if (!square.near_(p, 2.0))
 					continue;
 				const bool on = square.outline.contains(node.id);
 				const bool inside = square.contains(p);
@@ -551,6 +538,28 @@ std::vector<std::pair<ProcessedWay, double>> across_squares(
 	}
 	return lines;
 }
+} // namespace
+
+// Keep the original library helper API for callers that do not have a prepared,
+// clipped walk network. The generator uses the overload above with Rust's
+// precomputed path and node-use inputs.
+std::vector<std::pair<ProcessedWay, double>> across_squares(
+		const std::vector<ProcessedElement> &elements, double scale)
+{
+	std::vector<const ProcessedWay *> walk_ways;
+	std::unordered_map<std::uint64_t, std::size_t> uses;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		if (way.nodes.size() < 2 || !walk_density(way.tags))
+			continue;
+		walk_ways.push_back(&way);
+		for (const auto &node : way.nodes)
+			++uses[node.id];
+	}
+	return across_squares_clipped(elements, walk_ways, uses, scale);
+}
 
 WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 		double scale, bool keep_left, bool signals, const cartesian::XZBBox &world,
@@ -577,7 +586,7 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 		bool shared{};
 	};
 	std::vector<WayRef> ways;
-	std::deque<ProcessedWay> clipped_ways;
+	std::vector<std::pair<const ProcessedWay *, std::pair<int, double>>> found_walks;
 	std::unordered_map<std::uint64_t, RoadUse> roads;
 	std::unordered_map<std::uint64_t, std::size_t> uses;
 	std::vector<std::pair<double, double>> destinations;
@@ -589,16 +598,7 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 				if (const auto density = walk_density(way.tags)) {
 					const int half = highways::highway_block_range(
 							way.tags.get("highway"), way.tags, scale);
-					if (auto pieces = clipping::cut_way_to_outline(way, clipping_world)) {
-						for (auto &piece : *pieces) {
-							if (piece.nodes.size() < 2)
-								continue;
-							clipped_ways.push_back(std::move(piece));
-							ways.push_back({&clipped_ways.back(), half, *density, false});
-						}
-					} else {
-						ways.push_back({&way, half, *density, false});
-					}
+					found_walks.emplace_back(&way, std::pair{half, *density});
 				}
 			}
 			if (highways::cars::drivable(way.tags)) {
@@ -629,28 +629,39 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 				destinations.emplace_back(node.x, node.z);
 		}
 	}
+	const auto clipped_walks = clipping::cut_ways_to_outline(found_walks, clipping_world);
+	ways.reserve(clipped_walks.size());
+	for (const auto &clipped : clipped_walks) {
+		const auto &way = clipped.way();
+		if (way.nodes.size() >= 2)
+			ways.push_back({&way, clipped.value.first, clipped.value.second, false});
+	}
 	const Footfall footfall(destinations, FOOTFALL_M * scale);
 	const Furniture furniture_index(std::move(obstacles));
 	for (const auto &ref : ways)
 		for (const auto &node : ref.way->nodes)
 			++uses[node.id];
-	const auto generated_squares = across_squares(elements, scale);
-	std::vector<std::pair<ProcessedWay, double>> squares;
-	for (const auto &[way, density] : generated_squares) {
-		if (auto pieces = clipping::cut_way_to_outline(way, clipping_world)) {
-			for (auto &piece : *pieces)
-				if (piece.nodes.size() >= 2)
-					squares.emplace_back(std::move(piece), density);
-		} else {
-			squares.emplace_back(way, density);
-		}
-	}
-	for (const auto &[way, _] : squares)
-		for (const auto &node : way.nodes)
+	std::vector<const ProcessedWay *> clipped_walk_ways;
+	clipped_walk_ways.reserve(ways.size());
+	for (const auto &way : ways)
+		clipped_walk_ways.push_back(way.way);
+	const auto generated_squares =
+			across_squares_clipped(elements, clipped_walk_ways, uses, scale);
+	std::vector<std::pair<const ProcessedWay *, double>> found_squares;
+	found_squares.reserve(generated_squares.size());
+	for (const auto &[way, density] : generated_squares)
+		found_squares.emplace_back(&way, density);
+	const auto squares = clipping::cut_ways_to_outline(found_squares, clipping_world);
+	for (const auto &square : squares)
+		for (const auto &node : square.way().nodes)
 			++uses[node.id];
-	for (const auto &[way, density] : squares)
-		ways.push_back({&way, highways::highway_block_range("footway", way.tags, scale),
-				density, true});
+	for (const auto &square : squares) {
+		const auto &way = square.way();
+		if (way.nodes.size() >= 2)
+			ways.push_back(
+					{&way, highways::highway_block_range("footway", way.tags, scale),
+							square.value, true});
+	}
 	struct Piece
 	{
 		const WayRef *way;
@@ -1201,12 +1212,12 @@ void WalkNetwork::link()
 				lane.next.push_back(candidate);
 		std::sort(lane.next.begin(), lane.next.end());
 		lane.back = backs[i];
-		const bool near = !beside[i].empty() && beside[i].back().has_value();
+		const bool near_ = !beside[i].empty() && beside[i].back().has_value();
 		lane.beside = std::move(beside[i]);
 		if (lane.out)
 			lane.next.clear();
 		else if (lane.next.empty() || lane.cut.second)
-			lane.next = backs[i] && near ? std::vector<std::size_t>{*backs[i]}
+			lane.next = backs[i] && near_ ? std::vector<std::size_t>{*backs[i]}
 										 : std::vector<std::size_t>{};
 	}
 }
@@ -1291,8 +1302,8 @@ void WalkNetwork::untrap()
 			if (lanes_[i].next.size() == before)
 				continue;
 			changed = true;
-			const bool near = !lanes_[i].beside.empty() && lanes_[i].beside.back();
-			if (lanes_[i].next.empty() && near && lanes_[i].back &&
+			const bool near_ = !lanes_[i].beside.empty() && lanes_[i].beside.back();
+			if (lanes_[i].next.empty() && near_ && lanes_[i].back &&
 					!trap(g, group[*lanes_[i].back]))
 				lanes_[i].next.push_back(*lanes_[i].back);
 		}
@@ -1792,7 +1803,7 @@ bool Square::contains(std::pair<double, double> point) const
 	return inside;
 }
 
-bool Square::near(std::pair<double, double> point, double reach) const
+bool Square::near_(std::pair<double, double> point, double reach) const
 {
 	return point.first >= min.first - reach && point.first <= max.first + reach &&
 		   point.second >= min.second - reach && point.second <= max.second + reach;

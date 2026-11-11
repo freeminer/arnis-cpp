@@ -15,7 +15,6 @@
 #include <array>
 #include <charconv>
 #include <cmath>
-#include <deque>
 #include <iomanip>
 #include <iterator>
 #include <limits>
@@ -523,9 +522,7 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		const std::function<bool(int, int)> &built)
 {
 	std::vector<RoadRef> roads;
-	// Keep clipped way storage stable: RoadRef and later lane vertices retain
-	// pointers into these temporary outline-cut copies for the duration of build.
-	std::deque<ProcessedWay> clipped_ways;
+	std::vector<std::pair<const ProcessedWay *, std::pair<int, int>>> found_roads;
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
@@ -537,16 +534,14 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 			continue;
 		const int half = highway_block_range(highway_it->second, way.tags, scale);
 		const int oneway = road_markings::oneway_sign(highway_it->second, way.tags);
-		if (auto pieces = clipping::cut_way_to_outline(way, world)) {
-			for (auto &piece : *pieces) {
-				if (piece.nodes.size() < 2)
-					continue;
-				clipped_ways.push_back(std::move(piece));
-				roads.push_back({&clipped_ways.back(), half, oneway});
-			}
-		} else {
-			roads.push_back({&way, half, oneway});
-		}
+		found_roads.emplace_back(&way, std::pair{half, oneway});
+	}
+	const auto clipped_roads = clipping::cut_ways_to_outline(found_roads, world);
+	roads.reserve(clipped_roads.size());
+	for (const auto &clipped : clipped_roads) {
+		const auto &way = clipped.way();
+		if (way.nodes.size() >= 2)
+			roads.push_back({&way, clipped.value.first, clipped.value.second});
 	}
 
 	std::vector<std::pair<const ProcessedWay *, int>> junction_roads;
@@ -2005,13 +2000,13 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 				  << distance(PLAYER_AT[2])
 				  << "] run scoreboard players set #t arnis.car 0\n";
 	if (walkers) {
-		const auto near = distance(PLAYER_AT[0]);
-		const auto far = distance(PLAYER_AT[1]);
+		const auto near_ = distance(PLAYER_AT[0]);
+		const auto far_ = distance(PLAYER_AT[1]);
 		const auto long_near = distance(PLAYER_AT[0] + LONG_EXTRA);
 		const auto long_far = distance(PLAYER_AT[1] + LONG_EXTRA);
 		const auto radius = distance(1.2);
 		for (const auto &[condition, front, rear] :
-				{std::tuple{"tag=!arnis.car.long", near, far},
+				{std::tuple{"tag=!arnis.car.long", near_, far_},
 						std::tuple{"tag=arnis.car.long", long_near, long_far}})
 			clear << "# Yield to a pedestrian crossing the road, not one walking beside it.\n"
 				  << "execute if entity @s[" << condition

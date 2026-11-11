@@ -17,14 +17,14 @@ bool ends_with(std::string_view s, std::string_view suffix)
 
 bool walk_through(std::string_view name)
 {
-	static constexpr std::array<std::string_view, 39> open{"air", "cave_air", "void_air",
+	static constexpr std::array<std::string_view, 40> open{"air", "cave_air", "void_air",
 			"light", "snow", "short_grass", "tall_grass", "short_dry_grass",
 			"tall_dry_grass", "fern", "large_fern", "dead_bush", "bush", "firefly_bush",
 			"vine", "sunflower", "lilac", "rose_bush", "peony", "dandelion", "poppy",
 			"blue_orchid", "allium", "azure_bluet", "oxeye_daisy", "cornflower",
 			"lily_of_the_valley", "torchflower", "pink_petals", "wildflowers",
 			"leaf_litter", "rail", "powered_rail", "detector_rail", "activator_rail",
-			"redstone_wire", "tripwire", "lever", "flower_pot"};
+			"redstone_wire", "tripwire", "lever", "flower_pot", "lily_pad"};
 	if (std::find(open.begin(), open.end(), name) != open.end())
 		return true;
 	static constexpr std::array<std::string_view, 8> suffixes{"_carpet", "_tulip",

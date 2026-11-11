@@ -344,43 +344,45 @@ StopFeature::Kind stop_kind(const tags_t &tags)
 	return StopFeature::Kind::Any;
 }
 
-std::vector<Piece> make_pieces(const std::vector<ProcessedElement> &elements)
+std::vector<Piece> make_pieces(
+		const std::vector<ProcessedElement> &elements, const ::XZBBox &world)
 {
-	std::vector<std::pair<const ProcessedWay *, Mode>> ways;
+	std::vector<std::pair<const ProcessedWay *, Mode>> found;
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
 		const auto &way = element.as_way();
 		if (way.nodes.size() >= 2)
 			if (auto mode = mode_of(way))
-				ways.emplace_back(&way, *mode);
+				found.emplace_back(&way, *mode);
 	}
+	const auto ways = clipping::cut_ways_to_outline(found, world);
 	std::unordered_map<std::uint64_t, std::size_t> uses;
-	for (const auto &[way, mode] : ways) {
-		(void)mode;
-		for (const auto &node : way->nodes)
+	for (const auto &clipped : ways)
+		for (const auto &node : clipped.way().nodes)
 			++uses[node.id];
-	}
 	std::vector<Piece> out;
-	for (const auto &[way, mode] : ways) {
+	for (const auto &clipped : ways) {
+		const auto &way = clipped.way();
+		const auto mode = clipped.value;
 		Piece piece;
-		piece.way = way->id;
+		piece.way = way.id;
 		piece.mode = mode;
-		if (const auto it = way->tags.find("maxspeed"); it != way->tags.end())
+		if (const auto it = way.tags.find("maxspeed"); it != way.tags.end())
 			piece.maxspeed = parse_kmh(it->second);
-		for (std::size_t k = 0; k < way->nodes.size(); ++k) {
-			const auto &node = way->nodes[k];
+		for (std::size_t k = 0; k < way.nodes.size(); ++k) {
+			const auto &node = way.nodes[k];
 			if (!piece.node_ids.empty() && piece.node_ids.back() == node.id)
 				continue;
 			piece.node_ids.push_back(node.id);
 			piece.nodes.push_back({node.x + 0.5, node.z + 0.5});
-			const bool inner = k > 0 && k + 1 < way->nodes.size();
+			const bool inner = k > 0 && k + 1 < way.nodes.size();
 			if (inner && uses[node.id] > 1 && piece.nodes.size() >= 2) {
 				out.push_back(std::move(piece));
 				piece = Piece{};
-				piece.way = way->id;
+				piece.way = way.id;
 				piece.mode = mode;
-				if (const auto it = way->tags.find("maxspeed"); it != way->tags.end())
+				if (const auto it = way.tags.find("maxspeed"); it != way.tags.end())
 					piece.maxspeed = parse_kmh(it->second);
 				piece.node_ids.push_back(node.id);
 				piece.nodes.push_back({node.x + 0.5, node.z + 0.5});
@@ -1347,16 +1349,10 @@ TrainRouteNetwork TrainRouteNetwork::build(const std::vector<ProcessedElement> &
 {
 	TrainRouteNetwork result;
 	result.size_ = std::clamp(scale, 0.4, 3.0);
-	std::vector<ProcessedElement> outline_elements;
-	const auto *network_elements = &elements;
-	if (world.outline()) {
-		const ::XZBBox outline_world(
-				world.min_x(), world.min_z(), world.max_x(), world.max_z());
-		outline_elements = clipping::cut_elements_to_outline(
-				elements, outline_world.with_outline(world.outline()));
-		network_elements = &outline_elements;
-	}
-	auto track_pieces = make_pieces(*network_elements);
+	const ::XZBBox clipping_world(
+			world.min_x(), world.min_z(), world.max_x(), world.max_z());
+	auto track_pieces =
+			make_pieces(elements, clipping_world.with_outline(world.outline()));
 	result.routes_ = make_routes(track_pieces, world, scale);
 	// Rust clips the track ways before building pieces, but derives stations from
 	// the original elements. Keep nearby stops available to routes whose cut ends

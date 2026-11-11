@@ -4,6 +4,7 @@
 #include "peaks.h"
 #include "postprocess.h"
 
+#include <cmath>
 #include <functional>
 #include <memory>
 #include <optional>
@@ -73,6 +74,17 @@ struct ProcessedElevationData
 	ElevationAffine affine() const
 	{
 		return {min_height_m, blocks_per_meter, ground_level, soft_top};
+	}
+	// Match ElevationData::soft_top_stretch: the inverse slope of the
+	// compressed height curve, used when consumers need metre distances at Y.
+	double soft_top_stretch(int y) const
+	{
+		if (!soft_top)
+			return 1.0;
+		const double knee_y =
+				ground_level + (soft_top->knee_m - min_height_m) * blocks_per_meter;
+		const double above = static_cast<double>(y) - knee_y;
+		return above <= 0.0 ? 1.0 : std::cosh(above / soft_top->width_blocks);
 	}
 	std::optional<int> lowest_y() const;
 };

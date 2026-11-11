@@ -1602,34 +1602,25 @@ bool generate_world(WorldEditor &editor,
 	auto [max_x, max_z] = editor.get_max_coords();
 	::XZBBox xzbbox(min_x, min_z, max_x, max_z);
 	if (args.shapes) {
-		try {
-			const geographic::LLBBox geographic_bbox(geo[0], geo[2], geo[1], geo[3]);
-			const auto projection_spec = projection::ProjectionSpec::from_args(args);
-			const auto [transformer, projected_rect] =
-					projection_spec.transformer(geographic_bbox);
-			auto projected = transformer.transform_shapes(*args.shapes);
-			if (args.projection == projection::ProjectionKind::Local)
-				for (auto &polygon : projected)
-					for (auto &ring : polygon)
-						for (auto &[x, z] : ring) {
-							x += min_x;
-							z += min_z;
-						}
-			const cartesian::XZBBoxRect generation_rect({min_x, min_z}, {max_x, max_z});
-			std::string outline_error;
-			if (auto outline = XZBBoxShape::create(
-						generation_rect, std::move(projected), &outline_error)) {
-				xzbbox = xzbbox.with_outline(
-						std::make_shared<const XZBBoxShape>(std::move(*outline)));
-			} else {
-				const std::string message = "invalid polygon outline: " + outline_error;
-				editor.report_generation_error(message);
-				std::cerr << "Arnis generation error: " << message << '\n';
-				return false;
-			}
-		} catch (const std::exception &e) {
+		const geographic::LLBBox geographic_bbox(geo[0], geo[2], geo[1], geo[3]);
+		const auto projection_spec = projection::ProjectionSpec::from_args(args);
+		const auto shaped_frame =
+				cartesian::XZBBox::rect_from_min_max(min_x, min_z, max_x, max_z);
+		std::string outline_error;
+		if (auto shaped = projection_spec.shaped(
+					geographic_bbox, shaped_frame, *args.shapes, &outline_error)) {
+			const auto all_columns = shaped_frame.bounding_rect().total_blocks();
+			const auto covered_columns = shaped->outline()->covered_columns();
+			xzbbox = xzbbox.with_outline(shaped->outline());
+			const auto percent =
+					all_columns == 0 ? 0
+									 : static_cast<int>(std::round(
+											   100.0 * covered_columns / all_columns));
+			std::cout << "  Area shape covers " << covered_columns << " of the "
+					  << all_columns << " columns around it (" << percent << "%)\n";
+		} else {
 			const std::string message =
-					std::string("could not project polygon outline: ") + e.what();
+					"could not project polygon outline: " + outline_error;
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';
 			return false;

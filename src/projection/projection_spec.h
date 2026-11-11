@@ -1,11 +1,14 @@
 #pragma once
 
 #include "../coordinate_system/cartesian/xzbbox/rectangle.h"
+#include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
 #include "../coordinate_system/geographic/llbbox.h"
+#include "../fm_ll_shapes.h"
 #include "../coordinate_system/transformation.h"
 #include "web_mercator.h"
 
 #include <optional>
+#include <string>
 #include <utility>
 
 namespace arnis
@@ -28,6 +31,9 @@ struct ProjectionSpec
 	WebMercatorProjection mercator(const geographic::LLBBox &bbox) const;
 	std::pair<coordinate_system::CoordTransformer, cartesian::XZBBoxRect> transformer(
 			const geographic::LLBBox &bbox) const;
+	std::optional<cartesian::XZBBox> shaped(const geographic::LLBBox &bbox,
+			const cartesian::XZBBox &xzbbox, const LLShapes &shapes,
+			std::string *error = nullptr) const;
 	cartesian::XZBBoxRect clip_bbox(const cartesian::XZBBoxRect &bbox) const;
 };
 

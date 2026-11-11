@@ -1,4 +1,5 @@
 #include "clipping.h"
+#include "rust_numeric.h"
 #include <algorithm>
 #include <cmath>
 #include <map>
@@ -228,15 +229,7 @@ std::vector<ProcessedNode> clip_way_to_bbox_owned(
 std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 		const std::vector<ProcessedNode> &ring, const XZBBox &box)
 {
-	// Match Rust's water-ring closure tolerance. OSM rings can end at adjacent
-	// projected cells after coordinate quantization even when their node IDs
-	// differ; rejecting those here drops otherwise valid water polygons.
-	const bool water_ring_closed =
-			ring.size() >= 3 &&
-			(ring.front().id == ring.back().id ||
-					(std::abs(ring.front().x - ring.back().x) <= 1 &&
-							std::abs(ring.front().z - ring.back().z) <= 1));
-	if (!water_ring_closed)
+	if (ring.empty())
 		return std::nullopt;
 	if (std::all_of(ring.begin(), ring.end(), [&](const auto &node) {
 			return inside_box({double(node.x), double(node.z)}, box);
@@ -246,6 +239,16 @@ std::optional<std::vector<ProcessedNode>> clip_water_ring_to_bbox(
 	// for distant OSM water, this prevents a degenerate all-outside ring from
 	// producing a spurious clipped sliver after coordinate rounding.
 	if (ring_outside_box(ring, box))
+		return std::nullopt;
+	// Match Rust's water-ring closure tolerance. OSM rings can end at adjacent
+	// projected cells after coordinate quantization even when their node IDs
+	// differ; rejecting those here drops otherwise valid water polygons.
+	const bool water_ring_closed =
+			ring.size() >= 3 &&
+			(ring.front().id == ring.back().id ||
+					(std::abs(ring.front().x - ring.back().x) <= 1 &&
+							std::abs(ring.front().z - ring.back().z) <= 1));
+	if (!water_ring_closed)
 		return std::nullopt;
 	std::vector<P> input;
 	input.reserve(ring.size());
@@ -275,8 +278,8 @@ std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
 	constexpr double min_cut_run = 12.0;
 	constexpr std::uint64_t cut_base = 9'000'000;
 	const auto block = [](double x, double z) {
-		return std::pair{static_cast<std::int32_t>(std::floor(x)),
-				static_cast<std::int32_t>(std::floor(z))};
+		return std::pair{rust_numeric::saturating_i32(std::floor(x)),
+				rust_numeric::saturating_i32(std::floor(z))};
 	};
 	const auto inside = [&](double x, double z) {
 		const auto [bx, bz] = block(x, z);
@@ -291,7 +294,7 @@ std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
 		};
 		return (hit(1, 0) && hit(-1, 0)) || (hit(0, 1) && hit(0, -1));
 	};
-	const auto near = [&](double x, double z) {
+	const auto near_ = [&](double x, double z) {
 		const auto [bx, bz] = block(x, z);
 		return world.touches(bx - slack, bz - slack, bx + slack, bz + slack) &&
 			   !between(bx, bz);
@@ -356,7 +359,7 @@ std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
 				} else {
 					if (!after_in)
 						after_in = {x, z};
-					if (!near(x, z)) {
+					if (!near_(x, z)) {
 						const auto [lx, lz, length] = last_in;
 						const auto [cx, cz] =
 								boundary(lx, lz, after_in->first, after_in->second);
@@ -428,8 +431,12 @@ std::optional<std::vector<ProcessedWay>> cut_way_to_outline(
 			if (it != by_id.end() && !is_invented_node_id(id)) {
 				clipped.nodes.push_back(*it->second);
 			} else {
-				clipped.nodes.push_back({id, {}, static_cast<int>(std::floor(x)),
-						static_cast<int>(std::floor(z))});
+				// Rust's float-to-i32 `as` cast saturates (and maps NaN to zero).
+				// Keep invented outline-cut nodes safe for coordinates outside the
+				// representable world-coordinate range as well.
+				clipped.nodes.push_back(
+						{id, {}, rust_numeric::saturating_i32(std::floor(x)),
+								rust_numeric::saturating_i32(std::floor(z))});
 			}
 		}
 		result.push_back(std::move(clipped));

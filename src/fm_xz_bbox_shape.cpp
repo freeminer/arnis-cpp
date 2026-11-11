@@ -59,8 +59,10 @@ void sweep(const XZBBoxShape::Polygon &rings, const cartesian::XZBBoxRect &rect,
 				!std::isfinite(hi))
 			return;
 		const auto row_index = static_cast<std::int64_t>(row);
-		const double a = std::clamp(std::floor(std::min(lo, hi)), min_x, max_x);
-		const double b = std::clamp(std::floor(std::max(lo, hi)), min_x, max_x);
+		// Match Rust's intersect-then-rasterize behavior. Clamping both endpoints
+		// would collapse an entirely out-of-bounds span onto a border column.
+		const double a = std::max(std::floor(std::min(lo, hi)), min_x);
+		const double b = std::min(std::floor(std::max(lo, hi)), max_x);
 		if (a > b)
 			return;
 		const auto index = static_cast<std::size_t>(row_index - min_z);
@@ -89,13 +91,17 @@ void sweep(const XZBBoxShape::Polygon &rings, const cartesian::XZBBoxRect &rect,
 	if (edges.empty())
 		return;
 	const auto [lo, hi] = std::minmax_element(heights.begin(), heights.end());
-	const auto first = static_cast<std::int64_t>(
-			std::max(std::ceil(*lo), static_cast<double>(min_z)));
-	const auto last = static_cast<std::int64_t>(
-			std::min(std::floor(*hi), static_cast<double>(max_z + 1)));
-	if (first <= last)
+	// Compare in floating point before converting. A finite outline may be far
+	// outside the rectangle; converting its height directly to int64_t is
+	// undefined in C++, while Rust's float-to-int cast saturates.
+	const double first_height = std::max(std::ceil(*lo), static_cast<double>(min_z));
+	const double last_height = std::min(std::floor(*hi), static_cast<double>(max_z + 1));
+	if (first_height <= last_height) {
+		const auto first = static_cast<std::int64_t>(first_height);
+		const auto last = static_cast<std::int64_t>(last_height);
 		for (auto z = first; z <= last; ++z)
 			heights.push_back(static_cast<double>(z));
+	}
 	std::sort(heights.begin(), heights.end());
 	heights.erase(std::unique(heights.begin(), heights.end()), heights.end());
 	std::sort(edges.begin(), edges.end(),
@@ -197,6 +203,9 @@ std::span<const XZBBoxShape::Span> XZBBoxShape::row(std::int32_t z) const
 
 bool XZBBoxShape::contains(std::int32_t x, std::int32_t z) const
 {
+	if (x < rect_->min().x || x > rect_->max().x || z < rect_->min().z ||
+			z > rect_->max().z)
+		return false;
 	const auto spans = row(z);
 	const auto it = std::lower_bound(spans.begin(), spans.end(), x,
 			[](const Span &span, std::int32_t value) { return span.second < value; });

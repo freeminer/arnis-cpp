@@ -106,7 +106,7 @@ struct Square
 
 	static std::optional<Square> of(const ProcessedElement &element, double scale);
 	bool contains(std::pair<double, double> point) const;
-	bool near(std::pair<double, double> point, double reach) const;
+	bool near_(std::pair<double, double> point, double reach) const;
 	bool by_edge(std::pair<double, double> point, double reach) const;
 };
 

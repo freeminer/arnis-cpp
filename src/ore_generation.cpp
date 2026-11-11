@@ -83,9 +83,10 @@ void generate_ores(world_editor::WorldEditor &e, int min_x, int max_x, int min_z
 			int ground = e.get_ground_level(cx * 16 + 8, cz * 16 + 8);
 			for (const auto &rule : rules()) {
 				const int lo = std::max(floor + 1, ground - MAX_ORE_DEPTH);
-				const int hi = ground - rule.depth_min;
-				if (lo > hi)
-					continue;
+				// Match Rust's lower-bound clamp: even a surface at/below the
+				// terrain floor leaves a one-level ore interval at the first
+				// writable block instead of silently skipping the chunk.
+				const int hi = std::max(ground - rule.depth_min, lo);
 				const auto span = static_cast<std::uint32_t>(hi - lo + 1);
 				const auto orig_span =
 						static_cast<std::uint32_t>(rule.depth_max - rule.depth_min + 1);

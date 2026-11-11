@@ -1,6 +1,7 @@
 #pragma once
 #include <array>
 #include <cstdint>
+#include <optional>
 #include <utility>
 #include <vector>
 #include <tuple>
@@ -31,6 +32,37 @@ std::optional<std::vector<OutlineRun>> cut_line_to_outline(std::uint64_t way_id,
 		std::uint64_t &cuts);
 std::optional<std::vector<ProcessedWay>> cut_way_to_outline(
 		const ProcessedWay &way, const XZBBox &world);
+
+// C++ equivalent of Rust's Cow-backed cut_ways_to_outline: ways which need no
+// outline cut stay borrowed, while clipped pieces own their generated nodes.
+// Keep the returned vector alive while using way() references.
+template <typename T>
+struct OutlineWay
+{
+	const ProcessedWay *borrowed{};
+	std::optional<ProcessedWay> owned;
+	T value;
+
+	const ProcessedWay &way() const { return owned ? *owned : *borrowed; }
+};
+
+template <typename T>
+std::vector<OutlineWay<T>> cut_ways_to_outline(
+		const std::vector<std::pair<const ProcessedWay *, T>> &ways, const XZBBox &world)
+{
+	std::vector<OutlineWay<T>> result;
+	result.reserve(ways.size());
+	for (const auto &[way, value] : ways) {
+		if (auto pieces = cut_way_to_outline(*way, world)) {
+			for (auto &piece : *pieces)
+				result.push_back({nullptr, std::move(piece), value});
+		} else {
+			result.push_back({way, std::nullopt, value});
+		}
+	}
+	return result;
+}
+
 std::vector<ProcessedElement> cut_elements_to_outline(
 		const std::vector<ProcessedElement> &elements, const XZBBox &world);
 }

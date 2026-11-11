@@ -1174,13 +1174,13 @@ ShipPlan ShipPlan::build(const std::vector<ProcessedElement> &elements, double s
 	}
 	const auto at_edge = [&](const ShipNode &node) {
 		const auto [id, x, z] = node;
-		const auto near = [](double value, int lo, int hi) {
+		const auto near_ = [](double value, int lo, int hi) {
 			return value < static_cast<double>(lo) + EDGE_REACH ||
 				   value > static_cast<double>(hi + 1) - EDGE_REACH;
 		};
 		return clipping::is_invented_node_id(id) ||
-			   near(x, world.min_x(), world.max_x()) ||
-			   near(z, world.min_z(), world.max_z());
+			   near_(x, world.min_x(), world.max_x()) ||
+			   near_(z, world.min_z(), world.max_z());
 	};
 	for (auto &chain : chains(ferry_ways, 120.0)) {
 		if (plan.lines_.size() >= MAX_FERRIES)

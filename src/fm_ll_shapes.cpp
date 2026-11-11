@@ -259,8 +259,12 @@ std::optional<std::vector<LLShapes::Polygon>> LLShapes::from_geojson(
 {
 	try {
 		std::vector<RawPolygon> raw;
-		if (!collect_geojson(Json::parse(text), raw, 0, error) || raw.empty())
+		if (!collect_geojson(Json::parse(text), raw, 0, error))
 			return std::nullopt;
+		if (raw.empty()) {
+			set_error(error, "no Polygon or MultiPolygon geometry found");
+			return std::nullopt;
+		}
 		std::vector<Polygon> result;
 		for (const auto &polygon : raw) {
 			Polygon parsed;
