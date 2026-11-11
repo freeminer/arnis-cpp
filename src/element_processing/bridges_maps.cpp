@@ -965,12 +965,12 @@ bool continues_past(const ProcessedWay &way, const ProcessedWay &other)
 		return false;
 	const auto &a = way.nodes.front();
 	const auto &b = way.nodes.back();
-	for (const auto &[joint, far] : {std::pair{&a, &b}, std::pair{&b, &a}}) {
+	for (const auto &[joint, far_] : {std::pair{&a, &b}, std::pair{&b, &a}}) {
 		if (!std::any_of(other.nodes.begin(), other.nodes.end(), [&](const auto &end) {
 				return end.x == joint->x && end.z == joint->z;
 			}))
 			continue;
-		if (past_way_end(far->x, far->z, other))
+		if (past_way_end(far_->x, far_->z, other))
 			return true;
 	}
 	return false;

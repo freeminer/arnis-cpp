@@ -594,9 +594,9 @@ std::vector<std::pair<std::size_t, bool>> shared_faces(const Part &a, const Part
 		return {};
 	std::vector<std::pair<std::size_t, bool>> faces;
 	for (std::size_t axis = 0; axis < 3; ++axis)
-		for (const bool far : {false, true}) {
-			const auto face = [axis, far](const Part &p) {
-				return p.corner[axis] + (far ? p.size[axis] : 0.0f);
+		for (const bool far_ : {false, true}) {
+			const auto face = [axis, far_](const Part &p) {
+				return p.corner[axis] + (far_ ? p.size[axis] : 0.0f);
 			};
 			if (std::abs(face(a) - face(b)) > 0.02f)
 				continue;
@@ -611,7 +611,7 @@ std::vector<std::pair<std::size_t, bool>> shared_faces(const Part &a, const Part
 					overlaps = false;
 			}
 			if (overlaps)
-				faces.emplace_back(axis, far);
+				faces.emplace_back(axis, far_);
 		}
 	return faces;
 }
