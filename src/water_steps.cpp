@@ -355,8 +355,28 @@ void shape_region(world_editor::WorldEditor &editor, Borders &borders,
 
 void shape_world(world_editor::WorldEditor &editor, bool caves)
 {
-	const auto [min_x, min_z] = editor.get_min_coords();
-	const auto [max_x, max_z] = editor.get_max_coords();
+	int min_x = 0, min_z = 0, max_x = -1, max_z = -1;
+	if (editor.mg) {
+		std::tie(min_x, min_z) = editor.get_min_coords();
+		std::tie(max_x, max_z) = editor.get_max_coords();
+	} else if (editor.standalone_storage) {
+		// Standalone/library editors have no mapgen bounds. Their written columns
+		// are the complete test/generation region, so derive a safe finite extent.
+		for (const auto &[x, y, z] : editor.written_cells) {
+			(void)y;
+			if (max_x < min_x) {
+				min_x = max_x = x;
+				min_z = max_z = z;
+			} else {
+				min_x = std::min(min_x, x);
+				min_z = std::min(min_z, z);
+				max_x = std::max(max_x, x);
+				max_z = std::max(max_z, z);
+			}
+		}
+	} else {
+		return;
+	}
 	if (min_x > max_x || min_z > max_z)
 		return;
 

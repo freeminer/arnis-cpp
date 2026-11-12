@@ -267,6 +267,32 @@ bool is_tree_part(const std::optional<std::string> &name)
 		   has_suffix(name, "jungleleaves") || has_suffix(name, "_needles");
 }
 
+bool is_tree_part(const WorldEditor &editor, int x, int y, int z)
+{
+	if (is_tree_part(editor.block_name_absolute(x, y, z)))
+		return true;
+	// Standalone library editors have no NodeDefManager to provide names. Keep
+	// tree clearing functional there by recognizing the canonical tree palette.
+	const auto block = editor.get_block_absolute(x, y, z);
+	if (!block || block->id() == AIR.id() || block->id() == CONTENT_IGNORE)
+		return false;
+	const std::array<Block, 18> tree_blocks{block_definitions::OAK_LOG,
+			block_definitions::BIRCH_LOG, block_definitions::SPRUCE_LOG,
+			block_definitions::DARK_OAK_LOG, block_definitions::JUNGLE_LOG,
+			block_definitions::ACACIA_LOG, block_definitions::MANGROVE_LOG,
+			block_definitions::CHERRY_LOG, block_definitions::OAK_LEAVES,
+			block_definitions::BIRCH_LEAVES, block_definitions::SPRUCE_LEAVES,
+			block_definitions::DARK_OAK_LEAVES, block_definitions::JUNGLE_LEAVES,
+			block_definitions::ACACIA_LEAVES, block_definitions::MANGROVE_LEAVES,
+			block_definitions::CHERRY_LEAVES, block_definitions::AZALEA_LEAVES,
+			block_definitions::FLOWERING_AZALEA_LEAVES};
+	return std::any_of(
+			tree_blocks.begin(), tree_blocks.end(), [&](const Block &candidate) {
+				return candidate.id() != AIR.id() && candidate.id() != CONTENT_IGNORE &&
+					   candidate.id() == block->id();
+			});
+}
+
 void clear_stranded_vegetation(WorldEditor &editor, int x, int z, int water_y)
 {
 	for (int y = water_y + 1; y <= water_y + 3; ++y) {
@@ -352,7 +378,7 @@ void clear_tree_within(WorldEditor &editor, int x, int y, int z,
 		stack.pop_back();
 		if (!keep_column(cx, cz))
 			continue;
-		if (!is_tree_part(editor.block_name_absolute(cx, cy, cz)))
+		if (!is_tree_part(editor, cx, cy, cz))
 			continue;
 		// Rust passes Some(&[]): an explicit empty replacement set clears
 		// generated tree blocks regardless of the first-write guard.
