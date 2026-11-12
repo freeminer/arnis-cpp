@@ -522,6 +522,43 @@ RuinPlans plan_ruins(const std::vector<Column> &columns,
 		const BuildingFootprintBitmap &footprints, const RegionTops &tops)
 {
 	RuinPlans plans;
+	std::array<std::array<std::optional<std::pair<int, int>>, 16>, 16> corners{};
+	const auto chunk_base = [](int coordinate) {
+		int chunk = coordinate / 16;
+		if (coordinate % 16 < 0)
+			--chunk;
+		return chunk * 16;
+	};
+	const int base_x = columns.empty() ? 0 : chunk_base(columns.front().x);
+	const int base_z = columns.empty() ? 0 : chunk_base(columns.front().z);
+	auto corner_of = [&](int x, int z) {
+		std::vector<std::pair<int, int>> path;
+		std::pair<int, int> at{x, z};
+		std::pair<int, int> corner;
+		for (;;) {
+			const int lx = at.first - base_x, lz = at.second - base_z;
+			if (lx < 0 || lx >= 16 || lz < 0 || lz >= 16) {
+				corner = building_corner(footprints, at.first, at.second);
+				break;
+			}
+			auto &cached =
+					corners[static_cast<std::size_t>(lz)][static_cast<std::size_t>(lx)];
+			if (cached) {
+				corner = *cached;
+				break;
+			}
+			path.emplace_back(lx, lz);
+			const auto next = corner_step(footprints, at.first, at.second);
+			if (!next) {
+				corner = at;
+				break;
+			}
+			at = *next;
+		}
+		for (const auto &[lx, lz] : path)
+			corners[static_cast<std::size_t>(lz)][static_cast<std::size_t>(lx)] = corner;
+		return corner;
+	};
 	const auto wall = [&](int x, int z) {
 		return footprints.contains(x, z) &&
 			   (!footprints.contains(x + 1, z) || !footprints.contains(x - 1, z) ||
@@ -547,7 +584,7 @@ RuinPlans plan_ruins(const std::vector<Column> &columns,
 						break;
 					}
 				}
-		const auto corner = building_corner(footprints, column.x, column.z);
+		const auto corner = corner_of(column.x, column.z);
 		plans[column.z & 15][column.x & 15] = {
 				decay_of(corner, column.x, column.z), is_wall, eave, *column_top};
 	}
