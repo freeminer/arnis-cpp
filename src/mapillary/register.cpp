@@ -291,15 +291,15 @@ Registration register_band(const std::string &pano_id, const std::vector<XY> &ba
 	const auto ratio = result.second_best
 							   ? (*result.second_best)[2] / std::max(1e-9, cost)
 							   : std::numeric_limits<double>::infinity();
-	std::vector<XY> near;
+	std::vector<XY> near_;
 	for (const auto &point : band)
 		if (std::hypot(point[0] - centre[0], point[1] - centre[1]) <=
 				params.reg_check_radius_m)
-			near.push_back(point);
+			near_.push_back(point);
 	double agreement = std::numeric_limits<double>::infinity();
-	if (near.size() >= reg_min_points / 2) {
+	if (near_.size() >= reg_min_points / 2) {
 		const auto [dx25, dy25, ignored_cost, ignored_ranked] =
-				search_shift(near, dt, centre, params, theta);
+				search_shift(near_, dt, centre, params, theta);
 		(void)ignored_cost;
 		(void)ignored_ranked;
 		agreement = std::hypot(dx - dx25, dy - dy25);

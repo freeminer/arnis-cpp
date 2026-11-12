@@ -1598,7 +1598,7 @@ std::vector<Point> Furniture::go_round(std::vector<Point> points) const
 		const double len = std::max(std::hypot(b.x - a.x, b.z - a.z), 1e-9);
 		return std::pair{(b.x - a.x) / len, (b.z - a.z) / len};
 	};
-	std::vector<std::uint32_t> near;
+	std::vector<std::uint32_t> near_;
 	for (std::size_t i = 0; i + 1 < points.size(); ++i) {
 		const auto lo = cell(std::min(points[i].x, points[i + 1].x) - 3.0,
 				std::min(points[i].z, points[i + 1].z) - 3.0);
@@ -1607,16 +1607,16 @@ std::vector<Point> Furniture::go_round(std::vector<Point> points) const
 		for (int x = lo.first; x <= hi.first; ++x)
 			for (int z = lo.second; z <= hi.second; ++z)
 				if (const auto found = cells_.find({x, z}); found != cells_.end())
-					near.insert(near.end(), found->second.begin(), found->second.end());
+					near_.insert(near_.end(), found->second.begin(), found->second.end());
 	}
-	std::sort(near.begin(), near.end());
-	near.erase(std::unique(near.begin(), near.end()), near.end());
+	std::sort(near_.begin(), near_.end());
+	near_.erase(std::unique(near_.begin(), near_.end()), near_.end());
 	struct Bend
 	{
 		double at, side, plateau, ramp;
 	};
 	std::vector<Bend> bends;
-	for (const auto index : near) {
+	for (const auto index : near_) {
 		const auto &o = items_[index];
 		std::optional<std::tuple<double, double, double, std::size_t>> best;
 		for (std::size_t k = 0; k + 1 < points.size(); ++k) {
