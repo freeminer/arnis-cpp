@@ -2,6 +2,8 @@
 #include <string>
 #include <filesystem>
 #include <optional>
+#include <memory>
+#include "pack_dir.h"
 namespace arnis::trees
 {
 class RegionLibrary;
@@ -21,15 +23,19 @@ class TreePackSource
 {
 	std::string realm_;
 	std::filesystem::path root_;
+	std::shared_ptr<const PackDir> pack_dir_;
 
 public:
-	explicit TreePackSource(std::string realm, std::filesystem::path root = {});
+	explicit TreePackSource(std::string realm, std::filesystem::path root = {},
+			std::shared_ptr<const PackDir> pack_dir = {});
 	// Rust's embedded() source resolves against the bundled asset directory;
 	// C++ keeps the same API while allowing distributions to override the root.
-	static TreePackSource embedded(
-			const std::string &realm, std::filesystem::path root = {});
+	static TreePackSource embedded(const std::string &realm,
+			std::filesystem::path root = {},
+			std::shared_ptr<const PackDir> pack_dir = {});
 	const std::string &realm() const { return realm_; }
 	const std::filesystem::path &root() const { return root_; }
+	const std::shared_ptr<const PackDir> &pack_dir() const { return pack_dir_; }
 	std::string realm_file(const std::string &relative) const;
 	std::string vanilla_file(const std::string &relative) const;
 	std::filesystem::path realm_path(const std::string &relative) const;

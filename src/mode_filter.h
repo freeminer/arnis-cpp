@@ -7,7 +7,8 @@
 
 namespace arnis::mode_filter
 {
-void retain_for_mode(std::vector<ProcessedElement> &elements, GenerationMode mode);
+void retain_for_mode(std::vector<ProcessedElement> &elements, GenerationMode mode,
+		bool buildings = true);
 
 template <typename OutlineSuppression>
 OutlineSuppression outline_suppression_for_mode(

@@ -38,7 +38,7 @@ namespace arnis::one_world
 inline constexpr const char *MANIFEST_FILE = "arnis_one_world.json";
 inline constexpr const char *PREVIEW_DIR = "arnis_one_world/previews";
 inline constexpr const char *DEFAULT_WORLD_NAME = "Arnis One World";
-inline constexpr std::uint32_t MANIFEST_VERSION = 3;
+inline constexpr std::uint32_t MANIFEST_VERSION = 4;
 inline constexpr int CLIP_PAD_BLOCKS = 128;
 inline int ground_pad_blocks(double scale)
 {
@@ -57,6 +57,12 @@ struct GeneratedArea
 	int min_x = 0, min_z = 0, max_x = -1, max_z = -1;
 	double min_lat = 0, min_lon = 0, max_lat = 0, max_lon = 0;
 	std::optional<std::string> preview;
+	struct PieceRef
+	{
+		std::string job;
+		std::uint32_t index = 0;
+	};
+	std::optional<PieceRef> piece;
 	bool contains(int x0, int z0, int x1, int z1) const
 	{
 		return x0 <= min_x && z0 <= min_z && x1 >= max_x && z1 >= max_z;
@@ -68,10 +74,37 @@ struct GeneratedArea
 		return contains(x0, z0, x1, z1);
 	}
 };
+struct JobStatus
+{
+	std::uint32_t done = 0, total = 0;
+	bool finished = false;
+	std::uint64_t last_run_ms = 0;
+};
+struct JobRecord
+{
+	std::string name;
+	std::vector<std::string> settings;
+	std::optional<std::array<double, 4>> bbox;
+	JobStatus status;
+};
 struct SoftTop
 {
 	double knee_m = 0;
 	double width_blocks = 0;
+};
+struct UnitLease
+{
+	std::uint32_t piece = 0;
+	std::uint32_t area_id = 0;
+	bool extending = false;
+	std::int32_t first_map_id = 0;
+	// The unit's owned rectangle and the full job rectangle, inclusive.
+	std::array<std::int32_t, 4> rect{};
+	std::array<std::int32_t, 4> job{};
+	bool tiled = false;
+	// Shared coordination directory for pieces of this job. Embedders may leave
+	// it empty when the pieces do not need cross-process cave datum sharing.
+	std::filesystem::path job_dir;
 };
 struct ElevationAffine
 {
@@ -102,9 +135,16 @@ struct Manifest
 	int ground_level = 0;
 	bool terrain = true, disable_height_limit = false, aws_only_elevation = false;
 	double height_multiplier = 1;
+	std::optional<std::uint64_t> seed;
+	std::optional<std::uint64_t> cave_seed;
+	std::optional<std::int32_t> cave_datum_y;
 	std::optional<ElevationAffine> elevation;
+	bool world_border = false;
 	std::uint32_t next_area_id = 1;
 	std::vector<GeneratedArea> areas;
+	std::optional<std::string> place_name;
+	std::vector<JobRecord> jobs;
+	std::optional<std::int32_t> map_id;
 	static Manifest create(const ::arnis::Args &args, double origin_lat,
 			double origin_lon, const std::string &arnis_version);
 	projection::WebMercatorProjection projection() const;
@@ -126,6 +166,9 @@ struct RunContext
 	bool extending = false;
 	std::uint64_t replaced_chunks = 0;
 	std::uint32_t area_id = 0;
+	std::optional<GeneratedArea::PieceRef> piece;
+	// Set when this process builds one leased region-group piece of a job.
+	std::optional<UnitLease> unit;
 	// Optional lock acquired by prepare(). Direct library callers that construct
 	// RunContext themselves are still protected by generate_world's local guard.
 	std::shared_ptr<world_utils::SessionLock> session_lock;
@@ -161,6 +204,12 @@ bool record_live_tile(const std::filesystem::path &world_dir,
 		const geographic::LLBBox &llbbox, const cartesian::XZBBox &xzbbox,
 		const std::optional<std::filesystem::path> &preview,
 		const std::string &arnis_version, std::string *error = nullptr);
+bool record_job(const std::filesystem::path &world_dir, const std::string &name,
+		const std::optional<std::vector<std::string>> &settings,
+		const std::optional<std::array<double, 4>> &bbox, std::uint32_t done,
+		std::uint32_t total, bool finished, std::string *error = nullptr);
+bool record_map_item(const std::filesystem::path &world_dir, std::int32_t map_id,
+		std::string *error = nullptr);
 bool remember_elevation(const RunContext &run, const ElevationAffine &elevation,
 		std::string *error = nullptr);
 }

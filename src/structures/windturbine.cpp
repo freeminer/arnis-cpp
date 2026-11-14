@@ -7,7 +7,7 @@ namespace arnis::structures::windturbine
 {
 void place(WorldEditor &editor, int x, int z)
 {
-	if (!editor.place_schematics())
+	if (!editor.place_prop(Prop::Windturbine))
 		return;
 	const auto h = land_cover::coord_hash(x, z);
 	const auto root = editor.get_schematic_asset_root().empty()

@@ -65,10 +65,23 @@ bool blueprint_feature(const ProcessedElement &element)
 			return true;
 	return false;
 }
+
+bool building_element(const ProcessedElement &element)
+{
+	const auto &tags = element.tags();
+	if (element.is_node())
+		return tags.contains("door") || tags.contains("entrance");
+	return tags.contains("building") || tags.contains("building:part") ||
+		   tags.get("type") == "building";
+}
 }
 
-void retain_for_mode(std::vector<ProcessedElement> &elements, GenerationMode mode)
+void retain_for_mode(
+		std::vector<ProcessedElement> &elements, GenerationMode mode, bool buildings)
 {
+	if (!buildings)
+		elements.erase(std::remove_if(elements.begin(), elements.end(), building_element),
+				elements.end());
 	if (mode == GenerationMode::TerrainOnly) {
 		elements.erase(
 				std::remove_if(elements.begin(), elements.end(),

@@ -3,6 +3,9 @@
 #include "../osm_parser.h"
 #include "world_editor.h"
 #include "waterways.h"
+#include "bridges.h"
+#include "../water_depth.h"
+#include "../water_detail.h"
 #include "field_texture.h"
 #include "../strict_parse.h"
 #include "../unicode_text.h"
@@ -25,6 +28,9 @@ namespace arnis
 
 namespace waterways
 {
+
+void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element,
+		WaterDetail detail, double scale, const ChannelBed *bed);
 
 int get_waterway_width(const std::string &waterway_type)
 {
@@ -91,8 +97,19 @@ int waterway_width(const std::string &type, const tags_t &tags)
 	return get_waterway_width(type);
 }
 
-void create_water_channel(
-		WorldEditor &editor, int center_x, int center_z, int width, int flat_water_y)
+int capped_waterway_width(
+		const std::string &type, const tags_t &tags, std::optional<int> cap)
+{
+	const int width = waterway_width(type, tags);
+	if (!cap || *cap <= 0)
+		return width;
+	if (get_waterway_width(type) <= 3)
+		return std::min({width, *cap, 1});
+	return std::min(width, *cap);
+}
+
+void create_water_channel(WorldEditor &editor, int center_x, int center_z, int width,
+		int target_water_y, const ChannelBed *bed)
 {
 	const int BANK_TOLERANCE = 2;
 	int half_width = width / 2;
@@ -105,9 +122,9 @@ void create_water_channel(
 			if (distance_from_center <= half_width + 1) {
 				const int ground_y = editor.get_ground_level(x, z);
 				std::optional<int> water_y;
-				if (ground_y <= flat_water_y) {
-					water_y = flat_water_y;
-				} else if (ground_y <= flat_water_y + BANK_TOLERANCE &&
+				if (ground_y <= target_water_y) {
+					water_y = target_water_y;
+				} else if (ground_y <= target_water_y + BANK_TOLERANCE &&
 						   !editor.block_exists_absolute(x, ground_y, z)) {
 					water_y = ground_y;
 				}
@@ -116,6 +133,17 @@ void create_water_channel(
 
 				editor.set_block_absolute(
 						WATER, x, water_y.value(), z, std::nullopt, std::nullopt);
+				// Apply the shared river-bed field only to open river columns. Roads
+				// retain their surface, and bore shells keep their tunnel roof intact.
+				if (bed && bed->field.is_river(x, z) && !bed->road_mask.contains(x, z) &&
+						!water_depth::at_bore(bed->field, bed->tunnel_footprint, x, z) &&
+						editor.check_for_block_absolute(x, *water_y, z,
+								std::optional<std::vector<Block>>(
+										std::vector<Block>{WATER}),
+								std::nullopt)) {
+					water_depth::carve_water_column(editor, x, z, *water_y,
+							bed->field.depth_at(x, z), bed->road_mask, bed->field);
+				}
 				editor.set_block_absolute(AIR, x, water_y.value() + 1, z,
 						std::optional<std::vector<Block>>(
 								std::vector<Block>(field_texture::PLOT_PLANTS.begin(),
@@ -132,6 +160,24 @@ void create_water_channel(
 
 void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element)
 {
+	generate_waterways(editor, element, WaterDetail::Default, 1.0);
+}
+
+void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element,
+		WaterDetail detail, double scale)
+{
+	generate_waterways(editor, element, detail, scale, nullptr);
+}
+
+void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element,
+		WaterDetail detail, double scale, const ChannelBed &bed)
+{
+	generate_waterways(editor, element, detail, scale, &bed);
+}
+
+void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element,
+		WaterDetail detail, double scale, const ChannelBed *bed)
+{
 	auto it = element.tags.find("waterway");
 	if (it == element.tags.end()) {
 		return;
@@ -139,7 +185,9 @@ void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &e
 	if (!is_channel_waterway(it->second) || is_underground_waterway(element.tags))
 		return;
 
-	int channel_width = waterway_width(it->second, element.tags);
+	const int cap = water_detail::channel_width_cap(detail, scale);
+	const int channel_width = capped_waterway_width(
+			it->second, element.tags, cap > 0 ? std::optional<int>(cap) : std::nullopt);
 
 	for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
 		auto prev_node = element.nodes[i].xz();
@@ -166,7 +214,11 @@ void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &e
 													(2 * last))
 							 : std::min(y0, y1);
 			const int seg_water_y = std::min(ramped, editor.get_water_level(bx, bz));
-			create_water_channel(editor, bx, bz, channel_width, seg_water_y);
+			if (bed && bed->piped_under_roads && bed->road_mask.contains(bx, bz) &&
+					(!bed->piped_under_roads->deck_clears(bx, bz, seg_water_y) ||
+							bed->piped_under_roads->over_grade_way(bx, bz)))
+				continue;
+			create_water_channel(editor, bx, bz, channel_width, seg_water_y, bed);
 		}
 	}
 }

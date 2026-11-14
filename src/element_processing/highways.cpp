@@ -23,6 +23,8 @@
 #include "bridges.h"
 #include "surfaces.h"
 #include "road_markings.h"
+#include "road_detail.h"
+#include "../water_detail.h"
 #include "raceways.h"
 #include "highway_tunnels.h"
 #include "highways.h"
@@ -618,7 +620,8 @@ int oneway_sign(const std::string &highway, const crate::tags_t &tags)
 }
 
 std::vector<LaneLine> lane_lines(const std::string &highway, const crate::tags_t &tags,
-		int block_range, const crate::road_markings::RoadMarkingIndex &markings)
+		int block_range, const crate::road_markings::RoadMarkingIndex &markings,
+		RoadDetail detail)
 {
 	const int lanes = lane_marking_count(highway, tags);
 	if (lanes < 2)
@@ -660,9 +663,20 @@ std::vector<LaneLine> lane_lines(const std::string &highway, const crate::tags_t
 			result.push_back({at(lane), solid, block, true});
 		}
 	};
+	auto apply_detail = [&] {
+		const int road_width = static_cast<int>(width);
+		const bool oneway = oneway_sign(highway, tags) != 0;
+		result.erase(std::remove_if(result.begin(), result.end(),
+							 [&](const LaneLine &line) {
+								 return !road_detail::keeps_lane_line(detail, highway,
+										 tags, road_width, line.centre, oneway);
+							 }),
+				result.end());
+	};
 	if (width + 1.0f < 3.0f * lanes) {
 		for (const auto lane : separators)
 			append_centre(lane);
+		apply_detail();
 		return result;
 	}
 	for (int lane = 1; lane < lanes; ++lane) {
@@ -673,6 +687,7 @@ std::vector<LaneLine> lane_lines(const std::string &highway, const crate::tags_t
 					{at(lane), false, crate::block_definitions::WHITE_CONCRETE, false});
 		}
 	}
+	apply_detail();
 	return result;
 }
 
@@ -1387,9 +1402,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	// Rust does not paint lane markings on a tunnel way; preserve pavement width
 	// and the tunnel's own interior treatment, but omit all surface stripe blocks.
 	const bool tunnel_way = renders_as_highway_tunnel(way);
-	const auto painted_lanes =
-			tunnel_way ? std::vector<LaneLine>{}
-					   : lane_lines(highway_type, way.tags, block_range, markings);
+	const auto painted_lanes = tunnel_way
+									   ? std::vector<LaneLine>{}
+									   : lane_lines(highway_type, way.tags, block_range,
+												 markings, args.road_detail);
 	std::optional<std::pair<float, float>> centre_span;
 	for (const auto &line : painted_lanes) {
 		if (!line.centre)
@@ -1419,7 +1435,9 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	const int race_deck = highway_type == "raceway" ? raceways::deck(way.tags) : 0;
 	const bool pedestrian = is_pedestrian_way_tags(way.tags);
 	const auto crossing_paint =
-			pedestrian ? markings.crossing_way_paint(way) : std::nullopt;
+			pedestrian && road_detail::paints_crossings(args.road_detail)
+					? markings.crossing_way_paint(way)
+					: std::nullopt;
 	const bool marked_crossing =
 			crossing_paint &&
 			crossing_paint->kind == crate::road_markings::CrossingPaint::Kind::Zebra;
@@ -1515,6 +1533,23 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 	// not populate the ground cache for miles of road outside this chunk.
 	// Bridges retain their full path for whole-span decorations and rail joins.
 	const auto road_halo = std::int64_t(block_range) * 3 + 4;
+	std::vector<std::pair<int, int>> drowning_centres;
+	for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+		const auto points = crate::bresenham::bresenham_line(way.nodes[i - 1].x, 0,
+				way.nodes[i - 1].z, way.nodes[i].x, 0, way.nodes[i].z);
+		for (std::size_t j = i > 1 ? 1 : 0; j < points.size(); ++j) {
+			const auto &p = points[j];
+			drowning_centres.emplace_back(std::get<0>(p), std::get<2>(p));
+		}
+	}
+	std::vector<bool> drowned_centres(drowning_centres.size(), false);
+	if (!is_bridge_member && !is_bridge_ramp &&
+			water_detail::drowns_crossing(args.water_detail, args.scale, way.tags))
+		drowned_centres = water_detail::drowned_points(
+				drowning_centres, block_range, [&](int x, int z) {
+					return editor.is_lc_water(x, z) &&
+						   editor.carved_bed(x, z).has_value();
+				});
 
 	for (const auto &node : way.nodes) {
 		if (previous_node.has_value()) {
@@ -1692,8 +1727,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						crossing_paint->kind ==
 								crate::road_markings::CrossingPaint::Kind::Lines &&
 						segment_norm > 0.0f &&
-						(!crossing_paint->broken ||
-								((dir_horizontal ? x : z) % 2 + 2) % 2 == 0)) {
+						(!crossing_paint->broken || road_detail::bar(args.road_detail,
+															dir_horizontal ? x : z))) {
 					const auto line_block = crate::block_definitions::WHITE_CONCRETE;
 					for (const int side : {-1, 1}) {
 						const int offset = side * (block_range + 1);
@@ -1742,6 +1777,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 																	set_x, set_z) +
 																	current_y)
 										: current_y;
+						if (tds < drowned_centres.size() && drowned_centres[tds] &&
+								editor.is_lc_water(set_x, set_z) &&
+								editor.carved_bed(set_x, set_z).has_value())
+							continue;
 						if (flatten_width && elevation_offset == 0 &&
 								!(approach_y && tunnel_footprint &&
 										tunnel_footprint->contains(set_x, set_z)))
@@ -1753,10 +1792,10 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 							crossing_horizontal =
 									(std::abs(x2 - x1) >= std::abs(z2 - z1));
 							if (crossing_horizontal) {
-								if ((set_x % 2 + 2) % 2 < 1)
+								if (road_detail::bar(args.road_detail, set_x))
 									zebra = true;
 							} else {
-								if ((set_z % 2 + 2) % 2 < 1)
+								if (road_detail::bar(args.road_detail, set_z))
 									zebra = true;
 							}
 						}
@@ -1770,7 +1809,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						// Node-mapped crossings and junction controls are indexed before
 						// rendering so that marks remain stable across way boundaries.
 						bool transverse_white = false;
-						if (segment_norm > 0.0f) {
+						if (segment_norm > 0.0f &&
+								road_detail::paints_crossings(args.road_detail)) {
 							if (const auto *way_marks = markings.way(way.id)) {
 								const auto t = static_cast<std::uint32_t>(tds);
 								for (const auto &mark : way_marks->marks) {
@@ -1802,7 +1842,8 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 									const float spacing = std::abs(px) + std::abs(pz);
 									const int stripe = static_cast<int>(std::floor(
 											(set_x * px + set_z * pz) / spacing));
-									const bool bar = ((stripe % 2) + 2) % 2 == 0;
+									const bool bar =
+											road_detail::bar(args.road_detail, stripe);
 									transverse_white =
 											mark.kind ==
 													crate::road_markings::TransverseMark::
@@ -2130,13 +2171,19 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 						const int dash_off = std::max(1,
 								static_cast<int>(
 										std::lround((fast ? 12.0 : 6.0) * scale_factor)));
-						const int dash_period = dash_on + dash_off;
+						const auto [dash_length_value, dash_period_value] =
+								road_detail::dash_pattern(args.road_detail,
+										{static_cast<std::uint32_t>(dash_on),
+												static_cast<std::uint32_t>(
+														dash_on + dash_off)});
+						const int dash_length = static_cast<int>(dash_length_value);
+						const int dash_period = static_cast<int>(dash_period_value);
 						const std::int64_t phase = way_marks
 														   ? way_marks->dash_phase(t)
 														   : static_cast<std::int64_t>(t);
 						const int dash_phase = static_cast<int>(
 								((phase % dash_period) + dash_period) % dash_period);
-						const bool dash = dash_phase < dash_on;
+						const bool dash = dash_phase < static_cast<int>(dash_length);
 						for (const auto &line : painted_lanes) {
 							if (!line.solid && !dash)
 								continue;
@@ -2624,7 +2671,33 @@ crate::CoordinateBitmap collect_road_surface_coords(
 		const crate::world_editor::WorldEditor &editor, const ::XZBBox &xzbbox,
 		double scale)
 {
+	return collect_road_surface_coords(
+			elements, editor, xzbbox, scale, WaterDetail::Default);
+}
+
+crate::CoordinateBitmap collect_road_surface_coords(
+		const std::vector<crate::osm_parser::ProcessedElement> &elements,
+		const crate::world_editor::WorldEditor &editor, const ::XZBBox &xzbbox,
+		double scale, WaterDetail detail)
+{
 	crate::CoordinateBitmap bitmap(xzbbox);
+	const auto point_key = [](int x, int z) {
+		return (std::uint64_t(static_cast<std::uint32_t>(x)) << 32) |
+			   static_cast<std::uint32_t>(z);
+	};
+	std::unordered_set<std::uint64_t> bridge_nodes;
+	if (water_detail::drowns_crossing(detail, scale, {})) {
+		for (const auto &element : elements) {
+			if (!element.is_way())
+				continue;
+			const auto &way = element.as_way();
+			const auto bridge = way.tags.get("bridge");
+			if (bridge.empty() || bridge == "no")
+				continue;
+			for (const auto &node : way.nodes)
+				bridge_nodes.insert(point_key(node.x, node.z));
+		}
+	}
 	for (const auto &element : elements) {
 		if (!element.is_way())
 			continue;
@@ -2634,6 +2707,27 @@ crate::CoordinateBitmap collect_road_surface_coords(
 			continue;
 
 		const int block_range = highway_block_range(*highway_type, way.tags, scale);
+		const bool can_drown =
+				water_detail::drowns_crossing(detail, scale, way.tags) &&
+				std::none_of(way.nodes.begin(), way.nodes.end(), [&](const auto &node) {
+					return bridge_nodes.contains(point_key(node.x, node.z));
+				});
+		std::vector<std::pair<int, int>> centres;
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const auto &prev = way.nodes[i - 1];
+			const auto &cur = way.nodes[i];
+			for (const auto &p :
+					crate::bresenham::bresenham_line(prev.x, 0, prev.z, cur.x, 0, cur.z))
+				centres.emplace_back(std::get<0>(p), std::get<2>(p));
+		}
+		std::vector<bool> drowned(centres.size(), false);
+		if (can_drown)
+			drowned =
+					water_detail::drowned_points(centres, block_range, [&](int x, int z) {
+						return editor.is_lc_water(x, z) &&
+							   editor.carved_bed(x, z).has_value();
+					});
+		std::size_t centre_index = 0;
 		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
 			const auto &prev = way.nodes[i - 1];
 			const auto &cur = way.nodes[i];
@@ -2642,11 +2736,17 @@ crate::CoordinateBitmap collect_road_surface_coords(
 			for (const auto &p : points) {
 				const int bx = std::get<0>(p);
 				const int bz = std::get<2>(p);
+				const bool skip_water =
+						centre_index < drowned.size() && drowned[centre_index];
 				for (int dx = -block_range; dx <= block_range; ++dx) {
 					for (int dz = -block_range; dz <= block_range; ++dz) {
+						if (skip_water && editor.is_lc_water(bx + dx, bz + dz) &&
+								editor.carved_bed(bx + dx, bz + dz).has_value())
+							continue;
 						bitmap.set(bx + dx, bz + dz);
 					}
 				}
+				++centre_index;
 			}
 		}
 	}

@@ -337,7 +337,7 @@ std::optional<ModelInfo> Client::fetch_info(std::uint64_t id) const
 		return cached;
 	std::optional<std::vector<std::uint8_t>> bytes;
 	{
-		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		[[maybe_unused]] auto permit = arnis::net::request_permit("3DMR model metadata");
 		if (fetch_bytes_) {
 			bytes = fetch_bytes_(url, 1024 * 1024);
 		} else {
@@ -375,7 +375,7 @@ std::optional<std::vector<std::uint8_t>> Client::fetch_glb(std::uint64_t id) con
 		return cached;
 	std::optional<std::vector<std::uint8_t>> bytes;
 	{
-		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		[[maybe_unused]] auto permit = arnis::net::request_permit("3DMR model asset");
 		if (fetch_bytes_) {
 			bytes = fetch_bytes_(url, MAX_GLB_BYTES);
 		} else {

@@ -5,7 +5,7 @@ namespace arnis::structures
 {
 void maybe_place_helicopter(WorldEditor &e, int x, int z)
 {
-	if (!e.place_schematics())
+	if (!e.place_prop(Prop::Helicopter))
 		return;
 	auto h = land_cover::coord_hash(x, z);
 	if (h % 100 >= 60 || e.is_lc_water(x, z))

@@ -14,7 +14,7 @@ constexpr int GROUND_STOREY = 10;
 
 void place(WorldEditor &editor, int x, int z)
 {
-	if (!editor.place_schematics())
+	if (!editor.place_prop(Prop::Lighthouse))
 		return;
 	const auto h = land_cover::coord_hash(x, z);
 	const auto root = editor.get_schematic_asset_root().empty()

@@ -88,7 +88,8 @@ std::optional<ModelAsset> RemoteModelProvider::fetch(const std::string &q)
 			if (!wikidata_client::save_cached(cache_, e->url, bytes))
 				return remember({});
 		} else {
-			[[maybe_unused]] auto permit = arnis::net::request_permit();
+			[[maybe_unused]] auto permit =
+					arnis::net::request_permit("Wikidata 3D model");
 			if (fetch_bytes_) {
 				auto fetched = fetch_bytes_(e->url, wikidata_client::MAX_MODEL_BYTES);
 				if (!fetched || fetched->size() > wikidata_client::MAX_MODEL_BYTES)

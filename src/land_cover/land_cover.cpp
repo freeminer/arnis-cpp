@@ -1,9 +1,11 @@
 #include "land_cover.h"
 #include "../grid_ops.h"
 #include "../cache_root.h"
+#include "../deterministic_rng.h"
 #include "cog.h"
 #include "shoreline.h"
 #include "../../http.h"
+#include "settings.h"
 #include <filesystem>
 #include <fstream>
 #include "../../arnis_adapter.h"
@@ -22,6 +24,7 @@
 #include <system_error>
 #include <utility>
 #include <atomic>
+#include <chrono>
 #include <cstdlib>
 #include <string_view>
 #include <thread>
@@ -32,6 +35,19 @@ namespace arnis::land_cover
 {
 namespace
 {
+bool missing_esa_tile(const std::filesystem::path &marker)
+{
+	std::error_code ec;
+	if (!std::filesystem::is_regular_file(marker, ec) || ec)
+		return false;
+	const auto modified = std::filesystem::last_write_time(marker, ec);
+	if (!ec && std::filesystem::file_time_type::clock::now() - modified <=
+					   std::chrono::hours(24 * 30))
+		return true;
+	std::filesystem::remove(marker, ec);
+	return false;
+}
+
 // COG reads are HTTP byte ranges. Cache each range rather than downloading the
 // full 3-degree TIFF: Rust uses the same header + internal-tile cache, and this
 // also lets separate chunk generations reuse the same ESA source data.
@@ -43,6 +59,12 @@ std::vector<std::uint8_t> fetch_cached_esa_range(const std::string &url,
 		return {};
 	const auto slash = url.find_last_of('/');
 	const auto basename = slash == std::string::npos ? url : url.substr(slash + 1);
+	const auto missing_path = cache_dir / (basename + ".missing");
+	// An absent WorldCover tile is geographic no-data (usually open ocean), not
+	// a transient range failure. Remember that response just like Rust does so
+	// each generation chunk does not repeat the same 404 for every COG range.
+	if (missing_esa_tile(missing_path))
+		return {};
 	const auto path = cache_dir / (basename + "_range_" + std::to_string(offset) + "_" +
 										  std::to_string(length) + ".bin");
 	// A fixed set of locks avoids duplicate concurrent downloads without keeping
@@ -51,6 +73,10 @@ std::vector<std::uint8_t> fetch_cached_esa_range(const std::string &url,
 	auto &mutex =
 			range_mutexes[std::hash<std::string>{}(path.string()) % range_mutexes.size()];
 	const std::lock_guard<std::mutex> lock(mutex);
+	// A different range lock may have received the tile's 404 while this caller
+	// waited, so recheck the tile-wide negative cache after taking the range lock.
+	if (missing_esa_tile(missing_path))
+		return {};
 	std::error_code ec;
 	if (std::filesystem::is_regular_file(path, ec) && !ec &&
 			std::filesystem::file_size(path, ec) == length && !ec) {
@@ -63,8 +89,26 @@ std::vector<std::uint8_t> fetch_cached_esa_range(const std::string &url,
 				return bytes;
 		}
 	}
-	const auto response = http_get_range(url, offset, length);
-	std::vector<std::uint8_t> bytes(response.begin(), response.end());
+	const auto response = http_get_range_response(
+			url, offset, length, g_settings->getS32("curl_file_download_timeout"));
+	if (response.response_code == 404) {
+		std::filesystem::create_directories(cache_dir, ec);
+		if (!ec) {
+			const auto temporary = missing_path.string() + ".tmp." +
+								   std::to_string(std::hash<std::thread::id>{}(
+										   std::this_thread::get_id()));
+			{
+				std::ofstream marker(temporary, std::ios::binary | std::ios::trunc);
+			}
+			std::filesystem::rename(temporary, missing_path, ec);
+			if (ec)
+				std::filesystem::remove(temporary, ec);
+		}
+		return {};
+	}
+	if (!response.succeeded || response.response_code != 206)
+		return {};
+	std::vector<std::uint8_t> bytes(response.data.begin(), response.data.end());
 	if (bytes.empty() || bytes.size() != static_cast<std::size_t>(length))
 		return {};
 	std::filesystem::create_directories(cache_dir, ec);
@@ -380,15 +424,30 @@ LandCoverData assemble_land_cover_data(const GeographicBounds &bbox, std::size_t
 	return out;
 }
 
-uint64_t coord_hash(int32_t x, int32_t z)
+namespace
+{
+uint64_t coordinate_hash(int32_t x, int32_t z, bool use_world_seed)
 {
 	// Keep the Rust arithmetic and wrapping points verbatim: this hash drives
 	// deterministic surface dithering, so a merely "good" different hash would
 	// visibly diverge between implementations.
 	uint64_t h = uint64_t(uint32_t(x)) * 0x9E3779B97F4A7C15ULL;
+	if (use_world_seed)
+		h = seeded(h);
 	h ^= uint64_t(uint32_t(z)) * 0x517CC1B727220A95ULL;
 	h *= 0x6C62272E07BB0142ULL;
 	return h ^ (h >> 32);
+}
+} // namespace
+
+uint64_t coord_hash(int32_t x, int32_t z)
+{
+	return coordinate_hash(x, z, true);
+}
+
+uint64_t geo_coord_hash(int32_t x, int32_t z)
+{
+	return coordinate_hash(x, z, false);
 }
 
 std::optional<uint8_t> nearest_land_class(const std::vector<std::vector<uint8_t>> &grid,

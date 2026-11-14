@@ -243,24 +243,26 @@ int height_slack(int want)
 {
 	return std::max(1, rust_numeric::round_i32(want * .08));
 }
-double default_height_m(int x, int z)
+double default_height_m(int x, int z, const SizeWeights *weights)
 {
-	static constexpr std::array<std::tuple<std::uint64_t, double, double>, 5> bands = {
-			{{150, 4., 7.}, {500, 7., 12.}, {830, 12., 18.}, {965, 18., 25.},
-					{1000, 25., 32.}}};
+	static constexpr std::array<std::pair<double, double>, 5> bands = {
+			{{4., 7.}, {7., 12.}, {12., 18.}, {18., 25.}, {25., 32.}}};
 	const auto roll = land_cover::coord_hash(x + 101, z + 233) % 1000;
 	const double t =
 			double(land_cover::coord_hash(x ^ 0x2C61, z ^ 0x5E0B) % 1000) / 1000.;
-	for (const auto &[limit, low, high] : bands)
-		if (roll < limit)
-			return low + (high - low) * t;
-	return 7. + 5. * t;
+	const auto band = weights ? weights->band(roll)
+							  : (roll < 150			 ? 0
+										: roll < 500 ? 1
+										: roll < 830 ? 2
+										: roll < 965 ? 3
+													 : 4);
+	return bands[band].first + (bands[band].second - bands[band].first) * t;
 }
-int default_height_blocks(int x, int z, double scale)
+int default_height_blocks(int x, int z, double scale, const SizeWeights *weights)
 {
 	// Match RegionSelector::default_height: even at very small map scales, a
 	// requested schematic height is at least one block.
-	return std::max(1, rust_numeric::round_i32(default_height_m(x, z) * scale));
+	return std::max(1, rust_numeric::round_i32(default_height_m(x, z, weights) * scale));
 }
 }
 
@@ -337,6 +339,7 @@ struct RegionSelector::Data
 	bool latitude_known = false;
 	bool palms_default = true;
 	SizeFilter sizes{};
+	std::optional<SizeWeights> size_weights;
 	bool allowed(TreeSize s) const
 	{
 		return sizes.allows(s) && (s != TreeSize::Giant || scale >= 1.0);
@@ -383,13 +386,17 @@ struct RegionSelector::Data
 
 std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		double scale, int ground_level, const SizeFilter &sizes, bool exclude_palms,
-		double blocks_per_meter, const std::vector<std::uint16_t> &ecoregion_ids)
+		double blocks_per_meter, const std::vector<std::uint16_t> &ecoregion_ids,
+		const std::optional<SizeWeights> &size_weights)
 {
 	auto data = std::make_shared<Data>();
 	data->scale = scale;
 	data->blocks_per_meter = blocks_per_meter;
 	data->ground_level = ground_level;
 	data->sizes = sizes;
+	data->size_weights = size_weights;
+	if (data->size_weights)
+		data->size_weights->restrict(data->sizes);
 	// Cache failed and successful model reads alike: manifests can reference
 	// the same missing or leafless asset from many communities.
 	std::unordered_map<std::string, std::optional<std::size_t>> asset_entries;
@@ -404,6 +411,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			std::string key;
 			std::filesystem::path path;
 			std::uint8_t width;
+			std::optional<TreeSize> size_override;
 		};
 		std::vector<Job> jobs;
 		std::unordered_set<std::string> queued;
@@ -430,12 +438,24 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 					for (const auto &relative : *paths) {
 						if (!relative.is_string())
 							continue;
-						auto path = manifest.parent_path() / relative.get<std::string>();
+						const auto relative_name = relative.get<std::string>();
+						const bool user_asset =
+								relative_name.starts_with("user:") && source.pack_dir();
+						const auto user_relative =
+								user_asset ? relative_name.substr(
+													 std::string("user:").size())
+										   : std::string{};
+						auto path = user_asset
+											? source.pack_dir()->user_path(user_relative)
+											: manifest.parent_path() / relative_name;
 						const auto key = std::filesystem::absolute(path)
 												 .lexically_normal()
 												 .string();
 						if (!asset_entries.contains(key) && queued.insert(key).second)
-							jobs.push_back({key, std::move(path), width});
+							jobs.push_back({key, std::move(path), width,
+									user_asset ? source.pack_dir()->tier_for_path(
+														 user_relative)
+											   : std::nullopt});
 					}
 				}
 			}
@@ -473,7 +493,8 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 			if (parsed[i]) {
 				auto schematic = std::move(parsed[i]);
 				const auto size = schematic_size(*schematic);
-				data->entries.push_back({std::move(schematic), size, jobs[i].width});
+				data->entries.push_back({std::move(schematic),
+						jobs[i].size_override.value_or(size), jobs[i].width});
 				entry = data->entries.size() - 1;
 			}
 			asset_entries.emplace(jobs[i].key, entry);
@@ -506,7 +527,16 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 							{{"w1", 1}, {"w2", 2}, {"w3", 3}}})
 				if (sp.contains(field))
 					for (const auto &relative : sp[field]) {
-						auto path = manifest.parent_path() / relative.get<std::string>();
+						const auto relative_name = relative.get<std::string>();
+						const bool user_asset =
+								relative_name.starts_with("user:") && source.pack_dir();
+						const auto user_relative =
+								user_asset ? relative_name.substr(
+													 std::string("user:").size())
+										   : std::string{};
+						auto path = user_asset
+											? source.pack_dir()->user_path(user_relative)
+											: manifest.parent_path() / relative_name;
 						try {
 							const auto asset_key = std::filesystem::absolute(path)
 														   .lexically_normal()
@@ -522,7 +552,13 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 							(void)inserted;
 							auto schem = load_schem_shared(path);
 							if (has_leaves(*schem)) {
-								const auto size = schematic_size(*schem);
+								const auto size =
+										user_asset
+												? source.pack_dir()
+														  ->tier_for_path(user_relative)
+														  .value_or(
+																  schematic_size(*schem))
+												: schematic_size(*schem);
 								data->entries.push_back(
 										{std::move(schem), size, std::uint8_t(width)});
 								variants.push_back(data->entries.size() - 1);
@@ -558,6 +594,8 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 		} catch (...) {
 			return {};
 		}
+		if (source.pack_dir())
+			source.pack_dir()->add_to_manifest(pack_name, root);
 		// Mirror Rust's required MRegion/MCommunity fields and serde defaults:
 		// only species width lists and community density are optional. Reject a
 		// malformed pack instead of silently generating from a partial manifest.
@@ -773,7 +811,7 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 								auto manifest_it = mix_manifests.find(pack_key);
 								if (manifest_it == mix_manifests.end()) {
 									const auto other_pack = TreePackSource::embedded(
-											pack_key, source.root());
+											pack_key, source.root(), source.pack_dir());
 									std::optional<nlohmann::json> manifest_json;
 									if (const auto manifest =
 													other_pack.realm_manifest()) {
@@ -781,6 +819,9 @@ std::optional<RegionSelector> RegionSelector::load(const TreePackSource &source,
 											std::ifstream file(*manifest);
 											nlohmann::json parsed;
 											file >> parsed;
+											if (source.pack_dir())
+												source.pack_dir()->add_to_manifest(
+														pack_key, parsed);
 											manifest_json = std::move(parsed);
 										} catch (...) {
 										}
@@ -1045,7 +1086,9 @@ std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
 		double longitude, const std::filesystem::path &root, double scale,
 		int ground_level, const SizeFilter &sizes, double blocks_per_meter,
 		const std::optional<std::string> &preferred_realm,
-		const std::vector<std::uint16_t> &ecoregion_ids, bool exclude_palms)
+		const std::vector<std::uint16_t> &ecoregion_ids, bool exclude_palms,
+		const std::optional<SizeWeights> &size_weights,
+		std::shared_ptr<const PackDir> pack_dir)
 {
 	// Rust chooses the pack belonging to the largest mapped ecoregion before
 	// falling back to the bbox-centre latitude/longitude.  `ecoregion_ids` is
@@ -1065,12 +1108,12 @@ std::optional<RegionSelector> RegionSelector::load_for_location(double latitude,
 	}
 	// Preserve the C++ asset-root override while resolving bundled assets for
 	// the common empty-root call path.
-	TreePackSource source = TreePackSource::embedded(realm, root);
+	TreePackSource source = TreePackSource::embedded(realm, root, std::move(pack_dir));
 	// Rust drops palm schematics only when the area's ecoregion data is complete
 	// and none of its mapped tree communities can use palms. Otherwise retain
 	// them so per-cell ecoregion and latitude rules can decide at placement time.
 	auto result = load(source, scale, ground_level, sizes, exclude_palms,
-			blocks_per_meter, ecoregion_ids);
+			blocks_per_meter, ecoregion_ids, size_weights);
 	if (result) {
 		result->data_->latitude = latitude;
 		result->data_->latitude_known = true;
@@ -1153,7 +1196,8 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 		sz = z;
 	}
 	const int wanted_height = data_->capped_height(
-			request.want_height.value_or(default_height_blocks(sx, sz, data_->scale)));
+			request.want_height.value_or(default_height_blocks(sx, sz, data_->scale,
+					data_->size_weights ? &*data_->size_weights : nullptr)));
 	// Invert the vertical affine, including terrain compression, as in region.rs.
 	const double per_metre =
 			data_->blocks_per_meter > 0.0 ? data_->blocks_per_meter : data_->scale;

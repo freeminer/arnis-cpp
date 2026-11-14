@@ -436,7 +436,8 @@ std::optional<HttpReply> Client::fetch_reply(
 	// Rust's request permit covers every transport, not just the built-in HTTP
 	// client. Keep injected library/test transports under the same process-wide
 	// request cap and avoid nested permits in the default fetcher.
-	[[maybe_unused]] auto permit = arnis::net::request_permit();
+	[[maybe_unused]] auto permit =
+			arnis::net::request_permit("Mapillary image or metadata");
 	if (graph_fetch_) {
 		auto reply = graph_fetch_(url, max_bytes);
 		return finish(!reply || reply->body.size() > max_bytes ? std::nullopt : reply);

@@ -32,6 +32,7 @@ public:
 	double z_for_lat(double latitude) const;
 	double lon_for_x(double x) const;
 	double lat_for_z(double z) const;
+	double origin_latitude_degrees() const { return origin_lat_; }
 };
 
 // Round near-integral projected edges consistently before applying floor/ceil.

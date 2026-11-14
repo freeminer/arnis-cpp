@@ -142,6 +142,22 @@ void emit_gui_progress_update_ex(
 	emit(std::move(event));
 }
 
+void emit_gui_transfer(
+		double progress, const std::string &message, const transfer::Transfer &transfer)
+{
+	if (!message.empty() && message.rfind("Error!", 0) != 0 &&
+			message.rfind("Done!", 0) != 0)
+		last_status = message;
+	if (emits_suppressed(progress, message) || !has_event_handler())
+		return;
+	Event event;
+	event.kind = Event::Kind::Progress;
+	event.progress = clamp_progress(progress);
+	event.message = message;
+	event.transfer = transfer;
+	emit(std::move(event));
+}
+
 void emit_gui_error(const std::string &message)
 {
 	const auto truncated = truncate_utf8(message, 35);

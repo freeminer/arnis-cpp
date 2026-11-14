@@ -15,6 +15,7 @@
 #include "world_editor.h"
 #include "surfaces.h"
 #include "sport_pitches.h"
+#include "ice_rinks.h"
 #include "raceways.h"
 #include "bridges.h"
 #include "../ground_decoration.h"
@@ -89,6 +90,10 @@ static void generate_leisure_area(WorldEditor &editor, const ProcessedWay &eleme
 		const auto &filled_area = *fill_result;
 		if (filled_area.empty() && is_oversized_ring(element))
 			return;
+		if (leisure_type == "ice_rink") {
+			ice_rinks::generate_ice_rink(editor, element, filled_area, holes);
+			return;
+		}
 
 		for (const ProcessedNode &node : element.nodes) {
 			if (previous_node.has_value()) {

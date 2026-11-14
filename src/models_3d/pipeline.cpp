@@ -4,6 +4,7 @@
 #include "three_dmr/client.h"
 #include "wikidata/prescan.h"
 #include "wikidata/client.h"
+#include "../net.h"
 #include "../../../arnis_adapter.h"
 #include "../cache_root.h"
 #include "../tile.h"
@@ -11,6 +12,7 @@
 #include <cmath>
 #include <limits>
 #include <span>
+#include <unordered_set>
 namespace arnis::models_3d
 {
 std::vector<std::filesystem::path> model_cache_roots()
@@ -68,6 +70,24 @@ Models3dPipeline Models3dPipeline::prescan_fetchable_wikidata(
 	wikidata::retain_fetchable(out.wikidata_, fetchable);
 	append_unique(out.suppressed_, out.wikidata_.suppressed);
 	return out;
+}
+
+void Models3dPipeline::prewarm(three_dmr::Client &provider) const
+{
+	std::unordered_set<std::uint64_t> ids;
+	ids.reserve(three_dmr_.placements.size());
+	for (const auto &placement : three_dmr_.placements)
+		ids.insert(placement.model_id);
+	for (const auto id : ids) {
+		try {
+			if (!provider.fetch_info(id) || !provider.fetch_glb(id))
+				net::note_uncached("3D models (3DMR)");
+		} catch (...) {
+			// Offline cache misses are counted by request_permit(); transport or
+			// cache-write failures during --prewarm are tracked separately.
+			net::note_uncached("3D models (3DMR)");
+		}
+	}
 }
 
 void Models3dPipeline::retain_fetchable_wikidata(

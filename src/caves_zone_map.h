@@ -23,7 +23,8 @@ namespace arnis::caves
 std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 		const CaveRect &bounds, std::string_view biome_spec = {},
 		std::optional<std::uint32_t> sample_step = std::nullopt,
-		int floor_y = VANILLA_FLOOR, std::string *error = nullptr);
+		int floor_y = VANILLA_FLOOR, std::string *error = nullptr,
+		double base_amount = 1.0, std::int64_t seed = 0xCA7ECA7E);
 
 // Args-driven counterpart to Rust's `render(&Args)`. The projected block
 // bounds remain an explicit input because the C++ library Args deliberately

@@ -91,7 +91,7 @@ void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int
 void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int>> &cells,
 		const CoordinateBitmap &building_footprints)
 {
-	if (!editor.place_schematics() || cells.size() < 1500)
+	if (!editor.place_prop(Prop::Crane) || cells.size() < 1500)
 		return;
 	auto schematic = crane_schematic(editor);
 	if (!schematic)
@@ -125,7 +125,7 @@ void maybe_place_crane(WorldEditor &editor, const std::vector<std::pair<int, int
 void place_mapped(WorldEditor &editor, int x, int z, const tags_t &tags,
 		const CoordinateBitmap &building_footprints)
 {
-	if (!editor.place_schematics())
+	if (!editor.place_prop(Prop::Crane))
 		return;
 	const auto kind = tags.find("crane:type");
 	const auto indoor = tags.find("indoor");
@@ -190,7 +190,7 @@ std::optional<std::pair<int, int>> mapped_crane_on(
 
 void place_on_site(WorldEditor &editor, int x, int z, int base_y, std::uint64_t seed)
 {
-	if (!editor.place_schematics() || editor.is_lc_water(x, z))
+	if (!editor.place_prop(Prop::Crane) || editor.is_lc_water(x, z))
 		return;
 	const auto schematic = crane_schematic(editor);
 	if (!schematic)

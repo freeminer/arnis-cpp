@@ -87,8 +87,7 @@ std::pair<double, double> warp(double col, double row)
 	const int x = static_cast<int>(std::floor(col * 64.0));
 	const int z = static_cast<int>(std::floor(row * 64.0));
 	const auto octave = [&](std::uint32_t salt, int period, double amp) {
-		return (ground_generation::value_noise_salted(x, z, period, salt) - .5) * 2.0 *
-			   amp;
+		return (ground_generation::geo_noise_salted(x, z, period, salt) - .5) * 2.0 * amp;
 	};
 	return {octave(0xEC00001, 384, .9) + octave(0xEC00002, 96, .35) +
 					octave(0xEC00005, 16, .12),
@@ -96,7 +95,7 @@ std::pair<double, double> warp(double col, double row)
 					octave(0xEC00006, 16, .12)};
 }
 
-std::pair<std::size_t, std::size_t> warped_cell(
+std::pair<std::size_t, std::size_t> warped_cell_impl(
 		const geo_grid::TiledGrid &grid, double lat, double lon)
 {
 	const auto [col, row] = grid.position(lat, lon);
@@ -110,6 +109,12 @@ std::int32_t euclidean_remainder(std::int32_t value, std::int32_t divisor)
 	return r < 0 ? r + divisor : r;
 }
 }
+std::pair<std::size_t, std::size_t> warped_cell(
+		const geo_grid::TiledGrid &grid, double latitude, double longitude)
+{
+	return warped_cell_impl(grid, latitude, longitude);
+}
+
 std::optional<Ecoregion> lookup(std::uint16_t id)
 {
 	if (auto *r = row(id))

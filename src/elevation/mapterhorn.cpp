@@ -282,7 +282,8 @@ FetchResult fetch_tile(const std::filesystem::path &root, const XyzTileKey &key)
 	for (unsigned attempt = 0; attempt < RETRIES; ++attempt) {
 		if (attempt)
 			std::this_thread::sleep_for(std::chrono::milliseconds(500u << (attempt - 1)));
-		[[maybe_unused]] auto permit = arnis::net::request_permit();
+		[[maybe_unused]] auto permit =
+				arnis::net::request_permit("MapTiler terrain tile");
 		const auto response = http_get(mapterhorn_tile_url(key));
 		if (response.result != CURLE_OK) {
 			out.error = curl_easy_strerror(response.result);

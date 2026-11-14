@@ -9,9 +9,20 @@
 
 namespace arnis::caves
 {
+BiomeAmounts BiomeAmounts::uniform(double amount)
+{
+	return {amount, amount, amount, amount, amount, amount, amount, amount};
+}
+
 BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 {
-	BiomeAmounts out;
+	return parse(spec, defaults(), error);
+}
+
+BiomeAmounts BiomeAmounts::parse(
+		std::string_view spec, const BiomeAmounts &base, std::string *error)
+{
+	BiomeAmounts out = base;
 	if (error)
 		error->clear();
 	auto fail = [&](std::string s) {
@@ -38,20 +49,20 @@ BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 		const auto eq = part.find('=');
 		if (eq == std::string_view::npos) {
 			fail("'" + std::string(part) + "': expected name=percent");
-			return {};
+			return base;
 		}
 		std::string name(trim(part.substr(0, eq)));
 		std::string value(trim(part.substr(eq + 1)));
 		const auto parsed = strict_parse::f64(value);
 		if (!parsed) {
 			fail("'" + std::string(part) + "': percent is not a number");
-			return {};
+			return base;
 		}
 		const double pct = *parsed;
 		if (!std::isfinite(pct)) {
 			fail("'" + std::string(part) +
 					"': percent must be a finite number (0..=200), got '" + value + "'");
-			return {};
+			return base;
 		}
 		const double v = std::clamp(pct, 0.0, 200.0) / 100.0;
 		std::transform(name.begin(), name.end(), name.begin(),
@@ -74,7 +85,7 @@ BiomeAmounts BiomeAmounts::parse(std::string_view spec, std::string *error)
 			out.coral = v;
 		else {
 			fail("unknown cave biome '" + name + "'");
-			return {};
+			return base;
 		}
 		begin = end + 1;
 	}

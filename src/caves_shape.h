@@ -38,6 +38,11 @@ struct CaveRect
 		const int q = value / divisor, r = value % divisor;
 		return r < 0 ? q - 1 : q;
 	}
+	static CaveRect everywhere() noexcept
+	{
+		constexpr int limit = 1'000'000'000;
+		return {-limit, limit, -limit, limit};
+	}
 };
 
 struct CaveEllipsoid

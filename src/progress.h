@@ -4,6 +4,7 @@
 #include <optional>
 #include <string>
 #include <utility>
+#include "transfer.h"
 
 namespace arnis::progress
 {
@@ -24,6 +25,7 @@ struct Event
 	double progress = MESSAGE_ONLY;
 	std::string message;
 	std::optional<bool> streaming;
+	std::optional<transfer::Transfer> transfer;
 };
 
 // Backend-neutral replacement for the Rust GUI emitter. Applications using
@@ -39,6 +41,8 @@ bool emits_suppressed(double progress, const std::string &message);
 void emit_gui_progress_update(double progress, const std::string &message);
 void emit_gui_progress_update_ex(
 		double progress, const std::string &message, bool streaming);
+void emit_gui_transfer(
+		double progress, const std::string &message, const transfer::Transfer &transfer);
 void emit_gui_error(const std::string &message);
 void emit_world_name_update(const std::string &name);
 void emit_map_preview_ready();

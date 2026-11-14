@@ -40,8 +40,9 @@ osm_parser::RawOsmDocument load_osm_file(const std::filesystem::path &path);
 void save_osm_json(osm_parser::RawOsmDocument &document,
 		const geographic::LLBBox &requested_bbox, const std::filesystem::path &path);
 std::string overpass_query(const geographic::LLBBox &bbox);
-std::vector<OverpassEndpoint> overpass_request_plan(
-		std::uint64_t seed = 0, bool probe_official_first = false);
+std::vector<OverpassEndpoint> overpass_request_plan(std::uint64_t seed = 0,
+		bool probe_official_first = false,
+		const std::vector<std::string> &configured_urls = {});
 bool remark_means_truncated(const std::string &remark);
 // Coarse, coordinate-free bucket for tile/archive fallback diagnostics.
 const char *fallback_reason(const std::string &error);
@@ -49,7 +50,8 @@ std::string fallback_reason_detail(const std::string &error);
 inline constexpr const char *AREA_TOO_LARGE = "Area too large, try a smaller one.";
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &,
 		const OverpassFetcher &, std::uint64_t seed = 0,
-		bool probe_official_first = false, std::string *error = nullptr);
+		bool probe_official_first = false, std::string *error = nullptr,
+		const std::vector<std::string> &configured_urls = {});
 // Rust's unified source-selection entry point: try the archive first, then
 // fall back to the caller-provided Overpass transport.
 std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &,

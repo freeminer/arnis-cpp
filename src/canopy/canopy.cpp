@@ -20,10 +20,14 @@ namespace arnis::canopy
 {
 namespace
 {
+using StatusRangeFetcher = std::function<std::optional<std::vector<std::uint8_t>>(
+		const std::string &, std::uint64_t, std::uint64_t, bool *)>;
+
 constexpr double MERCATOR_WORLD = 20037508.342789244;
 constexpr std::size_t ROW_BLOCK = 128;
 constexpr std::uint64_t FETCH_BATCH_BYTES = 16ULL << 20;
 constexpr auto ROW_CACHE_MAX_AGE = std::chrono::hours(24 * 30);
+constexpr auto MISSING_TILE_MAX_AGE = std::chrono::hours(24 * 30);
 constexpr auto TILE_FAILURE_RETRY = std::chrono::minutes(5);
 constexpr auto FAILURE_WARNING_RETRY = std::chrono::minutes(5);
 
@@ -112,6 +116,11 @@ std::shared_ptr<TileFetchState> tile_fetch_state(
 	}
 	return created;
 }
+
+std::optional<CanopyData> fetch_canopy_data_ranges_status(
+		const std::filesystem::path &base, const StatusRangeFetcher &fetch_range,
+		double min_lat, double min_lon, double max_lat, double max_lon,
+		std::size_t grid_width, std::size_t grid_height);
 
 bool should_log_canopy_failure()
 {
@@ -583,20 +592,20 @@ std::optional<CanopyData> assemble_cached_canopy(const std::filesystem::path &ba
 namespace
 {
 std::optional<StripIndex> cached_or_remote_strip_index(const std::filesystem::path &base,
-		int xt, int yt, const RangeFetcher &fetch_range)
+		int xt, int yt, const StatusRangeFetcher &fetch_range, bool *not_found)
 {
 	const auto cached = load_strip_index_cache(strip_index_cache_path(base, xt, yt));
 	if (cached)
 		return cached;
 	const auto url = tile_url(xt, yt);
-	auto header = fetch_range(url, 0, 4096);
+	auto header = fetch_range(url, 0, 4096, not_found);
 	if (!header || header->size() < 16)
 		return std::nullopt;
 	const auto tables = parse_bigtiff_header(*header);
 	if (!tables)
 		return std::nullopt;
-	auto offsets = fetch_range(url, tables->offsets_at, TILE_PX * 8);
-	auto counts = fetch_range(url, tables->counts_at, TILE_PX * 8);
+	auto offsets = fetch_range(url, tables->offsets_at, TILE_PX * 8, not_found);
+	auto counts = fetch_range(url, tables->counts_at, TILE_PX * 8, not_found);
 	if (!offsets || !counts)
 		return std::nullopt;
 	auto index = make_strip_index(*offsets, *counts);
@@ -606,9 +615,9 @@ std::optional<StripIndex> cached_or_remote_strip_index(const std::filesystem::pa
 }
 
 bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
-		const RangeFetcher &fetch_range, int xt, int yt, double min_lat, double min_lon,
-		double max_lat, double max_lon, std::size_t width, std::size_t height,
-		std::vector<std::uint8_t> &grid)
+		const StatusRangeFetcher &fetch_range, int xt, int yt, double min_lat,
+		double min_lon, double max_lat, double max_lon, std::size_t width,
+		std::size_t height, std::vector<std::uint8_t> &grid, bool *not_found)
 {
 	const auto win =
 			tile_window(xt, yt, min_lat, min_lon, max_lat, max_lon, width, height);
@@ -630,7 +639,7 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 	}
 	if (complete)
 		return true;
-	const auto index = cached_or_remote_strip_index(base, xt, yt, fetch_range);
+	const auto index = cached_or_remote_strip_index(base, xt, yt, fetch_range, not_found);
 	if (!index)
 		return false;
 	const auto url = tile_url(xt, yt);
@@ -728,7 +737,7 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 				range_hi = next_hi;
 				++count;
 			}
-			auto fetched = fetch_range(url, range_lo, range_hi - range_lo);
+			auto fetched = fetch_range(url, range_lo, range_hi - range_lo, not_found);
 			if (!fetched || fetched->size() != range_hi - range_lo)
 				return false;
 			for (std::size_t n = 0; n < count; ++n) {
@@ -794,7 +803,7 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 			const auto [first_row, last_row] = block_rows(block);
 			if (!strip_span(first_row, last_row, lo, hi))
 				return false;
-			auto replacement = fetch_range(url, lo, hi - lo);
+			auto replacement = fetch_range(url, lo, hi - lo, not_found);
 			if (!replacement || replacement->size() != hi - lo)
 				return false;
 			blob = std::move(*replacement);
@@ -829,15 +838,24 @@ bool fill_from_remote_tile_unlocked(const std::filesystem::path &base,
 }
 
 bool fill_from_remote_tile(const std::filesystem::path &base,
-		const RangeFetcher &fetch_range, int xt, int yt, double min_lat, double min_lon,
-		double max_lat, double max_lon, std::size_t width, std::size_t height,
-		std::vector<std::uint8_t> &grid)
+		const StatusRangeFetcher &fetch_range, int xt, int yt, double min_lat,
+		double min_lon, double max_lat, double max_lon, std::size_t width,
+		std::size_t height, std::vector<std::uint8_t> &grid)
 {
 	const auto window =
 			tile_window(xt, yt, min_lat, min_lon, max_lat, max_lon, width, height);
 	if (window.columns.empty() || window.rows.empty())
 		return false;
 
+	const auto marker = cache_dir(base) / (quadkey_of(xt, yt) + ".missing");
+	std::error_code ec;
+	const auto marker_time = std::filesystem::last_write_time(marker, ec);
+	if (!ec) {
+		const auto age = std::filesystem::file_time_type::clock::now() - marker_time;
+		if (age < MISSING_TILE_MAX_AGE)
+			return false;
+		std::filesystem::remove(marker, ec);
+	}
 	// Concurrent mapgen calls often ask for the same source tile. Serialize only
 	// requests for that tile; a successful first caller populates the strip/row
 	// caches, while a failed one suppresses repeated HTTP retries briefly.
@@ -846,8 +864,17 @@ bool fill_from_remote_tile(const std::filesystem::path &base,
 	const auto now = std::chrono::steady_clock::now();
 	if (state->unavailable_until > now)
 		return false;
+	bool not_found = false;
 	const bool loaded = fill_from_remote_tile_unlocked(base, fetch_range, xt, yt, min_lat,
-			min_lon, max_lat, max_lon, width, height, grid);
+			min_lon, max_lat, max_lon, width, height, grid, &not_found);
+	if (not_found) {
+		std::filesystem::create_directories(marker.parent_path(), ec);
+		if (!ec) {
+			std::ofstream out(marker, std::ios::binary);
+			if (out)
+				out.put('\n');
+		}
+	}
 	state->unavailable_until =
 			loaded ? std::chrono::steady_clock::time_point{} : now + TILE_FAILURE_RETRY;
 	return loaded;
@@ -1073,23 +1100,44 @@ std::optional<CanopyData> fetch_canopy_data(const std::filesystem::path &base,
 	// through the range-only algorithm so it never falls back to downloading a
 	// whole 450 MB canopy TIFF.  Embedders can use fetch_canopy_data_ranges()
 	// directly with their own transport.
-	const RangeFetcher native_range =
-			[](const std::string &url, std::uint64_t offset,
-					std::uint64_t length) -> std::optional<std::vector<std::uint8_t>> {
+	const StatusRangeFetcher native_status_range =
+			[](const std::string &url, std::uint64_t offset, std::uint64_t length,
+					bool *not_found) -> std::optional<std::vector<std::uint8_t>> {
 		if (length == 0 ||
 				length > std::uint64_t(std::numeric_limits<std::size_t>::max()))
 			return std::nullopt;
-		const auto body = http_get_range(url, offset, length, 90);
-		if (body.size() != length)
+		const auto response = http_get_range_response(url, offset, length, 90);
+		if (not_found)
+			*not_found |= response.response_code == 404;
+		if (!response.succeeded || response.response_code != 206 ||
+				response.data.size() != length)
 			return std::nullopt;
-		return std::vector<std::uint8_t>(body.begin(), body.end());
+		return std::vector<std::uint8_t>(response.data.begin(), response.data.end());
 	};
-	return fetch_canopy_data_ranges(base, native_range, min_lat, min_lon, max_lat,
-			max_lon, grid_width, grid_height);
+	return fetch_canopy_data_ranges_status(base, native_status_range, min_lat, min_lon,
+			max_lat, max_lon, grid_width, grid_height);
 }
 std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &base,
 		const RangeFetcher &fetch_range, double min_lat, double min_lon, double max_lat,
 		double max_lon, std::size_t grid_width, std::size_t grid_height)
+{
+	if (!fetch_range)
+		return std::nullopt;
+	const StatusRangeFetcher wrapped = [&fetch_range](const std::string &url,
+											   std::uint64_t offset, std::uint64_t length,
+											   bool *) {
+		return fetch_range(url, offset, length);
+	};
+	return fetch_canopy_data_ranges_status(
+			base, wrapped, min_lat, min_lon, max_lat, max_lon, grid_width, grid_height);
+}
+
+namespace
+{
+std::optional<CanopyData> fetch_canopy_data_ranges_status(
+		const std::filesystem::path &base, const StatusRangeFetcher &fetch_range,
+		double min_lat, double min_lon, double max_lat, double max_lon,
+		std::size_t grid_width, std::size_t grid_height)
 {
 	if (!fetch_range || grid_width == 0 || grid_height == 0 || !std::isfinite(min_lat) ||
 			!std::isfinite(min_lon) || !std::isfinite(max_lat) || !std::isfinite(max_lon))
@@ -1134,6 +1182,7 @@ std::optional<CanopyData> fetch_canopy_data_ranges(const std::filesystem::path &
 				<< " canopy tile(s) unavailable; those areas fall back to land cover.\n";
 	return std::optional<CanopyData>(std::move(data));
 }
+} // namespace
 std::size_t clear_canopy_cache(const std::filesystem::path &base)
 {
 	decoded_rows().clear();

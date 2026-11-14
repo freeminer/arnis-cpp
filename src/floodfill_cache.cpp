@@ -802,6 +802,7 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 	auto it_highway = way.tags.find("highway");
 	auto it_area = way.tags.find("area");
 	auto it_tomb = way.tags.find("tomb");
+	auto it_tourism = way.tags.find("tourism");
 
 	bool has_building = (it_building != way.tags.end());
 	bool has_building_part = (it_building_part != way.tags.end());
@@ -816,6 +817,13 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 	bool area_yes = has_area && (it_area->second == "yes");
 	bool has_tomb = (it_tomb != way.tags.end());
 	bool tomb_pyramid = has_tomb && (it_tomb->second == "pyramid");
+	bool camp_site =
+			it_tourism != way.tags.end() &&
+			(it_tourism->second == "camp_site" || it_tourism->second == "caravan_site");
+	const bool cemetery =
+			(it_landuse != way.tags.end() && it_landuse->second == "cemetery") ||
+			(it_amenity != way.tags.end() && it_amenity->second == "grave_yard") ||
+			(way.tags.get("cemetery") == "sector");
 	auto it_power = way.tags.find("power");
 	auto it_source = way.tags.find("generator:source");
 	bool solar_generator = it_power != way.tags.end() &&
@@ -826,7 +834,8 @@ bool FloodFillCache::way_needs_flood_fill(const ProcessedWay &way)
 	const bool needed = has_building || has_building_part || has_landuse || has_leisure ||
 						has_amenity || natural_not_tree || (has_highway && area_yes) ||
 						highways::is_aeroway_area(way) || golf::claims(way.tags) ||
-						tomb_pyramid || waterfront || solar_generator;
+						camp_site || cemetery || tomb_pyramid || waterfront ||
+						solar_generator;
 	return needed && !fill_goes_unread(way);
 }
 

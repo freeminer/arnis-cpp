@@ -8,7 +8,7 @@ namespace arnis::structures::tractor
 void maybe_place_tractor(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics() || cells.size() < 600)
+	if (!editor.place_prop(Prop::Tractor) || cells.size() < 600)
 		return;
 	const auto root = editor.get_schematic_asset_root().empty()
 							  ? assets::path("structures")

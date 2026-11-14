@@ -44,17 +44,18 @@ bool exclude_palms_for_latitude(double lat)
 {
 	return std::abs(lat) > 35.0;
 }
-TreePackSource::TreePackSource(std::string r, std::filesystem::path root) :
-		realm_(std::move(r)), root_(std::move(root))
+TreePackSource::TreePackSource(std::string r, std::filesystem::path root,
+		std::shared_ptr<const PackDir> pack_dir) :
+		realm_(std::move(r)), root_(std::move(root)), pack_dir_(std::move(pack_dir))
 {
 }
-TreePackSource TreePackSource::embedded(
-		const std::string &realm, std::filesystem::path root)
+TreePackSource TreePackSource::embedded(const std::string &realm,
+		std::filesystem::path root, std::shared_ptr<const PackDir> pack_dir)
 {
 	if (root.empty()) {
 		root = assets::path("tree-packs");
 	}
-	return TreePackSource(realm, std::move(root));
+	return TreePackSource(realm, std::move(root), std::move(pack_dir));
 }
 std::string TreePackSource::realm_file(const std::string &r) const
 {

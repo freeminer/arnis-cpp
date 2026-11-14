@@ -15,6 +15,7 @@
 #include <limits>
 #include <cmath>
 #include <iostream>
+#include <iterator>
 #include <numbers>
 #include <sstream>
 #include <system_error>
@@ -29,6 +30,13 @@ std::uint64_t unix_now()
 	const auto now = std::chrono::system_clock::now().time_since_epoch();
 	return static_cast<std::uint64_t>(
 			std::chrono::duration_cast<std::chrono::seconds>(now).count());
+}
+
+std::uint64_t unix_now_ms()
+{
+	const auto now = std::chrono::system_clock::now().time_since_epoch();
+	return static_cast<std::uint64_t>(
+			std::chrono::duration_cast<std::chrono::milliseconds>(now).count());
 }
 
 std::string fixed_2(double value)
@@ -51,7 +59,9 @@ Manifest Manifest::create(const ::arnis::Args &args, double origin_lat, double o
 		const std::string &version)
 {
 	Manifest manifest;
-	manifest.version = MANIFEST_VERSION;
+	manifest.version = args.seed || args.cave_seed || args.cave_datum_y
+							   ? MANIFEST_VERSION
+							   : MANIFEST_VERSION - 1;
 	manifest.created_with = "arnis " + version;
 	manifest.created_at = unix_now();
 	manifest.origin_lat = stable(origin_lat, 7);
@@ -62,6 +72,9 @@ Manifest Manifest::create(const ::arnis::Args &args, double origin_lat, double o
 	manifest.disable_height_limit = args.disable_height_limit;
 	manifest.aws_only_elevation = args.aws_only_elevation;
 	manifest.height_multiplier = stable(args.height_multiplier, 6);
+	manifest.seed = args.seed;
+	manifest.cave_seed = args.cave_seed;
+	manifest.cave_datum_y = args.cave_datum_y;
 	if (manifest.terrain) {
 		auto affine = elevation::ElevationAffine::whole_earth(
 				manifest.scale * manifest.height_multiplier,
@@ -108,6 +121,12 @@ std::optional<Manifest> Manifest::load(const std::filesystem::path &w, std::stri
 		m.disable_height_limit = j.at("disable_height_limit").get<bool>();
 		m.aws_only_elevation = j.at("aws_only_elevation").get<bool>();
 		m.height_multiplier = j.value("height_multiplier", 1.);
+		if (j.contains("seed") && !j["seed"].is_null())
+			m.seed = j.at("seed").get<std::uint64_t>();
+		if (j.contains("cave_seed") && !j["cave_seed"].is_null())
+			m.cave_seed = j.at("cave_seed").get<std::uint64_t>();
+		if (j.contains("cave_datum_y") && !j["cave_datum_y"].is_null())
+			m.cave_datum_y = j.at("cave_datum_y").get<std::int32_t>();
 		if (j.contains("elevation") && !j["elevation"].is_null()) {
 			ElevationAffine e;
 			const auto &ej = j.at("elevation");
@@ -138,9 +157,38 @@ std::optional<Manifest> Manifest::load(const std::filesystem::path &w, std::stri
 			a.max_lon = x.at("max_lon").get<double>();
 			if (x.contains("preview") && !x["preview"].is_null())
 				a.preview = x.at("preview").get<std::string>();
+			if (x.contains("piece") && x["piece"].is_object()) {
+				const auto &piece = x.at("piece");
+				a.piece = GeneratedArea::PieceRef{piece.at("job").get<std::string>(),
+						piece.at("index").get<std::uint32_t>()};
+			}
 			if (!a.contains(a.min_x, a.min_z, a.max_x, a.max_z))
 				throw std::runtime_error("invalid generated area");
 			m.areas.push_back(std::move(a));
+		}
+		m.world_border = j.value("world_border", false);
+		if (j.contains("place_name") && !j["place_name"].is_null())
+			m.place_name = j.at("place_name").get<std::string>();
+		if (j.contains("map_id") && !j["map_id"].is_null())
+			m.map_id = j.at("map_id").get<std::int32_t>();
+		if (j.contains("jobs") && j["jobs"].is_array()) {
+			for (const auto &entry : j["jobs"]) {
+				JobRecord job;
+				job.name = entry.value("name", std::string{});
+				job.settings = entry.value("settings", std::vector<std::string>{});
+				if (entry.contains("bbox") && entry["bbox"].is_array() &&
+						entry["bbox"].size() == 4)
+					job.bbox = entry["bbox"].get<std::array<double, 4>>();
+				if (entry.contains("status") && entry["status"].is_object()) {
+					const auto &status = entry["status"];
+					job.status.done = status.value("done", 0u);
+					job.status.total = status.value("total", 0u);
+					job.status.finished = status.value("finished", false);
+					job.status.last_run_ms =
+							status.value("last_run_ms", std::uint64_t{0});
+				}
+				m.jobs.push_back(std::move(job));
+			}
 		}
 		std::string validation;
 		if (!m.valid(&validation))
@@ -154,13 +202,25 @@ std::optional<Manifest> Manifest::load(const std::filesystem::path &w, std::stri
 }
 bool Manifest::save(const std::filesystem::path &w, std::string *error) const
 {
-	json j = {{"version", version}, {"created_with", created_with},
+	const bool needs_v4 =
+			seed || cave_seed || cave_datum_y || world_border || !jobs.empty() ||
+			std::any_of(areas.begin(), areas.end(),
+					[](const auto &area) { return area.piece.has_value(); });
+	const auto written_version = needs_v4 ? std::max(version, MANIFEST_VERSION)
+										  : std::min(version, MANIFEST_VERSION - 1);
+	json j = {{"version", written_version}, {"created_with", created_with},
 			{"created_at", created_at}, {"origin_lat", origin_lat},
 			{"origin_lon", origin_lon}, {"scale", scale}, {"ground_level", ground_level},
 			{"terrain", terrain}, {"disable_height_limit", disable_height_limit},
 			{"aws_only_elevation", aws_only_elevation},
 			{"height_multiplier", height_multiplier}, {"next_area_id", next_area_id},
 			{"areas", json::array()}};
+	if (seed)
+		j["seed"] = *seed;
+	if (cave_seed)
+		j["cave_seed"] = *cave_seed;
+	if (cave_datum_y)
+		j["cave_datum_y"] = *cave_datum_y;
 	if (elevation) {
 		json e = {{"min_height_m", elevation->min_height_m},
 				{"blocks_per_meter", elevation->blocks_per_meter},
@@ -170,12 +230,37 @@ bool Manifest::save(const std::filesystem::path &w, std::string *error) const
 					{"width_blocks", elevation->soft_top->width_blocks}};
 		j["elevation"] = std::move(e);
 	}
-	for (const auto &a : areas)
-		j["areas"].push_back({{"id", a.id}, {"generated_at", a.generated_at},
+	if (world_border)
+		j["world_border"] = true;
+	if (place_name)
+		j["place_name"] = *place_name;
+	if (map_id)
+		j["map_id"] = *map_id;
+	if (!jobs.empty()) {
+		j["jobs"] = json::array();
+		for (const auto &job : jobs) {
+			json status = {{"done", job.status.done}, {"total", job.status.total},
+					{"finished", job.status.finished},
+					{"last_run_ms", job.status.last_run_ms}};
+			json entry = {{"name", job.name}, {"settings", job.settings},
+					{"status", std::move(status)}};
+			if (job.bbox)
+				entry["bbox"] = *job.bbox;
+			j["jobs"].push_back(std::move(entry));
+		}
+	}
+	for (const auto &a : areas) {
+		json entry = {{"id", a.id}, {"generated_at", a.generated_at},
 				{"arnis_version", a.arnis_version}, {"min_x", a.min_x},
 				{"min_z", a.min_z}, {"max_x", a.max_x}, {"max_z", a.max_z},
 				{"min_lat", a.min_lat}, {"min_lon", a.min_lon}, {"max_lat", a.max_lat},
-				{"max_lon", a.max_lon}, {"preview", a.preview}});
+				{"max_lon", a.max_lon}};
+		if (a.preview)
+			entry["preview"] = *a.preview;
+		if (a.piece)
+			entry["piece"] = {{"job", a.piece->job}, {"index", a.piece->index}};
+		j["areas"].push_back(std::move(entry));
+	}
 	const auto text = j.dump(2);
 	const std::vector<std::uint8_t> bytes(text.begin(), text.end());
 	if (!world_utils::replace_file_atomically(path_in(w), bytes)) {
@@ -400,6 +485,26 @@ std::optional<Session> prepare(const std::filesystem::path &world_dir,
 	}
 
 	args.scale = manifest->scale;
+	if (args.seed && args.seed != manifest->seed) {
+		const auto kept = manifest->seed ? std::to_string(*manifest->seed) : "none";
+		std::cout << "Note: One World keeps the seed it was created with (" << kept
+				  << ").\n";
+	}
+	args.seed = manifest->seed;
+	if (args.cave_seed && args.cave_seed != manifest->cave_seed) {
+		const auto kept =
+				manifest->cave_seed ? std::to_string(*manifest->cave_seed) : "none";
+		std::cout << "Note: One World keeps the cave seed it was created with (" << kept
+				  << ").\n";
+	}
+	args.cave_seed = manifest->cave_seed;
+	if (args.cave_datum_y && args.cave_datum_y != manifest->cave_datum_y)
+		return fail_locked(
+				"One World keeps the cave datum it was created with (" +
+				(manifest->cave_datum_y ? std::to_string(*manifest->cave_datum_y)
+										: std::string("terrain-relative")) +
+				").");
+	args.cave_datum_y = manifest->cave_datum_y;
 	const auto [rect, effective_bbox] =
 			projection::snap_bbox_to_chunks(manifest->projection(), requested);
 	if (created && !manifest->save(world_dir, error))
@@ -518,6 +623,47 @@ std::optional<std::filesystem::path> safe_preview_path(
 	return world / prefix / name;
 }
 
+bool record_job(const std::filesystem::path &world_dir, const std::string &name,
+		const std::optional<std::vector<std::string>> &settings,
+		const std::optional<std::array<double, 4>> &bbox, std::uint32_t done,
+		std::uint32_t total, bool finished, std::string *error)
+{
+	std::string load_error;
+	auto manifest = Manifest::load(world_dir, &load_error);
+	if (!manifest) {
+		if (error)
+			*error = load_error.empty() ? "The One World vanished." : load_error;
+		return false;
+	}
+	auto it = std::find_if(manifest->jobs.begin(), manifest->jobs.end(),
+			[&](const auto &job) { return job.name == name; });
+	if (it == manifest->jobs.end()) {
+		manifest->jobs.push_back(JobRecord{});
+		it = std::prev(manifest->jobs.end());
+		it->name = name;
+	}
+	if (settings)
+		it->settings = *settings;
+	if (bbox)
+		it->bbox = bbox;
+	it->status = {done, total, finished, unix_now_ms()};
+	return manifest->save(world_dir, error);
+}
+
+bool record_map_item(
+		const std::filesystem::path &world_dir, std::int32_t map_id, std::string *error)
+{
+	std::string load_error;
+	auto manifest = Manifest::load(world_dir, &load_error);
+	if (!manifest) {
+		if (error)
+			*error = load_error.empty() ? "The One World vanished." : load_error;
+		return false;
+	}
+	manifest->map_id = map_id;
+	return manifest->save(world_dir, error);
+}
+
 bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
 		const cartesian::XZBBox &xzbbox, std::optional<ElevationAffine> elevation,
 		const std::optional<std::filesystem::path> &preview,
@@ -564,6 +710,7 @@ bool record_area(const RunContext &run, const geographic::LLBBox &llbbox,
 	manifest->areas.push_back({run.area_id, unix_now(), arnis_version, xzbbox.min_x(),
 			xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z(), min.lat(), min.lng(),
 			max.lat(), max.lng(), preview_relative});
+	manifest->areas.back().piece = run.piece;
 	const auto next_id = run.area_id == std::numeric_limits<std::uint32_t>::max()
 								 ? run.area_id
 								 : run.area_id + 1;

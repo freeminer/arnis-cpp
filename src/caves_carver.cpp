@@ -285,7 +285,7 @@ void carve_random_walk_carvers(world_editor::WorldEditor &editor, const CaveRect
 	const auto chunk_floor = [](int value) {
 		return value >= 0 ? value / 16 : -(((-value) + 15) / 16);
 	};
-	const int shift = floor_y - VANILLA_FLOOR;
+	const int shift = cave_y_shift(floor_y);
 	for (int cx = chunk_floor(origin_region.min_x) - CAVE_REACH_CHUNKS;
 			cx <= chunk_floor(origin_region.max_x) + CAVE_REACH_CHUNKS; ++cx) {
 		for (int cz = chunk_floor(origin_region.min_z) - CAVE_REACH_CHUNKS;
@@ -430,8 +430,8 @@ void place_geodes(world_editor::WorldEditor &editor, const CaveRect &region, int
 				continue;
 			const int gx = cx * 16 + static_cast<int>(decor_hash(cx, 1, cz, seed) % 16);
 			const int gz = cz * 16 + static_cast<int>(decor_hash(cx, 2, cz, seed) % 16);
-			const int gy =
-					floor_y + 10 + static_cast<int>(decor_hash(cx, 3, cz, seed) % 36);
+			const int gy = cave_vy(-54, floor_y) +
+						   static_cast<int>(decor_hash(cx, 3, cz, seed) % 36);
 			if (!world_bounds.contains(gx, gz) ||
 					gy + radius + 2 >= cave_shape.surface_y(gx, gz) ||
 					!water_plan.solid(cave_shape, gx, gy, gz))
@@ -613,7 +613,7 @@ void despeckle_and_prune(world_editor::WorldEditor &editor, const CaveRect &regi
 		if (component.size() < 48 && !touches_edge)
 			refill.insert(refill.end(), component.begin(), component.end());
 	}
-	const int vanilla_zero = floor_y + 64;
+	const int vanilla_zero = cave_vy(0, floor_y);
 	const std::vector<Block> air_only{AIR};
 	for (const auto &p : refill) {
 		const auto [x, y, z] = unpack_cave_pos(p);
@@ -657,9 +657,15 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 		const std::unordered_set<std::int64_t> *cave_air,
 		std::function<bool(int, int)> keep_out)
 {
+	const auto style = args.cave_style.value_or(CaveStyle::AllMix);
+	const double style_amount = style == CaveStyle::Vanilla		  ? 0.0
+								: style == CaveStyle::MoreVanilla ? 0.18
+								: style == CaveStyle::MoreMix	  ? 1.8
+																  : 1.0;
+	const auto style_amounts = BiomeAmounts::uniform(style_amount);
 	const auto amounts = args.cave_biomes
-								 ? biome_amounts_for_generation(*args.cave_biomes)
-								 : BiomeAmounts::defaults();
+								 ? BiomeAmounts::parse(*args.cave_biomes, style_amounts)
+								 : style_amounts;
 	const ThemeSelector themes(seed, amounts, floor_y);
 	const auto decoration_seed = static_cast<std::uint64_t>(seed);
 	const std::vector<Block> rocks{STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE,

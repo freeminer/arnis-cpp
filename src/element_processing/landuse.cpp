@@ -26,6 +26,10 @@
 #include "../land_cover/land_cover.h"
 #include "relation_area.h"
 #include "field_texture.h"
+#include "greenhouses.h"
+#include "plantations.h"
+#include "allotments.h"
+#include "natural.h"
 
 #include "../../../arnis_adapter.h"
 #include "../../../arnis_ground.h"
@@ -104,6 +108,28 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 		auto it = element.tags.find(std::string("landuse"));
 		return (it != element.tags.end()) ? it->second : binding;
 	}();
+	if (landuse_tag == "greenhouse_horticulture") {
+		const auto fill = flood_fill_cache.get_or_compute(element, args.timeout_ref());
+		greenhouses::horticulture_area(
+				editor, element, *fill, road_mask, building_footprints, holes);
+		return;
+	}
+	if (landuse_tag == "vineyard" || landuse_tag == "orchard") {
+		const auto fill = flood_fill_cache.get_or_compute(element, args.timeout_ref());
+		if (landuse_tag == "vineyard")
+			plantations::vineyard_area(
+					editor, element, *fill, road_mask, building_footprints, holes);
+		else
+			plantations::orchard_area(
+					editor, element, *fill, road_mask, building_footprints, holes);
+		return;
+	}
+	if (landuse_tag == "allotments") {
+		const auto fill = flood_fill_cache.get_or_compute(element, args.timeout_ref());
+		allotments::generate_area(
+				editor, element, *fill, road_mask, building_footprints, holes);
+		return;
+	}
 
 	Block block_type = GRASS_BLOCK;
 	if (landuse_tag == "greenfield" || landuse_tag == "meadow" ||
@@ -155,8 +181,7 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 			(military_tag->second == "training_area" || military_tag->second == "range" ||
 					military_tag->second == "danger_area" ||
 					military_tag->second == "trench");
-	const auto climate = editor.climate();
-	const bool site_arid = construction_site::is_arid(climate);
+	const auto area_climate = editor.climate();
 
 	// Use deterministic RNG seeded by element ID for consistent results across region boundaries
 	auto rng = element_rng(element.id);
@@ -218,6 +243,7 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 			SMOOTH_STONE,
 			WATER,
 	});
+	const bool per_cell_woods = natural::woods_by_cell(args);
 
 	for (auto const &coord : floor_area) {
 		int x = coord.first;
@@ -236,13 +262,15 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				field_layout
 						? std::optional<field_texture::Plot>{field_layout->plot_at(x, z)}
 						: std::nullopt;
+		const auto climate = editor.local_climate(x, z).value_or(area_climate);
 
 		// Apply per-block randomness for certain landuse types
 		Block actual_block = block_type;
 		if (plot) {
 			actual_block = plot->surface(x, z);
 		} else if (landuse_tag == "construction") {
-			actual_block = construction_site::ground_block(x, z, site_arid);
+			actual_block = construction_site::ground_block(
+					x, z, construction_site::is_arid(climate));
 		} else if (landuse_tag == "industrial") {
 			// Industrial: primarily stone, with some stone bricks and smooth stone
 			int random_value = static_cast<int>(rng.uniform(100));
@@ -299,6 +327,7 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 		// ground pass may include its halo, but plants there belong to that tile.
 		if (editor.is_lc_water(x, z) || !editor.owns(x, z))
 			continue;
+		const bool roots = natural::piece_plants_at(args, x, z);
 
 		if (landuse_tag == "cemetery") {
 			if ((x % 3 == 0) && (z % 3 == 0)) {
@@ -313,7 +342,7 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 								std::optional<std::vector<Block>>(),
 								std::optional<std::vector<Block>>());
 					}
-				} else if (random_choice >= 30 && random_choice < 33 &&
+				} else if (roots && random_choice >= 30 && random_choice < 33 &&
 						   editor.land_cover_backs_trees(x, z)) {
 					Tree::create(editor, Coord{x, 1, z}, &building_footprints,
 							&bridge_surface);
@@ -338,19 +367,32 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				const double density = ground_generation::value_noise_01(x, z, 32);
 				const int tree_threshold =
 						std::max(5, static_cast<int>(60.0 - density * 45.0));
-				if (rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0) {
-					TreeType tree_type = trees_ok_to_generate[rng.uniform(
-							static_cast<std::uint32_t>(trees_ok_to_generate.size()))];
-					Tree::create_of_type(editor, Coord{x, 1, z}, tree_type,
-							&building_footprints, &bridge_surface, false, std::nullopt,
-							leaf_type_tagged);
+				std::optional<ChaCha8Rng> cell_rng;
+				if (per_cell_woods)
+					cell_rng.emplace(
+							coord_rng(x, z, static_cast<std::uint64_t>(element.id)));
+				auto &tree_rng = cell_rng ? *cell_rng : rng;
+				const bool spawn_tree =
+						tree_rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0;
+				const int random_choice = static_cast<int>(rng.uniform(30));
+				if (spawn_tree) {
+					const TreeType tree_type =
+							trees_ok_to_generate.empty()
+									? TreeType::Oak
+									: trees_ok_to_generate[tree_rng.uniform(
+											  static_cast<std::uint32_t>(
+													  trees_ok_to_generate.size()))];
+					if (roots || per_cell_woods)
+						Tree::create_of_type(editor, Coord{x, 1, z}, tree_type,
+								&building_footprints, &bridge_surface, false,
+								std::nullopt, leaf_type_tagged);
 				} else {
-					const int random_choice = static_cast<int>(rng.uniform(30));
 					if (random_choice == 2) {
 						const int feature = 1 + static_cast<int>(rng.uniform(6));
-						if (feature == 1)
-							bush::place(editor, x, z, bush::Kind::Wild);
-						else if (feature == 5)
+						if (feature == 1) {
+							if (roots)
+								bush::place(editor, x, z, bush::Kind::Wild);
+						} else if (feature == 5)
 							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
 						else
 							ground_decoration::place_scattered_flower(editor, x, z,
@@ -369,7 +411,8 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 								std::vector<Block>{GRASS_BLOCK}})) {
 				int r = static_cast<int>(rng.uniform(200));
 				if (r == 0) {
-					bush::place(editor, x, z, bush::Kind::Garden);
+					if (roots)
+						bush::place(editor, x, z, bush::Kind::Garden);
 				} else if (r <= 8) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -388,7 +431,8 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 								std::vector<Block>{GRASS_BLOCK}})) {
 				int r = static_cast<int>(rng.uniform(200));
 				if (r == 0) {
-					bush::place(editor, x, z, bush::Kind::Wild);
+					if (roots)
+						bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (r <= 2) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -403,13 +447,15 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 								std::vector<Block>{GRASS_BLOCK}})) {
 				int random_choice = static_cast<int>(rng.uniform(1001));
 				if (random_choice < 5 && editor.land_cover_backs_trees(x, z)) {
-					Tree::create(editor, Coord{x, 1, z}, &building_footprints,
-							&bridge_surface);
+					if (roots)
+						Tree::create(editor, Coord{x, 1, z}, &building_footprints,
+								&bridge_surface);
 				} else if (random_choice < 6) {
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (random_choice < 9) {
-					bush::place(editor, x, z, bush::Kind::Wild);
+					if (roots)
+						bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (random_choice < 40) {
 					editor.set_block(FERN, x, 1, z, std::optional<std::vector<Block>>(),
 							std::optional<std::vector<Block>>());
@@ -450,7 +496,8 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 								   std::vector<Block>{COARSE_DIRT}})) {
 			int r = static_cast<int>(rng.uniform(150));
 			if (r <= 3) {
-				bush::place(editor, x, z, bush::Kind::Low);
+				if (roots)
+					bush::place(editor, x, z, bush::Kind::Low);
 			} else if (r == 4) {
 				editor.set_block(DEAD_BUSH, x, 1, z, std::nullopt, std::nullopt);
 			} else if (r <= 15) {

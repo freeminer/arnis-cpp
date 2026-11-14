@@ -13,6 +13,7 @@ namespace arnis::ground_generation
 // to make borders deterministic across independently generated tiles.
 double value_noise_01(int x, int z, int scale);
 double value_noise_salted(int x, int z, int scale, std::uint32_t salt);
+double geo_noise_salted(int x, int z, int scale, std::uint32_t salt);
 double patch_noise(int x, int z, int scale, std::uint32_t salt);
 double ground_noise(int x, int z, int scale, std::uint32_t salt);
 

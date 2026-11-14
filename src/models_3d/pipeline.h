@@ -62,6 +62,10 @@ public:
 	{
 		return suppressed_;
 	}
+	// Fetch the unique 3DMR assets that placement would need. In offline mode
+	// cache misses are recorded by the network layer and surfaced before terrain
+	// generation starts; prewarm mode fills the same provider caches.
+	void prewarm(three_dmr::Client &) const;
 	void retain_fetchable_wikidata(const std::function<bool(const std::string &)> &);
 	std::vector<std::pair<int, int>> deferred_regions(double scale) const;
 	std::vector<std::vector<std::pair<int, int>>> placement_regions(double scale) const;

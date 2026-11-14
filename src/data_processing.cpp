@@ -10,6 +10,7 @@
 #include "element_processing/signage.h"
 #include "element_processing/advtrains.h"
 #include "overture.h"
+#include "deterministic_rng.h"
 #include "world_style.h"
 #include <sys/types.h>
 #include <atomic>
@@ -62,6 +63,10 @@
 #include "element_processing/attractions.h"
 #include "element_processing/fuel_stations.h"
 #include "element_processing/golf.h"
+#include "element_processing/camp_sites.h"
+#include "element_processing/allotments.h"
+#include "element_processing/road_detail.h"
+#include "element_processing/cemetery.h"
 #include "element_processing/stadiums.h"
 #include "element_processing/power.h"
 #include "element_processing/emergency.h"
@@ -70,6 +75,7 @@
 #include "element_processing/barriers.h"
 #include "element_processing/way_segments.h"
 #include "element_processing/highways.h"
+#include "element_processing/surfaces.h"
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"
@@ -85,8 +91,10 @@
 #include "element_processing/buildings.h"
 #include "element_processing/blueprint.h"
 #include "element_processing/waterfront.h"
+#include "element_processing/waterways.h"
 #include "element_processing/tree.h"
 #include "element_processing/subprocessor/interior/index.h"
+#include "element_processing/subprocessor/buildings_loot.h"
 #include "building_facades/registry.h"
 #include "ground_decoration.h"
 #include "mapillary/atlas.h"
@@ -106,10 +114,12 @@
 #include "ore_generation.h"
 #include "caves_deepslate.h"
 #include "caves_carver.h"
+#include "caves_theme.h"
 #include "caves_ores.h"
 #include "caves_water.h"
 #include "trees/region.h"
 #include "water_depth.h"
+#include "water_detail.h"
 #include "water_steps.h"
 #include "world_editor/floor_state.h"
 #include "progress.h"
@@ -148,6 +158,19 @@ namespace arnis
 
 namespace
 {
+class WriteBoundsRestore
+{
+	world_editor::WorldEditor &editor_;
+	std::optional<std::tuple<int, int, int, int>> previous_;
+
+public:
+	explicit WriteBoundsRestore(world_editor::WorldEditor &editor) :
+			editor_(editor), previous_(editor.get_write_bounds())
+	{
+	}
+	~WriteBoundsRestore() { editor_.set_write_bounds(std::move(previous_)); }
+};
+
 // Keep the manifest's per-area generator version aligned with the Rust package
 // version in Cargo.toml. The C++ library is built independently of Cargo.
 constexpr char ARNIS_PACKAGE_VERSION[] = "3.3.0";
@@ -186,7 +209,9 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		const std::filesystem::path &root, const std::string &realm, double latitude,
 		double longitude, double scale, int ground_level, arnis::trees::TreeSize max_size,
 		double blocks_per_meter, const std::vector<std::uint16_t> &ecoregion_ids,
-		bool exclude_palms, bool wait_for_load = false)
+		bool exclude_palms, bool wait_for_load = false,
+		const std::optional<arnis::trees::SizeWeights> &size_weights = std::nullopt,
+		std::shared_ptr<const arnis::trees::PackDir> pack_dir = {})
 {
 	// Tree pack loading eagerly opens every referenced schematic. Keep it out
 	// of the synchronous generation path so terrain and structures can proceed.
@@ -237,19 +262,26 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 	// A selector retains location-specific latitude rules and may resolve its
 	// default realm from the coordinates. Keep selectors for distinct locations
 	// separate even when their other loading parameters match.
-	const auto key = root.string() + "|" + realm + "|" +
-					 std::to_string(std::bit_cast<std::uint64_t>(latitude)) + "|" +
-					 std::to_string(std::bit_cast<std::uint64_t>(longitude)) + "|" +
-					 std::to_string(std::bit_cast<std::uint64_t>(scale)) + "|" +
-					 std::to_string(ground_level) + "|" +
-					 std::to_string(static_cast<int>(max_size)) + "|" +
-					 std::to_string(std::bit_cast<std::uint64_t>(blocks_per_meter)) +
-					 "|" + (exclude_palms ? "exclude-palms" : "include-palms") + [&] {
-						 std::string suffix;
-						 for (const auto id : effective_ecoregion_ids)
-							 suffix += "|" + std::to_string(id);
-						 return suffix;
-					 }();
+	const auto key =
+			root.string() + "|" + realm + "|" +
+			std::to_string(std::bit_cast<std::uint64_t>(latitude)) + "|" +
+			std::to_string(std::bit_cast<std::uint64_t>(longitude)) + "|" +
+			std::to_string(std::bit_cast<std::uint64_t>(scale)) + "|" +
+			std::to_string(ground_level) + "|" +
+			std::to_string(static_cast<int>(max_size)) + "|" +
+			std::to_string(std::bit_cast<std::uint64_t>(blocks_per_meter)) + "|" +
+			(exclude_palms ? "exclude-palms" : "include-palms") + "|" +
+			(size_weights ? size_weights->key() : "default-weights") + "|" +
+			(pack_dir ? pack_dir->root().lexically_normal().string() : "bundled") +
+			(pack_dir && pack_dir->mode() == arnis::trees::TreePackMode::Replace
+							? "|replace"
+							: "|add") +
+			[&] {
+				std::string suffix;
+				for (const auto id : effective_ecoregion_ids)
+					suffix += "|" + std::to_string(id);
+				return suffix;
+			}();
 	std::shared_ptr<CacheState::Job> job;
 	{
 		std::unique_lock lock(state->mutex);
@@ -268,7 +300,8 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 		state->selectors.emplace(key, job);
 	}
 	auto load = [root, realm, latitude, longitude, scale, ground_level, max_size,
-						blocks_per_meter, effective_ecoregion_ids, exclude_palms, job] {
+						blocks_per_meter, effective_ecoregion_ids, exclude_palms,
+						size_weights, pack_dir, job] {
 		{
 			std::unique_lock lock(state->mutex);
 			state->ready.wait(lock, [&] { return state->active_loaders < 2; });
@@ -280,7 +313,7 @@ std::shared_ptr<arnis::trees::RegionSelector> cached_region_selector(
 					longitude, root, scale, ground_level,
 					arnis::trees::SizeFilter::up_to(max_size), blocks_per_meter,
 					realm.empty() ? std::nullopt : std::optional<std::string>(realm),
-					effective_ecoregion_ids, exclude_palms);
+					effective_ecoregion_ids, exclude_palms, size_weights, pack_dir);
 			if (loaded) {
 				// Rust's TreePackSource::load reports the selected realm, community
 				// counts and enabled size tiers when the pack is first loaded. The
@@ -414,6 +447,13 @@ std::uint64_t available_memory_mb()
 #else
 	return 0;
 #endif
+}
+
+std::uint64_t available_memory_mb(const Args &args)
+{
+	if (args.ram_budget_mb && *args.ram_budget_mb > 0)
+		return *args.ram_budget_mb;
+	return available_memory_mb();
 }
 
 std::uint64_t per_region_estimate_mb(bool fillground)
@@ -660,7 +700,8 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 				tags.contains("highway"))
 			return std::nullopt;
 		bool fills = false;
-		if (swimming_pools::is_swimming_pool(tags) || golf::claims(tags))
+		if (swimming_pools::is_swimming_pool(tags) || golf::claims(tags) ||
+				camp_sites::claims(tags))
 			fills = true;
 		else if (tags.contains("landuse"))
 			fills = landuse_paints_ground(tags);
@@ -685,6 +726,7 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 				area_kind == element_processing::RelationArea::Natural ||
 				area_kind == element_processing::RelationArea::Leisure ||
 				area_kind == element_processing::RelationArea::Golf ||
+				area_kind == element_processing::RelationArea::Grounds ||
 				area_kind == element_processing::RelationArea::Pool ||
 				(area_kind == element_processing::RelationArea::Landuse &&
 						element_processing::landuse_paints_ground(tags));
@@ -1112,7 +1154,7 @@ void generate_siding(WorldEditor &editor, const ProcessedWay &way,
 		const bridges::BridgeSurfaceMap &bridge_surface);
 CoordinateBitmap collect_road_surface_coords(
 		const std::vector<ProcessedElement> &elements, const WorldEditor &editor,
-		const ::XZBBox &xzbbox, double scale);
+		const ::XZBBox &xzbbox, double scale, WaterDetail water_detail);
 CoordinateBitmap collect_carriageway_coords(const std::vector<ProcessedElement> &elements,
 		const ::XZBBox &xzbbox, double scale);
 CoordinateBitmap collect_building_passage_coords(
@@ -1165,11 +1207,6 @@ void generate_leisure_from_relation(WorldEditor &editor, const ProcessedRelation
 		const Args &args, FloodFillCache const &flood_fill_cache,
 		BuildingFootprintBitmap const &building_footprints,
 		const bridges::BridgeSurfaceMap &bridge_surface);
-}
-
-namespace waterways
-{
-void generate_waterways(WorldEditor &editor, const ProcessedWay &way);
 }
 
 namespace water_areas
@@ -1271,6 +1308,7 @@ bool generate_world(WorldEditor &editor,
 		const bridges::BridgeContext *shared_bridges)
 // ===
 {
+	WriteBoundsRestore write_bounds_restore(editor);
 	// Rust starts this best-effort sweep from both CLI and GUI entry points.
 	// The C++ library has a single generation boundary, so do it here using
 	// the caller-configured Arnis cache root; its daily stamp makes repeated
@@ -1288,14 +1326,54 @@ bool generate_world(WorldEditor &editor,
 			return false;
 		}
 	}
+	effective_args.apply_y_bounds();
 	effective_args.apply_mode_defaults();
 	effective_args.apply_body_defaults();
 	effective_args.apply_feature_needs();
+	surfaces::set_patches(effective_args.surface_patches);
+	if (!effective_args.buildings) {
+		// --no-buildings also makes building-only external work irrelevant; do
+		// not reject a generation because a disabled facade directory is missing.
+		effective_args.building_facades = false;
+		effective_args.mapillary_facades = false;
+		effective_args.mapillary_probe = false;
+		effective_args.mapillary_facades_dir.reset();
+		effective_args.mapillary_debug_dir.reset();
+		effective_args.mapillary_facade_debug_dir.reset();
+		effective_args.building_facades_dir.reset();
+	}
 	// Rust no longer exposes a roof-generation toggle: roof handling is always
 	// part of building generation. Keep the legacy C++ field for source
 	// compatibility, but normalize it at the pipeline boundary.
 	effective_args.roof = true;
 	const Args &args = effective_args;
+	// Rust's offline policy is scoped to one generation invocation. All provider
+	// cache lookups happen before request_permit(), so cached inputs remain usable.
+	const auto request_limit =
+			args.max_downloads
+					? std::optional<std::size_t>(static_cast<std::size_t>(
+							  std::min<std::uint64_t>(*args.max_downloads,
+									  std::numeric_limits<std::size_t>::max())))
+					: std::nullopt;
+	net::RunScope network_run(args.offline, args.prewarm, request_limit);
+	std::string loot_table_error;
+	if (!buildings_loot::configure_loot_table(args.loot_table, &loot_table_error)) {
+		const std::string message =
+				"invalid interior loot table" +
+				(args.loot_table ? " (" + args.loot_table->string() + ")" : "") + ": " +
+				loot_table_error;
+		editor.report_generation_error(message);
+		std::cerr << "Arnis generation error: " << message << '\n';
+		return false;
+	}
+	caves::set_cave_datum(args.cave_datum_y);
+	caves::set_piece_cave_datum(std::nullopt);
+	// Match Rust's process-wide world seed before any element/coordinate RNG is
+	// created. The default zero keeps existing worlds' random streams unchanged.
+	set_world_seed(args.seed.value_or(0));
+	const std::int64_t cave_seed =
+			args.cave_seed ? std::bit_cast<std::int64_t>(*args.cave_seed) : CAVE_SEED;
+	const bool more_cave_ores = args.cave_ores == CaveOres::More;
 	Bench bench(args.benchmark);
 	// Rust's Args::skip_osm() boundary replaces the parsed OSM payload with an
 	// empty OsmData value. Enforce that here too, since library callers may pass
@@ -1309,7 +1387,7 @@ bool generate_world(WorldEditor &editor,
 	(void)input_building_footprints;
 	const PreparedBuildingData *generation_prepared_buildings =
 			skip_osm ? nullptr : prepared_buildings;
-	if (skip_osm && facade_job) {
+	if ((skip_osm || !args.buildings) && facade_job) {
 		facade_job->cancel();
 		facade_job = nullptr;
 	}
@@ -1395,10 +1473,10 @@ bool generate_world(WorldEditor &editor,
 	if (java_world && !extending_world && !java_world_path.empty() &&
 			(args.world_type == WorldType::Void || args.shapes.has_value()))
 		world_utils::remove_untouched_template_region(java_world_path);
-	// Rust uses the same 3D toggle for bundled schematic props and model
-	// placements.  Direct callers of generate_world do not pass through the
-	// GenerationOptions adapter, so set the editor policy here as well.
-	editor.set_place_schematics(args.use_3d);
+	// Explicit --props can re-enable a schematic family independently of the
+	// --no-3d toggle used by external model providers.
+	editor.set_place_schematics(true);
+	editor.set_props(args.resolved_props());
 	// A One World extension keeps the first area's level.dat settings intact;
 	// standalone/new worlds receive this run's requested values.
 	if (!(args.one_world_run && args.one_world_run->extending))
@@ -1437,9 +1515,13 @@ bool generate_world(WorldEditor &editor,
 	const bool place_branding = java_world && !extending_world;
 	int first_map_id = map_item::FIRST_MAP_ID;
 	if (java_world) {
-		const auto maps_dir =
-				world_utils::WorldLayout::of(java_world_path).maps_dir(java_world_path);
-		first_map_id = map_item::next_map_id(maps_dir);
+		if (args.one_world_run && args.one_world_run->unit) {
+			first_map_id = args.one_world_run->unit->first_map_id;
+		} else {
+			const auto maps_dir = world_utils::WorldLayout::of(java_world_path)
+										  .maps_dir(java_world_path);
+			first_map_id = map_item::next_map_id(maps_dir);
+		}
 	}
 	const int first_decal_map_id =
 			first_map_id + (wants_map_item ? 2 : (place_branding ? 1 : 0));
@@ -1475,21 +1557,24 @@ bool generate_world(WorldEditor &editor,
 	// Mapillary exports and preset building textures are different schemas.
 	// Do not feed a Mapillary export directory to FacadeSet::load_directory;
 	// Rust installs that export into its own facade store first.
-	const bool facade_set_enabled = args.building_facades && java_format;
+	const bool facade_set_enabled =
+			args.buildings && args.building_facades && java_format;
 	building_facades::reset(
 			facade_set_enabled, facade_directory, args.facade_px, args.scale);
 	mapillary::facades::clear();
 	// Rust treats an explicit off toggle as authoritative even when an export
 	// directory was also supplied (the GUI can set both independently).
-	if (!skip_osm && args.mapillary_facades != std::optional<bool>(false) &&
+	if (!skip_osm && args.buildings &&
+			args.mapillary_facades != std::optional<bool>(false) &&
 			args.mapillary_facades_dir) {
 		std::string facade_error;
 		if (auto export_data = mapillary::facades::load_export(
 					*args.mapillary_facades_dir, &facade_error))
 			mapillary::facades::install_export(std::move(*export_data));
 	}
-	if (facade_job && (args.mapillary_facades == std::optional<bool>(false) ||
-							  args.mapillary_facades_dir))
+	if (facade_job &&
+			(!args.buildings || args.mapillary_facades == std::optional<bool>(false) ||
+					args.mapillary_facades_dir))
 		facade_job->cancel();
 	// Rust creates each WorldEditor with the area's XZ origin. C++ receives an
 	// editor from its host, so establish the same frame here instead of relying
@@ -1569,20 +1654,33 @@ bool generate_world(WorldEditor &editor,
 		std::cout << "  Replaced " << dropped_pier_paths
 				  << " footpath(s) with mapped pier decks\n";
 	man_made::drop_doubled_summit_crosses(ordered_source_elements, args.scale);
+	road_detail::retain(ordered_source_elements, args.road_detail);
+	camp_sites::prepare(ordered_source_elements);
+	allotments::prepare(ordered_source_elements, args.scale);
+	const auto geographic_bounds = editor.geographic_bounds();
+	const auto cemetery_region =
+			decals::detect_region((geographic_bounds[0] + geographic_bounds[2]) * 0.5,
+					(geographic_bounds[1] + geographic_bounds[3]) * 0.5);
+	cemetery::prepare(ordered_source_elements, cemetery_region);
 	if (!elements_prepared)
 		sort_elements_by_priority(ordered_source_elements);
+	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;
+	std::vector<ProcessedElement> building_filtered_elements = land_cover_elements;
+	mode_filter::retain_for_mode(
+			building_filtered_elements, GenerationMode::GeoTerrain, args.buildings);
 	// Prepare Rust-equivalent building suppression and part groups before any pass
 	// builds masks, footprints, or indexes from OSM tags.
 	std::optional<PreparedBuildingData> computed_buildings;
-	if (!generation_prepared_buildings || dropped_aircraft_buildings > 0)
-		computed_buildings = prepare_building_data(ordered_source_elements);
+	if (!args.buildings || !generation_prepared_buildings ||
+			dropped_aircraft_buildings > 0)
+		computed_buildings = prepare_building_data(building_filtered_elements);
 	const PreparedBuildingData &building_data =
-			generation_prepared_buildings && dropped_aircraft_buildings == 0
+			args.buildings && generation_prepared_buildings &&
+							dropped_aircraft_buildings == 0
 					? *generation_prepared_buildings
 					: *computed_buildings;
-	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;
-	std::vector<ProcessedElement> mode_filtered_elements = land_cover_elements;
-	mode_filter::retain_for_mode(mode_filtered_elements, args.mode);
+	std::vector<ProcessedElement> mode_filtered_elements = building_filtered_elements;
+	mode_filter::retain_for_mode(mode_filtered_elements, args.mode, args.buildings);
 	// Prepared host input already has Rust priority ordering; direct callers now
 	// retain that ordering through the full and mode-filtered views above.
 	const auto &elements = mode_filtered_elements;
@@ -1626,6 +1724,38 @@ bool generate_world(WorldEditor &editor,
 			return false;
 		}
 	}
+	auto own_rect = cartesian::XZBBox::rect_from_min_max(min_x, min_z, max_x, max_z);
+	if (args.one_world_run && args.one_world_run->unit) {
+		const auto &lease = *args.one_world_run->unit;
+		if (lease.rect[2] < lease.rect[0] || lease.rect[3] < lease.rect[1] ||
+				lease.job[2] < lease.job[0] || lease.job[3] < lease.job[1] ||
+				lease.rect[0] < lease.job[0] || lease.rect[1] < lease.job[1] ||
+				lease.rect[2] > lease.job[2] || lease.rect[3] > lease.job[3]) {
+			const std::string message = "One World piece lease has an invalid rectangle";
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+		own_rect = cartesian::XZBBox::rect_from_min_max(
+				lease.rect[0], lease.rect[1], lease.rect[2], lease.rect[3]);
+		editor.set_write_bounds(
+				std::tuple{lease.rect[0], lease.rect[1], lease.rect[2], lease.rect[3]});
+	}
+	if (!args.cave_datum_y && args.caves && args.one_world_run &&
+			args.one_world_run->unit && !args.one_world_run->unit->job_dir.empty()) {
+		caves::set_piece_cave_datum(caves::share_piece_datum(
+				args.one_world_run->unit->job_dir, world_editor::terrain_floor_y()));
+	}
+	const auto cave_world_bounds = [&]() {
+		if (caves::cave_datum_pinned())
+			return caves::CaveRect::everywhere();
+		if (args.one_world_run && args.one_world_run->unit) {
+			const auto &job = args.one_world_run->unit->job;
+			return caves::CaveRect{job[0], job[2], job[1], job[3]};
+		}
+		return caves::CaveRect{
+				xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
+	};
 	editor.set_generation_bounds(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	editor.set_generation_outline(xzbbox.outline());
@@ -1672,6 +1802,12 @@ bool generate_world(WorldEditor &editor,
 	editor.set_schematic_tree_pack_available(false);
 	std::shared_ptr<trees::RegionSelector> shared_selector;
 	const auto tree_pack_root = assets::path("tree-packs");
+	std::shared_ptr<const trees::PackDir> custom_tree_pack;
+	if (args.tree_pack_dir) {
+		auto scanned = trees::PackDir::scan(*args.tree_pack_dir, args.tree_pack_mode);
+		scanned.report();
+		custom_tree_pack = std::make_shared<const trees::PackDir>(std::move(scanned));
+	}
 	std::optional<std::string> dominant_tree_realm;
 	std::vector<std::uint16_t> area_ecoregion_ids;
 	bool ecoregion_map_has_gaps = true;
@@ -1730,6 +1866,12 @@ bool generate_world(WorldEditor &editor,
 			}
 		}
 	}
+	const bool forced_tree_realm =
+			args.tree_realm && !args.tree_realm->empty() && *args.tree_realm != "auto";
+	if (forced_tree_realm) {
+		dominant_tree_realm = *args.tree_realm;
+		area_ecoregion_ids.clear();
+	}
 	const double abs_centre_lat = std::abs(centre_lat);
 	const bool unmapped_palms = ecoregion_map_has_gaps && abs_centre_lat <= 35.0;
 	const bool any_area_ecoregion_allows_palms = std::any_of(
@@ -1737,13 +1879,15 @@ bool generate_world(WorldEditor &editor,
 				const auto eco = ecoregion::lookup(id);
 				return eco && ecoregion::palms_belong(*eco, abs_centre_lat);
 			});
-	const bool exclude_palms = !unmapped_palms && !any_area_ecoregion_allows_palms;
+	const bool exclude_palms =
+			!forced_tree_realm && !unmapped_palms && !any_area_ecoregion_allows_palms;
 	if (!args.legacy_trees) {
 		const auto selector = cached_region_selector(tree_pack_root,
 				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
 				area_floor, args.max_tree_size,
 				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0,
-				area_ecoregion_ids, exclude_palms);
+				area_ecoregion_ids, exclude_palms, false, args.tree_size_weights,
+				custom_tree_pack);
 		if (selector)
 			shared_selector = selector;
 		if (shared_selector) {
@@ -1820,12 +1964,14 @@ bool generate_world(WorldEditor &editor,
 	}
 	const auto [landmark_min_x, landmark_min_z] = editor.get_min_coords();
 	const auto [landmark_max_x, landmark_max_z] = editor.get_max_coords();
-	auto landmark_plan = args.use_3d && !args.skip_objects()
-								 ? landmarks::prescan(elements, landmark_anchors,
-										   {landmark_min_x, landmark_min_z,
-												   landmark_max_x, landmark_max_z},
-										   args.scale, args.rotation)
-								 : landmarks::PrescanResult{};
+	auto landmark_plan =
+			args.buildings && args.resolved_props().has(structures::Prop::Landmark) &&
+							!args.skip_objects()
+					? landmarks::prescan(elements, landmark_anchors,
+							  {landmark_min_x, landmark_min_z, landmark_max_x,
+									  landmark_max_z},
+							  args.scale, args.rotation)
+					: landmarks::PrescanResult{};
 	auto provider_suppression = landmark_plan.suppressed;
 	// Match Rust's prescan ordering: 3DMR claims first, then Wikidata claims,
 	// before stadiums decide which remaining OSM geometry they can replace.
@@ -1835,6 +1981,20 @@ bool generate_world(WorldEditor &editor,
 							  models_3d::Models3dPipeline::prescan(elements, args.scale,
 									  args.rotation, provider_suppression))
 					: std::nullopt;
+	// Mirror Rust's offline preflight: a missing external 3D model must fail
+	// before the terrain and structures have been partially written.
+	if (args.offline && model_pipeline) {
+		model_pipeline->prewarm(three_dmr_provider);
+		const auto missing = net::offline_misses();
+		if (!missing.empty()) {
+			std::string message = "offline generation is missing cached network inputs:";
+			for (const auto &[name, count] : missing)
+				message += " " + name + " (" + std::to_string(count) + ")";
+			editor.report_generation_error(message);
+			std::cerr << "Arnis generation error: " << message << '\n';
+			return false;
+		}
+	}
 	std::set<element_processing::stadiums::Key> stadium_already;
 	for (const auto &key : landmark_plan.suppressed)
 		stadium_already.emplace(key.first, key.second);
@@ -1844,8 +2004,9 @@ bool generate_world(WorldEditor &editor,
 	const auto stadium_plan =
 			element_processing::stadiums::prescan(elements, args, stadium_already);
 	const auto plane_candidates =
-			args.use_3d ? structures::plane::prescan_placements(elements, args.scale)
-						: std::vector<structures::plane::Placement>{};
+			args.resolved_props().has(structures::Prop::Plane)
+					? structures::plane::prescan_placements(elements, args.scale)
+					: std::vector<structures::plane::Placement>{};
 	const auto projection_spec = projection::ProjectionSpec::from_args(args);
 	const cartesian::XZBBoxRect padded_clip =
 			projection_spec.clip_bbox({{min_x, min_z}, {max_x, max_z}});
@@ -1858,7 +2019,8 @@ bool generate_world(WorldEditor &editor,
 	// Rust waits for precomputation after terrain/OSM preparation, immediately
 	// before its export is projected and buildings are placed. Explicit review
 	// exports were installed above and remain authoritative.
-	if (facade_job && args.mapillary_facades != std::optional<bool>(false) &&
+	if (facade_job && args.buildings &&
+			args.mapillary_facades != std::optional<bool>(false) &&
 			!args.mapillary_facades_dir) {
 		if (const auto export_dir = facade_job->join()) {
 			std::string facade_error;
@@ -1868,15 +2030,17 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 	mapillary::facades::set_displays_enabled(
-			java_format && args.mapillary_facades != std::optional<bool>(false) &&
+			args.buildings && java_format &&
+			args.mapillary_facades != std::optional<bool>(false) &&
 			args.mapillary_facade_mode == FacadeMode::Photos);
 	const auto facade_attribution_dir =
 			args.mapillary_facades != std::optional<bool>(false) &&
 							args.mapillary_facades_dir
 					? std::optional<std::filesystem::path>(*args.mapillary_facades_dir)
 					: std::nullopt;
-	mapillary::facades::project_export(
-			elements, xzbbox, args.scale, facade_attribution_dir);
+	if (args.buildings)
+		mapillary::facades::project_export(
+				elements, xzbbox, args.scale, facade_attribution_dir);
 	building_facades::set_world_extent(
 			xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
 	const auto ground_geographic = editor.geographic_bounds();
@@ -1984,7 +2148,9 @@ bool generate_world(WorldEditor &editor,
 					});
 			if (dropped_water_footprints > 0) {
 				mode_filtered_elements = ordered_source_elements;
-				mode_filter::retain_for_mode(mode_filtered_elements, args.mode);
+				mode_filter::retain_for_mode(
+						mode_filtered_elements, args.mode, args.buildings);
+				road_detail::retain(mode_filtered_elements, args.road_detail);
 			}
 		}
 		editor.ground->apply_osm_land_override(land_cover_elements, xzbbox, args.scale);
@@ -2015,7 +2181,7 @@ bool generate_world(WorldEditor &editor,
 		editor.ground->warm_water_blend();
 	auto road_mask_owner =
 			std::make_shared<const RoadMaskBitmap>(highways::collect_road_surface_coords(
-					elements, editor, clip_bbox, args.scale));
+					elements, editor, clip_bbox, args.scale, args.water_detail));
 	const auto &road_mask = *road_mask_owner;
 	std::vector<datapack::discoveries::Place> extra_places;
 	std::optional<std::string> settlement;
@@ -2108,8 +2274,21 @@ bool generate_world(WorldEditor &editor,
 				},
 				true);
 	}
-	auto big_water_field = std::make_shared<const water_depth::BigWaterField>(
-			water_depth::compute_big_water_field(editor, xzbbox));
+	auto water_field = water_depth::compute_big_water_field(
+			editor, xzbbox, args.water_detail, args.scale);
+	if (args.river_bed != RiverBed::Off && editor.ground) {
+		const int width_cap =
+				water_detail::channel_width_cap(args.water_detail, args.scale);
+		std::optional<int> river_width_cap;
+		if (width_cap > 0)
+			river_width_cap = width_cap;
+		water_field.set_river_bed(river_bed::compute_river_bed_field(args.river_bed,
+				elements, *editor.ground, water_field, xzbbox.min_x(), xzbbox.min_z(),
+				clip_bbox.min_x(), clip_bbox.max_x(), clip_bbox.min_z(),
+				clip_bbox.max_z(), args.scale, river_width_cap));
+	}
+	auto big_water_field =
+			std::make_shared<const water_depth::BigWaterField>(std::move(water_field));
 	editor.set_water_field(big_water_field);
 	// Pre-scan still water surfaces for consistent water levels across tiles
 	StillWaterSurfaces still_surfaces;
@@ -2119,8 +2298,7 @@ bool generate_world(WorldEditor &editor,
 	progress::emit_gui_progress_update(19.5, "Processing data...");
 	auto highway_connectivity = highways::build_highway_connectivity_map(elements);
 	if (args.one_world_run)
-		highway_connectivity.meet_at_edge_of(cartesian::XZBBox::rect_from_min_max(
-				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()));
+		highway_connectivity.meet_at_edge_of(own_rect);
 	// fm: Shared chunks retain the full-source bridge analysis. Other callers keep
 	// building their own map from the elements supplied to this invocation.
 	std::optional<bridges::BridgeContext> local_bridge_context;
@@ -2146,7 +2324,8 @@ bool generate_world(WorldEditor &editor,
 				dominant_tree_realm.value_or(""), centre_lat, centre_lon, args.scale,
 				area_floor, args.max_tree_size,
 				editor.ground ? editor.ground->elevation_blocks_per_meter : 0.0,
-				area_ecoregion_ids, exclude_palms, true);
+				area_ecoregion_ids, exclude_palms, true, args.tree_size_weights,
+				custom_tree_pack);
 		if (shared_selector)
 			editor.set_tree_slot_spacing(shared_selector->slot_spacing(true));
 		if (shared_selector)
@@ -2346,8 +2525,7 @@ bool generate_world(WorldEditor &editor,
 	// layout, so halls and tunnel pins see the same clipped endpoints as track
 	// rendering in every adjacent area.
 	if (args.one_world_run)
-		rail_joins.meet_at_edge_of(cartesian::XZBBox::rect_from_min_max(
-				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z()));
+		rail_joins.meet_at_edge_of(own_rect);
 	// Rust registers fitted station surfaces before dispatch so rail profiles
 	// and adjoining track beds can use the shared station elevation immediately.
 	auto station_track_beds =
@@ -2435,7 +2613,7 @@ bool generate_world(WorldEditor &editor,
 		// actually allocated, not the more optimistic pre-assignment snapshot.
 		tile_fill_reader_state = compute_tile_fill_readers(element_assignments, elements,
 				building_part_groups, building_group_members, flood_fill_cache);
-		tile_available_memory_mb = available_memory_mb();
+		tile_available_memory_mb = available_memory_mb(args);
 		eviction_active =
 				java_format && should_stream_to_disk(element_tiles.size(),
 									   tile_available_memory_mb, args.fillground);
@@ -2684,10 +2862,12 @@ bool generate_world(WorldEditor &editor,
 	const bool parallel_tile_workers =
 			regional_ground_passes && bool(editor.begin_tile_sink) &&
 			bool(editor.merge_tile_sink) && editor.tile_worker_callbacks_safe();
+	const auto detected_threads =
+			std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
 	const auto pool_threads = static_cast<std::size_t>(
-			std::max(1u, std::min(16u, std::thread::hardware_concurrency())));
+			args.threads ? std::max(1u, *args.threads) : detected_threads);
 	if (!tiled_element_dispatch)
-		tile_available_memory_mb = available_memory_mb();
+		tile_available_memory_mb = available_memory_mb(args);
 	const auto tile_batch_size = tile_processing_threads(
 			pool_threads, tile_available_memory_mb, args.fillground);
 	std::size_t deferred_tiles_in_batch = 0;
@@ -2821,29 +3001,28 @@ bool generate_world(WorldEditor &editor,
 				&bridge_surface);
 		railways::clear_rail_gauge(editor, building_footprints);
 		if (args.caves) {
-			const caves::CaveRect cave_world{
-					xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
+			const caves::CaveRect cave_world = cave_world_bounds();
 			const caves::CaveRect cave_region{min_x, max_x, min_z, max_z};
 			caves::CaveEllipsoids tile_ellipsoids;
 			std::unordered_set<std::int64_t> cave_air;
-			caves::carve_region(editor, cave_region, cave_world, CAVE_SEED,
+			caves::carve_region(editor, cave_region, cave_world, cave_seed,
 					world_editor::terrain_floor_y(), &tile_ellipsoids, &cave_air);
 			const caves::CaveShapeQuery cave_shape(editor, cave_world, cave_region,
-					CAVE_SEED, world_editor::terrain_floor_y(), tile_ellipsoids);
+					cave_seed, world_editor::terrain_floor_y(), tile_ellipsoids);
 			std::unordered_set<std::int64_t> cave_basin_fluid;
 			std::unordered_set<std::int64_t> cave_water_cells;
 			caves::WaterPlan cave_water_plan;
-			caves::generate_water_features(editor, cave_world, cave_region, CAVE_SEED,
+			caves::generate_water_features(editor, cave_world, cave_region, cave_seed,
 					world_editor::terrain_floor_y(), args, cave_shape, &cave_basin_fluid,
 					&cave_water_cells, &cave_air, &cave_water_plan);
 			caves::generate_deep_lava_sea(editor, cave_region,
 					world_editor::terrain_floor_y(), cave_air, cave_water_cells,
 					&cave_basin_fluid);
-			caves::stamp_schematics_region(editor, cave_region, cave_air, CAVE_SEED,
+			caves::stamp_schematics_region(editor, cave_region, cave_air, cave_seed,
 					world_editor::terrain_floor_y(), args, &cave_basin_fluid);
-			caves::place_ores_region(
-					editor, cave_region, CAVE_SEED, world_editor::terrain_floor_y());
-			caves::decorate_region(editor, cave_region, cave_world, CAVE_SEED,
+			caves::place_ores_region(editor, cave_region, cave_seed,
+					world_editor::terrain_floor_y(), more_cave_ores);
+			caves::decorate_region(editor, cave_region, cave_world, cave_seed,
 					world_editor::terrain_floor_y(), args, cave_shape, cave_water_plan,
 					&cave_basin_fluid, &cave_water_cells, &cave_air, [&](int x, int z) {
 						return tunnel_footprint.contains(x, z) ||
@@ -3044,6 +3223,12 @@ bool generate_world(WorldEditor &editor,
 						building_footprints, road_mask);
 			} else if (golf::claims(way.tags)) {
 				golf::generate_golf(editor, way, args, flood_fill_cache);
+			} else if (camp_sites::claims(way.tags)) {
+				camp_sites::generate_camp_site(editor, way, flood_fill_cache,
+						building_footprints, road_mask, args.timeout);
+			} else if (cemetery::claims(way.tags)) {
+				cemetery::generate_cemetery(editor, way, args, flood_fill_cache,
+						building_footprints, road_mask, bridge_surface);
 			} else if (way.tags.contains("landuse")) {
 				landuse::generate_landuse(editor, way, args, flood_fill_cache,
 						building_footprints, road_mask, bridge_surface);
@@ -3078,7 +3263,15 @@ bool generate_world(WorldEditor &editor,
 							tunnel_footprint.is_empty() ? nullptr : &tunnel_footprint,
 							bridge_surface, surface_level);
 				} else {
-					waterways::generate_waterways(editor, way);
+					const auto *piped_under_roads =
+							(args.river_bed != RiverBed::Off ||
+									args.water_detail != WaterDetail::Default)
+									? &bridge_surface
+									: nullptr;
+					waterways::generate_waterways(editor, way, args.water_detail,
+							args.scale,
+							waterways::ChannelBed{*big_water_field, road_mask,
+									tunnel_footprint, piped_under_roads});
 				}
 			} else if (way.tags.contains("railway")) {
 				railways::generate_railways(editor, way, state.rail_tunnel_points,
@@ -3150,6 +3343,10 @@ bool generate_world(WorldEditor &editor,
 			} else if (node.tags.get("aeroway") ==
 					   std::optional<std::string>(std::string("helipad"))) {
 				highways::generate_helipad_node(editor, node, args, building_footprints);
+			} else if (cemetery::is_mapped_grave(node.tags)) {
+				cemetery::generate_mapped_grave(editor, node, building_footprints);
+			} else if (camp_sites::is_pitch(node.tags)) {
+				camp_sites::generate_pitch_node(editor, node);
 			} else if (node.tags.contains("tourism")) {
 				tourisms::generate_tourisms(editor, node, road_mask);
 			} else if (node.tags.contains("man_made")) {
@@ -3203,6 +3400,28 @@ bool generate_world(WorldEditor &editor,
 					golf::generate_golf_from_relation(
 							editor, rel, args, flood_fill_cache);
 					break;
+				case element_processing::RelationArea::Grounds: {
+					InnerRings inners(rel);
+					for (const auto &member : rel.members) {
+						if (member.role != ProcessedMemberRole::Outer || !member.way)
+							continue;
+						const auto holes = flood_fill_cache.holes_in(
+								*member.way, inners, args.timeout);
+						ProcessedWay way_with_relation_tags;
+						way_with_relation_tags.id = member.way->id;
+						way_with_relation_tags.nodes = member.way->nodes;
+						way_with_relation_tags.tags = rel.tags;
+						if (cemetery::claims(rel.tags))
+							cemetery::cemetery_area(editor, way_with_relation_tags, args,
+									flood_fill_cache, building_footprints, road_mask,
+									bridge_surface, holes ? &*holes : nullptr);
+						else if (camp_sites::claims(rel.tags))
+							camp_sites::camp_area(editor, way_with_relation_tags,
+									flood_fill_cache, building_footprints, road_mask,
+									args.timeout, holes ? &*holes : nullptr);
+					}
+					break;
+				}
 				case element_processing::RelationArea::Leisure:
 					leisure::generate_leisure_from_relation(editor, rel, args,
 							flood_fill_cache, building_footprints, bridge_surface);
@@ -3538,30 +3757,28 @@ bool generate_world(WorldEditor &editor,
 		if (args.caves) {
 			progress::emit_gui_progress_update(89.0, "Carving caves...");
 			std::unordered_set<std::int64_t> cave_air;
-			caves::carve_region(editor,
-					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					CAVE_SEED, world_editor::terrain_floor_y(), &cave_ellipsoids,
-					&cave_air);
+			const caves::CaveRect cave_world = cave_world_bounds();
+			const caves::CaveRect cave_region{
+					xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
+			caves::carve_region(editor, cave_region, cave_world, cave_seed,
+					world_editor::terrain_floor_y(), &cave_ellipsoids, &cave_air);
 			std::unordered_set<std::int64_t> cave_basin_fluid;
 			std::unordered_set<std::int64_t> cave_water_cells;
 			caves::WaterPlan cave_water_plan;
-			const caves::CaveRect cave_world{
-					xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()};
-			const caves::CaveShapeQuery cave_shape(editor, cave_world, cave_world,
-					CAVE_SEED, world_editor::terrain_floor_y(), cave_ellipsoids);
-			caves::generate_water_features(editor, cave_world, cave_world, CAVE_SEED,
+			const caves::CaveShapeQuery cave_shape(editor, cave_world, cave_region,
+					cave_seed, world_editor::terrain_floor_y(), cave_ellipsoids);
+			caves::generate_water_features(editor, cave_world, cave_region, cave_seed,
 					world_editor::terrain_floor_y(), args, cave_shape, &cave_basin_fluid,
 					&cave_water_cells, &cave_air, &cave_water_plan);
-			caves::generate_deep_lava_sea(editor, cave_world,
+			caves::generate_deep_lava_sea(editor, cave_region,
 					world_editor::terrain_floor_y(), cave_air, cave_water_cells,
 					&cave_basin_fluid);
-			caves::stamp_schematics_region(editor, cave_world, cave_air, CAVE_SEED,
+			caves::stamp_schematics_region(editor, cave_region, cave_air, cave_seed,
 					world_editor::terrain_floor_y(), args, &cave_basin_fluid);
 			caves::place_ores_region(editor,
 					{xzbbox.min_x(), xzbbox.max_x(), xzbbox.min_z(), xzbbox.max_z()},
-					CAVE_SEED, world_editor::terrain_floor_y());
-			caves::decorate_region(editor, cave_world, cave_world, CAVE_SEED,
+					cave_seed, world_editor::terrain_floor_y(), more_cave_ores);
+			caves::decorate_region(editor, cave_region, cave_world, cave_seed,
 					world_editor::terrain_floor_y(), args, cave_shape, cave_water_plan,
 					&cave_basin_fluid, &cave_water_cells, &cave_air, [&](int x, int z) {
 						return tunnel_footprint.contains(x, z) ||
@@ -4038,6 +4255,16 @@ bool generate_world(WorldEditor &editor,
 	if (editor.signage_context) {
 		std::cout << editor.signage_context->summary(args.debug) << '\n';
 	}
+	const auto missing_network_inputs =
+			args.offline ? net::offline_misses() : decltype(net::offline_misses()){};
+	if (!missing_network_inputs.empty()) {
+		std::string message = "offline generation is missing cached network inputs:";
+		for (const auto &[name, count] : missing_network_inputs)
+			message += " " + name + " (" + std::to_string(count) + ")";
+		editor.report_generation_error(message);
+		std::cerr << "Arnis generation error: " << message << '\n';
+		return false;
+	}
 	progress::emit_gui_progress_update(99.5, "Finalizing world...");
 
 	return true;
@@ -4063,6 +4290,8 @@ bool generate_world_with_options(WorldEditor &editor,
 	args.map_item = options.map_item;
 	args.map_preview = options.map_preview;
 	args.use_3d = options.use_3d;
+	args.props = options.props;
+	args.props_min_scale = options.props_min_scale;
 	auto facade_job = options.facades;
 	const auto geo = editor.geographic_bounds();
 	if (!facade_job)

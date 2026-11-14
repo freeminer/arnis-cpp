@@ -77,7 +77,7 @@ void walk_river(const CaveShapeQuery &shape, const CaveRect &world, int floor_y,
 	const double sway_phase = double(r.next_float()) * 2.0 * M_PI;
 	const double sway_amp = 0.18 + double(r.next_float()) * 0.14;
 	std::map<std::pair<int, int>, int> by_column;
-	const double level_out = double(floor_y + (-50 - VANILLA_FLOOR));
+	const double level_out = double(cave_vy(-50, floor_y));
 
 	for (int step = 0; step < steps; ++step) {
 		yaw += (double(r.next_float()) - 0.5) * 0.6 +
@@ -152,7 +152,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 		const std::unordered_set<std::int64_t> &water_cells,
 		std::unordered_set<std::int64_t> *basin_fluid)
 {
-	const int lava_level = floor_y + 10; // Rust vy(-54), with vanilla floor at -64.
+	const int lava_level = cave_vy(-54, floor_y);
 	constexpr std::array<std::array<int, 3>, 6> neighbours = {
 			{{1, 0, 0}, {-1, 0, 0}, {0, 1, 0}, {0, -1, 0}, {0, 0, 1}, {0, 0, -1}}};
 	auto is_open = [&](int x, int y, int z) {
@@ -184,7 +184,7 @@ void generate_deep_lava_sea_impl(world_editor::WorldEditor &editor,
 				supported.contains(pack_cave_pos(x, y - 1, z)))
 			supported.insert(p);
 	}
-	const int stone_transition = floor_y + 64;
+	const int stone_transition = cave_vy(0, floor_y);
 	const std::vector<Block> rim_rock{
 			STONE, DEEPSLATE, TUFF, COBBLED_DEEPSLATE, GRANITE, DIORITE, ANDESITE};
 	// Rust applies these edits from its deterministic FNV set. Keep C++ output
@@ -246,8 +246,15 @@ void generate_water_features(world_editor::WorldEditor &editor,
 		std::unordered_set<std::int64_t> *water_cells_out,
 		std::unordered_set<std::int64_t> *cave_air_out, WaterPlan *plan_out)
 {
-	const auto amounts = args.cave_biomes ? BiomeAmounts::parse(*args.cave_biomes)
-										  : BiomeAmounts::defaults();
+	const auto style = args.cave_style.value_or(CaveStyle::AllMix);
+	const double style_amount = style == CaveStyle::Vanilla		  ? 0.0
+								: style == CaveStyle::MoreVanilla ? 0.18
+								: style == CaveStyle::MoreMix	  ? 1.8
+																  : 1.0;
+	const auto style_amounts = BiomeAmounts::uniform(style_amount);
+	const auto amounts = args.cave_biomes
+								 ? BiomeAmounts::parse(*args.cave_biomes, style_amounts)
+								 : style_amounts;
 	const ThemeSelector decor(seed, amounts, floor_y);
 	std::unordered_set<std::int64_t> water_cells;
 	std::unordered_set<std::int64_t> carved_cells;
@@ -265,8 +272,8 @@ void generate_water_features(world_editor::WorldEditor &editor,
 				const int gz = cz * 16 + pool_rng.next_int(16);
 				if (world_bounds.contains(gx, gz)) {
 					const int top = cave_shape.surface_y(gx, gz) - CAVE_TOP_GATE;
-					const int lo = floor_y + 16;
-					const int hi = std::min(top - 10, floor_y + 94);
+					const int lo = cave_vy(-48, floor_y);
+					const int hi = std::min(top - 10, cave_vy(30, floor_y));
 					if (hi > lo) {
 						const int gy = lo + pool_rng.next_int(hi - lo + 1);
 						const bool coral = decor.coral_zone(gx, gz);
@@ -371,8 +378,9 @@ void generate_water_features(world_editor::WorldEditor &editor,
 			const int oz = cz * 16 + river_rng.next_int(16);
 			if (!world_bounds.contains(ox, oz))
 				continue;
-			const int lo = floor_y + 44;
-			const int hi = std::min(cave_shape.surface_y(ox, oz) - 14, floor_y + 102);
+			const int lo = cave_vy(-20, floor_y);
+			const int hi =
+					std::min(cave_shape.surface_y(ox, oz) - 14, cave_vy(38, floor_y));
 			if (hi <= lo)
 				continue;
 			const int oy = lo + river_rng.next_int(hi - lo + 1);
@@ -460,8 +468,7 @@ void seal_floating_fluid_region(
 					plugs.push_back({x, y, z});
 		}
 
-	// Rust's vy(1) is terrain_floor_y + 65 (vanilla's floor is -64).
-	const int deepslate_transition = floor_y + 65;
+	const int deepslate_transition = cave_vy(1, floor_y);
 	for (const auto &fluid : plugs) {
 		const int x = fluid[0], y = fluid[1], z = fluid[2];
 		const Block rock = y < deepslate_transition ? DEEPSLATE : STONE;

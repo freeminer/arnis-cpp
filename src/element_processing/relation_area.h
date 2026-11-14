@@ -22,6 +22,7 @@ enum class RelationArea
 	Water,
 	Golf,
 	Leisure,
+	Grounds,
 	Natural,
 	Landuse,
 	ManMade,
@@ -54,6 +55,11 @@ inline std::optional<RelationArea> relation_area(const tags_t &tags)
 			!tags.contains("highway") && tags.get("natural") != "water" &&
 			tags.get("natural") != "wetland")
 		return RelationArea::Golf;
+	const auto tourism = tags.get("tourism");
+	if (tourism == "camp_site" || tourism == "caravan_site" ||
+			tags.get("landuse") == "cemetery" || tags.get("amenity") == "grave_yard" ||
+			tags.get("cemetery") == "sector")
+		return RelationArea::Grounds;
 	if (tags.contains("natural"))
 		return RelationArea::Natural;
 	if (tags.contains("landuse"))
@@ -102,6 +108,7 @@ inline bool relation_area_fills_members(RelationArea area, const tags_t &tags)
 	case RelationArea::Pool:
 	case RelationArea::Golf:
 	case RelationArea::Leisure:
+	case RelationArea::Grounds:
 		return true;
 	case RelationArea::Landuse:
 		return landuse_paints_ground(tags);

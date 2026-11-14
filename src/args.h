@@ -17,9 +17,14 @@
 #include "celestial.h"
 #include "projection/web_mercator.h"
 #include "one_world.h"
+#include "world_utils.h"
 #include "element_processing/field_texture.h"
 #include "trees/tree_library.h"
+#include "trees/size_weights.h"
+#include "trees/pack_dir.h"
+#include "structures/prop_set.h"
 #include "caves_biomes.h"
+#include "climate.h"
 #include "fm_ll_shapes.h"
 
 namespace arnis
@@ -103,6 +108,34 @@ enum class FacadeDetail
 {
 	Standard,
 	High
+};
+enum class RoadDetail
+{
+	Max,
+	Clean,
+	Compact
+};
+enum class WaterDetail
+{
+	Default,
+	Scaled
+};
+enum class RiverBed
+{
+	Off,
+	V1
+};
+enum class CaveStyle
+{
+	Vanilla,
+	MoreVanilla,
+	AllMix,
+	MoreMix
+};
+enum class CaveOres
+{
+	Normal,
+	More
 };
 enum class OvertureSource
 {
@@ -240,6 +273,17 @@ inline SignageLevel signage_level_from_string(const std::string &value)
 
 struct Args
 {
+	// Matches Rust's optional --seed, with zero preserving the historical
+	// deterministic streams. Freeminer exposes this as arnis.seed.
+	std::optional<std::uint64_t> seed;
+	struct ScatterOptions
+	{
+		bool rocks{true};
+		double rock_density{0.02};
+		bool bushes{true};
+		double bush_density{0.05};
+	};
+	ScatterOptions scatter;
 	// Optional Rust-compatible geographic polygon selection. Library callers can
 	// set `shapes` directly or provide --polygon/GeoJSON values and resolve them.
 	std::vector<std::string> polygon;
@@ -250,7 +294,7 @@ struct Args
 	// Bounding box of the area (min_lat,min_lng,max_lat,max_lng) (required)
 	//LLBBox bbox{};
 
-	// JSON file containing OSM data (optional)
+	// Local OSM input: .osm/.xml, Overpass JSON, or .osm.pbf (optional)
 	std::optional<std::string> file{std::nullopt};
 
 	// JSON file to save OSM data to (optional)
@@ -271,9 +315,29 @@ struct Args
 
 	// Downloader method (requests/curl/wget) (optional)
 	std::string downloader{std::string("requests")};
+	// Global limit for concurrent provider requests; absent keeps the Rust default.
+	std::optional<std::uint64_t> max_downloads;
+	// Resource hints for the native tile pipeline. A zero RAM budget means
+	// detect available system memory, matching Rust's --ram-budget-mb behavior.
+	std::optional<std::uint32_t> threads;
+	std::optional<std::uint64_t> ram_budget_mb;
+	// Refuse provider network requests after cache misses and report them rather
+	// than silently generating with incomplete remote inputs.
+	bool offline{false};
+	// Fetch/cache required inputs without writing a generated world. Front ends
+	// may direct the run to a scratch backend; the generator records uncached
+	// sources so they can report an incomplete prewarm.
+	bool prewarm{false};
+	// Ordered replacement Overpass endpoints. Empty preserves the bundled
+	// Arnis endpoint; requests try the configured endpoints in order.
+	std::vector<std::string> overpass_url;
 	// OSM tile archive source. Rust tries this before Overpass unless disabled.
 	std::string osm_tiles_url{"https://tiles.arnisproject.com/v1"};
 	bool no_tile_archive{false};
+	// Optional local/geofabrik PBF source, kept separate from --file to mirror
+	// Rust's explicit source selection. Freeminer callers can set these directly.
+	std::optional<std::string> osm_pbf;
+	std::optional<std::string> osm_pbf_url;
 
 	// World scale to use, in blocks per meter (1.0 = real size)
 	double scale{1.0};
@@ -294,7 +358,15 @@ struct Args
 	// Existing Java dimension bounds supplied by library/UI callers. When absent,
 	// generation discovers them from the destination world's tall datapack.
 	std::optional<std::pair<std::int32_t, std::int32_t>> tall_range;
+	// Explicit Java dimension endpoints; omitted endpoints retain the bundled
+	// tall datapack's respective limit.
+	std::optional<std::int32_t> min_y;
+	std::optional<std::int32_t> max_y;
 	field_texture::FieldPreset fields{field_texture::FieldPreset::Patchwork};
+	climate::ClimateMode climate_mode{climate::ClimateMode::Origin};
+	RoadDetail road_detail{RoadDetail::Max};
+	WaterDetail water_detail{WaterDetail::Default};
+	RiverBed river_bed{RiverBed::Off};
 
 	// Ground level to use in the Minecraft world
 	int ground_level{-62};
@@ -304,13 +376,29 @@ struct Args
 	GenerationMode mode{GenerationMode::GeoTerrain};
 	bool terrain{true};
 	bool legacy_terrain{false};
+	// Match Rust's optional coherent multi-block paving/asphalt palettes.
+	bool surface_patches{false};
 	// Optional final-world transformations introduced by Rust: environmental
 	// winter dressing and post-apocalyptic ruins/overgrowth.
 	bool winter{false};
 	bool post_apocalyptic{false};
 	// Largest schematic tree tier permitted by the Rust tree-pack selector.
 	trees::TreeSize max_tree_size{trees::TreeSize::Giant};
+	// Optional Rust-compatible weighting of the five schematic size tiers.
+	std::optional<trees::SizeWeights> tree_size_weights;
+	// Optional user schematic packs, merged into bundled regional communities.
+	std::optional<std::filesystem::path> tree_pack_dir;
+	trees::TreePackMode tree_pack_mode{trees::TreePackMode::Add};
+	// "auto" selects by ecoregion and location; any other value forces a realm.
+	std::optional<std::string> tree_realm;
 	bool terrain_enabled() const { return mode != GenerationMode::GeoOnly; }
+	structures::PropSet resolved_props() const
+	{
+		if (props_min_scale && scale < *props_min_scale)
+			return structures::PropSet::none();
+		return props.value_or(
+				use_3d ? structures::PropSet::all() : structures::PropSet::none());
+	}
 	bool skip_objects() const
 	{
 		return mode == GenerationMode::TerrainOnly || scale < OBJECT_SKIP_SCALE;
@@ -390,6 +478,15 @@ struct Args
 		if (disasters || zombie_outbreak)
 			mob_spawning = MobSpawning::Off;
 	}
+	void apply_y_bounds()
+	{
+		if (!min_y && !max_y)
+			return;
+		disable_height_limit = true;
+		tall_range = std::pair<std::int32_t, std::int32_t>{
+				min_y.value_or(world_utils::TALL_DATAPACK_FULL_RANGE.first),
+				max_y.value_or(world_utils::TALL_DATAPACK_FULL_RANGE.second)};
+	}
 	bool mapillary_facades_wanted() const
 	{
 		return mapillary_facades_on() || mapillary_facades_dir.has_value();
@@ -421,8 +518,13 @@ struct Args
 
 	// Rust's CLI leaves interior generation off unless explicitly requested.
 	bool interior{false};
+	// Optional JSON-backed interior chest table, equivalent to Rust --loot-table.
+	std::optional<std::filesystem::path> loot_table;
 	// Retained for parity with Rust argument validation; exporters may consume
 	// these options when they support facade panels.
+	// Rust's --no-buildings counterpart. Terrain and transport remain enabled,
+	// while buildings, building parts, doors and entrances are omitted.
+	bool buildings{true};
 	bool building_facades{false};
 	std::optional<bool> mapillary_facades{std::nullopt};
 	bool mapillary_probe{false};
@@ -444,6 +546,8 @@ struct Args
 	bool canopy_height{true};
 	bool overture{true};
 	bool use_3d{true};
+	std::optional<structures::PropSet> props;
+	std::optional<double> props_min_scale;
 	bool disable_height_limit{false};
 	bool aws_only_elevation{false};
 	bool bake_lighting{false};
@@ -485,6 +589,10 @@ struct Args
 	// the generator keeps them optional so existing library callers remain stable.
 	bool caves{false};
 	bool disasters{false};
+	std::optional<CaveStyle> cave_style;
+	std::optional<CaveOres> cave_ores;
+	std::optional<std::uint64_t> cave_seed;
+	std::optional<std::int32_t> cave_datum_y;
 	std::optional<std::string> cave_biomes{std::nullopt};
 	std::optional<std::string> cave_asset_pack{std::nullopt};
 	// Rust's diagnostic cave-zone preview controls. The renderer itself is
@@ -508,6 +616,28 @@ struct Args
 	// diagnostic/error type.
 	std::optional<std::string> validation_error() const
 	{
+		if (min_y || max_y) {
+			constexpr std::int32_t vanilla_min_y = -64;
+			constexpr std::int32_t vanilla_max_y = 319;
+			if (!disable_height_limit || bedrock || luanti)
+				return "--min-y/--max-y set the range of the extended build height: Java worlds only.";
+			if (one_world_enabled())
+				return "--min-y/--max-y do not combine with --one-world: the world fixes its own build height.";
+			const auto [pack_min, pack_max] = world_utils::TALL_DATAPACK_FULL_RANGE;
+			if (min_y &&
+					(*min_y % 16 != 0 || *min_y < pack_min || *min_y > vanilla_min_y))
+				return "--min-y must be a multiple of 16 from " +
+					   std::to_string(pack_min) + " to " + std::to_string(vanilla_min_y) +
+					   " (got " + std::to_string(*min_y) + ").";
+			const auto section_end = [](std::int32_t y) {
+				return ((y % 16) + 16) % 16 == 15;
+			};
+			if (max_y &&
+					(!section_end(*max_y) || *max_y < vanilla_max_y || *max_y > pack_max))
+				return "--max-y must end a section (16n - 1) from " +
+					   std::to_string(vanilla_max_y) + " to " + std::to_string(pack_max) +
+					   " (got " + std::to_string(*max_y) + ").";
+		}
 		if (shapes && one_world_enabled())
 			return "--polygon makes a world of its own and cannot be combined with --one-world";
 		if ((polygon_file || !polygon.empty()) && !shapes)
@@ -518,8 +648,21 @@ struct Args
 			return "invalid scale, height multiplier, or timeout";
 		if (const auto error = validate_height_multiplier(height_multiplier))
 			return error;
+		if (threads && *threads == 0)
+			return "thread count must be at least 1";
+		if (!std::isfinite(scatter.rock_density) || scatter.rock_density < 0.0 ||
+				scatter.rock_density > 1.0)
+			return "Rock density must be between 0 and 1.";
+		if (!std::isfinite(scatter.bush_density) || scatter.bush_density < 0.0 ||
+				scatter.bush_density > 1.0)
+			return "Bush density must be between 0 and 1.";
+		if (props_min_scale &&
+				(!std::isfinite(*props_min_scale) || *props_min_scale < 0.0))
+			return "props minimum scale must be a finite value of 0 or more";
 		if (timeout_ref().count() < 0)
 			return "timeout must not be negative";
+		if (loot_table && !interior)
+			return "--loot-table requires interior generation";
 		if (world_time < 0 || world_time >= 24000)
 			return "world time must be between 0 and 23999";
 		if (vanilla_height && disable_height_limit)
@@ -571,8 +714,17 @@ struct Args
 		}
 		if (!std::isfinite(rotation) || rotation < -90.0 || rotation > 90.0)
 			return "Rotation angle must be between -90 and 90 degrees.";
-		const int floor = (disable_height_limit && !bedrock && !luanti ? -2032 : -64) + 2;
-		const int top = !disable_height_limit || luanti ? 319 : bedrock ? 511 : 2031;
+		if (climate_mode == climate::ClimateMode::PerPosition &&
+				std::abs(rotation) > std::numeric_limits<double>::epsilon())
+			return "per-position climate does not support rotation";
+		const int floor = (disable_height_limit && !bedrock && !luanti
+										  ? (tall_range ? tall_range->first : -2032)
+										  : -64) +
+						  2;
+		const int top = !disable_height_limit || luanti ? 319
+						: bedrock						? 511
+						: tall_range					? tall_range->second
+														: 2031;
 		const int ceiling = top - 15;
 		if (ground_level < floor || ground_level > ceiling)
 			return "--ground-level must be between " + std::to_string(floor) + " and " +
@@ -613,6 +765,15 @@ struct Args
 				return "building facade directory does not exist or is not a directory";
 		}
 		const bool cave_preview = cave_zone_map.has_value();
+		if ((cave_style || cave_seed) && !caves && !cave_preview)
+			return "--cave-style and --cave-seed only apply to --caves or --cave-zone-map.";
+		if (cave_ores && !caves)
+			return "--cave-ores only applies to --caves.";
+		if (cave_datum_y && !caves)
+			return "--cave-datum-y only applies to --caves.";
+		if (cave_datum_y && (*cave_datum_y % 16 != 0 || *cave_datum_y < -2032 ||
+									*cave_datum_y > 2016))
+			return "--cave-datum-y must be a multiple of 16 from -2032 to 2016.";
 		if (cave_biomes && !caves && !cave_preview)
 			return "cave biome weights require cave generation or a cave-zone preview";
 		if (cave_biomes) {

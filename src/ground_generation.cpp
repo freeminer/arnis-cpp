@@ -17,6 +17,7 @@
 #include "trees/mapped.h"
 #include "biome.h"
 #include "ground_decoration.h"
+#include "ground_scatter.h"
 #include "surface.h"
 #include "progress.h"
 #include "water_depth.h"
@@ -42,6 +43,8 @@ namespace
 constexpr int CHUNK_SIZE = 16;
 constexpr std::uint32_t SALT_SHRUB_DIRT = 0x5B7BD127u;
 constexpr std::uint32_t SALT_BARE_EARTH = 0xBA4EEA27u;
+constexpr std::uint32_t SALT_PAVING_WEAR = 0xBA7E3EA1u;
+constexpr std::uint32_t SALT_PAVING_KIND = 0xBA7E3EA2u;
 
 int chunk_index(int coordinate)
 {
@@ -292,12 +295,12 @@ bool is_protected_surface(WorldEditor &editor, int x, int y, int z)
 
 std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int z,
 		int ground_y, int slope, int slope_t27, std::uint8_t cover, bool has_cover,
-		terrain_surface::Rock rock)
+		terrain_surface::Rock rock, bool surface_patches)
 {
 	if (slope > slope_t27)
 		return terrain_surface::steep_palette(x, z, ground_y, slope, cover, rock);
 	if (has_cover && editor.ground) {
-		const auto climate = editor.ground->climate();
+		const auto climate = editor.ground->climate_at(editor.ground_point(x, z));
 		auto climate_palette = climate::surface_palette(
 				climate, cover, x, z, rock == terrain_surface::Rock::Red);
 		if (climate_palette)
@@ -305,7 +308,8 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 	}
 	if (cover == land_cover::LC_BEACH) {
 		const auto climate =
-				editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
+				editor.ground ? editor.ground->climate_at(editor.ground_point(x, z))
+							  : biome::Climate::Temperate;
 		if ((climate == biome::Climate::Tundra || climate == biome::Climate::IceCap) &&
 				value_noise_01(x + 41, z + 5, 6) < .7)
 			return {GRAVEL, STONE};
@@ -316,6 +320,15 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 	if (cover == land_cover::LC_CROPLAND)
 		return {FARMLAND, DIRT};
 	if (cover == land_cover::LC_BUILT_UP) {
+		if (surface_patches) {
+			if (ground_noise(x, z, 5, SALT_PAVING_WEAR) >= .28)
+				return {STONE_BRICKS, STONE};
+			const double kind = ground_noise(x, z, 12, SALT_PAVING_KIND);
+			const Block top = kind < .54   ? CRACKED_STONE_BRICKS
+							  : kind < .71 ? STONE
+										   : COBBLESTONE;
+			return {top, STONE};
+		}
 		const auto h = land_cover::coord_hash(x, z) % 100;
 		return {h < 72	 ? STONE_BRICKS
 				: h < 87 ? CRACKED_STONE_BRICKS
@@ -406,8 +419,9 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 	const auto cover =
 			editor.ground ? editor.ground->cover_class(editor.ground_point(x, z)) : 0;
 	auto rng = coord_rng(x, z, 0);
-	const auto climate =
-			editor.ground ? editor.ground->climate() : biome::Climate::Temperate;
+	const auto climate = editor.ground
+								 ? editor.ground->climate_at(editor.ground_point(x, z))
+								 : biome::Climate::Temperate;
 	// Rust only lets the canopy raster make tree decisions when land cover is
 	// present too; without it, vegetation falls back entirely to the procedural
 	// biome/terrain path.
@@ -554,7 +568,10 @@ double value_noise_01(int x, int z, int scale)
 	return value_noise_01_impl(x, z, scale);
 }
 
-double value_noise_salted(int x, int z, int scale, std::uint32_t salt)
+namespace
+{
+template <typename Hash>
+double salted_noise_with(int x, int z, int scale, std::uint32_t salt, Hash hash)
 {
 	constexpr double c = 0.891006524188368, s = 0.453990499739547;
 	const double u = (x * c - z * s) / std::max(1, scale);
@@ -565,11 +582,22 @@ double value_noise_salted(int x, int z, int scale, std::uint32_t salt)
 	const int sx = static_cast<int>(salt),
 			  sz = static_cast<int>((salt << 16) | (salt >> 16));
 	const auto sample = [&](int a, int b) {
-		return double(land_cover::coord_hash(a ^ sx, b ^ sz) % 1000) / 1000.0;
+		return double(hash(a ^ sx, b ^ sz) % 1000) / 1000.0;
 	};
 	const double a = sample(u0, v0) * (1.0 - su) + sample(u0 + 1, v0) * su;
 	const double b = sample(u0, v0 + 1) * (1.0 - su) + sample(u0 + 1, v0 + 1) * su;
 	return a * (1.0 - sv) + b * sv;
+}
+} // namespace
+
+double value_noise_salted(int x, int z, int scale, std::uint32_t salt)
+{
+	return salted_noise_with(x, z, scale, salt, land_cover::coord_hash);
+}
+
+double geo_noise_salted(int x, int z, int scale, std::uint32_t salt)
+{
+	return salted_noise_with(x, z, scale, salt, land_cover::geo_coord_hash);
 }
 
 double patch_noise(int x, int z, int scale, std::uint32_t salt)
@@ -705,7 +733,12 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				const auto eco = editor.ground->ecoregion_at(
 						editor.ground_point(sample_x, sample_z));
 				const auto habitat = ground_decoration::habitat(land_cover::LC_TREE_COVER,
-						editor.ground->climate(), std::abs(center_latitude), false, eco);
+						editor.ground->climate_at(
+								editor.ground_point(sample_x, sample_z)),
+						std::abs(editor.ground->latitude_at(
+								editor.ground_point(sample_x, sample_z),
+								center_latitude)),
+						false, eco);
 				if (habitat == ground_decoration::Habitat::Taiga)
 					forest_fern_share = .45;
 				else if (habitat == ground_decoration::Habitat::Jungle)
@@ -877,8 +910,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									!planetary &&
 									terrain_surface::is_glacier_cover(cover_here) &&
 									editor.ground &&
-									terrain_surface::is_plausible_ice(
-											snow_depth, editor.ground->climate());
+									terrain_surface::is_plausible_ice(snow_depth,
+											editor.ground->climate_at(relative));
 							if (glacier)
 								snow_depth = terrain_surface::glacier_depth(snow_depth);
 							auto snow = terrain_surface::Snow::none();
@@ -898,7 +931,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							const auto rock =
 									editor.ground
 											? terrain_surface::rock_at(
-													  editor.ground->climate(), x, z,
+													  editor.ground->climate_at(relative),
+													  x, z,
 													  [&](int sx, int sz) {
 														  return editor.ground->ecoregion_at(
 																  editor.ground_point(
@@ -940,7 +974,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									: glacier ? std::pair{PACKED_ICE, PACKED_ICE}
 											  : natural_surface_palette(editor, x, z,
 														ground_y, slope, slope_t27,
-														cover_here, has_cover, rock);
+														cover_here, has_cover, rock,
+														args.surface_patches);
 							// Rust's field preset overrides the generic cropland palette only when
 							// no mapped element owns the column and no higher-priority climate,
 							// slope, talus, or glacier palette selected its surface.
@@ -949,8 +984,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 									slope <= slope_t27 && !glacier &&
 									!(editor.ground &&
 											climate::surface_palette(
-													editor.ground->climate(), cover_here,
-													x, z,
+													editor.ground->climate_at(relative),
+													cover_here, x, z,
 													rock == terrain_surface::Rock::
 																	Red)) &&
 									!editor.block_exists_absolute(x, ground_y, z)) {
@@ -1131,6 +1166,15 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					// overlapping element regardless of the active terrain provider.
 					clear_road_vegetation(editor, x, ground_y, z);
 
+					// Opt-in water beds can fall below the adjacent terrain crust.
+					// Back the bank to the lowest neighbouring carve instead of
+					// leaving a floating overhang.
+					if (!args.fillground) {
+						if (const auto lowest = editor.lowest_water_beside(x, z))
+							editor.fill_column_absolute(
+									STONE, x, z, *lowest, ground_y - 1, true);
+					}
+
 					if (args.fillground)
 						editor.fill_column_absolute(
 								STONE, x, z, column_fill_y_min, ground_y - 3, true);
@@ -1151,6 +1195,8 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 	// ground column in this region has its final surface. Keep the caller's
 	// region bounds here so streamed tile generation uses the same patch origins
 	// while clipping writes to the tile currently being generated.
+	ground_scatter::scatter_region(
+			editor, args, xzbbox, iter_min_x, iter_max_x, iter_min_z, iter_max_z);
 	ground_decoration::decorate_region(
 			editor, args, xzbbox, iter_min_x, iter_max_x, iter_min_z, iter_max_z);
 }

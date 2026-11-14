@@ -237,7 +237,7 @@ std::vector<std::string> fetch_overture_release_listing()
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
 	long status = 0;
-	[[maybe_unused]] auto permit = net::request_permit();
+	[[maybe_unused]] auto permit = net::request_permit("Overture release listing");
 	const auto result = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
@@ -1389,7 +1389,7 @@ std::optional<std::string> http_get_bytes(const std::string &url)
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
 	long status = 0;
-	[[maybe_unused]] auto permit = net::request_permit();
+	[[maybe_unused]] auto permit = net::request_permit("Overture data metadata");
 	const auto result = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);
@@ -1419,7 +1419,7 @@ std::optional<std::uint64_t> parquet_file_size(
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 45L);
 	long status = 0;
-	[[maybe_unused]] auto permit = net::request_permit();
+	[[maybe_unused]] auto permit = net::request_permit("Overture parquet metadata");
 	const auto result = curl_easy_perform(curl);
 	curl_off_t length = -1;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
@@ -1464,7 +1464,7 @@ std::optional<std::vector<std::uint8_t>> fetch_parquet_range(const std::string &
 		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 20L);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, 90L);
 		long status = 0;
-		[[maybe_unused]] auto permit = net::request_permit();
+		[[maybe_unused]] auto permit = net::request_permit("Overture parquet range");
 		const auto result = curl_easy_perform(curl);
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 		curl_easy_cleanup(curl);

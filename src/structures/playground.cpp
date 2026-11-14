@@ -12,7 +12,7 @@ namespace arnis::structures::playground
 void scatter_playgrounds(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics() || cells.size() < 120)
+	if (!editor.place_prop(Prop::Playground) || cells.size() < 120)
 		return;
 	const auto target = std::clamp<std::size_t>(cells.size() / 500, 1, 4);
 	std::vector<std::pair<int, int>> placed;

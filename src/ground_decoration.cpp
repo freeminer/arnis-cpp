@@ -568,10 +568,11 @@ void grow_patch(WorldEditor &editor, const Ground &ground, const ::XZBBox &bbox,
 		return ground.ecoregion_at({x - bbox.min_x(), z - bbox.min_z()});
 	};
 	const auto point_habitat = [&](int x, int z) {
-		const int terrain_y = ground.elevation_enabled
-									  ? ground.level({x - bbox.min_x(), z - bbox.min_z()})
-									  : args.ground_level;
-		return habitat(point_cover(x, z), ground.climate(), absolute_latitude,
+		const XZPoint point{x - bbox.min_x(), z - bbox.min_z()};
+		const int terrain_y =
+				ground.elevation_enabled ? ground.level(point) : args.ground_level;
+		return habitat(point_cover(x, z), ground.climate_at(point),
+				std::abs(ground.latitude_at(point, absolute_latitude)),
 				terrain_y >= alpine_from_y, point_eco(x, z));
 	};
 	// Rust keeps these as static slices.  Keep the equivalent C++ palettes
@@ -783,7 +784,9 @@ void decorate_region(WorldEditor &editor, const Args &args, const ::XZBBox &bbox
 											 : args.ground_level;
 				const auto habitat_origin =
 						habitat(editor.ground->cover_class(origin_coord),
-								editor.ground->climate(), absolute_latitude,
+								editor.ground->climate_at(origin_coord),
+								std::abs(editor.ground->latitude_at(
+										origin_coord, absolute_latitude)),
 								origin_y >= alpine_from_y, origin_eco);
 				if (!habitat_origin)
 					continue;

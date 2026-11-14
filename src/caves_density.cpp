@@ -1,5 +1,6 @@
 #include "caves_density.h"
 #include "caves_shape.h"
+#include "caves_theme.h"
 #include "block_definitions.h"
 #include "world_editor/floor_state.h"
 #include "../../arnis_world_editor.h"
@@ -14,7 +15,6 @@ namespace arnis::caves
 {
 namespace
 {
-constexpr int VANILLA_FLOOR = -64;
 constexpr int CELL_WIDTH = 4;
 constexpr int CELL_HEIGHT = 8;
 constexpr int TOP_GATE = 6;
@@ -130,7 +130,7 @@ double lerp(double delta, double start, double end)
 }
 
 CaveGen::CaveGen(std::int64_t seed, int floor_y, int world_max_y) :
-		y_shift_(floor_y - VANILLA_FLOOR), world_max_y_(world_max_y)
+		y_shift_(cave_y_shift(floor_y)), world_max_y_(world_max_y)
 {
 	XoroRandom root = XoroRandom::from_seed(seed);
 	const auto factory = root.fork_positional();

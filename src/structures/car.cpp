@@ -54,7 +54,7 @@ std::shared_ptr<const CarFleet> load_fleet(const std::filesystem::path &root)
 void place_car(WorldEditor &editor, int cx, int cz, int base_y, uint8_t rot_base,
 		std::uint64_t h, int max_height)
 {
-	if (!editor.place_schematics())
+	if (!editor.place_prop(Prop::Car))
 		return;
 	if (h % 100 >= 50)
 		return;
@@ -81,6 +81,27 @@ void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base)
 {
 	place_car(editor, cx, cz, editor.get_absolute_y(cx, 1, cz), rot_base,
 			land_cover::coord_hash(cx, cz), std::numeric_limits<int>::max());
+}
+
+void place_vehicle(WorldEditor &editor, int cx, int cz, uint8_t rot_base, bool camper,
+		std::uint64_t h)
+{
+	if (!editor.place_prop(Prop::Car))
+		return;
+	// Rust keeps the camper/pickup/SUV/sedan indices stable when an asset is
+	// missing, so an unavailable selected model remains absent rather than
+	// changing every later deterministic vehicle choice.
+	const std::size_t model_index = camper ? 6 : 7 + static_cast<std::size_t>(h % 3);
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	const auto fleet = load_fleet(root);
+	if (model_index >= fleet->available.size() || !fleet->available[model_index])
+		return;
+	const auto flip = ((h >> 16) & 1) ? 2 : 0;
+	place_structure(editor, fleet->cars[model_index], cx,
+			editor.get_absolute_y(cx, 1, cz), cz,
+			(rot_base + fleet->alignments[model_index] + flip) & 3);
 }
 
 void maybe_place_car_on_deck(

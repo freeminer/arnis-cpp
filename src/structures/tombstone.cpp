@@ -28,6 +28,7 @@ namespace tombstone
 namespace
 {
 constexpr int SMALL_GRID = 4, LARGE_GRID = 32, LARGE_HALF = 6;
+constexpr std::uint64_t LARGE_PERCENT = 5;
 
 std::filesystem::path asset(const WorldEditor &editor, const std::string &name)
 {
@@ -82,14 +83,77 @@ bool near_large_crypt(int x, int z)
 				   LARGE_GRID;
 	const auto dx = static_cast<long long>(x) - gx;
 	const auto dz = static_cast<long long>(z) - gz;
-	return land_cover::coord_hash(gx, gz) % 100 < 5 && dx >= -LARGE_HALF &&
+	return land_cover::coord_hash(gx, gz) % 100 < LARGE_PERCENT && dx >= -LARGE_HALF &&
 		   dx <= LARGE_HALF && dz >= -LARGE_HALF && dz <= LARGE_HALF;
 }
+unsigned rotation_for(std::pair<int, int> dir)
+{
+	if (dir.first > 0)
+		return 0;
+	if (dir.second > 0)
+		return 1;
+	if (dir.first < 0)
+		return 2;
+	return 3;
+}
+}
+
+bool near_crypt(int x, int z)
+{
+	return near_large_crypt(x, z);
+}
+
+bool place_model(WorldEditor &editor, bool cross, std::pair<int, int> anchor,
+		std::pair<int, int> dir, std::uint64_t seed)
+{
+	if (!editor.place_prop(Prop::Tombstone))
+		return false;
+	const auto &models = variants(editor, cross ? 1 : 4, cross ? 3 : 9);
+	const auto *schem = pick_variant(models, seed);
+	if (!schem)
+		return false;
+	const int y = editor.get_absolute_y(anchor.first, 0, anchor.second);
+	return place_structure(
+			editor, *schem, anchor.first, y, anchor.second, rotation_for(dir));
+}
+
+bool place_grave(WorldEditor &editor, std::pair<int, int> head, std::pair<int, int> dir,
+		std::uint64_t seed)
+{
+	return place_model(
+			editor, false, {head.first + dir.first, head.second + dir.second}, dir, seed);
+}
+
+bool place_cross(WorldEditor &editor, int x, int z)
+{
+	const auto h =
+			land_cover::coord_hash(wrapping_add(x, 0x5f5fU), wrapping_add(z, 0x3c3cU));
+	if (!editor.place_prop(Prop::Tombstone))
+		return false;
+	const auto &models = variants(editor, 1, 3);
+	const auto *schem = pick_variant(models, h);
+	return schem && place_structure(editor, *schem, x, editor.get_absolute_y(x, 0, z), z,
+							(h >> 16) & 3);
+}
+
+void maybe_place_crypt(WorldEditor &editor, int x, int z, const RoadMaskBitmap &road_mask)
+{
+	if (!editor.place_prop(Prop::Tombstone) || x % LARGE_GRID != 0 ||
+			z % LARGE_GRID != 0 || editor.is_lc_water(x, z) || road_mask.contains(x, z))
+		return;
+	const auto h = land_cover::coord_hash(x, z);
+	if (h % 100 >= LARGE_PERCENT)
+		return;
+	const auto &models = variants(editor, 10, 11);
+	const auto *schem = pick_variant(models, h);
+	if (schem)
+		place_structure(
+				editor, *schem, x, editor.get_absolute_y(x, 0, z), z, (h >> 16) & 3);
 }
 
 void maybe_place(WorldEditor &e, int x, int z, const RoadMaskBitmap &road_mask)
 {
-	if (!e.place_schematics() || x % SMALL_GRID != 0 || z % SMALL_GRID != 0 ||
+	if (!e.place_prop(Prop::Tombstone) || x % SMALL_GRID != 0 || z % SMALL_GRID != 0 ||
 			e.is_lc_water(x, z) || road_mask.contains(x, z))
 		return;
 	const auto h = land_cover::coord_hash(x, z);
@@ -117,7 +181,7 @@ void maybe_place(WorldEditor &e, int x, int z, const RoadMaskBitmap &road_mask)
 
 void scatter_tombstones(WorldEditor &e, int minx, int minz, int maxx, int maxz)
 {
-	if (!e.place_schematics())
+	if (!e.place_prop(Prop::Tombstone))
 		return;
 	auto grid_start = [](int value) { return value - ((value % 4) + 4) % 4; };
 	for (int z = grid_start(minz); z <= maxz; z += 4)

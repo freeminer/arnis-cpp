@@ -1,9 +1,11 @@
 #include "caves_zone_map.h"
+#include "caves_theme.h"
 
 #include "args.h"
 
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cmath>
 #include <limits>
 #include <map>
@@ -16,7 +18,6 @@ namespace arnis::caves
 {
 namespace
 {
-constexpr std::int64_t cave_seed = 0xCA7ECA7E;
 constexpr std::uint32_t max_side = 1536;
 constexpr std::uint64_t max_pixels = 64ull * 1024 * 1024;
 
@@ -71,7 +72,8 @@ bool save_png(const std::filesystem::path &path, std::uint32_t width,
 
 std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 		const CaveRect &bounds, std::string_view biome_spec,
-		std::optional<std::uint32_t> sample_step, int floor_y, std::string *error)
+		std::optional<std::uint32_t> sample_step, int floor_y, std::string *error,
+		double base_amount, std::int64_t seed)
 {
 	if (error)
 		error->clear();
@@ -82,10 +84,10 @@ std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 	};
 	if (bounds.min_x > bounds.max_x || bounds.min_z > bounds.max_z)
 		return fail("cave zone map bounds are empty");
-	BiomeAmounts amounts;
+	BiomeAmounts amounts = BiomeAmounts::uniform(base_amount);
 	if (!biome_spec.empty()) {
 		std::string parse_error;
-		amounts = BiomeAmounts::parse(biome_spec, &parse_error);
+		amounts = BiomeAmounts::parse(biome_spec, amounts, &parse_error);
 		if (!parse_error.empty())
 			return fail("--cave-biomes: " + parse_error);
 	}
@@ -106,10 +108,10 @@ std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 	const auto width = static_cast<std::uint32_t>(width64);
 	const auto height = static_cast<std::uint32_t>(height64);
 	const auto pixel_count = static_cast<std::size_t>(width64 * height64);
-	const ThemeSelector decor(cave_seed, amounts, floor_y);
-	const auto upper_y = floor_y + (-20 - VANILLA_FLOOR);
-	const auto deep_y = floor_y + (-48 - VANILLA_FLOOR);
-	const auto high_surface = floor_y + (200 - VANILLA_FLOOR);
+	const ThemeSelector decor(seed, amounts, floor_y);
+	const auto upper_y = cave_vy(-20, floor_y);
+	const auto deep_y = cave_vy(-48, floor_y);
+	const auto high_surface = cave_vy(200, floor_y);
 	const std::array<std::pair<const char *, int>, 2> bands{
 			{{"upper", upper_y}, {"deep", deep_y}}};
 	nlohmann::json result = nlohmann::json::object();
@@ -154,13 +156,21 @@ std::optional<std::string> render_zone_map(const std::filesystem::path &prefix,
 std::optional<std::string> render_zone_map(const ::arnis::Args &args,
 		const CaveRect &bounds, int floor_y, std::string *error)
 {
+	set_cave_datum(args.cave_datum_y);
 	if (!args.cave_zone_map) {
 		if (error)
 			*error = "cave-zone map output path is not configured";
 		return std::nullopt;
 	}
+	const auto style = args.cave_style.value_or(CaveStyle::AllMix);
+	const double style_amount = style == CaveStyle::Vanilla		  ? 0.0
+								: style == CaveStyle::MoreVanilla ? 0.18
+								: style == CaveStyle::MoreMix	  ? 1.8
+																  : 1.0;
+	const auto seed = args.cave_seed ? std::bit_cast<std::int64_t>(*args.cave_seed)
+									 : std::int64_t(0xCA7ECA7E);
 	return render_zone_map(*args.cave_zone_map, bounds,
 			args.cave_biomes.value_or(std::string{}), args.cave_zone_map_step, floor_y,
-			error);
+			error, style_amount, seed);
 }
 } // namespace arnis::caves

@@ -1,4 +1,5 @@
 #include "caves_deepslate.h"
+#include "caves_theme.h"
 #include "block_definitions.h"
 #include "land_cover/land_cover.h"
 #include "world_editor/floor_state.h"
@@ -50,7 +51,8 @@ double noise(int x, int y, int z)
 void apply_deepslate(
 		world_editor::WorldEditor &e, int min_x, int max_x, int min_z, int max_z)
 {
-	const int floor = world_editor::terrain_floor_y(), band_floor = floor + 5;
+	const int floor = world_editor::terrain_floor_y();
+	const int band_floor = cave_vy(-59, floor);
 	const std::optional<std::vector<Block>> stone_filter{{STONE}};
 	for (int x = min_x; x <= max_x; ++x)
 		for (int z = min_z; z <= max_z; ++z) {

@@ -2,6 +2,9 @@
 #include "net.h"
 #include "args.h"
 #include "osm_tiles.h"
+#include "osm_pbf.h"
+#include "osm_pbf_cache.h"
+#include "one_world.h"
 #include "telemetry.h"
 #include <algorithm>
 #include <cctype>
@@ -12,6 +15,14 @@
 #include <sstream>
 #include <stdexcept>
 #include <utility>
+
+#include <osmium/handler.hpp>
+#include <osmium/io/pbf_input.hpp>
+#include <osmium/io/reader.hpp>
+#include <osmium/osm/node.hpp>
+#include <osmium/osm/relation.hpp>
+#include <osmium/osm/way.hpp>
+#include <osmium/visitor.hpp>
 
 namespace arnis::retrieve_data
 {
@@ -72,6 +83,88 @@ nlohmann::json document_json(const osm_parser::RawOsmDocument &document)
 	}
 	return root;
 }
+
+class RawPbfHandler : public osmium::handler::Handler
+{
+	osm_parser::RawOsmDocument &document_;
+
+	static tags_t copy_tags(const osmium::TagList &source)
+	{
+		tags_t out;
+		for (const auto &tag : source)
+			out.emplace(tag.key(), tag.value());
+		return out;
+	}
+
+public:
+	explicit RawPbfHandler(osm_parser::RawOsmDocument &document) : document_(document) {}
+
+	void node(const osmium::Node &node)
+	{
+		osm_parser::RawNode out;
+		out.id = static_cast<std::uint64_t>(node.id());
+		if (node.location().valid()) {
+			out.lat = node.location().lat();
+			out.lon = node.location().lon();
+		}
+		out.tags = copy_tags(node.tags());
+		document_.nodes.push_back(std::move(out));
+	}
+
+	void way(const osmium::Way &way)
+	{
+		osm_parser::RawWay out;
+		out.id = static_cast<std::uint64_t>(way.id());
+		out.node_refs.reserve(way.nodes().size());
+		for (const auto &node : way.nodes())
+			out.node_refs.push_back(static_cast<std::uint64_t>(node.ref()));
+		out.tags = copy_tags(way.tags());
+		document_.ways.push_back(std::move(out));
+	}
+
+	void relation(const osmium::Relation &relation)
+	{
+		osm_parser::RawRelation out;
+		out.id = static_cast<std::uint64_t>(relation.id());
+		out.tags = copy_tags(relation.tags());
+		out.members.reserve(relation.members().size());
+		for (const auto &member : relation.members()) {
+			const char *type = nullptr;
+			switch (member.type()) {
+			case osmium::item_type::node:
+				type = "node";
+				break;
+			case osmium::item_type::way:
+				type = "way";
+				break;
+			case osmium::item_type::relation:
+				type = "relation";
+				break;
+			default:
+				continue;
+			}
+			out.members.push_back({type, static_cast<std::uint64_t>(member.ref()),
+					std::string(member.role())});
+		}
+		document_.relations.push_back(std::move(out));
+	}
+};
+
+osm_parser::RawOsmDocument parse_osm_pbf(const std::filesystem::path &path)
+{
+	osm_parser::RawOsmDocument document;
+	osmium::io::Reader reader{osmium::io::File{path.string()}};
+	const auto bounds = reader.header().joined_boxes();
+	if (bounds.valid())
+		document.bounds = std::array<double, 4>{bounds.bottom_left().lat(),
+				bounds.bottom_left().lon(), bounds.top_right().lat(),
+				bounds.top_right().lon()};
+	RawPbfHandler handler(document);
+	osmium::apply(reader, handler);
+	reader.close();
+	document.completeness = osm_parser::analyze_completeness(document);
+	return document;
+}
 }
 std::string url_host(const std::string &url)
 {
@@ -89,8 +182,21 @@ bool is_osm_xml_path(const std::filesystem::path &path)
 	return ext == ".osm" || ext == ".xml";
 }
 
+namespace
+{
+bool is_osm_pbf_path(const std::filesystem::path &path)
+{
+	auto ext = path.extension().string();
+	std::transform(ext.begin(), ext.end(), ext.begin(),
+			[](unsigned char c) { return char(std::tolower(c)); });
+	return ext == ".pbf";
+}
+}
+
 osm_parser::RawOsmDocument load_osm_file(const std::filesystem::path &path)
 {
+	if (is_osm_pbf_path(path))
+		return parse_osm_pbf(path);
 	std::ifstream input(path, std::ios::binary);
 	if (!input)
 		throw std::runtime_error("Cannot open OSM input " + path.string());
@@ -144,11 +250,23 @@ std::string overpass_query(const geographic::LLBBox &bbox)
 	return out.str();
 }
 
-std::vector<OverpassEndpoint> overpass_request_plan(std::uint64_t seed, bool probe)
+std::vector<OverpassEndpoint> overpass_request_plan(
+		std::uint64_t seed, bool probe, const std::vector<std::string> &configured_urls)
 {
 	(void)seed;
 	(void)probe;
-	return {{ARNIS_OVERPASS_URL}};
+	std::vector<OverpassEndpoint> endpoints;
+	if (configured_urls.empty()) {
+		endpoints.push_back({ARNIS_OVERPASS_URL});
+		return endpoints;
+	}
+	endpoints.reserve(configured_urls.size());
+	for (const auto &url : configured_urls)
+		if (!url.empty())
+			endpoints.push_back({url});
+	if (endpoints.empty())
+		endpoints.push_back({ARNIS_OVERPASS_URL});
+	return endpoints;
 }
 
 bool remark_means_truncated(const std::string &remark)
@@ -208,13 +326,13 @@ std::string fallback_reason_detail(const std::string &error)
 
 std::optional<FetchResult> fetch_overpass(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, std::uint64_t seed, bool probe,
-		std::string *error)
+		std::string *error, const std::vector<std::string> &configured_urls)
 {
 	const auto query = overpass_query(bbox);
 	std::size_t answered = 0;
 	std::size_t truncated = 0;
 	std::string last_error;
-	for (const auto &endpoint : overpass_request_plan(seed, probe)) {
+	for (const auto &endpoint : overpass_request_plan(seed, probe, configured_urls)) {
 		auto response = fetcher(endpoint, query);
 		if (!response) {
 			last_error = "Overpass request failed at " + url_host(endpoint.url);
@@ -265,7 +383,8 @@ namespace
 std::optional<FetchResult> fetch_osm_data_impl(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, bool use_tile_archive,
 		const std::string &tiles_url, double scale, std::uint64_t seed, bool probe,
-		std::string *error, const std::optional<std::string> &save_file = std::nullopt)
+		std::string *error, const std::optional<std::string> &save_file = std::nullopt,
+		const std::vector<std::string> &configured_urls = {})
 {
 	std::string archive_error;
 	if (use_tile_archive && !tiles_url.empty()) {
@@ -288,8 +407,10 @@ std::optional<FetchResult> fetch_osm_data_impl(const geographic::LLBBox &bbox,
 					"tile_archive_fallback: " + fallback_reason_detail(archive_error));
 		}
 	}
+	net::note_uncached("OpenStreetMap data from Overpass (its answers are never cached)");
 	std::string overpass_error;
-	auto result = fetch_overpass(bbox, fetcher, seed, probe, &overpass_error);
+	auto result =
+			fetch_overpass(bbox, fetcher, seed, probe, &overpass_error, configured_urls);
 	if (result && save_file)
 		save_osm_json(result->document, bbox, *save_file);
 	if (!result && error) {
@@ -315,8 +436,77 @@ std::optional<FetchResult> fetch_osm_data(const geographic::LLBBox &bbox,
 		const OverpassFetcher &fetcher, const arnis::Args &args, std::uint64_t seed,
 		bool probe, std::string *error)
 {
+	if (args.osm_pbf && args.file) {
+		if (error)
+			*error = "--osm-pbf and --file are mutually exclusive";
+		return std::nullopt;
+	}
+	if (args.osm_pbf) {
+		const bool automatic = *args.osm_pbf == "geofabrik";
+		std::string pbf_error;
+		if (args.osm_pbf_url && !automatic) {
+			if (error)
+				*error = "--osm-pbf-url requires --osm-pbf geofabrik";
+			return std::nullopt;
+		}
+		try {
+			const auto path = osm_pbf::locate_extract(
+					*args.osm_pbf, args.osm_pbf_url, bbox, &pbf_error);
+			if (path) {
+				auto document = osm_pbf::cached_cut_extract(*path, bbox,
+						one_world::CLIP_PAD_BLOCKS / std::max(args.scale, 1e-6));
+				const bool empty = document.nodes.empty() && document.ways.empty() &&
+								   document.relations.empty();
+				if (!empty || !automatic || net::offline()) {
+					if (empty && !automatic && error)
+						*error =
+								"the .pbf extract holds no OpenStreetMap data for this area";
+					if (args.save_json_file)
+						save_osm_json(document, bbox, *args.save_json_file);
+					if (error)
+						error->clear();
+					return FetchResult{std::move(document), path->string()};
+				}
+				pbf_error =
+						"the Geofabrik extract holds no OpenStreetMap data for this area";
+			}
+		} catch (const std::exception &e) {
+			pbf_error = e.what();
+		}
+		// Match Rust: a user-named PBF is authoritative; an automatically
+		// selected Geofabrik source may fall through to tiles/Overpass online.
+		if (!automatic || net::offline()) {
+			if (error)
+				*error = pbf_error.empty() ? "could not read the requested .pbf source"
+										   : pbf_error;
+			return std::nullopt;
+		}
+		const auto reason = pbf_error.empty() ? std::string("unknown") : pbf_error;
+		std::cerr << "Warning: Region Download unavailable (" << reason
+				  << "); falling back to the default source.\n";
+		telemetry::send_log(telemetry::LogLevel::Warning,
+				"region_download_fallback: " + fallback_reason_detail(reason));
+	}
+	// An explicitly named input is authoritative: do not silently replace a
+	// missing or malformed local extract with remote tile/Overpass data. This
+	// also makes the .pbf reader available through the same source-selection
+	// entry point as the XML and JSON readers.
+	if (args.file) {
+		try {
+			auto document = load_osm_file(*args.file);
+			if (args.save_json_file)
+				save_osm_json(document, bbox, *args.save_json_file);
+			if (error)
+				error->clear();
+			return FetchResult{std::move(document), *args.file};
+		} catch (const std::exception &e) {
+			if (error)
+				*error = e.what();
+			return std::nullopt;
+		}
+	}
 	return fetch_osm_data_impl(bbox, fetcher, !args.no_tile_archive, args.osm_tiles_url,
-			args.scale, seed, probe, error, args.save_json_file);
+			args.scale, seed, probe, error, args.save_json_file, args.overpass_url);
 }
 
 std::optional<std::string> area_name_from_nominatim_json(const std::string &body)
@@ -340,6 +530,10 @@ std::optional<std::string> area_name_from_nominatim_json(const std::string &body
 
 std::optional<std::string> fetch_area_name(double lat, double lon)
 {
+	// Reverse lookup is optional metadata; an offline run has no cacheable name
+	// source and should not report a network-cache miss.
+	if (net::offline())
+		return std::nullopt;
 	const auto url = "https://nominatim.openstreetmap.org/reverse?format=jsonv2&lat=" +
 					 std::to_string(lat) + "&lon=" + std::to_string(lon) +
 					 "&addressdetails=1";
@@ -357,7 +551,7 @@ std::optional<std::string> fetch_area_name(double lat, double lon)
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 20L);
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	long status = 0;
-	[[maybe_unused]] auto permit = net::request_permit();
+	[[maybe_unused]] auto permit = net::request_permit("Nominatim place lookup");
 	const auto result = curl_easy_perform(curl);
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
 	curl_easy_cleanup(curl);

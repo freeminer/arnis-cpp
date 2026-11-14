@@ -26,7 +26,7 @@ void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max
 {
 	// Match Rust: structure scattering is disabled when schematic placement is
 	// disabled, even if terrain/land-cover data is available.
-	if (!editor.ground || !editor.place_schematics())
+	if (!editor.ground || !editor.place_prop(Prop::Boat))
 		return;
 	const auto *schematic = boat_schematic(editor);
 	if (!schematic)

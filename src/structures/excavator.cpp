@@ -9,7 +9,7 @@ namespace arnis::structures::excavator
 void scatter_excavators(
 		WorldEditor &editor, const std::vector<std::pair<int, int>> &cells)
 {
-	if (!editor.place_schematics() || cells.size() < 1500)
+	if (!editor.place_prop(Prop::Excavator) || cells.size() < 1500)
 		return;
 	const auto root = editor.get_schematic_asset_root().empty()
 							  ? assets::path("structures")

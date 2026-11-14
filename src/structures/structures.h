@@ -139,6 +139,8 @@ void scatter_boats(WorldEditor &editor, int min_x, int min_z, int max_x, int max
 namespace car
 {
 void maybe_place_car(WorldEditor &editor, int cx, int cz, uint8_t rot_base);
+void place_vehicle(WorldEditor &editor, int cx, int cz, uint8_t rot_base, bool camper,
+		std::uint64_t h);
 void maybe_place_car_on_deck(WorldEditor &editor, int cx, int cz, int base_y,
 		uint8_t rot_base, int max_height);
 }
@@ -157,6 +159,14 @@ void place_on_launch_mount(WorldEditor &editor, const ProcessedWay &ring);
 namespace tombstone
 {
 void maybe_place(WorldEditor &editor, int x, int z, const RoadMaskBitmap &road_mask);
+bool near_crypt(int x, int z);
+bool place_model(WorldEditor &editor, bool cross, std::pair<int, int> anchor,
+		std::pair<int, int> dir, std::uint64_t seed);
+bool place_grave(WorldEditor &editor, std::pair<int, int> head, std::pair<int, int> dir,
+		std::uint64_t seed);
+bool place_cross(WorldEditor &editor, int x, int z);
+void maybe_place_crypt(
+		WorldEditor &editor, int x, int z, const RoadMaskBitmap &road_mask);
 }
 
 namespace windturbine

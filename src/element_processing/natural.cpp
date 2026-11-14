@@ -26,11 +26,25 @@
 #include "../trees/mapped.h"
 #include "../trees/region.h"
 #include "../ground_decoration.h"
+#include "natural.h"
 namespace arnis
 {
 
 namespace natural
 {
+
+bool piece_plants_at(const Args &args, int x, int z)
+{
+	if (!args.one_world_run || !args.one_world_run->unit)
+		return true;
+	const auto &rect = args.one_world_run->unit->rect;
+	return x >= rect[0] && x <= rect[2] && z >= rect[1] && z <= rect[3];
+}
+
+bool woods_by_cell(const Args &args)
+{
+	return args.one_world_run && args.one_world_run->unit.has_value();
+}
 
 uint64_t coord_hash(int x, int z)
 {
@@ -73,7 +87,7 @@ NaturalCellSurface natural_cell_surface(const WorldEditor &editor,
 		const std::string &natural_type, Block block_type, int x, int z,
 		bool rock_variation)
 {
-	const auto climate_value = editor.climate();
+	const auto climate_value = editor.local_climate(x, z).value_or(editor.climate());
 	const bool dry_ground = (natural_type == "scrub" || natural_type == "grassland" ||
 									natural_type == "heath") &&
 							biome::climate_is_dry(climate_value);
@@ -440,15 +454,8 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 		});
 
 		std::vector<std::pair<int, int>> wetland_puddles;
-		const auto climate = editor.climate();
-		const bool arid =
-				natural_type == "sand" && (climate == biome::Climate::HotDesert ||
-												  climate == biome::Climate::HotSteppe ||
-												  climate == biome::Climate::ColdDesert ||
-												  climate == biome::Climate::ColdSteppe);
-		const bool dry_ground = (natural_type == "scrub" || natural_type == "grassland" ||
-										natural_type == "heath") &&
-								biome::climate_is_dry(climate);
+		const auto area_climate = editor.climate();
+		const bool per_cell_woods = woods_by_cell(args);
 		std::optional<Block> shrubbery_species;
 		for (const auto &p : filled_area) {
 			int x = p.first;
@@ -460,6 +467,16 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 			// owned clip-margin cells must still pass through this loop.
 			if (!editor.in_bounds(x, z) && !editor.owns(x, z))
 				continue;
+			const auto climate = editor.local_climate(x, z).value_or(area_climate);
+			const bool arid = natural_type == "sand" &&
+							  (climate == biome::Climate::HotDesert ||
+									  climate == biome::Climate::HotSteppe ||
+									  climate == biome::Climate::ColdDesert ||
+									  climate == biome::Climate::ColdSteppe);
+			const bool dry_ground =
+					(natural_type == "scrub" || natural_type == "grassland" ||
+							natural_type == "heath") &&
+					biome::climate_is_dry(climate);
 			const bool sealed = editor.surface_is_sealed(x, z);
 			const auto cell_surface = natural_cell_surface(
 					editor, natural_type, block_type, x, z, rock_variation);
@@ -496,6 +513,7 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 					wetland_puddles.emplace_back(x, z);
 				continue;
 			}
+			const bool roots = piece_plants_at(args, x, z);
 
 			if (dry_ground && !editor.check_for_block(x, 0, z, grass_block_only())) {
 				if (rng.uniform(60) == 0)
@@ -517,7 +535,8 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 						editor.set_block(
 								COBBLESTONE, x, 0, z, std::nullopt, std::nullopt);
 					} else if (random_choice < 6) {
-						bush::place(editor, x, z, bush::Kind::Low);
+						if (roots)
+							bush::place(editor, x, z, bush::Kind::Low);
 					} else {
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					}
@@ -528,13 +547,15 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				}
 				int random_choice = static_cast<int>(rng.uniform(500));
 				if (random_choice == 0 && editor.land_cover_backs_trees(x, z)) {
-					Tree::create(
-							editor, {x, 1, z}, &building_footprints, &bridge_surface);
+					if (roots)
+						Tree::create(
+								editor, {x, 1, z}, &building_footprints, &bridge_surface);
 				} else if (random_choice == 1) {
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Meadow);
 				} else if (random_choice < 40) {
-					bush::place(editor, x, z, bush::Kind::Wild);
+					if (roots)
+						bush::place(editor, x, z, bush::Kind::Wild);
 				} else if (random_choice < 300) {
 					if (random_choice < 250) {
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
@@ -553,8 +574,12 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				const int tree_threshold = std::max(5, int(60.0 - density * 45.0));
 				// Preserve Rust's per-cell RNG draw order: the tree decision is drawn
 				// before the understory choice, even when a tree ultimately wins.
+				std::optional<ChaCha8Rng> cell_rng;
+				if (per_cell_woods)
+					cell_rng.emplace(coord_rng(x, z, static_cast<std::uint64_t>(way.id)));
+				auto &tree_rng = cell_rng ? *cell_rng : rng;
 				const bool spawn_tree =
-						rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0;
+						tree_rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0;
 				const int random_choice = static_cast<int>(rng.uniform(30));
 				if (spawn_tree) {
 					// Match Rust's explicit oak fallback when no regional tree types
@@ -562,12 +587,13 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 					const TreeType tree_type =
 							trees_ok_to_generate.empty()
 									? TreeType::Oak
-									: trees_ok_to_generate[rng.uniform(
+									: trees_ok_to_generate[tree_rng.uniform(
 											  static_cast<std::uint32_t>(
 													  trees_ok_to_generate.size()))];
-					Tree::create_of_type(editor, {x, 1, z}, tree_type,
-							&building_footprints, &bridge_surface, false, std::nullopt,
-							leaf_type_tagged);
+					if (roots || per_cell_woods)
+						Tree::create_of_type(editor, {x, 1, z}, tree_type,
+								&building_footprints, &bridge_surface, false,
+								std::nullopt, leaf_type_tagged);
 				} else if (random_choice == 1) {
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Forest);
@@ -630,9 +656,10 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 										? TreeType::Mangrove
 										: (rng.random_bool(.6) ? TreeType::Willow
 															   : TreeType::Mangrove);
-						Tree::create_of_type(editor, {x, 1, z}, type,
-								&building_footprints, &bridge_surface, false,
-								std::nullopt, true);
+						if (roots)
+							Tree::create_of_type(editor, {x, 1, z}, type,
+									&building_footprints, &bridge_surface, false,
+									std::nullopt, true);
 					} else if (r < 15)
 						place_grass_or_tall(editor, rng, x, z);
 				} else if (wetland_type == "bog") {
@@ -685,7 +712,8 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					} else if (vegetation_chance < 25) {
 						// 5% chance for small shrubs
-						bush::place(editor, x, z, bush::Kind::Low);
+						if (roots)
+							bush::place(editor, x, z, bush::Kind::Low);
 					}
 				}
 			} else if (natural_type == "shrubbery") {
@@ -747,8 +775,9 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				int hill_chance = static_cast<int>(rng.uniform(1000));
 				if (hill_chance == 0 && editor.land_cover_backs_trees(x, z)) {
 					// 0.1% chance for rare trees
-					Tree::create(
-							editor, {x, 1, z}, &building_footprints, &bridge_surface);
+					if (roots)
+						Tree::create(
+								editor, {x, 1, z}, &building_footprints, &bridge_surface);
 				} else if (hill_chance < 50) {
 					// 5% chance for flowers
 					ground_decoration::place_scattered_flower(

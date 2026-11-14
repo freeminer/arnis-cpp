@@ -18,6 +18,7 @@ struct ProcessedWay;
 class FloodFillCache;
 class CoordinateBitmap;
 struct Args;
+enum class WaterDetail;
 namespace world_editor
 {
 struct WorldEditor;
@@ -48,6 +49,13 @@ bool is_carriageway(const std::string &highway_type);
 std::optional<std::string> surface_highway_type(const ProcessedWay &way);
 bool tunnel_renders_at_surface(
 		const ProcessedWay &way, const world_editor::WorldEditor *editor, double scale);
+CoordinateBitmap collect_road_surface_coords(
+		const std::vector<ProcessedElement> &elements,
+		const world_editor::WorldEditor &editor, const ::XZBBox &xzbbox, double scale,
+		WaterDetail water_detail);
+CoordinateBitmap collect_road_surface_coords(
+		const std::vector<ProcessedElement> &elements,
+		const world_editor::WorldEditor &editor, const ::XZBBox &xzbbox, double scale);
 
 /// Canonical terrain-following surface profile shared by road and bridge ramps.
 std::vector<int> road_profile(const world_editor::WorldEditor &editor,

@@ -1,4 +1,5 @@
 #include "water_depth.h"
+#include "water_detail.h"
 
 #include <algorithm>
 #include <array>
@@ -8,6 +9,8 @@
 #include <cstdint>
 #include <iostream>
 #include <limits>
+#include <mutex>
+#include <shared_mutex>
 #include <tuple>
 #include <unordered_map>
 #include <vector>
@@ -21,6 +24,17 @@
 
 namespace arnis::water_depth
 {
+namespace
+{
+std::shared_mutex crossing_carve_mutex;
+water_detail::CarveDepth crossing_carve;
+}
+
+void set_crossing_carve(water_detail::CarveDepth carve)
+{
+	std::unique_lock lock(crossing_carve_mutex);
+	crossing_carve = carve;
+}
 
 const std::array<Block, 4> &bore_shell()
 {
@@ -98,7 +112,6 @@ namespace
 
 constexpr std::uint16_t SHOAL_DT_UNITS = 9;
 constexpr std::uint8_t DT_MAX = std::numeric_limits<std::uint8_t>::max();
-constexpr int MAX_WATER_DEPTH = 6;
 constexpr std::size_t MAX_WATER_FIELD_CELLS = 1'000'000'000ULL;
 constexpr std::size_t FRONTIER_KEEP = 1U << 16;
 
@@ -144,7 +157,8 @@ int polygon_local_max(std::uint16_t component_max_units)
 	return 6;
 }
 
-int depth_from_dt(double dt_eff, std::uint16_t component_max_units)
+int depth_from_dt(
+		double dt_eff, std::uint16_t component_max_units, bool round_depth = false)
 {
 	if (dt_eff < static_cast<double>(SHOAL_DT_UNITS))
 		return 0;
@@ -154,19 +168,23 @@ int depth_from_dt(double dt_eff, std::uint16_t component_max_units)
 						: component_max_units < 45 ? 12.
 						: component_max_units < 75 ? 20.
 												   : 35.;
+	const double depth = local_max * std::sqrt(std::clamp(dist_blocks / span, 0., 1.));
 	return std::clamp(
-			static_cast<int>(std::floor(
-					local_max * std::sqrt(std::clamp(dist_blocks / span, 0., 1.)))),
-			0, local_max);
+			static_cast<int>(round_depth ? std::round(depth) : std::floor(depth)), 0,
+			local_max);
 }
 
-int ocean_depth_for_cell(
-		int x, int z, std::uint16_t dt_units, std::uint16_t component_max_units)
+int ocean_depth_for_cell(int x, int z, std::uint16_t dt_units,
+		std::uint16_t component_max_units, WaterDetail detail = WaterDetail::Default,
+		double scale = 1.0)
 {
 	if (dt_units == 0)
 		return 0;
+	if (water_detail::uses_bowl(detail, scale))
+		return water_detail::bowl_depth(x, z, dt_units, component_max_units, scale);
 	const double wobble = (value_noise_01(x, z, 12) - 0.5) * 4.0;
-	return depth_from_dt(static_cast<double>(dt_units) + wobble, component_max_units);
+	return depth_from_dt(static_cast<double>(dt_units) + wobble, component_max_units,
+			water_detail::rounds_depth(detail));
 }
 
 bool bridge_adjacent(const RoadMaskBitmap &road_mask, int x, int z)
@@ -179,6 +197,20 @@ bool bridge_adjacent(const RoadMaskBitmap &road_mask, int x, int z)
 				return true;
 		}
 	}
+	return false;
+}
+
+bool at_bore_impl(
+		const BigWaterField &field, const RoadMaskBitmap &footprint, int x, int z)
+{
+	if (footprint.contains(x, z))
+		return true;
+	if (!field.deeper_than_crust() || footprint.is_empty())
+		return false;
+	for (int dz = -1; dz <= 1; ++dz)
+		for (int dx = -1; dx <= 1; ++dx)
+			if (footprint.contains(x + dx, z + dz))
+				return true;
 	return false;
 }
 
@@ -365,6 +397,28 @@ void place_underwater_vegetation(
 	}
 }
 
+void place_river_grass(WorldEditor &editor, int x, int z, int water_y, int bed_y)
+{
+	const double meadow = ground_generation::ground_noise(x, z, 12, 0x5256'0010);
+	if (meadow < .72 || land_cover::coord_hash(x + 17, z + 31) % 10 >= 5)
+		return;
+	const int y = bed_y + 1;
+	if (y + 1 < water_y && land_cover::coord_hash(x + 211, z + 73) % 100 < 35) {
+		editor.set_block_absolute(TALL_SEAGRASS_BOTTOM, x, y, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
+		editor.set_block_absolute(TALL_SEAGRASS_TOP, x, y + 1, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
+	} else if (y < water_y) {
+		editor.set_block_absolute(SEAGRASS, x, y, z, std::nullopt,
+				std::optional<std::vector<Block>>({AIR}));
+	}
+}
+
+}
+
+bool at_bore(const BigWaterField &field, const RoadMaskBitmap &footprint, int x, int z)
+{
+	return at_bore_impl(field, footprint, x, z);
 }
 
 void clear_tree_within(WorldEditor &editor, int x, int y, int z,
@@ -409,6 +463,13 @@ void clear_tree(WorldEditor &editor, int x, int y, int z)
 
 int BigWaterField::depth_at(int x, int z) const
 {
+	if (const auto river = river_.depth_override(x, z))
+		return *river;
+	return legacy_depth_at(x, z);
+}
+
+int BigWaterField::legacy_depth_at(int x, int z) const
+{
 	const auto lx = static_cast<long long>(x) - static_cast<long long>(min_x_);
 	const auto lz = static_cast<long long>(z) - static_cast<long long>(min_z_);
 	if (lx < 0 || lz < 0 || static_cast<std::size_t>(lx) >= width_ ||
@@ -420,7 +481,13 @@ int BigWaterField::depth_at(int x, int z) const
 
 bool BigWaterField::reaches(int x, int z, int radius) const
 {
-	if (empty() || radius < 0)
+	if (radius < 0)
+		return false;
+	if (river_.has_bounds() && x + radius >= river_.min_x() &&
+			x - radius <= river_.max_x() && z + radius >= river_.min_z() &&
+			z - radius <= river_.max_z())
+		return true;
+	if (depth_.empty() || width_ == 0 || height_ == 0)
 		return false;
 	const auto px = static_cast<std::int64_t>(x);
 	const auto pz = static_cast<std::int64_t>(z);
@@ -455,7 +522,7 @@ int BigWaterField::body_max_7x7(int x, int z) const
 	int maximum = 0;
 	for (int dz = -3; dz <= 3; ++dz)
 		for (int dx = -3; dx <= 3; ++dx) {
-			maximum = std::max(maximum, depth_at(x + dx, z + dz));
+			maximum = std::max(maximum, legacy_depth_at(x + dx, z + dz));
 			if (maximum >= MAX_WATER_DEPTH)
 				return maximum;
 		}
@@ -568,6 +635,11 @@ std::vector<BoreCrossing> bore_crossings(
 		for (const auto k : members)
 			lowest[k] = low;
 	}
+	water_detail::CarveDepth carve;
+	{
+		std::shared_lock lock(crossing_carve_mutex);
+		carve = crossing_carve;
+	}
 	std::vector<BoreCrossing> result;
 	result.reserve(cells.size());
 	for (std::size_t k = 0; k < cells.size(); ++k) {
@@ -581,12 +653,19 @@ std::vector<BoreCrossing> bore_crossings(
 		for (const std::uint16_t tier : {std::uint16_t{0}, std::uint16_t{21},
 					 std::uint16_t{45}, std::uint16_t{75}})
 			depth = std::max(depth, depth_from_dt(dt_eff, tier));
+		depth = carve.crossing(depth);
 		result.push_back({depth, lowest[k]});
 	}
 	return result;
 }
 
 BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
+{
+	return compute_big_water_field(editor, xzbbox, WaterDetail::Default, 1.0);
+}
+
+BigWaterField compute_big_water_field(
+		WorldEditor &editor, const XZBBox &xzbbox, WaterDetail detail, double scale)
 {
 	// Rust parity: src/water_depth.rs::compute_big_water_field.
 	// Uses Ground::lc_water_block_bounds when the C++ adapter has a land-cover grid.
@@ -647,6 +726,7 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 	chamfer_3_4_dt(dt, sw, sh);
 
 	BigWaterField out;
+	out.deeper_than_crust_ = detail != WaterDetail::Default;
 	out.depth_.assign((total + 1) / 2, 0);
 	out.width_ = sw;
 	out.height_ = sh;
@@ -698,7 +778,7 @@ BigWaterField compute_big_water_field(WorldEditor &editor, const XZBBox &xzbbox)
 				const int x = smin_x + static_cast<int>(idx % sw);
 				const int z = smin_z + static_cast<int>(idx / sw);
 				const int depth = ocean_depth_for_cell(
-						x, z, static_cast<std::uint16_t>(dt[idx]), cm);
+						x, z, static_cast<std::uint16_t>(dt[idx]), cm, detail, scale);
 				nibble_set(out.depth_, idx, static_cast<std::uint8_t>(depth));
 				neighbors(idx, [&](std::size_t n) {
 					if (dt[n] != 0 && !bit_get(baked, n)) {
@@ -744,6 +824,9 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	assert(depth <= MAX_WATER_DEPTH && "water carve depth exceeds the max tier");
 	depth = std::clamp(depth, 0, MAX_WATER_DEPTH);
 	depth = std::min(depth, std::max(0, water_y - world_editor::min_y() - 2));
+	if (depth > 0 && bwf.deeper_than_crust() &&
+			editor.water_stands_over_neighbour(x, z, water_y))
+		depth = 0;
 	// Bridge piers are registered by the bridge pass before water carving.  Rust
 	// keeps the pier material all the way to the bed instead of replacing it
 	// with a water column.
@@ -760,11 +843,16 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	clear_stranded_vegetation(editor, x, z, water_y);
 
 	const int bed_y = water_y - depth - 1;
+	const bool is_river = bwf.is_river(x, z);
 	const bool near_bridge = depth >= 2 && bridge_adjacent(road_mask, x, z);
 
 	Block top_block = SAND;
 	Block under_block = SANDSTONE;
-	if (depth <= 1) {
+	if (is_river) {
+		const bool sandy = depth <= 1 &&
+						   editor.near_beach(x, z, std::max(4.0 * editor.scale(), 1.0));
+		std::tie(top_block, under_block) = river_bed::bed_blocks(x, z, depth, sandy);
+	} else if (depth <= 1) {
 		std::tie(top_block, under_block) = shallow_bed(editor, x, z);
 	} else if (depth >= 2 && near_bridge) {
 		top_block = (value_noise_01(x, z, 6) < 0.4 && depth <= 3) ? SAND : GRAVEL;
@@ -818,11 +906,13 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	if (fill_from <= fill_to)
 		editor.fill_column_absolute(STONE, x, z, fill_from, fill_to, true);
 
-	const int bump = depth >= 2 && !near_bridge
+	const int bump = depth >= 2 && !near_bridge && !is_river
 							 ? place_underwater_dunes(editor, x, z, water_y, bed_y,
 									   dune_amp(bwf.body_max_7x7(x, z), depth), top_block)
 							 : 0;
-	if (depth >= 3 && !near_bridge)
+	if (is_river && depth >= 2 && !near_bridge)
+		place_river_grass(editor, x, z, water_y, bed_y);
+	else if (depth >= 3 && !near_bridge)
 		place_underwater_vegetation(editor, x, z, water_y, bed_y + bump, depth);
 }
 
@@ -843,36 +933,8 @@ void carve_lc_water_pass(WorldEditor &editor, const BigWaterField &bwf,
 		const RoadMaskBitmap &road_mask, const RoadMaskBitmap &tunnel_footprint,
 		const bridges::BridgeSurfaceMap *bridge_surface)
 {
-	if (bwf.empty())
-		return;
-	for (int z = bwf.min_z(); z <= bwf.max_z(); ++z) {
-		for (int x = bwf.min_x(); x <= bwf.max_x(); ++x) {
-			if (!editor.is_lc_water(x, z))
-				continue;
-			int water_y = editor.get_water_level(x, z);
-			if (editor.get_ground_level(x, z) > water_y) {
-				// Rust keeps a classified interior-water cell at its own terrain
-				// level when the shoreline snap falls below a local step.  Only
-				// banks are skipped; otherwise deep water develops dry seams.
-				if (!editor.get_ground() || !editor.get_ground()->is_interior_water(
-													editor.ground_point(x, z)))
-					continue;
-				water_y = editor.get_ground_level(x, z);
-			}
-			if (road_mask.contains(x, z) &&
-					(!bridge_surface || !bridge_surface->deck_clears(x, z, water_y) ||
-							bridge_surface->over_grade_way(x, z)))
-				continue;
-			int depth = carve_depth(bwf.depth_at(x, z), water_y);
-			if (tunnel_footprint.contains(x, z)) {
-				const auto fits = depth_over_bore(editor, x, z, water_y, depth);
-				if (!fits)
-					continue;
-				depth = *fits;
-			}
-			carve_water_column(editor, x, z, water_y, depth, road_mask, bwf);
-		}
-	}
+	carve_lc_water_region(editor, bwf, road_mask, tunnel_footprint, bwf.min_x(),
+			bwf.max_x(), bwf.min_z(), bwf.max_z(), bridge_surface);
 }
 
 void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
@@ -897,9 +959,27 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 		return;
 	for (int z = z0; z <= z1; ++z)
 		for (int x = x0; x <= x1; ++x) {
-			if (!editor.is_lc_water(x, z))
+			const bool lc_water = editor.is_lc_water(x, z);
+			const bool river = bwf.is_river(x, z);
+			if (!lc_water && !river)
 				continue;
 			int water_y = editor.get_water_level(x, z);
+			if (river && !lc_water && editor.get_ground()) {
+				const int ground_y = editor.get_ground_level(x, z);
+				const int floor = std::min(
+						editor.get_ground()->water_level(editor.ground_point(x, z)),
+						ground_y);
+				bool found = false;
+				for (int y = ground_y + 20; y >= floor; --y) {
+					if (editor.get_block_absolute(x, y, z) == WATER) {
+						water_y = y;
+						found = true;
+						break;
+					}
+				}
+				if (!found)
+					continue;
+			}
 			if (editor.get_ground_level(x, z) > water_y) {
 				if (!editor.get_ground() || !editor.get_ground()->is_interior_water(
 													editor.ground_point(x, z)))
@@ -911,7 +991,7 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 							bridge_surface->over_grade_way(x, z)))
 				continue;
 			int depth = carve_depth(bwf.depth_at(x, z), water_y);
-			if (tunnel_footprint.contains(x, z)) {
+			if (at_bore(bwf, tunnel_footprint, x, z)) {
 				const auto fits = depth_over_bore(editor, x, z, water_y, depth);
 				if (!fits)
 					continue;
@@ -919,6 +999,50 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 			}
 			carve_water_column(editor, x, z, water_y, depth, road_mask, bwf);
 		}
+
+	// Match Rust's `deepen_shallow_rivers`: closed river ways can be rasterized
+	// as a one-block sheet over otherwise dry land, so they are not visited by
+	// the land-cover-water loop above. Once the regular carve has completed,
+	// find those existing water columns and deepen them to the river field.
+	// This also handles columns over completed bores, while retaining the bore
+	// shell and any raised bridge deck.
+	if (!editor.get_ground())
+		return;
+	constexpr int SURFACE_REACH = 20;
+	const std::vector<Block> water{WATER};
+	for (int z = min_z; z <= max_z; ++z) {
+		for (int x = min_x; x <= max_x; ++x) {
+			if (!bwf.is_river(x, z) || editor.is_lc_water(x, z))
+				continue;
+			const auto point = editor.ground_point(x, z);
+			const int ground_y = editor.get_ground_level(x, z);
+			const int lowest =
+					std::min(editor.get_ground()->water_level(point), ground_y);
+			int water_y = ground_y + SURFACE_REACH;
+			for (; water_y >= lowest; --water_y) {
+				if (editor.check_for_block_absolute(x, water_y, z, water, std::nullopt))
+					break;
+			}
+			if (water_y < lowest)
+				continue;
+			if (road_mask.contains(x, z) &&
+					(!bridge_surface || !bridge_surface->deck_clears(x, z, water_y) ||
+							bridge_surface->over_grade_way(x, z)))
+				continue;
+
+			const int depth = carve_depth(bwf.depth_at(x, z), water_y);
+			if (at_bore(bwf, tunnel_footprint, x, z)) {
+				const auto fits = depth_over_bore(editor, x, z, water_y, depth);
+				if (fits)
+					carve_water_column(editor, x, z, water_y, *fits, road_mask, bwf);
+				continue;
+			}
+			// If an earlier pass already dug the bed, keep its subsequent fill;
+			// only untouched one-block sheets need this post-pass.
+			if (!editor.check_for_block_absolute(x, water_y - 1, z, water, std::nullopt))
+				carve_water_column(editor, x, z, water_y, depth, road_mask, bwf);
+		}
+	}
 }
 
 }

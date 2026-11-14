@@ -1,4 +1,5 @@
 #include "caves_ores.h"
+#include "caves_theme.h"
 
 #include "block_definitions.h"
 #include "caves_rng.h"
@@ -194,7 +195,7 @@ int floor_div_16(int value)
 } // namespace
 
 void place_ores_region(world_editor::WorldEditor &editor, const CaveRect &region,
-		std::int64_t seed, int floor_y)
+		std::int64_t seed, int floor_y, bool more)
 {
 	if (region.min_x > region.max_x || region.min_z > region.max_z)
 		return;
@@ -202,7 +203,7 @@ void place_ores_region(world_editor::WorldEditor &editor, const CaveRect &region
 	const int cx1 = floor_div_16(region.max_x) + 1;
 	const int cz0 = floor_div_16(region.min_z) - 1;
 	const int cz1 = floor_div_16(region.max_z) + 1;
-	const int shift = floor_y - (-64);
+	const int shift = cave_y_shift(floor_y);
 	for (int cx = cx0; cx <= cx1; ++cx)
 		for (int cz = cz0; cz <= cz1; ++cz) {
 			auto random = chunk_rng(seed, cx, cz);
@@ -210,6 +211,8 @@ void place_ores_region(world_editor::WorldEditor &editor, const CaveRect &region
 				int attempts = ore.count;
 				if (ore.count_kind == CountKind::Rarity)
 					attempts = random.next_int(ore.count) == 0 ? 1 : 0;
+				if (more && ore.stone != ore.deep)
+					attempts *= 2;
 				for (int attempt = 0; attempt < attempts; ++attempt) {
 					const int x = cx * 16 + random.next_int(16);
 					const int z = cz * 16 + random.next_int(16);

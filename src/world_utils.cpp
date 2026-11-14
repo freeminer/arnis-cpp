@@ -138,7 +138,7 @@ bool check_run_size(const Args &args, const geographic::LLBBox &bbox, WorldForma
 	};
 	if (args.mapillary_probe)
 		return true;
-	if (!args.skip_osm() && !args.file && !args.no_tile_archive &&
+	if (!args.skip_osm() && !args.file && !args.osm_pbf && !args.no_tile_archive &&
 			!args.osm_tiles_url.empty()) {
 		std::string detail;
 		if (!osm_tiles::check_size(bbox, args.scale, &detail))

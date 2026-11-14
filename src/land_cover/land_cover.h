@@ -193,6 +193,8 @@ bool reconstruct_water_shoreline(
 		LandCoverData &data, const std::vector<EsaRasterTile> &source_tiles);
 
 uint64_t coord_hash(int32_t x, int32_t z);
+// Seed-independent coordinate hash for geographic masks and noise fields.
+uint64_t geo_coord_hash(int32_t x, int32_t z);
 
 // First non-water, non-nodata class found on successive Chebyshev rings,
 // matching Rust's nearest_land_class helper.

@@ -14,6 +14,9 @@ std::span<const Block> get_blocks_for_surface_way(
 		const ProcessedWay &way, std::span<const Block> default_blocks);
 std::span<const Block> cycleway_palette(const tags_t &tags);
 std::span<const Block> cycleway_palette(const ProcessedWay &way);
+void set_patches(bool enabled);
+bool patches();
+Block patch_surface(int x, int z, std::span<const Block> block_types);
 Block semirandom_surface(int x, int z, std::span<const Block> block_types);
 
 }

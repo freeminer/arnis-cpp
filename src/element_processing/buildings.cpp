@@ -36,12 +36,14 @@
 #include "../mapillary/facades.h"
 #include "building_facade.h"
 #include "rooftops.h"
+#include "surfaces.h"
 #include "../building_facades/registry.h"
 #include "signage.h"
 #include "../decals/pictograms.h"
 #include "../decals/font.h"
 #include "historic.h"
 #include "parking_garage.h"
+#include "greenhouses.h"
 #include "bridge_towers.h"
 #include "subprocessor/buildings_interior.h"
 #include "subprocessor/interior/uses.h"
@@ -8079,8 +8081,28 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			osm_parser::building_arch_era_dated(element.tags, start_year));
 	if (era == ArchEra::Unknown && element.tags.contains("building:part"))
 		era = static_cast<ArchEra>(osm_parser::arch_era_from_hint(group_hint));
-	const auto climate = editor->get_ground() ? editor->get_ground()->climate()
-											  : biome::Climate::Temperate;
+	int climate_min_x = INT_MAX, climate_max_x = INT_MIN;
+	int climate_min_z = INT_MAX, climate_max_z = INT_MIN;
+	for (const auto &node : element.nodes) {
+		climate_min_x = std::min(climate_min_x, node.x);
+		climate_max_x = std::max(climate_max_x, node.x);
+		climate_min_z = std::min(climate_min_z, node.z);
+		climate_max_z = std::max(climate_max_z, node.z);
+	}
+	for (const auto &[x, z] : sibling_cells) {
+		climate_min_x = std::min(climate_min_x, x);
+		climate_max_x = std::max(climate_max_x, x);
+		climate_min_z = std::min(climate_min_z, z);
+		climate_max_z = std::max(climate_max_z, z);
+	}
+	const int climate_x = climate_min_x == INT_MAX
+								  ? 0
+								  : climate_min_x + (climate_max_x - climate_min_x) / 2;
+	const int climate_z = climate_min_z == INT_MAX
+								  ? 0
+								  : climate_min_z + (climate_max_z - climate_min_z) / 2;
+	const auto climate =
+			editor->local_climate(climate_x, climate_z).value_or(editor->climate());
 	const auto [wall_lat, wall_lon] = editor->geo_anchor();
 	const auto wall_region = building_style::material_region_at(wall_lat, wall_lon);
 	std::size_t party_length = 0;
@@ -12400,6 +12422,14 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	if (roof_generated && explicit_roof_pass && category == BuildingCategory::Hospital)
 		generate_hospital_wall_cross(*editor, element, category, start_y_offset,
 				building_height, abs_terrain_offset);
+	if (greenhouses::is_greenhouse(element.tags)) {
+		const bool along_x = preferred_ridge_along_x.value_or(true);
+		if (greenhouses::wants_venlo_roof(element.tags) && roof_generated)
+			greenhouses::venlo_roof(*editor, roof_area, along_x,
+					start_y_offset + building_height + abs_terrain_offset + 1);
+		greenhouses::plant_rows(*editor, cached_floor_area, along_x,
+				start_y_offset + abs_terrain_offset, element.id);
+	}
 	mapillary::facades::collect_displays(*editor, element.id, start_y_offset,
 			abs_terrain_offset, building_height, args.facade_px);
 	return signage_anchor;
@@ -12560,20 +12590,37 @@ inline void generate_roof(WorldEditor &editor, ProcessedWay const &element,
 	const bool sheet_top_enabled = sheet_top_candidate && !tagged_roof_block;
 	// Match Rust precedence: OSM tag, category preset, regional pitched style.
 	const auto selected_roof_block = [&]() {
+		Block selected;
 		if (tagged_roof_block) {
 			if (!is_glass_wall_block(*tagged_roof_block))
-				return *tagged_roof_block;
-			if (curtain_glass)
-				return *curtain_glass;
-			if (is_glass_wall_block(wall_block))
-				return wall_block;
-			return *tagged_roof_block;
+				selected = *tagged_roof_block;
+			else if (curtain_glass)
+				selected = *curtain_glass;
+			else if (is_glass_wall_block(wall_block))
+				selected = wall_block;
+			else
+				selected = *tagged_roof_block;
+		} else if (roof_block_override) {
+			selected = *roof_block_override;
+		} else if (regional_pitched_roof) {
+			selected = *regional_pitched_roof;
+		} else {
+			selected = default_roof_surface_block(wall_block, style_seed);
 		}
-		if (roof_block_override)
-			return *roof_block_override;
-		if (regional_pitched_roof)
-			return *regional_pitched_roof;
-		return default_roof_surface_block(wall_block, style_seed);
+		if (!surfaces::patches() || tagged_roof_block)
+			return selected;
+		const bool stair_built =
+				roof_type == RoofType::Gabled || roof_type == RoofType::Hipped ||
+				roof_type == RoofType::HalfHipped || roof_type == RoofType::Gambrel ||
+				roof_type == RoofType::Mansard || roof_type == RoofType::Skillion ||
+				roof_type == RoofType::Pyramidal;
+		if (!stair_built)
+			return selected;
+		if (selected == RED_TERRACOTTA || selected == ORANGE_TERRACOTTA)
+			return BRICK;
+		if (selected == TERRACOTTA)
+			return GRANITE;
+		return selected;
 	};
 	RoofPatchCache tone_patch_cache;
 	RoofPatchCache sheet_patch_cache;

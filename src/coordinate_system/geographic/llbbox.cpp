@@ -1,7 +1,9 @@
 #include "llbbox.h"
+#include <array>
+#include <charconv>
 #include <cmath>
-#include <sstream>
 #include <stdexcept>
+#include <string>
 namespace arnis::geographic
 {
 LLBBox::LLBBox(double a, double b, double c, double d) : min_(a, b), max_(c, d)
@@ -11,15 +13,36 @@ LLBBox::LLBBox(double a, double b, double c, double d) : min_(a, b), max_(c, d)
 }
 LLBBox LLBBox::from_str(const std::string &s)
 {
-	std::string t = s;
-	for (char &c : t)
-		if (c == ',')
-			c = ' ';
-	std::stringstream q(t);
-	double a, b, c, d;
-	if (!(q >> a >> b >> c >> d))
-		throw std::invalid_argument("invalid bbox string");
-	return LLBBox(a, b, c, d);
+	std::array<double, 4> values{};
+	std::size_t count = 0;
+	std::size_t begin = 0;
+	const auto parse_field = [&](std::size_t end) {
+		if (end == begin)
+			return;
+		if (count == values.size())
+			throw std::invalid_argument("Invalid LLBBox: expected 4 values, got more");
+		const std::string field = s.substr(begin, end - begin);
+		double value = 0.0;
+		const auto [parsed_end, error] =
+				std::from_chars(field.data(), field.data() + field.size(), value);
+		if (error != std::errc{} || parsed_end != field.data() + field.size())
+			throw std::invalid_argument(
+					"Invalid LLBBox: '" + field + "' is not a number");
+		if (!std::isfinite(value))
+			throw std::invalid_argument(
+					"Invalid LLBBox: '" + field + "' is not a finite number");
+		values[count++] = value;
+	};
+	for (std::size_t i = 0; i <= s.size(); ++i) {
+		if (i != s.size() && s[i] != ',' && s[i] != ' ')
+			continue;
+		parse_field(i);
+		begin = i + 1;
+	}
+	if (count != values.size())
+		throw std::invalid_argument(
+				"Invalid LLBBox: expected 4 values, got " + std::to_string(count));
+	return LLBBox(values[0], values[1], values[2], values[3]);
 }
 bool LLBBox::contains(const LLPoint &p) const
 {

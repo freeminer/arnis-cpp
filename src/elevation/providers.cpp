@@ -759,7 +759,7 @@ bool download_tile(const std::string &url, const std::filesystem::path &file,
 	tmp += ".tmp" + std::to_string(ARNIS_ELEVATION_GETPID()) + "-" +
 		   std::to_string(temp_counter.fetch_add(1, std::memory_order_relaxed));
 	std::error_code ec;
-	[[maybe_unused]] auto permit = arnis::net::request_permit();
+	[[maybe_unused]] auto permit = arnis::net::request_permit("elevation tile");
 	if (!http_to_file(url, tmp.string())) {
 		std::filesystem::remove(tmp, ec);
 		return false;

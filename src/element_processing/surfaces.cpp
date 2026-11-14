@@ -1,15 +1,32 @@
 #include "surfaces.h"
 
 #include "../unicode_text.h"
+#include "../ground_generation.h"
 
 #include <cstdint>
 #include <algorithm>
 #include <array>
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 
 namespace arnis::surfaces
 {
+namespace
+{
+std::atomic<bool> g_patches{false};
+constexpr std::uint32_t PATCH_SALT = 0x5A7FACE5u;
+} // namespace
+
+void set_patches(bool enabled)
+{
+	g_patches.store(enabled, std::memory_order_relaxed);
+}
+
+bool patches()
+{
+	return g_patches.load(std::memory_order_relaxed);
+}
 
 std::span<const Block> get_blocks_for_surface(const std::string &surface_type)
 {
@@ -137,12 +154,24 @@ Block semirandom_surface(int x, int z, std::span<const Block> block_types)
 {
 	if (block_types.empty())
 		return block_definitions::STONE;
+	if (block_types.size() > 1 && patches())
+		return patch_surface(x, z, block_types);
 	uint32_t h = static_cast<uint32_t>(x) * 0x9E3779B9u ^
 				 static_cast<uint32_t>(z) * 0x517CC1B7u;
 	h ^= h >> 16;
 	h *= 0x45D9F3Bu;
 	h ^= h >> 16;
 	return block_types[h % block_types.size()];
+}
+
+Block patch_surface(int x, int z, std::span<const Block> block_types)
+{
+	if (block_types.empty())
+		return block_definitions::STONE;
+	const double noise = ground_generation::ground_noise(x, z, 5, PATCH_SALT);
+	const auto index = std::min(
+			static_cast<std::size_t>(noise * block_types.size()), block_types.size() - 1);
+	return block_types[index];
 }
 
 }

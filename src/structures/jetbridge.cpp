@@ -60,7 +60,7 @@ bool claims(const ProcessedWay &way)
 void generate_jet_bridge(WorldEditor &editor, const ProcessedWay &way,
 		const BuildingFootprintBitmap &building_footprints)
 {
-	if (!editor.place_schematics() || !claims(way))
+	if (!editor.place_prop(Prop::Jetbridge) || !claims(way))
 		return;
 	const auto *document = jetbridge_asset(editor);
 	if (!document)

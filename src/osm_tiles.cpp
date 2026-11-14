@@ -330,7 +330,7 @@ std::optional<std::vector<std::uint8_t>> http_range(const std::string &url,
 	curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 	curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 	curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-	[[maybe_unused]] auto permit = net::request_permit();
+	[[maybe_unused]] auto permit = net::request_permit("OSM tile");
 	const auto rc = curl_easy_perform(curl);
 	long status = 0;
 	curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &status);
@@ -854,7 +854,7 @@ std::optional<osm_parser::RawOsmDocument> fetch_data_from_tiles(
 		curl_easy_setopt(curl, CURLOPT_FOLLOWLOCATION, 1L);
 		curl_easy_setopt(curl, CURLOPT_TIMEOUT, 120L);
 		curl_easy_setopt(curl, CURLOPT_CONNECTTIMEOUT, 15L);
-		[[maybe_unused]] auto permit = net::request_permit();
+		[[maybe_unused]] auto permit = net::request_permit("OSM tile archive index");
 		const auto manifest_rc = curl_easy_perform(curl);
 		long manifest_status = 0;
 		curl_easy_getinfo(curl, CURLINFO_RESPONSE_CODE, &manifest_status);

@@ -4,14 +4,21 @@
 #include "block_definitions.h"
 #include "geo_grid.h"
 #include "ground_generation.h"
+#include "ecoregion.h"
+#include "coordinate_system/geographic/llbbox.h"
+#include <png.h>
+#include <nlohmann/json.hpp>
 #include <algorithm>
 #include <cmath>
 #include <filesystem>
 #include <fstream>
 #include <initializer_list>
+#include <array>
+#include <map>
 #include <utility>
 #include <memory>
 #include <mutex>
+#include <vector>
 namespace arnis::climate
 {
 namespace
@@ -29,33 +36,49 @@ const std::vector<std::uint8_t> &koppen_grid()
 	return grid;
 }
 
+const std::optional<geo_grid::TiledGrid> &koppen_tiled_grid()
+{
+	static const auto grid = geo_grid::TiledGrid::parse(koppen_grid());
+	return grid;
+}
+
+std::uint8_t koppen_value(std::pair<std::size_t, std::size_t> cell)
+{
+	const auto &grid = koppen_tiled_grid();
+	if (!grid)
+		return 0;
+	struct Tile
+	{
+		std::once_flag once;
+		std::optional<std::vector<std::uint8_t>> data;
+	};
+	static const auto tiles = [] {
+		std::vector<std::unique_ptr<Tile>> result;
+		const auto &parsed = koppen_tiled_grid();
+		if (parsed) {
+			result.reserve(parsed->tile_count());
+			for (std::size_t i = 0; i < parsed->tile_count(); ++i)
+				result.push_back(std::make_unique<Tile>());
+		}
+		return result;
+	}();
+	const auto index = grid->tile_of(cell);
+	if (index >= tiles.size())
+		return 0;
+	auto &tile = *tiles[index];
+	std::call_once(tile.once, [&] { tile.data = grid->decode(index); });
+	return tile.data ? static_cast<std::uint8_t>(
+							   grid->value(*tile.data, grid->index_in_tile(cell)))
+					 : 0;
+}
+
 std::uint8_t koppen_class(double latitude, double longitude)
 {
 	const auto &bytes = koppen_grid();
-	static const auto grid = geo_grid::TiledGrid::parse(bytes);
+	const auto &grid = koppen_tiled_grid();
 	if (grid) {
-		struct Tile
-		{
-			std::once_flag once;
-			std::optional<std::vector<std::uint8_t>> data;
-		};
-		static const auto tiles = [] {
-			std::vector<std::unique_ptr<Tile>> result;
-			result.reserve(grid->tile_count());
-			for (std::size_t i = 0; i < grid->tile_count(); ++i)
-				result.push_back(std::make_unique<Tile>());
-			return result;
-		}();
 		const auto [col, row] = grid->position(latitude, longitude);
-		const auto cell = grid->cell(col, row);
-		const auto index = grid->tile_of(cell);
-		if (index >= tiles.size())
-			return 0;
-		auto &tile = *tiles[index];
-		std::call_once(tile.once, [&] { tile.data = grid->decode(index); });
-		return tile.data ? static_cast<std::uint8_t>(
-								   grid->value(*tile.data, grid->index_in_tile(cell)))
-						 : 0;
+		return koppen_value(grid->cell(col, row));
 	}
 	// Keep accepting older raw assets supplied by library users.
 	if (bytes.size() != KOPPEN_COLS * KOPPEN_ROWS)
@@ -202,10 +225,153 @@ arnis::biome::Climate classify(double latitude, double longitude)
 		return arnis::biome::Climate::Temperate;
 	return from_koppen_class(koppen_class(latitude, longitude));
 }
+double koppen_cell_degrees()
+{
+	const auto &grid = koppen_tiled_grid();
+	return grid && grid->cells_per_degree() > 0.0 ? 1.0 / grid->cells_per_degree() : 0.1;
+}
+
+std::optional<std::string> render_climate_map(const std::filesystem::path &prefix,
+		const geographic::LLBBox &bbox, std::string *error)
+{
+	constexpr std::uint32_t max_side = 512;
+	const double south = bbox.min().lat(), north = bbox.max().lat();
+	const double west = bbox.min().lng(), east = bbox.max().lng();
+	const double ground_width =
+			(east - west) * std::cos(((south + north) * 0.5) * M_PI / 180.0);
+	const double ground_height = north - south;
+	const double longest = std::max(ground_width, ground_height);
+	auto side = [longest](double length) -> std::uint32_t {
+		if (!(longest > 0.0) || !std::isfinite(longest) || !std::isfinite(length))
+			return 1;
+		return std::max<std::uint32_t>(
+				1, static_cast<std::uint32_t>(
+						   std::clamp(std::round(double(max_side) * length / longest),
+								   1.0, double(max_side))));
+	};
+	const std::uint32_t width = side(ground_width), height = side(ground_height);
+	auto color = [](arnis::biome::Climate climate) {
+		using Climate = arnis::biome::Climate;
+		switch (climate) {
+		case Climate::Temperate:
+			return std::pair{std::array<std::uint8_t, 3>{120, 180, 90}, "temperate"};
+		case Climate::TropicalSavanna:
+			return std::pair{
+					std::array<std::uint8_t, 3>{170, 190, 80}, "tropical_savanna"};
+		case Climate::HotDesert:
+			return std::pair{std::array<std::uint8_t, 3>{237, 201, 120}, "hot_desert"};
+		case Climate::HotSteppe:
+			return std::pair{std::array<std::uint8_t, 3>{214, 178, 110}, "hot_steppe"};
+		case Climate::ColdDesert:
+			return std::pair{std::array<std::uint8_t, 3>{200, 190, 160}, "cold_desert"};
+		case Climate::ColdSteppe:
+			return std::pair{std::array<std::uint8_t, 3>{190, 185, 140}, "cold_steppe"};
+		case Climate::DryContinental:
+			return std::pair{
+					std::array<std::uint8_t, 3>{200, 140, 80}, "dry_continental"};
+		case Climate::Boreal:
+			return std::pair{std::array<std::uint8_t, 3>{80, 150, 120}, "boreal"};
+		case Climate::Tundra:
+			return std::pair{std::array<std::uint8_t, 3>{170, 200, 205}, "tundra"};
+		case Climate::IceCap:
+			return std::pair{std::array<std::uint8_t, 3>{240, 248, 255}, "ice_cap"};
+		}
+		return std::pair{std::array<std::uint8_t, 3>{120, 180, 90}, "temperate"};
+	};
+	std::vector<std::uint8_t> pixels(std::size_t(width) * height * 3);
+	std::map<std::string, std::uint32_t> counts;
+	for (std::uint32_t y = 0; y < height; ++y) {
+		const double latitude = north - (double(y) + 0.5) / height * ground_height;
+		for (std::uint32_t x = 0; x < width; ++x) {
+			const double longitude = west + (double(x) + 0.5) / width * (east - west);
+			const auto [rgb, name] = color(classify_warped(latitude, longitude));
+			++counts[name];
+			const auto offset = (std::size_t(y) * width + x) * 3;
+			std::copy(rgb.begin(), rgb.end(), pixels.begin() + offset);
+		}
+	}
+	const auto path = std::filesystem::path(prefix.string() + ".png");
+	png_image image{};
+	image.version = PNG_IMAGE_VERSION;
+	image.width = width;
+	image.height = height;
+	image.format = PNG_FORMAT_RGB;
+	if (!png_image_write_to_file(
+				&image, path.string().c_str(), 0, pixels.data(), 0, nullptr)) {
+		if (error)
+			*error = "write " + path.string() + ": " + image.message;
+		return std::nullopt;
+	}
+	const double total = double(width) * height;
+	nlohmann::json shares = nlohmann::json::object();
+	for (const auto &[name, count] : counts) {
+		const double percent = std::round(double(count) * 1000.0 / total) / 10.0;
+		shares[name] = percent;
+	}
+	return nlohmann::json{{"shares", std::move(shares)}, {"_file", path.string()},
+			{"_size", {width, height}}}
+			.dump();
+}
+
+arnis::biome::Climate classify_warped(double latitude, double longitude)
+{
+	const auto &grid = koppen_tiled_grid();
+	if (!grid || !std::isfinite(latitude) || !std::isfinite(longitude))
+		return arnis::biome::Climate::Temperate;
+	return from_koppen_class(static_cast<unsigned char>(
+			koppen_value(ecoregion::warped_cell(*grid, latitude, longitude))));
+}
 arnis::biome::Climate classify_bbox(double min_latitude, double min_longitude,
 		double max_latitude, double max_longitude)
 {
 	return classify(
 			(min_latitude + max_latitude) * .5, (min_longitude + max_longitude) * .5);
+}
+
+ClimateField::ClimateField(const GeoFunction &geo, std::pair<int, int> alignment,
+		std::size_t world_width, std::size_t world_height) : geo_(geo)
+{
+	const double lon_per_block = std::abs(geo_(1.0, 0.0).second - geo_(0.0, 0.0).second);
+	const double step = koppen_cell_degrees() / std::max(lon_per_block, 1e-12) / 64.0;
+	const int bounded_step = std::clamp(static_cast<int>(step), 4, 32);
+	cell_ = 1;
+	while (cell_ <= bounded_step / 2)
+		cell_ *= 2;
+	const auto rem = [](int value, int divisor) {
+		const int r = value % divisor;
+		return r < 0 ? r + divisor : r;
+	};
+	origin_x_ = -rem(alignment.first, cell_);
+	origin_z_ = -rem(alignment.second, cell_);
+	const auto span = [&](std::size_t len, int from) {
+		const auto numerator = static_cast<std::int64_t>(len) - from + cell_ - 1;
+		return static_cast<std::size_t>(std::max<std::int64_t>(1, numerator / cell_));
+	};
+	width_ = span(world_width, origin_x_);
+	height_ = span(world_height, origin_z_);
+	climates_.reserve(width_ * height_);
+	const double half = cell_ / 2.0;
+	for (std::size_t i = 0; i < width_ * height_; ++i) {
+		const double gx = origin_x_ + static_cast<double>(i % width_) * cell_ + half;
+		const double gz = origin_z_ + static_cast<double>(i / width_) * cell_ + half;
+		const auto [lat, lon] = geo_(gx, gz);
+		climates_.push_back(classify_warped(lat, lon));
+	}
+}
+
+arnis::biome::Climate ClimateField::climate(int x, int z) const
+{
+	const auto index = [&](int value, int origin, std::size_t len) {
+		const int delta = value - origin;
+		const int quotient = delta >= 0 ? delta / cell_ : (delta - cell_ + 1) / cell_;
+		return static_cast<std::size_t>(
+				std::clamp(quotient, 0, static_cast<int>(len) - 1));
+	};
+	return climates_[index(z, origin_z_, height_) * width_ + index(x, origin_x_, width_)];
+}
+
+double ClimateField::latitude(int x, int z) const
+{
+	return geo_(x + 0.5, z + 0.5).first;
 }
 }

@@ -5,7 +5,7 @@ namespace arnis::structures
 {
 void place_starship(WorldEditor &e, const ProcessedWay &w)
 {
-	if (!e.place_schematics() || w.nodes.empty())
+	if (!e.place_prop(Prop::Starship) || w.nodes.empty())
 		return;
 	long long sx = 0, sz = 0;
 	for (auto &n : w.nodes) {

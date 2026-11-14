@@ -69,6 +69,8 @@ struct GenerationOptions
 	// with world_utils::unique_world_folder_name when allocating output paths.
 	std::optional<std::string> world_name;
 	bool map_preview = false, map_item = true, bake_lighting = false, use_3d = true;
+	std::optional<structures::PropSet> props;
+	std::optional<double> props_min_scale;
 	// Rust's provider selection is carried with generation options so callers
 	// can choose PMTiles, GeoParquet, or the automatic policy explicitly.
 	OvertureSource overture_source = OvertureSource::Auto;
@@ -136,6 +138,8 @@ inline bool valid_generation_options(const GenerationOptions &o, const Args &bas
 	Args adapted = base_args;
 	adapted.ground_level = o.ground_level;
 	adapted.scale = o.projection_scale;
+	adapted.props = o.props;
+	adapted.props_min_scale = o.props_min_scale;
 	adapted.bedrock = is_bedrock(o.format);
 	adapted.luanti = is_luanti(o.format);
 	if (!adapted.valid())
@@ -155,7 +159,11 @@ inline void apply_generation_options(WorldEditor &editor, const GenerationOption
 	editor.set_projection_info(o.projection_name, o.projection_scale);
 	editor.set_geographic_bounds(o.min_lat, o.max_lat, o.min_lon, o.max_lon);
 	editor.set_bake_lighting(o.bake_lighting);
-	editor.set_place_schematics(o.use_3d);
+	editor.set_place_schematics(true);
+	editor.set_props(o.props_min_scale && o.projection_scale < *o.props_min_scale
+							 ? structures::PropSet::none()
+							 : o.props.value_or(o.use_3d ? structures::PropSet::all()
+														 : structures::PropSet::none()));
 	editor.set_start_with_map(o.map_item);
 	editor.set_map_decals(is_java(o.format));
 }

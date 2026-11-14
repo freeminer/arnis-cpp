@@ -394,7 +394,8 @@ bool place(WorldEditor &editor, const Placement &placement, double scale,
 		double rotation_degrees)
 {
 	if (!placement.landmark || scale <= 0.0 || !std::isfinite(scale) ||
-			!std::isfinite(rotation_degrees) || !editor.place_schematics())
+			!std::isfinite(rotation_degrees) ||
+			!editor.place_prop(structures::Prop::Landmark))
 		return false;
 	std::shared_ptr<const structures::PalettizedSchematic> schematic;
 	if (placement.landmark->built_model) {

@@ -454,7 +454,7 @@ std::vector<Placement> prescan_placements(
 
 bool place_plane_placement(WorldEditor &editor, const Placement &placement)
 {
-	if (!editor.place_schematics())
+	if (!editor.place_prop(Prop::Plane))
 		return false;
 	const bool gear_down = placement.kind == PlaneKind::Parked;
 	const auto fleet = available_plane_assets(editor, gear_down);

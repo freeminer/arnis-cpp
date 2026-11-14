@@ -59,6 +59,10 @@ std::optional<std::string_view> name(std::uint16_t id);
 std::optional<std::pair<std::string_view, std::string_view>> tree_mix(std::uint16_t id);
 bool palms_belong(Ecoregion eco, double absolute_latitude);
 bool realm_is_americas(Realm realm);
+// Shared, seed-independent raster warp used by both ecoregions and climate
+// classification so their geographic borders stay aligned.
+std::pair<std::size_t, std::size_t> warped_cell(
+		const geo_grid::TiledGrid &grid, double latitude, double longitude);
 
 class EcoMap
 {

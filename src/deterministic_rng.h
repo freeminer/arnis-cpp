@@ -1,6 +1,7 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <bit>
 #include <cmath>
 #include <cstdint>
@@ -8,6 +9,27 @@
 
 namespace arnis
 {
+
+namespace building_facades
+{
+std::uint64_t hash64(std::uint64_t);
+}
+
+// Rust mixes the configured world seed into every deterministic stream.
+// Generation options are process-wide in the Freeminer adapter, matching
+// Rust's one-seed-per-run model.
+inline std::atomic<std::uint64_t> WORLD_SEED{0};
+
+inline void set_world_seed(std::uint64_t seed)
+{
+	WORLD_SEED.store(seed, std::memory_order_relaxed);
+}
+
+inline std::uint64_t seeded(std::uint64_t value)
+{
+	const auto seed = WORLD_SEED.load(std::memory_order_relaxed);
+	return seed == 0 ? value : value ^ building_facades::hash64(seed);
+}
 
 class ChaCha8Rng
 {
@@ -133,15 +155,16 @@ public:
 
 inline ChaCha8Rng element_rng(std::uint64_t id)
 {
-	return ChaCha8Rng(id);
+	return ChaCha8Rng(seeded(id));
 }
 inline ChaCha8Rng element_rng_salted(std::uint64_t id, std::uint64_t salt)
 {
-	return ChaCha8Rng(id ^ ((salt << 32) | (salt >> 32)));
+	return ChaCha8Rng(seeded(id ^ ((salt << 32) | (salt >> 32))));
 }
 inline ChaCha8Rng coord_rng(std::int32_t x, std::int32_t z, std::uint64_t id)
 {
-	return ChaCha8Rng((std::uint64_t(std::uint32_t(x)) << 32 | std::uint32_t(z)) ^ id);
+	return ChaCha8Rng(
+			seeded((std::uint64_t(std::uint32_t(x)) << 32 | std::uint32_t(z)) ^ id));
 }
 
 }
