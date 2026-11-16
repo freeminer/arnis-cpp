@@ -28,6 +28,10 @@
 #include <vector>
 #include <cctype>
 
+#if __EMSCRIPTEN__
+#undef write
+#endif
+
 namespace arnis::osm_pbf
 {
 namespace
