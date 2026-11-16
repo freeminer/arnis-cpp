@@ -30,6 +30,7 @@
 
 #if __EMSCRIPTEN__
 #undef write
+#undef close
 #endif
 
 namespace arnis::osm_pbf

@@ -103,7 +103,9 @@ std::string cache_key(const std::filesystem::path &path)
 		absolute = std::filesystem::absolute(path, ec).lexically_normal();
 	const auto size = std::filesystem::file_size(path, ec);
 	const auto modified = std::filesystem::last_write_time(path, ec);
-	const auto ticks = ec ? 0LL : modified.time_since_epoch().count();
+	const auto ticks =
+			ec ? std::int64_t{0}
+			   : static_cast<std::int64_t>(modified.time_since_epoch().count());
 	const auto source =
 			absolute.string() + "|" + std::to_string(size) + "|" + std::to_string(ticks);
 	std::uint64_t hash = 14695981039346656037ULL;
