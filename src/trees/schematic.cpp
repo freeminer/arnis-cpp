@@ -233,7 +233,29 @@ std::optional<Block> map_block(const std::string &name)
 	const auto canonical = tree_block_name(name);
 	if (!canonical)
 		return std::nullopt;
-	return structures::resolve_schem_block(*canonical);
+	// Tree packs use a deliberately separate palette from general structures.
+	// The general schematic resolver drops several species aliases before its
+	// broader structure mapping, while Rust's tree mapper resolves these names
+	// directly to the corresponding tree block.
+	using namespace block_definitions;
+	static const std::unordered_map<std::string, const Block *> tree_palette{
+			{"minecraft:oak_log", &OAK_LOG}, {"minecraft:birch_log", &BIRCH_LOG},
+			{"minecraft:spruce_log", &SPRUCE_LOG},
+			{"minecraft:dark_oak_log", &DARK_OAK_LOG},
+			{"minecraft:jungle_log", &JUNGLE_LOG}, {"minecraft:acacia_log", &ACACIA_LOG},
+			{"minecraft:cherry_log", &CHERRY_LOG},
+			{"minecraft:mangrove_log", &MANGROVE_LOG},
+			{"minecraft:oak_leaves", &OAK_LEAVES},
+			{"minecraft:birch_leaves", &BIRCH_LEAVES},
+			{"minecraft:spruce_leaves", &SPRUCE_LEAVES},
+			{"minecraft:dark_oak_leaves", &DARK_OAK_LEAVES},
+			{"minecraft:jungle_leaves", &JUNGLE_LEAVES},
+			{"minecraft:acacia_leaves", &ACACIA_LEAVES},
+			{"minecraft:cherry_leaves", &CHERRY_LEAVES},
+			{"minecraft:mangrove_leaves", &MANGROVE_LEAVES},
+			{"minecraft:azalea_leaves", &AZALEA_LEAVES}};
+	const auto it = tree_palette.find(*canonical);
+	return it == tree_palette.end() ? std::nullopt : std::optional<Block>(*it->second);
 }
 Schematic load_schem(const std::filesystem::path &file)
 {

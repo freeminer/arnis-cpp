@@ -49,8 +49,10 @@ public:
 	void testTrainDoors()
 	{
 		const arnis::train_bodies::Coach wagon = arnis::train_bodies::Container{0};
-		UASSERT(arnis::train_bodies::doors(wagon).empty());
-		UASSERT(arnis::train_bodies::door_key(wagon) == arnis::train_bodies::NO_DOORS);
+		const auto wagon_doors = arnis::train_bodies::doors(wagon);
+		UASSERT(wagon_doors.spots.empty());
+		UASSERT(!wagon_doors.view.empty());
+		UASSERT(arnis::train_bodies::door_key(wagon) == "f184");
 		const arnis::train_bodies::Coach coach = arnis::train_bodies::MetroMid{};
 		const auto spots = arnis::train_bodies::doors(coach);
 		const auto &[keep, make] =

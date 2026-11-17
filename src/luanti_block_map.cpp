@@ -42,6 +42,23 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 {
 	if (block.block == block_definitions::BARRIER)
 		return {"air", 0};
+	if (block.block == block_definitions::SNOW_BLOCK)
+		return {"mcl_core:snowblock", 0};
+	if (block.block == block_definitions::SNOW_LAYER) {
+		const auto defaults = block.block.properties();
+		const BlockProperties empty_properties;
+		const auto &properties = block.properties ? block.property_values()
+								 : defaults		  ? *defaults
+												  : empty_properties;
+		const auto it = properties.find("layers");
+		const int layers = it == properties.end()
+								   ? 1
+								   : std::clamp(std::atoi(it->second.c_str()), 1, 7);
+		static constexpr const char *snow_names[] = {"mcl_core:snow", "mcl_core:snow_2",
+				"mcl_core:snow_3", "mcl_core:snow_4", "mcl_core:snow_5",
+				"mcl_core:snow_6", "mcl_core:snow_7"};
+		return {snow_names[layers - 1], 0};
+	}
 	const auto defaults = block.block.properties();
 	const BlockProperties empty_properties;
 	const auto &properties = block.properties ? block.property_values()

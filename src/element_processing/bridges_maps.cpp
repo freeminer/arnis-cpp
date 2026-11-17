@@ -54,8 +54,6 @@ constexpr int PATH_HEADROOM = 5;
 constexpr int RAIL_HEADROOM = 8;
 constexpr int RIVER_HEADROOM = 4;
 constexpr int STREAM_HEADROOM = 2;
-constexpr int LANDING_LIFT = 2;
-constexpr std::size_t ROAD_BEYOND_CELLS = 3;
 constexpr int STACKED_DECK_HEADROOM = 6;
 constexpr int LOWER_DECK_GAP = STACKED_DECK_HEADROOM - 1;
 constexpr int DECK_STRUCTURE_DEPTH = 2;
@@ -604,22 +602,6 @@ bool meets_a_deck(const ProcessedWay &way)
 						  highway == "abandoned" || highway == "razed";
 	return !excluded && (tunnel.empty() || tunnel == "no") &&
 		   (indoor.empty() || indoor == "no");
-}
-
-std::optional<int> road_level_beyond(const WorldEditor &editor, const ProcessedWay &road,
-		const std::pair<int, int> &endpoint,
-		const highways::HighwayConnectivity &connectivity, double scale)
-{
-	const auto profile = highways::road_profile(editor, road,
-			highway_block_range(road, scale), connectivity,
-			[](int, int) -> std::optional<int> { return std::nullopt; });
-	if (profile.empty())
-		return std::nullopt;
-	const std::size_t last = profile.size() - 1;
-	const bool at_start = road.nodes.front().x == endpoint.first &&
-						  road.nodes.front().z == endpoint.second;
-	const std::size_t offset = std::min(ROAD_BEYOND_CELLS, last);
-	return profile[at_start ? offset : last - offset];
 }
 
 std::vector<std::pair<float, float>> leaving_dirs(
@@ -1793,27 +1775,14 @@ BridgeStructureMap BridgeStructureMap::build(
 							connectivity.is_shared(xz.first, xz.second)) {
 						const int junction =
 								highways::junction_level(editor, xz.first, xz.second);
-						std::optional<int> beyond;
-						if (const auto roads = node_to_other_highways.find(xz);
-								roads != node_to_other_highways.end())
-							for (const auto road_index : roads->second) {
-								const auto &road = *other_highway_ways[road_index];
-								if (is_ramp_candidate(road) || !meets_a_deck(road))
-									continue;
-								if (const auto level = road_level_beyond(
-											editor, road, xz, connectivity, scale))
-									beyond = beyond ? std::max(*beyond, *level) : *level;
-							}
-						const int landing =
-								beyond ? std::max(junction,
-												 std::min(*beyond,
-														 junction + LANDING_LIFT))
-									   : junction;
-						terrain[cell] = landing;
+						// The connected road profile uses this same terrain-derived
+						// junction level. Looking farther down the road and lifting the
+						// bridge endpoint independently creates a discontinuity at the join.
+						terrain[cell] = junction;
 						const auto [it, inserted] =
-								result.landings_.try_emplace(xz, landing);
+								result.landings_.try_emplace(xz, junction);
 						if (!inserted)
-							it->second = std::max(it->second, landing);
+							it->second = std::max(it->second, junction);
 					}
 				}
 			}
@@ -1869,6 +1838,14 @@ BridgeStructureMap BridgeStructureMap::build(
 						profile_nonterrain_ends.insert(xz);
 						profile_free_ends.push_back(u);
 						profile_free_end_cells.emplace_back(idx, cell);
+						return;
+					}
+					if (const auto landing = result.landings_.find(xz);
+							landing != result.landings_.end()) {
+						profile_anchors.push_back(u);
+						profile_anchor_levels.emplace_back(u, landing->second);
+						profile_requirements.emplace_back(
+								u, static_cast<float>(landing->second));
 						return;
 					}
 					const bool has_external_ramp = external_ramp_ends.contains(xz);
