@@ -74,6 +74,7 @@ public:
 	{
 		return (depth_.empty() || width_ == 0 || height_ == 0) && river_.empty();
 	}
+	bool has_river() const { return !river_.empty(); }
 	bool reaches(int x, int z, int radius) const;
 	int depth_at(int x, int z) const;
 	int body_max_7x7(int x, int z) const;

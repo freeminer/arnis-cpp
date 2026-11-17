@@ -646,7 +646,7 @@ int artwork_pedestal(WorldEditor &editor, int x, int z, std::uint64_t roll, int 
 }
 
 void generate_column(WorldEditor &editor, const ProcessedNode &node, int requested_height,
-		std::uint64_t roll)
+		std::uint64_t roll, bool figure)
 {
 	const int x = node.x, z = node.z;
 	int ground = std::numeric_limits<int>::max();
@@ -665,7 +665,7 @@ void generate_column(WorldEditor &editor, const ProcessedNode &node, int request
 	artwork_stepped_square(
 			editor, x, z, 1, ground + 4, POLISHED_ANDESITE, POLISHED_ANDESITE_STAIRS);
 	const int height = std::clamp(requested_height, 5, 30);
-	const bool crowned = editor.get_generation_format() == 0;
+	const bool crowned = figure && editor.get_generation_format() == 0;
 	const int capital = ground + (crowned ? std::max(height - 3, 5) : height);
 	for (int y = ground + 5; y < capital; ++y)
 		put(QUARTZ_PILLAR, x, y, z);
@@ -701,7 +701,8 @@ void generate_artwork_figure(WorldEditor &editor, const ProcessedNode &node)
 	const Block material = figure_material(node.tags, roll);
 	if (*form == "statue" && node.tags.get("statue") != "equestrian") {
 		if (const auto height = mapped_height(node.tags); height && *height >= 6.0) {
-			generate_column(editor, node, static_cast<int>(std::lround(*height)), roll);
+			generate_column(
+					editor, node, static_cast<int>(std::lround(*height)), roll, true);
 			return;
 		}
 	}
@@ -801,9 +802,6 @@ void generate_memorial(WorldEditor &editor, const ProcessedNode &node)
 	int x = node.x;
 	int z = node.z;
 
-	// Use deterministic RNG for consistent results
-	auto rng = element_rng(node.id);
-
 	// Get memorial subtype
 	auto it_memorial = node.tags.find("memorial");
 	std::string memorial_type =
@@ -823,15 +821,11 @@ void generate_memorial(WorldEditor &editor, const ProcessedNode &node)
 		}
 	} else if (memorial_type == "statue" || memorial_type == "sculpture" ||
 			   memorial_type == "bust") {
-		// Statue on a pedestal
-		editor.set_block(STONE_BRICKS, x, 1, z, std::nullopt, std::nullopt);
-		editor.set_block(CHISELED_STONE_BRICKS, x, 2, z, std::nullopt, std::nullopt);
-
-		// Use polished andesite for bronze/metal statue appearance
-		Block statue_block = (rng.uniform(2) == 0) ? POLISHED_ANDESITE : POLISHED_DIORITE;
-		editor.set_block(statue_block, x, 3, z, std::nullopt, std::nullopt);
-		editor.set_block(statue_block, x, 4, z, std::nullopt, std::nullopt);
-		editor.set_block(STONE_BRICK_WALL, x, 5, z, std::nullopt, std::nullopt);
+		// Rust only places a figure when statues::form accepts its tags (ground-level,
+		// uncovered, and an actual statue/bust/sculpture). Keep this entry point aligned
+		// for callers that dispatch through historic instead of the artwork pass.
+		if (is_artwork_figure(node.tags))
+			generate_artwork_figure(editor, node);
 	} else if (memorial_type == "stone" || memorial_type == "stolperstein") {
 		// Simple memorial stone embedded in ground
 		Block stone_block = (memorial_type == "stolperstein") ? GOLD_BLOCK : STONE;
@@ -889,36 +883,12 @@ void generate_memorial(WorldEditor &editor, const ProcessedNode &node)
 
 void generate_monument(WorldEditor &editor, const ProcessedNode &node)
 {
-	int x = node.x;
-	int z = node.z;
-
-	// Monuments are typically larger structures
-	const auto it_height = node.tags.find("height");
-	const int height =
-			std::clamp(it_height == node.tags.end()
-							   ? 10
-							   : strict_parse::i32(it_height->second).value_or(10),
-					5, 20);
-
-	// Large base platform
-	for (int dx = -2; dx <= 2; ++dx) {
-		for (int dz = -2; dz <= 2; ++dz) {
-			editor.set_block(STONE_BRICKS, x + dx, 1, z + dz, std::nullopt, std::nullopt);
-		}
-	}
-	for (int dx = -1; dx <= 1; ++dx) {
-		for (int dz = -1; dz <= 1; ++dz) {
-			editor.set_block(STONE_BRICKS, x + dx, 2, z + dz, std::nullopt, std::nullopt);
-		}
-	}
-
-	// Main structure
-	for (int y = 3; y < height; ++y) {
-		editor.set_block(POLISHED_ANDESITE, x, y, z, std::nullopt, std::nullopt);
-	}
-
-	// Decorative top
-	editor.set_block(CHISELED_STONE_BRICKS, x, height, z, std::nullopt, std::nullopt);
+	const int height = static_cast<int>(
+			std::lround(std::clamp(mapped_height(node.tags).value_or(10.0), 5.0, 20.0)));
+	const auto memorial = node.tags.get("memorial");
+	const bool figure = memorial == "statue" || memorial == "column";
+	auto rng = element_rng(node.id);
+	generate_column(editor, node, height, rng(), figure);
 }
 
 void generate_wayside_cross(WorldEditor &editor, const ProcessedNode &node)

@@ -85,6 +85,7 @@
 #include "element_processing/pedestrians.h"
 #include "water_probe.h"
 #include "element_processing/trains.h"
+#include "element_processing/aircraft.h"
 #include "element_processing/level_crossings.h"
 #include "element_processing/ships.h"
 #include "element_processing/swimming_pools.h"
@@ -2785,7 +2786,7 @@ bool generate_world(WorldEditor &editor,
 			stadium_already.emplace(key.first, key.second);
 	const auto stadium_plan =
 			element_processing::stadiums::prescan(elements, args, stadium_already);
-	const auto plane_candidates =
+	auto plane_candidates =
 			args.resolved_props().has(structures::Prop::Plane)
 					? structures::plane::prescan_placements(elements, args.scale)
 					: std::vector<structures::plane::Placement>{};
@@ -3232,8 +3233,40 @@ bool generate_world(WorldEditor &editor,
 		}
 		auto network =
 				trains::TrainRouteNetwork::build(elements, args.scale, train_bounds);
-		const bool has_rail_trains = !network.is_empty();
-		if (has_rail_trains || (ship_plan && !ship_plan->is_empty())) {
+		std::optional<element_processing::aircraft::AirPlan> air_plan;
+		if (args.resolved_props().has(structures::Prop::Plane)) {
+			const double ceiling = bedrock_world
+										   ? element_processing::aircraft::BEDROCK_CEILING
+										   : std::numeric_limits<double>::infinity();
+			air_plan = element_processing::aircraft::AirPlan::build(elements, args.scale,
+					network.room_for_aircraft(), ceiling,
+					[&](int x, int z) -> std::optional<double> {
+						if (!editor.ground || !xzbbox.contains(x, z))
+							return std::nullopt;
+						return editor.ground->level(editor.ground_point(x, z));
+					});
+			if (air_plan && !air_plan->is_empty()) {
+				const auto [flying, parked] = air_plan->counts();
+				std::cout << "  Moving vehicles: " << flying << " aircraft flying and "
+						  << parked << " standing at the airfields\n";
+				const auto &extents = air_plan->extents();
+				plane_candidates.erase(
+						std::remove_if(plane_candidates.begin(), plane_candidates.end(),
+								[&](const auto &placement) {
+									return std::any_of(extents.begin(), extents.end(),
+											[&](const auto &extent) {
+												return placement.anchor_x >= extent[0] &&
+													   placement.anchor_x <= extent[2] &&
+													   placement.anchor_z >= extent[1] &&
+													   placement.anchor_z <= extent[3];
+											});
+								}),
+						plane_candidates.end());
+				network.add_aircraft(std::move(*air_plan).into_fields());
+			}
+		}
+		const bool has_rail_trains = network.train_count() > 0;
+		if (!network.is_empty() || (ship_plan && !ship_plan->is_empty())) {
 			generation_train_network =
 					std::make_shared<trains::TrainRouteNetwork>(std::move(network));
 			editor.train_network = generation_train_network;
@@ -3336,6 +3369,26 @@ bool generate_world(WorldEditor &editor,
 						&crossing_breaks));
 	} else {
 		editor.car_network.reset();
+	}
+	// Rust reserves atlas capacity for vehicles before facade panels are admitted.
+	// At this point the complete train/aircraft network, car looks and crossing
+	// models are known; ship appearances are reserved conservatively before their
+	// finished-water probe decides which routes can launch.
+	if (java_world) {
+		std::vector<vehicle_models::Look> generation_vehicle_looks = car_model_looks;
+		if (editor.train_network) {
+			auto looks = editor.train_network->java_looks();
+			generation_vehicle_looks.insert(
+					generation_vehicle_looks.end(), looks.begin(), looks.end());
+		}
+		if (ship_plan) {
+			auto looks = ship_plan->possible_looks();
+			generation_vehicle_looks.insert(
+					generation_vehicle_looks.end(), looks.begin(), looks.end());
+		}
+		generation_vehicle_looks.insert(generation_vehicle_looks.end(),
+				parked_model_looks.begin(), parked_model_looks.end());
+		mapillary::atlas::reserve(vehicle_models::atlas_px(generation_vehicle_looks));
 	}
 	auto rail_joins = railways::RailJoins::build(elements, railways::track_level);
 	// Rust extends the shared rail graph to the One World boundary before station
@@ -4188,6 +4241,14 @@ bool generate_world(WorldEditor &editor,
 				emergency::generate_emergency(editor, node);
 			} else if (node.tags.contains("advertising")) {
 				advertising::generate_advertising(editor, node, road_mask);
+			} else if (node.tags.get("natural") == std::optional<std::string>("stone") ||
+					   node.tags.get("natural") == std::optional<std::string>("rock")) {
+				// Rust places mapped boulders after advertising and other node
+				// features so a natural marker cannot overwrite a higher-priority asset.
+				if (args.scale >= 0.75 &&
+						editor.cover_class(node.x, node.z) != land_cover::LC_WATER)
+					natural::generate_natural(editor, element, args, flood_fill_cache,
+							building_footprints, bridge_surface);
 			}
 		} else if (element.is_relation()) {
 			auto const &rel = element.as_relation();
@@ -4846,6 +4907,11 @@ bool generate_world(WorldEditor &editor,
 	if (java_world && !java_world_path.empty()) {
 		std::string error;
 		std::vector<std::pair<std::string, std::vector<std::uint8_t>>> vehicle_pack;
+		if (editor.train_network) {
+			auto train_looks = editor.train_network->java_looks();
+			car_model_looks.insert(
+					car_model_looks.end(), train_looks.begin(), train_looks.end());
+		}
 		if (!car_model_looks.empty() || !parked_model_looks.empty())
 			for (auto &file :
 					vehicle_models::java_pack(car_model_looks, parked_model_looks))
@@ -5158,5 +5224,4 @@ bool generate_world_with_options(WorldEditor &editor,
 			options.prepared_buildings ? &*options.prepared_buildings : nullptr,
 			facade_job.get(), options.spawn_point);
 }
-
 }

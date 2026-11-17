@@ -69,6 +69,8 @@ static std::string_view renamed(std::string_view name)
 		return "wooden_pressure_plate";
 	if (name == "oak_trapdoor")
 		return "trapdoor";
+	if (name == "oak_sign")
+		return "standing_sign";
 	if (name == "cobblestone_stairs")
 		return "stone_stairs";
 	if (name == "stone_stairs")
@@ -1226,7 +1228,7 @@ static BedrockBlock convert_block_with_properties(
 				bits |= bit;
 		return state("vine", {{"vine_direction_bits", bits}});
 	}
-	if (has_suffix(name, "_fence_gate")) {
+	if (name == "fence_gate" || has_suffix(name, "_fence_gate")) {
 		set("minecraft:cardinal_direction", std::string(string_prop("facing", "north")));
 		set("open_bit", is_true("open"));
 		set("in_wall_bit", is_true("in_wall"));
@@ -1258,15 +1260,33 @@ static BedrockBlock convert_block_with_properties(
 									   : "cave_vines";
 		return state(vine_name, {{"growing_plant_age", head ? int_prop("age", 0) : 0}});
 	}
+	// `snow_block` is renamed to Bedrock's full snow block id `snow`; only
+	// Java's `snow` (the thin snow layer) should become `snow_layer`.
+	const bool java_snow_layer = [&]() {
+		if (!canonical_name)
+			return name == "snow" && value.block != block_definitions::SNOW_BLOCK;
+		auto java_name = *canonical_name;
+		if (const auto separator = java_name.rfind(':');
+				separator != std::string_view::npos)
+			java_name.remove_prefix(separator + 1);
+		return java_name == "snow";
+	}();
 	if (value.block == block_definitions::SNOW_LAYER || name == "snow_layer" ||
-			name == "snow") {
+			java_snow_layer) {
 		const auto layers = std::clamp(int_prop("layers", 1), 1, 8);
 		return state("snow_layer", {{"height", layers - 1}, {"covered_bit", false}});
 	}
 	if (has_suffix(name, "_stairs")) {
-		if (name == "stone_stairs")
+		std::string_view java_name = name;
+		if (canonical_name) {
+			java_name = *canonical_name;
+			if (const auto separator = java_name.rfind(':');
+					separator != std::string_view::npos)
+				java_name.remove_prefix(separator + 1);
+		}
+		if (java_name == "stone_stairs")
 			out.name = "minecraft:normal_stone_stairs";
-		else if (name == "cobblestone_stairs")
+		else if (java_name == "cobblestone_stairs")
 			out.name = "minecraft:stone_stairs";
 		set("weirdo_direction", facing_weirdo());
 		set("upside_down_bit", string_prop("half", "bottom") == "top");
@@ -1328,8 +1348,8 @@ static BedrockBlock convert_block_with_properties(
 		set("minecraft:vertical_half", std::string(type == "top" ? "top" : "bottom"));
 		return out;
 	}
-	if (name == "chain" || has_suffix(name, "_log") || has_suffix(name, "_wood") ||
-			name == "basalt") {
+	if (name == "chain" || name == "iron_chain" || has_suffix(name, "_log") ||
+			has_suffix(name, "_wood") || name == "basalt") {
 		const auto axis = string_prop("axis", "y");
 		set("pillar_axis", std::string(axis));
 		return out;
@@ -1402,6 +1422,8 @@ static BedrockBlock convert_block_with_properties(
 		return out;
 	}
 	if (name == "standing_sign" || name == "sign") {
+		// The built-in sign block already arrives with this Bedrock identifier.
+		out.name = "minecraft:standing_sign";
 		set("ground_sign_direction", ((int_prop("rotation", 0) % 16) + 16) % 16);
 		return out;
 	}

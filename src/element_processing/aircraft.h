@@ -1,7 +1,9 @@
 #pragma once
 
 #include "../osm_parser.h"
+#include "trains.h"
 
+#include <array>
 #include <cstddef>
 #include <cstdint>
 #include <functional>
@@ -83,5 +85,32 @@ private:
 			Point at, std::optional<Point> towards, double near, double far) const;
 	std::size_t cut_taxiway(std::size_t a, std::size_t b, double t, std::size_t source);
 };
+
+/// Planned aircraft movements and parked planes at the airfields in an extract.
+/// The route/service values use the same pack-neutral contract as trains and ships.
+class AirPlan
+{
+public:
+	using Ground = std::function<std::optional<double>(int, int)>;
+	static AirPlan build(const std::vector<ProcessedElement> &elements, double scale,
+			std::size_t point_budget, double ceiling, Ground ground);
+	bool is_empty() const { return fields_.empty(); }
+	std::pair<std::size_t, std::size_t> counts() const { return {flying_, parked_}; }
+	const std::vector<std::array<double, 4>> &extents() const { return extents_; }
+	std::vector<std::pair<::arnis::trains::Route, std::vector<::arnis::trains::Service>>>
+	into_fields() &&
+	{
+		return std::move(fields_);
+	}
+
+private:
+	std::vector<std::pair<::arnis::trains::Route, std::vector<::arnis::trains::Service>>>
+			fields_;
+	std::vector<std::array<double, 4>> extents_;
+	std::size_t flying_{};
+	std::size_t parked_{};
+};
+
+inline constexpr double BEDROCK_CEILING = 316.0;
 
 } // namespace arnis::element_processing::aircraft

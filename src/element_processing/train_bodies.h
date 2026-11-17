@@ -9,6 +9,12 @@
 #include <variant>
 #include <vector>
 #include "ship_bodies.h"
+#include "plane_bodies_types.h"
+
+namespace arnis::vehicle_models
+{
+struct Look;
+}
 
 namespace arnis::train_bodies
 {
@@ -43,7 +49,8 @@ enum class CoachKind : std::uint8_t
 	Container,
 	Tank,
 	Boxcar,
-	Ship
+	Ship,
+	Plane
 };
 
 struct TramCab
@@ -111,11 +118,16 @@ struct Ship
 	ship_bodies::Vessel vessel{ship_bodies::Vessel::WaterBus};
 	bool low{};
 };
+struct Plane
+{
+	element_processing::plane_bodies::Airframe frame{
+			element_processing::plane_bodies::Airframe::Light};
+};
 
 /// One carriage, mirroring the Rust enum: payloads exist only on variants that use them.
 using Coach = std::variant<TramCab, TramMid, TramShort, MetroCab, MetroMid, SBahnCab,
 		SBahnMid, RegioCab, RegioMid, DeckCab, DeckMid, Loco, IceCab, IceMid, Container,
-		Tank, Boxcar, Ship>;
+		Tank, Boxcar, Ship, Plane>;
 
 /// A train's colours and deterministic freight palette seed.
 struct Livery
@@ -149,11 +161,12 @@ inline constexpr const char *NO_DOORS = "none";
 struct Doors
 {
 	std::vector<float> spots;
+	std::vector<float> view;
 	double eye{2.12};
 	float width{4.4f};
 	float height{3.8f};
 	bool deck{};
-	bool empty() const { return spots.empty(); }
+	bool empty() const { return spots.empty() && view.empty(); }
 };
 Doors doors(const Coach &coach);
 std::string door_key(const Coach &coach);
@@ -163,9 +176,11 @@ std::pair<std::string, std::string> door_functions(
 std::pair<std::string, std::string> door_functions(
 		const std::string &key, const std::vector<float> &spots, double size);
 std::vector<Part> parts(const Coach &coach, const Livery &livery);
+vehicle_models::Look look(const Coach &coach, const Livery &livery);
 std::vector<std::pair<std::size_t, bool>> shared_faces(const Part &a, const Part &b);
 void apart(std::vector<Part> &parts);
 std::string key(const Coach &coach, const Livery &livery);
 /// Emit the macro body that summons a carriage's block displays at its centre.
 std::string summon_function(const std::vector<Part> &parts, double size, bool bare);
+std::string summon_function(const Coach &coach, const Livery &livery, double size);
 } // namespace arnis::train_bodies

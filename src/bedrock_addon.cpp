@@ -1,7 +1,6 @@
 #include "bedrock_addon.h"
 
 #include "assets_root.h"
-#include "bedrock_addon/models.h"
 #include "element_processing/cars.h"
 #include "element_processing/trains.h"
 
@@ -11,10 +10,12 @@
 #include <fstream>
 #include <iomanip>
 #include <iterator>
+#include <numbers>
 #include <random>
 #include <sstream>
 #include <stdexcept>
 #include <string_view>
+#include <unordered_set>
 
 namespace arnis::bedrock_addon
 {
@@ -23,9 +24,12 @@ namespace
 constexpr std::string_view SERVER_MODULE = "2.3.0";
 constexpr std::array<int, 3> MIN_ENGINE{1, 21, 120};
 constexpr std::string_view ENTITY_FORMAT = "1.21.90";
-constexpr std::string_view TEXTURE = "textures/entity/arnis_vehicles";
 constexpr std::array<std::string_view, 4> SCRIPTS{
 		"main.js", "cars.js", "trains.js", "util.js"};
+constexpr int SPEED_MAX = 255;
+constexpr int PITCH_MAX = 450;
+constexpr std::string_view PITCH_ANIMATION = "animation.arnis.pitch";
+constexpr std::string_view PITCH_BONE = "air";
 
 std::string new_uuid()
 {
@@ -100,9 +104,18 @@ nlohmann::json behavior_entity(const Body &body)
 {
 	nlohmann::json description{{"identifier", "arnis:" + body.name},
 			{"is_spawnable", false}, {"is_summonable", true}};
-	if (body.fleet == Fleet::Car)
-		description["properties"] = {{"arnis:brake",
-				{{"type", "bool"}, {"default", false}, {"client_sync", true}}}};
+	if (body.fleet == Fleet::Car) {
+		description["properties"] = {
+				{"arnis:brake",
+						{{"type", "bool"}, {"default", false}, {"client_sync", true}}},
+				{"arnis:speed", {{"type", "int"}, {"range", {0, SPEED_MAX}},
+										{"default", 0}, {"client_sync", true}}}};
+	} else if (body.fleet == Fleet::Plane) {
+		description["properties"] = {{"arnis:gear", {{"type", "bool"}, {"default", true},
+															{"client_sync", true}}},
+				{"arnis:pitch", {{"type", "int"}, {"range", {-PITCH_MAX, PITCH_MAX}},
+										{"default", 0}, {"client_sync", true}}}};
+	}
 	nlohmann::json components = nlohmann::json::object();
 	components["minecraft:type_family"] = {
 			{"family", {std::string(family(body.fleet)), "inanimate"}}};
@@ -124,18 +137,67 @@ nlohmann::json behavior_entity(const Body &body)
 										 {"components", std::move(components)}}}};
 }
 
-nlohmann::json client_entity(const Body &body)
+std::string texture_path(const Body &body);
+
+nlohmann::json client_entity(const Body &body, const std::string &geometry)
 {
-	const std::string controller = body.fleet == Fleet::Car
-										   ? "controller.render.arnis.car"
-										   : "controller.render.arnis.vehicle";
+	const std::string controller =
+			body.fleet == Fleet::Car	 ? "controller.render.arnis.car"
+			: body.fleet == Fleet::Plane ? "controller.render.arnis.plane"
+										 : "controller.render.arnis.vehicle";
 	nlohmann::json description{{"identifier", "arnis:" + body.name},
 			{"materials", {{"default", "entity_alphatest"}, {"lit", "entity_emissive"}}},
-			{"textures", {{"default", std::string(TEXTURE)}}},
-			{"geometry", {{"default", "geometry.arnis." + body.name}}},
-			{"render_controllers", {controller}}};
+			{"textures", {{"default", texture_path(body)}}},
+			{"geometry", {{"default", geometry}}}, {"render_controllers", {controller}}};
+	if (body.fleet == Fleet::Plane) {
+		description["scripts"] = {{"animate", {"pitch"}}};
+		description["animations"] = {{"pitch", PITCH_ANIMATION}};
+	} else if (body.fleet == Fleet::Car) {
+		const auto wheels = vehicle_models::model(body.look.model).wheels();
+		if (!wheels.empty()) {
+			const auto animation = "animation.arnis.wheels." + body.look.model;
+			const double radius_blocks = wheels.front().second / 16.0 * body.size;
+			const double per_unit = 0.5 / radius_blocks * 180.0 / std::numbers::pi;
+			std::ostringstream spin;
+			spin << "v.spin = math.mod((v.spin ?? 0) + q.property('arnis:speed') * "
+				 << "q.delta_time * " << std::fixed << std::setprecision(3) << per_unit
+				 << ", 360);";
+			description["scripts"] = {
+					{"pre_animation", {spin.str()}}, {"animate", {"wheels"}}};
+			description["animations"] = {{"wheels", animation}};
+		}
+	}
 	return {{"format_version", "1.10.0"},
 			{"minecraft:client_entity", {{"description", std::move(description)}}}};
+}
+
+std::string geometry_name(const Body &body)
+{
+	const auto size = static_cast<std::int64_t>(std::llround(body.size * 1000.0));
+	return "geometry.arnis." + body.look.model + (body.look.backward ? ".back" : "") +
+		   ".s" + std::to_string(size);
+}
+
+void hang_from_pitch_bone(nlohmann::json &geometry)
+{
+	auto &bones = geometry["minecraft:geometry"][0]["bones"];
+	if (!bones.is_array())
+		return;
+	for (auto &bone : bones)
+		if (!bone.contains("parent"))
+			bone["parent"] = PITCH_BONE;
+	bones.insert(bones.begin(), nlohmann::json{{"name", PITCH_BONE},
+										{"pivot", {0, -vehicle_models::LIFT * 16.0, 0}}});
+}
+
+std::string texture_path(const Body &body)
+{
+	return "textures/entity/arnis/" + body.name;
+}
+
+std::string wheel_animation(std::string_view model)
+{
+	return "animation.arnis.wheels." + std::string(model);
 }
 
 nlohmann::json render_controllers()
@@ -155,6 +217,10 @@ nlohmann::json render_controllers()
 	controllers["controller.render.arnis.car"] = {{"geometry", "Geometry.default"},
 			{"materials", materials}, {"textures", {"Texture.default"}},
 			{"part_visibility", std::move(part_visibility)}};
+	controllers["controller.render.arnis.plane"] = {{"geometry", "Geometry.default"},
+			{"materials", materials}, {"textures", {"Texture.default"}},
+			{"part_visibility", {{{"gear*", "q.property('arnis:gear')"}},
+										{{"lit_gear*", "q.property('arnis:gear')"}}}}};
 	return {{"format_version", "1.8.0"}, {"render_controllers", std::move(controllers)}};
 }
 
@@ -218,24 +284,62 @@ Addon build(const nlohmann::json &data, const std::vector<Body> &bodies)
 	add_json(addon.resources, "manifest.json",
 			pack_manifest(resources_id, resources_module_ids, false, std::nullopt));
 	addon.resources.files.emplace_back("pack_icon.png", icon);
-	auto texture = models::texture();
-	if (texture.empty())
-		throw std::runtime_error("could not encode the Bedrock vehicle palette texture");
-	addon.resources.files.emplace_back(std::string(TEXTURE) + ".png", std::move(texture));
 	add_json(addon.resources, "render_controllers/arnis_vehicles.render_controllers.json",
 			render_controllers());
 	add_json(addon.resources, "texts/languages.json", nlohmann::json::array({"en_US"}));
 	std::string language;
+	std::unordered_set<std::string> geometries;
+	nlohmann::json animations = nlohmann::json::object();
 	for (const auto &body : bodies) {
 		add_json(
 				addon.behavior, "entities/" + body.name + ".json", behavior_entity(body));
+		const std::string geometry = geometry_name(body);
+		if (geometries.insert(geometry).second) {
+			auto geo = vehicle_models::bedrock_geometry(
+					body.look.model, geometry_name(body), body.size, body.look.backward);
+			if (body.fleet == Fleet::Plane)
+				hang_from_pitch_bone(geo);
+			const std::string resource_name =
+					geometry_name(body).substr(std::string("geometry.").size());
+			add_json(addon.resources, "models/entity/" + resource_name + ".geo.json", geo,
+					-1);
+		}
+		const auto &model = vehicle_models::model(body.look.model);
+		if (body.fleet == Fleet::Plane &&
+				!animations.contains(std::string(PITCH_ANIMATION)))
+			animations[std::string(PITCH_ANIMATION)] = {{"loop", true},
+					{"bones", {{std::string(PITCH_BONE),
+									  {{"rotation", {"-0.1 * q.property('arnis:pitch')",
+															0, 0}}}}}}};
+		const auto wheels = model.wheels();
+		if (body.fleet == Fleet::Car && !wheels.empty()) {
+			const std::string animation_name = wheel_animation(body.look.model);
+			if (!animations.contains(animation_name)) {
+				nlohmann::json bones = nlohmann::json::object();
+				for (const auto &[bone, radius] : wheels) {
+					(void)radius;
+					bones[bone] = {{"rotation", {"v.spin", 0, 0}}};
+				}
+				animations[animation_name] = {
+						{"loop", true}, {"bones", std::move(bones)}};
+			}
+		}
+		auto texture = vehicle_models::texture(body.look, true);
+		if (texture.empty())
+			throw std::runtime_error(
+					"could not encode Bedrock texture for vehicle " + body.name);
+		addon.resources.files.emplace_back(
+				texture_path(body) + ".png", std::move(texture));
 		add_json(addon.resources, "entity/" + body.name + ".entity.json",
-				client_entity(body));
-		add_json(addon.resources, "models/entity/" + body.name + ".geo.json",
-				models::geometry(body.name, body.shapes), -1);
-		language += "entity.arnis:" + body.name +
-					".name=" + (body.fleet == Fleet::Car ? "Car\n" : "Train\n");
+				client_entity(body, geometry));
+		const char *label = body.fleet == Fleet::Car	 ? "Car"
+							: body.fleet == Fleet::Plane ? "Aircraft"
+														 : "Train";
+		language += "entity.arnis:" + body.name + ".name=" + label + "\n";
 	}
+	if (!animations.empty())
+		add_json(addon.resources, "animations/arnis_vehicles.animation.json",
+				{{"format_version", "1.8.0"}, {"animations", std::move(animations)}});
 	add_text(addon.resources, "texts/en_US.lang", std::move(language));
 	return addon;
 }

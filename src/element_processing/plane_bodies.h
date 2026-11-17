@@ -1,6 +1,7 @@
 #pragma once
 
 #include "train_bodies.h"
+#include "plane_bodies_types.h"
 
 #include <array>
 #include <span>
@@ -10,15 +11,6 @@
 namespace arnis::element_processing::plane_bodies
 {
 /// Aircraft sizes and performance, matching Rust's `plane_bodies::Airframe`.
-enum class Airframe
-{
-	Light,
-	Bizjet,
-	Regional,
-	Narrow,
-	Wide
-};
-
 inline constexpr std::array<Airframe, 5> ALL{Airframe::Light, Airframe::Bizjet,
 		Airframe::Regional, Airframe::Narrow, Airframe::Wide};
 

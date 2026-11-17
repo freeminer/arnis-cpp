@@ -297,6 +297,7 @@ double cruise_kmh(Mode mode)
 	case Mode::Rail:
 		return 110.0;
 	case Mode::Water:
+	case Mode::Air:
 		return 0.0;
 	}
 	return 110.0;
@@ -314,6 +315,7 @@ double lateral_accel(Mode mode)
 	case Mode::Rail:
 		return 0.6;
 	case Mode::Water:
+	case Mode::Air:
 		return 0.0;
 	}
 	return 0.6;
@@ -329,7 +331,7 @@ bool served_by(Mode mode, StopFeature::Kind kind)
 	case StopFeature::Kind::Train:
 		return mode == Mode::SBahn || mode == Mode::Rail;
 	case StopFeature::Kind::Any:
-		return mode != Mode::Tram && mode != Mode::Water;
+		return mode != Mode::Tram && mode != Mode::Water && mode != Mode::Air;
 	}
 	return false;
 }
@@ -927,6 +929,7 @@ std::pair<double, double> accel_brake(Mode mode)
 	case Mode::Rail:
 		return {0.6, 0.7};
 	case Mode::Water:
+	case Mode::Air:
 		return {0.0, 0.0};
 	}
 	return {0.6, 0.7};
@@ -944,6 +947,7 @@ std::pair<double, double> dwell_seconds(Mode mode)
 	case Mode::Rail:
 		return {35, 60};
 	case Mode::Water:
+	case Mode::Air:
 		return {0.0, 0.0};
 	}
 	return {35, 60};
@@ -960,6 +964,7 @@ double headway_seconds(Mode mode)
 	case Mode::Rail:
 		return 330;
 	case Mode::Water:
+	case Mode::Air:
 		return 0;
 	}
 	return 330;
@@ -1088,6 +1093,8 @@ struct Trip
 std::optional<std::pair<std::vector<std::int32_t>, std::int64_t>> timetable(
 		const Route &route, const Body &body, double scale)
 {
+	if (route.mode == Mode::Air)
+		return std::nullopt;
 	auto [accel, brake] = accel_brake(route.mode);
 	double max_speed = cruise_kmh(route.mode);
 	auto dwell = dwell_seconds(route.mode);
@@ -1389,10 +1396,32 @@ TrainRouteNetwork TrainRouteNetwork::build(const std::vector<ProcessedElement> &
 std::size_t TrainRouteNetwork::train_count() const
 {
 	std::size_t total = 0;
-	for (std::size_t i = 0;
-			i < services_.size() - std::min(ship_services_, services_.size()); ++i)
-		total += services_[i].trains.size();
+	for (const auto &service : services_)
+		if (service.route < routes_.size() &&
+				routes_[service.route].mode != Mode::Water &&
+				routes_[service.route].mode != Mode::Air)
+			total += service.trains.size();
 	return total;
+}
+
+std::vector<vehicle_models::Look> TrainRouteNetwork::java_looks() const
+{
+	std::vector<vehicle_models::Look> result;
+	for (const auto &service : services_)
+		for (const auto &departure : service.trains)
+			for (const auto &coach : service.coaches)
+				result.push_back(train_bodies::look(coach, departure.livery));
+	std::sort(result.begin(), result.end(), [](const auto &a, const auto &b) {
+		return std::tie(a.model, a.livery, a.colours, a.backward) <
+			   std::tie(b.model, b.livery, b.colours, b.backward);
+	});
+	result.erase(std::unique(result.begin(), result.end(),
+						 [](const auto &a, const auto &b) {
+							 return a.model == b.model && a.livery == b.livery &&
+									a.colours == b.colours && a.backward == b.backward;
+						 }),
+			result.end());
+	return result;
 }
 
 std::vector<bool> TrainRouteNetwork::busy(
@@ -1471,7 +1500,7 @@ std::vector<std::vector<TrackAt>> TrainRouteNetwork::tracks_at(
 		if (service.route >= routes_.size())
 			continue;
 		const auto &route = routes_[service.route];
-		if (route.mode == Mode::Water || route.points.empty())
+		if (route.mode == Mode::Water || route.mode == Mode::Air || route.points.empty())
 			continue;
 		std::map<std::size_t, std::pair<double, std::size_t>> nearest;
 		for (std::size_t i = 0; i < route.points.size(); ++i) {
@@ -1522,17 +1551,20 @@ bool TrainRouteNetwork::runs(std::size_t service_index,
 std::size_t TrainRouteNetwork::ship_count() const
 {
 	std::size_t total = 0;
-	const auto first = services_.size() - std::min(ship_services_, services_.size());
-	for (std::size_t i = first; i < services_.size(); ++i)
-		total += services_[i].trains.size();
+	for (const auto &service : services_)
+		if (service.route < routes_.size() && routes_[service.route].mode == Mode::Water)
+			total += service.trains.size();
 	return total;
 }
 
 void TrainRouteNetwork::add_ships(std::vector<std::pair<Route, Service>> ships)
 {
+	// A route may be shared by several services. Count each route once, matching
+	// TrainNetwork::points_held in Rust, or the boat budget is needlessly reduced.
+	std::unordered_set<std::size_t> seen;
 	std::size_t used_points = 0;
 	for (const auto &service : services_)
-		if (service.route < routes_.size())
+		if (service.route < routes_.size() && seen.insert(service.route).second)
 			used_points += routes_[service.route].points.size();
 	std::size_t room = MAX_POINTS > used_points ? MAX_POINTS - used_points : 0;
 	std::size_t boats = MAX_BOATS;
@@ -1546,7 +1578,29 @@ void TrainRouteNetwork::add_ships(std::vector<std::pair<Route, Service>> ships)
 		service.route = routes_.size();
 		routes_.push_back(std::move(route));
 		services_.push_back(std::move(service));
-		++ship_services_;
+	}
+}
+
+std::size_t TrainRouteNetwork::room_for_aircraft() const
+{
+	std::unordered_set<std::size_t> seen;
+	std::size_t used = 0;
+	for (const auto &service : services_)
+		if (service.route < routes_.size() && seen.insert(service.route).second)
+			used += routes_[service.route].points.size();
+	return MAX_POINTS > used ? (MAX_POINTS - used) / 2 : 0;
+}
+
+void TrainRouteNetwork::add_aircraft(
+		std::vector<std::pair<Route, std::vector<Service>>> fields)
+{
+	for (auto &[route, services] : fields) {
+		const auto route_index = routes_.size();
+		routes_.push_back(std::move(route));
+		for (auto &service : services) {
+			service.route = route_index;
+			services_.push_back(std::move(service));
+		}
 	}
 }
 
@@ -1557,7 +1611,7 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 	std::ostringstream network;
 	network << "data modify storage arnis:trains tmp set value []\n";
 	std::ostringstream all;
-	std::map<std::string, std::vector<train_bodies::Part>> bodies;
+	std::map<std::string, std::string> bodies;
 	std::map<std::string, train_bodies::Doors> doors;
 	doors.emplace(train_bodies::NO_DOORS, train_bodies::Doors{});
 	std::unordered_set<std::size_t> written_routes;
@@ -1715,7 +1769,8 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 				const auto &coach = service.coaches[i];
 				const auto &livery = departure.livery;
 				const auto body_key = train_bodies::key(coach, livery);
-				bodies.try_emplace(body_key, train_bodies::parts(coach, livery));
+				bodies.try_emplace(
+						body_key, train_bodies::summon_function(coach, livery, size_));
 				const auto door_key = train_bodies::door_key(coach);
 				doors.try_emplace(door_key, train_bodies::doors(coach));
 				const double offset =
@@ -1743,14 +1798,10 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 		out.emplace_back(
 				"data/arnis/function/trains/door_new/" + key + ".mcfunction", make);
 	}
-	for (const auto &[key, parts] : bodies) {
-		for (const bool bare : {false, true}) {
-			const auto body = train_bodies::summon_function(parts, size_, bare);
-			const std::string prefix = bare ? "ov121/" : "";
-			out.emplace_back(
-					prefix + "data/arnis/function/trains/body/" + key + ".mcfunction",
-					body);
-		}
+	for (const auto &[key, body] : bodies) {
+		out.emplace_back("data/arnis/function/trains/body/" + key + ".mcfunction", body);
+		out.emplace_back(
+				"ov121/data/arnis/function/trains/body/" + key + ".mcfunction", body);
 	}
 	return out;
 }
@@ -1765,7 +1816,6 @@ TrainRouteNetwork::bedrock_data(
 	std::unordered_map<std::string, std::size_t> body_of;
 	std::unordered_map<std::size_t, std::size_t> written_routes;
 	std::size_t carriage = 0;
-	const float size = static_cast<float>(size_);
 	for (const auto &service : services_) {
 		if (service.route >= routes_.size())
 			continue;
@@ -1844,22 +1894,11 @@ TrainRouteNetwork::bedrock_data(
 				if (inserted) {
 					bedrock_addon::Body body;
 					body.name = name;
-					body.fleet = bedrock_addon::Fleet::Train;
-					for (const auto &part :
-							train_bodies::parts(coach, departure.livery)) {
-						bedrock_addon::Shape shape;
-						shape.block = part.block;
-						shape.size = part.size;
-						shape.corner = part.corner;
-						shape.tilt = part.tilt;
-						shape.lamp = part.glow ? bedrock_addon::Lamp::On
-											   : bedrock_addon::Lamp::Off;
-						for (std::size_t axis = 0; axis < 3; ++axis) {
-							shape.size[axis] *= size;
-							shape.corner[axis] *= size;
-						}
-						body.shapes.push_back(std::move(shape));
-					}
+					body.fleet = std::holds_alternative<train_bodies::Plane>(coach)
+										 ? bedrock_addon::Fleet::Plane
+										 : bedrock_addon::Fleet::Train;
+					body.look = train_bodies::look(coach, departure.livery);
+					body.size = size_;
 					bodies.push_back(std::move(body));
 				}
 				const double offset =

@@ -1632,8 +1632,10 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	if (const auto fitted_rotation = turn(index))
 		return SlotSelection{sx, sz, index, *fitted_rotation};
 	const auto stand_in_order = [&](std::size_t a, std::size_t b) {
-		const int da = std::abs(data_->entries[a].schem->height - wanted_height);
-		const int db = std::abs(data_->entries[b].schem->height - wanted_height);
+		// choose_in_community uses its adjusted target when the community has no
+		// model under the size cap; rank stand-ins against that same target.
+		const int da = std::abs(data_->entries[a].schem->height - pick_height);
+		const int db = std::abs(data_->entries[b].schem->height - pick_height);
 		return std::tie(da, data_->entries[a].width, a) <
 			   std::tie(db, data_->entries[b].width, b);
 	};

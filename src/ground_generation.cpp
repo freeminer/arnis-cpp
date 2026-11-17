@@ -446,12 +446,7 @@ std::pair<Block, Block> natural_surface_palette(WorldEditor &editor, int x, int 
 std::pair<bool, bool> canopy_verdict(WorldEditor &editor, int x, int z, int origin_x,
 		int origin_z, int spacing, bool schematic_trees, double scale)
 {
-	const auto floor_div = [spacing](int v) {
-		const int quotient = v / spacing;
-		return quotient - (v % spacing < 0 ? 1 : 0);
-	};
-	const int cell_x = floor_div(x) * spacing;
-	const int cell_z = floor_div(z) * spacing;
+	const auto [cell_x, cell_z] = trees::slot_cell(x, z, spacing);
 	if (!editor.ground)
 		return {false, false};
 	const XZPoint canopy_origin{cell_x - origin_x, cell_z - origin_z};

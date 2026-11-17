@@ -19,6 +19,9 @@ public:
 			const cartesian::XZBBox &world,
 			const std::function<bool(int, int)> &is_water);
 	bool is_empty() const { return lines_.empty(); }
+	/// Every vessel texture this plan could use, before finished-world water
+	/// sampling determines which routes can sail. Used to reserve atlas space.
+	std::vector<vehicle_models::Look> possible_looks() const;
 	std::shared_ptr<water_probe::WaterProbe> probe() const;
 	std::vector<std::pair<trains::Route, trains::Service>> finish(
 			const water_probe::WaterProbe &probe) const;

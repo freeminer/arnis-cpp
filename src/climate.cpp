@@ -14,7 +14,10 @@
 #include <fstream>
 #include <initializer_list>
 #include <array>
+#include <atomic>
+#include <exception>
 #include <map>
+#include <thread>
 #include <utility>
 #include <memory>
 #include <mutex>
@@ -349,14 +352,59 @@ ClimateField::ClimateField(const GeoFunction &geo, std::pair<int, int> alignment
 	};
 	width_ = span(world_width, origin_x_);
 	height_ = span(world_height, origin_z_);
-	climates_.reserve(width_ * height_);
+	climates_.resize(width_ * height_);
 	const double half = cell_ / 2.0;
-	for (std::size_t i = 0; i < width_ * height_; ++i) {
-		const double gx = origin_x_ + static_cast<double>(i % width_) * cell_ + half;
-		const double gz = origin_z_ + static_cast<double>(i / width_) * cell_ + half;
-		const auto [lat, lon] = geo_(gx, gz);
-		climates_.push_back(classify_warped(lat, lon));
+	// Rayon builds the aligned cell raster in parallel while preserving row-major
+	// indexing. Write each result to its final slot so C++ gets the same stable
+	// layout without a serial classification pass on large generation areas.
+	const std::size_t count = climates_.size();
+	const unsigned int hardware = std::max(1u, std::thread::hardware_concurrency());
+	const unsigned int available = std::max(1u, hardware * 9 / 10);
+	const std::size_t workers = count < 256 ? 1 : std::min<std::size_t>(count, available);
+	std::atomic_size_t next{0};
+	std::atomic_bool stop{false};
+	std::exception_ptr failure;
+	std::mutex failure_mutex;
+	auto work = [&] {
+		try {
+			for (;;) {
+				if (stop.load(std::memory_order_relaxed))
+					return;
+				const auto i = next.fetch_add(1, std::memory_order_relaxed);
+				if (i >= count)
+					return;
+				const double gx =
+						origin_x_ + static_cast<double>(i % width_) * cell_ + half;
+				const double gz =
+						origin_z_ + static_cast<double>(i / width_) * cell_ + half;
+				const auto [lat, lon] = geo_(gx, gz);
+				climates_[i] = classify_warped(lat, lon);
+			}
+		} catch (...) {
+			stop.store(true, std::memory_order_relaxed);
+			std::lock_guard lock(failure_mutex);
+			if (!failure)
+				failure = std::current_exception();
+		}
+	};
+	if (workers <= 1) {
+		work();
+	} else {
+		std::vector<std::thread> threads;
+		threads.reserve(workers - 1);
+		for (std::size_t i = 1; i < workers; ++i) {
+			try {
+				threads.emplace_back(work);
+			} catch (...) {
+				break;
+			}
+		}
+		work();
+		for (auto &thread : threads)
+			thread.join();
 	}
+	if (failure)
+		std::rethrow_exception(failure);
 }
 
 arnis::biome::Climate ClimateField::climate(int x, int z) const

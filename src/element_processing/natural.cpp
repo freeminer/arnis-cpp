@@ -300,8 +300,10 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 	}
 	if ((natural_type == "rock" || natural_type == "stone") && element.is_node()) {
 		const auto &node = element.as_node();
-		ground_scatter::place_mapped_rock(editor, building_footprints, node.x, node.z,
-				static_cast<std::uint64_t>(element.id()), natural_type == "stone");
+		if (args.scale >= 0.75 &&
+				editor.cover_class(node.x, node.z) != land_cover::LC_WATER)
+			ground_scatter::place_mapped_rock(editor, building_footprints, node.x, node.z,
+					static_cast<std::uint64_t>(element.id()), natural_type == "stone");
 		return;
 	}
 

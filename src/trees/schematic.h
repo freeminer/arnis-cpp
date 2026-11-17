@@ -56,6 +56,7 @@ bool low_wood_clear(const world_editor::WorldEditor &, const Schematic &,
 		const std::function<int()> &base_y);
 // One deterministic trunk position per lattice cell; shared by regional and
 // canopy-driven placement so streamed tiles cannot disagree at their seam.
+std::pair<int, int> slot_cell(int x, int z, int spacing);
 std::pair<int, int> trunk_slot_s(int x, int z, int spacing);
 // Rotate a schematic-local X/Z coordinate clockwise, preserving the Rust
 // convention that dimensions refer to the unrotated asset.

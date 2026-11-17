@@ -11,6 +11,7 @@
 #include <vector>
 
 #include <nlohmann/json.hpp>
+#include "vehicle_models.h"
 
 namespace arnis::highways::cars
 {
@@ -27,7 +28,8 @@ namespace arnis::bedrock_addon
 enum class Fleet : std::uint8_t
 {
 	Car,
-	Train
+	Train,
+	Plane
 };
 
 constexpr std::string_view family(Fleet fleet) noexcept
@@ -36,6 +38,7 @@ constexpr std::string_view family(Fleet fleet) noexcept
 	case Fleet::Car:
 		return "arnis_car";
 	case Fleet::Train:
+	case Fleet::Plane:
 		return "arnis_train";
 	}
 	return "arnis_car";
@@ -61,7 +64,8 @@ struct Body
 {
 	std::string name;
 	Fleet fleet{Fleet::Car};
-	std::vector<Shape> shapes;
+	vehicle_models::Look look;
+	double size{1.0};
 };
 
 struct Pack

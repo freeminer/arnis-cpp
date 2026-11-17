@@ -382,7 +382,6 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				auto &tree_rng = cell_rng ? *cell_rng : rng;
 				const bool spawn_tree =
 						tree_rng.uniform(static_cast<std::uint32_t>(tree_threshold)) == 0;
-				const int random_choice = static_cast<int>(rng.uniform(30));
 				if (spawn_tree) {
 					const TreeType tree_type =
 							trees_ok_to_generate.empty()
@@ -395,6 +394,9 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 								&building_footprints, &bridge_surface, false,
 								std::nullopt, leaf_type_tagged);
 				} else {
+					// Rust only advances the area RNG for undergrowth when this cell
+					// did not spawn a tree. Keep per-cell woods draws isolated above.
+					const int random_choice = static_cast<int>(rng.uniform(30));
 					if (random_choice == 2) {
 						const int feature = 1 + static_cast<int>(rng.uniform(6));
 						if (feature == 1) {

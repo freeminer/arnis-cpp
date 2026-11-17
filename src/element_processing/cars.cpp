@@ -2551,26 +2551,13 @@ std::vector<bedrock_addon::Body> CarNetwork::bedrock_bodies() const
 	std::vector<bedrock_addon::Body> out;
 	const auto definitions = all_bodies();
 	out.reserve(definitions.size());
-	const float size = static_cast<float>(size_);
 	for (const auto &[kind, colour] : definitions) {
 		bedrock_addon::Body body;
 		body.name = body_name(kind, colour);
 		body.fleet = bedrock_addon::Fleet::Car;
-		for (const auto &part : body_parts(kind, std::string(colour))) {
-			bedrock_addon::Lamp lamp = bedrock_addon::Lamp::Off;
-			if (part.light == Light::Head)
-				lamp = bedrock_addon::Lamp::On;
-			else if (part.light == Light::Tail)
-				lamp = bedrock_addon::Lamp::Brake;
-			bedrock_addon::Shape shape;
-			shape.block = part.block;
-			shape.lamp = lamp;
-			for (std::size_t axis = 0; axis < 3; ++axis) {
-				shape.size[axis] = part.size[axis] * size;
-				shape.corner[axis] = part.corner[axis] * size;
-			}
-			body.shapes.push_back(std::move(shape));
-		}
+		body.look = vehicle_models::Look::plain(std::string(vehicle_model_name(kind)),
+				colour_name(colour), std::string(colour));
+		body.size = size_;
 		out.push_back(std::move(body));
 	}
 	return out;

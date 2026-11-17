@@ -4,6 +4,7 @@
 #include "../bedrock_addon.h"
 #include "../../../arnis_adapter.h"
 #include "train_bodies.h"
+#include "../vehicle_models.h"
 
 #include <cstddef>
 #include <cstdint>
@@ -29,7 +30,8 @@ enum class Mode : std::uint8_t
 	Metro,
 	SBahn,
 	Rail,
-	Water
+	Water,
+	Air
 };
 
 enum class End : std::uint8_t
@@ -135,6 +137,7 @@ public:
 			double scale, const cartesian::XZBBox &world);
 	const std::vector<Route> &routes() const { return routes_; }
 	const std::vector<Service> &services() const { return services_; }
+	std::vector<vehicle_models::Look> java_looks() const;
 	double size() const { return size_; }
 	std::size_t train_count() const;
 	std::size_t ship_count() const;
@@ -153,6 +156,8 @@ public:
 	/// Append water services planned from the finished-world water probe. Each item owns one
 	/// route and its backend-neutral schedule, just like a rail service.
 	void add_ships(std::vector<std::pair<Route, Service>> ships);
+	std::size_t room_for_aircraft() const;
+	void add_aircraft(std::vector<std::pair<Route, std::vector<Service>>> fields);
 	std::vector<std::pair<std::string, std::string>> datapack_functions(
 			const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
 			const;
@@ -164,7 +169,6 @@ private:
 	std::vector<Route> routes_;
 	std::vector<Service> services_;
 	double size_{1.0};
-	std::size_t ship_services_{};
 };
 
 // Keep the Rust module's public type name available to library consumers;

@@ -1056,7 +1056,7 @@ void carve_lc_water_region(WorldEditor &editor, const BigWaterField &bwf,
 	// find those existing water columns and deepen them to the river field.
 	// This also handles columns over completed bores, while retaining the bore
 	// shell and any raised bridge deck.
-	if (!editor.get_ground())
+	if (!editor.get_ground() || !bwf.has_river())
 		return;
 	constexpr int SURFACE_REACH = 20;
 	const std::vector<Block> water{WATER};

@@ -383,7 +383,7 @@ bool low_wood_clear(const world_editor::WorldEditor &editor, const Schematic &sc
 	}
 	return true;
 }
-std::pair<int, int> trunk_slot_s(int x, int z, int spacing)
+std::pair<int, int> slot_cell(int x, int z, int spacing)
 {
 	const int s = std::max(1, spacing);
 	const auto wrap_i32 = [](std::uint32_t value) {
@@ -405,6 +405,22 @@ std::pair<int, int> trunk_slot_s(int x, int z, int spacing)
 	const auto cx = euclid_div(add(x, -shift));
 	const int x0 = add(mul(cx, static_cast<std::uint32_t>(s)), shift);
 	const int z0 = mul(cz, static_cast<std::uint32_t>(s));
+	return {x0, z0};
+}
+
+std::pair<int, int> trunk_slot_s(int x, int z, int spacing)
+{
+	const int s = std::max(1, spacing);
+	const auto [x0, z0] = slot_cell(x, z, s);
+	const auto wrap_i32 = [](std::uint32_t value) {
+		return std::bit_cast<std::int32_t>(value);
+	};
+	const auto add = [&](int a, int b) {
+		return wrap_i32(std::uint32_t(a) + std::uint32_t(b));
+	};
+	const auto mul = [&](int a, std::uint32_t b) {
+		return wrap_i32(std::uint32_t(a) * b);
+	};
 	const auto hx = add(mul(x0, 0x1f1fu), 17);
 	const auto hz = add(mul(z0, 0x2b2bu), 91);
 	const auto h = land_cover::coord_hash(hx, hz);

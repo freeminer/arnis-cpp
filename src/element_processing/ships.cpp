@@ -1278,6 +1278,43 @@ std::shared_ptr<water_probe::WaterProbe> ShipPlan::probe() const
 	return std::make_shared<water_probe::WaterProbe>(columns);
 }
 
+std::vector<vehicle_models::Look> ShipPlan::possible_looks() const
+{
+	std::vector<ship_bodies::Vessel> vessels;
+	const auto add = [&](ship_bodies::Vessel vessel) {
+		if (std::find(vessels.begin(), vessels.end(), vessel) == vessels.end())
+			vessels.push_back(vessel);
+	};
+	for (const auto &line : lines_) {
+		if (line.leisure) {
+			add(ship_bodies::Vessel::Sailboat);
+			add(ship_bodies::Vessel::Motorboat);
+		} else if (line.waterway_class) {
+			for (std::uint64_t roll = 0; roll < 100; ++roll)
+				for (const auto vessel : waterway_vessels(*line.waterway_class, roll))
+					add(vessel);
+		} else if (line.cars) {
+			// Length and offshore exposure are resolved when the line is sampled.
+			// Reserve every car-ferry class it can choose from here.
+			add(ship_bodies::Vessel::SeaFerry);
+			add(ship_bodies::Vessel::CarFerry);
+			add(ship_bodies::Vessel::RiverFerry);
+		} else {
+			add(ship_bodies::Vessel::WaterBus);
+		}
+	}
+	std::vector<vehicle_models::Look> looks;
+	for (const auto vessel : vessels) {
+		for (const bool low : ship_bodies::lowers(vessel) ? std::array{false, true}
+														  : std::array{false, false}) {
+			for (const auto &livery : ship_bodies::liveries(vessel))
+				looks.push_back(
+						train_bodies::look(train_bodies::Ship{vessel, low}, livery));
+		}
+	}
+	return looks;
+}
+
 std::vector<std::pair<trains::Route, trains::Service>> ShipPlan::finish(
 		const water_probe::WaterProbe &probe) const
 {
