@@ -408,11 +408,14 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 							ground_decoration::place_scattered_flower(editor, x, z,
 									ground_decoration::FlowerSetting::Forest);
 					} else if (random_choice <= 12) {
+						// Consume this draw for litter cells too, matching Rust's per-cell
+						// RNG stream for every later forest decoration choice.
+						const bool fern = rng.uniform(100) < 12;
 						if (litter) {
 							if (random_choice <= 3)
 								editor.set_block(
 										FERN, x, 1, z, std::nullopt, std::nullopt);
-						} else if (rng.uniform(100) < 12)
+						} else if (fern)
 							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
 						else if (!floor || random_choice <= 5)
 							editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);

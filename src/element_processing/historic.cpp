@@ -528,6 +528,12 @@ bool names_a_horse(const tags_t &tags)
 		auto value = tags.get(std::string(key));
 		std::transform(value.begin(), value.end(), value.begin(),
 				[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+		// Rust's Unicode lowercase maps Polish capital Ń (C5 83) to ń (C5 84).
+		// Keep the non-ASCII horse keyword case-insensitive without depending on a
+		// process locale, which is often the C locale during map generation.
+		for (std::size_t pos = 0;
+				(pos = value.find("\xC5\x83", pos)) != std::string::npos; pos += 2)
+			value.replace(pos, 2, "\xC5\x84");
 		for (const auto word : words)
 			if (value.find(word) != std::string::npos)
 				return true;

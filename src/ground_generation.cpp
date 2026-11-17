@@ -65,8 +65,9 @@ enum class ForestFloor
 	Dry
 };
 
+template <typename LatitudeFallback>
 std::optional<ForestFloor> forest_floor_kind(const Ground &ground, const XZPoint &point,
-		biome::Climate climate, double fallback_latitude)
+		biome::Climate climate, LatitudeFallback &&fallback_latitude)
 {
 	if (climate != biome::Climate::Temperate && climate != biome::Climate::DryContinental)
 		return std::nullopt;
@@ -86,7 +87,7 @@ std::optional<ForestFloor> forest_floor_kind(const Ground &ground, const XZPoint
 			return std::nullopt;
 		}
 	}
-	const double latitude = std::abs(ground.latitude_at(point, fallback_latitude));
+	const double latitude = std::abs(fallback_latitude());
 	if (latitude < 23.5)
 		return std::nullopt;
 	return latitude > 55.0 ? ForestFloor::Conifer : ForestFloor::Broadleaf;
@@ -731,12 +732,14 @@ std::optional<Block> mapped_forest_floor(const WorldEditor &editor, int x, int z
 		return std::nullopt;
 	const auto point = editor.ground_point(x, z);
 	const auto climate = editor.ground->climate_at(point);
-	const auto bounds = editor.geographic_bounds();
-	const double world_latitude = (bounds[0] + bounds[1]) * 0.5;
 	const auto kind =
 			climate == biome::Climate::Boreal
 					? std::optional<ForestFloor>(ForestFloor::Conifer)
-					: forest_floor_kind(*editor.ground, point, climate, world_latitude);
+					: forest_floor_kind(*editor.ground, point, climate, [&] {
+						  const auto bounds = editor.geographic_bounds();
+						  const double world_latitude = (bounds[0] + bounds[1]) * 0.5;
+						  return editor.ground->latitude_at(point, world_latitude);
+					  });
 	if (!kind)
 		return std::nullopt;
 	if (const auto canopy_height = editor.ground->canopy_height_m(point);
@@ -861,8 +864,10 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 					return std::nullopt;
 				const auto sample = editor.ground_point(
 						chunk_origin(chunk_x) + 8, chunk_origin(chunk_z) + 8);
-				return forest_floor_kind(*editor.ground, sample,
-						editor.ground->climate_at(sample), center_latitude);
+				return forest_floor_kind(
+						*editor.ground, sample, editor.ground->climate_at(sample), [&] {
+							return editor.ground->latitude_at(sample, center_latitude);
+						});
 			}();
 			std::optional<ChunkGroundCache> ground_cache;
 			if (terrain_enabled)

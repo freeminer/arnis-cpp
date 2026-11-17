@@ -85,13 +85,23 @@ struct SlotSelection
 	std::size_t schematic_index = 0;
 	unsigned rotation = 0;
 };
+/// Ordered schematic candidates for a mapped tree. Rust first tries the selected
+/// model at its mapped coordinate, then the same species/genus/type near it, and
+/// only then the selected habitat community.
+struct MappedSelection
+{
+	SlotSelection selected;
+	std::vector<std::size_t> own_models;
+	std::vector<std::size_t> community_models;
+};
 class RegionSelector
 {
 	struct Data;
 	std::shared_ptr<Data> data_;
 	explicit RegionSelector(std::shared_ptr<Data> data) : data_(std::move(data)) {}
 	std::optional<SlotSelection> pick_slot_impl(int x, int z, Habitat, int elevation_y,
-			SlotRequest request, bool mapped_selection) const;
+			SlotRequest request, bool mapped_selection,
+			MappedSelection *mapped_candidates = nullptr) const;
 
 public:
 	RegionSelector() = default;
@@ -119,6 +129,8 @@ public:
 	std::optional<SlotSelection> pick_slot(
 			int x, int z, Habitat, int elevation_y, SlotRequest request = {}) const;
 	std::optional<SlotSelection> pick_mapped(
+			int x, int z, Habitat, int elevation_y, const MappedRequest &) const;
+	std::optional<MappedSelection> pick_mapped_candidates(
 			int x, int z, Habitat, int elevation_y, const MappedRequest &) const;
 	const Schematic *schematic(std::size_t index) const;
 };

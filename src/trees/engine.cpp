@@ -10,6 +10,7 @@
 #include <array>
 #include <algorithm>
 #include <cmath>
+#include <optional>
 #include <tuple>
 namespace arnis::trees
 {
@@ -210,72 +211,95 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 			   editor.check_for_block(sx, 0, sz,
 					   std::optional<std::vector<Block>>({block_definitions::WATER}));
 	};
-	if (!editor.owns(x, z) || blocked(x, z, false))
+	// Rust rejects a mapped tree at its source coordinate when land cover says
+	// water; unlike a procedural slot, it must not relocate that tree onto land.
+	if (!editor.owns(x, z) || blocked(x, z, true))
 		return false;
 	auto mapped_request = request;
 	const auto caller_fit = request.fits;
-	mapped_request.fits = [&](std::size_t index, unsigned rotation) {
-		const auto *candidate = selector.schematic(index);
-		return candidate && (!caller_fit || caller_fit(index, rotation)) &&
-			   fits_tree_wood(editor, *candidate, x, z, rotation, y_offset, true);
-	};
+	mapped_request.fits = {};
 	auto selected =
 			selector.pick_mapped(x, z, request.habitat, elevation_y, mapped_request);
 	if (!selected)
 		return false;
 	// Match Rust's tile ownership rule: a mapped tree is never dropped just
 	// because its deterministic schematic slot crosses an ownership seam.
-	if (!editor.owns(selected->x, selected->z)) {
-		selected->x = x;
-		selected->z = z;
-	}
-	const auto *schem = selector.schematic(selected->schematic_index);
-	if (!schem)
-		return false;
-	const int reach = std::max(3, static_cast<int>(std::lround(8.0 * editor.scale())));
-	std::vector<std::pair<int, int>> offsets;
-	for (int dx = -reach; dx <= reach; ++dx)
-		for (int dz = -reach; dz <= reach; ++dz)
-			if ((dx || dz) && dx * dx + dz * dz <= reach * reach)
-				offsets.emplace_back(dx, dz);
-	std::sort(offsets.begin(), offsets.end(), [&](const auto &a, const auto &b) {
-		return std::tuple{a.first * a.first + a.second * a.second,
-					   editor.surface_is_sealed(x + a.first, z + a.second), a.first,
-					   a.second} <
-			   std::tuple{b.first * b.first + b.second * b.second,
-					   editor.surface_is_sealed(x + b.first, z + b.second), b.first,
-					   b.second};
-	});
-	auto fits_at = [&](int ax, int az,
+	selected->x = x;
+	selected->z = z;
+	auto fits_at = [&](int ax, int az, std::size_t index,
 						   unsigned preferred_rotation) -> std::optional<unsigned> {
 		if (!editor.owns(ax, az) || editor.on_carriageway(ax, az) ||
 				blocked(ax, az, true))
 			return std::nullopt;
+		const auto *schem = selector.schematic(index);
+		if (!schem)
+			return std::nullopt;
 		for (unsigned k = 0; k < 4; ++k) {
 			const unsigned rotation = (preferred_rotation + k) & 3u;
-			if (fits_tree_wood(editor, *schem, ax, az, rotation, y_offset, true))
+			if ((!caller_fit || caller_fit(index, rotation)) &&
+					fits_tree_wood(editor, *schem, ax, az, rotation, y_offset, true))
 				return rotation;
 		}
 		return std::nullopt;
 	};
-	if (const auto rotation = fits_at(selected->x, selected->z, selected->rotation)) {
+	if (const auto rotation =
+					fits_at(x, z, selected->schematic_index, selected->rotation)) {
 		selected->rotation = *rotation;
-	} else {
-		bool found = false;
-		for (const auto &[dx, dz] : offsets) {
-			if (const auto rotation = fits_at(x + dx, z + dz, selected->rotation)) {
-				selected->x = x + dx;
-				selected->z = z + dz;
-				selected->rotation = *rotation;
-				found = true;
-				break;
-			}
-		}
-		if (!found)
-			return false;
+		return place_selected_schematic(
+				editor, selector, y_offset, *selected, building_footprints, true);
 	}
+	// Rust only resolves the complete same-species and community fallback lists after
+	// the mapped model fails at its exact location. Avoid allocating/scanning those
+	// pools on the common path where the requested tree already fits.
+	auto candidates = selector.pick_mapped_candidates(
+			x, z, request.habitat, elevation_y, mapped_request);
+	if (!candidates)
+		return false;
+	std::optional<std::vector<std::pair<int, int>>> offsets;
+	auto nearby_offsets = [&]() -> const std::vector<std::pair<int, int>> & {
+		if (!offsets) {
+			const int reach =
+					std::max(3, static_cast<int>(std::lround(8.0 * editor.scale())));
+			offsets.emplace();
+			for (int dx = -reach; dx <= reach; ++dx)
+				for (int dz = -reach; dz <= reach; ++dz)
+					if ((dx || dz) && dx * dx + dz * dz <= reach * reach)
+						offsets->emplace_back(dx, dz);
+			std::sort(
+					offsets->begin(), offsets->end(), [&](const auto &a, const auto &b) {
+						return std::tuple{a.first * a.first + a.second * a.second,
+									   editor.surface_is_sealed(
+											   x + a.first, z + a.second),
+									   a.first, a.second} <
+							   std::tuple{b.first * b.first + b.second * b.second,
+									   editor.surface_is_sealed(
+											   x + b.first, z + b.second),
+									   b.first, b.second};
+					});
+		}
+		return *offsets;
+	};
+	auto find_nearest =
+			[&](const std::vector<std::size_t> &models) -> std::optional<SlotSelection> {
+		for (const auto index : models)
+			if (const auto rotation = fits_at(x, z, index, selected->rotation))
+				return SlotSelection{x, z, index, *rotation};
+		for (const auto &[dx, dz] : nearby_offsets())
+			for (const auto index : models)
+				if (const auto rotation =
+								fits_at(x + dx, z + dz, index, selected->rotation))
+					return SlotSelection{x + dx, z + dz, index, *rotation};
+		return std::nullopt;
+	};
+	auto placed = [&]() -> std::optional<SlotSelection> {
+		if (auto own = find_nearest(candidates->own_models))
+			return own;
+		return find_nearest(candidates->community_models);
+	}();
+	if (!placed)
+		return false;
 	return place_selected_schematic(
-			editor, selector, y_offset, *selected, building_footprints, true);
+			editor, selector, y_offset, *placed, building_footprints, true);
 }
 bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int x, int z, std::uint8_t cover, int elevation_y,

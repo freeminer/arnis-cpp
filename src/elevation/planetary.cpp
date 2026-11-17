@@ -12,6 +12,12 @@
 #include <limits>
 #include <thread>
 
+#if defined(_WIN32)
+#include <process.h>
+#else
+#include <unistd.h>
+#endif
+
 namespace arnis::elevation
 {
 namespace
@@ -157,7 +163,22 @@ void save_window(const std::filesystem::path &path, const std::vector<float> &va
 	std::filesystem::create_directories(path.parent_path(), error);
 	if (error)
 		return;
-	const auto temporary = path.string() + ".tmp";
+	// Concurrent chunks can request the same planetary window. Match Rust's
+	// unique temporary-file behavior so writers never truncate one another's
+	// in-progress cache data.
+	static std::atomic<std::uint64_t> write_sequence{0};
+	const auto process_id =
+#if defined(_WIN32)
+			_getpid();
+#else
+			getpid();
+#endif
+	const auto temporary =
+			path.parent_path() /
+			("." + path.filename().string() + "." + std::to_string(process_id) + "." +
+					std::to_string(
+							write_sequence.fetch_add(1, std::memory_order_relaxed)) +
+					".tmp");
 	std::ofstream output(temporary, std::ios::binary | std::ios::trunc);
 	if (!output)
 		return;
@@ -169,12 +190,19 @@ void save_window(const std::filesystem::path &path, const std::vector<float> &va
 				static_cast<std::uint8_t>(bits >> 16),
 				static_cast<std::uint8_t>(bits >> 24)};
 		output.write(reinterpret_cast<const char *>(bytes), sizeof(bytes));
-		if (!output)
+		if (!output) {
+			output.close();
+			std::filesystem::remove(temporary, error);
 			break;
+		}
 	}
+	if (!output)
+		return;
 	output.close();
 	if (output)
 		std::filesystem::rename(temporary, path, error);
+	else
+		error = std::make_error_code(std::errc::io_error);
 	if (error)
 		std::filesystem::remove(temporary, error);
 }

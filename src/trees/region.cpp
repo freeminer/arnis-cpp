@@ -1185,7 +1185,8 @@ const Schematic *RegionSelector::schematic(std::size_t index) const
 }
 
 std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habitat hint,
-		int elevation, SlotRequest request, bool mapped_selection) const
+		int elevation, SlotRequest request, bool mapped_selection,
+		MappedSelection *mapped_candidates) const
 {
 	if (empty())
 		return std::nullopt;
@@ -1598,9 +1599,12 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	}
 	std::size_t pick = land_cover::coord_hash(sx + 31, sz + 57) % total;
 	std::vector<std::size_t> selected_species;
-	for (const auto &species : usable_species) {
+	std::size_t selected_species_index = usable_species.size();
+	for (std::size_t i = 0; i < usable_species.size(); ++i) {
+		const auto &species = usable_species[i];
 		if (pick < species.size()) {
 			selected_species = species;
+			selected_species_index = i;
 			break;
 		}
 		pick -= species.size();
@@ -1619,6 +1623,119 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	const auto index = width[land_cover::coord_hash(sx + 313, sz + 727) % width.size()];
 	const unsigned rotation =
 			unsigned(land_cover::coord_hash(sx ^ 0x5bd1, sz ^ 0x9e37) % 4);
+	if (mapped_candidates && mapped_selection) {
+		mapped_candidates->selected = {sx, sz, index, rotation};
+		const auto by_standin_preference = [&](std::size_t a, std::size_t b) {
+			const int da = std::abs(data_->entries[a].schem->height - pick_height);
+			const int db = std::abs(data_->entries[b].schem->height - pick_height);
+			return std::tie(da, data_->entries[a].width, a) <
+				   std::tie(db, data_->entries[b].width, b);
+		};
+		mapped_candidates->own_models.push_back(index);
+		std::vector<std::size_t> same_species;
+		for (const auto candidate : species_candidates[selected_species_index])
+			if (candidate != index && eligible(candidate))
+				same_species.push_back(candidate);
+		std::sort(same_species.begin(), same_species.end(), by_standin_preference);
+		mapped_candidates->own_models.insert(mapped_candidates->own_models.end(),
+				same_species.begin(), same_species.end());
+		std::vector<std::size_t> other_own;
+		for (const auto &species : species_candidates)
+			for (const auto candidate : species)
+				if (candidate != index && eligible(candidate) &&
+						std::find(mapped_candidates->own_models.begin(),
+								mapped_candidates->own_models.end(),
+								candidate) == mapped_candidates->own_models.end())
+					other_own.push_back(candidate);
+		std::sort(other_own.begin(), other_own.end(), by_standin_preference);
+		mapped_candidates->own_models.insert(
+				mapped_candidates->own_models.end(), other_own.begin(), other_own.end());
+		auto community_models = [&]() {
+			std::vector<std::size_t> result;
+			bool any_capped = false;
+			for (const auto &species : all_species)
+				for (const auto candidate : species)
+					any_capped = any_capped || capped(candidate);
+			const auto usable = [&](std::size_t candidate) {
+				return !any_capped || capped(candidate);
+			};
+			int target_height = wanted_height;
+			if (!any_capped) {
+				target_height = std::numeric_limits<int>::max();
+				for (const auto &species : all_species)
+					for (const auto candidate : species)
+						target_height = std::min(
+								target_height, data_->entries[candidate].schem->height);
+			}
+			int nearest = std::numeric_limits<int>::max();
+			for (const auto &species : all_species)
+				for (const auto candidate : species)
+					if (usable(candidate))
+						nearest = std::min(nearest,
+								std::abs(data_->entries[candidate].schem->height -
+										 target_height));
+			if (nearest == std::numeric_limits<int>::max())
+				return result;
+			const int limit = nearest + height_slack(target_height);
+			std::vector<std::vector<std::size_t>> close_species;
+			std::size_t close_total = 0;
+			for (const auto &species : all_species) {
+				std::vector<std::size_t> close;
+				for (const auto candidate : species)
+					if (usable(candidate) &&
+							std::abs(data_->entries[candidate].schem->height -
+									 target_height) <= limit)
+						close.push_back(candidate);
+				close_total += close.size();
+				close_species.push_back(std::move(close));
+			}
+			if (!close_total)
+				return result;
+			std::size_t roll = land_cover::coord_hash(sx + 31, sz + 57) % close_total;
+			std::size_t chosen_species = 0;
+			for (std::size_t i = 0; i < close_species.size(); ++i) {
+				if (roll < close_species[i].size()) {
+					chosen_species = i;
+					break;
+				}
+				roll -= close_species[i].size();
+			}
+			const auto &pool = close_species[chosen_species];
+			const auto width_roll = land_cover::coord_hash(sx + 5, sz + 11) % 100;
+			const int wanted_width = width_roll < 78 ? 1 : width_roll < 96 ? 2 : 3;
+			std::vector<std::size_t> preferred;
+			for (int w = wanted_width; w >= 1 && preferred.empty(); --w)
+				for (const auto candidate : pool)
+					if (data_->entries[candidate].width == w)
+						preferred.push_back(candidate);
+			if (preferred.empty())
+				preferred = pool;
+			const auto picked = preferred[land_cover::coord_hash(sx + 313, sz + 727) %
+										  preferred.size()];
+			result.push_back(picked);
+			const auto append_standins = [&](std::size_t species_index) {
+				if (species_index >= all_species.size())
+					return;
+				std::vector<std::size_t> standins;
+				for (const auto candidate : all_species[species_index])
+					if (candidate != picked && usable(candidate))
+						standins.push_back(candidate);
+				std::sort(standins.begin(), standins.end(), by_standin_preference);
+				result.insert(result.end(), standins.begin(), standins.end());
+			};
+			append_standins(chosen_species);
+			std::vector<std::size_t> remaining;
+			for (std::size_t i = 0; i < all_species.size(); ++i)
+				if (i != chosen_species)
+					for (const auto candidate : all_species[i])
+						if (candidate != picked && usable(candidate))
+							remaining.push_back(candidate);
+			std::sort(remaining.begin(), remaining.end(), by_standin_preference);
+			result.insert(result.end(), remaining.begin(), remaining.end());
+			return result;
+		};
+		mapped_candidates->community_models = community_models();
+	}
 	if (!request.fits)
 		return SlotSelection{sx, sz, index, rotation};
 	const auto turn = [&](std::size_t candidate) -> std::optional<unsigned> {
@@ -1700,5 +1817,22 @@ std::optional<SlotSelection> RegionSelector::pick_mapped(
 	// clearing roll to an explicitly tagged trunk.
 	request.density_decided = true;
 	return pick_slot_impl(x, z, hint, elevation, request, true);
+}
+
+std::optional<MappedSelection> RegionSelector::pick_mapped_candidates(
+		int x, int z, Habitat hint, int elevation, const MappedRequest &mapped) const
+{
+	SlotRequest request;
+	request.want_height = mapped.want_height;
+	request.eco = mapped.eco;
+	request.beach = mapped.beach;
+	request.tagged = mapped.conifer.has_value();
+	request.genus = mapped.genus;
+	request.conifer = mapped.conifer;
+	request.density_decided = true;
+	MappedSelection candidates;
+	if (!pick_slot_impl(x, z, hint, elevation, std::move(request), true, &candidates))
+		return std::nullopt;
+	return candidates;
 }
 }
