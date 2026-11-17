@@ -4,6 +4,7 @@
 #include "signage.h"
 #include <algorithm>
 #include <array>
+#include <bit>
 #include <cctype>
 #include <cstdint>
 #include <cmath>
@@ -233,7 +234,7 @@ bool add_artwork_figure_displays(WorldEditor &editor, const ProcessedNode &node,
 						   : static_cast<double>(
 									 editor.get_absolute_y(node.x, relative_y, node.z)) +
 									 y_fraction;
-	auto seed = static_cast<std::int64_t>(node.id * std::uint64_t(64));
+	auto seed = std::bit_cast<std::int64_t>(node.id * std::uint64_t{64});
 	const auto add_box = [&](Point3 pivot, Point3 offset, Point3 size, Quat rotation,
 								 double scale) {
 		const auto rotated_offset = rotate(
@@ -241,7 +242,10 @@ bool add_artwork_figure_displays(WorldEditor &editor, const ProcessedNode &node,
 		const Point3 translation{pivot[0] * scale + rotated_offset[0],
 				pivot[1] * scale + rotated_offset[1],
 				pivot[2] * scale + rotated_offset[2]};
-		nlohmann::json extra = {{"block_state", {{"Name", material}}},
+		seed = std::bit_cast<std::int64_t>(
+				std::bit_cast<std::uint64_t>(seed) + std::uint64_t{1});
+		nlohmann::json extra = {
+				{"block_state", {{"Name", material}}},
 				{"Rotation", {yaw, 0.0f}},
 				{"transformation", {{"left_rotation", {rotation[0], rotation[1],
 															  rotation[2], rotation[3]}},
@@ -249,8 +253,8 @@ bool add_artwork_figure_displays(WorldEditor &editor, const ProcessedNode &node,
 										   {"translation", translation},
 										   {"scale", {size[0] * scale, size[1] * scale,
 															 size[2] * scale}}}},
-				{"view_range", 3.0}};
-		return editor.add_block_display(x, y, z, seed++, std::move(extra));
+		};
+		return editor.add_block_display(x, y, z, seed, std::move(extra));
 	};
 	const auto add_part = [&](Point3 centre, Point3 size) {
 		return add_box({0, 0, 0},

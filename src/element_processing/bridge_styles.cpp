@@ -45,6 +45,7 @@ constexpr std::size_t WIDE_BEAM_PIER_INTERVAL = 12;
 constexpr std::size_t BOARDWALK_POST_INTERVAL = 4;
 constexpr std::size_t ARCH_SPAN = 20;
 constexpr float ARCH_RISE_FRACTION = 0.85f;
+constexpr int ARCH_WATER_ROOM = 6;
 constexpr int PIER_FOOTING_MIN_HEIGHT = 5;
 constexpr int TRUSS_TOP_HEIGHT = 5;
 constexpr std::size_t TRUSS_DIAGONAL_PERIOD = 8;
@@ -627,13 +628,17 @@ void place_arch_below_deck(WorldEditor &editor, int set_x, int cell_y, int set_z
 		int centerline_ground_y, std::size_t tds, std::size_t total, bool use_absolute_y,
 		bool is_centerline)
 {
-	place_arch_spandrel_cell(editor, set_x, cell_y, set_z, centerline_ground_y, tds,
-			total, use_absolute_y);
-	if (!is_centerline)
+	const bool low_over_water =
+			editor.is_mapped_water(set_x, set_z) &&
+			cell_y - editor.get_water_level(set_x, set_z) < ARCH_WATER_ROOM;
+	if (!low_over_water)
+		place_arch_spandrel_cell(editor, set_x, cell_y, set_z, centerline_ground_y, tds,
+				total, use_absolute_y);
+	if (!is_centerline && !low_over_water)
 		return;
 	const auto [start, span] = arch_segment(tds, total);
 	if (tds == start || tds + 1 == start + span)
-		place_pillar_impl(editor, set_x, cell_y, set_z, STONE_BRICKS, true);
+		place_pillar_impl(editor, set_x, cell_y, set_z, STONE_BRICKS, is_centerline);
 }
 
 std::vector<std::size_t> default_pylons(BridgeStyle style, std::size_t total,

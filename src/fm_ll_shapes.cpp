@@ -1,10 +1,11 @@
 #include "fm_ll_shapes.h"
+#include "unicode_text.h"
 
 #include <nlohmann/json.hpp>
 
 #include <algorithm>
 #include <cmath>
-#include <sstream>
+#include <string_view>
 
 namespace arnis
 {
@@ -21,6 +22,12 @@ void set_error(std::string *error, std::string value)
 {
 	if (error)
 		*error = std::move(value);
+}
+
+std::string_view trim(std::string_view value)
+{
+	const auto [begin, end] = unicode_text::trim_whitespace(value);
+	return value.substr(begin, end - begin);
 }
 
 std::optional<RawRing> json_ring(const Json &value, std::string *error)
@@ -87,7 +94,8 @@ bool collect_geojson(const Json &value, std::vector<RawPolygon> &out, unsigned d
 	if (type != "Polygon" && type != "MultiPolygon")
 		return true;
 	if (!coordinates) {
-		set_error(error, "no Polygon or MultiPolygon geometry found");
+		set_error(error, type == "Polygon" ? "Polygon has no coordinates"
+										   : "MultiPolygon has no coordinates");
 		return false;
 	}
 	auto parse_polygon = [&](const Json &rings) {
@@ -237,32 +245,45 @@ std::optional<LLShapes> LLShapes::create(
 std::optional<std::vector<std::pair<double, double>>> LLShapes::parse_points(
 		const std::string &text, std::string *error)
 {
-	std::string normalized = text;
-	for (auto &c : normalized)
-		if (c == ';' || c == '\n' || c == '\t')
-			c = ' ';
-	std::istringstream input(normalized);
 	std::vector<std::pair<double, double>> result;
-	std::string token;
-	while (input >> token) {
-		const auto comma = token.find(',');
-		if (comma == std::string::npos ||
-				token.find(',', comma + 1) != std::string::npos) {
-			set_error(error, "'" + token + "' is not a lat,lng point");
-			return std::nullopt;
-		}
-		try {
-			std::size_t used_lat = 0, used_lng = 0;
-			const double lat = std::stod(token.substr(0, comma), &used_lat);
-			const double lng = std::stod(token.substr(comma + 1), &used_lng);
-			if (used_lat != comma || used_lng != token.size() - comma - 1 ||
-					!std::isfinite(lat) || !std::isfinite(lng))
-				throw std::invalid_argument("invalid coordinate");
+	for (std::size_t begin = 0; begin <= text.size();) {
+		const auto end = text.find_first_of(" ;\n\t", begin);
+		const auto pair = trim(std::string_view(text).substr(
+				begin, end == std::string::npos ? std::string::npos : end - begin));
+		if (!pair.empty()) {
+			const auto comma = pair.find(',');
+			if (comma == std::string_view::npos ||
+					pair.find(',', comma + 1) != std::string_view::npos) {
+				set_error(error, "'" + std::string(pair) + "' is not a lat,lng point");
+				return std::nullopt;
+			}
+			const auto lat_text = trim(pair.substr(0, comma));
+			const auto lng_text = trim(pair.substr(comma + 1));
+			const auto parse_number = [&](std::string_view value, double &number) {
+				try {
+					std::size_t used = 0;
+					number = std::stod(std::string(value), &used);
+					return used == value.size() && std::isfinite(number);
+				} catch (...) {
+					return false;
+				}
+			};
+			double lat{}, lng{};
+			if (!parse_number(lat_text, lat)) {
+				set_error(error, "'" + std::string(lat_text) + "' in '" +
+										 std::string(pair) + "' is not a number");
+				return std::nullopt;
+			}
+			if (!parse_number(lng_text, lng)) {
+				set_error(error, "'" + std::string(lng_text) + "' in '" +
+										 std::string(pair) + "' is not a number");
+				return std::nullopt;
+			}
 			result.emplace_back(lat, lng);
-		} catch (...) {
-			set_error(error, "'" + token + "' is not a finite lat,lng point");
-			return std::nullopt;
 		}
+		if (end == std::string::npos)
+			break;
+		begin = end + 1;
 	}
 	return result;
 }

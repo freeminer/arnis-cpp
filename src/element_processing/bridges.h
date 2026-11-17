@@ -127,11 +127,23 @@ public:
 	const BridgeMemberInfo *lookup_member(std::uint64_t way_id) const;
 	const BridgeRampInfo *lookup_ramp(std::uint64_t way_id) const;
 	const RailDeckInfo *rail_deck(std::uint64_t way_id) const;
+	std::optional<int> landing_y(int x, int z) const;
 
 private:
+	struct LandingHash
+	{
+		std::size_t operator()(const std::pair<int, int> &p) const noexcept
+		{
+			return std::hash<std::uint64_t>{}(
+					(static_cast<std::uint64_t>(static_cast<std::uint32_t>(p.first))
+							<< 32) |
+					static_cast<std::uint32_t>(p.second));
+		}
+	};
 	std::unordered_map<std::uint64_t, BridgeMemberInfo> members_;
 	std::unordered_map<std::uint64_t, BridgeRampInfo> ramps_;
 	std::unordered_map<std::uint64_t, RailDeckInfo> rail_decks_;
+	std::unordered_map<std::pair<int, int>, int, LandingHash> landings_;
 };
 
 class BridgeSurfaceMap
@@ -143,6 +155,8 @@ public:
 
 	std::optional<int> deck_y_at(int x, int z) const;
 	std::optional<std::pair<std::pair<int, int>, int>> nearest_deck_cell(
+			int x, int z, int radius) const;
+	std::optional<std::pair<std::pair<int, int>, int>> nearest_railing(
 			int x, int z, int radius) const;
 	std::optional<int> nearby_deck_y(int x, int z, int radius) const;
 	bool deck_near(int x, int z, int y, int tolerance) const;
@@ -159,6 +173,10 @@ public:
 	// structural block (including girders) is above the water surface.
 	bool deck_clears(int x, int z, int water_y) const;
 	bool over_grade_way(int x, int z) const;
+	bool keeps_clear(int x, int z) const
+	{
+		return deck_y_.contains({x, z}) || railings_.contains({x, z});
+	}
 	const bridge_decks::DeckParts *parts_of(std::uint64_t way_id) const;
 	void set_deck_parts(std::unordered_map<std::uint64_t,
 			std::shared_ptr<const bridge_decks::DeckParts>>
@@ -175,6 +193,7 @@ private:
 	};
 	std::unordered_map<std::pair<int, int>, int, PairHash> deck_y_;
 	std::unordered_map<std::pair<int, int>, int, PairHash> deck_low_y_;
+	std::unordered_map<std::pair<int, int>, int, PairHash> railings_;
 	std::unordered_map<std::pair<int, int>, int, PairHash> rail_deck_y_;
 	std::unordered_map<std::pair<int, int>, std::pair<std::uint64_t, int>, PairHash>
 			rail_tracks_;

@@ -879,6 +879,10 @@ void generate_barriers(world_editor::WorldEditor &editor, const ProcessedElement
 	spots.reserve(trace.cells.size());
 	for (std::size_t i = 0; i < trace.cells.size(); ++i) {
 		const auto [x, z] = trace.cells[i];
+		if (grounded && on_deck[i] && bridge_surface.keeps_clear(x, z)) {
+			spots.push_back({BarrierSpotKind::RoadGap, x, z});
+			continue;
+		}
 		if (!grounded || on_deck[i]) {
 			spots.push_back({BarrierSpotKind::Post, x, z});
 			continue;

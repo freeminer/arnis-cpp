@@ -273,14 +273,26 @@ std::optional<cartesian::XZPoint> XZBBoxShape::first_inside() const
 		const int size = 2 * margin;
 		for (std::int64_t z = rect_->min().z; z <= rect_->max().z; ++z) {
 			for (const auto &[a, b] : row(static_cast<std::int32_t>(z))) {
-				const auto lo = std::max(a, rect_->min().x);
-				const auto hi = std::min(b, rect_->max().x);
-				if (static_cast<std::int64_t>(hi) - lo < size)
+				const auto first_x = std::max(a, rect_->min().x);
+				const auto last_x = std::min(b, rect_->max().x);
+				if (static_cast<std::int64_t>(last_x) - first_x < size)
 					continue;
-				if (covers(lo, static_cast<std::int32_t>(z), lo + size,
-							static_cast<std::int32_t>(z + size)))
-					return cartesian::XZPoint{
-							lo + margin, static_cast<std::int32_t>(z + margin)};
+				// A row's first span may not provide enough room for the spawn square
+				// even when a later column does. Match Rust's bounded slide along the
+				// span, testing every subsequent candidate at the margin's stride.
+				auto x = static_cast<std::int64_t>(first_x);
+				for (int attempt = 0; attempt < 256; ++attempt) {
+					if (x + size > last_x || z + size > rect_->max().z ||
+							x + size > std::numeric_limits<std::int32_t>::max() ||
+							z + size > std::numeric_limits<std::int32_t>::max())
+						break;
+					if (covers(static_cast<std::int32_t>(x), static_cast<std::int32_t>(z),
+								static_cast<std::int32_t>(x + size),
+								static_cast<std::int32_t>(z + size)))
+						return cartesian::XZPoint{static_cast<std::int32_t>(x + margin),
+								static_cast<std::int32_t>(z + margin)};
+					x += std::max(margin, 1);
+				}
 			}
 		}
 	}

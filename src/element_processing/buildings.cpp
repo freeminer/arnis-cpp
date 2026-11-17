@@ -388,6 +388,15 @@ constexpr int BUILDING_PASSAGE_HEIGHT = 4;
 constexpr int GROUND_FLOOR_BONUS = 2;
 constexpr std::size_t THIN_RING_MAX_CELLS = 4;
 
+bool rail_hall_type(std::string_view type)
+{
+	static constexpr std::string_view types[] = {"train_station", "transportation",
+			"train_shed", "depot", "industrial", "manufacture", "factory", "warehouse",
+			"storage", "hangar", "service", "shed", "barn", "farm_auxiliary", "garage",
+			"garages", "roof"};
+	return std::find(std::begin(types), std::end(types), type) != std::end(types);
+}
+
 int floor_div(int value, int divisor)
 {
 	const int quotient = value / divisor;
@@ -6965,7 +6974,8 @@ void generate_corner_quoins(WorldEditor &editor, const ProcessedWay &element,
 		const building_facade::FacadePlan &facade, BuildingCategory category,
 		BuildingCondition condition, Block wall_block, Block accent_block, int start_y,
 		int building_height, int abs_offset, const CoordinateBitmap *passages,
-		std::uint64_t seed, const building_facade::PointSet *preset_shell,
+		int passage_height, std::uint64_t seed,
+		const building_facade::PointSet *preset_shell,
 		const building_facade::PointSet *photo_shell)
 {
 	if (wall_block == accent_block || condition == BuildingCondition::Construction ||
@@ -7002,10 +7012,10 @@ void generate_corner_quoins(WorldEditor &editor, const ProcessedWay &element,
 						!(public_corner && facade.corner &&
 								facade.corner->vertex == std::pair{corner.x, corner.z})))
 			continue;
-		const int first_y = start_y + 1 +
-							((passages && passages->contains(corner.x, corner.z))
-											? BUILDING_PASSAGE_HEIGHT
-											: 0);
+		const int first_y =
+				start_y + 1 +
+				((passages && passages->contains(corner.x, corner.z)) ? passage_height
+																	  : 0);
 		for (int y = first_y; y <= start_y + building_height; ++y)
 			editor.set_block_absolute(accent_block, corner.x, y + abs_offset, corner.z,
 					std::vector<Block>{wall_block});
@@ -7687,7 +7697,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		const CoordinateBitmap *building_footprints,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
 				*group_members,
-		const interior_uses::InteriorUseIndex *interior_index)
+		const interior_uses::InteriorUseIndex *interior_index,
+		const railways::RailPassages *rail_passages)
 {
 	const auto packed_group_seed = style_seed.value_or(element.id);
 	const auto outline_year = packed_group_seed != element.id
@@ -8069,6 +8080,15 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				calculate_building_height(element, building_type, min_level, scale_factor,
 						relation_levels, floor_cycle, cached_footprint_size, group_seed);
 	}
+	const auto &rail = rail_passages ? *rail_passages : railways::RailPassages::none();
+	const auto rail_through = rail.through(cached_floor_area);
+	const int passage_height = rail_through == railways::RailThrough::None
+									   ? BUILDING_PASSAGE_HEIGHT
+									   : rail.height;
+	const bool is_rail_hall =
+			min_level_offset == 0 && rail_through == railways::RailThrough::Into &&
+			(rail_hall_type(building_type) ||
+					building_height <= 2 * floor_cycle + GROUND_FLOOR_BONUS);
 	const int style_building_height = building_height;
 	// Rust classifies from the tagged/inferred full height, then applies
 	// construction/ruin reductions to the realized shell.
@@ -8129,7 +8149,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						element.id, building_height, construction_storey),
 				terrain_enabled, scale_factor,
 				building_footprints ? *building_footprints : empty_footprints,
-				building_passages, BUILDING_PASSAGE_HEIGHT);
+				building_passages, passage_height);
 		return std::nullopt;
 	}
 	if (condition == BuildingCondition::Construction)
@@ -9428,10 +9448,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					}
 				}
 
-				const int passage_height =
-						std::min(BUILDING_PASSAGE_HEIGHT, building_height);
-				const int wall_start = is_passage ? start_y_offset + passage_height + 1
-												  : start_y_offset + 1;
+				const int wall_start =
+						is_passage ? start_y_offset +
+											 std::min(passage_height, building_height) + 1
+								   : start_y_offset + 1;
 				int column_top = start_y_offset + building_height;
 				if (condition == BuildingCondition::Construction) {
 					// Rust derives an independent, repeatable half-built height for each
@@ -10212,7 +10232,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						}
 					}
 				}
-				if (is_passage && passage_height < building_height) {
+				if (is_passage && passage_height < building_height && !is_rail_hall) {
 					editor->set_block_absolute(floor_block, bx,
 							start_y_offset + passage_height + abs_terrain_offset, bz);
 				}
@@ -11162,8 +11182,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					interior_tenants, interior_area};
 			interior_plan = interior_uses::plan_interior(plan_inputs);
 		}
-		const bool open_hall =
-				(interior_plan && interior_plan->open_hall) || glass_hall_shell;
+		const bool open_hall = (interior_plan && interior_plan->open_hall) ||
+							   glass_hall_shell || is_rail_hall;
 		// Rust gives each unit in a shared ground-floor tenancy its own street
 		// entrance when the existing mapped/synthetic doors leave it unserved.
 		// Keep the entrance selection tied to the same planned unit anchors and
@@ -11297,19 +11317,20 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 						condition != BuildingCondition::Ruined &&
 						editor->get_generation_format() !=
 								static_cast<int>(WorldFormat::LuantiWorld);
-				if (!is_passage) {
+				const bool is_rail_track =
+						rail_passages && rail_passages->track.contains(x, z);
+				if (!is_passage || is_rail_track) {
 					editor->set_block_absolute(
 							floor_block, x, start_y_offset + abs_terrain_offset, z);
 				}
 				const int top = start_y_offset + building_height;
 				int top_floor = start_y_offset;
-				if (building_height > floor_cycle && !open_hall) {
+				if (building_height > floor_cycle && !open_hall && !is_rail_hall) {
 					for (int h = start_y_offset + grammar_anchor + floor_cycle; h < top;
 							h += floor_cycle) {
 						top_floor = h;
-						if (is_passage &&
-								h <= start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-															  building_height))
+						if (is_passage && h <= start_y_offset + std::min(passage_height,
+																		building_height))
 							continue;
 						const bool lamp = (x % 3) == 0 && (z % 3) == 0;
 						const Block block = lamp && !hidden_lights ? ceiling_light_block
@@ -11323,18 +11344,16 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 				const int top_headroom = top - top_floor;
 				const bool under_passage =
 						is_passage &&
-						top <= start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														building_height);
+						top <= start_y_offset + std::min(passage_height, building_height);
 				if ((x % 3) == 0 && (z % 3) == 0 && !under_passage &&
 						(top_headroom >= 3 || top_floor == start_y_offset))
 					editor->set_block_absolute(
 							hidden_lights ? LIGHT : ceiling_light_block, x,
 							top + abs_terrain_offset, z);
 
-				if (is_passage && building_height > BUILDING_PASSAGE_HEIGHT)
+				if (is_passage && building_height > passage_height && !is_rail_hall)
 					editor->set_block_absolute(floor_block, x,
-							start_y_offset + BUILDING_PASSAGE_HEIGHT + abs_terrain_offset,
-							z);
+							start_y_offset + passage_height + abs_terrain_offset, z);
 			}
 		}
 
@@ -11346,8 +11365,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		if (!element.tags.contains("building:part"))
 			generate_corner_quoins(*editor, element, facade_plan, category, condition,
 					wall_block, accent_block, start_y_offset, building_height,
-					abs_terrain_offset, effective_passages, element.id, &preset_shell,
-					&photo_shell);
+					abs_terrain_offset, effective_passages, passage_height, element.id,
+					&preset_shell, &photo_shell);
 		if (interior_plan) {
 			const bool is_abandoned_building =
 					condition == BuildingCondition::Abandoned ||
@@ -11363,8 +11382,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 			const InteriorRequest interior_request{floor_area, floor_levels,
 					start_y_offset, building_height, abs_terrain_offset, wall_block,
 					*interior_plan, is_abandoned_building, interior_passages,
-					interior_entries, {{min_x, min_z}, {max_x, max_z}}, interior_claims,
-					args.scale, floor_block, group_seed};
+					passage_height, interior_entries, {{min_x, min_z}, {max_x, max_z}},
+					interior_claims, args.scale, floor_block, group_seed};
 			generate_building_interior(*editor, interior_request);
 		}
 	}
@@ -13820,7 +13839,8 @@ void generate_building_from_relation(WorldEditor &editor,
 		const BuildingFootprintBitmap *building_footprints,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
 				*group_members,
-		const std::unordered_set<std::uint64_t> *housing_relation_parts)
+		const std::unordered_set<std::uint64_t> *housing_relation_parts,
+		const railways::RailPassages *rail_passages)
 {
 	if (is_underground_building(relation.tags)) {
 		return;
@@ -13871,7 +13891,7 @@ void generate_building_from_relation(WorldEditor &editor,
 		generate_buildings(&editor, merged_way, args, relation_levels, flood_fill_cache,
 				building_passages, hole_polygons.empty() ? nullptr : &hole_polygons,
 				osm_parser::seed_with_residential_mark(merged_way.id, housing), road_mask,
-				building_footprints, group_members, interior_index);
+				building_footprints, group_members, interior_index, rail_passages);
 	}
 }
 

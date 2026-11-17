@@ -4,6 +4,7 @@
 #include <unordered_map>
 #include <memory>
 #include <chrono>
+#include <cassert>
 #include <optional>
 #include <mutex>
 #include <unordered_map>
@@ -35,7 +36,7 @@ struct XZBBox
 	bool contains(int32_t x, int32_t z) const
 	{
 		return x >= min_x_ && x <= max_x_ && z >= min_z_ && z <= max_z_ &&
-				(!outline_ || outline_->contains(x, z));
+			   (!outline_ || outline_->contains(x, z));
 	}
 	bool covers(int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) const
 	{
@@ -46,7 +47,8 @@ struct XZBBox
 	bool touches(int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) const
 	{
 		if (!outline_)
-			return min_x <= max_x_ && max_x >= min_x_ && min_z <= max_z_ && max_z >= min_z_;
+			return min_x <= max_x_ && max_x >= min_x_ && min_z <= max_z_ &&
+				   max_z >= min_z_;
 		return outline_->touches(min_x, min_z, max_x, max_z);
 	}
 	XZBBox with_outline(std::shared_ptr<const arnis::XZBBoxShape> shape) const
@@ -104,6 +106,23 @@ public:
 
 	/// Checks if a coordinate is set.
 	bool contains(int32_t x, int32_t z) const;
+	/// Marks every coordinate in another bitmap with the same bounds.
+	void union_with(const CoordinateBitmap &other)
+	{
+		if (other.is_empty())
+			return;
+		if (bits_.empty()) {
+			*this = other;
+			return;
+		}
+		assert(min_x_ == other.min_x_ && min_z_ == other.min_z_ &&
+				width_ == other.width_ && "bitmaps over different bounds");
+		for (std::size_t i = 0; i < std::min(bits_.size(), other.bits_.size()); ++i)
+			bits_[i] |= other.bits_[i];
+		count_ = 0;
+		for (const auto byte : bits_)
+			count_ += static_cast<std::size_t>(__builtin_popcount(byte));
+	}
 	bool is_unset_in_bounds(int32_t x, int32_t z) const;
 
 	/// Returns true if no coordinates are marked.

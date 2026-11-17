@@ -888,11 +888,6 @@ std::optional<decals::DecalKey> furniture_pictogram(const tags_t &tags)
 		return decals::PictogramKey{"recycling"};
 	if (machine_front(tags))
 		return std::nullopt;
-	if (tags.get("emergency") == "fire_hydrant" &&
-			tags.get("fire_hydrant:type") != "underground" &&
-			tags.get("fire_hydrant:type") != "wall" &&
-			tags.get("fire_hydrant:type") != "pond")
-		return decals::PictogramKey{"hydrant"};
 	return std::nullopt;
 }
 

@@ -22,6 +22,8 @@ namespace arnis::highways
 {
 namespace
 {
+constexpr int KERB_REACH = 6;
+constexpr int ISLAND_REACH = 8;
 constexpr double DIR_REACH = 6.0;
 constexpr int COVER = 6;
 constexpr int MAST_Y = 7;
@@ -144,11 +146,36 @@ std::pair<double, double> kerb_side(double tx, double tz, bool left)
 std::optional<std::tuple<int, int, int>> kerb_cell(double ox, double oz, double sx,
 		double sz, int half, const RoadMaskBitmap &road_mask)
 {
-	for (int offset = half + 1; offset <= half + 4; ++offset) {
+	for (int offset = half + 1; offset <= half + KERB_REACH; ++offset) {
 		const int x = static_cast<int>(std::floor(ox + sx * offset));
 		const int z = static_cast<int>(std::floor(oz + sz * offset));
 		if (!road_mask.contains(x, z))
 			return std::tuple{x, z, offset};
+	}
+	return std::nullopt;
+}
+
+std::optional<std::tuple<int, int, int>> island_cell(
+		double ox, double oz, const RoadMaskBitmap &road_mask)
+{
+	const int x0 = static_cast<int>(std::floor(ox));
+	const int z0 = static_cast<int>(std::floor(oz));
+	for (int radius = 1; radius <= ISLAND_REACH; ++radius) {
+		std::optional<std::pair<int, int>> best;
+		for (int dx = -radius; dx <= radius; ++dx)
+			for (int dz = -radius; dz <= radius; ++dz) {
+				if (std::max(std::abs(dx), std::abs(dz)) != radius ||
+						road_mask.contains(x0 + dx, z0 + dz))
+					continue;
+				const auto candidate = std::pair{dx, dz};
+				if (!best || std::tuple{dx * dx + dz * dz, dx, dz} <
+									 std::tuple{best->first * best->first +
+														best->second * best->second,
+											 best->first, best->second})
+					best = candidate;
+			}
+		if (best)
+			return std::tuple{x0 + best->first, z0 + best->second, 1};
 	}
 	return std::nullopt;
 }
@@ -280,8 +307,7 @@ void add_signal_head(world_editor::WorldEditor &editor, std::array<double, 3> ce
 			part(y, 0.15, {0.24f, 0.24f, 0.04f}, lamp_block(lamp),
 					cycling ? std::vector<std::string>{"arnis.tl", tag}
 							: std::vector<std::string>{},
-					lit ? std::pair{15, 15}
-						: (cycling ? std::pair{3, 0} : std::pair{11, 4}));
+					lit ? std::pair{15, 15} : std::pair{11, 4});
 			part(y + 0.135, 0.19, {0.28f, 0.03f, 0.12f}, "minecraft:black_concrete");
 		}
 		return;
@@ -298,7 +324,7 @@ void add_signal_head(world_editor::WorldEditor &editor, std::array<double, 3> ce
 		part(y * k, 0.17 * k, {lamp_size, lamp_size, 0.04f}, lamp_block(lamp),
 				cycling ? std::vector<std::string>{"arnis.tl", tag}
 						: std::vector<std::string>{},
-				lit ? std::pair{15, 15} : (cycling ? std::pair{3, 0} : std::pair{11, 4}));
+				lit ? std::pair{15, 15} : std::pair{11, 4});
 		part((y + 0.15) * k, 0.225 * k,
 				{static_cast<float>(0.32 * k), static_cast<float>(0.035 * k),
 						static_cast<float>(0.15 * k)},
@@ -566,8 +592,10 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 			const double ox = node.x + .5 + arm.dx * back;
 			const double oz = node.z + .5 + arm.dz * back;
 			auto kerb = kerb_cell(ox, oz, side.first, side.second, arm.half, road_mask);
-			if (!kerb && node.kind == Kind::Bike)
+			if (!kerb)
 				kerb = kerb_cell(ox, oz, -side.first, -side.second, arm.half, road_mask);
+			if (!kerb)
+				kerb = island_cell(ox, oz, road_mask);
 			if (!kerb)
 				continue;
 			const auto [px, pz, offset] = *kerb;
@@ -623,6 +651,11 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 						kerb = kerb_cell(from_x, from_z, sx, sz, road.half, road_mask);
 						if (kerb)
 							break;
+					}
+					if (!kerb) {
+						const double ahead_x = node.x + .5 + sx * road.half;
+						const double ahead_z = node.z + .5 + sz * road.half;
+						kerb = island_cell(ahead_x, ahead_z, road_mask);
 					}
 					if (!kerb)
 						continue;

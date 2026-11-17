@@ -7,6 +7,7 @@
 #include "fm_arnis_bench.h"
 #include "element_processing/fm_highway_connectivity.h"
 #include "fm_ecoregion_cache.h"
+#include "fm_rail_passages.h"
 #include "element_processing/signage.h"
 #include "element_processing/advtrains.h"
 #include "overture.h"
@@ -1870,7 +1871,9 @@ void generate_building_from_relation(WorldEditor &editor,
 		const RoadMaskBitmap *road_mask,
 		const BuildingFootprintBitmap *building_footprints,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
-				*group_members);
+				*group_members,
+		const std::unordered_set<std::uint64_t> *housing_relation_parts,
+		const railways::RailPassages *rail_passages);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels);
@@ -1883,7 +1886,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		const CoordinateBitmap *building_footprints,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
 				*group_members,
-		const interior_uses::InteriorUseIndex *interior_index);
+		const interior_uses::InteriorUseIndex *interior_index,
+		const railways::RailPassages *rail_passages);
 }
 
 namespace highways
@@ -2059,7 +2063,8 @@ void generate_power_nodes(WorldEditor &editor, const ProcessedNode &node);
 
 namespace emergency
 {
-void generate_emergency(WorldEditor &editor, const ProcessedNode &node);
+void generate_emergency(
+		WorldEditor &editor, const ProcessedNode &node, const RoadMaskBitmap &road_mask);
 }
 
 namespace advertising
@@ -3201,6 +3206,9 @@ bool generate_world(WorldEditor &editor,
 	} regional_tree_scope{editor};
 	auto building_passages =
 			highways::collect_building_passage_coords(elements, clip_bbox, args.scale);
+	auto rail_passages = railways::collect_rail_passages(
+			elements, clip_bbox, args.scale, building_footprints);
+	building_passages.union_with(rail_passages.cells);
 	// Rust also builds the junction/crossing index before it reorders ground
 	// fills; only then does element dispatch begin.
 	const auto geo_bounds = editor.geographic_bounds();
@@ -4062,7 +4070,8 @@ bool generate_world(WorldEditor &editor,
 									? std::nullopt
 									: std::optional<std::uint64_t>(group->second),
 							&road_mask, &building_footprints, &building_group_members,
-							interior_use_index ? &*interior_use_index : nullptr);
+							interior_use_index ? &*interior_use_index : nullptr,
+							&rail_passages);
 					if (editor.signage_enabled())
 						signage::generate_building_signage(editor, *render_way, anchor);
 					if (way.tags.get("amenity") == std::optional<std::string>("fuel"))
@@ -4246,7 +4255,7 @@ bool generate_world(WorldEditor &editor,
 			} else if (node.tags.contains("historic")) {
 				historic::generate_historic(editor, node);
 			} else if (node.tags.contains("emergency")) {
-				emergency::generate_emergency(editor, node);
+				emergency::generate_emergency(editor, node, road_mask);
 			} else if (node.tags.contains("advertising")) {
 				advertising::generate_advertising(editor, node, road_mask);
 			} else if (node.tags.get("natural") == std::optional<std::string>("stone") ||
@@ -4280,7 +4289,7 @@ bool generate_world(WorldEditor &editor,
 								flood_fill_cache, clip_bbox, building_passages,
 								interior_use_index ? &*interior_use_index : nullptr,
 								&road_mask, &building_footprints, &building_group_members,
-								&building_data.housing_relation_parts);
+								&building_data.housing_relation_parts, &rail_passages);
 					}
 					break;
 				case element_processing::RelationArea::Water: {

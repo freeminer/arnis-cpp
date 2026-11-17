@@ -584,6 +584,8 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 {
 	std::vector<std::pair<uint64_t, bool>> sealed_ids;
 	std::vector<uint64_t> planted_ids;
+	std::unordered_set<uint64_t> turf_outers;
+	std::vector<uint64_t> turf_holes;
 	for (const auto &element : elements) {
 		if (element.is_relation()) {
 			const auto &relation = element.as_relation();
@@ -591,10 +593,14 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 				for (const auto &member : relation.members) {
 					if (!member.way || !contains(member.way->id))
 						continue;
-					if (member.role == ProcessedMemberRole::Outer)
-						sealed_ids.emplace_back(member.way->id, true);
-					else if (member.role == ProcessedMemberRole::Inner)
-						planted_ids.push_back(member.way->id);
+					if (member.role == ProcessedMemberRole::Outer) {
+						// Golf multipolygon turf is applied after nested planted areas,
+						// while its own inner rings are reopened after the turf is sealed.
+						sealed_ids.emplace_back(member.way->id, false);
+						turf_outers.insert(member.way->id);
+					} else if (member.role == ProcessedMemberRole::Inner) {
+						turf_holes.push_back(member.way->id);
+					}
 				}
 			}
 			continue;
@@ -636,6 +642,8 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 
 	std::vector<Layer> layers;
 	layers.reserve(sealed_ids.size() + planted_ids.size());
+	std::vector<Layer> turf;
+	turf.reserve(turf_outers.size());
 	std::vector<Layer> managed;
 	managed.reserve(sealed_ids.size());
 	std::size_t largest_paving = 0;
@@ -646,6 +654,8 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		if (yields) {
 			largest_paving = std::max(largest_paving, *sealed_lens[i]);
 			layers.push_back({*sealed_lens[i], true, id});
+		} else if (turf_outers.contains(id)) {
+			turf.push_back({*sealed_lens[i], true, id});
 		} else {
 			managed.push_back({*sealed_lens[i], true, id});
 		}
@@ -670,6 +680,9 @@ std::optional<SealedSurfaceBitmap> FloodFillCache::collect_sealed_surfaces(
 		// Apply planted layers first at equal size, so paving takes precedence.
 		return a.paved < b.paved;
 	});
+	layers.insert(layers.end(), turf.begin(), turf.end());
+	for (const auto id : turf_holes)
+		layers.push_back({0, false, id});
 	layers.insert(layers.end(), managed.begin(), managed.end());
 	auto mask = roads;
 	for (std::size_t begin = 0; begin < layers.size();) {
@@ -870,7 +883,7 @@ bool FloodFillCache::fill_goes_unread(const ProcessedWay &way)
 		return false;
 	return amenity != tags.end() && amenity->second != "bicycle_parking" &&
 		   amenity->second != "shelter" && amenity->second != "fountain" &&
-		   amenity->second != "parking";
+		   amenity->second != "parking" && amenity->second != "grave_yard";
 }
 
 std::optional<std::pair<int32_t, int32_t>> FloodFillCache::compute_centroid(

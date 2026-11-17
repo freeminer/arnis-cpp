@@ -286,12 +286,14 @@ namespace
 
 std::vector<int> at_grade_profile(const crate::world_editor::WorldEditor &editor,
 		const ProcessedWay &way, int block_range, const HighwayConnectivity &connectivity,
-		const TunnelPortalMap &tunnel_portals)
+		const TunnelPortalMap &tunnel_portals, const bridges::BridgeStructureMap &bridges)
 {
 	return road_profile(editor, way, block_range, connectivity,
 			[&](int x, int z) -> std::optional<int> {
 				if (!connectivity.is_shared(x, z))
 					return std::nullopt;
+				if (const auto landing = bridges.landing_y(x, z))
+					return landing;
 				if (tunnel_portals.is_open_end({x, z}))
 					return editor.terrain_level(x, z).value_or(
 							editor.get_ground_level(x, z));
@@ -374,15 +376,18 @@ std::shared_ptr<const RoadSurfaces::WaySurface> RoadSurfaces::surface_of(
 	std::vector<int> ys;
 	if (const auto *member = bridges_.lookup_member(way.id)) {
 		ys.reserve(cells.size());
+		const auto total = cells.size();
+		const auto ramp_length = std::max<std::size_t>(1, total / 2);
 		for (std::size_t i = 0; i < cells.size(); ++i)
-			ys.push_back(member->drive_y_at(i));
+			ys.push_back(member->y_at(i, total, ramp_length));
 	} else if (const auto *ramp = bridges_.lookup_ramp(way.id)) {
 		ys.reserve(cells.size());
 		for (std::size_t i = 0; i < cells.size(); ++i)
 			ys.push_back(ramp->y_at(i));
 	} else {
 		const int half = highway_block_range(way.tags.get("highway"), way.tags, scale_);
-		ys = at_grade_profile(editor_, way, half, connectivity_, tunnel_portals_);
+		ys = at_grade_profile(
+				editor_, way, half, connectivity_, tunnel_portals_, bridges_);
 		if (const auto approach = tunnel_portals_.approach(way.id))
 			for (std::size_t i = 0; i < ys.size(); ++i)
 				ys[i] += std::min(0, approach->offset(static_cast<int>(i)));
@@ -751,6 +756,15 @@ void place_way_lamps(crate::world_editor::WorldEditor &editor,
 {
 	const auto place_street_lamp = [&editor](int x, int z) {
 		const int base = editor.get_absolute_y(x, 0, z);
+		const std::optional<std::vector<crate::block_definitions::Block>> lamp_blocks{
+				std::vector<crate::block_definitions::Block>{
+						crate::block_definitions::REDSTONE_LAMP}};
+		for (int dz = -3; dz <= 3; ++dz)
+			for (int dx = -3; dx <= 3; ++dx)
+				for (int y = base + 2; y <= base + 9; ++y)
+					if (editor.check_for_block_absolute(
+								x + dx, y, z + dz, lamp_blocks, std::nullopt))
+						return;
 		editor.register_lamp(x, z);
 		editor.set_block_absolute(crate::block_definitions::SMOOTH_STONE, x, base + 1, z);
 		for (int dy = 2; dy <= 4; ++dy)
@@ -1153,15 +1167,35 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			const bool layered = (indoor == tags.end() || indoor->second != "yes") &&
 								 layer != tags.end() &&
 								 crate::strict_parse::i32(layer->second).value_or(0) > 0;
-			if (layered) {
-				if (const auto deck = bridge_surface.nearest_deck_cell(
+			std::optional<int> curb_y;
+			if (!bridge_surface.contains(x, z) &&
+					(layered || editor.is_mapped_water(x, z))) {
+				if (const auto railing = bridge_surface.nearest_railing(
 							x, z, LAYERED_LAMP_DECK_REACH)) {
+					x = railing->first.first;
+					z = railing->first.second;
+					curb_y = railing->second;
+				} else if (const auto deck = bridge_surface.nearest_deck_cell(
+								   x, z, LAYERED_LAMP_DECK_REACH)) {
 					x = deck->first.first;
 					z = deck->first.second;
 				}
 			}
-			const int base =
-					node_feature_base_y(editor, bridge_surface, element.tags(), x, z);
+			const int base = curb_y.value_or(
+					node_feature_base_y(editor, bridge_surface, element.tags(), x, z));
+			const std::optional<std::vector<Block>> lamp_blocks{
+					std::vector<Block>{crate::block_definitions::REDSTONE_LAMP}};
+			bool crowded = false;
+			for (int dz = -3; dz <= 3 && !crowded; ++dz)
+				for (int dx = -3; dx <= 3 && !crowded; ++dx)
+					for (int y = base + 2; y <= base + 9; ++y)
+						if (editor.check_for_block_absolute(
+									x + dx, y, z + dz, lamp_blocks, std::nullopt)) {
+							crowded = true;
+							break;
+						}
+			if (crowded)
+				return;
 			editor.set_block_absolute(crate::block_definitions::COBBLESTONE_WALL, x,
 					base + 1, z, std::optional<std::vector<Block>>(),
 					std::optional<std::vector<Block>>());

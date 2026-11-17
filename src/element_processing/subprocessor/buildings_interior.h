@@ -23,6 +23,7 @@ struct InteriorRequest
 	const interior_uses::InteriorPlan &plan;
 	bool abandoned;
 	const CoordinateBitmap &passages;
+	int passage_height;
 	const std::vector<interior_uses::Entry> &entrances;
 	std::pair<std::pair<int, int>, std::pair<int, int>> bounds;
 	const std::vector<interior_uses::Claim> &claims;

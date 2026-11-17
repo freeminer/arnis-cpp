@@ -6,6 +6,7 @@
 #include <vector>
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
+#include "../fm_rail_passages.h"
 #include "building_facade.h"
 
 namespace arnis
@@ -128,7 +129,8 @@ void generate_building_from_relation(WorldEditor &editor,
 		const BuildingFootprintBitmap *building_footprints = nullptr,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
 				*group_members = nullptr,
-		const std::unordered_set<std::uint64_t> *housing_relation_parts = nullptr);
+		const std::unordered_set<std::uint64_t> *housing_relation_parts = nullptr,
+		const railways::RailPassages *rail_passages = nullptr);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels);
@@ -142,6 +144,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		const CoordinateBitmap *building_footprints = nullptr,
 		const std::unordered_map<std::uint64_t, std::vector<std::uint64_t>>
 				*group_members = nullptr,
-		const interior_uses::InteriorUseIndex *interior_index = nullptr);
+		const interior_uses::InteriorUseIndex *interior_index = nullptr,
+		const railways::RailPassages *rail_passages = nullptr);
 }
 }

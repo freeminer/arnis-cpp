@@ -40,6 +40,8 @@ LuantiNode apply_slab_type(LuantiNode node, const Block &block, std::string_view
 LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		const char *facing, bool open, bool top)
 {
+	if (block.block == block_definitions::BARRIER)
+		return {"air", 0};
 	const auto defaults = block.block.properties();
 	const BlockProperties empty_properties;
 	const auto &properties = block.properties ? block.property_values()
@@ -220,8 +222,6 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 	}
 	// Barrier is only the Java-side invisible cell reserved for a hydrant. Mineclonia
 	// has no equivalent node, so keep the cell transparent in Luanti worlds.
-	if (id == 527)
-		return {"air", 0};
 	const auto state_facing = property("facing");
 	const auto state_half = property("half");
 	const char *effective_facing = state_facing.empty() ? facing : state_facing.data();
@@ -252,7 +252,7 @@ LuantiNode to_luanti_node(
 	const auto id = block.id();
 	if ((id >= 393 && id <= 396) || id == 400 || id == 402 || id == 406 || id == 408 ||
 			id == 409 || id == 36 || id == 192 || id == 196 || id == 260 || id == 339 ||
-			id == 527)
+			block == block_definitions::BARRIER)
 		return to_luanti_node(BlockWithProperties{block}, game, facing, open, top);
 	if (block == BLUE_ICE)
 		return {"mcl_core:blue_ice", 0};

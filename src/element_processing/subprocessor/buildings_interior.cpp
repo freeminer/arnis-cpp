@@ -33,7 +33,6 @@ bool chest_gate(int x, int z, int floor_y, unsigned salt, unsigned modulus)
 					   static_cast<unsigned>(floor_y) * 0xC2B2AE35u ^ salt;
 	return h % modulus == 0;
 }
-constexpr int BUILDING_PASSAGE_HEIGHT = 4;
 constexpr std::array<std::pair<int, int>, 4> INTERIOR_DIRS = {
 		std::pair{0, -1}, std::pair{1, 0}, std::pair{0, 1}, std::pair{-1, 0}};
 
@@ -4453,6 +4452,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 	const Block floor_block = request.floor_block;
 	const bool is_abandoned_building = request.abandoned;
 	const auto &building_passages = request.passages;
+	const int passage_height = request.passage_height;
 	const auto &entries = request.entrances;
 	const int min_x = request.bounds.first.first;
 	const int min_z = request.bounds.first.second;
@@ -4595,7 +4595,7 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			if ((claim != claimed_top.end() &&
 						claim->second > initial_floor_metres + 1.0) ||
 					(building_passages.contains(x, z) &&
-							floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
+							floor_y < start_y_offset + std::min(passage_height,
 															   building_height)) ||
 					editor.get_block_absolute(x, floor_y + abs_terrain_offset + 1, z))
 				continue;
@@ -4648,8 +4648,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				if (claim != claimed_top.end() && claim->second > floor_metres + 1.0)
 					continue;
 				if (building_passages.contains(x, z) &&
-						floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														   building_height))
+						floor_y < start_y_offset +
+										  std::min(passage_height, building_height))
 					continue;
 				layout_cells.emplace_back(x, z);
 				std::uint16_t zone = 1;
@@ -4864,8 +4864,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 				(shaft_claim == claimed_top.end() ||
 						shaft_claim->second <= shaft_floor_metres + 1.0) &&
 				!(building_passages.contains(shaft->first.first, shaft->first.second) &&
-						floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														   building_height));
+						floor_y < start_y_offset +
+										  std::min(passage_height, building_height));
 		const bool shaft_open =
 				shaft_owned &&
 				!editor.get_block_absolute(shaft->first.first,
@@ -4943,8 +4943,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 			if (claim != claimed_top.end() && claim->second > floor_metres + 1.0)
 				continue;
 			if (building_passages.contains(x, z) &&
-					floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-													   building_height)) {
+					floor_y <
+							start_y_offset + std::min(passage_height, building_height)) {
 				continue;
 			}
 
@@ -5033,8 +5033,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						furnish_shop(editor, unit, unit_zone_cells[unit_index], entries,
 								door_positions, structural_cells, kept_cells, claimed_top,
 								building_passages, floor_metres,
-								start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														 building_height),
+								start_y_offset +
+										std::min(passage_height, building_height),
 								floor_y, floor_y + y_offset + abs_terrain_offset,
 								current_floor_ceiling, floor_seed, interior_seed,
 								building_salt);
@@ -5045,8 +5045,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						furnish_supermarket(editor, unit_zone_cells[unit_index], entries,
 								door_positions, structural_cells, kept_cells, claimed_top,
 								building_passages, floor_metres,
-								start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														 building_height),
+								start_y_offset +
+										std::min(passage_height, building_height),
 								floor_y, floor_y + y_offset + abs_terrain_offset,
 								current_floor_ceiling, floor_seed, interior_seed);
 					continue;
@@ -5057,8 +5057,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 								door_positions, structural_cells, wall_positions,
 								planned_partition_cells, partition_walls, kept_cells,
 								claimed_top, building_passages, floor_metres,
-								start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														 building_height),
+								start_y_offset +
+										std::min(passage_height, building_height),
 								floor_y, floor_y + y_offset + abs_terrain_offset,
 								current_floor_ceiling, wall_block, floor_seed,
 								interior_seed, building_salt);
@@ -5079,8 +5079,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						furnish_civic(editor, unit, unit_zone_cells[unit_index], entries,
 								door_positions, structural_cells, kept_cells, claimed_top,
 								building_passages, floor_metres,
-								start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														 building_height),
+								start_y_offset +
+										std::min(passage_height, building_height),
 								floor_y, floor_y + y_offset + abs_terrain_offset,
 								current_floor_ceiling, floor_seed, interior_seed,
 								building_salt, floor_index, floor_levels.size(),
@@ -5099,8 +5099,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 						furnish_hall(editor, unit, unit_zone_cells[unit_index], entries,
 								door_positions, structural_cells, kept_cells, claimed_top,
 								building_passages, floor_metres,
-								start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-														 building_height),
+								start_y_offset +
+										std::min(passage_height, building_height),
 								floor_y, floor_y + y_offset + abs_terrain_offset,
 								current_floor_ceiling, floor_seed, interior_seed,
 								building_salt);
@@ -5121,9 +5121,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 								claim->second > floor_metres + 1.0)
 							return false;
 						return !building_passages.contains(x, z) ||
-							   floor_y >=
-									   start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-																building_height);
+							   floor_y >= start_y_offset + std::min(passage_height,
+																   building_height);
 					};
 					const auto &zone_cells = unit_zone_cells[unit_index];
 					std::unordered_set<std::uint64_t> zone_set;
@@ -5224,9 +5223,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 								claim->second > floor_metres + 1.0)
 							return false;
 						if (building_passages.contains(x, z) &&
-								floor_y <
-										start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-																 building_height))
+								floor_y < start_y_offset + std::min(passage_height,
+																   building_height))
 							return false;
 						return !editor.get_block_absolute(
 								x, floor_y + y_offset + abs_terrain_offset, z);
@@ -5495,9 +5493,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 								claim->second > floor_metres + 1.0)
 							continue;
 						if (building_passages.contains(x, z) &&
-								floor_y <
-										start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-																 building_height))
+								floor_y < start_y_offset + std::min(passage_height,
+																   building_height))
 							continue;
 						candidates.emplace_back(x, z);
 					}
@@ -5549,8 +5546,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 					if (claim != claimed_top.end() && claim->second > floor_metres + 1.0)
 						continue;
 					if (building_passages.contains(x, z) &&
-							floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-															   building_height))
+							floor_y < start_y_offset +
+											  std::min(passage_height, building_height))
 						continue;
 					passable_cells.insert(key);
 				}
@@ -5731,8 +5728,8 @@ void generate_building_interior(WorldEditor &editor, const InteriorRequest &requ
 							wall_cells.contains(key) || door_cells.contains(key))
 						continue;
 					if (building_passages.contains(x, z) &&
-							floor_y < start_y_offset + std::min(BUILDING_PASSAGE_HEIGHT,
-															   building_height))
+							floor_y < start_y_offset +
+											  std::min(passage_height, building_height))
 						continue;
 					open_cells.emplace_back(x, z);
 				}

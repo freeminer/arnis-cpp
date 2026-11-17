@@ -107,6 +107,7 @@ extern Block BLACKSTONE_WALL;
 extern Block BLUE_ICE;
 extern Block BLUE_FLOWER;
 extern Block BLUE_TERRACOTTA;
+extern Block BARRIER;
 extern Block BRICK;
 extern Block CAULDRON;
 extern Block CHISELED_STONE_BRICKS;

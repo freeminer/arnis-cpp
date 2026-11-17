@@ -54,6 +54,8 @@ constexpr int PATH_HEADROOM = 5;
 constexpr int RAIL_HEADROOM = 8;
 constexpr int RIVER_HEADROOM = 4;
 constexpr int STREAM_HEADROOM = 2;
+constexpr int LANDING_LIFT = 2;
+constexpr std::size_t ROAD_BEYOND_CELLS = 3;
 constexpr int STACKED_DECK_HEADROOM = 6;
 constexpr int LOWER_DECK_GAP = STACKED_DECK_HEADROOM - 1;
 constexpr int DECK_STRUCTURE_DEPTH = 2;
@@ -602,6 +604,22 @@ bool meets_a_deck(const ProcessedWay &way)
 						  highway == "abandoned" || highway == "razed";
 	return !excluded && (tunnel.empty() || tunnel == "no") &&
 		   (indoor.empty() || indoor == "no");
+}
+
+std::optional<int> road_level_beyond(const WorldEditor &editor, const ProcessedWay &road,
+		const std::pair<int, int> &endpoint,
+		const highways::HighwayConnectivity &connectivity, double scale)
+{
+	const auto profile = highways::road_profile(editor, road,
+			highway_block_range(road, scale), connectivity,
+			[](int, int) -> std::optional<int> { return std::nullopt; });
+	if (profile.empty())
+		return std::nullopt;
+	const std::size_t last = profile.size() - 1;
+	const bool at_start = road.nodes.front().x == endpoint.first &&
+						  road.nodes.front().z == endpoint.second;
+	const std::size_t offset = std::min(ROAD_BEYOND_CELLS, last);
+	return profile[at_start ? offset : last - offset];
 }
 
 std::vector<std::pair<float, float>> leaving_dirs(
@@ -1696,6 +1714,7 @@ BridgeStructureMap BridgeStructureMap::build(
 			};
 			std::vector<PendingRamp> pending_ramps;
 			std::unordered_set<std::pair<int, int>, XZPairHash> external_ramp_ends;
+			std::unordered_set<std::pair<int, int>, XZPairHash> linked_ends;
 			for (const auto idx : group_indices) {
 				const auto &way = *bridge_ways[idx];
 				for (const auto *node : {&way.nodes.front(), &way.nodes.back()}) {
@@ -1714,8 +1733,11 @@ BridgeStructureMap BridgeStructureMap::build(
 											  candidate.nodes.front().z == xz.second;
 						const auto &far_ = at_start ? candidate.nodes.back()
 													: candidate.nodes.front();
-						if (node_members.contains({far_.x, far_.z}))
+						const std::pair<int, int> far_xz{far_.x, far_.z};
+						if (node_to_bridge_indices.contains(far_xz)) {
+							linked_ends.insert(xz);
 							continue;
+						}
 						const auto highway = candidate.tags.get("highway");
 						auto ground = highways::road_profile(editor, candidate,
 								highways::highway_block_range(
@@ -1749,7 +1771,8 @@ BridgeStructureMap BridgeStructureMap::build(
 			const auto anchors_end = [&](const std::pair<int, int> &xz) {
 				return (is_boundary(xz) || fork_landings.contains(xz)) &&
 					   !cut_ends.contains(xz) && !covered_boundaries.contains(xz) &&
-					   !external_ramp_ends.contains(xz) && !joins_external_bridge(xz);
+					   !external_ramp_ends.contains(xz) && !linked_ends.contains(xz) &&
+					   !joins_external_bridge(xz);
 			};
 			// At-grade roads that meet a landing share one junction height with the
 			// bridge. Apply it before deriving the bridge's longitudinal profile,
@@ -1767,9 +1790,31 @@ BridgeStructureMap BridgeStructureMap::build(
 										terrain.size() - 1}}};
 				for (const auto &[xz, cell] : ends) {
 					if (cell < terrain.size() && anchors_end(xz) &&
-							connectivity.is_shared(xz.first, xz.second))
-						terrain[cell] =
+							connectivity.is_shared(xz.first, xz.second)) {
+						const int junction =
 								highways::junction_level(editor, xz.first, xz.second);
+						std::optional<int> beyond;
+						if (const auto roads = node_to_other_highways.find(xz);
+								roads != node_to_other_highways.end())
+							for (const auto road_index : roads->second) {
+								const auto &road = *other_highway_ways[road_index];
+								if (is_ramp_candidate(road) || !meets_a_deck(road))
+									continue;
+								if (const auto level = road_level_beyond(
+											editor, road, xz, connectivity, scale))
+									beyond = beyond ? std::max(*beyond, *level) : *level;
+							}
+						const int landing =
+								beyond ? std::max(junction,
+												 std::min(*beyond,
+														 junction + LANDING_LIFT))
+									   : junction;
+						terrain[cell] = landing;
+						const auto [it, inserted] =
+								result.landings_.try_emplace(xz, landing);
+						if (!inserted)
+							it->second = std::max(it->second, landing);
+					}
 				}
 			}
 			terrain_min = std::numeric_limits<int>::max();
@@ -2425,6 +2470,33 @@ BridgeStructureMap BridgeStructureMap::build(
 		}
 	}
 
+	// A raised road linking the ends of two resolved bridge decks carries the
+	// shared deck levels across the gap instead of being terrain-following.
+	for (const auto *way : other_highway_ways) {
+		if (!is_ramp_candidate(*way) || claimed_ramp_ways.contains(way->id) ||
+				result.ramps_.contains(way->id) || way->nodes.size() < 2)
+			continue;
+		const auto &start = way->nodes.front();
+		const auto &end = way->nodes.back();
+		const auto y_start = resolved_joints.find({start.x, start.z});
+		const auto y_end = resolved_joints.find({end.x, end.z});
+		if (y_start == resolved_joints.end() || y_end == resolved_joints.end())
+			continue;
+		const auto cells = way_cells(*way);
+		if (cells.empty())
+			continue;
+		BridgeRampInfo link;
+		link.ys.reserve(cells.size());
+		const auto last = cells.size() - 1;
+		for (std::size_t i = 0; i < cells.size(); ++i) {
+			const double t = static_cast<double>(i) / std::max<std::size_t>(1, last);
+			link.ys.push_back(rust_numeric::round_i32(
+					static_cast<double>(y_start->second) +
+					static_cast<double>(y_end->second - y_start->second) * t));
+		}
+		result.ramps_.emplace(way->id, std::move(link));
+	}
+
 	// Plan rail decks after road bridge profiles are resolved. This mirrors Rust's
 	// carried-track detection and shared level for connected rail viaducts.
 	std::vector<const ProcessedWay *> rail_bridge_ways;
@@ -2642,6 +2714,12 @@ const RailDeckInfo *BridgeStructureMap::rail_deck(std::uint64_t way_id) const
 	return it == rail_decks_.end() ? nullptr : &it->second;
 }
 
+std::optional<int> BridgeStructureMap::landing_y(int x, int z) const
+{
+	const auto it = landings_.find({x, z});
+	return it == landings_.end() ? std::nullopt : std::optional<int>(it->second);
+}
+
 BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &elements,
 		const BridgeStructureMap &structures, double scale, const WorldEditor *editor)
 {
@@ -2804,9 +2882,14 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 		std::unordered_map<std::uint64_t, std::shared_ptr<const bridge_decks::DeckParts>>
 				shared_parts;
 		shared_parts.reserve(parts.size());
-		for (auto &[way_id, deck_parts] : parts)
+		for (auto &[way_id, deck_parts] : parts) {
+			for (const auto &[x, z, y] : deck_parts.rails)
+				result.railings_.try_emplace({x, z}, y);
+			for (const auto &[x, z, y] : deck_parts.lamps)
+				result.railings_.try_emplace({x, z}, y);
 			shared_parts.emplace(way_id, std::make_shared<const bridge_decks::DeckParts>(
 												 std::move(deck_parts)));
+		}
 		result.set_deck_parts(std::move(shared_parts));
 	}
 	return result;
@@ -2831,6 +2914,23 @@ std::optional<std::pair<std::pair<int, int>, int>> BridgeSurfaceMap::nearest_dec
 				best = std::tuple{distance, cell, it->second};
 		}
 	}
+	if (!best)
+		return std::nullopt;
+	return std::pair{std::get<1>(*best), std::get<2>(*best)};
+}
+
+std::optional<std::pair<std::pair<int, int>, int>> BridgeSurfaceMap::nearest_railing(
+		int x, int z, int radius) const
+{
+	std::optional<std::tuple<int, std::pair<int, int>, int>> best;
+	for (int dx = -radius; dx <= radius; ++dx)
+		for (int dz = -radius; dz <= radius; ++dz) {
+			const std::pair<int, int> cell{x + dx, z + dz};
+			const int distance = dx * dx + dz * dz;
+			if (const auto it = railings_.find(cell);
+					it != railings_.end() && (!best || distance < std::get<0>(*best)))
+				best = std::tuple{distance, cell, it->second};
+		}
 	if (!best)
 		return std::nullopt;
 	return std::pair{std::get<1>(*best), std::get<2>(*best)};
