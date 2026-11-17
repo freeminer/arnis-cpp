@@ -508,8 +508,10 @@ std::optional<double> mapped_height(const tags_t &tags)
 		return std::nullopt;
 	const auto last = value.find_last_not_of(" \t\r\n");
 	value = value.substr(first, last - first + 1);
-	if (!value.empty() && value.back() == 'm') {
+	const auto with_units = value.size();
+	while (!value.empty() && value.back() == 'm')
 		value.pop_back();
+	if (value.size() != with_units) {
 		const auto trimmed = value.find_last_not_of(" \t\r\n");
 		if (trimmed == std::string::npos)
 			return std::nullopt;
@@ -707,8 +709,12 @@ void generate_artwork_figure(WorldEditor &editor, const ProcessedNode &node)
 	const Block material = figure_material(node.tags, roll);
 	if (*form == "statue" && node.tags.get("statue") != "equestrian") {
 		if (const auto height = mapped_height(node.tags); height && *height >= 6.0) {
-			generate_column(
-					editor, node, static_cast<int>(std::lround(*height)), roll, true);
+			// Rust's float-to-i32 cast saturates before generate_column clamps the
+			// result. Clamp while still floating-point so extreme mapped heights do
+			// not overflow std::lround or the intermediate int conversion.
+			const int column_height =
+					static_cast<int>(std::lround(std::clamp(*height, 5.0, 30.0)));
+			generate_column(editor, node, column_height, roll, true);
 			return;
 		}
 	}
