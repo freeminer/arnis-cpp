@@ -263,6 +263,8 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 						? std::optional<field_texture::Plot>{field_layout->plot_at(x, z)}
 						: std::nullopt;
 		const auto climate = editor.local_climate(x, z).value_or(area_climate);
+		const auto forest_floor =
+				landuse_tag == "forest" ? editor.forest_floor_at(x, z) : std::nullopt;
 
 		// Apply per-block randomness for certain landuse types
 		Block actual_block = block_type;
@@ -286,6 +288,8 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 			if (!surface)
 				continue;
 			actual_block = *surface;
+		} else if (forest_floor) {
+			actual_block = *forest_floor;
 		} else if (landuse_tag == "quarry") {
 			int random_value = static_cast<int>(rng.uniform(100));
 			if (random_value < 40) {
@@ -361,9 +365,13 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 				}
 			}
 		} else if (landuse_tag == "forest") {
+			const bool litter = editor.check_for_block(
+					x, 0, z, ground_generation::forest_litter_blocks());
 			if (editor.check_for_block(x, 0, z,
 						std::optional<std::vector<Block>>{
-								std::vector<Block>{GRASS_BLOCK}})) {
+								std::vector<Block>{GRASS_BLOCK}}) ||
+					litter) {
+				const bool floor = forest_floor.has_value();
 				const double density = ground_generation::value_noise_01(x, z, 32);
 				const int tree_threshold =
 						std::max(5, static_cast<int>(60.0 - density * 45.0));
@@ -398,9 +406,13 @@ static void generate_landuse_area(WorldEditor &editor, ProcessedWay const &eleme
 							ground_decoration::place_scattered_flower(editor, x, z,
 									ground_decoration::FlowerSetting::Forest);
 					} else if (random_choice <= 12) {
-						if (rng.uniform(100) < 12)
+						if (litter) {
+							if (random_choice <= 3)
+								editor.set_block(
+										FERN, x, 1, z, std::nullopt, std::nullopt);
+						} else if (rng.uniform(100) < 12)
 							editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
-						else
+						else if (!floor || random_choice <= 5)
 							editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 					}
 				}

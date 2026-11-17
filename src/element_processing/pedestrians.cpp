@@ -40,6 +40,9 @@ constexpr std::size_t LANES_PER_LINE = 256;
 constexpr std::size_t CELLS_PER_LINE = 256;
 constexpr double FOOTFALL_M = 75.0;
 constexpr double KERB_BACK = 1.5;
+constexpr double RAIL_BACK_M = 3.5;
+constexpr double RAIL_MIN_SINE = 0.3;
+constexpr double RAIL_REACH = 2.0;
 constexpr double BESIDE_M = 6.0;
 constexpr double SCRAP_M = 30.0;
 constexpr double SPOT_CELL = 32.0;
@@ -126,9 +129,36 @@ struct Measured
 		return {points[k - 1].first + (points[k].first - points[k - 1].first) * t,
 				points[k - 1].second + (points[k].second - points[k - 1].second) * t};
 	}
+	std::optional<std::pair<double, std::pair<double, double>>> nearest(
+			std::pair<double, double> point, double reach) const
+	{
+		std::optional<std::pair<double, std::pair<double, double>>> best;
+		double best_distance = reach;
+		for (std::size_t i = 1; i < points.size(); ++i) {
+			const auto [ax, az] = points[i - 1];
+			const auto [bx, bz] = points[i];
+			const double dx = bx - ax, dz = bz - az;
+			const double length = std::hypot(dx, dz);
+			if (length <= 1e-9)
+				continue;
+			const double t =
+					std::clamp(((point.first - ax) * dx + (point.second - az) * dz) /
+									   (length * length),
+							0.0, 1.0);
+			const double x = ax + t * dx, z = az + t * dz;
+			const double distance = std::hypot(point.first - x, point.second - z);
+			if (distance <= best_distance) {
+				best_distance = distance;
+				best = std::pair{
+						at[i - 1] + t * length, std::pair{dx / length, dz / length}};
+			}
+		}
+		return best;
+	}
 };
 
-using Mark = std::tuple<double, std::optional<std::uint8_t>, bool>;
+using Mark = std::tuple<double, std::optional<std::uint8_t>, bool,
+		std::optional<std::uint32_t>>;
 
 void refine(double a, double b, const std::function<double(double)> &y_at, unsigned depth,
 		std::vector<Mark> &out)
@@ -142,14 +172,14 @@ void refine(double a, double b, const std::function<double(double)> &y_at, unsig
 			const double end = a + step * (j + 1);
 			refine(end - step, end, y_at, depth + 1, out);
 			if (j + 1 < pieces)
-				out.emplace_back(end, std::nullopt, false);
+				out.emplace_back(end, std::nullopt, false, std::nullopt);
 		}
 		return;
 	}
 	const double mid = (a + b) / 2.0;
 	if (std::abs(y_at(mid) - (y_at(a) + y_at(b)) / 2.0) >= 1.0) {
 		refine(a, mid, y_at, depth + 1, out);
-		out.emplace_back(mid, std::nullopt, false);
+		out.emplace_back(mid, std::nullopt, false, std::nullopt);
 		refine(mid, b, y_at, depth + 1, out);
 	}
 }
@@ -563,7 +593,8 @@ std::vector<std::pair<ProcessedWay, double>> across_squares(
 
 WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 		double scale, bool keep_left, bool signals, const cartesian::XZBBox &world,
-		const SurfaceY &surface_y)
+		const SurfaceY &surface_y,
+		const std::vector<level_crossings::WalkStop> &rail_stops)
 {
 	WalkNetwork network;
 	network.scale_ = scale;
@@ -720,10 +751,10 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 					continue;
 				const double stretch =
 						path.length() > 0.0 ? middle.length() / path.length() : 1.0;
-				std::vector<Mark> marks{
-						{0.0, std::nullopt, false}, {path.length(), std::nullopt, false}};
+				std::vector<Mark> marks{{0.0, std::nullopt, false, std::nullopt},
+						{path.length(), std::nullopt, false, std::nullopt}};
 				for (std::size_t k = 1; k + 1 < path.points.size(); ++k)
-					marks.emplace_back(path.at[k], std::nullopt, false);
+					marks.emplace_back(path.at[k], std::nullopt, false, std::nullopt);
 				const auto heading = [&](std::size_t k) {
 					const auto a = path.points[std::min(
 							k == 0 ? 0 : k - 1, path.points.size() - 2)];
@@ -753,7 +784,37 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 											   ? std::optional<std::uint8_t>(
 														 signal_group(heading(k)))
 											   : std::nullopt;
-					marks.emplace_back(s, light, !light.has_value());
+					marks.emplace_back(s, light, !light.has_value(), std::nullopt);
+				}
+				double min_x = path.points.front().first, max_x = min_x;
+				double min_z = path.points.front().second, max_z = min_z;
+				for (const auto &[x, z] : path.points) {
+					min_x = std::min(min_x, x);
+					max_x = std::max(max_x, x);
+					min_z = std::min(min_z, z);
+					max_z = std::max(max_z, z);
+				}
+				const double reach = piece.way->half + RAIL_REACH;
+				for (const auto &stop : rail_stops) {
+					if (stop.at.first < min_x - reach || stop.at.first > max_x + reach ||
+							stop.at.second < min_z - reach ||
+							stop.at.second > max_z + reach)
+						continue;
+					const auto nearest = path.nearest(stop.at, reach);
+					if (!nearest)
+						continue;
+					const auto [distance, direction] = *nearest;
+					const double sine = std::abs(direction.first * stop.track.second -
+												 direction.second * stop.track.first);
+					const auto end = path.points.back();
+					const bool ends_short = distance + 1.0 > path.length() &&
+											std::hypot(end.first - stop.at.first,
+													end.second - stop.at.second) > 1.5;
+					if (distance < 1.0 || ends_short || sine < RAIL_MIN_SINE)
+						continue;
+					const double back = RAIL_BACK_M * scale / std::max(sine, 0.4);
+					marks.emplace_back(std::max(distance - back, 0.0), std::nullopt,
+							false, stop.crossing);
 				}
 				const auto kerb = [&](const ProcessedNode &node) {
 					const auto road = road_at(node, way.id);
@@ -766,8 +827,8 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 						return std::get<0>(m) < lo || std::get<0>(m) > hi;
 					});
 					if (hi - lo >= 2.0) {
-						marks.emplace_back(lo, std::nullopt, false);
-						marks.emplace_back(hi, std::nullopt, false);
+						marks.emplace_back(lo, std::nullopt, false, std::nullopt);
+						marks.emplace_back(hi, std::nullopt, false, std::nullopt);
 					} else {
 						marks.clear();
 					}
@@ -782,6 +843,8 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 						if (!std::get<1>(merged.back()))
 							std::get<1>(merged.back()) = std::get<1>(mark);
 						std::get<2>(merged.back()) |= std::get<2>(mark);
+						if (!std::get<3>(merged.back()))
+							std::get<3>(merged.back()) = std::get<3>(mark);
 					} else {
 						merged.push_back(mark);
 					}
@@ -801,10 +864,11 @@ WalkNetwork WalkNetwork::build(const std::vector<ProcessedElement> &elements,
 					stations.push_back(mark);
 				}
 				std::vector<Point> points, alternate;
-				for (const auto &[distance, light, kerb_mark] : stations) {
+				for (const auto &[distance, light, kerb_mark, rail] : stations) {
 					const auto to_point = [&](std::pair<double, double> p) {
 						return Point{std::round(p.first * 10.0) / 10.0, y_at(distance),
-								std::round(p.second * 10.0) / 10.0, light, kerb_mark};
+								std::round(p.second * 10.0) / 10.0, light, kerb_mark,
+								rail};
 					};
 					const auto p = to_point(path.point_at(distance));
 					if (world.contains(
@@ -1052,7 +1116,8 @@ std::optional<SettledWalk> settle_walk(
 	const auto point = [&](std::size_t k) {
 		if (steps[k].point)
 			return Point{points[*steps[k].point].x, high[k], points[*steps[k].point].z,
-					points[*steps[k].point].light, points[*steps[k].point].kerb};
+					points[*steps[k].point].light, points[*steps[k].point].kerb,
+					points[*steps[k].point].rail};
 		return step_point(steps[k], high[k]);
 	};
 	SettledWalk settled;
@@ -1218,7 +1283,7 @@ void WalkNetwork::link()
 			lane.next.clear();
 		else if (lane.next.empty() || lane.cut.second)
 			lane.next = backs[i] && near_ ? std::vector<std::size_t>{*backs[i]}
-										 : std::vector<std::size_t>{};
+										  : std::vector<std::size_t>{};
 	}
 }
 
@@ -1362,7 +1427,7 @@ void WalkNetwork::build_spots()
 				at += segment;
 				++k;
 			}
-			if (lane.points[k].light || lane.points[k].kerb)
+			if (lane.points[k].light || lane.points[k].kerb || lane.points[k].rail)
 				continue;
 			const auto &p = lane.points[k];
 			const std::pair<int, int> key{static_cast<int>(std::floor(p.x / SPOT_CELL)),
@@ -1422,6 +1487,8 @@ std::vector<std::pair<std::string, std::string>> WalkNetwork::pack_functions() c
 					network << ",g:" << static_cast<unsigned>(*point.light) << 'b';
 				if (point.kerb)
 					network << ",c:1b";
+				if (point.rail)
+					network << ",r:" << *point.rail;
 				network << '}';
 			}
 			network << "],n:[I;";

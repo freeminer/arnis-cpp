@@ -38,6 +38,7 @@ struct Extras
 	bool disasters{};
 	bool cars{};
 	bool trains{};
+	bool crossings{};
 	bool pedestrians{};
 
 	static Extras from_args(const Args &args);
@@ -84,6 +85,8 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		std::optional<int> highest_surface = std::nullopt,
 		const disasters::Surface *surface = nullptr,
 		std::optional<int> sea_y = std::nullopt,
-		const std::vector<std::pair<std::string, std::string>> *walk_functions = nullptr);
+		const std::vector<std::pair<std::string, std::string>> *walk_functions = nullptr,
+		const std::vector<std::pair<std::string, std::string>> *crossing_functions =
+				nullptr);
 } // namespace datapack
 } // namespace arnis

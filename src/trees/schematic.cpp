@@ -1,6 +1,7 @@
 #include "schematic.h"
 #include "../../../arnis_adapter.h"
 #include "../ground_decoration.h"
+#include "../element_processing/tree.h"
 #include "../land_cover/land_cover.h"
 #include "../block_definitions.h"
 #include <array>
@@ -12,6 +13,7 @@
 #include <bit>
 #include <mutex>
 #include <optional>
+#include <map>
 #include <set>
 #include <unordered_map>
 #include <deque>
@@ -155,12 +157,21 @@ void finalize_tree_schematic(Schematic &schematic)
 		schematic.leaf_columns = static_cast<std::uint32_t>(leaf_columns.size());
 	}
 	schematic.min_log_vy = schematic.height;
+	std::map<std::pair<std::int16_t, std::int16_t>, std::int16_t> lowest_wood;
 	for (const auto &voxel : schematic.voxels)
-		if (is_log_block(voxel.block))
+		if (is_log_block(voxel.block)) {
 			schematic.min_log_vy =
 					std::min(schematic.min_log_vy, static_cast<int>(voxel.y));
+			auto [it, inserted] = lowest_wood.try_emplace({voxel.x, voxel.z}, voxel.y);
+			if (!inserted)
+				it->second = std::min(it->second, voxel.y);
+		}
 	if (schematic.min_log_vy == schematic.height)
 		schematic.min_log_vy = 0;
+	schematic.wood_columns.clear();
+	schematic.wood_columns.reserve(lowest_wood.size());
+	for (const auto &[column, y] : lowest_wood)
+		schematic.wood_columns.emplace_back(column.first, column.second, y);
 }
 
 // Tree assets deliberately collapse decorative states to the Rust tree palette.
@@ -344,26 +355,62 @@ TreeSize schematic_size(const Schematic &s)
 {
 	return size_for_height(s.height);
 }
+
+bool low_wood_clear(const world_editor::WorldEditor &editor, const Schematic &schem,
+		unsigned rotation, int anchor_x, int anchor_z,
+		const std::function<bool(int, int)> &keep_off, const std::function<int()> &base_y)
+{
+	const bool quarter = (rotation & 1u) != 0;
+	const int fw = quarter ? schem.length : schem.width;
+	const int fl = quarter ? schem.width : schem.length;
+	const int cx = (fw - 1) / 2;
+	const int cz = (fl - 1) / 2;
+	std::optional<int> resolved_base;
+	for (const auto &[vx, vz, vy16] : schem.wood_columns) {
+		const auto [rx, rz] = rotate_xz(vx, vz, schem.width, schem.length, rotation);
+		const int wx = anchor_x + rx - cx;
+		const int wz = anchor_z + rz - cz;
+		if (!keep_off(wx, wz))
+			continue;
+		const int vy = vy16;
+		const int bottom =
+				vy <= schem.min_log_vy + 2
+						? std::numeric_limits<int>::min()
+						: (resolved_base ? *resolved_base : *(resolved_base = base_y())) +
+								  vy;
+		if (in_headroom(editor, wx, bottom, wz))
+			return false;
+	}
+	return true;
+}
 std::pair<int, int> trunk_slot_s(int x, int z, int spacing)
 {
 	const int s = std::max(1, spacing);
-	// Preserve Rust's Euclidean cell division and its deliberately tiny (0/1)
-	// jitter.  A modulo-spread jitter looks reasonable locally but produces a
-	// different global lattice and consequently visible tile-seam divergence.
-	auto euclid_div = [s](int v) {
+	const auto wrap_i32 = [](std::uint32_t value) {
+		return std::bit_cast<std::int32_t>(value);
+	};
+	const auto add = [&](int a, int b) {
+		return wrap_i32(std::uint32_t(a) + std::uint32_t(b));
+	};
+	const auto mul = [&](int a, std::uint32_t b) {
+		return wrap_i32(std::uint32_t(a) * b);
+	};
+	const auto euclid_div = [s](int v) -> std::int32_t {
 		const auto wide = static_cast<std::int64_t>(v);
 		return static_cast<std::int32_t>(wide >= 0 ? wide / s : -((-wide + s - 1) / s));
 	};
-	const auto cx = euclid_div(x), cz = euclid_div(z);
-	// Rust's wrapped seed arithmetic is unsigned arithmetic in C++, then a
-	// bit-preserving conversion back to the signed coordinate hash input.
-	const auto hx = std::bit_cast<std::int32_t>(std::uint32_t(cx) * 0x1f1fu + 17u);
-	const auto hz = std::bit_cast<std::int32_t>(std::uint32_t(cz) * 0x2b2bu + 91u);
+	const auto cz = euclid_div(z);
+	const auto shift_hash = land_cover::coord_hash(add(mul(cz, 0x3d3du), 5), 0x5107);
+	const int shift = static_cast<int>(shift_hash % static_cast<std::uint32_t>(s));
+	const auto cx = euclid_div(add(x, -shift));
+	const int x0 = add(mul(cx, static_cast<std::uint32_t>(s)), shift);
+	const int z0 = mul(cz, static_cast<std::uint32_t>(s));
+	const auto hx = add(mul(x0, 0x1f1fu), 17);
+	const auto hz = add(mul(z0, 0x2b2bu), 91);
 	const auto h = land_cover::coord_hash(hx, hz);
-	return {std::bit_cast<std::int32_t>(
-					std::uint32_t(cx) * std::uint32_t(s) + std::uint32_t(h & 1U)),
-			std::bit_cast<std::int32_t>(
-					std::uint32_t(cz) * std::uint32_t(s) + std::uint32_t((h >> 1) & 1U))};
+	const std::uint32_t reach = static_cast<std::uint32_t>(std::max(s - 1, 1));
+	return {add(x0, static_cast<int>(h % reach)),
+			add(z0, static_cast<int>((h / reach) % reach))};
 }
 
 std::pair<int, int> rotate_xz(int x, int z, int width, int length, unsigned rotation)
@@ -456,8 +503,9 @@ bool place_schematic_tree(world_editor::WorldEditor &editor, const Schematic &s,
 		if (roof != std::numeric_limits<int>::min() && wy <= roof)
 			continue;
 		const bool log = is_log(v.block);
-		if (!log && editor.check_for_block_absolute(
-							wx, wy - 1, wz, std::optional<std::vector<Block>>({WATER})))
+		if (!log && (editor.check_for_block_absolute(wx, wy - 1, wz,
+							 std::optional<std::vector<Block>>({WATER})) ||
+							in_headroom(editor, wx, wy, wz)))
 			continue;
 		if (log && (editor.check_for_block(
 							wx, 0, wz, std::optional<std::vector<Block>>({WATER})) ||

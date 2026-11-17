@@ -1617,8 +1617,64 @@ std::optional<SlotSelection> RegionSelector::pick_slot_impl(int x, int z, Habita
 	if (width.empty())
 		width = selected_species;
 	const auto index = width[land_cover::coord_hash(sx + 313, sz + 727) % width.size()];
-	return SlotSelection{sx, sz, index,
-			unsigned(land_cover::coord_hash(sx ^ 0x5bd1, sz ^ 0x9e37) % 4)};
+	const unsigned rotation =
+			unsigned(land_cover::coord_hash(sx ^ 0x5bd1, sz ^ 0x9e37) % 4);
+	if (!request.fits)
+		return SlotSelection{sx, sz, index, rotation};
+	const auto turn = [&](std::size_t candidate) -> std::optional<unsigned> {
+		for (unsigned k = 0; k < 4; ++k) {
+			const unsigned candidate_rotation = (rotation + k) & 3u;
+			if (request.fits(candidate, candidate_rotation))
+				return candidate_rotation;
+		}
+		return std::nullopt;
+	};
+	if (const auto fitted_rotation = turn(index))
+		return SlotSelection{sx, sz, index, *fitted_rotation};
+	const auto stand_in_order = [&](std::size_t a, std::size_t b) {
+		const int da = std::abs(data_->entries[a].schem->height - wanted_height);
+		const int db = std::abs(data_->entries[b].schem->height - wanted_height);
+		return std::tie(da, data_->entries[a].width, a) <
+			   std::tie(db, data_->entries[b].width, b);
+	};
+	std::vector<std::size_t> stand_ins;
+	for (const auto candidate : selected_species)
+		if (candidate != index && eligible(candidate))
+			stand_ins.push_back(candidate);
+	std::sort(stand_ins.begin(), stand_ins.end(), stand_in_order);
+	// If the selected species has no fitting orientation, use the nearest and
+	// slimmest candidates from other species in the same selected community.
+	std::vector<std::size_t> other_species;
+	for (const auto &species : usable_species)
+		for (const auto candidate : species)
+			if (candidate != index && eligible(candidate) &&
+					std::find(stand_ins.begin(), stand_ins.end(), candidate) ==
+							stand_ins.end())
+				other_species.push_back(candidate);
+	std::sort(other_species.begin(), other_species.end(), stand_in_order);
+	stand_ins.insert(stand_ins.end(), other_species.begin(), other_species.end());
+	for (const auto candidate : stand_ins)
+		if (const auto fitted_rotation = turn(candidate))
+			return SlotSelection{sx, sz, candidate, *fitted_rotation};
+	// A mapped tree's own genus/type pool gets first refusal. If every such
+	// model collides with a road, roof or other clearance mask, Rust then tries
+	// the locality-selected community before leaving the mapped trunk bare.
+	if (mapped_selection && request.fits) {
+		std::vector<std::size_t> community_models;
+		for (const auto &species : all_species)
+			for (const auto candidate : species)
+				if (candidate != index && eligible(candidate) &&
+						std::find(stand_ins.begin(), stand_ins.end(), candidate) ==
+								stand_ins.end() &&
+						std::find(community_models.begin(), community_models.end(),
+								candidate) == community_models.end())
+					community_models.push_back(candidate);
+		std::sort(community_models.begin(), community_models.end(), stand_in_order);
+		for (const auto candidate : community_models)
+			if (const auto fitted_rotation = turn(candidate))
+				return SlotSelection{sx, sz, candidate, *fitted_rotation};
+	}
+	return std::nullopt;
 }
 
 std::optional<SlotSelection> RegionSelector::pick_slot(
@@ -1637,6 +1693,7 @@ std::optional<SlotSelection> RegionSelector::pick_mapped(
 	request.tagged = mapped.conifer.has_value();
 	request.genus = mapped.genus;
 	request.conifer = mapped.conifer;
+	request.fits = mapped.fits;
 	// Mapped OSM trees are density-decided: Rust never applies the grove
 	// clearing roll to an explicitly tagged trunk.
 	request.density_decided = true;

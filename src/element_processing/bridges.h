@@ -2,6 +2,7 @@
 
 #include <cstddef>
 #include <optional>
+#include <memory>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
@@ -13,6 +14,11 @@
 #include "bridge_towers.h"
 
 #include <memory>
+
+namespace arnis::bridge_decks
+{
+struct DeckParts;
+}
 
 namespace arnis::bridges
 {
@@ -59,10 +65,28 @@ struct RailDeckInfo
 	bool end_is_boundary = true;
 };
 
+enum class DeckDesign
+{
+	Motorway,
+	Road,
+	Foot,
+	Glass,
+	Stone,
+	Brick,
+	Timber,
+	Boardwalk,
+	Covered,
+};
+
 struct BridgeMemberInfo
 {
 	int deck_y = 0;
+	std::size_t structure_id = 0;
 	bridge_styles::BridgeStyle style = bridge_styles::BridgeStyle::Beam;
+	DeckDesign deck_design = DeckDesign::Road;
+	bool lit = false;
+	std::optional<std::pair<std::pair<float, float>, std::pair<float, float>>>
+			structure_axis;
 	bool start_is_group_boundary = true;
 	bool end_is_group_boundary = true;
 	std::optional<int> start_internal_ramp;
@@ -114,13 +138,15 @@ class BridgeSurfaceMap
 {
 public:
 	static BridgeSurfaceMap build(const std::vector<ProcessedElement> &elements,
-			const BridgeStructureMap &structures, double scale);
+			const BridgeStructureMap &structures, double scale,
+			const WorldEditor *editor = nullptr);
 
 	std::optional<int> deck_y_at(int x, int z) const;
 	std::optional<std::pair<std::pair<int, int>, int>> nearest_deck_cell(
 			int x, int z, int radius) const;
 	std::optional<int> nearby_deck_y(int x, int z, int radius) const;
 	bool deck_near(int x, int z, int y, int tolerance) const;
+	bool rail_deck_near(int x, int z, int y, int tolerance) const;
 	std::optional<std::pair<std::uint64_t, int>> rail_track_at(int x, int z) const;
 	// Barrier placement queries road-deck cells via nearby_deck_y; rail-only
 	// shelter footprints must not make this road-deck map appear non-empty.
@@ -133,6 +159,10 @@ public:
 	// structural block (including girders) is above the water surface.
 	bool deck_clears(int x, int z, int water_y) const;
 	bool over_grade_way(int x, int z) const;
+	const bridge_decks::DeckParts *parts_of(std::uint64_t way_id) const;
+	void set_deck_parts(std::unordered_map<std::uint64_t,
+			std::shared_ptr<const bridge_decks::DeckParts>>
+					parts);
 
 private:
 	struct PairHash
@@ -149,6 +179,8 @@ private:
 	std::unordered_map<std::pair<int, int>, std::pair<std::uint64_t, int>, PairHash>
 			rail_tracks_;
 	std::unordered_set<std::pair<int, int>, PairHash> grade_crossings_;
+	std::unordered_map<std::uint64_t, std::shared_ptr<const bridge_decks::DeckParts>>
+			deck_parts_;
 };
 
 bool is_bridge_way(const ProcessedWay &way);

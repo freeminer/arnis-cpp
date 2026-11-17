@@ -20,6 +20,7 @@
 #include "../../../arnis_adapter.h"
 #include "../floodfill_cache.h"
 #include "bridge_styles.h"
+#include "bridge_decks.h"
 #include "bridges.h"
 #include "surfaces.h"
 #include "road_markings.h"
@@ -2260,6 +2261,14 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 		const bool cable_style =
 				bridge_style == crate::bridge_styles::BridgeStyle::Suspension ||
 				bridge_style == crate::bridge_styles::BridgeStyle::CableStayed;
+		if (bridge_member) {
+			if (const auto *parts = bridge_surface.parts_of(way.id))
+				crate::bridge_decks::render(editor, bridge_member->deck_design, *parts);
+			else
+				crate::bridge_decks::render(editor, bridge_surface,
+						bridge_member->deck_design, bridge_path, block_range,
+						bridge_member->lit);
+		}
 		if (!schematic && (!cable_style || bridge_pylons))
 			crate::bridge_styles::decorate_bridge_above_deck(editor, bridge_style,
 					bridge_surface, bridge_path, block_range, start_is_boundary,

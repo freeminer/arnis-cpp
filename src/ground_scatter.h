@@ -2,11 +2,14 @@
 
 #include "args.h"
 #include "floodfill_cache.h"
+#include <cstdint>
 
 namespace arnis::ground_scatter
 {
 
 void scatter_region(WorldEditor &editor, const Args &args, const XZBBox &bbox, int min_x,
 		int max_x, int min_z, int max_z);
+void place_mapped_rock(WorldEditor &editor, const BuildingFootprintBitmap &buildings,
+		int x, int z, std::uint64_t id, bool large);
 
 } // namespace arnis::ground_scatter

@@ -58,7 +58,7 @@ Extras Extras::for_format(WorldFormat format) const
 bool Extras::any() const
 {
 	return gravity || traffic_lights || discoveries || pause_menu || outbreak ||
-		   disasters || cars || trains || pedestrians;
+		   disasters || cars || trains || crossings || pedestrians;
 }
 
 bool Extras::wants_places() const
@@ -172,6 +172,8 @@ json pack_metadata(const std::vector<Feature> &features)
 			active.emplace_back("moving cars");
 		else if (feature.name == std::string("trains"))
 			active.emplace_back("trains");
+		else if (feature.name == std::string("xing"))
+			active.emplace_back("level crossings");
 		else if (feature.name == std::string("walk"))
 			active.emplace_back("pedestrians");
 		else if (feature.name == std::string("discoveries"))
@@ -311,7 +313,8 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 		bool wooded, const std::vector<std::pair<std::string, std::uint64_t>> &biomes,
 		std::optional<int> highest_surface, const disasters::Surface *surface,
 		std::optional<int> sea_y,
-		const std::vector<std::pair<std::string, std::string>> *walk_functions)
+		const std::vector<std::pair<std::string, std::string>> *walk_functions,
+		const std::vector<std::pair<std::string, std::string>> *crossing_functions)
 {
 	if (args.bedrock || args.luanti || args.one_world_enabled() || world.empty())
 		return true;
@@ -320,18 +323,20 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 	const bool traffic = enabled.traffic_lights;
 	const bool moving_cars = enabled.cars && cars;
 	const bool moving_trains = enabled.cars && trains && !trains->is_empty();
+	const bool moving_crossings =
+			moving_trains && crossing_functions && !crossing_functions->empty();
 	const bool pedestrians = enabled.pedestrians;
 	const bool has_discoveries = enabled.discoveries && !places.empty();
 	const bool menu = enabled.pause_menu;
 	const bool outbreak = enabled.outbreak;
 	const bool disasters = enabled.disasters;
-	if (!gravity && !traffic && !moving_cars && !moving_trains && !pedestrians &&
-			!enabled.discoveries && !menu && !outbreak && !disasters)
+	if (!gravity && !traffic && !moving_cars && !moving_trains && !moving_crossings &&
+			!pedestrians && !enabled.discoveries && !menu && !outbreak && !disasters)
 		return true;
 	const std::vector<Feature> features{{"gravity", gravity}, {"traffic", traffic},
 			{"cars", moving_cars}, {"trains", moving_trains}, {"walk", pedestrians},
-			{"disaster", disasters}, {"discoveries", enabled.discoveries}, {"menu", menu},
-			{"outbreak", outbreak}};
+			{"xing", moving_crossings}, {"disaster", disasters},
+			{"discoveries", enabled.discoveries}, {"menu", menu}, {"outbreak", outbreak}};
 	const auto source_root = assets::path("minecraft/datapack_extras");
 	const auto target_root = world / "datapacks" / PACK_NAME;
 	std::error_code ec;
@@ -641,6 +646,10 @@ bool install_runtime_extras(const std::filesystem::path &world, const Args &args
 			if (!write_text(target_root / path, contents, error))
 				return false;
 	}
+	if (moving_crossings)
+		for (const auto &[path, contents] : *crossing_functions)
+			if (!write_text(target_root / path, contents, error))
+				return false;
 	if (pedestrians && walk_functions)
 		for (const auto &[path, contents] : *walk_functions)
 			if (!write_text(target_root / path, contents, error))

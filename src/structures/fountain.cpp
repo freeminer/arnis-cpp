@@ -1,37 +1,72 @@
 #include "structures.h"
 #include "../assets_root.h"
+#include "../block_definitions.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
+#include "../tile.h"
 
+#include <algorithm>
+#include <limits>
 #include <memory>
 #include <string>
+#include <vector>
 
 namespace arnis::structures::fountain
 {
+namespace
+{
+constexpr std::size_t LARGE_FOUNTAIN_CELLS = 300;
+constexpr int MAX_CUT = 3;
+}
+
 void place(WorldEditor &editor, int x, int z, std::size_t area_cells)
 {
 	if (!editor.place_prop(Prop::Fountain))
 		return;
 	const auto h = land_cover::coord_hash(x, z);
-	const auto variant = area_cells >= 300 ? 4 : int((h >> 4) % 3) + 1;
-	const int y = editor.get_absolute_y(x, 1, z);
+	const auto variant = area_cells >= LARGE_FOUNTAIN_CELLS ? 4 : int((h >> 4) % 3) + 1;
 	const unsigned rotation = (h >> 8) & 3;
 	const auto root = editor.get_schematic_asset_root().empty()
 							  ? assets::path("structures")
 							  : editor.get_schematic_asset_root();
-	const auto load_variant = [&](int index) {
-		return try_load_structure_cached(
-				root / ("fountain" + std::to_string(index) + ".schem"));
-	};
-
-	// Rust chooses a fallback only when decoding the requested asset failed.
-	// Keep that decision separate from placement: a valid schematic that clips
-	// entirely at a tile edge must not cause a different fountain to be stamped.
-	auto schematic = load_variant(variant);
+	auto schematic = try_load_structure_cached(
+			root / ("fountain" + std::to_string(variant) + ".schem"));
+	// Match Rust's fallback: the chosen asset is used when valid; if it failed
+	// to decode, use the first available small fountain (never another large one).
 	if (!schematic)
 		for (int fallback = 1; fallback <= 3 && !schematic; ++fallback)
-			schematic = load_variant(fallback);
-	if (schematic)
-		place_structure(editor, *schematic, x, y, z, rotation);
+			schematic = try_load_structure_cached(
+					root / ("fountain" + std::to_string(fallback) + ".schem"));
+	if (!schematic || schematic->max_extent > TILE_EDITOR_HALO)
+		return;
+
+	// Level the basin to the lowest terrain column in its footprint, but cap
+	// excavation on steep terrain and support the downhill edge with stone.
+	const auto columns =
+			structure_base(*schematic, x, z, rotation, std::numeric_limits<int>::max());
+	if (columns.empty())
+		return;
+	int low = std::numeric_limits<int>::max();
+	int high = std::numeric_limits<int>::min();
+	for (const auto &[cx, cz] : columns) {
+		const int ground = editor.get_ground_level(cx, cz);
+		low = std::min(low, ground);
+		high = std::max(high, ground);
+	}
+	const int base_y = std::max(low, high - MAX_CUT);
+	const std::vector<Block> replace_none;
+	for (const auto &[cx, cz] : columns) {
+		if (editor.surface_override(cx, cz))
+			continue;
+		const int ground = editor.get_ground_level(cx, cz);
+		for (int y = base_y + 1; y <= ground; ++y)
+			editor.set_block_absolute(
+					block_definitions::AIR, cx, y, cz, nullptr, &replace_none);
+		for (int y = ground + 1; y <= base_y; ++y)
+			editor.set_block_absolute(
+					block_definitions::STONE_BRICKS, cx, y, cz, nullptr, &replace_none);
+		editor.register_road_surface_y(cx, cz, base_y);
+	}
+	place_structure(editor, *schematic, x, base_y + 1, z, rotation);
 }
 }

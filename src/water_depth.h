@@ -61,6 +61,9 @@ std::pair<int, int> grid_span_to_block_span(std::size_t grid_lo, std::size_t gri
 void clear_tree_within(WorldEditor &editor, int x, int y, int z,
 		const std::function<bool(int, int)> &keep_column);
 void clear_tree_from(WorldEditor &editor, int x, int y, int z);
+// Replaces water laid beneath already-placed bridge/plinth supports, extending
+// their material through the water column to the bed.
+void pierce_support_columns(WorldEditor &editor);
 
 class BigWaterField
 {

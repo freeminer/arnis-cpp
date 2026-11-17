@@ -567,6 +567,11 @@ bool WorldEditor::surface_is_sealed(int x, int z) const
 	return sealed_surface && sealed_surface->contains(x, z);
 }
 
+bool WorldEditor::on_carriageway(int x, int z) const
+{
+	return carriageway && carriageway->contains(x, z);
+}
+
 bool WorldEditor::nested_area_owns(int x, int z) const
 {
 	// The merged mask clears paving where a smaller planted area takes

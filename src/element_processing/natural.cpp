@@ -18,6 +18,7 @@
 #include "../floodfill.h"
 #include "../floodfill_cache.h"
 #include "../ground_generation.h"
+#include "../ground_scatter.h"
 #include "../biome.h"
 #include "../climate.h"
 #include "../land_cover/land_cover.h"
@@ -297,6 +298,12 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				editor, {x, 1, z}, mapped, &building_footprints, &bridge_surface);
 		return;
 	}
+	if ((natural_type == "rock" || natural_type == "stone") && element.is_node()) {
+		const auto &node = element.as_node();
+		ground_scatter::place_mapped_rock(editor, building_footprints, node.x, node.z,
+				static_cast<std::uint64_t>(element.id()), natural_type == "stone");
+		return;
+	}
 
 	// Rust consumes every natural=tree element in this arm, but only renders
 	// node elements. Tree-tagged ways receive their ground fill in the earlier
@@ -478,8 +485,12 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 							natural_type == "heath") &&
 					biome::climate_is_dry(climate);
 			const bool sealed = editor.surface_is_sealed(x, z);
-			const auto cell_surface = natural_cell_surface(
+			const auto wood_floor =
+					natural_type == "wood" ? editor.forest_floor_at(x, z) : std::nullopt;
+			auto cell_surface = natural_cell_surface(
 					editor, natural_type, block_type, x, z, rock_variation);
+			if (wood_floor)
+				cell_surface.surface = *wood_floor;
 			if (!sealed && !editor.check_for_block(x, 0, z, protected_fill_blocks)) {
 				editor.set_block(
 						cell_surface.surface, x, 0, z, std::nullopt, std::nullopt);
@@ -567,9 +578,12 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 					}
 				}
 			} else if (natural_type == "tree_row" || natural_type == "wood") {
-				if (!editor.check_for_block(x, 0, z, grass_block_only())) {
+				const bool litter = editor.check_for_block(
+						x, 0, z, ground_generation::forest_litter_blocks());
+				if (!editor.check_for_block(x, 0, z, grass_block_only()) && !litter) {
 					continue;
 				}
+				const bool floor = wood_floor.has_value();
 				const double density = ground_generation::value_noise_01(x, z, 32);
 				const int tree_threshold = std::max(5, int(60.0 - density * 45.0));
 				// Preserve Rust's per-cell RNG draw order: the tree decision is drawn
@@ -597,8 +611,12 @@ static void generate_natural_area(WorldEditor &editor, const ProcessedElement &e
 				} else if (random_choice == 1) {
 					ground_decoration::place_scattered_flower(
 							editor, x, z, ground_decoration::FlowerSetting::Forest);
+				} else if (litter) {
+					if (random_choice <= 3)
+						editor.set_block(FERN, x, 1, z, std::nullopt, std::nullopt);
 				} else if (random_choice <= 12) {
-					editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
+					if (!floor || random_choice <= 5)
+						editor.set_block(GRASS, x, 1, z, std::nullopt, std::nullopt);
 				}
 			} else if (natural_type == "sand") {
 				if (arid && editor.check_for_block(x, 0, z, sand_surface_blocks()) &&

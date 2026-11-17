@@ -202,6 +202,26 @@ LuantiNode to_luanti_node(const BlockWithProperties &block, LuantiGame game,
 		return {property("berries") == "true" ? "mcl_lush_caves:cave_vines_lit"
 											  : "mcl_lush_caves:cave_vines",
 				0};
+	// Flat iron bars and panes use facedir to keep the connection run in the
+	// same orientation as Java's north/south/east/west block-state properties.
+	if (id == 36 || id == 192 || id == 196 || id == 339) {
+		const bool north_south =
+				property("north") == "true" || property("south") == "true";
+		const bool east_west = property("east") == "true" || property("west") == "true";
+		const char *name = id == 36	   ? "mcl_panes:bar_flat"
+						   : id == 192 ? "mcl_panes:pane_grey_flat"
+						   : id == 196 ? "mcl_panes:pane_natural_flat"
+									   : "mcl_panes:pane_blue_flat";
+		return {name, static_cast<std::uint8_t>(north_south && !east_west)};
+	}
+	if (id == 260) {
+		const auto direction = property("facing");
+		return {"mcl_core:ladder", wallmounted(direction.empty() ? "north" : direction)};
+	}
+	// Barrier is only the Java-side invisible cell reserved for a hydrant. Mineclonia
+	// has no equivalent node, so keep the cell transparent in Luanti worlds.
+	if (id == 527)
+		return {"air", 0};
 	const auto state_facing = property("facing");
 	const auto state_half = property("half");
 	const char *effective_facing = state_facing.empty() ? facing : state_facing.data();
@@ -231,7 +251,8 @@ LuantiNode to_luanti_node(
 
 	const auto id = block.id();
 	if ((id >= 393 && id <= 396) || id == 400 || id == 402 || id == 406 || id == 408 ||
-			id == 409)
+			id == 409 || id == 36 || id == 192 || id == 196 || id == 260 || id == 339 ||
+			id == 527)
 		return to_luanti_node(BlockWithProperties{block}, game, facing, open, top);
 	if (block == BLUE_ICE)
 		return {"mcl_core:blue_ice", 0};

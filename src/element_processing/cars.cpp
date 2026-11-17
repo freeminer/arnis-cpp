@@ -6,6 +6,7 @@
 #include "road_markings.h"
 #include "traffic_lights.h"
 #include "train_bodies.h"
+#include "../vehicle_models.h"
 #include "../clipping.h"
 #include "../strict_parse.h"
 #include "../unicode_text.h"
@@ -73,9 +74,10 @@ constexpr double ONCOMING_OFFSET = 1.0;
 constexpr std::array<double, 3> PLAYER_AT{3.0, 6.0, 2.0};
 constexpr int GIVE_WAY_STEPS = 30;
 constexpr std::array<int, 2> PACE{880, 1120};
-constexpr std::array<std::pair<VehicleKind, std::uint32_t>, 6> KINDS{
-		{{VehicleKind::Sedan, 52}, {VehicleKind::Hatchback, 24}, {VehicleKind::Van, 10},
-				{VehicleKind::Pickup, 6}, {VehicleKind::Truck, 5},
+constexpr std::array<std::pair<VehicleKind, std::uint32_t>, 9> KINDS{
+		{{VehicleKind::Sedan, 30}, {VehicleKind::Hatchback, 20}, {VehicleKind::Suv, 16},
+				{VehicleKind::Estate, 10}, {VehicleKind::City, 6}, {VehicleKind::Van, 8},
+				{VehicleKind::Pickup, 4}, {VehicleKind::Truck, 3},
 				{VehicleKind::Bus, 3}}};
 constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> CAR_COLOURS{
 		{{"minecraft:white_concrete", 24}, {"minecraft:black_concrete", 20},
@@ -94,6 +96,64 @@ constexpr std::array<std::pair<std::string_view, std::uint32_t>, 3> TRUCK_COLOUR
 				{"minecraft:blue_concrete", 20}}};
 constexpr std::array<std::pair<std::string_view, std::uint32_t>, 2> BUS_COLOURS{
 		{{"minecraft:red_concrete", 50}, {"minecraft:white_concrete", 50}}};
+constexpr std::array<std::pair<std::string_view, std::uint32_t>, 8> PARK_CAR_COLOURS{
+		{{"minecraft:white_concrete", 24}, {"minecraft:black_concrete", 20},
+				{"minecraft:gray_concrete", 17}, {"minecraft:light_gray_concrete", 14},
+				{"minecraft:blue_concrete", 9}, {"minecraft:red_concrete", 8},
+				{"minecraft:cyan_concrete", 4}, {"minecraft:green_concrete", 4}}};
+constexpr std::array<std::pair<std::string_view, std::uint32_t>, 3> PARK_VAN_COLOURS{
+		{{"minecraft:white_concrete", 70}, {"minecraft:light_gray_concrete", 20},
+				{"minecraft:gray_concrete", 10}}};
+constexpr std::array<std::pair<std::string_view, std::uint32_t>, 5> PARK_PICKUP_COLOURS{
+		{{"minecraft:white_concrete", 25}, {"minecraft:black_concrete", 25},
+				{"minecraft:red_concrete", 20}, {"minecraft:blue_concrete", 20},
+				{"minecraft:green_concrete", 10}}};
+
+struct ParkKind
+{
+	std::string_view model;
+	std::uint32_t weight;
+};
+constexpr std::array<ParkKind, 7> PARK_KINDS{
+		{{"car_sedan", 30}, {"car_hatchback", 20}, {"car_suv", 16}, {"car_estate", 10},
+				{"car_city", 6}, {"car_van", 8}, {"car_pickup", 4}}};
+
+std::uint32_t pick_weight(const ParkKind &choice)
+{
+	return choice.weight;
+}
+
+template <typename T>
+std::uint32_t pick_weight(const std::pair<T, std::uint32_t> &choice)
+{
+	return choice.second;
+}
+
+std::span<const std::pair<std::string_view, std::uint32_t>> park_colours(
+		std::string_view model)
+{
+	if (model == "car_van")
+		return PARK_VAN_COLOURS;
+	if (model == "car_pickup")
+		return PARK_PICKUP_COLOURS;
+	return PARK_CAR_COLOURS;
+}
+
+template <typename Choices>
+auto weighted_pick(const Choices &choices, std::uint64_t roll)
+{
+	std::uint64_t total = 0;
+	for (const auto &choice : choices)
+		total += pick_weight(choice);
+	std::uint64_t at = total ? roll % total : 0;
+	for (const auto &choice : choices) {
+		const auto weight = pick_weight(choice);
+		if (at < weight)
+			return choice;
+		at -= weight;
+	}
+	return choices.front();
+}
 
 struct Path
 {
@@ -165,6 +225,7 @@ struct Mark
 	double distance{};
 	std::optional<std::uint8_t> stop;
 	std::optional<std::int32_t> cap;
+	std::optional<std::uint8_t> holds;
 };
 
 struct Reach
@@ -519,7 +580,8 @@ bool drivable(const tags_t &tags)
 CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, double scale,
 		bool drives_on_left, bool stop_at_signals, const ::XZBBox &world,
 		const std::function<int(const ProcessedWay &, int, int)> &surface_y,
-		const std::function<bool(int, int)> &built)
+		const std::function<bool(int, int)> &built,
+		const element_processing::level_crossings::BreakMap *crossings)
 {
 	std::vector<RoadRef> roads;
 	std::vector<std::pair<const ProcessedWay *, std::pair<int, int>>> found_roads;
@@ -550,13 +612,16 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		junction_roads.emplace_back(road.way, road.half);
 	const auto junctions = Junctions::build(junction_roads, scale);
 	const auto is_junction = [&](std::uint64_t id) { return junctions.is_junction(id); };
+	const double car_size = std::clamp(scale, 0.4, 3.0);
 
 	std::vector<Piece> pieces;
 	for (const auto &road : roads) {
 		const auto &nodes = road.way->nodes;
 		std::size_t start = 0;
 		for (std::size_t k = 1; k < nodes.size(); ++k) {
-			if (k + 1 == nodes.size() || is_junction(nodes[k].id)) {
+			const bool crossing =
+					crossings && crossings->contains({road.way->id, nodes[k].id});
+			if (k + 1 == nodes.size() || is_junction(nodes[k].id) || crossing) {
 				Piece piece{road.way, {}, road.half, road.oneway};
 				piece.nodes.reserve(k - start + 1);
 				for (std::size_t i = start; i <= k; ++i)
@@ -628,7 +693,29 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		const auto trim = [&](std::uint64_t id) {
 			return is_junction(id) ? junctions.widest(id) + 1.0 : 0.0;
 		};
+		const auto crossing_at = [&](std::uint64_t id)
+				-> const element_processing::level_crossings::Break * {
+			if (!crossings)
+				return nullptr;
+			const auto found = crossings->find({way.id, id});
+			return found == crossings->end() ? nullptr : &found->second;
+		};
+		const auto *leaves = crossing_at(first_id);
+		const auto *meets = crossing_at(last_id);
+		const bool forward = !lane.backward;
 		double from = trim(first_id), to = path.length() - trim(last_id);
+		if (leaves)
+			from = std::max(from, leaves->exit(forward));
+		if (meets) {
+			constexpr double CARS_FRONT_M = 2.65; // longest ordinary car's half-length
+			to = std::min(
+					to, path.length() - meets->stop(forward) - CARS_FRONT_M * car_size);
+			if (!leaves) {
+				constexpr double LONG_FRONT_M = 5.0; // longest bus half-length
+				const double room = (LONG_FRONT_M - CARS_FRONT_M + 1.0) * car_size;
+				from = std::max(0.0, std::min(from, to - room));
+			}
+		}
 		if (to - from < 2.0) {
 			const double mid = std::clamp((from + to) / 2.0, 0.0, path.length());
 			from = std::max(mid - 1.0, 0.0);
@@ -636,12 +723,24 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		}
 		std::vector<Mark> marks{
 				{from, std::nullopt,
-						is_junction(first_id) ? capped(JUNCTION_KMH) : std::nullopt},
+						is_junction(first_id) || leaves ? capped(JUNCTION_KMH)
+														: std::nullopt},
 				{to, std::nullopt,
-						(is_junction(last_id) || turns_back) ? capped(LANE_END_KMH)
-															 : std::nullopt}};
-		if ((is_junction(last_id) || turns_back) && to - from > LANE_END_REACH + 2.0)
+						(is_junction(last_id) || turns_back || meets)
+								? capped(LANE_END_KMH)
+								: std::nullopt}};
+		if ((is_junction(last_id) || turns_back || meets) &&
+				to - from > LANE_END_REACH + 2.0)
 			marks.push_back({to - LANE_END_REACH, std::nullopt, std::nullopt});
+		if (meets) {
+			constexpr double CARS_FRONT_M = 2.65;
+			constexpr double LONG_FRONT_M = 5.0;
+			const double front = to + CARS_FRONT_M * car_size;
+			marks.push_back({std::clamp(front - CARS_FRONT_M * car_size, from, to), 3,
+					std::nullopt, 1});
+			marks.push_back({std::clamp(front - LONG_FRONT_M * car_size, from, to), 3,
+					std::nullopt, 2});
+		}
 		for (std::size_t k = 1; k + 1 < path.points.size(); ++k) {
 			const double s = path.at[k];
 			if (s <= from || s >= to)
@@ -689,6 +788,10 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 			if (!merged.empty() && mark.distance - merged.back().distance < 0.5) {
 				if (!merged.back().stop)
 					merged.back().stop = mark.stop;
+				if (!merged.back().holds)
+					merged.back().holds = mark.holds;
+				else if (mark.holds && merged.back().holds != mark.holds)
+					merged.back().holds.reset();
 				merged.back().cap = lower(merged.back().cap, mark.cap);
 			} else {
 				merged.push_back(mark);
@@ -708,7 +811,9 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 		}
 		Segment segment;
 		segment.way = way.id;
-		segment.into_junction = is_junction(last_id);
+		if (meets)
+			segment.crossing = meets->crossing;
+		segment.into_junction = is_junction(last_id) || meets;
 		segment.turns_back = turns_back;
 		segment.speed = speed;
 		segment.density = density(highway) * 2.0 / (lane.count + 1.0);
@@ -719,13 +824,14 @@ CarNetwork CarNetwork::build(const std::vector<ProcessedElement> &elements, doub
 			if (!world.contains(ix, iz))
 				continue;
 			segment.points.push_back({std::round(x * 10.0) / 10.0, y_at(station.distance),
-					std::round(z * 10.0) / 10.0, station.stop, station.cap});
+					std::round(z * 10.0) / 10.0, station.stop, station.cap,
+					station.holds});
 			segment.arcs.push_back(station.distance);
 		}
 		segments.push_back(std::move(segment));
 	}
 
-	const double vehicle_size = std::clamp(scale, 0.4, 3.0);
+	const double vehicle_size = car_size;
 	for (auto &segment : segments)
 		tidy(segment, U_TURN_RADIUS_M * vehicle_size);
 	link(segments, lanes, world, [scale](double kmh) { return step_speed(kmh, scale); },
@@ -986,7 +1092,7 @@ void tidy(Segment &segment, double radius)
 		points.emplace_back(to.first, to.second, 1.0);
 		for (const auto &[x, z, t] : points) {
 			segment.points.push_back({std::round(x * 10.0) / 10.0, p.y,
-					std::round(z * 10.0) / 10.0, p.stop, p.cap});
+					std::round(z * 10.0) / 10.0, p.stop, p.cap, p.holds});
 			segment.arcs.push_back(s + d * (2.0 * t - 1.0));
 		}
 	}
@@ -1073,6 +1179,27 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 		wheel = 0.62f;
 		lights = 0.68f;
 		break;
+	case VehicleKind::Estate:
+		length = 4.7f;
+		width = 1.8f;
+		axle = 1.0f;
+		wheel = 0.64f;
+		lights = 0.68f;
+		break;
+	case VehicleKind::Suv:
+		length = 4.5f;
+		width = 1.86f;
+		axle = 0.95f;
+		wheel = 0.74f;
+		lights = 0.78f;
+		break;
+	case VehicleKind::City:
+		length = 3.6f;
+		width = 1.65f;
+		axle = 0.7f;
+		wheel = 0.6f;
+		lights = 0.66f;
+		break;
 	case VehicleKind::Van:
 		length = 4.9f;
 		width = 1.95f;
@@ -1123,13 +1250,20 @@ std::vector<ModelPart> body_parts(VehicleKind kind, const std::string &colour)
 			lamp("minecraft:white_concrete", length / 2.0f, Light::Head),
 			lamp("minecraft:red_concrete", -length / 2.0f - 0.04f, Light::Tail),
 			plate(length / 2.0f), plate(-length / 2.0f - 0.02f)};
-	if (kind == VehicleKind::Sedan) {
-		out.push_back(part(
-				colour, {width, 0.72f, length}, {-width / 2.0f, 0.22f, -length / 2.0f}));
-		out.push_back(part("minecraft:tinted_glass", {width - 0.2f, 0.52f, 2.3f},
-				{-(width - 0.2f) / 2.0f, 0.94f, -1.3f}));
-		out.push_back(part(colour, {width - 0.18f, 0.07f, 2.0f},
-				{-(width - 0.18f) / 2.0f, 1.43f, -1.15f}));
+	if (kind == VehicleKind::Sedan || kind == VehicleKind::Estate ||
+			kind == VehicleKind::Suv || kind == VehicleKind::City) {
+		const float body_height = kind == VehicleKind::Suv ? 0.95f : 0.72f;
+		const float roof_height = kind == VehicleKind::Suv ? 1.68f : 1.43f;
+		const float cabin_length = kind == VehicleKind::City ? 1.85f : 2.3f;
+		const float cabin_z = kind == VehicleKind::Estate ? -1.15f
+							  : kind == VehicleKind::City ? -1.05f
+														  : -1.3f;
+		out.push_back(part(colour, {width, body_height, length},
+				{-width / 2.0f, 0.22f, -length / 2.0f}));
+		out.push_back(part("minecraft:tinted_glass", {width - 0.2f, 0.52f, cabin_length},
+				{-(width - 0.2f) / 2.0f, body_height + 0.12f, cabin_z}));
+		out.push_back(part(colour, {width - 0.18f, 0.07f, cabin_length - 0.3f},
+				{-(width - 0.18f) / 2.0f, roof_height, cabin_z + 0.1f}));
 	} else if (kind == VehicleKind::Hatchback) {
 		out.push_back(part(
 				colour, {width, 0.72f, length}, {-width / 2.0f, 0.22f, -length / 2.0f}));
@@ -1183,6 +1317,12 @@ const char *kind_name(VehicleKind kind)
 		return "sedan";
 	case VehicleKind::Hatchback:
 		return "hatchback";
+	case VehicleKind::Estate:
+		return "estate";
+	case VehicleKind::Suv:
+		return "suv";
+	case VehicleKind::City:
+		return "city";
 	case VehicleKind::Van:
 		return "van";
 	case VehicleKind::Pickup:
@@ -1193,6 +1333,31 @@ const char *kind_name(VehicleKind kind)
 		return "bus";
 	}
 	return "sedan";
+}
+
+std::string_view vehicle_model_name(VehicleKind kind)
+{
+	switch (kind) {
+	case VehicleKind::Sedan:
+		return "car_sedan";
+	case VehicleKind::Hatchback:
+		return "car_hatchback";
+	case VehicleKind::Estate:
+		return "car_estate";
+	case VehicleKind::Suv:
+		return "car_suv";
+	case VehicleKind::City:
+		return "car_city";
+	case VehicleKind::Van:
+		return "car_van";
+	case VehicleKind::Pickup:
+		return "car_pickup";
+	case VehicleKind::Truck:
+		return "car_truck";
+	case VehicleKind::Bus:
+		return "car_bus";
+	}
+	return "car_sedan";
 }
 
 std::span<const std::pair<std::string_view, std::uint32_t>> vehicle_colours(
@@ -1239,6 +1404,12 @@ std::pair<double, double> seat(VehicleKind kind)
 		return {0.4, 1.15};
 	case VehicleKind::Hatchback:
 		return {0.1, 1.2};
+	case VehicleKind::Estate:
+		return {0.3, 1.15};
+	case VehicleKind::Suv:
+		return {0.25, 1.35};
+	case VehicleKind::City:
+		return {0.05, 1.2};
 	case VehicleKind::Van:
 		return {1.25, 1.42};
 	case VehicleKind::Pickup:
@@ -1257,6 +1428,12 @@ std::pair<float, float> hitbox(VehicleKind kind)
 	case VehicleKind::Sedan:
 		return {2.4f, 1.45f};
 	case VehicleKind::Hatchback:
+		return {2.4f, 1.5f};
+	case VehicleKind::Estate:
+		return {2.4f, 1.5f};
+	case VehicleKind::Suv:
+		return {2.5f, 1.7f};
+	case VehicleKind::City:
 		return {2.4f, 1.5f};
 	case VehicleKind::Van:
 		return {2.6f, 1.8f};
@@ -1394,6 +1571,7 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 						180.0 / std::numbers::pi;
 	std::optional<std::pair<std::size_t, double>> keep;
 	std::optional<std::uint8_t> held_stop;
+	std::optional<std::uint8_t> held_holds;
 	Waypoint start = a;
 	auto start_heading = *heading;
 	if (turn > 150.0) {
@@ -1422,6 +1600,7 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 		for (std::size_t n = k; n < segment.points.size(); ++n)
 			if (segment.points[n].stop) {
 				held_stop = segment.points[n].stop;
+				held_holds = segment.points[n].holds;
 				break;
 			}
 	}
@@ -1487,8 +1666,10 @@ bool bend_into(std::vector<Segment> &segments, std::size_t i, std::size_t j,
 								 std::round(z * 10.0) / 10.0, std::nullopt, cap},
 				arc});
 	}
-	if (!added.empty())
+	if (!added.empty()) {
 		added.front().first.stop = held_stop;
+		added.front().first.holds = held_holds;
+	}
 	auto &result = segments[i];
 	if (keep) {
 		result.points.resize(keep->first);
@@ -1797,6 +1978,73 @@ std::map<std::pair<int, int>, std::vector<std::pair<std::size_t, std::size_t>>> 
 
 } // namespace
 
+void place_parked_model(world_editor::WorldEditor &editor, int x, int y, int z,
+		std::uint8_t rotation, std::uint64_t seed, int max_height)
+{
+	const double headroom = max_height == std::numeric_limits<int>::max()
+									? std::numeric_limits<double>::max()
+									: static_cast<double>(max_height) - 0.1;
+	const auto look = parked_look(seed >> 8, headroom);
+	if (!look)
+		return;
+	const auto unit = [seed](unsigned shift) {
+		return static_cast<double>((seed >> shift) & 0xffu) / 255.0 - 0.5;
+	};
+	const double flip = ((seed >> 16) & 1u) == 0 ? 0.0 : 180.0;
+	const float yaw =
+			static_cast<float>(double(rotation & 3u) * 90.0 + flip + unit(40) * 5.0);
+	const double px = double(x) + 0.5 + unit(48) * 0.3;
+	const double pz = double(z) + 0.5 + unit(56) * 0.3;
+	auto extra = vehicle_models::display_nbt(
+			look->model, vehicle_models::parked_item_model(*look), 1.0, false);
+	extra["Rotation"] = nlohmann::json::array({yaw, 0.0f});
+	extra["Tags"] = nlohmann::json::array({"arnis.parked"});
+	extra["view_range"] = 2.0f;
+	editor.add_entity_exact("minecraft:item_display", px, y, pz,
+			static_cast<std::int64_t>(seed >> 1), std::move(extra));
+}
+
+std::vector<vehicle_models::Look> parked_looks()
+{
+	std::vector<vehicle_models::Look> result;
+	for (const auto &kind : PARK_KINDS)
+		for (const auto &[colour, weight] : park_colours(kind.model)) {
+			(void)weight;
+			result.push_back(vehicle_models::Look::plain(
+					std::string(kind.model), colour_name(colour), std::string(colour)));
+		}
+	return result;
+}
+
+std::vector<vehicle_models::Look> java_looks()
+{
+	std::vector<vehicle_models::Look> result;
+	for (const auto &[kind, weight] : KINDS) {
+		(void)weight;
+		for (const auto &[colour, colour_weight] : vehicle_colours(kind)) {
+			(void)colour_weight;
+			result.push_back(
+					vehicle_models::Look::plain(std::string(vehicle_model_name(kind)),
+							colour_name(colour), std::string(colour)));
+		}
+	}
+	return result;
+}
+
+std::optional<vehicle_models::Look> parked_look(std::uint64_t seed, double headroom)
+{
+	std::vector<ParkKind> fitting;
+	for (const auto &kind : PARK_KINDS)
+		if (vehicle_models::model(kind.model).top_m() <= headroom)
+			fitting.push_back(kind);
+	if (fitting.empty())
+		return std::nullopt;
+	const auto kind = weighted_pick(fitting, seed);
+	const auto colour = weighted_pick(park_colours(kind.model), seed >> 24);
+	return vehicle_models::Look::plain(std::string(kind.model), colour_name(colour.first),
+			std::string(colour.first));
+}
+
 std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 		bool walkers) const
 {
@@ -1847,6 +2095,10 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 						<< ::arnis::datapack::macro_coord(point.z);
 				if (point.stop)
 					storage << ",g:" << static_cast<unsigned>(*point.stop) << 'b';
+				if (point.stop == 3 && segment.crossing)
+					storage << ",lx:" << *segment.crossing;
+				if (point.holds)
+					storage << ",k:" << static_cast<unsigned>(*point.holds) << 'b';
 				if (point.cap)
 					storage << ",m:" << *point.cap;
 				storage << '}';
@@ -2032,37 +2284,26 @@ std::vector<std::pair<std::string, std::string>> CarNetwork::datapack_functions(
 	for (const auto &[kind, weight] : KINDS) {
 		(void)weight;
 		const char *name = kind_name(kind);
-		for (const auto &[prefix, bare] : std::array<std::pair<const char *, bool>, 2>{
-					 {{"", false}, {"ov121/", true}}}) {
+		for (const char *prefix : {"", "ov121/"}) {
 			std::ostringstream body;
 			const auto [width, height] = hitbox(kind);
 			body << "$summon interaction $(x) $(y) $(z) {Tags:[\"arnis.car.part\",\"arnis.k_"
 				 << name << "\"],width:" << std::fixed << std::setprecision(2)
 				 << width * size << "f,height:" << height * size << "f}\n"
 				 << std::setprecision(3);
-			for (const auto &part : body_parts(kind, "$(colour)")) {
-				const auto block =
-						bare ? "\"" + part.block + "\"" : "{Name:\"" + part.block + "\"}";
-				const auto vector = [size](const std::array<float, 3> &v) {
-					std::ostringstream value;
-					value << std::fixed << std::setprecision(3) << '[' << v[0] * size
-						  << "f," << v[1] * size << "f," << v[2] * size << "f]";
-					return value.str();
-				};
-				const char *tags = "\"arnis.car.part\"";
-				const char *glow = "";
-				if (part.light == Light::Head)
-					glow = ",brightness:{sky:15,block:15}";
-				else if (part.light == Light::Tail) {
-					tags = "\"arnis.car.part\",\"arnis.car.tail\"";
-					glow = ",brightness:{sky:7,block:7}";
-				}
-				body << "$summon block_display $(x) $(y) $(z) {Tags:[" << tags
-					 << "],teleport_duration:2,view_range:3f,block_state:" << block
-					 << ",transformation:{left_rotation:[0f,0f,0f,1f],right_rotation:[0f,0f,0f,1f],translation:"
-					 << vector(part.corner) << ",scale:" << vector(part.size) << '}'
-					 << glow << "}\n";
-			}
+			const auto model = vehicle_model_name(kind);
+			const auto item = vehicle_models::item_model_named(model, "$(colour)");
+			body << "$execute positioned $(x) $(y) $(z) run summon item_display ~ ~"
+				 << vehicle_models::LIFT << " ~ {"
+				 << vehicle_models::display_snbt(model, item, size_, false,
+							vehicle_models::LIFT,
+							",Tags:[\"arnis.car.part\",\"arnis.car.lift\"],teleport_duration:2,view_range:3f")
+				 << "}\n"
+				 << "$summon item_display $(x) $(y) $(z) {"
+				 << vehicle_models::display_snbt(model,
+							vehicle_models::brake_item_model(model), size_, false, 0.0,
+							",Tags:[\"arnis.car.part\",\"arnis.car.tail\"],teleport_duration:2,view_range:3f,brightness:{sky:7,block:7}")
+				 << "}\n";
 			out.emplace_back(std::string(prefix) + "data/arnis/function/cars/body/" +
 									 name + ".mcfunction",
 					body.str());
@@ -2158,6 +2399,10 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 				{"w", 0}, {"q", 0}, {"b", 0}};
 		if (target.stop)
 			data["g"] = *target.stop;
+		if (target.stop == 3 && segment.crossing)
+			data["lx"] = *segment.crossing;
+		if (target.holds)
+			data["k"] = *target.holds;
 		if (target.cap)
 			data["m"] = *target.cap;
 		nlohmann::json tags = {"arnis.car"};
@@ -2174,30 +2419,26 @@ void CarNetwork::place_way(world_editor::WorldEditor &editor, std::uint64_t way)
 						{"Tags", {"arnis.car.part",
 										 std::string("arnis.k_") + kind_name(car.kind)}},
 						{"Rotation", rotation}});
-		const auto parts = body_parts(car.kind, car.colour);
-		for (std::size_t part_index = 0; part_index < parts.size(); ++part_index) {
-			const auto &part = parts[part_index];
-			const auto scaled = [scale](const std::array<float, 3> &v) {
-				return nlohmann::json::array({v[0] * scale, v[1] * scale, v[2] * scale});
-			};
-			nlohmann::json tags = {"arnis.car.part"};
-			if (part.light == Light::Tail)
-				tags.push_back("arnis.car.tail");
-			nlohmann::json extra = {{"block_state", {{"Name", part.block}}},
-					{"transformation",
-							{{"left_rotation", {0.0f, 0.0f, 0.0f, 1.0f}},
-									{"right_rotation", {0.0f, 0.0f, 0.0f, 1.0f}},
-									{"translation", scaled(part.corner)},
-									{"scale", scaled(part.size)}}},
-					{"Tags", std::move(tags)}, {"teleport_duration", 2},
-					{"view_range", 3.0f}, {"Rotation", rotation}};
-			if (part.light == Light::Head)
-				extra["brightness"] = {{"sky", 15}, {"block", 15}};
-			else if (part.light == Light::Tail)
-				extra["brightness"] = {{"sky", 7}, {"block", 7}};
-			editor.add_block_display(x, y, z,
-					seed + 1 + static_cast<std::int64_t>(part_index), std::move(extra));
-		}
+		const auto model = vehicle_model_name(car.kind);
+		const auto look = vehicle_models::Look::plain(
+				std::string(model), colour_name(car.colour), car.colour);
+		auto body = vehicle_models::display_nbt(model, vehicle_models::item_model(look),
+				scale_, false, vehicle_models::LIFT);
+		body["Tags"] = {"arnis.car.part", "arnis.car.lift"};
+		body["teleport_duration"] = 2;
+		body["view_range"] = 3.0f;
+		body["Rotation"] = rotation;
+		editor.add_entity_exact(
+				"minecraft:item_display", x, y, z, seed + 1, std::move(body));
+		auto brake = vehicle_models::display_nbt(
+				model, vehicle_models::brake_item_model(model), scale_, false, 0.0);
+		brake["Tags"] = {"arnis.car.part", "arnis.car.tail"};
+		brake["teleport_duration"] = 2;
+		brake["view_range"] = 3.0f;
+		brake["Rotation"] = rotation;
+		brake["brightness"] = {{"sky", 7}, {"block", 7}};
+		editor.add_entity_exact(
+				"minecraft:item_display", x, y, z, seed + 2, std::move(brake));
 	}
 }
 

@@ -25,6 +25,7 @@
 #include "../rust_numeric.h"
 #include "../strict_parse.h"
 #include "bridge_modules.h"
+#include "bridge_decks.h"
 #include "highways.h"
 #include "rail_track.h"
 
@@ -1255,7 +1256,16 @@ BridgeStructureMap BridgeStructureMap::build(
 	std::unordered_set<std::uint64_t> claimed_ramp_ways;
 
 	for (const auto &group_indices : ordered_groups) {
+		const auto structure_id =
+				static_cast<std::size_t>(&group_indices - ordered_groups.data());
 		const auto group_style = majority_style(group_indices, bridge_ways, outlines);
+		std::vector<const ProcessedWay *> group_ways;
+		group_ways.reserve(group_indices.size());
+		for (const auto idx : group_indices)
+			group_ways.push_back(bridge_ways[idx]);
+		const auto deck_design = bridge_decks::pick(group_style, group_ways);
+		const bool lit = std::any_of(group_ways.begin(), group_ways.end(),
+				[](const ProcessedWay *way) { return way->tags.get("lit") == "yes"; });
 		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> endpoint_counts;
 		std::unordered_map<std::pair<int, int>, std::size_t, XZPairHash> node_members;
 		std::unordered_set<std::pair<int, int>, XZPairHash> cut_ends;
@@ -1469,16 +1479,44 @@ BridgeStructureMap BridgeStructureMap::build(
 			}
 			const float axis_length =
 					std::sqrt(static_cast<float>(axis_distance_squared));
-			const float axis_dx =
+			float axis_dx =
 					axis_length > 0.0f
 							? static_cast<float>(axis_end.first - axis_start.first) /
 									  axis_length
 							: 0.0f;
-			const float axis_dz =
+			float axis_dz =
 					axis_length > 0.0f
 							? static_cast<float>(axis_end.second - axis_start.second) /
 									  axis_length
 							: 0.0f;
+			// Use the signed mean heading of the members, aligned to the far-end
+			// chord. The chord alone skews a shared axis when a group has parallel
+			// carriageways or a long diagonal member beside its main route.
+			float heading_x = 0.0f;
+			float heading_z = 0.0f;
+			const float chord_x = static_cast<float>(axis_end.first - axis_start.first);
+			const float chord_z = static_cast<float>(axis_end.second - axis_start.second);
+			for (const auto idx : group_indices) {
+				const auto &member = *bridge_ways[idx];
+				if (member.nodes.size() < 2)
+					continue;
+				float dx = static_cast<float>(
+						member.nodes.back().x - member.nodes.front().x);
+				float dz = static_cast<float>(
+						member.nodes.back().z - member.nodes.front().z);
+				if (dx * chord_x + dz * chord_z < 0.0f) {
+					dx = -dx;
+					dz = -dz;
+				}
+				heading_x += dx;
+				heading_z += dz;
+			}
+			const float heading_length = std::hypot(heading_x, heading_z);
+			if (heading_length > 0.0f &&
+					heading_x * chord_x + heading_z * chord_z > 0.0f) {
+				axis_dx = heading_x / heading_length;
+				axis_dz = heading_z / heading_length;
+			}
 			bool follows_axis = axis_length >= 1.0f;
 			for (auto &[idx, path] : paths) {
 				if (covered_ids.contains(bridge_ways[idx]->id))
@@ -2332,7 +2370,15 @@ BridgeStructureMap BridgeStructureMap::build(
 				const auto &e = way.nodes.back();
 				BridgeMemberInfo info;
 				info.deck_y = deck_y;
+				info.structure_id = structure_id;
 				info.style = group_style;
+				info.deck_design = deck_design;
+				info.lit = lit;
+				if (follows_axis)
+					info.structure_axis = std::make_pair(
+							std::make_pair(static_cast<float>(axis_start.first),
+									static_cast<float>(axis_start.second)),
+							std::make_pair(axis_dx, axis_dz));
 				info.start_is_group_boundary = is_edge({s.x, s.z});
 				info.end_is_group_boundary = is_edge({e.x, e.z});
 				info.start_internal_ramp = decide_internal_ramp({s.x, s.z}, deck_y,
@@ -2597,7 +2643,7 @@ const RailDeckInfo *BridgeStructureMap::rail_deck(std::uint64_t way_id) const
 }
 
 BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &elements,
-		const BridgeStructureMap &structures, double scale)
+		const BridgeStructureMap &structures, double scale, const WorldEditor *editor)
 {
 	BridgeSurfaceMap result;
 	for (const auto &element : elements) {
@@ -2753,6 +2799,16 @@ BridgeSurfaceMap BridgeSurfaceMap::build(const std::vector<ProcessedElement> &el
 			}
 		}
 	}
+	if (editor) {
+		auto parts = bridge_decks::plan(elements, structures, result, *editor, scale);
+		std::unordered_map<std::uint64_t, std::shared_ptr<const bridge_decks::DeckParts>>
+				shared_parts;
+		shared_parts.reserve(parts.size());
+		for (auto &[way_id, deck_parts] : parts)
+			shared_parts.emplace(way_id, std::make_shared<const bridge_decks::DeckParts>(
+												 std::move(deck_parts)));
+		result.set_deck_parts(std::move(shared_parts));
+	}
 	return result;
 }
 
@@ -2805,6 +2861,25 @@ bool BridgeSurfaceMap::deck_near(int x, int z, int y, int tolerance) const
 	const auto low = deck_low_y_.find({x, z});
 	return high != deck_y_.end() && low != deck_low_y_.end() &&
 		   low->second <= y + tolerance && high->second >= y - tolerance;
+}
+
+bool BridgeSurfaceMap::rail_deck_near(int x, int z, int y, int tolerance) const
+{
+	const auto it = rail_deck_y_.find({x, z});
+	return it != rail_deck_y_.end() && std::abs(it->second - y) <= tolerance;
+}
+
+const bridge_decks::DeckParts *BridgeSurfaceMap::parts_of(std::uint64_t way_id) const
+{
+	const auto it = deck_parts_.find(way_id);
+	return it == deck_parts_.end() ? nullptr : it->second.get();
+}
+
+void BridgeSurfaceMap::set_deck_parts(
+		std::unordered_map<std::uint64_t, std::shared_ptr<const bridge_decks::DeckParts>>
+				parts)
+{
+	deck_parts_ = std::move(parts);
 }
 
 std::optional<std::pair<std::uint64_t, int>> BridgeSurfaceMap::rail_track_at(

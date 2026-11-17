@@ -13,6 +13,10 @@ inline constexpr std::uint32_t MIN_PX_PER_BLOCK = 4;
 // Select the atlas size used by this generation.  The setting is process-wide
 // because facade panels and preset building facades share one atlas.
 void set_atlas_side(std::uint32_t side);
+// Reserve texture pixels for other assets sharing Minecraft's block atlas.
+// The most recent call replaces the previous reservation, before or after
+// selecting the active atlas size.
+void reserve(std::uint64_t pixels);
 
 // Shared per-block resolution cap for all facade sources in this generation.
 // Mapillary settles it first; preset facades must not crop above that fit.

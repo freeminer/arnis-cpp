@@ -76,6 +76,31 @@ struct RoutePoint
 	double x{}, z{};
 };
 
+/// Per-point aircraft attitude. Airfield routes use these instead of deriving
+/// yaw from adjacent samples, and carry pitch and wheel state to each backend.
+struct Air
+{
+	std::vector<float> yaw;
+	std::vector<float> climb;
+	std::vector<float> nose;
+	std::vector<bool> gear;
+
+	bool valid_for(std::size_t point_count) const
+	{
+		return yaw.size() == point_count && climb.size() == point_count &&
+			   nose.size() == point_count && gear.size() == point_count;
+	}
+};
+
+/// A service's rail track passing near a sampled world point.
+struct TrackAt
+{
+	std::size_t service{};
+	double at{};
+	std::pair<double, double> dir{1.0, 0.0};
+	Mode mode{Mode::Rail};
+};
+
 /// Backend-neutral railway service path. Stops are point indices along the route.
 struct Route
 {
@@ -92,6 +117,7 @@ struct Route
 	/// Rail routes leave this empty and resolve their track from registered rail nodes.
 	std::vector<double> surface_y;
 	double surface_lift{0.0625};
+	std::optional<Air> air;
 	double length() const;
 };
 
@@ -113,6 +139,17 @@ public:
 	std::size_t train_count() const;
 	std::size_t ship_count() const;
 	bool is_empty() const { return services_.empty(); }
+	/// Timetable ticks when any train of service `service` occupies a track position.
+	/// `at` and `half` are measured in route blocks; the result uses the shared
+	/// timetable clock, with one entry per tenth-second step.
+	std::vector<bool> busy(std::size_t service, double at, double half) const;
+	/// Services whose rail routes pass within `reach` blocks of each sampled point.
+	std::vector<std::vector<TrackAt>> tracks_at(
+			const std::vector<RoutePoint> &spots, double reach) const;
+	/// Whether a service route has enough placed rail or supplied surface heights to run.
+	bool runs(std::size_t service,
+			const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y)
+			const;
 	/// Append water services planned from the finished-world water probe. Each item owns one
 	/// route and its backend-neutral schedule, just like a rail service.
 	void add_ships(std::vector<std::pair<Route, Service>> ships);

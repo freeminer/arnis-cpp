@@ -41,6 +41,7 @@ namespace
 {
 
 constexpr int CHUNK_SIZE = 16;
+constexpr std::uint32_t SALT_FOREST_LITTER = 0xF0E57117u;
 constexpr std::uint32_t SALT_SHRUB_DIRT = 0x5B7BD127u;
 constexpr std::uint32_t SALT_BARE_EARTH = 0xBA4EEA27u;
 constexpr std::uint32_t SALT_PAVING_WEAR = 0xBA7E3EA1u;
@@ -55,6 +56,84 @@ int chunk_index(int coordinate)
 int chunk_origin(int chunk)
 {
 	return chunk * CHUNK_SIZE;
+}
+
+enum class ForestFloor
+{
+	Conifer,
+	Broadleaf,
+	Dry
+};
+
+std::optional<ForestFloor> forest_floor_kind(const Ground &ground, const XZPoint &point,
+		biome::Climate climate, double fallback_latitude)
+{
+	if (climate != biome::Climate::Temperate && climate != biome::Climate::DryContinental)
+		return std::nullopt;
+	if (const auto eco = ground.ecoregion_at(point)) {
+		using biome_type = ecoregion::EcoBiome;
+		switch (eco->biome) {
+		case biome_type::TemperateConifer:
+		case biome_type::Boreal:
+			return ForestFloor::Conifer;
+		case biome_type::TemperateBroadleaf:
+		case biome_type::TemperateGrassland:
+		case biome_type::MontaneGrassland:
+			return ForestFloor::Broadleaf;
+		case biome_type::Mediterranean:
+			return ForestFloor::Dry;
+		default:
+			return std::nullopt;
+		}
+	}
+	const double latitude = std::abs(ground.latitude_at(point, fallback_latitude));
+	if (latitude < 23.5)
+		return std::nullopt;
+	return latitude > 55.0 ? ForestFloor::Conifer : ForestFloor::Broadleaf;
+}
+
+std::pair<Block, Block> forest_floor_surface(int x, int z, ForestFloor kind)
+{
+	const double noise = ground_noise(x, z, 7, SALT_FOREST_LITTER);
+	Block top = GRASS_BLOCK;
+	switch (kind) {
+	case ForestFloor::Conifer:
+		if (noise < .30)
+			top = PODZOL;
+		else if (noise < .42)
+			top = COARSE_DIRT;
+		break;
+	case ForestFloor::Broadleaf:
+		if (noise < .12)
+			top = PODZOL;
+		else if (noise < .20)
+			top = COARSE_DIRT;
+		else if (noise < .25)
+			top = MOSS_BLOCK;
+		break;
+	case ForestFloor::Dry:
+		if (noise < .22)
+			top = COARSE_DIRT;
+		else if (noise < .28)
+			top = PODZOL;
+		break;
+	}
+	return {top, DIRT};
+}
+
+bool in_closed_stand(const Ground &ground, const XZPoint &point)
+{
+	const auto crown = [&](int dx, int dz) {
+		const auto height = ground.canopy_height_m(XZPoint{point.x + dx, point.z + dz});
+		return height && *height >= canopy::CANOPY_MIN_M;
+	};
+	if (!crown(0, 0))
+		return false;
+	int nearby = 0;
+	for (const auto &[dx, dz] :
+			std::array<std::pair<int, int>, 4>{{{6, 0}, {-6, 0}, {0, 6}, {0, -6}}})
+		nearby += crown(dx, dz);
+	return nearby >= 3;
 }
 
 // Rust passes these palettes as static slices. Keep the C++ equivalents shared
@@ -403,7 +482,7 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		const BuildingFootprintBitmap &building_footprints, int origin_x, int origin_z,
 		const CoordinateBitmap *tunnel_footprint,
 		const bridges::BridgeSurfaceMap *bridge_surface, double scale, int slope,
-		double forest_fern_share, int tree_spacing, bool schematic_trees,
+		double forest_fern_share, bool floored, int tree_spacing, bool schematic_trees,
 		bool cropland_enabled, const field_texture::Plot *cropland_plot)
 {
 	const bool sealed = editor.surface_is_sealed(x, z);
@@ -448,6 +527,14 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 			climate_sward(climate) *
 			(editor.check_for_block_type_absolute(x, ground_y, z, COARSE_DIRT) ? .5
 																			   : 1.0);
+	const bool litter = floored && editor.check_for_block_absolute(x, ground_y, z,
+										   ground_generation::forest_litter_blocks());
+	const double floor_mean = litter ? .08 : floored ? .15 : .4;
+	const auto forest_fern = [&](int fx, int fz) {
+		return litter ||
+			   (double(land_cover::coord_hash(fx ^ 0xfe, fz ^ 0x4e) % 100) / 100.0 <
+					   forest_fern_share);
+	};
 	// Rust's decoration pass only installs a plant when the space above the
 	// finished surface is still open.  Keep this invariant for all lightweight
 	// vegetation choices below; structures and schematics remain authoritative.
@@ -464,10 +551,8 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 		if (choice == 0 && !canopy_covered && !editor.under_mapped_crown(x, z)) {
 			Tree::create(editor, Coord{x, 1, z}, &building_footprints, bridge_surface);
 		} else if (ground_is_natural &&
-				   undergrowth_roll(x, z, .4 * sward, SALT_FOREST_FLOOR)) {
-			const double fern_roll =
-					double(land_cover::coord_hash(x ^ 0xfe, z ^ 0x4e) % 100) / 100.0;
-			place_decoration(fern_roll < forest_fern_share ? FERN : GRASS, ground_y + 1);
+				   undergrowth_roll(x, z, floor_mean * sward, SALT_FOREST_FLOOR)) {
+			place_decoration(forest_fern(x, z) ? FERN : GRASS, ground_y + 1);
 		}
 	} else if (cover == land_cover::LC_CROPLAND && cropland_enabled) {
 		if (cropland_plot) {
@@ -517,6 +602,12 @@ void maybe_place_vegetation(WorldEditor &editor, int x, int ground_y, int z,
 				place_decoration(DEAD_BUSH, ground_y + 1);
 		} else if (rng.uniform(100) == 0)
 			place_decoration(DEAD_BUSH, ground_y + 1);
+	} else if ((cover == land_cover::LC_GRASSLAND || cover == land_cover::LC_SHRUBLAND) &&
+			   floored && ground_is_natural) {
+		if (cover == land_cover::LC_SHRUBLAND && rng.uniform(100) < 2)
+			bush::place(editor, x, z, bush::Kind::Wild);
+		else if (undergrowth_roll(x, z, floor_mean * sward, SALT_FOREST_FLOOR))
+			place_decoration(forest_fern(x, z) ? FERN : GRASS, ground_y + 1);
 	} else if (cover == land_cover::LC_SHRUBLAND && ground_is_natural) {
 		if (rng.uniform(100) < 2) {
 			bush::place(editor, x, z, bush::Kind::Wild);
@@ -633,6 +724,32 @@ double ground_noise(int x, int z, int scale, std::uint32_t salt)
 	return 1.0 - (1.0 - s) * (1.0 - s) * k;
 }
 
+const std::vector<Block> &forest_litter_blocks()
+{
+	static const std::vector<Block> blocks{PODZOL, COARSE_DIRT, MOSS_BLOCK};
+	return blocks;
+}
+
+std::optional<Block> mapped_forest_floor(const WorldEditor &editor, int x, int z)
+{
+	if (!editor.ground)
+		return std::nullopt;
+	const auto point = editor.ground_point(x, z);
+	const auto climate = editor.ground->climate_at(point);
+	const auto bounds = editor.geographic_bounds();
+	const double world_latitude = (bounds[0] + bounds[1]) * 0.5;
+	const auto kind =
+			climate == biome::Climate::Boreal
+					? std::optional<ForestFloor>(ForestFloor::Conifer)
+					: forest_floor_kind(*editor.ground, point, climate, world_latitude);
+	if (!kind)
+		return std::nullopt;
+	if (const auto canopy_height = editor.ground->canopy_height_m(point);
+			canopy_height && *canopy_height < canopy::CANOPY_MIN_M)
+		return std::nullopt;
+	return forest_floor_surface(x, z, *kind).first;
+}
+
 void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints, int iter_min_x,
 		int iter_max_x, int iter_min_z, int iter_max_z,
@@ -744,6 +861,14 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 				else if (habitat == ground_decoration::Habitat::Jungle)
 					forest_fern_share = .3;
 			}
+			const auto chunk_floor = [&]() -> std::optional<ForestFloor> {
+				if (!editor.ground)
+					return std::nullopt;
+				const auto sample = editor.ground_point(
+						chunk_origin(chunk_x) + 8, chunk_origin(chunk_z) + 8);
+				return forest_floor_kind(*editor.ground, sample,
+						editor.ground->climate_at(sample), center_latitude);
+			}();
 			std::optional<ChunkGroundCache> ground_cache;
 			if (terrain_enabled)
 				ground_cache = ChunkGroundCache::populate(editor, chunk_x, chunk_z,
@@ -832,6 +957,19 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							editor.ground && editor.ground->has_land_cover();
 					const std::uint8_t cover_here =
 							has_cover ? editor.ground->cover_class(relative) : 0;
+					std::optional<ForestFloor> floor_here;
+					if (chunk_floor && has_cover) {
+						if (cover_here == land_cover::LC_TREE_COVER) {
+							const auto canopy_height =
+									editor.ground->canopy_height_m(relative);
+							if (!canopy_height || *canopy_height >= canopy::CANOPY_MIN_M)
+								floor_here = chunk_floor;
+						} else if ((cover_here == land_cover::LC_GRASSLAND ||
+										   cover_here == land_cover::LC_SHRUBLAND) &&
+								   in_closed_stand(*editor.ground, relative)) {
+							floor_here = chunk_floor;
+						}
+					}
 					bool did_underfill = false;
 					// Authored stone is already a terrain surface except where snow or
 					// exposed bare ground needs the generated palette to replace it.
@@ -965,6 +1103,14 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 											  : std::pair<Block, Block>{};
 							std::optional<std::pair<field_texture::Plot, Block>>
 									cropland_plot;
+							const auto climate_palette =
+									has_cover
+											? climate::surface_palette(
+													  editor.ground->climate_at(relative),
+													  cover_here, x, z,
+													  rock == terrain_surface::Rock::Red)
+											: std::nullopt;
+							bool floored = false;
 							auto palette =
 									planetary	  ? planetary_palette
 									: talus_block ? *talus_block
@@ -976,6 +1122,11 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 														ground_y, slope, slope_t27,
 														cover_here, has_cover, rock,
 														args.surface_patches);
+							if (floor_here && !planetary && !talus_block &&
+									slope <= slope_t27 && !glacier && !climate_palette) {
+								palette = forest_floor_surface(x, z, *floor_here);
+								floored = true;
+							}
 							// Rust's field preset overrides the generic cropland palette only when
 							// no mapped element owns the column and no higher-priority climate,
 							// slope, talus, or glacier palette selected its surface.
@@ -1134,7 +1285,7 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								maybe_place_vegetation(editor, x, ground_y, z,
 										building_footprints, xzbbox.min_x(),
 										xzbbox.min_z(), tunnel_footprint, bridge_surface,
-										args.scale, slope, forest_fern_share,
+										args.scale, slope, forest_fern_share, floored,
 										tree_spacing, schematic_trees,
 										cropland.has_value(),
 										cropland_plot ? &cropland_plot->first : nullptr);

@@ -20,12 +20,14 @@ namespace arnis::ground_scatter
 namespace
 {
 constexpr std::uint64_t SALT = 0x5CA77E12B0C40000ULL;
+constexpr std::uint64_t SALT_MAPPED = 0x5CA77E12B0C40001ULL;
 constexpr int MAX_BASE_STEP = 2;
 constexpr int TOWN_REACH = 32;
 const std::vector<Block> SOIL{
 		GRASS_BLOCK, COARSE_DIRT, DIRT, FARMLAND, MOSS_BLOCK, PODZOL};
 const std::vector<Block> ROCK_SOIL{GRASS_BLOCK, COARSE_DIRT, DIRT, MOSS_BLOCK, PODZOL};
 const std::vector<Block> CROPS{WHEAT, CARROTS, POTATOES};
+const std::vector<Block> MOSSABLE{ANDESITE, TUFF, STONE, COBBLESTONE};
 
 using SchemPtr = std::shared_ptr<const structures::StructureSchematic>;
 std::mutex pool_mutex;
@@ -100,13 +102,15 @@ int floor_chunk(int v)
 void scatter_one(WorldEditor &editor, const Ground &ground, const Args &args,
 		const XZBBox &bbox, int min_x, int max_x, int min_z, int max_z, int chunk_x,
 		int chunk_z, const std::vector<SchemPtr> &rocks,
-		const std::vector<SchemPtr> &bushes)
+		const std::vector<SchemPtr> &bushes, double rugged)
 {
 	ChaCha8Rng rng = coord_rng(chunk_x, chunk_z, SALT);
-	const bool rock_hit =
-			rng.random_bool(args.scatter.rocks ? args.scatter.rock_density : 0.0);
+	const double rock_roll = rng.uniform_real(0.0, 1.0);
 	const bool bush_hit =
 			rng.random_bool(args.scatter.bushes ? args.scatter.bush_density : 0.0);
+	const double rock_density = args.scatter.rocks ? args.scatter.rock_density : 0.0;
+	const bool rock_hit =
+			rock_roll < rock_density || (!bush_hit && rock_roll < rock_density * rugged);
 	if (!rock_hit && !bush_hit)
 		return;
 	const auto &pool = rock_hit ? rocks : bushes;
@@ -150,7 +154,10 @@ void scatter_one(WorldEditor &editor, const Ground &ground, const Args &args,
 	const int az = chunk_z * 16 + lo_z +
 				   rng.uniform(static_cast<std::uint32_t>(hi_z - lo_z + 1));
 	const auto cover = ground.cover_class({ax - bbox.min_x(), az - bbox.min_z()});
-	if (cover != land_cover::LC_CROPLAND && cover != land_cover::LC_GRASSLAND)
+	const bool woods =
+			cover == land_cover::LC_TREE_COVER || cover == land_cover::LC_SHRUBLAND;
+	if (cover != land_cover::LC_CROPLAND && cover != land_cover::LC_GRASSLAND &&
+			!(rock_hit && woods))
 		return;
 	for (int dz = -TOWN_REACH; dz <= TOWN_REACH; dz += 8)
 		for (int dx = -TOWN_REACH; dx <= TOWN_REACH; dx += 8)
@@ -192,6 +199,33 @@ void scatter_one(WorldEditor &editor, const Ground &ground, const Args &args,
 			return;
 	}
 	structures::place_structure(editor, schem, ax, base_y, az, rot, nullptr);
+	if (rock_hit && woods) {
+		const auto point = editor.ground_point(ax, az);
+		const auto eco = ground.ecoregion_at(point);
+		const bool mossy =
+				eco ? eco->biome == ecoregion::EcoBiome::TemperateBroadleaf ||
+								eco->biome == ecoregion::EcoBiome::TemperateConifer ||
+								eco->biome == ecoregion::EcoBiome::Boreal ||
+								eco->biome == ecoregion::EcoBiome::MoistTropical ||
+								eco->biome == ecoregion::EcoBiome::TropicalConifer
+					: (ground.climate_at(point) == biome::Climate::Temperate ||
+							  ground.climate_at(point) == biome::Climate::Boreal);
+		if (mossy) {
+			std::map<std::pair<int, int>, int> tops;
+			for (const auto &cell : cells) {
+				auto [it, inserted] = tops.emplace(std::pair{cell.x, cell.z}, cell.y);
+				if (!inserted)
+					it->second = std::max(it->second, cell.y);
+			}
+			for (const auto &[column, top_y] : tops) {
+				const int x = ax + column.first, z = az + column.second;
+				if (land_cover::coord_hash(x, z) % 10 < 6 &&
+						editor.check_for_block_absolute(x, base_y + top_y, z, MOSSABLE))
+					editor.set_block_absolute(MOSS_CARPET, x, base_y + top_y + 1, z,
+							std::vector<Block>{AIR});
+			}
+		}
+	}
 	for (const auto &p : cells) {
 		const int x = ax + p.x, y = base_y + p.y, z = az + p.z;
 		editor.set_block_absolute(
@@ -201,6 +235,63 @@ void scatter_one(WorldEditor &editor, const Ground &ground, const Args &args,
 	}
 }
 } // namespace
+
+void place_mapped_rock(WorldEditor &editor, const BuildingFootprintBitmap &buildings,
+		int x, int z, std::uint64_t id, bool large)
+{
+	const auto root = editor.get_schematic_asset_root();
+	if (root.empty())
+		return;
+	const auto pool = load_pool(root, true);
+	std::vector<SchemPtr> candidates;
+	for (const auto &schem : pool)
+		if ((std::max(schem->width, schem->length) >= 8) == large)
+			candidates.push_back(schem);
+	if (candidates.empty())
+		return;
+	auto rng = coord_rng(x, z, SALT_MAPPED ^ id);
+	const auto &schem =
+			*candidates[rng.uniform(static_cast<std::uint32_t>(candidates.size()))];
+	const unsigned rotation = rng.uniform(4);
+	const auto cells = offsets(schem, rotation);
+	if (cells.empty())
+		return;
+	std::int64_t sum_x = 0, sum_z = 0;
+	for (const auto &cell : cells) {
+		sum_x += cell.x;
+		sum_z += cell.z;
+	}
+	const auto count = static_cast<std::int64_t>(cells.size());
+	const int anchor_x = x - static_cast<int>(sum_x / count);
+	const int anchor_z = z - static_cast<int>(sum_z / count);
+	for (const auto &cell : cells) {
+		const int cx = anchor_x + cell.x, cz = anchor_z + cell.z;
+		if (editor.surface_is_sealed(cx, cz) || buildings.contains(cx, cz))
+			return;
+	}
+	int low = std::numeric_limits<int>::max();
+	int high = std::numeric_limits<int>::min();
+	for (const auto &cell : cells) {
+		if (cell.y != 0)
+			continue;
+		const int y = editor.get_ground_level(anchor_x + cell.x, anchor_z + cell.z);
+		low = std::min(low, y);
+		high = std::max(high, y);
+	}
+	if (low == std::numeric_limits<int>::max() || high - low > MAX_BASE_STEP + 2)
+		return;
+	for (const auto &cell : cells) {
+		const int cx = anchor_x + cell.x, cz = anchor_z + cell.z;
+		const int y = low + 1 + cell.y;
+		if (y > editor.get_ground_level(cx, cz) &&
+				editor.block_exists_absolute(cx, y, cz) &&
+				!editor.check_for_block_absolute(
+						cx, y, cz, ground_decoration::loose_plant_blocks()))
+			return;
+	}
+	structures::place_structure(
+			editor, schem, anchor_x, low + 1, anchor_z, rotation, nullptr);
+}
 
 void scatter_region(WorldEditor &editor, const Args &args, const XZBBox &bbox, int min_x,
 		int max_x, int min_z, int max_z)
@@ -219,8 +310,12 @@ void scatter_region(WorldEditor &editor, const Args &args, const XZBBox &bbox, i
 	const auto bushes =
 			bush_density > 0 ? load_pool(root, false) : std::vector<SchemPtr>{};
 	for (int cx = floor_chunk(min_x); cx <= floor_chunk(max_x); ++cx)
-		for (int cz = floor_chunk(min_z); cz <= floor_chunk(max_z); ++cz)
+		for (int cz = floor_chunk(min_z); cz <= floor_chunk(max_z); ++cz) {
+			const auto center = editor.ground_point(cx * 16 + 8, cz * 16 + 8);
+			const double slope = editor.ground->slope_exact(center);
+			const double rugged = 1.0 + 2.0 * std::clamp((slope - 1.0) / 3.0, 0.0, 1.0);
 			scatter_one(editor, *editor.ground, args, bbox, min_x, max_x, min_z, max_z,
-					cx, cz, rocks, bushes);
+					cx, cz, rocks, bushes, rugged);
+		}
 }
 } // namespace arnis::ground_scatter

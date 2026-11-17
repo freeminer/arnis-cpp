@@ -79,7 +79,9 @@ bool place_item_display(arnis::world_editor::WorldEditor &, const std::string &n
 // A menu-only world still writes the Arnis banner resource pack.
 bool write_world_resource_pack(arnis::world_editor::WorldEditor &,
 		const std::filesystem::path &world, bool include_banner,
-		std::string *error = nullptr);
+		std::string *error = nullptr,
+		const std::vector<std::pair<std::string, std::vector<std::uint8_t>>>
+				&extra_files = {});
 class Registry
 {
 	bool enabled_ = false;

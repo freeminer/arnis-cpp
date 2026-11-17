@@ -3,6 +3,8 @@
 #include <filesystem>
 #include <vector>
 #include <memory>
+#include <functional>
+#include <tuple>
 #include "../structures/schem_decoder.h"
 #include "tree_library.h"
 #include "../floodfill_cache.h"
@@ -23,6 +25,9 @@ struct Schematic
 
 	int width = 0, height = 0, length = 0;
 	std::vector<Voxel> voxels;
+	// Lowest log voxel in each column, used to keep trunks and low branches out
+	// of road/pedestrian headroom without scanning the full schematic per pick.
+	std::vector<std::tuple<std::int16_t, std::int16_t, std::int16_t>> wood_columns;
 	int min_log_vy = 0;
 	std::uint32_t leaf_columns = 0;
 };
@@ -45,6 +50,10 @@ Schematic load_schem(const std::filesystem::path &file);
 // Weak asset cache: selectors share immutable voxels; no cache owns them forever.
 std::shared_ptr<const Schematic> load_schem_shared(const std::filesystem::path &file);
 TreeSize schematic_size(const Schematic &schem);
+bool low_wood_clear(const world_editor::WorldEditor &, const Schematic &,
+		unsigned rotation, int anchor_x, int anchor_z,
+		const std::function<bool(int, int)> &keep_off,
+		const std::function<int()> &base_y);
 // One deterministic trunk position per lattice cell; shared by regional and
 // canopy-driven placement so streamed tiles cannot disagree at their seam.
 std::pair<int, int> trunk_slot_s(int x, int z, int spacing);

@@ -53,6 +53,7 @@
 #include "../../arnis_adapter.h"
 #include "../../arnis_ground.h"
 #include "assets_root.h"
+#include "vehicle_models.h"
 #include "retrieve_data.h"
 #include "bresenham.h"
 #include "cache_root.h"
@@ -84,6 +85,7 @@
 #include "element_processing/pedestrians.h"
 #include "water_probe.h"
 #include "element_processing/trains.h"
+#include "element_processing/level_crossings.h"
 #include "element_processing/ships.h"
 #include "element_processing/swimming_pools.h"
 #include "element_processing/rail_track.h"
@@ -170,6 +172,772 @@ public:
 	}
 	~WriteBoundsRestore() { editor_.set_write_bounds(std::move(previous_)); }
 };
+
+struct OpenCrossingApproach
+{
+	double x{}, z{};
+	int half{};
+	bool from_negative{};
+	bool from_positive{};
+};
+
+struct OpenCrossingInfo
+{
+	std::vector<OpenCrossingApproach> roads;
+	std::vector<std::pair<double, double>> rails;
+	std::size_t number{};
+	int x{}, z{};
+	bool heavy_track{};
+	std::optional<bool> service_heavy;
+	std::optional<bool> barrier;
+	std::optional<bool> light;
+};
+
+// Index tagged crossings once. Rust's CrossingPlan does the same before walking
+// the elements; scanning every way from every node made dense urban extracts
+// quadratic in the number of crossing nodes.
+std::unordered_map<std::uint64_t, OpenCrossingInfo> collect_open_crossings(
+		const std::vector<ProcessedElement> &elements, double scale)
+{
+	std::unordered_map<std::uint64_t, OpenCrossingInfo> crossings;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		if (way.nodes.size() < 2)
+			continue;
+		const auto railway = way.tags.get("railway");
+		const auto highway = way.tags.get("highway");
+		const bool is_rail = railway == "rail" || railway == "light_rail" ||
+							 railway == "tram" || railway == "subway" ||
+							 railway == "narrow_gauge" || railway == "preserved";
+		const bool is_road = highways::cars::drivable(way.tags);
+		if (!is_rail && !is_road)
+			continue;
+		if (std::none_of(way.nodes.begin(), way.nodes.end(), [](const auto &node) {
+				return node.tags.get("railway") == "level_crossing";
+			}))
+			continue;
+		std::vector<std::pair<double, double>> line;
+		line.reserve(way.nodes.size());
+		std::vector<double> arcs{0.0};
+		for (const auto &point : way.nodes) {
+			line.emplace_back(point.x + 0.5, point.z + 0.5);
+			if (line.size() > 1) {
+				const auto &[px, pz] = line[line.size() - 2];
+				arcs.push_back(arcs.back() + std::hypot(line.back().first - px,
+													 line.back().second - pz));
+			}
+		}
+		const auto line_at = [&](double distance) {
+			const auto n = line.size();
+			std::size_t segment = 0;
+			double offset = distance;
+			if (distance >= arcs.back()) {
+				segment = n - 2;
+				offset = distance - arcs[segment];
+			} else if (distance > 0.0) {
+				const auto upper = std::upper_bound(arcs.begin(), arcs.end(), distance);
+				segment = static_cast<std::size_t>(upper - arcs.begin() - 1);
+				offset = distance - arcs[segment];
+			}
+			const auto [ax, az] = line[segment];
+			const auto [bx, bz] = line[segment + 1];
+			const double length = std::hypot(bx - ax, bz - az);
+			if (length < 1e-9)
+				return line[segment];
+			return std::pair{
+					ax + (bx - ax) * offset / length, az + (bz - az) * offset / length};
+		};
+		for (std::size_t i = 0; i < way.nodes.size(); ++i) {
+			const auto &node = way.nodes[i];
+			if (node.tags.get("railway") != "level_crossing")
+				continue;
+			auto &[id, crossing] = *crossings.try_emplace(node.id).first;
+			(void)id;
+			crossing.x = node.x;
+			crossing.z = node.z;
+			if (node.tags.contains("crossing:barrier"))
+				crossing.barrier = node.tags.get("crossing:barrier") != "no";
+			if (node.tags.contains("crossing:light"))
+				crossing.light = node.tags.get("crossing:light") != "no";
+			const auto before = line_at(arcs[i] - 1.5);
+			const auto after = line_at(arcs[i] + 1.5);
+			const double dx = after.first - before.first;
+			const double dz = after.second - before.second;
+			const double length = std::hypot(dx, dz);
+			if (length < 1e-6)
+				continue;
+			const std::pair<double, double> dir{dx / length, dz / length};
+			if (is_rail) {
+				crossing.rails.push_back(dir);
+				crossing.heavy_track |= railway == "rail" || railway == "narrow_gauge" ||
+										railway == "preserved";
+			}
+			if (is_road) {
+				const int half = std::max(
+						1, highways::highway_block_range(highway, way.tags, scale));
+				const int oneway = road_markings::oneway_sign(highway, way.tags);
+				const bool from_negative = i > 0 && oneway >= 0;
+				const bool from_positive = i + 1 < way.nodes.size() && oneway <= 0;
+				auto same = std::find_if(crossing.roads.begin(), crossing.roads.end(),
+						[&](const auto &old) {
+							return std::abs(old.x * dir.second - old.z * dir.first) < 0.1;
+						});
+				if (same == crossing.roads.end()) {
+					crossing.roads.push_back(
+							{dir.first, dir.second, half, from_negative, from_positive});
+				} else {
+					same->half = std::max(same->half, half);
+					same->from_negative |= from_negative;
+					same->from_positive |= from_positive;
+				}
+			}
+		}
+	}
+	std::vector<std::uint64_t> ids;
+	ids.reserve(crossings.size());
+	for (const auto &[id, crossing] : crossings) {
+		(void)crossing;
+		ids.push_back(id);
+	}
+	std::sort(ids.begin(), ids.end());
+	for (std::size_t i = 0; i < ids.size(); ++i)
+		crossings.at(ids[i]).number = i;
+	return crossings;
+}
+
+struct OpenCrossingGate
+{
+	int x{}, z{}, curb{};
+	double facing_x{}, facing_z{}, side_x{}, side_z{}, sign{};
+};
+
+std::vector<OpenCrossingGate> open_crossing_gates(int node_x, int node_z,
+		const OpenCrossingInfo &crossing, const RoadMaskBitmap &road_mask,
+		bool drives_on_left)
+{
+	std::vector<OpenCrossingGate> gates;
+	for (const auto &approach : crossing.roads) {
+		const double rx = approach.x;
+		const double rz = approach.z;
+		const bool crosses = std::any_of(
+				crossing.rails.begin(), crossing.rails.end(), [&](const auto &rail) {
+					return std::abs(rx * rail.second - rz * rail.first) >=
+						   0.42261826174069944;
+				});
+		if (!crosses)
+			continue;
+		for (const double sign : {-1.0, 1.0}) {
+			if ((sign < 0.0 && !approach.from_negative) ||
+					(sign > 0.0 && !approach.from_positive))
+				continue;
+			const double travel_x = -sign * rx;
+			const double travel_z = -sign * rz;
+			const double side_x = drives_on_left ? -travel_z : travel_z;
+			const double side_z = drives_on_left ? travel_x : -travel_x;
+			const double along = approach.half + 2.0;
+			int x = 0, z = 0, curb = approach.half + 1;
+			for (; curb <= approach.half + 4; ++curb) {
+				x = static_cast<int>(
+						std::floor(node_x + 0.5 + sign * rx * along + side_x * curb));
+				z = static_cast<int>(
+						std::floor(node_z + 0.5 + sign * rz * along + side_z * curb));
+				if (!road_mask.contains(x, z))
+					break;
+			}
+			if (curb > approach.half + 4) {
+				curb = approach.half + 1;
+				x = static_cast<int>(
+						std::floor(node_x + 0.5 + sign * rx * along + side_x * curb));
+				z = static_cast<int>(
+						std::floor(node_z + 0.5 + sign * rz * along + side_z * curb));
+			}
+			gates.push_back({x, z, curb, sign * rx, sign * rz, side_x, side_z, sign});
+		}
+	}
+	return gates;
+}
+
+std::vector<element_processing::level_crossings::CrossingSchedule>
+build_crossing_schedules(std::unordered_map<std::uint64_t, OpenCrossingInfo> &crossings,
+		const trains::TrainRouteNetwork &train_network, const RoadMaskBitmap &road_mask,
+		bool drives_on_left)
+{
+	using Schedule = element_processing::level_crossings::CrossingSchedule;
+	std::vector<Schedule> schedules(crossings.size());
+	if (schedules.empty())
+		return schedules;
+	std::vector<trains::RoutePoint> positions(schedules.size());
+	for (const auto &[id, crossing] : crossings) {
+		(void)id;
+		if (crossing.number < schedules.size())
+			positions[crossing.number] = {crossing.x + 0.5, crossing.z + 0.5};
+	}
+	const auto tracks = train_network.tracks_at(positions, 2.0);
+	for (const auto &[id, crossing] : crossings) {
+		const auto index = crossing.number;
+		if (index >= tracks.size())
+			continue;
+		auto &mutable_crossing = crossings.at(id);
+		for (const auto &track : tracks[index]) {
+			const bool known_direction = std::any_of(mutable_crossing.rails.begin(),
+					mutable_crossing.rails.end(), [&](const auto &rail) {
+						return std::abs(rail.first * track.dir.first +
+										rail.second * track.dir.second) > 0.999;
+					});
+			if (!known_direction)
+				mutable_crossing.rails.push_back(track.dir);
+		}
+		for (const auto &gate : open_crossing_gates(
+					 crossing.x, crossing.z, mutable_crossing, road_mask, drives_on_left))
+			schedules[index].posts.emplace_back(gate.x, gate.z);
+		for (const auto &road : crossing.roads) {
+			for (double offset = -road.half; offset <= road.half; offset += 2.0) {
+				schedules[index].spots.emplace_back(positions[index].x - road.z * offset,
+						positions[index].z + road.x * offset);
+			}
+		}
+		for (const auto &track : tracks[index]) {
+			double minimum_sine = 1.0;
+			int half = 0;
+			for (const auto &road : crossing.roads) {
+				const double sine =
+						std::abs(road.x * track.dir.second - road.z * track.dir.first);
+				if (sine < 0.42261826174069944)
+					continue;
+				minimum_sine = std::min(minimum_sine, sine);
+				half = std::max(half, road.half);
+			}
+			if (half == 0 || minimum_sine >= 1.0)
+				continue;
+			const auto same_walk_track = std::find_if(schedules[index].walk_stops.begin(),
+					schedules[index].walk_stops.end(), [&](const auto &stop) {
+						return std::abs(stop.track.first - track.dir.first) < 0.01 &&
+							   std::abs(stop.track.second - track.dir.second) < 0.01;
+					});
+			if (same_walk_track == schedules[index].walk_stops.end())
+				schedules[index].walk_stops.push_back({static_cast<std::uint32_t>(index),
+						{crossing.x + 0.5, crossing.z + 0.5}, track.dir});
+			const bool service_heavy =
+					track.mode == trains::Mode::Rail || track.mode == trains::Mode::SBahn;
+			mutable_crossing.service_heavy =
+					mutable_crossing.service_heavy.value_or(false) || service_heavy;
+			const double track_half = (half + 2.0) / minimum_sine;
+			auto &scheduled = schedules[index].tracks;
+			const auto same = std::find_if(
+					scheduled.begin(), scheduled.end(), [&](const auto &old) {
+						return old.service == track.service &&
+							   std::abs(old.at - track.at) < 1.0;
+					});
+			if (same == scheduled.end())
+				scheduled.push_back({track.service, track.at, track_half});
+			else
+				same->half = std::max(same->half, track_half);
+		}
+	}
+	return schedules;
+}
+
+// Rust also closes an unmarked crossing where a mapped footway crosses an at-grade
+// railway. Keep those pedestrian-only crossings in the same timetable namespace as
+// road crossings so the walker pack can wait on the same train state.
+void add_footpath_crossings(
+		std::vector<element_processing::level_crossings::CrossingSchedule> &schedules,
+		const std::vector<ProcessedElement> &elements,
+		const trains::TrainRouteNetwork &train_network)
+{
+	using Point = std::pair<double, double>;
+	struct Segment
+	{
+		Point a, b;
+	};
+	struct Hit
+	{
+		Point at, track;
+		double sine{};
+	};
+	constexpr double CELL = 64.0;
+	constexpr double MIN_SINE = 0.3420201433256687; // sin(20 degrees)
+	const auto cell = [=](double value) {
+		return static_cast<int>(std::floor(value / CELL));
+	};
+	const auto unit = [](double x, double z) -> std::optional<Point> {
+		const double length = std::hypot(x, z);
+		if (length <= 1e-9)
+			return std::nullopt;
+		return Point{x / length, z / length};
+	};
+	std::vector<Segment> tracks;
+	std::map<std::pair<int, int>, std::vector<std::size_t>> grid;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto railway = way.tags.get("railway");
+		const bool rail = railway == "rail" || railway == "light_rail" ||
+						  railway == "tram" || railway == "subway" ||
+						  railway == "narrow_gauge" || railway == "preserved";
+		if (!rail || way.nodes.size() < 2 || way.tags.get("area") == "yes" ||
+				(way.tags.contains("bridge") && way.tags.get("bridge") != "no") ||
+				(way.tags.contains("tunnel") && way.tags.get("tunnel") != "no"))
+			continue;
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const Segment segment{{way.nodes[i - 1].x + 0.5, way.nodes[i - 1].z + 0.5},
+					{way.nodes[i].x + 0.5, way.nodes[i].z + 0.5}};
+			const auto index = tracks.size();
+			for (int gx = cell(std::min(segment.a.first, segment.b.first));
+					gx <= cell(std::max(segment.a.first, segment.b.first)); ++gx)
+				for (int gz = cell(std::min(segment.a.second, segment.b.second));
+						gz <= cell(std::max(segment.a.second, segment.b.second)); ++gz)
+					grid[{gx, gz}].push_back(index);
+			tracks.push_back(segment);
+		}
+	}
+	if (tracks.empty())
+		return;
+	std::vector<Hit> hits;
+	std::map<std::pair<int, int>, std::vector<std::size_t>> hit_grid;
+	const auto add_hit = [&](Point at, Point path, Point track) {
+		const double sine =
+				std::abs(path.first * track.second - path.second * track.first);
+		if (sine < MIN_SINE)
+			return;
+		const auto gx = cell(at.first), gz = cell(at.second);
+		for (int x = gx - 1; x <= gx + 1; ++x)
+			for (int z = gz - 1; z <= gz + 1; ++z) {
+				const auto found = hit_grid.find({x, z});
+				if (found == hit_grid.end())
+					continue;
+				for (const auto existing : found->second)
+					if (std::hypot(hits[existing].at.first - at.first,
+								hits[existing].at.second - at.second) < 1.0)
+						return;
+			}
+		const auto index = hits.size();
+		hits.push_back({at, track, sine});
+		hit_grid[{gx, gz}].push_back(index);
+	};
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		if (way.nodes.size() < 2 ||
+				!element_processing::pedestrians::walk_density(way.tags) ||
+				highways::cars::drivable(way.tags) || way.tags.get("area") == "yes" ||
+				(way.tags.contains("bridge") && way.tags.get("bridge") != "no") ||
+				(way.tags.contains("tunnel") && way.tags.get("tunnel") != "no"))
+			continue;
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const Point a{way.nodes[i - 1].x + 0.5, way.nodes[i - 1].z + 0.5};
+			const Point b{way.nodes[i].x + 0.5, way.nodes[i].z + 0.5};
+			const auto path = unit(b.first - a.first, b.second - a.second);
+			if (!path)
+				continue;
+			std::set<std::size_t> seen;
+			for (int gx = cell(std::min(a.first, b.first));
+					gx <= cell(std::max(a.first, b.first)); ++gx)
+				for (int gz = cell(std::min(a.second, b.second));
+						gz <= cell(std::max(a.second, b.second)); ++gz) {
+					const auto bucket = grid.find({gx, gz});
+					if (bucket == grid.end())
+						continue;
+					seen.insert(bucket->second.begin(), bucket->second.end());
+				}
+			for (const auto index : seen) {
+				const auto &track_segment = tracks[index];
+				const double rx = b.first - a.first, rz = b.second - a.second;
+				const double sx = track_segment.b.first - track_segment.a.first;
+				const double sz = track_segment.b.second - track_segment.a.second;
+				const double denominator = rx * sz - rz * sx;
+				if (std::abs(denominator) <= 1e-9)
+					continue;
+				const double qx = track_segment.a.first - a.first;
+				const double qz = track_segment.a.second - a.second;
+				const double t = (qx * sz - qz * sx) / denominator;
+				const double u = (qx * rz - qz * rx) / denominator;
+				if (t < 0.0 || t > 1.0 || u < 0.0 || u > 1.0)
+					continue;
+				const auto track = unit(sx, sz);
+				if (track)
+					add_hit({a.first + t * rx, a.second + t * rz}, *path, *track);
+			}
+		}
+	}
+	if (hits.empty())
+		return;
+	std::vector<trains::RoutePoint> positions;
+	positions.reserve(hits.size());
+	for (const auto &hit : hits)
+		positions.push_back({hit.at.first, hit.at.second});
+	const auto served = train_network.tracks_at(positions, 2.0);
+	for (std::size_t i = 0; i < hits.size() && i < served.size(); ++i) {
+		if (served[i].empty())
+			continue;
+		const auto crossing = static_cast<std::uint32_t>(schedules.size());
+		element_processing::level_crossings::CrossingSchedule schedule;
+		schedule.walk_stops.push_back({crossing, hits[i].at, hits[i].track});
+		for (const auto &track : served[i]) {
+			const auto duplicate = std::find_if(
+					schedule.tracks.begin(), schedule.tracks.end(), [&](const auto &old) {
+						return old.service == track.service &&
+							   std::abs(old.at - track.at) < 1.0;
+					});
+			if (duplicate == schedule.tracks.end())
+				schedule.tracks.push_back({track.service, track.at, 3.0 / hits[i].sine});
+		}
+		schedules.push_back(std::move(schedule));
+	}
+}
+
+element_processing::level_crossings::BreakMap build_crossing_breaks(
+		const std::vector<ProcessedElement> &elements,
+		const std::unordered_map<std::uint64_t, OpenCrossingInfo> &crossings,
+		double scale)
+{
+	using BreakMap = element_processing::level_crossings::BreakMap;
+	constexpr double MIN_SINE = 0.42261826174069944;
+	constexpr double TRACK_HALF_M = 2.0;
+	constexpr double BOOM_M = 2.0;
+	constexpr double LINE_M = 1.5;
+	constexpr double EXIT_M = 0.5;
+	constexpr int KERB_REACH = 3;
+	const double metres = std::max(scale, 0.6);
+	BreakMap result;
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		if (way.nodes.size() < 2 || !highways::cars::drivable(way.tags))
+			continue;
+		const auto highway = way.tags.get("highway");
+		const int half =
+				std::max(1, highways::highway_block_range(highway, way.tags, scale));
+		std::vector<std::pair<double, double>> points;
+		std::vector<double> arcs{0.0};
+		points.reserve(way.nodes.size());
+		for (const auto &node : way.nodes) {
+			points.emplace_back(node.x + 0.5, node.z + 0.5);
+			if (points.size() > 1) {
+				const auto &a = points[points.size() - 2];
+				const auto &b = points.back();
+				arcs.push_back(
+						arcs.back() + std::hypot(b.first - a.first, b.second - a.second));
+			}
+		}
+		const auto line_at = [&](double distance) {
+			std::size_t segment = 0;
+			double offset = distance;
+			if (distance >= arcs.back()) {
+				segment = points.size() - 2;
+				offset = distance - arcs[segment];
+			} else if (distance > 0.0) {
+				const auto upper = std::upper_bound(arcs.begin(), arcs.end(), distance);
+				segment = static_cast<std::size_t>(upper - arcs.begin() - 1);
+				offset = distance - arcs[segment];
+			}
+			const auto &[ax, az] = points[segment];
+			const auto &[bx, bz] = points[segment + 1];
+			const double length = std::hypot(bx - ax, bz - az);
+			if (length < 1e-9)
+				return points[segment];
+			return std::pair{
+					ax + (bx - ax) * offset / length, az + (bz - az) * offset / length};
+		};
+		std::vector<std::size_t> tagged;
+		for (std::size_t i = 0; i < way.nodes.size(); ++i) {
+			const auto found = crossings.find(way.nodes[i].id);
+			if (way.nodes[i].tags.get("railway") == "level_crossing" &&
+					found != crossings.end() && !found->second.rails.empty())
+				tagged.push_back(i);
+		}
+		for (std::size_t begin = 0; begin < tagged.size();) {
+			std::size_t end = begin + 1;
+			while (end < tagged.size() &&
+					arcs[tagged[end]] - arcs[tagged[end - 1]] <= 16.0 * metres)
+				++end;
+			const auto lo = tagged[begin];
+			const auto hi = tagged[end - 1];
+			const auto split = hi + 1 == way.nodes.size() ? hi : lo;
+			const auto a = line_at(arcs[lo] - 4.0);
+			const auto b = line_at(arcs[hi] + 4.0);
+			const double road_length = std::hypot(b.first - a.first, b.second - a.second);
+			if (road_length < 1e-9) {
+				begin = end;
+				continue;
+			}
+			const std::pair<double, double> road{(b.first - a.first) / road_length,
+					(b.second - a.second) / road_length};
+			const double across = half + KERB_REACH;
+			double from = std::numeric_limits<double>::max();
+			double to = std::numeric_limits<double>::lowest();
+			for (std::size_t p = begin; p < end; ++p) {
+				const auto index = tagged[p];
+				const auto &crossing = crossings.at(way.nodes[index].id);
+				const double at = arcs[index] - arcs[split];
+				for (const auto &[ux, uz] : crossing.rails) {
+					const double sine = std::abs(road.first * uz - road.second * ux);
+					if (sine < MIN_SINE)
+						continue;
+					const double cosine = std::abs(road.first * ux + road.second * uz);
+					const double reach =
+							across * cosine / sine + TRACK_HALF_M * metres / sine;
+					from = std::min(from, at - reach);
+					to = std::max(to, at + reach);
+				}
+			}
+			if (from <= to) {
+				const auto crossing_id = crossings.at(way.nodes[lo].id).number;
+				result[{way.id, way.nodes[split].id}] = {crossing_id,
+						std::max(0.0, -from + (BOOM_M + LINE_M) * metres),
+						std::max(0.0, -from + EXIT_M * metres),
+						std::max(0.0, to + (BOOM_M + LINE_M) * metres),
+						std::max(0.0, to + EXIT_M * metres)};
+			}
+			begin = end;
+		}
+	}
+	return result;
+}
+
+struct CrossingDisplayPiece
+{
+	std::array<double, 3> at{};
+	std::array<double, 3> size{};
+	double roll{};
+	const char *block{};
+	bool dim{};
+};
+
+std::vector<CrossingDisplayPiece> standing_crossing_pieces(
+		bool booms, double boom_m, bool road_right)
+{
+	constexpr double U = 1.0 / 32.0;
+	constexpr double PI = 3.14159265358979323846;
+	const auto piece = [=](std::array<double, 3> at, std::array<double, 3> size,
+							   const char *block) {
+		for (auto &value : at)
+			value *= U;
+		for (auto &value : size)
+			value *= U;
+		return CrossingDisplayPiece{at, size, 0.0, block, false};
+	};
+	std::vector<CrossingDisplayPiece> pieces{
+			piece({0.0, 2.5, 0.0}, {12.0, 5.0, 12.0}, "minecraft:smooth_stone"),
+			piece({0.0, 55.5, 0.0}, {4.0, 101.0, 4.0}, "minecraft:light_gray_concrete"),
+			piece({0.0, 74.0, 0.0}, {24.0, 3.0, 3.0}, "minecraft:light_gray_concrete")};
+	for (const double x : {-12.0, 12.0}) {
+		pieces.push_back(
+				piece({x, 74.0, 2.25}, {16.0, 16.0, 1.5}, "minecraft:black_concrete"));
+		auto lens = piece({x, 74.0, 3.125}, {9.0, 9.0, 0.25}, "minecraft:red_concrete");
+		lens.dim = true;
+		pieces.push_back(lens);
+	}
+	for (const auto &[roll, z] : {std::pair{45.0, 3.0}, std::pair{-45.0, 3.25}}) {
+		const double radians = roll * PI / 180.0;
+		const double cosine = std::cos(radians), sine = std::sin(radians);
+		for (const auto &[along, length, block] :
+				{std::tuple{-16.0, 6.0, "minecraft:red_concrete"},
+						std::tuple{0.0, 26.0, "minecraft:white_concrete"},
+						std::tuple{16.0, 6.0, "minecraft:red_concrete"}}) {
+			auto cross = piece(
+					{along * cosine, 98.0 + along * sine, z}, {length, 6.0, 1.0}, block);
+			cross.roll = roll;
+			pieces.push_back(cross);
+		}
+	}
+	if (!booms)
+		return pieces;
+	pieces.push_back(
+			piece({0.0, 30.0, 7.75}, {14.0, 32.0, 11.5}, "minecraft:smooth_stone"));
+	pieces.push_back(
+			piece({0.0, 9.5, 7.5}, {10.0, 9.0, 7.0}, "minecraft:light_gray_concrete"));
+	const double roll = road_right ? 80.0 : 100.0;
+	const double radians = roll * PI / 180.0;
+	const double cosine = std::cos(radians), sine = std::sin(radians);
+	const auto along = [&](double distance) {
+		return std::array{distance * cosine, 1.0 + distance * sine, 15.0 / 32.0};
+	};
+	const auto stripes =
+			static_cast<std::size_t>(std::clamp(std::lround(boom_m / 0.5), 2l, 12l));
+	const double stripe = boom_m / stripes;
+	for (std::size_t i = 0; i < stripes; ++i) {
+		const bool red = i % 2 == 1 || i + 1 == stripes;
+		pieces.push_back({along(stripe * (static_cast<double>(i) + 0.5)),
+				{stripe, 2.5 * U, 1.5 * U}, roll,
+				red ? "minecraft:red_concrete" : "minecraft:white_concrete", false});
+	}
+	pieces.push_back({along(-12.0 * U), {24.0 * U, 5.0 * U, 4.0 * U}, roll,
+			"minecraft:gray_concrete", false});
+	return pieces;
+}
+
+void place_standing_crossing_displays(WorldEditor &editor, int x, int z, double facing_x,
+		double facing_z, double reach_x, double reach_z, bool booms, double boom_m,
+		double size, std::int64_t seed)
+{
+	constexpr double PI = 3.14159265358979323846;
+	const double ground = editor.get_ground_level(x, z) + 1.0;
+	const double centre_x = x + 0.5, centre_z = z + 0.5;
+	const double yaw = std::atan2(-facing_x, facing_z) * 180.0 / PI;
+	const std::array<double, 2> right{facing_z, -facing_x};
+	const bool road_right = reach_x * right[0] + reach_z * right[1] > 0.0;
+	const auto pieces = standing_crossing_pieces(booms, boom_m, road_right);
+	for (std::size_t i = 0; i < pieces.size(); ++i) {
+		const auto &part = pieces[i];
+		const std::array<double, 3> dimensions{
+				part.size[0] * size, part.size[1] * size, part.size[2] * size};
+		const double radians = part.roll * PI / 180.0;
+		const double sine = std::sin(radians / 2.0), cosine = std::cos(radians / 2.0);
+		const double half_x = dimensions[0] / 2.0;
+		const double half_y = dimensions[1] / 2.0;
+		const double middle_x = half_x * std::cos(radians) - half_y * std::sin(radians);
+		const double middle_y = half_x * std::sin(radians) + half_y * std::cos(radians);
+		const std::array<double, 3> translation{part.at[0] * size - middle_x,
+				part.at[1] * size - middle_y, part.at[2] * size - dimensions[2] / 2.0};
+		nlohmann::json nbt{{"block_state", {{"Name", part.block}}},
+				{"transformation",
+						{{"left_rotation", {0.0f, 0.0f, static_cast<float>(sine),
+												   static_cast<float>(cosine)}},
+								{"right_rotation", {0.0f, 0.0f, 0.0f, 1.0f}},
+								{"translation", translation}, {"scale", dimensions}}},
+				{"Rotation", {static_cast<float>(yaw), 0.0f}}};
+		if (part.dim)
+			nbt["brightness"] = {{"sky", 11}, {"block", 4}};
+		editor.add_block_display(centre_x, ground, centre_z,
+				seed + static_cast<std::int64_t>(i), std::move(nbt));
+	}
+}
+
+// Place the native gate displays; timetable changes are installed in the Java extras
+// datapack after the completed rail network has resolved its track heights.
+void place_open_level_crossing(WorldEditor &editor, const ProcessedNode &node,
+		const OpenCrossingInfo *crossing, const RoadMaskBitmap &road_mask,
+		bool drives_on_left, bool model_displays, bool block_displays)
+{
+	if (!crossing || !editor.owns(node.x, node.z) || crossing->roads.empty() ||
+			crossing->rails.empty())
+		return;
+	const bool booms = crossing->barrier.value_or(
+			crossing->service_heavy.value_or(crossing->heavy_track));
+	const bool lamps = booms || crossing->light.value_or(true);
+	if (!lamps)
+		return;
+	const auto cardinal = [](double dx, double dz) {
+		if (std::abs(dx) >= std::abs(dz))
+			return dx >= 0.0 ? std::tuple{"east", 1, 0} : std::tuple{"west", -1, 0};
+		return dz >= 0.0 ? std::tuple{"south", 0, 1} : std::tuple{"north", 0, -1};
+	};
+	constexpr double PI = 3.14159265358979323846;
+	const double size = std::clamp(editor.scale(), 0.6, 2.0);
+	bool bell_assigned = false;
+	for (const auto &gate :
+			open_crossing_gates(node.x, node.z, *crossing, road_mask, drives_on_left)) {
+		const int cx = gate.x;
+		const int cz = gate.z;
+		const int curb = gate.curb;
+		const double facing_x = gate.facing_x;
+		const double facing_z = gate.facing_z;
+		const double side_x = gate.side_x;
+		const double side_z = gate.side_z;
+		const double sign = gate.sign;
+		if (!editor.owns(cx, cz))
+			continue;
+		const int ground = editor.get_ground_level(cx, cz);
+		const int head = ground + std::max(3, static_cast<int>(std::lround(3.3 * size)));
+		if (model_displays) {
+			const double yaw = std::atan2(-facing_x, facing_z) * 180.0 / PI;
+			const auto model_nbt = [&](const std::string &model, double model_size,
+										   double model_yaw,
+										   std::vector<std::string> tags) {
+				const auto look = vehicle_models::Look::plain(
+						model, "std", "minecraft:black_concrete");
+				auto nbt = vehicle_models::display_nbt(
+						model, vehicle_models::item_model(look), model_size, false);
+				nbt["item"]["components"]["minecraft:custom_data"] = {
+						{"x", static_cast<std::int32_t>(crossing->number)}};
+				nbt["Rotation"] = {static_cast<float>(model_yaw), 0.0f};
+				nbt["Tags"] = std::move(tags);
+				return nbt;
+			};
+			const double display_y = ground + 1.0;
+			const double centre_x = cx + 0.5;
+			const double centre_z = cz + 0.5;
+			const std::string crossing_tag = "arnis.x" + std::to_string(crossing->number);
+			std::vector<std::string> mast_tags{"arnis.xp", crossing_tag, "arnis.xlamp"};
+			if (!bell_assigned) {
+				mast_tags.emplace_back("arnis.xbell");
+				bell_assigned = true;
+			}
+			editor.add_item_display(centre_x, display_y, centre_z,
+					0x580000 + static_cast<std::int64_t>(crossing->number) * 64 +
+							static_cast<std::int64_t>(sign + 1.0),
+					model_nbt("xing_light_off", 0.5 * size, yaw, std::move(mast_tags)));
+			if (booms) {
+				const double reach_x = -side_x;
+				const double reach_z = -side_z;
+				const double front_x = reach_z;
+				const double front_z = -reach_x;
+				const double boom_yaw = std::atan2(-front_x, front_z) * 180.0 / PI;
+				const double boom_metres = std::clamp((curb - 0.25) / size, 1.5, 14.0);
+				const double hinge_front = 15.0 / 32.0;
+				const double hinge_up = 1.0;
+				const auto seed = 0x580000 +
+								  static_cast<std::int64_t>(crossing->number) * 64 +
+								  static_cast<std::int64_t>(sign + 1.0) + 1;
+				auto boom_nbt = model_nbt("xing_boom", 0.5 * size, boom_yaw,
+						{"arnis.xp", crossing_tag, "arnis.xboom"});
+				auto &transform = boom_nbt["transformation"];
+				const double half_angle = 80.0 * PI / 360.0;
+				transform["left_rotation"] = {0.0f, 0.0f,
+						static_cast<float>(-std::sin(half_angle)),
+						static_cast<float>(std::cos(half_angle))};
+				transform["scale"][0] =
+						transform["scale"][0].get<double>() * boom_metres / (4.0 * size);
+				const double room = boom_metres + 4.0 * size * 0.25;
+				boom_nbt["width"] = static_cast<float>(2.0 * room + 1.0);
+				boom_nbt["height"] = static_cast<float>(room + 1.0);
+				editor.add_item_display(centre_x + facing_x * hinge_front * size,
+						display_y + hinge_up * size,
+						centre_z + facing_z * hinge_front * size, seed,
+						std::move(boom_nbt));
+			}
+			continue;
+		}
+		if (block_displays) {
+			const double boom_m = std::clamp((curb - 0.25) / size, 1.5, 14.0);
+			place_standing_crossing_displays(editor, cx, cz, facing_x, facing_z, -side_x,
+					-side_z, booms, boom_m, size,
+					0x5A0000 + static_cast<std::int64_t>(crossing->number) * 64 +
+							static_cast<std::int64_t>(sign + 1.0) * 16);
+			continue;
+		}
+		editor.set_block_absolute(
+				block_definitions::COBBLESTONE_WALL, cx, ground + 1, cz);
+		for (int y = ground + 2; y < head; ++y)
+			editor.set_block_absolute(block_definitions::IRON_BARS, cx, y, cz);
+		editor.set_block_absolute(block_definitions::LIGHT_GRAY_CONCRETE, cx, head, cz);
+		const auto [facing, fx, fz] = cardinal(facing_x, facing_z);
+		editor.place_wall_banner(block_definitions::WHITE_WALL_BANNER, cx + fx, head,
+				cz + fz, facing, "white", {{"red", "minecraft:cross"}});
+		if (!booms)
+			continue;
+		const int bx = cx - fx, bz = cz - fz;
+		// Rust leaves the raised, open boom beside the carriageway rather than
+		// placing a solid block in a drivable lane.
+		if (road_mask.contains(bx, bz))
+			continue;
+		const int boom_rows =
+				std::clamp(static_cast<int>(std::lround(curb - 0.25)), 2, 8);
+		const int boom_y = editor.get_ground_level(bx, bz);
+		for (int row = 1; row <= boom_rows; ++row) {
+			const Block &stripe = row % 2 == 0 || row == boom_rows
+										  ? block_definitions::BRICK_WALL
+										  : block_definitions::DIORITE_WALL;
+			editor.set_block_absolute(stripe, bx, boom_y + row, bz);
+		}
+	}
+}
 
 // Keep the manifest's per-area generator version aligned with the Rust package
 // version in Cargo.toml. The C++ library is built independently of Cargo.
@@ -1194,7 +1962,8 @@ void generate_amenities(
 		WorldEditor &editor, const ProcessedElement &element, const Args &args);
 void generate_amenities(WorldEditor &editor, const ProcessedElement &element,
 		const Args &args, const FloodFillCache &flood_fill_cache,
-		const RoadMaskBitmap &road_mask);
+		const RoadMaskBitmap &road_mask, const bridges::BridgeSurfaceMap &bridge_surface);
+void drop_furniture_in_water(WorldEditor &editor);
 }
 
 namespace leisure
@@ -1464,6 +2233,15 @@ bool generate_world(WorldEditor &editor,
 								   : bedrock_world ? WorldFormat::BedrockMcWorld
 												   : WorldFormat::LuantiWorld;
 	auto extras = datapack::Extras::from_args(args).for_format(generation_format);
+	// Match Rust's parked-car model path: Java worlds with moving-vehicle extras
+	// use backend-native displays for parked cars; other formats retain schematics.
+	editor.parked_car_models = java_world && extras.cars;
+	auto car_model_looks = java_world && extras.cars
+								   ? highways::cars::java_looks()
+								   : std::vector<vehicle_models::Look>{};
+	const auto parked_model_looks = editor.parked_car_models
+											? highways::cars::parked_looks()
+											: std::vector<vehicle_models::Look>{};
 	const bool extending_world = args.one_world_run && args.one_world_run->extending;
 	const auto java_world_path =
 			args.one_world_run ? args.one_world_run->world_dir : editor.output_path;
@@ -1528,6 +2306,10 @@ bool generate_world(WorldEditor &editor,
 	editor.set_first_decal_map_id(first_decal_map_id);
 	editor.clear_facade_panels();
 	mapillary::atlas::set_atlas_side(facade_atlas_side(args.facade_detail));
+	std::vector<vehicle_models::Look> atlas_vehicle_looks = car_model_looks;
+	atlas_vehicle_looks.insert(atlas_vehicle_looks.end(), parked_model_looks.begin(),
+			parked_model_looks.end());
+	mapillary::atlas::reserve(vehicle_models::atlas_px(atlas_vehicle_looks));
 	std::optional<std::filesystem::path> facade_directory =
 			args.building_facades_dir
 					? std::optional<std::filesystem::path>(*args.building_facades_dir)
@@ -2183,6 +2965,9 @@ bool generate_world(WorldEditor &editor,
 			std::make_shared<const RoadMaskBitmap>(highways::collect_road_surface_coords(
 					elements, editor, clip_bbox, args.scale, args.water_detail));
 	const auto &road_mask = *road_mask_owner;
+	auto carriageway_owner = std::make_shared<const CoordinateBitmap>(
+			highways::collect_carriageway_coords(elements, xzbbox, args.scale));
+	editor.set_carriageway(carriageway_owner);
 	std::vector<datapack::discoveries::Place> extra_places;
 	std::optional<std::string> settlement;
 	if (extras.wants_places()) {
@@ -2310,7 +3095,7 @@ bool generate_world(WorldEditor &editor,
 		local_bridge_context->structures = bridges::BridgeStructureMap::build(elements,
 				editor, highway_connectivity, local_bridge_context->outlines, args.scale);
 		local_bridge_context->surface = bridges::BridgeSurfaceMap::build(
-				elements, local_bridge_context->structures, args.scale);
+				elements, local_bridge_context->structures, args.scale, &editor);
 		bridge_context = &*local_bridge_context;
 	}
 	const auto &bridge_structures = bridge_context->structures;
@@ -2483,6 +3268,19 @@ bool generate_world(WorldEditor &editor,
 			highways::collect_tunnel_internal_endpoints(elements, xzbbox);
 	auto tunnel_portals = highways::collect_tunnel_portals(
 			elements, editor, bridge_structures, tunnel_internal_endpoints, args.scale);
+	auto open_crossings = collect_open_crossings(elements, args.scale);
+	auto crossing_schedules =
+			extras.cars && editor.train_network
+					? build_crossing_schedules(open_crossings, *editor.train_network,
+							  road_mask, marking_index.drives_on_left)
+					: std::vector<
+							  element_processing::level_crossings::CrossingSchedule>{};
+	if (extras.cars && editor.train_network)
+		add_footpath_crossings(crossing_schedules, elements, *editor.train_network);
+	std::vector<element_processing::level_crossings::WalkStop> crossing_walk_stops;
+	for (const auto &crossing : crossing_schedules)
+		crossing_walk_stops.insert(crossing_walk_stops.end(), crossing.walk_stops.begin(),
+				crossing.walk_stops.end());
 	if (extras.pedestrians) {
 		auto walk_bounds = cartesian::XZBBox::rect_from_min_max(
 				xzbbox.min_x(), xzbbox.min_z(), xzbbox.max_x(), xzbbox.max_z());
@@ -2490,11 +3288,13 @@ bool generate_world(WorldEditor &editor,
 			walk_bounds = walk_bounds.with_outline(xzbbox.outline());
 		const highways::RoadSurfaces surfaces(editor, bridge_structures,
 				highway_connectivity, tunnel_portals, args.scale);
-		auto network = element_processing::pedestrians::WalkNetwork::build(elements,
-				args.scale, marking_index.drives_on_left, extras.traffic_lights,
-				walk_bounds, [&surfaces](const ProcessedWay &way, int x, int z) {
+		auto network = element_processing::pedestrians::WalkNetwork::build(
+				elements, args.scale, marking_index.drives_on_left, extras.traffic_lights,
+				walk_bounds,
+				[&surfaces](const ProcessedWay &way, int x, int z) {
 					return surfaces.y_at(way, x, z);
-				});
+				},
+				crossing_walk_stops);
 		if (!network.is_empty()) {
 			walk_probe = network.probe();
 			editor.set_walk_probe(walk_probe);
@@ -2504,6 +3304,24 @@ bool generate_world(WorldEditor &editor,
 	extras.pedestrians = walk_network.has_value();
 	auto tunnel_footprint = highways::collect_tunnel_footprint(
 			elements, editor, tunnel_internal_endpoints, xzbbox, args.scale);
+	const auto crossing_breaks =
+			build_crossing_breaks(elements, open_crossings, args.scale);
+	const bool has_scheduled_crossings =
+			java_world && extras.cars &&
+			std::any_of(crossing_schedules.begin(), crossing_schedules.end(),
+					[](const auto &crossing) { return !crossing.tracks.empty(); });
+	const bool crossing_models =
+			has_scheduled_crossings &&
+			std::any_of(crossing_schedules.begin(), crossing_schedules.end(),
+					[](const auto &crossing) {
+						return !crossing.tracks.empty() && !crossing.posts.empty();
+					});
+	extras.crossings = has_scheduled_crossings;
+	if (crossing_models)
+		for (const auto *model :
+				{"xing_light_off", "xing_light_a", "xing_light_b", "xing_boom"})
+			car_model_looks.push_back(vehicle_models::Look::plain(
+					model, "std", "minecraft:black_concrete"));
 	if (extras.cars) {
 		auto surfaces = highways::RoadSurfaces(editor, bridge_structures,
 				highway_connectivity, tunnel_portals, args.scale);
@@ -2514,9 +3332,8 @@ bool generate_world(WorldEditor &editor,
 						[&](const ProcessedWay &way, int x, int z) {
 							return surfaces.y_at(way, x, z);
 						},
-						[&](int x, int z) {
-							return building_footprints.contains(x, z);
-						}));
+						[&](int x, int z) { return building_footprints.contains(x, z); },
+						&crossing_breaks));
 	} else {
 		editor.car_network.reset();
 	}
@@ -3035,7 +3852,9 @@ bool generate_world(WorldEditor &editor,
 		}
 		water_depth::carve_lc_water_region(editor, *big_water_field, road_mask,
 				tunnel_footprint, min_x, max_x, min_z, max_z, &bridge_surface);
+		water_depth::pierce_support_columns(editor);
 		highways::drop_lamps_in_water(editor);
+		amenities::drop_furniture_in_water(editor);
 		// Rust's eviction path cannot run these passes after regions have been
 		// released. Match it by reopening tunnel interiors after the tile's ground,
 		// ore and water writes, then sealing any newly exposed cave fluids before
@@ -3241,8 +4060,8 @@ bool generate_world(WorldEditor &editor,
 				if (way.tags.get("amenity") == std::optional<std::string>("fuel"))
 					fuel_stations::generate_station(editor, element, flood_fill_cache,
 							building_footprints, road_mask, args.scale, args.timeout);
-				amenities::generate_amenities(
-						editor, element, args, flood_fill_cache, road_mask);
+				amenities::generate_amenities(editor, element, args, flood_fill_cache,
+						road_mask, bridge_surface);
 				if (editor.signage_enabled() && way.tags.get("amenity") == "parking")
 					signage::generate_parking_signage(editor, way, road_mask);
 			} else if (way.tags.contains("leisure")) {
@@ -3286,6 +4105,8 @@ bool generate_world(WorldEditor &editor,
 			} else if (way.tags.get("service") ==
 					   std::optional<std::string>(std::string("siding"))) {
 				highways::generate_siding(editor, way, bridge_surface);
+			} else if (historic::is_artwork_figure(way.tags)) {
+				historic::generate_artwork_figure(editor, way);
 			} else if (way.tags.get("tomb") ==
 					   std::optional<std::string>(std::string("pyramid"))) {
 				historic::generate_pyramid(editor, way, args, flood_fill_cache);
@@ -3311,6 +4132,11 @@ bool generate_world(WorldEditor &editor,
 				release_task_fills(task_index);
 				return;
 			}
+			const auto crossing = open_crossings.find(node.id);
+			place_open_level_crossing(editor, node,
+					crossing == open_crossings.end() ? nullptr : &crossing->second,
+					road_mask, marking_index.drives_on_left, crossing_models,
+					java_world && !crossing_models);
 			if (editor.signage_enabled())
 				signage::generate_node_signage(
 						editor, node, building_footprints, road_mask);
@@ -3331,8 +4157,8 @@ bool generate_world(WorldEditor &editor,
 				fuel_stations::generate_station(editor, element, flood_fill_cache,
 						building_footprints, road_mask, args.scale, args.timeout);
 			} else if (node.tags.contains("amenity")) {
-				amenities::generate_amenities(
-						editor, element, args, flood_fill_cache, road_mask);
+				amenities::generate_amenities(editor, element, args, flood_fill_cache,
+						road_mask, bridge_surface);
 			} else if (node.tags.contains("barrier")) {
 				barriers::generate_barrier_nodes(editor, node, bridge_surface);
 			} else if (node.tags.contains("highway") || highways::is_signal(node.tags)) {
@@ -3347,6 +4173,8 @@ bool generate_world(WorldEditor &editor,
 				cemetery::generate_mapped_grave(editor, node, building_footprints);
 			} else if (camp_sites::is_pitch(node.tags)) {
 				camp_sites::generate_pitch_node(editor, node);
+			} else if (historic::is_artwork_figure(node.tags)) {
+				historic::generate_artwork_figure(editor, node);
 			} else if (node.tags.contains("tourism")) {
 				tourisms::generate_tourisms(editor, node, road_mask);
 			} else if (node.tags.contains("man_made")) {
@@ -3798,6 +4626,9 @@ bool generate_world(WorldEditor &editor,
 	if (!regional_ground_passes)
 		water_depth::carve_lc_water_pass(
 				editor, *big_water_field, road_mask, tunnel_footprint, &bridge_surface);
+	water_depth::pierce_support_columns(editor);
+	if (!regional_ground_passes)
+		amenities::drop_furniture_in_water(editor);
 	if (!regional_ground_passes)
 		highways::drop_lamps_in_water(editor);
 	// Keep the surface mask alive when the post-generation style pass needs to
@@ -3856,6 +4687,8 @@ bool generate_world(WorldEditor &editor,
 	barrier_clearance = {};
 	interior_use_index.reset();
 	road_mask_owner.reset();
+	carriageway_owner.reset();
+	editor.release_carriageway();
 	editor.traffic_signal_index.reset();
 	// Java has finished placing its cars, but Bedrock still needs the route
 	// network when the vehicle behavior/resource packs are assembled below.
@@ -4012,8 +4845,13 @@ bool generate_world(WorldEditor &editor,
 	}
 	if (java_world && !java_world_path.empty()) {
 		std::string error;
+		std::vector<std::pair<std::string, std::vector<std::uint8_t>>> vehicle_pack;
+		if (!car_model_looks.empty() || !parked_model_looks.empty())
+			for (auto &file :
+					vehicle_models::java_pack(car_model_looks, parked_model_looks))
+				vehicle_pack.emplace_back(std::move(file.path), std::move(file.bytes));
 		if (!mapillary::displays::write_world_resource_pack(
-					editor, java_world_path, extras.pause_menu, &error))
+					editor, java_world_path, extras.pause_menu, &error, vehicle_pack))
 			std::cerr << "Warning: Failed to write facade resource pack: " << error
 					  << '\n';
 		mapillary::facades::clear();
@@ -4233,6 +5071,22 @@ bool generate_world(WorldEditor &editor,
 				disaster_biomes.assign(counts.begin(), counts.end());
 			}
 		}
+		const auto crossing_functions =
+				java_world && extras.crossings && editor.train_network
+						? std::optional(
+								  element_processing::level_crossings::pack_functions(
+										  crossing_schedules, *editor.train_network,
+										  [&editor](std::size_t service) {
+											  return editor.train_network->runs(service,
+													  [&editor](std::uint64_t way, int x,
+															  int z) {
+														  return editor.rail_height(
+																  way, x, z);
+													  });
+										  },
+										  std::max(2.0,
+												  5.5 * std::max(args.scale, 0.6) - 0.5)))
+						: std::nullopt;
 		const auto walk_functions =
 				walk_network ? std::optional(walk_network->pack_functions())
 							 : std::nullopt;
@@ -4245,7 +5099,10 @@ bool generate_world(WorldEditor &editor,
 					extra_places, extra_spawn, &error, disaster_wooded, disaster_biomes,
 					disaster_highest_surface,
 					disaster_surface ? &*disaster_surface : nullptr, disaster_sea_y,
-					walk_functions ? &*walk_functions : nullptr)) {
+					walk_functions ? &*walk_functions : nullptr,
+					crossing_functions && !crossing_functions->empty()
+							? &*crossing_functions
+							: nullptr)) {
 			const auto message = "failed to install gameplay datapack: " + error;
 			editor.report_generation_error(message);
 			std::cerr << "Arnis generation error: " << message << '\n';

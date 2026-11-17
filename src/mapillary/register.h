@@ -89,22 +89,32 @@ inline std::vector<double> envelope(const std::vector<double> &f)
 	}
 	return out;
 }
+inline std::vector<double> edt_rect(
+		const std::vector<bool> &mask, std::size_t w, std::size_t h);
 inline std::vector<double> edt(const std::vector<bool> &mask, std::size_t n)
 {
-	std::vector<double> work(n * n), out(n * n), line(n);
+	return edt_rect(mask, n, n);
+}
+inline std::vector<double> edt_rect(
+		const std::vector<bool> &mask, std::size_t w, std::size_t h)
+{
+	if (w == 0 || h == 0 || mask.size() != w * h)
+		return {};
+	std::vector<double> work(w * h), out(w * h);
 	for (std::size_t i = 0; i < work.size(); ++i)
 		work[i] = mask[i] ? 0 : std::numeric_limits<double>::infinity();
-	for (std::size_t x = 0; x < n; ++x) {
-		for (std::size_t y = 0; y < n; ++y)
-			line[y] = work[y * n + x];
-		auto d = envelope(line);
-		for (std::size_t y = 0; y < n; ++y)
-			out[y * n + x] = d[y];
+	for (std::size_t x = 0; x < w; ++x) {
+		std::vector<double> column(h);
+		for (std::size_t y = 0; y < h; ++y)
+			column[y] = work[y * w + x];
+		auto d = envelope(column);
+		for (std::size_t y = 0; y < h; ++y)
+			out[y * w + x] = d[y];
 	}
-	for (std::size_t y = 0; y < n; ++y) {
-		std::copy_n(out.begin() + y * n, n, line.begin());
-		auto d = envelope(line);
-		std::copy(d.begin(), d.end(), out.begin() + y * n);
+	for (std::size_t y = 0; y < h; ++y) {
+		std::vector<double> row(out.begin() + y * w, out.begin() + (y + 1) * w);
+		auto d = envelope(row);
+		std::copy(d.begin(), d.end(), out.begin() + y * w);
 	}
 	return out;
 }

@@ -9,6 +9,8 @@
 #include "../land_cover/land_cover.h"
 #include <array>
 #include <algorithm>
+#include <cmath>
+#include <tuple>
 namespace arnis::trees
 {
 namespace
@@ -49,27 +51,47 @@ std::optional<Habitat> ecoregion_habitat(
 	}
 }
 
+int schematic_base_y(world_editor::WorldEditor &editor, const Schematic &schem, int x,
+		int z, int offset)
+{
+	const int center = editor.get_absolute_y(x, offset, z);
+	int fpmin = center;
+	const int half = std::clamp(std::max(schem.width, schem.length) / 2, 1, 6);
+	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 8>{
+				 {{-half, 0}, {half, 0}, {0, -half}, {0, half}, {-half, -half},
+						 {half, half}, {-half, half}, {half, -half}}})
+		fpmin = std::min(fpmin, editor.get_absolute_y(x + dx, offset, z + dz));
+	return std::min(center, fpmin + 2);
+}
+
+bool fits_tree_wood(world_editor::WorldEditor &editor, const Schematic &schem, int x,
+		int z, unsigned rotation, int offset, bool allow_on_paved)
+{
+	const auto keep_off = [&](int wx, int wz) {
+		return allow_on_paved ? editor.on_carriageway(wx, wz)
+							  : editor.surface_is_sealed(wx, wz);
+	};
+	return low_wood_clear(editor, schem, rotation, x, z, keep_off,
+			[&] { return schematic_base_y(editor, schem, x, z, offset); });
+}
+
 bool place_selected_schematic(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int offset, const SlotSelection &selected,
-		const BuildingFootprintBitmap *building_footprints)
+		const BuildingFootprintBitmap *building_footprints, bool allow_on_paved)
 {
 	const auto *schem = selector.schematic(selected.schematic_index);
 	if (!schem)
 		return false;
 	const int sx = selected.x, sz = selected.z;
-	const int center = editor.get_absolute_y(sx, offset, sz);
-	int fpmin = center;
-	const int half = std::clamp(std::max(schem->width, schem->length) / 2, 1, 6);
-	for (const auto &[dx, dz] : std::array<std::pair<int, int>, 8>{
-				 {{-half, 0}, {half, 0}, {0, -half}, {0, half}, {-half, -half},
-						 {half, half}, {-half, half}, {half, -half}}})
-		fpmin = std::min(fpmin, editor.get_absolute_y(sx + dx, offset, sz + dz));
+	const int base_y = schematic_base_y(editor, *schem, sx, sz, offset);
 	auto blacklist = Tree::get_building_wall_blocks();
 	for (const auto &blocks : {Tree::get_building_floor_blocks(),
 				 Tree::get_structural_blocks(), Tree::get_functional_blocks()})
 		blacklist.insert(blacklist.end(), blocks.begin(), blocks.end());
 	blacklist.push_back(block_definitions::WATER);
-	const int base_y = std::min(center, fpmin + 2);
+	if (!fits_tree_wood(
+				editor, *schem, sx, sz, selected.rotation, offset, allow_on_paved))
+		return false;
 	const auto &wood = ground_decoration::wood_blocks();
 	for (int y = base_y; y <= base_y + 2; ++y)
 		if (editor.check_for_block_absolute(sx, y, sz, wood))
@@ -147,17 +169,31 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 	// deterministic schematic slot crosses an ownership seam, plant at the request.
 	if (!editor.owns(x, z) || blocked(x, z, false))
 		return false;
-	auto selected = selector.pick_slot(x, z, habitat, elevation_y, request);
-	if (!selected)
+	const int offset = elevation_y - editor.get_ground_level(x, z);
+	const auto [requested_slot_x, requested_slot_z] =
+			trunk_slot_s(x, z, selector.slot_spacing(request.density_decided));
+	const int fit_x =
+			editor.owns(requested_slot_x, requested_slot_z) ? requested_slot_x : x;
+	const int fit_z =
+			editor.owns(requested_slot_x, requested_slot_z) ? requested_slot_z : z;
+	auto caller_fit = request.fits;
+	request.fits = [&](std::size_t index, unsigned rotation) {
+		const auto *schem = selector.schematic(index);
+		return schem && (!caller_fit || caller_fit(index, rotation)) &&
+			   fits_tree_wood(
+					   editor, *schem, fit_x, fit_z, rotation, offset, allow_on_paved);
+	};
+	auto fit_selection = selector.pick_slot(x, z, habitat, elevation_y, request);
+	if (!fit_selection)
 		return false;
-	if (!editor.owns(selected->x, selected->z)) {
-		selected->x = x;
-		selected->z = z;
+	if (!editor.owns(fit_selection->x, fit_selection->z)) {
+		fit_selection->x = x;
+		fit_selection->z = z;
 	}
-	if (blocked(selected->x, selected->z, true))
+	if (blocked(fit_selection->x, fit_selection->z, true))
 		return false;
-	return place_selected_schematic(editor, selector,
-			elevation_y - editor.get_ground_level(x, z), *selected, building_footprints);
+	return place_selected_schematic(editor, selector, offset, *fit_selection,
+			building_footprints, allow_on_paved);
 }
 bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int x, int z, int elevation_y, int y_offset,
@@ -176,7 +212,15 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 	};
 	if (!editor.owns(x, z) || blocked(x, z, false))
 		return false;
-	auto selected = selector.pick_mapped(x, z, request.habitat, elevation_y, request);
+	auto mapped_request = request;
+	const auto caller_fit = request.fits;
+	mapped_request.fits = [&](std::size_t index, unsigned rotation) {
+		const auto *candidate = selector.schematic(index);
+		return candidate && (!caller_fit || caller_fit(index, rotation)) &&
+			   fits_tree_wood(editor, *candidate, x, z, rotation, y_offset, true);
+	};
+	auto selected =
+			selector.pick_mapped(x, z, request.habitat, elevation_y, mapped_request);
 	if (!selected)
 		return false;
 	// Match Rust's tile ownership rule: a mapped tree is never dropped just
@@ -185,10 +229,53 @@ bool place_selected_mapped_region_tree(world_editor::WorldEditor &editor,
 		selected->x = x;
 		selected->z = z;
 	}
-	if (blocked(selected->x, selected->z, true))
+	const auto *schem = selector.schematic(selected->schematic_index);
+	if (!schem)
 		return false;
+	const int reach = std::max(3, static_cast<int>(std::lround(8.0 * editor.scale())));
+	std::vector<std::pair<int, int>> offsets;
+	for (int dx = -reach; dx <= reach; ++dx)
+		for (int dz = -reach; dz <= reach; ++dz)
+			if ((dx || dz) && dx * dx + dz * dz <= reach * reach)
+				offsets.emplace_back(dx, dz);
+	std::sort(offsets.begin(), offsets.end(), [&](const auto &a, const auto &b) {
+		return std::tuple{a.first * a.first + a.second * a.second,
+					   editor.surface_is_sealed(x + a.first, z + a.second), a.first,
+					   a.second} <
+			   std::tuple{b.first * b.first + b.second * b.second,
+					   editor.surface_is_sealed(x + b.first, z + b.second), b.first,
+					   b.second};
+	});
+	auto fits_at = [&](int ax, int az,
+						   unsigned preferred_rotation) -> std::optional<unsigned> {
+		if (!editor.owns(ax, az) || editor.on_carriageway(ax, az) ||
+				blocked(ax, az, true))
+			return std::nullopt;
+		for (unsigned k = 0; k < 4; ++k) {
+			const unsigned rotation = (preferred_rotation + k) & 3u;
+			if (fits_tree_wood(editor, *schem, ax, az, rotation, y_offset, true))
+				return rotation;
+		}
+		return std::nullopt;
+	};
+	if (const auto rotation = fits_at(selected->x, selected->z, selected->rotation)) {
+		selected->rotation = *rotation;
+	} else {
+		bool found = false;
+		for (const auto &[dx, dz] : offsets) {
+			if (const auto rotation = fits_at(x + dx, z + dz, selected->rotation)) {
+				selected->x = x + dx;
+				selected->z = z + dz;
+				selected->rotation = *rotation;
+				found = true;
+				break;
+			}
+		}
+		if (!found)
+			return false;
+	}
 	return place_selected_schematic(
-			editor, selector, y_offset, *selected, building_footprints);
+			editor, selector, y_offset, *selected, building_footprints, true);
 }
 bool place_selected_region_tree_for_cover(world_editor::WorldEditor &editor,
 		const RegionSelector &selector, int x, int z, std::uint8_t cover, int elevation_y,

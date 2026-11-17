@@ -16,6 +16,8 @@ double value_noise_salted(int x, int z, int scale, std::uint32_t salt);
 double geo_noise_salted(int x, int z, int scale, std::uint32_t salt);
 double patch_noise(int x, int z, int scale, std::uint32_t salt);
 double ground_noise(int x, int z, int scale, std::uint32_t salt);
+std::optional<Block> mapped_forest_floor(const WorldEditor &editor, int x, int z);
+const std::vector<Block> &forest_litter_blocks();
 
 void generate_ground_layer(WorldEditor &editor, const Args &args, const XZBBox &xzbbox,
 		const BuildingFootprintBitmap &building_footprints,

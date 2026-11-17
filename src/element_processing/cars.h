@@ -3,6 +3,8 @@
 #include "../../../arnis_adapter.h"
 #include "../bedrock_addon.h"
 #include "../floodfill_cache.h"
+#include "../vehicle_models.h"
+#include "level_crossings.h"
 
 #include <array>
 #include <cstddef>
@@ -30,6 +32,8 @@ struct Waypoint
 	double x{}, y{}, z{};
 	std::optional<std::uint8_t> stop;
 	std::optional<std::int32_t> cap;
+	/// 1: car-only stop; 2: bus/truck-only stop, matching the extras datapack.
+	std::optional<std::uint8_t> holds;
 };
 
 struct Turn
@@ -41,6 +45,7 @@ struct Turn
 struct Segment
 {
 	std::uint64_t way{};
+	std::optional<std::size_t> crossing;
 	std::vector<Waypoint> points;
 	std::vector<double> arcs;
 	std::vector<Turn> next;
@@ -61,6 +66,9 @@ enum class VehicleKind : std::uint8_t
 {
 	Sedan,
 	Hatchback,
+	Estate,
+	Suv,
+	City,
 	Van,
 	Pickup,
 	Truck,
@@ -84,7 +92,8 @@ public:
 	static CarNetwork build(const std::vector<ProcessedElement> &elements, double scale,
 			bool drives_on_left, bool stop_at_signals, const ::XZBBox &world,
 			const std::function<int(const ProcessedWay &, int, int)> &surface_y,
-			const std::function<bool(int, int)> &built);
+			const std::function<bool(int, int)> &built,
+			const element_processing::level_crossings::BreakMap *crossings = nullptr);
 	void place_way(world_editor::WorldEditor &editor, std::uint64_t way) const;
 
 	std::size_t car_count() const { return cars_.size(); }
@@ -117,5 +126,14 @@ private:
 	double size_{1.0};
 	double scale_{1.0};
 };
+
+/// Place a parked vehicle with the shared vehicle item-model assets. `max_height`
+/// limits its roof clearance; `seed` controls model, livery, placement and entity id.
+void place_parked_model(world_editor::WorldEditor &editor, int x, int y, int z,
+		std::uint8_t rotation, std::uint64_t seed, int max_height);
+std::vector<vehicle_models::Look> parked_looks();
+std::optional<vehicle_models::Look> parked_look(std::uint64_t seed, double headroom);
+/// All Java item-model looks the moving-car network can select.
+std::vector<vehicle_models::Look> java_looks();
 
 } // namespace arnis::highways::cars

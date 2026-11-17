@@ -33,6 +33,7 @@ struct MappedTree;
 inline constexpr double MICRO_TREE_MAX_SCALE = 0.35;
 
 int crown_probe_blocks(double scale);
+bool in_headroom(const WorldEditor &, int x, int y, int z);
 
 struct Coord
 {

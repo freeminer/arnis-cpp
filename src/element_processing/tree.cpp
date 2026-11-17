@@ -17,6 +17,16 @@ int crown_probe_blocks(double scale)
 	return std::max(1, rust_numeric::round_i32(2.0 * scale));
 }
 
+bool in_headroom(const WorldEditor &editor, int x, int y, int z)
+{
+	if (!editor.surface_is_sealed(x, z))
+		return false;
+	const double metres = editor.on_carriageway(x, z) ? 4.0 : 2.5;
+	const int clearance =
+			std::max(2, rust_numeric::round_i32(metres * std::min(editor.scale(), 1.0)));
+	return y <= editor.get_ground_level(x, z) + clearance;
+}
+
 // Rust's leaf_gap_at/leaf_hash helpers: keep canopy gaps deterministic and
 // independent of the tree generation traversal order.
 static std::uint64_t leaf_hash(int x, int y, int z)

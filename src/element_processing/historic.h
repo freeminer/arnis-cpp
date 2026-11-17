@@ -8,6 +8,9 @@ namespace arnis
 namespace historic
 {
 void generate_historic(WorldEditor &editor, const ProcessedNode &node);
+bool is_artwork_figure(const tags_t &tags);
+void generate_artwork_figure(WorldEditor &editor, const ProcessedNode &node);
+void generate_artwork_figure(WorldEditor &editor, const ProcessedWay &way);
 void generate_memorial(WorldEditor &editor, const ProcessedNode &node);
 void generate_monument(WorldEditor &editor, const ProcessedNode &node);
 void generate_wayside_cross(WorldEditor &editor, const ProcessedNode &node);

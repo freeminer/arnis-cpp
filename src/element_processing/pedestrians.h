@@ -2,6 +2,7 @@
 
 #include "../../../arnis_types.h"
 #include "../coordinate_system/cartesian/xzbbox/xzbbox_enum.h"
+#include "level_crossings.h"
 #include "../water_probe.h"
 
 #include <cstddef>
@@ -30,6 +31,7 @@ struct Point
 	double x{}, y{}, z{};
 	std::optional<std::uint8_t> light;
 	bool kerb{};
+	std::optional<std::uint32_t> rail;
 	bool operator==(const Point &) const = default;
 };
 
@@ -39,7 +41,8 @@ public:
 	using SurfaceY = std::function<int(const ProcessedWay &, int, int)>;
 	static WalkNetwork build(const std::vector<ProcessedElement> &elements, double scale,
 			bool keep_left, bool signals, const cartesian::XZBBox &world,
-			const SurfaceY &surface_y);
+			const SurfaceY &surface_y,
+			const std::vector<level_crossings::WalkStop> &rail_stops = {});
 	bool is_empty() const;
 	std::size_t lane_count() const;
 	std::shared_ptr<water_probe::WalkProbe> probe() const;

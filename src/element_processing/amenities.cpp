@@ -18,6 +18,7 @@
 #include "../decals/machines.h"
 #include "road_mask_search.h"
 #include "street_furniture.h"
+#include "bridges.h"
 #include "../strict_parse.h"
 
 namespace arnis
@@ -289,9 +290,33 @@ static std::optional<std::pair<int, int>> get_nearest_road_block(
 	return element_processing::get_nearest_road_block(x, z, max_radius, road_mask);
 }
 
+void drop_furniture_in_water(crate::world_editor::WorldEditor &editor)
+{
+	for (const auto &cells : editor.take_furniture()) {
+		if (cells.empty())
+			continue;
+		const auto &[mx, my, mz] = cells[cells.size() / 2];
+		(void)my;
+		const bool wet = !editor.owns(mx, mz) ||
+						 std::any_of(cells.begin(), cells.end(), [&](const auto &cell) {
+							 const auto &[x, y, z] = cell;
+							 return editor.check_for_block_absolute(x, y - 1, z,
+									 std::vector<Block>{crate::block_definitions::WATER});
+						 });
+		if (!wet)
+			continue;
+		for (const auto &[x, y, z] : cells)
+			editor.set_block_absolute(crate::block_definitions::AIR, x, y, z,
+					std::vector<Block>{crate::block_definitions::OAK_STAIRS,
+							crate::block_definitions::OAK_SLAB_TOP,
+							crate::block_definitions::CAULDRON});
+	}
+}
+
 void generate_amenities(crate::world_editor::WorldEditor &editor,
 		const crate::osm_parser::ProcessedElement &element, const crate::args::Args &args,
-		const FloodFillCache &flood_fill_cache, const RoadMaskBitmap &road_mask)
+		const FloodFillCache &flood_fill_cache, const RoadMaskBitmap &road_mask,
+		const crate::bridges::BridgeSurfaceMap &bridge_surface)
 {
 	// Match Rust parse::<i32>().unwrap_or(0): malformed tags default to zero.
 	const auto &t = element.tags();
@@ -311,6 +336,18 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 	if (const auto node = element.first_node(); node.has_value())
 		first_node.emplace(
 				crate::coordinate_system::cartesian::XZPoint(node->x, node->z));
+	std::optional<std::pair<std::pair<int, int>, int>> deck;
+	if (element.is_node() && first_node)
+		deck = bridge_surface.nearest_deck_cell(first_node->x, first_node->z, 1);
+	if (deck) {
+		if (amenity_type != "bench" && amenity_type != "waste_basket" &&
+				amenity_type != "waste_disposal")
+			return;
+		first_node.emplace(deck->first.first, deck->first.second);
+	}
+	const auto above = [&](int x, int z) {
+		return deck ? deck->second + 1 : editor.get_absolute_y(x, 1, z);
+	};
 
 	// Handle recycling containers
 	if (amenity_type == "recycling") {
@@ -379,11 +416,12 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 
 	if (amenity_type == "waste_disposal" || amenity_type == "waste_basket") {
 		if (first_node.has_value()) {
-			editor.set_block(crate::block_definitions::CAULDRON, first_node->x, 1,
-					first_node->z, std::nullopt, std::nullopt);
-			place_furniture_decals(editor, tags, first_node->x,
-					editor.get_absolute_y(first_node->x, 1, first_node->z),
-					first_node->z);
+			const int y = above(first_node->x, first_node->z);
+			editor.set_block_absolute(
+					crate::block_definitions::CAULDRON, first_node->x, y, first_node->z);
+			editor.register_furniture({{first_node->x, y, first_node->z}});
+			if (deck || !editor.is_mapped_water(first_node->x, first_node->z))
+				place_furniture_decals(editor, tags, first_node->x, y, first_node->z);
 		}
 		return;
 	}
@@ -437,7 +475,13 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 			auto road_pos =
 					get_nearest_road_block(first_node->x, first_node->z, 4, road_mask);
 			bool use_east_west;
-			if (road_pos.has_value()) {
+			const auto fits_deck = [&](int dx, int dz) {
+				return bridge_surface.contains(first_node->x - dx, first_node->z - dz) &&
+					   bridge_surface.contains(first_node->x + dx, first_node->z + dz);
+			};
+			if (deck && (fits_deck(1, 0) != fits_deck(0, 1))) {
+				use_east_west = fits_deck(1, 0);
+			} else if (road_pos.has_value()) {
 				int dx = std::abs(road_pos->first - first_node->x);
 				int dz = std::abs(road_pos->second - first_node->z);
 				use_east_west = dz >= dx;
@@ -451,7 +495,7 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 					use_east_west ? StairFacing::East : StairFacing::South;
 			const int dx = use_east_west ? 1 : 0;
 			const int dz = use_east_west ? 0 : 1;
-			const int abs_y = editor.get_absolute_y(first_node->x, 1, first_node->z);
+			const int abs_y = above(first_node->x, first_node->z);
 			const std::vector<Block> blacklist{crate::block_definitions::OAK_LOG,
 					crate::block_definitions::SPRUCE_LOG};
 			const auto stair_a = top_stair(
@@ -459,13 +503,16 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 							facing_a, StairShape::Straight));
 			editor.set_block_with_properties_absolute(stair_a, first_node->x - dx, abs_y,
 					first_node->z - dz, std::nullopt, blacklist);
-			editor.set_block(crate::block_definitions::OAK_SLAB_TOP, first_node->x, 1,
-					first_node->z, std::nullopt, blacklist);
+			editor.set_block_absolute(crate::block_definitions::OAK_SLAB_TOP,
+					first_node->x, abs_y, first_node->z, std::nullopt, blacklist);
 			const auto stair_b = top_stair(
 					create_stair_with_properties(crate::block_definitions::OAK_STAIRS,
 							facing_b, StairShape::Straight));
 			editor.set_block_with_properties_absolute(stair_b, first_node->x + dx, abs_y,
 					first_node->z + dz, std::nullopt, blacklist);
+			editor.register_furniture({{first_node->x - dx, abs_y, first_node->z - dz},
+					{first_node->x, abs_y, first_node->z},
+					{first_node->x + dx, abs_y, first_node->z + dz}});
 		}
 		return;
 	}
@@ -667,7 +714,8 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 {
 	FloodFillCache cache;
 	RoadMaskBitmap road_mask;
-	generate_amenities(editor, element, args, cache, road_mask);
+	const crate::bridges::BridgeSurfaceMap bridge_surface;
+	generate_amenities(editor, element, args, cache, road_mask, bridge_surface);
 }
 
 } // namespace amenities

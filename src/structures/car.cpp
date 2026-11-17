@@ -1,5 +1,6 @@
 #include "structures.h"
 #include "../assets_root.h"
+#include "../element_processing/cars.h"
 #include "../land_cover/land_cover.h"
 #include "schem_decoder.h"
 #include <algorithm>
@@ -58,6 +59,11 @@ void place_car(WorldEditor &editor, int cx, int cz, int base_y, uint8_t rot_base
 		return;
 	if (h % 100 >= 50)
 		return;
+	if (editor.parked_car_models) {
+		highways::cars::place_parked_model(
+				editor, cx, base_y, cz, rot_base, h, max_height);
+		return;
+	}
 	const auto root = editor.get_schematic_asset_root().empty()
 							  ? assets::path("structures")
 							  : editor.get_schematic_asset_root();

@@ -22,6 +22,7 @@
 #include <string_view>
 #include <tuple>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 namespace arnis::trains
@@ -1394,6 +1395,130 @@ std::size_t TrainRouteNetwork::train_count() const
 	return total;
 }
 
+std::vector<bool> TrainRouteNetwork::busy(
+		std::size_t service_index, double at, double half) const
+{
+	if (service_index >= services_.size())
+		return {};
+	const auto &service = services_[service_index];
+	if (service.route >= routes_.size() || service.timetable.empty())
+		return {};
+	const auto &route = routes_[service.route];
+	const auto length = [&](const Coach &coach) {
+		return train_bodies::length_m(coach) * size_;
+	};
+	const double front =
+			service.coaches.empty() ? 0.0 : length(service.coaches.front()) / 2.0;
+	const double back =
+			service.coaches.empty() ? 0.0 : length(service.coaches.back()) / 2.0;
+	const double span = service.offsets.empty() ? 0.0 : service.offsets.back();
+	const auto mm = [](double blocks) -> std::int64_t {
+		return static_cast<std::int64_t>(std::llround(blocks * 1000.0));
+	};
+	const std::int64_t behind = mm(span + back + half);
+	const std::int64_t ahead = mm(front + half);
+	const std::int64_t position = mm(at);
+	const std::int64_t route_mm = mm(route.length());
+	std::int64_t lap = 0;
+	switch (route.shape) {
+	case Shape::Loop:
+		lap = route_mm;
+		break;
+	case Shape::Through:
+		lap = service.period;
+		break;
+	case Shape::Shuttle:
+		break;
+	}
+	const auto positive_mod = [](std::int64_t value, std::int64_t modulus) {
+		const auto remainder = value % modulus;
+		return remainder < 0 ? remainder + modulus : remainder;
+	};
+	const auto covers = [&](std::int64_t nose) {
+		if (lap > 0)
+			return positive_mod(position - (nose - behind), lap) <= behind + ahead;
+		return nose - behind <= position && position <= nose + ahead;
+	};
+
+	const auto count = service.timetable.size();
+	std::vector<bool> busy(count, false);
+	for (const auto &departure : service.trains) {
+		const auto phase = departure.phase % count;
+		for (std::size_t i = 0; i < count; ++i) {
+			if (covers(service.timetable[i]))
+				busy[(i + count - phase) % count] = true;
+		}
+	}
+	return busy;
+}
+
+std::vector<std::vector<TrackAt>> TrainRouteNetwork::tracks_at(
+		const std::vector<RoutePoint> &spots, double reach) const
+{
+	const double cell = std::max(reach, 1.0);
+	const auto key = [cell](double x, double z) {
+		return std::pair{static_cast<std::int64_t>(std::floor(x / cell)),
+				static_cast<std::int64_t>(std::floor(z / cell))};
+	};
+	std::map<std::pair<std::int64_t, std::int64_t>, std::vector<std::size_t>> grid;
+	for (std::size_t i = 0; i < spots.size(); ++i)
+		grid[key(spots[i].x, spots[i].z)].push_back(i);
+
+	std::vector<std::vector<TrackAt>> result(spots.size());
+	for (std::size_t service_index = 0; service_index < services_.size();
+			++service_index) {
+		const auto &service = services_[service_index];
+		if (service.route >= routes_.size())
+			continue;
+		const auto &route = routes_[service.route];
+		if (route.mode == Mode::Water || route.points.empty())
+			continue;
+		std::map<std::size_t, std::pair<double, std::size_t>> nearest;
+		for (std::size_t i = 0; i < route.points.size(); ++i) {
+			const auto [cx, cz] = key(route.points[i].x, route.points[i].z);
+			for (std::int64_t dx = -1; dx <= 1; ++dx) {
+				for (std::int64_t dz = -1; dz <= 1; ++dz) {
+					const auto found = grid.find({cx + dx, cz + dz});
+					if (found == grid.end())
+						continue;
+					for (const auto spot_index : found->second) {
+						const double distance =
+								std::hypot(spots[spot_index].x - route.points[i].x,
+										spots[spot_index].z - route.points[i].z);
+						if (distance > reach)
+							continue;
+						const auto best = nearest.find(spot_index);
+						if (best == nearest.end() || distance < best->second.first)
+							nearest[spot_index] = {distance, i};
+					}
+				}
+			}
+		}
+		const auto heading_reach = static_cast<std::size_t>(HEADING_REACH);
+		for (const auto &[spot_index, candidate] : nearest) {
+			const auto i = candidate.second;
+			const auto &a = route.points[i > heading_reach ? i - heading_reach : 0];
+			const auto &b =
+					route.points[std::min(i + heading_reach, route.points.size() - 1)];
+			const auto heading =
+					unit(b.x - a.x, b.z - a.z).value_or(RoutePoint{1.0, 0.0});
+			result[spot_index].push_back({service_index, static_cast<double>(i),
+					{heading.x, heading.z}, route.mode});
+		}
+	}
+	return result;
+}
+
+bool TrainRouteNetwork::runs(std::size_t service_index,
+		const std::function<std::optional<int>(std::uint64_t, int, int)> &rail_y) const
+{
+	if (service_index >= services_.size() ||
+			services_[service_index].route >= routes_.size())
+		return false;
+	return bedrock_route_heights(routes_[services_[service_index].route], rail_y)
+			.has_value();
+}
+
 std::size_t TrainRouteNetwork::ship_count() const
 {
 	std::size_t total = 0;
@@ -1435,12 +1560,16 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 	std::map<std::string, std::vector<train_bodies::Part>> bodies;
 	std::map<std::string, train_bodies::Doors> doors;
 	doors.emplace(train_bodies::NO_DOORS, train_bodies::Doors{});
+	std::unordered_set<std::size_t> written_routes;
 	std::size_t carriage = 0;
-	for (std::size_t route_index = 0; route_index < services_.size(); ++route_index) {
-		const auto &service = services_[route_index];
+	for (std::size_t service_index = 0; service_index < services_.size();
+			++service_index) {
+		const auto &service = services_[service_index];
 		if (service.route >= routes_.size())
 			continue;
 		const auto &route = routes_[service.route];
+		const std::size_t r = service.route;
+		const std::size_t t = service_index;
 		const std::size_t n = route.points.size();
 		if (n == 0 || route.ways.size() < n)
 			continue;
@@ -1508,34 +1637,42 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 			}
 		}
 
-		const std::size_t r = route_index;
-		network << "data modify storage arnis:trains r" << r << " set value []\n";
-		for (std::size_t start = 0; start < n; start += 400) {
-			const auto end = std::min(n, start + 400);
-			network << "data modify storage arnis:trains tmp set value [";
-			for (std::size_t i = start; i < end; ++i) {
-				if (i != start)
-					network << ',';
-				const auto &a = route.points[route.shape == Shape::Loop
-													 ? i
-													 : (i + 1 < n ? i : i - (i > 0))];
-				const auto &b = route.points[route.shape == Shape::Loop
-													 ? (i + 1) % n
-													 : (i + 1 < n ? i + 1 : i)];
-				const double heading =
-						std::atan2(-(b.x - a.x), b.z - a.z) * 180.0 / std::numbers::pi;
-				network << "{x:" << std::fixed << std::setprecision(2)
-						<< ::arnis::datapack::macro_coord(route.points[i].x)
-						<< "d,y:" << std::setprecision(3)
-						<< heights[i] + route.surface_lift
-						<< "d,z:" << std::setprecision(2)
-						<< ::arnis::datapack::macro_coord(route.points[i].z)
-						<< "d,h:" << std::setprecision(1) << heading << "f}";
+		if (written_routes.insert(r).second) {
+			network << "data modify storage arnis:trains r" << r << " set value []\n";
+			for (std::size_t start = 0; start < n; start += 400) {
+				const auto end = std::min(n, start + 400);
+				network << "data modify storage arnis:trains tmp set value [";
+				for (std::size_t i = start; i < end; ++i) {
+					if (i != start)
+						network << ',';
+					const auto &a = route.points[route.shape == Shape::Loop
+														 ? i
+														 : (i + 1 < n ? i : i - (i > 0))];
+					const auto &b = route.points[route.shape == Shape::Loop
+														 ? (i + 1) % n
+														 : (i + 1 < n ? i + 1 : i)];
+					const bool has_air = route.air && route.air->valid_for(n);
+					const double heading = has_air ? route.air->yaw[i]
+												   : std::atan2(-(b.x - a.x), b.z - a.z) *
+															 180.0 / std::numbers::pi;
+					network << "{x:" << std::fixed << std::setprecision(2)
+							<< ::arnis::datapack::macro_coord(route.points[i].x)
+							<< "d,y:" << std::setprecision(3)
+							<< heights[i] + route.surface_lift
+							<< "d,z:" << std::setprecision(2)
+							<< ::arnis::datapack::macro_coord(route.points[i].z)
+							<< "d,h:" << std::setprecision(1) << heading << "f";
+					if (has_air)
+						network << ",q:" << (-route.air->climb[i] + 0.0f)
+								<< "f,p:" << (-route.air->nose[i] + 0.0f)
+								<< "f,g:" << static_cast<unsigned>(route.air->gear[i]);
+					network << '}';
+				}
+				network << "]\ndata modify storage arnis:trains r" << r
+						<< " append from storage arnis:trains tmp[]\n";
 			}
-			network << "]\ndata modify storage arnis:trains r" << r
-					<< " append from storage arnis:trains tmp[]\n";
 		}
-		network << "data modify storage arnis:trains s" << r << " set value [I;";
+		network << "data modify storage arnis:trains s" << t << " set value [I;";
 		for (std::size_t i = 0; i < service.timetable.size(); ++i) {
 			if (i)
 				network << ',';
@@ -1554,16 +1691,17 @@ std::vector<std::pair<std::string, std::string>> TrainRouteNetwork::datapack_fun
 		for (std::size_t train_index = 0; train_index < service.trains.size();
 				++train_index) {
 			const auto &departure = service.trains[train_index];
-			const auto name = std::to_string(r) + "_" + std::to_string(train_index);
+			const auto name = std::to_string(t) + "_" + std::to_string(train_index);
 			std::ostringstream text;
-			text << "# Train " << train_index << " on route " << r
+			text << "# Train " << train_index << " of service " << t << " on route " << r
 				 << ": position from its timetable.\n"
 				 << "scoreboard players operation #i arnis.train = #now arnis.train\n"
 				 << "scoreboard players add #i arnis.train " << departure.phase << '\n'
 				 << "scoreboard players set #T arnis.train " << service.timetable.size()
 				 << '\n'
 				 << "scoreboard players operation #i arnis.train %= #T arnis.train\n"
-				 << "data modify storage arnis:trains a set value {r:" << r << "}\n"
+				 << "data modify storage arnis:trains a set value {r:" << r << ",t:" << t
+				 << "}\n"
 				 << "execute store result storage arnis:trains a.i int 1 run scoreboard players get #i arnis.train\n"
 				 << "function arnis:trains/when with storage arnis:trains a\n"
 				 << "scoreboard players set #L arnis.train " << visible << '\n'
@@ -1625,6 +1763,7 @@ TrainRouteNetwork::bedrock_data(
 	nlohmann::json service_data = nlohmann::json::array();
 	std::vector<bedrock_addon::Body> bodies;
 	std::unordered_map<std::string, std::size_t> body_of;
+	std::unordered_map<std::size_t, std::size_t> written_routes;
 	std::size_t carriage = 0;
 	const float size = static_cast<float>(size_);
 	for (const auto &service : services_) {
@@ -1639,13 +1778,15 @@ TrainRouteNetwork::bedrock_data(
 		std::array<std::int64_t, 4> previous{};
 		for (std::size_t i = 0; i < route.points.size(); ++i) {
 			const auto &[x, z] = route.points[i];
+			const bool has_air = route.air && route.air->valid_for(route.points.size());
 			const std::array<std::int64_t, 4> at{
 					static_cast<std::int64_t>(std::llround(x * 100.0)),
 					static_cast<std::int64_t>(
 							std::llround(((*heights)[i] + route.surface_lift) * 1000.0)),
 					static_cast<std::int64_t>(std::llround(z * 100.0)),
-					static_cast<std::int64_t>(
-							std::llround(bedrock_heading(route, i) * 10.0))};
+					static_cast<std::int64_t>(std::llround(
+							(has_air ? route.air->yaw[i] : bedrock_heading(route, i)) *
+							10.0))};
 			for (std::size_t axis = 0; axis < at.size(); ++axis)
 				points.push_back(at[axis] - previous[axis]);
 			previous = at;
@@ -1662,10 +1803,27 @@ TrainRouteNetwork::bedrock_data(
 			max_x = std::max(max_x, x);
 			max_z = std::max(max_z, z);
 		}
-		routes.push_back(
-				{{"p", bedrock_addon::list(points)}, {"loop", route.shape == Shape::Loop},
-						{"box", {std::floor(min_x), std::floor(min_z), std::ceil(max_x),
-										std::ceil(max_z)}}});
+		nlohmann::json route_data{{"p", bedrock_addon::list(points)},
+				{"loop", route.shape == Shape::Loop},
+				{"box", {std::floor(min_x), std::floor(min_z), std::ceil(max_x),
+								std::ceil(max_z)}}};
+		if (route.air && route.air->valid_for(route.points.size())) {
+			std::vector<std::int64_t> attitude;
+			attitude.reserve(route.points.size() * 3);
+			for (std::size_t i = 0; i < route.points.size(); ++i) {
+				attitude.push_back(static_cast<std::int64_t>(
+						std::llround(route.air->climb[i] * 10.0f)));
+				attitude.push_back(static_cast<std::int64_t>(
+						std::llround(route.air->nose[i] * 10.0f)));
+				attitude.push_back(route.air->gear[i] ? 1 : 0);
+			}
+			route_data["air"] = bedrock_addon::list(attitude);
+		}
+		const auto [route_it, inserted] =
+				written_routes.emplace(service.route, routes.size());
+		if (inserted)
+			routes.push_back(std::move(route_data));
+		const std::size_t route_at = route_it->second;
 
 		const auto length_mm =
 				static_cast<std::int64_t>(std::llround(route.length() * 1000.0));
@@ -1713,7 +1871,7 @@ TrainRouteNetwork::bedrock_data(
 			carriage += service.coaches.size();
 			departures.push_back({{"phase", departure.phase}, {"cars", std::move(cars)}});
 		}
-		service_data.push_back({{"route", routes.size() - 1},
+		service_data.push_back({{"route", route_at},
 				{"steps", bedrock_addon::list(bedrock_run_lengths(service.timetable))},
 				{"count", service.timetable.size()}, {"visible", visible},
 				{"period", period},

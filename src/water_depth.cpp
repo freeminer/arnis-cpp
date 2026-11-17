@@ -26,8 +26,20 @@ namespace arnis::water_depth
 {
 namespace
 {
+constexpr int PIERCE_REACH = 20;
+constexpr int MAPPED_DEPTH = 2;
+constexpr int MAPPED_SHELF = 2;
 std::shared_mutex crossing_carve_mutex;
 water_detail::CarveDepth crossing_carve;
+
+int mapped_depth(const WorldEditor &editor, int x, int z)
+{
+	const bool interior = editor.is_mapped_water(x + MAPPED_SHELF, z) &&
+						  editor.is_mapped_water(x - MAPPED_SHELF, z) &&
+						  editor.is_mapped_water(x, z + MAPPED_SHELF) &&
+						  editor.is_mapped_water(x, z - MAPPED_SHELF);
+	return interior ? MAPPED_DEPTH : 1;
+}
 }
 
 void set_crossing_carve(water_detail::CarveDepth carve)
@@ -824,6 +836,13 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 	assert(depth <= MAX_WATER_DEPTH && "water carve depth exceeds the max tier");
 	depth = std::clamp(depth, 0, MAX_WATER_DEPTH);
 	depth = std::min(depth, std::max(0, water_y - world_editor::min_y() - 2));
+	// OSM waterways can be absent from ESA land cover. Give those mapped cells a
+	// shallow bed, with a deeper center when the mapped water extends past a shelf.
+	const bool missed =
+			depth == 0 && !editor.is_lc_water(x, z) && editor.is_mapped_water(x, z);
+	if (missed)
+		depth = std::min(mapped_depth(editor, x, z),
+				std::max(0, water_y - world_editor::min_y() - 2));
 	if (depth > 0 && bwf.deeper_than_crust() &&
 			editor.water_stands_over_neighbour(x, z, water_y))
 		depth = 0;
@@ -834,6 +853,10 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 		for (int dy = 0; dy <= depth; ++dy)
 			editor.set_block_absolute(*pier, x, water_y - dy, z, std::nullopt,
 					std::optional<std::vector<Block>>(std::vector<Block>{}));
+		const int bed_y = water_y - depth - 1;
+		const int fill_from = std::max(bed_y - 12, world_editor::min_y() + 1);
+		if (fill_from <= bed_y)
+			editor.fill_column_absolute(STONE, x, z, fill_from, bed_y, true);
 		return;
 	}
 
@@ -844,7 +867,7 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 
 	const int bed_y = water_y - depth - 1;
 	const bool is_river = bwf.is_river(x, z);
-	const bool near_bridge = depth >= 2 && bridge_adjacent(road_mask, x, z);
+	const bool near_bridge = depth >= 2 && (missed || bridge_adjacent(road_mask, x, z));
 
 	Block top_block = SAND;
 	Block under_block = SANDSTONE;
@@ -914,6 +937,33 @@ void carve_water_column(WorldEditor &editor, int x, int z, int water_y, int dept
 		place_river_grass(editor, x, z, water_y, bed_y);
 	else if (depth >= 3 && !near_bridge)
 		place_underwater_vegetation(editor, x, z, water_y, bed_y + bump, depth);
+}
+
+void pierce_support_columns(WorldEditor &editor)
+{
+	const std::vector<Block> water{WATER};
+	for (const auto &[x, z, material] : editor.support_column_entries()) {
+		const int ground = editor.get_ground_level(x, z);
+		const int low = std::max(world_editor::min_y(), ground - MAX_WATER_DEPTH - 1);
+		const int high = ground + PIERCE_REACH;
+		std::optional<int> foot;
+		for (int y = high; y >= low; --y) {
+			const auto above = editor.get_block_absolute(x, y + 1, z);
+			if (editor.check_for_block_absolute(x, y, z, water, std::nullopt) && above &&
+					*above != AIR && *above != WATER) {
+				foot = y;
+				break;
+			}
+		}
+		if (!foot)
+			continue;
+		for (int y = *foot; y > world_editor::min_y(); --y) {
+			if (!editor.check_for_block_absolute(x, y, z, water, std::nullopt))
+				break;
+			editor.set_block_absolute(material, x, y, z, std::nullopt,
+					std::optional<std::vector<Block>>(water));
+		}
+	}
 }
 
 void carve_lc_water_pass(

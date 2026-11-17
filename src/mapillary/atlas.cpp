@@ -17,6 +17,7 @@ constexpr std::uint64_t budget_for(std::uint32_t side)
 }
 
 std::atomic<std::uint64_t> active_budget{budget_for(ATLAS_SIDE_STANDARD)};
+std::atomic<std::uint64_t> reserved_area{0};
 std::atomic<std::uint32_t> active_pixel_cap{std::numeric_limits<std::uint32_t>::max()};
 std::mutex usage_mutex;
 std::unordered_map<std::uint64_t, std::pair<std::uint64_t, std::uint64_t>> used_textures;
@@ -59,6 +60,11 @@ void set_atlas_side(std::uint32_t side)
 	reset_texture_usage();
 }
 
+void reserve(std::uint64_t pixels)
+{
+	reserved_area.store(pixels, std::memory_order_relaxed);
+}
+
 void set_pixel_resolution_cap(std::uint32_t pixels_per_block)
 {
 	active_pixel_cap.store(
@@ -72,7 +78,9 @@ std::uint32_t pixel_resolution_cap()
 
 std::uint64_t atlas_budget()
 {
-	return active_budget.load(std::memory_order_relaxed);
+	const auto budget = active_budget.load(std::memory_order_relaxed);
+	const auto reserved = reserved_area.load(std::memory_order_relaxed);
+	return budget > reserved ? budget - reserved : 0;
 }
 
 std::uint64_t used_texture_area()

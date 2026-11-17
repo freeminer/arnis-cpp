@@ -693,7 +693,8 @@ bool Registry::collect_to_editor(arnis::world_editor::WorldEditor &editor,
 }
 
 bool write_world_resource_pack(arnis::world_editor::WorldEditor &editor,
-		const std::filesystem::path &world, bool include_banner, std::string *error)
+		const std::filesystem::path &world, bool include_banner, std::string *error,
+		const std::vector<std::pair<std::string, std::vector<std::uint8_t>>> &extra_files)
 {
 	if (error)
 		error->clear();
@@ -713,19 +714,22 @@ bool write_world_resource_pack(arnis::world_editor::WorldEditor &editor,
 			panels.end());
 	const auto panel_count = panels.size();
 	const auto pack_path = world / "resources.zip";
-	if (panels.empty() && !include_banner)
+	if (panels.empty() && !include_banner && extra_files.empty())
 		return true;
 	std::error_code existing_error;
 	const bool previous_exists =
 			std::filesystem::is_regular_file(pack_path, existing_error);
 	ExistingZipArchive previous;
+	const bool previous_readable =
+			previous_exists && read_zip_archive(pack_path, &previous);
 	const bool previous_is_arnis =
-			previous_exists && read_zip_archive(pack_path, &previous) &&
+			previous_readable &&
 			std::any_of(previous.entries.begin(), previous.entries.end(),
 					[](const ExistingZipEntry &entry) {
 						return entry.name == PACK_MARKER;
 					});
-	if (panels.empty() && include_banner && previous_exists && !previous_is_arnis)
+	if (panels.empty() && include_banner && extra_files.empty() && previous_exists &&
+			!previous_is_arnis)
 		return true; // Like Rust, leave a user's resource pack untouched for banner-only runs.
 	const auto staged_path = world / "resources.zip.tmp";
 	auto fail = [&](const std::string &message) {
@@ -771,16 +775,25 @@ bool write_world_resource_pack(arnis::world_editor::WorldEditor &editor,
 				contents.size());
 	};
 	const std::string metadata =
-			nlohmann::json{{"pack", {{"pack_format", PACK_FORMAT},
-											{"supported_formats", {PACK_FORMAT, 999}},
-											{"min_format", PACK_FORMAT},
-											{"max_format", {999, 0}},
-											{"description", "Arnis facade panels"}}}}
+			nlohmann::json{
+					{"pack",
+							{{"pack_format", PACK_FORMAT},
+									{"supported_formats", {PACK_FORMAT, 999}},
+									{"min_format", PACK_FORMAT}, {"max_format", {999, 0}},
+									{"description",
+											"Arnis generated models and facade panels"}}}}
 					.dump();
 	if (!put_text("pack.mcmeta", metadata) ||
 			!put(".arnis_facade_pack",
 					reinterpret_cast<const std::uint8_t *>("arnis facade panels\n"), 20))
 		return fail("write resource pack metadata");
+	std::unordered_set<std::string> extra_names;
+	for (const auto &[name, bytes] : extra_files) {
+		if (!extra_names.insert(name).second)
+			continue;
+		if (!put(name, bytes.data(), bytes.size()))
+			return fail("write generated resource " + name);
+	}
 	std::unordered_map<std::uint64_t, std::string> textures;
 	for (auto &panel : panels) {
 		if (!put_text("assets/arnis/items/" + panel.item_name + ".json",
@@ -840,7 +853,7 @@ bool write_world_resource_pack(arnis::world_editor::WorldEditor &editor,
 				!put_text("assets/arnis/lang/en_us.json", language))
 			return fail("write pause-menu banner resources");
 	}
-	if (previous_is_arnis) {
+	if (previous_readable) {
 		std::unordered_set<std::string> replaced;
 		for (const auto &entry : entries)
 			replaced.insert(entry.name);

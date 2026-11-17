@@ -10,6 +10,7 @@
 #include <filesystem>
 #include <memory>
 #include <optional>
+#include <functional>
 namespace arnis::trees
 {
 struct Species
@@ -63,6 +64,10 @@ struct SlotRequest
 	bool beach = false;
 	std::optional<std::string> genus;
 	std::optional<bool> conifer;
+	// Optional orientation-aware footprint predicate. It lets a tree give way
+	// to a species/model that clears roads or roofs without changing the normal
+	// deterministic pick when the first choice already fits.
+	std::function<bool(std::size_t, unsigned)> fits;
 };
 struct MappedRequest
 {
@@ -72,6 +77,7 @@ struct MappedRequest
 	std::optional<int> want_height;
 	std::optional<ecoregion::Ecoregion> eco;
 	bool beach = false;
+	std::function<bool(std::size_t, unsigned)> fits;
 };
 struct SlotSelection
 {
