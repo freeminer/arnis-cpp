@@ -2240,6 +2240,12 @@ bool generate_world(WorldEditor &editor,
 	auto car_model_looks = java_world && extras.cars
 								   ? highways::cars::java_looks()
 								   : std::vector<vehicle_models::Look>{};
+	if (java_world && extras.traffic_lights)
+		for (const auto *model :
+				{"signal_car_red", "signal_car_amber", "signal_car_green",
+						"signal_car_red_amber", "signal_walk_red", "signal_walk_green"})
+			car_model_looks.push_back(vehicle_models::Look::plain(
+					model, "std", "minecraft:black_concrete"));
 	const auto parked_model_looks = editor.parked_car_models
 											? highways::cars::parked_looks()
 											: std::vector<vehicle_models::Look>{};
@@ -3201,9 +3207,11 @@ bool generate_world(WorldEditor &editor,
 	auto marking_index = road_markings::RoadMarkingIndex::build(elements, args.scale,
 			decals::detect_region((geo_bounds[0] + geo_bounds[1]) * .5,
 					(geo_bounds[2] + geo_bounds[3]) * .5));
-	if (extras.traffic_lights) {
-		editor.traffic_signal_index = highways::SignalIndex::build(
-				elements, args.scale, marking_index.drives_on_left, road_mask);
+	// Rust plans poles for Java even without the optional cycling data pack;
+	// native block backends need the same signal geometry as well.
+	if (extras.traffic_lights || java_world) {
+		editor.traffic_signal_index = highways::SignalIndex::build(elements, args.scale,
+				marking_index.drives_on_left, road_mask, extras.traffic_lights);
 	} else {
 		editor.traffic_signal_index.reset();
 	}

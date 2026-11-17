@@ -6,6 +6,7 @@
 #include "fm_traffic_signals.h"
 #include "highways.h"
 #include "road_markings.h"
+#include "../vehicle_models.h"
 
 #include <algorithm>
 #include <array>
@@ -235,9 +236,33 @@ void add_signal_part(world_editor::WorldEditor &editor, std::array<double, 3> ce
 
 void add_signal_head(world_editor::WorldEditor &editor, std::array<double, 3> centre,
 		Kind kind, double facing_x, double facing_z, char group, double scale,
-		std::int64_t &seed)
+		std::int64_t &seed, bool cycling, bool bracketed)
 {
 	const double k = scale;
+	if (cycling) {
+		const bool pedestrian = kind == Kind::Pedestrian;
+		const char *model =
+				pedestrian ? (group == 'a' ? "signal_walk_red" : "signal_walk_green")
+						   : (group == 'a' ? "signal_car_green" : "signal_car_red");
+		const std::string tag = pedestrian ? std::string("arnis.tl_p") + group
+										   : std::string("arnis.tl_") + group;
+		const auto look =
+				vehicle_models::Look::plain(model, "std", "minecraft:black_concrete");
+		auto nbt = vehicle_models::display_nbt(
+				model, vehicle_models::item_model(look), 0.5 * k, false);
+		nbt["Rotation"] = {static_cast<float>(std::atan2(-facing_x, facing_z) * 180.0 /
+											  std::numbers::pi),
+				0.0f};
+		nbt["Tags"] = {"arnis.tl", tag};
+		const double offset = bracketed ? (0.0625 + 0.15 * k) : 0.0;
+		const double model_offset =
+				bracketed ? (0.0625 + 1.5 / 32.0 * k) : (1.5 / 32.0 * k - 8.0 / 32.0 * k);
+		const double half_height = (pedestrian ? 12.5 : 17.5) / 32.0 * k;
+		const double x = centre[0] - facing_x * offset + facing_x * model_offset;
+		const double z = centre[2] - facing_z * offset + facing_z * model_offset;
+		editor.add_item_display(x, centre[1] - half_height, z, seed++, std::move(nbt));
+		return;
+	}
 	const auto part =
 			[&](double vertical, double forward, std::array<float, 3> size,
 					const std::string &block, std::vector<std::string> tags = {},
@@ -252,8 +277,11 @@ void add_signal_head(world_editor::WorldEditor &editor, std::array<double, 3> ce
 			const bool lit = group == 'a' ? lamp == Lamp::Red : lamp == Lamp::Green;
 			const std::string tag =
 					std::string("arnis.tl_p") + group + "_" + lamp_tag(lamp);
-			part(y, 0.15, {0.24f, 0.24f, 0.04f}, lamp_block(lamp), {"arnis.tl", tag},
-					lit ? std::pair{15, 15} : std::pair{3, 0});
+			part(y, 0.15, {0.24f, 0.24f, 0.04f}, lamp_block(lamp),
+					cycling ? std::vector<std::string>{"arnis.tl", tag}
+							: std::vector<std::string>{},
+					lit ? std::pair{15, 15}
+						: (cycling ? std::pair{3, 0} : std::pair{11, 4}));
 			part(y + 0.135, 0.19, {0.28f, 0.03f, 0.12f}, "minecraft:black_concrete");
 		}
 		return;
@@ -268,7 +296,9 @@ void add_signal_head(world_editor::WorldEditor &editor, std::array<double, 3> ce
 		const std::string tag = std::string("arnis.tl_") + group + "_" + lamp_tag(lamp);
 		const float lamp_size = static_cast<float>(0.26 * k);
 		part(y * k, 0.17 * k, {lamp_size, lamp_size, 0.04f}, lamp_block(lamp),
-				{"arnis.tl", tag}, lit ? std::pair{15, 15} : std::pair{3, 0});
+				cycling ? std::vector<std::string>{"arnis.tl", tag}
+						: std::vector<std::string>{},
+				lit ? std::pair{15, 15} : (cycling ? std::pair{3, 0} : std::pair{11, 4}));
 		part((y + 0.15) * k, 0.225 * k,
 				{static_cast<float>(0.32 * k), static_cast<float>(0.035 * k),
 						static_cast<float>(0.15 * k)},
@@ -422,7 +452,7 @@ bool Junctions::passed(
 
 std::shared_ptr<const SignalIndex> SignalIndex::build(
 		const std::vector<ProcessedElement> &elements, double scale, bool drives_on_left,
-		const RoadMaskBitmap &road_mask)
+		const RoadMaskBitmap &road_mask, bool cycling)
 {
 	std::vector<const ProcessedWay *> ways;
 	for (const auto &element : elements)
@@ -478,6 +508,7 @@ std::shared_ptr<const SignalIndex> SignalIndex::build(
 			std::make_move_iterator(offroad.end()));
 
 	auto result = std::make_shared<SignalIndex>();
+	result->cycling_ = cycling;
 	std::vector<std::uint64_t> ids;
 	ids.reserve(nodes.size());
 	for (const auto &[id, node] : nodes) {
@@ -633,7 +664,7 @@ bool SignalIndex::place_node(world_editor::WorldEditor &editor, const ProcessedN
 				const std::array<double, 3> centre{pole.x + 0.5 + head.facing_x * out,
 						base_y + height, pole.z + 0.5 + head.facing_z * out};
 				add_signal_head(editor, centre, head.kind, head.facing_x, head.facing_z,
-						head.group, scale, display_seed);
+						head.group, scale, display_seed, cycling_, true);
 			} else {
 				const int height = head.kind == Kind::Car ? 4 : 3;
 				const int fx = std::abs(head.facing_x) >= std::abs(head.facing_z)
@@ -675,7 +706,7 @@ bool SignalIndex::place_node(world_editor::WorldEditor &editor, const ProcessedN
 				const std::array<double, 3> centre{
 						pole.mast_x + 0.5, base_y + MAST_Y - 0.62, pole.mast_z + 0.5};
 				add_signal_head(editor, centre, head.kind, head.facing_x, head.facing_z,
-						head.group, scale, display_seed);
+						head.group, scale, display_seed, cycling_, false);
 			} else {
 				fm_place_native_traffic_signal_head(
 						editor, pole.mast_x, base_y + MAST_Y, pole.mast_z, fx, fz);

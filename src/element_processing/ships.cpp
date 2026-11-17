@@ -3,6 +3,7 @@
 #include "ship_bodies.h"
 #include "train_bodies.h"
 #include "../clipping.h"
+#include "../mapillary/geometry.h"
 
 #include <algorithm>
 #include <array>
@@ -125,7 +126,7 @@ std::optional<std::uint8_t> waterway_class(const tags_t &tags)
 	if (waterway != "river" && waterway != "canal" && waterway != "fairway")
 		return std::nullopt;
 	const auto tunnel = tags.get("tunnel");
-	if ((!tunnel.empty() && tunnel != "no") || tags.get("lock") == "yes" ||
+	if ((tags.contains("tunnel") && tunnel != "no") || tags.get("lock") == "yes" ||
 			tags.get("intermittent") == "yes")
 		return std::nullopt;
 	const auto is_no = [&](const char *key) {
@@ -139,12 +140,11 @@ std::optional<std::uint8_t> waterway_class(const tags_t &tags)
 	if ((is_no("ship") && is_no("boat")) || (is_no("motorboat") && !is_yes("ship")))
 		return std::nullopt;
 	const auto cemt = tags.get("CEMT");
-	if (!cemt.empty()) {
-		std::string c;
-		c.reserve(cemt.size());
-		for (const unsigned char ch : cemt)
-			if (!std::isspace(ch))
-				c.push_back(static_cast<char>(std::toupper(ch)));
+	if (tags.contains("CEMT")) {
+		const auto [begin, end] = mapillary::geodesy::trim_rust_whitespace(cemt);
+		std::string c = cemt.substr(begin, end - begin);
+		std::transform(c.begin(), c.end(), c.begin(),
+				[](unsigned char ch) { return static_cast<char>(std::toupper(ch)); });
 		if (c.starts_with("VII"))
 			return 7;
 		if (c.starts_with("VI"))

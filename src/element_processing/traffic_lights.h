@@ -68,7 +68,7 @@ public:
 
 	static std::shared_ptr<const SignalIndex> build(
 			const std::vector<ProcessedElement> &elements, double scale,
-			bool drives_on_left, const RoadMaskBitmap &road_mask);
+			bool drives_on_left, const RoadMaskBitmap &road_mask, bool cycling = true);
 
 	bool place_node(world_editor::WorldEditor &editor, const ProcessedNode &node,
 			const std::function<int(int, int)> &base_y) const;
@@ -91,6 +91,7 @@ private:
 	};
 	std::vector<Pole> poles_;
 	std::unordered_map<std::uint64_t, std::vector<std::size_t>> by_node_;
+	bool cycling_ = false;
 };
 
 bool is_vehicular(const std::string &highway);
