@@ -31,6 +31,7 @@
 #include "../floodfill_cache.h"
 #include "buildings.h"
 #include "building_construction.h"
+#include "building_inset.h"
 #include "building_region.h"
 #include "connected_blocks.h"
 #include "../mapillary/facades.h"
@@ -7689,9 +7690,8 @@ std::optional<std::pair<double, bool>> mapped_walls_m(const tags_t &tags, Height
 }
 
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
-		const ProcessedWay &element, const Args &args,
-		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
-		const CoordinateBitmap &building_passages,
+		ProcessedWay element, const Args &args, const std::optional<int> &relation_levels,
+		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons,
 		std::optional<std::uint64_t> style_seed, const CoordinateBitmap *road_mask,
 		const CoordinateBitmap *building_footprints,
@@ -7901,6 +7901,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 
 	building_facade::PointSet current_footprint(
 			cached_floor_area.begin(), cached_floor_area.end());
+	building_inset::CellSet eave_strip;
 	// Rust derives the open-glass backing mask from the rasterized wall ring.
 	// Keep the same boundary exclusion here so a backing panel never lands in
 	// an opposite wall or a courtyard that happens to overlap the floor fill.
@@ -8817,6 +8818,87 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		}
 		return RoofType::Flat;
 	}();
+	// Rust steps free walls in by one block under an eave when the OSM outline
+	// follows the roof edge. Keep party walls and cadastral wall surveys fixed;
+	// the returned strip is retained as roof/own-footprint area so the eave
+	// covers exactly the outline cells the walls left behind.
+	const bool roof_has_eaves = resolved_style_roof == RoofType::Mansard ||
+								resolved_style_roof == RoofType::Gabled ||
+								resolved_style_roof == RoofType::Gambrel ||
+								resolved_style_roof == RoofType::HalfHipped ||
+								resolved_style_roof == RoofType::Round ||
+								resolved_style_roof == RoofType::Hipped;
+	const double outline_angle = dominant_building_axis_angle(element.nodes);
+	const bool outline_turned = std::abs(std::tan(outline_angle)) * 6.0 > 1.0;
+	const auto outline_source_traces_walls = [&]() {
+		if (element.tags.contains("ref:bag") ||
+				element.tags.contains("ref:ruian:building") ||
+				element.tags.contains("ref:bygningsnr"))
+			return true;
+		if (const auto it = element.tags.find("source:geometry:ref");
+				it != element.tags.end() &&
+				(it->second.starts_with("Gbg/") || it->second.starts_with("Gba/")))
+			return true;
+		static constexpr std::array<std::string_view, 10> surveys{"cadastr", "kadast",
+				"katast", "catast", "alkis", "lantm", "cuzk", "ruian", "hausumring",
+				"picc"};
+		for (const auto &[key, raw] : element.tags) {
+			if (key != "source" && !key.starts_with("source:"))
+				continue;
+			std::string value = raw;
+			std::transform(value.begin(), value.end(), value.begin(),
+					[](unsigned char c) { return static_cast<char>(std::tolower(c)); });
+			if (std::any_of(surveys.begin(), surveys.end(), [&](std::string_view token) {
+					return value.find(token) != std::string::npos;
+				}))
+				return true;
+			std::string word;
+			for (const unsigned char c : value) {
+				if (std::isalnum(c)) {
+					word.push_back(static_cast<char>(c));
+				} else {
+					if (word == "bag" || word == "dkm")
+						return true;
+					word.clear();
+				}
+			}
+			if (word == "bag" || word == "dkm")
+				return true;
+		}
+		return false;
+	};
+	if (args.roof && roof_has_eaves && sloped_roof &&
+			condition != BuildingCondition::Construction &&
+			condition != BuildingCondition::Ruined && !outline_turned &&
+			min_level_offset == 0 && args.scale >= building_inset::MIN_INSET_SCALE &&
+			!element.tags.contains("building:part") && !outline_source_traces_walls() &&
+			!mapillary::facades::has_building(element.id)) {
+		static const CoordinateBitmap empty_footprints;
+		auto inset = building_inset::inset_outline(element.nodes, cached_floor_area,
+				building_footprints ? *building_footprints : empty_footprints);
+		if (inset) {
+			eave_strip = std::move(inset->strip);
+			element.nodes = std::move(inset->nodes);
+			cached_floor_area = std::move(inset->fill);
+			current_footprint.insert(eave_strip.begin(), eave_strip.end());
+			wall_ring_cells.clear();
+			for (const auto &cell : building_inset::ring_cells(element.nodes))
+				wall_ring_cells.insert(cell);
+			if (road_mask && building_footprints &&
+					cached_footprint_size >= building_facade::MIN_FACADE_FOOTPRINT) {
+				building_facade::PointSet own_cells = current_footprint;
+				own_cells.insert(sibling_cells.begin(), sibling_cells.end());
+				static const interior_uses::InteriorUseIndex empty_interior_uses;
+				const auto &facade_interior_uses =
+						interior_index ? *interior_index : empty_interior_uses;
+				const building_facade::BuildingContext context{flood_fill_cache,
+						building_passages, *road_mask, *building_footprints, groups,
+						facade_interior_uses};
+				facade_plan = building_facade::compute_facade_plan(
+						element, context, args.scale, own_cells);
+			}
+		}
+	}
 	const int tower_crown_full_height = building_height;
 	std::optional<int> tower_crown_screen_rows;
 	std::optional<int> tower_crown_setback_tiers;
@@ -10781,6 +10863,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	// sorted to make every roof feature's iteration order deterministic.
 	std::vector<std::pair<int, int>> roof_area = cached_floor_area;
 	roof_area.insert(roof_area.end(), current_building.begin(), current_building.end());
+	roof_area.insert(roof_area.end(), eave_strip.begin(), eave_strip.end());
 	std::sort(roof_area.begin(), roof_area.end());
 	roof_area.erase(std::unique(roof_area.begin(), roof_area.end()), roof_area.end());
 	// Keep pitched-roof eaves out of adjacent buildings and sibling parts, as in

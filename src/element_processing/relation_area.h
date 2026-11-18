@@ -11,6 +11,7 @@
 #include <utility>
 #include <vector>
 #include <string_view>
+#include <string>
 
 namespace arnis::element_processing
 {
@@ -19,6 +20,7 @@ enum class RelationArea
 {
 	Building,
 	Pool,
+	Parking,
 	Water,
 	Golf,
 	Leisure,
@@ -34,6 +36,30 @@ inline bool landuse_paints_ground(const tags_t &tags)
 	return it == tags.end() ||
 		   (it->second != "residential" && it->second != "commercial" &&
 				   it->second != "education" && it->second != "religious");
+}
+
+inline bool parking_lot_surface(const tags_t &tags)
+{
+	if (tags.get("amenity") != "parking" || tags.contains("building"))
+		return false;
+	for (const auto key : {"parking", "location"}) {
+		const auto value = tags.get(key);
+		if (value == "underground" || value == "multi-storey" || value == "rooftop" ||
+				value == "roof")
+			return false;
+	}
+	for (const auto key : {"layer", "level"}) {
+		const auto value = tags.get(key);
+		if (value.empty())
+			continue;
+		try {
+			if (std::stoi(value) < 0)
+				return false;
+		} catch (...) {
+			// Match Rust's parse::<i32>().ok(): malformed levels are not below ground.
+		}
+	}
+	return true;
 }
 
 inline std::optional<RelationArea> relation_area(const tags_t &tags)
@@ -98,6 +124,8 @@ inline std::optional<RelationArea> relation_area(const tags_t &tags)
 	}
 	if (tags.contains("man_made"))
 		return RelationArea::ManMade;
+	if (parking_lot_surface(tags))
+		return RelationArea::Parking;
 	return std::nullopt;
 }
 
@@ -109,6 +137,7 @@ inline bool relation_area_fills_members(RelationArea area, const tags_t &tags)
 	case RelationArea::Golf:
 	case RelationArea::Leisure:
 	case RelationArea::Grounds:
+	case RelationArea::Parking:
 		return true;
 	case RelationArea::Landuse:
 		return landuse_paints_ground(tags);

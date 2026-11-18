@@ -216,6 +216,7 @@ void rotate_world_with_ground(double angle_degrees,
 	const bool had_elevation = ground.elevation_enabled;
 	const bool had_land_cover = ground.has_land_cover();
 	const bool had_canopy = ground.has_canopy();
+	const bool had_survey = ground.has_laser();
 	const auto *original_ecoregions = ground.ecoregion_map();
 	std::optional<ecoregion::EcoMap> materialized_ecoregions;
 	// Rust Ground always owns an area-local EcoMap and rotates that map with
@@ -302,6 +303,9 @@ void rotate_world_with_ground(double angle_degrees,
 	std::vector<std::uint8_t> canopy;
 	if (had_canopy)
 		canopy.assign(grid_width * grid_height, canopy::CANOPY_NODATA);
+	std::vector<std::array<std::uint8_t, 5>> survey;
+	if (had_survey)
+		survey.resize(grid_width * grid_height);
 	for (std::size_t zi = 0; zi < grid_height; ++zi) {
 		for (std::size_t xi = 0; xi < grid_width; ++xi) {
 			const int wx = bbox.min_x() +
@@ -335,6 +339,9 @@ void rotate_world_with_ground(double angle_degrees,
 				canopy[zi * grid_width + xi] =
 						ground.canopy_height_m(source).value_or(canopy::CANOPY_NODATA);
 			}
+			if (had_survey)
+				survey[zi * grid_width + xi] =
+						ground.survey_raw(source).value_or(std::array<std::uint8_t, 5>{});
 		}
 	}
 	// Integer coordinate resampling introduces stair-steps. Rust smooths the
@@ -369,6 +376,10 @@ void rotate_world_with_ground(double angle_degrees,
 		ground.set_canopy_data(
 				canopy::CanopyData(std::move(canopy), grid_width, grid_height), new_width,
 				new_height);
+	if (had_survey)
+		ground.rotate_survey(std::move(survey), grid_width, grid_height);
+	if (had_survey)
+		ground.apply_measured_canopy();
 	// Ground's source grids remain in their original orientation; the mask
 	// inverse-transforms generated points to that source footprint.  This is
 	// the important safety half of Rust's rotation flow and prevents the

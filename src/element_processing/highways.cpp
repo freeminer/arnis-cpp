@@ -25,6 +25,8 @@
 #include "surfaces.h"
 #include "road_markings.h"
 #include "road_detail.h"
+#include "road_width.h"
+#include "kerb_strips.h"
 #include "../water_detail.h"
 #include "raceways.h"
 #include "highway_tunnels.h"
@@ -56,16 +58,7 @@ std::optional<double> parse_width_tag_m(
 	const auto it = tags.find("width");
 	if (it == tags.end())
 		return std::nullopt;
-	const auto [begin, end] = unicode_text::trim_whitespace(it->second);
-	std::string_view width(it->second.data() + begin, end - begin);
-	while (!width.empty() && width.back() == 'm')
-		width.remove_suffix(1);
-	const auto [number_begin, number_end] = unicode_text::trim_whitespace(width);
-	width = width.substr(number_begin, number_end - number_begin);
-	const auto metres = crate::strict_parse::f64(width);
-	if (!metres || !std::isfinite(*metres) || *metres <= 0.0)
-		return std::nullopt;
-	return metres;
+	return road_width::metres(it->second);
 }
 
 const std::vector<crate::block_definitions::Block> &default_road_mix()
@@ -1026,58 +1019,7 @@ std::vector<std::pair<int, int>> stair_fill_cells(
 int highway_block_range(const std::string &highway_type,
 		const std::unordered_map<std::string, std::string> &tags, double scale)
 {
-	if (highway_type == "construction") {
-		const auto construction = tags.find("construction");
-		if (construction != tags.end() && !construction->second.empty() &&
-				construction->second != "construction")
-			return highway_block_range(construction->second, tags, scale);
-	}
-	int block_range = 2;
-	bool scales_with_lanes = true;
-	if (highway_type == "footway" || highway_type == "pedestrian" ||
-			highway_type == "path" || highway_type == "cycleway") {
-		block_range = 1;
-		scales_with_lanes = false;
-	} else if (highway_type == "motorway" || highway_type == "primary" ||
-			   highway_type == "trunk") {
-		block_range = 5;
-	} else if (highway_type == "secondary") {
-		block_range = 4;
-	} else if (highway_type == "tertiary") {
-		block_range = 2;
-	} else if (highway_type == "track" || highway_type == "escape" ||
-			   highway_type == "steps") {
-		block_range = 1;
-		scales_with_lanes = false;
-	} else if (highway_type == "service") {
-		block_range = 2;
-	} else if (highway_type == "secondary_link" || highway_type == "tertiary_link") {
-		block_range = 1;
-	} else if (highway_type == "raceway") {
-		block_range = crate::raceways::default_half_width(tags);
-		scales_with_lanes = false;
-	}
-	const int default_lanes = highway_default_lanes(highway_type);
-	const auto lane_tag = tags.find("lanes");
-	const int lanes = std::clamp(
-			lane_tag == tags.end()
-					? default_lanes
-					: crate::strict_parse::i32(lane_tag->second).value_or(default_lanes),
-			1, 16);
-	// An explicitly mapped physical width takes precedence. Otherwise retain the
-	// historic type width as a minimum and enlarge multi-lane carriageways.
-	if (const auto metres = parse_width_tag_m(tags)) {
-		const double rounded = std::round(*metres / 2.0);
-		block_range = static_cast<int>(
-				std::clamp(rounded, 1.0, static_cast<double>(MAX_BLOCK_RANGE)));
-	} else if (scales_with_lanes) {
-		block_range = std::max(
-				block_range, static_cast<int>(std::round((lanes * 3.5 - 1.0) / 2.0)));
-	}
-	block_range = std::clamp(block_range, 1, 8);
-	if (scale < 1.0)
-		block_range = std::max(1, static_cast<int>(std::floor(block_range * scale)));
-	return block_range;
+	return road_width::road_halves(highway_type, tags, scale).kerb;
 }
 
 int calculate_point_elevation(std::size_t distance, std::size_t total_distance,
@@ -2307,6 +2249,14 @@ void generate_highways_internal(crate::world_editor::WorldEditor &editor,
 			crate::bridge_styles::decorate_bridge_above_deck(editor, bridge_style,
 					bridge_surface, bridge_path, block_range, start_is_boundary,
 					end_is_boundary, bridge_pylons, bridge_cable_span);
+	}
+	if (editor.kerb_strips) {
+		for (const auto &cell : editor.kerb_strips->of(way.id)) {
+			const int x = cell.cell.first, z = cell.cell.second;
+			const int y = editor.get_absolute_y(cell.from.first, 0, cell.from.second);
+			const auto block = crate::surfaces::semirandom_surface(x, z, block_types);
+			editor.set_block_absolute(block, x, y, z, std::nullopt, protected_surfaces);
+		}
 	}
 }
 

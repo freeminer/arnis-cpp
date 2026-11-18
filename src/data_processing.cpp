@@ -81,6 +81,10 @@
 #include "element_processing/highway_tunnels.h"
 #include "element_processing/road_markings.h"
 #include "element_processing/traffic_lights.h"
+#include "element_processing/parking_lots.h"
+#include "survey/heights.h"
+#include "survey/elements.h"
+#include "element_processing/kerb_strips.h"
 #include "datapack/extras.h"
 #include "element_processing/cars.h"
 #include "element_processing/pedestrians.h"
@@ -1498,6 +1502,7 @@ std::optional<double> ground_fill_area(const ProcessedElement &element)
 				area_kind == element_processing::RelationArea::Golf ||
 				area_kind == element_processing::RelationArea::Grounds ||
 				area_kind == element_processing::RelationArea::Pool ||
+				area_kind == element_processing::RelationArea::Parking ||
 				(area_kind == element_processing::RelationArea::Landuse &&
 						element_processing::landuse_paints_ground(tags));
 		if (!draws_ground)
@@ -1875,12 +1880,11 @@ void generate_building_from_relation(WorldEditor &editor,
 		const std::unordered_set<std::uint64_t> *housing_relation_parts,
 		const railways::RailPassages *rail_passages);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
-		const ProcessedWay &element, const Args &args,
+		ProcessedWay element, const Args &args,
 		const std::optional<int> &relation_levels);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
-		const ProcessedWay &element, const Args &args,
-		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
-		const CoordinateBitmap &building_passages,
+		ProcessedWay element, const Args &args, const std::optional<int> &relation_levels,
+		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons,
 		std::optional<std::uint64_t> style_seed, const CoordinateBitmap *road_mask,
 		const CoordinateBitmap *building_footprints,
@@ -2155,13 +2159,36 @@ bool generate_world(WorldEditor &editor,
 	// prepared elements, footprints, or facade work independently of the parser.
 	static const std::vector<ProcessedElement> no_osm_elements;
 	const bool skip_osm = args.skip_osm();
-	const auto &generation_input = skip_osm ? no_osm_elements : input_elements;
+	const auto &parsed_generation_input = skip_osm ? no_osm_elements : input_elements;
+	std::vector<ProcessedElement> survey_height_elements;
+	const std::vector<ProcessedElement> *generation_input = &parsed_generation_input;
+	bool survey_heights_applied = false;
+	if (editor.ground && editor.ground->laser_heights_wanted() &&
+			!parsed_generation_input.empty()) {
+		survey_height_elements = parsed_generation_input;
+		const auto [survey_min_x, survey_min_z] = editor.get_min_coords();
+		const auto [survey_max_x, survey_max_z] = editor.get_max_coords();
+		const ::XZBBox survey_bbox(
+				survey_min_x, survey_min_z, survey_max_x, survey_max_z);
+		auto measured = survey::heights::apply(
+				survey_height_elements, *editor.ground, survey_bbox, args.scale);
+		// C++ callers currently provide one already-combined element set. Apply
+		// deferred saturated measurements after the input's existing height tags
+		// (including any Overture hints) have had precedence.
+		measured.filled += survey::heights::apply_deferred(
+				survey_height_elements, measured.deferred);
+		survey_heights_applied = measured.filled > 0;
+		if (measured.filled > 0)
+			std::cout << "  Measured heights for " << measured.filled
+					  << " buildings from laser scans\n";
+		generation_input = &survey_height_elements;
+	}
 	// Rust derives its footprint mask from the final element set and clipped
 	// generation bounds. Keep the legacy precomputed argument for ABI/source
 	// compatibility, but don't let its unpadded bounds truncate One World seams.
 	(void)input_building_footprints;
 	const PreparedBuildingData *generation_prepared_buildings =
-			skip_osm ? nullptr : prepared_buildings;
+			(skip_osm || survey_heights_applied) ? nullptr : prepared_buildings;
 	if ((skip_osm || !args.buildings) && facade_job) {
 		facade_job->cancel();
 		facade_job = nullptr;
@@ -2172,8 +2199,8 @@ bool generate_world(WorldEditor &editor,
 	std::vector<ProcessedElement> aircraft_filtered_elements;
 	std::size_t dropped_aircraft_buildings =
 			highways::drop_buildings_on_aircraft_pavement(
-					generation_input, aircraft_filtered_elements, args.scale);
-	const std::vector<ProcessedElement> *elements_source = &generation_input;
+					*generation_input, aircraft_filtered_elements, args.scale);
+	const std::vector<ProcessedElement> *elements_source = generation_input;
 	if (dropped_aircraft_buildings > 0) {
 		std::cout << "  Skipped " << dropped_aircraft_buildings
 				  << " building(s) on runways, taxiways and aprons\n";
@@ -2458,36 +2485,9 @@ bool generate_world(WorldEditor &editor,
 	cemetery::prepare(ordered_source_elements, cemetery_region);
 	if (!elements_prepared)
 		sort_elements_by_priority(ordered_source_elements);
-	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;
-	std::vector<ProcessedElement> building_filtered_elements = land_cover_elements;
-	mode_filter::retain_for_mode(
-			building_filtered_elements, GenerationMode::GeoTerrain, args.buildings);
-	// Prepare Rust-equivalent building suppression and part groups before any pass
-	// builds masks, footprints, or indexes from OSM tags.
-	std::optional<PreparedBuildingData> computed_buildings;
-	if (!args.buildings || !generation_prepared_buildings ||
-			dropped_aircraft_buildings > 0)
-		computed_buildings = prepare_building_data(building_filtered_elements);
-	const PreparedBuildingData &building_data =
-			args.buildings && generation_prepared_buildings &&
-							dropped_aircraft_buildings == 0
-					? *generation_prepared_buildings
-					: *computed_buildings;
-	std::vector<ProcessedElement> mode_filtered_elements = building_filtered_elements;
-	mode_filter::retain_for_mode(mode_filtered_elements, args.mode, args.buildings);
-	// Prepared host input already has Rust priority ordering; direct callers now
-	// retain that ordering through the full and mode-filtered views above.
-	const auto &elements = mode_filtered_elements;
-	// Build the authored-trunk index once per generation.  Ground decoration
-	// can then suppress only procedural crowns overlapping mapped trees, while
-	// preserving deterministic results for streamed tiles.
-	auto mapped_trunks = trees::mapped::MappedTrunks::collect(elements, args.scale);
-	// Ground may receive its shared canopy raster asynchronously below. Do not
-	// freeze the typical mapped-tree height before that fetch completes; Rust
-	// measures this index only after its Ground already owns the final canopy.
-	editor.mapped_trunks.reset();
-	editor.mapped_cranes = std::make_shared<const std::vector<std::pair<int, int>>>(
-			man_made::mapped_crane_points(elements));
+	// Survey-derived structures are Rust building sources, not a late rendering
+	// overlay: add them before footprints, suppression groups and mode filters are
+	// built so every downstream generation pass sees the same element set.
 	const auto geo = editor.geographic_bounds();
 	const double centre_lat = (geo[0] + geo[1]) * .5, centre_lon = (geo[2] + geo[3]) * .5;
 	auto [min_x, min_z] = editor.get_min_coords();
@@ -2518,6 +2518,60 @@ bool generate_world(WorldEditor &editor,
 			return false;
 		}
 	}
+	if (editor.ground && editor.ground->has_survey()) {
+		auto measured = survey::elements::candidates(*editor.ground, xzbbox);
+		const auto result = survey::elements::merge(std::move(measured),
+				ordered_source_elements, args.scale, [&](int x, int z) {
+					return editor.is_mapped_water(x, z) ||
+						   (editor.ground->has_land_cover() &&
+								   editor.ground->cover_class(editor.ground_point(
+										   x, z)) == land_cover::LC_WATER);
+				});
+		if (!result.first.empty()) {
+			std::cout << "  Added " << result.first.size()
+					  << " sheds, garages and pools from garden detail\n";
+			ordered_source_elements.insert(ordered_source_elements.end(),
+					std::make_move_iterator(result.first.begin()),
+					std::make_move_iterator(result.first.end()));
+			if (!elements_prepared)
+				sort_elements_by_priority(ordered_source_elements);
+			// Host-prepared suppression/index data predates these outlines.
+			generation_prepared_buildings = nullptr;
+		}
+		if (result.second > 0)
+			std::cout << "  Left out " << result.second
+					  << " garden features on roads, tracks, squares or car parks\n";
+	}
+	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;
+	std::vector<ProcessedElement> building_filtered_elements = land_cover_elements;
+	mode_filter::retain_for_mode(
+			building_filtered_elements, GenerationMode::GeoTerrain, args.buildings);
+	// Prepare Rust-equivalent building suppression and part groups before any pass
+	// builds masks, footprints, or indexes from OSM tags.
+	std::optional<PreparedBuildingData> computed_buildings;
+	if (!args.buildings || !generation_prepared_buildings ||
+			dropped_aircraft_buildings > 0)
+		computed_buildings = prepare_building_data(building_filtered_elements);
+	const PreparedBuildingData &building_data =
+			args.buildings && generation_prepared_buildings &&
+							dropped_aircraft_buildings == 0
+					? *generation_prepared_buildings
+					: *computed_buildings;
+	std::vector<ProcessedElement> mode_filtered_elements = building_filtered_elements;
+	mode_filter::retain_for_mode(mode_filtered_elements, args.mode, args.buildings);
+	// Prepared host input already has Rust priority ordering; direct callers now
+	// retain that ordering through the full and mode-filtered views above.
+	const auto &elements = mode_filtered_elements;
+	// Build the authored-trunk index once per generation.  Ground decoration
+	// can then suppress only procedural crowns overlapping mapped trees, while
+	// preserving deterministic results for streamed tiles.
+	auto mapped_trunks = trees::mapped::MappedTrunks::collect(elements, args.scale);
+	// Ground may receive its shared canopy raster asynchronously below. Do not
+	// freeze the typical mapped-tree height before that fetch completes; Rust
+	// measures this index only after its Ground already owns the final canopy.
+	editor.mapped_trunks.reset();
+	editor.mapped_cranes = std::make_shared<const std::vector<std::pair<int, int>>>(
+			man_made::mapped_crane_points(elements));
 	auto own_rect = cartesian::XZBBox::rect_from_min_max(min_x, min_z, max_x, max_z);
 	if (args.one_world_run && args.one_world_run->unit) {
 		const auto &lease = *args.one_world_run->unit;
@@ -2974,9 +3028,31 @@ bool generate_world(WorldEditor &editor,
 	if (editor.ground)
 		editor.ground->warm_water_blend();
 	auto road_mask_owner =
-			std::make_shared<const RoadMaskBitmap>(highways::collect_road_surface_coords(
+			std::make_shared<RoadMaskBitmap>(highways::collect_road_surface_coords(
 					elements, editor, clip_bbox, args.scale, args.water_detail));
-	const auto &road_mask = *road_mask_owner;
+	auto &road_mask = *road_mask_owner;
+	// Build sidewalk-to-road strips from the same tagged geometry and final masks
+	// consumed by rendering. Fold their cells into the shared road mask before
+	// vegetation, water and subsequent feature placement read sealed surfaces.
+	auto sealed = flood_fill_cache.collect_sealed_surfaces(elements, road_mask);
+	const auto &strip_blockers = sealed ? *sealed : road_mask;
+	const auto kerb_ways = element_processing::kerb_strips::KerbWays::stamp(
+			elements, editor, clip_bbox, args.scale);
+	auto kerb_strips =
+			std::make_shared<const element_processing::kerb_strips::KerbStrips>(
+					kerb_ways.strips(editor, args.scale, road_mask, building_footprints,
+							strip_blockers));
+	for (const auto &[x, z] : kerb_strips->cells()) {
+		road_mask.set(x, z);
+		if (sealed)
+			sealed->set(x, z);
+	}
+	editor.set_kerb_strips(kerb_strips);
+	struct KerbStripsScope
+	{
+		WorldEditor &editor;
+		~KerbStripsScope() { editor.release_kerb_strips(); }
+	} kerb_strips_scope{editor};
 	auto carriageway_owner = std::make_shared<const CoordinateBitmap>(
 			highways::collect_carriageway_coords(elements, xzbbox, args.scale));
 	editor.set_carriageway(carriageway_owner);
@@ -3019,7 +3095,6 @@ bool generate_world(WorldEditor &editor,
 			barriers::RoadClearance::build(elements, editor, args.scale, road_mask_owner);
 	// Share the road bitmap when no additional paved area contributes cells.
 	// The scope guard releases the generation mask on every exit path.
-	auto sealed = flood_fill_cache.collect_sealed_surfaces(elements, road_mask);
 	editor.set_sealed_surface(
 			sealed ? std::make_shared<const CoordinateBitmap>(std::move(*sealed))
 				   : road_mask_owner);
@@ -4345,6 +4420,20 @@ bool generate_world(WorldEditor &editor,
 					swimming_pools::generate_relation(editor, rel, args, flood_fill_cache,
 							building_footprints, road_mask);
 					break;
+				case element_processing::RelationArea::Parking: {
+					const InnerRings inners(rel);
+					for (const auto &member : rel.members) {
+						if (member.role != ProcessedMemberRole::Outer || !member.way)
+							continue;
+						const auto holes = flood_fill_cache.holes_in(
+								*member.way, inners, args.timeout);
+						ProcessedWay lot = *member.way;
+						lot.tags = rel.tags;
+						element_processing::parking_lots::generate_parking_lot(editor,
+								lot, args, flood_fill_cache, holes ? &*holes : nullptr);
+					}
+					break;
+				}
 				case element_processing::RelationArea::ManMade:
 					man_made::generate_man_made(editor, ProcessedElement(rel), args,
 							flood_fill_cache, building_footprints);

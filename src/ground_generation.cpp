@@ -2,6 +2,7 @@
 
 #include "block_definitions.h"
 #include "element_processing/tree.h"
+#include "survey/place.h"
 #include "element_processing/bush.h"
 #include "element_processing/swimming_pools.h"
 #include "element_processing/field_texture.h"
@@ -1155,6 +1156,29 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								climate_under = STONE;
 							else if (!climate_under)
 								climate_under = DIRT;
+							std::optional<survey::Cell> survey_owned;
+							if (editor.ground && editor.ground->has_survey()) {
+								survey_owned = editor.ground->survey_cell(relative);
+								if (survey_owned &&
+										((has_cover &&
+												 !survey::claims_cover(cover_here)) ||
+												steep_override || talus_block ||
+												blend_is_water ||
+												building_footprints.contains(x, z) ||
+												editor.surface_is_sealed(x, z) ||
+												editor.block_exists_absolute(
+														x, ground_y, z)))
+									survey_owned.reset();
+							}
+							if (survey_owned) {
+								auto measured = survey::ground_blocks(
+										*survey_owned, x, z, cover_here);
+								if (measured) {
+									surface = measured->first;
+									climate_under = measured->second;
+									cropland_plot.reset();
+								}
+							}
 							// Select snow before the protected/absent-only surface write, so
 							// mapped roads and structures are not overwritten by a later cap.
 							if ((snow.is_block() ||
@@ -1279,16 +1303,31 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 								}
 							}
 
+							if (survey_owned) {
+								survey::place_objects(
+										editor, *survey_owned, x, ground_y, z);
+								if (survey_owned->kind == survey::Kind::Lawn &&
+										!editor.surface_is_sealed(x, z) &&
+										surface::takes_wild_plants(surface) &&
+										!editor.block_exists_absolute(
+												x, ground_y + 1, z) &&
+										survey::lawn_tuft(x, z))
+									editor.set_block_absolute(GRASS, x, ground_y + 1, z,
+											std::nullopt, std::nullopt);
+							}
 							if (!place_esa_water && has_cover &&
 									!editor.check_for_block_type_absolute(
 											x, ground_y, z, WATER))
-								maybe_place_vegetation(editor, x, ground_y, z,
-										building_footprints, xzbbox.min_x(),
-										xzbbox.min_z(), tunnel_footprint, bridge_surface,
-										args.scale, slope, forest_fern_share, floored,
-										tree_spacing, schematic_trees,
-										cropland.has_value(),
-										cropland_plot ? &cropland_plot->first : nullptr);
+								if (!survey_owned ||
+										survey_owned->kind == survey::Kind::Tree)
+									maybe_place_vegetation(editor, x, ground_y, z,
+											building_footprints, xzbbox.min_x(),
+											xzbbox.min_z(), tunnel_footprint,
+											bridge_surface, args.scale, slope,
+											forest_fern_share, floored, tree_spacing,
+											schematic_trees, cropland.has_value(),
+											cropland_plot ? &cropland_plot->first
+														  : nullptr);
 						}
 					}
 

@@ -7,8 +7,10 @@
 #include <cstdint>
 #include <cstdlib>
 #include <filesystem>
+#include <iomanip>
 #include <limits>
 #include <optional>
+#include <sstream>
 #include <string>
 #include <string_view>
 #include <utility>
@@ -26,6 +28,7 @@
 #include "caves_biomes.h"
 #include "climate.h"
 #include "fm_ll_shapes.h"
+#include "survey/survey.h"
 
 namespace arnis
 {
@@ -155,6 +158,7 @@ inline constexpr double MIN_SCALE = 0.05;
 inline constexpr double MAX_SCALE = 4.0;
 inline constexpr double MIN_HEIGHT_MULTIPLIER = 0.1;
 inline constexpr double MAX_HEIGHT_MULTIPLIER = 10.0;
+inline constexpr double LASER_MIN_SCALE = 0.75;
 inline constexpr std::int64_t DEFAULT_WORLD_TIME = 6000;
 inline constexpr std::int64_t MIDNIGHT_TICKS = 18000;
 inline constexpr int DISASTER_GROUND_LEVEL = -40;
@@ -417,6 +421,7 @@ struct Args
 			return;
 		winter = false;
 		post_apocalyptic = false;
+		lidar = false;
 		scale = celestial_world_scale(body);
 		mode = GenerationMode::TerrainOnly;
 		world_type = WorldType::Void;
@@ -544,6 +549,38 @@ struct Args
 
 	bool legacy_trees{false};
 	bool canopy_height{true};
+	// Optional regional airborne-laser features. The C++ library can receive a
+	// SurveyData grid through Ground; these options mirror Rust's request policy.
+	bool lidar{false};
+	bool garden_detail{true};
+	bool measured_trees{true};
+	bool measured_heights{true};
+	std::uint32_t lidar_max_mb{1000};
+	std::optional<survey::Features> lidar_features() const
+	{
+		const survey::Features features{garden_detail, measured_trees, measured_heights};
+		return lidar && (features.garden || features.trees || features.heights) &&
+							   !lidar_off_reason()
+					   ? std::optional<survey::Features>(features)
+					   : std::nullopt;
+	}
+	std::optional<std::string> lidar_off_reason() const
+	{
+		if (!lidar)
+			return std::nullopt;
+		if (!is_earth(body))
+			return "it is the Earth's only";
+		if (one_world_enabled())
+			return "One World does not use it";
+		if (scale < LASER_MIN_SCALE) {
+			std::ostringstream message;
+			message << "it needs a scale of " << LASER_MIN_SCALE
+					<< " or more, and this run's is " << std::fixed
+					<< std::setprecision(2) << scale;
+			return message.str();
+		}
+		return std::nullopt;
+	}
 	bool overture{true};
 	bool use_3d{true};
 	std::optional<structures::PropSet> props;

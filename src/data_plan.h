@@ -7,6 +7,15 @@
 #include <string>
 #include <vector>
 
+namespace arnis
+{
+struct Args;
+namespace geographic
+{
+class LLBBox;
+}
+} // namespace arnis
+
 namespace arnis::data_plan
 {
 struct Item
@@ -39,6 +48,10 @@ Item count_files(std::string source, const std::vector<std::filesystem::path> &f
 		std::uint64_t typical_bytes);
 DataPlan count_cache(
 		const std::filesystem::path &root, const std::vector<SourceFiles> &sources);
+// Add the optional regional-laser inventory using the same cache-only area
+// estimate as survey generation. `root` is the shared Arnis cache root.
+void add_survey_item(DataPlan &plan, const std::filesystem::path &root, const Args &args,
+		const geographic::LLBBox &bbox);
 std::optional<std::uint64_t> free_bytes(const std::filesystem::path &path);
 
 std::uint64_t region_bake_bytes(std::uint64_t pbf_bytes, double selection_share);

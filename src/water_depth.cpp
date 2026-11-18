@@ -1,5 +1,6 @@
 #include "water_depth.h"
 #include "water_detail.h"
+#include "../../voxelibre_placement.h"
 
 #include <algorithm>
 #include <array>
@@ -376,6 +377,10 @@ void place_underwater_vegetation(
 					static_cast<int>(static_cast<long long>(avail) * share / 100), 3,
 					avail);
 			const int plant_top = plant_bottom + used;
+			if (voxelibre::ocean.kelp_enabled) {
+				voxelibre::place_kelp(editor, voxelibre::ocean, x, bed_top, z, used);
+				return;
+			}
 			for (int y = plant_bottom; y < plant_top; ++y)
 				editor.set_block_absolute(KELP_PLANT, x, y, z, std::nullopt,
 						std::optional<std::vector<Block>>({AIR}));
@@ -395,6 +400,10 @@ void place_underwater_vegetation(
 		return;
 
 	const int pick = static_cast<int>(land_cover::coord_hash(x + 211, z + 73) % 100);
+	if (pick < 85 && voxelibre::seagrass.enabled) {
+		voxelibre::place_seagrass(editor, voxelibre::seagrass, x, bed_top, z);
+		return;
+	}
 	if (pick < 50) {
 		editor.set_block_absolute(SEAGRASS, x, plant_y, z, std::nullopt,
 				std::optional<std::vector<Block>>({AIR}));
@@ -404,6 +413,11 @@ void place_underwater_vegetation(
 		editor.set_block_absolute(TALL_SEAGRASS_TOP, x, plant_y + 1, z, std::nullopt,
 				std::optional<std::vector<Block>>({AIR}));
 	} else {
+		if (voxelibre::ocean.pickle_enabled) {
+			voxelibre::place_rooted(editor, voxelibre::ocean.pickle, 0,
+					voxelibre::ocean.water, x, bed_top, z);
+			return;
+		}
 		editor.set_block_absolute(SEA_PICKLE, x, plant_y, z, std::nullopt,
 				std::optional<std::vector<Block>>({AIR}));
 	}
@@ -415,6 +429,10 @@ void place_river_grass(WorldEditor &editor, int x, int z, int water_y, int bed_y
 	if (meadow < .72 || land_cover::coord_hash(x + 17, z + 31) % 10 >= 5)
 		return;
 	const int y = bed_y + 1;
+	if (y < water_y && voxelibre::seagrass.enabled) {
+		voxelibre::place_seagrass(editor, voxelibre::seagrass, x, bed_y, z);
+		return;
+	}
 	if (y + 1 < water_y && land_cover::coord_hash(x + 211, z + 73) % 100 < 35) {
 		editor.set_block_absolute(TALL_SEAGRASS_BOTTOM, x, y, z, std::nullopt,
 				std::optional<std::vector<Block>>({AIR}));

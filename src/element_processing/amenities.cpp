@@ -19,6 +19,7 @@
 #include "road_mask_search.h"
 #include "street_furniture.h"
 #include "bridges.h"
+#include "parking_lots.h"
 #include "../strict_parse.h"
 
 namespace arnis
@@ -331,6 +332,13 @@ void generate_amenities(crate::world_editor::WorldEditor &editor,
 	if (it_amenity == tags.end())
 		return;
 	const std::string &amenity_type = it_amenity->second;
+	if (amenity_type == "parking") {
+		if (element_processing::parking_lots::is_surface_lot(element.tags()) &&
+				element.is_way())
+			element_processing::parking_lots::generate_parking_lot(
+					editor, element.as_way(), args, flood_fill_cache);
+		return;
+	}
 
 	std::optional<crate::coordinate_system::cartesian::XZPoint> first_node = std::nullopt;
 	if (const auto node = element.first_node(); node.has_value())

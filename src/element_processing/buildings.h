@@ -135,9 +135,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		const ProcessedWay &element, const Args &args,
 		const std::optional<int> &relation_levels);
 std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *editor,
-		const ProcessedWay &element, const Args &args,
-		const std::optional<int> &relation_levels, const FloodFillCache &flood_fill_cache,
-		const CoordinateBitmap &building_passages,
+		ProcessedWay element, const Args &args, const std::optional<int> &relation_levels,
+		const FloodFillCache &flood_fill_cache, const CoordinateBitmap &building_passages,
 		const std::vector<HolePolygon> *hole_polygons = nullptr,
 		std::optional<std::uint64_t> style_seed = std::nullopt,
 		const CoordinateBitmap *road_mask = nullptr,

@@ -8,6 +8,7 @@
 #include "block_definitions.h"
 #include "world_editor/floor_state.h"
 #include "../../arnis_world_editor.h"
+#include "../../voxelibre_placement.h"
 #include <algorithm>
 #include <array>
 #include <cmath>
@@ -986,6 +987,15 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 											  : GRAVEL;
 			editor.set_block_absolute(bed, x, y - 1, z, rock_options, std::nullopt);
 			const auto growth = decor_hash(x, y, z, decoration_seed ^ 0xC0A2) % 1000;
+			if (growth >= 300 && growth < 360 && voxelibre::ocean.pickle_enabled) {
+				voxelibre::place_rooted(editor, voxelibre::ocean.pickle, 0,
+						voxelibre::ocean.water, x, y - 1, z);
+				continue;
+			}
+			if (growth >= 360 && growth < 450 && voxelibre::seagrass.enabled) {
+				voxelibre::place_seagrass(editor, voxelibre::seagrass, x, y - 1, z);
+				continue;
+			}
 			Block growth_block = AIR;
 			if (growth < 90)
 				growth_block =
@@ -999,7 +1009,21 @@ void decorate_region(world_editor::WorldEditor &editor, const CaveRect &region,
 				growth_block = SEA_PICKLE;
 			else if (growth < 450)
 				growth_block = SEAGRASS;
-			if (growth_block != AIR)
+			bool rooted = false;
+			if (voxelibre::ocean.enabled && growth >= 90 && growth < 300) {
+				const auto &nodes =
+						growth < 210 ? voxelibre::ocean.fans : voxelibre::ocean.corals;
+				for (const auto &node : nodes) {
+					if (node.id() != CONTENT_IGNORE && node.id() != CONTENT_AIR &&
+							growth_block.id() == node.id()) {
+						voxelibre::place_rooted(editor, node, growth < 210 ? 4 : 1,
+								voxelibre::ocean.water, x, y - 1, z);
+						rooted = true;
+						break;
+					}
+				}
+			}
+			if (!rooted && growth_block != AIR)
 				editor.set_block_absolute(
 						growth_block, x, y, z, std::vector<Block>{WATER}, std::nullopt);
 		}

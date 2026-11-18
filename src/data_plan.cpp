@@ -1,5 +1,10 @@
 #include "data_plan.h"
 
+#include "args.h"
+#include "coordinate_system/geographic/llbbox.h"
+#include "survey/laser_cache.h"
+#include "survey/plan.h"
+
 #include <algorithm>
 #include <cmath>
 #include <functional>
@@ -79,6 +84,41 @@ DataPlan count_cache(
 		plan.items.push_back(
 				count_files(source.source, source.files, source.typical_bytes));
 	return plan;
+}
+
+void add_survey_item(DataPlan &plan, const std::filesystem::path &root, const Args &args,
+		const geographic::LLBBox &bbox)
+{
+	const auto features = args.lidar_features();
+	if (!features)
+		return;
+
+	const auto laser_root = root / "laser";
+	auto survey_plan = survey::plan_in(laser_root, bbox);
+	if (!survey_plan)
+		return;
+	const auto need_mb = survey_plan->need_mb(laser_root, *features);
+	if (survey_plan->too_large() || need_mb > args.lidar_max_mb)
+		return;
+
+	Item item;
+	item.source = "laser";
+	item.total = survey_plan->tiles.size();
+	item.cached = item.total - survey_plan->missing.size();
+	for (const auto &tile : survey_plan->tiles) {
+		if (std::find(survey_plan->missing.begin(), survey_plan->missing.end(), tile) !=
+				survey_plan->missing.end())
+			continue;
+		std::error_code ec;
+		const auto size = std::filesystem::file_size(
+				survey::laser_cache::cache_path(
+						laser_root, survey_plan->sheet, tile.first, tile.second),
+				ec);
+		if (!ec)
+			item.cached_bytes = saturated_add(item.cached_bytes, size);
+	}
+	item.missing_bytes = static_cast<std::uint64_t>(need_mb) * 1'000'000;
+	plan.items.push_back(std::move(item));
 }
 
 std::optional<std::uint64_t> free_bytes(const std::filesystem::path &path)
