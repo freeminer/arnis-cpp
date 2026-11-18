@@ -14,6 +14,10 @@
 #include <string_view>
 #include <thread>
 
+#if __EMSCRIPTEN__
+#undef write
+#endif
+
 namespace arnis::survey::fetch
 {
 namespace
