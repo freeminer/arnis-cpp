@@ -2,6 +2,7 @@
 
 #include "../cache_root.h"
 #include "laser_cache.h"
+#include "photo.h"
 #include "survey.h"
 
 #include <algorithm>
@@ -88,9 +89,7 @@ std::uint64_t photo_bytes(const std::filesystem::path &root, const Plan &plan)
 	const auto [e0, n0, e1, n1] = plan.rect;
 	std::uint64_t bytes = 0;
 	for (const auto &[east, north] : plan.tiles) {
-		const auto cache =
-				root / plan.sheet.cache_dir() /
-				("photo_" + std::to_string(east) + "_" + std::to_string(north) + ".bin");
+		const auto cache = photo::cache_path(root, plan.sheet, east, north);
 		std::error_code ec;
 		if (std::filesystem::exists(cache, ec) && !ec)
 			continue;

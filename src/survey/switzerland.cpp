@@ -104,7 +104,7 @@ std::variant<TileUrls, std::string> lookup(const Sheet &, const Rect &r)
 		  << std::fixed << std::setprecision(6) << west << ',' << south << ',' << east
 		  << ',' << north << "&limit=100";
 	std::optional<std::string> next = first.str();
-	using Rank = std::tuple<int, std::string, std::string>;
+	using Rank = std::tuple<int, std::string, std::string, std::string>;
 	std::map<Tile, Rank> newest;
 	for (unsigned page = 0; next && page < 10; ++page) {
 		auto request = std::move(*next);
@@ -154,7 +154,7 @@ std::variant<TileUrls, std::string> lookup(const Sheet &, const Rect &r)
 				auto href = copc ? copc : zip;
 				if (!href)
 					continue;
-				Rank rank{copc ? 1 : 0, year, *href};
+				Rank rank{copc ? 1 : 0, year, *href, zip.value_or(std::string{})};
 				auto it = newest.find(tile);
 				if (it == newest.end() || it->second < rank)
 					newest[tile] = std::move(rank);
@@ -168,8 +168,12 @@ std::variant<TileUrls, std::string> lookup(const Sheet &, const Rect &r)
 				}
 	}
 	TileUrls out;
-	for (const auto &[tile, rank] : newest)
+	for (const auto &[tile, rank] : newest) {
 		out.emplace_back(tile, std::get<2>(rank));
+		const auto &fallback = std::get<3>(rank);
+		if (!fallback.empty() && fallback != std::get<2>(rank))
+			out.emplace_back(tile, fallback);
+	}
 	return out;
 }
 } // namespace

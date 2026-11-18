@@ -9,6 +9,7 @@
 #include <vector>
 
 #include "../grid_ops.h"
+#include "photo.h"
 
 namespace arnis::survey
 {

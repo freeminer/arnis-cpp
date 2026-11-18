@@ -31,7 +31,10 @@ int outward_side(const std::vector<ProcessedNode> &nodes)
 std::pair<int, int> normal(const ProcessedNode &a, const ProcessedNode &b, int outward)
 {
 	const int dx = b.x - a.x, dz = b.z - a.z;
-	return {-dz * outward, dx * outward};
+	const int nx = -dz * outward, nz = dx * outward;
+	if (std::abs(nx) >= std::abs(nz))
+		return {nx < 0 ? -1 : nx > 0 ? 1 : 0, 0};
+	return {0, nz < 0 ? -1 : nz > 0 ? 1 : 0};
 }
 
 CellSet own_and_outline(const std::vector<ProcessedNode> &nodes,
@@ -356,13 +359,13 @@ std::optional<std::pair<std::vector<bool>, OutlineInset>> decide(
 						   const std::vector<bool> &step_flags)
 			-> std::optional<std::pair<std::vector<bool>, OutlineInset>> {
 		auto first = inset_with(nodes, own, outline, near_flags);
+		if (!first)
+			return std::nullopt;
 		if (step_flags == near_flags)
-			return first ? std::optional(std::pair{near_flags, std::move(*first)})
-						 : std::nullopt;
+			return std::pair{near_flags, std::move(*first)};
 		if (auto inset = inset_with(nodes, own, outline, step_flags))
 			return std::pair{step_flags, std::move(*inset)};
-		return first ? std::optional(std::pair{near_flags, std::move(*first)})
-					 : std::nullopt;
+		return std::nullopt;
 	};
 	if (auto result = attempt(near, step))
 		return result;

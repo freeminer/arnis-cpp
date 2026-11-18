@@ -8,6 +8,7 @@
 #include <atomic>
 #include <chrono>
 #include <cctype>
+#include <fstream>
 #include <limits>
 #include <mutex>
 #include <string_view>
@@ -23,6 +24,7 @@ std::atomic<std::uint64_t> laser_total{0}, photo_total{0}, laser_area{0};
 std::atomic<std::uint64_t> laser_limit{std::numeric_limits<std::uint64_t>::max()};
 thread_local bool photo_thread = false;
 std::mutex pacing_mutex;
+std::mutex laser_budget_mutex;
 std::optional<Clock::time_point> next_start;
 
 struct Response
@@ -32,6 +34,14 @@ struct Response
 	long status = 0;
 	std::size_t body_limit = static_cast<std::size_t>(MAX_BODY);
 	bool too_large = false;
+};
+
+struct FileResponse
+{
+	std::ofstream *output = nullptr;
+	std::uint64_t bytes = 0;
+	bool past_limit = false;
+	bool write_failed = false;
 };
 
 size_t write_body(char *data, size_t size, size_t count, void *opaque)
@@ -45,6 +55,27 @@ size_t write_body(char *data, size_t size, size_t count, void *opaque)
 	}
 	const auto *first = reinterpret_cast<const std::uint8_t *>(data);
 	response.body.insert(response.body.end(), first, first + bytes);
+	return bytes;
+}
+
+size_t write_file(char *data, size_t size, size_t count, void *opaque)
+{
+	if (size && count > std::numeric_limits<std::size_t>::max() / size)
+		return 0;
+	const auto bytes = size * count;
+	auto &response = *static_cast<FileResponse *>(opaque);
+	std::lock_guard budget_lock(laser_budget_mutex);
+	if (bytes > remaining_laser_bytes()) {
+		response.past_limit = true;
+		return 0;
+	}
+	laser_total.fetch_add(bytes, std::memory_order_relaxed);
+	response.output->write(data, static_cast<std::streamsize>(bytes));
+	if (!*response.output) {
+		response.write_failed = true;
+		return 0;
+	}
+	response.bytes += bytes;
 	return bytes;
 }
 
@@ -235,7 +266,59 @@ Result<std::vector<std::uint8_t>> get(const std::string &url,
 	}
 	return Failure{Failure::Kind::Other, "server busy"};
 }
+
+Result<std::uint64_t> download_file_impl(
+		const std::string &url, const std::filesystem::path &destination)
+{
+	try {
+		auto permit = net::request_permit("survey " + url);
+		std::ofstream output(destination, std::ios::binary | std::ios::trunc);
+		if (!output)
+			return Failure{Failure::Kind::Other, "cannot create " + destination.string()};
+		FileResponse response{&output};
+		using Curl = std::unique_ptr<CURL, decltype(&curl_easy_cleanup)>;
+		Curl curl(curl_easy_init(), &curl_easy_cleanup);
+		if (!curl)
+			return Failure{Failure::Kind::Other, "curl initialization failed"};
+		curl_easy_setopt(curl.get(), CURLOPT_URL, url.c_str());
+		curl_easy_setopt(curl.get(), CURLOPT_WRITEFUNCTION, write_file);
+		curl_easy_setopt(curl.get(), CURLOPT_WRITEDATA, &response);
+		curl_easy_setopt(curl.get(), CURLOPT_USERAGENT, "arnis/1.0");
+		curl_easy_setopt(curl.get(), CURLOPT_ACCEPT_ENCODING, "identity");
+		curl_easy_setopt(curl.get(), CURLOPT_FOLLOWLOCATION, 1L);
+		curl_easy_setopt(curl.get(), CURLOPT_CONNECTTIMEOUT, 15L);
+		curl_easy_setopt(curl.get(), CURLOPT_TIMEOUT, 0L);
+		curl_easy_setopt(curl.get(), CURLOPT_LOW_SPEED_LIMIT, 1L);
+		curl_easy_setopt(curl.get(), CURLOPT_LOW_SPEED_TIME, 60L);
+		curl_easy_setopt(curl.get(), CURLOPT_NOSIGNAL, 1L);
+		curl_easy_setopt(curl.get(), CURLOPT_FAILONERROR, 1L);
+		const auto result = curl_easy_perform(curl.get());
+		long status = 0;
+		curl_easy_getinfo(curl.get(), CURLINFO_RESPONSE_CODE, &status);
+		output.flush();
+		if (response.past_limit)
+			return Failure{Failure::Kind::Other, PAST_LIMIT};
+		if (response.write_failed || !output)
+			return Failure{Failure::Kind::Other, "failed writing LAS download"};
+		if (status == 403 || status == 404)
+			return Failure{Failure::Kind::Missing, "not found"};
+		if (result != CURLE_OK)
+			return Failure{Failure::Kind::Other,
+					transport_kind(result) + ": " + curl_easy_strerror(result)};
+		if (status < 200 || status >= 300)
+			return Failure{Failure::Kind::Other, "HTTP " + std::to_string(status)};
+		return response.bytes;
+	} catch (const std::exception &error) {
+		return Failure{Failure::Kind::Other, error.what()};
+	}
+}
 } // namespace
+
+Result<std::uint64_t> download_file(
+		const std::string &url, const std::filesystem::path &destination)
+{
+	return download_file_impl(url, destination);
+}
 
 std::string Failure::to_string() const
 {
@@ -258,9 +341,19 @@ std::uint64_t photo_bytes()
 {
 	return photo_total.load(std::memory_order_relaxed);
 }
-void for_photos()
+std::uint64_t remaining_laser_bytes()
+{
+	const auto limit = laser_limit.load(std::memory_order_relaxed);
+	const auto used = laser_bytes() + photo_bytes();
+	return used >= limit ? 0 : limit - used;
+}
+PhotoRequestScope::PhotoRequestScope() : was_photo_thread_(photo_thread)
 {
 	photo_thread = true;
+}
+PhotoRequestScope::~PhotoRequestScope()
+{
+	photo_thread = was_photo_thread_;
 }
 void limit_laser_bytes(std::uint64_t bytes)
 {
