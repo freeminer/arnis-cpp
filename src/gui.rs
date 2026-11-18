@@ -388,6 +388,8 @@ struct LiveStartOptions {
     world_name: String,
     version: Option<String>,
     view_distance: u32,
+    #[serde(default)]
+    lan: bool,
     accept_eula: bool,
     bbox_text: Option<String>,
     spawn_point: Option<(f64, f64)>,
@@ -403,6 +405,11 @@ struct LiveStartOptions {
     max_tree_size: String,
     field_preset: String,
     canopy_height_enabled: bool,
+    lidar_enabled: bool,
+    garden_detail_enabled: bool,
+    measured_trees_enabled: bool,
+    measured_heights_enabled: bool,
+    lidar_max_mb: u32,
     overture_enabled: bool,
     use_3d_enabled: bool,
     aws_only_elevation: bool,
@@ -492,6 +499,11 @@ fn gui_live_start(options: LiveStartOptions) -> Result<(), String> {
         &options.field_preset,
     );
     args.canopy_height = options.canopy_height_enabled;
+    args.lidar = options.lidar_enabled;
+    args.garden_detail = options.garden_detail_enabled;
+    args.measured_trees = options.measured_trees_enabled;
+    args.measured_heights = options.measured_heights_enabled;
+    args.lidar_max_mb = options.lidar_max_mb;
     args.overture = options.overture_enabled;
     args.use_3d = options.use_3d_enabled;
     args.aws_only_elevation = options.aws_only_elevation;
@@ -516,6 +528,7 @@ fn gui_live_start(options: LiveStartOptions) -> Result<(), String> {
         version: options.version.filter(|v| !v.trim().is_empty()),
         view_distance: options.view_distance.clamp(4, 32),
         port: None,
+        lan: options.lan,
         messages: options.messages,
     };
     let notify = std::sync::Arc::new(|s: &crate::live::Status| progress::emit_live_status(s));
@@ -1286,6 +1299,7 @@ fn cache_size_string() -> String {
     let mut total = dir_size_bytes(&get_base_cache_dir());
     total = total.saturating_add(dir_size_bytes(&crate::land_cover::land_cover_cache_dir()));
     total = total.saturating_add(dir_size_bytes(&crate::canopy::canopy_cache_dir()));
+    total = total.saturating_add(dir_size_bytes(&crate::survey::cache_root()));
     // Its own root beside the tile cache, and Clear Cache deletes it.
     total = total.saturating_add(dir_size_bytes(&crate::overture::cache_root()));
     for d in [crate::osm_tiles::cache_root(), crate::osm_pbf::cache_dir()]
@@ -1366,6 +1380,7 @@ fn clear_tile_caches_now() -> Result<String, String> {
     let combined = clear_all_cached_tiles()
         .combined(clear_land_cover_cache())
         .combined(crate::canopy::clear_canopy_cache())
+        .combined(crate::survey::clear_cache())
         .combined(crate::overture::clear_overture_cache())
         .combined(crate::osm_tiles::clear_osm_tiles_cache())
         .combined(crate::osm_pbf::clear_osm_pbf_cache())
@@ -2437,6 +2452,11 @@ fn gui_data_plan(
     terrain_enabled: bool,
     skip_osm_objects: bool,
     canopy_height_enabled: bool,
+    lidar_enabled: bool,
+    garden_detail_enabled: bool,
+    measured_trees_enabled: bool,
+    measured_heights_enabled: bool,
+    lidar_max_mb: u32,
     overture_enabled: bool,
     aws_only_elevation: bool,
     flags: Vec<String>,
@@ -2452,6 +2472,11 @@ fn gui_data_plan(
         crate::args::GenerationMode::GeoOnly
     };
     args.canopy_height = canopy_height_enabled;
+    args.lidar = lidar_enabled;
+    args.garden_detail = garden_detail_enabled;
+    args.measured_trees = measured_trees_enabled;
+    args.measured_heights = measured_heights_enabled;
+    args.lidar_max_mb = lidar_max_mb;
     args.overture = overture_enabled;
     args.aws_only_elevation = aws_only_elevation;
     let bbox = LLBBox::from_str(&bbox_text)?;
@@ -2692,6 +2717,11 @@ fn gui_start_generation(
     max_tree_size: String,
     field_preset: String,
     canopy_height_enabled: bool,
+    lidar_enabled: bool,
+    garden_detail_enabled: bool,
+    measured_trees_enabled: bool,
+    measured_heights_enabled: bool,
+    lidar_max_mb: u32,
     overture_enabled: bool,
     use_3d_enabled: bool,
     disable_height_limit: bool,
@@ -3078,6 +3108,11 @@ fn gui_start_generation(
                     &field_preset,
                 ),
                 canopy_height: canopy_height_enabled,
+                lidar: lidar_enabled,
+                garden_detail: garden_detail_enabled,
+                measured_trees: measured_trees_enabled,
+                measured_heights: measured_heights_enabled,
+                lidar_max_mb,
                 overture: overture_enabled,
                 // Auto picks whichever transport is cheaper for the area. The
                 // two are not bit-identical - tiles quantise coordinates to a
@@ -3611,35 +3646,41 @@ fn gui_start_generation(
                         &crate::projection::ProjectionSpec::from_args(&args),
                     );
 
-                    let overture::OvertureData {
-                        elements: overture_elements,
-                        hints: overture_hints,
-                        ..
-                    } = overture_data;
-
-                    // Fill height/levels on OSM buildings that have neither
-                    overture_hints.apply(&mut parsed_elements);
-
-                    // Merge supplementary Overture buildings against parsed OSM
-                    if !overture_elements.is_empty() {
-                        let unique_overture =
-                            overture::deduplicate_against_osm(overture_elements, &parsed_elements);
-                        parsed_elements.extend(unique_overture);
-                    }
+                    // The same merge as run_cli: measured heights, Overture, garden buildings.
+                    crate::building_sources::merge(
+                        &mut parsed_elements,
+                        overture_data,
+                        &ground,
+                        &xzbbox,
+                        args.overture && !args.skip_objects(),
+                        args.scale,
+                    );
 
                     osm_parser::sort_by_priority(&mut parsed_elements);
 
                     let mut ground = ground;
 
+                    // Where line waterways are piped under roads; the masks skip it too.
+                    ground.pipe_channels_under_roads(&parsed_elements, &xzbbox, &args);
                     // OSM water override first, then bridge repair.
-                    ground.apply_osm_water_override(&parsed_elements, &xzbbox);
+                    ground.apply_osm_water_override(
+                        &parsed_elements,
+                        &xzbbox,
+                        args.scale,
+                        args.water.water_detail.channel_width_cap(args.scale),
+                    );
                     overture::drop_footprints_in_water(
                         &mut parsed_elements,
                         &ground,
                         &xzbbox,
                         args.scale,
                     );
-                    ground.apply_osm_land_override(&parsed_elements, &xzbbox, args.scale);
+                    ground.apply_osm_land_override(
+                        &parsed_elements,
+                        &xzbbox,
+                        args.scale,
+                        args.water.water_detail.channel_width_cap(args.scale),
+                    );
                     ground.apply_bridge_land_cover_repair(&parsed_elements, &xzbbox, args.scale);
                     ground.finish_land_cover(args.mode);
 

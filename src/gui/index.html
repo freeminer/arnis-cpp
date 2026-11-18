@@ -91,6 +91,8 @@
     <symbol id="i-flask" viewBox="0 0 24 24"><path d="M10 2v7.527a2 2 0 0 1-.211.896L4.72 20.55a1 1 0 0 0 .9 1.45h12.76a1 1 0 0 0 .9-1.45l-5.069-10.127A2 2 0 0 1 14 9.527V2"/><path d="M8.5 2h7"/><path d="M7 16h10"/></symbol>
     <symbol id="i-file-text" viewBox="0 0 24 24"><path d="M15 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V7Z"/><path d="M14 2v4a2 2 0 0 0 2 2h4"/><path d="M10 9H8"/><path d="M16 13H8"/><path d="M16 17H8"/></symbol>
     <symbol id="i-tag" viewBox="0 0 24 24"><path d="M12.586 2.586A2 2 0 0 0 11.172 2H4a2 2 0 0 0-2 2v7.172a2 2 0 0 0 .586 1.414l8.704 8.704a2.426 2.426 0 0 0 3.42 0l6.58-6.58a2.426 2.426 0 0 0 0-3.42z"/><circle cx="7.5" cy="7.5" r=".5" fill="currentColor"/></symbol>
+    <symbol id="i-users" viewBox="0 0 24 24"><path d="M16 21v-2a4 4 0 0 0-4-4H6a4 4 0 0 0-4 4v2"/><circle cx="9" cy="7" r="4"/><path d="M22 21v-2a4 4 0 0 0-3-3.87"/><path d="M16 3.13a4 4 0 0 1 0 7.75"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect width="14" height="14" x="8" y="8" rx="2" ry="2"/><path d="M4 16c-1.1 0-2-.9-2-2V4c0-1.1.9-2 2-2h10c1.1 0 2 .9 2 2"/></symbol>
     <symbol id="i-external" viewBox="0 0 24 24"><path d="M15 3h6v6"/><path d="M10 14 21 3"/><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/></symbol>
   </svg>
 
@@ -175,6 +177,8 @@
           <div class="progress-section">
             <img src="" alt="" class="secret-parrot" id="secret-parrot">
             <span id="progress-info" class="progress-info-text"></span>
+            <!-- Live open to LAN: where friends on the network join, click to copy (main.js) -->
+            <div id="live-lan-info" class="live-lan-info" aria-live="polite" hidden></div>
             <!-- The plan of a job in pieces before it runs (above the bar), and the ring around a One World's built land. -->
             <div id="job-plan" class="job-plan meld-only" hidden></div>
             <!-- Before a job in pieces starts: what it asks of the computer, and a hold to start it (main.js) -->
@@ -536,6 +540,23 @@
                         <option value="24">24</option>
                         <option value="32">32</option>
                       </select>
+                    </div>
+                  </div>
+
+                  <div class="settings-row setting-tile is-wide setting-sub" id="live-lan-row" style="display: none;">
+                    <label for="live-lan-toggle" class="setting-label">
+                      <svg class="icon setting-icon" aria-hidden="true"><use href="#i-users"></use></svg>
+                      <span class="setting-text">
+                        <span class="setting-heading">
+                          <span data-localize="live_lan">Open to LAN</span>
+                          <span class="tooltip-icon" data-tooltip-key="live_lan_tip" data-tooltip="Players on the same Wi-Fi or network join at the address Arnis shows while Live runs, or pick it in their Multiplayer screen. They need Minecraft Java in the server's version. Commands stay with players on this computer; share them with /op. If your computer asks about network access for Arnis, allow it.">?</span>
+                          <img class="new-badge" src="images/new-badge.png" alt="New" data-localize-alt="new_badge" data-new="live_lan" data-new-when="#live-lan-toggle:checked">
+                        </span>
+                        <span class="setting-desc" data-localize="live_lan_desc">Friends on the same network can join too. Minecraft lists it for them under LAN worlds.</span>
+                      </span>
+                    </label>
+                    <div class="settings-control">
+                      <input type="checkbox" class="switch" id="live-lan-toggle" name="live-lan-toggle">
                     </div>
                   </div>
                 </div>
@@ -1254,6 +1275,96 @@
                   </label>
                   <div class="settings-control">
                     <input type="checkbox" class="switch" id="enable-hytale-toggle" name="enable-hytale-toggle">
+                  </div>
+                </div>
+
+                <!-- Laser Data and the features it feeds, as one block: they show while it is on -->
+                <div class="setting-stack is-wide" id="lidar-stack">
+                  <div class="settings-row setting-tile is-wide">
+                    <label for="lidar-toggle" class="setting-label">
+                      <svg class="icon setting-icon" aria-hidden="true"><use href="#i-layers"></use></svg>
+                      <span class="setting-text">
+                        <span class="setting-heading">
+                          <span data-localize="lidar">Laser Data</span>
+                          <span class="tooltip-icon" data-tooltip-key="lidar_tip" data-tooltip="Reads open laser scans and aerial photos for detail OpenStreetMap lacks, where a region publishes them. Not used for One World or areas over 16 km². Covers Bavaria, North Rhine-Westphalia, France, the Netherlands, Luxembourg, Estonia, Latvia, Switzerland, much of the US and parts of Canada. Experimental.">?</span>
+                          <img class="new-badge" src="images/new-badge.png" alt="New" data-localize-alt="new_badge" data-new="lidar" data-new-when="#lidar-toggle:checked">
+                        </span>
+                        <span class="setting-desc" data-localize="lidar_desc">Measured detail where a region publishes its scans. Experimental.</span>
+                      </span>
+                    </label>
+                    <div class="settings-control">
+                      <input type="checkbox" class="switch" id="lidar-toggle" name="lidar-toggle">
+                    </div>
+                  </div>
+
+                  <div class="settings-row setting-tile is-wide setting-sub" id="garden-detail-row" style="display: none;">
+                    <label for="garden-detail-toggle" class="setting-label">
+                      <svg class="icon setting-icon" aria-hidden="true"><use href="#i-trees"></use></svg>
+                      <span class="setting-text">
+                        <span class="setting-heading">
+                          <span data-localize="garden_detail">Garden Detail</span>
+                          <span class="tooltip-icon" data-tooltip-key="garden_detail_tip" data-tooltip="Fills unmapped gardens and yards with lawns, paving, hedges, beds, sheds and pools measured by the laser and the photos. Mapped features always win.">?</span>
+                        </span>
+                        <span class="setting-desc" data-localize="garden_detail_desc">Lawns, hedges and sheds measured by laser scans.</span>
+                      </span>
+                    </label>
+                    <div class="settings-control">
+                      <input type="checkbox" class="switch" id="garden-detail-toggle" name="garden-detail-toggle" checked>
+                    </div>
+                  </div>
+
+                  <div class="settings-row setting-tile is-wide setting-sub" id="measured-trees-row" style="display: none;">
+                    <label for="measured-trees-toggle" class="setting-label">
+                      <svg class="icon setting-icon" aria-hidden="true"><use href="#i-tree"></use></svg>
+                      <span class="setting-text">
+                        <span class="setting-heading">
+                          <span data-localize="measured_trees">Measured Trees</span>
+                          <span class="tooltip-icon" data-tooltip-key="measured_trees_tip" data-tooltip="Places trees where the laser saw them, at their measured height, instead of the global canopy map. Mapped trees take the measured height too.">?</span>
+                        </span>
+                        <span class="setting-desc" data-localize="measured_trees_desc">Trees where the laser saw them, at their height.</span>
+                      </span>
+                    </label>
+                    <div class="settings-control">
+                      <input type="checkbox" class="switch" id="measured-trees-toggle" name="measured-trees-toggle" checked>
+                    </div>
+                  </div>
+
+                  <div class="settings-row setting-tile is-wide setting-sub" id="measured-heights-row" style="display: none;">
+                    <label for="measured-heights-toggle" class="setting-label">
+                      <svg class="icon setting-icon" aria-hidden="true"><use href="#i-building"></use></svg>
+                      <span class="setting-text">
+                        <span class="setting-heading">
+                          <span data-localize="measured_heights">Measured Heights</span>
+                          <span class="tooltip-icon" data-tooltip-key="measured_heights_tip" data-tooltip="Gives buildings that OpenStreetMap leaves without height or levels the height the laser measured, and flat roofs where it saw them.">?</span>
+                        </span>
+                        <span class="setting-desc" data-localize="measured_heights_desc">Real heights for buildings without a height tag.</span>
+                      </span>
+                    </label>
+                    <div class="settings-control">
+                      <input type="checkbox" class="switch" id="measured-heights-toggle" name="measured-heights-toggle" checked>
+                    </div>
+                  </div>
+
+                  <div class="settings-row setting-tile is-wide setting-sub" id="lidar-limit-row" style="display: none;">
+                    <label class="setting-label">
+                      <svg class="icon setting-icon" aria-hidden="true"><use href="#i-download"></use></svg>
+                      <span class="setting-text">
+                        <span class="setting-heading">
+                          <span data-localize="lidar_limit">Download Limit</span>
+                          <span class="tooltip-icon" data-tooltip-key="lidar_limit_tip" data-tooltip="Most a run downloads for laser data. Cached scans do not count. Past it the run goes on without them. A square kilometre is about 100–300 MB.">?</span>
+                        </span>
+                        <span class="setting-desc" data-localize="lidar_limit_desc">Most a run downloads for laser data.</span>
+                      </span>
+                    </label>
+                    <div class="settings-control">
+                      <div class="segmented-control" id="lidar-limit-group">
+                        <button type="button" class="segment" data-lidar-limit="250">250 MB</button>
+                        <button type="button" class="segment" data-lidar-limit="500">500 MB</button>
+                        <button type="button" class="segment active" data-default data-lidar-limit="1000">1 GB</button>
+                        <button type="button" class="segment" data-lidar-limit="2000">2 GB</button>
+                        <button type="button" class="segment" data-lidar-limit="5000">5 GB</button>
+                      </div>
+                    </div>
                   </div>
                 </div>
               </div>
