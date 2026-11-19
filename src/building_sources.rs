@@ -16,7 +16,8 @@ use colored::Colorize;
 ///    beats Overture's estimate);
 /// 2. Overture's heights for the buildings still without;
 /// 3. Overture's own buildings where OSM has none;
-/// 4. the sheds, garages and pools garden detail measured where nothing mapped
+/// 4. the roof shapes the laser saw, for outlines of either without one;
+/// 5. the sheds, garages and pools garden detail measured where nothing mapped
 ///    stands.
 ///
 /// `overture_wanted` says whether the run asked Overture for buildings, for the
@@ -68,9 +69,29 @@ pub fn merge(
         println!("  No additional buildings from Overture Maps for this area");
     }
 
+    // Overture's footprints too: any outline the laser saw a roof over.
+    let measured_roofs = crate::survey::roofs::apply(parsed_elements, ground, xzbbox, scale);
+    if measured_roofs > 0 {
+        println!(
+            "  Measured roof shapes for {} buildings from laser scans",
+            measured_roofs.to_string().bright_white().bold()
+        );
+    }
+
+    // No sheds or pools to place: skip the world-wide water and road scans.
+    let candidates = crate::survey::elements::candidates(ground, xzbbox);
+    if candidates.is_empty() {
+        return;
+    }
     // Mapped water and the land cover's: no shed or pool of the laser's stands there.
-    let mapped_water =
-        crate::floodfill_cache::collect_tree_keep_clear(parsed_elements, xzbbox, scale, None, 0);
+    let mapped_water = crate::floodfill_cache::collect_tree_keep_clear(
+        parsed_elements,
+        xzbbox,
+        scale,
+        None,
+        0,
+        None,
+    );
     let water = |x: i32, z: i32| {
         mapped_water.as_ref().is_some_and(|m| m.contains(x, z))
             || ground.cover_class(crate::coordinate_system::cartesian::XZPoint::new(
@@ -78,12 +99,8 @@ pub fn merge(
                 z - xzbbox.min_z(),
             )) == crate::land_cover::LC_WATER
     };
-    let (measured, on_paved) = crate::survey::elements::merge(
-        crate::survey::elements::candidates(ground, xzbbox),
-        parsed_elements,
-        scale,
-        &water,
-    );
+    let (measured, on_paved) =
+        crate::survey::elements::merge(candidates, parsed_elements, scale, &water);
     if !measured.is_empty() {
         println!(
             "  Added {} sheds, garages and pools from garden detail",
@@ -155,6 +172,7 @@ mod tests {
             garden: true,
             trees: false,
             heights: true,
+            roofs: false,
         };
         let mut ground = Ground::new_flat(0);
         ground.set_world_dims(w, h);

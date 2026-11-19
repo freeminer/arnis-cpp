@@ -349,6 +349,10 @@ fn process_element(
                         args.timeout.as_ref(),
                     );
                 }
+            } else if (way.tags.contains_key("building") || way.tags.contains_key("building:part"))
+                && editor.stations().is_some_and(|s| s.draws_building(way.id))
+            {
+                // A canopy or train shed over platforms, drawn with its station.
             } else if args.mode == GenerationMode::Blueprint
                 && (way.tags.contains_key("building") || way.tags.contains_key("building:part"))
             {
@@ -589,6 +593,28 @@ fn process_element(
             }
         }
         ProcessedElement::Node(node) => {
+            // A fountain is handed to the tiles its basin reaches; outside its own only the basin is built.
+            if !editor.owns(node.x, node.z)
+                && crate::structures::fountain::node_spread(&node.tags, args.scale).is_some()
+            {
+                // Only if its own tile reaches the amenity branch below with it too.
+                let claimed_before = node.tags.contains_key("door")
+                    || node.tags.contains_key("entrance")
+                    || node.tags.get("natural").map(String::as_str) == Some("tree")
+                    || attractions::claims(&node.tags)
+                    || man_made::is_summit_cross(&node.tags);
+                if !claimed_before {
+                    amenities::generate_amenities(
+                        editor,
+                        element,
+                        args,
+                        flood_fill_cache,
+                        road_mask,
+                        bridge_surface,
+                    );
+                }
+                return;
+            }
             if signage {
                 signage::generate_node_signage(editor, node, building_footprints, road_mask);
             }
@@ -972,7 +998,7 @@ pub fn generate_world_with_options(
     args: &Args,
     options: GenerationOptions,
     outline_suppression: OutlineSuppression,
-    part_groups: PartGroups,
+    mut part_groups: PartGroups,
     housing_parts: HousingRelationParts,
 ) -> Result<PathBuf, String> {
     let output_path = options.path.clone();
@@ -1072,10 +1098,11 @@ pub fn generate_world_with_options(
     };
     // Voxy and DH render from stored light, so an unlit LOD cache would be a
     // black horizon. The toggles imply baked lighting rather than silently
-    // producing that.
-    let wants_voxy = args.voxy_lod && world_format == WorldFormat::JavaAnvil;
-    let wants_dh = args.dh_lod && world_format == WorldFormat::JavaAnvil;
-    editor.set_bake_lighting(args.bake_lighting || wants_voxy || wants_dh);
+    // producing that. A One World builds its caches from every region after the run.
+    let java = world_format == WorldFormat::JavaAnvil;
+    let wants_voxy = args.voxy_lod && java && one_world.is_none();
+    let wants_dh = args.dh_lod && java && one_world.is_none();
+    editor.set_bake_lighting(args.bake_lighting || (java && (args.voxy_lod || args.dh_lod)));
     let void_world =
         world_format == WorldFormat::JavaAnvil && args.world_type == crate::args::WorldType::Void;
     editor.set_void_world(void_world);
@@ -1174,7 +1201,6 @@ pub fn generate_world_with_options(
     // Mapillary side still decides for itself whether to collect anything: its
     // `collect` also asks the facade store, which is off unless the export
     // asked for the photos mode.
-    let java = world_format == WorldFormat::JavaAnvil;
     // The atlas the panels are budgeted against, before anything measures one.
     // Both sources read it, so it is set whichever of them is running.
     crate::mapillary::atlas::set_atlas_side(args.facade_detail.atlas_side());
@@ -1391,6 +1417,7 @@ pub fn generate_world_with_options(
     cemetery::prepare(&mut elements, sign_region);
     camp_sites::prepare(&mut elements);
     allotments::prepare(&mut elements, args.scale);
+    mobile_homes::prepare(&mut elements, args.scale);
     // Nested areas render correctly only if the smallest one writes first.
     sort_ground_fill_areas(&mut elements);
 
@@ -1562,12 +1589,14 @@ pub fn generate_world_with_options(
     let tree_keep_clear = ground
         .laser_trees_wanted()
         .then(|| {
+            let room = crate::structures::fountain::room_at(&editor, &road_mask);
             crate::floodfill_cache::collect_tree_keep_clear(
                 &elements,
                 &xzbbox,
                 args.scale,
                 args.water.water_detail.channel_width_cap(args.scale),
                 1,
+                Some(&room),
             )
         })
         .flatten()
@@ -1680,13 +1709,40 @@ pub fn generate_world_with_options(
         args.scale,
     );
     railways::add_tunnel_footprint(&elements, &xzbbox, &mut tunnel_footprint);
-    let tunnel_portals = highways::collect_tunnel_portals(
+    let mut tunnel_portals = highways::collect_tunnel_portals(
         &elements,
         &editor,
         &bridge_structures,
         &tunnel_internal_endpoints,
         args.scale,
     );
+    tunnel_portals.plan_bores(
+        &elements,
+        &editor,
+        &tunnel_internal_endpoints,
+        args.scale,
+        one_world.is_some().then_some(&own_rect),
+    );
+
+    // Resolved before the 3D archetypes so they never claim a landmark's element.
+    let landmarks = crate::landmarks::prescan(&elements, &xzbbox, llbbox, args);
+    // 3D model pipeline pre-scan: elements rendered as 3D models instead of
+    // voxels are recorded here and skipped by the element loop below.
+    let models_3d_pipeline = args.use_3d.then(|| {
+        crate::models_3d::Models3dPipeline::prescan(&elements, args, landmarks.suppressed())
+    });
+    // What the stations leave alone: landmarks, models and outlines their parts replace.
+    let station_taken: HashSet<(&'static str, u64)> = landmarks
+        .suppressed()
+        .iter()
+        .chain(models_3d_pipeline.iter().flat_map(|p| p.suppressed()))
+        .copied()
+        .collect();
+    let station_skips: HashSet<(&'static str, u64)> = station_taken
+        .iter()
+        .chain(&outline_suppression)
+        .copied()
+        .collect();
 
     // Platforms and halls, laid out before any track so the tracks can keep level with them.
     let stations = Arc::new(stations::StationIndex::build(
@@ -1702,13 +1758,29 @@ pub fn generate_world_with_options(
             scale: args.scale,
             timeout: args.timeout.as_ref(),
             underground: args.mode != GenerationMode::Blueprint,
+            roofs: args.mode != GenerationMode::Blueprint,
+            skips: &station_skips,
         },
     ));
     editor.set_stations(Arc::clone(&stations));
+    // Each rail tunnel is planned whole, after the halls it runs through, so every tile lays one grade.
+    let rail_tunnels = railways::plan_rail_tunnels(&elements, &editor, &rail_joins);
+    rail_joins.set_tunnels(rail_tunnels);
     let mut station_voids: Vec<stations::StationVoid> = Vec::new();
-
-    // Resolved before the 3D archetypes so they never claim a landmark's element.
-    let landmarks = crate::landmarks::prescan(&elements, &xzbbox, llbbox, args);
+    // The rest of a station building whose parts include a shed the station draws, styled
+    // like its parts.
+    let station_buildings = stations.station_buildings(
+        &elements,
+        &outline_suppression,
+        &station_taken,
+        args.timeout.as_ref(),
+    );
+    for (piece, part) in station_buildings {
+        if let Some(seed) = part.and_then(|p| part_groups.get(&p).copied()) {
+            part_groups.insert(piece.id(), seed);
+        }
+        elements.push(piece);
+    }
 
     // The trains are planned before the cars, which wait at the level crossings they close.
     let planned_trains = extras.cars.then(|| {
@@ -1957,11 +2029,6 @@ pub fn generate_world_with_options(
             .any(|&[x0, z0, x1, z1]| x >= x0 && x <= x1 && z >= z0 && z <= z1)
     });
 
-    // 3D model pipeline pre-scan: elements rendered as 3D models instead of
-    // voxels are recorded here and skipped by the element loop below.
-    let models_3d_pipeline = args.use_3d.then(|| {
-        crate::models_3d::Models3dPipeline::prescan(&elements, args, landmarks.suppressed())
-    });
     // Offline, a model the cache lacks stops the run here instead of after the build.
     if crate::net::offline() {
         if let Some(p) = &models_3d_pipeline {
@@ -3038,13 +3105,16 @@ pub fn generate_world_with_options(
         }
     }
 
-    // Save world
-    if let Err(e) = editor.save() {
-        // The panels were waiting for the pack this save was going to make a
-        // world for; without one they are only memory.
-        crate::mapillary::displays::discard();
-        return Err(e.to_string());
-    }
+    // Save world, which a Bedrock archive can leave beside the path asked for.
+    let output_path = match editor.save() {
+        Ok(written) => written,
+        Err(e) => {
+            // The panels were waiting for the pack this save was going to make a
+            // world for; without one they are only memory.
+            crate::mapillary::displays::discard();
+            return Err(e.to_string());
+        }
+    };
     bench.mark("save");
 
     if args.benchmark {
