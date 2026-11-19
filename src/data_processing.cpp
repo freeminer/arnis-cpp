@@ -1,4 +1,5 @@
 #include "data_processing.h"
+#include "building_sources.h"
 #include "biome.h"
 // fm: Optional full-source bridge analysis shared by streamed chunks.
 #include "element_processing/fm_bridge_context.h"
@@ -2084,7 +2085,8 @@ bool generate_world(WorldEditor &editor,
 		const PreparedBuildingData *prepared_buildings, mapillary::FacadeJob *facade_job,
 		std::optional<std::pair<int, int>> spawn_point,
 		// fm: Immutable bridge profiles shared by streamed chunks.
-		const bridges::BridgeContext *shared_bridges)
+		const bridges::BridgeContext *shared_bridges,
+		const overture::OvertureHints *overture_hints)
 // ===
 {
 	WriteBoundsRestore write_bounds_restore(editor);
@@ -2163,24 +2165,25 @@ bool generate_world(WorldEditor &editor,
 	std::vector<ProcessedElement> survey_height_elements;
 	const std::vector<ProcessedElement> *generation_input = &parsed_generation_input;
 	bool survey_heights_applied = false;
-	if (editor.ground && editor.ground->laser_heights_wanted() &&
-			!parsed_generation_input.empty()) {
+	const bool has_overture_hints = overture_hints && !overture_hints->empty();
+	if (!parsed_generation_input.empty() &&
+			(has_overture_hints ||
+					(editor.ground && editor.ground->laser_heights_wanted()))) {
 		survey_height_elements = parsed_generation_input;
 		const auto [survey_min_x, survey_min_z] = editor.get_min_coords();
 		const auto [survey_max_x, survey_max_z] = editor.get_max_coords();
 		const ::XZBBox survey_bbox(
 				survey_min_x, survey_min_z, survey_max_x, survey_max_z);
-		auto measured = survey::heights::apply(
-				survey_height_elements, *editor.ground, survey_bbox, args.scale);
-		// C++ callers currently provide one already-combined element set. Apply
-		// deferred saturated measurements after the input's existing height tags
-		// (including any Overture hints) have had precedence.
-		measured.filled += survey::heights::apply_deferred(
-				survey_height_elements, measured.deferred);
-		survey_heights_applied = measured.filled > 0;
-		if (measured.filled > 0)
-			std::cout << "  Measured heights for " << measured.filled
+		const auto merged = building_sources::merge_heights(survey_height_elements,
+				editor.ground, survey_bbox, args.scale,
+				has_overture_hints ? overture_hints : nullptr);
+		survey_heights_applied = merged.measured + merged.overture + merged.deferred > 0;
+		if (merged.measured + merged.deferred > 0)
+			std::cout << "  Measured heights for " << merged.measured + merged.deferred
 					  << " buildings from laser scans\n";
+		if (merged.overture > 0)
+			std::cout << "  Filled heights on " << merged.overture
+					  << " OSM buildings from Overture Maps\n";
 		generation_input = &survey_height_elements;
 	}
 	// Rust derives its footprint mask from the final element set and clipped
@@ -2519,27 +2522,26 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 	if (editor.ground && editor.ground->has_survey()) {
-		auto measured = survey::elements::candidates(*editor.ground, xzbbox);
-		const auto result = survey::elements::merge(std::move(measured),
+		const auto result = building_sources::merge_gardens(*editor.ground, xzbbox,
 				ordered_source_elements, args.scale, [&](int x, int z) {
 					return editor.is_mapped_water(x, z) ||
 						   (editor.ground->has_land_cover() &&
 								   editor.ground->cover_class(editor.ground_point(
 										   x, z)) == land_cover::LC_WATER);
 				});
-		if (!result.first.empty()) {
-			std::cout << "  Added " << result.first.size()
+		if (!result.elements.empty()) {
+			std::cout << "  Added " << result.elements.size()
 					  << " sheds, garages and pools from garden detail\n";
 			ordered_source_elements.insert(ordered_source_elements.end(),
-					std::make_move_iterator(result.first.begin()),
-					std::make_move_iterator(result.first.end()));
+					std::make_move_iterator(result.elements.begin()),
+					std::make_move_iterator(result.elements.end()));
 			if (!elements_prepared)
 				sort_elements_by_priority(ordered_source_elements);
 			// Host-prepared suppression/index data predates these outlines.
 			generation_prepared_buildings = nullptr;
 		}
-		if (result.second > 0)
-			std::cout << "  Left out " << result.second
+		if (result.on_paved > 0)
+			std::cout << "  Left out " << result.on_paved
 					  << " garden features on roads, tracks, squares or car parks\n";
 	}
 	const std::vector<ProcessedElement> &land_cover_elements = ordered_source_elements;

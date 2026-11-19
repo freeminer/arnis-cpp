@@ -16,6 +16,10 @@
 
 namespace arnis
 {
+namespace overture
+{
+class OvertureHints;
+}
 namespace mapillary
 {
 class FacadeJob;
@@ -327,7 +331,8 @@ bool generate_world(WorldEditor &editor, const std::vector<ProcessedElement> &el
 		const PreparedBuildingData *prepared_buildings = nullptr,
 		mapillary::FacadeJob *facade_job = nullptr,
 		std::optional<std::pair<int, int>> spawn_point = std::nullopt,
-		const bridges::BridgeContext *shared_bridges = nullptr);
+		const bridges::BridgeContext *shared_bridges = nullptr,
+		const overture::OvertureHints *overture_hints = nullptr);
 // Options-aware entry point matching Rust's generate_world_with_options for
 // library callers that already own the backend editor instance.
 bool generate_world_with_options(WorldEditor &editor,

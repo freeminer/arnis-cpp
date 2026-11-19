@@ -925,7 +925,10 @@ std::size_t OvertureHints::apply(std::vector<ProcessedElement> &elements) const
 {
 	std::size_t enriched = 0;
 	for (auto &element : elements) {
-		if (element.is_node())
+		// Rust applies Overture hints to the parsed OSM vector before appending
+		// supplementary Overture footprints. The host caches both sources in
+		// one vector; their reserved ID bit preserves the same source boundary.
+		if (element.is_node() || (element.id() & OVERTURE_ID_HIGH_BIT) != 0)
 			continue;
 		tags_t *tags = nullptr;
 		if (element.is_way())

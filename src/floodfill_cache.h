@@ -106,6 +106,8 @@ public:
 
 	/// Checks if a coordinate is set.
 	bool contains(int32_t x, int32_t z) const;
+	/// Checks whether any marked coordinate intersects an inclusive rectangle.
+	bool any_in(int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) const;
 	/// Marks every coordinate in another bitmap with the same bounds.
 	void union_with(const CoordinateBitmap &other)
 	{
@@ -193,6 +195,12 @@ bool edge_in_hole(const Holes *holes, int32_t x, int32_t z);
 std::vector<std::pair<int32_t, int32_t>> without_holes(
 		const std::vector<std::pair<int32_t, int32_t>> &cells, const Holes *holes);
 FloodFillResult without_holes(const FloodFillResult &cells, const Holes *holes);
+
+/// Mapped water columns and their margin that measured trees must keep clear.
+/// Mirrors Rust floodfill_cache::collect_tree_keep_clear.
+std::optional<CoordinateBitmap> collect_tree_keep_clear(
+		const std::vector<ProcessedElement> &elements, const XZBBox &bbox, double scale,
+		std::optional<int> channel_width_cap = std::nullopt, int margin = 0);
 
 // A closed ring whose bounding box exceeds the bitmap-fill cap.  Consumers
 // distinguish this deliberate refusal from an open way or a thin ring with no

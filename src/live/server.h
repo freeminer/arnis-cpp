@@ -1,13 +1,21 @@
 #pragma once
 
 #include <cstdint>
+#include <chrono>
 #include <deque>
 #include <filesystem>
+#include <functional>
+#include <memory>
 #include <mutex>
 #include <optional>
-#include <atomic>
 #include <string>
 #include <vector>
+#include <atomic>
+
+namespace arnis::live::rcon
+{
+class Rcon;
+}
 
 namespace arnis::live::server
 {
@@ -57,6 +65,27 @@ private:
 	std::size_t capacity_;
 	mutable std::mutex mutex_;
 	std::deque<std::string> lines_;
+};
+
+class Server
+{
+public:
+	static std::unique_ptr<Server> start(const std::filesystem::path &dir,
+			const Launch &launch, std::string *error = nullptr);
+	~Server();
+	Server(const Server &) = delete;
+	Server &operator=(const Server &) = delete;
+
+	bool wait_ready(std::chrono::milliseconds timeout,
+			const std::function<bool()> &cancel, std::string *error = nullptr);
+	bool running();
+	std::string tail(std::size_t count) const;
+	void stop(rcon::Rcon *rcon, std::chrono::milliseconds timeout);
+
+private:
+	struct State;
+	explicit Server(std::unique_ptr<State> state);
+	std::unique_ptr<State> state_;
 };
 
 std::filesystem::path server_dir();

@@ -3,6 +3,7 @@
 #include "../../arnis_ground.h"
 #include "../floodfill_cache.h"
 #include "../osm_parser.h"
+#include "../overture.h"
 
 #include <algorithm>
 #include <cmath>
@@ -178,7 +179,11 @@ ApplyResult apply(std::vector<ProcessedElement> &elements, const Ground &ground,
 		return result;
 	for (std::size_t i = 0; i < elements.size(); ++i) {
 		auto *way = std::get_if<ProcessedWay>(static_cast<variant_t *>(&elements[i]));
-		if (!way || !way->tags.contains("building") || way->tags.contains("height") ||
+		// Rust measures the parsed OSM set before appending Overture's distinct
+		// footprints. The host caches those together for chunk selection, so use
+		// Overture's reserved ID bit to preserve that source boundary here.
+		if (!way || (way->id & ::arnis::overture::OVERTURE_ID_HIGH_BIT) != 0 ||
+				!way->tags.contains("building") || way->tags.contains("height") ||
 				way->tags.contains("building:levels") ||
 				way->tags.contains("building:part"))
 			continue;
