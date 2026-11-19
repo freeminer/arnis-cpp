@@ -149,7 +149,7 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 	const auto blocked = [&](int sx, int sz, bool selected_slot) {
 		return (!allow_on_paved && editor.surface_is_sealed(sx, sz)) ||
 			   (selected_slot && editor.is_lc_water(sx, sz)) ||
-			   editor.in_clear_corridor(sx, sz) ||
+			   editor.tree_keep_clear_any(sx, sz) || editor.in_clear_corridor(sx, sz) ||
 			   (building_footprints && building_footprints->contains(sx, sz)) ||
 			   (bridge_surface && bridge_surface->contains(sx, sz)) ||
 			   editor.check_for_block(sx, 0, sz,
@@ -180,7 +180,24 @@ bool place_selected_region_tree(world_editor::WorldEditor &editor,
 	auto caller_fit = request.fits;
 	request.fits = [&](std::size_t index, unsigned rotation) {
 		const auto *schem = selector.schematic(index);
-		return schem && (!caller_fit || caller_fit(index, rotation)) &&
+		bool overlaps_kept_water = false;
+		if (schem && editor.tree_keep_clear) {
+			const int fw = (rotation & 1U) ? schem->length : schem->width;
+			const int fl = (rotation & 1U) ? schem->width : schem->length;
+			const int x0 = fit_x - (fw - 1) / 2;
+			const int z0 = fit_z - (fl - 1) / 2;
+			overlaps_kept_water =
+					editor.tree_keep_clear->any_in(x0, z0, x0 + fw - 1, z0 + fl - 1);
+			if (overlaps_kept_water)
+				overlaps_kept_water = std::any_of(schem->voxels.begin(),
+						schem->voxels.end(), [&](const auto &voxel) {
+							const auto [rx, rz] = rotate_xz(voxel.x, voxel.z,
+									schem->width, schem->length, rotation);
+							return editor.tree_keep_clear->contains(x0 + rx, z0 + rz);
+						});
+		}
+		return schem && !overlaps_kept_water &&
+			   (!caller_fit || caller_fit(index, rotation)) &&
 			   fits_tree_wood(
 					   editor, *schem, fit_x, fit_z, rotation, offset, allow_on_paved);
 	};

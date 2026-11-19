@@ -32,6 +32,7 @@
 #include "buildings.h"
 #include "building_construction.h"
 #include "building_inset.h"
+#include "fortifications.h"
 #include "building_region.h"
 #include "connected_blocks.h"
 #include "../mapillary/facades.h"
@@ -44,6 +45,8 @@
 #include "../decals/font.h"
 #include "historic.h"
 #include "parking_garage.h"
+#include "mobile_homes.h"
+#include "../survey/roofs.h"
 #include "greenhouses.h"
 #include "bridge_towers.h"
 #include "subprocessor/buildings_interior.h"
@@ -2999,6 +3002,12 @@ RoofType parse_roof_type(const std::string &roof_shape)
 	return RoofType::Flat;
 }
 
+std::string read_roof_shape(const tags_t &tags)
+{
+	const auto mapped = tags.get("roof:shape");
+	return mapped.empty() ? tags.get(survey::roofs::SHAPE_HINT) : mapped;
+}
+
 bool roof_dormers_enabled(BuildingCondition condition, BuildingCategory category,
 		RoofType roof_type, ArchEra era, building_style::BuildingRegion region,
 		int building_height, int floor_cycle, std::uint64_t style_seed)
@@ -4233,7 +4242,7 @@ std::pair<int, bool> calculate_building_height(const ProcessedWay &element,
 			effective = std::max(
 					1.0, effective - (min_level * floor_cycle + ground_floor_bonus));
 		}
-		if (element.tags.get("roof:shape") != "flat")
+		if (read_roof_shape(element.tags) != "flat")
 			if (const auto roof_height = parse_meter_tag(element.tags, "roof:height"))
 				effective = std::max(effective - std::max(0.0, *roof_height),
 						std::min(is_part ? 1.0 : 3.0, effective));
@@ -7525,10 +7534,10 @@ std::optional<double> mapped_top_m(
 					? tags.get("building")
 					: (tags.contains("building:part") ? tags.get("building:part")
 													  : "yes");
+	const auto roof_shape = read_roof_shape(tags);
 	const std::optional<RoofType> shape =
-			tags.contains("roof:shape")
-					? std::optional<RoofType>(parse_roof_type(tags.get("roof:shape")))
-					: std::nullopt;
+			!roof_shape.empty() ? std::optional<RoofType>(parse_roof_type(roof_shape))
+								: std::nullopt;
 	auto positive_tag = [&](const char *key) -> std::optional<double> {
 		const auto value = parse_meter_tag(tags, key);
 		return value && std::isfinite(*value) && *value > 0.0 ? value : std::nullopt;
@@ -7617,10 +7626,10 @@ std::optional<double> mapped_top_m(
 std::optional<std::pair<double, bool>> mapped_walls_m(const tags_t &tags, HeightHint hint)
 {
 	const bool own = tags.contains("height") || tags.contains("building:levels");
+	const auto roof_shape = read_roof_shape(tags);
 	const std::optional<RoofType> shape =
-			tags.contains("roof:shape")
-					? std::optional<RoofType>(parse_roof_type(tags.get("roof:shape")))
-					: std::nullopt;
+			!roof_shape.empty() ? std::optional<RoofType>(parse_roof_type(roof_shape))
+								: std::nullopt;
 	auto positive_tag = [&](const char *key) -> std::optional<double> {
 		const auto value = parse_meter_tag(tags, key);
 		return value && std::isfinite(*value) && *value > 0.0 ? value : std::nullopt;
@@ -7769,10 +7778,10 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	if (cached_floor_area.empty() && (!hole_polygons || hole_polygons->empty()) &&
 			!is_oversized_ring(element))
 		cached_floor_area = thin_ring_cells(element);
+	std::unordered_set<std::pair<int, int>, PairHash> hole_points;
 	if (hole_polygons && !hole_polygons->empty() && !cached_floor_area.empty()) {
 		std::unordered_set<std::pair<int, int>, PairHash> outer_area(
 				cached_floor_area.begin(), cached_floor_area.end());
-		std::unordered_set<std::pair<int, int>, PairHash> hole_points;
 		for (const auto &hole : *hole_polygons) {
 			if (hole.way.nodes.size() < 3)
 				continue;
@@ -7826,6 +7835,16 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 		start_y_offset = terrain_base + min_level_offset;
 	} else {
 		start_y_offset = min_level_offset;
+	}
+	const bool mobile_home = mobile_homes::claims(element.tags) &&
+							 min_level_offset == 0 && hole_points.empty();
+	if (mobile_home) {
+		static const CoordinateBitmap no_roads, no_footprints;
+		if (mobile_homes::generate(*editor, element, cached_floor_area,
+					start_y_offset + abs_terrain_offset, args,
+					road_mask ? *road_mask : no_roads,
+					building_footprints ? *building_footprints : no_footprints))
+			return std::nullopt;
 	}
 
 	// Match Rust's early special-structure dispatch order so these elements do
@@ -8314,6 +8333,43 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	}
 	if (condition == BuildingCondition::Construction)
 		wall_block = SCAFFOLDING;
+	// Rust's fortification pass emits walls and gates as solid masses before the
+	// ordinary facade/roof pipeline. Keep mapped towers and covered wall walks on
+	// that pipeline when they have a pitched roof.
+	const auto fortification_kind = fortifications::kind(element.tags);
+	const bool fortification_gate = fortification_kind == fortifications::Kind::Gate;
+	const auto mapped_roof_shape = read_roof_shape(element.tags);
+	const bool fortification_pitched =
+			(!mapped_roof_shape.empty() && mapped_roof_shape != "flat") ||
+			(mapped_auto_roof && *mapped_auto_roof != RoofType::Flat);
+	const bool mapped_wall = element.tags.get("building") == "wall";
+	if (fortification_kind && (mapped_wall || !fortification_pitched)) {
+		std::vector<std::pair<int, int>> passages;
+		for (const auto &cell : cached_floor_area) {
+			if (building_passages.contains(cell.first, cell.second) ||
+					(fortification_gate && road_mask &&
+							road_mask->contains(cell.first, cell.second)))
+				passages.push_back(cell);
+		}
+		const int span_x = max_x - min_x + 1;
+		const int span_z = max_z - min_z + 1;
+		const bool compact = std::max(span_x, span_z) <= 2 * std::min(span_x, span_z) &&
+							 static_cast<double>(cached_footprint_size) >=
+									 0.4 * static_cast<double>(span_x * span_z);
+		const bool level = fortification_gate || compact || min_level_offset > 0;
+		fortifications::Mass mass{cached_floor_area, wall_block, building_height,
+				level ? std::optional<int>(start_y_offset + abs_terrain_offset)
+					  : std::nullopt,
+				min_level_offset > 0,
+				fortifications::crenellated(element.tags, *fortification_kind),
+				std::move(passages), {},
+				[building_footprints](int x, int z) {
+					return building_footprints && building_footprints->contains(x, z);
+				},
+				scale_factor};
+		fortifications::generate(*editor, mass);
+		return std::nullopt;
+	}
 	if (category == BuildingCategory::MasonrySkyscraper) {
 		floor_block = SMOOTH_STONE;
 	} else if (category == BuildingCategory::GlassySkyscraper ||
@@ -8484,7 +8540,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 	auto awning_rng = element_rng(group_seed ^ 0x0A3B11B60000000BULL);
 	const bool awning_enabled = awning_rng.random_bool(.55);
 	const Block awning_block = awning_options[awning_rng.uniform(5)];
-	const auto roof_shape = element.tags.get("roof:shape");
+	const auto roof_shape = read_roof_shape(element.tags);
 	const bool sloped_roof =
 			args.roof && roof_shape != "flat" &&
 			(!roof_shape.empty() ||
@@ -8737,7 +8793,7 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					? *fixed_vertical_accent
 					: (has_multiple_floors && !use_accent_lines && rng.random_bool(0.1));
 	const RoofType resolved_style_roof = [&]() {
-		const auto roof_shape = element.tags.get("roof:shape");
+		const auto roof_shape = read_roof_shape(element.tags);
 		if (!roof_shape.empty())
 			return parse_roof_type(roof_shape);
 		const bool preset_flat_roof =
@@ -9399,8 +9455,8 @@ std::optional<building_facade::FacadeAnchor> generate_buildings(WorldEditor *edi
 					building_type == "conservatory" || building_type == "train_station" ||
 					building_type == "hangar" ||
 					(element.tags.get("roof:material") == "glass" &&
-							element.tags.contains("roof:shape") &&
-							parse_roof_type(element.tags.get("roof:shape")) !=
+							!read_roof_shape(element.tags).empty() &&
+							parse_roof_type(read_roof_shape(element.tags)) !=
 									RoofType::Flat));
 	const bool glass_shell_backing =
 			!args.interior && condition == BuildingCondition::Normal &&

@@ -33,6 +33,7 @@ using std::vector;
 #include "bridges.h"
 #include "advtrains.h"
 #include "highway_tunnels.h"
+#include "tunnel_grade.h"
 #include "rail_track.h"
 #undef stoi
 namespace arnis
@@ -56,8 +57,6 @@ const int WALL_RADIUS = 2;
 const int AIR_RADIUS = 1;
 constexpr int INTERIOR_HEIGHT = RAIL_TUNNEL_INTERIOR_HEIGHT;
 const std::size_t LIGHT_INTERVAL = 8;
-constexpr double TUNNEL_SHALLOW_COST = 0.25;
-constexpr double TUNNEL_SHALLOW_UNDER_WATER_COST = 1.0;
 static_assert(RAIL_TUNNEL_DEPTH + INTERIOR_HEIGHT < water_depth::BORE_ROOM);
 
 static const optional<vector<Block>> &rail_clear_variants()
@@ -87,6 +86,49 @@ Block rail_tunnel_shell_block(int x, int y, int z)
 	if (v < 18)
 		return MOSSY_STONE_BRICKS;
 	return STONE_BRICKS;
+}
+
+using RailPortalFace = highways::PortalFace;
+
+static array<optional<RailPortalFace>, 2> rail_portal_faces(
+		const vector<pair<int, int>> &cells, const array<TrackEnd, 2> &ends)
+{
+	array<optional<RailPortalFace>, 2> faces{};
+	if (cells.size() < 2)
+		return faces;
+	const std::size_t inner_offset =
+			std::min<std::size_t>(2 * WALL_RADIUS, cells.size() - 1);
+	for (std::size_t e = 0; e < 2; ++e) {
+		const std::size_t at_index = e == 0 ? 0 : cells.size() - 1;
+		const std::size_t inner_index =
+				e == 0 ? inner_offset : cells.size() - 1 - inner_offset;
+		const auto at = cells[at_index];
+		const auto inner = cells[inner_index];
+		if (!ends[e].meets_surface || at == inner)
+			continue;
+		const auto sign = [](int value) { return (value > 0) - (value < 0); };
+		faces[e] = RailPortalFace{
+				at, {sign(at.first - inner.first), sign(at.second - inner.second)}};
+	}
+	return faces;
+}
+
+static array<optional<RailPortalFace>, 2> rail_faces_near(
+		const array<optional<RailPortalFace>, 2> &faces, std::size_t i, std::size_t last)
+{
+	const std::size_t reach = 2 * WALL_RADIUS + 2;
+	return {i <= reach ? faces[0] : nullopt, last - i <= reach ? faces[1] : nullopt};
+}
+
+static bool rail_beyond_portal(
+		const array<optional<RailPortalFace>, 2> &faces, int x, int z)
+{
+	for (const auto &face : faces)
+		if (face && (x - face->at.first) * face->out.first +
+									(z - face->at.second) * face->out.second >
+							0)
+			return true;
+	return false;
 }
 
 // --- Helper functions translated from Rust ---
@@ -1467,21 +1509,27 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 			return;
 		const auto ends = rail_joins.ends(element.id);
 		const int depth = RAIL_TUNNEL_FLOOR_DEPTH;
-		const int lowest = world_editor::min_y() + 1;
-		std::vector<int> ground(n), surface(n), deep(n);
+		const int lowest = tunnel_grade::lowest_floor();
+		std::vector<int> ground(n), surface(n), deep(n), low_ground(n), ceiling_y(n);
 		std::vector<std::optional<int>> carved_bed(n);
 		for (std::size_t i = 0; i < n; ++i) {
 			ground[i] = editor.get_ground_level(cells[i].first, cells[i].second);
+			low_ground[i] = ground[i];
+			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
+				for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz)
+					low_ground[i] = std::min(
+							low_ground[i], editor.get_ground_level(cells[i].first + dx,
+												   cells[i].second + dz));
 			carved_bed[i] = editor.lowest_carved_bed(
 					cells[i].first, cells[i].second, WALL_RADIUS);
 			if (carved_bed[i] && *carved_bed[i] >= ground[i])
 				carved_bed[i].reset();
-			const int bed = carved_bed[i].value_or(ground[i]);
-			surface[i] = bed;
-			deep[i] = surface[i] - depth;
+			const int bed = carved_bed[i].value_or(low_ground[i]);
+			surface[i] = std::min(bed, low_ground[i]);
+			ceiling_y[i] = surface[i] - depth;
+			deep[i] = ceiling_y[i];
 		}
 		std::vector<std::optional<int>> pins(n);
-		std::optional<int> joint_low;
 		for (std::size_t e = 0; e < 2; ++e) {
 			const auto &end = ends[e];
 			const std::size_t at = e == 0 ? 0 : n - 1;
@@ -1491,7 +1539,6 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				if (const auto joint = editor.station_tunnel_joint_floor(x, z);
 						joint && *joint < deep[at]) {
 					level = *joint;
-					joint_low = joint_low ? std::min(*joint_low, *joint) : *joint;
 				}
 			}
 			if (end.shared) {
@@ -1501,11 +1548,6 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				if (!pins[next])
 					pins[next] = std::max(level, lowest);
 			}
-			if (end.meets_surface)
-				for (std::size_t k = 0; k < n; ++k) {
-					const int along = static_cast<int>(k > at ? k - at : at - k);
-					deep[k] = std::max(deep[k], ground[at] - along / 4);
-				}
 		}
 		// Use the same stable terrain sample from either side of an area seam.
 		// The portal ramp may have raised `deep`, so derive the seam pin from the
@@ -1519,19 +1561,23 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 					pins[i] = level;
 		}
 		std::vector<std::optional<std::pair<int, bool>>> station_pins(n);
-		std::optional<int> station_pin_low;
 		for (std::size_t i = 0; i < n; ++i) {
 			const auto [x, z] = cells[i];
 			station_pins[i] = editor.station_tunnel_pin(element.id, x, z);
-			if (station_pins[i]) {
+			if (station_pins[i])
 				pins[i] = station_pins[i]->first;
-				station_pin_low = station_pin_low ? std::min(*station_pin_low,
-															station_pins[i]->first)
-												  : station_pins[i]->first;
-			}
 		}
-		if (joint_low && (!station_pin_low || *joint_low < *station_pin_low))
-			station_pin_low = *joint_low;
+		const std::array<bool, 2> portal{ends[0].meets_surface, ends[1].meets_surface};
+		std::vector<std::optional<double>> fixed(n);
+		std::vector<double> ceiling(n), top(n);
+		for (std::size_t i = 0; i < n; ++i) {
+			ceiling[i] = ceiling_y[i];
+			top[i] = carved_bed[i] ? ceiling[i] : ground[i];
+			if (pins[i])
+				fixed[i] = *pins[i];
+		}
+		const auto bore = tunnel_grade::Bore::make(n, depth, 0.04, 0.25, lowest);
+		const auto target = tunnel_grade::grade_line(ceiling, top, fixed, portal, bore);
 		const auto straight = straight_cells(cells,
 				ends[0].beyond.empty() ? std::nullopt
 									   : std::optional(ends[0].beyond.front()),
@@ -1540,25 +1586,25 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 		const auto floors = rail_profile(
 				straight,
 				[&](std::size_t i) {
-					return pins[i] ? std::pair{*pins[i], *pins[i]}
-								   : std::pair{
-											 std::max(std::min(deep[i] - 10,
-															  station_pin_low.value_or(
-																	  std::numeric_limits<
-																			  int>::
-																			  max())),
-													 lowest),
-											 std::max(ground[i], lowest)};
+					return pins[i] ? std::pair{*pins[i], *pins[i]} : [&] {
+						const int aim = static_cast<int>(std::lround(target[i]));
+						const int hi = std::max(std::min(ground[i], aim + 10), lowest);
+						return std::pair{std::min(std::max(aim - 10, lowest), hi), hi};
+					}();
 				},
 				[&](std::size_t i, int y) {
-					const int shallower = y - deep[i];
-					if (shallower <= 0)
-						return static_cast<double>(-shallower);
-					return (carved_bed[i] ? TUNNEL_SHALLOW_UNDER_WATER_COST
-										  : TUNNEL_SHALLOW_COST) *
-						   shallower;
+					return std::abs(static_cast<double>(y) - target[i]);
 				},
 				2.5);
+		std::vector<bool> bare(n, false);
+		for (std::size_t i = 0; i < n; ++i)
+			bare[i] = floors[i] + INTERIOR_HEIGHT + 1 >= low_ground[i];
+		const auto portal_open =
+				tunnel_grade::portal_cuttings(bare, portal, tunnel_grade::CUTTING_GAP);
+		std::vector<bool> shut(n, false);
+		for (std::size_t i = 0; i < n; ++i)
+			shut[i] = bare[i] && !portal_open[i];
+		const auto faces = rail_portal_faces(cells, ends);
 		for (std::size_t i = 0; i < n; ++i) {
 			const auto [x, z] = cells[i];
 			const int floor_y = floors[i];
@@ -1568,13 +1614,18 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 			rail_tunnel_points.emplace_back(x, z, floor_y, i % LIGHT_INTERVAL == 0);
 			if (floor_y <= world_editor::min_y())
 				continue;
+			const auto near = rail_faces_near(faces, i, n - 1);
 			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
 				for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz) {
+					if (rail_beyond_portal(near, x + dx, z + dz))
+						continue;
 					const int top = editor.get_ground_level(x + dx, z + dz);
 					for (int y = floor_y; y <= ceil_y; ++y) {
 						const bool shell = std::abs(dx) == WALL_RADIUS ||
 										   std::abs(dz) == WALL_RADIUS || y == ceil_y;
-						if (shell && y > floor_y && y >= top)
+						const bool cutting =
+								portal_open[i] || (!shut[i] && ceil_y >= top);
+						if (shell && cutting && y > floor_y && y >= top)
 							continue;
 						const Block block =
 								y == floor_y ? POLISHED_DEEPSLATE
@@ -1699,8 +1750,10 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 	const auto smoothed = build_connected_centerline(element);
 	std::vector<int> station_profile;
 	std::vector<std::optional<std::pair<int, bool>>> station_pins(smoothed.size());
+	std::vector<bool> station_portal_open(smoothed.size(), false);
+	std::vector<bool> station_shut(smoothed.size(), false);
+	const auto station_ends = rail_joins.ends(element.id);
 	std::optional<int> station_pin_low;
-	std::optional<int> joint_low;
 	for (std::size_t j = 0; j < smoothed.size(); ++j) {
 		station_pins[j] = editor.station_tunnel_pin(
 				element.id, smoothed[j].first, smoothed[j].second);
@@ -1710,18 +1763,27 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 									  : station_pins[j]->first;
 	}
 	if (station_pin_low && smoothed.size() >= 2) {
-		const auto ends = rail_joins.ends(element.id);
+		const auto &ends = station_ends;
 		const int depth = RAIL_TUNNEL_FLOOR_DEPTH;
-		const int lowest = world_editor::min_y() + 1;
+		const int lowest = tunnel_grade::lowest_floor();
 		std::vector<int> ground(smoothed.size()), surface(smoothed.size()),
-				deep(smoothed.size());
+				deep(smoothed.size()), low_ground(smoothed.size());
+		std::vector<std::optional<int>> carved_bed(smoothed.size());
 		std::vector<std::optional<int>> pins(smoothed.size());
 		for (std::size_t j = 0; j < smoothed.size(); ++j) {
 			ground[j] = editor.get_ground_level(smoothed[j].first, smoothed[j].second);
-			const int bed = editor.lowest_carved_bed(smoothed[j].first,
-										  smoothed[j].second, WALL_RADIUS)
-									.value_or(ground[j]);
-			surface[j] = std::min(ground[j], bed);
+			low_ground[j] = ground[j];
+			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
+				for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz)
+					low_ground[j] = std::min(
+							low_ground[j], editor.get_ground_level(smoothed[j].first + dx,
+												   smoothed[j].second + dz));
+			carved_bed[j] = editor.lowest_carved_bed(
+					smoothed[j].first, smoothed[j].second, WALL_RADIUS);
+			if (carved_bed[j] && *carved_bed[j] >= ground[j])
+				carved_bed[j].reset();
+			const int bed = carved_bed[j].value_or(low_ground[j]);
+			surface[j] = std::min(low_ground[j], bed);
 			deep[j] = surface[j] - depth;
 		}
 		for (std::size_t e = 0; e < 2; ++e) {
@@ -1733,7 +1795,6 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				if (const auto joint = editor.station_tunnel_joint_floor(x, z);
 						joint && *joint < deep[at]) {
 					level = *joint;
-					joint_low = joint_low ? std::min(*joint_low, *joint) : *joint;
 				}
 			}
 			if (end.shared) {
@@ -1741,11 +1802,6 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				pins[at] = std::max(level, lowest);
 				pins[next] = std::max(level, lowest);
 			}
-			if (end.meets_surface)
-				for (std::size_t j = 0; j < smoothed.size(); ++j) {
-					const auto distance = static_cast<int>(j > at ? j - at : at - j);
-					deep[j] = std::max(deep[j], ground[at] - distance / 4);
-				}
 		}
 		for (const auto crossing : rail_joins.edge_crossings(smoothed)) {
 			const auto lower = smoothed[crossing[0]] < smoothed[crossing[1]]
@@ -1759,8 +1815,18 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 		for (std::size_t j = 0; j < station_pins.size(); ++j)
 			if (station_pins[j])
 				pins[j] = station_pins[j]->first;
-		if (joint_low && (!station_pin_low || *joint_low < *station_pin_low))
-			station_pin_low = *joint_low;
+		const std::array<bool, 2> portal{ends[0].meets_surface, ends[1].meets_surface};
+		std::vector<std::optional<double>> fixed(smoothed.size());
+		std::vector<double> ceiling(smoothed.size()), top(smoothed.size());
+		for (std::size_t j = 0; j < smoothed.size(); ++j) {
+			ceiling[j] = deep[j];
+			top[j] = carved_bed[j] ? ceiling[j] : ground[j];
+			if (pins[j])
+				fixed[j] = *pins[j];
+		}
+		const auto bore =
+				tunnel_grade::Bore::make(smoothed.size(), depth, 0.04, 0.25, lowest);
+		const auto target = tunnel_grade::grade_line(ceiling, top, fixed, portal, bore);
 		const auto straight = straight_cells(smoothed,
 				ends[0].beyond.empty() ? std::nullopt
 									   : std::optional(ends[0].beyond.front()),
@@ -1771,19 +1837,49 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 				[&](std::size_t j) {
 					if (pins[j])
 						return std::pair{*pins[j], *pins[j]};
-					return std::pair{
-							std::max(std::min(deep[j] - 10, *station_pin_low), lowest),
-							std::max(ground[j], lowest)};
+					const int aim = static_cast<int>(std::lround(target[j]));
+					const int hi = std::max(std::min(ground[j], aim + 10), lowest);
+					return std::pair{std::min(std::max(aim - 10, lowest), hi), hi};
 				},
 				[&](std::size_t j, int y) {
-					const int shallower = y - deep[j];
-					return shallower > 0 ? .25 * shallower : -shallower;
+					return std::abs(static_cast<double>(y) - target[j]);
 				},
 				2.5);
 	}
+	// Preserve Rust's bore-state distinction for station-pinned/Advtrains tunnels:
+	// only portal-connected bare stretches become cuttings; an isolated bare
+	// stretch remains shut beneath its natural cover.
+	if (smoothed.size() >= 2) {
+		std::vector<bool> bare(smoothed.size(), false);
+		for (std::size_t j = 0; j < smoothed.size(); ++j) {
+			const auto [x, z] = smoothed[j];
+			const pos_t floor_y = station_profile.empty()
+										  ? (plan ? plan->heights[j]
+												  : editor.get_ground_level(x,
+															z) - RAIL_TUNNEL_FLOOR_DEPTH)
+										  : station_profile[j];
+			int low_ground = editor.get_ground_level(x, z);
+			for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx)
+				for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz)
+					low_ground =
+							std::min(low_ground, editor.get_ground_level(x + dx, z + dz));
+			bare[j] = floor_y + INTERIOR_HEIGHT + 1 >= low_ground;
+		}
+		const std::array<bool, 2> portal{
+				station_ends[0].meets_surface, station_ends[1].meets_surface};
+		station_portal_open =
+				tunnel_grade::portal_cuttings(bare, portal, tunnel_grade::CUTTING_GAP);
+		for (std::size_t j = 0; j < bare.size(); ++j)
+			station_shut[j] = bare[j] && !station_portal_open[j];
+	}
+	const auto station_faces = rail_portal_faces(smoothed, station_ends);
 	for (size_t j = 0; j < smoothed.size(); ++j) {
 		int bx = smoothed[j].first;
 		int bz = smoothed[j].second;
+		// Station halls own their complete bore; a second rail-tunnel shell here
+		// would overwrite the hall envelope and can close its openings.
+		if (station_pins[j] && station_pins[j]->second)
+			continue;
 		const int ground_y = editor.get_ground_level(bx, bz);
 		pos_t floor_y =
 				station_profile.empty()
@@ -1795,6 +1891,7 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 			continue;
 		if (ADVTRAINS_AVAILABLE)
 			advtrains::tunnel_floors.emplace_back(bx, floor_y, bz);
+		const auto near = rail_faces_near(station_faces, j, smoothed.size() - 1);
 
 		const int prev_ground = j > 0 ? editor.get_ground_level(smoothed[j - 1].first,
 												smoothed[j - 1].second)
@@ -1806,14 +1903,16 @@ void generate_rail_tunnel_shell(WorldEditor &editor, const ProcessedWay &element
 
 		for (int dx = -WALL_RADIUS; dx <= WALL_RADIUS; ++dx) {
 			for (int dz = -WALL_RADIUS; dz <= WALL_RADIUS; ++dz) {
+				if (rail_beyond_portal(near, bx + dx, bz + dz))
+					continue;
 				const int top = editor.get_ground_level(bx + dx, bz + dz);
 				for (int y = floor_y; y <= ceil_y; ++y) {
 					const bool wall_or_ceiling =
 							dx == -WALL_RADIUS || dx == WALL_RADIUS ||
 							dz == -WALL_RADIUS || dz == WALL_RADIUS || y == ceil_y;
-					// A portal or a rising connected track can lie above terrain.
-					// Do not build an exposed tunnel shell around those cells.
-					if (wall_or_ceiling && y > floor_y && y >= top)
+					const bool cutting =
+							station_portal_open[j] || (!station_shut[j] && ceil_y >= top);
+					if (cutting && wall_or_ceiling && y > floor_y && y >= top)
 						continue;
 					Block block =
 							y == floor_y ? POLISHED_DEEPSLATE

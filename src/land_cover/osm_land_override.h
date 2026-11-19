@@ -3,6 +3,13 @@
 #include "../../../arnis_adapter.h"
 #include "land_cover.h"
 
+#include <optional>
+
+namespace arnis
+{
+class CoordinateBitmap;
+}
+
 namespace arnis::land_cover
 {
 inline constexpr double SHORE_BAND_M = 15.0;
@@ -14,5 +21,7 @@ std::optional<int> over_water_half_width(const ProcessedWay &way, double scale);
 
 void apply_osm_land_override(LandCoverData &land_cover, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox, double scale);
+		const XZBBox &bbox, double scale,
+		std::optional<int> channel_width_cap = std::nullopt,
+		const CoordinateBitmap *roads_at_grade = nullptr);
 }

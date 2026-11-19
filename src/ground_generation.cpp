@@ -1304,8 +1304,19 @@ void generate_ground_region(WorldEditor &editor, const Args &args, const XZBBox 
 							}
 
 							if (survey_owned) {
-								survey::place_objects(
-										editor, *survey_owned, x, ground_y, z);
+								bool mapped_beside = false;
+								if (survey_owned->kind == survey::Kind::Hedge ||
+										survey_owned->kind == survey::Kind::Fence) {
+									for (int dx = -1; dx <= 1 && !mapped_beside; ++dx)
+										for (int dz = -1; dz <= 1; ++dz)
+											if (editor.is_barrier(x + dx, z + dz)) {
+												mapped_beside = true;
+												break;
+											}
+								}
+								if (!mapped_beside)
+									survey::place_objects(
+											editor, *survey_owned, x, ground_y, z);
 								if (survey_owned->kind == survey::Kind::Lawn &&
 										!editor.surface_is_sealed(x, z) &&
 										surface::takes_wild_plants(surface) &&

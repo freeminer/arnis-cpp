@@ -398,7 +398,8 @@ std::optional<int> over_water_half_width(const ProcessedWay &way, double scale)
 
 void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox, double scale)
+		const XZBBox &bbox, double scale, std::optional<int> channel_width_cap,
+		const CoordinateBitmap *roads_at_grade)
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2)
 		return;
@@ -461,9 +462,15 @@ void apply_osm_land_override(LandCoverData &data, std::size_t world_width,
 		if (way.tags.contains("waterway")) {
 			if (waterways::is_channel_waterway(waterway) &&
 					!waterways::is_underground_waterway(way.tags)) {
-				const int half_width =
-						std::max(0, waterways::waterway_width(waterway, way.tags) / 2);
-				stamp_line(water_line, way.nodes, half_width, map, bbox);
+				const int width = waterways::capped_waterway_width(
+						waterway, way.tags, scale, channel_width_cap);
+				waterways::channel_cells(
+						way.nodes, width, roads_at_grade, bbox, [&](int x, int z) {
+							const int gx = map.x(x), gz = map.z(z);
+							if (gx >= 0 && gz >= 0 && gx < int(map.width) &&
+									gz < int(map.height))
+								set_bit(water_line, std::size_t(gz) * map.width + gx);
+						});
 			}
 			continue;
 		}

@@ -56,6 +56,8 @@ CoordinateBitmap collect_road_surface_coords(
 CoordinateBitmap collect_road_surface_coords(
 		const std::vector<ProcessedElement> &elements,
 		const world_editor::WorldEditor &editor, const ::XZBBox &xzbbox, double scale);
+CoordinateBitmap collect_roads_at_grade(const std::vector<ProcessedElement> &elements,
+		const ::XZBBox &xzbbox, double scale);
 
 /// Canonical terrain-following surface profile shared by road and bridge ramps.
 std::vector<int> road_profile(const world_editor::WorldEditor &editor,

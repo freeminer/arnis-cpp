@@ -796,6 +796,10 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	// A trunk rooted below a bridge would grow through its deck.
 	if (bridge_surface && bridge_surface->contains(pos.x, pos.z))
 		return;
+	// Mapped OSM trees take the create_mapped path and remain explicit; generated
+	// trees keep clear of the laser-derived OSM-water bitmap.
+	if (!allow_on_paved && editor.tree_keep_clear_any(pos.x, pos.z))
+		return;
 	if (!allow_on_paved && editor.surface_is_sealed(pos.x, pos.z))
 		return;
 
@@ -829,7 +833,6 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 		if (handled.has_value() || editor.has_schematic_tree_pack())
 			return;
 	}
-
 	std::vector<Block> blacklist;
 	auto bw = get_building_wall_blocks();
 	blacklist.insert(blacklist.end(), bw.begin(), bw.end());
@@ -850,6 +853,8 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 	// Fixed-size tree models dominate country-scale terrain. Keep the same
 	// species palette but scale a nominal 25 m tree into a compact shrub.
 	if (editor.scale() < MICRO_TREE_MAX_SCALE) {
+		if (!allow_on_paved && editor.tree_keep_clear_any(pos.x, pos.z, 1))
+			return;
 		// Match Rust's compact low-scale tree representation: even a tall mapped
 		// crown is represented by at most eight blocks at this scale.
 		const double rounded_height =
@@ -875,6 +880,8 @@ void Tree::create_of_type(WorldEditor &editor, const Coord &pos, TreeType tree_t
 					std::nullopt, std::optional<const std::vector<Block>>(blacklist));
 		return;
 	}
+	if (!allow_on_paved && editor.tree_keep_clear_any(pos.x, pos.z, MAX_CANOPY_RADIUS))
+		return;
 	int canopy_top = 0;
 	for (const auto &range : tree.leaves_fill)
 		canopy_top = std::max(canopy_top, range.second.y);

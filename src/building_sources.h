@@ -24,6 +24,7 @@ struct HeightMergeStats
 	std::size_t measured = 0;
 	std::size_t overture = 0;
 	std::size_t deferred = 0;
+	std::size_t roof_shapes = 0;
 };
 
 struct GardenMergeStats

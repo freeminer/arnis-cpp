@@ -8,6 +8,7 @@
 #include <optional>
 #include <mutex>
 #include <unordered_map>
+#include <functional>
 #include <utility>
 #include <string_view>
 
@@ -200,7 +201,9 @@ FloodFillResult without_holes(const FloodFillResult &cells, const Holes *holes);
 /// Mirrors Rust floodfill_cache::collect_tree_keep_clear.
 std::optional<CoordinateBitmap> collect_tree_keep_clear(
 		const std::vector<ProcessedElement> &elements, const XZBBox &bbox, double scale,
-		std::optional<int> channel_width_cap = std::nullopt, int margin = 0);
+		std::optional<int> channel_width_cap = std::nullopt, int margin = 0,
+		const std::function<std::vector<std::pair<int32_t, int32_t>>(
+				const tags_t &, int, int)> &point_fountain_columns = {});
 
 // A closed ring whose bounding box exceeds the bitmap-fill cap.  Consumers
 // distinguish this deliberate refusal from an open way or a thin ring with no

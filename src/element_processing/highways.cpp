@@ -36,6 +36,7 @@
 #include "signage.h"
 #include "../floodfill.h"
 #include "../rust_numeric.h"
+#include "../unicode_text.h"
 #include "../structures/helicopter.h"
 #include "fm_highway_connectivity.h"
 #include "fm_traffic_signals.h"
@@ -2744,6 +2745,151 @@ crate::CoordinateBitmap collect_road_surface_coords(
 		}
 	}
 	return bitmap;
+}
+
+crate::CoordinateBitmap collect_roads_at_grade(
+		const std::vector<crate::osm_parser::ProcessedElement> &elements,
+		const ::XZBBox &xzbbox, double scale)
+{
+	crate::CoordinateBitmap roads(xzbbox);
+	crate::CoordinateBitmap paths(xzbbox);
+	const auto tag_is = [](const ProcessedWay &way, const char *key, const char *value) {
+		return way.tags.get(key) == value;
+	};
+	const auto bridge_way = [&](const ProcessedWay &way) {
+		return !tag_is(way, "indoor", "yes") && !tag_is(way, "aeroway", "jet_bridge") &&
+			   way.tags.contains("bridge") && way.tags.get("bridge") != "no";
+	};
+	const auto is_mapped_path = [&](const ProcessedWay &way, const std::string &type) {
+		const bool alongside = tag_is(way, "footway", "sidewalk") ||
+							   tag_is(way, "cycleway", "sidewalk") ||
+							   tag_is(way, "path", "sidewalk") ||
+							   tag_is(way, "is_sidepath", "yes");
+		if (is_carriageway(type) || !alongside || bridge_way(way) ||
+				(way.tags.contains("tunnel") && way.tags.get("tunnel") != "no"))
+			return false;
+		for (const char *key : {"layer", "level"}) {
+			if (!way.tags.contains(key))
+				continue;
+			const auto raw = way.tags.get(key);
+			const auto [begin, end] = unicode_text::trim_whitespace(raw);
+			const std::string_view value(raw.data() + begin, end - begin);
+			const auto level = crate::strict_parse::f64(value);
+			if (!level || *level != 0.0)
+				return false;
+		}
+		return true;
+	};
+	const auto inside_disc = [](int dx, int dz, int half) {
+		return dx * dx + dz * dz <= half * half + half;
+	};
+	const auto mapped_stamp = [&](const ProcessedWay &way, int x, int z,
+									  std::optional<std::pair<float, float>> direction,
+									  const auto &sink) {
+		const auto type = surface_highway_type(way);
+		if (!type)
+			return;
+		const int half = highway_block_range(*type, way.tags, scale);
+		const auto sides = road_width::kerb_sides(*type, way.tags, scale);
+		const int wide = std::max(sides.first, sides.second);
+		for (int dx = -half; dx <= half; ++dx) {
+			for (int dz = -half; dz <= half; ++dz) {
+				int side_half = wide;
+				if (direction && sides.first != sides.second) {
+					const float right = dx * -direction->second + dz * direction->first;
+					if (right > 0.01f)
+						side_half = sides.second;
+					else if (right < -0.01f)
+						side_half = sides.first;
+				}
+				if (inside_disc(dx, dz, side_half))
+					sink(x + dx, z + dz);
+			}
+		}
+	};
+	const auto stamp_way = [&](const ProcessedWay &way, crate::CoordinateBitmap &mask) {
+		if (!surface_highway_type(way) || renders_as_highway_tunnel(way))
+			return;
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const auto &a = way.nodes[i - 1];
+			const auto &b = way.nodes[i];
+			const float dx = static_cast<float>(b.x - a.x);
+			const float dz = static_cast<float>(b.z - a.z);
+			const float length = std::hypot(dx, dz);
+			std::optional<std::pair<float, float>> direction;
+			if (length > 0.0f)
+				direction = std::pair<float, float>{dx / length, dz / length};
+			for (const auto &point :
+					crate::bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
+				const int x = std::get<0>(point);
+				const int z = std::get<2>(point);
+				mapped_stamp(
+						way, x, z, direction, [&](int sx, int sz) { mask.set(sx, sz); });
+			}
+		}
+	};
+	// First pass: only mapped sidewalks and side paths. Roads widen or stop at
+	// these cells in the second pass, matching Rust's paths-first precedence.
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto type = surface_highway_type(way);
+		if (type && is_mapped_path(way, *type))
+			stamp_way(way, paths);
+	}
+	for (const auto &element : elements) {
+		if (!element.is_way())
+			continue;
+		const auto &way = element.as_way();
+		const auto type = surface_highway_type(way);
+		if (!type || bridge_way(way) || renders_as_highway_tunnel(way))
+			continue;
+		const int core = road_width::wall_half(*type, way.tags, scale);
+		const auto sides = road_width::kerb_sides(*type, way.tags, scale);
+		const int half = highway_block_range(*type, way.tags, scale);
+		const bool has_core = core < half && way.tags.get("tunnel") != "building_passage";
+		for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+			const auto &a = way.nodes[i - 1];
+			const auto &b = way.nodes[i];
+			const float vx = static_cast<float>(b.x - a.x);
+			const float vz = static_cast<float>(b.z - a.z);
+			const float length = std::hypot(vx, vz);
+			std::optional<std::pair<float, float>> direction;
+			if (length > 0.0f)
+				direction = std::pair<float, float>{vx / length, vz / length};
+			for (const auto &point :
+					crate::bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
+				const int x = std::get<0>(point);
+				const int z = std::get<2>(point);
+				mapped_stamp(way, x, z, direction, [&](int sx, int sz) {
+					const int dx = sx - x;
+					const int dz = sz - z;
+					if (has_core && !inside_disc(dx, dz, core)) {
+						int cx = dx, cz = dz;
+						while (!inside_disc(cx, cz, core)) {
+							if (paths.contains(x + cx, z + cz))
+								return;
+							const double length = std::hypot(double(cx), double(cz));
+							if (length <= 0.0)
+								break;
+							const double keep = (length - 1.0) / length;
+							const int nx =
+									static_cast<int>(std::lround(double(cx) * keep));
+							const int nz =
+									static_cast<int>(std::lround(double(cz) * keep));
+							if (nx == cx && nz == cz)
+								break;
+							cx = nx;
+							cz = nz;
+						}
+					}
+					roads.set(sx, sz);
+				});
+			}
+		}
+	}
+	return roads;
 }
 
 crate::CoordinateBitmap collect_carriageway_coords(

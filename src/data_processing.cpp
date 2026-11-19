@@ -64,6 +64,7 @@
 #include "element_processing/relation_area.h"
 #include "element_processing/aerialways.h"
 #include "element_processing/attractions.h"
+#include "element_processing/mobile_homes.h"
 #include "element_processing/fuel_stations.h"
 #include "element_processing/golf.h"
 #include "element_processing/camp_sites.h"
@@ -75,6 +76,7 @@
 #include "element_processing/emergency.h"
 #include "element_processing/advertising.h"
 #include "element_processing/bridges.h"
+#include "structures/structures.h"
 #include "element_processing/barriers.h"
 #include "element_processing/way_segments.h"
 #include "element_processing/highways.h"
@@ -2168,7 +2170,8 @@ bool generate_world(WorldEditor &editor,
 	const bool has_overture_hints = overture_hints && !overture_hints->empty();
 	if (!parsed_generation_input.empty() &&
 			(has_overture_hints ||
-					(editor.ground && editor.ground->laser_heights_wanted()))) {
+					(editor.ground && (editor.ground->laser_heights_wanted() ||
+											  editor.ground->laser_roofs_wanted())))) {
 		survey_height_elements = parsed_generation_input;
 		const auto [survey_min_x, survey_min_z] = editor.get_min_coords();
 		const auto [survey_max_x, survey_max_z] = editor.get_max_coords();
@@ -2177,13 +2180,18 @@ bool generate_world(WorldEditor &editor,
 		const auto merged = building_sources::merge_heights(survey_height_elements,
 				editor.ground, survey_bbox, args.scale,
 				has_overture_hints ? overture_hints : nullptr);
-		survey_heights_applied = merged.measured + merged.overture + merged.deferred > 0;
+		survey_heights_applied =
+				merged.measured + merged.overture + merged.deferred + merged.roof_shapes >
+				0;
 		if (merged.measured + merged.deferred > 0)
 			std::cout << "  Measured heights for " << merged.measured + merged.deferred
 					  << " buildings from laser scans\n";
 		if (merged.overture > 0)
 			std::cout << "  Filled heights on " << merged.overture
 					  << " OSM buildings from Overture Maps\n";
+		if (merged.roof_shapes > 0)
+			std::cout << "  Measured roof shapes for " << merged.roof_shapes
+					  << " buildings from laser scans\n";
 		generation_input = &survey_height_elements;
 	}
 	// Rust derives its footprint mask from the final element set and clipped
@@ -2481,6 +2489,9 @@ bool generate_world(WorldEditor &editor,
 	road_detail::retain(ordered_source_elements, args.road_detail);
 	camp_sites::prepare(ordered_source_elements);
 	allotments::prepare(ordered_source_elements, args.scale);
+	// Tag house-shaped footprints in trailer parks before deriving building
+	// groups, suppression sets and shared footprint masks.
+	mobile_homes::prepare(ordered_source_elements, args.scale);
 	const auto geographic_bounds = editor.geographic_bounds();
 	const auto cemetery_region =
 			decals::detect_region((geographic_bounds[0] + geographic_bounds[2]) * 0.5,
@@ -2973,6 +2984,7 @@ bool generate_world(WorldEditor &editor,
 		}
 	}
 	std::size_t dropped_water_footprints = 0;
+	std::shared_ptr<const CoordinateBitmap> roads_at_grade;
 	const int mapped_tree_crown_radius = crown_probe_blocks(args.scale);
 	mapped_trunks.measure_typical_height([&editor, mapped_tree_crown_radius](int x,
 												 int z) -> std::optional<std::uint8_t> {
@@ -2981,11 +2993,19 @@ bool generate_world(WorldEditor &editor,
 	});
 	editor.mapped_trunks =
 			std::make_shared<const trees::mapped::MappedTrunks>(std::move(mapped_trunks));
+	if (args.river_bed != RiverBed::Off || args.water_detail != WaterDetail::Default) {
+		auto at_grade_elements = elements;
+		road_detail::retain(at_grade_elements, args.road_detail);
+		roads_at_grade = std::make_shared<const CoordinateBitmap>(
+				highways::collect_roads_at_grade(at_grade_elements, xzbbox, args.scale));
+	}
 	if (editor.ground && editor.ground->has_land_cover()) {
 		// These are elevation-mutating passes in Rust. Run them through Ground so
 		// water snapping and bridge repair update the authoritative DEM, rather
 		// than a rounded land-cover-sized sample that is discarded afterwards.
-		editor.ground->apply_osm_water_override(land_cover_elements, xzbbox);
+		editor.ground->apply_osm_water_override(land_cover_elements, xzbbox, args.scale,
+				water_detail::channel_width_cap(args.water_detail, args.scale),
+				roads_at_grade.get());
 		// Match Rust's order: drop water/bridge-shadow detections after OSM water
 		// is carved, but before pier and shoreline overrides turn supported cells
 		// into land.
@@ -3003,7 +3023,9 @@ bool generate_world(WorldEditor &editor,
 				road_detail::retain(mode_filtered_elements, args.road_detail);
 			}
 		}
-		editor.ground->apply_osm_land_override(land_cover_elements, xzbbox, args.scale);
+		editor.ground->apply_osm_land_override(land_cover_elements, xzbbox, args.scale,
+				water_detail::channel_width_cap(args.water_detail, args.scale),
+				roads_at_grade.get());
 		if (args.debug)
 			editor.ground->save_land_cover_debug_image("landcover_debug_post_osm_water");
 		editor.ground->apply_bridge_land_cover_repair(
@@ -3086,6 +3108,19 @@ bool generate_world(WorldEditor &editor,
 	const auto clear_corridors = std::make_shared<const CoordinateBitmap>(
 			aerialways::clear_corridors(elements, xzbbox));
 	editor.set_clear_corridors(clear_corridors);
+	editor.set_tree_keep_clear(nullptr);
+	// Laser-classified trees keep OSM-mapped pools, rivers, channels and fountain
+	// footprints clear. The bitmap is immutable and shared by each tile editor.
+	if (editor.ground && editor.ground->laser_trees_wanted()) {
+		const auto keep_clear = collect_tree_keep_clear(elements, xzbbox, args.scale,
+				water_detail::channel_width_cap(args.water_detail, args.scale), 1,
+				[&editor](const tags_t &, int x, int z) {
+					return structures::fountain::point_columns(editor, x, z);
+				});
+		if (keep_clear)
+			editor.set_tree_keep_clear(
+					std::make_shared<const CoordinateBitmap>(std::move(*keep_clear)));
+	}
 	const auto station_platforms = stations::collect_platforms(elements, args.timeout);
 	std::vector<stations::Platform> station_surface_groups;
 	const auto station_tree_clearance = std::make_shared<const stations::SparseCells>(
@@ -3159,7 +3194,7 @@ bool generate_world(WorldEditor &editor,
 		water_field.set_river_bed(river_bed::compute_river_bed_field(args.river_bed,
 				elements, *editor.ground, water_field, xzbbox.min_x(), xzbbox.min_z(),
 				clip_bbox.min_x(), clip_bbox.max_x(), clip_bbox.min_z(),
-				clip_bbox.max_z(), args.scale, river_width_cap));
+				clip_bbox.max_z(), args.scale, river_width_cap, roads_at_grade.get()));
 	}
 	auto big_water_field =
 			std::make_shared<const water_depth::BigWaterField>(std::move(water_field));
@@ -4237,7 +4272,8 @@ bool generate_world(WorldEditor &editor,
 					waterways::generate_waterways(editor, way, args.water_detail,
 							args.scale,
 							waterways::ChannelBed{*big_water_field, road_mask,
-									tunnel_footprint, piped_under_roads});
+									tunnel_footprint, piped_under_roads,
+									roads_at_grade.get()});
 				}
 			} else if (way.tags.contains("railway")) {
 				railways::generate_railways(editor, way, state.rail_tunnel_points,

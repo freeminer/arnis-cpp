@@ -2,6 +2,7 @@
 #include "block_definitions.h"
 #include "bresenham.h"
 #include "connected_blocks.h"
+#include "fortifications.h"
 #include "world_editor.h"
 #include "highways.h"
 #include "../strict_parse.h"
@@ -830,6 +831,88 @@ void generate_barriers(world_editor::WorldEditor &editor, const ProcessedElement
 		return;
 	const auto &way = element.as_way();
 	const double scale = editor.scale();
+	if (fortifications::line_wall(way.tags) && !way.tags.contains("min_height")) {
+		constexpr double default_height_m = 8.0;
+		constexpr double default_thickness_m = 3.0;
+		const bool ruin =
+				(way.tags.get("ruins") != "" && way.tags.get("ruins") != "no") ||
+				way.tags.get("historic") == "ruins";
+		const double height_m =
+				parse_min_height(way.tags.get("height"))
+						.value_or(ruin ? default_height_m / 2.0 : default_height_m);
+		const int wall_height = std::max(1, rust_round_i32(height_m * scale));
+		const auto mapped_thickness = highways::parse_width_tag_m(way.tags);
+		const double thickness_m =
+				mapped_thickness && *mapped_thickness >= 0.5 && *mapped_thickness <= 30.0
+						? *mapped_thickness
+						: default_thickness_m;
+		const int reach =
+				std::max(0, (static_cast<int>(std::lround(thickness_m * scale)) - 1) / 2);
+		const auto trace = trace_barrier(way, scale, true);
+		using Cell = std::pair<int, int>;
+		std::unordered_set<Cell, RoadBucketHash> wall_cells;
+		std::unordered_set<Cell, RoadBucketHash> passages;
+		const auto stamp = [&](auto &set, Cell cell) {
+			for (int dx = -reach; dx <= reach; ++dx)
+				for (int dz = -reach; dz <= reach; ++dz)
+					set.emplace(cell.first + dx, cell.second + dz);
+		};
+		for (std::size_t i = 0; i < trace.cells.size(); ++i) {
+			const auto [x, z] = trace.cells[i];
+			const auto placement = clearance.place(
+					x, z, trace.directions[i], false, building_footprints);
+			if (placement.kind != RoadClearance::PlacementKind::Post) {
+				stamp(passages, {x, z});
+				stamp(wall_cells, {x, z});
+				continue;
+			}
+			if (editor.is_mapped_water(placement.x, placement.z) ||
+					bridge_surface.keeps_clear(placement.x, placement.z))
+				continue;
+			stamp(wall_cells, {placement.x, placement.z});
+		}
+		for (const auto &mark : trace.marks) {
+			const auto [lo, hi] = barrier_span(mark.at, mark.width, trace.cells.size());
+			for (std::size_t i = lo; i <= hi; ++i)
+				stamp(passages, trace.cells[i]);
+		}
+		std::vector<Cell> cells;
+		cells.reserve(wall_cells.size());
+		for (const auto &cell : wall_cells) {
+			if (building_footprints.contains(cell.first, cell.second))
+				continue;
+			if (!passages.contains(cell) &&
+					clearance.place(cell.first, cell.second, {1.0f, 0.0f}, false,
+									 building_footprints)
+									.kind != RoadClearance::PlacementKind::Post)
+				continue;
+			if (!passages.contains(cell) &&
+					bridge_surface.keeps_clear(cell.first, cell.second))
+				continue;
+			if (!passages.contains(cell) &&
+					editor.is_mapped_water(cell.first, cell.second))
+				continue;
+			cells.push_back(cell);
+		}
+		std::sort(cells.begin(), cells.end());
+		for (const auto &[x, z] : cells)
+			editor.register_barrier(x, z);
+		Block block = block_definitions::STONE_BRICKS;
+		const auto material = way.tags.get("material");
+		if (material == "brick" || material == "bricks")
+			block = block_definitions::BRICK;
+		else if (material == "sandstone")
+			block = block_definitions::SANDSTONE;
+		else if (material == "concrete")
+			block = block_definitions::LIGHT_GRAY_CONCRETE;
+		fortifications::Mass mass{cells, block, wall_height, std::nullopt, false, !ruin,
+				std::vector<Cell>(passages.begin(), passages.end()), {},
+				[&building_footprints](
+						int x, int z) { return building_footprints.contains(x, z); },
+				scale};
+		fortifications::generate(editor, mass);
+		return;
+	}
 	int lift = 0;
 	if (const auto it = element.tags().find("min_height"); it != element.tags().end())
 		if (const auto metres = parse_min_height(it->second))
@@ -928,7 +1011,10 @@ void generate_barriers(world_editor::WorldEditor &editor, const ProcessedElement
 			bases = barrier_bases(editor, bridge_surface, cells);
 		}
 		for (std::size_t i = 0; i < run.size(); ++i) {
-			if (!bases[i] || run[i].gate)
+			if (!bases[i])
+				continue;
+			editor.register_barrier(run[i].x, run[i].z);
+			if (run[i].gate)
 				continue;
 			const int x = run[i].x, z = run[i].z, base = *bases[i];
 			if (hedge && !editor.surface_is_sealed(x, z) &&

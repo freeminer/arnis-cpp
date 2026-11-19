@@ -1,4 +1,5 @@
 #include "stations.h"
+#include "tunnel_grade.h"
 
 #include "../bresenham.h"
 #include "../floodfill.h"
@@ -1482,7 +1483,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 					*level == railways::TrackLevel::Tunnel, {dx / length, dz / length}});
 		}
 	}
-	const int lowest = world_editor::min_y() + 1;
+	const int lowest = tunnel_grade::lowest_floor();
 	struct Candidate
 	{
 		std::unordered_set<TrackBedIndex::Key, TrackBedIndex::Hash> tracks;
@@ -2697,7 +2698,7 @@ TunnelPinIndex underground_track_pins(const std::vector<ProcessedElement> &eleme
 					std::min(ground, editor.lowest_carved_bed(x, z, 2).value_or(ground));
 			const int deep = std::max(
 					std::min(surface, ground) - railways::RAIL_TUNNEL_FLOOR_DEPTH,
-					world_editor::min_y() + 1);
+					tunnel_grade::lowest_floor());
 			const int reach = hall_floor + climbs / 2;
 			if (reach < deep)
 				result.set_joint_floor(x, z, reach);

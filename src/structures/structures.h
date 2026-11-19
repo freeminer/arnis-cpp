@@ -93,6 +93,7 @@ bool place_named_structure(
 namespace fountain
 {
 void place(WorldEditor &editor, int x, int z, std::size_t area_cells);
+std::vector<std::pair<int, int>> point_columns(const WorldEditor &editor, int x, int z);
 }
 
 namespace playground

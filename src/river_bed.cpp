@@ -38,7 +38,7 @@ constexpr double EMBED_MARGIN = 4.0;
 struct RiverLine
 {
 	const ProcessedWay *way{};
-	int half_width{};
+	int width{};
 };
 
 using Span = std::pair<int, int>;
@@ -430,7 +430,7 @@ void build_tile(RiverBedField &result, const TileKey &tile, const TileWork &work
 		const std::vector<RiverPolygon> &nonriver_polygons, const Ground &ground,
 		const water_depth::BigWaterField &legacy, int world_origin_x, int world_origin_z,
 		int world_min_x, int world_max_x, int world_min_z, int world_max_z, int halo,
-		double scale)
+		double scale, const CoordinateBitmap *roads_at_grade)
 {
 	const std::int64_t raw_core_x = static_cast<std::int64_t>(tile.first) * TILE_SIDE;
 	const std::int64_t raw_core_z = static_cast<std::int64_t>(tile.second) * TILE_SIDE;
@@ -472,24 +472,18 @@ void build_tile(RiverBedField &result, const TileKey &tile, const TileWork &work
 										  z - world_origin_z}) == land_cover::LC_WATER;
 	for (const auto line_index : work.lines) {
 		const auto &line = lines[line_index];
-		const int radius = line.half_width + 1;
-		const auto hw = static_cast<std::uint8_t>(std::clamp(radius + 1, 1, 255));
-		for (std::size_t k = 1; k < line.way->nodes.size(); ++k) {
-			const auto &a = line.way->nodes[k - 1], &b = line.way->nodes[k];
-			if (std::max(a.x, b.x) + radius < min_x ||
-					std::min(a.x, b.x) - radius > max_x ||
-					std::max(a.z, b.z) + radius < min_z ||
-					std::min(a.z, b.z) - radius > max_z)
-				continue;
-			for (const auto &[cx, _, cz] : bresenham_line(a.x, 0, a.z, b.x, 0, b.z))
-				for (int x = cx - radius; x <= cx + radius; ++x)
-					for (int z = cz - radius; z <= cz + radius; ++z)
-						if (inside(x, z)) {
-							const auto i = idx(x, z);
-							line_mask[i] = 1;
-							hw_line[i] = std::max(hw_line[i], hw);
-						}
-		}
+		const auto [before, after] = waterways::channel_reach(line.width);
+		const auto hw = static_cast<std::uint8_t>(
+				std::clamp(std::max(before, after) + 1, 1, 255));
+		const XZBBox tile_bounds(min_x, min_z, max_x, max_z);
+		waterways::channel_cells(line.way->nodes, line.width, roads_at_grade, tile_bounds,
+				[&](int x, int z) {
+					if (!inside(x, z))
+						return;
+					const auto i = idx(x, z);
+					line_mask[i] = 1;
+					hw_line[i] = std::max(hw_line[i], hw);
+				});
 	}
 	for (const auto i : work.rivers)
 		rasterize_poly(river_polygons[i], min_x, max_x, min_z, max_z, idx, poly_mask);
@@ -666,7 +660,7 @@ RiverBedField compute_river_bed_field(RiverBed mode,
 		const std::vector<ProcessedElement> &elements, const Ground &ground,
 		const water_depth::BigWaterField &legacy, int world_origin_x, int world_origin_z,
 		int world_min_x, int world_max_x, int world_min_z, int world_max_z, double scale,
-		std::optional<int> channel_width_cap)
+		std::optional<int> channel_width_cap, const CoordinateBitmap *roads_at_grade)
 {
 	RiverBedField result;
 	if (mode == RiverBed::Off || world_min_x > world_max_x || world_min_z > world_max_z)
@@ -689,9 +683,9 @@ RiverBedField compute_river_bed_field(RiverBed mode,
 				!waterways::is_channel_waterway(it->second) ||
 				waterways::is_underground_waterway(way.tags))
 			return;
-		const int width =
-				waterways::capped_waterway_width(it->second, way.tags, channel_width_cap);
-		lines.push_back({&way, width / 2});
+		const int width = waterways::capped_waterway_width(
+				it->second, way.tags, scale, channel_width_cap);
+		lines.push_back({&way, width});
 	};
 	for (const auto &element : elements) {
 		if (element.is_way())
@@ -713,7 +707,8 @@ RiverBedField compute_river_bed_field(RiverBed mode,
 	TileWorks work;
 	for (std::size_t i = 0; i < lines.size(); ++i) {
 		const auto &line = lines[i];
-		const int stamp_radius = line.half_width + 1;
+		const auto [before, after] = waterways::channel_reach(line.width);
+		const int stamp_radius = std::max(before, after) + 1;
 		for (std::size_t k = 1; k < line.way->nodes.size(); ++k) {
 			const auto &a = line.way->nodes[k - 1], &b = line.way->nodes[k];
 			for_tiles(saturating_offset(std::min(a.x, b.x), -stamp_radius),
@@ -778,7 +773,7 @@ RiverBedField compute_river_bed_field(RiverBed mode,
 		if (tile_work.active)
 			build_tile(result, tile, tile_work, lines, river_polygons, nonriver_polygons,
 					ground, legacy, world_origin_x, world_origin_z, world_min_x,
-					world_max_x, world_min_z, world_max_z, halo, scale);
+					world_max_x, world_min_z, world_max_z, halo, scale, roads_at_grade);
 	return result;
 }
 }

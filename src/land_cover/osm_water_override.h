@@ -3,6 +3,12 @@
 #include "land_cover.h"
 
 #include <cstdint>
+#include <optional>
+
+namespace arnis
+{
+class CoordinateBitmap;
+}
 
 namespace arnis::land_cover
 {
@@ -23,8 +29,12 @@ WaterOverrideGuard build_water_override_guard(
 void apply_osm_water_override(LandCoverData &data,
 		std::vector<std::vector<float>> &heights, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox);
+		const XZBBox &bbox, double scale = 1.0,
+		std::optional<int> channel_width_cap = std::nullopt,
+		const CoordinateBitmap *roads_at_grade = nullptr);
 void mark_inland_water(LandCoverData &data, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox);
+		const XZBBox &bbox, double scale = 1.0,
+		std::optional<int> channel_width_cap = std::nullopt,
+		const CoordinateBitmap *roads_at_grade = nullptr);
 }

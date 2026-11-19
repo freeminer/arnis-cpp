@@ -555,11 +555,15 @@ struct Args
 	bool garden_detail{true};
 	bool measured_trees{true};
 	bool measured_heights{true};
+	bool measured_roofs{true};
 	std::uint32_t lidar_max_mb{1000};
 	std::optional<survey::Features> lidar_features() const
 	{
-		const survey::Features features{garden_detail, measured_trees, measured_heights};
-		return lidar && (features.garden || features.trees || features.heights) &&
+		const survey::Features features{
+				garden_detail, measured_trees, measured_heights, measured_roofs};
+		return lidar &&
+							   (features.garden || features.trees || features.heights ||
+									   features.roofs) &&
 							   !lidar_off_reason()
 					   ? std::optional<survey::Features>(features)
 					   : std::nullopt;

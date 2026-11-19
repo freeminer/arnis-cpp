@@ -35,6 +35,7 @@ struct Features
 	bool garden = false;
 	bool trees = false;
 	bool heights = false;
+	bool roofs = false;
 };
 
 struct Cell

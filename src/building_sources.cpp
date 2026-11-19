@@ -5,6 +5,7 @@
 #include "overture.h"
 #include "survey/elements.h"
 #include "survey/heights.h"
+#include "survey/roofs.h"
 
 #include <utility>
 
@@ -25,6 +26,8 @@ HeightMergeStats merge_heights(std::vector<ProcessedElement> &elements,
 		stats.overture = hints->apply(elements);
 	if (ground)
 		stats.deferred = survey::heights::apply_deferred(elements, measured.deferred);
+	if (ground)
+		stats.roof_shapes = survey::roofs::apply(elements, *ground, bbox, scale);
 	return stats;
 }
 

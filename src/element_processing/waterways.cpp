@@ -8,6 +8,7 @@
 #include "../water_detail.h"
 #include "field_texture.h"
 #include "../strict_parse.h"
+#include "../mapillary/geometry.h"
 #include "../unicode_text.h"
 
 #include <vector>
@@ -45,9 +46,9 @@ int get_waterway_width(const std::string &waterway_type)
 	if (waterway_type == "flowline")
 		return 2;
 	if (waterway_type == "brook")
-		return 2;
+		return 3;
 	if (waterway_type == "ditch")
-		return 2;
+		return 1;
 	if (waterway_type == "drain")
 		return 1;
 	return 4;
@@ -76,86 +77,118 @@ bool is_underground_waterway(const tags_t &tags)
 	return false;
 }
 
-int waterway_width(const std::string &type, const tags_t &tags)
+int waterway_width(const std::string &type, const tags_t &tags, double scale)
 {
+	double metres = static_cast<double>(get_waterway_width(type));
 	if (const auto it = tags.find("width"); it != tags.end()) {
-		// Rust trims the whole tag and splits only on a literal space. In
-		// particular, reject unit-suffixed values and tab-separated tokens
-		// instead of silently accepting a numeric prefix.
-		const auto [begin, end] = unicode_text::trim_whitespace(it->second);
-		const std::string_view trimmed(it->second.data() + begin, end - begin);
-		const auto first_space = trimmed.find(' ');
-		const auto token = trimmed.substr(0, first_space);
-		if (const auto width = strict_parse::f64(token); width && std::isfinite(*width)) {
-			const double rounded = std::round(*width);
-			if (rounded < 1)
-				return get_waterway_width(type);
-			return rounded >= MAX_WATERWAY_WIDTH ? MAX_WATERWAY_WIDTH
-												 : static_cast<int>(rounded);
-		}
+		const auto separator = it->second.find(';');
+		const auto first = it->second.substr(0, separator);
+		if (const auto width = mapillary::geodesy::parse_length_m(first);
+				width && std::isfinite(*width) && *width > 0.0)
+			metres = *width;
 	}
-	return get_waterway_width(type);
+	// Rust's positive-infinity-to-integer cast saturates, so the following
+	// maximum-width check handles +inf as a capped channel. NaN and non-positive
+	// scales fall back to one block, matching the Rust cast followed by clamp.
+	if (std::isnan(scale) || scale <= 0.0)
+		return 1;
+	const double blocks = std::round(metres * scale);
+	if (blocks <= 1.0)
+		return 1;
+	if (blocks >= MAX_WATERWAY_WIDTH)
+		return MAX_WATERWAY_WIDTH;
+	return static_cast<int>(blocks);
 }
 
 int capped_waterway_width(
-		const std::string &type, const tags_t &tags, std::optional<int> cap)
+		const std::string &type, const tags_t &tags, double scale, std::optional<int> cap)
 {
-	const int width = waterway_width(type, tags);
+	const int width = waterway_width(type, tags, scale);
 	if (!cap || *cap <= 0)
 		return width;
 	if (get_waterway_width(type) <= 3)
-		return std::min({width, *cap, 1});
+		return std::min({width, *cap, 3});
 	return std::min(width, *cap);
 }
 
-void create_water_channel(WorldEditor &editor, int center_x, int center_z, int width,
-		int target_water_y, const ChannelBed *bed)
+std::pair<int, int> channel_reach(int width)
 {
-	const int BANK_TOLERANCE = 2;
-	int half_width = width / 2;
-	for (int x = center_x - half_width - 1; x <= center_x + half_width + 1; ++x) {
-		for (int z = center_z - half_width - 1; z <= center_z + half_width + 1; ++z) {
-			int dx = std::abs(x - center_x);
-			int dz = std::abs(z - center_z);
-			int distance_from_center = std::max(dx, dz);
+	width = std::max(1, width);
+	return {(width - 1) / 2, width / 2};
+}
 
-			if (distance_from_center <= half_width + 1) {
-				const int ground_y = editor.get_ground_level(x, z);
-				std::optional<int> water_y;
-				if (ground_y <= target_water_y) {
-					water_y = target_water_y;
-				} else if (ground_y <= target_water_y + BANK_TOLERANCE &&
-						   !editor.block_exists_absolute(x, ground_y, z)) {
-					water_y = ground_y;
-				}
-				if (!water_y.has_value())
-					continue;
-
-				editor.set_block_absolute(
-						WATER, x, water_y.value(), z, std::nullopt, std::nullopt);
-				// Apply the shared river-bed field only to open river columns. Roads
-				// retain their surface, and bore shells keep their tunnel roof intact.
-				if (bed && bed->field.is_river(x, z) && !bed->road_mask.contains(x, z) &&
-						!water_depth::at_bore(bed->field, bed->tunnel_footprint, x, z) &&
-						editor.check_for_block_absolute(x, *water_y, z,
-								std::optional<std::vector<Block>>(
-										std::vector<Block>{WATER}),
-								std::nullopt)) {
-					water_depth::carve_water_column(editor, x, z, *water_y,
-							bed->field.depth_at(x, z), bed->road_mask, bed->field);
-				}
-				editor.set_block_absolute(AIR, x, water_y.value() + 1, z,
-						std::optional<std::vector<Block>>(
-								std::vector<Block>(field_texture::PLOT_PLANTS.begin(),
-										field_texture::PLOT_PLANTS.end())),
-						std::nullopt);
-				editor.set_block_absolute(AIR, x, water_y.value() + 2, z,
-						std::optional<std::vector<Block>>(
-								std::vector<Block>{SUNFLOWER_UPPER}),
-						std::nullopt);
+void channel_walk(const std::vector<ProcessedNode> &nodes, int width,
+		const CoordinateBitmap *roads_at_grade, const XZBBox &area,
+		const std::function<void(const ChannelCentre &, int, int)> &cell)
+{
+	const auto [before, after] = channel_reach(width);
+	const int reach = std::max(before, after) + 1;
+	std::optional<std::pair<int, int>> previous;
+	for (std::size_t segment = 0; segment + 1 < nodes.size(); ++segment) {
+		const auto &a = nodes[segment];
+		const auto &b = nodes[segment + 1];
+		if (std::int64_t(std::max(a.x, b.x)) + reach < area.min_x() ||
+				std::int64_t(std::min(a.x, b.x)) - reach > area.max_x() ||
+				std::int64_t(std::max(a.z, b.z)) + reach < area.min_z() ||
+				std::int64_t(std::min(a.z, b.z)) - reach > area.max_z()) {
+			previous.reset();
+			continue;
+		}
+		const auto line = bresenham_line(a.x, 0, a.z, b.x, 0, b.z);
+		const std::size_t steps = line.empty() ? 0 : line.size() - 1;
+		for (std::size_t step = 0; step < line.size(); ++step) {
+			const int x = std::get<0>(line[step]);
+			const int z = std::get<2>(line[step]);
+			if (roads_at_grade && roads_at_grade->contains(x, z)) {
+				previous.reset();
+				continue;
 			}
+			const ChannelCentre centre{x, z, segment, step, steps};
+			if (width <= 1 && previous && previous->first != x && previous->second != z)
+				cell(centre, previous->first, z);
+			for (int cx = x - before; cx <= x + after; ++cx)
+				for (int cz = z - before; cz <= z + after; ++cz)
+					cell(centre, cx, cz);
+			previous = std::pair{x, z};
 		}
 	}
+}
+
+void fill_channel_cell(
+		WorldEditor &editor, int x, int z, int target_water_y, const ChannelBed *bed)
+{
+	const int BANK_TOLERANCE = 2;
+	const int ground_y = editor.get_ground_level(x, z);
+	std::optional<int> water_y;
+	if (ground_y <= target_water_y)
+		water_y = target_water_y;
+	else if (ground_y <= target_water_y + BANK_TOLERANCE &&
+			 !editor.block_exists_absolute(x, ground_y, z))
+		water_y = ground_y;
+	if (!water_y)
+		return;
+	editor.set_block_absolute(WATER, x, *water_y, z, std::nullopt, std::nullopt);
+	const bool under_deck = bed && bed->piped_under_roads &&
+							bed->piped_under_roads->deck_clears(x, z, *water_y) &&
+							!bed->piped_under_roads->over_grade_way(x, z);
+	if (bed &&
+			(bed->field.is_river(x, z) ||
+					(!editor.is_lc_water(x, z) && editor.is_mapped_water(x, z))) &&
+			(!bed->road_mask.contains(x, z) || under_deck) &&
+			!water_depth::at_bore(bed->field, bed->tunnel_footprint, x, z) &&
+			editor.check_for_block_absolute(x, *water_y, z,
+					std::optional<std::vector<Block>>(std::vector<Block>{WATER}),
+					std::nullopt))
+		water_depth::carve_water_column(editor, x, z, *water_y, bed->field.depth_at(x, z),
+				bed->road_mask, bed->field);
+	editor.set_block_absolute(AIR, x, *water_y + 1, z,
+			std::optional<std::vector<Block>>(
+					std::vector<Block>(field_texture::PLOT_PLANTS.begin(),
+							field_texture::PLOT_PLANTS.end())),
+			std::nullopt);
+	editor.set_block_absolute(AIR, x, *water_y + 2, z,
+			std::optional<std::vector<Block>>(std::vector<Block>{SUNFLOWER_UPPER}),
+			std::nullopt);
 }
 
 void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &element)
@@ -186,41 +219,52 @@ void generate_waterways(world_editor::WorldEditor &editor, const ProcessedWay &e
 		return;
 
 	const int cap = water_detail::channel_width_cap(detail, scale);
-	const int channel_width = capped_waterway_width(
-			it->second, element.tags, cap > 0 ? std::optional<int>(cap) : std::nullopt);
+	const int channel_width = capped_waterway_width(it->second, element.tags, scale,
+			cap > 0 ? std::optional<int>(cap) : std::nullopt);
 
-	for (std::size_t i = 0; i + 1 < element.nodes.size(); ++i) {
-		auto prev_node = element.nodes[i].xz();
-		auto current_node = element.nodes[i + 1].xz();
-		const int y0 = editor.get_water_level(prev_node.x, prev_node.z);
-		const int y1 = editor.get_water_level(current_node.x, current_node.z);
-
-		std::vector<std::tuple<int, int, int>> bresenham_points = bresenham_line(
-				prev_node.x, 0, prev_node.z, current_node.x, 0, current_node.z);
-
-		// Rust waterways.rs: ramp between endpoints, rounding half steps away
-		// from zero, then clamp to the local surface to avoid floating sheets.
-		const auto last = static_cast<std::int64_t>(bresenham_points.size()) - 1;
-		const auto dy = static_cast<std::int64_t>(y1) - y0;
-		for (std::size_t point_index = 0; point_index < bresenham_points.size();
-				++point_index) {
-			const auto &pt = bresenham_points[point_index];
-			int bx = std::get<0>(pt);
-			int bz = std::get<2>(pt);
-			const auto num = dy * static_cast<std::int64_t>(point_index);
-			const int ramped =
-					last > 0 ? static_cast<int>(
-									   y0 + (2 * num + last * ((dy > 0) - (dy < 0))) /
-													(2 * last))
-							 : std::min(y0, y1);
-			const int seg_water_y = std::min(ramped, editor.get_water_level(bx, bz));
-			if (bed && bed->piped_under_roads && bed->road_mask.contains(bx, bz) &&
-					(!bed->piped_under_roads->deck_clears(bx, bz, seg_water_y) ||
-							bed->piped_under_roads->over_grade_way(bx, bz)))
-				continue;
-			create_water_channel(editor, bx, bz, channel_width, seg_water_y, bed);
-		}
-	}
+	if (element.nodes.size() < 2)
+		return;
+	const auto [min_x, max_x] = std::minmax_element(element.nodes.begin(),
+			element.nodes.end(), [](const auto &a, const auto &b) { return a.x < b.x; });
+	const auto [min_z, max_z] = std::minmax_element(element.nodes.begin(),
+			element.nodes.end(), [](const auto &a, const auto &b) { return a.z < b.z; });
+	const XZBBox bounds(min_x->x, min_z->z, max_x->x, max_z->z);
+	std::optional<std::tuple<std::size_t, int, int>> endpoints;
+	std::optional<std::pair<ChannelCentre, int>> surface;
+	channel_walk(element.nodes, channel_width, bed ? bed->roads_at_grade : nullptr,
+			bounds, [&](const ChannelCentre &centre, int x, int z) {
+				int water_y;
+				if (surface && surface->first == centre) {
+					water_y = surface->second;
+				} else {
+					if (!endpoints || std::get<0>(*endpoints) != centre.segment) {
+						const auto a = element.nodes[centre.segment].xz();
+						const auto b = element.nodes[centre.segment + 1].xz();
+						endpoints = std::make_tuple(centre.segment,
+								editor.get_water_level(a.x, a.z),
+								editor.get_water_level(b.x, b.z));
+					}
+					const auto [segment, y0, y1] = *endpoints;
+					(void)segment;
+					const auto last = static_cast<std::int64_t>(centre.steps);
+					const auto dy = static_cast<std::int64_t>(y1) - y0;
+					const auto num = dy * static_cast<std::int64_t>(centre.step);
+					const int ramped =
+							last == 0 ? std::min(y0, y1)
+									  : static_cast<int>(
+												y0 +
+												(2 * num + last * ((dy > 0) - (dy < 0))) /
+														(2 * last));
+					water_y =
+							std::min(ramped, editor.get_water_level(centre.x, centre.z));
+					surface = std::make_pair(centre, water_y);
+				}
+				if (bed && bed->piped_under_roads && bed->road_mask.contains(x, z) &&
+						(!bed->piped_under_roads->deck_clears(x, z, water_y) ||
+								bed->piped_under_roads->over_grade_way(x, z)))
+					return;
+				fill_channel_cell(editor, x, z, water_y, bed);
+			});
 }
 
 }

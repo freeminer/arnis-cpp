@@ -17,27 +17,46 @@ namespace
 {
 constexpr std::size_t LARGE_FOUNTAIN_CELLS = 300;
 constexpr int MAX_CUT = 3;
+
+std::shared_ptr<const StructureSchematic> selected_schematic(const WorldEditor &editor,
+		int x, int z, std::size_t area_cells, unsigned &rotation)
+{
+	const auto h = land_cover::coord_hash(x, z);
+	const auto variant = area_cells >= LARGE_FOUNTAIN_CELLS ? 4 : int((h >> 4) % 3) + 1;
+	rotation = (h >> 8) & 3;
+	const auto root = editor.get_schematic_asset_root().empty()
+							  ? assets::path("structures")
+							  : editor.get_schematic_asset_root();
+	auto schematic = try_load_structure_cached(
+			root / ("fountain" + std::to_string(variant) + ".schem"));
+	if (!schematic)
+		for (int fallback = 1; fallback <= 3 && !schematic; ++fallback)
+			schematic = try_load_structure_cached(
+					root / ("fountain" + std::to_string(fallback) + ".schem"));
+	if (!schematic || schematic->max_extent > TILE_EDITOR_HALO)
+		return {};
+	return schematic;
+}
+}
+
+std::vector<std::pair<int, int>> point_columns(const WorldEditor &editor, int x, int z)
+{
+	if (!editor.place_prop(Prop::Fountain))
+		return {};
+	unsigned rotation = 0;
+	const auto schematic = selected_schematic(editor, x, z, 0, rotation);
+	return schematic ? structure_base(*schematic, x, z, rotation,
+							   std::numeric_limits<int>::max())
+					 : std::vector<std::pair<int, int>>{};
 }
 
 void place(WorldEditor &editor, int x, int z, std::size_t area_cells)
 {
 	if (!editor.place_prop(Prop::Fountain))
 		return;
-	const auto h = land_cover::coord_hash(x, z);
-	const auto variant = area_cells >= LARGE_FOUNTAIN_CELLS ? 4 : int((h >> 4) % 3) + 1;
-	const unsigned rotation = (h >> 8) & 3;
-	const auto root = editor.get_schematic_asset_root().empty()
-							  ? assets::path("structures")
-							  : editor.get_schematic_asset_root();
-	auto schematic = try_load_structure_cached(
-			root / ("fountain" + std::to_string(variant) + ".schem"));
-	// Match Rust's fallback: the chosen asset is used when valid; if it failed
-	// to decode, use the first available small fountain (never another large one).
+	unsigned rotation = 0;
+	const auto schematic = selected_schematic(editor, x, z, area_cells, rotation);
 	if (!schematic)
-		for (int fallback = 1; fallback <= 3 && !schematic; ++fallback)
-			schematic = try_load_structure_cached(
-					root / ("fountain" + std::to_string(fallback) + ".schem"));
-	if (!schematic || schematic->max_extent > TILE_EDITOR_HALO)
 		return;
 
 	// Level the basin to the lowest terrain column in its footprint, but cap

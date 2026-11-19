@@ -13,6 +13,7 @@ namespace arnis
 {
 struct Ground;
 class ProcessedElement;
+class CoordinateBitmap;
 namespace water_depth
 {
 class BigWaterField;
@@ -46,7 +47,8 @@ RiverBedField compute_river_bed_field(RiverBed mode,
 		const std::vector<ProcessedElement> &elements, const Ground &ground,
 		const water_depth::BigWaterField &legacy, int world_origin_x, int world_origin_z,
 		int min_x, int max_x, int min_z, int max_z, double scale,
-		std::optional<int> channel_width_cap = std::nullopt);
+		std::optional<int> channel_width_cap = std::nullopt,
+		const CoordinateBitmap *roads_at_grade = nullptr);
 
 std::pair<Block, Block> bed_blocks(int x, int z, int depth, bool sandy);
 }

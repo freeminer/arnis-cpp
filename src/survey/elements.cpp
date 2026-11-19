@@ -265,7 +265,7 @@ struct Paved
 				if (waterway && waterways::is_channel_waterway(*waterway) &&
 						!waterways::is_underground_waterway(tags)) {
 					const double reach = waterways::capped_waterway_width(
-												 *waterway, tags, std::nullopt) /
+												 *waterway, tags, scale, std::nullopt) /
 												 2 +
 										 1;
 					const auto &way = element.as_way();

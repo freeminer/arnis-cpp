@@ -5,9 +5,13 @@
 #include "element_processing/relation_area.h"
 #include "element_processing/highways.h"
 #include "element_processing/golf.h"
+#include "element_processing/waterways.h"
+#include "structures/schem_decoder.h"
+#include "assets_root.h"
 #include "bresenham.h"
 #include "strict_parse.h"
 #include <algorithm>
+#include <array>
 #include <span>
 #include <atomic>
 #include <charconv>
@@ -21,6 +25,7 @@
 #include <semaphore>
 #include <unordered_set>
 #include <iterator>
+#include <string>
 #include <string_view>
 #include <utility>
 
@@ -552,6 +557,224 @@ bool CoordinateBitmap::contains(int32_t x, int32_t z) const
 
 	// Safety: bounds checks above ensure byte_index is always valid
 	return ((bits_[byte_index] >> bit_offset) & 1U) == 1U;
+}
+
+bool CoordinateBitmap::any_in(
+		int32_t min_x, int32_t min_z, int32_t max_x, int32_t max_z) const
+{
+	if (is_empty() || min_x > max_x || min_z > max_z)
+		return false;
+	min_x = std::max(min_x, min_x_);
+	min_z = std::max(min_z, min_z_);
+	max_x = static_cast<int32_t>(std::min<std::int64_t>(max_x,
+			static_cast<std::int64_t>(min_x_) + static_cast<std::int64_t>(width_) - 1));
+	max_z = static_cast<int32_t>(std::min<std::int64_t>(max_z,
+			static_cast<std::int64_t>(min_z_) + static_cast<std::int64_t>(height_) - 1));
+	if (min_x > max_x || min_z > max_z)
+		return false;
+	for (int64_t z = min_z; z <= max_z; ++z)
+		for (int64_t x = min_x; x <= max_x; ++x)
+			if (contains(static_cast<int32_t>(x), static_cast<int32_t>(z)))
+				return true;
+	return false;
+}
+
+namespace
+{
+enum class KeptWaterKind
+{
+	Area,
+	Fountain,
+	Channel
+};
+
+struct KeptWater
+{
+	KeptWaterKind kind;
+	int radius = 0;
+};
+
+std::optional<KeptWater> kept_water(
+		const tags_t &tags, double scale, std::optional<int> channel_width_cap)
+{
+	const auto is = [&](const char *key, const char *value) {
+		const auto it = tags.find(key);
+		return it != tags.end() && it->second == value;
+	};
+	if (is("amenity", "fountain"))
+		return KeptWater{KeptWaterKind::Fountain};
+	if (is("leisure", "swimming_pool") || is("natural", "water") ||
+			tags.contains("water") || is("landuse", "reservoir") ||
+			is("man_made", "reservoir_covered") || is("waterway", "riverbank") ||
+			is("waterway", "dock"))
+		return KeptWater{KeptWaterKind::Area};
+	const auto waterway = tags.find("waterway");
+	if (waterway == tags.end() || !waterways::is_channel_waterway(waterway->second) ||
+			waterways::is_underground_waterway(tags))
+		return std::nullopt;
+	const int width = waterways::capped_waterway_width(
+			waterway->second, tags, scale, channel_width_cap);
+	return KeptWater{KeptWaterKind::Channel, width / 2 + 1};
+}
+
+int fountain_reach(std::size_t area_cells)
+{
+	static const auto reaches = [] {
+		std::array<int, 4> result{};
+		const auto root = assets::path("structures");
+		for (int i = 0; i < 4; ++i) {
+			const auto schem = structures::try_load_structure_cached(
+					root / ("fountain" + std::to_string(i + 1) + ".schem"));
+			if (schem)
+				result[i] = schem->max_extent;
+		}
+		return result;
+	}();
+	const int small = std::max({reaches[0], reaches[1], reaches[2]});
+	return area_cells >= 300 ? (reaches[3] > 0 ? reaches[3] : small) : small;
+}
+
+std::vector<std::vector<ProcessedNode>> closed_relation_rings(
+		const ProcessedRelation &relation, ProcessedMemberRole role, const XZBBox &bbox)
+{
+	std::vector<std::vector<ProcessedNode>> rings;
+	for (const auto &member : relation.members)
+		if (member.role == role && member.way)
+			rings.push_back(member.way->nodes);
+	merge_way_segments(rings);
+	std::vector<std::vector<ProcessedNode>> result;
+	for (auto &ring : rings) {
+		ring = clipping::clip_way_to_bbox_owned(std::move(ring), bbox);
+		if (ring.size() < 4)
+			continue;
+		if (ring.front().x != ring.back().x || ring.front().z != ring.back().z) {
+			if (std::abs(int64_t(ring.front().x) - ring.back().x) > 1 ||
+					std::abs(int64_t(ring.front().z) - ring.back().z) > 1)
+				continue;
+			ring.push_back(ring.front());
+		}
+		result.push_back(std::move(ring));
+	}
+	return result;
+}
+
+std::vector<std::pair<int32_t, int32_t>> fill_ring(const std::vector<ProcessedNode> &ring)
+{
+	std::vector<std::pair<int32_t, int32_t>> points;
+	points.reserve(ring.size());
+	for (const auto &node : ring)
+		points.emplace_back(node.x, node.z);
+	return flood_fill_area(points, nullptr);
+}
+} // namespace
+
+std::optional<CoordinateBitmap> collect_tree_keep_clear(
+		const std::vector<ProcessedElement> &elements, const XZBBox &bbox, double scale,
+		std::optional<int> channel_width_cap, int margin,
+		const std::function<std::vector<std::pair<int32_t, int32_t>>(
+				const tags_t &, int, int)> &point_fountain_columns)
+{
+	CoordinateBitmap keep(bbox);
+	const auto mark = [&](int x, int z, int radius) {
+		for (int dx = -radius; dx <= radius; ++dx)
+			for (int dz = -radius; dz <= radius; ++dz)
+				keep.set(x + dx, z + dz);
+	};
+	const int point_fountain_radius =
+			point_fountain_columns ? 0 : fountain_reach(0) + margin;
+	const auto mark_point_fountain = [&](const tags_t &tags, int x, int z) {
+		if (point_fountain_columns) {
+			for (const auto &[cx, cz] : point_fountain_columns(tags, x, z))
+				mark(cx, cz, margin);
+		} else {
+			mark(x, z, point_fountain_radius);
+		}
+	};
+	for (const auto &element : elements) {
+		const auto water = kept_water(element.tags(), scale, channel_width_cap);
+		if (!water)
+			continue;
+		const bool fountain = water->kind == KeptWaterKind::Fountain;
+		if (element.is_node()) {
+			if (fountain) {
+				const auto &node = element.as_node();
+				mark_point_fountain(node.tags, node.x, node.z);
+			}
+			continue;
+		}
+		if (element.is_way()) {
+			const auto &way = element.as_way();
+			if (water->kind == KeptWaterKind::Channel) {
+				const int radius = water->radius + margin;
+				for (std::size_t i = 1; i < way.nodes.size(); ++i) {
+					const auto &a = way.nodes[i - 1];
+					const auto &b = way.nodes[i];
+					if (std::max(a.x, b.x) + radius < bbox.min_x() ||
+							std::min(a.x, b.x) - radius > bbox.max_x() ||
+							std::max(a.z, b.z) + radius < bbox.min_z() ||
+							std::min(a.z, b.z) - radius > bbox.max_z())
+						continue;
+					for (const auto &[x, y, z] :
+							bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
+						(void)y;
+						mark(x, z, radius);
+					}
+				}
+				continue;
+			}
+			if (fountain && way.nodes.size() < 3) {
+				if (!way.nodes.empty())
+					mark_point_fountain(
+							way.tags, way.nodes.front().x, way.nodes.front().z);
+				continue;
+			}
+			const auto clipped = clipping::clip_way_to_bbox(way.nodes, bbox);
+			std::vector<std::pair<int32_t, int32_t>> points;
+			points.reserve(clipped.size());
+			for (const auto &node : clipped)
+				points.emplace_back(node.x, node.z);
+			auto cells = flood_fill_area(points, nullptr);
+			if (fountain && points.size() >= 4 && points.front() == points.back()) {
+				for (std::size_t i = 1; i < points.size(); ++i)
+					for (const auto &[x, y, z] :
+							bresenham_line(points[i - 1].first, 0, points[i - 1].second,
+									points[i].first, 0, points[i].second)) {
+						(void)y;
+						cells.emplace_back(x, z);
+					}
+				std::sort(cells.begin(), cells.end());
+				cells.erase(std::unique(cells.begin(), cells.end()), cells.end());
+			}
+			for (const auto &[x, z] : cells)
+				mark(x, z, margin);
+			continue;
+		}
+		if (water->kind == KeptWaterKind::Channel)
+			continue;
+
+		const auto &relation = element.as_relation();
+		auto outers = closed_relation_rings(relation, ProcessedMemberRole::Outer, bbox);
+		auto inners = closed_relation_rings(relation, ProcessedMemberRole::Inner, bbox);
+		const auto groups = element_processing::hole_groups(outers, inners);
+		for (const auto &[outer_indices, inner_indices] : groups) {
+			CoordinateBitmap island(bbox);
+			for (const auto inner_index : inner_indices)
+				for (const auto &[x, z] : fill_ring(inners[inner_index]))
+					island.set(x, z);
+			for (const auto outer_index : outer_indices) {
+				auto cells = fill_ring(outers[outer_index]);
+				cells.erase(std::remove_if(cells.begin(), cells.end(),
+									[&](const auto &p) {
+										return island.contains(p.first, p.second);
+									}),
+						cells.end());
+				for (const auto &[x, z] : cells)
+					mark(x, z, margin);
+			}
+		}
+	}
+	return keep.is_empty() ? std::nullopt
+						   : std::optional<CoordinateBitmap>(std::move(keep));
 }
 
 bool CoordinateBitmap::is_unset_in_bounds(int32_t x, int32_t z) const

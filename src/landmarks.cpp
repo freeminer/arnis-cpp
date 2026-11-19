@@ -4,6 +4,7 @@
 #include "models_3d/pipeline.h"
 #include "structures/schem_decoder.h"
 #include "structures/elizabeth_tower.h"
+#include "structures/hollywood_sign.h"
 #include "unicode_text.h"
 #include "world_editor/floor_state.h"
 
@@ -96,6 +97,13 @@ std::shared_ptr<const structures::PalettizedSchematic> elizabeth_tower_model()
 {
 	static const auto model = std::make_shared<const structures::PalettizedSchematic>(
 			structures::elizabeth_tower::build());
+	return model;
+}
+
+std::shared_ptr<const structures::PalettizedSchematic> hollywood_sign_model()
+{
+	static const auto model = std::make_shared<const structures::PalettizedSchematic>(
+			structures::hollywood_sign::build());
 	return model;
 }
 
@@ -293,6 +301,15 @@ const std::vector<Landmark> &catalogue()
 			{"Elizabeth Tower", "Q41225", {{"way", 123557148}}, nullptr, 51.5007012,
 					-0.1245730, 8.5, 8.5, 0, 0, {}, 0, 8.0, 8.0, 13, 96,
 					&elizabeth_tower_model},
+			{"Hollywood Sign", "Q180376",
+					{{"way", 125433362}, {"way", 125433363}, {"way", 125433364},
+							{"way", 125433365}, {"way", 125433366}, {"way", 125433367},
+							{"way", 125433369}, {"way", 125433370}, {"way", 125433372}},
+					nullptr, 34.1340991, -118.3216520,
+					structures::hollywood_sign::ANCHOR_X,
+					structures::hollywood_sign::ANCHOR_Z,
+					structures::hollywood_sign::GROUND, 0, {}, 0, 56.0, 10.0, 58, 14,
+					&hollywood_sign_model},
 	};
 	return entries;
 }

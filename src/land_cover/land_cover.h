@@ -13,6 +13,7 @@
 namespace arnis
 {
 class ProcessedElement;
+class CoordinateBitmap;
 }
 struct XZBBox;
 
@@ -215,6 +216,6 @@ void apply_bridge_land_cover_repair(LandCoverData &data,
 		const XZBBox &bbox, double scale);
 void apply_osm_land_override(LandCoverData &land_cover, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox, double scale);
-
+		const XZBBox &bbox, double scale, std::optional<int> channel_width_cap,
+		const CoordinateBitmap *roads_at_grade);
 }

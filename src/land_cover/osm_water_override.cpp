@@ -17,6 +17,7 @@
 #include <iostream>
 #include <limits>
 #include <numeric>
+#include <optional>
 #include <string_view>
 #include <thread>
 #include <utility>
@@ -314,7 +315,8 @@ void spread_inland_water(LandCoverData &data, const std::vector<std::uint64_t> &
 void rasterize_osm_water(LandCoverData &data, std::vector<std::vector<float>> *heights,
 		std::size_t world_width, std::size_t world_height,
 		const std::vector<ProcessedElement> &elements, const XZBBox &bbox,
-		bool write_land_cover)
+		bool write_land_cover, double scale, std::optional<int> channel_width_cap,
+		const CoordinateBitmap *roads_at_grade)
 {
 	if (data.width < 2 || data.height < 2 || world_width < 2 || world_height < 2 ||
 			data.width > std::numeric_limits<std::size_t>::max() / data.height ||
@@ -470,40 +472,21 @@ void rasterize_osm_water(LandCoverData &data, std::vector<std::vector<float>> *h
 				return count;
 			};
 	const auto rasterize_line = [&](const std::vector<ProcessedNode> &nodes,
-										int half_width) {
-		if (nodes.size() < 2 || half_width < 0)
+										int channel_width) {
+		if (nodes.size() < 2 || channel_width < 1)
 			return std::size_t{0};
 		std::size_t count = 0;
-		for (std::size_t i = 1; i < nodes.size(); ++i) {
-			const auto &a = nodes[i - 1];
-			const auto &b = nodes[i];
-			const int margin = std::max(0, half_width);
-			if (std::max(a.x, b.x) + margin < bbox.min_x() ||
-					std::min(a.x, b.x) - margin > bbox.max_x() ||
-					std::max(a.z, b.z) + margin < bbox.min_z() ||
-					std::min(a.z, b.z) - margin > bbox.max_z())
-				continue;
-			for (const auto &[bx, y, bz] :
-					bresenham::bresenham_line(a.x, 0, a.z, b.x, 0, b.z)) {
-				(void)y;
-				for (int dx = -half_width; dx <= half_width; ++dx)
-					for (int dz = -half_width; dz <= half_width; ++dz) {
-						const int wx = bx + dx, wz = bz + dz;
-						// Match Rust's rasterize_line: reject coordinates below the
-						// bbox origin, map the remaining world coordinate to the
-						// land-cover grid, then clip by grid dimensions. A point just
-						// beyond the positive edge can round onto the last raster cell.
-						if (wx < bbox.min_x() || wz < bbox.min_z())
-							continue;
-						const auto gx = static_cast<std::size_t>(
-								std::llround((wx - bbox.min_x()) * sx));
-						const auto gz = static_cast<std::size_t>(
-								std::llround((wz - bbox.min_z()) * sz));
-						if (gx < data.width && gz < data.height)
-							count += write_water(gx, gz);
-					}
-			}
-		}
+		waterways::channel_cells(
+				nodes, channel_width, roads_at_grade, bbox, [&](int wx, int wz) {
+					if (wx < bbox.min_x() || wz < bbox.min_z())
+						return;
+					const auto gx = static_cast<std::size_t>(
+							std::llround((wx - bbox.min_x()) * sx));
+					const auto gz = static_cast<std::size_t>(
+							std::llround((wz - bbox.min_z()) * sz));
+					if (gx < data.width && gz < data.height)
+						count += write_water(gx, gz);
+				});
 		return count;
 	};
 	for (const auto &e : elements) {
@@ -570,8 +553,9 @@ void rasterize_osm_water(LandCoverData &data, std::vector<std::vector<float>> *h
 				   !waterways::is_underground_waterway(w.tags)) {
 			current_inland = true;
 			current_sea = false;
-			const int half_width = waterways::waterway_width(*waterway, w.tags) / 2;
-			changed += rasterize_line(w.nodes, half_width);
+			const int channel_width = waterways::capped_waterway_width(
+					*waterway, w.tags, scale, channel_width_cap);
+			changed += rasterize_line(w.nodes, channel_width);
 		}
 	}
 	spread_inland_water(data, sea_mask);
@@ -609,15 +593,19 @@ void rasterize_osm_water(LandCoverData &data, std::vector<std::vector<float>> *h
 void apply_osm_water_override(LandCoverData &data,
 		std::vector<std::vector<float>> &heights, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox)
+		const XZBBox &bbox, double scale, std::optional<int> channel_width_cap,
+		const CoordinateBitmap *roads_at_grade)
 {
-	rasterize_osm_water(data, &heights, world_width, world_height, elements, bbox, true);
+	rasterize_osm_water(data, &heights, world_width, world_height, elements, bbox, true,
+			scale, channel_width_cap, roads_at_grade);
 }
 
 void mark_inland_water(LandCoverData &data, std::size_t world_width,
 		std::size_t world_height, const std::vector<ProcessedElement> &elements,
-		const XZBBox &bbox)
+		const XZBBox &bbox, double scale, std::optional<int> channel_width_cap,
+		const CoordinateBitmap *roads_at_grade)
 {
-	rasterize_osm_water(data, nullptr, world_width, world_height, elements, bbox, false);
+	rasterize_osm_water(data, nullptr, world_width, world_height, elements, bbox, false,
+			scale, channel_width_cap, roads_at_grade);
 }
 } // namespace arnis::land_cover
